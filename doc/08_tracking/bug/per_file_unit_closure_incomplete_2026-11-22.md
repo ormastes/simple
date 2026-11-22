@@ -1,8 +1,74 @@
 # Per-file unit fails CLOSURE-INCOMPLETE when a target imports a summarised package `__init__.spl`
 
 Date: 2026-11-22
-Status: fixed in source (plan step); not yet proven on a redeployed compiler
-Area: `src/compiler/80.driver/driver_unit_tldr_imports_v1.spl` (PM3 unit plan)
+Status: root cause corrected below; route fix in source, not yet proven on a redeployed compiler
+Area: `src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl` (export-route freeze);
+`src/compiler/80.driver/driver_unit_tldr_imports_v1.spl` (PM3 unit plan, earlier partial fix)
+
+## Correction (measured, supersedes "Root cause" below)
+
+PR #10738 (no summary for an `/__init__.spl` row) fixed a real summary-route
+symptom but did not cure the bootstrap build. Stage 2 from release
+`a685c58a3f0` (which contains #10738) still fails, and with
+`SIMPLE_COMPILER_PHASE_PROFILE=1` the worker names the edge, 8 identical rows
+per failing unit:
+
+```
+phase2:surface:missing-direct-edge worker=3/4 kind=export source=src/lib/nogc_async_mut/env/__init__.spl target=src/lib/platform.spl
+```
+
+`env/__init__.spl` holds `export platform.detect_os, ...`; `platform` there is
+the sibling `env/platform.spl`. The export-route freeze
+(`module_surface_registry_index.spl`, qualified-export branch) resolved the
+qualifier against `module_surface_package_name_from_name(surface.preferred_registry_name)`
+first. A package `__init__.spl` whose preferred registry name is the package
+itself (no `.__init__` suffix) therefore got its PARENT package, so
+`<parent>.platform` matched a same-named module one level up before the
+relative sibling probe ran. `variables` / `paths` / `validation` have no
+same-named module there, miss that first probe and reach the sibling probe,
+which is why only `platform` broke. `src/lib/scv/__init__.spl` (`core`) is the
+same class.
+
+Only the per-file lane fails: it is the only consumer that treats
+`export_route_target_indices` as a hard readiness edge
+(`driver_source_parse_streaming.spl`, `worker_surface_ready_v1`). The HIR
+re-export walk (`_Items/module_reexport_materialization.spl`,
+`find_reexport_source_walk`) follows the same wrong route first, does not find
+the item there and falls through to package-sibling inference, so the
+whole-program lanes compiled the file correctly despite the wrong route.
+
+Repro (Stage 2 from `a685c58a3f0`, `SIMPLE_FILE_WORKER_BATCH=1`,
+`native-build src/cfx/main.spl --entry-closure`, sources committed in a git repo):
+
+```
+src/cfx/env/__init__.spl   export platform.cfx_detect
+src/cfx/env/platform.spl   pub fn cfx_detect(n: i64) -> i64: n + 1
+src/cfx/platform.spl       pub fn cfx_top(n: i64) -> i64: n + 100
+src/cfx/other.spl          use cfx.platform.{cfx_top} ...
+src/cfx/main.spl           use cfx.env.{cfx_detect}; use cfx.other.{cfx_other}
+```
+
+Result: `missing-direct-edge ... kind=export source=src/cfx/env/__init__.spl target=src/cfx/platform.spl`
+and `FILE-WORKER-E-CLOSURE-INCOMPLETE ... src/cfx/env/__init__.spl`. Renaming
+the upper module to `platform2.spl` gives 0 missing-edge rows and no
+CLOSURE-INCOMPLETE (that control then stops later on unrelated worker
+`CRASH` rows, so it proves the readiness gate only, not a full build).
+
+The same edge reproduces with the real layout (`src/lib/nogc_async_mut/env/`,
+`src/lib/platform.spl`, importer `use std.env.{...}`):
+`source=src/lib/nogc_async_mut/env/__init__.spl target=src/lib/platform.spl`.
+
+Fix: for an `/__init__.spl` surface the physical sibling
+(`module_surface_resolve_relative_key(registry, surface, "." + qualifier)`) is
+probed first; the registry-package probe and the upper-level module remain as
+fallbacks when no sibling exists. Unqualified
+exports, glob exports and `use` resolution are unchanged.
+
+Not verified: the fix on a rebuilt compiler (needs a bootstrap redeploy); the
+new spec `it "routes a package init's qualified export to its sibling, ..."` in
+`test/01_unit/compiler/hir/package_export_route_shapes_spec.spl` (no
+test-capable `simple` binary on the host); the exact registry alias the real
+`env/__init__.spl` gets (inferred from the edge, not dumped).
 
 ## Symptom
 

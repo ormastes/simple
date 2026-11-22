@@ -175,7 +175,7 @@ impl LlvmBackend {
             (inkwell::values::BasicValueEnum::IntValue(l), inkwell::values::BasicValueEnum::IntValue(r)) => {
                 // Ensure both operands have the same bit width as RuntimeValue
                 let rv_type = self.runtime_int_type();
-                let i64_type = rv_type; // alias for compatibility (may be i32 on 32-bit targets)
+                let i64_type = rv_type; // alias: RuntimeValue is i64 on every target
                 let rv_width = rv_type.get_bit_width();
                 let use_sext_l = matches!(op, BinOp::ShiftRight) && lhs_signed.unwrap_or(true);
                 let l = if l.get_type().get_bit_width() < rv_width {

@@ -26,10 +26,15 @@ use compiler.driver.driver_entry_closure_core.{
     _driver_cached_entry_source_scan, driver_closure_scan_phase_trace,
     _driver_entry_import_dirname, _driver_physical_source_key,
     driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
-    driver_closure_import_specs_v1, driver_closure_importer_module_v1
+    driver_closure_import_specs_v1, driver_closure_importer_module_v1,
+    driver_entry_scan_cache_release
 }
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use app.io._CliCompile.native_build_mcdc_closure.{native_build_mcdc_closure_spec_v1}
+use app.cli.native_build_parse_closure_scratch.{native_build_parse_closure_stage_end_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end}
+use std.nogc_sync_mut.fs.host_path.{host_path_release_cached_platform_v1}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_open_v1
 }
@@ -292,7 +297,82 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
         result = result.push(candidate)
     result
 
+# Live state carried between bounded coordinator walk stages. Source text,
+# resolver answers, and visibility observations deliberately stay outside.
+struct NativeBuildClosureChunkV1:
+    queue: [text]
+    discovered: Dict<text, bool>
+    result: [text]
+    resolve_cache: Dict<text, text>
+    frozen: bool
+    frozen_entry: text
+    frozen_source_dirs: [text]
+    closure_source_dirs: [text]
+    manifest_inventory: Dict<text, text>
+    manifest_selected: Dict<text, text>
+    manifest_snapshot_id: text
+    library_mode: text
+    qi: i64
+    snapshot_key: text
+    snapshot_root: text
+    snapshot_revision: text
+    snapshot_commit: text
+    snapshot_tree: text
+    snapshot_inventory: text
+
+fn _nb_closure_text_array_copy_v1(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        out = out.push(item)
+    out
+
+fn _nb_closure_bool_dict_copy_v1(items: Dict<text, bool>) -> Dict<text, bool>:
+    var out: Dict<text, bool> = {}
+    for key in items.keys():
+        out[key] = items[key]
+    out
+
+fn _nb_closure_text_dict_copy_v1(items: Dict<text, text>) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for key in items.keys():
+        out[key] = items[key]
+    out
+
+fn _nb_closure_chunk_checkpoint_v1(mut state: NativeBuildClosureChunkV1) -> bool:
+    val paused = transient_scope_pause()
+    driver_entry_scan_cache_release()
+    host_path_release_cached_platform_v1()
+    if not paused:
+        val _ended = transient_scope_end()
+        driver_entry_scan_cache_release()
+        host_path_release_cached_platform_v1()
+        return false
+    if not native_build_parse_closure_stage_end_v1(state):
+        return false
+    # Unlike the final publication checkpoint, the walk still needs its frozen
+    # snapshot mapping. Restore only the adopted strings, never old scope data.
+    _nb_scv_snapshot_key_v1 = state.snapshot_key
+    _nb_scv_snapshot_root_v1 = state.snapshot_root
+    _nb_scv_snapshot_revision_v1 = state.snapshot_revision
+    _nb_scv_snapshot_commit_v1 = state.snapshot_commit
+    _nb_scv_snapshot_tree_v1 = state.snapshot_tree
+    _nb_scv_snapshot_inventory_v1 = state.snapshot_inventory
+    if not transient_scope_begin():
+        return false
+    # Adoption prunes already-session-owned containers. Mutable BFS containers
+    # therefore need fresh transient heads; entries added in this next stage
+    # would otherwise be freed at the following checkpoint.
+    state.queue = _nb_closure_text_array_copy_v1(state.queue)
+    state.result = _nb_closure_text_array_copy_v1(state.result)
+    state.discovered = _nb_closure_bool_dict_copy_v1(state.discovered)
+    state.resolve_cache = _nb_closure_text_dict_copy_v1(state.resolve_cache)
+    true
+
 pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mode: text = "") -> [text]:
+    _native_build_entry_closure_chunked_v1(entry, source_dirs, library_mode, 0)
+
+pub fn _native_build_entry_closure_chunked_v1(entry: text, source_dirs: [text],
+        library_mode: text = "", checkpoint_every: i64 = 0) -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
@@ -356,12 +436,13 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mod
             "snapshot (weaker consistency guarantee: a concurrent edit is " +
             "not guaranteed to be seen atomically)")
     _nb_scv_unfrozen_closure_v1 = not frozen.0
-    val frozen_entry = if frozen.0: frozen.1 else: entry
-    val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
+    var frozen_snapshot = frozen.0
+    var frozen_entry = if frozen.0: frozen.1 else: entry
+    var frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
     var manifest_inventory: Dict<text, text> = {}
     var manifest_selected: Dict<text, text> = {}
     var manifest_snapshot_id = ""
-    if frozen.0:
+    if frozen_snapshot:
         val checkout = _nb_path_absolute_raw(".")
         if checkout.is_none(): return []
         val authority_root = compile_source_inventory_plain_checkout_v1(checkout.unwrap())
@@ -388,16 +469,41 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mod
     discovered[_driver_physical_source_key(frozen_entry)] = true
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
-    val closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
+    var closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
+    var walk_library_mode = library_mode
     var qi = 0
     var timing_file_start_us: i64 = 0
     while qi < queue.len():
+        if checkpoint_every > 0 and result.len() > 0 and
+                result.len() % checkpoint_every == 0 and qi < queue.len():
+            var chunk = NativeBuildClosureChunkV1(queue, discovered, result, resolve_cache,
+                frozen_snapshot, frozen_entry, frozen_source_dirs, closure_source_dirs,
+                manifest_inventory, manifest_selected, manifest_snapshot_id, walk_library_mode, qi,
+                _nb_scv_snapshot_key_v1, _nb_scv_snapshot_root_v1,
+                _nb_scv_snapshot_revision_v1, _nb_scv_snapshot_commit_v1,
+                _nb_scv_snapshot_tree_v1, _nb_scv_snapshot_inventory_v1)
+            if not _nb_closure_chunk_checkpoint_v1(chunk):
+                _cli_eprint("native-build: closure chunk scratch retirement failed")
+                return []
+            queue = chunk.queue
+            discovered = chunk.discovered
+            result = chunk.result
+            resolve_cache = chunk.resolve_cache
+            frozen_snapshot = chunk.frozen
+            frozen_entry = chunk.frozen_entry
+            frozen_source_dirs = chunk.frozen_source_dirs
+            closure_source_dirs = chunk.closure_source_dirs
+            manifest_inventory = chunk.manifest_inventory
+            manifest_selected = chunk.manifest_selected
+            manifest_snapshot_id = chunk.manifest_snapshot_id
+            walk_library_mode = chunk.library_mode
+            qi = chunk.qi
         val f = queue[qi]
         qi = qi + 1
         if trace_timing:
             timing_file_start_us = time_now_unix_micros()
         result.append(f)
-        if frozen.0:
+        if frozen_snapshot:
             # Validate policy inputs in the same frozen snapshot, but do not
             # traverse their imports. Only actual source imports add compile
             # dependencies; the worker parses ancestor policy records alone.
@@ -435,7 +541,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mod
             if resolve_cache.has(cache_key):
                 rp = resolve_cache[cache_key]
             else:
-                val selected = match driver_library_mode_resolve_v1(mp, closure_source_dirs, importer_dir, library_mode, importer_module):
+                val selected = match driver_library_mode_resolve_v1(mp, closure_source_dirs, importer_dir, walk_library_mode, importer_module):
                     case Ok(value): value
                     case Err(reason):
                         _cli_eprint(reason)
@@ -443,7 +549,7 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mod
                 match selected:
                     case SourceRootResolutionV1.Found(path):
                         val spelling = if mp.starts_with(".") and not mp.starts_with(".."): importer_module + mp else: mp
-                        rp = driver_library_mode_native_owner_v1(path, spelling, importer_dir, library_mode, importer_module)
+                        rp = driver_library_mode_native_owner_v1(path, spelling, importer_dir, walk_library_mode, importer_module)
                     case SourceRootResolutionV1.Missing: ()
                     case SourceRootResolutionV1.Ambiguous(directory):
                         _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")

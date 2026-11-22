@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Prevent duplicate definitions of OutputFormat, BuildMode, CompiledSymbol, and CompiledSymbolKind from returning across compiler layers.
+Audience: Compiler engineers maintaining single-owner type boundaries.
+"""
+# @cover src/compiler/00.common/driver_core_modes.spl
+# @cover src/compiler/70.backend/backend/backend_types.spl
+# @cover src/compiler/10.frontend/core/backend_types.spl
+# @cover src/compiler/70.backend/linker/link.spl
+# @cover src/compiler/80.driver/build_mode.spl
+# @req REQ-COMPFIX-7
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_source_text(path: text) -> text:
+    match rt_file_read_text(path):
+        case Some(content): content
+        case None: ""
+
+fn count_occurrences(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    val parts = haystack.split(needle)
+    parts.len() - 1
+
+describe "Duplicate backend/driver types single-terminal prevention":
+    it "declares OutputFormat, BuildMode, CompiledSymbol, and CompiledSymbolKind once each":
+        step("Scan all five compiler mode/backend/linker/driver files for declaration headers")
+        val files = [
+            "src/compiler/00.common/driver_core_modes.spl",
+            "src/compiler/70.backend/backend/backend_types.spl",
+            "src/compiler/10.frontend/core/backend_types.spl",
+            "src/compiler/70.backend/linker/link.spl",
+            "src/compiler/80.driver/build_mode.spl"
+        ]
+        var output_format_decls: i64 = 0
+        var build_mode_decls: i64 = 0
+        var compiled_symbol_decls: i64 = 0
+        var compiled_symbol_kind_decls: i64 = 0
+        for path in files:
+            val content = read_source_text(path)
+            expect(content.len() > 0).to_equal(true)
+            output_format_decls = output_format_decls + count_occurrences(content, "\nenum OutputFormat:")
+            build_mode_decls = build_mode_decls + count_occurrences(content, "\nenum BuildMode:")
+            compiled_symbol_decls = compiled_symbol_decls + count_occurrences(content, "\nstruct CompiledSymbol:")
+            compiled_symbol_kind_decls = compiled_symbol_kind_decls + count_occurrences(content, "\nenum CompiledSymbolKind:")
+
+        expect(output_format_decls).to_equal(1)
+        expect(build_mode_decls).to_equal(1)
+        expect(compiled_symbol_decls).to_equal(1)
+        expect(compiled_symbol_kind_decls).to_equal(1)
+
+    it "re-exports canonical declarations from frontend, linker, and driver modules":
+        step("Verify re-export statements in the three downstream compatibility modules")
+        val frontend = read_source_text("src/compiler/10.frontend/core/backend_types.spl")
+        val linker = read_source_text("src/compiler/70.backend/linker/link.spl")
+        val driver = read_source_text("src/compiler/80.driver/build_mode.spl")
+
+        expect(frontend).to_contain(r"export use compiler.common.driver_core_modes.{OutputFormat}")
+        expect(frontend).to_contain(r"export use compiler.backend.backend.backend_types.{BuildMode}")
+        expect(frontend).to_contain(r"export use compiler.backend.backend.backend_types.{CompiledSymbol, CompiledSymbolKind}")
+        expect(linker).to_contain(r"export use compiler.common.driver_core_modes.{OutputFormat}")
+        expect(driver).to_contain(r"export use compiler.backend.backend.backend_types.{BuildMode}")

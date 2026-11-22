@@ -1,0 +1,110 @@
+#!/bin/sh
+# The orchestrator controller (src/app/orchestrator/*.spl) must reach the host
+# ONLY through SoSix aliases (std.nogc_sync_mut.sosix.* / std.nogc_async_mut.sosix.*).
+#
+# Forbidden in every controller file: extern fn / rt_* calls, SFFI providers
+# (std.sffi.*, std.nogc_sync_mut.sffi.*, std.nogc_sync_mut.package_sffi), the
+# io_runtime monolith, the app IO facade (app.io.*), the raw io primitive owners
+# (std.nogc_sync_mut.io.{file_ops,dir_ops,dir_entry_ops,env_ops,process_ops,
+# time_ops,sysinfo_ops,pipe,crypto_sffi}) and std.nogc_sync_mut.file_system.*.
+#
+# Deliberately NOT forbidden (scope is raw host primitives, not every module
+# under io/):
+#   - std.nogc_sync_mut.io.tcp TcpStream/TcpListener: typed socket owners that
+#     themselves consume std.nogc_sync_mut.sosix.network; re-exporting them from
+#     sosix.network would create a sosix<->io.tcp import cycle.
+#   - domain owners that live under io/ (host_identity_store_v1, stdin_command_v1,
+#     host_service_auth_setup_v1, file_lock_owned_v2, local_authority_policy_v1,
+#     host_identity_ssh_projection*_v1): typed protocol/state owners, not host
+#     primitives.
+# Sibling of check-orchestrator-client-sosix-only.shs (PR #10809).
+# Record: doc/08_tracking/bug/orchestrator_controller_host_access_bypassed_sosix_2026-11-22.md
+#
+# usage: check-orchestrator-controller-sosix-only.shs [--selftest] [repo_root]
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+# 0 files scanned is ERROR, never PASS.
+
+CONTROLLER_DIR="src/app/orchestrator"
+
+RAW_PATTERN='^[[:space:]]*(use|export use|import)[[:space:]]+(app\.io\.|std\.nogc_sync_mut\.io\.(file_ops|dir_ops|dir_entry_ops|env_ops|process_ops|time_ops|sysinfo_ops|pipe|crypto_sffi)([^A-Za-z0-9_]|$)|std\.(nogc_sync_mut\.|nogc_async_mut\.)?io_runtime|std\.(nogc_sync_mut\.)?sffi\.|std\.nogc_sync_mut\.package_sffi|std\.nogc_sync_mut\.file_system\.)|extern[[:space:]]+fn|(^|[^A-Za-z0-9_.])rt_[a-z0-9_]+[[:space:]]*\('
+
+# scan_root <root> -> prints offenders "file:line:text" and a tail "#scanned <n>"
+scan_root() {
+    root=$1
+    n=0
+    for f in "$root/$CONTROLLER_DIR"/*.spl; do
+        [ -e "$f" ] || continue
+        n=$((n + 1))
+        rel="$CONTROLLER_DIR/$(basename "$f")"
+        grep -nE -- "$RAW_PATTERN" "$f" | grep -vE '^[0-9]+:[[:space:]]*#' | sed "s|^|$rel:|"
+    done
+    echo "#scanned $n"
+}
+
+verdict() {
+    out=$1
+    scanned=$(printf '%s\n' "$out" | sed -n 's/^#scanned //p')
+    offenders=$(printf '%s\n' "$out" | grep -v '^#scanned ' | grep -v '^$')
+    if [ -z "$scanned" ] || [ "$scanned" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        return 2
+    fi
+    if [ -n "$offenders" ]; then
+        printf '%s\n' "$offenders"
+        echo "FAIL — $(printf '%s\n' "$offenders" | wc -l | tr -d ' ') raw host route(s) in $scanned orchestrator controller file(s)"
+        return 1
+    fi
+    echo "PASS — $scanned orchestrator controller file(s) checked, host access via SoSix only"
+    return 0
+}
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — selftest mktemp failed"; return 2; }
+    mkdir -p "$tmp/clean/$CONTROLLER_DIR" "$tmp/dirty/$CONTROLLER_DIR" "$tmp/allowed/$CONTROLLER_DIR" "$tmp/empty/$CONTROLLER_DIR"
+    printf '%s\n' 'use std.nogc_sync_mut.sosix.host.{cli_get_args, set_permissions}' \
+        '# use std.sffi.cli_args.cli_get_args (historic)' 'fn f(): cli_get_args()' > "$tmp/clean/$CONTROLLER_DIR/main.spl"
+    printf '%s\n' 'use std.sffi.cli_args.cli_get_args' > "$tmp/dirty/$CONTROLLER_DIR/a.spl"
+    printf '%s\n' 'use std.nogc_sync_mut.package_sffi.{set_permissions}' > "$tmp/dirty/$CONTROLLER_DIR/b.spl"
+    printf '%s\n' 'use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded' > "$tmp/dirty/$CONTROLLER_DIR/c.spl"
+    printf '%s\n' 'use app.io.mod.{env_get}' 'fn g(): rt_env_get("X")' > "$tmp/dirty/$CONTROLLER_DIR/d.spl"
+    printf '%s\n' 'use std.nogc_sync_mut.io.tcp.{TcpStream}' \
+        'use std.nogc_sync_mut.io.file_ops_extra_v1.x' \
+        'use std.nogc_sync_mut.io.host_identity_store_v1.*' > "$tmp/allowed/$CONTROLLER_DIR/e.spl"
+    rc=0
+    verdict "$(scan_root "$tmp/clean")" > /dev/null; [ $? -eq 0 ] || { echo "selftest: clean fixture did not PASS"; rc=2; }
+    out=$(scan_root "$tmp/dirty")
+    verdict "$out" > /dev/null; [ $? -eq 1 ] || { echo "selftest: dirty fixture did not FAIL"; rc=2; }
+    hits=$(printf '%s\n' "$out" | grep -c "^$CONTROLLER_DIR/")
+    [ "$hits" -eq 5 ] || { echo "selftest: dirty fixture expected 5 offenders, got $hits"; rc=2; }
+    verdict "$(scan_root "$tmp/allowed")" > /dev/null; [ $? -eq 0 ] || { echo "selftest: allowed fixture did not PASS"; rc=2; }
+    verdict "$(scan_root "$tmp/empty")" > /dev/null; [ $? -eq 2 ] || { echo "selftest: empty fixture did not ERROR"; rc=2; }
+    rm -rf "$tmp"
+    return $rc
+}
+
+only_selftest=0
+root=""
+for a in "$@"; do
+    case "$a" in
+        --selftest) only_selftest=1 ;;
+        *) root=$a ;;
+    esac
+done
+
+selftest
+st=$?
+if [ $st -ne 0 ]; then
+    echo "ERROR — selftest failed"
+    exit 2
+fi
+if [ $only_selftest -eq 1 ]; then
+    echo "PASS — selftest (4 fixtures)"
+    exit 0
+fi
+[ -n "$root" ] || root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$root" ] || [ ! -d "$root/src" ]; then
+    echo "ERROR — nothing was checked (repo root not found)"
+    exit 2
+fi
+verdict "$(scan_root "$root")"
+exit $?

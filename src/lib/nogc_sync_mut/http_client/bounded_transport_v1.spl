@@ -32,11 +32,12 @@ fn bounded_tcp_read_v1(stream: TcpStream, count: i64, ms: i64) -> Result<[u8], t
 fn bounded_http_exchange_v1(request: text, max_body: i64, deadline: i64,
         write: fn(text, i64) -> Result<i64, text>,
         read: fn(i64, i64) -> Result<[u8], text>) -> Result<text, text>:
+    val req_bytes = request.byte_len()
     var offset = 0
-    while offset < request.len():
+    while offset < req_bytes:
         val remaining = bounded_http_remaining_v1(deadline)?
         val written = write(request.substring(offset), remaining)?
-        if written <= 0 or written > request.len() - offset: return Err("http_write_failed")
+        if written <= 0 or written > req_bytes - offset: return Err("http_write_failed")
         offset = offset + written
     val response = BoundedHttpReadV1.create(max_body)
     while true:
@@ -52,8 +53,9 @@ fn _bounded_http_post_with_request_limit_v1(target: BoundedHttpTargetV1, bearer:
         body: text, timeout_ms: i64, max_body: i64, max_request_body: i64) -> Result<text, text>:
     bounded_http_target_validate_v1(target)?
     if not bounded_http_bearer_valid_v1(bearer): return Err("http_credentials_invalid")
+    val body_bytes = body.byte_len()
     if max_request_body < 0 or max_request_body > BOUNDED_HTTP_REQUEST_LIMIT_V1 or
-        body.len() as i64 > max_request_body or max_body < 0 or max_body > BOUNDED_HTTP_BODY_LIMIT_V1:
+        body_bytes as i64 > max_request_body or max_body < 0 or max_body > BOUNDED_HTTP_BODY_LIMIT_V1:
         return Err("http_body_limit")
     if timeout_ms < 1 or timeout_ms > 60000: return Err("http_timeout_invalid")
     val now = browser_monotonic_ms()
@@ -61,7 +63,7 @@ fn _bounded_http_post_with_request_limit_v1(target: BoundedHttpTargetV1, bearer:
     val deadline = now + timeout_ms
     val head = "POST {target.path} HTTP/1.1\r\nHost: {target.host}:{target.port}\r\n"
     val auth = "Authorization: Bearer " + bearer + "\r\nContent-Type: application/sdn\r\n"
-    val framing = "Accept: application/sdn\r\nConnection: close\r\nContent-Length: {body.len()}\r\n\r\n"
+    val framing = "Accept: application/sdn\r\nConnection: close\r\nContent-Length: {body_bytes}\r\n\r\n"
     val request = head + auth + framing + body
     if target.tls:
         val handle = match browser_tls_connect_address(target.address, target.port,

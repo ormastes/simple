@@ -111,6 +111,24 @@ describe "hir_lower skip list":
         expect(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "").to_equal("hir_lower:mod.bad")
         g2e_reset()
 
+    it "does not re-launch or blame a sibling's module after an orderly compile error":
+        # Shard mode: a sibling worker is mid-module (open crumb in the shared
+        # run directory) when this worker exits 1 on an ordinary compile error.
+        # The open crumb is the sibling's; skipping it would drop an innocent
+        # module and fail the build regardless.
+        g2e_env("orderly_exit", "1", "")
+        expect(ice_boundary_module_start("mod.sibling", "fixture/mod.sibling.spl", "mir_lower", "")).to_equal("")
+        expect(ice_boundary_dead_worker_modules().len()).to_equal(1)
+        val compile_err = "[first-compile-error] unresolved name `nope` in mod.other\n"
+        val (kept_out, kept_err, kept_code) = native_build_relaunch_past_ice_crashes(
+            "no-such-worker-binary", [], 1000, 5, "first out", compile_err, 1)
+        expect(kept_out).to_equal("first out")
+        expect(kept_err).to_equal(compile_err)
+        expect(kept_code == 1).to_equal(true)
+        expect(env_get_opt("SIMPLE_ICE_SKIP_MODULES") ?? "").to_equal("")
+        expect(ice_records_read().len()).to_equal(0)
+        g2e_reset()
+
     it "does not change the native cache identity (a re-launch keeps every object hit)":
         val with_skip: [(text, text)] = [("PATH", "/usr/bin"),
             ("SIMPLE_ICE_SKIP_MODULES", "hir_lower:fixture/mod.bad.spl")]

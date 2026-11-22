@@ -46,3 +46,55 @@ Fresh stage2 from release tip (diagnostic, `SIMPLE_BUILD_MEMORY_RESERVE_BYTES=64
 Blocker: the fresh stage2 cannot native-build even hello world: `SCV-E-ADMISSION: observed-event-apply:inventory-publication-failed:publish-current-write-failed` (reproduced 3x: default flags; with `SIMPLE_SCV_INVENTORY_COLD_INIT/FREEZE_FALLBACK/NATIVE_INCREMENTAL/CACHE_SCOPE/PROJECT_ROOT` as in the p3mir recipe; with `--source build/rbn --entry-closure`). Source is inside the git checkout root; the write failure message carries no path. No fixture was built or run natively.
 
 Next: root-cause `publish-current-write-failed` (SCV inventory publication under a git worktree), and/or rebuild the llvm seed so text_bytes.spl compiles without the workaround; then re-run the five fixtures with the fresh stage2.
+
+## Lane 4: `publish-current-write-failed` root cause (2026-11-22, branch work/scvpub-20261119)
+Result: fixtures still NOT run natively. Status stays verification-pending.
+
+Root cause of `SCV-E-ADMISSION: observed-event-apply:inventory-publication-failed:publish-current-write-failed`:
+it is not a bug in the tree. The Lane 3 stage2 (`rbn3/stage2.exe`) was built with an incomplete local
+text_bytes workaround. That workaround changed `text_byte_buffer`/`text_byte_extraction_checked` to take
+`i64`, but left the `Capacity(value: ...)`/`Length(value: ...)` call sites in place. In that binary the
+UTF-8 encoder (`file_atomic_write` -> `file_atomic_write_encoded_text` -> `external_byte_buffer` ->
+`text_byte_buffer`) therefore fails. Every encoded `file_atomic_write` returns false, so the CURRENT
+pointer write fails. The generation blobs still publish, because they go through
+`file_publish_noreplace_raw`, which does not encode.
+Evidence:
+- On Nov 19, CURRENT was moved away and the run repeated: a new generation blob was written in the same
+  second, but CURRENT was still not written. Replace-over-existing is ruled out.
+- A stage2 built with the workaround applied to all 14 call sites (`s4/stage2.exe`, local only, never
+  committed) published CURRENT fine in a fresh worktree on a disk that was 100% full.
+- In the same worktree minutes later, `rbn3/stage2.exe` panics with
+  `panic: external text at byte -1: boxed text byte extraction failed`.
+
+Committed change (diagnostic only, not a Windows write fix): the inventory publication reasons now end
+with `path=<target>`. Spec: `test/01_unit/lib/scv/compile_source_inventory_lockless_publish_spec.spl`
+("names the CURRENT path when the pointer write fails"). It failed before the change (6/7) and passes
+after it (7/7, also on the rebased tip 6caedc506bb).
+
+Native runs with `s4/stage2.exe` (seed_llvm build of the pre-rebase tree with the local workaround,
+not admitted):
+- `native-build test/fixtures/unit_native/port_in.spl`: SCV admission, HIR and MIR succeed
+  (`[mir-shard] link modules=1 objects=1`). The link phase then hangs until `timeout 1200` (worker
+  exit 143). No artifact.
+- A second attempt hung before link (`timeout 150`, rc=124).
+- Host C: was 100% full (2.5 GB free); cache writes were refused (`[cache-admission] publish refused`).
+  A fresh stage2 rebuild from the current release tip was not attempted for lack of disk.
+
+Next: on a host with free disk, rebuild stage2 from the current release tip. That tip carries the linker
+and driver fixes that landed after Nov 19. Then re-run the five fixtures. If the link still hangs, check
+whether `native_linking.spl` spawns clang/lld at all.
+
+## Lane 5: existing post-11-19 self-hosted CLI, native-build of the fixtures (2026-11-22, worktree rbnat4 @ 6caedc506bb)
+Result: fixtures NOT run natively. Status stays verification-pending (no fixture built, so nothing verified).
+
+Compiler search: `bin/release/**` does not exist; no `stage*` dir under any `C:/dev/wt/*/build/bootstrap` or `*/bootstrap` holds a binary newer than 11-19. Only candidate with `SPL-UNIT-005` in `strings`: `C:/dev/wt/ctorfix-20261121/build/nb/cli_main.exe` (114 MB, 2026-11-22 08:28, full pure-Simple CLI source `src/app/cli` built by the seed; `--version` = `Simple v1.0.0-rc.1`). Copied to `build/rbnat4/cli_main.exe` (untouched original). Every `bin/simple.exe` in the other worktrees is the tracked seed (0 hits). No bootstrap was attempted: the existing binary got further than any prior lane, and a fresh bootstrap would hit the same SCV/link stages.
+
+Env: llvm-mingw UCRT first on PATH. Attempts, each `native-build ... -o build/rbnat4/out/port_oor.exe`:
+1. `test/fixtures/unit_native/port_oor.spl`, default flags: ~8 min, then `SCV-E-ENTRY: entry absent from frozen inventory` / `SCV freeze has no admitted source inventory ... entry closure is empty (source snapshot unavailable)`. (The `publish-current-write-failed` error did NOT recur on this binary.)
+2. Same with `SIMPLE_SCV_FREEZE_FALLBACK=1`, also with `--source test/fixtures/unit_native --entry <f> --entry-closure`: `SCV-W-FREEZE-FALLBACK`, then `SOURCE_ROOT_SELECTORS_MISSING` in phase load_sources. Cause in source: `native_build_closure_source_roots_v1` returns `Ok([])` when `_nb_scv_unfrozen_closure_v1` is set, and `native_source_root_paths_v1` (`driver_build/native_source_root_handoff.spl:8`) rejects empty selectors when a snapshot root is set. The fallback path is therefore unusable together with a snapshot root (new bug candidate).
+3. Fixture copied into a scratch `src/app/rbnat_fx/` (uncommitted, removed) so the default roots cover it, no env: freeze OK, parse/HIR/MIR/optimize/codegen all succeed (`app.rbnat_fx.port_oor`, 1/1 module, ~40 s, rss 876 MiB), then phase=link hangs: no linker child process, no output, no `.exe`; killed by `timeout 1500` (25 min).
+4. Same with `SIMPLE_LINKER=lld`: identical link hang, killed by `timeout 900`.
+
+Exit codes / stdout / stderr of the fixtures: none exist (no executable produced). Build logs: `C:/dev/wt/rbnat4/build/rbnat4/out/port_oor.build{,2,3,4,5}.log` (untracked).
+
+Remaining blockers, in order: (a) link phase of the pure-Simple native-build hangs on Windows before spawning any linker (same symptom as Lane 3's 1500 s `_LinkerWrapper/native_linking.spl` timeout under the cranelift seed build); (b) `SIMPLE_SCV_FREEZE_FALLBACK=1` yields empty root selectors; (c) entries outside `src/{app,lib,compiler,os,plugins}` are absent from the frozen inventory. Next: root-cause (a) (attach to the link phase / trace what native_linking.spl waits on), then rerun the five fixtures.

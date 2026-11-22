@@ -1,0 +1,242 @@
+# Bounded TCP protocol and client for Simple Orchestrator <-> Caret Suite sessions.
+#
+# Uses line-count framing over `TcpStream.read_line_bounded` (never unbounded
+# `read_line`) and canonical SDN payloads. Both server and client validate
+# host/server configuration through `server_selection_v1` (`host.sdn` ->
+# `servers.sdn`), supporting same-host local/loopback configs as well as
+# explicit server contexts.
+
+use std.nogc_sync_mut.sosix.host.{env_get, sosix_file_exists, file_read_regular_no_follow_bounded,
+    file_atomic_write, dir_create_all}
+use std.nogc_sync_mut.sosix.host.{set_permissions}
+use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.server_command_v1.server_selection_v1
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct OrchestratorCaretServerInfoV1:
+    controller_id: text
+    state_root: text
+    listen_addr: text
+    token: text
+    pid: i64
+    session: text
+    server_name: text
+    context_name: text
+
+# Process exit code matches `OrchestratorValidationReplyV1.exit_code` (`i64`).
+@allow(primitive_api)
+pub fn orchestrator_caret_error_reply_v1(code: text, exit_code: i64) -> OrchestratorValidationReplyV1:
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1),
+        "kind": SdnValue.String("orchestrator-caret-reply"),
+        "ok": SdnValue.Bool(false),
+        "status": SdnValue.String("error"),
+        "code": SdnValue.String(code)
+    }
+    OrchestratorValidationReplyV1(exit_code: exit_code,
+        output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn orchestrator_caret_parse_dict_v1(source: text) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 262144,
+        max_depth: 8, max_nodes: 2048, max_rows: 0, max_cells: 0, max_columns: 64))
+    if parsed.is_err():
+        return Err("orchestrator-caret-sdn-invalid")
+    match parsed.unwrap().value:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err("orchestrator-caret-object-required")
+
+pub fn orchestrator_caret_str_v1(fields: Dict<text, SdnValue>, key: text) -> text:
+    if not fields.contains_key(key): return ""
+    match fields[key]:
+        case SdnValue.String(v): v
+        case _: ""
+
+# Direct unwrapper for `SdnValue.Int(i64)` protocol fields.
+@allow(primitive_api)
+pub fn orchestrator_caret_int_v1(fields: Dict<text, SdnValue>, key: text, fallback: i64) -> i64:
+    if not fields.contains_key(key): return fallback
+    match fields[key]:
+        case SdnValue.Int(v): v
+        case _: fallback
+
+# Direct unwrapper for `SdnValue.Bool(bool)` protocol fields.
+@allow(primitive_api)
+pub fn orchestrator_caret_bool_v1(fields: Dict<text, SdnValue>, key: text) -> bool:
+    if not fields.contains_key(key): return false
+    match fields[key]:
+        case SdnValue.Bool(v): v
+        case _: false
+
+pub fn orchestrator_caret_arr_v1(fields: Dict<text, SdnValue>, key: text) -> [text]:
+    if not fields.contains_key(key): return []
+    match fields[key]:
+        case SdnValue.Array(items):
+            var out: [text] = []
+            for item in items:
+                match item:
+                    case SdnValue.String(s): out.push(s)
+                    case _: pass
+            out
+        case _: []
+
+pub fn orchestrator_caret_write_frame_v1(stream: TcpStream, payload: text) -> Result<bool, text>:
+    val normalized = if payload.ends_with("\n"): payload else: payload + "\n"
+    var line_count = 0
+    for idx in 0..normalized.byte_len():
+        if normalized.byte_at(idx) == 10u8:
+            line_count = line_count + 1
+    if line_count <= 0 or line_count > 4096:
+        return Err("orchestrator-caret-frame-lines-invalid")
+    match stream.write_text(line_count.to_text() + "\n" + normalized):
+        case Ok(_): Ok(true)
+        case Err(_): Err("orchestrator-caret-write-failed")
+
+pub fn orchestrator_caret_read_frame_v1(stream: TcpStream) -> Result<text, text>:
+    val header = match stream.read_line_bounded(64):
+        case Ok(line): line.trim()
+        case Err(_): return Err("orchestrator-caret-read-header-failed")
+    val count = header.to_i64() ?? 0
+    if count <= 0 or count > 4096:
+        return Err("orchestrator-caret-frame-count-invalid")
+    var out = ""
+    var i = 0
+    while i < count:
+        match stream.read_line_bounded(65536):
+            case Ok(line): out = out + line
+            case Err(_): return Err("orchestrator-caret-read-body-failed")
+        i = i + 1
+    Ok(out)
+
+pub fn orchestrator_caret_server_info_save_v1(runtime_dir: text,
+        info: OrchestratorCaretServerInfoV1) -> bool:
+    dir_create_all(runtime_dir)
+    val _pdir = set_permissions(runtime_dir, 0o700)
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1),
+        "kind": SdnValue.String("orchestrator-caret-server"),
+        "controllerId": SdnValue.String(info.controller_id),
+        "stateRoot": SdnValue.String(info.state_root),
+        "listenAddr": SdnValue.String(info.listen_addr),
+        "token": SdnValue.String(info.token),
+        "pid": SdnValue.Int(info.pid),
+        "session": SdnValue.String(info.session),
+        "serverName": SdnValue.String(info.server_name),
+        "contextName": SdnValue.String(info.context_name)
+    }
+    val path = runtime_dir + "/server.sdn"
+    val ok = file_atomic_write(path, sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    val _pfile = set_permissions(path, 0o600)
+    ok
+
+pub fn orchestrator_caret_server_info_load_v1(runtime_dir: text) -> Result<OrchestratorCaretServerInfoV1, text>:
+    if not host_path_is_absolute(runtime_dir):
+        return Err("orchestrator-caret-runtime-dir-invalid")
+    val path = runtime_dir + "/server.sdn"
+    if not sosix_file_exists(path):
+        return Err("orchestrator-caret-server-not-running")
+    val raw = file_read_regular_no_follow_bounded(path, 16384)
+    if raw.is_err():
+        return Err("orchestrator-caret-server-info-unreadable")
+    val d = orchestrator_caret_parse_dict_v1(raw.unwrap())?
+    if (orchestrator_caret_int_v1(d, "version", 0) != 1 or
+            orchestrator_caret_str_v1(d, "kind") != "orchestrator-caret-server"):
+        return Err("orchestrator-caret-server-info-invalid")
+    Ok(OrchestratorCaretServerInfoV1(
+        controller_id: orchestrator_caret_str_v1(d, "controllerId"),
+        state_root: orchestrator_caret_str_v1(d, "stateRoot"),
+        listen_addr: orchestrator_caret_str_v1(d, "listenAddr"),
+        token: orchestrator_caret_str_v1(d, "token"),
+        pid: orchestrator_caret_int_v1(d, "pid", -1),
+        session: orchestrator_caret_str_v1(d, "session"),
+        server_name: orchestrator_caret_str_v1(d, "serverName"),
+        context_name: orchestrator_caret_str_v1(d, "contextName")
+    ))
+
+pub fn orchestrator_caret_client_call_v1(runtime_dir: text, config_arg: text,
+        action: text, target: text, args: [text]) -> Result<text, text>:
+    val cfg = if config_arg == "": "-" else: config_arg
+    val selected = server_selection_v1(["server-resolve", cfg, "caret", "-", "-", "host"])?
+    val info = orchestrator_caret_server_info_load_v1(runtime_dir)?
+    val stream = match TcpStream.connect_timeout(info.listen_addr, 10000):
+        case Ok(s): s
+        case Err(_): return Err("orchestrator-caret-connect-failed")
+    var arg_vals: [SdnValue] = []
+    for a in args:
+        arg_vals.push(SdnValue.String(a))
+    val req_fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1),
+        "kind": SdnValue.String("orchestrator-caret-request"),
+        "token": SdnValue.String(info.token),
+        "controllerId": SdnValue.String(info.controller_id),
+        "clientServer": SdnValue.String(selected.record.name),
+        "clientContext": SdnValue.String(selected.context),
+        "action": SdnValue.String(action),
+        "target": SdnValue.String(target),
+        "args": SdnValue.Array(arg_vals)
+    }
+    val payload = sdn_encode_canonical(SdnValue.Dict(req_fields)) + "\n"
+    val wrote = orchestrator_caret_write_frame_v1(stream, payload)
+    if wrote.is_err():
+        val _c = stream.close()
+        return Err(wrote.unwrap_err())
+    val reply = orchestrator_caret_read_frame_v1(stream)
+    val _c = stream.close()
+    reply
+
+pub fn orchestrator_caret_client_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    # caret-client <runtime-dir> [--config <path|->] <action> [target_or_args...]
+    if args.len() < 3 or args[0] != "caret-client":
+        return orchestrator_caret_error_reply_v1("usage: caret-client <runtime-dir> [--config <file|->] <status|launch|inspect|send|crashed|relaunch|close|cleanup|shutdown> [args...]\n" +
+            "       caret-client <runtime-dir> [--config <file|->] cleanup-old [--apply]", 2)
+    val runtime_dir = args[1]
+    var config_arg = "-"
+    var idx = 2
+    if idx + 1 < args.len() and args[idx] == "--config":
+        config_arg = args[idx + 1]
+        idx = idx + 2
+    if idx >= args.len():
+        return orchestrator_caret_error_reply_v1("caret-client-action-required", 2)
+    val action = args[idx]
+    idx = idx + 1
+    var target = ""
+    var rest: [text] = []
+    if ["inspect", "close", "cleanup", "relaunch", "send"].contains(action):
+        if idx < args.len():
+            target = args[idx]
+            idx = idx + 1
+        while idx < args.len():
+            rest.push(args[idx])
+            idx = idx + 1
+    else:
+        while idx < args.len():
+            rest.push(args[idx])
+            idx = idx + 1
+    if ["close", "cleanup", "relaunch", "send"].contains(action) and target == "":
+        return orchestrator_caret_error_reply_v1("caret-client-target-required", 2)
+    if action == "cleanup" and rest.len() != 0:
+        return orchestrator_caret_error_reply_v1("caret-client-cleanup-extra-arguments", 2)
+    if action == "cleanup-old" and (rest.len() > 1 or (rest.len() == 1 and rest[0] != "--apply")):
+        return orchestrator_caret_error_reply_v1("usage: caret-client <runtime-dir> cleanup-old [--apply]", 2)
+    if action == "launch" and rest.len() == 0:
+        return orchestrator_caret_error_reply_v1("caret-client-launch-spec-required", 2)
+    match orchestrator_caret_client_call_v1(runtime_dir, config_arg, action, target, rest):
+        case Err(reason): orchestrator_caret_error_reply_v1(reason, 1)
+        case Ok(reply_text):
+            match orchestrator_caret_parse_dict_v1(reply_text):
+                case Err(reason): orchestrator_caret_error_reply_v1(reason, 1)
+                case Ok(d):
+                    val code = if orchestrator_caret_bool_v1(d, "ok"): 0 else: 1
+                    OrchestratorValidationReplyV1(exit_code: code, output: reply_text)
+
+export OrchestratorCaretServerInfoV1
+export orchestrator_caret_error_reply_v1, orchestrator_caret_parse_dict_v1
+export orchestrator_caret_str_v1, orchestrator_caret_int_v1
+export orchestrator_caret_bool_v1, orchestrator_caret_arr_v1
+export orchestrator_caret_write_frame_v1, orchestrator_caret_read_frame_v1
+export orchestrator_caret_server_info_save_v1, orchestrator_caret_server_info_load_v1
+export orchestrator_caret_client_call_v1, orchestrator_caret_client_command_v1

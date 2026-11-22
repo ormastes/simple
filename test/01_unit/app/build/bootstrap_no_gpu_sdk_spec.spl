@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Prove RB-BUILD-03 at config and planner level. The default build plan
+selects only host targets, every GPU/HDL accelerator group is opt-in, and the
+Rust seed's default cargo features enable no GPU backend, so host bootstrap
+needs no CUDA/ROCm/Vulkan SDK.
+Audience: build engineers maintaining targets.sdn and bootstrap lanes.
+## Operator workflow
+Run `bin/simple test test/01_unit/app/build/bootstrap_no_gpu_sdk_spec.spl` from the repo root.
+## Compatibility and limitations
+Does not run a bootstrap; it checks the declared plan, not an SDK-free machine.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md sections 6 and 9.
+"""
+# @req: REQ-BUILD-GROUP-008
+
+use app.build.targets.build_targets.{
+    load_targets_file, validate_targets, default_group_targets, group_targets
+}
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn _is_accel(s: text) -> bool:
+    val l = s.lower()
+    l.contains("cuda") or l.contains("rocm") or l.contains("vulkan") or l.contains("gpu") or l.contains("vhdl") or l.contains("hip")
+
+fn _feature_default_line(cargo: text) -> text:
+    var in_features = false
+    for line in cargo.split("\n"):
+        val t = line.trim()
+        if t.starts_with("["):
+            in_features = (t == "[features]")
+        elif in_features and t.starts_with("default"):
+            return t
+    ""
+
+# @manual_section: bootstrap_no_gpu_sdk
+describe "RB-BUILD-03: host bootstrap needs no GPU SDK":
+    """The default plan and default cargo features carry no accelerator SDK."""
+
+    it "selects only host targets in the default plan":
+        # @req: REQ-BUILD-GROUP-008
+        step("Load targets.sdn and resolve the default group selection")
+        val ts = load_targets_file("targets.sdn", ".")
+        expect(validate_targets(ts, ".").len()).to_equal(0)
+        val sel = default_group_targets(ts)
+        expect(sel.len()).to_be_greater_than(0)
+        for s in sel:
+            expect(_is_accel(s)).to_equal(false)
+        for t in ts.targets:
+            if sel.contains(t.name):
+                expect(_is_accel(t.entry)).to_equal(false)
+                expect(_is_accel(t.output)).to_equal(false)
+                for d in t.deps:
+                    expect(_is_accel(d)).to_equal(false)
+
+    it "keeps every accelerator group opt-in":
+        # @req: REQ-BUILD-GROUP-008
+        step("Check each GPU/HDL group is default: false and absent from the default selection")
+        val ts = load_targets_file("targets.sdn", ".")
+        val sel = default_group_targets(ts)
+        var seen = 0
+        for g in ts.groups:
+            if _is_accel(g.name):
+                seen = seen + 1
+                expect(g.is_default).to_equal(false)
+                for m in g.members:
+                    expect(sel.contains(m)).to_equal(false)
+        expect(seen).to_be_greater_than(4)
+        for name in ["backends_cuda", "backends_rocm", "backends_vulkan", "backends_vhdl", "runtime_gpu"]:
+            expect(group_targets(ts, name).len()).to_be_greater_than(0)
+
+    it "never lets a default target depend on an accelerator group member":
+        # @req: REQ-BUILD-GROUP-008
+        step("Walk dependency edges of default targets")
+        val ts = load_targets_file("targets.sdn", ".")
+        val sel = default_group_targets(ts)
+        var accel_members: [text] = []
+        for g in ts.groups:
+            if _is_accel(g.name):
+                for m in g.members:
+                    accel_members.push(m)
+        for t in ts.targets:
+            if sel.contains(t.name):
+                for d in t.deps:
+                    expect(accel_members.contains(d)).to_equal(false)
+
+    it "enables no GPU cargo feature by default in the seed bootstrap crates":
+        # @req: REQ-BUILD-GROUP-008
+        step("Read default feature lists of the native-all, compiler and driver crates")
+        for path in ["src/compiler_rust/native_all/Cargo.toml", "src/compiler_rust/compiler/Cargo.toml", "src/compiler_rust/driver/Cargo.toml", "src/compiler_rust/runtime/Cargo.toml"]:
+            val line = _feature_default_line(file_read(path))
+            expect(line.len()).to_be_greater_than(0)
+            expect(_is_accel(line)).to_equal(false)

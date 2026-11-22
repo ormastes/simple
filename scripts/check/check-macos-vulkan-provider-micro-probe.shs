@@ -18,7 +18,7 @@ OUTPUT="$BUILD_DIR/macos_vulkan_provider_micro_probe"
 RAW_STDOUT="$BUILD_DIR/probe.stdout"
 RAW_STDERR="$BUILD_DIR/probe.stderr"
 EVIDENCE="$BUILD_DIR/evidence.env"
-COMPILER_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/vulkan/trusted-build.env"
+COMPILER_MANIFEST="${VULKAN_PROVIDER_PROBE_COMPILER_MANIFEST:-$ROOT_DIR/build/macos_gpu_2d_live_native/vulkan/trusted-build.env}"
 NATIVE_LOG="$BUILD_DIR/native-build.log"
 NATIVE_STATUS="$BUILD_DIR/native-build.status"
 NATIVE_LOG_HEAD_BYTES=4096
@@ -188,6 +188,20 @@ verify_compiler_provenance() {
     MANIFEST_REPO_REVISION="$MACOS_GPU_ADMISSION_REPO_REVISION"
     MANIFEST_SOURCE_INPUT_FINGERPRINT=\
 "$MACOS_GPU_ADMISSION_SOURCE_INPUT_FINGERPRINT"
+    [ -n "$COMPILER_SOURCE_KIND" ] || return 1 # compiler_source_kind
+    if [ -n "${VULKAN_PROVIDER_PROBE_COMPILER:-}" ] &&
+       [ "$VULKAN_PROVIDER_PROBE_COMPILER" != "$COMPILER" ]; then
+        return 1
+    fi
+    if [ -n "${VULKAN_PROVIDER_DYLIB:-}" ] &&
+       [ "$VULKAN_PROVIDER_DYLIB" != "$PROVIDER" ]; then
+        return 1
+    fi
+    case "$COMPILER" in
+        *compiler_rust/target/*) return 1 ;;
+        "$ROOT_DIR/bin/release/aarch64-apple-darwin-macho/simple"|"$ROOT_DIR/bin/release/x86_64-apple-darwin-macho/simple") ;;
+        *) return 1 ;;
+    esac
 }
 
 probe_output_has_required_fields() {
@@ -241,6 +255,7 @@ fi
 
 set +e
 VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}" \
+DYLD_FALLBACK_LIBRARY_PATH="${DYLD_FALLBACK_LIBRARY_PATH:-/opt/homebrew/lib:/usr/local/lib}" \
 DYLD_PRINT_LIBRARIES=1 \
     "$OUTPUT" "$PROVIDER" >"$RAW_STDOUT" 2>"$RAW_STDERR"
 PROBE_EXIT=$?

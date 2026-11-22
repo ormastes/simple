@@ -1,7 +1,8 @@
-# Device-free lifecycle regression. Not executed: user verification waiver.
+# Device-free lifecycle regression for VulkanSessionBackend and VulkanSession reinit.
 use std.spec.{describe, it, expect}
 use std.spec.step
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_session.{VulkanSessionBackend}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 
 describe "Vulkan session adapter initialization ownership":
     it "preserves the live session when initialization is requested again":
@@ -9,6 +10,7 @@ describe "Vulkan session adapter initialization ownership":
         var backend = VulkanSessionBackend.create("default")
         backend.initialized = true
         backend.handle = 37
+        backend.last_error = "stale-error"
         backend.device_name = "existing-device"
         backend.shader_mode = "spirv_precompiled"
         backend.clear_count = 2
@@ -17,10 +19,48 @@ describe "Vulkan session adapter initialization ownership":
         step("Repeat initialization and retain the existing owner state")
         expect(backend.init_device()).to_equal("")
         expect(backend.handle).to_equal(37)
+        expect(backend.last_error).to_equal("")
         expect(backend.initialized).to_equal(true)
         expect(backend.device_name).to_equal("existing-device")
         expect(backend.shader_mode).to_equal("spirv_precompiled")
         expect(backend.clear_count).to_equal(2)
         expect(backend.rect_count).to_equal(3)
         expect(backend.readback_count).to_equal(1)
-        # No cleanup: the sentinel models ownership, it is not a provider handle.
+
+    it "preserves live VulkanSession shaders pipelines and ref_count on repeated init":
+        step("Represent an already initialized VulkanSession without touching FFI")
+        var session = VulkanSession.create()
+        session.is_initialized = true
+        session.device = 77
+        session.shader_clear = 81
+        session.pipe_clear = 91
+        session.ref_count = 2
+        session.init_error = "stale-init-error"
+        step("Repeat VulkanSession.init and verify zero handle overwrite")
+        expect(session.init()).to_equal(0)
+        expect(session.is_initialized).to_equal(true)
+        expect(session.device).to_equal(77)
+        expect(session.shader_clear).to_equal(81)
+        expect(session.pipe_clear).to_equal(91)
+        expect(session.ref_count).to_equal(2)
+        expect(session.init_error).to_equal("")
+
+    it "invalidates stale runtime-bound VulkanSession state when runtime device was shut down":
+        step("Represent a runtime-selected session whose runtime device is no longer live")
+        var session = VulkanSession.create()
+        session.is_initialized = true
+        session.selected_device_index = 0
+        session.device = 999999
+        session.shader_clear = 81
+        session.pipe_clear = 91
+        session.ref_count = 2
+        step("Re-init detects runtime device mismatch and clears stale handles before re-probing")
+        val rc = session.init()
+        if rc == 0:
+            expect(session.device == 999999).to_equal(false)
+            expect(session.ref_count).to_equal(2)
+        else:
+            expect(session.is_initialized).to_equal(false)
+            expect(session.device).to_equal(0)
+            expect(session.shader_clear).to_equal(0)
+            expect(session.pipe_clear).to_equal(0)

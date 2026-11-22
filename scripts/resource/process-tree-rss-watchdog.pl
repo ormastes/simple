@@ -1057,7 +1057,11 @@ sub windows_job_workload {
         "sample_duration_total_us=$result{sample_duration_total_us}\n" .
         "root_exit_raw=" . ($result{root_exit_raw} // '') . "\n" .
         "abnormal_exit_ntstatus=" . ($result{abnormal_exit_ntstatus} // '') . "\n" .
-        "timeout_signal=job-terminate\n";
+        # W21 (2026-11-22): every Windows stop terminates the Job the same
+        # way, but only a timeout is a timeout. An RSS-cap kill used to read
+        # timeout_signal=job-terminate as well and was diagnosed as a hang.
+        "termination=job-terminate\n" .
+        "timeout_signal=" . ($result{status} eq 'timeout' ? 'job-terminate' : 'none') . "\n";
     my $code = $result{status} eq 'interrupted' && $interrupted ? $interrupted : $result{exit_status};
     return ($result{status}, $code, $result{quiescent});
 }
@@ -1620,6 +1624,17 @@ sub receipt {
         "session_helper_integrity=" . ($helper_failed ? 'failed' : $helper_installed ? 'verified' : 'unverified') . "\n" .
         "unexpected_session_pids=" . join(',', sort {$a <=> $b} keys %unexpected_sid) . "\n" . $extra_receipt;
     print STDERR $body if $code == 88 || $code == 89 || $code == 90;
+    # W21 (2026-11-22): one explicit verdict line after the ~100-line body, so
+    # a cap kill is never read as an anonymous job-terminate / exit 88.
+    # Consumers grep '^rss-guard: (rss|phys-footprint)-cap-exceeded cap_kib='.
+    if ($status eq 'rss-cap-exceeded' || $status eq 'phys-footprint-cap-exceeded') {
+        my ($cap_kib, $peak_kib) = $status eq 'rss-cap-exceeded'
+            ? ($opt{'max-rss-kib'}, $peak)
+            : ($opt{'max-phys-footprint-kib'}, $peak_phys_footprint // 'unavailable');
+        print STDERR "rss-guard: $status cap_kib=$cap_kib peak_kib=$peak_kib " .
+            "(process tree killed by the enforced RSS cap, not a timeout; " .
+            "cap_source=$opt{'cap-source'} cap_bound=$opt{'cap-bound'})\n";
+    }
     if (defined $opt{receipt}) {
         my $tmp = "$opt{receipt}.tmp.$$";
         open(my $fh, '>', $tmp) or die "rss-guard: cannot write receipt\n";

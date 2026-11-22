@@ -25,6 +25,21 @@ copied over `bin/release/<triple>/simple` — a fresh seed with a fresh mtime is
 exactly what makes the next lane believe a self-host succeeded. That is the
 whole reason this guide deploys into a temp root instead.
 
+## When You Need Phase 1 vs. the Unified Phase 3 / Phase 4 Build (2026-11-22)
+
+Under the current bootstrap architecture (see [phase3_phase4_shared_build.md](phase3_phase4_shared_build.md) and [bootstrap_options.md](bootstrap_options.md)), **ordinary development and release builds do NOT run Phase 1 or Phase 2 once a pure-Simple Phase 3+ compiler exists:**
+
+1. **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Exists:**
+   In `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)** and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) **ONLY** when intentionally rebuilding Phase 1 & Phase 2 from the Rust seed (such as cold bringup documented below); pass `--skip-seed` to require an existing Phase 3+ compiler without seed fallback.
+2. **Shared Cross-Platform Phased Build (`scripts/bootstrap/build-phase3-phase4.sh` & `.bat`):**
+   One shared script across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**. Running interactively without `--phase=...` (or with `--menu`) opens the **interactive Phased Build Menu**; non-interactive calls pass `--phase=p3a|p3|p4|all`. On Windows, `scripts/bootstrap/build-phase3-phase4.bat` delegates to the same `.sh` script with 2 configs: **`mingw` is DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`), and **`msvc` is optional** (`--win-config=msvc`, `clang-cl`). Legacy standalone Phase 3/4 scripts (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated — direct invocation pauses with migration instructions for `build-phase3-phase4.sh` and returns without building.
+3. **Compile Mode (`shard` Default, `file` Optional) & `native_host_match` Unit Link:**
+   `--compile-mode=shard` is **DEFAULT** in `build-phase3-phase4.sh` (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`); `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional. `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}` enforces mandatory **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`), minimizing `simple` to link **only** thin entry + `(platform, cpu)` static primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so` / `.dll`) dynamically. **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib` already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+4. **Phase 4 Dual-Mode Build (`--xray` + Optimized Release) & Stage 5 MCP/LSP Essentials:**
+   Phase 4 builds **both** the optimized production binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`) — replacing the throwaway Phase 1 temp MCP deploy below once Phase 4 completes.
+5. **Protected Script Guard & Zero-Compile `--path-check`:**
+   Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running compilation.
+
 ## 0. Fix the shell PATH first (Windows only)
 
 Git Bash here inherits the raw Windows `;`-separated `PATH`, which POSIX tools
@@ -343,7 +358,8 @@ when rebuilding the MCP/LSP servers from a phase-1 compiler.
 ## See also
 
 - `.claude/rules/bootstrap.md` — why a seed must not masquerade as `bin/simple`
-- `doc/07_guide/tooling/bootstrap_options.md` — the full flag surface
+- [phase3_phase4_shared_build.md](phase3_phase4_shared_build.md) — unified cross-platform Phase 3 / Phase 4 build & Windows `.bat` wrapper
+- [bootstrap_options.md](bootstrap_options.md) — the full flag surface and shard/cache policy
 - `doc/07_guide/infra/phase_snapshots.md` — phase lineage snapshots
 - `doc/07_guide/infra/spipe_mcp.md` — the spipe MCP surface
 - `doc/07_guide/app/mcp/mcp.md` — `simple-mcp` wrapper contract and troubleshooting

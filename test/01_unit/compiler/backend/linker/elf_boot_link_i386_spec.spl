@@ -1,0 +1,147 @@
+# elf_boot_link — i386 (ELFCLASS32, SHT_REL) SimpleOS kernel-style link
+#
+# Fixtures: test/fixtures/linker/elf/i386_boot/{start_i386,lib_i386}.{S,o},
+# assembled with clang --target=i686-unknown-none-elf. They carry R_386_32,
+# R_386_PC32, R_386_PLT32 and a .data pointer into .rodata/.text. Every
+# expected byte below is `ld.lld -m elf_i386 -T i386_boot.ld` (LLVM 21, llvm-
+# mingw 20260922) on the same two objects. Before this lane elf_boot_link
+# rejected i386 ("supports only x86_64, aarch64 and riscv64 targets"), so the
+# SimpleOS x86_32 kernel (a SECTIONS script) could not be linked in-house.
+#
+# @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
+
+use compiler.backend.linker.elf.elf_boot_link.{ElfBootImage, elf_boot_link_image}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{BootLayoutPlan, boot_layout_from_text}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes, file_read}
+
+val I386_FIX: text = "test/fixtures/linker/elf/i386_boot"
+
+val LLD_I386_TEXT: [i64] = [188, 160, 0, 16, 0, 232, 22, 0, 0, 0, 232, 17, 0, 0, 0, 161, 80, 0, 16, 0, 185, 88, 0, 16, 0, 137, 1, 244, 235, 253, 204, 204, 184, 64, 0, 16, 0, 195]
+val LLD_I386_DATA: [i64] = [65, 0, 16, 0, 48, 0, 16, 0, 7, 0, 0, 0]
+val LLD_I386_MULTIBOOT: [i64] = [2, 176, 173, 27, 0, 0, 0, 0, 254, 79, 82, 228]
+
+fn i3_load(name: text) -> [i64]:
+    val raw = file_read_bytes("{I386_FIX}/{name}")
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn i3_u16(b: [i64], off: i64) -> i64:
+    b[off] | (b[off + 1] << 8)
+
+fn i3_u32(b: [i64], off: i64) -> i64:
+    i3_u16(b, off) | (i3_u16(b, off + 2) << 16)
+
+fn i3_img() -> ElfBootImage:
+    val plan = boot_layout_from_text(file_read("{I386_FIX}/i386_boot.ld")).unwrap()
+    elf_boot_link_image([i3_load("start_i386.o"), i3_load("lib_i386.o")], plan, RelocArch.I386).unwrap()
+
+fn i3_shdr(im: ElfBootImage, name: text) -> i64:
+    """File offset of the ELF32 section header of output section `name`."""
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            return i3_u32(im.bytes, 32) + (i + 1) * 40
+        i = i + 1
+    -1
+
+fn i3_sec(im: ElfBootImage, name: text, n: i64) -> [i64]:
+    val sh = i3_shdr(im, name)
+    if sh < 0:
+        return []
+    val off = i3_u32(im.bytes, sh + 16)
+    var out: [i64] = []
+    var k: i64 = 0
+    while k < n:
+        out = out.push(im.bytes[off + k])
+        k = k + 1
+    out
+
+describe "elf_boot_link - i386 ELF32":
+    it "links with an ELFCLASS32 little-endian EM_386 header and the script entry":
+        val im = i3_img()
+        expect(im.bytes[4]).to_equal(1)
+        expect(im.bytes[5]).to_equal(1)
+        expect(i3_u16(im.bytes, 16)).to_equal(2)
+        expect(i3_u16(im.bytes, 18)).to_equal(3)
+        expect(i3_u32(im.bytes, 24)).to_equal(0x100010)
+        expect(im.entry).to_equal(0x100010)
+        expect(i3_u16(im.bytes, 40)).to_equal(52)
+        expect(i3_u16(im.bytes, 42)).to_equal(32)
+        expect(i3_u16(im.bytes, 46)).to_equal(40)
+
+    it "places the script sections at the ld.lld addresses":
+        val im = i3_img()
+        expect(i3_u32(im.bytes, i3_shdr(im, ".multiboot") + 12)).to_equal(0x100000)
+        expect(i3_u32(im.bytes, i3_shdr(im, ".text") + 12)).to_equal(0x100010)
+        expect(i3_u32(im.bytes, i3_shdr(im, ".rodata") + 12)).to_equal(0x100040)
+        expect(i3_u32(im.bytes, i3_shdr(im, ".data") + 12)).to_equal(0x100050)
+        expect(i3_u32(im.bytes, i3_shdr(im, ".bss") + 12)).to_equal(0x100060)
+
+    it "applies R_386_32, R_386_PC32 and R_386_PLT32 exactly like ld.lld":
+        val im = i3_img()
+        expect(i3_sec(im, ".text", LLD_I386_TEXT.len())).to_equal(LLD_I386_TEXT)
+
+    it "patches REL implicit addends in .data pointers":
+        val im = i3_img()
+        expect(i3_sec(im, ".data", LLD_I386_DATA.len())).to_equal(LLD_I386_DATA)
+
+    it "keeps the multiboot header first and byte-exact":
+        val im = i3_img()
+        expect(i3_sec(im, ".multiboot", 12)).to_equal(LLD_I386_MULTIBOOT)
+
+    it "emits 32-byte program headers whose PT_LOADs map the sections":
+        val im = i3_img()
+        val phoff = i3_u32(im.bytes, 28)
+        val phnum = i3_u16(im.bytes, 44)
+        expect(phoff).to_equal(52)
+        var loads: i64 = 0
+        var covers_text = false
+        var i: i64 = 0
+        while i < phnum:
+            val ph = phoff + i * 32
+            if i3_u32(im.bytes, ph) == 1:
+                loads = loads + 1
+                val va = i3_u32(im.bytes, ph + 8)
+                val mem = i3_u32(im.bytes, ph + 20)
+                if va <= 0x100010 and 0x100010 + LLD_I386_TEXT.len() <= va + mem:
+                    covers_text = true
+            i = i + 1
+        expect(loads > 0).to_equal(true)
+        expect(covers_text).to_equal(true)
+
+    it "writes 16-byte Elf32_Sym entries naming _start at the entry":
+        val im = i3_img()
+        val sh = i3_shdr(im, ".text")
+        val shnum = i3_u16(im.bytes, 48)
+        val shoff = i3_u32(im.bytes, 32)
+        var found = false
+        var s: i64 = 0
+        while s < shnum:
+            val h = shoff + s * 40
+            if i3_u32(im.bytes, h + 4) == 2:
+                expect(i3_u32(im.bytes, h + 36)).to_equal(16)
+                val symoff = i3_u32(im.bytes, h + 16)
+                val count = i3_u32(im.bytes, h + 20) / 16
+                val stroff = i3_u32(im.bytes, shoff + i3_u32(im.bytes, h + 24) * 40 + 16)
+                var k: i64 = 1
+                while k < count:
+                    val e = symoff + k * 16
+                    val no = stroff + i3_u32(im.bytes, e)
+                    if im.bytes[no] == 95 and im.bytes[no + 1] == 115 and im.bytes[no + 6] == 0 and
+                            i3_u32(im.bytes, e + 4) == 0x100010:
+                        found = true
+                    k = k + 1
+            s = s + 1
+        expect(sh > 0).to_equal(true)
+        expect(found).to_equal(true)
+
+    it "fails closed on PIC relocations (R_386_GOTOFF) instead of linking them as PC32":
+        val plan = boot_layout_from_text(file_read("{I386_FIX}/i386_boot.ld")).unwrap()
+        val r = elf_boot_link_image([i3_load("gotoff_i386.o")], plan, RelocArch.I386)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("i386 relocation type 9 is unsupported")).to_equal(true)

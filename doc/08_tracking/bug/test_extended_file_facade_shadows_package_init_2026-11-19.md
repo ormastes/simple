@@ -1,6 +1,6 @@
 # `std.database.test_extended` resolves to a stale file facade, not the package `__init__` — full-CLI Stage 2 dies on `unresolved type: TestStatusCounts` (2026-11-19)
 
-- **Status:** WORKED AROUND (stdlib facade sync); compiler-side diagnostic OPEN
+- **Status:** FIXED (2026-11-22 — deleted duplicate `src/lib/{nogc_sync_mut,nogc_async_mut}/database/test_extended.spl` file facades and aligned `src/lib/nogc_sync_mut/database/test_extended/__init__.spl` on explicit `export use`, retiring the `@workaround` markers so `std.database.test_extended` resolves unambiguously to `test_extended/__init__.spl`)
 - **Area:** native entry-closure module resolution (`std.X` tier flattening) +
   HIR re-export chase; stdlib `database/test_extended` facades
 - **Found:** Phase 4, native Stage 2 (integ22,

@@ -1,0 +1,55 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (arm32 kernel link): rt_array_copy, rt_array_data_ptr, rt_array_fill_span,
+# rt_array_get_text, rt_array_is_byte_packed, rt_array_new_with_cap_u64,
+# rt_array_repeat, rt_array_set_text, rt_byte_array_new_len, rt_bytes_from_raw,
+# rt_bytes_to_text, rt_collection_remove, rt_dict_new, rt_typed_bytes_u8_data_at,
+# rt_typed_words_u64_at/_push/_set had no definition for the arm32 kernel.
+# The @cfg(arm32) exports reach memory through rt_mmio_*, so the host executes
+# the pure encoding / limit / bounds helpers every export routes through.
+# Link evidence: scripts/check/check-simpleos-arm32-kernel-link.shs.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.arm32.runtime_array_shims.{a32_word_encode, a32_clamp_count, a32_cap_arg, a32_index_ok, a32_dict_fail_message, a32_dict_fail_codes, A32_MAX_ELEMS}
+
+describe "arm32 kernel runtime array shims":
+    it "encodes u64 words one way for push and set":
+        step("raw and already-encoded values both become ENCODE_INT(raw)")
+        expect(a32_word_encode(5)).to_equal(40)
+        expect(a32_word_encode(40)).to_equal(40)
+        expect(a32_word_encode(a32_word_encode(7))).to_equal(56)
+
+    it "uses one element limit matching the C runtime (0x100000)":
+        expect(A32_MAX_ELEMS).to_equal(0x100000)
+        expect(a32_clamp_count(-4)).to_equal(0)
+        expect(a32_clamp_count(10)).to_equal(10)
+        expect(a32_clamp_count(0x2000000)).to_equal(0x100000)
+
+    it "passes capacity to rt_array_new_with_cap as an ENCODED int":
+        step("C rt_array_new_with_cap does DECODE_INT(cap_val)")
+        expect(a32_cap_arg(3)).to_equal(24)
+        expect(a32_cap_arg(0)).to_equal(8)
+        expect(a32_cap_arg(0x2000000)).to_equal(0x100000 << 3)
+
+    it "bounds-checks element indexes":
+        expect(a32_index_ok(0, 3)).to_equal(1)
+        expect(a32_index_ok(2, 3)).to_equal(1)
+        expect(a32_index_ok(3, 3)).to_equal(0)
+        expect(a32_index_ok(-1, 3)).to_equal(0)
+
+    it "fails fast in rt_dict_new with a serial message":
+        expect(a32_dict_fail_message().contains("rt_dict_new")).to_equal(true)
+        step("the kernel prints from byte codes; they must spell the message")
+        val msg = a32_dict_fail_message()
+        val codes = a32_dict_fail_codes()
+        expect(codes.len()).to_equal(msg.len())
+        var i = 0
+        while i < codes.len():
+            expect(codes[i]).to_equal(msg.byte_at(i))
+            i = i + 1
+
+    it "keeps the shim module in the arm32 kernel entry closure":
+        val entry = file_read_text("examples/09_embedded/simple_os/arch/arm32/os_entry.spl")
+        expect(entry.contains("use os.kernel.arch.arm32.runtime_array_shims.{}")).to_equal(true)

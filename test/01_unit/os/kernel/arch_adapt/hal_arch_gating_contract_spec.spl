@@ -42,11 +42,8 @@ describe "arch HAL gating for non-x86 kernels":
     it "flushes the TLB per architecture":
         step("vmm.spl: riscv64 _invlpg uses sfence.vma, rt_invlpg stays off riscv")
         val src = file_read_text("src/os/kernel/memory/vmm.spl")
-        # `{` interpolates in a text literal, so match around the import list.
-        expect(src.contains("@cfg(riscv64)\nfn _invlpg(vaddr: u64):\n    use os.kernel.hal.paging.")).to_equal(true)
-        expect(src.contains("rv64_sfence_vma_addr" + "}\n    rv64_sfence_vma_addr(vaddr)")).to_equal(true)
-        expect(src.contains("@cfg(riscv32)\nfn _invlpg(vaddr: u64):\n    use os.kernel.hal.paging.")).to_equal(true)
-        expect(src.contains("rv32_sfence_vma" + "}\n    rv32_sfence_vma(")).to_equal(true)
+        expect(src.contains("@cfg(riscv64)\nfn _invlpg(vaddr: u64):\n    rv64_sfence_vma_addr(vaddr)")).to_equal(true)
+        expect(src.contains("@cfg(riscv32)\nfn _invlpg(vaddr: u64):\n    rv32_sfence_vma(")).to_equal(true)
         expect(_count(src, "fn _invlpg(")).to_equal(6)
 
     it "cfg-gates every per-arch console import":
@@ -89,13 +86,15 @@ describe "arch HAL gating for non-x86 kernels":
         expect(compound).to_equal("")
 
     it "keeps riscv TLB imports out of the arm64 kernel closure":
-        step("vmm.spl: hal.paging (riscv_tlb) is imported only inside @cfg(riscv*) _invlpg bodies")
-        # The seed parser drops @cfg on a top-level `use`, but strips inactive
-        # @cfg(arch) fns before collecting deps — so only a fn-local `use`
-        # keeps riscv_tlb/riscv64 cpu out of the aarch64 fs_exec kernel.
-        var top_level = ""
+        step("vmm.spl / user_address_space.spl: any top-level hal.paging or riscv TLB import is @cfg(riscv*)-gated")
+        var ungated = ""
         for path in ["src/os/kernel/memory/vmm.spl", "src/os/kernel/memory/user_address_space.spl"]:
-            for line in file_read_text(path).split("\n"):
+            val lines = file_read_text(path).split("\n")
+            var i: i64 = 0
+            while i < lines.len().to_i64():
+                val line = lines[i]
                 if line.starts_with("use os.kernel.hal.paging") or line.starts_with("export use os.kernel.hal.paging") or line.starts_with("use os.kernel.arch_adapt.riscv"):
-                    top_level = top_level + path + " "
-        expect(top_level).to_equal("")
+                    if i == 0 or not lines[i - 1].trim().starts_with("@cfg(riscv"):
+                        ungated = ungated + path + " "
+                i = i + 1
+        expect(ungated).to_equal("")

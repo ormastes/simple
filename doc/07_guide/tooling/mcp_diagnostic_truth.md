@@ -34,7 +34,7 @@ To preserve `simple_lsp_mcp`'s lightweight startup closure (importing only `.jso
 
 1. Poll `task_handle` in the 64-entry task ring buffer when supplied, upgrading immediately to an admitted cache hit if one has materialized for `(file, snapshot_hash, policy_digest)`.
 2. Serve an admitted `DiagnosticBatchV1` cache hit (`SIMPLE_DIAGNOSTIC_BATCH_CACHE_FILE` or `<file>.diag.batch.json`) only when both `source_hash`/`snapshot_hash` and `target_profile.policy_digest` match the active snapshot and policy.
-3. When `SIMPLE_LSP_ENABLE_DIAGNOSTICS=1` is enabled, run a synchronous bounded `process_run_bounded` check (`run src/app/cli/query.spl check <file> --format json` in source mode; `check --format=json <file>` with `check --json <file>` fallback in native mode); when gated off, return `status: "unavailable"` with a registered `task_handle` and `next_actions` guidance immediately. Asynchronous background `TaskRunner` `"analysis"` job dispatch is reserved as a future phase extension.
+3. When `SIMPLE_LSP_ENABLE_DIAGNOSTICS=1` is enabled, run a bounded check. Source mode uses `run src/app/cli/query.spl check <file> --format json`. Native mode uses `check --json <file>` and retries with `--format=json` if the checker reports an unknown option. Set `SIMPLE_LSP_CHECK_BINARY` to a native standalone check executable to select it for diagnostics only. When the gate is off, return `status: "unavailable"` with a registered `task_handle` and `next_actions`. Asynchronous background `TaskRunner` `"analysis"` job dispatch is reserved as a future phase extension.
 
 ### Never Summarize Non-Complete Statuses as Clean
 

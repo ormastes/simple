@@ -18,6 +18,7 @@ extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 
 val LOADING = "src/compiler/80.driver/driver_source_loading.spl"
+val ENTRY_CORE = "src/compiler/80.driver/driver_entry_closure_core.spl"
 val HELPERS = "src/compiler/80.driver/driver_helpers.spl"
 
 describe "driver source collection has exactly one definition":
@@ -43,19 +44,23 @@ describe "driver source collection has exactly one definition":
     it "collapses driver_helpers.spl so only one collector definition remains":
         # @req REQ-SSPEC-COMPILER
         step("collapses driver_helpers.spl so only one collector definition remains")
-        step("Read both driver source-collection modules")
-        val loading = rt_file_read_text(LOADING) ?? ""
-        val helpers = rt_file_read_text(HELPERS) ?? ""
-        expect(loading).to_not_equal("")
-        expect(helpers).to_not_equal("")
+        step("Read the source-loading facade, closure core, and helpers modules")
+        val loading = (rt_file_read_text(LOADING) ?? "").replace("\r\n", "\n")
+        val core = (rt_file_read_text(ENTRY_CORE) ?? "").replace("\r\n", "\n")
+        val helpers = (rt_file_read_text(HELPERS) ?? "").replace("\r\n", "\n")
+        expect(loading.len() > 0).to_equal(true)
+        expect(core.len() > 0).to_equal(true)
+        expect(helpers.len() > 0).to_equal(true)
 
-        step("The canonical collector lives in driver_source_loading.spl")
-        expect(loading).to_contain("pub fn _driver_collect_sources(p: text) -> [SourceFile]:")
-        expect(loading).to_contain("pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
+        step("driver_source_loading.spl forwards and driver_entry_closure_core.spl owns the implementation")
+        expect(loading).to_contain("pub fn _driver_collect_sources(p: text) -> [SourceFile]:\n    _entry_core__driver_collect_sources(p)")
+        expect(loading).to_contain("pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:\n    _entry_core__driver_collect_sources_via_find(paths)")
+        expect(core).to_contain("pub fn _driver_collect_sources(p: text) -> [SourceFile]:")
+        expect(core).to_contain("pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
 
         step("driver_helpers.spl declares no competing definition")
-        expect(helpers).to_not_contain("fn _driver_collect_sources(p: text) -> [SourceFile]:")
-        expect(helpers).to_not_contain("fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")
+        expect(helpers.contains("fn _driver_collect_sources(p: text) -> [SourceFile]:")).to_equal(false)
+        expect(helpers.contains("fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:")).to_equal(false)
 
     it "applies the four lane exclusions that only the winning copy carries":
         # @req REQ-SSPEC-COMPILER
@@ -129,19 +134,19 @@ describe "driver source collection has exactly one definition":
         # @req REQ-SSPEC-COMPILER
         step("keeps the exclusion list intact in the definition that actually answers")
         step("Both collector branches carry all four excluded path fragments")
-        val loading = rt_file_read_text(LOADING) ?? ""
-        expect(loading).to_contain("/core/interpreter/")
-        expect(loading).to_contain("/10.frontend/parser/")
-        expect(loading).to_contain("/10.frontend/treesitter")
-        expect(loading).to_contain("/hir_lowering/async")
+        val core = (rt_file_read_text(ENTRY_CORE) ?? "").replace("\r\n", "\n")
+        expect(core).to_contain("/core/interpreter/")
+        expect(core).to_contain("/10.frontend/parser/")
+        expect(core).to_contain("/10.frontend/treesitter")
+        expect(core).to_contain("/hir_lowering/async")
 
     it "routes the bulk find collector through the same single definition":
         # @req REQ-SSPEC-COMPILER
         step("routes the bulk find collector through the same single definition")
         step("via_find delegates rather than re-implementing the filter")
-        val loading = rt_file_read_text(LOADING) ?? ""
-        expect(loading).to_contain("val loaded = _driver_load_bulk_source_file(path, native_entry_active)")
-        expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
+        val core = (rt_file_read_text(ENTRY_CORE) ?? "").replace("\r\n", "\n")
+        expect(core).to_contain("_driver_load_bulk_source_file(path, native_entry_active)")
+        expect(core).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
 
         step("Delegation is observable: an excluded path yields nothing")
         expect(_driver_collect_sources_via_find(["src/compiler/10.frontend/core/interpreter"]).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement

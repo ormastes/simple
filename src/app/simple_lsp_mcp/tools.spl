@@ -2,8 +2,10 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
-use app.io.minimal_runtime_ops.{cwd, env_get, process_run_bounded}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, lsp_query_path, query_visibility_path, saml_cli_path, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
+use app.cli.query_visibility.{query_visibility_symbols_payload_core}
+use app.io.minimal_runtime_ops.{cwd, env_get, is_aot_native_runtime, process_run_bounded}
+use app.io.cli_ops.{cli_current_exe_path}
 # Import process operations from the light owner, NOT app.io.mod — the
 # latter is a CLI/compiler re-export hub whose graph makes `bin/simple run` skip
 # main() (LSP MCP server never starts). See
@@ -22,15 +24,6 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 # with these bounds, but the merge left them undefined here.
 val LSP_COMMAND_TIMEOUT_MS: i64 = 30000
 val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
-
-fn lsp_query_path() -> text:
-    "src/app/lsp/lsp_query.spl"
-
-fn query_visibility_path() -> text:
-    "src/app/cli/query_visibility.spl"
-
-fn saml_cli_path() -> text:
-    "src/app/saml/main.spl"
 
 fn command_failure(code: i64, stderr: text, stdout: text) -> text:
     val prefix = "command failed with exit code " + str(code)
@@ -55,6 +48,15 @@ fn run_command_text(binary: text, args: [text]) -> text:
         return clean
     command_failure(code, stderr, clean)
 
+fn run_query_command(args: [text]) -> text:
+    # Native releases carry the query entrypoints in the server. The bounded
+    # worker exits after the query, so its allocations are reclaimed.
+    if (env_get("SIMPLE_BINARY") ?? "") == "" and is_aot_native_runtime():
+        val executable = cli_current_exe_path()
+        if executable != "":
+            return run_command_text(executable, args)
+    run_command_text(find_simple_binary(), args)
+
 fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
     # In-process first (L9 gate G1): a readable workspace file needs no `simple`
     # child — the adapter calls the same engine cores the one-shot wraps. The
@@ -63,14 +65,14 @@ fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
     val inproc = lsp_query_inproc_dispatch_v1(subcmd, file, line0 + 1, char0 + 1)
     if inproc.handled:
         return lsp_query_inproc_command_text_v1(inproc)
-    run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
+    run_query_command([lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 fn run_visibility_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
-    run_command_text(find_simple_binary(), [query_visibility_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
+    run_query_command([query_visibility_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
 
 # hover with an explicit requester location (`path[:line]`); "" = no requester.
 fn run_visibility_hover(file: text, line0: i64, char0: i64, requester: text) -> text:
-    run_command_text(find_simple_binary(), [query_visibility_path(), "hover", file, str(line0 + 1), str(char0 + 1), "--requester", requester])
+    run_query_command([query_visibility_path(), "hover", file, str(line0 + 1), str(char0 + 1), "--requester", requester])
 
 fn run_lsp_symbols(file: text) -> text:
     run_visibility_symbols(file, "", "", "", "")
@@ -80,32 +82,26 @@ fn run_lsp_symbols(file: text) -> text:
 # is the MDSOC+ reveal level (public default inside a boundary); `feature` /
 # `layer` narrow the list. REQ-PUBVIEW-009.
 fn run_visibility_symbols(file: text, requester: text, visibility: text, feature: text, layer: text) -> text:
-    run_command_text(find_simple_binary(), [query_visibility_path(), "symbols", file, "--requester", requester, "--visibility", visibility, "--feature", feature, "--layer", layer])
+    val (payload, code) = query_visibility_symbols_payload_core(file, requester, visibility, feature, layer)
+    if code == 0:
+        return payload
+    command_failure(code, "", payload)
 
 # Workspace view: by feature (one capsule across its layers), by layer (one
 # layer across features) or by query; same reveal levels and hidden summary.
 fn run_visibility_workspace_symbols(query: text, visibility: text, feature: text, layer: text, root: text) -> text:
     val base = if root == "": "src" else: root
-    run_command_text(find_simple_binary(), [query_visibility_path(), "workspace-symbols", "--query", query, "--visibility", visibility, "--feature", feature, "--layer", layer, "--root", base])
+    run_query_command([query_visibility_path(), "workspace-symbols", "--query", query, "--visibility", visibility, "--feature", feature, "--layer", layer, "--root", base])
 
 # Two-set view (layerPublic / featurePublic) for a requester location.
 fn run_visibility_sets(file: text, requester: text, source: text) -> text:
-    run_command_text(find_simple_binary(), [query_visibility_path(), "visibility", file, "--requester", requester, "--requester-source", source])
+    run_query_command([query_visibility_path(), "visibility", file, "--requester", requester, "--requester-source", source])
 
 fn run_saml_analyze(file: text, spec_dir: text) -> text:
-    # SAML analysis for an editor. Unlike `lsp_diagnostics`, this spawns a plain
-    # SCRIPT (src/app/saml/main.spl), not the `simple check` CLI subcommand, so
-    # it does not hit the source-mode process_run deadlock documented above —
-    # it is the same spawn shape as run_lsp_query/run_visibility_query, which
-    # work today. Measured cold cost: 0.51s for a 36-line module.
-    #
-    # `spec_dir` is optional: when non-empty it is forwarded as `--specs
-    # <spec_dir>` so the analyzer can fold in spec-derived external coverage
-    # (see src/lib/common/saml/spec_coverage.spl). When empty, no extra flag
-    # is passed, preserving prior behavior (main.spl's own default applies).
+    # An explicit spec directory enables external coverage analysis.
     if spec_dir.trim() == "":
-        return run_command_text(find_simple_binary(), [saml_cli_path(), "analyze", file])
-    run_command_text(find_simple_binary(), [saml_cli_path(), "analyze", file, "--specs", spec_dir])
+        return run_query_command([saml_cli_path(), "analyze", file])
+    run_query_command([saml_cli_path(), "analyze", file, "--specs", spec_dir])
 
 fn run_lsp_diagnostics(file: text) -> text:
     # `simple check` is a CLI subcommand that spawns its own delegate child.

@@ -216,9 +216,50 @@ impl MirLowering:
                 case _: ()
         ""
 
+    me enum_keys_match_declaration_v1(left_key: text, right_key: text) -> bool:
+        if not self.enum_variant_index_q.has(left_key) or not self.enum_variant_index_q.has(right_key):
+            return false
+        val left_variants = self.enum_variant_index_q[left_key]
+        val right_variants = self.enum_variant_index_q[right_key]
+        if left_variants.len() != right_variants.len():
+            return false
+        if (self.generic_enum_constructor_owners.get(left_key) ?? false) != (self.generic_enum_constructor_owners.get(right_key) ?? false):
+            return false
+        val has_left_disc = self.enum_variant_discriminants_q.has(left_key)
+        val has_right_disc = self.enum_variant_discriminants_q.has(right_key)
+        if has_left_disc != has_right_disc:
+            return false
+        var vi = 0
+        while vi < left_variants.len():
+            val vname = left_variants[vi]
+            if vname != right_variants[vi]:
+                return false
+            if has_left_disc:
+                if self.enum_variant_discriminants_q[left_key][vi] != self.enum_variant_discriminants_q[right_key][vi]:
+                    return false
+            val lk = "{left_key}::{vname}"
+            val rk = "{right_key}::{vname}"
+            val lkind = self.enum_variant_payload_kind.get(lk) ?? ""
+            val rkind = self.enum_variant_payload_kind.get(rk) ?? ""
+            if lkind != rkind:
+                return false
+            val ltypes = self.enum_variant_payload_types.get(lk) ?? []
+            val rtypes = self.enum_variant_payload_types.get(rk) ?? []
+            if ltypes.len() != rtypes.len():
+                return false
+            var pi = 0
+            while pi < ltypes.len():
+                if not enum_payload_types_compatible(ltypes[pi], rtypes[pi]) or not enum_payload_types_compatible(rtypes[pi], ltypes[pi]):
+                    return false
+                pi = pi + 1
+            vi = vi + 1
+        true
+
     me enum_constructor_metadata_owner(enum_name: text) -> text:
         if self.enum_variant_index_q.has(enum_name) and self.enum_bare_of(enum_name) != enum_name:
             return enum_name
+        if (self.enum_bare_ambiguous.get(enum_name) ?? false):
+            return ""
         # A bare legacy constructor carries no declaration symbol. Do not
         # select the last registered sibling, even when its variants happen
         # to have identical names/discriminants but different payload types.
@@ -228,15 +269,13 @@ impl MirLowering:
                 if owner != "" and owner != key:
                     # Dual registration of ONE declaration writes both the bare
                     # key and the runtime_name key (module_lowering.spl step c)
-                    # with identical variant lists; that is not an ambiguity.
-                    # Prefer the qualified runtime_name, the canonical identity.
-                    # A genuine collision is two DIFFERENT qualified keys
-                    # sharing a bare tail — only that stays ambiguous.
-                    if key.contains(".") and not owner.contains("."):
-                        owner = key
-                        continue
-                    if owner.contains(".") and not key.contains("."):
-                        continue
+                    # with identical variants, discriminants, and payloads; a
+                    # bare sibling with differing declarations stays ambiguous.
+                    if (key.contains(".") and not owner.contains(".")) or (owner.contains(".") and not key.contains(".")):
+                        if self.enum_keys_match_declaration_v1(owner, key):
+                            if key.contains("."):
+                                owner = key
+                            continue
                     return ""
                 owner = key
         owner
@@ -542,6 +581,36 @@ impl MirLowering:
                         case _: ()
             case _: ()
         false
+
+    fn call_arg_optional_into_non_optional_message(callee_name: text, index: i64, declared: HirType, expression: HirExpr, arg_local: LocalId) -> text?:
+        # The call-argument twin of the payload check above. `[T].pop()`,
+        # `.first()` and `.last()` lower to a typed `T?` (remembered on the
+        # result local by lower_array_first_or_last); handed straight to a
+        # non-optional `T` parameter the callee received the Option word and
+        # a total `match` on it fell through at runtime. Never widen nil:
+        # refuse at compile time. Scoped to these builtin producers, whose
+        # result cannot be flow-narrowed; a bound local (`if v != nil: g(v)`)
+        # still remembers `T?` and is deliberately not judged here.
+        # doc/08_tracking/bug/mir_enum_payload_mismatch_loopregion_2026-11-20.md
+        match declared.kind:
+            case HirTypeKind.Optional(_) | HirTypeKind.Any: return None
+            case _: ()
+        var method_name = ""
+        match expression.kind:
+            case HirExprKind.MethodCall(_, method, method_args, _):
+                if method_args.len() == 0: method_name = method
+            case _: ()
+        if method_name != "pop" and method_name != "first" and method_name != "last": return None
+        if val actual = self.find_local_hir_type(arg_local.id):
+            match actual.kind:
+                case HirTypeKind.Optional(actual_inner):
+                    if enum_payload_types_alias_compatible(declared, actual_inner, self.symbols):
+                        val declared_name = self.enum_payload_declared_name(declared)
+                        val callee = if callee_name != "": callee_name else: "<indirect>"
+                        val context = "; function={self.mir_tag_probe_active_function} module={self.current_module_id} arg_at={expression.span.file}:{expression.span.line}:{expression.span.col}"
+                        return Some("call '{callee}': argument type mismatch at {index}: optional '{declared_name}?' value from `.{method_name}()` into non-optional parameter (declared '{declared_name}'); unwrap it first (`if val`, or `.unwrap()` under a length guard){context}")
+                case _: ()
+        None
 
     fn enum_payload_declared_name(declared_type: HirType) -> text:
         match declared_type.kind:

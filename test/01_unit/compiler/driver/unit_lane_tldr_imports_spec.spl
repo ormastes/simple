@@ -11,6 +11,7 @@ use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_tldr_import_route_v1.{unit_tldr_imports_flag_v1, unit_tldr_imports_enabled_v1,
     unit_tldr_imports_memo_reset_v1, tldr_imports_memo_reset_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_lower_v1}
+use compiler.driver.driver_hir_cache.{hir_shard_key_sidecar_path_v1}
 use compiler.driver.driver.{compiler_driver_create}
 use compiler.common.driver_compile_options.{driver_core_compile_options_default}
 use compiler.common.driver_core_modes.{CompileMode}
@@ -150,6 +151,31 @@ describe "unit-lane TLDR imports (PM3)":
         expect(plan.parse_paths).to_equal([leaf, mods["pkg.env.__init__"]])
         for s in plan.surfaces:
             expect(s.module_name == "pkg.env").to_equal(false)
+        restore_switch(saved)
+
+    # bug per_file_unit_imported_class_method_origin_2026-11-22: a summary
+    # surface proves no method call origin and carries no class layout, so a
+    # class provider is summarised only once its interface-HIR sidecar exists.
+    it "parses a class provider until its interface HIR sidecar is published":
+        val saved = with_switch("")
+        val saved_queue = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+        val root = fixture_root("class_provider")
+        val queue = root + "/queue"
+        val _q = dir_create_all(queue)
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+        var mods: Dict<text, text> = {}
+        mods["pkg.box"] = put(root, "pkg.box",
+            "class Box:\n    value: i64\n    static fn make(n: i64) -> Box:\n        Box(value: n)\n    fn doubled() -> i64:\n        self.value * 2\n")
+        val leaf = put(root, "g", 'use pkg.box.{Box}' + "\n\nfn main() -> i64:\n    Box.make(21).doubled()\n")
+        val early = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
+        expect(early.fallback_modules).to_equal(["pkg.box"])
+        expect(early.parse_paths).to_equal([leaf, mods["pkg.box"]])
+        expect(early.surfaces.len()).to_equal(0)
+        val _w = file_write(hir_shard_key_sidecar_path_v1(queue, mods["pkg.box"]), "hirkey-v1\nk\nb\n")
+        val late = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
+        expect(late.fallbacks).to_equal(0)
+        expect(late.surfaces.len()).to_equal(1)
+        rt_env_set("SIMPLE_HIR_SHARD_QUEUE", saved_queue)
         restore_switch(saved)
 
     # bug per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12
