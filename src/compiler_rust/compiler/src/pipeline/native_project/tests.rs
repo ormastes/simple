@@ -7339,6 +7339,21 @@ fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
     assert!(!super::tools::is_system_symbol_for_target("app__main", target));
 }
 
+/// i386 COFF prefixes C names with `_`: mingw's stack probe `_alloca` is the
+/// undefined symbol `__alloca` in LLVM i686 objects. Stubbing it links but
+/// skips guard-page probing for large frames.
+#[test]
+fn test_mingw_i686_decorated_crt_symbols_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("i686-pc-windows-gnu").unwrap();
+    for symbol in ["__alloca", "___chkstk", "___chkstk_ms", "___main"] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} must resolve from the i686 MinGW CRT/compiler-rt, never generated stubs"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("_app__main", target));
+}
+
 #[test]
 fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
     let target = simple_common::target::Target::parse("x86_64-pc-windows-msvc").unwrap();
