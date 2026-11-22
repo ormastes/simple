@@ -18,15 +18,17 @@ use compiler.mir._MirLowering.module_lowering.*
 struct InsertOutcome:
     unresolved: i64
     fatal: i64
-    insert_calls: i64
+    push_calls: i64
+    get_calls: i64
+    set_calls: i64
 
-fn callee_is_insert(func: MirOperand) -> bool:
+fn callee_name(func: MirOperand) -> text:
     match func.kind:
         case Const(value, _):
             match value:
-                case Str(s): s == "rt_array_insert"
-                case _: false
-        case _: false
+                case Str(s): s
+                case _: ""
+        case _: ""
 
 fn lower_src(source: text, name: text) -> InsertOutcome:
     val filename = "array_insert_" + name + ".spl"
@@ -43,16 +45,23 @@ fn lower_src(source: text, name: text) -> InsertOutcome:
             unresolved = unresolved + 1
         if err.fatal:
             fatal = fatal + 1
-    var calls = 0
+    var pushes = 0
+    var gets = 0
+    var sets = 0
     for fn_ in mir.functions.values():
         for block in fn_.blocks:
             for inst in block.instructions:
                 match inst.kind:
                     case Call(_, func, args):
-                        if callee_is_insert(func) and args.len() == 3:
-                            calls = calls + 1
+                        val cname = callee_name(func)
+                        if cname == "rt_array_push" and args.len() == 2:
+                            pushes = pushes + 1
+                        elif cname == "rt_array_get" and args.len() == 2:
+                            gets = gets + 1
+                        elif cname == "rt_array_set" and args.len() == 3:
+                            sets = sets + 1
                     case _: ()
-    InsertOutcome(unresolved: unresolved, fatal: fatal, insert_calls: calls)
+    InsertOutcome(unresolved: unresolved, fatal: fatal, push_calls: pushes, get_calls: gets, set_calls: sets)
 
 val TEXT_INSERT_SOURCE = """
 fn main():
@@ -70,14 +79,18 @@ fn main():
 """
 
 describe "array insert native lowering":
-    it "lowers [text].insert to rt_array_insert without a fatal error":
+    it "lowers [text].insert through push+shift without a fatal error":
         val o = lower_src(TEXT_INSERT_SOURCE, "text")
         expect(o.unresolved).to_equal(0)
         expect(o.fatal).to_equal(0)
-        expect(o.insert_calls).to_equal(1)
+        expect(o.push_calls).to_equal(1)
+        expect(o.get_calls > 0).to_equal(true)
+        expect(o.set_calls > 0).to_equal(true)
 
-    it "lowers [i64].insert to rt_array_insert without a fatal error":
+    it "lowers [i64].insert through push+shift without a fatal error":
         val o = lower_src(I64_INSERT_SOURCE, "i64")
         expect(o.unresolved).to_equal(0)
         expect(o.fatal).to_equal(0)
-        expect(o.insert_calls).to_equal(2)
+        expect(o.push_calls).to_equal(2)
+        expect(o.get_calls > 0).to_equal(true)
+        expect(o.set_calls > 0).to_equal(true)

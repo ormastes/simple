@@ -1,0 +1,284 @@
+# ARM64 kernel text/crypto runtime shims (pure Simple).
+#
+# Runtime entry points the arm64 fs-exec kernel closure references but the
+# arm64 freestanding C runtime
+# (examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c) does not
+# define. Hosted twins: src/compiler_rust/runtime/src/value/collections.rs
+# (rt_text_find, rt_text_eq_any, rt_string_char_count, rt_slice_text_bytes),
+# src/runtime/runtime_native.c (rt_text_is_ascii), sffi/hash/sha256.rs
+# (rt_tls13_sha256), and the riscv64 C runtime (rt_sosix_collector_nonce_echo).
+#
+# Value layout (pinned by _Static_assert in baremetal_stubs.c): TAG_INT=0,
+# TAG_HEAP=1, NIL=3; RuntimeString {u32 type=1, u32 size, u64 len@8, data@16};
+# RuntimeArray {u32 type, u32 size, u32 len, u32 cap, items@16}. Scalar extern
+# args/returns are RAW i64. Text literals on this lane are RAW untagged char*
+# (see rt_text_eq_heap_vs_raw in baremetal_stubs.c), so the text view accepts a
+# heap string or a plausible aligned raw pointer (NUL-terminated). Like the
+# hosted text view, an ENCODE_INT >= 8192 has the same shape as a raw pointer;
+# these entry points are only reached with text operands.
+#
+# No `text`-typed locals or text methods in this file: text `==`, `.len()`,
+# `.slice()` and `.find()` lower to the very symbols defined here.
+
+use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+# Backed by the arm64 freestanding C runtime (baremetal_stubs.c).
+extern fn rt_mmio_read_u8(addr: u64) -> u64
+extern fn rt_mmio_read_u32(addr: u64) -> u64
+extern fn rt_mmio_read_u64(addr: u64) -> u64
+extern fn rt_string_new(data: i64, len: i64) -> i64
+extern fn rt_array_new(cap: i64) -> [u8]
+extern fn rt_array_push(arr: [u8], value: i64) -> [u8]
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn serial_println(msg: text)
+extern fn rt_bytes_to_text(arr: [u8]) -> text
+
+val A64_TAG_MASK: i64 = 7
+val A64_TAG_HEAP: i64 = 1
+val A64_NIL_VALUE: i64 = 3
+val A64_HEAP_STRING: u64 = 1
+val A64_RAW_PTR_FLOOR: i64 = 0x10000
+val A64_RAW_STRLEN_CAP: i64 = 0x100000
+
+# ---------------------------------------------------------------------------
+# Text view: data pointer + byte length of a text word, or length -1.
+# ---------------------------------------------------------------------------
+
+fn _a64_heap_string(value: i64) -> u64:
+    if (value & A64_TAG_MASK) != A64_TAG_HEAP:
+        return 0
+    val p = (value - A64_TAG_HEAP) as u64
+    if p < 4096:
+        return 0
+    if rt_mmio_read_u32(p) != A64_HEAP_STRING:
+        return 0
+    p
+
+fn _a64_is_raw_ptr(value: i64) -> bool:
+    value >= A64_RAW_PTR_FLOOR and (value & A64_TAG_MASK) == 0
+
+fn _a64_text_data(value: i64) -> u64:
+    val s = _a64_heap_string(value)
+    if s != 0:
+        return s + 16
+    if _a64_is_raw_ptr(value):
+        return value as u64
+    0
+
+fn _a64_text_len(value: i64) -> i64:
+    val s = _a64_heap_string(value)
+    if s != 0:
+        return rt_mmio_read_u64(s + 8) as i64
+    if not _a64_is_raw_ptr(value):
+        return -1
+    val p = value as u64
+    var n: i64 = 0
+    while n < A64_RAW_STRLEN_CAP and rt_mmio_read_u8(p + n as u64) != 0:
+        n = n + 1
+    n
+
+fn _a64_byte(data: u64, i: i64) -> u64:
+    rt_mmio_read_u8(data + i as u64)
+
+# ---------------------------------------------------------------------------
+# rt_text_find — byte-offset index_of; negative start clamps to 0, an empty
+# needle answers min(start, len), -1 when absent or either side is not text.
+# ---------------------------------------------------------------------------
+
+@export("C")
+fn rt_text_find(haystack: i64, needle: i64, start: i64) -> i64:
+    val hay_len = _a64_text_len(haystack)
+    val needle_len = _a64_text_len(needle)
+    if hay_len < 0 or needle_len < 0:
+        return -1
+    var from = start
+    if from < 0:
+        from = 0
+    if needle_len == 0:
+        if from < hay_len:
+            return from
+        return hay_len
+    if from >= hay_len or needle_len > hay_len:
+        return -1
+    val hay = _a64_text_data(haystack)
+    val ndl = _a64_text_data(needle)
+    var i = from
+    val last = hay_len - needle_len
+    while i <= last:
+        var j: i64 = 0
+        while j < needle_len and _a64_byte(hay, i + j) == _a64_byte(ndl, j):
+            j = j + 1
+        if j == needle_len:
+            return i
+        i = i + 1
+    -1
+
+# rt_text_is_ascii — 1 when every byte is < 0x80 (empty text is ASCII).
+@export("C")
+fn rt_text_is_ascii(value: i64) -> i64:
+    val len = _a64_text_len(value)
+    if len < 0:
+        return 0
+    val data = _a64_text_data(value)
+    var i: i64 = 0
+    while i < len:
+        if _a64_byte(data, i) > 0x7f:
+            return 0
+        i = i + 1
+    1
+
+# rt_text_eq_any — text ==/!= : nil words compare raw, two texts compare by
+# content, any other word is never equal to text.
+@export("C")
+fn rt_text_eq_any(left: i64, right: i64) -> i64:
+    if left == A64_NIL_VALUE or right == A64_NIL_VALUE:
+        if left == right:
+            return 1
+        return 0
+    val la = _a64_text_len(left)
+    val lb = _a64_text_len(right)
+    if la < 0 or lb < 0 or la != lb:
+        return 0
+    val a = _a64_text_data(left)
+    val b = _a64_text_data(right)
+    var i: i64 = 0
+    while i < la:
+        if _a64_byte(a, i) != _a64_byte(b, i):
+            return 0
+        i = i + 1
+    1
+
+# rt_string_char_count — Unicode scalar count (UTF-8 lead bytes), -1 for a
+# non-text receiver.
+@export("C")
+fn rt_string_char_count(value: i64) -> i64:
+    val len = _a64_text_len(value)
+    if len < 0:
+        return -1
+    val data = _a64_text_data(value)
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < len:
+        if (_a64_byte(data, i) & 0xC0) != 0x80:
+            count = count + 1
+        i = i + 1
+    count
+
+# rt_slice_text_bytes — `.slice(a, b)` / `.substring(a, b)` on text at BYTE
+# offsets clamped to 0..=len. A non-text receiver or step < 1 is nil — what
+# the lane's C rt_slice answers for a non-string.
+@export("C")
+fn rt_slice_text_bytes(value: i64, start: i64, end: i64, step: i64) -> i64:
+    val len = _a64_text_len(value)
+    if len < 0 or step < 1:
+        return A64_NIL_VALUE
+    var hi = end
+    if hi > len:
+        hi = len
+    if hi < 0:
+        hi = 0
+    var lo = start
+    if lo > hi:
+        lo = hi
+    if lo < 0:
+        lo = 0
+    if step != 1 or lo >= hi:
+        return rt_string_new(_a64_text_data(value) as i64, 0)
+    if lo == 0 and hi == len and _a64_heap_string(value) != 0:
+        return value
+    rt_string_new((_a64_text_data(value) + lo as u64) as i64, hi - lo)
+
+
+# ---------------------------------------------------------------------------
+# rt_tls13_sha256 — `extern fn rt_tls13_sha256(data: [u8]) -> [u8]`. Length
+# and bytes come from rt_arm_array_len_u32 / rt_bytes_u8_at, which share the
+# lane's raw-or-tagged handle and mixed item decode; the 32-byte digest is an
+# ENCODE_INT array (rt_bytes_from_raw shape). Hashing is the shared pure-Simple
+# std.common.crypto.sha256_core; SHA-256("") is hashed, not nil.
+# ---------------------------------------------------------------------------
+
+fn _a64_push_byte(arr: [u8], b: i64) -> [u8]:
+    rt_array_push(arr, (b & 0xFF) << 3)
+
+@export("C")
+fn rt_tls13_sha256(data: [u8]) -> [u8]:
+    val n = rt_arm_array_len_u32(data) as i64
+    var bytes: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        bytes.push(rt_bytes_u8_at(data, i) & 0xFF)
+        i = i + 1
+    val padded = sha256_pad_message(bytes)
+    var h = sha256_initial_hash()
+    var off: i64 = 0
+    while off < padded.len():
+        var block: [i64] = []
+        var k: i64 = 0
+        while k < 64:
+            block.push(padded[off + k])
+            k = k + 1
+        h = sha256_process_block(h, block)
+        off = off + 64
+    var out = rt_array_new(32)
+    var w: i64 = 0
+    while w < 8:
+        val word = h[w]
+        out = _a64_push_byte(out, word >> 24)
+        out = _a64_push_byte(out, word >> 16)
+        out = _a64_push_byte(out, word >> 8)
+        out = _a64_push_byte(out, word)
+        w = w + 1
+    out
+
+# ---------------------------------------------------------------------------
+# rt_sosix_collector_nonce_echo — canonical collector evidence nonce, same
+# contract as the riscv64 C runtime: /SOSIXNON.TXT must hold
+# "SOSIX_COLLECTOR_RUN_NONCE=<[A-Za-z0-9._:-]+>\n" followed only by zero
+# bytes, at most 118 bytes. The line (without '\n'; serial_println adds it)
+# is echoed to serial. Returns raw 1 or 0.
+# ---------------------------------------------------------------------------
+
+val A64_NONCE_FILE_MAX: i64 = 118
+
+fn _a64_nonce_prefix() -> [i64]:
+    # "SOSIX_COLLECTOR_RUN_NONCE="
+    [83, 79, 83, 73, 88, 95, 67, 79, 76, 76, 69, 67, 84, 79, 82, 95, 82, 85, 78, 95, 78, 79, 78, 67, 69, 61]
+
+fn _a64_nonce_char_ok(c: i64) -> bool:
+    (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 46 or c == 95 or c == 58 or c == 45
+
+@export("C")
+fn rt_sosix_collector_nonce_echo() -> i64:
+    val file = arm_fs_exec_read_file_bytes("/SOSIXNON.TXT")
+    val size = rt_arm_array_len_u32(file) as i64
+    val prefix = _a64_nonce_prefix()
+    val plen = prefix.len()
+    if size <= plen or size > A64_NONCE_FILE_MAX:
+        return 0
+    var i: i64 = 0
+    while i < plen:
+        if rt_bytes_u8_at(file, i) != prefix[i]:
+            return 0
+        i = i + 1
+    val begin = i
+    while i < size and rt_bytes_u8_at(file, i) != 10:
+        if not _a64_nonce_char_ok(rt_bytes_u8_at(file, i)):
+            return 0
+        i = i + 1
+    if i == begin or i >= size:
+        return 0
+    val line_end = i
+    i = i + 1
+    while i < size:
+        if rt_bytes_u8_at(file, i) != 0:
+            return 0
+        i = i + 1
+    var line = rt_array_new(line_end)
+    var k: i64 = 0
+    while k < line_end:
+        line = _a64_push_byte(line, rt_bytes_u8_at(file, k))
+        k = k + 1
+    serial_println(rt_bytes_to_text(line))
+    1

@@ -214,7 +214,23 @@ fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text:
 
 fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, libraries: [MachOProviderV1], arm: bool,
         closure: Option<MachOProviderClosureV1> = None, allow_darwin_abi: bool = false,
-        entry_name: text = "_main") -> Result<[MachOHostedSlot], text>:
+        entry_name: text = "_main", live: [[bool]] = []) -> Result<[MachOHostedSlot], text>:
+    var live_externals: {text: bool} = {}
+    if live.len() > 0:
+        var live_owner: i64 = 0
+        for input in inputs:
+            var si: i64 = 0
+            for segment in input.object.segments:
+                for section in segment.sections:
+                    if not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
+                        if live_owner < live.len() and si < live[live_owner].len() and live[live_owner][si]:
+                            for relocation in macho_parse_relocations(input.object.raw, section, input.object.byte_order):
+                                if relocation.r_extern and relocation.r_symbolnum >= 0 and relocation.r_symbolnum < input.object.symbols.len():
+                                    val sym = input.object.symbols[relocation.r_symbolnum]
+                                    if (sym.n_type & 1) != 0 and sym.name != "":
+                                        live_externals[sym.name] = true
+                    si = si + 1
+            live_owner = live_owner + 1
     var resolved: {text: MachOProviderBindingV1} = {}
     var missing_non_weak: [text] = []
     var missing_seen: {text: bool} = {}
@@ -222,7 +238,8 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
         var lookup = graph
         for input in inputs:
             for symbol in input.object.symbols:
-                if (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name) and not resolved.has(symbol.name):
+                val import_needed = live.len() == 0 or live_externals.has(symbol.name)
+                if import_needed and (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name) and not resolved.has(symbol.name):
                     if resolved.len() >= 100000: return Err("hosted Mach-O import count limit exceeded")
                     val binding = lookup.resolve_import(symbol.name)?
                     if binding.is_some():
@@ -245,7 +262,8 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
         for symbol in input.object.symbols:
             if not allow_darwin_abi and (symbol.n_type & 0xe0) == 0 and (symbol.n_desc & 0xc0) != 0:
                 return Err("hosted Mach-O weak definition/import coalescing is not implemented")
-            if (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name):
+            val import_needed = live.len() == 0 or live_externals.has(symbol.name)
+            if import_needed and (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name):
                 if symbol.name == "": return Err("empty hosted import name")
                 val key = macho_hosted_symbol_key(owner, index, symbol.name, true)
                 if not seen.has(key):
@@ -288,9 +306,11 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
         owner = owner + 1
     owner = 0
     for input in inputs:
+        var si: i64 = 0
         for segment in input.object.segments:
             for section in segment.sections:
-                if not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
+                val section_live = live.len() == 0 or (owner < live.len() and si < live[owner].len() and live[owner][si])
+                if section_live and not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
                     for relocation in macho_parse_relocations(input.object.raw, section, input.object.byte_order):
                         val got = if arm: relocation.r_type == 5 or relocation.r_type == 6 or relocation.r_type == 8 or relocation.r_type == 9 else: relocation.r_type == 3 or relocation.r_type == 4 or relocation.r_type == 9
                         if got:
@@ -305,6 +325,7 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
                                     symbol_index: relocation.r_symbolnum, library_ordinal: 0, thread_local: local_tlv,
                                     weak_unresolved: false))
                                 if slots.len() > 100000: return Err("hosted Mach-O GOT count limit exceeded")
+                si = si + 1
         owner = owner + 1
     Ok(slots)
 

@@ -46,7 +46,8 @@ fn macho_section_ignored(segname: text, sectname: text, allow_darwin_abi: bool) 
     false
 
 fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0,
-        allow_darwin_abi: bool = false, hosted_got_bytes: i64 = 0) -> Result<MachOLayout, text>:
+        allow_darwin_abi: bool = false, hosted_got_bytes: i64 = 0,
+        live: [[bool]] = []) -> Result<MachOLayout, text>:
     if hosted_text_reserve < 0 or hosted_text_reserve > limit or hosted_text_reserve % 0x4000 != 0:
         return Err("invalid hosted Mach-O text reservation")
     var placements: [MachOPlacement] = []
@@ -76,10 +77,13 @@ fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0,
     var max_tls_template_align: i64 = 0
     var has_tls_template = false
     if allow_darwin_abi:
+        var tls_owner: i64 = 0
         for input in inputs:
+            var tls_ordinal: i64 = 1
             for segment in input.object.segments:
                 for section in segment.sections:
-                    if not macho_section_ignored(section.segname, section.sectname, true):
+                    val tls_live = live.len() == 0 or (tls_owner < live.len() and (tls_ordinal - 1) < live[tls_owner].len() and live[tls_owner][tls_ordinal - 1])
+                    if tls_live and not macho_section_ignored(section.segname, section.sectname, true):
                         val sk = section.flags & 255
                         if (sk == 17 or sk == 18) and section.size > 0:
                             if section.align_val < 0 or section.align_val > 24:
@@ -87,6 +91,8 @@ fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0,
                             has_tls_template = true
                             if section.align_val > max_tls_template_align:
                                 max_tls_template_align = section.align_val
+                    tls_ordinal = tls_ordinal + 1
+            tls_owner = tls_owner + 1
     var pass_index: i64 = 0
     val pass_count: i64 = if allow_darwin_abi: 7 else: 2
     while pass_index < pass_count:
@@ -111,7 +117,8 @@ fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0,
             var ordinal: i64 = 1
             for segment in input.object.segments:
                 for section in segment.sections:
-                    if not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
+                    val section_live = live.len() == 0 or (owner < live.len() and (ordinal - 1) < live[owner].len() and live[owner][ordinal - 1])
+                    if section_live and not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
                         val kind = section.flags & 255
                         val writable = section.segname != "__TEXT"
                         val is_tls = kind == 17 or kind == 18 or kind == 19

@@ -98,3 +98,71 @@ Run one shard child of the real closure under `strace -f -k -e trace=brk,mmap`
 the allocating frames. `SIMPLE_MIR_FORK_BATCH` (added after `0d8a3269bec`,
 `3d3011bbce2`) bounds the held MIR per child and may hide the defect rather
 than fix it.
+
+## Change (2026-11-22): a MIR shard worker no longer captures initializer receipts
+
+**Status of the saving: unmeasured.** No compiler carrying this change has been
+built. Root cause of the retention is still not proven; this removes the only
+MIR-proportional scratch in the loop from the lane that died.
+
+`driver_capture_initializer_object_v1` is skipped when
+`native_staged_initializer_capture_dead_v1(staged_flushing, shard_queue)`
+(`driver_build/native_staged_codegen.spl`) holds, i.e. in a flushing
+`compile_to_native` of a process whose staged state carries a shard ledger
+queue. Call site: `driver_aot_native_output.spl`, post-process loop.
+
+Reader audit of what the capture produces:
+
+| data | writers | readers |
+|---|---|---|
+| `ctx.initializer_object_receipts_v1` | capture `:63`; reset `driver_source_pipeline_loading.spl:305`; remove at the loop head | `cache/initializer_link_capture_v1.spl:26-30` only, reached from the four `native_link_with_initializer_capture_v1` link sites |
+| `ctx.directory_aspect_objects_v2` | capture `:64`; reset `:300`; remove at the loop head | none |
+| `ctx.initializer_build_receipt_v1` | link capture `:62`, `:86` | none |
+
+The receipts are never serialized. They only select `native_link_with_receipt_v2`
+over `_v1` inside the process that links.
+
+Why no reader runs after the skip:
+
+- `shard_queue` is set in one place, `aot_compile_mir_shard_v1`
+  (`driver_aot_pipeline.spl:783`), which `aot_compile` returns from directly
+  (`:114`). That function covers the two-pass shard worker, its fork children
+  and the per-file unit child.
+- A worker reaches `compile_to_native` from `:674` (batch flush) and `:844`,
+  both with `flushing = true`. A flushing call returns at the staged hand-back
+  before any link site.
+- The link child (`aot_link_mir_shards_v1`, `:921`) builds a fresh state with
+  `shard_queue: ""` and lowers nothing. The capture needs
+  `ctx.mir_modules.has(module)`, so the link child never had a receipt and
+  already links through `_v1`. Its behaviour is unchanged.
+- The single-process staged lane (`shard_queue == ""`) links in the same
+  process and reads receipts of earlier batches. It still captures; the spec
+  pins that (`native_staged_codegen_spec.spl`, "skips the initializer receipt
+  only in a flushing MIR shard worker").
+
+Objects, capsule receipts, `build_cache` entries and ledger PASS records are
+written before or independently of the capture, so worker output is unchanged.
+
+Cost: before, per emitted module, one transient scope, a walk of every MIR
+function, two serializations and digests, two promotes (O(module MIR) time,
+about 5x module MIR scratch). After, two scalar tests. Nothing is added to any
+other lane.
+
+Measurement to run on the next Stage 2 that contains this change (same lane as
+the table above: `SIMPLE_FILE_WORKERS=0`, 2 MIR shard children, `--cache-dir`,
+30 s RSS trail of the largest process):
+
+1. Tree and largest-process RSS from the first `[NATIVE] codegen:` line to
+   `[mir-shard] done owner=`. Before: +7 GB/min after the last object until the
+   cgroup kill. Expected: flat within 1 GB, and the ledger gains `.object` and
+   `.terminal` files.
+2. Wall time between a child's last object and its `[mir-shard] done` line.
+   Before: 0.16 to 0.4 s per module. Expected: lower by the capture's share.
+3. Value check: per-module object sha256 from the shard ledger must equal a
+   run of the previous compiler on the same source and cache scope, and the
+   link child must print the same `[mir-shard] link modules=` line.
+
+If RSS still grows, the capture is cleared and the next suspect is whatever
+remains unscoped in that loop: two source re-reads and digests per module
+(`driver_native_disk_source_identity`, in `driver_native_capsule_result_bytes_v1` and the `source_unchanged`
+test), which the runtime never reclaims.

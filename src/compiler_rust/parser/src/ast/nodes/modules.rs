@@ -77,6 +77,7 @@ pub struct UseStmt {
     /// If true, this import is deferred until first symbol access.
     /// Syntax: `use lazy module.path`
     pub is_lazy: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 /// Common use statement: common use module.path.*
@@ -99,6 +100,7 @@ pub struct ExportUseStmt {
     pub span: Span,
     pub path: ModulePath,
     pub target: ImportTarget,
+    pub attributes: Vec<Attribute>,
 }
 
 /// Multiple comma-separated use statements: use a.B, c.D
@@ -108,6 +110,7 @@ pub struct MultiUse {
     pub span: Span,
     pub imports: Vec<(ModulePath, ImportTarget)>,
     pub is_type_only: bool,
+    pub attributes: Vec<Attribute>,
 }
 
 /// Auto import statement: auto import module.macro_name

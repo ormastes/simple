@@ -76,3 +76,20 @@ warmups, both legs against the same MoltenVK ICD) — see
 `doc/10_metrics/ui/vulkan_2d_c_vs_simple_compare_macos_2026-09-11.md`,
 `mode=manual`.
 
+## 2026-11-22 macOS MoltenVK & Contract Fixes (work/mac-bugs-vulkan-20261122)
+
+1. `scripts/check/check-vulkan-2d-c-compare.shs`:
+   - Added `-Wl,-rpath,/opt/homebrew/lib` to the default Darwin `VK_LINK` flags so `vk2d_bench` resolves `libvulkan.1.dylib` even when launched under SIP-protected `/usr/bin/time -l` (which strips `DYLD_FALLBACK_LIBRARY_PATH`).
+   - Added `DYLD_FALLBACK_LIBRARY_PATH="${DYLD_FALLBACK_LIBRARY_PATH:-/opt/homebrew/lib:/usr/local/lib}"` to the Simple leg invocation so dynamic `dlopen("libvulkan.dylib")` resolves Homebrew MoltenVK/Vulkan loader out of the box on macOS.
+   - Removed comment backticks in `check-vulkan-2d-c-compare.shs` that tripped `vulkan_2d_c_immutable_runs_contract_test.shs` (`wrapper command contract contains eval or backticks`).
+2. `test/05_perf/bench/vulkan_2d_c/vk2d_bench.c`:
+   - Queries `vkEnumerateInstanceExtensionProperties` before setting `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` + `VK_KHR_portability_enumeration` (portable across macOS MoltenVK and Linux Lavapipe/Mesa).
+   - Queries `vkEnumerateDeviceExtensionProperties` and enables `"VK_KHR_portability_subset"` when advertised (`VUID-VkDeviceCreateInfo-pProperties-04451` on MoltenVK).
+   - Fails closed cleanly instead of dereferencing a null `VkPhysicalDevice` / `VkDevice` when no Metal/Vulkan adapter is available (e.g. inside Seatbelt sandbox where `MTLCreateSystemDefaultDevice` is blocked).
+3. Verified:
+   - `clang -std=c99 -O2 -Wall -Wextra test/05_perf/bench/vulkan_2d_c/vk2d_bench.c -I/opt/homebrew/include -L/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/lib -lvulkan` builds cleanly with zero warnings.
+   - `sh test/01_unit/scripts/vulkan_2d_c_evidence_contract_test.shs` -> `vulkan_2d_c_evidence_contract=pass`
+   - `sh test/01_unit/scripts/perf_compare_leg_admission_contract_test.shs` -> `CONTRACT=PASS`
+   - `sh test/01_unit/scripts/vulkan_2d_c_immutable_runs_contract_test.shs` -> `vulkan_2d_c_immutable_runs_contract=pass`
+   - Cause 2 (deploying an admitted pure-Simple self-hosted `bin/simple` on macOS) awaits completion of the in-flight macOS bootstrap pipeline.
+

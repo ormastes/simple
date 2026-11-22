@@ -126,23 +126,23 @@ fn _near_zero(v: f64) -> bool:
 # so shape is checked BEFORE conversion — otherwise `box-shadow: red 0 0` would
 # read `red` as the number 0.
 fn _is_number(s: text) -> bool:
-    if s.len() == 0:
+    val slen = s.byte_len()
+    if slen == 0:
         return false
     var digits = 0
     var dots = 0
     var i = 0
-    while i < s.len():
-        val c = s.slice(i, i + 1)
-        if c == "+" or c == "-":
+    while i < slen:
+        val code = s.byte_at(i)
+        if code == 43u8 or code == 45u8:
             if i != 0:
                 return false
-        elif c == ".":
+        elif code == 46u8:
             dots = dots + 1
             if dots > 1:
                 return false
         else:
-            val code = s.char_code_at(i)
-            if code < 48 or code > 57:
+            if code < 48u8 or code > 57u8:
                 return false
             digits = digits + 1
         i = i + 1
@@ -153,60 +153,61 @@ fn _is_number(s: text) -> bool:
 # dropping them here would make `red,,blue` silently legal.
 fn _split_top_level(s: text, sep: text) -> [text]:
     var parts: [text] = []
-    var current = ""
+    val slen = s.byte_len()
+    var seg_start = 0
     var depth = 0
     var i = 0
-    while i < s.len():
+    while i < slen:
         val c = s.slice(i, i + 1)
         if c == "(":
             depth = depth + 1
-            current = current + c
         elif c == ")":
             depth = depth - 1
-            current = current + c
         elif c == sep and depth == 0:
-            parts.push(current.trim())
-            current = ""
-        else:
-            current = current + c
+            parts.push(s.slice(seg_start, i).trim())
+            seg_start = i + 1
         i = i + 1
-    parts.push(current.trim())
+    parts.push(s.slice(seg_start, slen).trim())
     parts
 
 # Split on runs of whitespace at paren depth zero, discarding the whitespace.
 fn _split_words(s: text) -> [text]:
     var parts: [text] = []
-    var current = ""
+    val slen = s.byte_len()
+    var seg_start = -1
     var depth = 0
     var i = 0
-    while i < s.len():
-        val c = s.slice(i, i + 1)
-        if c == "(":
+    while i < slen:
+        val b = s.byte_at(i)
+        if b == 40u8:
+            if seg_start < 0:
+                seg_start = i
             depth = depth + 1
-            current = current + c
-        elif c == ")":
+        elif b == 41u8:
+            if seg_start < 0:
+                seg_start = i
             depth = depth - 1
-            current = current + c
-        elif depth == 0 and (c == " " or c == "\t" or c == "\n"):
-            if current.len() > 0:
-                parts.push(current)
-                current = ""
+        elif depth == 0 and (b == 32u8 or b == 9u8 or b == 10u8):
+            if seg_start >= 0:
+                parts.push(s.slice(seg_start, i))
+                seg_start = -1
         else:
-            current = current + c
+            if seg_start < 0:
+                seg_start = i
         i = i + 1
-    if current.len() > 0:
-        parts.push(current)
+    if seg_start >= 0:
+        parts.push(s.slice(seg_start, slen))
     parts
 
 # Return the text between the first `(` and the final `)` of `s` when `s` is
-# exactly `name(...)`, else nil.
+# exactly `name(...)`, else None.
 fn _fn_inner(s: text, name: text) -> text?:
     val prefix = name + "("
     if not s.starts_with(prefix):
-        return nil
+        return None
     if not s.ends_with(")"):
-        return nil
-    s.slice(prefix.len(), s.len() - 1)
+        return None
+    Some(s.slice(prefix.byte_len(), s.byte_len() - 1))
 
 # A `px` length. Unitless `0` is accepted (CSS allows a bare zero length); any
 # other unit is nil, NOT 0.0 — this leaf has no font or viewport context, so a

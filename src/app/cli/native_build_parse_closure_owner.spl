@@ -15,7 +15,7 @@ use app.cli.native_build_parse_closure_scratch.{NativeBuildParseClosureSessionV1
     native_build_parse_closure_stage_end_v1, native_build_parse_closure_session_end_v1}
 use compiler.driver.driver_source_loading.{driver_entry_scan_cache_release}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1}
-use app.io._CliCompile.native_build_closure.{_native_build_entry_closure,
+use app.io._CliCompile.native_build_closure.{_native_build_entry_closure_chunked_v1,
     native_build_closure_release_snapshot_memo_v1,
     native_build_closure_snapshot_root_v1, native_build_closure_source_roots_v1}
 use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
@@ -98,17 +98,21 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
     if not authority.valid:
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure authority rejected: " + authority.reason)
-    if not native_build_parse_closure_checkpoint_v1(authority) or
-            not transient_scope_begin():
+    if not native_build_parse_closure_checkpoint_v1(authority):
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure authority scratch retirement failed")
+    # These caller-owned values are used after every walk chunk. Allocate them
+    # between scopes so the first chunk cannot retire them with walk scratch.
     val canonical = native_build_closure_roots_v1(source_root,
         authority.snapshot.snapshot_root, roots)
     if canonical.is_err():
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure roots rejected: " + canonical.unwrap_err())
     val entry_path = source_root + "/" + entry_identity
-    val paths = _native_build_entry_closure(entry_path, roots, library_mode)
+    if not transient_scope_begin():
+        return NativeBuildParseClosurePublicationV1("", "", 0,
+            "parse-shard closure authority scratch retirement failed")
+    val paths = _native_build_entry_closure_chunked_v1(entry_path, roots, library_mode, 64)
     # Reuse the walker's admitted mapping, never a separate cwd-based receipt
     # spelling. A fallback/live walk cannot publish a frozen closure request.
     val mapped = native_build_closure_source_roots_v1(entry_path, roots)

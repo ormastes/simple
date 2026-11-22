@@ -2,7 +2,7 @@
 
 - **Found:** 2026-11-20, DHR P4 (`DynGenerationI64SlotV1`, PR #10514)
 - **Host:** Windows 11, x86_64-pc-windows-gnu, `bin/simple.exe` (Rust seed interpreter)
-- **Status:** open
+- **Status:** fixed (2026-11-22)
 
 ## Symptom
 
@@ -24,8 +24,6 @@ The checked-resolve error path of `DynI64FnSlot` / `DynGenerationI64SlotV1` cann
 the seed. The P4 spec currently triggers the refusal path with an unsupported arity instead, so
 the lease-release-on-refused-resolve case is still covered. The unresolved-symbol branch is not.
 
-## Next step
+## Resolution (2026-11-22)
 
-Make the seed's `spl_dlsym` extern return 0 for a missing export, matching the C runtime's
-`dlsym`/`GetProcAddress` contract, instead of raising. Then add an unresolved-symbol case to
-`test/01_unit/lib/nogc_sync_mut/kernel_plugin/dynlib_generation_spec.spl`.
+`src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs::spl_dlsym` now returns `Ok(Value::Int(0))` when `dlsym` / `GetProcAddress` returns null on a valid handle, matching the C/native runtime (`wsffi_native.rs::spl_dlsym`) while preserving typed boundary errors for null handles and interior NUL bytes. Added `symbol_lookup_missing_export_returns_zero_not_abort` in `wsffi.rs` and the unresolved-symbol case (`NoSuchExport_dhr`) in `test/01_unit/lib/nogc_sync_mut/kernel_plugin/dynlib_generation_spec.spl`.
