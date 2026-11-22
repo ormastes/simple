@@ -1,8 +1,11 @@
-use compiler.backend.linker.macho.input.{macho_put}
-use compiler.backend.linker.macho.layout.{MachOLayout, macho_align, macho_segment, macho_section_header_64}
+use compiler.backend.linker.macho.input.{MachOInput, macho_put}
+use compiler.backend.linker.macho.layout.{MachOLayout, macho_align, macho_segment, macho_section_header_64, macho_section_ignored}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
 use compiler.backend.linker.macho.hosted_fixups.{MachOHostedFixups, macho_hosted_bind_stream, macho_hosted_rebase_stream}
 use compiler.backend.linker.macho.hosted_signature.{macho_hosted_sign, macho_hosted_signature_size}
+use compiler.backend.linker.macho.symbols.{MachOBinding}
+use compiler.backend.linker.macho.relocation_pairs.{macho_relocation_pair_v1}
+use compiler.backend.linker.macho_parser.{macho_parse_relocations}
 use compiler.backend.linker.reloc_engine.{reloc_apply_aarch64}
 use std.common.crypto.sha256.{sha256_u8_fast_hex}
 
@@ -20,6 +23,88 @@ fn _macho_put_u32(bytes: [u8], at: i64, value: i64) -> [u8]:
     out[at + 2] = ((value >> 16) & 255) as u8
     out[at + 3] = ((value >> 24) & 255) as u8
     out
+
+fn macho_hosted_section_dead_strippable(segname: text) -> bool:
+    segname == "__TEXT" or segname == "__DATA" or segname == "__DATA_CONST"
+
+fn _macho_hosted_mark_reloc_target(inputs: [MachOInput], definitions: {text: MachOBinding},
+        owner: i64, r_extern: bool, r_symbolnum: i64, ignored: [[bool]], mut live: [[bool]]) -> bool:
+    var changed = false
+    if not r_extern:
+        if r_symbolnum > 0 and owner >= 0 and owner < live.len():
+            val si = r_symbolnum - 1
+            if si >= 0 and si < live[owner].len() and not ignored[owner][si] and not live[owner][si]:
+                live[owner][si] = true
+                changed = true
+        return changed
+    if r_symbolnum < 0 or r_symbolnum >= inputs[owner].object.symbols.len():
+        return false
+    val symbol = inputs[owner].object.symbols[r_symbolnum]
+    if (symbol.n_type & 1) == 0:
+        if (symbol.n_type & 14) == 14 and symbol.n_sect > 0:
+            val si = symbol.n_sect - 1
+            if si >= 0 and si < live[owner].len() and not ignored[owner][si] and not live[owner][si]:
+                live[owner][si] = true
+                changed = true
+    elif definitions.has(symbol.name):
+        val binding = definitions[symbol.name]
+        if (binding.symbol.n_type & 14) == 14 and binding.symbol.n_sect > 0:
+            val si = binding.symbol.n_sect - 1
+            if binding.owner >= 0 and binding.owner < live.len() and si >= 0 and si < live[binding.owner].len():
+                if not ignored[binding.owner][si] and not live[binding.owner][si]:
+                    live[binding.owner][si] = true
+                    changed = true
+    changed
+
+fn macho_hosted_dead_strip_live(inputs: [MachOInput], definitions: {text: MachOBinding},
+        entry: text, retained_symbols: [text], arm: bool,
+        allow_darwin_abi: bool = false) -> Result<[[bool]], text>:
+    var live: [[bool]] = []
+    var ignored: [[bool]] = []
+    for input in inputs:
+        var input_live: [bool] = []
+        var input_ignored: [bool] = []
+        for segment in input.object.segments:
+            for section in segment.sections:
+                val sec_ignored = macho_section_ignored(section.segname, section.sectname, allow_darwin_abi)
+                input_ignored = input_ignored.push(sec_ignored)
+                val sec_init_root = not sec_ignored and (section.flags & 255) == 9
+                val sec_live = (not sec_ignored) and (sec_init_root or not macho_hosted_section_dead_strippable(section.segname))
+                input_live = input_live.push(sec_live)
+        ignored = ignored.push(input_ignored)
+        live = live.push(input_live)
+    var roots: [text] = [entry]
+    for retained in retained_symbols:
+        if retained != "" and not roots.contains(retained):
+            roots = roots.push(retained)
+    for root in roots:
+        if definitions.has(root):
+            val binding = definitions[root]
+            if (binding.symbol.n_type & 14) == 14 and binding.symbol.n_sect > 0:
+                val si = binding.symbol.n_sect - 1
+                if binding.owner >= 0 and binding.owner < live.len() and si >= 0 and si < live[binding.owner].len():
+                    if not ignored[binding.owner][si]:
+                        live[binding.owner][si] = true
+    var changed = true
+    while changed:
+        changed = false
+        var owner: i64 = 0
+        for input in inputs:
+            var si: i64 = 0
+            for segment in input.object.segments:
+                for section in segment.sections:
+                    if si < live[owner].len() and live[owner][si] and not ignored[owner][si]:
+                        val relocations = macho_parse_relocations(input.object.raw, section, input.object.byte_order)
+                        var index: i64 = 0
+                        while index < relocations.len():
+                            val pair = macho_relocation_pair_v1(relocations, index, arm, input.name)?
+                            val reloc = pair.relocation
+                            if _macho_hosted_mark_reloc_target(inputs, definitions, owner, reloc.r_extern, reloc.r_symbolnum, ignored, live):
+                                changed = true
+                            index = index + pair.consumed
+                    si = si + 1
+            owner = owner + 1
+    Ok(live)
 
 fn macho_hosted_text(bytes: [u8], at: i64, value: text) -> [u8]:
     var out = bytes
@@ -213,3 +298,4 @@ fn macho_hosted_image(payload: [u8], layout: MachOLayout, libraries: [MachOProvi
     macho_hosted_sign(out, signature_offset, layout.data_offset, identifier)
 
 export macho_hosted_stubs, macho_hosted_image
+export macho_hosted_section_dead_strippable, macho_hosted_dead_strip_live

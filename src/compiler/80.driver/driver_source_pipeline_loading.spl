@@ -438,17 +438,22 @@ impl CompilerDriver:
         # load_sources total=1, 2026-09-25). Route it through the same
         # entry-closure walk native-build --entry uses; that walk loads only
         # the transitive imports, not the bulk trees.
+        val is_interpret_mode = (self.ctx.options.mode == CompileMode.Interpret or
+            self.ctx.options.cli_mode_text == "interpret")
         val interpret_single_entry =
-            if self.ctx.options.mode == CompileMode.Interpret and driver_inputs.len() == 1 and
+            if is_interpret_mode and driver_inputs.len() == 1 and
                     driver_inputs[0].ends_with(".spl"):
                 driver_inputs[0]
             else:
                 ""
         driver_set_spec_prelude_entry(interpret_single_entry)
+        val interpret_entry_closure = interpret_single_entry != ""
         val native_entry_env = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val native_entry_input = if native_entry_env != "": native_entry_env else: interpret_single_entry
         val requested_entry_input = if explicit_entry_input != "":
             explicit_entry_input
+        elif interpret_entry_closure:
+            interpret_single_entry
         else:
             native_entry_input
         var native_group_inputs: [text] = []
@@ -473,8 +478,9 @@ impl CompilerDriver:
             return (self.ctx, false)
         val native_entry_closure_pre = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val explicit_entry_closure = explicit_entry_input != ""
-        val entry_closure_walk = admitted_preclosed == nil and not full_inventory_mode and (explicit_entry_closure or (
-            native_entry_input != "" and not native_entry_closure_pre) or
+        val entry_closure_walk = admitted_preclosed == nil and not full_inventory_mode and (
+            explicit_entry_closure or interpret_entry_closure or (
+                native_entry_input != "" and not native_entry_closure_pre) or
             native_group_inputs.len() > 0)
         # The persistent package index route (package_index_route_current_v1)
         # needs a producer/root-generation/variant-digest compatibility
@@ -1052,8 +1058,9 @@ impl CompilerDriver:
             elif package_index_routed:
                 _driver_collect_explicit_compiler_source(input_path)
             elif entry_closure_walk and (input_path == cold_entry_input or
+                    input_path == interpret_single_entry or
                     native_group_inputs.contains(input_path)):
-                if explicit_entry_closure or native_group_inputs.len() > 0:
+                if explicit_entry_closure or interpret_entry_closure or native_group_inputs.len() > 0:
                     _driver_collect_explicit_compiler_source(input_path)
                 else:
                     _driver_collect_requested_entry_source(input_path)
