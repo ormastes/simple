@@ -210,17 +210,23 @@ pub fn hamt_set(node, key, value, hash, shift) -> []:
     hamt_leaf(hash, key, value)
 
 # Remove a key from the HAMT.
-# Returns a NEW node with the key removed. Returns nil if the tree becomes empty.
-pub fn hamt_remove(node, key, hash, shift):
-    if node == nil:
-        return nil
+# Returns Some(new_node) with the key removed, or None if the tree becomes empty.
+pub fn hamt_remove(node, key, hash, shift) -> []?:
+    val updated = _hamt_remove_raw(node, key, hash, shift)
+    if updated == hamt_empty():
+        return None
+    Some(updated)
+
+fn _hamt_remove_raw(node, key, hash, shift):
+    if node == hamt_empty():
+        return hamt_empty()
 
     val header = node[0]
     val tag = header & HAMT_TAG_MASK
 
     if tag == HAMT_LEAF:
         if node[2] == key:
-            return nil
+            return hamt_empty()
         return node
 
     if tag == HAMT_BRANCH:
@@ -232,15 +238,15 @@ pub fn hamt_remove(node, key, hash, shift):
 
         val idx = hamt_index(bitmap, bit)
         val child = node[1 + idx]
-        val new_child = hamt_remove(child, key, hash, shift + HAMT_BITS)
+        val new_child = _hamt_remove_raw(child, key, hash, shift + HAMT_BITS)
 
         if new_child == child:
             return node
 
-        if new_child == nil:
+        if new_child == hamt_empty():
             val new_bitmap = (bitmap ^ bit) & HAMT_BITMAP_MASK
             if new_bitmap == 0:
-                return nil
+                return hamt_empty()
             val old_child_count = hamt_array_len(node) - 1
             if old_child_count == 2:
                 val sole = if idx == 0: node[2] else: node[1]
@@ -261,7 +267,9 @@ pub fn hamt_remove(node, key, hash, shift):
         return hamt_branch_replace(node, bitmap, idx, new_child)
 
     if tag == HAMT_COLLISION:
-        return hamt_collision_flat_remove(node, key)
+        match hamt_collision_flat_remove(node, key):
+            case Some(col_next): return col_next
+            case None: return hamt_empty()
 
     node
 
@@ -301,7 +309,7 @@ fn hamt_collision_flat_set(node, hash: i64, key, value) -> []:
     appended
 
 # Remove a key from a flat collision node, collapsing to a leaf when 1 entry remains.
-fn hamt_collision_flat_remove(node, key):
+fn hamt_collision_flat_remove(node, key) -> []?:
     val n = hamt_array_len(node)
     var found_idx = -1
     var i = 2
@@ -312,17 +320,17 @@ fn hamt_collision_flat_remove(node, key):
         i = i + 2
 
     if found_idx < 0:
-        return node
+        return Some(node)
 
     val pair_count = (n - 2) / 2
     val new_pair_count = pair_count - 1
     if new_pair_count <= 0:
-        return nil
+        return None
 
     val col_hash = node[1]
     if new_pair_count == 1:
         val rem_idx = if found_idx == 2: 4 else: 2
-        return hamt_leaf(col_hash, node[rem_idx], node[rem_idx + 1])
+        return Some(hamt_leaf(col_hash, node[rem_idx], node[rem_idx + 1]))
 
     var result = [HAMT_COLLISION, col_hash]
     var j = 2
@@ -331,7 +339,7 @@ fn hamt_collision_flat_remove(node, key):
             result.push(node[j])
             result.push(node[j + 1])
         j = j + 2
-    result
+    Some(result)
 
 # Create a flat branch node with `value` inserted at child position `idx`.
 fn hamt_branch_insert(node, new_bitmap: i64, idx: i64, value) -> []:

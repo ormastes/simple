@@ -75,7 +75,7 @@ describe "Compact HAMT tag packing and SoA collections":
             expect(hamt_node_entries(full_root).len()).to_equal(32)
 
             # Remove slot 0 and verify high-bit branch stays intact, then collapses cleanly
-            val without_0 = hamt_remove(root, "slot0", 0, 0)
+            val without_0 = hamt_remove(root, "slot0", 0, 0).unwrap()
             expect(hamt_node_tag(without_0)).to_equal(HAMT_LEAF)
             expect(hamt_get(without_0, "slot31", 31, 0)).to_equal(3100)
 
@@ -93,7 +93,7 @@ describe "Compact HAMT tag packing and SoA collections":
             deep = hamt_set(deep, "db", 222, h_deep_b, 0)
             expect(hamt_get(deep, "da", h_deep_a, 0)).to_equal(111)
             expect(hamt_get(deep, "db", h_deep_b, 0)).to_equal(222)
-            val deep_after_rem = hamt_remove(deep, "da", h_deep_a, 0)
+            val deep_after_rem = hamt_remove(deep, "da", h_deep_a, 0).unwrap()
             expect(hamt_node_tag(deep_after_rem)).to_equal(HAMT_LEAF)
             expect(hamt_get(deep_after_rem, "db", h_deep_b, 0)).to_equal(222)
 
@@ -130,16 +130,16 @@ describe "Compact HAMT tag packing and SoA collections":
             expect(hamt_get(promoted, "other", other_hash, 0)).to_equal("four")
 
             # Remove down to 1 collision entry -> collapses back to leaf
-            val after_r1 = hamt_remove(node, "c1", shared_hash, 0)
+            val after_r1 = hamt_remove(node, "c1", shared_hash, 0).unwrap()
             expect(hamt_node_tag(after_r1)).to_equal(HAMT_COLLISION)
             expect(after_r1.len()).to_equal(6)
 
-            val after_r2 = hamt_remove(after_r1, "c3", shared_hash, 0)
+            val after_r2 = hamt_remove(after_r1, "c3", shared_hash, 0).unwrap()
             expect(hamt_node_tag(after_r2)).to_equal(HAMT_LEAF)
             expect(hamt_get(after_r2, "c2", shared_hash, 0)).to_equal("TWO")
 
             val after_r3 = hamt_remove(after_r2, "c2", shared_hash, 0)
-            expect(after_r3).to_be_nil()
+            expect(after_r3.is_none()).to_be(true)
 
     describe "Lazy zero-allocation init and tombstone reuse in Map and HashMap":
         it "keeps empty Map and HashMap at capacity 0 with zero backing slots":
@@ -231,6 +231,96 @@ describe "Compact HAMT tag packing and SoA collections":
             expect(gmap.get(12) ?? "").to_equal("twelve")
             expect(gmap.get(8) ?? "").to_equal("eight")
             expect(gmap.len()).to_equal(3)
+
+        it "handles with_capacity(0/-5/5/10), negative and i64::MIN keys, 100% tombstone saturation, and swap-remove behind tombstones":
+            # 1) Zero, negative, and non-power-of-2 capacities (5 and 10)
+            var g0: Map<i64, text> = Map.with_capacity(0)
+            var gneg: Map<i64, text> = Map.with_capacity(-5)
+            var g5: Map<i64, text> = Map.with_capacity(5)
+            var g10: Map<i64, text> = Map.with_capacity(10)
+            expect(g0.capacity).to_equal(0)
+            expect(gneg.capacity).to_equal(0)
+            expect(g5.capacity).to_equal(5)
+            expect(g10.capacity).to_equal(10)
+            expect(g5.slots.len()).to_equal(0)
+            expect(g10.slots.len()).to_equal(0)
+
+            var h0 = HashMap.with_capacity(0)
+            var hneg = HashMap.with_capacity(-5)
+            var h5 = HashMap.with_capacity(5)
+            var h10 = HashMap.with_capacity(10)
+            expect(h0.capacity).to_equal(1)
+            expect(hneg.capacity).to_equal(1)
+            expect(h5.capacity).to_equal(5)
+            expect(h10.capacity).to_equal(10)
+
+            # 2) Negative & i64::MIN (-9223372036854775808) keys across non-power-of-2 and power-of-2 capacities
+            val min_i64: i64 = -9223372036854775807 - 1
+            val extreme_keys: [i64] = [min_i64, min_i64 + 1, -1000000007, -1, 0, 1, 9223372036854775807]
+            for ek in extreme_keys:
+                g0.insert(ek, "v0_{ek}")
+                gneg.insert(ek, "vn_{ek}")
+                g5.insert(ek, "v5_{ek}")
+                g10.insert(ek, "v10_{ek}")
+                h5.insert("hk_{ek}", "hv5_{ek}")
+                h10.insert("hk_{ek}", "hv10_{ek}")
+
+            for ek in extreme_keys:
+                expect(g0.get(ek) ?? "").to_equal("v0_{ek}")
+                expect(gneg.get(ek) ?? "").to_equal("vn_{ek}")
+                expect(g5.get(ek) ?? "").to_equal("v5_{ek}")
+                expect(g10.get(ek) ?? "").to_equal("v10_{ek}")
+                expect(h5.get("hk_{ek}") ?? "").to_equal("hv5_{ek}")
+                expect(h10.get("hk_{ek}") ?? "").to_equal("hv10_{ek}")
+
+            expect(g5.remove(min_i64) ?? "").to_equal("v5_{min_i64}")
+            expect(g5.has(min_i64)).to_be(false)
+            expect(g10.remove(-1) ?? "").to_equal("v10_-1")
+            expect(g10.has(-1)).to_be(false)
+
+            # 3) HashMap.with_capacity(4) at 100% tombstone saturation (size=1, tombstones=3, empty=0)
+            var hsat = HashMap.with_capacity(4)
+            var cand = 0
+            while hsat.capacity == 4 and (hsat.size + hsat.tombstones) < 4 and cand < 200:
+                val ck = "sat_{cand}"
+                hsat.insert(ck, "val_{cand}")
+                if (hsat.size + hsat.tombstones) < 4:
+                    expect(hsat.remove(ck) ?? "").to_equal("val_{cand}")
+                cand = cand + 1
+
+            expect(hsat.capacity).to_equal(4)
+            expect(hsat.size).to_equal(1)
+            expect(hsat.tombstones).to_equal(3)
+            val live_key = "sat_{cand - 1}"
+            expect(hsat.get(live_key) ?? "").to_equal("val_{cand - 1}")
+            expect(hsat.contains_key("never_inserted")).to_be(false)
+            expect(hsat.get("never_inserted").is_none()).to_be(true)
+            expect(hsat.get_observed("never_inserted").value.is_none()).to_be(true)
+            expect(hsat.remove("never_inserted").is_none()).to_be(true)
+            hsat.insert("after_full_tombstones", "recovered")
+            expect(hsat.get(live_key) ?? "").to_equal("val_{cand - 1}")
+            expect(hsat.get("after_full_tombstones") ?? "").to_equal("recovered")
+            expect(hsat.len()).to_equal(2)
+
+            # 4) Map.remove swap-remove when relocated last_d entry sits behind an earlier tombstone
+            var gswap: Map<i64, text> = Map.with_capacity(8)
+            # Keys 0, 8, 16, 24 all share low bits mod 8 (probe chain 0 -> 1 -> 2 -> 3)
+            gswap.insert(0, "d0")
+            gswap.insert(8, "d1")
+            gswap.insert(16, "d2")
+            gswap.insert(24, "d3_last")
+            # Remove d=1 (key 8): leaves a tombstone BEFORE d=3 (key 24), then relocates last_d=3 -> d=1
+            expect(gswap.remove(8) ?? "").to_equal("d1")
+            expect(gswap.get(24) ?? "").to_equal("d3_last")
+            expect(gswap.get(16) ?? "").to_equal("d2")
+            expect(gswap.get(0) ?? "").to_equal("d0")
+            expect(gswap.get(8).is_none()).to_be(true)
+            # Remove d=0 (key 0): relocates new last_d=2 (key 16, sitting behind tombstone) -> d=0
+            expect(gswap.remove(0) ?? "").to_equal("d0")
+            expect(gswap.get(16) ?? "").to_equal("d2")
+            expect(gswap.get(24) ?? "").to_equal("d3_last")
+            expect(gswap.get(0).is_none()).to_be(true)
+            expect(gswap.len()).to_equal(2)
 
     describe "AdaptiveMap lazy Linear mode":
         it "allocates zero hash or ordered slots while <= 8 entries in Linear mode":
