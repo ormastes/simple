@@ -1,0 +1,499 @@
+# Indic (Devanagari `dev2`) syllable segmentation and reordering on codepoints.
+#
+# Pure: no font, no I/O. Follows the OpenType Devanagari shaping spec as
+# HarfBuzz's Indic shaper implements it (what Chrome runs): the syllable
+# grammar, base-consonant search (base_pos LAST), implicit reph, initial
+# reordering, the per-item feature bits, and the final reordering permutation.
+# The GSUB pipeline consumes the record; the face decides only which
+# consonants have below-base / post-base forms and whether `rphf` exists.
+#
+# Categories: 0 other, 1 consonant, 2 Ra, 3 independent vowel, 4 nukta,
+# 5 halant, 6 ZWNJ, 7 ZWJ, 8 matra, 9 syllable modifier, 10 Vedic accent,
+# 11 dotted circle, 12 placeholder, 13 symbol.
+# Positions: 1 Ra that becomes reph, 2 pre-base matra, 3 pre-base consonant,
+# 4 base, 8 below-base consonant, 9 other matras, 11 post-base consonant,
+# 13 syllable modifiers and accents.
+# Syllable kinds: 0 consonant, 1 vowel, 2 standalone, 3 symbol, 4 broken
+# (a dotted circle is inserted at its start), 5 other.
+# Feature bits: 1 rphf, 2 half, 4 blwf, 8 pstf, 16 abvf.
+
+class IndicClusters:
+    codepoints: [u32]
+    source_index: [i64]
+    category: [i64]
+    position: [i64]
+    feature_bits: [i64]
+    syllable: [i64]
+    syllable_start: [i64]
+    syllable_end: [i64]
+    syllable_kind: [i64]
+    syllable_base: [i64]
+    syllable_reph: [bool]
+    syllable_cluster: [i64]
+
+class _IndicReordered:
+    order: [i64]
+    position: [i64]
+    feature_bits: [i64]
+    base: i64
+    reph: bool
+
+fn indic_category(cp: u32) -> i64:
+    if cp == 8204u32: return 6
+    if cp == 8205u32: return 7
+    if cp == 9676u32: return 11
+    if cp == 160u32: return 12
+    if cp >= 43232u32 and cp <= 43249u32: return 10
+    if cp < 2304u32 or cp > 2431u32: return 0
+    if cp <= 2307u32: return 9
+    if cp <= 2324u32: return 3
+    if cp == 2352u32: return 2
+    if cp <= 2361u32: return 1
+    if cp <= 2363u32: return 8
+    if cp == 2364u32: return 4
+    if cp == 2365u32: return 13
+    if cp <= 2380u32: return 8
+    if cp == 2381u32: return 5
+    if cp <= 2383u32: return 8
+    if cp == 2384u32: return 0
+    if cp <= 2386u32: return 10
+    if cp <= 2388u32: return 9
+    if cp <= 2391u32: return 8
+    if cp <= 2399u32: return 1
+    if cp <= 2401u32: return 3
+    if cp <= 2403u32: return 8
+    if cp <= 2405u32: return 0
+    if cp <= 2415u32: return 12
+    if cp <= 2417u32: return 0
+    if cp <= 2423u32: return 3
+    1
+
+# 0 not a matra, 1 pre-base (left), 2 above, 3 below, 4 post (right).
+fn indic_matra_placement(cp: u32) -> i64:
+    if indic_category(cp) != 8: return 0
+    if cp == 2367u32 or cp == 2382u32: return 1
+    if cp == 2362u32 or (cp >= 2373u32 and cp <= 2376u32) or cp == 2389u32: return 2
+    if (cp >= 2369u32 and cp <= 2372u32) or cp == 2390u32 or cp == 2391u32 or cp == 2402u32 or cp == 2403u32: return 3
+    4
+
+fn _indic_cat(cats: [i64], at: i64) -> i64:
+    if at < 0 or at >= cats.len(): return -1
+    cats[at]
+
+fn _indic_joiner(category: i64) -> bool:
+    category == 6 or category == 7
+
+# Consonant, Ra, vowel, dotted circle, placeholder: anything that can be a base.
+fn _indic_consonant(category: i64) -> bool:
+    category == 1 or category == 2 or category == 3 or category == 11 or category == 12
+
+fn _indic_contains(values: [u32], cp: u32) -> bool:
+    for value in values:
+        if value == cp: return true
+    false
+
+# --- syllable grammar (HarfBuzz indic machine) ----------------------------------
+
+# n = (N N?)?
+fn _indic_nuktas(cats: [i64], at: i64) -> i64:
+    var cursor = at
+    if _indic_cat(cats, cursor) == 4: cursor = cursor + 1
+    if cursor > at and _indic_cat(cats, cursor) == 4: cursor = cursor + 1
+    cursor
+
+# cn = c ZWJ? n
+fn _indic_consonant_group(cats: [i64], at: i64) -> i64:
+    val category = _indic_cat(cats, at)
+    if category != 1 and category != 2: return -1
+    var cursor = at + 1
+    if _indic_cat(cats, cursor) == 7: cursor = cursor + 1
+    _indic_nuktas(cats, cursor)
+
+# halant_group = z? H (ZWJ N?)?
+fn _indic_halant_group(cats: [i64], at: i64) -> i64:
+    var cursor = at
+    if _indic_joiner(_indic_cat(cats, cursor)): cursor = cursor + 1
+    if _indic_cat(cats, cursor) != 5: return -1
+    cursor = cursor + 1
+    if _indic_cat(cats, cursor) == 7:
+        cursor = cursor + 1
+        if _indic_cat(cats, cursor) == 4: cursor = cursor + 1
+    cursor
+
+# matra_group = z* M N? H?
+fn _indic_matra_group(cats: [i64], at: i64) -> i64:
+    var cursor = at
+    while _indic_joiner(_indic_cat(cats, cursor)): cursor = cursor + 1
+    if _indic_cat(cats, cursor) != 8: return -1
+    cursor = cursor + 1
+    if _indic_cat(cats, cursor) == 4: cursor = cursor + 1
+    if _indic_cat(cats, cursor) == 5: cursor = cursor + 1
+    cursor
+
+# syllable_tail = (z? SM SM? ZWNJ?)? A*
+fn _indic_syllable_tail(cats: [i64], at: i64) -> i64:
+    var cursor = at
+    var modifier = cursor
+    if _indic_joiner(_indic_cat(cats, modifier)): modifier = modifier + 1
+    if _indic_cat(cats, modifier) == 9:
+        modifier = modifier + 1
+        if _indic_cat(cats, modifier) == 9: modifier = modifier + 1
+        if _indic_cat(cats, modifier) == 6: modifier = modifier + 1
+        cursor = modifier
+    while _indic_cat(cats, cursor) == 10: cursor = cursor + 1
+    cursor
+
+# complex_syllable_tail = (halant_group cn){0,4} (final_halant_group | matra_group{0,4}) syllable_tail
+fn _indic_complex_tail(cats: [i64], at: i64) -> i64:
+    var cursor = at
+    var count: i64 = 0
+    while count < 4:
+        val halant = _indic_halant_group(cats, cursor)
+        val next = if halant < 0: -1 else: _indic_consonant_group(cats, halant)
+        if next < 0:
+            count = 4
+        else:
+            cursor = next
+            count = count + 1
+    val final_halant = _indic_halant_group(cats, cursor)
+    if final_halant >= 0:
+        val plain = _indic_cat(cats, cursor) == 5 and final_halant == cursor + 1
+        cursor = final_halant
+        if plain and _indic_cat(cats, cursor) == 6: cursor = cursor + 1
+    else:
+        count = 0
+        while count < 4:
+            val matra = _indic_matra_group(cats, cursor)
+            if matra < 0:
+                count = 4
+            else:
+                cursor = matra
+                count = count + 1
+    _indic_syllable_tail(cats, cursor)
+
+# Longest match at `at`, ties to the earlier kind. Returns end * 8 + kind.
+fn _indic_match(cats: [i64], at: i64) -> i64:
+    var best_end = at
+    var best_kind: i64 = 5
+    val reph: i64 = if _indic_cat(cats, at) == 2 and _indic_cat(cats, at + 1) == 5: 2 else: 0
+    # consonant_syllable = cn complex_syllable_tail
+    val group = _indic_consonant_group(cats, at)
+    if group >= 0:
+        best_end = _indic_complex_tail(cats, group)
+        best_kind = 0
+    # vowel_syllable = reph? V n (ZWJ | complex_syllable_tail)
+    if _indic_cat(cats, at + reph) == 3:
+        val after = _indic_nuktas(cats, at + reph + 1)
+        var vowel_end = _indic_complex_tail(cats, after)
+        if vowel_end == after and _indic_cat(cats, after) == 7: vowel_end = after + 1
+        if vowel_end > best_end:
+            best_end = vowel_end
+            best_kind = 1
+    # standalone_cluster = (PLACEHOLDER | reph? DOTTEDCIRCLE) n complex_syllable_tail
+    var head = -1
+    if _indic_cat(cats, at) == 12: head = at + 1
+    if _indic_cat(cats, at + reph) == 11: head = at + reph + 1
+    if head >= 0:
+        val standalone_end = _indic_complex_tail(cats, _indic_nuktas(cats, head))
+        if standalone_end > best_end:
+            best_end = standalone_end
+            best_kind = 2
+    # symbol_cluster = S N? syllable_tail
+    if _indic_cat(cats, at) == 13:
+        var symbol = at + 1
+        if _indic_cat(cats, symbol) == 4: symbol = symbol + 1
+        val symbol_end = _indic_syllable_tail(cats, symbol)
+        if symbol_end > best_end:
+            best_end = symbol_end
+            best_kind = 3
+    # broken_cluster = reph? n complex_syllable_tail
+    val broken_end = _indic_complex_tail(cats, _indic_nuktas(cats, at + reph))
+    if broken_end > best_end:
+        best_end = broken_end
+        best_kind = 4
+    if best_end <= at:
+        best_end = at + 1
+        best_kind = 5
+    best_end * 8 + best_kind
+
+# --- initial reordering -----------------------------------------------------------
+
+fn _indic_initial_position(cp: u32, category: i64, below_base: [u32], post_base: [u32]) -> i64:
+    if category == 1 or category == 2:
+        if _indic_contains(below_base, cp): return 8
+        if _indic_contains(post_base, cp): return 11
+        return 4
+    if category == 3 or category == 11 or category == 12: return 4
+    if category == 8: return (if cp == 2367u32 or cp == 2382u32: 2 else: 9)
+    if category == 9 or category == 10: return 13
+    0
+
+# One syllable (kinds 0, 1, 2, 4). `cps`/`cats` are the syllable's items in
+# logical order; the result is in sorted order, `order[k]` = logical index.
+fn _indic_reorder(cps: [u32], cats: [i64], below_base: [u32], post_base: [u32],
+                  has_rphf: bool) -> _IndicReordered:
+    val count = cats.len()
+    var pos: [i64] = []
+    var index: i64 = 0
+    while index < count:
+        pos.push(_indic_initial_position(cps[index], cats[index], below_base, post_base))
+        index = index + 1
+    # Base: from the end, the first consonant with no below-base form (post-base
+    # forms only count once a below-base one was seen); else the first consonant.
+    var has_reph = has_rphf and count >= 3 and cats[0] == 2 and cats[1] == 5 and not _indic_joiner(cats[2])
+    var limit: i64 = 0
+    var base = count
+    if has_reph:
+        limit = 2
+        base = 0
+    var seen_below = false
+    var cursor = count
+    var searching = count > 0
+    while searching:
+        cursor = cursor - 1
+        if _indic_consonant(cats[cursor]):
+            if pos[cursor] != 8 and (pos[cursor] != 11 or seen_below):
+                base = cursor
+                searching = false
+            else:
+                if pos[cursor] == 8: seen_below = true
+                base = cursor
+        else:
+            # A ZWJ after a halant asks for an explicit half form and stops the search.
+            if cursor > 0 and cats[cursor] == 7 and cats[cursor - 1] == 5: searching = false
+        if cursor <= limit: searching = false
+    # Ra + halant with no other consonant: Ra is the base, not a reph.
+    if has_reph and base == 0: has_reph = false
+    index = 0
+    while index < base:
+        if pos[index] > 3: pos[index] = 3
+        index = index + 1
+    if base < count: pos[base] = 4
+    if has_reph: pos[0] = 1
+    # Nuktas, halants and joiners take the position of what they follow.
+    var last_pos: i64 = 0
+    index = 0
+    while index < count:
+        val category = cats[index]
+        if category == 4 or category == 5 or _indic_joiner(category):
+            pos[index] = last_pos
+            if category == 5 and last_pos == 2:
+                var back = index
+                while back > 0:
+                    if pos[back - 1] != 2:
+                        pos[index] = pos[back - 1]
+                        back = 0
+                    else:
+                        back = back - 1
+        else:
+            if pos[index] != 13: last_pos = pos[index]
+        index = index + 1
+    # A post-base consonant owns everything since the previous consonant or matra.
+    var last = base
+    index = base + 1
+    while index < count:
+        if _indic_consonant(cats[index]):
+            var owned = last + 1
+            while owned < index:
+                if pos[owned] < 13: pos[owned] = pos[index]
+                owned = owned + 1
+            last = index
+        else:
+            if cats[index] == 8: last = index
+        index = index + 1
+    # Stable sort by position.
+    var order: [i64] = []
+    index = 0
+    while index < count:
+        var slot = order.len()
+        order.push(index)
+        while slot > 0 and pos[order[slot - 1]] > pos[index]:
+            order[slot] = order[slot - 1]
+            slot = slot - 1
+        order[slot] = index
+        index = index + 1
+    var sorted_pos: [i64] = []
+    var bits: [i64] = []
+    var sorted_base: i64 = -1
+    index = 0
+    while index < count:
+        sorted_pos.push(pos[order[index]])
+        bits.push(0)
+        if sorted_base < 0 and pos[order[index]] == 4: sorted_base = index
+        index = index + 1
+    val split = if sorted_base < 0: count else: sorted_base
+    index = 0
+    while index < count:
+        if index < split: bits[index] = 6
+        if index > split: bits[index] = 28
+        index = index + 1
+    index = 0
+    while index < count and sorted_pos[index] == 1:
+        bits[index] = bits[index] + 1
+        index = index + 1
+    # A ZWNJ takes `half` off everything back to (and including) its consonant.
+    index = 1
+    while index < count:
+        if cats[order[index]] == 6:
+            var back = index
+            var walking = true
+            while walking:
+                back = back - 1
+                if (bits[back] & 2) != 0: bits[back] = bits[back] - 2
+                if back <= 0 or _indic_consonant(cats[order[back]]): walking = false
+        index = index + 1
+    _IndicReordered(order: order, position: sorted_pos, feature_bits: bits, base: sorted_base, reph: has_reph)
+
+fn indic_clusters_with_forms(codepoints: [u32], below_base: [u32], post_base: [u32],
+                             has_rphf: bool) -> IndicClusters:
+    var cats: [i64] = []
+    for cp in codepoints:
+        cats.push(indic_category(cp))
+    var out_cps: [u32] = []
+    var out_source: [i64] = []
+    var out_cat: [i64] = []
+    var out_pos: [i64] = []
+    var out_bits: [i64] = []
+    var out_syllable: [i64] = []
+    var starts: [i64] = []
+    var ends: [i64] = []
+    var kinds: [i64] = []
+    var bases: [i64] = []
+    var rephs: [bool] = []
+    var clusters: [i64] = []
+    var at: i64 = 0
+    while at < cats.len():
+        val matched = _indic_match(cats, at)
+        val kind = matched % 8
+        val end_at = matched / 8
+        val ordinal = starts.len()
+        val first = out_cps.len()
+        var cps: [u32] = []
+        var sources: [i64] = []
+        var syllable_cats: [i64] = []
+        if kind == 4:
+            cps.push(9676u32)
+            sources.push(at)
+            syllable_cats.push(11)
+        var index = at
+        while index < end_at:
+            cps.push(codepoints[index])
+            sources.push(index)
+            syllable_cats.push(cats[index])
+            index = index + 1
+        var base: i64 = -1
+        var reph = false
+        if kind == 3 or kind == 5:
+            index = 0
+            while index < cps.len():
+                out_cps.push(cps[index])
+                out_source.push(sources[index])
+                out_cat.push(syllable_cats[index])
+                out_pos.push(0)
+                out_bits.push(0)
+                out_syllable.push(ordinal)
+                index = index + 1
+        else:
+            val reordered = _indic_reorder(cps, syllable_cats, below_base, post_base, has_rphf)
+            index = 0
+            while index < cps.len():
+                val from = reordered.order[index]
+                out_cps.push(cps[from])
+                out_source.push(sources[from])
+                out_cat.push(syllable_cats[from])
+                out_pos.push(reordered.position[index])
+                out_bits.push(reordered.feature_bits[index])
+                out_syllable.push(ordinal)
+                index = index + 1
+            if reordered.base >= 0: base = first + reordered.base
+            reph = reordered.reph
+        starts.push(first)
+        ends.push(out_cps.len())
+        kinds.push(kind)
+        bases.push(base)
+        rephs.push(reph)
+        clusters.push(at)
+        at = end_at
+    IndicClusters(codepoints: out_cps, source_index: out_source, category: out_cat,
+        position: out_pos, feature_bits: out_bits, syllable: out_syllable,
+        syllable_start: starts, syllable_end: ends, syllable_kind: kinds,
+        syllable_base: bases, syllable_reph: rephs, syllable_cluster: clusters)
+
+# Devanagari defaults: Ra is the only below-base consonant, `rphf` exists.
+fn indic_clusters(codepoints: [u32]) -> IndicClusters:
+    indic_clusters_with_forms(codepoints, [2352u32], [], true)
+
+# --- final reordering -------------------------------------------------------------
+
+# `values` with the item at `from` moved to slot `to` (from <= to).
+fn _indic_moved(values: [i64], from: i64, to: i64) -> [i64]:
+    var result: [i64] = []
+    var index: i64 = 0
+    while index < values.len():
+        if index != from: result.push(values[index])
+        if index == to: result.push(values[from])
+        index = index + 1
+    result
+
+# Final reordering of ONE syllable after the basic GSUB stages. `category` and
+# `position` describe its glyphs (a ligature keeps its first component's
+# values). Returns the permutation: result[k] = old index of the glyph at slot k.
+fn indic_final_order(category: [i64], position: [i64], reph_ligated: bool) -> [i64]:
+    val count = category.len()
+    var order: [i64] = []
+    var cat: [i64] = []
+    var pos: [i64] = []
+    var index: i64 = 0
+    while index < count:
+        order.push(index)
+        cat.push(category[index])
+        pos.push(position[index])
+        index = index + 1
+    if count < 2 or position.len() != count: return order
+    var base: i64 = 0
+    while base < count and pos[base] < 4: base = base + 1
+    if base < count and base > 0 and pos[base] > 4: base = base - 1
+    if base == count and cat[base - 1] == 7: base = base - 1
+    if base < count:
+        while base > 0 and (cat[base] == 4 or cat[base] == 5): base = base - 1
+    # Pre-base matra: after the last explicit halant before the base (and a
+    # joiner following it); with no such halant it stays where it is.
+    if base > 0:
+        var target = if base == count: base - 2 else: base - 1
+        if target < 0: target = 0
+        while target > 0 and cat[target] != 8 and cat[target] != 5: target = target - 1
+        if cat[target] == 5 and pos[target] != 2:
+            if target + 1 < count and _indic_joiner(cat[target + 1]): target = target + 1
+        else:
+            target = 0
+        if target > 0 and pos[target] != 2:
+            index = target
+            while index > 0:
+                if pos[index - 1] == 2:
+                    order = _indic_moved(order, index - 1, target)
+                    cat = _indic_moved(cat, index - 1, target)
+                    pos = _indic_moved(pos, index - 1, target)
+                    if index - 1 < base and base <= target: base = base - 1
+                    target = target - 1
+                index = index - 1
+    # Reph: after the first explicit halant before the base, else at the end of
+    # the syllable before the modifiers (and before a halant that follows a matra).
+    if reph_ligated and pos[0] == 1:
+        var target: i64 = 1
+        while target < base and cat[target] != 5: target = target + 1
+        if target < base and cat[target] == 5:
+            if target + 1 < base and _indic_joiner(cat[target + 1]): target = target + 1
+        else:
+            target = count - 1
+            while target > 0 and pos[target] == 13: target = target - 1
+            if cat[target] == 5:
+                index = base + 1
+                val stop = target
+                while index < stop:
+                    if cat[index] == 8: target = target - 1
+                    index = index + 1
+        if target > 0: order = _indic_moved(order, 0, target)
+    order
+
+export IndicClusters, indic_category, indic_matra_placement
+export indic_clusters, indic_clusters_with_forms, indic_final_order
