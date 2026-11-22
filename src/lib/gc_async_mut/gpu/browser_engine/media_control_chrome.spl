@@ -1,0 +1,325 @@
+# Chrome 159 (Linux) media-controls vector parts, as ARGB spans in DEVICE px.
+#
+# With no media loaded Chrome still paints the controls of `<audio controls>`
+# and `<video controls>`. Over the audio pill and the video scrim (painted by
+# the Draw IR producer) it draws Material icons scaled 20/24 and a 4 px
+# timeline track. Measured on Chrome for Testing 159 at device scale 1 and 4
+# (test/01_unit/browser_engine/media_controls_paint_chrome159_spec.spl), CSS px
+# relative to the control's content box of w x h:
+#
+# - audio play: `play_arrow` (8,5) (8,19) (19,12), icon box at (16, h/2 - 10),
+#   black at 30 % (the control is disabled without a source).
+# - audio timeline: stadium x 129.27 .. w - 90 (129.08 at device scale 1), 4 px
+#   high, centred on h/2, black at 20 %. Its left end follows the
+#   `0:00 / 0:00` time text, which is not painted here and whose advance
+#   depends on the device scale; the two numbers are its place with the
+#   default sans face.
+# - audio volume: `volume_up` (speaker polygon, a disc of radius 4.5 and a
+#   7..9 ring about (12,12), both right of x = 14), icon box at (w - 68,
+#   h/2 - 10), black at 30 %.
+# - audio kebab: `more_vert`, three r = 2 dots 6 units apart, icon box at
+#   (w - 36, h/2 - 10), black.
+# - video timeline: stadium x 16 .. w - 16, y h - 24 .. h - 20, white at 30 %.
+# - video kebab: the same dots centred on (w - 24, h - 48), white at 30 %.
+#
+# A wider video also shows a play button, the time text, volume and
+# fullscreen; those are not modelled.
+#
+# Coverage is exact along x and 8 sub-rows along y; all geometry is integer
+# 1/64 device px, so every lane rasterizes the same spans.
+
+use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans}
+
+val _MCC_DISABLED_DARK: u32 = 0x4D000000u32
+val _MCC_TRACK_DARK: u32 = 0x33000000u32
+val _MCC_SOLID_DARK: u32 = 0xFF000000u32
+val _MCC_DISABLED_LIGHT: u32 = 0x4DFFFFFFu32
+
+# kind 0: even-odd polygon `pts` (x, y pairs).
+# kind 1: ring r0..r1 about (cx, cy), kept right of clip_x (r0 == 0: a disc).
+# kind 2: stadium x0..x1 of radius r1 centred on cy.
+struct _MccShape:
+    kind: i32
+    pts: [i64]
+    cx: i64
+    cy: i64
+    r0: i64
+    r1: i64
+    clip_x: i64
+    x0: i64
+    x1: i64
+
+fn _mcc_isqrt(v: i64) -> i64:
+    if v <= 0:
+        return 0
+    var x = v
+    var y = (x + 1) / 2
+    # cpu-lane-loop-ok: Newton steps of one integer square root; about 20 for a 4K-wide control
+    while y < x:
+        x = y
+        y = (x + v / x) / 2
+    x
+
+# Sorted x intervals (start, end pairs) the shape covers on the line y = ys.
+fn _mcc_row_intervals(s: _MccShape, ys: i64) -> [i64]:
+    var out: [i64] = []
+    if s.kind == 0:
+        val n = (s.pts.len() / 2) as i32
+        var i = 0
+        # cpu-lane-loop-ok: edges of one icon polygon; at most 6
+        while i < n:
+            val j = (i + 1) % n
+            val ax = s.pts[i * 2]
+            val ay = s.pts[i * 2 + 1]
+            val bx = s.pts[j * 2]
+            val by = s.pts[j * 2 + 1]
+            if (ay <= ys and by > ys) or (by <= ys and ay > ys):
+                val x = ax + (ys - ay) * (bx - ax) / (by - ay)
+                var at = out.len() as i32
+                out.push(x)
+                # cpu-lane-loop-ok: insertion into the crossings of one line; at most 4
+                while at > 0 and out[at - 1] > x:
+                    out[at] = out[at - 1]
+                    at = at - 1
+                out[at] = x
+            i = i + 1
+        return out
+    val dy = if ys > s.cy: ys - s.cy else: s.cy - ys
+    if dy >= s.r1:
+        return out
+    val outer = _mcc_isqrt(s.r1 * s.r1 - dy * dy)
+    if s.kind == 2:
+        out.push(s.x0 + s.r1 - outer)
+        out.push(s.x1 - s.r1 + outer)
+        return out
+    if dy >= s.r0:
+        val a = if s.cx - outer > s.clip_x: s.cx - outer else: s.clip_x
+        if s.cx + outer > a:
+            out.push(a)
+            out.push(s.cx + outer)
+        return out
+    val inner = _mcc_isqrt(s.r0 * s.r0 - dy * dy)
+    val left = if s.cx - outer > s.clip_x: s.cx - outer else: s.clip_x
+    if s.cx - inner > left:
+        out.push(left)
+        out.push(s.cx - inner)
+    val right = if s.cx + inner > s.clip_x: s.cx + inner else: s.clip_x
+    if s.cx + outer > right:
+        out.push(right)
+        out.push(s.cx + outer)
+    out
+
+fn _mcc_scale_alpha(color: u32, coverage: i32) -> u32:
+    val alpha = ((color >> 24) & 0xFFu32) as i32
+    val scaled = (alpha * coverage + 127) / 255
+    ((scaled as u32) << 24) | (color & 0x00FFFFFFu32)
+
+# Appends the spans of one shape inside the 1/64 px box (bx0, by0)-(bx1, by1).
+# A run that repeats the run directly above it grows that span.
+fn _mcc_append(acc: ChromeSpans, s: _MccShape, bx0: i64, by0: i64, bx1: i64, by1: i64, color: u32) -> ChromeSpans:
+    var out = acc
+    val x0 = (bx0 / 64) as i32
+    val y0 = (by0 / 64) as i32
+    val x1 = ((bx1 + 63) / 64) as i32
+    val y1 = ((by1 + 63) / 64) as i32
+    val width = x1 - x0
+    if width <= 0 or y1 <= y0:
+        return out
+    val limit = (width as i64) * 64
+    var above: [i32] = []
+    var y = y0
+    # cpu-lane-loop-ok: device rows of one media-control part; bound is the part's device height (20k for an icon)
+    while y < y1:
+        var partial: [i32] = []
+        var steps: [i32] = []
+        var fill = 0
+        # cpu-lane-loop-ok: zeroes one row's accumulators; bound is the part's device width
+        while fill <= width:
+            partial.push(0)
+            steps.push(0)
+            fill = fill + 1
+        var sub = 0
+        # cpu-lane-loop-ok: the 8 sub-rows of one device row
+        while sub < 8:
+            val iv = _mcc_row_intervals(s, (y as i64) * 64 + 4 + (sub as i64) * 8)
+            var p = 0
+            # cpu-lane-loop-ok: intervals of one sub-row; at most 2
+            while p + 1 < (iv.len() as i32):
+                var xa = iv[p] - (x0 as i64) * 64
+                var xb = iv[p + 1] - (x0 as i64) * 64
+                if xa < 0:
+                    xa = 0
+                if xb > limit:
+                    xb = limit
+                if xb > xa:
+                    val pa = (xa / 64) as i32
+                    val pb = ((xb - 1) / 64) as i32
+                    if pa == pb:
+                        partial[pa] = partial[pa] + ((xb - xa) as i32)
+                    else:
+                        partial[pa] = partial[pa] + ((((pa + 1) as i64) * 64 - xa) as i32)
+                        partial[pb] = partial[pb] + ((xb - (pb as i64) * 64) as i32)
+                        steps[pa + 1] = steps[pa + 1] + 64
+                        steps[pb] = steps[pb] - 64
+                p = p + 2
+            sub = sub + 1
+        var current: [i32] = []
+        var solid = 0
+        var run_x = 0
+        var run_alpha = 0
+        var col = 0
+        # cpu-lane-loop-ok: columns of one row of the part; bound is the part's device width
+        while col <= width:
+            var alpha = 0
+            if col < width:
+                solid = solid + steps[col]
+                alpha = ((partial[col] + solid) * 255 + 256) / 512
+            if alpha != run_alpha:
+                if run_alpha > 0:
+                    val run_color = _mcc_scale_alpha(color, run_alpha)
+                    var grown = -1
+                    # cpu-lane-loop-ok: spans of the row above; bound is that row's run count (a handful)
+                    for candidate in above:
+                        if out.xs[candidate] == x0 + run_x and out.ws[candidate] == col - run_x and out.colors[candidate] == run_color:
+                            grown = candidate
+                    if grown >= 0:
+                        out.hs[grown] = out.hs[grown] + 1
+                        current.push(grown)
+                    else:
+                        current.push(out.xs.len() as i32)
+                        out.xs.push(x0 + run_x)
+                        out.ys.push(y)
+                        out.ws.push(col - run_x)
+                        out.hs.push(1)
+                        out.colors.push(run_color)
+                run_x = col
+                run_alpha = alpha
+            col = col + 1
+        above = current
+        y = y + 1
+    out
+
+# Icon coordinate: `origin` in 1/64 CSS px plus `hundredths` of a 24-unit icon
+# drawn at 20 CSS px, in 1/64 device px.
+fn _mcc_icon(origin: i64, hundredths: i64, k: i64) -> i64:
+    origin * k + hundredths * 64 * k / 120
+
+fn _mcc_ring(cx: i64, cy: i64, r0: i64, r1: i64, clip_x: i64) -> _MccShape:
+    _MccShape(kind: 1, pts: [], cx: cx, cy: cy, r0: r0, r1: r1, clip_x: clip_x, x0: 0, x1: 0)
+
+# The three `more_vert` dots of the icon box at (ox, oy), 1/64 CSS px.
+fn _mcc_append_kebab(acc: ChromeSpans, ox: i64, oy: i64, k: i64, color: u32) -> ChromeSpans:
+    var out = acc
+    val r = _mcc_icon(0, 200, k)
+    val cx = _mcc_icon(ox, 1200, k)
+    # cpu-lane-loop-ok: the three dots of one kebab icon
+    for unit_y in [600, 1200, 1800]:
+        val cy = _mcc_icon(oy, unit_y as i64, k)
+        out = _mcc_append(out, _mcc_ring(cx, cy, 0, r, cx - r), cx - r, cy - r, cx + r, cy + r, color)
+    out
+
+fn _mcc_append_track(acc: ChromeSpans, x0: i64, x1: i64, cy: i64, r: i64, color: u32) -> ChromeSpans:
+    if x1 - x0 < r * 2:
+        return acc
+    val track = _MccShape(kind: 2, pts: [], cx: 0, cy: cy, r0: 0, r1: r, clip_x: 0, x0: x0, x1: x1)
+    _mcc_append(acc, track, x0, cy - r, x1, cy + r, color)
+
+var g_mcc_cache_keys: [text] = []
+var g_mcc_cache_vals: [ChromeSpans] = []
+
+fn _mcc_cached(key: text) -> i32:
+    var i = 0
+    # cpu-lane-loop-ok: at most 8 cached controls
+    while i < (g_mcc_cache_keys.len() as i32):
+        if g_mcc_cache_keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn _mcc_remember(key: text, spans: ChromeSpans) -> ChromeSpans:
+    if g_mcc_cache_keys.len() >= 8:
+        g_mcc_cache_keys = []
+        g_mcc_cache_vals = []
+    g_mcc_cache_keys.push(key)
+    g_mcc_cache_vals.push(spans)
+    spans
+
+# Parts of an `<audio controls>` strip of w x h CSS px at device scale k,
+# origin at the content box's top-left device px. Empty below 250 x 24, where
+# Chrome drops parts this model does not follow.
+# reason: w and h are CSS px counts and k is a dimensionless device ratio.
+# @allow(primitive_api)
+pub fn chrome_audio_control_spans(w: i32, h: i32, k: i32) -> ChromeSpans:
+    var out = ChromeSpans(xs: [], ys: [], ws: [], hs: [], colors: [])
+    if w < 250 or h < 24 or k < 1:
+        return out
+    val key = "a{w}/{h}/{k}"
+    val hit = _mcc_cached(key)
+    if hit >= 0:
+        return g_mcc_cache_vals[hit]
+    val kk = k as i64
+    val oy = (h as i64) * 32 - 640
+    val play_x: i64 = 16 * 64
+    val play = _MccShape(
+        kind: 0,
+        pts: [
+            _mcc_icon(play_x, 800, kk), _mcc_icon(oy, 500, kk),
+            _mcc_icon(play_x, 800, kk), _mcc_icon(oy, 1900, kk),
+            _mcc_icon(play_x, 1900, kk), _mcc_icon(oy, 1200, kk)
+        ],
+        cx: 0, cy: 0, r0: 0, r1: 0, clip_x: 0, x0: 0, x1: 0)
+    out = _mcc_append(
+        out, play, _mcc_icon(play_x, 800, kk), _mcc_icon(oy, 500, kk),
+        _mcc_icon(play_x, 1900, kk), _mcc_icon(oy, 1900, kk), _MCC_DISABLED_DARK)
+    out = _mcc_append_track(
+        out, (if k == 1: 12908 else: 12927) * 64 * kk / 100, ((w - 90) as i64) * 64 * kk,
+        (h as i64) * 32 * kk, 128 * kk, _MCC_TRACK_DARK)
+    val vol_x = ((w - 68) as i64) * 64
+    val speaker = _MccShape(
+        kind: 0,
+        pts: [
+            _mcc_icon(vol_x, 300, kk), _mcc_icon(oy, 900, kk),
+            _mcc_icon(vol_x, 300, kk), _mcc_icon(oy, 1500, kk),
+            _mcc_icon(vol_x, 700, kk), _mcc_icon(oy, 1500, kk),
+            _mcc_icon(vol_x, 1200, kk), _mcc_icon(oy, 2000, kk),
+            _mcc_icon(vol_x, 1200, kk), _mcc_icon(oy, 400, kk),
+            _mcc_icon(vol_x, 700, kk), _mcc_icon(oy, 900, kk)
+        ],
+        cx: 0, cy: 0, r0: 0, r1: 0, clip_x: 0, x0: 0, x1: 0)
+    out = _mcc_append(
+        out, speaker, _mcc_icon(vol_x, 300, kk), _mcc_icon(oy, 400, kk),
+        _mcc_icon(vol_x, 1200, kk), _mcc_icon(oy, 2000, kk), _MCC_DISABLED_DARK)
+    val wave_cx = _mcc_icon(vol_x, 1200, kk)
+    val wave_cy = _mcc_icon(oy, 1200, kk)
+    val wave_clip = _mcc_icon(vol_x, 1400, kk)
+    val near_r = _mcc_icon(0, 450, kk)
+    val far_r = _mcc_icon(0, 900, kk)
+    out = _mcc_append(
+        out, _mcc_ring(wave_cx, wave_cy, 0, near_r, wave_clip),
+        wave_clip, wave_cy - near_r, wave_cx + near_r, wave_cy + near_r, _MCC_DISABLED_DARK)
+    out = _mcc_append(
+        out, _mcc_ring(wave_cx, wave_cy, _mcc_icon(0, 700, kk), far_r, wave_clip),
+        wave_clip, wave_cy - far_r, wave_cx + far_r, wave_cy + far_r, _MCC_DISABLED_DARK)
+    out = _mcc_append_kebab(out, ((w - 36) as i64) * 64, oy, kk, _MCC_SOLID_DARK)
+    _mcc_remember(key, out)
+
+# Parts of a `<video controls>` panel of w x h CSS px at device scale k,
+# origin at the content box's top-left device px. Empty below 64 x 60.
+# reason: w and h are CSS px counts and k is a dimensionless device ratio.
+# @allow(primitive_api)
+pub fn chrome_video_control_spans(w: i32, h: i32, k: i32) -> ChromeSpans:
+    var out = ChromeSpans(xs: [], ys: [], ws: [], hs: [], colors: [])
+    if w < 64 or h < 60 or k < 1:
+        return out
+    val key = "v{w}/{h}/{k}"
+    val hit = _mcc_cached(key)
+    if hit >= 0:
+        return g_mcc_cache_vals[hit]
+    val kk = k as i64
+    out = _mcc_append_kebab(out, ((w - 34) as i64) * 64, ((h - 58) as i64) * 64, kk, _MCC_DISABLED_LIGHT)
+    out = _mcc_append_track(
+        out, 16 * 64 * kk, ((w - 16) as i64) * 64 * kk,
+        ((h - 22) as i64) * 64 * kk, 128 * kk, _MCC_DISABLED_LIGHT)
+    _mcc_remember(key, out)
+
+export chrome_audio_control_spans, chrome_video_control_spans

@@ -1,0 +1,306 @@
+"""
+## Purpose and audience
+Purpose: Pin the vector parts Chrome paints inside the media controls of an
+`<audio controls>` and a `<video controls>` that have no media: the play
+triangle, the timeline track, the volume icon and the overflow (kebab) dots of
+the audio strip, and the timeline track and kebab dots of a narrow video.
+Before this spec the renderer painted only the audio pill and the video scrim,
+which left 1,015 (audio) and 388 (video) mismatching pixels at 1x on the web
+catalog's `animation` page (11,629 and 6,059 at device scale 4).
+Audience: browser-engine paint maintainers.
+
+Chrome oracle: Chrome for Testing 159 headless, `--window-size=400,300`, device
+scale 1 and 4, pixels read from the PNG. Page (PAGE below): a 300x54 audio at
+(10,10), a 120x150 video at (10,74), a 230x60 video at (10,234).
+
+Measured geometry (CSS px, relative to the control's content box, w x h):
+
+| part                | geometry                                                       | paint            |
+|---------------------|----------------------------------------------------------------|------------------|
+| audio play          | Material `play_arrow` (8,5) (8,19) (19,12) at 20/24, icon box 20x20 at (16, h/2-10) | black at 30 % |
+| audio timeline      | 4 px stadium, x 129.27 (1x: 129.08) .. w-90, centred on h/2   | black at 20 %    |
+| audio volume        | Material `volume_up` at 20/24, icon box at (w-68, h/2-10)       | black at 30 %    |
+| audio kebab         | three r=2 dots (x 20/24), 6 units apart, icon box at (w-36, h/2-10) | black         |
+| video timeline      | 4 px stadium, x 16 .. w-16, y h-24 .. h-20                      | white at 30 %    |
+| video kebab         | the same dots, centred on (w-24, h-48)                          | white at 30 %    |
+
+The audio timeline's left end follows the `0:00 / 0:00` time text, which is
+not modelled here (Chrome paints it with LCD text at 14 px); 129.27 (129.08
+at device scale 1, where the text advances differ) is its position with the
+host's default sans face.
+
+The 1x references are Chrome's pixels; a pixel counts as a mismatch when any
+channel is off by more than 8. At device scale 4 the ink box and ink count of
+each part are compared (box within 1 device px, count within 4 %).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-005 — the media-controls vector parts of audio and video paint as Chrome 159 paints them, at device scale 1 and 4
+"""
+# @tag: unit, browser_engine, paint, media_controls, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/media_control_chrome.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}audio,video{{display:block;margin:10px 0 0 10px}}p{{margin:0}}</style></head><body><audio controls></audio><video controls width=\"120\"></video><video controls style=\"width:230px;height:60px\"></video><p>x</p></body></html>"
+
+# Chrome 159, 1x: columns 30..43, rows 29..44.
+val PLAY_REF: [text] = [
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4e2e4e4dfe2e2f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaac4c6c7ecefeff1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaafb1b1d8dbdbf1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaa8aaaaa8aaaabcbebee8eaebf1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaa8aaaaa8aaaaa8aaaaabadadd0d2d2eff2f2f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaab5b7b7e2e4e5f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaab5b7b7e2e4e5f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaa8aaaaa8aaaaa8aaaaabadadd0d2d2eff2f2f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaa8aaaaa8aaaabcbebee8eaebf1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaaa8aaaaafb1b1d8dbdbf1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4dadcdca8aaaac4c6c7ecefeff1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4e2e4e4dfe2e2f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f0f4f4f0f4f4"
+]
+
+# Chrome 159, 1x: columns 136..145, rows 33..40.
+val TL_L_REF: [text] = [
+    "f0f2f4f0f2f4f0f2f4f0f2f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f0f2f4f0f2f4f0f2f4f0f2f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f0f2f4f0f2f4f0f2f4e0e1e3c8cacbc0c2c3c0c2c3c0c2c3c0c2c3c0c2c3",
+    "f0f2f4f0f2f4f0f2f4c7c9cbc0c2c3c0c2c3c0c2c3c0c2c3c0c2c3c0c2c3",
+    "f0f2f4f0f2f4f0f2f4c7c9cbc0c2c3c0c2c3c0c2c3c0c2c3c0c2c3c0c2c3",
+    "f0f2f4f0f2f4f0f2f4e0e1e3c8cacbc0c2c3c0c2c3c0c2c3c0c2c3c0c2c3",
+    "f0f2f4f0f2f4f0f2f4f0f2f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f0f2f4f0f2f4f0f2f4f0f2f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4"
+]
+
+# Chrome 159, 1x: columns 214..223, rows 33..40.
+val TL_R_REF: [text] = [
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "c0c2c3c0c2c3c0c2c3c0c2c3c8cacbe0e2e3f1f3f4f1f3f4f1f3f4f1f3f4",
+    "c0c2c3c0c2c3c0c2c3c0c2c3c0c2c3c8cacbf1f3f4f1f3f4f1f3f4f1f3f4",
+    "c0c2c3c0c2c3c0c2c3c0c2c3c0c2c3c8cacbf1f3f4f1f3f4f1f3f4f1f3f4",
+    "c0c2c3c0c2c3c0c2c3c0c2c3c8cacbe0e2e3f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4"
+]
+
+# Chrome 159, 1x: columns 242..263, rows 27..46.
+val VOL_REF: [text] = [
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4eceeeff0f3f3f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4dddfdff1f4f4d8dbdbafb1b1cfd2d2eff1f2f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4dee0e1aaacacf1f4f4e3e6e6b0b2b2a8aaaab5b7b7e9ebecf1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4dfe2e2abadada8aaaaf1f4f4f1f4f4f0f3f3d0d3d3a8aaaab0b2b2eef1f1f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4e0e2e2aaacaca8aaaaa8aaaaf1f4f4ecefeff1f4f4f1f4f4d1d4d4a8aaaaced0d0f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4dee1e1cccecfcccecfcbcdceabadada8aaaaa8aaaaa8aaaaf1f4f4d8dbdbbec0c0f0f3f3f0f3f3b2b4b4abadadeef1f1f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4cccecfa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaf1f4f4d8dbdba8aaaad6d8d8f1f4f4cfd1d1a8aaaadfe1e1f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4cccecfa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaf1f4f4d8dbdba8aaaac0c2c2f1f4f4dddfdfa8aaaad2d4d4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4cccecfa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaf1f4f4d8dbdba8aaaac0c2c2f1f4f4dfe1e1a8aaaad0d2d2f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4cccecfa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaa8aaaaf1f4f4d8dbdba8aaaad6d8d8f1f4f4d3d6d6a8aaaadbdddef1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4dee1e1cccecfcccecfcbcdceabadada8aaaaa8aaaaa8aaaaf1f4f4d8dbdbc0c2c2f0f3f3f1f4f4b8babaaaacacedeff0f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4e0e2e3abadada8aaaaa8aaaaf1f4f4ecefeff1f4f4f1f4f4d3d5d5a8aaaac4c6c7f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4dfe2e2aaacaca8aaaaf1f4f4f1f4f4f0f3f3d0d3d3a8aaaaafb1b1ebeeeef1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4dde0e0aaacacf1f4f4e3e6e6b0b2b2a8aaaab6b8b8e9ececf1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4dddfdff1f4f4d9dbdba8aaaac9cccceff1f2f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4ebeeeeecefeff1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4",
+    "f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4f1f4f4"
+]
+
+# Chrome 159, 1x: columns 280..288, rows 28..45.
+val KEBAB_REF: [text] = [
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4dddfdf696a6a696a6adddfdff1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f478797a000000000000808181f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f478797a00000000000078797af1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4dddfdf696a6a696a6adddfdff1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4dddfdf696a6a696a6adddfdff1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f478797a000000000000808181f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f478797a00000000000078797af1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4dddfdf696a6a696a6adddfdff1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4dddfdf696a6a696a6adddfdff1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f478797a000000000000808181f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f478797a00000000000078797af1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4dddfdf696a6a696a6adddfdff1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4",
+    "f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4f1f3f4"
+]
+
+# Chrome 159, 1x: columns 102..109, rows 167..183.
+val V_KEBAB_REF: [text] = [
+    "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+    "1919191a1a1a1919191919191919191a1a1a191919191919",
+    "1919191818181d1d1d3f3f3f4040401d1d1d181818181818",
+    "1818181818183b3b3b5e5e5e5e5e5e383838181818181818",
+    "1717171717173a3a3a5d5d5d5d5d5d3a3a3a171717171717",
+    "1616161616161b1b1b3d3d3d3d3d3d1b1b1b161616161616",
+    "151515151515151515151515151515151515151515151515",
+    "1414141515151919193d3d3d3c3c3c1a1a1a141414151515",
+    "1414141414143737375b5b5b5b5b5b353535141414141414",
+    "1313131313133636365a5a5a5a5a5a363636131313131313",
+    "1212121212121717173a3a3a3a3a3a171717121212121212",
+    "111111121212111111121212111111121212111111121212",
+    "111111111111161616393939393939161616111111111111",
+    "101010111111343434585858585858333333101010101010",
+    "1010100f0f0f3333335858585858583333330f0f0f0f0f0f",
+    "0f0f0f0f0f0f1414143838383838381414140f0f0f0f0f0f",
+    "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+]
+
+# Chrome 159, 1x: columns 24..30, rows 198..205.
+val V_TL_L_REF: [text] = [
+    "040404050505040404050505040404050505040404",
+    "040404040404040404040404040404040404040404",
+    "0404040404041d1d1d434343505050505050505050",
+    "0303030303034343434f4f4f4f4f4f4f4f4f505050",
+    "0303030303034343434f4f4f4f4f4f4f4f4f4f4f4f",
+    "0303030303031c1c1c4343434f4f4f4f4f4f4f4f4f",
+    "020202030303020202030303020202030303020202",
+    "020202020202020202020202020202020202020202"
+]
+
+# Chrome 159, 1x: columns 109..115, rows 198..205.
+val V_TL_R_REF: [text] = [
+    "050505040404050505040404050505040404050505",
+    "040404040404040404040404040404040404040404",
+    "5050505050505050504343431d1d1d040404040404",
+    "4f4f4f5050504f4f4f4f4f4f434343040404030303",
+    "4f4f4f4f4f4f4f4f4f4f4f4f434343030303030303",
+    "4f4f4f4f4f4f4f4f4f4343431c1c1c030303030303",
+    "030303020202030303020202030303020202030303",
+    "020202020202020202020202020202020202020202"
+]
+
+fn _r(p: u32) -> i32:
+    ((p >> 16) & 0xFFu32) as i32
+
+fn _g(p: u32) -> i32:
+    ((p >> 8) & 0xFFu32) as i32
+
+fn _b(p: u32) -> i32:
+    (p & 0xFFu32) as i32
+
+fn _mc_hex_digit(ch: text) -> i32:
+    "0123456789abcdef".index_of(ch) ?? 0
+
+fn _mc_hex_val(two: text) -> i32:
+    _mc_hex_digit(two.substring(0, 1)) * 16 + _mc_hex_digit(two.substring(1, 2))
+
+fn _off(a: i32, b: i32) -> bool:
+    a - b > 8 or b - a > 8
+
+# Pixels of the reference block at (x0, y0) that are off Chrome by more than 8.
+fn _mismatch(px: [u32], w: i32, x0: i32, y0: i32, reference: [text]) -> i32:
+    var bad = 0
+    var row = 0
+    while row < reference.len():
+        val cols = reference[row].len() / 6
+        var col = 0
+        while col < cols:
+            val want = reference[row].substring(col * 6, col * 6 + 6)
+            val got = px[(y0 + row) * w + x0 + col]
+            if _off(_mc_hex_val(want.substring(0, 2)), _r(got)) or _off(_mc_hex_val(want.substring(2, 4)), _g(got)) or _off(_mc_hex_val(want.substring(4, 6)), _b(got)):
+                bad = bad + 1
+            col = col + 1
+        row = row + 1
+    bad
+
+# [x_min, x_max, y_min, y_max, count] of the pixels whose red is in lo..hi.
+fn _ink(px: [u32], w: i32, x0: i32, y0: i32, x1: i32, y1: i32, lo: i32, hi: i32) -> [i32]:
+    var a = 1000000
+    var b = -1
+    var c = 1000000
+    var d = -1
+    var n = 0
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            val red = _r(px[y * w + x])
+            if red >= lo and red <= hi:
+                n = n + 1
+                if x < a: a = x
+                if x > b: b = x
+                if y < c: c = y
+                if y > d: d = y
+            x = x + 1
+        y = y + 1
+    [a, b, c, d, n]
+
+# The ink box is within 1 px of Chrome's and the ink count within 4 %.
+fn _ink_near(got: [i32], want: [i32]) -> bool:
+    var i = 0
+    while i < 4:
+        if got[i] - want[i] > 1 or want[i] - got[i] > 1:
+            return false
+        i = i + 1
+    val slack = want[4] * 4 / 100 + 1
+    got[4] - want[4] <= slack and want[4] - got[4] <= slack
+
+var g_px1: [u32] = []
+var g_px4: [u32] = []
+
+fn _p1() -> [u32]:
+    if g_px1.len() == 0:
+        g_px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+    g_px1
+
+fn _p4() -> [u32]:
+    if g_px4.len() == 0:
+        g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+    g_px4
+
+describe "Audio controls vector parts (Chrome 159)":
+    it "AC-1: the play triangle equals Chrome's pixels at 1x":
+        expect(_mismatch(_p1(), CSS_W, 30, 29, PLAY_REF)).to_equal(0)
+
+    it "AC-2: the timeline track ends equal Chrome's pixels at 1x":
+        expect(_mismatch(_p1(), CSS_W, 136, 33, TL_L_REF)).to_equal(0)
+        expect(_mismatch(_p1(), CSS_W, 214, 33, TL_R_REF)).to_equal(0)
+
+    it "AC-3: the volume icon is Chrome's shape at 1x":
+        step("Chrome 159: 79 px of ink (red <= 200) in columns 245..258, rows 30..43")
+        expect(_ink_near(_ink(_p1(), CSS_W, 240, 22, 270, 52, 0, 200), [245, 258, 30, 43, 79])).to_equal(true)
+        step("at most 6 of the 440 reference pixels are off by more than 8")
+        expect(_mismatch(_p1(), CSS_W, 242, 27, VOL_REF)).to_be_less_than(7)
+
+    it "AC-4: the kebab dots are Chrome's shape at 1x":
+        step("Chrome 159: 12 px of solid ink (red <= 60) in columns 283..284, rows 31..42")
+        expect(_ink_near(_ink(_p1(), CSS_W, 275, 22, 295, 52, 0, 60), [283, 284, 31, 42, 12])).to_equal(true)
+        step("12 of the 162 reference pixels (the dots' side pixels) are off by 9, one over the tolerance: Skia's bezier dots are a hair narrower than a circle; 48 on base")
+        expect(_mismatch(_p1(), CSS_W, 280, 28, KEBAB_REF)).to_be_less_than(13)
+
+    it "AC-5: the parts keep Chrome's ink boxes at device scale 4":
+        step("Chrome 159 at 4x: play c131-165 r125-170 (834 px)")
+        expect(_ink_near(_ink(_p4(), CSS_W * 4, 100, 80, 200, 200, 0, 200), [131, 165, 125, 170, 834])).to_equal(true)
+        step("timeline c557-879 r140-155 (5118 px)")
+        expect(_ink_near(_ink(_p4(), CSS_W * 4, 500, 100, 920, 200, 0, 215), [557, 879, 140, 155, 5118])).to_equal(true)
+        step("volume c978-1037 r119-176 (1486 px)")
+        expect(_ink_near(_ink(_p4(), CSS_W * 4, 960, 90, 1080, 200, 0, 200), [978, 1037, 119, 176, 1486])).to_equal(true)
+        step("kebab c1129-1142 r121-174 (420 px)")
+        expect(_ink_near(_ink(_p4(), CSS_W * 4, 1100, 90, 1180, 200, 0, 120), [1129, 1142, 121, 174, 420])).to_equal(true)
+
+describe "Video controls vector parts (Chrome 159)":
+    it "AC-6: the kebab dots and the timeline of a 120x150 video equal Chrome's pixels at 1x":
+        expect(_mismatch(_p1(), CSS_W, 102, 167, V_KEBAB_REF)).to_equal(0)
+        expect(_mismatch(_p1(), CSS_W, 24, 198, V_TL_L_REF)).to_equal(0)
+        expect(_mismatch(_p1(), CSS_W, 109, 198, V_TL_R_REF)).to_equal(0)
+
+    it "AC-7: the parts keep Chrome's ink boxes at device scale 4":
+        step("Chrome 159 at 4x: kebab c418-429 r677-729 (376 px with red >= 70)")
+        expect(_ink_near(_ink(_p4(), CSS_W * 4, 400, 660, 460, 750, 70, 255), [418, 429, 677, 729, 376])).to_equal(true)
+        step("timeline c104-455 r800-815 (5565 px with red >= 60)")
+        expect(_ink_near(_ink(_p4(), CSS_W * 4, 40, 780, 520, 830, 60, 255), [104, 455, 800, 815, 5565])).to_equal(true)

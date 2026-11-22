@@ -1,0 +1,81 @@
+"""
+## Purpose and audience
+Purpose: Pin where Chrome paints inline replaced boxes that follow collapsed
+whitespace. A space between inline boxes advances the line by the face's real
+space advance (4.45 px for the 16 px default sans), so the boxes sit at
+fractional x and Chrome snaps each to the nearest DEVICE pixel. The renderer
+advances by a whole 4 px and keeps boxes on whole CSS px, which puts the
+second and later boxes of the web catalog's `animation` probe row (svg,
+audio, video) one CSS px left at 1x and 0.5 .. 1.25 CSS px left at device
+scale 4 (about 300 edge pixels at 1x, 1,400 + 3,100 + 3,900 at 4x).
+Audience: inline-layout maintainers (layout lane; handed over by the
+animation page lane, which may not edit layout files).
+
+Chrome oracle: Chrome for Testing 159 headless, `--window-size=400,300`,
+`body{margin:0;font:16px/1.5 sans-serif}`, one `<div>` holding a 60x40
+canvas, two 60x40 svgs filled #7c3aed and a 120 px wide `<video controls>`,
+separated by one newline each. Layout x: canvas 0, svg 64.45, svg 128.9,
+video 193.34.
+
+| box       | 1x columns | 4x columns  |
+|-----------|------------|-------------|
+| first svg | 64..123    | 258..497    |
+| second svg| 129..188   | 516..755    |
+| video     | 193..312   | 773..1252   |
+
+Before the fix: 1x 64 / 128 / 192, 4x 256 / 512 / 768.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-REPLACED-006 — inline replaced boxes after collapsed whitespace are placed at the fractional pen position and snapped to device pixels as in Chrome 159
+"""
+# @tag: unit, browser_engine, layout, inline, replaced, device_scale, chrome159
+# @tag:in-development
+# Tracks: red handover spec (0/2 on base) — inline replaced boxes after collapsed whitespace must advance by the real space advance; fix belongs to the inline layout lane (layout_engine/layout_text); delete this tag in the commit that turns it green.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}p{{margin:0}}</style></head><body><div><canvas width=\"60\" height=\"40\"></canvas>\n<svg width=\"60\" height=\"40\"><rect width=\"60\" height=\"40\" fill=\"#7c3aed\"></rect></svg>\n<svg width=\"60\" height=\"40\"><rect width=\"60\" height=\"40\" fill=\"#7c3aed\"></rect></svg>\n<video controls width=\"120\"></video></div><p>x</p></body></html>"
+
+fn _purple(p: u32) -> bool:
+    val r = ((p >> 16) & 0xFFu32) as i32
+    val g = ((p >> 8) & 0xFFu32) as i32
+    val b = (p & 0xFFu32) as i32
+    r > 0x73 and r < 0x85 and g > 0x31 and g < 0x43 and b > 0xd0
+
+fn _dark(p: u32) -> bool:
+    val r = ((p >> 16) & 0xFFu32) as i32
+    val g = ((p >> 8) & 0xFFu32) as i32
+    r <= 0x40 and g <= 0x40
+
+# First columns of the purple runs and of the dark run on row y: "a,b,c".
+fn _starts(px: [u32], w: i32, y: i32) -> text:
+    var out = ""
+    var was_purple = false
+    var was_dark = false
+    var x = 0
+    while x < w:
+        val p = px[y * w + x]
+        val purple = _purple(p)
+        val dark = _dark(p)
+        if (purple and not was_purple) or (dark and not was_dark):
+            out = if out == "": "{x}" else: out + ",{x}"
+        was_purple = purple
+        was_dark = dark
+        x = x + 1
+    out
+
+describe "Inline replaced boxes after collapsed whitespace (Chrome 159)":
+    it "AC-1: at 1x each box is snapped from its fractional x":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(_starts(px, CSS_W, 130)).to_equal("64,129,193")
+
+    it "AC-2: at device scale 4 each box is snapped to a device pixel":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_starts(px, CSS_W * 4, 520)).to_equal("258,516,773")
