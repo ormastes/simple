@@ -1,4 +1,8 @@
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+use compiler.driver.watcher.smf_manifest.{smf_manifest_host_abi_digest}
 # Driver AOT SMF and self-contained outputs.
 
 use compiler.backend.backend_helpers.{
@@ -291,16 +295,20 @@ impl CompilerDriver:
         val launch_metadata_bytes = smf_render_launch_metadata().bytes()
         val target = Target.host()
         val mode = ctx.options.smf_output_mode
-        # TODO(lu3): emit opts.unit_identity_bytes (iface digest, host ABI digest,
-        # target triple, profile, allowed families) so try_load_smf_cached can
-        # admit fresh SMFs by identity; until then cached SMFs carry no record
-        # and are treated as a cache miss there.
+        # Unit identity record (.simple_meta kind 3): try_load_smf_cached admits
+        # this SMF only when it matches its manifest row (smf_cached_unit_identity_admit).
+        var identity_source = ""
+        if ctx.options.input_files.len() > 0:
+            identity_source = file_read_text(ctx.options.input_files[0])
+        val identity_bytes = smf_unit_identity_bytes_v1(
+            identity_source, ctx.options.native_target, ctx.options.profile, ctx.options.allowed_families)
         val smf_bytes = if mode == "elf_embedded":
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.unit_identity_bytes = identity_bytes
             generate_smf_with_raw_code_options(all_object_bytes, opts)
         elif mode == "reloc_sections":
             var opts = SmfBuildOptions.create(target)
@@ -308,6 +316,7 @@ impl CompilerDriver:
             opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.unit_identity_bytes = identity_bytes
             build_smf_with_relocations(all_object_bytes, opts)
         else:
             var opts = SmfBuildOptions.create(target)
@@ -315,6 +324,7 @@ impl CompilerDriver:
             opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.unit_identity_bytes = identity_bytes
             generate_smf_with_options(all_object_bytes, opts)
         Ok(smf_bytes)
 
@@ -397,3 +407,21 @@ fn smf_collect_dependency_hashes(ctx: CompileContext) -> [SmfDependencyEntry]:
         source_index = source_index + 1
     deps
 use compiler.common.diagnostics.span.{Span}
+
+# Canonical unit identity record for an SMF built from `source`. Fields match
+# what the SMF manifest row states (smf_manifest_entry_new_with_iface):
+# iface = interface_digest_of_source (simple/interface/v1), abi = host driver
+# ABI digest, triple = native_target, policy = profile, caps = allowed
+# families. No triple -> no record (unverifiable; loader treats it as a miss).
+# reason: identity fields are opaque digest/triple/policy/capability tokens
+@allow(primitive_api)
+fn smf_unit_identity_bytes_v1(source: text, native_target: text, profile: text, allowed_families: [text]) -> [u8]:
+    if native_target == "":
+        return []
+    val id = UnitIdentity(
+        iface_digest: interface_digest_of_source(source),
+        abi_digest: smf_manifest_host_abi_digest(),
+        target_triple: native_target,
+        policy: profile,
+        capabilities: allowed_families)
+    unit_identity_encode(id).bytes()
