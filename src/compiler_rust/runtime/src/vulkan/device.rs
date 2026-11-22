@@ -476,16 +476,48 @@ impl VulkanDevice {
             })
             .collect();
 
-        // Required features
+        // Required features (only request shader_int64 when supported by the adapter)
+        let supported_features = unsafe {
+            instance
+                .instance()
+                .get_physical_device_features(physical_device.handle)
+        };
         let mut features = vk::PhysicalDeviceFeatures::default();
-        features.shader_int64 = vk::TRUE; // For 64-bit atomics
+        if supported_features.shader_int64 == vk::TRUE {
+            features.shader_int64 = vk::TRUE; // For 64-bit atomics
+        }
 
-        // Device extensions
+        // Device extensions — enumerate advertised extensions so mandatory
+        // portability subset (VUID-VkDeviceCreateInfo-pProperties-04451 on
+        // MoltenVK) is enabled whenever advertised and swapchain is only
+        // requested on adapters that expose it.
+        let available_dev_exts: Vec<std::ffi::CString> = unsafe {
+            instance
+                .instance()
+                .enumerate_device_extension_properties(physical_device.handle)
+                .map(|exts| {
+                    exts.iter()
+                        .map(|e| std::ffi::CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let has_dev_ext =
+            |name: &std::ffi::CStr| available_dev_exts.iter().any(|e| e.as_c_str() == name);
+
         let mut extension_names_raw = vec![];
 
-        // Add swapchain extension for graphics/presentation
+        // Add swapchain extension for graphics/presentation when supported
         #[cfg(feature = "vulkan")]
-        extension_names_raw.push(ash::khr::swapchain::NAME.as_ptr());
+        if has_dev_ext(ash::khr::swapchain::NAME) {
+            extension_names_raw.push(ash::khr::swapchain::NAME.as_ptr());
+        }
+
+        let portability_subset_name =
+            std::ffi::CStr::from_bytes_with_nul(b"VK_KHR_portability_subset\0").unwrap();
+        if has_dev_ext(portability_subset_name) {
+            extension_names_raw.push(portability_subset_name.as_ptr());
+        }
 
         let extension_names: Vec<*const std::ffi::c_char> = extension_names_raw;
 

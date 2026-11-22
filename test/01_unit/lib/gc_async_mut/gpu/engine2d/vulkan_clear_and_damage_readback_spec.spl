@@ -1,0 +1,139 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 25%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 25%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv.spl 25%
+# @tag: unit, gpu, engine2d, vulkan, spirv, damage
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
+    VK_CLEAR_WORKGROUP_SIZE, VK_SPEC_MAX_WORKGROUP_COUNT, VK_CLEAR_MAX_GROUPS_X,
+    vulkan_clear_dispatch_groups_x, vulkan_clear_dispatch_groups_y
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_glsl.{_glsl_clear}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv.{spirv_clear}
+use std.gpu.engine2d.color.{rgb}
+
+describe "Vulkan 2D clear workgroup bounds and damaged readback":
+
+    context "clear workgroup tiling within Vulkan spec-minimum 65535":
+
+        it "returns zero workgroups for empty or negative pixel counts":
+            expect(vulkan_clear_dispatch_groups_x(0)).to_equal(0)
+            expect(vulkan_clear_dispatch_groups_y(0)).to_equal(0)
+            expect(vulkan_clear_dispatch_groups_x(-256)).to_equal(0)
+            expect(vulkan_clear_dispatch_groups_y(-256)).to_equal(0)
+
+        it "keeps 1080p and 4K UHD on 1D dispatch below 65535":
+            val px_1080p = 1920 * 1080
+            expect(vulkan_clear_dispatch_groups_x(px_1080p)).to_equal(8100)
+            expect(vulkan_clear_dispatch_groups_y(px_1080p)).to_equal(1)
+
+            val px_4k = 3840 * 2160
+            expect(vulkan_clear_dispatch_groups_x(px_4k)).to_equal(32400)
+            expect(vulkan_clear_dispatch_groups_y(px_4k)).to_equal(1)
+
+        it "tiles across Y once ceil(total / 256) exceeds 65535":
+            val exact_limit_px = VK_SPEC_MAX_WORKGROUP_COUNT * VK_CLEAR_WORKGROUP_SIZE
+            expect(vulkan_clear_dispatch_groups_x(exact_limit_px)).to_equal(65535)
+            expect(vulkan_clear_dispatch_groups_y(exact_limit_px)).to_equal(1)
+
+            val over_limit_px = exact_limit_px + 1
+            val gx_over = vulkan_clear_dispatch_groups_x(over_limit_px)
+            val gy_over = vulkan_clear_dispatch_groups_y(over_limit_px)
+            expect(gx_over).to_equal(VK_CLEAR_MAX_GROUPS_X)
+            expect(gy_over).to_equal(2)
+            expect(gx_over <= VK_SPEC_MAX_WORKGROUP_COUNT).to_equal(true)
+            expect(gy_over <= VK_SPEC_MAX_WORKGROUP_COUNT).to_equal(true)
+            expect(gx_over * gy_over * VK_CLEAR_WORKGROUP_SIZE >= over_limit_px).to_equal(true)
+
+        it "keeps 8K UHD, 8192x8192, and 16384x16384 within 65535 per axis":
+            val px_8k_uhd: i64 = 7680 * 4320
+            val gx_8k_uhd = vulkan_clear_dispatch_groups_x(px_8k_uhd)
+            val gy_8k_uhd = vulkan_clear_dispatch_groups_y(px_8k_uhd)
+            expect(gx_8k_uhd).to_equal(32768)
+            expect(gy_8k_uhd).to_equal(4)
+            expect(gx_8k_uhd <= VK_SPEC_MAX_WORKGROUP_COUNT).to_equal(true)
+            expect(gy_8k_uhd <= VK_SPEC_MAX_WORKGROUP_COUNT).to_equal(true)
+            expect(gx_8k_uhd * gy_8k_uhd * 256 >= px_8k_uhd).to_equal(true)
+
+            val px_8k_sq: i64 = 8192 * 8192
+            val gx_8k_sq = vulkan_clear_dispatch_groups_x(px_8k_sq)
+            val gy_8k_sq = vulkan_clear_dispatch_groups_y(px_8k_sq)
+            expect(gx_8k_sq).to_equal(32768)
+            expect(gy_8k_sq).to_equal(8)
+            expect(gx_8k_sq * gy_8k_sq * 256).to_equal(px_8k_sq)
+
+            val px_16k_sq: i64 = 16384 * 16384
+            val gx_16k_sq = vulkan_clear_dispatch_groups_x(px_16k_sq)
+            val gy_16k_sq = vulkan_clear_dispatch_groups_y(px_16k_sq)
+            expect(gx_16k_sq).to_equal(32768)
+            expect(gy_16k_sq).to_equal(32)
+            expect(gy_16k_sq <= VK_SPEC_MAX_WORKGROUP_COUNT).to_equal(true)
+
+        it "matches 2D workgroup indexing in _glsl_clear and spirv_clear":
+            val glsl = _glsl_clear()
+            expect(glsl).to_contain("gl_WorkGroupID.y")
+            expect(glsl).to_contain("gl_NumWorkGroups.x")
+            val spv = spirv_clear()
+            expect(spv.len() % 4).to_equal(0)
+            expect(spv.len()).to_be_greater_than(944)
+
+    context "clip-bounded damage hints and staged present-damage readback":
+
+        it "intersects consume_damage_hint against active clip bounds":
+            var backend = VulkanBackend.create()
+            backend.w = 4
+            backend.h = 3
+            backend.set_clip(2, 1, 1, 1)
+
+            backend.hint_damage(0, 0, 4, 3)
+            backend.consume_damage_hint()
+
+            expect(backend.frame_damage_valid).to_equal(true)
+            expect(backend.frame_damage_full).to_equal(false)
+            expect(backend.frame_damage_x0).to_equal(2)
+            expect(backend.frame_damage_y0).to_equal(1)
+            expect(backend.frame_damage_x1).to_equal(3)
+            expect(backend.frame_damage_y1).to_equal(2)
+
+            backend._clear_frame_damage()
+            backend.hint_damage(0, 0, 1, 1)
+            backend.consume_damage_hint()
+            expect(backend.frame_damage_valid).to_equal(false)
+
+        it "reads back only staged dirty rect bytes when read_pixels precedes present":
+            var backend = VulkanBackend.create()
+            if backend.init(4, 3):
+                val bg = rgb(12, 18, 28)
+                val left = rgb(40, 180, 90)
+                val right_before = rgb(180, 70, 50)
+                val right_after = rgb(50, 130, 230)
+
+                backend.clear(bg)
+                backend.draw_rect_filled(0, 1, 1, 1, left)
+                backend.draw_rect_filled(2, 1, 1, 1, right_before)
+                val seed_rb = backend.read_pixels_with_source()
+                backend.present()
+                expect(seed_rb.source).to_equal("device_readback")
+                expect(backend.present_readback_bytes).to_equal(48)
+                expect(backend.host_mirror_valid).to_equal(true)
+
+                expect(backend.stage_present_damage([2, 1, 1, 1])).to_equal(true)
+                backend.set_clip(2, 1, 1, 1)
+                backend.draw_rect_filled(0, 0, 4, 3, bg)
+                backend.draw_rect_filled(2, 1, 1, 1, right_after)
+                backend.clear_clip()
+
+                val damaged_rb = backend.read_pixels_with_source()
+                backend.present()
+
+                expect(damaged_rb.source).to_equal("device_readback")
+                expect(backend.present_readback_bytes).to_equal(4)
+                expect(backend.present_readback_rect_count).to_equal(1)
+                expect(damaged_rb.pixels[1 * 4 + 0]).to_equal(left)
+                expect(damaged_rb.pixels[1 * 4 + 2]).to_equal(right_after)
+                expect(damaged_rb.pixels[0]).to_equal(bg)
+                backend.shutdown()
+            else:
+                expect(backend.last_error == "").to_equal(false)

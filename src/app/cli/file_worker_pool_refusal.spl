@@ -78,7 +78,10 @@ pub fn file_worker_pool_mir_price_kb_v1(modules: i64) -> i64:
 # It never holds the whole-program HIR, so the closure-scaled MIR SHARD price
 # (26 GiB ceiling) refused the pool below ~91 GB free (bug
 # native_build_default_worker_budget_26gib_refuses_pool_at_49gb_free_2026-11-09).
-pub const FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1: i64 = SHARD_HIR_WORKER_KB_V1
+# A literal, not an alias of the imported SHARD_HIR_WORKER_KB_V1: the natively
+# built Stage 2 read the aliased const as 0, which priced MIR at 0 kB and
+# admitted 0 workers (bug per_file_pool_zero_worker_admission_2026-11-22).
+pub const FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1: i64 = 9000000
 
 # Default MIR price before overrides: per-file pool -> the per-file figure;
 # MIR shard path -> the closure-scaled shard price.
@@ -237,6 +240,18 @@ pub fn file_worker_pool_mir_budget_kb_v1(modules: i64, scale: bool) -> i64:
 pub const FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1: i64 = 3145728
 pub const FILE_WORKER_UNIT_SMALL_CLOSURE_FLOOR_KB_V1: i64 = 2097152
 
+# Default price of one module-scoped unit worker (HIR and MIR alike): 6 GiB =
+# the measured 1.7-4.7 GB unit-worker RSS (64-CPU / 60 GB host, 1601-module
+# bootstrap CLI closure, 2026-11-22) plus the usual >= 25% margin. Distinct from
+# the 9 GB whole-closure price above, which admitted 2 workers at 53 GB free.
+pub const FILE_WORKER_UNIT_WORKER_KB_V1: i64 = 6291456
+
+# A non-positive price is never a worker budget: admission turns it into 0
+# workers. Fall back to `fallback_kb` instead.
+pub fn file_worker_pool_nonzero_price_kb_v1(price_kb: i64, fallback_kb: i64) -> i64:
+    if price_kb > 0: return price_kb
+    return fallback_kb
+
 pub struct FileWorkerUnitPriceV1:
     budget_kb: i64
     explicit: bool
@@ -308,21 +323,20 @@ fn _file_worker_pool_live_unit_usable_kb_v1() -> i64:
 pub(package) fn file_worker_pool_live_unit_hir_budget_kb_v1(modules: i64) -> i64:
     val env_field = env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? ""
     val host_field = host_limit_value("worker_mem_mib")
-    val explicit = _file_worker_pool_unit_price_explicit_v1(env_field, host_field, SHARD_HIR_WORKER_KB_V1)
-    val budget = _file_worker_pool_unit_phase_price_kb_v1(env_field, host_field, SHARD_HIR_WORKER_KB_V1)
-    return file_worker_pool_addressable_budget_kb_v1(
+    val explicit = _file_worker_pool_unit_price_explicit_v1(env_field, host_field, FILE_WORKER_UNIT_WORKER_KB_V1)
+    val budget = _file_worker_pool_unit_phase_price_kb_v1(env_field, host_field, FILE_WORKER_UNIT_WORKER_KB_V1)
+    return file_worker_pool_nonzero_price_kb_v1(file_worker_pool_addressable_budget_kb_v1(
         _file_worker_pool_unit_scaled_budget_kb_v1(budget, _file_worker_pool_live_unit_usable_kb_v1(), explicit, modules),
-        file_worker_pool_host_pointer_bits_v1())
+        file_worker_pool_host_pointer_bits_v1()), FILE_WORKER_UNIT_WORKER_KB_V1)
 
 pub(package) fn file_worker_pool_live_unit_mir_budget_kb_v1(modules: i64) -> i64:
     val env_field = env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? ""
     val host_field = host_limit_value("worker_mem_mib")
-    val default_kb = file_worker_pool_mir_default_price_kb_v1(modules, true)
-    val explicit = _file_worker_pool_unit_price_explicit_v1(env_field, host_field, default_kb)
-    val budget = _file_worker_pool_unit_phase_price_kb_v1(env_field, host_field, default_kb)
-    return file_worker_pool_addressable_budget_kb_v1(
+    val explicit = _file_worker_pool_unit_price_explicit_v1(env_field, host_field, FILE_WORKER_UNIT_WORKER_KB_V1)
+    val budget = _file_worker_pool_unit_phase_price_kb_v1(env_field, host_field, FILE_WORKER_UNIT_WORKER_KB_V1)
+    return file_worker_pool_nonzero_price_kb_v1(file_worker_pool_addressable_budget_kb_v1(
         _file_worker_pool_unit_scaled_budget_kb_v1(budget, _file_worker_pool_live_unit_usable_kb_v1(), explicit, modules),
-        file_worker_pool_host_pointer_bits_v1())
+        file_worker_pool_host_pointer_bits_v1()), FILE_WORKER_UNIT_WORKER_KB_V1)
 
 # ===== host pointer width ====================================================
 # The width of the RUNNING image, never the cfg target: an interpreted

@@ -26,7 +26,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1, file_worker_inc_reuse_lookup_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_excluded, hir_shard_claim_reason_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_at_claim_loop_v1, native_mir_fork_exit_v1,
-    native_mir_fork_child_cap_v1, native_mir_fork_batch_v1, native_mir_fork_budget_cap_v1}
+    native_mir_fork_child_cap_v1, native_mir_fork_batch_v1, native_mir_fork_budget_cap_v1,
+    native_mir_fork_solo_rows_v1, native_mir_fork_front_load_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
@@ -1613,6 +1614,26 @@ impl CompilerDriver:
                         mir_walk_order = native_mir_shard_worker_order_v1(
                             native_mir_shard_lpt_order_v1(staged_source_names, child_weights),
                             native_mir_shard_spec_v1(), mir_shard_queue)
+                    # Solo retry of memory-killed rows (native_mir_fork_v1): walk
+                    # the released rows first, so this lone child takes them.
+                    val solo_rows = native_mir_fork_solo_rows_v1()
+                    if solo_rows.len() > 0:
+                        var solo_order: [i64] = []
+                        if mir_walk_order.len() == mir_source_indices.len():
+                            solo_order = mir_walk_order
+                        else:
+                            var so_pos: i64 = 0
+                            while so_pos < mir_source_indices.len():
+                                solo_order = solo_order.push(so_pos)
+                                so_pos = so_pos + 1
+                        var solo_names: [text] = []
+                        for so_idx in mir_source_indices:
+                            val so_module = self.ctx.sources[so_idx].module_name
+                            if mir_physical_ownership_active and self.ctx.hir_modules.contains_key(so_module):
+                                solo_names = solo_names.push(mir_layout_canonical_module_name(self.ctx.hir_modules[so_module].name))
+                            else:
+                                solo_names = solo_names.push(so_module)
+                        mir_walk_order = native_mir_fork_front_load_v1(solo_order, solo_names, solo_rows)
             val go_to_end_active = go_to_end_enabled_v1()
             self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()

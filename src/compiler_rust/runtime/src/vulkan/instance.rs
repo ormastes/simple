@@ -20,6 +20,8 @@ const VULKAN_LIB_CANDIDATES: &[&str] = &[
     "/usr/local/lib/libvulkan.1.dylib",
     "/usr/local/lib/libvulkan.dylib",
 ];
+
+pub use crate::vulkan_graphics_runtime::ensure_macos_moltenvk_icd_env;
 #[cfg(all(unix, not(target_os = "macos")))]
 const VULKAN_LIB_CANDIDATES: &[&str] = &["libvulkan.so.1", "libvulkan.so"];
 #[cfg(windows)]
@@ -53,6 +55,7 @@ impl VulkanInstance {
 
     /// Check if Vulkan is available on this system
     pub fn is_available() -> bool {
+        ensure_macos_moltenvk_icd_env();
         if unsafe { ash::Entry::load() }.is_ok() {
             return true;
         }
@@ -68,6 +71,8 @@ impl VulkanInstance {
     /// the platform-default soname is not on the dyld search path (MoltenVK via
     /// Homebrew installs to /opt/homebrew/lib, which `ash::Entry::load` misses).
     fn load_entry() -> VulkanResult<ash::Entry> {
+        ensure_macos_moltenvk_icd_env();
+
         if let Ok(entry) = unsafe { ash::Entry::load() } {
             return Ok(entry);
         }
@@ -148,33 +153,29 @@ impl VulkanInstance {
             extension_names_raw.push(ash::ext::debug_utils::NAME.to_owned());
         }
 
+        // Enumerate advertised instance extensions ONCE so both surface and
+        // portability extensions are gated on what the loader actually exposes.
+        let available_exts: Vec<std::ffi::CString> = unsafe {
+            entry
+                .enumerate_instance_extension_properties(None)
+                .map(|extensions| {
+                    extensions
+                        .iter()
+                        .map(|e| CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let has_ext = |name: &CStr| available_exts.iter().any(|e| e.as_c_str() == name);
+
         // Surface extensions for windowing
         #[cfg(feature = "vulkan")]
         let mut headless_surface_enabled = false;
         #[cfg(feature = "vulkan")]
         {
-            extension_names_raw.push(ash::khr::surface::NAME.to_owned());
-            // Enumerate ONCE, then gate every optional surface extension on what
-            // the loader actually advertises. Requesting an unadvertised
-            // extension makes vkCreateInstance fail outright, which took down
-            // the whole Vulkan path -- including headless compute rendering that
-            // needs no surface at all -- on any host without the matching
-            // windowing system. Measured 2026-09-06 on a headless box:
-            // "loader_validate_instance_extensions: Extension VK_KHR_xlib_surface
-            // not found in list of known instance extensions", rt_vulkan_init -> 0,
-            // and every engine2d Vulkan gate died with no verdict line.
-            let available_exts: Vec<std::ffi::CString> = unsafe {
-                entry
-                    .enumerate_instance_extension_properties(None)
-                    .map(|extensions| {
-                        extensions
-                            .iter()
-                            .map(|e| CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            let has_ext = |name: &CStr| available_exts.iter().any(|e| e.as_c_str() == name);
+            if has_ext(ash::khr::surface::NAME) {
+                extension_names_raw.push(ash::khr::surface::NAME.to_owned());
+            }
             let headless_available = has_ext(ash::ext::headless_surface::NAME);
             if headless_available {
                 extension_names_raw.push(ash::ext::headless_surface::NAME.to_owned());
@@ -183,7 +184,9 @@ impl VulkanInstance {
 
             // Platform-specific surface extensions
             #[cfg(target_os = "windows")]
-            extension_names_raw.push(ash::khr::win32_surface::NAME.to_owned());
+            if has_ext(ash::khr::win32_surface::NAME) {
+                extension_names_raw.push(ash::khr::win32_surface::NAME.to_owned());
+            }
 
             #[cfg(target_os = "linux")]
             {
@@ -202,20 +205,25 @@ impl VulkanInstance {
             }
 
             #[cfg(target_os = "macos")]
-            {
+            if has_ext(ash::ext::metal_surface::NAME) {
                 extension_names_raw.push(ash::ext::metal_surface::NAME.to_owned());
-                extension_names_raw.push(ash::khr::portability_enumeration::NAME.to_owned());
             }
-        }
-
-        for ext in &extension_names_raw {
-            extension_names.push(ext.as_ptr());
         }
 
         let mut create_flags = vk::InstanceCreateFlags::empty();
         #[cfg(target_os = "macos")]
         {
-            create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+            // VUID-VkInstanceCreateInfo-flags-06559: ENUMERATE_PORTABILITY_KHR
+            // requires VK_KHR_portability_enumeration in enabledExtensionNames,
+            // regardless of whether the `vulkan` surface feature is enabled.
+            if has_ext(ash::khr::portability_enumeration::NAME) {
+                extension_names_raw.push(ash::khr::portability_enumeration::NAME.to_owned());
+                create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+            }
+        }
+
+        for ext in &extension_names_raw {
+            extension_names.push(ext.as_ptr());
         }
 
         let create_info = vk::InstanceCreateInfo::default()
