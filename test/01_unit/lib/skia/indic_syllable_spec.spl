@@ -1,0 +1,375 @@
+# @cover src/lib/skia/feature/shaper/indic_syllable.spl 80%
+"""
+# Indic (Devanagari dev2) syllable segmentation and reordering
+
+Pure codepoint -> cluster record, no font. Expectations follow the OpenType
+Devanagari shaping spec and HarfBuzz's Indic shaper (what Chrome 159 runs):
+syllable grammar, base consonant (last consonant that has no below-base form),
+reph (Ra + halant at syllable start, not followed by a joiner), initial
+reordering (reph, pre-base matra, pre-base consonants, base, the rest), the
+per-item feature bits, and the final reordering permutation.
+
+Codepoints: क 2325 ख 2326 ग 2327 ज 2332 ट 2335 त 2340 द 2342 ध 2343 न 2344
+प 2346 ब 2348 म 2350 य 2351 र 2352 व 2357 श 2358 ष 2359 स 2360 ह 2361
+nukta 2364 ा 2366 ि 2367 ी 2368 ु 2369 ू 2370 ृ 2371 े 2375 halant 2381
+ँ 2305 ं 2306 ः 2307 अ 2309 आ 2310 ई 2312 उ 2313 ZWNJ 8204 ZWJ 8205 ◌ 9676.
+Positions: 1 reph, 2 pre-base matra, 3 pre-base consonant, 4 base, 8 below-base,
+9 other matra, 11 post-base, 13 modifier. Bits: 1 rphf, 2 half, 4 blwf, 8 pstf, 16 abvf.
+"""
+
+use std.spipe.*
+use std.skia.feature.shaper.indic_syllable.{
+    IndicClusters,
+    indic_category,
+    indic_matra_placement,
+    indic_clusters,
+    indic_clusters_with_forms,
+    indic_final_order
+}
+
+describe "indic categories":
+    it "classifies the Devanagari block":
+        expect(indic_category(2325u32)).to_equal(1)
+        expect(indic_category(2352u32)).to_equal(2)
+        expect(indic_category(2309u32)).to_equal(3)
+        expect(indic_category(2364u32)).to_equal(4)
+        expect(indic_category(2381u32)).to_equal(5)
+        expect(indic_category(8204u32)).to_equal(6)
+        expect(indic_category(8205u32)).to_equal(7)
+        expect(indic_category(2367u32)).to_equal(8)
+        expect(indic_category(2306u32)).to_equal(9)
+        expect(indic_category(2305u32)).to_equal(9)
+        expect(indic_category(2307u32)).to_equal(9)
+        expect(indic_category(2385u32)).to_equal(10)
+        expect(indic_category(9676u32)).to_equal(11)
+        expect(indic_category(2406u32)).to_equal(12)
+        expect(indic_category(160u32)).to_equal(12)
+        expect(indic_category(2365u32)).to_equal(13)
+        expect(indic_category(2404u32)).to_equal(0)
+        expect(indic_category(2384u32)).to_equal(0)
+        expect(indic_category(97u32)).to_equal(0)
+        expect(indic_category(2392u32)).to_equal(1)
+        expect(indic_category(2424u32)).to_equal(1)
+
+    it "classifies matra placement":
+        expect(indic_matra_placement(2367u32)).to_equal(1)
+        expect(indic_matra_placement(2382u32)).to_equal(1)
+        expect(indic_matra_placement(2375u32)).to_equal(2)
+        expect(indic_matra_placement(2369u32)).to_equal(3)
+        expect(indic_matra_placement(2371u32)).to_equal(3)
+        expect(indic_matra_placement(2366u32)).to_equal(4)
+        expect(indic_matra_placement(2368u32)).to_equal(4)
+        expect(indic_matra_placement(2379u32)).to_equal(4)
+        expect(indic_matra_placement(2325u32)).to_equal(0)
+        expect(indic_matra_placement(2381u32)).to_equal(0)
+
+describe "indic syllables and initial reordering":
+    it "हिन्दी: pre-base matra moves before its base, half-form bits on न्":
+        val c = indic_clusters([2361u32, 2367u32, 2344u32, 2381u32, 2342u32, 2368u32])
+        expect(c.codepoints).to_equal([2367u32, 2361u32, 2344u32, 2381u32, 2342u32, 2368u32])
+        expect(c.source_index).to_equal([1, 0, 2, 3, 4, 5])
+        expect(c.position).to_equal([2, 4, 3, 3, 4, 9])
+        expect(c.feature_bits).to_equal([6, 0, 6, 6, 0, 28])
+        expect(c.syllable).to_equal([0, 0, 1, 1, 1, 1])
+        expect(c.syllable_start).to_equal([0, 2])
+        expect(c.syllable_end).to_equal([2, 6])
+        expect(c.syllable_kind).to_equal([0, 0])
+        expect(c.syllable_base).to_equal([1, 4])
+        expect(c.syllable_reph).to_equal([false, false])
+        expect(c.syllable_cluster).to_equal([0, 2])
+
+    it "क्षत्रिय: matra jumps the whole त्र cluster, Ra is below-base":
+        val c = indic_clusters([2325u32, 2381u32, 2359u32, 2340u32, 2381u32, 2352u32, 2367u32, 2351u32])
+        expect(c.codepoints).to_equal([2325u32, 2381u32, 2359u32, 2367u32, 2340u32, 2381u32, 2352u32, 2351u32])
+        expect(c.position).to_equal([3, 3, 4, 2, 4, 8, 8, 4])
+        expect(c.feature_bits).to_equal([6, 6, 0, 6, 0, 28, 28, 0])
+        expect(c.syllable_start).to_equal([0, 3, 7])
+        expect(c.syllable_base).to_equal([2, 4, 7])
+
+    it "प्रकार: three syllables, rakar is below-base":
+        val c = indic_clusters([2346u32, 2381u32, 2352u32, 2325u32, 2366u32, 2352u32])
+        expect(c.codepoints).to_equal([2346u32, 2381u32, 2352u32, 2325u32, 2366u32, 2352u32])
+        expect(c.position).to_equal([4, 8, 8, 4, 9, 4])
+        expect(c.feature_bits).to_equal([0, 28, 28, 0, 28, 0])
+        expect(c.syllable_start).to_equal([0, 3, 5])
+        expect(c.syllable_base).to_equal([0, 3, 5])
+
+    it "र्म: Ra + halant at syllable start is reph":
+        val c = indic_clusters([2352u32, 2381u32, 2350u32])
+        expect(c.codepoints).to_equal([2352u32, 2381u32, 2350u32])
+        expect(c.position).to_equal([1, 1, 4])
+        expect(c.feature_bits).to_equal([7, 7, 0])
+        expect(c.syllable_reph).to_equal([true])
+        expect(c.syllable_base).to_equal([2])
+
+    it "किताब: one syllable per akshara":
+        val c = indic_clusters([2325u32, 2367u32, 2340u32, 2366u32, 2348u32])
+        expect(c.codepoints).to_equal([2367u32, 2325u32, 2340u32, 2366u32, 2348u32])
+        expect(c.syllable_start).to_equal([0, 2, 4])
+        expect(c.syllable_end).to_equal([2, 4, 5])
+        expect(c.syllable_cluster).to_equal([0, 2, 4])
+
+    it "स्त्री: base is त, the last consonant without a below-base form":
+        val c = indic_clusters([2360u32, 2381u32, 2340u32, 2381u32, 2352u32, 2368u32])
+        expect(c.codepoints).to_equal([2360u32, 2381u32, 2340u32, 2381u32, 2352u32, 2368u32])
+        expect(c.position).to_equal([3, 3, 4, 8, 8, 9])
+        expect(c.feature_bits).to_equal([6, 6, 0, 28, 28, 28])
+        expect(c.syllable_base).to_equal([2])
+
+    it "हिंदी: anusvara stays last in its syllable":
+        val c = indic_clusters([2361u32, 2367u32, 2306u32, 2342u32, 2368u32])
+        expect(c.codepoints).to_equal([2367u32, 2361u32, 2306u32, 2342u32, 2368u32])
+        expect(c.position).to_equal([2, 4, 13, 4, 9])
+        expect(c.syllable_start).to_equal([0, 3])
+
+    it "ज़रूर: nukta attaches to its consonant":
+        val c = indic_clusters([2332u32, 2364u32, 2352u32, 2370u32, 2352u32])
+        expect(c.position).to_equal([4, 4, 4, 9, 4])
+        expect(c.syllable_start).to_equal([0, 2, 4])
+        expect(c.syllable_reph).to_equal([false, false, false])
+
+    it "क्‍ष: ZWJ after halant keeps one syllable and the half bit":
+        val c = indic_clusters([2325u32, 2381u32, 8205u32, 2359u32])
+        expect(c.syllable_start).to_equal([0])
+        expect(c.syllable_end).to_equal([4])
+        expect(c.position).to_equal([3, 3, 3, 4])
+        expect(c.feature_bits).to_equal([6, 6, 6, 0])
+
+    it "क्‌ष: ZWNJ after halant ends the syllable with an explicit halant":
+        val c = indic_clusters([2325u32, 2381u32, 8204u32, 2359u32])
+        expect(c.syllable_start).to_equal([0, 3])
+        expect(c.syllable_end).to_equal([3, 4])
+        expect(c.position).to_equal([4, 4, 4, 4])
+        expect(c.feature_bits).to_equal([0, 28, 28, 0])
+
+    it "दुःख: visarga is a syllable modifier":
+        val c = indic_clusters([2342u32, 2369u32, 2307u32, 2326u32])
+        expect(c.position).to_equal([4, 9, 13, 4])
+        expect(c.syllable_start).to_equal([0, 3])
+
+    it "श्री: Ra after halant is below-base, श is base":
+        val c = indic_clusters([2358u32, 2381u32, 2352u32, 2368u32])
+        expect(c.position).to_equal([4, 8, 8, 9])
+        expect(c.feature_bits).to_equal([0, 28, 28, 28])
+        expect(c.syllable_base).to_equal([0])
+
+    it "द्वार: व is base, द् is a pre-base half":
+        val c = indic_clusters([2342u32, 2381u32, 2357u32, 2366u32, 2352u32])
+        expect(c.position).to_equal([3, 3, 4, 9, 4])
+        expect(c.feature_bits).to_equal([6, 6, 0, 28, 0])
+        expect(c.syllable_start).to_equal([0, 4])
+
+    it "विद्या":
+        val c = indic_clusters([2357u32, 2367u32, 2342u32, 2381u32, 2351u32, 2366u32])
+        expect(c.codepoints).to_equal([2367u32, 2357u32, 2342u32, 2381u32, 2351u32, 2366u32])
+        expect(c.position).to_equal([2, 4, 3, 3, 4, 9])
+
+    it "र्कि: reph first, then the pre-base matra, then the base":
+        val c = indic_clusters([2352u32, 2381u32, 2325u32, 2367u32])
+        expect(c.codepoints).to_equal([2352u32, 2381u32, 2367u32, 2325u32])
+        expect(c.source_index).to_equal([0, 1, 3, 2])
+        expect(c.position).to_equal([1, 1, 2, 4])
+        expect(c.feature_bits).to_equal([7, 7, 6, 0])
+        expect(c.syllable_reph).to_equal([true])
+        expect(c.syllable_base).to_equal([3])
+
+    it "शक्ति: matra moves before the क्त cluster, not before श":
+        val c = indic_clusters([2358u32, 2325u32, 2381u32, 2340u32, 2367u32])
+        expect(c.codepoints).to_equal([2358u32, 2367u32, 2325u32, 2381u32, 2340u32])
+        expect(c.position).to_equal([4, 2, 3, 3, 4])
+        expect(c.feature_bits).to_equal([0, 6, 6, 6, 0])
+        expect(c.syllable_cluster).to_equal([0, 1])
+
+    it "अंग्रेज़ी: vowel syllable, then two consonant syllables":
+        val c = indic_clusters([2309u32, 2306u32, 2327u32, 2381u32, 2352u32, 2375u32, 2332u32, 2364u32, 2368u32])
+        expect(c.syllable_kind).to_equal([1, 0, 0])
+        expect(c.syllable_start).to_equal([0, 2, 6])
+        expect(c.position).to_equal([4, 13, 4, 8, 8, 9, 4, 4, 9])
+
+    it "हूँ":
+        val c = indic_clusters([2361u32, 2370u32, 2305u32])
+        expect(c.position).to_equal([4, 9, 13])
+        expect(c.syllable_end).to_equal([3])
+
+    it "कर्त्ता: reph on a conjunct, base is the last त":
+        val c = indic_clusters([2325u32, 2352u32, 2381u32, 2340u32, 2381u32, 2340u32, 2366u32])
+        expect(c.syllable_start).to_equal([0, 1])
+        expect(c.position).to_equal([4, 1, 1, 3, 3, 4, 9])
+        expect(c.feature_bits).to_equal([0, 7, 7, 6, 6, 0, 28])
+        expect(c.syllable_reph).to_equal([false, true])
+        expect(c.syllable_base).to_equal([0, 5])
+
+    it "ट्रक":
+        val c = indic_clusters([2335u32, 2381u32, 2352u32, 2325u32])
+        expect(c.position).to_equal([4, 8, 8, 4])
+        expect(c.syllable_start).to_equal([0, 3])
+
+    it "राष्ट्र: ष् half, ट base, trailing rakar below":
+        val c = indic_clusters([2352u32, 2366u32, 2359u32, 2381u32, 2335u32, 2381u32, 2352u32])
+        expect(c.syllable_start).to_equal([0, 2])
+        expect(c.position).to_equal([4, 9, 3, 3, 4, 8, 8])
+        expect(c.syllable_base).to_equal([0, 4])
+        expect(c.syllable_reph).to_equal([false, false])
+
+    it "बुद्धि":
+        val c = indic_clusters([2348u32, 2369u32, 2342u32, 2381u32, 2343u32, 2367u32])
+        expect(c.codepoints).to_equal([2348u32, 2369u32, 2367u32, 2342u32, 2381u32, 2343u32])
+        expect(c.position).to_equal([4, 9, 2, 3, 3, 4])
+
+    it "र्कीं: reph with a post matra and anusvara":
+        val c = indic_clusters([2352u32, 2381u32, 2325u32, 2368u32, 2306u32])
+        expect(c.position).to_equal([1, 1, 4, 9, 13])
+        expect(c.feature_bits).to_equal([7, 7, 0, 28, 28])
+
+    it "क्: final halant stays in the syllable":
+        val c = indic_clusters([2325u32, 2381u32])
+        expect(c.syllable_end).to_equal([2])
+        expect(c.position).to_equal([4, 4])
+        expect(c.feature_bits).to_equal([0, 28])
+
+    it "संस्कृत":
+        val c = indic_clusters([2360u32, 2306u32, 2360u32, 2381u32, 2325u32, 2371u32, 2340u32])
+        expect(c.syllable_start).to_equal([0, 2, 6])
+        expect(c.position).to_equal([4, 13, 3, 3, 4, 9, 4])
+
+    it "उन्हें":
+        val c = indic_clusters([2313u32, 2344u32, 2381u32, 2361u32, 2375u32, 2306u32])
+        expect(c.syllable_kind).to_equal([1, 0])
+        expect(c.position).to_equal([4, 3, 3, 4, 9, 13])
+
+    it "र्‍य: ZWJ after Ra + halant blocks reph (eyelash Ra)":
+        val c = indic_clusters([2352u32, 2381u32, 8205u32, 2351u32])
+        expect(c.syllable_reph).to_equal([false])
+        expect(c.position).to_equal([3, 3, 3, 4])
+        expect(c.feature_bits).to_equal([6, 6, 6, 0])
+        expect(c.syllable_base).to_equal([3])
+
+    it "आई: two vowel syllables":
+        val c = indic_clusters([2310u32, 2312u32])
+        expect(c.syllable_kind).to_equal([1, 1])
+        expect(c.syllable_start).to_equal([0, 1])
+
+    it "र्ई: reph on an independent vowel":
+        val c = indic_clusters([2352u32, 2381u32, 2312u32])
+        expect(c.syllable_kind).to_equal([1])
+        expect(c.syllable_reph).to_equal([true])
+        expect(c.position).to_equal([1, 1, 4])
+
+    it "क़्त: nukta consonant as a half form":
+        val c = indic_clusters([2325u32, 2364u32, 2381u32, 2340u32])
+        expect(c.syllable_end).to_equal([4])
+        expect(c.position).to_equal([3, 3, 3, 4])
+
+    it "र्: Ra + halant alone is not a reph":
+        val c = indic_clusters([2352u32, 2381u32])
+        expect(c.syllable_reph).to_equal([false])
+        expect(c.position).to_equal([4, 4])
+
+    it "अ + ZWJ is one vowel syllable":
+        val c = indic_clusters([2309u32, 8205u32])
+        expect(c.syllable_kind).to_equal([1])
+        expect(c.syllable_end).to_equal([2])
+
+describe "indic broken, standalone and other clusters":
+    it "a lone pre-base matra gets a dotted circle base and still reorders":
+        val c = indic_clusters([2367u32])
+        expect(c.codepoints).to_equal([2367u32, 9676u32])
+        expect(c.source_index).to_equal([0, 0])
+        expect(c.position).to_equal([2, 4])
+        expect(c.syllable_kind).to_equal([4])
+        expect(c.syllable_base).to_equal([1])
+
+    it "a lone halant gets a dotted circle":
+        val c = indic_clusters([2381u32])
+        expect(c.codepoints).to_equal([9676u32, 2381u32])
+        expect(c.position).to_equal([4, 4])
+        expect(c.syllable_kind).to_equal([4])
+
+    it "space then matra: other item, then a broken cluster":
+        val c = indic_clusters([32u32, 2366u32])
+        expect(c.codepoints).to_equal([32u32, 9676u32, 2366u32])
+        expect(c.source_index).to_equal([0, 1, 1])
+        expect(c.syllable_kind).to_equal([5, 4])
+        expect(c.syllable_start).to_equal([0, 1])
+        expect(c.syllable_end).to_equal([1, 3])
+        expect(c.syllable_base).to_equal([-1, 1])
+        expect(c.syllable_cluster).to_equal([0, 1])
+
+    it "र् + ि is a broken cluster: the circle is the base, Ra goes below":
+        val c = indic_clusters([2352u32, 2381u32, 2367u32])
+        expect(c.codepoints).to_equal([2367u32, 9676u32, 2352u32, 2381u32])
+        expect(c.position).to_equal([2, 4, 8, 8])
+        expect(c.feature_bits).to_equal([6, 0, 28, 28])
+        expect(c.syllable_kind).to_equal([4])
+        expect(c.syllable_reph).to_equal([false])
+
+    it "an explicit dotted circle is a standalone cluster, nothing inserted":
+        val c = indic_clusters([9676u32, 2366u32])
+        expect(c.codepoints).to_equal([9676u32, 2366u32])
+        expect(c.syllable_kind).to_equal([2])
+        expect(c.position).to_equal([4, 9])
+
+    it "digits and NBSP are placeholders":
+        val c = indic_clusters([2407u32, 2408u32, 160u32, 2366u32])
+        expect(c.syllable_kind).to_equal([2, 2, 2])
+        expect(c.syllable_end).to_equal([1, 2, 4])
+
+    it "danda, Latin and avagraha":
+        val c = indic_clusters([97u32, 2325u32, 2404u32, 2365u32])
+        expect(c.syllable_kind).to_equal([5, 0, 5, 3])
+        expect(c.syllable_base).to_equal([-1, 1, -1, -1])
+        expect(c.position).to_equal([0, 4, 0, 0])
+
+    it "an empty run":
+        val c = indic_clusters([])
+        expect(c.codepoints.len()).to_equal(0)
+        expect(c.syllable_start.len()).to_equal(0)
+
+describe "indic face-probed forms":
+    it "without rphf Ra + halant is an ordinary pre-base half":
+        val c = indic_clusters_with_forms([2352u32, 2381u32, 2350u32], [2352u32], [], false)
+        expect(c.syllable_reph).to_equal([false])
+        expect(c.position).to_equal([3, 3, 4])
+        expect(c.feature_bits).to_equal([6, 6, 0])
+
+    it "without a below-base Ra the last consonant is the base":
+        val c = indic_clusters_with_forms([2346u32, 2381u32, 2352u32], [], [], true)
+        expect(c.position).to_equal([3, 3, 4])
+        expect(c.syllable_base).to_equal([2])
+
+    it "a post-base consonant owns its halant":
+        val c = indic_clusters_with_forms([2325u32, 2381u32, 2351u32], [], [2351u32], true)
+        expect(c.position).to_equal([4, 11, 11])
+        expect(c.feature_bits).to_equal([0, 28, 28])
+        expect(c.syllable_base).to_equal([0])
+
+describe "indic final reordering":
+    it "र्कि: reph goes to the end, matra stays in front":
+        expect(indic_final_order([2, 8, 1], [1, 2, 4], true)).to_equal([1, 2, 0])
+
+    it "र्त्ता: reph goes after the post matra of a ligated base":
+        expect(indic_final_order([2, 1, 8], [1, 3, 9], true)).to_equal([1, 2, 0])
+
+    it "र्कीं: reph stops before the anusvara":
+        expect(indic_final_order([2, 1, 8, 9], [1, 4, 9, 13], true)).to_equal([1, 2, 0, 3])
+
+    it "क्ति with a half form: no halant left, matra stays first":
+        expect(indic_final_order([8, 1, 1], [2, 3, 4], false)).to_equal([0, 1, 2])
+
+    it "an explicit halant before the base pulls the matra after it":
+        expect(indic_final_order([8, 1, 5, 1], [2, 3, 3, 4], false)).to_equal([1, 2, 0, 3])
+
+    it "a joiner after that halant is skipped too":
+        expect(indic_final_order([8, 1, 5, 7, 1], [2, 3, 3, 3, 4], false)).to_equal([1, 2, 3, 0, 4])
+
+    it "reph lands after the first explicit halant before the base":
+        expect(indic_final_order([2, 1, 5, 1], [1, 3, 3, 4], true)).to_equal([1, 2, 0, 3])
+
+    it "reph goes before a final halant that follows a matra":
+        expect(indic_final_order([2, 1, 8, 5], [1, 4, 9, 9], true)).to_equal([1, 2, 0, 3])
+
+    it "reph goes after a plain consonant + halant":
+        expect(indic_final_order([2, 1, 5], [1, 4, 4], true)).to_equal([1, 2, 0])
+
+    it "an unligated Ra + halant is not moved":
+        expect(indic_final_order([2, 5, 1], [1, 1, 4], false)).to_equal([0, 1, 2])
