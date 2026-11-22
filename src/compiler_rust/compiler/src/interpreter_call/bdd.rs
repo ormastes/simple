@@ -183,6 +183,11 @@ thread_local! {
     // library's own `test_pending` counter is a module global the interpreter
     // cannot observe from here, so the `pending` arm raises this flag.
     pub(crate) static BDD_PENDING_IN_IT: RefCell<bool> = const { RefCell::new(false) };
+    // Whether the current "it" block called the spec library's `skip(...)` in its
+    // body. skip() is a declaration (a sibling of `it`); called inside an example
+    // the Simple body drops it, so without this flag the example reported a pass.
+    // Skip wins: the example is recorded as skipped even if a later expect fails.
+    pub(crate) static BDD_SKIP_IN_IT: RefCell<bool> = const { RefCell::new(false) };
     // Whether the current "it" block's `pending(...)` reason starts with
     // `BLOCKED:` -- an environment-gated example (counted BLOCKED, never a pass).
     pub(crate) static BDD_PENDING_BLOCKED: RefCell<bool> = const { RefCell::new(false) };
@@ -315,6 +320,16 @@ fn record_describe_level_skip(name: String) {
     BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name.clone()));
     let desc_path = get_current_describe_path();
     record_test_result(desc_path, name, true, true);
+}
+
+/// `skip(...)` called while an `it` body runs: flag that example skipped so the
+/// `it` arm records it as skipped instead of a pass. Returns whether it did.
+fn mark_skip_in_example() -> bool {
+    if !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+        return false;
+    }
+    BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = true);
+    true
 }
 
 /// Record an example executed OUTSIDE the tree-walk interpreter (a spec run
@@ -1117,6 +1132,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
             BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
+            BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = false);
             BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
@@ -1168,6 +1184,24 @@ pub(super) fn eval_bdd_builtin(
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
+
+            // skip() called in the body wins over every other outcome: the
+            // example is skipped, never a pass, and a failure after the skip
+            // does not turn it into one.
+            if BDD_SKIP_IN_IT.with(|cell| *cell.borrow()) {
+                // The Simple skip() body already printed its "... skipped (<reason>)"
+                // line, which the runner's `Results:` line counts; this marker is
+                // worded so that it is not counted a second time.
+                println!("{}\x1b[33m○ {} (skip in body)\x1b[0m", indent_str, name_str);
+                BDD_IGNORED_TESTS.with(|cell| cell.borrow_mut().push(name_str.clone()));
+                record_test_result(get_current_describe_path(), name_str.clone(), true, true);
+                BDD_LAZY_VALUES.with(|cell| {
+                    for (_, (_, cached)) in cell.borrow_mut().iter_mut() {
+                        *cached = None;
+                    }
+                });
+                return Ok(Some(Value::Nil));
+            }
 
             // Check if block execution had an error first
             match result {
@@ -1377,12 +1411,12 @@ pub(super) fn eval_bdd_builtin(
             // reached this table, so the SPEC FILE VERDICT said `skipped=0` for
             // the same run. Record the skipped example here, then defer to the
             // Simple body unchanged (a rejected skip under a critical assurance
-            // profile still prints its FAILED line from there). Only a call at
-            // describe level is a skipped example: a same-named helper called
-            // inside an `it` body, or outside any describe, is left alone.
-            let describe_level =
-                BDD_INDENT.with(|cell| *cell.borrow()) > 0 && !BDD_INSIDE_IT.with(|cell| *cell.borrow());
-            if describe_level && functions.contains_key(name) {
+            // profile still prints its FAILED line from there). At describe level
+            // it is one skipped example. Inside an `it` body it marks THAT
+            // example skipped (the `it` arm reports it, skip wins); before this
+            // the call was left alone and the example reported a pass. Outside
+            // any describe it is left alone.
+            if functions.contains_key(name) && !mark_skip_in_example() && BDD_INDENT.with(|cell| *cell.borrow()) > 0 {
                 record_describe_level_skip(extract_desc_str(args, "unnamed"));
             }
             Ok(None)
@@ -2433,6 +2467,7 @@ pub fn clear_bdd_state() {
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_TOTALS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
+    BDD_SKIP_IN_IT.with(|cell| *cell.borrow_mut() = false);
     BDD_PENDING_BLOCKED.with(|cell| *cell.borrow_mut() = false);
     BDD_BLOCKED_TOTAL.with(|cell| *cell.borrow_mut() = 0);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
@@ -2592,6 +2627,30 @@ mod failure_retention_tests {
         assert!(out.contains("failure-15"), "{out}");
         assert!(!out.contains("failure-16"), "cap exceeded: {out}");
         assert!(out.contains("+4 more"), "missing overflow note: {out}");
+    }
+}
+
+// skip() inside an `it` body must mark that example skipped (it used to be
+// dropped, so the example passed). doc/08_tracking/bug/spec_skip_reported_as_pass_2026-11-19.md
+#[cfg(test)]
+mod skip_in_example_tests {
+    use super::*;
+
+    #[test]
+    fn skip_inside_an_example_flags_it() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        assert!(mark_skip_in_example());
+        assert!(BDD_SKIP_IN_IT.with(|cell| *cell.borrow()));
+        clear_bdd_state();
+        assert!(!BDD_SKIP_IN_IT.with(|cell| *cell.borrow()));
+    }
+
+    #[test]
+    fn skip_outside_an_example_does_not_flag() {
+        clear_bdd_state();
+        assert!(!mark_skip_in_example());
+        assert!(!BDD_SKIP_IN_IT.with(|cell| *cell.borrow()));
     }
 }
 
