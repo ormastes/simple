@@ -1,16 +1,31 @@
 # Private AOT artifact naming and diagnostic lifetime.
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.path.{dirname}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.io_runtime.{file_size_raw}
+
+# Parent directory of an object base, split at the LAST separator of either
+# kind. On Windows `rt_path_join` joins with `\`, so the driver's object base
+# is `<cache-dir>\<scope>\object`; `std.path.dirname` splits only at `/` and
+# returned the parent of `<cache-dir>`, so every object landed outside its
+# cache scope and every later lookup evicted it. See
+# doc/08_tracking/bug/native_aot_object_dir_windows_backslash_cache_never_hits_2026-11-22.md.
+pub fn native_aot_object_dir_v1(output_base: text) -> text:
+    val slash = output_base.rfind("/")
+    val bslash = output_base.rfind("\\")
+    val sep_idx = if bslash > slash: bslash else: slash
+    if sep_idx < 0:
+        return "."
+    if sep_idx == 0:
+        return output_base.substring(0, 1)
+    output_base.substring(0, sep_idx)
 
 # Hash both length-framed identities: distinct output bases in one directory
 # must not share an object. The fixed ASCII leaf also bounds UTF-8 components
 # and leaves room for capsule-receipt and temporary-publication suffixes.
 pub fn native_aot_object_path_v1(output_base: text, module_name: text) -> text:
     val identity = "native-aot-object-v1|{output_base.len()}:{output_base}|{module_name.len()}:{module_name}"
-    dirname(output_base) + "/aot-" + sha256_text(identity) + ".o"
+    native_aot_object_dir_v1(output_base) + "/aot-" + sha256_text(identity) + ".o"
 
 # Only a successful, physically valid object permits cleanup. Failed evidence
 # belongs to this private attempt directory until its build owner removes it;

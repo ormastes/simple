@@ -7,7 +7,10 @@ use std.common.net.host_name.{HostName, HostIdentity, host_name_parse, host_iden
 use std.string_core.{char_from_code, char_code, str_trim, str_repeat, text_to_bytes, bytes_to_text}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module, flat_bridge_decode_brace_escapes}
-use compiler.frontend.core.ast.{DECL_FN, DECL_STRUCT, DECL_ENUM, ast_reset, decl_export_names, module_get_decls}
+use compiler.frontend.core.ast.{
+    DECL_FN, DECL_STRUCT, DECL_ENUM, EXPR_ARRAY_LIT, STMT_IF, CoreExpr, make_core_expr,
+    TYPE_NAMED_BASE, ast_reset, decl_export_names, module_get_decls
+}
 use compiler.frontend.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, expr_count, expr_get_str}
 use compiler.frontend.core.string_interpolation_expand.{
     parse_string_interpolation_regions,
@@ -210,3 +213,26 @@ describe "cache codec and receipt explicit slice loops across interpreters":
         val result_vid = core_interpret(loop_src, "explicit_copy_probe.spl")
         expect(result_vid >= 0).to_equal(true)
         expect(val_get_int(result_vid)).to_equal(90)
+
+    # @manual scenario evidence
+    it "keeps core/ast.spl sibling re-exports in Tier-3 facade form for Stage-2 package discovery":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Verify sibling AST/type symbols resolve through compiler.frontend.core.ast without export-use ownership collisions")
+        expect(EXPR_ARRAY_LIT > 0).to_equal(true)
+        expect(STMT_IF > 0).to_equal(true)
+        expect(TYPE_NAMED_BASE).to_equal(10000)
+        val core_expr_sample: CoreExpr = make_core_expr(EXPR_INT_LIT, 7)
+        expect(core_expr_sample.span_id).to_equal(7)
+
+        step("Verify ast.spl avoids export-use on sibling core modules and types.spl defines untyped-pattern TYPE_NAMED_BASE")
+        val ast_src = file_read_text("src/compiler/10.frontend/core/ast.spl")
+        expect(ast_src.contains("export use compiler.frontend.core._Ast.decl_nodes.")).to_equal(true)
+        expect(ast_src.contains("export use compiler.frontend.core._Ast.module_state.")).to_equal(true)
+        expect(ast_src.contains("export use compiler.frontend.core._AstExpr.")).to_equal(false)
+        expect(ast_src.contains("export use compiler.frontend.core.ast_stmt.")).to_equal(false)
+        expect(ast_src.contains("export use compiler.frontend.core.ast_types.")).to_equal(false)
+        expect(ast_src.contains("export use compiler.frontend.core.types.")).to_equal(false)
+        val types_src = file_read_text("src/compiler/10.frontend/core/types.spl")
+        expect(types_src.contains("pub val TYPE_NAMED_BASE = 10000")).to_equal(true)
+        val rr_src = file_read_text("src/compiler/80.driver/cache/reverse_reference_receipt.spl")
+        expect(rr_src.contains("prune_min_age_s: i64 = 600) -> bool:")).to_equal(true)

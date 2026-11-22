@@ -68,3 +68,25 @@ and the only such branch in `driver_source_parse_retained.spl` (`:465`) runs aft
 ## Workaround
 W16 (`C:/dev/simple-release-boot-20261122/build/rboot/WORKAROUNDS.md`): single direct thread, cold
 frontend cache. The cold cache is the part this record expects to matter.
+
+## Second occurrence: MIR shard workers, `.fpc` read-back (2026-11-22, release `8dae652711e9` Phase 2)
+Same variable, different phase. Canonical Stage 3 with `SIMPLE_MIR_SHARDING=1`, pinned
+`pinned-8dae652711e9`, log `.simple/storage/build/bootstrap/logs/x86_64-pc-windows-msvc/stage3-native-build.log`:
+- **Cold run** (empty frontend cache): shard 0/9 passed 179/180; shards 1/9 and 2/9 then died
+  `0xC0000005` at `claimed=0`. Shard 0 was the first process to parse with the cache on, so it wrote
+  the `.fpc` entries that shards 1 and 2 read back.
+- **Warm run** (caches from the cold run): shard 0/9 died at `claimed=0` immediately
+  (`stage3-native-build.log:6647`, `exit=-1073741819 ... ntstatus=0xC0000005`). Lines `6600-6646` show
+  `phase2:parse` with `cached=1..4` (every file a frontend-cache hit); the last completed file is
+  `src/compiler/00.common/driver_core_types.spl`. So the AV is in parse, on `.fpc` hits, long before
+  any MIR claim (`native_mir_shard.spl:6-11`: workers re-run parse/HIR before claiming).
+- **Workaround confirmed:** `SIMPLE_FRONTEND_CACHE=0` (`frontend_parse_cache.spl:103`; the HIR cache
+  stays on via `driver_hir_cache.spl:130-136`). With it, shard 0/9 passed 180/180 and shard 1/9 got
+  past startup on the same tree.
+- Ruled out: the Windows backslash `dirname` defect
+  (`native_aot_object_dir_windows_backslash_cache_never_hits_2026-11-22.md`). The `.fpc` path is joined
+  with `/` (`frontend_parse_cache.spl:150`).
+
+Root cause is still not named: no minidump. Both occurrences are "a process restores
+frontend-cache entries written by an earlier process, then AVs". The cross-process `.fpc`
+hit-restore path (`frontend.spl:160-172`) is the shared suspect; step 3 above (minidump) still applies.

@@ -256,8 +256,17 @@ static SRWLOCK g_scalar_tls_lock = SRWLOCK_INIT;
 #define SCALAR_TLS_WRUNLOCK() ReleaseSRWLockExclusive(&g_scalar_tls_lock)
 #endif
 
-/* The hosted runtime represents i64 scalar values as pointer-sized TLS bits. */
-_Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "scalar TLS requires 64-bit pointers");
+/* The hosted runtime stores i64 scalar values in TLS. 64-bit targets keep the
+ * bits in the pointer-sized slot; 32-bit targets (i686 Windows, armv7) keep a
+ * per-thread heap cell, allocated on first set and owned by that thread. */
+#ifdef SPL_THREAD_PTHREAD
+#define SCALAR_TLS_RAW_GET(k) pthread_getspecific(k)
+#define SCALAR_TLS_RAW_SET(k, v) (void)pthread_setspecific((k), (v))
+#else
+#define SCALAR_TLS_RAW_GET(k) TlsGetValue(k)
+#define SCALAR_TLS_RAW_SET(k, v) (void)TlsSetValue((k), (v))
+#endif
+#define SCALAR_TLS_INLINE (sizeof(uintptr_t) >= sizeof(int64_t))
 
 int64_t rt_thread_local_new(void) {
     SCALAR_TLS_WRLOCK();
@@ -288,7 +297,7 @@ int64_t rt_thread_local_new(void) {
     }
 
 #ifdef SPL_THREAD_PTHREAD
-    if (pthread_key_create(&g_scalar_tls_entries[index].key, NULL) != 0) {
+    if (pthread_key_create(&g_scalar_tls_entries[index].key, SCALAR_TLS_INLINE ? NULL : free) != 0) {
         SCALAR_TLS_WRUNLOCK();
         return 0;
     }
@@ -329,12 +338,13 @@ int64_t rt_thread_local_get_i64(int64_t handle) {
     SCALAR_TLS_RDLOCK();
     ScalarTlsEntry* entry = scalar_tls_live(handle, NULL);
     if (entry) {
-#ifdef SPL_THREAD_PTHREAD
-        uintptr_t bits = (uintptr_t)pthread_getspecific(entry->key);
-#else
-        uintptr_t bits = (uintptr_t)TlsGetValue(entry->key);
-#endif
-        memcpy(&value, &bits, sizeof(value));
+        void* raw = SCALAR_TLS_RAW_GET(entry->key);
+        if (SCALAR_TLS_INLINE) {
+            uintptr_t bits = (uintptr_t)raw;
+            memcpy(&value, &bits, sizeof(bits));
+        } else if (raw) {
+            memcpy(&value, raw, sizeof(value));
+        }
     }
     SCALAR_TLS_RDUNLOCK();
     return value;
@@ -344,13 +354,18 @@ void rt_thread_local_set_i64(int64_t handle, int64_t value) {
     SCALAR_TLS_RDLOCK();
     ScalarTlsEntry* entry = scalar_tls_live(handle, NULL);
     if (entry) {
-        uintptr_t bits;
-        memcpy(&bits, &value, sizeof(bits));
-#ifdef SPL_THREAD_PTHREAD
-        (void)pthread_setspecific(entry->key, (void*)bits);
-#else
-        (void)TlsSetValue(entry->key, (void*)bits);
-#endif
+        if (SCALAR_TLS_INLINE) {
+            uintptr_t bits = 0;
+            memcpy(&bits, &value, sizeof(bits));
+            SCALAR_TLS_RAW_SET(entry->key, (void*)bits);
+        } else {
+            int64_t* cell = (int64_t*)SCALAR_TLS_RAW_GET(entry->key);
+            if (!cell) {
+                cell = (int64_t*)malloc(sizeof(int64_t));
+                if (cell) SCALAR_TLS_RAW_SET(entry->key, cell);
+            }
+            if (cell) *cell = value;
+        }
     }
     SCALAR_TLS_RDUNLOCK();
 }
@@ -360,6 +375,9 @@ void rt_thread_local_free(int64_t handle) {
     SCALAR_TLS_WRLOCK();
     ScalarTlsEntry* entry = scalar_tls_live(handle, &index);
     if (entry) {
+        if (!SCALAR_TLS_INLINE) {
+            free(SCALAR_TLS_RAW_GET(entry->key)); /* calling thread's cell */
+        }
 #ifdef SPL_THREAD_PTHREAD
         (void)pthread_key_delete(entry->key);
 #else
