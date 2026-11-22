@@ -4,7 +4,7 @@
 
 Host tuning (reserve, Stage 3 tree RSS cap, Stage 3 direct threads, Stage 3
 file workers) is read from host config keys `mem_reserve_free_mib`,
-`stage3_tree_rss_cap_kib`, `stage3_direct_threads`, `stage3_file_workers`
+`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`
 via `scripts/bootstrap/lib/host-bootstrap-settings.shs` and
 `bootstrap-jobs.shs`; env vars still win, absent keys change nothing. Update
 with `sh scripts/setup/update-host-config.shs --dry-run`. A user
