@@ -12,7 +12,7 @@
 
 use compiler.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
-use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_toolchain_v1, runtime_windows_cached_compile_v1, runtime_windows_cache_publish_batch_v1}
+use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_toolchain_v1, runtime_windows_cached_compile_and_publish_v1, runtime_windows_cache_publish_batch_v1}
 use compiler.backend.runtime_xray_context_policy_v1.{runtime_xray_context_validate_v1, runtime_xray_context_cache_suffix_v1, runtime_xray_context_flags_v1}
 use common.types.{Enabled}
 use compiler.backend.runtime_tagged_callback_owner_v1.{runtime_tagged_callback_owner_v1}
@@ -1193,6 +1193,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
     var windows_toolchain = ""
     var windows_compiler_digest = ""
     var windows_pending_keys: [text] = []
+    var windows_published_any = false
     # Both Windows drivers (clang-cl and llvm-mingw clang.exe) use the content
     # cache; the toolchain identity is "" (uncached) for any other compiler.
     if _is_windows() and not native_tool_strict_requested_v1() and (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") != "0":
@@ -1353,11 +1354,14 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
                     return Err("runtime C compiler authority changed")
             val runtime_context = ["target=" + target, "profile=" + runtime_profile, "alloc_observer_v1={alloc_observer}", "abi=" + abi_policy, "host=" + host_arch()]
             if windows_toolchain != "":
-                val result = runtime_windows_cached_compile_v1(windows_cache_root, cc, windows_compiler_digest, windows_toolchain, comp_args, src_path, obj_path, runtime_context, trace)
+                # Per-TU publish: a run killed mid-batch keeps every finished TU.
+                val result = runtime_windows_cached_compile_and_publish_v1(windows_cache_root, cc, windows_compiler_digest, windows_toolchain, comp_args, src_path, obj_path, runtime_context, trace, process_run)
                 comp_out = result.stdout
                 comp_err = result.stderr
                 comp_code = result.exit_code
                 windows_pending_keys.push(result.pending_key)
+                if comp_code == 0: windows_published_any = true
+                print "[runtime-c] {object_count + 1}/{sources.len()} {name}"
             elif rt_parallel_eligible:
                 rt_pending_slots.push(resolved_objects.len())
                 resolved_objects.push(obj_path)
@@ -1428,7 +1432,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         return Err("runtime C toolchain changed during compilation")
     # Bounded store: sweep oldest objects past SIMPLE_RT_OBJ_CACHE_MAX_BYTES
     # (default 2 GiB; 542 MB measured for one toolchain, 2026-10-26).
-    var published_any = false
+    var published_any = windows_published_any
     for pending in windows_pending_keys:
         if pending != "": published_any = true
     if windows_toolchain != "" and published_any:

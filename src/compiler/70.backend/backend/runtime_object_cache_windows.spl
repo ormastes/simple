@@ -600,6 +600,24 @@ pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_di
     """
     runtime_windows_cached_compile_with_runner_v1(root, compiler, compiler_digest, toolchain, arguments, source, output, context, trace, process_run)
 
+# reason: same path/text cache-plumbing shape as runtime_windows_cached_compile_with_runner_v1; exported for unit specs
+@allow(primitive_api)
+pub fn runtime_windows_cached_compile_and_publish_v1(root: text, compiler: text, compiler_digest: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool, run_process: fn(text, [text]) -> (text, text, i64)) -> RuntimeWindowsCacheCompileResultV1:
+    """Compile one TU and publish it to the cache immediately on success.
+
+    Publishing only after the whole runtime batch meant a run killed mid-batch
+    (a lane timeout during a ~16 min cold Windows build) published nothing, so
+    every retry restarted cold. The single-key publish keeps the toolchain
+    identity re-check per TU. The returned pending_key is "" once published.
+    doc/08_tracking/bug/native_build_windows_link_phase_hang_runtime_cache_batch_2026-11-22.md
+    """
+    val result = runtime_windows_cached_compile_with_runner_v1(root, compiler, compiler_digest, toolchain, arguments, source, output, context, trace, run_process)
+    if result.exit_code != 0 or result.pending_key == "":
+        return result
+    if not runtime_windows_cache_publish_batch_v1(root, compiler, toolchain, [result.pending_key], [output]):
+        return RuntimeWindowsCacheCompileResultV1(stdout: result.stdout, stderr: result.stderr + "runtime C toolchain changed during compilation", exit_code: 1, pending_key: "")
+    RuntimeWindowsCacheCompileResultV1(stdout: result.stdout, stderr: result.stderr, exit_code: 0, pending_key: "")
+
 pub fn runtime_windows_cache_publish_batch_v1(root: text, compiler: text, toolchain: text, keys: [text], objects: [text]) -> bool:
     # No object is published before this batch-wide check. Hash the compiler's
     # adjacent DLLs twice per batch, not once per translation unit.
