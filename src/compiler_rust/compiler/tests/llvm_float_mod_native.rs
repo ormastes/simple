@@ -1,7 +1,7 @@
 //! LLVM float `%`: the seed rejected it with `Unsupported float binop: Mod`,
 //! so `src/runtime/simple_core/core_any_ops.spl` (and the simple-core archive)
-//! could not be built. The fixture checks floored semantics for f64 and f32
-//! with both operand signs, matching the interpreter and the cranelift backend.
+//! could not be built. The fixture checks floored f64 semantics for all four
+//! operand-sign combinations, matching the interpreter and the cranelift backend.
 //! See doc/08_tracking/bug/seed_llvm_float_mod_unsupported_blocks_simple_core_archive_2026-11-22.md
 #![cfg(feature = "llvm")]
 
@@ -37,7 +37,7 @@ impl Drop for BootstrapEnvironment {
 }
 
 #[test]
-fn float_mod_is_floored_for_f64_and_f32_on_llvm_core_c() {
+fn f64_mod_is_floored_on_llvm_core_c() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let temporary = tempfile::tempdir().unwrap();
     let source = temporary.path().join("src");

@@ -42,10 +42,19 @@ the interpreter and cranelift on mixed signs.
 - Reproducing: `src/compiler_rust/compiler/tests/llvm_float_mod_native.rs` builds
   `test/fixtures/native/f64_mod/main.spl` with LLVM/core-C, runs the binary and expects
   `PASS float-mod-floored-semantics`.
-- Generalization: the same fixture covers f32 as well as f64, and both operand signs.
-- The fixture passes on the Phase 1 interpreter (`run`).
-- `cargo test --test llvm_float_mod_native --features llvm` was NOT run: it needs a seed
-  cargo build, deferred while Phase 3/4 hold host memory. Reviewers should run it before landing.
+- Generalization: the fixture covers all four f64 operand-sign combinations.
+- Verified 2026-11-22 (Windows MSVC, LLVM 23, `cargo test --release -j 8 --test
+  llvm_float_mod_native --features llvm`): with the fix, `test result: ok. 1 passed; 0 failed`.
+  Without the fix (`instructions.rs` from `origin/release/1.0.0`), it reproduces the defect:
+  `llvm codegen: semantic: Unsupported float binop: Mod`, `test result: FAILED`.
+- The fixture also passes on the Phase 1 interpreter (`run`).
+
+## Related defect (open, not fixed here)
+
+f32 on the seed LLVM/core-C lane is broken independently of `%`. In the same native fixture,
+`fn f32_add(a: f32, b: f32) -> f32: a + b` called as `f32_add(5.5f32, 2.0f32)` returned `0.0`,
+and an f32 `%` result printed as an integer (`17587646354272`). f32 was therefore removed from
+this fixture. It needs its own record and spec.
 
 ## Unblock condition
 
