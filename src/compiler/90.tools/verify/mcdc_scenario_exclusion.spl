@@ -427,18 +427,21 @@ fn bind_mcdc_scenario_exclusions_v1(
                 stale_count: 0),
             binary_row_count: if rows.len() % row_bytes == 0: rows.len() / row_bytes else: -1,
             bound_count: 0, exact: false)
+    val _source_head = source.substring(0, 0)
     var audit = mcdc_scenario_exclusion_audit_v1()
+    val row_count = rows.len() / row_bytes
+    if not source.contains(MCDC_EXCLUSION_PREFIX):
+        return McdcScenarioExclusionBindingV1(
+            audit: audit, binary_row_count: row_count,
+            bound_count: 0, exact: row_count == 0)
     var seen: {text: bool} = {}
     var bound_count = 0
     var exact = true
-    var cursor: i64 = 0
-    while cursor <= source.len():
-        var line_end = source.index_of("\n", cursor)
-        if line_end < 0: line_end = source.len()
-        val next_cursor = line_end + 1
-        if mcdc_exclusion_line_is_directive_v1(source, cursor, line_end):
+    for line in source.split("\n"):
+        val line_len = line.len()
+        if mcdc_exclusion_line_is_directive_v1(line, 0, line_len):
             if audit.directive_count >= MCDC_EXCLUSION_MAX_DIRECTIVES or
-                    line_end - cursor > MCDC_EXCLUSION_MAX_LINE_BYTES:
+                    line_len > MCDC_EXCLUSION_MAX_LINE_BYTES:
                 audit = McdcScenarioExclusionAuditV1(
                     directive_count: audit.directive_count + 1,
                     accepted_count: audit.accepted_count,
@@ -446,8 +449,7 @@ fn bind_mcdc_scenario_exclusions_v1(
                     stale_count: audit.stale_count)
                 exact = false
             else:
-                val parsed = parse_mcdc_scenario_exclusion_v1(
-                    source.substring(cursor, line_end), current_epoch)
+                val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
                 val duplicate = parsed.status == McdcScenarioExclusionStatusV1.Accepted and
                     seen.contains_key(parsed.scenario_id)
                 if duplicate:
@@ -461,7 +463,7 @@ fn bind_mcdc_scenario_exclusions_v1(
                     audit = mcdc_scenario_exclusion_audit_add_v1(audit, parsed)
                     if parsed.status == McdcScenarioExclusionStatusV1.Accepted:
                         seen[parsed.scenario_id] = true
-                        if bound_count >= rows.len() / row_bytes or
+                        if bound_count >= row_count or
                                 not _mcdc_exclusion_row_matches_v1(
                                     parsed, rows, bound_count * row_bytes):
                             exact = false
@@ -469,9 +471,6 @@ fn bind_mcdc_scenario_exclusions_v1(
                             bound_count = bound_count + 1
                     else:
                         exact = false
-        cursor = next_cursor
-        if line_end == source.len(): break
-    val row_count = rows.len() / row_bytes
     exact = exact and bound_count == row_count and
         audit.directive_count == row_count and
         audit.accepted_count == row_count and
@@ -484,21 +483,23 @@ fn bind_mcdc_scenario_exclusions_with_evidence_v1(
         source: text, rows: [u8], evidence_rows: [u8],
         trusted_public_key: [u8], current_epoch: i64) -> McdcScenarioExclusionBindingV1:
     val base = bind_mcdc_scenario_exclusions_v1(source, rows, current_epoch)
-    if not base.exact or evidence_rows.len() % MCDC_EXCLUSION_EVIDENCE_V1_BYTES != 0 or
+    val _source_head = source.substring(0, 0)
+    if source.len() > MCDC_EXCLUSION_MAX_SOURCE_BYTES or
+            not base.exact or evidence_rows.len() % MCDC_EXCLUSION_EVIDENCE_V1_BYTES != 0 or
             evidence_rows.len() / MCDC_EXCLUSION_EVIDENCE_V1_BYTES > MCDC_EXCLUSION_EVIDENCE_MAX_ROWS or
             evidence_rows.len() / MCDC_EXCLUSION_EVIDENCE_V1_BYTES != base.bound_count:
         return McdcScenarioExclusionBindingV1(audit: base.audit,
             binary_row_count: base.binary_row_count,
             bound_count: base.bound_count, exact: false)
+    if base.bound_count == 0:
+        return McdcScenarioExclusionBindingV1(audit: base.audit,
+            binary_row_count: base.binary_row_count,
+            bound_count: 0, exact: true)
     var evidence_index = 0
-    var cursor: i64 = 0
-    while cursor <= source.len():
-        var line_end = source.index_of("\n", cursor)
-        if line_end < 0: line_end = source.len()
-        val next_cursor = line_end + 1
-        if mcdc_exclusion_line_is_directive_v1(source, cursor, line_end):
-            val parsed = parse_mcdc_scenario_exclusion_v1(
-                source.substring(cursor, line_end), current_epoch)
+    for line in source.split("\n"):
+        val line_len = line.len()
+        if mcdc_exclusion_line_is_directive_v1(line, 0, line_len):
+            val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
             if parsed.status != McdcScenarioExclusionStatusV1.Accepted:
                 return McdcScenarioExclusionBindingV1(audit: base.audit,
                     binary_row_count: base.binary_row_count,
@@ -523,8 +524,6 @@ fn bind_mcdc_scenario_exclusions_with_evidence_v1(
                     binary_row_count: base.binary_row_count,
                     bound_count: evidence_index, exact: false)
             evidence_index = evidence_index + 1
-        cursor = next_cursor
-        if line_end == source.len(): break
     McdcScenarioExclusionBindingV1(audit: base.audit,
         binary_row_count: base.binary_row_count,
         bound_count: base.bound_count, exact: evidence_index == base.bound_count)
@@ -557,23 +556,17 @@ fn mcdc_exclusion_line_is_directive_v1(source: text, start: i64,
 fn scan_mcdc_scenario_exclusions_v1(
         source: text, current_epoch: i64) -> McdcScenarioExclusionAuditV1:
     var audit = mcdc_scenario_exclusion_audit_v1()
+    val _source_head = source.substring(0, 0)
     if source.len() > MCDC_EXCLUSION_MAX_SOURCE_BYTES:
         return McdcScenarioExclusionAuditV1(
             directive_count: 1, accepted_count: 0, rejected_count: 1,
             stale_count: 0)
-    # Offset walking avoids materializing an array for every line in the
-    # bounded 4 MiB source. Only a candidate directive (at most 1024 bytes) is
-    # copied, and at most 256 stable scenario IDs are retained.
+    if not source.contains(MCDC_EXCLUSION_PREFIX):
+        return audit
     var seen_scenarios: {text: bool} = {}
-    var source_cursor: i64 = 0
-    while source_cursor <= source.len():
-        var line_end = source.index_of("\n", source_cursor)
-        if line_end < 0:
-            line_end = source.len()
-        val next_cursor = line_end + 1
-        if not mcdc_exclusion_line_is_directive_v1(source, source_cursor, line_end):
-            source_cursor = next_cursor
-            if line_end == source.len(): break
+    for line in source.split("\n"):
+        val line_len = line.len()
+        if not mcdc_exclusion_line_is_directive_v1(line, 0, line_len):
             continue
         if audit.directive_count >= MCDC_EXCLUSION_MAX_DIRECTIVES:
             return McdcScenarioExclusionAuditV1(
@@ -581,13 +574,12 @@ fn scan_mcdc_scenario_exclusions_v1(
                 accepted_count: audit.accepted_count,
                 rejected_count: audit.rejected_count + 1,
                 stale_count: audit.stale_count)
-        if line_end - source_cursor > MCDC_EXCLUSION_MAX_LINE_BYTES:
+        if line_len > MCDC_EXCLUSION_MAX_LINE_BYTES:
             return McdcScenarioExclusionAuditV1(
                 directive_count: audit.directive_count + 1,
                 accepted_count: audit.accepted_count,
                 rejected_count: audit.rejected_count + 1,
                 stale_count: audit.stale_count)
-        val line = source.substring(source_cursor, line_end)
         val parsed = parse_mcdc_scenario_exclusion_v1(line, current_epoch)
         if parsed.status == McdcScenarioExclusionStatusV1.Accepted and
                 seen_scenarios.contains_key(parsed.scenario_id):
@@ -600,8 +592,6 @@ fn scan_mcdc_scenario_exclusions_v1(
             audit = mcdc_scenario_exclusion_audit_add_v1(audit, parsed)
             if parsed.status == McdcScenarioExclusionStatusV1.Accepted:
                 seen_scenarios[parsed.scenario_id] = true
-        source_cursor = next_cursor
-        if line_end == source.len(): break
     audit
 
 fn mcdc_scenario_exclusion_normal_gate_v1(audit: McdcScenarioExclusionAuditV1) -> bool:
