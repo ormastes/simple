@@ -71,6 +71,7 @@ module rejects unknown names up front rather than letting that happen.
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
 use std.io_runtime.{env_get, env_set}
 use std.io_runtime.{file_exists, getpid, host_os}
+use std.nogc_sync_mut.io.darwin_image_owner.{darwin_image_path}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 
@@ -99,20 +100,30 @@ pub fn is_known_engine(engine: text) -> bool:
     """An unrecognised SIMPLE_EXECUTION_MODE silently means JIT — reject it."""
     engine == "jit" or engine == "interpret" or engine == "interpreter"
 
-# The Windows self-exe answer costs one PowerShell spawn; a pid's image path
-# cannot change, so ask once per process.
+# Per-process cache for OS-specific current-executable resolution.
 var _self_exe_windows_cache = ""
+var _self_exe_darwin_cache = ""
 
 pub fn self_exe_path() -> text?:
     """Absolute path of the running executable, or None when it cannot be resolved.
 
-    /proc/self/exe where it exists; on Windows (no /proc) this pid's image path
-    from PowerShell. Never returns a `.spl` path, so it is never a script.
+    /proc/self/exe where it exists; dyld _NSGetExecutablePath on macOS;
+    PowerShell Get-Process on Windows. Never returns a `.spl` path.
     """
     val self_path = path_absolute("/proc/self/exe") ?? ""
     if self_path.len() > 0 and self_path != "/proc/self/exe" and not self_path.ends_with(".spl") and file_exists(self_path):
         return Some(self_path)
-    if host_os() == "windows":
+    val os_name = host_os()
+    if os_name == "macos":
+        if _self_exe_darwin_cache != "":
+            return Some(_self_exe_darwin_cache)
+        match darwin_image_path():
+            case Ok(mac_path):
+                if mac_path != "" and not mac_path.ends_with(".spl") and file_exists(mac_path):
+                    _self_exe_darwin_cache = mac_path
+                    return Some(mac_path)
+            case Err(_): pass
+    if os_name == "windows":
         if _self_exe_windows_cache != "":
             return Some(_self_exe_windows_cache)
         val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
@@ -125,27 +136,23 @@ pub fn self_exe_path() -> text?:
 pub fn simple_binary() -> text:
     """Resolve the compiler binary to spawn probes with.
 
-    Order: SIMPLE_BINARY, then SIMPLE_RUNTIME, then PLAN_ACCEPTANCE_RUNNER
-    (the three names this family has accreted across the codebase -- see
-    doc/08_tracking/bug/three_simple_binary_env_var_names_silent_wrong_verdict_2026-09-06.md
-    for why silently honouring only one of them produces a confident, WRONG
-    verdict instead of an error), then the invoking binary via /proc/self/exe
-    (so a probe runs on the SAME build the spec is running on, not a stale
-    bin/simple), then bin/simple. Mirrors
-    std.test_runner.test_executor_parsing.find_simple_binary()'s precedence.
+    Order: SIMPLE_BINARY, SIMPLE_RUNTIME, PLAN_ACCEPTANCE_RUNNER, SIMPLE_BIN,
+    SIMPLE_TEST_BINARY, then the invoking binary via self_exe_path(), then
+    deployed release/bin locations.
     """
-    var configured = env_get("SIMPLE_BINARY") ?? ""
-    if configured == "":
-        configured = env_get("SIMPLE_RUNTIME") ?? ""
-    if configured == "":
-        configured = env_get("PLAN_ACCEPTANCE_RUNNER") ?? ""
-    if configured != "" and file_exists(configured):
-        return configured
+    for var_name in ["SIMPLE_BINARY", "SIMPLE_RUNTIME", "PLAN_ACCEPTANCE_RUNNER", "SIMPLE_BIN", "SIMPLE_TEST_BINARY"]:
+        val candidate = env_get(var_name) ?? ""
+        if candidate != "" and file_exists(candidate):
+            return candidate
     match self_exe_path():
         case Some(self_path): return self_path
         case None: pass
     if file_exists("bin/simple"):
         return "bin/simple"
+    if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
     "./bin/simple"
 
 pub fn run_under_engine(spl_path: text, engine: text) -> (text, text, i64):
@@ -199,11 +206,26 @@ pub fn engine_max_rss_kb(spl_path: text, engine: text) -> i64:
     env_set("SIMPLE_RUNTIME_MODE", engine)
     env_set(PROBE_DEPTH_VAR, "1")
 
-    val (_out, err, _code) = rt_process_run_bounded("/usr/bin/time", ["-f", "MAXRSS_KB %M", binary, "run", spl_path], PROBE_TIMEOUT_MS, PROBE_MAX_OUTPUT)
+    val os_name = host_os()
+    val time_args = if os_name == "macos" or os_name == "freebsd":
+        ["-l", binary, "run", spl_path]
+    else:
+        ["-f", "MAXRSS_KB %M", binary, "run", spl_path]
+    val (_out, err, _code) = rt_process_run_bounded("/usr/bin/time", time_args, PROBE_TIMEOUT_MS, PROBE_MAX_OUTPUT)
 
     env_set(PROBE_DEPTH_VAR, "")
     env_set("SIMPLE_EXECUTION_MODE", previous)
     env_set("SIMPLE_RUNTIME_MODE", previous_runtime)
+    if os_name == "macos" or os_name == "freebsd":
+        for line in err.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.ends_with("maximum resident set size"):
+                val raw_rss = trimmed.replace("maximum resident set size", "").trim().to_int()
+                if raw_rss > 0:
+                    if os_name == "macos":
+                        return (raw_rss + 1023) / 1024
+                    return raw_rss
+        return -1
     for line in err.split("\n"):
         if line.starts_with("MAXRSS_KB "):
             return line.replace("MAXRSS_KB ", "").trim().to_int()

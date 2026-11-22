@@ -83,6 +83,7 @@ use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceParserOwner,
     module_surface_canonical_path,
     module_surface_from_owner,
+    module_surface_placeholder_from_source_v1,
     module_surface_promote,
     module_surfaces_promote,
     module_surfaces_promote_reason,
@@ -436,6 +437,45 @@ impl CompilerDriver:
             return Err("module surface builder is frozen")
         if builder.index_by_path_lookup_index(canonical_path) >= 0:
             return Err("module surface already exists for physical source: {canonical_path}")
+        val has_manifest_evidence = source_index >= 0 and source_index < self.ctx.source_manifest_evidence_owner_v1.len()
+        val manifest_complete = has_manifest_evidence and self.ctx.source_manifest_evidence_owner_v1[source_index].complete
+        val is_manifest_init = manifest_complete and source_path.ends_with("/__init__.spl")
+        val no_frozen_text = match frozen_parse_text:
+            case Some(_): false
+            case None: true
+        val no_full_inventory = match self.ctx.runtime_std_full_inventory_selection:
+            case Some(_): false
+            case None: true
+        if worker_mode == 2 and not force_source_parse and not is_manifest_init and
+                no_frozen_text and
+                (driver_parse_env_get_v1("SIMPLE_HIR_CFG_SELECT") ?? "") != "1" and
+                no_full_inventory:
+            var placeholder_source = SourceFile(
+                path: source_path,
+                authored_path: source_authored_path,
+                content: source_content,
+                module_name: source_module_name)
+            if has_manifest_evidence:
+                placeholder_source = source_file_with_manifest_evidence_v1(placeholder_source,
+                    self.ctx.source_manifest_evidence_owner_v1[source_index])
+            val pre_len = if source_index >= 0 and source_index < self.ctx.source_byte_lengths_owner.len():
+                self.ctx.source_byte_lengths_owner[source_index]
+            else:
+                -1
+            val has_hash_slot = source_index >= 0 and source_index < self.ctx.source_content_hashes_owner.len()
+            val pre_hash = if has_hash_slot: self.ctx.source_content_hashes_owner[source_index] else: 0
+            # `source_content_hashes_owner` maps raw hash 0 -> 1 as an initialized sentinel;
+            # recompute directly on 0/1 so placeholder content_hash matches raw rt_hash_text.
+            val pre_hash_exact = has_hash_slot and pre_hash != 0 and pre_hash != 1
+            val placeholder_result = module_surface_placeholder_from_source_v1(
+                placeholder_source, canonical_path, source_index, pre_len, pre_hash, pre_hash_exact)
+            if placeholder_result.is_err():
+                return Err(placeholder_result.unwrap_err())
+            val add_placeholder = builder.add_surface_canonical_identity(
+                placeholder_result.unwrap(), source_module_name, canonical_path)
+            if add_placeholder.is_err():
+                return Err(add_placeholder.unwrap_err())
+            return Ok(builder)
         ast_prepare_persistent_owner_v1()
         val parser_generation = parser_initialization_generation_v1()
         if not driver_parse_transient_scope_begin_v1():

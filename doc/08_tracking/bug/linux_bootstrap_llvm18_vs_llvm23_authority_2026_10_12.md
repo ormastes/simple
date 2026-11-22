@@ -38,3 +38,16 @@ Note: the named check is pure sh+embedded-python and does not invoke the Simple 
 Sanity-confirmed in worktree: `scripts/setup/install-linux-phase23-llvm23.shs`, `scripts/check/pin-linux-phase23-llvm23.shs` exist and the workflow references them; workflow YAML unchanged.
 
 Scope note: this verifies the workflow wiring/fixture level only; the real ~2 GB LLVM 23.1.1 archive download, installation, and full native bootstrap execution remain unexecuted (as the doc already records).
+
+## Re-verification attempt (2026-11-22, Linux aarch64) — still blocked, status unchanged
+
+Base `origin/release/1.0.0` @ `3c2e4556b6d`. `sh test/01_unit/scripts/linux_phase23_llvm23_workflow_test.shs`
+-> `Actual Linux workflow wiring: valid commands + seven negative removals PASS` (rc=0). This only
+repeats the 2026-11-05 fixture evidence.
+
+Concrete blocker for the remaining acceptance (real archive install + native bootstrap):
+`scripts/setup/install-linux-phase23-llvm23.shs:8` refuses anything but `Linux:x86_64`
+(asset `LLVM-23.1.1-Linux-X64.tar.xz`), and the only consumer, the `llvm` backend row of
+`.github/workflows/rust-bootstrap-multiplatform.yml`, runs on `ubuntu-24.04` (x86_64). No arm64 job
+consumes it, so an aarch64 host cannot qualify this; it needs a Linux x86_64 CI run of that lane.
+A local `--features llvm` check was not run: local LLVM is 23.1.0, not the pinned 23.1.1 authority.

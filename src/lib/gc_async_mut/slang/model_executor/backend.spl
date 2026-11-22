@@ -30,10 +30,15 @@ use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi
 use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
 use std.gc_async_mut.slang.host.slang_host.{host_file_exists}
 use std.gc_async_mut.slang.model_executor.pure.stop.{stop_scan}
+use std.common.binary_io.{f32_from_bits}
 
 # Bytes IN only: the callee gets (prefix..., ptr, len, suffix...) for a copy that
 # lives for this one call. Media payloads cross the int64-only ABI this way.
 extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
+# Bytes OUT: the callee gets (prefix..., buf, cap, out_len*, suffix...) and fills
+# `out_bytes[offset .. offset + cap]`. Local declaration until L2 exports it
+# from std.nogc_sync_mut.sffi.dynamic (design gap G1); drop it then.
+extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8], offset: i64, capacity: i64, out_len: &mut i64, suffix_args: [i64]) -> i64
 
 enum BackendError:
     LibraryNotFound
@@ -79,6 +84,8 @@ fn backend_error_text(e: BackendError) -> text:
 const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
 const SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS: i64 = 64
 const SLANG_CAP_MTMD: i64 = 128
+const SLANG_CAP_BULK_IO: i64 = 256
+const SLANG_CAP_MODEL_HANDLES: i64 = 512
 const SLANG_PHYSICAL_PAGE_ABI_V1: i64 = 1
 const INVALID_NONNEGATIVE_I64_TEXT: i64 = -1
 
@@ -141,6 +148,7 @@ struct GgmlBackend:
     f_tree_nodes: i64
     f_tree_cached_tokens: i64
     f_tree_shared_tokens: i64
+    f_tree_n_ubatch: i64
     f_context_profile_configure: i64
     f_gpu_offload_supported: i64
     f_model_offloaded: i64
@@ -191,6 +199,25 @@ struct GgmlBackend:
     f_page_bytes: i64
     f_page_request_create: i64
     physical_lightweight_requests: bool
+    # Bit 256: one-call byte I/O (with_bytes in, into_bytes out). Zero when
+    # the shim predates it; the per-byte entries above then carry the bytes.
+    bulk_io: bool
+    f_str_push_bytes: i64
+    f_out_into: i64
+    f_request_str_push_bytes: i64
+    f_request_out_into: i64
+    # Bit 512: model handles, embeddings, token input, sampler config.
+    model_handles: bool
+    f_model_open: i64
+    f_model_close: i64
+    f_request_create_for: i64
+    f_request_embed_configure: i64
+    f_request_embed_eval: i64
+    f_request_embeddings_into: i64
+    f_request_rerank_tokenize: i64
+    f_request_tokens_set: i64
+    f_request_sampler_configure: i64
+    f_request_is_eog: i64
 
 struct GgmlRequest:
     handle: i64
@@ -349,7 +376,7 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         "slang_ggml_gpu_offload_supported", "slang_ggml_model_offloaded",
         "slang_ggml_prefix_cache_mode_configure", "slang_ggml_tree_mode",
         "slang_ggml_tree_nodes", "slang_ggml_tree_cached_tokens",
-        "slang_ggml_tree_shared_tokens"
+        "slang_ggml_tree_shared_tokens", "slang_ggml_tree_n_ubatch"
     ]
     var optional: [i64] = []
     for n in optional_names:
@@ -432,6 +459,31 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_page_request_create != 0)
     if not physical_lightweight_requests:
         f_page_request_create = 0
+    # Bulk byte I/O and the handle group, each behind its own bit for the same
+    # fail-closed dlsym reason as the page group.
+    var bulk_io = (reported_capabilities & SLANG_CAP_BULK_IO) != 0
+    var bulk_addrs: [i64] = []
+    for n in ["slang_ggml_str_push_bytes", "slang_ggml_out_into",
+              "slang_ggml_request_str_push_bytes", "slang_ggml_request_out_into"]:
+        val address = if bulk_io: spl_dlsym(lib, n) else: 0
+        bulk_addrs.push(address)
+        if address == 0:
+            bulk_io = false
+    if not bulk_io:
+        bulk_addrs = [0, 0, 0, 0]
+    var model_handles = request_group_ok and (reported_capabilities & SLANG_CAP_MODEL_HANDLES) != 0
+    var handle_addrs: [i64] = []
+    for n in ["slang_ggml_model_open", "slang_ggml_model_close",
+              "slang_ggml_request_create_for", "slang_ggml_request_embed_configure",
+              "slang_ggml_request_embed_eval", "slang_ggml_request_embeddings_into",
+              "slang_ggml_request_rerank_tokenize", "slang_ggml_request_tokens_set",
+              "slang_ggml_request_sampler_configure", "slang_ggml_request_is_eog"]:
+        val address = if model_handles: spl_dlsym(lib, n) else: 0
+        handle_addrs.push(address)
+        if address == 0:
+            model_handles = false
+    if not model_handles:
+        handle_addrs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     Ok(GgmlBackend(
         lib: lib,
         f_str_reset: addrs[0], f_str_push: addrs[1], f_out_len: addrs[2],
@@ -452,7 +504,7 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_gpu_offload_supported: optional[9], f_model_offloaded: optional[10],
         f_prefix_mode_configure: optional[11], f_tree_mode: optional[12],
         f_tree_nodes: optional[13], f_tree_cached_tokens: optional[14],
-        f_tree_shared_tokens: optional[15],
+        f_tree_shared_tokens: optional[15], f_tree_n_ubatch: optional[16],
         f_request_configure: request_addrs[0], f_request_create: request_addrs[1],
         f_request_close: request_addrs[2], f_request_cancel: request_addrs[3],
         f_request_str_reset: request_addrs[4], f_request_str_push: request_addrs[5],
@@ -486,22 +538,70 @@ fn open_backend(lib_path: text) -> Result<GgmlBackend, BackendError>:
         f_page_allocated_bytes: physical_page_addrs[15],
         f_page_bytes: physical_page_addrs[16],
         f_page_request_create: f_page_request_create,
-        physical_lightweight_requests: physical_lightweight_requests
+        physical_lightweight_requests: physical_lightweight_requests,
+        bulk_io: bulk_io,
+        f_str_push_bytes: bulk_addrs[0], f_out_into: bulk_addrs[1],
+        f_request_str_push_bytes: bulk_addrs[2], f_request_out_into: bulk_addrs[3],
+        model_handles: model_handles,
+        f_model_open: handle_addrs[0], f_model_close: handle_addrs[1],
+        f_request_create_for: handle_addrs[2],
+        f_request_embed_configure: handle_addrs[3],
+        f_request_embed_eval: handle_addrs[4],
+        f_request_embeddings_into: handle_addrs[5],
+        f_request_rerank_tokenize: handle_addrs[6],
+        f_request_tokens_set: handle_addrs[7],
+        f_request_sampler_configure: handle_addrs[8],
+        f_request_is_eog: handle_addrs[9]
     ))
 
-# Strings cross the int64-only ABI one byte at a time. That is the price of a
-# boundary that marshals no pointers, and it is paid once per prompt, not per
-# token, so it does not touch the decode loop.
+# Strings cross the int64-only ABI as ONE bytes-in call when the shim has bit
+# 256 (with_bytes: the callee gets ptr, len) and output comes back as ONE
+# into_bytes call. A shim without the bit gets the old one-call-per-byte path,
+# so an older shim keeps working (design gap G3).
 fn _push_text(b: GgmlBackend, s: text) -> i64:
     _call0(b.f_str_reset)
+    val bytes = text_to_utf8_bytes(s)
+    if b.bulk_io:
+        if spl_wffi_call_i64_with_bytes(b.f_str_push_bytes, [], bytes, 0, bytes.len(), []) < 0:
+            return -1
+        return bytes.len()
     var pushed = 0
-    for byte in text_to_utf8_bytes(s):
+    for byte in bytes:
         if _call1(b.f_str_push, byte.to_i64()) < 0:
             return -1
         pushed = pushed + 1
     pushed
 
+# A packed out-buffer of at least `n` bytes. Local stand-in until L2's
+# bytes_zeroed lands (design gap G5): text_to_utf8_bytes returns packed
+# storage, and doubling keeps it to log2(n) concatenations, where a push(0)
+# loop would build a widened generic array. The contents are overwritten.
+fn _out_buffer(n: i64) -> [u8]:
+    var s = " "
+    while s.len() < n:
+        s = s + s
+    text_to_utf8_bytes(s)
+
+# Reads `fptr`'s (prefix..., buf, cap, out_len) output whole: a cap-0 call
+# reports the size, the second call fills a buffer of exactly that size.
+fn _read_bytes_into(fptr: i64, prefix: [i64]) -> Result<[u8], i64>:
+    var sizer = _out_buffer(1)
+    var need: i64 = 0
+    val probe = spl_wffi_call_i64_into_bytes(fptr, prefix, &mut sizer, 0, 0, &mut need, [])
+    if need <= 0:
+        return if probe < 0: Err(probe) else: Ok([])
+    var buf = _out_buffer(need)
+    var written: i64 = 0
+    val rc = spl_wffi_call_i64_into_bytes(fptr, prefix, &mut buf, 0, need, &mut written, [])
+    if rc < 0 or written != need:
+        return Err(if rc < 0: rc else: -4)
+    Ok(buf[0:written])
+
 fn _read_out(b: GgmlBackend) -> text:
+    if b.bulk_io:
+        match _read_bytes_into(b.f_out_into, []):
+            Ok(bytes): return bytes_to_text(bytes)
+            Err(_): return ""
     val n = _call0(b.f_out_len)
     if n <= 0:
         return ""
@@ -514,14 +614,23 @@ fn _read_out(b: GgmlBackend) -> text:
 
 fn _push_request_text(b: GgmlBackend, request: GgmlRequest, s: text) -> i64:
     _call1(b.f_request_str_reset, request.handle)
+    val bytes = text_to_utf8_bytes(s)
+    if b.bulk_io:
+        if spl_wffi_call_i64_with_bytes(b.f_request_str_push_bytes, [request.handle], bytes, 0, bytes.len(), []) < 0:
+            return -1
+        return bytes.len()
     var pushed = 0
-    for byte in text_to_utf8_bytes(s):
+    for byte in bytes:
         if _call2(b.f_request_str_push, request.handle, byte.to_i64()) < 0:
             return -1
         pushed = pushed + 1
     pushed
 
 fn _read_request_out(b: GgmlBackend, request: GgmlRequest) -> text:
+    if b.bulk_io:
+        match _read_bytes_into(b.f_request_out_into, [request.handle]):
+            Ok(bytes): return bytes_to_text(bytes)
+            Err(_): return ""
     val n = _call1(b.f_request_out_len, request.handle)
     if n <= 0:
         return ""
@@ -606,6 +715,13 @@ fn request_sample(b: GgmlBackend, request: GgmlRequest) -> Result<i64, BackendEr
     Ok(token)
 
 fn request_is_eog(b: GgmlBackend, token: i64) -> bool:
+    _call1(b.f_is_eog, token) == 1
+
+# EOG against the request's own model (bit 512); the default model's vocab
+# otherwise, which is the only model an older shim has.
+fn _request_eog(b: GgmlBackend, request: GgmlRequest, token: i64) -> bool:
+    if b.model_handles:
+        return _call2(b.f_request_is_eog, request.handle, token) == 1
     _call1(b.f_is_eog, token) == 1
 
 fn request_piece(b: GgmlBackend, request: GgmlRequest,
@@ -712,7 +828,7 @@ fn gen_stream_step(st: GenStream) -> Result<GenStream, BackendError>:
     if st.produced >= st.max_tokens:
         return Ok(_gs_finish(st, st.text, "length", st.produced))
     val tok = _call1(b.f_request_sample, request.handle)
-    if _call1(b.f_is_eog, tok) == 1:
+    if _request_eog(b, request, tok):
         return Ok(_gs_finish(st, st.text, "stop", st.produced))
     if _call2(b.f_request_piece, request.handle, tok) < 0:
         return Err(BackendError.DecodeFailed)
@@ -963,13 +1079,15 @@ struct TreeCacheStats:
     nodes: i64
     cached_tokens: i64
     shared_tokens: i64
+    n_ubatch: i64
 
 fn tree_cache_stats(b: GgmlBackend) -> TreeCacheStats:
     TreeCacheStats(
         mode: _optional_call0(b.f_tree_mode),
         nodes: _optional_call0(b.f_tree_nodes),
         cached_tokens: _optional_call0(b.f_tree_cached_tokens),
-        shared_tokens: _optional_call0(b.f_tree_shared_tokens)
+        shared_tokens: _optional_call0(b.f_tree_shared_tokens),
+        n_ubatch: _optional_call0(b.f_tree_n_ubatch)
     )
 
 fn physical_page_provider_status(b: GgmlBackend) -> PhysicalPageProviderStatus:
@@ -1171,6 +1289,160 @@ fn physical_page_bytes(b: GgmlBackend, pool: i64) -> Result<i64, BackendError>:
         return Err(BackendError.PhysicalPageOperationFailed)
     Ok(bytes)
 
+# ---- model handles, embeddings, token input, sampler (capability bit 512) ----
+#
+# A handle is a model loaded BESIDE the default one (load_model), so a chat
+# model and an embedding model, or an LLM and its vocoder, are resident at
+# once. Opening a path that is already open returns the same handle.
+
+struct GgmlModelHandle:
+    handle: i64
+
+fn backend_model_handles(b: GgmlBackend) -> bool:
+    b.model_handles
+
+fn open_model_handle(b: GgmlBackend, model_path: text, n_gpu_layers: i64) -> Result<GgmlModelHandle, BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    _call0(b.f_backend_init)
+    val path = text_to_utf8_bytes(model_path)
+    val h = spl_wffi_call_i64_with_bytes(b.f_model_open, [], path, 0, path.len(), [n_gpu_layers])
+    if h <= 0:
+        return Err(BackendError.ModelLoadFailed)
+    Ok(GgmlModelHandle(handle: h))
+
+# Refused while a request built on the model is still open.
+fn close_model_handle(b: GgmlBackend, model: GgmlModelHandle) -> Result<(), BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    if spl_wffi_call_i64(b.f_model_close, [model.handle], 1) < 0:
+        return Err(BackendError.NotOpen)
+    Ok(())
+
+# A request on `model`; every request_* entry (tokenize, eval, sample, piece)
+# then runs against that model's weights and vocabulary.
+fn open_request_for(b: GgmlBackend, model: GgmlModelHandle, n_ctx: i64) -> Result<GgmlRequest, BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    val handle = _call2(b.f_request_create_for, model.handle, n_ctx)
+    if handle <= 0:
+        return Err(BackendError.ContextCreateFailed)
+    Ok(GgmlRequest(handle: handle))
+
+# Pooling values follow llama.cpp: -1 the model's own, 0 none (one vector per
+# position), 1 mean, 2 cls, 3 last, 4 rank. Returns the pooling in effect.
+const POOLING_MODEL_DEFAULT: i64 = -1
+const POOLING_NONE: i64 = 0
+const POOLING_RANK: i64 = 4
+
+fn request_embed_configure(b: GgmlBackend, request: GgmlRequest, pooling: i64) -> Result<i64, BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    val effective = _call2(b.f_request_embed_configure, request.handle, pooling)
+    if effective < 0:
+        return Err(BackendError.ContextCreateFailed)
+    Ok(effective)
+
+# Text in: tokenized with the model's own BOS/EOS (BERT adds CLS/SEP).
+fn request_set_text(b: GgmlBackend, request: GgmlRequest, input: text) -> Result<i64, BackendError>:
+    if _push_request_text(b, request, input) < 0:
+        return Err(BackendError.TokenizeFailed)
+    val count = _call2(b.f_request_tokenize, request.handle, 1)
+    if count <= 0:
+        return Err(BackendError.TokenizeFailed)
+    Ok(count)
+
+# Raw token ids in (e.g. a vocoder's audio codes), bypassing the tokenizer.
+# Ids are packed int32 little-endian; the shim checks each against the vocab.
+fn request_set_tokens(b: GgmlBackend, request: GgmlRequest, tokens: [i64]) -> Result<i64, BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    var packed = _out_buffer(tokens.len() * 4)
+    var at = 0
+    for t in tokens:
+        if t < 0 or t > 2147483647:
+            return Err(BackendError.TokenizeFailed)
+        packed[at] = (t & 255).to_u8()
+        packed[at + 1] = ((t >> 8) & 255).to_u8()
+        packed[at + 2] = ((t >> 16) & 255).to_u8()
+        packed[at + 3] = ((t >> 24) & 255).to_u8()
+        at = at + 4
+    val count = spl_wffi_call_i64_with_bytes(b.f_request_tokens_set, [request.handle], packed, 0, tokens.len() * 4, [])
+    if count < 0:
+        return Err(BackendError.TokenizeFailed)
+    Ok(count)
+
+# Rerank pair: tokenized exactly like llama.cpp's server (the model's "rerank"
+# template, else [BOS] query [EOS] [SEP] doc [EOS]).
+fn request_set_rerank_pair(b: GgmlBackend, request: GgmlRequest, query: text, document: text) -> Result<i64, BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    val query_len = text_to_utf8_bytes(query).len()
+    if _push_request_text(b, request, query + document) < 0:
+        return Err(BackendError.TokenizeFailed)
+    val count = _call2(b.f_request_rerank_tokenize, request.handle, query_len)
+    if count <= 0:
+        return Err(BackendError.TokenizeFailed)
+    Ok(count)
+
+# Runs the request's tokens as one batch with every position output, then
+# returns the result as packed float32 little-endian bytes: pooling none gives
+# tokens x n_embd floats (row-major), rank gives the score(s), any other
+# pooling one n_embd vector. Decode with f32_le_to_floats when needed.
+fn request_embeddings(b: GgmlBackend, request: GgmlRequest) -> Result<[u8], BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    val ran = _call1(b.f_request_embed_eval, request.handle)
+    if ran == -4:
+        return Err(BackendError.CapacityExceeded)
+    if ran <= 0:
+        return Err(BackendError.DecodeFailed)
+    match _read_bytes_into(b.f_request_embeddings_into, [request.handle]):
+        Err(_): Err(BackendError.DecodeFailed)
+        Ok(bytes): Ok(bytes)
+
+# Sampler for a request; greedy stays the default when this is never called.
+# temperature <= 0 is greedy (a repetition penalty != 1.0 still applies);
+# fractions are thousandths; seed < 0 is random.
+struct SamplerConfig:
+    temperature_milli: i64
+    top_k: i64
+    top_p_milli: i64
+    repeat_penalty_milli: i64
+    seed: i64
+
+fn request_configure_sampler(b: GgmlBackend, request: GgmlRequest, config: SamplerConfig) -> Result<(), BackendError>:
+    if not b.model_handles:
+        return Err(BackendError.SymbolMissing)
+    val rc = spl_wffi_call_i64(b.f_request_sampler_configure,
+        [request.handle, config.temperature_milli, config.top_k, config.top_p_milli,
+         config.repeat_penalty_milli, config.seed], 6)
+    if rc < 0:
+        return Err(BackendError.ContextCreateFailed)
+    Ok(())
+
+# Generation on a request the caller already opened (e.g. open_request_for on a
+# model handle): prompt fed verbatim, or chat-rendered when `chat`. The caller
+# configures the sampler beforehand and closes the request afterwards.
+fn generate_on_request(input: BackendActiveGenerationRequest) -> Result<BackendGeneration, BackendError>:
+    _generate_request_observed(input)
+
+# Drops this GgmlBackend's reference on the shim library WITHOUT freeing the
+# default model (close_backend does that). For a runner that opened the shim
+# only to use model handles beside a resident chat model.
+fn release_backend_library(b: GgmlBackend):
+    spl_dlclose(b.lib)
+
+# Packed float32 little-endian -> f64 values.
+fn f32_le_to_floats(bytes: [u8]) -> [f64]:
+    var out: [f64] = []
+    var i = 0
+    while i + 3 < bytes.len():
+        val bits = (bytes[i] as u32) | ((bytes[i + 1] as u32) << 8) | ((bytes[i + 2] as u32) << 16) | ((bytes[i + 3] as u32) << 24)
+        out.push(f32_from_bits(bits) as f64)
+        i = i + 4
+    out
+
 # Releases the model, context and sampler, then the library itself. Callers that
 # stop a model mid-session rely on this leaving no handle behind.
 fn close_backend(b: GgmlBackend) -> Result<(), BackendError>:
@@ -1205,3 +1477,9 @@ export physical_page_prefill, physical_page_decode, physical_page_boundary_logit
 export physical_page_table_commit, physical_page_table_abort
 export physical_page_allocated_bytes, physical_page_bytes
 export SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS
+export SLANG_CAP_BULK_IO, SLANG_CAP_MODEL_HANDLES
+export GgmlModelHandle, backend_model_handles, open_model_handle, close_model_handle, open_request_for
+export POOLING_MODEL_DEFAULT, POOLING_NONE, POOLING_RANK, request_embed_configure
+export request_set_text, request_set_tokens, request_set_rerank_pair, request_embeddings
+export SamplerConfig, request_configure_sampler, f32_le_to_floats, release_backend_library
+export BackendActiveGenerationRequest, generate_on_request

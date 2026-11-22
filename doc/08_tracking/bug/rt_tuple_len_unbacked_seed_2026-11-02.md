@@ -11,3 +11,40 @@
   9336ac0e56b is re-opened (it was never execution-verified there).
 - Close: deploy a binary registering `rt_tuple_len`/`rt_tuple_get`, restore 9336ac0e56b body.
 - Other unbacked use: `src/lib/nogc_sync_mut/sffi/enum_wire.spl` (only if imported on the test path).
+
+## 2026-11-22: workaround removed; it broke native `--parallel` on Windows
+
+- The direct `rt_env_vars()` return was not harmless in native builds. A runtime
+  pair is an array-headed heap object (`rt_tuple_new` in
+  `src/runtime/runtime_native.c`); native code reads a typed `(text, text)` as two
+  inline words. `for (key, value) in snapshot` in
+  `src/lib/nogc_sync_mut/io/windows_redirected_process.spl` therefore bound two
+  header words, every child environment entry became `=`, and
+  `windows_process_request_valid_v1` returned `invalid environment assignment`.
+  The runner reported it as
+  `owned Windows child admission or collection failed: child admission refused`
+  for every file under `--parallel` (rc 1). `--sequential` does not use the owned
+  spawn and was unaffected; the interpreter was never affected.
+- Evidence (pin-built rung-7 runner, lldb): `windows_process_request_valid_v1`
+  returns that text on the first assignment, whose bytes are `=`; the loop's
+  disassembly loads `[pair & ~7]` and `[pair & ~7 + 8]` with no `rt_tuple_get`.
+- Compiler-side fix already on release: `e9b6b0e24d6` (2026-11-15) rebuilds any
+  extern `-> [(A, B)]?` result into native tuples at the call
+  (`extern_runtime_tuple_array_to_native`). A runner built by a compiler with
+  that commit is not affected. The frozen Phase 2 pin predates it, so pin-built
+  binaries of tip source still were.
+- Fix: `env_vars_nilable` is correct for both producers. `rt_tuple_len` is the
+  validated discriminator: it returns 2 for a runtime pair (frozen Phase 2 pin),
+  which is rebuilt through `rt_tuple_get`, and -1 for anything else (a native
+  tuple from a compiler with `e9b6b0e24d6`), which is kept as-is. No pair is
+  dropped; None means only that the snapshot itself is unavailable. #10688 as
+  first merged (70e103b) returned None on `!= 2`, which under `e9b6b0e24d6` lost
+  the whole snapshot; #10701 corrects that. `C:/dev/seeds/simple-release.exe` and
+  the release-tip interpreter (`interpreter_extern/mod.rs`) register both externs.
+- Same destructure, covered by the same owner change:
+  `src/lib/nogc_sync_mut/test_runner/aggregate_task_executor.spl` (environment
+  digest). The `pair.0`/`pair.1` readers in `src/app/bootstrap_builder/` consume
+  the same snapshot; their native behaviour was not measured here.
+- Spec: `test/01_unit/lib/sffi/rt_tuple_len_env_vars_spec.spl`. It passes under
+  the interpreter before and after, so the native witness is a pin-built probe of
+  the same loop, not the spec.

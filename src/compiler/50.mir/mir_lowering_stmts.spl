@@ -31,7 +31,7 @@ use compiler.common.value_access.{compiler_value_discriminant}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
 use compiler.frontend.resource_registry.{resource_is_declared}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirLocal, mir_type_probe_text}  # explicit: a glob is not an import-origin for surface projection
-use std.common.mcdc.model.{mcdc_authored_path_v1, mcdc_runtime_decision_id_v1, mcdc_path_in_instrumentation_scope}
+use std.common.mcdc.model.{McdcSyntheticDecisionKeyV1, mcdc_authored_path_v1, mcdc_runtime_decision_id_v1, mcdc_synthetic_runtime_decision_id_v1, mcdc_path_in_instrumentation_scope}
 use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
 use std.io_runtime.{env_get_opt}
 use compiler.mir.array_move.mir_array_move.{am_var_symbol, am_field_base_symbol, am_field_name, am_hir_type_is_array, am_default_is_fresh,
@@ -849,12 +849,28 @@ impl MirLowering:
                 val qualified_nested = self.declared_struct_layout_key(nested_ownership_key)
                 if self.struct_field_order.contains(qualified_nested):
                     nested_layout = qualified_nested
-            if nested_name != "" and not nested_is_class and not copy_chain.contains(nested_layout):
-                nested_symbol = self.symbols.lookup_or_invalid(nested_name)
-                if nested_symbol.is_valid() and self.struct_field_order.contains(nested_layout):
-                    nested_symbol = self.canonical_mir_type_symbol(nested_symbol)
-                    field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
-                    copy_nested = true
+            var cfi_declared_is_enum = false
+            if cfi < declared_field_types.len():
+                val rebound_df = self.declared_field_type_in_current_table(effective_struct_name, cfi, declared_field_types[cfi])
+                match rebound_df.kind:
+                    case HirTypeKind.Named(df_sym, _):
+                        if val df_info = self.symbols.get_symbol_raw(df_sym.id):
+                            if df_info.kind == SymbolKind.Enum:
+                                cfi_declared_is_enum = true
+                    case _: ()
+            if nested_name != "" and not nested_is_class and not cfi_declared_is_enum and not self.mir_layout_or_runtime_key_is_enum(nested_ownership_key) and not self.mir_layout_or_runtime_key_is_enum(nested_layout) and not copy_chain.contains(nested_layout):
+                var resolved_nested_struct: SymbolId? = self.struct_symbol_for_layout_key(nested_layout)
+                if resolved_nested_struct == None:
+                    val bare_nested = self.symbols.lookup_or_invalid(nested_name)
+                    if bare_nested.is_valid():
+                        if val nested_info = self.symbols.get_symbol_raw(bare_nested.id):
+                            if nested_info.kind == SymbolKind.Struct:
+                                resolved_nested_struct = Some(bare_nested)
+                if val valid_nested_sym = resolved_nested_struct:
+                    if self.struct_field_order.contains(nested_layout):
+                        nested_symbol = self.canonical_mir_type_symbol(valid_nested_sym)
+                        field_type = MirType(kind: MirTypeKind.Struct(nested_symbol))
+                        copy_nested = true
 
             var field_bldr = self.builder
             val field_val = field_bldr.emit_get_field(mir_operand_copy(init_local), cfi, field_type)
@@ -922,21 +938,34 @@ impl MirLowering:
         val struct_type_name = struct_sym ?? ""
         if struct_type_name == "" or self.class_type_names.contains(struct_type_name):
             return None
+        if self.mir_layout_or_runtime_key_is_enum(struct_type_name):
+            return None
         if not self.struct_field_order.contains(struct_type_name):
             return None
         val init_type = self.local_mir_type_of(init_local) ?? MirType.i64()
-        val struct_symbol_id: SymbolId? = match init_type.kind:
-            case MirTypeKind.Struct(sym): sym
-            case MirTypeKind.Opaque(opaque_name):
-                # Runtime-handle slot typed by its record owner (enumerate()
-                # pair element): resolve the owner name to its symbol.
-                if opaque_name == struct_type_name:
-                    val opaque_symbol = self.symbols.lookup_or_invalid(opaque_name)
-                    if opaque_symbol.is_valid(): Some(opaque_symbol) else: self.struct_symbol_for_layout_key(opaque_name)
+        var verified_struct_symbol: SymbolId? = None
+        match init_type.kind:
+            case MirTypeKind.Struct(sym):
+                if val type_info = self.symbols.get_symbol_raw(sym.id):
+                    if type_info.kind == SymbolKind.Struct:
+                        verified_struct_symbol = Some(sym)
                 else:
-                    None
-            case _: None
-        if val type_symbol = struct_symbol_id:
+                    val canonical_key = self.canonical_mir_type_key_v1(sym.id)
+                    if canonical_key != "" and not self.class_type_names.has(canonical_key) and not self.enum_variant_index_q.has(canonical_key) and not self.enum_runtime_to_bare.has(canonical_key):
+                        verified_struct_symbol = Some(sym)
+            case MirTypeKind.Opaque(opaque_name):
+                if opaque_name == struct_type_name:
+                    val by_layout = self.struct_symbol_for_layout_key(opaque_name)
+                    if by_layout != None:
+                        verified_struct_symbol = by_layout
+                    else:
+                        val opaque_symbol = self.symbols.lookup_or_invalid(opaque_name)
+                        if opaque_symbol.is_valid():
+                            if val opaque_info = self.symbols.get_symbol_raw(opaque_symbol.id):
+                                if opaque_info.kind == SymbolKind.Struct:
+                                    verified_struct_symbol = Some(opaque_symbol)
+            case _: ()
+        if val type_symbol = verified_struct_symbol:
             val copied = self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
             return copied
         None
@@ -3666,8 +3695,15 @@ impl MirLowering:
         val authored_path = self.mcdc_authored_path(cond.span)
         var decision_id = mcdc_runtime_decision_id_v1(authored_path, cond.span.start)
         if cond.span.start < 0:
-            decision_id = self.mcdc_next_runtime_id
-            self.mcdc_next_runtime_id = decision_id + 1
+            val synthetic_ordinal = self.mcdc_next_runtime_id
+            self.mcdc_next_runtime_id = synthetic_ordinal + 1
+            decision_id = mcdc_synthetic_runtime_decision_id_v1(
+                McdcSyntheticDecisionKeyV1(
+                    authored_path: authored_path,
+                    owner_module: self.current_module_id,
+                    ordinal: synthetic_ordinal
+                )
+            )
         val mode_name = if self.mcdc_mode == 2: "dynamic" else: "static"
         val semantic_id = "mcdc.{mode_name}.d{decision_id}"
         self.mcdc_active_decision_id = decision_id
@@ -5338,8 +5374,9 @@ impl MirLowering:
                                     # (mir_dict_read_bare_struct_provenance_2026-11-07).
                                     if for_elem_info.kind == SymbolKind.Struct:
                                         self.array_element_struct_syms[collection_local.id] = self.struct_value_provenance_key(for_elem_info)
-                                    elif for_elem_info.kind == SymbolKind.Class or for_elem_info.kind == SymbolKind.Enum:
-                                        self.array_element_struct_syms[collection_local.id] = for_elem_info.name
+                                    elif for_elem_info.kind == SymbolKind.Class:
+                                        val cls_key = mir_class_identity_raw(self.symbols, for_elem_symbol.id)
+                                        self.array_element_struct_syms[collection_local.id] = if cls_key != "": cls_key else: for_elem_info.name
                             case _: ()
                 case HirTypeKind.Str:
                     collection_hir_is_text = true
@@ -5667,7 +5704,7 @@ impl MirLowering:
 
         # Bind loop variable to the (decoded) element
         var binding_element_type = element_type
-        if for_has_real_struct_name and result_err_layout_identity(fesn) != "":
+        if for_has_real_struct_name and not self.mir_layout_or_runtime_key_is_enum(fesn) and result_err_layout_identity(fesn) != "":
             # The call's HIR element Named ID may be provider-local. Preserve
             # nominal storage using the proven canonical MIR record symbol.
             binding_element_type = self.canonical_array_record_element_type(fesn)

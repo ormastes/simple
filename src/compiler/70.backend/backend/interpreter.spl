@@ -214,6 +214,15 @@ impl InterpreterBackendImpl:
                         val pf: HirFunction = pf_
                         if not entry_idx.fn_by_name.has(pf.name) and not fn_owner.has(pf.name):
                             fn_owner[pf.name] = pm
+                    # Struct/class owners too, so imported constructors resolve.
+                    for ps_ in pm.structs.values():
+                        val ps: HirStruct = ps_
+                        if not fn_owner.has(ps.name):
+                            fn_owner[ps.name] = pm
+                    for pc_ in pm.classes.values():
+                        val pc: HirClass = pc_
+                        if not fn_owner.has(pc.name):
+                            fn_owner[pc.name] = pm
                     for mkey_ in pm_idx.method_by_key.keys():
                         val mkey: text = mkey_
                         if not provider_method_by_key.has(mkey):
@@ -416,6 +425,11 @@ impl InterpreterBackendImpl:
                         field_names = field_names.push(cf.name)
                     break
         if not found_type:
+            # Imported struct/class: its declaration lives in the provider module.
+            if ctx.has_fn_owner and ctx.fn_owner.has(type_name):
+                val owner: HirModule = ctx.fn_owner[type_name]
+                if owner.name != ctx.module.name:
+                    return self.try_construct_struct(type_name, args, arg_values, self.module_context(owner, ctx))
             return nil
         var fields: Dict<text, Value> = {}
         for i in 0..args.len():
@@ -775,6 +789,12 @@ impl InterpreterBackendImpl:
                         Ok(backend_value_bool_v1(l > interp_int_to_f64(r, right_unsigned)))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
+            case Value.String(l):
+                match right:
+                    case Value.String(r):
+                        Ok(backend_value_bool_v1(l > r))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for >", Some(span)))
             case _:
                 Err(BackendError.type_error("invalid operands for >", Some(span)))
 
@@ -798,6 +818,12 @@ impl InterpreterBackendImpl:
                     case Value.Int(r):
                         # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
                         Ok(backend_value_bool_v1(l >= interp_int_to_f64(r, right_unsigned)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for >=", Some(span)))
+            case Value.String(l):
+                match right:
+                    case Value.String(r):
+                        Ok(backend_value_bool_v1(l >= r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case _:

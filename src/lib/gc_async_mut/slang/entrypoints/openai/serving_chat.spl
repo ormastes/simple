@@ -22,7 +22,7 @@
 #   - no backend built -> 503, naming the library that is absent
 #   - will not fit     -> 503, naming the arithmetic that refused it
 
-use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_max_bytes, video_frame_count, sample_frames}
+use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_frame_count, sample_frames}
 use std.common.base_encoding.base64.{base64_encode_bytes}
 use std.io_runtime.{file_exists}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatMessage, ChatPart, ChatRequest, chat_message_media_count, parse_chat_request, openai_error_response, openai_chat_completion_response, openai_chat_completion_response_finish, chat_messages_from_body, chat_messages_parse}
@@ -122,10 +122,14 @@ fn media_refusal(model_id: text, messages: [ChatMessage], projector: text) -> Re
                 media = media + 1
     # With an ffmpeg configured, a video part that is still here belongs to a
     # request whose model has no projector; the text-only refusal below says so.
+    # Each video part costs two ffmpeg runs; a request with many of them would
+    # hold the handler for minutes.
+    if video > video_max_parts():
+        return Err(openai_error_response(400, "the request carries " + video.to_text() + " video parts; slang takes at most " + video_max_parts().to_text() + " per request", "invalid_request_error", "too_many_video_parts", ""))
     if video > 0 and video_ffmpeg_path() == "":
         return Err(_unsupported_modality("video input is not supported by this slang build: slang has no video container decoder of its own and does not run external tools such as ffmpeg/ffprobe; send sampled frames as image_url parts instead"))
     if media > 0 and projector == "":
-        return Err(_unsupported_modality("model '" + model_id + "' accepts text only (no multimodal projector next to the model); the request carries " + media.to_text() + " image/audio part(s) and slang will not answer it as if they were absent"))
+        return Err(_unsupported_modality("model '" + model_id + "' accepts text only (no multimodal projector next to the model); the request carries " + media.to_text() + " image/audio/video part(s) and slang will not answer it as if they were absent"))
     Ok(())
 
 # Replaces every video part by its sampled JPEG frames, as image parts at the
@@ -147,6 +151,8 @@ fn expand_video_parts(messages: [ChatMessage]) -> Result<[ChatMessage], ApiRespo
                     return Err(openai_error_response(503, "SLANG_FFMPEG is set to '" + video_ffmpeg_path() + "', which is not a file; video sampling is unavailable", "server_error", "video_decoder_unavailable", ""))
                 match sample_frames(blob, video_frame_count()):
                     Err(reason):
+                        if video_reason_is_server_fault(reason):
+                            return Err(openai_error_response(503, "video sampling failed on the server; retry later", "server_error", "video_sampling_failed", ""))
                         return Err(openai_error_response(400, "video could not be sampled: " + reason, "invalid_request_error", "invalid_media", ""))
                     Ok(frames):
                         for frame in frames:
@@ -242,6 +248,13 @@ fn chat_prepare(model_root: text, body: text) -> Result<ChatPlan, ApiResponse>:
                     found = m
             if found == nil:
                 return Err(model_not_found_response(request.model))
+            # Refusals (video-part cap, text-only model) run on the request as
+            # sent, BEFORE expansion: expansion turns video parts into images,
+            # so a cap checked afterwards would never see them.
+            match media_refusal(request.model, messages, found!.mmproj_path):
+                Err(refusal):
+                    return Err(refusal)
+                Ok(_): ()
             var served = messages
             var served_frames = framed
             if found!.mmproj_path != "" and video_ffmpeg_path() != "":

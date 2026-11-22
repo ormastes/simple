@@ -76,8 +76,10 @@ resume_stage4_prepare() {
     echo "error: Stage 4 planner/candidate/source/backend binding mismatch" >&2; return 1;
   }
   full="$output/full/$platform/simple"
-  case "$platform" in *windows*) full="${full}.exe" ;; esac
+  full_debug="$output/full/$platform/simple-debug"
+  case "$platform" in *windows*) full="${full}.exe"; full_debug="${full_debug}.exe" ;; esac
   [ ! -e "$full" ] && [ ! -L "$full" ] &&
+    [ ! -e "$full_debug" ] && [ ! -L "$full_debug" ] &&
     [ ! -e "${full}.provenance.env" ] && [ ! -L "${full}.provenance.env" ] || {
     echo "error: Stage 4 resume output collision" >&2; return 1;
   }
@@ -154,6 +156,11 @@ resume_stage4_finalize() {
     echo stage4_provenance_sha256="$(bootstrap_stage3_hash_file "${full_bin}.provenance.env")"
     echo stage4_output_path="$full_bin"
     echo stage4_provenance_path="${full_bin}.provenance.env"
+    if [ "${stage4_dual_mode:-1}" -eq 1 ] && [ -n "${full_debug_bin:-}" ] && [ -e "${full_debug_bin}" ]; then
+      [ -f "$full_debug_bin" ] && [ ! -L "$full_debug_bin" ] && [ -x "$full_debug_bin" ] || exit 1
+      echo stage4_debug_output_path="$full_debug_bin"
+      echo stage4_debug_output_sha256="$(bootstrap_stage3_hash_file "$full_debug_bin")"
+    fi
   } >>"$tmp" || return 1
   if [ "${SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE:-0}" = 1 ]; then
     [ "${deploy:-0}" -eq 0 ] || return 1

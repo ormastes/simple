@@ -219,8 +219,80 @@ pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
         var deleted = false
         unsafe(capabilities: [ffi]):
             deleted = rt_file_delete(victim)
+            if deleted and victim.ends_with(".spab"):
+                val _seal = rt_file_delete(victim + ".seal")
         plan.record_delete(victim_size, deleted)
     plan.removed_count()
 
+pub struct CacheTreeEvictRequestV1:
+    root_dir: text
+    suffix: text
+    max_bytes: i64
+
+pub struct CacheTreeEvictSummaryV1:
+    removed: i64
+    remaining_bytes: i64
+
+# Iterative subdirectory-walking LRU eviction for sharded caches such as
+# `<cache_dir>/artifacts/v1/<algo>/<2hex>/*.spab`. Skips `*.tmp` in-flight
+# writes and `.seal` sidecars during discovery, preserves `CACHE_EVICT_GRACE_SECS`,
+# and deletes each primary `.spab` victim before its `.spab.seal` sidecar.
+pub fn cache_dir_evict_tree_to_cap_v1(req: CacheTreeEvictRequestV1) -> CacheTreeEvictSummaryV1:
+    if req.max_bytes <= 0 or req.root_dir == "" or req.suffix == "":
+        return CacheTreeEvictSummaryV1(removed: 0, remaining_bytes: 0)
+    var root_present = false
+    unsafe(capabilities: [ffi]):
+        root_present = rt_dir_exists(req.root_dir)
+    if not root_present:
+        return CacheTreeEvictSummaryV1(removed: 0, remaining_bytes: 0)
+    var now_micros: i64 = 0
+    unsafe(capabilities: [ffi]):
+        now_micros = rt_time_now_unix_micros()
+    val now_secs = now_micros / 1000000
+    val plan = _CacheDirEvictPlan.empty()
+    var pending_dirs: [text] = [req.root_dir]
+    var dir_idx: i64 = 0
+    while dir_idx < pending_dirs.len():
+        val cur_dir = pending_dirs[dir_idx]
+        dir_idx = dir_idx + 1
+        var entries: [text] = []
+        unsafe(capabilities: [ffi]):
+            entries = rt_dir_list(cur_dir) ?? []
+        for name in entries:
+            if name == "" or name == "." or name == ".." or name.ends_with(".tmp") or name.ends_with(".seal"):
+                continue
+            val path = cur_dir + "/" + name
+            if name.ends_with(req.suffix):
+                var size: i64 = 0
+                unsafe(capabilities: [ffi]):
+                    size = rt_file_size(path)
+                if size <= 0:
+                    continue
+                var mtime: i64 = 0
+                unsafe(capabilities: [ffi]):
+                    mtime = rt_file_stat(path)
+                plan.account_entry(path, size, mtime, now_secs)
+            else:
+                var sub_present = false
+                unsafe(capabilities: [ffi]):
+                    sub_present = rt_dir_exists(path)
+                if sub_present:
+                    pending_dirs.push(path)
+    if not plan.over_cap(req.max_bytes):
+        return CacheTreeEvictSummaryV1(removed: 0, remaining_bytes: plan.total_bytes())
+    plan.prepare()
+    while plan.over_cap(req.max_bytes) and plan.has_candidate():
+        val victim = plan.oldest_path()
+        val victim_size = plan.oldest_size()
+        plan.pop_oldest()
+        var deleted = false
+        unsafe(capabilities: [ffi]):
+            deleted = rt_file_delete(victim)
+            if deleted and victim.ends_with(".spab"):
+                val _seal = rt_file_delete(victim + ".seal")
+        plan.record_delete(victim_size, deleted)
+    CacheTreeEvictSummaryV1(removed: plan.removed_count(), remaining_bytes: plan.total_bytes())
+
 export CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_GRACE_SECS, CACHE_EVICT_SWEEP_INTERVAL
-export cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
+export CacheTreeEvictRequestV1, CacheTreeEvictSummaryV1
+export cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap, cache_dir_evict_tree_to_cap_v1

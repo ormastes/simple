@@ -3,9 +3,9 @@
 # process per file (parse -> HIR -> MIR -> obj), then link. Whole-program is
 # opt-in per invocation only: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; two-pass shard
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
-# Exception (2026-11-13): Stage 3 takes SIMPLE_FILE_WORKERS from the tracked
-# config/bootstrap.sdn key stage3_file_workers (env overrides) while the
-# per-file route is broken (bug #8504); delete the key once it is fixed.
+# Stage 3 takes SIMPLE_FILE_WORKERS from the tracked config/bootstrap.sdn key
+# stage3_file_workers (default 1 = per-file worker pool; explicit env
+# SIMPLE_FILE_WORKERS=0 opts out per invocation).
 # 2026-11-05: the admitted compiler's bootstrap_main.spl now applies the same
 # default to EVERY route -- plain positional native-build, Stage 4 and the
 # coordinator/Stage 3 routes (Windows batch included; it delegates here) --
@@ -496,6 +496,7 @@ produce_stage3_receipt_reason=''
 produce_managed_receipt_reason=''
 produce_managed_receipt_requested=0
 stop_after_stage3=0
+stage4_dual_mode="${SIMPLE_STAGE4_DUAL_MODE:-1}"
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
@@ -568,7 +569,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --invalidate-cache=*)
       selected_invalidation_scope=${1#*=}
-      case "${selected_invalidation_scope}" in stage2|stage3|stage4|stage4b-ui-backend|stage5[0-9]*) ;; *) echo 'error: --invalidate-cache requires a build phase scope' >&2; exit 64 ;; esac
+      case "${selected_invalidation_scope}" in stage2|stage3|stage4|stage4-debug|stage4b-ui-backend|stage5[0-9]*) ;; *) echo 'error: --invalidate-cache requires a build phase scope' >&2; exit 64 ;; esac
       invalidate_cache_scope="${invalidate_cache_scope:+${invalidate_cache_scope},}${selected_invalidation_scope}"
       ;;
     --refresh-stage2-source-cache=*)
@@ -633,6 +634,12 @@ while [ "$#" -gt 0 ]; do
     --force-deploy-mcp)
       force_deploy_mcp=1
       ;;
+    --stage4-dual-mode)
+      stage4_dual_mode=1
+      ;;
+    --no-stage4-dual-mode)
+      stage4_dual_mode=0
+      ;;
     --keep-artifacts|--no-verify)
       ;;
     --progress)
@@ -663,6 +670,10 @@ done
 case "${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF:-0}" in
   0|1) ;;
   *) echo "error: SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF must be 0 or 1 (got '${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF}')" >&2; exit 64 ;;
+esac
+case "${stage4_dual_mode}" in
+  0|1) ;;
+  *) echo "error: SIMPLE_STAGE4_DUAL_MODE must be 0 or 1 (got '${stage4_dual_mode}')" >&2; exit 64 ;;
 esac
 
 if [ "${stop_after_seed}" -eq 1 ]; then
@@ -2012,7 +2023,7 @@ ${cache_assurance_payload}
 ${cache_admission_payload}"
       ;;
     stage4*|stage5*)
-      if [ "$1" = stage4 ]; then
+      if [ "$1" = stage4 ] || [ "$1" = stage4-debug ]; then
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" "SIMPLE_CACHE_SCOPE=$1" \
           SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1 \
@@ -2022,6 +2033,10 @@ ${cache_admission_payload}"
           SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
           SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
           SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
+        if [ "$1" = stage4-debug ]; then
+          cache_environment_payload="${cache_environment_payload}
+STAGE4_BUILD_LANE=debug-xray"
+        fi
       elif [ "$1" = stage4b-ui-backend ]; then
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
@@ -2109,7 +2124,7 @@ prepare_native_cache() {
   label=$1
   cache_producer=$2 cache_entry=$3
   cache_build_mode=${bootstrap_mode}
-  [ "${label}" != stage4 ] || cache_build_mode=one-binary
+  [ "${label}" != stage4 ] && [ "${label}" != stage4-debug ] || cache_build_mode=one-binary
   # Each entry and exact producer receives a separate writable object/frontend
   # namespace. Previous producers remain available for explicit manual clean.
   producer_sha=$(hash_file "${cache_producer}") || exit 1
@@ -2992,6 +3007,9 @@ bootstrap_native_build_main() {
   # See doc/08_tracking/bug/stage4_seven_source_roots_rejected_2026-10-24.md
   compiler=$1
   output=$2
+  stage4_variant=${3:-release}
+  stage4_rss_receipt="${log_dir}/stage4-native-build.log.rss.env"
+  stage4_cache_scope="${SIMPLE_CACHE_SCOPE:-stage4}"
   set -- native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
@@ -3000,6 +3018,21 @@ bootstrap_native_build_main() {
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
+  if [ "${stage4_variant}" = debug-xray ]; then
+    stage4_rss_receipt="${log_dir}/stage4-debug-native-build.log.rss.env"
+    stage4_cache_scope="${SIMPLE_CACHE_SCOPE:-stage4-debug}"
+    set -- "$@" --profile=dev --debug --no-strip
+    case "${backend}:${PLATFORM}" in
+      llvm:aarch64-*-linux-*|llvm:x86_64-*-linux-*|\
+      llvm:aarch64-apple-darwin*|llvm:arm64-apple-darwin*|llvm:x86_64-apple-darwin*|\
+      llvm:aarch64-apple-macosx*|llvm:arm64-apple-macosx*|llvm:x86_64-apple-macosx*|\
+      native:aarch64-*-linux-*|native:x86_64-*-linux-*)
+        set -- "$@" --xray
+        ;;
+    esac
+  else
+    set -- "$@" --profile=prod --release --strip
+  fi
   set -- "$@" \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
@@ -3041,7 +3074,7 @@ bootstrap_native_build_main() {
     --cap-source="${bootstrap_tree_rss_source}" \
     --cap-bound="${bootstrap_tree_rss_bound}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
-    --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
+    --receipt="${stage4_rss_receipt}" -- \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -3050,7 +3083,7 @@ bootstrap_native_build_main() {
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
     SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
-    SIMPLE_CACHE_SCOPE="${SIMPLE_CACHE_SCOPE:-stage4}" \
+    SIMPLE_CACHE_SCOPE="${stage4_cache_scope}" \
     SIMPLE_FRONTEND_CACHE=1 \
     SIMPLE_FRONTEND_CACHE_DIR="${native_cache_dir}/frontend" \
     SIMPLE_HIR_CACHE=1 \
@@ -6442,7 +6475,66 @@ run_logged stage4-essential-tools-smoke run_timeout_kill 180 env \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   sh scripts/check/check-bootstrap-essential-tools-smoke.shs
 
+full_debug_bin=""
+if [ "${stage4_dual_mode}" -eq 1 ]; then
+  echo "Stage 4a (dual-mode): compiling debug + XRay CLI binary..."
+  full_debug_bin="$(bootstrap_stage3_canonical_path "$(absolute_path "${full_dir}/simple-debug${exe_suffix}")")" || {
+    echo "error: Stage 4 debug output path is not canonical" >&2
+    exit 1
+  }
+  rm -f "${full_debug_bin}"
+  saved_stage4_native_cache_dir="${native_cache_dir}"
+  prepare_native_cache stage4-debug "${stage_for_build}" full-cli-debug
+  bootstrap_progress_mark stage4-debug "$(absolute_path "${log_dir}/stage4-debug-native-build.log")"
+  run_logged stage4-debug-native-build bootstrap_native_build_main \
+    "${stage4_parent}" "${full_debug_bin}" debug-xray
+  native_cache_dir="${saved_stage4_native_cache_dir}"
+  if grep -Eq '\[stmt_get_tag\] OOB|\[flat-bridge\] missing (stmt|expr) tag' "${log_dir}/stage4-debug-native-build.log"; then
+    echo "error: Stage 4 debug+xray emitted stale flat-AST index diagnostics" >&2
+    exit 1
+  fi
+  if [ ! -x "${full_debug_bin}" ]; then
+    echo "error: failed to compile Stage 4 debug+xray CLI binary (simple-debug)" >&2
+    exit 1
+  fi
+  stage4_debug_smoke="$(run_timeout 30 "${full_debug_bin}" -c 'print(1+1)' 2>/dev/null)"
+  if [ "${stage4_debug_smoke}" != "2" ]; then
+    echo "error: stage4 debug+xray binary failed smoke test (-c 'print(1+1)' -> '${stage4_debug_smoke}')" >&2
+    exit 1
+  fi
+  if ! run_timeout 60 env SIMPLE_BINARY="$(absolute_path "${full_debug_bin}")" \
+      "${full_debug_bin}" check src/app/cli/bootstrap_main.spl >/dev/null 2>&1; then
+    echo "error: stage4 debug+xray binary failed source-check smoke" >&2
+    exit 1
+  fi
+  case "${backend}:${PLATFORM}" in
+    llvm:aarch64-*-linux-*|llvm:x86_64-*-linux-*|\
+    llvm:aarch64-apple-darwin*|llvm:arm64-apple-darwin*|llvm:x86_64-apple-darwin*|\
+    llvm:aarch64-apple-macosx*|llvm:arm64-apple-macosx*|llvm:x86_64-apple-macosx*|\
+    native:aarch64-*-linux-*|native:x86_64-*-linux-*)
+      stage4_xray_sym_ok=0
+      if command -v nm >/dev/null 2>&1 && nm "${full_debug_bin}" 2>/dev/null | grep -Eq '(__xray_set_handler|simple_xray_llvm_patch_function|simple_xray_native_handler_v1|__simple_darwin_xray_edge_v1)'; then
+        stage4_xray_sym_ok=1
+      elif command -v llvm-nm >/dev/null 2>&1 && llvm-nm "${full_debug_bin}" 2>/dev/null | grep -Eq '(__xray_set_handler|simple_xray_llvm_patch_function|simple_xray_native_handler_v1|__simple_darwin_xray_edge_v1)'; then
+        stage4_xray_sym_ok=1
+      elif command -v strings >/dev/null 2>&1 && strings "${full_debug_bin}" 2>/dev/null | grep -Eq '(__xray_set_handler|simple_xray_llvm_patch_function|simple_xray_native_handler_v1|__simple_darwin_xray_edge_v1)'; then
+        stage4_xray_sym_ok=1
+      fi
+      if [ "${stage4_xray_sym_ok}" -ne 1 ]; then
+        echo "error: stage4 debug+xray binary is missing expected XRay runtime symbols: ${full_debug_bin}" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  echo "  Stage 4 debug+xray binary: ${full_debug_bin}"
+else
+  rm -f "${full_dir}/simple-debug${exe_suffix}"
+  echo "Stage 4a (dual-mode): skipped (SIMPLE_STAGE4_DUAL_MODE=0)"
+fi
+
 stage4_provenance="${full_bin}.provenance.env"
+STAGE4_DUAL_MODE="${stage4_dual_mode}" \
+STAGE4_DEBUG_CANDIDATE_PATH="${full_debug_bin}" \
 stage4_write_candidate_provenance \
   "${full_bin}" "${stage4_provenance}" "${repo_root}" \
   "${bootstrap_script_path}" "${stage4_parent}" \
@@ -6918,6 +7010,22 @@ if [ "${deploy}" -eq 1 ]; then
     echo "ERROR: deploy refused - compiler transaction admission failed" >&2
     exit 1
   }
+  full_debug_candidate="${full_dir}/simple-debug${exe_suffix}"
+  if [ "${stage4_dual_mode}" -eq 1 ]; then
+    [ -x "${full_debug_candidate}" ] && selfhost_identity_ok "${full_debug_candidate}" || {
+      echo "ERROR: deploy refused - Stage 4 debug+xray candidate missing or failed pure-Simple identity gate: ${full_debug_candidate}" >&2
+      bootstrap_deploy_tx_abort || true
+      exit 1
+    }
+  fi
+  if [ -x "${full_debug_candidate}" ]; then
+    bootstrap_deploy_tx_add "simple-debug${exe_suffix}" "${full_debug_candidate}" \
+      "${deploy_dir}/simple-debug${exe_suffix}" 755 "$(hash_file "${full_debug_candidate}")" || {
+      echo "ERROR: deploy refused - debug+xray compiler transaction admission failed" >&2
+      bootstrap_deploy_tx_abort || true
+      exit 1
+    }
+  fi
   if [ -z "${resume_stage4_output}" ]; then
     bootstrap_deploy_tx_add simple_seed "${seed_src}" "${seed_delegate}" 755 \
       "$(hash_file "${seed_src}")" || {
@@ -7018,7 +7126,11 @@ if [ "${deploy}" -eq 1 ]; then
   bootstrap_add_deploy_authority authority.performance-measurement.env \
     "${phase7_measurement_receipt}" "${phase7_measurement_receipt_sha256}" || exit 1
 
-  for launcher_program in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do
+  launcher_programs="simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server"
+  if [ -x "${full_dir}/simple-debug${exe_suffix}" ]; then
+    launcher_programs="simple simple-debug simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server"
+  fi
+  for launcher_program in ${launcher_programs}; do
     launcher_candidate="${full_dir}/launcher.${launcher_program}${exe_suffix}"
     simple_release_write_generation_launcher "${launcher_candidate}" "${launcher_program}${exe_suffix}" v1 || exit 1
     bootstrap_deploy_tx_add "launcher.${launcher_program}${exe_suffix}" \
@@ -7078,6 +7190,10 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   }
   receipt_entries_sha="$(hash_file "${receipt_entries}")"
+  full_debug_manifest_hash="none"
+  if [ -x "${full_dir}/simple-debug${exe_suffix}" ]; then
+    full_debug_manifest_hash="$(hash_file "${full_dir}/simple-debug${exe_suffix}")"
+  fi
   generation_manifest="${bootstrap_deploy_tx_dir}/bootstrap-generation.env"
   {
     echo "schema=bootstrap-deploy-generation-v1"
@@ -7088,6 +7204,8 @@ if [ "${deploy}" -eq 1 ]; then
     echo "transaction_entries_path=${bootstrap_deploy_tx_final_dir}/receipt-entries.env"
     echo "transaction_entries_sha256=${receipt_entries_sha}"
     echo "stage4_candidate_sha256=${full_hash}"
+    echo "stage4_dual_mode=${stage4_dual_mode}"
+    echo "stage4_debug_candidate_sha256=${full_debug_manifest_hash}"
     echo "stage4_provenance_sha256=${locked_stage4_provenance_sha}"
     echo "stage3_acceptance_sha256=${locked_stage3_acceptance_sha}"
     echo "policy_authority_sha256=${locked_policy_authority_sha}"

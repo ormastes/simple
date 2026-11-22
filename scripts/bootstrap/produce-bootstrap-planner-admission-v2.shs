@@ -303,18 +303,38 @@ planner_build_argv=$(bootstrap_planner_v2_canonical_build_argv_text \
     "$admission_root/stage2-runtime-authority" \
     "$adm_dir/planner-cache" "$planner_entry_rel" "$build_planner_out")
 planner_build_argv_sha=$(bootstrap_planner_v2_hash_text "$planner_build_argv") || adm_fail planner-build-argv-unavailable
-# SIMPLE_FILE_WORKERS=0 pins this mandatory admission build to the phase route:
-# the per-file pool's process facade intermittently starts inert for a
-# worker's whole lifetime (no llc child ever spawns), which flaked this build
-# 3 of 4 attempts on 2026-11-05. Tracked in
-# doc/08_tracking/bug/per_file_pool_llc_spawn_flaky_noop_2026-11-05.md. This is
-# the documented per-invocation opt-out, not a script-global default.
-if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_FILE_WORKERS=0 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
+# Default to the per-file worker pool (SIMPLE_FILE_WORKERS=1 when unset);
+# explicit caller SIMPLE_FILE_WORKERS=0 opts out to the two-pass phase route.
+# Prebuilt Stage 2 binaries predating the clang IR-to-object cutover could
+# intermittently hit an inert per-unit-child spawn (`llc-no-object`,
+# doc/08_tracking/bug/per_file_pool_llc_spawn_flaky_noop_2026-11-05.md).
+# Run the canonical argv on the per-file default first, and ONLY on that exact
+# spawn-noop signature retry once cleanly (keeping planner_build_argv_sha
+# identical by reusing the exact `$adm_dir/planner-cache` path).
+adm_run_planner_build() {
+    ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_FILE_WORKERS="$1" SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
         native-build "--backend=$adm_planner_backend" --source src/app/cli --source src/lib \
         --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
         --cache-dir "$adm_dir/planner-cache" \
-        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
-    adm_fail planner-build-failed
+        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1
+}
+adm_requested_fw=${SIMPLE_FILE_WORKERS:-1}
+if ! adm_run_planner_build "$adm_requested_fw"; then
+    if [ -z "${SIMPLE_FILE_WORKERS:-}" ] && grep -Eq 'llc-no-object|llc produced no object file|Failed to read compiled object file' "$adm_dir/planner-build.log"; then
+        cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.attempt1.log" 2>/dev/null || :
+        rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+        if ! adm_run_planner_build 1; then
+            if grep -Eq 'llc-no-object|llc produced no object file|Failed to read compiled object file' "$adm_dir/planner-build.log"; then
+                cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.attempt2.log" 2>/dev/null || :
+                rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+                adm_run_planner_build 0 || adm_fail planner-build-failed
+            else
+                adm_fail planner-build-failed
+            fi
+        fi
+    else
+        adm_fail planner-build-failed
+    fi
 fi
 [ -x "$build_planner_out" ] || adm_fail planner-build-produced-no-executable
 planner_sha=$(bootstrap_planner_v2_hash_file "$build_planner_out")

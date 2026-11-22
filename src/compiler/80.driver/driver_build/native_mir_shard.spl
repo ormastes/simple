@@ -167,6 +167,79 @@ pub fn native_mir_shard_outcome_after_hir_errors_v1(outcome: text, hir_compile_e
 fn native_mir_shard_record_base_v1(queue: text, module_name: text) -> text:
     "{queue}/{sha256_text(module_name)}"
 
+fn _native_mir_shard_spec_slot_v1(spec: text) -> (i64, i64):
+    val parts = spec.split("/")
+    if parts.len() != 2:
+        return (0, 1)
+    val idx = parts[0].to_i64() ?? -1
+    val count = parts[1].to_i64() ?? 0
+    if count <= 1 or idx < 0 or idx >= count:
+        return (0, 1)
+    (idx, count)
+
+var _g_mir_visit_rotation_start: i64 = 0
+var _g_mir_visit_cursor_path: text = ""
+
+fn _native_mir_shard_cursor_path_for_slot_v1(queue: text, slot: i64, count: i64) -> text:
+    if count > 1 and slot >= 0 and slot < count:
+        return "{queue}/.mir_claim_cursor.{slot}-{count}"
+    "{queue}/.mir_claim_cursor"
+
+# reason: MIR ledger queue path and loop position for multi-round LPT cursor rotation
+@allow(primitive_api)
+pub fn native_mir_shard_note_cursor_v1(queue: text, loop_pos: i64, total: i64):
+    if queue == "" or _g_mir_visit_cursor_path == "" or total <= 0:
+        return
+    val raw_next = (_g_mir_visit_rotation_start + loop_pos + 1) % total
+    val bounded = if raw_next >= 0 and raw_next < total: raw_next else: 0
+    val _ = file_atomic_write(_g_mir_visit_cursor_path, "{bounded}")
+
+# Partition `lpt_order` across workers without losing LPT balance or work-stealing:
+# - Multi-shard workers (`0/K .. (K-1)/K`): worker `slot` visits `pos % K == slot`
+#   first (each worker gets 1st-group, 2nd-group, ... largest modules with zero
+#   contention), then the remaining LPT positions to steal stragglers if a peer slows/dies.
+# - Sequential batch children (`0/1` or `+fork` multi-round children): rotate
+#   the slot schedule from `.mir_claim_cursor` so 100+ rounds scan O(N) total.
+# reason: schedule index vector and MIR shard spec/queue/owner strings
+@allow(primitive_api)
+pub fn native_mir_shard_worker_order_v1(lpt_order: [i64], spec: text, queue: text, owner: text = "") -> [i64]:
+    _g_mir_visit_rotation_start = 0
+    _g_mir_visit_cursor_path = ""
+    val total = lpt_order.len()
+    if total <= 1 or spec == "":
+        return lpt_order
+    val (slot, count) = _native_mir_shard_spec_slot_v1(spec)
+    var partitioned = lpt_order
+    if count > 1:
+        var home: [i64] = []
+        var steal: [i64] = []
+        var rank = 0
+        while rank < total:
+            if (rank % count) == slot:
+                home.push(lpt_order[rank])
+            else:
+                steal.push(lpt_order[rank])
+            rank = rank + 1
+        for item in steal:
+            home.push(item)
+        partitioned = home
+    val effective_owner = if owner != "": owner else: native_mir_shard_owner_v1()
+    if queue != "" and (count <= 1 or effective_owner.contains("+fork")):
+        val cpath = _native_mir_shard_cursor_path_for_slot_v1(queue, slot, count)
+        _g_mir_visit_cursor_path = cpath
+        val raw_cursor = if file_exists(cpath): file_read(cpath).trim().to_i64() ?? 0 else: 0
+        val start = if raw_cursor >= 0 and raw_cursor < total: raw_cursor else: 0
+        _g_mir_visit_rotation_start = start
+        if start == 0:
+            return partitioned
+        var rotated: [i64] = []
+        var step = 0
+        while step < total:
+            rotated.push(partitioned[(start + step) % total])
+            step = step + 1
+        return rotated
+    partitioned
+
 # 1 = claimed by this worker, 0 = owned by another worker, -1 = ledger refused.
 pub fn native_mir_shard_claim_v1(queue: text, module_name: text, key: text) -> i64:
     hir_shard_recovery_claim(queue, native_mir_shard_owner_v1(), module_name, key)
