@@ -80,8 +80,9 @@ if defined BOOTSTRAP_BIN (
 )
 
 echo error: no Simple runtime found under %REPO_ROOT% 1>&2
-echo   set SIMPLE_BINARY to a seed built from this tree, or deploy one: 1>&2
-echo   sh scripts/bootstrap/bootstrap-windows.sh --msvc ^&^& sh scripts/setup/setup.shs 1>&2
+echo   set SIMPLE_BINARY to a seed built from this tree, or build Phase 3/4 ^(mingw default^): 1>&2
+echo   scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=all 1>&2
+echo   ^(cold seed fallback: sh scripts/bootstrap/bootstrap-windows.sh --mingw ^&^& sh scripts/setup/setup.shs^) 1>&2
 echo   check a deployed binary with: sh scripts/check/check-deployed-simple-runnable.shs 1>&2
 exit /b 1
 
