@@ -1,0 +1,216 @@
+"""Pure-Simple compiler memory, @embed placement, flat AST slices, SMF assembly, and retention regression spec."""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.types.type_layout.{TypeLayoutKind, layoutattr_default_}
+use compiler.common.data.attribute_schema_v1.{
+    AttrPlacementV1, attr_placement_from_token_v1, attr_placement_token_v1
+}
+use compiler.common.data.data_schema_contracts.{data_schema_authority_v1}
+use compiler.common.data.data_schema_resolver.{
+    data_schema_decls_from_sdn_v1, data_schema_resolve_v1,
+    data_policy_rules_from_sdn_v1, data_attr_storage_resolve_v1
+}
+use compiler.common._Attributes.decl_attrs.{
+    EmbedLayoutMode, parse_embed_attr, embed_attr_placement_v1, apply_embed_layout_attr_v1,
+    parse_function_attrs, parse_vhdl_hardware_attrs,
+    vhdl_hardware_metadata_absent_shared_v1, driver_manifest_attr_absent_shared_v1
+}
+use compiler.common.bootstrap_low_memory_config.{
+    BootstrapLowMemoryEnv, BootstrapLowMemoryMode,
+    bootstrap_low_memory_opt_ins_requested,
+    bootstrap_low_memory_mode_resolve,
+    bootstrap_stage_low_memory_relief_requested
+}
+use compiler.core.ast_stmt.{
+    stmt_reset, stmt_alloc, stmt_body, stmt_body_flat,
+    stmt_body_store_one, stmt_assign_stmt, stmt_compound_assign_stmt,
+    stmt_labeled_loop, stmt_get_body, stmt_get_expr, stmt_get_name, stmt_get_type
+}
+use compiler.driver.smf_writer.{
+    Target, SmfBuildOptions, SmfDependencyEntry,
+    serialize_smf_dependencies, deserialize_smf_dependencies,
+    generate_smf_with_raw_code_options
+}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.borrow.borrow_check.{check_mir_module}
+
+fn _attr_ident(name: text, args: [Expr]) -> Attribute:
+    Attribute(name: name, args: args, span: Span.empty())
+
+fn _str_expr(value: text) -> Expr:
+    Expr(kind: ExprKind.StringLit(value, None), span: Span.empty())
+
+fn _int_expr(value: i64) -> Expr:
+    Expr(kind: ExprKind.IntLit(value), span: Span.empty())
+
+fn _make_mir_fn(sym_id: i64, name: text, invalid_move: bool) -> MirFunction:
+    val l0 = LocalId(id: 0)
+    val l1 = LocalId(id: 1)
+    val l2 = LocalId(id: 2)
+    var instructions: [MirInst] = [
+        MirInst(kind: MirInstKind.Const(l0, MirConstValue.Int(11), MirType.i64()), span: None)
+    ]
+    if invalid_move:
+        instructions.push(MirInst(kind: MirInstKind.Move(l1, l0), span: None))
+    instructions.push(MirInst(kind: MirInstKind.Copy(l2, l0), span: None))
+    MirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [],
+        blocks: [MirBlock(
+            id: BlockId.entry(),
+            label: None,
+            instructions: instructions,
+            terminator: MirTerminator.Ret(None)
+        )],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: {},
+        layout_phase: None,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: driver_manifest_attr_absent_shared_v1(),
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_absent_shared_v1(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: None
+    )
+
+describe "Pure-Simple compiler memory, @embed placement, flat slices, and SMF assembly":
+    it "resolves @embed placement tokens, TypeLayout mapping, and compiler_function_attrs_v1.sdn":
+        val embed_placement = attr_placement_from_token_v1("embed")
+        expect(embed_placement.is_ok()).to_equal(true)
+        expect(attr_placement_token_v1(embed_placement.unwrap())).to_equal("direct")
+
+        val parsed_default = parse_embed_attr([_attr_ident("embed", [])])
+        expect(parsed_default.is_some()).to_equal(true)
+        val layout_default = apply_embed_layout_attr_v1(layoutattr_default_(), parsed_default)
+        expect(layout_default.is_preserve_order).to_equal(true)
+        expect(attr_placement_token_v1(embed_attr_placement_v1(parsed_default))).to_equal("direct")
+
+        val parsed_packed = parse_embed_attr([_attr_ident("embed", [_str_expr("packed"), _int_expr(8)])])
+        val layout_packed = apply_embed_layout_attr_v1(layoutattr_default_(), parsed_packed)
+        expect(layout_packed.layout_kind == TypeLayoutKind.Packed).to_equal(true)
+        expect(layout_packed.is_packed).to_equal(true)
+        expect(layout_packed.has_explicit_align).to_equal(true)
+        expect(layout_packed.explicit_align).to_equal(8)
+
+        val fn_attr = parse_function_attrs([_attr_ident("embed", [])])
+        expect(fn_attr.is_inline).to_equal(true)
+
+        val sdn_path = "config/data_policy/compiler_function_attrs_v1.sdn"
+        val sdn_source = file_read(sdn_path)
+        val decls = data_schema_decls_from_sdn_v1(sdn_source, sdn_path, "compiler.mir").unwrap()
+        val surface = data_schema_resolve_v1(data_schema_authority_v1("compiler.mir", ["compiler.mir"]), decls, []).unwrap()
+        expect(surface.attrs.len()).to_equal(6)
+        val rules = data_policy_rules_from_sdn_v1(sdn_source, sdn_path, "compiler.mir").unwrap()
+        val sym_choice = data_attr_storage_resolve_v1("compiler.mir", "compiler.mir.MirFunctionView", "symbol", rules, "direct").unwrap()
+        expect(sym_choice.choice).to_equal("embed")
+        expect(attr_placement_token_v1(attr_placement_from_token_v1(sym_choice.choice).unwrap())).to_equal("direct")
+        val vhdl_choice = data_attr_storage_resolve_v1("compiler.mir", "compiler.mir.MirFunctionView", "vhdl_metadata", rules, "direct").unwrap()
+        expect(vhdl_choice.choice).to_equal("sparse_hash")
+
+    it "fast-paths absent VHDL and driver manifest defaults without mutability bleed":
+        val empty_vhdl = parse_vhdl_hardware_attrs([])
+        expect(empty_vhdl.is_hardware).to_equal(false)
+        expect(empty_vhdl.has_clocked).to_equal(false)
+        expect(empty_vhdl.generics.len()).to_equal(0)
+        val hw_vhdl = parse_vhdl_hardware_attrs([_attr_ident("hardware", [])])
+        expect(hw_vhdl.is_hardware).to_equal(true)
+        expect(vhdl_hardware_metadata_absent_shared_v1().is_hardware).to_equal(false)
+
+    it "stores 1-element statement bodies directly in stmt_body_flat with zero stmt_body growth":
+        stmt_reset()
+        val assign_id = stmt_assign_stmt(10, 20, 1)
+        val compound_id = stmt_compound_assign_stmt(3, 30, 40, 2)
+        val loop_id = stmt_labeled_loop("outer", 50, 3)
+        val custom_id = stmt_alloc(1, 4)
+        stmt_body_store_one(custom_id, 99)
+
+        expect(stmt_body.len()).to_equal(0)
+        expect(stmt_body_flat).to_equal([20, 40, 50, 99])
+        expect(stmt_get_expr(assign_id)).to_equal(10)
+        expect(stmt_get_body(assign_id)).to_equal([20])
+        expect(stmt_get_type(compound_id)).to_equal(3)
+        expect(stmt_get_body(compound_id)).to_equal([40])
+        expect(stmt_get_name(loop_id)).to_equal("outer")
+        expect(stmt_get_body(loop_id)).to_equal([50])
+        expect(stmt_get_body(custom_id)).to_equal([99])
+        stmt_reset()
+
+    it "assembles SMF sections in-place with exact trailer, offsets, and payload bytes":
+        val code_bytes: [u8] = [0x90, 0xC3, 0xCC, 0x90]
+        var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        opts.deps = [
+            SmfDependencyEntry(module_path: "std/core", content_hash: 123456789),
+            SmfDependencyEntry(module_path: "compiler/mir", content_hash: 987654321)
+        ]
+        opts.driver_manifest_bytes = [0x44, 0x52, 0x56, 0x53]
+        opts.launch_metadata_bytes = [0x6D, 0x65, 0x74, 0x61]
+        opts.compile_options_bytes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        opts.source_hash = 424242
+
+        val smf = generate_smf_with_raw_code_options(code_bytes, opts)
+        val expected_deps = serialize_smf_dependencies(opts.deps)
+        expect(deserialize_smf_dependencies(expected_deps).len()).to_equal(2)
+
+        # Code prefix is intact at offset 0
+        expect(smf[0:4]).to_equal(code_bytes)
+        # Deps payload immediately follows code_bytes
+        expect(smf[4:4 + expected_deps.len()]).to_equal(expected_deps)
+        val drv_off = 4 + expected_deps.len()
+        expect(smf[drv_off:drv_off + 4]).to_equal(opts.driver_manifest_bytes)
+        val launch_off = drv_off + 4
+        expect(smf[launch_off:launch_off + 4]).to_equal(opts.launch_metadata_bytes)
+        # Trailer header at EOF-96 starts with "SMF\0" (83, 77, 70, 0)
+        expect(smf.len()).to_be_greater_than(96)
+        val trailer_start = smf.len() - 96
+        expect(smf[trailer_start:trailer_start + 4]).to_equal([83, 77, 70, 0])
+
+    it "checks clean and conflicting MIR functions per-function with zero-loan fast-skip parity":
+        var clean_fns: Dict<SymbolId, MirFunction> = {}
+        val clean_a = _make_mir_fn(101, "clean_scalar_a", false)
+        val clean_b = _make_mir_fn(102, "clean_scalar_b", false)
+        clean_fns[clean_a.symbol] = clean_a
+        clean_fns[clean_b.symbol] = clean_b
+        val clean_mod = MirModule(name: "clean_mod", functions: clean_fns, statics: {}, constants: {}, types: {})
+        expect(check_mir_module(clean_mod).len()).to_equal(0)
+
+        var mixed_fns: Dict<SymbolId, MirFunction> = {}
+        val bad_move = _make_mir_fn(202, "bad_move_fn", true)
+        mixed_fns[clean_a.symbol] = clean_a
+        mixed_fns[bad_move.symbol] = bad_move
+        val mixed_mod = MirModule(name: "mixed_mod", functions: mixed_fns, statics: {}, constants: {}, types: {})
+        val mixed_errs = check_mir_module(mixed_mod)
+        expect(mixed_errs.len()).to_equal(1)
+        expect(mixed_errs[0].function_name).to_equal("bad_move_fn")
+        expect(mixed_errs[0].message).to_contain("moved")
+
+    it "preserves Stage 4 low-memory predicate while enabling Stage 2/3 opt-in relief":
+        expect(bootstrap_low_memory_opt_ins_requested("1", "1", "1")).to_equal(true)
+        expect(bootstrap_low_memory_opt_ins_requested("1", "0", "1")).to_equal(false)
+        expect(bootstrap_stage_low_memory_relief_requested("1", "2", "0", "1")).to_equal(true)
+        expect(bootstrap_stage_low_memory_relief_requested("1", "3", "", "1")).to_equal(true)
+        expect(bootstrap_stage_low_memory_relief_requested("0", "2", "0", "1")).to_equal(true)
+        expect(bootstrap_stage_low_memory_relief_requested("1", "2", "0", "0")).to_equal(false)
+        expect(bootstrap_stage_low_memory_relief_requested("0", "", "0", "1")).to_equal(false)
+        val mode = bootstrap_low_memory_mode_resolve(BootstrapLowMemoryEnv(
+            bootstrap: "1", stage: "3", stage4: "0", low_memory: "1"
+        ))
+        expect(mode == BootstrapLowMemoryMode.StageRelief).to_equal(true)

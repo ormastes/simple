@@ -31,6 +31,7 @@ use compiler.frontend.rt_criticality_registry.{rt_criticality_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
 use compiler.frontend.resource_registry.{resource_registry_reset}
 use compiler.mir.mir_data.{bootstrap_fn_registries_reset_after_session_v1}
+use compiler.common._Attributes.decl_attrs.{decl_attrs_set_session_v1, decl_attrs_reset_after_session_v1, decl_attrs_warm_absent_defaults_v1}
 
 @unsafe(reason: "begin the build session heap", capabilities: [ffi])
 extern fn rt_session_heap_begin() -> u32
@@ -66,6 +67,7 @@ fn build_session_end_reset_globals_v1():
     layer_eq_registry_reset()
     resource_registry_reset()
     bootstrap_fn_registries_reset_after_session_v1()
+    decl_attrs_reset_after_session_v1()
 
 fn _sffi_session_rc_share<T>(value: T) -> bool:
     unsafe(capabilities: [ffi]):
@@ -113,12 +115,16 @@ class BuildSession:
     me begin() -> bool:
         if self.heap != 0u32:
             return true
+        # Pre-warm permanent absent attribute defaults BEFORE entering the
+        # session heap so shared absent metadata lives on the permanent heap.
+        decl_attrs_warm_absent_defaults_v1()
         if build_session_enabled_by_env():
             unsafe(capabilities: [ffi]):
                 self.heap = rt_session_heap_begin()
         # Set on the canonical store (the forwarders read it), not a copy.
         bootstrap_hir_store_set_session(self.active())
         bootstrap_mir_store_set_session(self.active())
+        decl_attrs_set_session_v1(self.active())
         self.active()
 
     me publish_alloc_begin() -> bool:
