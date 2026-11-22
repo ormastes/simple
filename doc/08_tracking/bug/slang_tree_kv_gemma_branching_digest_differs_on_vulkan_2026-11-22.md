@@ -1,39 +1,48 @@
-# Tree KV cache (mode 3): Gemma branching digest differs from no-cache on Vulkan
+# Tree KV cache (mode 3): not bit-exact against cache-off on Vulkan (Gemma branching digest differs)
 
-- **Status:** open
-- **Found:** 2026-11-22, Windows EVO-X5Pro host, Radeon 8065S through the Vulkan llama.cpp build (`build-mingw-vulkan`)
-- **Shim:** `C:/dev/slang-shims/postfix-e7a4fb390ad/vulkan/slang_ggml.dll`, built from PR #10682
+- **Status:** open. The cause is identified (two backend-level causes, below). The fix needs an owner decision.
+- **Found:** 2026-11-22, Windows EVO-X5Pro host, Radeon 8065S through the Vulkan llama.cpp build (`build-mingw-vulkan`, llama.cpp `99b9548`)
 - **Seed:** `C:/dev/seeds/simple-release.exe`
-- **Spec:** `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl`
+- **Spec:** `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl` (unchanged; it still fails 2/3 on Gemma on Vulkan)
 
 ## Observed
 
 On Vulkan, `gemma-3-270m-it-GGUF` is fully offloaded (19/19 layers).
 
-| workload | lane | prefilled | reused | wall ms | digest |
-|---|---|---|---|---|---|
-| branching | off | 6652 | 0 | 1584 | 81048996d497 |
-| branching | tree | 3068 | 3584 | 655 | **4524590e911e** |
-| boundary | off / tree | 1987 / 1475 | 0 / 512 | 276 / 145 | 57f18cb60a04 (equal) |
-| multiturn | off / tree | 5295 / 2735 | 0 / 2560 | 959 / 509 | 695f3acdc604 (equal) |
+| workload | lane | prefilled | reused | digest |
+|---|---|---|---|---|
+| branching | off | 6652 | 0 | 81048996d497 |
+| branching | tree | 3068 | 3584 | **4524590e911e** |
+| boundary | off / tree | 1987 / 1475 | 0 / 512 | 57f18cb60a04 (equal) |
+| multiturn | off / tree | 5295 / 2735 | 0 / 2560 | 695f3acdc604 (equal) |
 
-The branching example therefore fails (2/3).
+Request 6 (follow-up 3) is the only request whose text differs. Qwen2.5-1.5B on Vulkan passes 3/3. On the CPU build Gemma branching is digest-equal (`C:/dev/slang-logs/shimtree/tree_spec3.log`); bits there are unmeasured.
 
-On the same host, Qwen2.5-1.5B-Instruct-Q4_K_M on Vulkan (29/29 layers) passes all three workloads (3/3) with equal digests. The same Gemma branching workload matched on the CPU build (`C:/dev/slang-logs/shimtree/tree_spec3.log`, digest 139fec2ec5a6).
+## Method
 
-## Suspected cause (not yet proven)
+A diagnostic shim printed an FNV hash of the full logits vector at every sample step, with the top-1 token and the top-1/top-2 gap. A diagnostic copy of the live spec printed per-request output digests. Each lane ran in its own load, and every run took the GPU lock. All logs are under `C:/dev/slang-logs/treevk/`; the diagnostic spec is kept there as `treevk_diag_spec.spl`. Steps are counted over the branching workload: 16 warmup steps ("Zebra."), then 16 per request.
 
-The Fable review of #10518 (finding 6) noted that the tree cold path differs in shape from the no-cache path on an offloaded host:
+## Findings
 
-- no-cache decodes the whole prompt in one call while its context is unwarmed;
-- the tree splits off the last token.
+1. **The shape-split theory is wrong.** Splitting the last prompt token on the cold no-cache path (the earlier WIP) left every per-request digest unchanged in both lanes (`diag_base_gemma_1.log` vs `diag_fix1_gemma_1.log`).
+2. **The prefix reuse is not the cause.** Off vs tree, 144 of 144 logits steps differ, including the warmup and cold request 0, which reuse nothing in either lane (`diag2_gemma.log`). With reuse forced off in the tree, the tree lane gives the same bad digest 4524590e911e (`diag2_noreuse_gemma.log`). The off lane is deterministic: two runs match at every step.
+3. **Qwen is exact only by luck.** Every logits step differs between its lanes too; greedy argmax just never flips (`v_qwen.log`).
+4. **Cause C1: ggml-vulkan fusion depends on the KV stream count.** With `GGML_VK_DISABLE_FUSION=1`, cold request 0 becomes bit-exact off vs tree (steps 17-32), and the off digest moves to the tree's value (`v_GGML_VK_DISABLE_FUSION.log`). `GGML_VK_DISABLE_GRAPH_OPTIMIZE=1` has the same effect (`v_GGML_VK_DISABLE_GRAPH_OPTIMIZE.log`). Both runs report 3/3, but at bit level requests 1-7 still differ, so that pass is luck as well.
+   - Proven by the env experiment: fusion changes the off lane's numerics and not the tree's.
+   - Inferred from code, no graph dump: with `n_stream > 1`, `llama_kv_cache::cpy_k` (`src/llama-kv-cache.cpp:1349`) inserts a `ggml_reshape_2d` between the K view and `set_rows`. The Vulkan `rms_norm_mul_rope_view_set_rows` / `rope_view_set_rows` matchers then no longer see their pattern, so the one-stream cache-off context runs the fused kernel and the 16-stream tree context does not.
+5. **Cause C2: stale K/V data in freed cells changes flash-attention output.** With fusion off and reuse off:
+   - requests 0-4 are bit-exact;
+   - requests 5-7 differ (`v_nofusion_noreuse.log`). They ran on seqs 1-3, whose streams had earlier held longer requests, and the stale cells sit past the new request's frontier inside `n_kv`;
+   - request 4 ran on seq 0, whose earlier contents (the warm-up) lay below the new frontier and were overwritten, and it is exact.
 
-On a GPU backend, a different micro-batch shape can change reduction order, so branches decoded from a reused prefix can diverge in the last bits. The two workloads that are exact (boundary, multiturn) reuse along one path. Branching reuses one owner prefix for 7 siblings.
+   Zeroing the stream first (a cross-stream `seq_cp` from a never-used seq) makes requests 0-7 all bit-exact (`v_nofusion_noreuse_zero.log`). Under reuse, `seq_cp` copies the owner's whole stream, including its tail past `reuse`, so every reused request carries stale data past its frontier.
+   - Proven: masked cells within `n_kv` affect the result.
+   - Not identified: the shader-level mechanism (the `-inf` mask should zero those terms).
 
-## Next steps
+## Fix options (owner decision)
 
-1. Run the no-cache lane twice on Vulkan to rule out run-to-run nondeterminism.
-2. Log per-request outputs to find the first request that diverges.
-3. If the cause is the shape difference, either make the cold no-cache path use the same split, or document that mode 3 is exact only on CPU, or on GPU when the shape matches.
+- **(a)** Set `GGML_VK_DISABLE_FUSION` process-wide before Vulkan device init. This fixes C1 only. It costs about 6% wall time (branching off 1293 -> 1373 ms, tree 720 -> 749 ms) for every Vulkan model in the process.
+- **(b)** Per tree request, zero the destination stream from a pristine seq, then restore the reused prefix with a host `llama_state_seq_get_data` / `set_data` round-trip instead of the whole-stream `seq_cp`. This fixes C2. It is untested and costs a host copy of the reused KV on every hit.
+- **(c)** Upstream fix in llama.cpp/ggml-vulkan: accept the reshape in the fusion matchers when a ubatch uses one stream, and make flash attention independent of masked-cell data.
 
-Logs: `C:/dev/slang-logs/postfix/tree_live_vulkan_*.log`
+Exactness needs (a or c) plus (b or c). Until then mode 3 is digest-equal to cache-off on the CPU build only. On Vulkan it gives the same text only while greedy argmax happens not to flip. The live spec's digest check is not evidence of bit exactness on a GPU. Only branching was compared at bit level; boundary and multiturn are digest-only.
