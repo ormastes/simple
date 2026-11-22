@@ -8,6 +8,7 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
 use compiler.core.unit_constraint.{unit_constraint_register, unit_constraint_drain_conflicts}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
 use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
@@ -48,3 +49,28 @@ describe "unit name conflict with different bounds":
     it "reports nothing for a single declaration":
         val src = "unit UncOne: u16 as unco in 1..=100\nfn main():\n    0\n"
         expect(conflict_warnings(src).len()).to_equal(0)
+
+fn receipt_conflicts(module_name: text, hir: HirModule) -> [text]:
+    val receipt = collect_module_typecheck_receipt_v1(module_name, hir, TypecheckPassSeverity.Warn)
+    var out: [text] = []
+    for w in receipt.warnings:
+        if w.contains("SPL-UNIT-006"): out.push(w)
+    out
+
+describe "SPL-UNIT-006 attribution across modules":
+    it "attributes the warning to the declaring module, not the next one typechecked":
+        val _s = unit_constraint_drain_conflicts()
+        val src_a = "unit UncMa: u16 as ucma in 1..=100\nunit UncMa: u16 as ucma in 1..=200\nfn main():\n    0\n"
+        val src_b = "unit UncMb: u16 as ucmb in 1..=100\nfn main():\n    0\n"
+        val mod_a = parse_full_frontend(src_a, "unc_mod_a.spl", "unc_mod_a.spl", Logger(level: 0))
+        val mod_b = parse_full_frontend(src_b, "unc_mod_b.spl", "unc_mod_b.spl", Logger(level: 0))
+        var hl_a = HirLowering.with_filename("unc_mod_a.spl")
+        val hir_a = hl_a.lower_module(mod_a)
+        var hl_b = HirLowering.with_filename("unc_mod_b.spl")
+        val hir_b = hl_b.lower_module(mod_b)
+        # B is typechecked first: it must not receive A's warning.
+        expect(receipt_conflicts("unc_mod_b", hir_b).len()).to_equal(0)
+        val ws_a = receipt_conflicts("unc_mod_a", hir_a)
+        expect(ws_a.len()).to_equal(1)
+        expect(ws_a[0]).to_contain("unc_mod_a")
+        expect(ws_a[0]).to_contain("UncMa")
