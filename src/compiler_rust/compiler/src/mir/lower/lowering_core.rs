@@ -2241,6 +2241,7 @@ impl<'a> MirLowerer<'a> {
 
         // Copy extern function names from HIR to MIR
         module.extern_fn_names = hir.extern_fn_names.clone();
+        module.extern_system_abi = hir.extern_system_abi.clone();
 
         // Copy compile-time constant init values from HIR to MIR
         module.global_init_values = hir.global_init_values.clone();

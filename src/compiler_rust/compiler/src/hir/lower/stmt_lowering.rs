@@ -1958,6 +1958,8 @@ impl Lowerer {
                     .iter()
                     .map(|p| self.resolve_type_opt(&p.ty))
                     .collect::<Result<Vec<_>, _>>()?;
+                self.module
+                    .record_extern_system_abi(&e.name, &e.attributes, &param_types, ret_ty);
                 self.module.extern_param_types.insert(e.name.clone(), param_types);
                 Ok(vec![])
             }

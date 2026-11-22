@@ -13,6 +13,7 @@ use super::core::Parser;
 /// These are non-effect, non-decorator tags used for metadata, lint control, test config, etc.
 pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     // Lint control
+    "abi",
     "allow",
     "warn",
     "deny",

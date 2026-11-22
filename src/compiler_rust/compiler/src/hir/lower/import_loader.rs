@@ -763,6 +763,12 @@ impl Lowerer {
                             .iter()
                             .map(|p| self.resolve_type_opt(&p.ty))
                             .collect::<Result<Vec<_>, _>>()?;
+                        self.module.record_extern_system_abi(
+                            &extern_fn.name,
+                            &extern_fn.attributes,
+                            &param_types,
+                            ret_ty,
+                        );
                         self.module.extern_param_types.insert(extern_fn.name.clone(), param_types);
                         imported_count += 1;
                     }

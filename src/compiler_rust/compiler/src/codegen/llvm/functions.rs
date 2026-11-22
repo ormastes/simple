@@ -3649,7 +3649,7 @@ impl LlvmBackend {
                             .get(i)
                             .copied()
                             .and_then(|ty| ty.try_into().ok())
-                            .filter(|ty: &inkwell::types::BasicTypeEnum| !ty.is_pointer_type())
+                            .filter(|ty: &inkwell::types::BasicTypeEnum| !ty.is_pointer_type() && func.get_call_conventions() != 64)
                             .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
@@ -3726,7 +3726,9 @@ impl LlvmBackend {
                     }
                     let declared_params = func.get_type().get_param_types().len();
                     let typed = Self::ptr_arg_needs_typed_call(&func.get_type().get_param_types(), &arg_vals);
-                    let call_site = if declared_params != arg_vals.len() || typed {
+                    let call_site = if func.get_call_conventions() == 64 {
+                        self.build_system_abi_call(func, &arg_vals, builder, "mcall")?
+                    } else if declared_params != arg_vals.len() || typed {
                         let fn_ptr = func.as_global_value().as_pointer_value();
                         let call_ty = if typed { self.call_type_from_args(func.get_type(), &arg_vals) } else { fallback_fn_type };
                         builder
@@ -3740,6 +3742,7 @@ impl LlvmBackend {
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
+                            let ret_val = self.widen_system_abi_return(&func, ret_val, builder)?;
                             vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
