@@ -1,0 +1,93 @@
+# Builds the SCI section-10 extension route table from composition source and
+# an extension config, then encodes a full admitted composition image.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.composition.types.{SimpleCompositionImageV1}
+use std.nogc_sync_mut.composition.source.{parse_composition_source_v1}
+use std.nogc_sync_mut.composition.codec.{encode_composition_image_with_cli_option_route_v1}
+use std.nogc_sync_mut.composition.cli_option_route.{SimpleCliOptionRouteTableV1, SimpleCliExtensionNamespaceRecordV1, SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1}
+use std.nogc_sync_mut.composition.cli_extension_config.{cli_extension_registry_from_sdn_v1, availability_from_text, missing_policy_from_text}
+use std.nogc_sync_mut.composition.sci_generator.{SciRouteSourceV1, sci_generate_route_section_v1}
+
+struct SciExtensionArtifactV1:
+    ok: bool
+    error: text
+    bytes: [u8]           # full SCI image with section 10
+    config_sha256: text   # sha256_text(config_source)
+    artifact_sha256: text # sha256_u8_hex(bytes)
+    route_count: i64
+
+fn _artifact_error(error: text) -> SciExtensionArtifactV1:
+    SciExtensionArtifactV1(ok: false, error: error, bytes: [], config_sha256: "", artifact_sha256: "", route_count: 0)
+
+fn _field_text(item: SdnValue, key: text) -> Result<text, text>:
+    match item.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("composition-error: cli-extension: field must be text: " + key)
+        case None: Ok("")
+
+fn sci_extension_namespace_route_v1(image: SimpleCompositionImageV1, record: SimpleCliExtensionNamespaceRecordV1) -> Result<SciRouteSourceV1, text>:
+    var i = 0
+    while i < image.bindings.len():
+        if image.bindings[i].provider_id == record.provider_id:
+            return Ok(SciRouteSourceV1(key: record.namespace, route_kind: SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1,
+                command_id: record.missing_policy, target: record.provider_id,
+                component_count: record.availability, flags: i + 1))
+        i = i + 1
+    Err("composition-error: cli-extension: unbound provider " + record.provider_id)
+
+fn composition_cli_extension_routes_v1(source: text) -> Result<[SciRouteSourceV1], text>:
+    val image = parse_composition_source_v1(source)?
+    val parsed = match parse_with_issues(source):
+        case Ok(p): p
+        case Err(e): return Err("composition-error: malformed sdn: " + e)
+    val entries = match parsed.0.get("cli_extensions"):
+        case Some(v):
+            match v.as_array():
+                case Some(a): a
+                case None: return Err("composition-error: cli_extensions must be an array")
+        case None: return Ok([])
+    var table = SimpleCliOptionRouteTableV1.create()
+    var i = 0
+    while i < entries.len():
+        val item = entries[i]
+        val namespace = _field_text(item, "namespace")?
+        val provider_id = _field_text(item, "provider")?
+        val availability = availability_from_text(_field_text(item, "availability")?)?
+        val missing_policy = missing_policy_from_text(_field_text(item, "missing_policy")?)?
+        val diag = table.register_namespace(SimpleCliExtensionNamespaceRecordV1(
+            namespace: namespace, provider_id: provider_id,
+            availability: availability, missing_policy: missing_policy))
+        if not diag.ok:
+            return Err("composition-error: cli-extension: register failed for namespace " + namespace + ": " + diag.detail)
+        i = i + 1
+    var routes: [SciRouteSourceV1] = []
+    var n = 0
+    while n < table.namespaces.len():
+        routes.push(sci_extension_namespace_route_v1(image, table.namespaces[n])?)
+        n = n + 1
+    Ok(routes)
+
+fn sci_compile_extension_config_v1(image: SimpleCompositionImageV1, config_source: text, generation: i64) -> SciExtensionArtifactV1:
+    val table = match cli_extension_registry_from_sdn_v1(config_source):
+        case Ok(t): t
+        case Err(e): return _artifact_error(e)
+    var routes: [SciRouteSourceV1] = []
+    var n = 0
+    while n < table.namespaces.len():
+        match sci_extension_namespace_route_v1(image, table.namespaces[n]):
+            case Ok(r): routes.push(r)
+            case Err(e): return _artifact_error(e)
+        n = n + 1
+    val section = sci_generate_route_section_v1(routes, generation)
+    if not section.ok:
+        return _artifact_error(section.error_code + ": " + section.error_message)
+    match encode_composition_image_with_cli_option_route_v1(image, section.bytes):
+        case Ok(bytes):
+            SciExtensionArtifactV1(ok: true, error: "", bytes: bytes, config_sha256: sha256_text(config_source),
+                artifact_sha256: sha256_u8_hex(bytes), route_count: section.route_count)
+        case Err(e): _artifact_error(e)
