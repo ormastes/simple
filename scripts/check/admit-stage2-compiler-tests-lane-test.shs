@@ -15,6 +15,11 @@ scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
 trap 'for p in "$scratch"/*.leftover; do [ ! -f "$p" ] || kill "$(cat "$p")" 2>/dev/null || :; done; rm -rf -- "$scratch"' EXIT HUP INT TERM
 checked=0
 fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+# W23: the lane runs the shared concurrent-heavy-work scan; pin it to an idle
+# fixture so a real Stage 3 on the test host never decides these cases.
+: >"$scratch/idle.snapshot"
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$scratch/idle.snapshot"
+export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
 
 src="$scratch/src"
 mkdir -p "$src/scripts/bootstrap/lib"
@@ -35,6 +40,12 @@ cat >"$src/scripts/bootstrap/bootstrap-phase-verification.shs" <<EOF
 sleep 300 &
 echo \$! >"$scratch/\$ADMIT_FIXTURE_MODE.leftover"
 [ "\$ADMIT_FIXTURE_MODE" = hang ] && wait
+if [ "\$ADMIT_FIXTURE_MODE" = capkill ]; then
+  # The real campaign watchdog's receipt tail plus its W21 verdict line.
+  printf 'status=rss-cap-exceeded\nexit_status=88\nmax_rss_kib=11638710\npeak_rss_kib=11689776\ntimeout_signal=none\n' >&2
+  echo 'rss-guard: rss-cap-exceeded cap_kib=11638710 peak_kib=11689776 (process tree killed by the enforced RSS cap, not a timeout; cap_source=phase-policy cap_bound=small-host-one-worker)' >&2
+  exit 88
+fi
 exit 1
 EOF
 
@@ -120,6 +131,85 @@ LLVM_SYS_231_PREFIX="$llvm" SIMPLE_LINKER_FLAVOR=gnu ADMIT_FIXTURE_MODE=orphan \
 grep -q 'conflicts with --platform' "$scratch/o3.err" || fail 'conflict lane: refusal unexplained'
 [ "$(cat "$scratch/o3/stage2-compiler-tests/$wplat/rejection.env")" = prior ] ||
     fail 'conflict lane: prior rejection superseded'
+checked=$((checked + 1))
+
+# W21 reproduction: an RSS-cap kill (exit 88) is named in the verdict and the
+# rejection record, not left as an anonymous status 88 / job-terminate.
+# doc/08_tracking/bug/stage2_admit_rss_cap_ballooned_and_unnamed_2026-11-22.md
+mkout o4 "$plat"
+rc=0
+ADMIT_FIXTURE_MODE=capkill sh "$admit" --source-root="$src" --output="$scratch/o4" \
+    --platform="$plat" >"$scratch/o4.out" 2>"$scratch/o4.err" || rc=$?
+[ "$rc" = 1 ] || fail "capkill: exit $rc, want 1"
+[ -f "$scratch/capkill.leftover" ] || fail 'capkill: stub verifier never ran (vacuous)'
+grep -q 'REJECTED (status=88, rss-cap-exceeded cap_kib=11638710 peak_kib=11689776: killed by the process-tree RSS cap, not a timeout)' \
+    "$scratch/o4.err" || fail "capkill: verdict does not name the RSS cap: $(cat "$scratch/o4.err")"
+grep -qx 'kill_cause=rss-cap-exceeded cap_kib=11638710 peak_kib=11689776' \
+    "$scratch/o4/stage2-compiler-tests/$plat/rejection.env" || fail 'capkill: rejection.env has no kill_cause'
+checked=$((checked + 1))
+# W21 campaign owner: a cap kill in the campaign receipt becomes a summary row.
+(
+    . "$repo/scripts/bootstrap/lib/tree-rss-policy.shs"
+    . "$repo/scripts/bootstrap/bootstrap-verification-campaign.shs"
+    mkdir -p "$scratch/camp/a" "$scratch/camp/b"
+    printf 'status=rss-cap-exceeded\nexit_status=88\nmax_rss_kib=11638710\npeak_rss_kib=11689776\ntermination=job-terminate\ntimeout_signal=none\n' \
+        >"$scratch/camp/a/process.env"
+    printf 'status=complete\nexit_status=1\nmax_rss_kib=11638710\npeak_rss_kib=900\n' >"$scratch/camp/b/process.env"
+    bootstrap_verification_campaign_record_cap_kill 88 "$scratch/camp/a" "$scratch/camp" 2>"$scratch/camp.err" ||
+        fail 'campaign: cap kill not recorded'
+    grep -q '^task=campaign_rss_cap|result=FAIL|status=88|kill_cause=rss-cap-exceeded cap_kib=11638710 peak_kib=11689776|' \
+        "$scratch/camp/summary.env" || fail 'campaign: no campaign_rss_cap row'
+    grep -q 'campaign process-tree RSS cap fired: rss-cap-exceeded cap_kib=11638710' "$scratch/camp.err" ||
+        fail 'campaign: no stderr verdict'
+    ! bootstrap_verification_campaign_record_cap_kill 1 "$scratch/camp/b" "$scratch/camp" 2>/dev/null ||
+        fail 'campaign: plain failure recorded as a cap kill'
+    [ "$(grep -c campaign_rss_cap "$scratch/camp/summary.env")" = 1 ] || fail 'campaign: extra cap row'
+) || exit 1
+checked=$((checked + 1))
+# W21 generalization: an ordinary failure carries no kill cause.
+grep -q 'kill_cause=' "$scratch/o1/stage2-compiler-tests/$plat/rejection.env" &&
+    fail 'orphan: plain failure mislabelled as an RSS-cap kill'
+grep -q 'REJECTED (status=1); log:' "$scratch/o1.err" || fail 'orphan: plain verdict changed'
+checked=$((checked + 1))
+
+# W23 reproduction: a concurrent native-build (the running Stage 3) refuses the
+# lane with exit 75 before anything is superseded and before the verifier runs.
+# doc/08_tracking/bug/stage2_admit_concurrent_heavy_lane_admitted_2026-11-22.md
+busy="$scratch/busy.snapshot"
+printf '4242|1|30000000|C:/dev/x/stage3/simple native-build --source src/compiler --entry src/app/cli/bootstrap_main.spl\n' >"$busy"
+mkout o5 "$plat"
+mkdir -p "$scratch/o5/stage2-compiler-tests/$plat"
+printf 'prior\n' >"$scratch/o5/stage2-compiler-tests/$plat/rejection.env"
+rc=0
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$busy" ADMIT_FIXTURE_MODE=busy \
+    sh "$admit" --source-root="$src" --output="$scratch/o5" --platform="$plat" \
+    >"$scratch/o5.out" 2>"$scratch/o5.err" || rc=$?
+[ "$rc" = 75 ] || fail "busy: exit $rc, want 75"
+grep -q 'concurrent heavy work (native=1' "$scratch/o5.err" || fail 'busy: refusal does not name the peer'
+grep -q 'admit-stage2: refused: concurrent heavy work' "$scratch/o5.err" || fail 'busy: no lane refusal line'
+[ ! -f "$scratch/busy.leftover" ] || fail 'busy: verifier ran despite the refusal'
+[ "$(cat "$scratch/o5/stage2-compiler-tests/$plat/rejection.env")" = prior ] ||
+    fail 'busy: prior rejection superseded'
+checked=$((checked + 1))
+# W23 generalization: two bootstrap coordinators (a peer lane) are refused too;
+# one (the lane's own caller) is allowed and reaches the verifier.
+printf '5001|1|1000|sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap\n5002|1|1000|sh scripts/bootstrap/bootstrap-from-scratch.sh --resume\n' >"$scratch/peer.snapshot"
+mkout o6 "$plat"
+rc=0
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$scratch/peer.snapshot" ADMIT_FIXTURE_MODE=peer \
+    sh "$admit" --source-root="$src" --output="$scratch/o6" --platform="$plat" \
+    >"$scratch/o6.out" 2>"$scratch/o6.err" || rc=$?
+[ "$rc" = 75 ] || fail "peer: exit $rc, want 75"
+[ ! -f "$scratch/peer.leftover" ] || fail 'peer: verifier ran despite the refusal'
+checked=$((checked + 1))
+printf '5001|1|1000|sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap\n' >"$scratch/one.snapshot"
+mkout o7 "$plat"
+rc=0
+SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$scratch/one.snapshot" ADMIT_FIXTURE_MODE=one \
+    sh "$admit" --source-root="$src" --output="$scratch/o7" --platform="$plat" \
+    >"$scratch/o7.out" 2>"$scratch/o7.err" || rc=$?
+[ "$rc" = 1 ] || fail "one-coordinator: exit $rc, want 1 (stub verifier rejects)"
+[ -f "$scratch/one.leftover" ] || fail 'one-coordinator: verifier never ran'
 checked=$((checked + 1))
 
 printf 'PASS — %s admit-lane case(s) checked\n' "$checked"
