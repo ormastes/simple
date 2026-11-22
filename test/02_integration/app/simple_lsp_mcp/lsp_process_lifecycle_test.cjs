@@ -180,6 +180,12 @@ setInterval(() => {}, 1000);
     name: 'lsp_document_highlight', arguments: position,
   });
   assert.match(highlights.content[0].text, /^1:7:14:/);
+  const samlFixture = path.join(__dirname, '../../../01_unit/lib/saml/fixtures/resume.saml');
+  fs.copyFileSync(samlFixture, path.join(directory, 'resume.saml'));
+  const analysis = await nativeQueryClient.request('tools/call', {
+    name: 'saml_analyze', arguments: { file: 'resume.saml' },
+  });
+  assert.match(analysis.content[0].text, /module=resume functions=2 errors=0/);
   await nativeQueryClient.close();
   passed++;
 

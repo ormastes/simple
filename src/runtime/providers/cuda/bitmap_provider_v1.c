@@ -76,6 +76,10 @@ static int load_driver(void) {
 fail:
     dlclose(driver.lib); memset(&driver,0,sizeof(driver)); return 0;
 }
+static int owns_session(uint64_t session) { return session && session==state.handle; }
+static int owns(uint64_t session,uint64_t handle,uint64_t current) {
+    return owns_session(session) && handle && handle==current;
+}
 static int enter(void) {
     return !state.context_fault && !driver.CtxPushCurrent(state.context);
 }
@@ -138,15 +142,16 @@ static int32_t session_open(uint64_t backend,uint64_t device,uint64_t *out) {
 done:
     pthread_mutex_unlock(&mutex); return result;
 }
+static int32_t with_context(int (*fn)(void)) { return enter() ? leave(fn()) : UNCERTAIN; }
 static int32_t session_close(uint64_t session) {
     pthread_mutex_lock(&mutex);
-    int result = !session || session!=state.handle ? INVALID : close_locked();
+    int result = !owns_session(session) ? INVALID : close_locked();
     pthread_mutex_unlock(&mutex); return result;
 }
 static int32_t resource_alloc(uint64_t session,const SimpleGpuResourceDescV1 *desc,uint64_t *out) {
     if (!out) return REJECTED;
     *out=0; pthread_mutex_lock(&mutex); int result=REJECTED;
-    if (!session || session!=state.handle || !desc || desc->struct_size!=sizeof(*desc) ||
+    if (!owns_session(session) || !desc || desc->struct_size!=sizeof(*desc) ||
         desc->flags || desc->usage_bits!=1 || !desc->size_bytes || desc->size_bytes>MAX_BYTES ||
         desc->size_bytes%4 || !next_handle) goto done;
     if (state.resource) goto done;
@@ -165,7 +170,7 @@ static uint32_t load32(const uint8_t *p) {
 static int32_t submit(uint64_t session,const SimpleGpuSubmitV1 *desc,uint64_t *out) {
     if (!out) return REJECTED;
     *out=0; pthread_mutex_lock(&mutex); int result=REJECTED;
-    if (!session || session!=state.handle || !desc || desc->struct_size!=sizeof(*desc) ||
+    if (!owns_session(session) || !desc || desc->struct_size!=sizeof(*desc) ||
         desc->format!=1 || !desc->data || desc->length<8 || !desc->correlation_id ||
         !state.resource || desc->output_resource!=state.resource || !next_handle) goto done;
     uint32_t words=load32(desc->data);
@@ -200,7 +205,7 @@ static uint64_t now_ns(void) {
 }
 static int32_t wait_completion(uint64_t session,uint64_t completion,uint64_t timeout,SimpleGpuReceiptV1 *receipt) {
     pthread_mutex_lock(&mutex); int result=INVALID;
-    if (!session || session!=state.handle || !completion || completion!=state.completion ||
+    if (!owns(session,completion,state.completion) ||
         !state.submitted || !timeout || !receipt || receipt->struct_size!=sizeof(*receipt)) goto done;
     if (!enter()) { result=UNCERTAIN; goto done; }
     uint64_t start=now_ns(); int rc;
@@ -231,7 +236,7 @@ done:
 }
 static int32_t readback(uint64_t session,uint64_t resource,SimpleGpuBytesV1 *bytes) {
     pthread_mutex_lock(&mutex); int result=INVALID;
-    if (session && session==state.handle && resource && resource==state.resource &&
+    if (owns(session,resource,state.resource) &&
         state.ready && !state.context_fault && bytes && bytes->struct_size==sizeof(*bytes) &&
         !bytes->reserved && bytes->data && bytes->length>=state.bytes) {
         memcpy(bytes->data,state.host_output,state.bytes); bytes->length=state.bytes; result=OK;
@@ -240,14 +245,13 @@ static int32_t readback(uint64_t session,uint64_t resource,SimpleGpuBytesV1 *byt
 }
 static int32_t completion_release(uint64_t session,uint64_t completion) {
     pthread_mutex_lock(&mutex); int result=INVALID;
-    if (session && session==state.handle && completion && completion==state.completion)
-        result=enter() ? leave(drain_completion()) : UNCERTAIN;
+    if (owns(session,completion,state.completion)) result=with_context(drain_completion);
     pthread_mutex_unlock(&mutex); return result;
 }
 static int32_t resource_release(uint64_t session,uint64_t resource) {
     pthread_mutex_lock(&mutex); int result=INVALID;
-    if (session && session==state.handle && resource && resource==state.resource)
-        result=state.completion ? BUSY : (enter() ? leave(free_resource()) : UNCERTAIN);
+    if (owns(session,resource,state.resource))
+        result=state.completion ? BUSY : with_context(free_resource);
     pthread_mutex_unlock(&mutex); return result;
 }
 static int32_t shutdown_provider(void) {

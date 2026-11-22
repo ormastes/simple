@@ -1,4 +1,8 @@
 #!/bin/sh
+# ==============================================================================
+# PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER
+# Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs
+# ==============================================================================
 # Diagnostic-only Darwin continuation: immutable P2 -> full P3 -> P3 rebuild -> P4 CLI.
 # It never creates admission or publication authority.
 set -eu
@@ -50,6 +54,10 @@ case "$(uname -s 2>/dev/null || echo unknown)" in Darwin) ;; *) echo 'chain-erro
 case "$(uname -m 2>/dev/null || echo unknown)" in arm64|aarch64) target=aarch64-apple-darwin;; x86_64) target=x86_64-apple-darwin;; *) echo 'chain-error: unsupported Darwin architecture' >&2; exit 2;; esac
 
 adapter_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+STAGE3_POLICY_SDN="$adapter_root/scripts/bootstrap/stage3-native-host-link-policy.sdn"
+export STAGE3_POLICY_SDN
+. "$adapter_root/scripts/bootstrap/stage3-native-host-link-policy.shs"
+stage3_check_native_host_match "$target" || exit 2
 source_root=$(CDPATH= cd -- "$source_root_arg" && pwd -P)
 phase2=$(CDPATH= cd -- "$(dirname -- "$phase2_arg")" && pwd -P)/$(basename -- "$phase2_arg")
 runtime_path=$(CDPATH= cd -- "$runtime_arg" && pwd -P)
@@ -200,6 +208,7 @@ awk '
 ' "$phase2_transcript" >"$source_roots_file" || fail 'Phase 2 source vector is malformed'
 chmod 0444 "$source_roots_file"
 source_count=0
+has_plugin_root=0
 while IFS= read -r source_root_row; do
   source_count=$((source_count + 1))
   case "$source_count:$source_root_row" in
@@ -208,15 +217,19 @@ while IFS= read -r source_root_row; do
     2:src/compositions/cuda_static) cuda_mode=static; cuda_root=$source_root_row ;;
     2:src/compositions/cuda_dynamic) cuda_mode=dynamic; cuda_root=$source_root_row ;;
     2:src/compositions/cuda_disabled) cuda_mode=disabled; cuda_root=$source_root_row ;;
-    3:src/compiler|4:src/app|5:src/lib|6:src/plugins) ;;
-    *) fail 'Phase 2 source vector differs from canonical six-root Stage 3 contract' ;;
+    3:src/compiler|4:src/app|5:src/lib) ;;
+    6:src/plugins) has_plugin_root=1 ;;
+    *) fail 'Phase 2 source vector differs from canonical Stage 3 contract' ;;
   esac
 done <"$source_roots_file"
-[ "$source_count" -eq 6 ] || fail 'Phase 2 transcript does not contain six Stage 3 source roots'
+[ "$source_count" -eq 5 ] || [ "$source_count" -eq 6 ] || fail 'Phase 2 transcript does not contain five or six Stage 3 source roots'
 case "${SIMPLE_KERNEL_K1_POLICY:-$k1_policy}" in "$k1_policy") ;; *) fail 'requested K1 policy differs from P2 source transcript';; esac
 case "${SIMPLE_BOOTSTRAP_CUDA_MODE:-$cuda_mode}" in "$cuda_mode") ;; *) fail 'requested CUDA mode differs from P2 source transcript';; esac
 plugin_root=src/plugins
-for rel in "$k1_root" "$cuda_root" src/compiler src/app src/lib "$plugin_root"; do [ -d "$source_root/$rel" ] && [ ! -L "$source_root/$rel" ] || fail "canonical source root unavailable: $rel"; done
+for rel in "$k1_root" "$cuda_root" src/compiler src/app src/lib; do [ -d "$source_root/$rel" ] && [ ! -L "$source_root/$rel" ] || fail "canonical source root unavailable: $rel"; done
+if [ "$has_plugin_root" -eq 1 ]; then
+  [ -d "$source_root/$plugin_root" ] && [ ! -L "$source_root/$plugin_root" ] || fail "canonical source root unavailable: $plugin_root"
+fi
 k1_composition_file="$source_root/$k1_root/compiler/driver/bootstrap_k1_selected.spl"
 [ -f "$k1_composition_file" ] && [ ! -L "$k1_composition_file" ] || fail 'selected K1 composition source is unavailable'
 k1_composition_sha=$(hash_file "$k1_composition_file") || fail 'cannot hash selected K1 composition source'
@@ -226,7 +239,13 @@ source_arity_cap=$(sed -n 's/.*sources\.len()[[:space:]]*>[[:space:]]*\([0-9][0-
 case "$source_arity_cap" in
   '') ;;
   *[!0-9]*) fail 'cannot parse Stage 3 producer source-root arity';;
-  *) [ "$source_arity_cap" -ge 6 ] || fail 'Stage 3 producer capsule accepts fewer than six roots; canonical build requires K1, CUDA, compiler, app, lib, and plugins';;
+  *)
+    if [ "$has_plugin_root" -eq 1 ]; then
+      [ "$source_arity_cap" -ge 6 ] || fail 'Stage 3 producer capsule accepts fewer than six roots; canonical build requires K1, CUDA, compiler, app, lib, and plugins'
+    else
+      [ "$source_arity_cap" -ge 5 ] || fail 'Stage 3 producer capsule accepts fewer than five roots'
+    fi
+    ;;
 esac
 source_snapshot "$output/identity/source-before.snapshot" before
 runtime_snapshot="$output/identity/runtime-before.snapshot"
@@ -348,7 +367,15 @@ run_build() {
     'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' "SIMPLE_KERNEL_K1_POLICY=$k1_policy" \
     "SIMPLE_BINARY=$producer"
   case "$kind" in
-    stage3) set -- "$@" 'SIMPLE_BOOTSTRAP_STAGE3=1' 'SIMPLE_STAGE3_STREAMING_SURFACES=0';;
+    stage3)
+      stage3_check_native_host_match "$target" || fail "native_host_match check failed for $target"
+      set -- "$@" 'SIMPLE_BOOTSTRAP_STAGE3=1' 'SIMPLE_STAGE3_STREAMING_SURFACES=0' \
+        "SIMPLE_STAGE3_HOST_TAG=$STAGE3_HOST_TAG" 'SIMPLE_STAGE3_NATIVE_HOST_MATCH=1' \
+        "SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE=$STAGE3_POLICY_ARCHIVE" \
+        'SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES=1' 'SIMPLE_FILE_WORKERS=1' \
+        'SIMPLE_NATIVE_LIBRARY_UNITS=1' 'SIMPLE_STAGE3_LIB_DYNLIB=1' \
+        'SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS=0' 'SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS=1'
+      ;;
     stage4) set -- "$@" 'SIMPLE_BOOTSTRAP_STAGE4=1';;
     hello) ;;
     *) fail "internal build kind invalid: $kind";;
@@ -356,14 +383,25 @@ run_build() {
   while IFS= read -r tool_env_assignment; do set -- "$@" "$tool_env_assignment"; done <"$tool_env_file"
   case "$kind" in
     stage3)
-      TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
-        "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
-        "$producer" native-build --target "$target" --backend "$backend" \
-        --runtime-bundle core-c-bootstrap --threads "$jobs" --cache-dir "$stage_dir/cache" \
-        --runtime-path "$runtime_path" \
-        --source "$k1_root" --source "$cuda_root" --source src/compiler --source src/app --source src/lib --source "$plugin_root" \
-        --entry-closure --mode dynload --entry "$entry" -o "$output_bin" \
-        || fail "$label native-build failed; see $log" ;;
+      if [ "$has_plugin_root" -eq 1 ] && [ "${SIMPLE_STAGE3_OMIT_PLUGIN_ROOT:-0}" != "1" ]; then
+        TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
+          "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
+          "$producer" native-build --target "$target" --backend "$backend" \
+          --runtime-bundle core-c-bootstrap --threads "$jobs" --cache-dir "$stage_dir/cache" \
+          --runtime-path "$runtime_path" \
+          --source "$k1_root" --source "$cuda_root" --source src/compiler --source src/app --source src/lib --source "$plugin_root" \
+          --entry-closure --mode dynload --entry "$entry" -o "$output_bin" \
+          || fail "$label native-build failed; see $log"
+      else
+        TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
+          "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
+          "$producer" native-build --target "$target" --backend "$backend" \
+          --runtime-bundle core-c-bootstrap --threads "$jobs" --cache-dir "$stage_dir/cache" \
+          --runtime-path "$runtime_path" \
+          --source "$k1_root" --source "$cuda_root" --source src/compiler --source src/app --source src/lib \
+          --entry-closure --mode dynload --entry "$entry" -o "$output_bin" \
+          || fail "$label native-build failed; see $log"
+      fi ;;
     stage4)
       TMPDIR="$stage_dir/tmp" run_owned bootstrap_stage3_run_transcribed \
         "$transcript" "$source_root" "$log" "$stage_dir/home" "$stage_dir/tmp" "$canonical_path" "$@" -- \
