@@ -33,6 +33,7 @@ use compiler.driver.driver_build.library_unit_dynlib_v1.{
     _dynlib_collect_direct_objects_v1, _dynlib_rsp_quote_v1
 }
 use compiler.tools.verify.mcdc_scenario_exclusion.{
+    McdcScenarioExclusionStatusV1, parse_mcdc_scenario_exclusion_v1,
     scan_mcdc_scenario_exclusions_v1, bind_mcdc_scenario_exclusions_v1
 }
 use compiler.common.assurance.package_pins.{
@@ -367,15 +368,27 @@ describe "O(N) MCDC exclusion scanning and in-place package_pins normalization":
         expect(crlf_audit.rejected_count).to_equal(0)
         expect(bind_mcdc_scenario_exclusions_v1(crlf_clean, [], 10).exact).to_equal(true)
 
-        # 200 × 3-byte UTF-8 '⋯' = 600 bytes (> 512 MCDC_EXCLUSION_MAX_LINE_BYTES) though < 512 codepoints.
+        # Valid 11-field directive with CRLF is accepted; >=360 × 3-byte '⋯' (> 1024 MCDC_EXCLUSION_MAX_LINE_BYTES,
+        # < 1024 codepoints) hits the byte-length bound directly (Malformed, not InvalidReason).
+        val valid_prefix = "# @mcdc-exclude: scenario=rt.hal.probe | kind=capability-unavailable | code=hal.none | predicate=capability.unavailable | producible=false | reason=hardware probe "
+        val valid_suffix = " | evidence=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef | observed=5 | owner=rt.safety | reviewed=8 | expires=20"
+        val valid_11_crlf = valid_prefix + "unavailable" + valid_suffix + "\r\n"
+        val ok_audit = scan_mcdc_scenario_exclusions_v1(valid_11_crlf, 10)
+        expect(ok_audit.directive_count).to_equal(1)
+        expect(ok_audit.accepted_count).to_equal(1)
+        expect(ok_audit.rejected_count).to_equal(0)
+
         var dots: [text] = []
         var di = 0
-        while di < 200:
+        while di < 360:
             dots.push("⋯")
             di = di + 1
-        val over_byte_line = "# @mcdc-exclude: " + dots.join("") + "\r\n"
-        val over_audit = scan_mcdc_scenario_exclusions_v1(over_byte_line, 10)
+        val over_byte_line = valid_prefix + dots.join("") + valid_suffix
+        expect(parse_mcdc_scenario_exclusion_v1(over_byte_line, 10).status).to_equal(
+            McdcScenarioExclusionStatusV1.Malformed)
+        val over_audit = scan_mcdc_scenario_exclusions_v1(over_byte_line + "\r\n", 10)
         expect(over_audit.directive_count).to_equal(1)
+        expect(over_audit.accepted_count).to_equal(0)
         expect(over_audit.rejected_count).to_equal(1)
 
     it "normalizes paths and computes transitive dependency closures with cycles":
