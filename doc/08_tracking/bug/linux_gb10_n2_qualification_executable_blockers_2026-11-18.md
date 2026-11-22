@@ -593,3 +593,88 @@ Command: `cargo test --release -p simple-compiler --lib` (clang/lld env).
   `collection_capture`, 2 `mir::reachability`, 6 `pipeline::native_project`
   (bootstrap capsule ABI, core-lane ABI, hosted bundle, partial archive, object
   cache slice, lsp-mcp startup) — plus `value::tests::shared_text_unicode_index_and_slice`.
+
+## 2026-11-23 (later) — Blocker 10 fixed: strict Vulkan clips plain rects; 3 of 3 scenes byte-identical Engine2D vs Skia
+
+Branch `work/webrender-vkclip-20261123` (base release/1.0.0 `f9994a57f03`, which
+carries the Blocker 9 seed fix from PR #10940).
+
+### Fix (pure Simple, no shader change)
+
+The plain-rect compute kernel already had a scissor. `_pack_rect_pc` packs
+`clip_x/y/w/h/clip_enabled` into its push constants, and the GLSL rect kernels
+discard pixels outside the scissor. The strict lane never set it.
+`engine2d/draw_ir_adv.spl`:
+
+- **Preflight** (`_engine2d_draw_ir_strict_vulkan_primitive_reason`) now admits
+  `clip_rect.present` on a non-affine command only when all of these hold: it
+  is a `DRAW_IR_COMMAND_RECT`, it is not the first command, and the clip width
+  and height are not negative.
+- **Still fail closed:** a clipped first command (it is executed as
+  `eng.clear`, which ignores the clip), clipped text, edge and path commands
+  (their strict executors apply no clip), and a negative clip. All of them
+  still return `strict-vulkan-command-preflight-required`.
+- **Executor** (`_engine2d_draw_ir_execute_strict_vulkan_primitives`): for a
+  plain or fractional rect, it calls `eng.set_clip(clip)` before
+  `draw_rect_filled` and `eng.clear_clip()` right after.
+
+The damage entry (`..._strict_vulkan_submit_damage_with_images`) shares the
+preflight. It replays through the general renderer, which already applies
+`command.clip_rect` through `set_clip`. No `*-spirv-pinned` row is affected.
+
+### Red to green
+
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_clipped_rect_spec.spl`
+runs on lavapipe (`VK_DRIVER_FILES=lvp_icd.json`).
+
+- **Red:** 2/6 passed (`cb4f6d46439`). The failures were real:
+  `strict-vulkan-command-preflight-required` and `pixels == []`.
+- **Green:** 6/6 passed (`4b5cd5eeffe`), in 63 s with 3.2 GB maximum RSS.
+
+The spec covers:
+
+- an 8x6 scene where the clip cuts a rect on all four sides, followed by an
+  unclipped rect outside the clip that proves the clip is restored; the pixels
+  are given exactly;
+- the same scene compared with the CPU engine;
+- a clipped fractional rect;
+- the negative cases above;
+- **corpus case 06 at its full 640x480**: strict Vulkan readback equals the CPU
+  engine and the oracle `0372ef52…ebb1`. One cyan pixel, `0xff00aaff`, is
+  checked first.
+
+Neighbouring specs are unchanged: `strict_vulkan_fractional_rect` 2/2,
+`strict_vulkan_affine_coverage` 3/3, `final_output_capture` 8/8.
+
+### Physical GB10: Engine2D vs upstream Skia
+
+**Executable**
+
+The recipe is the one from the earlier 2026-11-23 section. The seed source has
+no diff from `6596560270f`, so the fixed seed (sha256 `73ee310b…7680`) was
+copied to the private `~/.cache/cargo-target-wr-vkclip`.
+
+1. `SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_CACHE_SCOPE=wr-vkclip-20261123
+   CC=clang CXX=clang++ AR=llvm-ar` native-build gave `compiled=511 failed=0`
+   in 27 s with 1.48 GB RSS. The link was then refused with the same 239
+   symbols (Blocker 8 is unchanged).
+2. Hand-link (`libsimple_native_all.a` first, then the default lane's
+   `core_c_runtime/libsimple_runtime.a`).
+
+Result: `/home/yoon/skia-n2/artifacts/nb_vkclip_20261123/vulkan_2d_qualification`,
+sha256 `e7c05e557f06d355fdf09ac7f13cb9b63b88fb01b89f77ec54d3fa7c34d3f68e`. It is
+diagnostic-grade, for the Blocker 8 reason given above.
+
+**Results**
+
+Run with `check-vulkan-2d-qualification.shs <bin> <provider> <out> <scene>` on
+the NVIDIA ICD. Receipts carry `physical_device_uuid: 1883ff9c30a91b8abc50ef34ac2f5a89`.
+
+| scene | `run-*` | Engine2D = Skia = oracle sha256 | tries |
+|---|---|---|---|
+| web-box | **pass** (`pair_exact_rgba: pass`) | `204df3a7ca11c4633399761142e60ec5f3775aefe7e91a74863f107b9b647817` | 1/1 |
+| corpus-case01 | **pass** | `2f4d3fb17e0a1ab65cba1f3b3950f1cf67b51f2f09df5faac247c2dc858039e9` | 1/1 |
+| corpus-case06 | **pass** (was blocked, Blocker 10) | `0372ef52c5e58dfa59d71239609526592e022a00419f25e3eebc902d083debb1` | 3/3 |
+
+Blocker 10 is closed. What remains open: Blocker 8 (no sanctioned link lane for
+a GPU entry) and case 02 (Skia edge tolerance).

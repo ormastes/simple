@@ -3777,3 +3777,22 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Change:** `_letter_gap_skipped` (`simple_web_html_layout_renderer_foundation.spl`) resolves those characters for `spaced_advances_milli`. `spaced_glyph_xs_milli` puts the same gaps into a shaped run's glyph xs. Each gap sits right of its codepoint's glyph and moves every glyph further right. `_html_draw_ir_resolved_text_command` applies it. A shaped run with no blank glyph (no space) is painted from xs, so `مرحباabc` at 2px kept its ink (Chrome x1 +4). This was the precondition deva-A named for its empty-glyph skip.
 - **Spec:** `shaped_run_spacing_chrome159_spec` AC-7/AC-8, plus AC-9 at device scale 4 (Chrome k=4 `مرحباabc` ink 84..315 -> 84..331; base +0, head +16). 6/9 on base, 9/9 on head.
 - **Open defect, seen at k=4:** `simple_web_layout_render_html_pixels_engine2d_at_device_scale` returns an EMPTY frame (len 0) for `<html lang="ar">` with `مرحبا123` (unshaped Arabic+digits). This happens on base too. Chrome paints ink 85..317.
+## 2026-11-23 — Strict Vulkan clips plain rects; case 06 Engine2D = Skia on the GB10
+
+- **Trap:** the strict Vulkan DrawIR lane (`_engine2d_draw_ir_strict_vulkan_primitive_reason`)
+  rejected every clipped non-affine command. This happened even though the
+  plain-rect kernel already supports a scissor: `_pack_rect_pc` packs
+  `clip_*` into push constants, and the GLSL discards outside it.
+- **Fix:** admit `clip_rect` on a later plain or fractional RECT, then bracket
+  `draw_rect_filled` with `set_clip`/`clear_clip`. A clipped clear, text, edge
+  or path, or a negative clip, still fails closed.
+- **Spec:** `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_clipped_rect_spec.spl`,
+  6/6 on lavapipe. It includes full 640x480 corpus case 06, checked against
+  both the CPU engine and the oracle.
+- **Trap:** a successful strict readback leaves `fallback_reason` as `""`, not
+  `"none"`. Only the submit result uses `"none"`.
+- **GB10:** web-box, corpus-case01 and corpus-case06 are all `run-*` pass, with
+  Engine2D, Skia and the oracle byte-identical. The binary is
+  `nb_vkclip_20261123`, sha256 `e7c05e55…f68e`. The recipe is in
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
+  (2026-11-23, later).
