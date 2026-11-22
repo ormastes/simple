@@ -1,6 +1,6 @@
 # CUDA optimizer dependency surface ownership
 
-Status: RESOLVED-DISAPPEARED 2026-11-22 (defect no longer reproduces on stage2 ef46f0d2; workaround retired; native CUDA port closure passes HIR without the owner imports). See the 2026-11-22 section.
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-22). Owner imports removed; the native CUDA port closure passes HIR 514/514 without them. Remaining verification: the next Phase 3 full-CLI bootstrap build whose source contains this removal (inline, loop_opt, loop_licm and auto_vectorize_cost are compiler modules, so that build compiles them).
 
 On release/1.0 `c48d5fb07cc5d75777c63252f2e0659b9bd8e248`, native compilation
 of `src/plugins/backend_cuda/cuda_backend.spl` reaches HIR but rejects imported
@@ -120,7 +120,7 @@ bin/simple.exe @ 46fe8f6b6def):
   this host (policy: no heavy entry-closure builds from bug lanes), and the
   closure still SIGSEGVs at MIR lowering per the bounded evidence above.
 
-## 2026-11-22 verification (lane work/cuda-compiler-bugs) — RESOLVED-DISAPPEARED, workaround retired
+## 2026-11-22 verification (lane work/cuda-compiler-bugs) — workaround removed, verification pending
 
 Producer: integ25 Stage 2 admitted native-build
 (`.../bootstrap-s2probe-integ25/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`,
@@ -160,7 +160,7 @@ owners directly, which is its purpose).
 
 Negative control (same producer, env and flags): a fixture with `fn take(x: NoSuchOwnerType)` fails HIR with `[ERROR] HIR lowering error ... unresolved type: NoSuchOwnerType` (build rc=1). So `failed=0` on the 514-module closure is evidence that can fail, not a vacuous pass.
 Importer audit: no file under src/ or test/ that imports the four optimizer modules or `cuda_backend_port` names `LocalId`, `BlockId`, `MirType` or `MirSignature` without the owner import. The only matches are commented-out code in `mir_opt_spec.spl` and the intentional `mir_owner_adapter/cuda_adapter_import_only.spl` fixture.
-**Untracked residual:** the 2026-10-10 CUDA-closure crash at MIR entry (SIGSEGV, exit 139) has no other bug record, and this run could not reach it because of the 8 GiB OOM. It is now UNTRACKED; file a narrow MIR record when a run above 8 GiB reproduces it.
+**Residual crash:** the 2026-10-10 CUDA-closure crash at MIR entry (SIGSEGV, exit 139) is now filed as `native_build_mir_entry_sigsegv_cuda_backend_closure_2026-10-10`.
 
 ## 2026-11-22 follow-up: 20 GiB run (coordinator-approved) — no binary; cgroup-dependent compiler SIGSEGV
 
@@ -184,10 +184,22 @@ instead of `lib.nogc_sync_mut.sffi.runtime`), and the crash follows.
 
 A crash report exists at
 `/var/crash/_home_yoon_dev_simple-integ5-20261116_..._stage2-admitted_simple.1000.crash`.
-This is a separate compiler defect and is not yet filed.
+Filed as `native_build_hir_sigsegv_under_20g_cgroup_cuda_port_closure_2026-11-22`.
 
 Result: still no linked binary.
 - Bugs 1 and 2 keep the HIR 514/514 evidence from the 8G run (with the negative control).
 - End-to-end (link + run) evidence is blocked between the 8G OOM at MIR 200/514
   and the 20G HIR SIGSEGV at 82/514.
 - The bug 3 fixture was not run, since the success of this run was its precondition.
+
+## 2026-11-22 status correction (review P2)
+
+The retirement criterion was "the CUDA closure compiles without them". That has
+not happened yet: the build OOMs at MIR 200/514 under 8G, and SIGSEGVs at HIR
+82/514 under 20G. So the status is `fix-implemented-verification-pending`, not
+`resolved-disappeared`. The import removal is kept.
+
+To close, either of these must succeed:
+- the next Phase 3 full-CLI bootstrap build whose source contains this removal; or
+- a native link and run of `test/native/cuda_compiler_bugs/port_owner`, whose
+  stdout must match `expected_output.txt`.

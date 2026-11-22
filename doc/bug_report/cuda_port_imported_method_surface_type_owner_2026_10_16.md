@@ -1,6 +1,6 @@
 # CUDA port imported method surface loses MIR type owners
 
-Status: RESOLVED-DISAPPEARED 2026-11-22; workaround retired after actual native HIR passed without it (see below).
+Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-22). Workaround import removed; HIR passes without it. Remaining verification: the next Phase 3 full-CLI build whose source contains this removal, or a native link and run of test/native/cuda_compiler_bugs/port_owner.
 Canonical bug DB reconciliation is pending: the qualified database CLI is not
 available in this diagnostic lane. Bug identifier:
 `cuda_port_imported_method_surface_type_owner_2026_10_16`.
@@ -95,7 +95,7 @@ The full command and context are in
 
 Negative control (same producer, env and flags): a fixture with `fn take(x: NoSuchOwnerType)` fails HIR with `[ERROR] HIR lowering error ... unresolved type: NoSuchOwnerType` (build rc=1). So `failed=0` on the 514-module closure is evidence that can fail, not a vacuous pass.
 Importer audit: no file under src/ or test/ that imports the four optimizer modules or `cuda_backend_port` names `LocalId`, `BlockId`, `MirType` or `MirSignature` without the owner import. The only matches are commented-out code in `mir_opt_spec.spl` and the intentional `mir_owner_adapter/cuda_adapter_import_only.spl` fixture.
-**Untracked residual:** the 2026-10-10 CUDA-closure crash at MIR entry (SIGSEGV, exit 139) has no other bug record, and this run could not reach it because of the 8 GiB OOM. It is now UNTRACKED; file a narrow MIR record when a run above 8 GiB reproduces it.
+**Residual crash:** the 2026-10-10 CUDA-closure crash at MIR entry (SIGSEGV, exit 139) is now filed as `native_build_mir_entry_sigsegv_cuda_backend_closure_2026-10-10`.
 
 ## 2026-11-22 follow-up: 20 GiB run (coordinator-approved) — no binary; cgroup-dependent compiler SIGSEGV
 
@@ -119,7 +119,7 @@ instead of `lib.nogc_sync_mut.sffi.runtime`), and the crash follows.
 
 A crash report exists at
 `/var/crash/_home_yoon_dev_simple-integ5-20261116_..._stage2-admitted_simple.1000.crash`.
-This is a separate compiler defect and is not yet filed.
+Filed as `native_build_hir_sigsegv_under_20g_cgroup_cuda_port_closure_2026-11-22`.
 
 Result: still no linked binary.
 - Bugs 1 and 2 keep the HIR 514/514 evidence from the 8G run (with the negative control).
