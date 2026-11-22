@@ -62,6 +62,8 @@ bootstrap_resume_trap() {
     rm -rf -- "$lock"
   elif [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
        [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
+    # Marks a deliberate retention so stale-lock recovery never takes it.
+    [ ! -d "$lock" ] || [ -L "$lock" ] || : >"$lock/retained" 2>/dev/null || true
     echo "ERROR: retaining ${lock:-output lock}: Stage 3 descendants were not proven stopped" >&2
   fi
   [ "$sig" = none ] || exit "$status"
@@ -682,9 +684,10 @@ if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
   echo "error: canonical Stage 3 already converged: $manifest" >&2
   exit 1
 fi
-mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
+# Recovers only a lock whose recorded owner is provably dead (W14).
+. "$root/scripts/bootstrap/lib/output-lock.shs"
+bootstrap_output_lock_acquire "$lock" || exit 1
 bootstrap_resume_lock_owned=1
-printf '%s\n' "$$" >"$lock/pid"
 bootstrap_resume_stage=stage3-build
 bootstrap_release_resume_cleanup() {
   resume_status=$?
