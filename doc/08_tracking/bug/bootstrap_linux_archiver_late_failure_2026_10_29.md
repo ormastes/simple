@@ -34,7 +34,7 @@ native compiler qualification is claimed from that run.
 
 ## Verification (2026-11-22, Linux aarch64)
 
-Base `origin/release/1.0.0` @ `3c2e4556b6d`, worktree `/home/yoon/dev/wt-linux-seed-bugs`.
+Base `origin/release/1.0.0` @ `3c2e4556b6d`, dedicated worktree.
 
 1. The record's named regression **had rotted**: `sh scripts/bootstrap/tests/preflight-authority-milestone-test.shs`
    exited 2 with no output. `a282038efae` changed the call to
@@ -45,7 +45,7 @@ Base `origin/release/1.0.0` @ `3c2e4556b6d`, worktree `/home/yoon/dev/wt-linux-s
 2. The real `bootstrap_linux_native_archive_preflight_v1` (extracted from
    `bootstrap-from-scratch.sh` lines ~4128-4145) run on this host after
    `. scripts/setup/llvm-toolchain-env.shs`: rc=0, selects
-   `/home/yoon/dev/llvm/install/bin/llvm-ar` (LLVM 23.1.0). With `PATH=/nonexistent`
+   `llvm-ar` from PATH (LLVM 23.1.0, a local LLVM install). With `PATH=/nonexistent`
    and `AR=/usr/bin/ar`: rc=1 with the `requires a working llvm-ar before source compilation` refusal.
 3. Candidate order matches the native owner `src/compiler_rust/common/src/platform/cc_detect.rs:265-268`.
    The check is top level, after the seed-only exit and before pure-stage compilation.

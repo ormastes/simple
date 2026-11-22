@@ -2,7 +2,8 @@
 
 Canonical ID: `release_linux_seed_link_undefined_process_bridge_symbols_2026_11_08`
 
-Status: verified (2026-11-22, Linux aarch64 seed link). Found while trying to verify
+Status: fix-implemented-verification-pending (2026-11-22: partial evidence, a
+Linux aarch64 local seed link; the x86_64 release.yml stage1 run is still required). Found while trying to verify
 `release_stage1_native_build_worker_sigsegv_2026_10_20` natively; this bug is
 upstream of it (no stage1 can be built until the seed links).
 
@@ -75,12 +76,12 @@ A release.yml run on `release/1.0.0` whose linux-x86_64 job passes the seed
 build step and reaches stage1 (`Native-built Simple binary verified`). Then the
 original bug's "Create distribution package" step becomes observable again.
 
-## Verification (2026-11-22, Linux aarch64)
+## Partial evidence (2026-11-22, Linux aarch64) — NOT the acceptance criterion
 
 The provider is gated on `target_os == "linux"` only (`build.rs:519-529`) and both
 consumers on `__linux__`, so an aarch64 Linux host exercises the same link as the
-x86_64 CI job. Seed built from `origin/release/1.0.0` @ `3c2e4556b6d` in worktree
-`/home/yoon/dev/wt-linux-seed-bugs` (clang 23.1.0 via `scripts/setup/llvm-toolchain-env.shs`,
+x86_64 CI job. Seed built from `origin/release/1.0.0` @ `3c2e4556b6d` in a dedicated
+worktree (clang 23.1.0 via `scripts/setup/llvm-toolchain-env.shs`,
 mold), under `systemd-run --user --scope -p MemoryMax=8G`:
 
 ```
@@ -101,4 +102,7 @@ not reported in this configuration, presumably dropped with its unreferenced cal
 prints `PASS ... 5 seed bridges resolve and fail closed`; linking it without the provider gives 5
 undefined symbols (a discrimination check on the test, not a seed reproduction).
 
-Still open separately: a release.yml x86_64 run reaching stage1 (the original bug's packaging step).
+This local build is not shown to match CI: it used `-j2`, mold as linker and clang 23.1.0 on aarch64,
+not the GitHub-hosted ubuntu x86_64 toolchain. **Remaining check (acceptance):** a release.yml run on
+`release/1.0.0` whose linux-x86_64 job passes the seed build step and reaches stage1
+(`Native-built Simple binary verified`), per "Verification needed" above.
