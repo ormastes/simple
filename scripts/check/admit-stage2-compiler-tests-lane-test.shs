@@ -1,0 +1,125 @@
+#!/bin/sh
+# W12 + W13 regressions for scripts/bootstrap/admit-built-stage2-compiler-tests.shs,
+# run against a fixture source root whose verifier is a stub (no compiler runs).
+#  W12: processes the verifier leaves behind are reaped before the verdict, and
+#       a TERM to the lane reaps them too; the lane exits promptly either way.
+#  W13: the Windows toolchain env is derived from --platform, env wins, and a
+#       conflicting value is refused (exit 64) before any rejection is superseded.
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+admit="$repo/scripts/bootstrap/admit-built-stage2-compiler-tests.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-admit-lane.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+trap 'for p in "$scratch"/*.leftover; do [ ! -f "$p" ] || kill "$(cat "$p")" 2>/dev/null || :; done; rm -rf -- "$scratch"' EXIT HUP INT TERM
+checked=0
+fail() { printf 'FAIL — %s\n' "$1"; exit 1; }
+
+src="$scratch/src"
+mkdir -p "$src/scripts/bootstrap/lib"
+cat >"$src/scripts/bootstrap/lib/tree-rss-policy.shs" <<'EOF'
+bootstrap_tree_rss_whole_build_export() {
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1 BOOTSTRAP_VERIFY_BUILD_THREADS=$1
+  bootstrap_tree_rss_plan_summary=fixture
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB BOOTSTRAP_VERIFY_BUILD_THREADS
+}
+bootstrap_tree_rss_scaled_timeout() {
+  eval "[ -n \"\${$1:-}\" ] || $1=$2; export $1"
+  BOOTSTRAP_VERIFY_TIMEOUT_SCALE=1 BOOTSTRAP_VERIFY_TIMEOUT_SOURCE=fixture
+}
+EOF
+# Stub verifier: MODE=orphan leaves a background child and fails at once;
+# MODE=hang blocks in a child until signalled. Child pids land in *.leftover.
+cat >"$src/scripts/bootstrap/bootstrap-phase-verification.shs" <<EOF
+sleep 300 &
+echo \$! >"$scratch/\$ADMIT_FIXTURE_MODE.leftover"
+[ "\$ADMIT_FIXTURE_MODE" = hang ] && wait
+exit 1
+EOF
+
+mkout() {
+    # NAME PLATFORM
+    mkdir -p "$scratch/$1/stage3/$2/stage2-admitted"
+    printf 'fixture\n' >"$scratch/$1/stage3/$2/stage2-admitted/simple"
+    : >"$scratch/$1/stage3/$2/stage2-admitted/admission.env"
+}
+gone() { ! kill -0 "$(cat "$scratch/$1.leftover")" 2>/dev/null; }
+
+# W12 reproduction: an orphan left by a REJECTED verifier is reaped.
+plat=x86_64-unknown-linux-gnu
+mkout o1 "$plat"
+t0=$(date +%s)
+rc=0
+ADMIT_FIXTURE_MODE=orphan sh "$admit" --source-root="$src" --output="$scratch/o1" \
+    --platform="$plat" >"$scratch/o1.out" 2>"$scratch/o1.err" || rc=$?
+t1=$(date +%s)
+[ "$rc" = 1 ] || fail "orphan: exit $rc, want 1"
+grep -q 'admit-stage2: REJECTED' "$scratch/o1.err" || fail 'orphan: no REJECTED verdict'
+[ -f "$scratch/orphan.leftover" ] || fail 'orphan: stub verifier never ran (vacuous)'
+gone orphan || fail 'orphan: verifier child survived the verdict'
+[ $((t1 - t0)) -le 30 ] || fail "orphan: took $((t1 - t0))s"
+[ -f "$scratch/o1/stage2-compiler-tests/$plat/rejection.env" ] || fail 'orphan: no rejection.env'
+checked=$((checked + 1))
+
+# W12 generalization: TERM to the lane reaps the verifier's tree and exits 143.
+mkout o2 "$plat"
+ADMIT_FIXTURE_MODE=hang sh "$admit" --source-root="$src" --output="$scratch/o2" \
+    --platform="$plat" >"$scratch/o2.out" 2>"$scratch/o2.err" &
+lane=$!
+i=0
+while [ ! -f "$scratch/hang.leftover" ] && [ "$i" -lt 60 ]; do sleep 1; i=$((i + 1)); done
+[ -f "$scratch/hang.leftover" ] || fail 'hang: stub verifier never ran (vacuous)'
+kill -TERM "$lane"
+rc=0
+wait "$lane" || rc=$?
+[ "$rc" = 143 ] || fail "hang: exit $rc, want 143"
+sleep 1
+gone hang || fail 'hang: verifier child survived TERM'
+checked=$((checked + 1))
+
+# W13 unit cases on the env helper.
+. "$repo/scripts/bootstrap/lib/admit-stage2-toolchain-env.shs"
+llvm="$scratch/llvm23"
+mkdir -p "$llvm/bin" "$scratch/nolld/bin"
+for t in clang-cl.exe lld-link.exe; do
+    printf '#!/bin/sh\n' >"$llvm/bin/$t"; chmod +x "$llvm/bin/$t"
+done
+printf '#!/bin/sh\n' >"$scratch/nolld/bin/clang-cl.exe"; chmod +x "$scratch/nolld/bin/clang-cl.exe"
+probe() {
+    # prints "rc|abi|flavor|prefix|path-head" from a clean subshell
+    (
+        unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR LLVM_SYS_231_PREFIX SIMPLE_LLVM_WIN_ROOT_23
+        for kv in "$@"; do case "$kv" in *=*) export "$kv" ;; esac; done
+        r=0
+        admit_stage2_toolchain_env "$1" "$scratch/no-src" 2>/dev/null || r=$?
+        printf '%s|%s|%s|%s|%s\n' "$r" "${SIMPLE_WINDOWS_ABI:-}" "${SIMPLE_LINKER_FLAVOR:-}" \
+            "${LLVM_SYS_231_PREFIX:-}" "${PATH%%:*}"
+    )
+}
+want() { [ "$1" = "$2" ] || fail "env: got '$1' want '$2'"; checked=$((checked + 1)); }
+want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$llvm")" "0|msvc|msvc|$llvm|$llvm/bin"
+want "$(probe x86_64-pc-windows-msvc SIMPLE_LLVM_WIN_ROOT_23="$llvm")" "0|msvc|msvc|$llvm|$llvm/bin"
+want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$llvm" SIMPLE_LINKER_FLAVOR=gnu | cut -d'|' -f1)" 1
+want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$llvm" SIMPLE_WINDOWS_ABI=gnu | cut -d'|' -f1)" 1
+want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$scratch/nolld" | cut -d'|' -f1)" 1
+want "$(probe x86_64-pc-windows-gnu | cut -d'|' -f1-4)" '0|gnu|gnu|'
+want "$(probe x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=mingw | cut -d'|' -f1-3)" '0|gnu|mingw'
+want "$(probe x86_64-unknown-linux-gnu SIMPLE_LINKER_FLAVOR=gnu | cut -d'|' -f1-4)" '0||gnu|'
+
+# W13 lane: a conflicting env is refused before an earlier rejection is superseded.
+wplat=x86_64-pc-windows-msvc
+mkout o3 "$wplat"
+mkdir -p "$scratch/o3/stage2-compiler-tests/$wplat"
+printf 'prior\n' >"$scratch/o3/stage2-compiler-tests/$wplat/rejection.env"
+rc=0
+LLVM_SYS_231_PREFIX="$llvm" SIMPLE_LINKER_FLAVOR=gnu ADMIT_FIXTURE_MODE=orphan \
+    sh "$admit" --source-root="$src" --output="$scratch/o3" --platform="$wplat" \
+    >"$scratch/o3.out" 2>"$scratch/o3.err" || rc=$?
+[ "$rc" = 64 ] || fail "conflict lane: exit $rc, want 64"
+grep -q 'conflicts with --platform' "$scratch/o3.err" || fail 'conflict lane: refusal unexplained'
+[ "$(cat "$scratch/o3/stage2-compiler-tests/$wplat/rejection.env")" = prior ] ||
+    fail 'conflict lane: prior rejection superseded'
+checked=$((checked + 1))
+
+printf 'PASS — %s admit-lane case(s) checked\n' "$checked"

@@ -1,0 +1,107 @@
+# Stage 3 resume output lock (`<output>.lock`): an mkdir lock carrying the
+# owner's pid (and, on Windows, its Win32 pid). A run killed outright never
+# runs its EXIT trap and leaves the lock behind; before this helper every
+# later run refused "bootstrap output is locked" until an operator verified
+# the owner dead and moved the lock aside by hand (W14,
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md).
+#
+# Recovery is admitted only when the recorded owner is PROVABLY dead. Liveness
+# is tri-state and anything but `dead` keeps the lock:
+#   alive   - kill -0 / ps / tasklist sees the pid
+#   dead    - the process table was read and the pid is absent
+#   unknown - no readable pid, no Win32 pid on Windows (pre-fix lock), or the
+#             process-table query itself failed
+# A lock the owner deliberately RETAINED (its trap could not prove Stage 3
+# descendants stopped) carries a `retained` marker and is never recovered.
+# A recovered lock is moved aside as `<lock>.stale-pid<pid>-<stamp>-<$$>`,
+# never deleted.
+
+# PID WINPID -> prints alive|dead|unknown
+bootstrap_output_lock_pid_state() {
+    case "$1" in ''|*[!0-9]*|0|1) echo unknown; return 0 ;; esac
+    if kill -0 "$1" 2>/dev/null; then echo alive; return 0; fi
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            # kill -0 sees only MSYS pids; the Win32 pid is authoritative.
+            case "$2" in ''|*[!0-9]*|0) echo unknown; return 0 ;; esac
+            bootstrap_output_lock_tasks=$(tasklist //FI "PID eq $2" //NH //FO CSV 2>/dev/null) || {
+                echo unknown; return 0
+            }
+            case "$bootstrap_output_lock_tasks" in
+                *"\"$2\""*) echo alive ;;
+                '') echo unknown ;;
+                *\"*) echo unknown ;;
+                *) echo dead ;;
+            esac ;;
+        *)
+            # kill -0 also fails with EPERM for another user's live process.
+            bootstrap_output_lock_ps=0
+            ps -p "$1" >/dev/null 2>&1 || bootstrap_output_lock_ps=$?
+            case "$bootstrap_output_lock_ps" in
+                0) echo alive ;;
+                1) echo dead ;;
+                *) echo unknown ;;
+            esac ;;
+    esac
+}
+
+bootstrap_output_lock_record_owner() {
+    bootstrap_output_lock_write_owner "$1" && return 0
+    rm -rf -- "$1"
+    echo "error: could not record the owner of $1; lock released" >&2
+    return 1
+}
+
+bootstrap_output_lock_write_owner() {
+    printf '%s\n' "$$" >"$1/pid" || return 1
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            # Without it the lock's owner can never be proven dead later.
+            cat "/proc/$$/winpid" >"$1/winpid" 2>/dev/null || return 1 ;;
+    esac
+}
+
+# LOCK -> 0 acquired (owner recorded), 1 refused (reason on stderr)
+bootstrap_output_lock_acquire() {
+    if mkdir "$1" 2>/dev/null; then
+        bootstrap_output_lock_record_owner "$1"
+        return $?
+    fi
+    [ -d "$1" ] && [ ! -L "$1" ] || {
+        echo "error: bootstrap output is locked: $1 (not a lock directory)" >&2
+        return 1
+    }
+    if [ -e "$1/retained" ]; then
+        echo "error: bootstrap output is locked: $1 (retained: Stage 3 descendants were not proven stopped)" >&2
+        return 1
+    fi
+    bootstrap_output_lock_pid=$(sed -n 1p "$1/pid" 2>/dev/null || :)
+    bootstrap_output_lock_winpid=$(sed -n 1p "$1/winpid" 2>/dev/null || :)
+    bootstrap_output_lock_state=$(bootstrap_output_lock_pid_state \
+        "$bootstrap_output_lock_pid" "$bootstrap_output_lock_winpid")
+    if [ "$bootstrap_output_lock_state" != dead ]; then
+        echo "error: bootstrap output is locked: $1 (owner pid '${bootstrap_output_lock_pid}' ${bootstrap_output_lock_state})" >&2
+        return 1
+    fi
+    bootstrap_output_lock_aside="$1.stale-pid${bootstrap_output_lock_pid}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mv -- "$1" "$bootstrap_output_lock_aside" 2>/dev/null || {
+        echo "error: bootstrap output is locked: $1 (stale lock could not be moved aside)" >&2
+        return 1
+    }
+    # A concurrent recoverer may have replaced the lock between the check and
+    # the move; only the judged lock may be retired.
+    if [ "$(sed -n 1p "$bootstrap_output_lock_aside/pid" 2>/dev/null || :)" != "$bootstrap_output_lock_pid" ] ||
+        [ -e "$bootstrap_output_lock_aside/retained" ]; then
+        mv -- "$bootstrap_output_lock_aside" "$1" 2>/dev/null ||
+            echo "error: moved a live lock aside and could not restore it: $bootstrap_output_lock_aside" >&2
+        echo "error: bootstrap output is locked: $1 (lock changed during stale recovery)" >&2
+        return 1
+    fi
+    echo "bootstrap-output-lock: owner pid ${bootstrap_output_lock_pid} is dead; stale lock moved aside: $bootstrap_output_lock_aside" >&2
+    if mkdir "$1" 2>/dev/null; then
+        bootstrap_output_lock_record_owner "$1"
+        return $?
+    fi
+    echo "error: bootstrap output is locked: $1 (another run acquired it during recovery)" >&2
+    return 1
+}

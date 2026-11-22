@@ -2,7 +2,7 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, lsp_query_path, query_visibility_path, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, lsp_query_path, query_visibility_path, saml_cli_path, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
 use app.cli.query_visibility.{query_visibility_symbols_payload_core}
 use app.io.minimal_runtime_ops.{cwd, env_get, is_aot_native_runtime, process_run_bounded}
 use app.io.cli_ops.{cli_current_exe_path}
@@ -24,9 +24,6 @@ extern fn rt_bytes_to_text(data: [u8]) -> text
 # with these bounds, but the merge left them undefined here.
 val LSP_COMMAND_TIMEOUT_MS: i64 = 30000
 val LSP_COMMAND_OUTPUT_CAPTURE_BYTES: i64 = 1024 * 1024
-
-fn saml_cli_path() -> text:
-    "src/app/saml/main.spl"
 
 fn command_failure(code: i64, stderr: text, stdout: text) -> text:
     val prefix = "command failed with exit code " + str(code)
@@ -101,19 +98,10 @@ fn run_visibility_sets(file: text, requester: text, source: text) -> text:
     run_query_command([query_visibility_path(), "visibility", file, "--requester", requester, "--requester-source", source])
 
 fn run_saml_analyze(file: text, spec_dir: text) -> text:
-    # SAML analysis for an editor. Unlike `lsp_diagnostics`, this spawns a plain
-    # SCRIPT (src/app/saml/main.spl), not the `simple check` CLI subcommand, so
-    # it does not hit the source-mode process_run deadlock documented above —
-    # it is the same spawn shape as run_lsp_query/run_visibility_query, which
-    # work today. Measured cold cost: 0.51s for a 36-line module.
-    #
-    # `spec_dir` is optional: when non-empty it is forwarded as `--specs
-    # <spec_dir>` so the analyzer can fold in spec-derived external coverage
-    # (see src/lib/common/saml/spec_coverage.spl). When empty, no extra flag
-    # is passed, preserving prior behavior (main.spl's own default applies).
+    # An explicit spec directory enables external coverage analysis.
     if spec_dir.trim() == "":
-        return run_command_text(find_simple_binary(), [saml_cli_path(), "analyze", file])
-    run_command_text(find_simple_binary(), [saml_cli_path(), "analyze", file, "--specs", spec_dir])
+        return run_query_command([saml_cli_path(), "analyze", file])
+    run_query_command([saml_cli_path(), "analyze", file, "--specs", spec_dir])
 
 fn run_lsp_diagnostics(file: text) -> text:
     # `simple check` is a CLI subcommand that spawns its own delegate child.
