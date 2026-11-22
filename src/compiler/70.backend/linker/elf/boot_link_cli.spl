@@ -1,0 +1,137 @@
+# Command-line front end of scripts/check/baremetal-simple-link.spl: parse the
+# ld.lld-style options a freestanding kernel link needs and run elf_boot_link.
+#
+#   <arch> <script.ld> <out.elf> [options] <obj.o>...
+#   options: -L <dir>            INCLUDE search dir (after the working dir)
+#            --gc-sections       drop sections unreachable from the entry
+#            --defsym <a>=<b>    alias, as ld.lld --defsym
+#            --archive <lib.a>   static archive, members pulled on demand
+#            --objects-list <f>  more objects, one path per line (long kernel
+#                                links overflow the Windows command line)
+#
+# With no option the link is exactly the old positional elf_boot_link call.
+
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link, elf_boot_link_archives_policy}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_file, boot_layout_add_defsym}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_exists, file_read, file_read_bytes_i64}
+
+struct BootLinkCliOpts:
+    arch: text
+    script: text
+    output: text
+    objects: [text]
+    archives: [text]
+    object_lists: [text]
+    lib_dirs: [text]
+    defsyms: [text]
+    gc_sections: bool
+    error: text
+
+struct BootLinkCliResult:
+    rc: i64
+    lines: [text]
+    bytes: [i64]
+    undefined: [text]
+
+fn boot_link_cli_parse(args: [text]) -> BootLinkCliOpts:
+    """Split argv into options and positionals; `error` is non-empty on bad usage."""
+    var pos: [text] = []
+    var archives: [text] = []
+    var lists: [text] = []
+    var dirs: [text] = []
+    var defs: [text] = []
+    var gc = false
+    var err = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--gc-sections":
+            gc = true
+        elif a == "-L" or a == "--defsym" or a == "--archive" or a == "--objects-list":
+            if i + 1 >= args.len():
+                err = "{a} needs a value"
+            else:
+                val v = args[i + 1]
+                if a == "-L": dirs = dirs.push(v)
+                elif a == "--archive": archives = archives.push(v)
+                elif a == "--objects-list": lists = lists.push(v)
+                elif not v.contains("="): err = "--defsym {v}: expected name=target"
+                else: defs = defs.push(v)
+                i = i + 1
+        elif a.starts_with("-"):
+            err = "unknown option {a}"
+        else:
+            pos = pos.push(a)
+        i = i + 1
+    if err == "" and (pos.len() < 3 or (pos.len() == 3 and lists.len() == 0)):
+        err = "usage: <arch> <script.ld> <out.elf> [options] <obj>..."
+    var objs: [text] = []
+    var k: i64 = 3
+    while k < pos.len():
+        objs = objs.push(pos[k])
+        k = k + 1
+    BootLinkCliOpts(arch: if pos.len() > 0: pos[0] else: "",
+        script: if pos.len() > 1: pos[1] else: "",
+        output: if pos.len() > 2: pos[2] else: "",
+        objects: objs, archives: archives, object_lists: lists, lib_dirs: dirs, defsyms: defs,
+        gc_sections: gc, error: err)
+
+fn _boot_link_arch(name: text) -> Result<RelocArch, text>:
+    if name == "x86_64": return Ok(RelocArch.X86_64)
+    if name == "aarch64": return Ok(RelocArch.AArch64)
+    if name == "riscv64": return Ok(RelocArch.Riscv64)
+    Err("unsupported arch {name}")
+
+fn _boot_link_fail(rc: i64, msg: text) -> BootLinkCliResult:
+    BootLinkCliResult(rc: rc, lines: ["simple-link: {msg}"], bytes: [], undefined: [])
+
+fn _boot_link_read_all(paths: [text]) -> Result<[[i64]], text>:
+    var out: [[i64]] = []
+    for p in paths:
+        val raw = file_read_bytes_i64(p)
+        if raw.len() == 0: return Err("cannot read {p}")
+        out = out.push(raw)
+    Ok(out)
+
+fn boot_link_cli_run(args: [text]) -> BootLinkCliResult:
+    """rc 0 linked, 1 link error (each undefined symbol on its own line), 2 bad usage."""
+    val o = boot_link_cli_parse(args)
+    if o.error != "": return _boot_link_fail(2, o.error)
+    val arch = _boot_link_arch(o.arch)
+    if arch.is_err(): return _boot_link_fail(2, arch.unwrap_err())
+    val planned = boot_layout_from_file(o.script, o.lib_dirs)
+    if planned.is_err(): return _boot_link_fail(1, "script: {planned.unwrap_err()}")
+    var plan = planned.unwrap()
+    for d in o.defsyms:
+        val eq = d.find("=")
+        plan = boot_layout_add_defsym(plan, d.substring(0, eq), d.substring(eq + 1))
+    var paths = o.objects
+    for lf in o.object_lists:
+        if not file_exists(lf): return _boot_link_fail(1, "cannot read objects list {lf}")
+        for line in file_read(lf).split("\n"):
+            val p = line.trim()
+            if p != "": paths = paths.push(p)
+    val objects = _boot_link_read_all(paths)
+    if objects.is_err(): return _boot_link_fail(1, objects.unwrap_err())
+    val archives = _boot_link_read_all(o.archives)
+    if archives.is_err(): return _boot_link_fail(1, archives.unwrap_err())
+    val plain = o.archives.len() == 0 and o.defsyms.len() == 0 and not o.gc_sections
+    val linked = if plain: elf_boot_link(objects.unwrap(), plan, arch.unwrap())
+        else: elf_boot_link_archives_policy(objects.unwrap(), archives.unwrap(), plan,
+            arch.unwrap(), false, [], o.gc_sections, [])
+    if linked.is_err():
+        val e = linked.unwrap_err()
+        if not e.starts_with("undefined symbol: "): return _boot_link_fail(1, e)
+        var names: [text] = []
+        var lines: [text] = []
+        for n in e.substring(18).split("; "):
+            if not names.contains(n):
+                names = names.push(n)
+                lines = lines.push("simple-link: undefined symbol: {n}")
+        return BootLinkCliResult(rc: 1, lines: lines, bytes: [], undefined: names)
+    val bytes = linked.unwrap()
+    BootLinkCliResult(rc: 0, lines: ["simple-link: wrote {o.output} ({bytes.len()} bytes, {paths.len()} objects)"],
+        bytes: bytes, undefined: [])
+
+export BootLinkCliOpts, BootLinkCliResult, boot_link_cli_parse, boot_link_cli_run
