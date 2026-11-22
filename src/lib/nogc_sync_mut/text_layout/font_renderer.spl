@@ -272,8 +272,36 @@ fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
 # fixed point, truncated (`SkScalarToFDot6`), so 10.6667 px is 682/64 =
 # 10.65625 px and 13.3333 px 853/64. Every fractional-size advance and pen is
 # scaled by this many 1/64 px, not by the float size.
+# Before that, Blink creates the platform font at its font-cache-key size:
+# `(unsigned)(size * 100)` in float32, / 100. `font-size: 18.72px` is float
+# 18.7199993, x100 = 1871.9999 -> 18.71 px -> 1197/64 (not 1198/64); 20.72 x100
+# rounds to 2072.0 and keeps 1326/64 (font_cache_key_size_chrome159_spec).
+# units_per_em of the selected outline face (head.unitsPerEm), 0 when unknown.
+# One-entry memo keyed on the face identity: a run asks once per draw.
+var _fr_upem_identity: text = ""
+var _fr_upem_value: i64 = 0
+val _FR_TAG_HEAD: u32 = 1751474532u32
+
+fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
+    if identity == "" or blob.len() < 12:
+        return 0
+    if identity == _fr_upem_identity:
+        return _fr_upem_value
+    var upem: i64 = 0
+    if val Some(font) = sfnt_glyf_parse_offset_table(blob):
+        if val Some(t) = sfnt_glyf_find_table(font, _FR_TAG_HEAD):
+            val off = t.offset as i64
+            if off + 20 <= blob.len():
+                upem = sfnt_glyf_read_u16_be(blob, off + 18) as i64
+    _fr_upem_identity = identity
+    _fr_upem_value = upem
+    upem
+
 fn _fr_size_26_6(size_milli: i64) -> i64:
-    size_milli * 64 / 1000
+    val size: f32 = ((size_milli as f64) / 1000.0) as f32
+    val hundredths = (size * (100.0 as f32)) as i64
+    val keyed: f32 = ((hundredths as f64) / 100.0) as f32
+    (keyed * (64.0 as f32)) as i64
 
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
@@ -360,6 +388,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdGlyph, SfntLcdOutline}
+use std.common.encoding.sfnt_glyf.{sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
@@ -1743,9 +1772,21 @@ class FontRenderer:
                 whole[n] = end_px
         else:
             pens = self._text_pen_milli(cps, font_size, run_identity)
+            # An integer-size pen is a whole number of font units
+            # (size/upem px), but it is summed from advances each rounded to
+            # milli-px: `p` after `a..o` (letter-spacing 5px, 16 px) comes out
+            # at 190.622, not the exact quarter tie 190.625 Chrome rounds UP.
+            # Snapped to the unit grid, the phase sees the exact pen
+            # (lcd_quarter_phase_tie_chrome159_spec). `whole` keeps the
+            # layout's pens.
+            val upem = _fr_units_per_em(run_identity, self.selected_outline_blob)
+            val grid_den: i64 = (font_size as i64) * 1000
             var k: i64 = 0
             while k <= n:
                 whole[k] = _milli_px_to_px_i64(pens[k])
+                if upem > 0:
+                    val units = _fr_scale_round(pens[k], upem, grid_den)
+                    pens[k] = _fr_scale_round(units, grid_den, upem)
                 k = k + 1
         if letter_milli != 0 or word_milli != 0:
             var extra: i64 = 0
@@ -1806,7 +1847,9 @@ class FontRenderer:
         # glyph_index -1 - phase - 4 * size_milli (whole-px phase cells keep
         # -1 - phase). The atlas matches on glyph_index and font_size.
         val cell_base: i64 = if frac: 4 * size_milli else: 0
-        val x_milli: i64 = if frac: size_milli else: 0
+        # The outline is rasterised at the size FreeType gets (font-cache key,
+        # 26.6): 18.72 px glyphs are 1197/64 px wide (font_cache_key_size AC-5).
+        val x_milli: i64 = if frac: (_fr_size_26_6(size_milli) * 1000 + 32) / 64 else: 0
         var quads = self.staged_quads
         var inserted: [FontRenderQuad] = []
         var ci: i64 = 0

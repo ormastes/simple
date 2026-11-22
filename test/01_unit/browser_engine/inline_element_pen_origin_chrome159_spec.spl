@@ -1,0 +1,87 @@
+"""
+## Purpose and audience
+Purpose: Pin the mid-line pen origin of a text run that starts INSIDE an
+inline element after a collapsible space (`Keyboard samples: <kbd>Tab</kbd>`,
+`<kbd>A</kbd> <kbd>B</kbd>`, the html catalog's keyboard line). Chrome 159
+starts the element's run at the exact float pen (145.4063 px after
+`Keyboard samples: `, 104.7813 px after `<kbd>ArrowRight</kbd> `) and paints
+its glyphs at that pen's quarter phase. The layout's pen-error tracking
+(`inline_pen_err` / `text_pen_origin_record`, layout_engine +
+layout_foundation) loses the error at the trimmed trailing space of the
+preceding text, so the element's run gets `pen-origin-milli` 0 and is painted
+on its whole-pixel pen: every glyph of the run sits 0.41 / 0.77 px left of
+Chrome's. A text run that FOLLOWS an element already carries its origin
+(`<kbd>ArrowRight</kbd> mmmm` gets 775 and matches Chrome within 0.05 px).
+On the html catalog page the keyboard line alone is 2,050 of 9,599 mismatching
+px at 1x (measured 2026-11-22, head 4b2368c8280).
+Audience: web renderer layout (inline pen origin) maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, `font:16px/1.5
+sans-serif`, `color:#000` on white; monospace = DejaVu Sans Mono here, 1233
+units = 9.6328 px; Range rects: `<kbd>` x = 145.4063 and 104.7813):
+
+| line | pixel | Chrome 159 | this engine |
+|------|-------|------------|-------------|
+| `Keyboard samples: <kbd>mmmm</kbd>` (top 0)          | (145,14) | ffffe7 | f7cf87 |
+|                                                      | (146,14) | a7571f | 2f172f |
+|                                                      | (147,14) | 1f57a7 | 77cff7 |
+| `<kbd>ArrowRight</kbd> <kbd>mmmm</kbd>` (top 90)     | (105,104) | d79747 | 2f172f |
+|                                                      | (106,104) | 172767 | 77cff7 |
+
+Tolerance: 8 levels per channel (the catalog differ's tolerance).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-METRICS-005 - a run inside an inline element after a collapsible space starts at Chrome's exact mid-line pen.
+"""
+# @tag: unit, browser_engine, text, layout, chrome159
+# @tag:in-development
+# Tracks: doc/00_llm_process/feature_expert/web_render_css_parity/skill.md ("2026-11-22 — fractional sizes at Chrome's font-cache-key size; quarter-phase ties", handed-off item: html catalog keyboard line); owner = layout lane (simple_web_html_layout_renderer_layout_engine.spl text_pen_origin_record / layout_foundation.spl inline_pen_err: carry the pen error across the trimmed trailing space into the next inline element's first run).
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 300
+val H: i32 = 128
+val TOL: i64 = 8
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px/1.5 sans-serif;color:#000\"><p style=\"margin:0;position:absolute;left:4px;top:0px\">Keyboard samples: <kbd>mmmm</kbd></p><p style=\"margin:0;position:absolute;left:4px;top:90px\"><kbd>ArrowRight</kbd> <kbd>mmmm</kbd></p></body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+describe "inline element run pen origin after a collapsible space (Chrome 159)":
+    it "AC-1: <kbd> after `Keyboard samples: ` starts at pen 145.4063":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome first m stem: (145,14) ffffe7 (146,14) a7571f (147,14) 1f57a7")
+        expect(_near(px, 145, 14, 0xffffe7u32)).to_equal(true)
+        expect(_near(px, 146, 14, 0xa7571fu32)).to_equal(true)
+        expect(_near(px, 147, 14, 0x1f57a7u32)).to_equal(true)
+
+    it "AC-2: <kbd> after `<kbd>ArrowRight</kbd> ` starts at pen 104.7813":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("Chrome first m stem: (105,104) d79747 (106,104) 172767")
+        expect(_near(px, 105, 104, 0xd79747u32)).to_equal(true)
+        expect(_near(px, 106, 104, 0x172767u32)).to_equal(true)

@@ -3575,3 +3575,42 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Trap:** Skia's 1x kebab dots are a hair narrower than a circle (side pixels 0x78 vs 0x6f on #f1f3f4): 12 px stay 9 off, one over the catalog tolerance.
 - **Handover:** inline replaced boxes after a collapsed space sit one CSS px left (space advance 4 vs 4.45; whole-CSS-px boxes at device scale 4) — red spec `inline_replaced_fractional_x_chrome159_spec.spl`, for the layout lane.
 - **Spec:** `test/01_unit/browser_engine/media_controls_paint_chrome159_spec.spl` (0/7 on base, 7/7 on head).
+
+
+## 2026-11-22 — round horizontal stems keep their natural width (Chrome 159 light autohinter)
+
+- **Measured (pixel attribution, html / forms-media / overview / evidence / tab-bar at 1x):** 95..99% of every page's mismatch sits under a text rect; no layout offset. Inside the text, the heavy deltas were the top and bottom arcs of round lowercase letters (`a e o s c p`): Chrome's arc is about 1.2 px thick below the x-height row, ours was about 1.0 px.
+- **Root cause:** `_lcd_hint_knots` warps y through the blue-zone knots, and the overshoot collapses onto the reference below half a pixel. FreeType moves EDGES instead: a curve extremum is a round edge, the outer and inner extremum of an arc are a stem, the outer edge takes the zone fit and the inner edge follows at the natural width. The y warp took the collapsed overshoot (0.16..0.19 px at 16 px) out of the stroke.
+- **Change (`sfnt_glyf.spl`):**
+  - `_hstem_round_extrema` adds round edges to the stem pairing: an on-curve point with an off-curve neighbour whose two neighbours lie on its near-horizontal tangent (1:14) and continue in the same x direction.
+  - `_hstem_knots` builds a glyph's knots from its OWN blue edges and blue extrema (`_hstem_edge_knot`), not from every zone. An `o` has no edge on the flat baseline reference; a knot there squashed the arc between the collapsed overshoot and the inner edge.
+- **Spec:** `glyph_round_stem_chrome159_spec` (0/3 on base, 3/3 after).
+- **Fixture (Liberation Sans 16 / 13.333 / 18.72 bold / 24 bold, mono 12, 400x100):** 4329 -> 3709 (round stems) -> 3631 (own-edge knots) mismatching px.
+- **Catalog 1x:**
+
+  | page | before | after |
+  |---|---|---|
+  | html | 1.77 | 1.49 |
+  | forms-media | 2.15 | 1.78 |
+  | overview | 1.10 | 0.89 |
+  | evidence | 0.67 | 0.52 |
+  | tab-bar | 0.31 | 0.30 |
+
+- **Trap — a mid-quad extremum is not a round edge here.** Only an on-curve extremum point is detected. A curve whose extreme is a control point keeps the blue-extremum knot only (FreeType fits the control point).
+- **Trap — the o bottom centre stays off.** Chrome `e7dfc7`, ours `eff7e7` (was `ffffff`): Chrome's bottom arc is heavier on its right half. The stem fit is symmetric, so pin the shoulder pixel (7,17), not the centre.
+- **Open, measured, not fixed (page lanes html / forms-media):**
+  - **Device scale 4, text pens:** `draw_ir_composition_at_device_scale` multiplies the whole-CSS-px `advance_widths` by k, so a glyph pen is a multiple of 4 device px. Chrome keeps the fractional advance (E 10.672 px -> 42.69 device px): per-glyph offsets of -2..+2 device px on `Examples show`. The grayscale raster also drops the bearing fraction (`_outline_edges(..., bounds.left * scale, ...)`): Chrome's E stem is 21.26..27.22, ours 21..27. Needs a fractional device advance on the Draw IR text command (producer, device-scale pass, Engine2D consumer).
+  - **18.72 px bold (h3):** some glyphs (`a`, `p`) sit about 0.2..0.3 px right of Chrome's while `m` matches: a per-glyph LCD phase difference at fractional sizes.
+  - **Tool note:** element attribution needs the rect dump in standards mode. Prepending anything before `<!doctype>` puts Chrome in quirks mode and moves every rect about 14 px.
+
+## 2026-11-22 — fractional sizes at Chrome's font-cache-key size; quarter-phase ties (page lane html / forms-media)
+
+- **Measured (Chrome 159, Range rects of `m` runs):** the size Chrome shapes and rasterises `font-size: S` at is `trunc(trunc_f32(S * 100) / 100 * 64) / 64`. Blink keys its font cache on `(unsigned)(size * 100)` in float32 and creates the platform font at that size; Skia then truncates to 26.6. 18.72 (UA h3) is float 18.7199993 -> x100 1871.9999 -> 18.71 -> **1197/64**, not 1198/64. 37.44 -> 2395, 17.72 -> 1133, 19.72 -> 1261, but 20.72 x100 rounds to 2072.0 in float32 and keeps 1326; 13.3333 -> 853, 13.28 (h5) -> 849, 10.72 (h6) -> 686.
+- **Root cause of the open "18.72 bold per-glyph LCD phase" item above:** `_fr_size_26_6` scaled every fractional pen by 1198/64, 0.09% long. That crossed a quarter phase on about half of each h3 run's glyphs (ink +0.25..0.31 px right). The bold face was not the cause; 18.72 regular showed the same.
+- **Change (`font_renderer.spl`):** `_fr_size_26_6` emulates the float32 key truncation. Spec: `font_cache_key_size_chrome159_spec` (1/4 -> 4/4, then AC-5 4/5 -> 5/5). The LCD outline is rasterised at the keyed size too (`x_milli` = keyed 26.6 size in milli): AC-5 edge pixels go from 16 to 8 levels off, which is exactly at the 8-level tolerance. AC-2 (37.44) allows 2/64 px: Chrome's 39902/64 width is 1.85/64 above the linear 2395/64 model, a residual still unexplained. The old 2396/64 width was 15/64 off.
+- **Quarter-phase ties:** at an integer size a pen is a whole number of font units (16 px Liberation: 1/128 px), so pens at k/8 px are exact ties, and Chrome (SkFixed + 1/8, floor to 1/4) rounds them up. The engine summed per-glyph advances that were each rounded to milli-px, so a tie could come out 3 milli short and round down (`p` at 190.622). Fix: `_lcd_apply_pen_phases` snaps integer-size pens to the unit grid (`_fr_units_per_em`). The snap never grows the error. `whole` (the layout pens) is unchanged. Spec: `lcd_quarter_phase_tie_chrome159_spec` (0/1 -> 1/1).
+- **Handed off (layout lane), not fixed here:** a run inside an inline element after a collapsible space (`Keyboard samples: <kbd>`, `<kbd>A</kbd> <kbd>B</kbd>`) gets `pen-origin-milli` 0, because the trimmed trailing space breaks `inline_pen_err`. Its glyphs land 0.41 / 0.77 px left. This is 2,050 of the html page's 9,599 mismatching px at 1x. A text run that follows an element keeps its origin. Spec: `inline_element_pen_origin_chrome159_spec` (`@tag:in-development`, 0/2).
+- **Trap — monospace here is DejaVu Sans Mono** (1233 units = 9.6328 px at 16 px), not Liberation Mono.
+- **Trap — `cols`-style ink-run attribution merges touching glyphs.** Compare per-glyph centroids on a `letter-spacing` fixture instead. A pen error shows as a ±0.25 step, a raster error as an ink-sum change with the centroid unmoved.
+- **Remaining 1x text residual (this lane, open):** per-glyph raster shape at 16 px. Word positions match within 0.06 px, while ink runs 0.3..0.5% lighter. The worst glyphs are `a` (top and bottom arc rows), `s`, `o`, `q`, `g` and digits `3 5 6 8 9`, at 20..40 mismatching px per glyph; `i l j t` sit at 0..3.
+- **Perf (html 1x, 3 alternations, idle box, same seed binary):** base 40.15 s, round stems 40.50 s (+0.9%), font-cache-key size 40.68 s (+0.45%), final 40.67 s. The tie snap adds nothing measurable. Max RSS is about 800 MB on every commit.

@@ -1,0 +1,152 @@
+"""
+## Purpose and audience
+Purpose: Pin the size Chrome 159 really shapes and rasterises a fractional
+`font-size` at. Blink keys its font cache on `(unsigned)(size * 100)` in
+float32 (`FontCacheKey` precision multiplier 100) and creates the platform
+font at that truncated size; Skia then hands FreeType the size in 26.6,
+truncated. `font-size: 18.72px` (UA h3) is float 18.7199993, x100 = 1871.9999
+-> 1871 -> 18.71 px -> 1197/64 px, not the 1198/64 a direct 26.6 truncation of
+18.72 gives. Every advance, pen and glyph quarter phase of an h3 run follows.
+The engine scaled by 1198/64: each pen ran 0.09% long, which crossed a quarter
+phase on about half the glyphs of the catalog h3 headings (ink 0.25 px right).
+Audience: web renderer / text metrics maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, Liberation Sans):
+
+| run | Chrome 159 width (1/64 px) | before this fix |
+|-----|----------------------------|-----------------|
+| 40 x `m` at 18.72 px  | 39885 (623.203 px) | 623.70 px (1198/64) |
+| 20 x `m` at 37.44 px  | 39902 (623.469 px) | 623.70 px (2396/64) |
+| 40 x `m` at 18.725 px | 39918 (623.719 px) | 623.70 px (unchanged) |
+
+Measured effective sizes (m runs, 1/64 px): 17.72 -> 1133, 18.705 -> 1196,
+18.72 -> 1197, 19.72 -> 1261, 20.72 -> 1326 (float32 x100 rounds to 2072),
+13.3333 -> 853, 18.725 -> 1198; every one is
+`trunc(trunc_f32(size * 100) / 100 * 64)`.
+
+Paint (same Chrome, `<p style="margin:0;position:absolute;left:4px;top:0;
+font-size:18.72px;line-height:30px;letter-spacing:4px">Examplesshowapqmoceasd`,
+`color:#000` on white): the `e` (8th glyph) has its Chrome pen at 90.3594 px,
+quarter phase 1; the 1198/64 pens put it at 90.417 (phase 2):
+
+| pixel   | Chrome 159 | before this fix |
+|---------|------------|-----------------|
+| (90,15) | ffe7b7 | ffffe7 |
+| (91,15) | 5f1f00 | a7470f |
+| (99,13) | 3f8fcf | 174f9f |
+| (92,19) | 571f00 | 974f17 |
+
+Raster (same page): Chrome hands FreeType the keyed size for the outline too,
+so the 18.72 px glyphs are 1197/64 px wide. Rasterised at 18.72 the stems
+are about 16 levels darker at their edge pixels:
+
+| pixel   | Chrome 159 | at 18.72 | at 1197/64 |
+|---------|------------|----------|------------|
+| (62,11) | e7f7ff | d7f7ff | dff7ff |
+| (138,12) | 673f17 | 774717 | 6f3f17 |
+| (185,13) | 2f0700 | 3f0f00 | 370f00 |
+| (290,13) | 2f0700 | 3f0f00 | 370f00 |
+
+Tolerance: widths within 1/64 px of Chrome's LayoutUnit width (37.44 px: 2/64 --
+Chrome's 39902 is 1.85/64 above the linear 2395/64 width 39900.15, a residual
+not explained by the key size; the 2396/64 width before this fix was 15/64 off); pixels within 8
+levels per channel (the catalog differ's tolerance).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-METRICS-004 - fractional font sizes shape and paint at Chrome's font-cache-key size (float32 x100 truncation, then 26.6 truncation).
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language_milli}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 32
+val TOL: i64 = 8
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif;color:#000\"><p style=\"margin:0;position:absolute;left:4px;top:0px;font-size:18.72px;line-height:30px;letter-spacing:4px\">Examplesshowapqmoceasd</p></body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+# |exact run width - Chrome's width| <= tol_64 / 64 px.
+fn _width_near(size_milli: i32, content: text, chrome_64: i64, tol_64: i64) -> bool:
+    val m = resolve_font_metrics_with_language_milli("sans-serif", content, size_milli, "und")
+    if not m.valid or m.width_milli < 0:
+        return false
+    var d = m.width_milli * 64 - chrome_64 * 1000
+    if d < 0: d = 0 - d
+    d <= tol_64 * 1000
+
+fn _ms(n: i32) -> text:
+    var s = ""
+    var i = 0
+    while i < n:
+        s = s + "m"
+        i = i + 1
+    s
+
+describe "fractional font size at Chrome 159's font-cache-key size":
+    it "AC-1: 18.72 px runs are shaped at 18.71 px (1197/64)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome: 40 m at 18.72 px = 39885/64 px")
+        expect(_width_near(18720, _ms(40), 39885, 1)).to_equal(true)
+        val m = resolve_font_metrics_with_language_milli("sans-serif", _ms(40), 18720, "und")
+        expect(m.width).to_equal(623)
+
+    it "AC-2: 37.44 px runs are shaped at 37.43 px (2395/64)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome: 20 m at 37.44 px = 39902/64 px")
+        expect(_width_near(37440, _ms(20), 39902, 2)).to_equal(true)
+
+    it "AC-3: a size whose float32 x100 does not truncate keeps its 26.6 size":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome: 40 m at 18.725 px = 39918/64 px")
+        expect(_width_near(18725, _ms(40), 39918, 1)).to_equal(true)
+
+    it "AC-4: the 18.72 px glyph pens take Chrome's quarter phases":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome e (pen 90.3594, phase 1): (90,15) ffe7b7 (91,15) 5f1f00 (99,13) 3f8fcf (92,19) 571f00")
+        expect(_near(px, 90, 15, 0xffe7b7u32)).to_equal(true)
+        expect(_near(px, 91, 15, 0x5f1f00u32)).to_equal(true)
+        expect(_near(px, 99, 13, 0x3f8fcfu32)).to_equal(true)
+        expect(_near(px, 92, 19, 0x571f00u32)).to_equal(true)
+
+    it "AC-5: the 18.72 px glyph outlines are rasterised at the keyed size (1197/64 px wide)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("Chrome stem edges: (62,11) e7f7ff (138,12) 673f17 (185,13) 2f0700 (290,13) 2f0700")
+        expect(_near(px, 62, 11, 0xe7f7ffu32)).to_equal(true)
+        expect(_near(px, 138, 12, 0x673f17u32)).to_equal(true)
+        expect(_near(px, 185, 13, 0x2f0700u32)).to_equal(true)
+        expect(_near(px, 290, 13, 0x2f0700u32)).to_equal(true)

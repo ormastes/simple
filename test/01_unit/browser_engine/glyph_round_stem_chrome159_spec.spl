@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Purpose: Pin ROUND horizontal stems (the top and bottom arcs of `o`, `e`, `a`,
+`c`, `s`, `p` ...) of 16 px Liberation Sans on the Engine2D CPU text path against
+Chrome 159. Chrome on Linux rasterises with FreeType's "light" autohinter. A
+curve extremum is a (round) edge there, and the outer and inner extremum of an
+arc form a stem: the outer edge sits on its blue zone (overshoot collapsed onto
+the reference below half a pixel) and the inner edge follows at the NATURAL
+stroke width. This engine used to warp y through the blue-zone knots only, so
+the collapsed overshoot (about 0.19 px at 16 px) was taken out of the stroke:
+the arcs of every round lowercase letter were one fifth of a row thinner than
+Chrome's, which was the largest single text-raster cause on the catalog pages
+(see doc/00_llm_process/feature_expert/web_render_css_parity/skill.md).
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, Liberation Sans 16 px,
+`color:#000` on white, `<p style="margin:0;position:absolute;left:4px;top:4px;
+line-height:20px">oceasd bpqgu</p>`). The arc centre column is fully inside the
+glyph horizontally, so the pixel is the stroke's vertical coverage:
+
+| glyph | pixel   | Chrome 159 | before this fix |
+|-------|---------|------------|-----------------|
+| o top, second row     | (8,11)  | e7efe7 | ffffff |
+| o top shoulder        | (7,11)  | 6fa7cf | 9fd7f7 |
+| o bottom shoulder     | (7,17)  | 6fafcf | 9fd7f7 |
+| e top, second row     | (25,11) | dfe7df | f7ffef |
+| o top, first row      | (8,10)  | 000000 | 000000 |
+| o bottom, first row   | (8,18)  | 070000 | 000000 |
+
+Open (not pinned): the o bottom centre (8,17) is e7dfc7 in Chrome, ffffff
+before this fix and eff7e7 after it. Chrome's bottom arc carries about a third
+of a pixel more ink on its right half than its left; the stem fit is symmetric,
+so the rest belongs to the open LCD filter class, not to the stem width.
+
+Tolerance: 8 levels per channel, the catalog differ's own tolerance
+(src/app/ui/chrome_showcase/pixel_diff.spl TOLERANCE); the open LCD filter /
+gamma class moves a channel by a few levels and is not what this spec pins.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-003 - Draw IR LCD text keeps the natural width of round horizontal stems like Chrome's light autohinter.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 128
+val H: i32 = 32
+val TOL: i64 = 8
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:4px;top:4px;font-size:16px;line-height:20px;color:#000\">oceasd bpqgu</p></body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+# Every channel of pixel (x, y) is within TOL of Chrome's `want`.
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+describe "round horizontal stems against Chrome 159 (light autohinter)":
+    it "AC-1: the o top arc keeps its natural width below the x-height row":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome o top centre x=8: row 10 000000, row 11 e7efe7; shoulder x=7 row 11 6fa7cf")
+        expect(_near(px, 8, 10, 0x000000u32)).to_equal(true)
+        expect(_near(px, 8, 11, 0xe7efe7u32)).to_equal(true)
+        expect(_near(px, 7, 11, 0x6fa7cfu32)).to_equal(true)
+
+    it "AC-2: the o bottom arc keeps its natural width above the baseline row":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("Chrome o bottom: shoulder x=7 row 17 6fafcf, centre x=8 row 18 070000")
+        expect(_near(px, 7, 17, 0x6fafcfu32)).to_equal(true)
+        expect(_near(px, 8, 18, 0x070000u32)).to_equal(true)
+
+    it "AC-3: the e top arc (crossbar glyph) keeps its natural width":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("Chrome e top centre x=25: row 10 000000, row 11 dfe7df")
+        expect(_near(px, 25, 10, 0x000000u32)).to_equal(true)
+        expect(_near(px, 25, 11, 0xdfe7dfu32)).to_equal(true)
