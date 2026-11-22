@@ -1,0 +1,176 @@
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/serving/serving_pooling.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/runners/pooling_runner.spl 80%
+# @cover src/runtime/slang_ggml_shim.c 40%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang/slang_pluggable_modalities.md
+
+"""
+## Purpose and audience
+Purpose: prove /v1/embeddings and /v1/rerank on real GGUF models through the
+ggml shim's model handles, and that a chat model stays resident and answers
+while an embedding model is loaded beside it.
+Audience: engineers changing the pooling runner, the serving module or the
+shim's handle / embeddings group.
+
+## What is checked
+- embeddings: OpenAI list shape, one L2-normalized vector per input; cosine of
+  a paraphrase pair is higher than of an unrelated pair; base64 encoding is
+  accepted;
+- rerank: the relevant document ranks first and top_n bounds the results;
+- a chat model is wrong_model_kind (400) on /v1/embeddings;
+- two models resident: a handle model and the default chat model in one
+  process, and the chat model still answers.
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_MODEL_ROOT holds bge-small-en-v1.5-gguf (q8_0)
+and bge-reranker-v2-m3-GGUF (resolved as Rerank from its cls.output.weight
+tensor; no slang_kind.sdn needed), and the ggml shim has capability bit
+512 (SLANG_GGML_LIB, absolute path). SLANG_POOL_CHAT_MODEL_ID picks the chat
+model for the residency check (default Qwen2.5-1.5B-Instruct-Q4_K_M).
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_pooling.{serve_embeddings, serve_rerank}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_lib_path}
+use std.gc_async_mut.slang.model_executor.backend.{open_backend, load_model, open_context, generate_observed_request, BackendGenerationRequest, chat_frame, close_backend, backend_model_handles, open_model_handle, close_model_handle, open_request_for, close_backend_request, request_embed_configure, request_set_text, request_embeddings, POOLING_MODEL_DEFAULT}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.io_runtime.{env_get, is_dir}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
+use std.gc_async_mut.slang.modality.kinds.{model_kind_text}
+
+val EMBED_ID = "bge-small-en-v1.5-gguf"
+val RERANK_ID = "bge-reranker-v2-m3-GGUF"
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available() and
+        is_dir(_model_root() + "/" + EMBED_ID) and is_dir(_model_root() + "/" + RERANK_ID)
+
+# The loadable file of model `id` under the root, "" when absent.
+fn pooling_spec_model_file(id: text) -> text:
+    for m in scan_model_root(_model_root(), true):
+        if m.id == id:
+            return m.entry_path
+    ""
+
+# The resolved kind of model `id`, "" when absent.
+fn pooling_spec_model_kind(id: text) -> text:
+    for m in scan_model_root(_model_root(), true):
+        if m.id == id:
+            return model_kind_text(m.profile.kind)
+    ""
+
+# env_get answers "" for an unset variable, so `??` alone never defaults.
+fn pooling_spec_chat_model_id() -> text:
+    val wanted = env_get("SLANG_POOL_CHAT_MODEL_ID") ?? ""
+    if wanted == "": "Qwen2.5-1.5B-Instruct-Q4_K_M" else: wanted
+
+fn _vectors(body: text) -> [[f64]]:
+    var out: [[f64]] = []
+    val parsed = json_parse_with_error(body)
+    if not json_object_get(parsed.0, "data").?:
+        return out
+    val data = json_object_get(parsed.0, "data")!
+    var i = 0
+    while i < json_array_length(data):
+        val emb = json_object_get(json_array_get(data, i), "embedding")
+        var v: [f64] = []
+        var j = 0
+        while j < json_array_length(emb):
+            v.push(json_array_get(emb, j).1)
+            j = j + 1
+        out.push(v)
+        i = i + 1
+    out
+
+fn _dot(a: [f64], b: [f64]) -> f64:
+    var s = 0.0
+    var i = 0
+    while i < a.len():
+        s = s + a[i] * b[i]
+        i = i + 1
+    s
+
+describe "slang pooling (embeddings + rerank), live":
+    it "embeds with similar pairs closer than dissimilar ones":
+        if not _live_enabled():
+            skip("embeds with similar pairs closer than dissimilar ones", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT with the bge models and the ggml shim")
+            return
+        val r = serve_embeddings(_model_root(), "{\"model\":\"" + EMBED_ID + "\",\"input\":[\"A cat sits on the mat.\",\"A kitten is resting on a rug.\",\"The stock market fell sharply on Tuesday.\"]}")
+        expect(r.status).to_equal(200)
+        val v = _vectors(r.body)
+        expect(v.len()).to_equal(3)
+        expect(v[0].len()).to_equal(384)
+        val unit = _dot(v[0], v[0])
+        expect(unit > 0.999 and unit < 1.001).to_equal(true)
+        val similar = _dot(v[0], v[1])
+        val dissimilar = _dot(v[0], v[2])
+        step("cosine similar=" + similar.to_text() + " dissimilar=" + dissimilar.to_text())
+        expect(similar > dissimilar).to_equal(true)
+
+    it "accepts encoding_format base64":
+        if not _live_enabled():
+            skip("accepts encoding_format base64", "needs SLANG_LIVE=1 and the bge models")
+            return
+        val r = serve_embeddings(_model_root(), "{\"model\":\"" + EMBED_ID + "\",\"input\":\"hello\",\"encoding_format\":\"base64\"}")
+        expect(r.status).to_equal(200)
+        # 384 float32 = 1536 bytes = 2048 base64 characters.
+        val emb = json_object_get(json_array_get(json_object_get(json_parse_with_error(r.body).0, "data"), 0), "embedding")
+        expect(emb.0).to_equal("string")
+        expect(emb.1.len()).to_equal(2048)
+
+    it "ranks the relevant document first and honours top_n":
+        if not _live_enabled():
+            skip("ranks the relevant document first and honours top_n", "needs SLANG_LIVE=1 and the bge models")
+            return
+        # No slang_kind.sdn is needed: the cls.output.weight tensor makes it Rerank.
+        expect(pooling_spec_model_kind(RERANK_ID)).to_equal("rerank")
+        val r = serve_rerank(_model_root(), "{\"model\":\"" + RERANK_ID + "\",\"query\":\"What is the capital of France?\",\"documents\":[\"Berlin is the capital of Germany.\",\"Paris is the capital and largest city of France.\",\"Bananas are rich in potassium.\"],\"top_n\":2}")
+        step("rerank " + r.body)
+        expect(r.status).to_equal(200)
+        val results = json_object_get(json_parse_with_error(r.body).0, "results")
+        expect(json_array_length(results)).to_equal(2)
+        expect(json_object_get(json_array_get(results, 0), "index").1).to_equal(1.0)
+
+    it "refuses a chat model on /v1/embeddings with wrong_model_kind":
+        if not _live_enabled():
+            skip("refuses a chat model on /v1/embeddings with wrong_model_kind", "needs SLANG_LIVE=1 and the bge models")
+            return
+        val chat_id = pooling_spec_chat_model_id()
+        val r = serve_embeddings(_model_root(), "{\"model\":\"" + chat_id + "\",\"input\":\"x\"}")
+        expect(r.status).to_equal(400)
+        expect(r.body.contains("wrong_model_kind")).to_equal(true)
+
+    it "keeps a chat model and an embedding model resident together":
+        if not _live_enabled():
+            skip("keeps a chat model and an embedding model resident together", "needs SLANG_LIVE=1 and the bge models")
+            return
+        val chat_id = pooling_spec_chat_model_id()
+        val chat_path = pooling_spec_model_file(chat_id)
+        val embed_path = pooling_spec_model_file(EMBED_ID)
+        expect(chat_path != "").to_equal(true)
+        val b = open_backend(engine_lib_path()).unwrap()
+        expect(backend_model_handles(b)).to_equal(true)
+        expect(load_model(b, chat_path, 0).is_ok()).to_equal(true)
+        expect(open_context(b, 2048).is_ok()).to_equal(true)
+        val h = open_model_handle(b, embed_path, 0).unwrap()
+        val r = open_request_for(b, h, 512).unwrap()
+        expect(request_embed_configure(b, r, POOLING_MODEL_DEFAULT).is_ok()).to_equal(true)
+        expect(request_set_text(b, r, "resident").is_ok()).to_equal(true)
+        expect(request_embeddings(b, r).unwrap().len()).to_equal(1536)
+        # Closing the model while its request is open is refused.
+        expect(close_model_handle(b, h).is_err()).to_equal(true)
+        close_backend_request(b, r)
+        val answer = generate_observed_request(BackendGenerationRequest(max_tokens: "8", prompt: chat_frame("user", "What is the capital of France? One word."), backend: b, chat: true, stops: [])).unwrap()
+        step("chat while embedder resident: " + answer.output)
+        expect(answer.output.contains("Paris")).to_equal(true)
+        expect(close_model_handle(b, h).is_ok()).to_equal(true)
+        close_backend(b)
