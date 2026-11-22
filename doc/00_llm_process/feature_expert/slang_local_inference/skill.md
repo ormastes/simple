@@ -366,7 +366,9 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   Media decode is C-side (stb_image/miniaudio); pure-Simple decoders are not wired.
 - **Memory gate:** overhead is `estimate_runtime_overhead_bytes` (n_ctx- and model-scaled, no GGUF parse), so a small model at small context no longer needs ~10 GiB free; the per-token constant is an admission-only upper bound, not exact KV size.
 - **Runner trap:** `skip(...)` inside an example is counted as PASSED
-  (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
+  (`skipped=0`) by seeds without the 2026-11-23 `bdd.rs` fix (source now counts it
+  skipped and prints `○ name (skip in body)`; bug doc
+  `spec_skip_reported_as_pass_2026-11-19`; keep the `SKIPPED:` lines until the seed is redeployed); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
 - **Live spec timeout knob:** `SLANG_RUN_TIMEOUT_MS` (default 600000) bounds each child in `caret_slang_local_hello_system_spec.spl`; the 3-model gate (`check-slang-ggml-inference.shs`, 9 dirs) took 34m50s on a loaded Windows host, so set e.g. 3300000 with `SIMPLE_TIMEOUT_SECONDS=3600`.
 
 ## Model kinds and modalities (L1 common structure, 2026-11-17)
