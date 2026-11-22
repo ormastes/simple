@@ -687,19 +687,23 @@ impl MirLowering:
 
     me consumer_builtin_none_symbol_v1(span: Span) -> SymbolId:
         """The consumer table's built-in `None` symbol, defined on first use the
-        way HIR lowering defines it. Invalid when the consumer binds `None` to
-        anything else (a module-owned symbol or a non-function): the default
-        then stays Error rather than naming an unrelated consumer symbol."""
+        way HIR lowering defines it. Invalid when the consumer binds `None` to a
+        module-owned callable/value or type declaration. An unrelated enum's unit
+        variant `Foo.None` (bound bare as `SymbolKind.EnumVariant` by `lower_variant`)
+        does not shadow `Option.None` in value position, so allocate a non-lexical
+        module-less `Function` symbol when lexical `None` is an `EnumVariant`."""
         val existing = self.symbols.lookup_or_invalid("None")
         if not existing.is_valid():
             return self.symbols.define("None", SymbolKind.Function, None, span, Visibility.Private, false, None)
-        if self.symbols.symbol_defining_module_scalar_raw(existing.id) != "":
+        if not self.symbols.symbols.has(existing.id):
             return SymbolId(id: -1)
-        val optional_existing: HirSymbol? = self.symbols.get_symbol_raw(existing.id)
-        if val present_existing = optional_existing:
-            val existing_symbol: HirSymbol = present_existing
-            if existing_symbol.kind == SymbolKind.Function:
-                return existing
+        val existing_symbol: HirSymbol = self.symbols.symbols[existing.id]
+        if existing_symbol.kind == SymbolKind.Function:
+            if self.symbols.symbol_defining_module_scalar_raw(existing.id) != "":
+                return SymbolId(id: -1)
+            return existing
+        if existing_symbol.kind == SymbolKind.EnumVariant:
+            return self.symbols.define_with_binding("None", SymbolKind.Function, None, span, Visibility.Private, false, None, false)
         SymbolId(id: -1)
 
     me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
@@ -767,7 +771,14 @@ impl MirLowering:
                         # consumer omitting the field failed with "unsupported
                         # provider default". A linked or module-owned symbol
                         # named None is a real provider callable, not this.
+                        var expr_is_optional = false
+                        if result.has_type_:
+                            match result.type_.kind:
+                                case HirTypeKind.Optional(_): expr_is_optional = true
+                                case _: ()
                         if source.kind == SymbolKind.Function and source.name == "None" and (source.defining_module ?? "") == "" and not links.has(id.id):
+                            source_is_builtin_none = true
+                        elif expr_is_optional and source.kind == SymbolKind.EnumVariant and source.name == "None":
                             source_is_builtin_none = true
                         if source.kind == SymbolKind.Class:
                             source_is_class = true

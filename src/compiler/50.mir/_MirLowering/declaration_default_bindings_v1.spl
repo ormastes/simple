@@ -324,13 +324,15 @@ impl MirLowering:
         target
 
     me declaration_default_reference_v1(source_id: SymbolId,
-            frame: MirHirDefaultBindingFrameV1) -> SymbolId:
+            frame: MirHirDefaultBindingFrameV1,
+            expr_is_optional: bool = false) -> SymbolId:
         if frame.lexical_ids.has(source_id.id): return SymbolId(id: frame.lexical_ids[source_id.id])
-        if frame.declaration_ids.has(source_id.id): return SymbolId(id: frame.declaration_ids[source_id.id])
         if not frame.provider.symbols.symbols.has(source_id.id):
             self.declaration_default_fail_v1(frame, "parameter default reference lacks a provider symbol", Span.empty())
             return SymbolId(id: -1)
         val source: HirSymbol = frame.provider.symbols.symbols[source_id.id]
+        if source.kind != SymbolKind.EnumVariant and frame.declaration_ids.has(source_id.id):
+            return SymbolId(id: frame.declaration_ids[source_id.id])
         var target = SymbolId(id: -1)
         match source.kind:
             case SymbolKind.Function | SymbolKind.Method:
@@ -342,14 +344,20 @@ impl MirLowering:
                 target = self.relocate_provider_type_symbol(source_id, frame.provider.symbols)
             case SymbolKind.Const | SymbolKind.Variable:
                 target = self.declaration_default_global_symbol_v1(source, frame)
+            case SymbolKind.EnumVariant:
+                if expr_is_optional and source.name == "None":
+                    target = self.consumer_builtin_none_symbol_v1(source.span)
+                else:
+                    self.declaration_default_fail_v1(frame, "parameter default reference is not a bound lexical or canonical declaration", source.span)
             case _:
                 self.declaration_default_fail_v1(frame, "parameter default reference is not a bound lexical or canonical declaration", source.span)
         if target.id < 0:
             self.declaration_default_fail_v1(frame, "parameter default canonical reference could not be relocated", source.span)
             return target
-        var ids = frame.declaration_ids
-        ids[source_id.id] = target.id
-        frame.declaration_ids = ids
+        if source.kind != SymbolKind.EnumVariant:
+            var ids = frame.declaration_ids
+            ids[source_id.id] = target.id
+            frame.declaration_ids = ids
         target
 
     me declaration_default_frame_v1(provider: MirHirModuleDeclarationsV1,

@@ -35,6 +35,7 @@ use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 use compiler.mir._MirLowering.declaration_return_types_v1.*
 use compiler.mir._MirLowering.declaration_default_bindings_v1.*
 use compiler.mir._MirLowering.declaration_default_rewrite_v1.*
+use compiler.mir._MirLowering.declaration_inventory_barriers_v1.*
 use compiler.mir.hir_declaration_variant_identity_v1.{mir_hir_global_variant_identity_v1}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -172,11 +173,13 @@ impl MirLowering:
                 enum_trace_rows = enum_trace_rows + 1
             if provider.enums.len() > 0:
                 enum_trace_providers = enum_trace_providers + 1
-            if provider.name == module.name: continue
+            if provider.name == module.name:
+                self.install_declaration_local_composite_defaults_v1(provider)
+                continue
             for raw_struct in provider.structs:
                 val declaration: MirHirNominalDeclarationV1 = raw_struct
                 self.register_provider_struct_from_declarations_v1(declaration, provider.symbols,
-                    consumer_names.has(declaration.name))
+                    consumer_names.has(declaration.name), name)
             if provider.classes.len() > 0 or provider.enums.len() > 0 or provider.structs.len() > 0 or provider.impls.len() > 0:
                 val links = self.declaration_links_v1(provider)
                 for raw_class in provider.classes:
@@ -285,10 +288,18 @@ impl MirLowering:
         val expression: HirExpr = loaded.unwrap()
         Some(expression)
 
-    me load_declaration_expression_v1(owner: text, artifact: MirHirExpressionArtifactV1) -> HirExpr?:
+    me load_declaration_expression_v1(owner: text, artifact: MirHirExpressionArtifactV1,
+            declared_slot_type: HirType? = None) -> HirExpr?:
         val raw_expression = self.load_declaration_raw_expression_v1(owner, artifact)
         if raw_expression == None: return None
-        val expression: HirExpr = raw_expression.unwrap()
+        var expression: HirExpr = raw_expression.unwrap()
+        if not expression.has_type_:
+            if val slot_type = declared_slot_type:
+                match slot_type.kind:
+                    case HirTypeKind.Optional(_):
+                        expression.has_type_ = true
+                        expression.type_ = slot_type
+                    case _: ()
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
         val module: MirHirModuleDeclarationsV1 = repository.modules[owner]
         if mir_layout_canonical_module_name(module.name) == self.current_module_id:
@@ -312,7 +323,7 @@ impl MirLowering:
         val field: MirHirFieldDeclarationV1 = fields[index]
         if not field.has_default: return None
         if val artifact = field.default_artifact:
-            return self.load_declaration_expression_v1(self.declaration_field_default_owners[key], artifact)
+            return self.load_declaration_expression_v1(self.declaration_field_default_owners[key], artifact, Some(field.type_))
         self.error_fatal("declaration field default artifact is absent: {key}", Some(field.span))
         None
 
@@ -377,7 +388,14 @@ impl MirLowering:
                 index = index + 1
                 continue
             if val artifact = param.default_artifact:
-                if val expression = self.load_declaration_raw_expression_v1(defaults.module_name, artifact):
+                if val raw_param_expr = self.load_declaration_raw_expression_v1(defaults.module_name, artifact):
+                    var expression = raw_param_expr
+                    if not expression.has_type_:
+                        match param.type_.kind:
+                            case HirTypeKind.Optional(_):
+                                expression.has_type_ = true
+                                expression.type_ = param.type_
+                            case _: ()
                     val remapped = self.remap_declaration_default_expr_v1(expression, frame)
                     if frame.failed: return Err("call default remapping failed")
                     val declared = self.remap_declaration_default_type_v1(param.type_, frame)
@@ -954,7 +972,7 @@ impl MirLowering:
         # semantics of the bare maps themselves.
         self.reindex_enum_variant_owners(enum_def.name, [], names)
 
-    me register_provider_struct_from_declarations_v1(struct_def: MirHirNominalDeclarationV1, provider: SymbolTable, consumer_owns_name: bool):
+    me register_provider_struct_from_declarations_v1(struct_def: MirHirNominalDeclarationV1, provider: SymbolTable, consumer_owns_name: bool, owner_module: text):
         # prescan_module_struct_names registers every module's struct field
         # metadata before any module is lowered, so an imported struct's
         # struct_field_hir_type holds Named ids from the PROVIDER table. Read
@@ -974,6 +992,7 @@ impl MirLowering:
             val source: HirSymbol = present_source
             var fields: [MirHirFieldDeclarationV1] = []
             var field_names: [text] = []
+            var flags: [bool] = []
             for raw_field in struct_def.fields:
                 val field: MirHirFieldDeclarationV1 = raw_field
                 # Annotated copies: nested struct transports lose their declared
@@ -983,9 +1002,22 @@ impl MirLowering:
                 relocated.type_ = self.relocate_provider_type(field_type, provider)
                 fields = fields.push(relocated)
                 field_names = field_names.push(field.name)
+                flags = flags.push(field.has_default)
             val key = self.composite_layout_key(source)
             if key != struct_def.name:
                 self.register_declaration_fields_v1(key, fields, self.symbols, true)
+                self.struct_field_has_default[key] = flags
+                self.declaration_field_defaults[key] = struct_def.fields
+                self.declaration_field_default_owners[key] = owner_module
+            val target = self.relocate_provider_type_symbol(struct_def.symbol, provider)
+            if target.id >= 0 and self.symbols.symbols.has(target.id):
+                val consumer_symbol: HirSymbol = self.symbols.symbols[target.id]
+                val consumer_key = self.composite_layout_key(consumer_symbol)
+                if consumer_key != struct_def.name and consumer_key != key:
+                    self.register_declaration_fields_v1(consumer_key, fields, self.symbols, true)
+                    self.struct_field_has_default[consumer_key] = flags
+                    self.declaration_field_defaults[consumer_key] = struct_def.fields
+                    self.declaration_field_default_owners[consumer_key] = owner_module
             # The bare-name entry is shared by every same-named struct: replace it
             # only when the consumer does not declare that name itself and the
             # recorded bare-layout owner is this provider's declaration -- a
@@ -1005,6 +1037,9 @@ impl MirLowering:
                     return
                 i = i + 1
             self.register_declaration_fields_v1(struct_def.name, fields, self.symbols, true)
+            self.struct_field_has_default[struct_def.name] = flags
+            self.declaration_field_defaults[struct_def.name] = struct_def.fields
+            self.declaration_field_default_owners[struct_def.name] = owner_module
 
 # Trait-typed receiver dispatch (bug
 # stage2_trait_typed_receiver_method_unresolved_2026-10-10). A declaration's

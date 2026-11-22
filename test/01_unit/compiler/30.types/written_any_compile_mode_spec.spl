@@ -73,10 +73,10 @@ describe "Written Any policy":
             "        val z: Any = 1\n" +
             "        0\n"
 
-        step("Scripts and non-robust builds report written Any as warnings")
+        step("Scripts and non-robust builds report written Any once per occurrence")
         val lenient_outside = lowering_diagnostics(outside, false)
         assert_equal(any_error_count(lenient_outside.errors), 0)
-        assert_equal(any_warning_count(lenient_outside.warnings) >= 2, true)
+        assert_equal(any_warning_count(lenient_outside.warnings), 2)
         val lenient_unsafe = lowering_diagnostics(inside, false)
         assert_equal(any_error_count(lenient_unsafe.errors), 0)
         assert_equal(any_warning_count(lenient_unsafe.warnings), 1)
@@ -85,8 +85,45 @@ describe "Written Any policy":
         assert_equal(nested_written_any.parse_errors, 0)
         assert_equal(any_warning_count(nested_written_any.warnings), 2)
 
+        step("Callable, trait, impl, constant, and public alias signatures report written Any once")
+        val multi_param_sig = lowering_diagnostics(
+            "fn pair(a: Any, b: Any) -> i64:\n    0\n", false)
+        assert_equal(any_warning_count(multi_param_sig.warnings), 2)
+        assert_equal(any_error_count(lowering_errors("fn pair(a: Any, b: Any) -> i64:\n    0\n", true)), 2)
+        val extern_sig = lowering_diagnostics("extern fn ext(a: Any) -> Any\n", true)
+        assert_equal(any_error_count(extern_sig.errors), 2)
+        val trait_sig = lowering_diagnostics("trait Erased:\n    fn run(self, x: Any) -> Any\n", true)
+        assert_equal(any_error_count(trait_sig.errors), 2)
+        val impl_static_sig = lowering_diagnostics(
+            "struct Boxed:\n    v: i64\nimpl Boxed:\n    static fn make(x: Any) -> Any:\n        x\n", true)
+        assert_equal(any_error_count(impl_static_sig.errors), 2)
+        val global_const_any = lowering_diagnostics("val GLOBAL_ANY: Any = 1\n", true)
+        assert_equal(any_error_count(global_const_any.errors), 1)
+        val public_alias_any = lowering_diagnostics("pub type PublicHidden = Any\n", true)
+        assert_equal(any_error_count(public_alias_any.errors), 1)
+        val opt_param_any_lenient = lowering_diagnostics("fn opt_f(x: Any? = None) -> i64:\n    0\n", false)
+        assert_equal(opt_param_any_lenient.errors, "")
+        assert_equal(any_warning_count(opt_param_any_lenient.warnings), 1)
+        val opt_param_any_strict = lowering_diagnostics("fn opt_f(x: Any? = None) -> i64:\n    0\n", true)
+        assert_equal(any_error_count(opt_param_any_strict.errors), 1)
+        val alias_opt_safe = lowering_diagnostics(
+            "type MaybeInt = i64?\nenum Color:\n    Red\n    None\nfn opt_alias_safe(x: MaybeInt = None) -> i64:\n    0\n", true)
+        assert_equal(alias_opt_safe.errors, "")
+        assert_equal(any_warning_count(alias_opt_safe.warnings), 0)
+        val alias_opt_any = lowering_diagnostics(
+            "type MaybeAny = Any?\nfn opt_alias_any(x: MaybeAny = None) -> i64:\n    0\n", false)
+        assert_equal(alias_opt_any.errors, "")
+        assert_equal(any_warning_count(alias_opt_any.warnings), 2)
+        val struct_field_any = lowering_diagnostics("struct Carrier:\n    payload: Any\n", true)
+        assert_equal(any_error_count(struct_field_any.errors), 1)
+        val generic_class_ret_any = lowering_diagnostics(
+            "class Holder<T>:\n    v: T\n    fn leak(self) -> Any:\n        self.v\n", true)
+        assert_equal(any_error_count(generic_class_ret_any.errors), 1)
+        val callback_ret_any = lowering_diagnostics("fn invoke(cb) -> Any:\n    cb(1)\n", true)
+        assert_equal(any_error_count(callback_ret_any.errors), 1)
+
         step("Robust compiled code rejects Any outside type_erasure")
-        assert_equal(any_error_count(lowering_errors(outside, true)) >= 2, true)
+        assert_equal(any_error_count(lowering_errors(outside, true)), 2)
         assert_equal(any_error_count(lowering_errors(inside, true)), 1)
 
         step("Only an actual type_erasure capability suppresses the diagnostic")

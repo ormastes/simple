@@ -838,7 +838,37 @@ impl HirLowering:
         # omitted-field default fill (switch_operators_calls.spl) never
         # fired (jit-0x890 defaulted-field bug chain).
         val fld_has_default = fld.has_default
-        val lowered_default = if fld_has_default:
+        var optional_field_none = false
+        if fld_has_default:
+            match type_.kind:
+                case HirTypeKind.Optional(_):
+                    match fld.default.kind:
+                        case ExprKind.Ident(ident_name):
+                            optional_field_none = ident_name == "None"
+                        case _: ()
+                case _: ()
+        val lowered_default = if fld_has_default and optional_field_none:
+            # An `Option<T> = None` field default denotes built-in `Option.None`, even
+            # when an unrelated enum in the same module registered a bare `None`
+            # `EnumVariant` symbol in lexical scope.
+            var none_sym = self.symbols.lookup_or_invalid("None")
+            var needs_builtin_none = not none_sym.is_valid()
+            if not needs_builtin_none and self.symbols.symbols.has(none_sym.id):
+                val existing_none: HirSymbol = self.symbols.symbols[none_sym.id]
+                if existing_none.kind == SymbolKind.EnumVariant:
+                    needs_builtin_none = true
+            if needs_builtin_none:
+                val bind_lex = not self.symbols.lookup_or_invalid("None").is_valid()
+                none_sym = self.symbols.define_with_binding("None", SymbolKind.Function, None, fld.default.span, Visibility.Private, false, None, bind_lex)
+            if none_sym.is_valid() and self.symbols.symbols.has(none_sym.id):
+                val resolved_none: HirSymbol = self.symbols.symbols[none_sym.id]
+                if resolved_none.kind == SymbolKind.Function and (resolved_none.defining_module ?? "") == "":
+                    HirExpr(kind: HirExprKind.NamedVar(none_sym, "None"), has_type_: true, type_: type_, span: fld.default.span)
+                else:
+                    self.lower_hir_expr(fld.default)
+            else:
+                self.lower_hir_expr(fld.default)
+        elif fld_has_default:
             val initializer = self.lower_hir_expr(fld.default)
             if self.attributed_factory_call_kind(initializer.kind): self.retain_attributed_collection_type(initializer, type_) else: initializer
         else:
