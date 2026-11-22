@@ -127,22 +127,48 @@ Snapshot generated 2026-04-23 from existing tracked `.spl`, `.rs`, `.c`, `.h`, `
 
 ### From Source (Developers Only)
 
-Only needed if you want to modify the runtime:
+Only needed if you want to modify the compiler or runtime. **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS** share the **same unified Phase 3 / Phase 4 build script** (`scripts/bootstrap/build-phase3-phase4.sh`), with `scripts/bootstrap/build-phase3-phase4.bat` on Windows delegating to it (`mingw` DEFAULT: `--win-config=mingw` with `llvm-mingw` clang + `ld.lld`; `msvc` optional: `--win-config=msvc` with `clang-cl`):
+
+- **Default seed-skip (`P3 -> P4`):** When a working native pure-Simple Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner), `scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt>` **skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`) by default** and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`; `sh scripts/bootstrap/build-phase3-phase4.sh` is the direct interactive/CLI phased entrypoint for Stage 3 & Stage 4). Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing Phase 3+ compiler without seed fallback.
+- **Shard compile default & `native_host_match` minimal link:** `--compile-mode=shard` is **DEFAULT** (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`); `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional. `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}` enforces mandatory `native_host_match` (`target (platform, cpu) == host (os, arch)`), linking `simple` with thin entry + static `libsimple-primitive-<platform>-<cpu>.a` + dead-stripped primitive C core and dynamic `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`). Phase 3 builds **ONLY** native host targets (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm are not built in Phase 3, though pre-existing `.dylib` plugins on disk remain loadable via `--backend-plugin <existing.dylib>`).
+- **Phase 4 dual-mode build & deprecated legacy scripts:** Phase 4 builds **both** optimized release `simple` (`--profile=prod --release --strip`) AND XRay-instrumented debug `simple-debug` (`--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`). Old standalone `p3-*.shs` scripts (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated and pause with migration instructions to `build-phase3-phase4.sh`.
+- **Protected bootstrap scripts & zero-compile check:** Core bootstrap scripts carry the `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner, verified in sub-second time alongside `--path-check` (`PATH_ACTION|...|status=ALIVE` superset records via `check-bootstrap-path-matrix-all.shs`) by `sh scripts/check/fast-verify-bootstrap-scripts.shs`.
 
 ```bash
+# Initial host setup + planner-admitted bootstrap (skips Phase 1 & 2 when Phase 3+ exists)
+# Note: use `sh scripts/bootstrap/build-phase3-phase4.sh` directly for interactive/CLI Stage 3 & Stage 4 builds.
 scripts/setup/setup.shs
-bin/simple build bootstrap
+sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt>
+sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --skip-seed     # require existing Phase 3+; no seed fallback
+sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --from-seed     # explicit cold rebuild from Phase 1 Rust seed
+
+# Sub-second verification of protected banners, sealed .sdn SHA-256 digests, syntax & alive path matrix
+sh scripts/check/fast-verify-bootstrap-scripts.shs
+
+# Interactive Phased Build Menu (Linux / macOS / FreeBSD / Git-Bash / SimpleOS)
+sh scripts/bootstrap/build-phase3-phase4.sh --menu
+
+# Non-interactive phases (--phase=p3a|p3|p4|all; --compile-mode=shard is DEFAULT, --compile-mode=file optional)
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=all
+
+# Fast alive path check (verifies native_host_match + phase action routing without heavy compile)
+sh scripts/bootstrap/build-phase3-phase4.sh --path-check
 ```
 
-Direct commands behind the wrapper:
+Windows Command Prompt / PowerShell (delegates to the same `.sh` script underneath):
 
-```bash
-src/compiler_rust/target/bootstrap/simple --version
-bin/simple build bootstrap
-sha256sum bootstrap/simple_stage2 bootstrap/simple_stage3
+```bat
+rem Default MinGW config (--win-config=mingw, llvm-mingw clang + ld.lld):
+scripts\bootstrap\build-phase3-phase4.bat --phase=p3 --compile-mode=shard
+
+rem Optional MSVC config (--win-config=msvc, clang-cl):
+scripts\bootstrap\build-phase3-phase4.bat --win-config=msvc --phase=p3 --compile-mode=shard
 ```
 
-See [doc/02_requirements/app/build/bootstrap.md](doc/02_requirements/app/build/bootstrap.md) and [doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md](doc/03_plan/compiler/bootstrap/pure_simple_bootstrap_stage2_remaining_2026-05-04.md) for the current bootstrap flow and remaining pure-Simple self-hosting notes.
+See [doc/07_guide/tooling/phase3_phase4_shared_build.md](doc/07_guide/tooling/phase3_phase4_shared_build.md), [doc/07_guide/tooling/bootstrap_options.md](doc/07_guide/tooling/bootstrap_options.md), and [doc/02_requirements/app/build/bootstrap.md](doc/02_requirements/app/build/bootstrap.md) for full phased options, `(platform, cpu)` `native_host_match` link policy, and pure-Simple self-hosting notes.
 
 ### Build with GPU Support
 

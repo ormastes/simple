@@ -2,7 +2,7 @@
 // Run only against a qualified native server: node this-file --server ABSOLUTE_BINARY.
 // No default binary: the tracked Rust seed is not an admitted MCP producer.
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -133,7 +133,7 @@ async function run() {
   const pidFile = path.join(directory, 'descendant.pid');
   const queryPidFile = path.join(directory, 'query.pid');
   fs.writeFileSync(path.join(directory, 'check'), `
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit', windowsHide: true });
 fs.writeFileSync(process.env.LSP_TEST_PID_FILE, String(child.pid));
@@ -166,6 +166,39 @@ setInterval(() => {}, 1000);
   });
   assert(JSON.parse(symbols.content[0].text).some(symbol => symbol.name === 'fixture_symbol'));
   await symbolClient.close();
+  passed++;
+
+  // Both native query entrypoints run in the bounded server child without a Simple CLI.
+  const nativeQueryClient = client({ SIMPLE_BINARY: '' });
+  await initialize(nativeQueryClient);
+  const position = { file: 'fixture.spl', line: 0, character: 8 };
+  const hover = await nativeQueryClient.request('tools/call', {
+    name: 'lsp_hover', arguments: position,
+  });
+  assert.match(JSON.parse(hover.content[0].text).contents.value, /fixture_symbol/);
+  const highlights = await nativeQueryClient.request('tools/call', {
+    name: 'lsp_document_highlight', arguments: position,
+  });
+  assert.match(highlights.content[0].text, /^1:7:14:/);
+  const samlFixture = path.join(__dirname, '../../../01_unit/lib/saml/fixtures/resume.saml');
+  fs.copyFileSync(samlFixture, path.join(directory, 'resume.saml'));
+  const analysis = await nativeQueryClient.request('tools/call', {
+    name: 'saml_analyze', arguments: { file: 'resume.saml' },
+  });
+  assert.match(analysis.content[0].text, /module=resume functions=2 errors=0/);
+  await nativeQueryClient.close();
+  passed++;
+
+  // Direct fast-query callers still get the capsule's default public view.
+  const scoped = path.join(directory, 'symbol-scope');
+  fs.mkdirSync(scoped);
+  fs.writeFileSync(path.join(scoped, '__init__.spl'), '');
+  fs.writeFileSync(path.join(scoped, 'fixture.spl'), 'val HIDDEN_SYMBOL = 42\n');
+  const defaultView = JSON.parse(execFileSync(server,
+    ['src/app/lsp/lsp_query.spl', 'symbols', 'symbol-scope/fixture.spl'],
+    { cwd: directory, encoding: 'utf8', timeout: 5000 }));
+  assert(defaultView.some(symbol => symbol.simpleHiddenSummary?.hidden === 1));
+  assert(!defaultView.some(symbol => symbol.name === 'HIDDEN_SYMBOL'));
   passed++;
 
   // Each remaining child-backed query must preserve the bounded owner's error.
