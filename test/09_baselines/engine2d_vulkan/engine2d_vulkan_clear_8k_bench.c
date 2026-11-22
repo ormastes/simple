@@ -122,13 +122,16 @@ int main(int argc, char **argv) {
     ClearPush pc = { .color = 0xff336699u, .width = (uint32_t)active_pixels, .height = 1 };
     if (rect_mode) {
         /* Seed retained pixels once; timed frames update only active damage. */
+        uint64_t seed_groups = (full_pixels + 255) / 256;
+        int64_t seed_gx = seed_groups <= 65535 ? (int64_t)seed_groups : 32768;
+        int64_t seed_gy = seed_groups <= 65535 ? 1 : (int64_t)((seed_groups + 32767) / 32768);
         pc.color = 0xff101010u; pc.width = width; pc.height = height;
         int64_t desc = rt_vulkan_create_descriptor_set(pipe);
         int64_t cmd = rt_vulkan_begin_compute();
         int ok = desc > 0 && cmd > 0 && rt_vulkan_bind_buffer(desc, 0, buffer) &&
             rt_vulkan_bind_pipeline(cmd, pipe) && rt_vulkan_bind_descriptors(cmd, desc) &&
             rt_vulkan_push_constants_raw(cmd, pipe, (int64_t)(uintptr_t)&pc, 64) &&
-            rt_vulkan_dispatch(cmd, (int64_t)((full_pixels + 255) / 256), 1, 1) &&
+            rt_vulkan_dispatch(cmd, seed_gx, seed_gy, 1) &&
             rt_vulkan_end_compute(cmd);
         int64_t fence = ok ? rt_vulkan_submit_and_wait_fence(cmd) : 0;
         ok = fence > 0 && rt_vulkan_wait_fence(fence, 0);
@@ -224,8 +227,11 @@ int main(int argc, char **argv) {
                     rt_vulkan_dispatch(cmd, (tail + 15) / 16, 1, 1);
             }
         } else {
+            uint64_t clear_groups = (active_pixels + 255) / 256;
+            int64_t clear_gx = clear_groups <= 65535 ? (int64_t)clear_groups : 32768;
+            int64_t clear_gy = clear_groups <= 65535 ? 1 : (int64_t)((clear_groups + 32767) / 32768);
             if (ok) ok = rt_vulkan_push_constants_raw(cmd, pipe, (int64_t)(uintptr_t)&pc, 64);
-            if (ok) ok = rt_vulkan_dispatch(cmd, (int64_t)((active_pixels + 255) / 256), 1, 1);
+            if (ok) ok = rt_vulkan_dispatch(cmd, clear_gx, clear_gy, 1);
         }
         if (ok) ok = rt_vulkan_end_compute(cmd);
         if (ok) { fence = rt_vulkan_submit_and_wait_fence(cmd); ok = fence > 0; }

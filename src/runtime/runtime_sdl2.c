@@ -204,6 +204,9 @@ static const char* const g_sdl2_candidates[] = {
     "SDL2.dll",
 #elif defined(__APPLE__)
     "libSDL2-2.0.0.dylib", "libSDL2-2.0.dylib", "libSDL2.dylib",
+    "/opt/homebrew/lib/libSDL2-2.0.0.dylib", "/opt/homebrew/lib/libSDL2-2.0.dylib", "/opt/homebrew/lib/libSDL2.dylib",
+    "/usr/local/lib/libSDL2-2.0.0.dylib", "/usr/local/lib/libSDL2-2.0.dylib", "/usr/local/lib/libSDL2.dylib",
+    "/Library/Frameworks/SDL2.framework/SDL2",
 #else
     "libSDL2-2.0.so.0", "libSDL2-2.0.so", "libSDL2.so.0", "libSDL2.so",
 #endif
