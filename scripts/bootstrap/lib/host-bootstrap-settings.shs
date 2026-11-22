@@ -1,0 +1,55 @@
+#!/bin/sh
+# Host-config defaults for bootstrap tuning knobs that used to be passed as
+# ad-hoc launcher env vars. Precedence per knob: env var (or CLI flag that
+# sets it) > host config key (scripts/setup/host-env.shs --get: SIMPLE_HOST_<KEY>
+# > user host.sdn > config/host/<hostname>.sdn) > the consumer's built-in
+# default. A host without the key is unchanged: nothing is exported.
+#
+# The Stage 3 child runs under `env -i` with a sandboxed HOME and no hostname,
+# so it cannot read host config itself; the SCRIPT layer resolves the key and
+# exports the env var, which the entry scripts already forward/hash.
+#
+#   key                       exported as
+#   mem_reserve_free_mib      SIMPLE_BUILD_MEMORY_RESERVE_BYTES (MiB * 1048576)
+#   stage3_tree_rss_cap_kib   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB (Stage 3 only)
+#   stage3_direct_threads     SIMPLE_STAGE3_DIRECT_THREADS (Stage 3 only; skipped
+#                             when SIMPLE_NATIVE_BUILD_THREADS is set)
+#   stage3_file_workers       read in bootstrap-jobs.shs bootstrap_select_stage3_file_workers
+#
+# Measure/update the keys: sh scripts/setup/update-host-config.shs --dry-run
+
+# bootstrap_host_setting KEY ROOT -> effective host-config value, or empty.
+bootstrap_host_setting() {
+  [ -f "$2/scripts/setup/host-env.shs" ] || return 0
+  sh "$2/scripts/setup/host-env.shs" --get "$1" | tail -n 1
+}
+
+# bootstrap_host_apply_memory_reserve ROOT
+bootstrap_host_apply_memory_reserve() {
+  [ -z "${SIMPLE_BUILD_MEMORY_RESERVE_BYTES+x}" ] || return 0
+  bhs_v=$(bootstrap_host_setting mem_reserve_free_mib "$1")
+  case "$bhs_v" in ''|0*|*[!0-9]*|??????????*) return 0 ;; esac
+  SIMPLE_BUILD_MEMORY_RESERVE_BYTES=$((bhs_v * 1048576))
+  export SIMPLE_BUILD_MEMORY_RESERVE_BYTES
+  echo "Build memory reserve: $SIMPLE_BUILD_MEMORY_RESERVE_BYTES bytes (source: host config mem_reserve_free_mib=$bhs_v)" >&2
+}
+
+# bootstrap_host_apply_stage3_settings ROOT
+bootstrap_host_apply_stage3_settings() {
+  if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
+    bhs_v=$(bootstrap_host_setting stage3_tree_rss_cap_kib "$1")
+    case "$bhs_v" in ''|0*|*[!0-9]*) ;; *)
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$bhs_v
+      export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      echo "Stage 3 tree RSS cap: $bhs_v KiB (source: host config stage3_tree_rss_cap_kib)" ;;
+    esac
+  fi
+  if [ -z "${SIMPLE_STAGE3_DIRECT_THREADS:-}" ] && [ -z "${SIMPLE_NATIVE_BUILD_THREADS:-}" ]; then
+    bhs_v=$(bootstrap_host_setting stage3_direct_threads "$1")
+    if [ -n "$bhs_v" ]; then
+      SIMPLE_STAGE3_DIRECT_THREADS=$bhs_v
+      export SIMPLE_STAGE3_DIRECT_THREADS
+      echo "Stage 3 direct threads: $bhs_v (source: host config stage3_direct_threads)"
+    fi
+  fi
+}

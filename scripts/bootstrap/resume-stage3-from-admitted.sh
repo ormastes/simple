@@ -875,6 +875,12 @@ stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
 # Direct fanout is explicit and bounded. The legacy thread environment still
 # selects its coordinator route. The resolved thread count and route are bound
 # into both the argument hash and the transcribed worker invocation below.
+# Host-config defaults (env/--jobs still win; a host without the keys is
+# unchanged): stage3_direct_threads, stage3_tree_rss_cap_kib,
+# mem_reserve_free_mib -> the env vars consumed below.
+. "$root/scripts/bootstrap/lib/host-bootstrap-settings.shs"
+bootstrap_host_apply_stage3_settings "$root"
+bootstrap_host_apply_memory_reserve "$root"
 . "$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
 bootstrap_stage3_resolve_parallel_policy || exit 1
 stage3_threads=$bootstrap_stage3_policy_threads

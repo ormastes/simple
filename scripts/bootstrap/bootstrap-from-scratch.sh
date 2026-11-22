@@ -51,6 +51,11 @@ case "${1:-}" in
     exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
     ;;
 esac
+# Host-config build-start memory reserve (mem_reserve_free_mib, #8931): env
+# SIMPLE_BUILD_MEMORY_RESERVE_BYTES wins; a host without the key is unchanged.
+# Stage 3 knobs are applied in resume-stage3-from-admitted.sh (after --jobs).
+. "${bootstrap_entry_dir}/lib/host-bootstrap-settings.shs"
+bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
