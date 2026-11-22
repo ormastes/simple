@@ -6,15 +6,20 @@
 # costs seconds per file, so it cannot run in the required `fast-gates` job
 # (runner has no bin/simple); check-primitive-api-semantic-ratchet.shs covers
 # only a 6-file sample and is not in the push tier. This is the fast twin of
-# the QUICK scanner (lint_primitive_api.spl `primitive_api_findings`): per
-# touched src/**.spl file it counts bare-primitive params/returns on
-# `pub fn|pub me|pub static fn` lines at the base and at the head of the
-# range; head > base FAILs. Existing debt is grandfathered (base count);
-# fixing debt only lowers it. Same exemptions as the lint: bare text,
-# `@allow(primitive_api)` / `#[allow(primitive_api)]` on the lines above,
-# file-scope `#![allow(primitive_api)]`, and the all-same-primitive
-# pure-math signature
-# (numeric only: an all-bool signature is SPL-BOOL-001 and is never exempt). Primitive set = compiler.semantics.lint.primitive_types.
+# the QUICK scanner (lint_primitive_api.spl `primitive_api_findings`) +
+# struct/class fields and methods: per touched src/**.spl file it counts
+# bare-primitive params/returns on public functions/methods (including
+# multi-line signatures, pub(scope), async/static, unwrapped ?/Option/Result)
+# and non-exempt public struct/class fields at the base and at the head of
+# the range (following renames via git diff -M); head > base FAILs. Existing
+# debt is grandfathered (base count); fixing debt only lowers it. Exemptions:
+# bare text, `[u8]`/`List<u8>`/containers, `@allow(primitive_api)` /
+# `#[allow(primitive_api)]` on the lines above, file-scope
+# `#![allow(primitive_api)]`, single-field numeric newtype structs (`struct`
+# with 1 numeric bare-primitive field and no bare-primitive methods), and the
+# all-same-numeric-primitive pure-math signature (an all-bool signature or
+# single-field bool struct is SPL-BOOL-001 and is never exempt).
+# Primitive set = compiler.semantics.lint.primitive_types.
 #
 # Usage: sh scripts/check/check-primitive-api-added.shs --changed BASE..HEAD
 #        sh scripts/check/check-primitive-api-added.shs --selftest
@@ -22,45 +27,460 @@
 #                             FAIL — ... / ERROR — nothing was checked
 set -u
 
+AWK_BIN=${AWK_BIN:-awk}
+
 count_stdin() {
-  awk '
+  "$AWK_BIN" '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-    function prim(t) { return t ~ /^(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool)$/ }
-    { sub(/\r$/, "") }
-    /^[ \t]*#!\[allow\(primitive_api\)\]/ { filewide = 1 }
-    {
-      t = trim($0)
-      if (t == "") next
-      if (t ~ /^[#@]/) { if (t ~ /allow\(primitive_api\)/) allowed = 1; next }
-      isfn = (t ~ /^pub (fn|me) / || t ~ /^pub static fn /)
-      was_allowed = allowed; allowed = 0
-      if (!isfn || was_allowed) next
-      p = index(t, "("); q = index(t, ")")
-      n = 0; cnt = 0
-      if (p > 0 && q > p) {
-        ps = trim(substr(t, p + 1, q - p - 1))
-        if (ps != "") {
-          m = split(ps, parts, ",")
-          for (i = 1; i <= m; i++) {
-            c = index(parts[i], ":")
-            if (c > 0) { n++; ty[n] = trim(substr(parts[i], c + 1)) }
+    function prim(t) { return t ~ /^(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|usize|isize)$/ }
+    function is_bare_numeric(t) { return prim(t) && t != "bool" }
+
+    function strip_quotes_and_comments(raw,   i, n, ch, q3, j, found_close, in_q, out) {
+      out = ""
+      n = length(raw)
+      if (in_doc != "") {
+        j = index(raw, in_doc)
+        if (j > 0) {
+          in_doc = ""
+          return substr(raw, j + 3)
+        }
+        return ""
+      }
+      in_q = ""
+      i = 1
+      while (i <= n) {
+        ch = substr(raw, i, 1)
+        if (in_q != "") {
+          out = out ch
+          if (ch == "\\" && i < n) {
+            i++
+            out = out substr(raw, i, 1)
+          } else if (ch == in_q) {
+            in_q = ""
+          }
+          i++
+          continue
+        }
+        q3 = (i + 2 <= n) ? substr(raw, i, 3) : ""
+        if (q3 == "\"\"\"" || q3 == "'\'''\'''\''") {
+          found_close = index(substr(raw, i + 3), q3)
+          if (found_close == 0) {
+            in_doc = q3
+            return out
+          }
+          i = i + 3 + found_close + 2
+          out = out " "
+          continue
+        }
+        if (ch == "#") {
+          return out
+        }
+        if (ch == "\"" || ch == "'\''") {
+          in_q = ch
+        }
+        out = out ch
+        i++
+      }
+      return out
+    }
+
+    function clean_type_head(s) {
+      s = trim(s)
+      while (s ~ /^(mut[ \t]+|&mut[ \t]+|&[ \t]*)/) {
+        sub(/^(mut[ \t]+|&mut[ \t]+|&[ \t]*)/, "", s)
+        s = trim(s)
+      }
+      return s
+    }
+
+    function strip_default(s,   i, n, ch, prev, pd, bd, ad, in_q) {
+      n = length(s)
+      pd = 0; bd = 0; ad = 0; in_q = ""; prev = ""
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (in_q != "") {
+          if (ch == "\\" && i < n) { i++; prev = ""; continue }
+          if (ch == in_q) in_q = ""
+        } else {
+          if (ch == "\"" || ch == "'\''") in_q = ch
+          else if (ch == "(") pd++
+          else if (ch == ")" && pd > 0) pd--
+          else if (ch == "[") bd++
+          else if (ch == "]" && bd > 0) bd--
+          else if (ch == "<") ad++
+          else if (ch == ">" && prev != "-" && ad > 0) ad--
+          else if (ch == "=" && pd == 0 && bd == 0 && ad == 0) {
+            return trim(substr(s, 1, i - 1))
+          }
+        }
+        prev = ch
+      }
+      return trim(s)
+    }
+
+    function count_type_prims(t,   inner, i, n, ch, prev, pd, bd, ad, in_q, split_at, left_t, right_t) {
+      t = clean_type_head(t)
+      while (length(t) > 0 && substr(t, length(t), 1) == "?") {
+        t = trim(substr(t, 1, length(t) - 1))
+      }
+      t = clean_type_head(t)
+      if (t == "") return 0
+      if (prim(t)) return 1
+      if (t ~ /^Option<.*>$/) {
+        inner = substr(t, 8, length(t) - 8)
+        return count_type_prims(inner)
+      }
+      if (t ~ /^Result<.*>$/) {
+        inner = substr(t, 8, length(t) - 8)
+        n = length(inner)
+        pd = 0; bd = 0; ad = 0; in_q = ""; prev = ""; split_at = 0
+        for (i = 1; i <= n; i++) {
+          ch = substr(inner, i, 1)
+          if (in_q != "") {
+            if (ch == "\\" && i < n) { i++; prev = ""; continue }
+            if (ch == in_q) in_q = ""
+          } else {
+            if (ch == "\"" || ch == "'\''") in_q = ch
+            else if (ch == "(") pd++
+            else if (ch == ")" && pd > 0) pd--
+            else if (ch == "[") bd++
+            else if (ch == "]" && bd > 0) bd--
+            else if (ch == "<") ad++
+            else if (ch == ">" && prev != "-" && ad > 0) ad--
+            else if (ch == "," && pd == 0 && bd == 0 && ad == 0) {
+              split_at = i
+              break
+            }
+          }
+          prev = ch
+        }
+        if (split_at > 0) {
+          left_t = substr(inner, 1, split_at - 1)
+          right_t = substr(inner, split_at + 1)
+          return count_type_prims(left_t) + count_type_prims(right_t)
+        }
+        return count_type_prims(inner)
+      }
+      return 0
+    }
+
+    function sig_paren_delta(s,   i, n, ch, d, in_q) {
+      n = length(s); d = 0; in_q = ""
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (in_q != "") {
+          if (ch == "\\" && i < n) { i++; continue }
+          if (ch == in_q) in_q = ""
+        } else {
+          if (ch == "\"" || ch == "'\''") in_q = ch
+          else if (ch == "(") d++
+          else if (ch == ")") d--
+        }
+      }
+      return d
+    }
+
+    function split_top_commas(s, arr,   i, n, ch, prev, pd, bd, ad, in_q, count, start) {
+      n = length(s)
+      count = 0
+      if (trim(s) == "") return 0
+      pd = 0; bd = 0; ad = 0; in_q = ""; prev = ""; start = 1
+      for (i = 1; i <= n; i++) {
+        ch = substr(s, i, 1)
+        if (in_q != "") {
+          if (ch == "\\" && i < n) { i++; prev = ""; continue }
+          if (ch == in_q) in_q = ""
+        } else {
+          if (ch == "\"" || ch == "'\''") in_q = ch
+          else if (ch == "(") pd++
+          else if (ch == ")" && pd > 0) pd--
+          else if (ch == "[") bd++
+          else if (ch == "]" && bd > 0) bd--
+          else if (ch == "<") ad++
+          else if (ch == ">" && prev != "-" && ad > 0) ad--
+          else if (ch == "," && pd == 0 && bd == 0 && ad == 0) {
+            count++
+            arr[count] = substr(s, start, i - start)
+            start = i + 1
+          }
+        }
+        prev = ch
+      }
+      count++
+      arr[count] = substr(s, start)
+      return count
+    }
+
+    function eval_fn_sig(sig, is_allowed,   work, fn_pos, p, q, i, len_w, ch, pd, in_q, ps, m, parts, c, raw_t, exact_t, after_q, r, n_slots, exact_ty, cnt_ty, same, fn_cnt) {
+      if (is_allowed) return 0
+      work = trim(sig)
+      if (work ~ /^pub\([^)]+\)[ \t]+/) sub(/^pub\([^)]+\)[ \t]+/, "", work)
+      else if (work ~ /^pub[ \t]+/) sub(/^pub[ \t]+/, "", work)
+      sub(/^(async[ \t]+)?(static[ \t]+)?(fn|me)[ \t]+/, "", work)
+      p = index(work, "(")
+      if (p <= 0) return 0
+      len_w = length(work)
+      pd = 0; in_q = ""; q = 0
+      for (i = p; i <= len_w; i++) {
+        ch = substr(work, i, 1)
+        if (in_q != "") {
+          if (ch == "\\" && i < len_w) { i++; continue }
+          if (ch == in_q) in_q = ""
+        } else {
+          if (ch == "\"" || ch == "'\''") in_q = ch
+          else if (ch == "(") pd++
+          else if (ch == ")") {
+            pd--
+            if (pd == 0) { q = i; break }
           }
         }
       }
-      a = index(t, "->")
-      if (a > 0) {
-        r = trim(substr(t, a + 2)); c = index(r, ":")
-        if (c > 0) r = trim(substr(r, 1, c - 1))
-        if (r != "") { n++; ty[n] = r }
+      if (q <= p) return 0
+      n_slots = 0
+      ps = trim(substr(work, p + 1, q - p - 1))
+      if (ps != "") {
+        m = split_top_commas(ps, parts)
+        for (i = 1; i <= m; i++) {
+          c = index(parts[i], ":")
+          if (c > 0) {
+            raw_t = strip_default(substr(parts[i], c + 1))
+            exact_t = clean_type_head(raw_t)
+            if (exact_t != "") {
+              n_slots++
+              exact_ty[n_slots] = exact_t
+              cnt_ty[n_slots] = count_type_prims(raw_t)
+            }
+          }
+        }
       }
-      same = (n >= 2 && prim(ty[1]) && ty[1] != "bool")
-      for (i = 2; i <= n && same; i++) if (ty[i] != ty[1]) same = 0
-      if (same) next
-      for (i = 1; i <= n; i++) if (prim(ty[i])) cnt++
-      total += cnt
+      after_q = trim(substr(work, q + 1))
+      if (after_q ~ /^->/) {
+        r = trim(substr(after_q, 3))
+        sub(/:[ \t]*$/, "", r)
+        r = trim(r)
+        exact_t = clean_type_head(r)
+        if (exact_t != "") {
+          n_slots++
+          exact_ty[n_slots] = exact_t
+          cnt_ty[n_slots] = count_type_prims(r)
+        }
+      }
+      same = (n_slots >= 2 && is_bare_numeric(exact_ty[1]))
+      for (i = 2; i <= n_slots && same; i++) {
+        if (exact_ty[i] != exact_ty[1]) same = 0
+      }
+      if (same) return 0
+      fn_cnt = 0
+      for (i = 1; i <= n_slots; i++) fn_cnt += cnt_ty[i]
+      return fn_cnt
     }
-    END { print (filewide ? 0 : total + 0) }
+
+    function add_fn_count(cnt) {
+      if (pending_in_type) method_prims += cnt
+      else total += cnt
+    }
+
+    function flush_pending_sig() {
+      if (pending_sig == "") return
+      add_fn_count(eval_fn_sig(pending_sig, pending_allowed))
+      pending_sig = ""
+      pending_depth = 0
+      pending_allowed = 0
+      pending_in_type = 0
+    }
+
+    function flush_type() {
+      if (!in_type) return
+      if (type_kind == "struct" && field_count == 1 && method_prims == 0 && is_bare_numeric(single_field_raw)) {
+        in_type = 0
+        type_kind = ""
+        return
+      }
+      total += field_prims + method_prims
+      in_type = 0
+      type_kind = ""
+      field_count = 0
+      field_prims = 0
+      single_field_raw = ""
+      method_prims = 0
+      in_method = 0
+    }
+
+    function extract_type_name(hdr,   w) {
+      w = hdr
+      if (w ~ /^pub\([^)]+\)[ \t]+/) sub(/^pub\([^)]+\)[ \t]+/, "", w)
+      else if (w ~ /^pub[ \t]+/) sub(/^pub[ \t]+/, "", w)
+      sub(/^(struct|class|impl)[ \t]+/, "", w)
+      sub(/[^A-Za-z0-9_].*$/, "", w)
+      return w
+    }
+
+    BEGIN {
+      filewide = 0; total = 0; allowed = 0; in_doc = ""
+      pending_sig = ""; pending_depth = 0; pending_allowed = 0; pending_in_type = 0
+      in_type = 0; type_kind = ""; type_indent = -1; type_allowed = 0
+      field_count = 0; field_prims = 0; single_field_raw = ""; method_prims = 0
+      in_method = 0; method_indent = -1
+    }
+
+    { sub(/\r$/, "") }
+    /^[ \t]*#!\[allow\(primitive_api\)\]/ { filewide = 1 }
+
+    {
+      raw_t = trim($0)
+      if (raw_t ~ /^[#@]/) {
+        if (raw_t ~ /allow\(primitive_api\)/) allowed = 1
+        next
+      }
+
+      code = strip_quotes_and_comments($0)
+      t = trim(code)
+      if (t == "") next
+
+      if (pending_sig != "") {
+        if (pending_depth > 0) {
+          pending_sig = pending_sig " " t
+          pending_depth += sig_paren_delta(t)
+          if (pending_depth <= 0 && t ~ /:[ \t]*$/) {
+            flush_pending_sig()
+          }
+          next
+        }
+        if (t ~ /^->/) {
+          pending_sig = pending_sig " " t
+          if (t ~ /:[ \t]*$/) {
+            flush_pending_sig()
+          }
+          next
+        }
+        flush_pending_sig()
+      }
+
+      ind = match(code, /[^ \t]/) - 1
+      if (ind < 0) next
+
+      if (in_type && ind <= type_indent) {
+        flush_type()
+      }
+      if (in_type && in_method && ind <= method_indent) {
+        in_method = 0
+        method_indent = -1
+      }
+
+      if (!in_type && t ~ /^pub(\([^)]+\))?[ \t]+(struct|class)[ \t]+[A-Za-z_][A-Za-z0-9_]*/) {
+        was_allowed = allowed; allowed = 0
+        tname = extract_type_name(t)
+        pub_types[tname] = 1
+        in_type = 1
+        type_kind = (t ~ /^pub(\([^)]+\))?[ \t]+struct[ \t]+/) ? "struct" : "class"
+        type_indent = ind
+        type_allowed = was_allowed
+        field_count = 0; field_prims = 0; single_field_raw = ""; method_prims = 0
+        in_method = 0; method_indent = -1
+        next
+      }
+
+      if (!in_type && t ~ /^impl[ \t]+[A-Za-z_][A-Za-z0-9_]*/) {
+        was_allowed = allowed; allowed = 0
+        tname = extract_type_name(t)
+        if (tname in pub_types) {
+          in_type = 1
+          type_kind = "impl"
+          type_indent = ind
+          type_allowed = was_allowed
+          field_count = 0; field_prims = 0; single_field_raw = ""; method_prims = 0
+          in_method = 0; method_indent = -1
+        }
+        next
+      }
+
+      if (t ~ /^pub(\([^)]+\))?[ \t]+(async[ \t]+)?(static[ \t]+)?(fn|me)[ \t]+/) {
+        was_allowed = allowed; allowed = 0
+        if (in_type) {
+          in_method = 1
+          method_indent = ind
+        }
+        d = sig_paren_delta(t)
+        if (d > 0 || !(t ~ /:[ \t]*$/)) {
+          pending_sig = t
+          pending_depth = d
+          pending_allowed = (was_allowed || (in_type && type_allowed))
+          pending_in_type = in_type
+        } else {
+          cnt = eval_fn_sig(t, was_allowed || (in_type && type_allowed))
+          if (in_type) method_prims += cnt
+          else total += cnt
+        }
+        next
+      }
+
+      if (in_type && ind > type_indent) {
+        if (in_method) next
+
+        if (t ~ /^(async[ \t]+)?(static[ \t]+)?(fn|me)[ \t]+[A-Za-z_][A-Za-z0-9_]*/) {
+          was_allowed = allowed; allowed = 0
+          in_method = 1
+          method_indent = ind
+          mname = t
+          sub(/^(async[ \t]+)?(static[ \t]+)?(fn|me)[ \t]+/, "", mname)
+          if (substr(mname, 1, 1) == "_") next
+          d = sig_paren_delta(t)
+          if (d > 0 || !(t ~ /:[ \t]*$/)) {
+            pending_sig = t
+            pending_depth = d
+            pending_allowed = (was_allowed || type_allowed)
+            pending_in_type = 1
+          } else {
+            method_prims += eval_fn_sig(t, was_allowed || type_allowed)
+          }
+          next
+        }
+
+        if (type_kind == "struct" || type_kind == "class") {
+          was_allowed = allowed; allowed = 0
+          fl = t
+          is_pub_field = 0
+          if (fl ~ /^pub(\([^)]+\))?[ \t]+/) {
+            is_pub_field = 1
+            if (fl ~ /^pub\([^)]+\)[ \t]+/) sub(/^pub\([^)]+\)[ \t]+/, "", fl)
+            else sub(/^pub[ \t]+/, "", fl)
+          }
+          sub(/^(val|var)[ \t]+/, "", fl)
+          if (fl ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t]*:/) {
+            fc = index(fl, ":")
+            fname = trim(substr(fl, 1, fc - 1))
+            if (!is_pub_field && substr(fname, 1, 1) == "_") next
+            ftype = strip_default(substr(fl, fc + 1))
+            exact_ft = clean_type_head(ftype)
+            field_count++
+            if (field_count == 1) single_field_raw = exact_ft
+            else single_field_raw = ""
+            if (!(was_allowed || type_allowed)) {
+              field_prims += count_type_prims(ftype)
+            }
+          }
+        }
+        next
+      }
+
+      allowed = 0
+    }
+
+    END {
+      flush_pending_sig()
+      flush_type()
+      print (filewide ? 0 : total + 0)
+    }
   '
+}
+
+selftest_count() {
+  desc=$1
+  expected=$2
+  input=$3
+  got=$(printf '%s' "$input" | count_stdin)
+  [ "$got" = "$expected" ] || { echo "selftest FAIL ($desc): expected $expected got $got"; return 1; }
+  return 0
 }
 
 selftest() {
@@ -80,10 +500,97 @@ pub me e(flag: bool):
 pub fn g(f: bool) -> bool:
     f
 '
-  got=$(printf '%s' "$fx" | count_stdin)
-  [ "$got" = 5 ] || { echo "selftest FAIL: expected 5 got $got"; return 1; }
-  got=$(printf '#![allow(primitive_api)]\n%s' "$fx" | count_stdin)
-  [ "$got" = 0 ] || { echo "selftest FAIL: file-scope allow expected 0 got $got"; return 1; }
+  selftest_count "baseline" 5 "$fx" || return 1
+  selftest_count "file-scope allow" 0 "#![allow(primitive_api)]
+$fx" || return 1
+
+  # Scope visibility, usize/isize, async/static modifiers
+  fx_vis='pub(package) fn p1(idx: usize) -> isize:
+    idx
+pub(crate) async fn p2(n: i32) -> text:
+    ""
+pub static fn p3(flag: bool) -> i64:
+    0
+'
+  selftest_count "pub scope and modifiers" 5 "$fx_vis" || return 1
+
+  # Multi-line signature, comments, defaults, Option/Result/?, [u8]/List<u8> exempt
+  fx_ml='pub fn multi(
+    a: i64 = 0, # trailing comment
+    b: Option<i64> = None,
+    c: u8?,
+    d: [u8],
+    e: List<u8>
+) -> Result<bool, text>:
+    Ok(true)
+'
+  selftest_count "multiline + wrapped + [u8]" 4 "$fx_ml" || return 1
+
+  # Single-field numeric newtype struct exempt; bool wrapper and multi-field flagged
+  fx_struct='pub struct GoodId:
+    value: i64
+
+pub struct BadFlag:
+    value: bool
+
+pub struct BadPair:
+    id: i64
+    ok: bool = false
+
+@allow(primitive_api)
+pub struct AllowedStruct:
+    count: i64
+
+pub class Service:
+    timeout: i64
+    fn public_method(count: i32) -> bool:
+        true
+    fn _private_helper(n: i64) -> i64:
+        n
+'
+  selftest_count "structs and class methods" 6 "$fx_struct" || return 1
+
+  # Pure math numeric vs all-bool
+  fx_math='pub fn add(a: f64, b: f64) -> f64:
+    a + b
+pub fn xor_bool(a: bool, b: bool) -> bool:
+    a != b
+'
+  selftest_count "pure math vs all-bool" 3 "$fx_math" || return 1
+
+  # Git rename selftest in self-contained temp directory
+  (
+    td=$(mktemp -d) || exit 1
+    trap 'rm -rf "$td"' EXIT
+    mkdir -p "$td/src/pkg"
+    printf 'pub fn existing(x: i64) -> text:\n    ""\n' > "$td/src/pkg/old.spl"
+    git -C "$td" init -q || exit 1
+    git -C "$td" add src/pkg/old.spl || exit 1
+    git -C "$td" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m "base" || exit 1
+    b_sha=$(git -C "$td" rev-parse HEAD) || exit 1
+
+    git -C "$td" mv src/pkg/old.spl src/pkg/renamed.spl || exit 1
+    git -C "$td" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m "mv only" || exit 1
+    mv_sha=$(git -C "$td" rev-parse HEAD) || exit 1
+
+    tmp_diff_s=$(mktemp) || exit 1
+    git -C "$td" diff --name-status -M --diff-filter=AMR "$b_sha" "$mv_sha" -- 'src/*.spl' > "$tmp_diff_s"
+    IFS=$(printf '\t')
+    read -r st p1 p2 < "$tmp_diff_s"
+    rm -f "$tmp_diff_s"
+    case "$st" in R*) ;; *) echo "selftest FAIL (rename detection): status=$st"; exit 1 ;; esac
+    old_c=$(git -C "$td" show "$b_sha:$p1" | count_stdin)
+    new_c=$(git -C "$td" show "$mv_sha:$p2" | count_stdin)
+    [ "$new_c" -le "$old_c" ] || { echo "selftest FAIL (mv preserve): $new_c > $old_c"; exit 1; }
+
+    printf 'pub fn added(y: bool) -> text:\n    ""\n' >> "$td/src/pkg/renamed.spl"
+    git -C "$td" add src/pkg/renamed.spl || exit 1
+    git -C "$td" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m "mv+add" || exit 1
+    add_sha=$(git -C "$td" rev-parse HEAD) || exit 1
+    new_c2=$(git -C "$td" show "$add_sha:$p2" | count_stdin)
+    [ "$new_c2" -gt "$old_c" ] || { echo "selftest FAIL (mv+add): expected > $old_c got $new_c2"; exit 1; }
+  ) || return 1
+
   return 0
 }
 
@@ -103,19 +610,43 @@ git rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "ERROR — nothi
 mb=$(git merge-base "$base" "$head") || { echo "ERROR — nothing was checked (no merge base for $range)"; exit 2; }
 base=$mb
 
-files=$(git diff --name-only --diff-filter=AM "$base" "$head" -- 'src/*.spl' |
-  grep -v '/vendor/\|/test/\|_spec\.spl$\|_test\.spl$')
+tmp_diff=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -f "$tmp_diff"' EXIT
+git diff --name-status -M --diff-filter=AMR "$base" "$head" -- 'src/*.spl' > "$tmp_diff" || { echo "ERROR — nothing was checked (git diff failed)"; exit 2; }
+
 n=0; bad=0; added=0
-for f in $files; do
+TAB=$(printf '\t')
+while IFS="$TAB" read -r status p1 p2; do
+  [ -n "$status" ] || continue
+  case "$status" in
+    R*)
+      old_f=$p1
+      new_f=$p2
+      ;;
+    A|M)
+      old_f=$p1
+      new_f=$p1
+      ;;
+    *)
+      continue
+      ;;
+  esac
+  case "$new_f" in
+    */vendor/*|*/test/*|*_spec.spl|*_test.spl) continue ;;
+  esac
   n=$((n + 1))
-  new=$(git show "$head:$f" | count_stdin)
-  old=$(git show "$base:$f" 2>/dev/null | count_stdin)
+  new=$(git show "$head:$new_f" | count_stdin)
+  case "$status" in
+    A) old=0 ;;
+    *) old=$(git show "$base:$old_f" 2>/dev/null | count_stdin) ;;
+  esac
   [ -n "$old" ] || old=0
   if [ "$new" -gt "$old" ]; then
-    echo "FAIL $f: $new public bare-primitive finding(s) > base $old (use a domain type from std.common.types, or @allow(primitive_api) with a reason)"
+    echo "FAIL $new_f: $new public bare-primitive finding(s) > base $old (use a domain type from std.common.types, or @allow(primitive_api) with a reason)"
     bad=$((bad + 1)); added=$((added + new - old))
   fi
-done
+done < "$tmp_diff"
+
 if [ "$n" = 0 ]; then echo "PASS — 0 src .spl file(s) touched in $range, nothing to check (selftest ok)"; exit 0; fi
 if [ "$bad" -gt 0 ]; then echo "FAIL — $n file(s) checked, $bad file(s) add $added public primitive(s)"; exit 1; fi
 echo "PASS — $n file(s) checked, 0 public primitives added"

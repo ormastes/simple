@@ -4,8 +4,8 @@
 # @cover src/app/bug/workaround_revert.spl
 
 use std.spec.{describe, it, expect, step}
-use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex}
-use app.bug.workaround_revert.{workaround_revert_candidates, revert_candidate_message}
+use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex, WorkaroundLineNumber, WorkaroundCompleteness}
+use app.bug.workaround_revert.{RevertAuthorization, workaround_revert_candidates, revert_candidate_message}
 use std.database.bug.{BugDatabase, bug_database_from_sdn}
 use std.database.core.{SdnDatabase, SdnTable, SdnRow}
 
@@ -22,53 +22,53 @@ fn bug_fixture(status: text) -> BugDatabase:
     bug_database_from_sdn(raw)
 
 fn index_of(links: [WorkaroundLink]) -> WorkaroundIndex:
-    WorkaroundIndex(revision: "abcdef0", complete: true, links: links)
+    WorkaroundIndex(revision: "abcdef0", complete: WorkaroundCompleteness.Complete, links: links)
 
 describe "workaround revert candidates":
     it "emits a candidate only when the linked bug is fixed or closed":
         # @req CU-016
         step("open yields none; fixed and closed yield one")
-        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 7, recover: "abcdef0", reason: "temporary")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: WorkaroundLineNumber(value: 7), recover: "abcdef0", reason: "temporary")
         val idx = index_of([link])
         expect(workaround_revert_candidates(idx, bug_fixture("open"), "2026-11-15").len()).to_equal(0)
         expect(workaround_revert_candidates(idx, bug_fixture("fixed"), "2026-11-15").len()).to_equal(1)
         val closed = workaround_revert_candidates(idx, bug_fixture("closed"), "2026-11-15")
         expect(closed.len()).to_equal(1)
         expect(closed[0].path).to_equal("src/a.spl")
-        expect(closed[0].line).to_equal(7)
+        expect(closed[0].line.value).to_equal(7)
         expect(closed[0].trigger).to_equal("fix_landed")
 
     it "never marks a candidate as authorized to apply":
         # @req CU-016
         step("authorization stays explicit")
-        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 7, recover: "", reason: "")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: WorkaroundLineNumber(value: 7), recover: "", reason: "")
         val c = workaround_revert_candidates(index_of([link]), bug_fixture("fixed"), "2026-11-15")[0]
-        expect(c.authorized).to_equal(false)
+        expect(c.authorized).to_equal(RevertAuthorization.Unauthorized)
         expect(revert_candidate_message(c)).to_contain("src/a.spl:7")
         expect(revert_candidate_message(c)).to_contain("not applied")
 
     it "skips unknown bugs":
         # @req CU-016
         step("missing bug is reported elsewhere")
-        val link = WorkaroundLink(bug_id: "missing_bug", path: "src/a.spl", line: 1, recover: "", reason: "")
+        val link = WorkaroundLink(bug_id: "missing_bug", path: "src/a.spl", line: WorkaroundLineNumber(value: 1), recover: "", reason: "")
         expect(workaround_revert_candidates(index_of([link]), bug_fixture("fixed"), "2026-11-15").len()).to_equal(0)
 
     it "emits an expired candidate when expires has passed, even while the bug is open":
         # @req CU-016
         step("inject today; boundary day is not yet expired")
-        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 7, recover: "", reason: "", expires: "2026-11-10")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: WorkaroundLineNumber(value: 7), recover: "", reason: "", expires: "2026-11-10")
         val idx = index_of([link])
         val late = workaround_revert_candidates(idx, bug_fixture("open"), "2026-11-11")
         expect(late.len()).to_equal(1)
         expect(late[0].trigger).to_equal("expired")
-        expect(late[0].authorized).to_equal(false)
+        expect(late[0].authorized).to_equal(RevertAuthorization.Unauthorized)
         expect(workaround_revert_candidates(idx, bug_fixture("open"), "2026-11-10").len()).to_equal(0)
         expect(workaround_revert_candidates(idx, bug_fixture("open"), "2026-11-09").len()).to_equal(0)
 
     it "a fixed bug wins over expiry and yields exactly one candidate":
         # @req CU-016
         step("both triggers hold")
-        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: 7, recover: "", reason: "", expires: "2026-11-10")
+        val link = WorkaroundLink(bug_id: "bug_alpha", path: "src/a.spl", line: WorkaroundLineNumber(value: 7), recover: "", reason: "", expires: "2026-11-10")
         val rows = workaround_revert_candidates(index_of([link]), bug_fixture("fixed"), "2026-12-01")
         expect(rows.len()).to_equal(1)
         expect(rows[0].trigger).to_equal("fix_landed")

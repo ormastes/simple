@@ -17,23 +17,23 @@ pub class TraceConventionResultBuilderV1:
     claim_keys: [text] = []
     diagnostic_keys: [text] = []
     lookup_keys: [text] = []
-    me work(amount: i64 = 1) -> Result<bool, TraceCodecIssueV1>:
-        if amount < 0 or amount > self.limits.max_work.value - self.used_work.value:
+    me work(amount: TraceUsedCountV1 = TraceUsedCountV1(value: 1)) -> Result<TraceCodecValidityV1, TraceCodecIssueV1>:
+        if amount.value < 0 or amount.value > self.limits.max_work.value - self.used_work.value:
             return Err(trace_codec_issue_v1("work_limit", "", "Convention evaluation exhausted bounded work"))
-        self.used_work = TraceUsedCountV1(value: self.used_work.value + amount)
-        Ok(true)
-    me claim(from_id: text, relation: text, to_id: text, rule_id: text, source_path: text, target_path: text) -> Result<bool, TraceCodecIssueV1>:
+        self.used_work = TraceUsedCountV1(value: self.used_work.value + amount.value)
+        Ok(TraceCodecValidityV1.Valid)
+    me claim(from_id: text, relation: text, to_id: text, rule_id: text, source_path: text, target_path: text) -> Result<TraceCodecValidityV1, TraceCodecIssueV1>:
         self.work()?
         if self.result.claims.len() >= self.limits.max_claims.value: return Err(trace_codec_issue_v1("claim_limit", "claims", "Claim count exceeds budget"))
         val fields = [from_id, relation, to_id, rule_id, source_path, target_path]
         self.text_budget.charge(fields, "claims")?
         val key = trace_graph_tuple_key_v1(fields)
-        if self.seen_claims.contains_key(key): return Ok(true)
+        if self.seen_claims.contains_key(key): return Ok(TraceCodecValidityV1.Valid)
         self.seen_claims[key] = true
         self.claim_keys.push(key)
         self.result.claims.push(TraceConventionClaimV1(from_id: from_id, relation: relation, to_id: to_id, rule_id: rule_id, source_path: source_path, target_path: target_path))
-        Ok(true)
-    me diagnostic(code: text, entity: text, path: text, origin: text) -> Result<bool, TraceCodecIssueV1>:
+        Ok(TraceCodecValidityV1.Valid)
+    me diagnostic(code: text, entity: text, path: text, origin: text) -> Result<TraceCodecValidityV1, TraceCodecIssueV1>:
         self.work()?
         if self.result.diagnostics.len() >= self.limits.max_diagnostics.value: return Err(trace_codec_issue_v1("diagnostic_limit", "diagnostics", "Diagnostic count exceeds budget"))
         val message = "Conventional structural association could not be resolved"
@@ -42,9 +42,9 @@ pub class TraceConventionResultBuilderV1:
         self.text_budget.charge(fields, "diagnostics")?
         self.diagnostic_keys.push(trace_graph_tuple_key_v1(fields))
         self.result.diagnostics.push(TraceDiagnosticV1(code: code, severity: "error", entity: entity, path: path, path_available: (if path != "": TraceAvailabilityV1.Available else: TraceAvailabilityV1.Absent), span_available: TraceAvailabilityV1.Absent, line: TraceLineNumberV1(value: 0), column: TraceColumnNumberV1(value: 0), message: message, snapshot_id: self.result.snapshot_id, rule_version: self.result.rules_version, origin: origin, repair: repair))
-        Ok(true)
-    me lookup(kind: text, entity: text, group: text, rule: text, path: text, ids: [text]) -> Result<bool, TraceCodecIssueV1>:
-        self.work(ids.len() + 1)?
+        Ok(TraceCodecValidityV1.Valid)
+    me lookup(kind: text, entity: text, group: text, rule: text, path: text, ids: [text]) -> Result<TraceCodecValidityV1, TraceCodecIssueV1>:
+        self.work(TraceUsedCountV1(value: ids.len() + 1))?
         if self.result.lookups.len() >= self.limits.max_lookups.value: return Err(trace_codec_issue_v1("lookup_limit", "lookups", "Lookup count exceeds budget"))
         val fields = [kind, entity, group, rule, path, (ids.len() > 0).to_text()]
         self.text_budget.charge(fields, "lookups")?
@@ -57,11 +57,11 @@ pub class TraceConventionResultBuilderV1:
                 candidates.push(ids[index.value])
                 last = ids[index.value]
         val key = trace_graph_tuple_key_v1(fields + candidates)
-        if self.seen_lookups.contains_key(key): return Ok(true)
+        if self.seen_lookups.contains_key(key): return Ok(TraceCodecValidityV1.Valid)
         self.seen_lookups[key] = true
         self.lookup_keys.push(key)
         self.result.lookups.push(TraceConventionLookupV1(kind: kind, entity_id: entity, group_id: group, rule_id: rule, path: path, found: (if candidates.len() > 0: TraceLookupOutcomeV1.Found else: TraceLookupOutcomeV1.NotFound), candidate_ids: candidates))
-        Ok(true)
+        Ok(TraceCodecValidityV1.Valid)
     me finish() -> TraceConventionResolutionV1:
         var claims: [TraceConventionClaimV1] = []
         for index in trace_codec_row_order_v1(self.claim_keys): claims.push(self.result.claims[index.value])

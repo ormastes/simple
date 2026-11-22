@@ -34,7 +34,7 @@ on every host. Wiring into `bug-resolve` is not covered here.
 
 use std.spec.*
 use app.bug.closure_gate.*
-use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink}
+use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, WorkaroundLineNumber, WorkaroundCompleteness}
 
 val HEAD = "0123456789abcdef0123456789abcdef01234567"
 val OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
@@ -86,8 +86,8 @@ fn policy() -> BugClosurePolicyV1:
     BugClosurePolicyV1(required_backends: [backend("interp")], run_evidence: BugRunEvidenceV1.Observed)
 
 fn clean_index() -> WorkaroundIndex:
-    WorkaroundIndex(revision: HEAD, complete: true,
-        links: [WorkaroundLink(bug_id: "bug_other", path: "src/a.spl", line: 4, recover: "", reason: "unrelated")])
+    WorkaroundIndex(revision: HEAD, complete: WorkaroundCompleteness.Complete,
+        links: [WorkaroundLink(bug_id: "bug_other", path: "src/a.spl", line: WorkaroundLineNumber(value: 4), recover: "", reason: "unrelated")])
 
 fn bug() -> BugIdV1:
     BugIdV1(value: "bug_parser_nesting")
@@ -200,13 +200,13 @@ describe "bug closure gate: blocked diagnostics":
     it "blocks while a workaround for the bug is live or coverage is incomplete":
         # @req BUG-004
         step("Adverse: a live workaround marker still names this bug")
-        val live = WorkaroundIndex(revision: HEAD, complete: true,
-            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/p.spl", line: 12, recover: "", reason: "shim")])
+        val live = WorkaroundIndex(revision: HEAD, complete: WorkaroundCompleteness.Complete,
+            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/p.spl", line: WorkaroundLineNumber(value: 12), recover: "", reason: "shim")])
         val r1 = bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), live)
         expect(codes(r1)).to_equal("E-BUG-WR-004")
         expect(r1.findings[0].proof.value).to_equal("src/p.spl:12")
         step("Adverse: an incomplete workaround index cannot prove absence")
-        val partial = WorkaroundIndex(revision: HEAD, complete: false, links: [])
+        val partial = WorkaroundIndex(revision: HEAD, complete: WorkaroundCompleteness.Partial, links: [])
         expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), partial))).to_equal("E-BUG-WR-004")
 
     it "blocks broken bug, requirement and test references":
@@ -233,7 +233,7 @@ describe "bug closure gate: blocked diagnostics":
             known_requirements: view().known_requirements, runs: view().runs)
         expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), moved_bug, clean_index()))).to_equal("E-BUG-RACE-006")
         step("Adverse: the workaround index was read at another revision")
-        val other_rev = WorkaroundIndex(revision: OTHER_HEAD, complete: true, links: [])
+        val other_rev = WorkaroundIndex(revision: OTHER_HEAD, complete: WorkaroundCompleteness.Complete, links: [])
         expect(codes(bug_closure_evaluate_v1(candidate(), bug(), policy(), view(), other_rev))).to_equal("E-BUG-RACE-006")
 
 describe "bug closure gate: non-fix dispositions":
@@ -272,8 +272,8 @@ describe "bug closure gate: run evidence mode and disposition vocabulary":
         expect(ok.verdict == BugClosureVerdictV1.Allowed).to_equal(true)
         expect(bug_closure_run_evidence_text_v1(ok.run_evidence)).to_equal("not_observed")
         step("Adverse: a live workaround for the bug still blocks without run evidence")
-        val live = WorkaroundIndex(revision: HEAD, complete: true,
-            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/a.spl", line: 9, recover: "", reason: "temp")])
+        val live = WorkaroundIndex(revision: HEAD, complete: WorkaroundCompleteness.Complete,
+            links: [WorkaroundLink(bug_id: "bug_parser_nesting", path: "src/a.spl", line: WorkaroundLineNumber(value: 9), recover: "", reason: "temp")])
         expect(codes(bug_closure_evaluate_v1(candidate(), bug(), unobserved, view_with([]), live))).to_equal("E-BUG-WR-004")
         step("Adverse: an unknown test case still blocks as a broken link")
         val no_cases = BugTestDbViewV1(head: digest(HEAD), bug_state: digest("state-7"),

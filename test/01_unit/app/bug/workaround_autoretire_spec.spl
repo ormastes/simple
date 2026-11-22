@@ -13,7 +13,7 @@ applied or written.
 # @cover src/app/bug/workaround_autoretire.spl
 
 use std.spec.{describe, it, expect, step}
-use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex}
+use app.bug.workaround_index.{WorkaroundLink, WorkaroundIndex, WorkaroundLineNumber, WorkaroundCompleteness}
 use app.bug.closure_gate.{BugIdV1}
 use app.bug.workaround_autoretire.{workaround_auto_retire_report_v1, workaround_auto_retire_lines_v1,
     workaround_closure_bypass_findings_v1, workaround_closure_bypass_message_v1, AutoRetireVerdictV1}
@@ -33,9 +33,9 @@ fn bug_fixture(status: text) -> BugDatabase:
     bug_database_from_sdn(raw)
 
 fn link_of(bug: text, path: text, line: i64) -> WorkaroundLink:
-    WorkaroundLink(bug_id: bug, path: path, line: line, recover: "", reason: "")
+    WorkaroundLink(bug_id: bug, path: path, line: WorkaroundLineNumber(value: line), recover: "", reason: "")
 
-fn index_of(links: [WorkaroundLink], complete: bool) -> WorkaroundIndex:
+fn index_of(links: [WorkaroundLink], complete: WorkaroundCompleteness) -> WorkaroundIndex:
     WorkaroundIndex(revision: "abcdef0", complete: complete, links: links)
 
 describe "workaround auto-retire report":
@@ -43,7 +43,7 @@ describe "workaround auto-retire report":
         # @req CU-016
         step("two sites for bug_alpha, one for another bug")
         val idx = index_of([link_of("bug_alpha", "src/a.spl", 7), link_of("other", "src/b.spl", 3),
-            link_of("bug_alpha", "src/c.spl", 9)], true)
+            link_of("bug_alpha", "src/c.spl", 9)], WorkaroundCompleteness.Complete)
         val report = workaround_auto_retire_report_v1(idx, BugIdV1(value: "bug_alpha"))
         expect(report.verdict).to_equal(AutoRetireVerdictV1.CandidatesRemain)
         expect(report.sites.len()).to_equal(2)
@@ -56,14 +56,14 @@ describe "workaround auto-retire report":
     it "does not block when a complete index has no site for the bug":
         # @req CU-016
         step("complete index, unrelated link only")
-        val idx = index_of([link_of("other", "src/b.spl", 3)], true)
+        val idx = index_of([link_of("other", "src/b.spl", 3)], WorkaroundCompleteness.Complete)
         val report = workaround_auto_retire_report_v1(idx, BugIdV1(value: "bug_alpha"))
         expect(report.verdict).to_equal(AutoRetireVerdictV1.NothingToRetire)
 
     it "never reports an incomplete index as clean":
         # @req CU-016
         step("incomplete index with no matching site still blocks")
-        val idx = index_of([], false)
+        val idx = index_of([], WorkaroundCompleteness.Partial)
         val report = workaround_auto_retire_report_v1(idx, BugIdV1(value: "bug_alpha"))
         expect(report.verdict).to_equal(AutoRetireVerdictV1.IndexIncomplete)
         expect(workaround_auto_retire_lines_v1(report)[0]).to_contain("fullscan")
@@ -72,7 +72,7 @@ describe "workaround closure bypass":
     it "flags a fixed or closed bug that still has a live workaround":
         # @req CU-015
         step("fixed and closed each yield one E-BUG-WR-004 finding with path:line")
-        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7)], true)
+        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7)], WorkaroundCompleteness.Complete)
         val fixed = workaround_closure_bypass_findings_v1(idx, bug_fixture("fixed"))
         expect(fixed.len()).to_equal(1)
         expect(fixed[0].code.value).to_equal("E-BUG-WR-004")
@@ -84,7 +84,7 @@ describe "workaround closure bypass":
     it "ignores open bugs and unknown bug ids":
         # @req CU-015
         step("open bug is a legitimate workaround; unknown id is reported elsewhere")
-        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7)], true)
+        val idx = index_of([link_of("bug_alpha", "src/a.spl", 7)], WorkaroundCompleteness.Complete)
         expect(workaround_closure_bypass_findings_v1(idx, bug_fixture("open")).len()).to_equal(0)
-        val ghost = index_of([link_of("missing", "src/a.spl", 7)], true)
+        val ghost = index_of([link_of("missing", "src/a.spl", 7)], WorkaroundCompleteness.Complete)
         expect(workaround_closure_bypass_findings_v1(ghost, bug_fixture("fixed")).len()).to_equal(0)

@@ -10,7 +10,7 @@ use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_
     parse_workaround_source, encode_workaround_index, decode_workaround_index,
     replace_workaround_paths, WorkaroundCheckV1, workaround_path_valid, workaround_recovery_valid,
     WorkaroundFragment, encode_workaround_fragment, decode_workaround_fragment,
-    merge_workaround_fragments}
+    merge_workaround_fragments, WorkaroundCompleteness, WorkaroundFragmentKind}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read, workaround_host_read_bytes,
     workaround_host_exists, workaround_host_stage, workaround_host_publish_noreplace,
     workaround_host_modified_time, workaround_host_remove, workaround_host_list,
@@ -64,7 +64,7 @@ pub fn workaround_fragment_files(root: text) -> Result<[WorkaroundFragmentFile],
                     break
             match decode_workaround_fragment(content):
                 case Ok(fragment):
-                    if fragment.base: damaged = ""
+                    if fragment.base == WorkaroundFragmentKind.Base: damaged = ""
                     files.push(WorkaroundFragmentFile(name: name, fragment: fragment))
                 case Err(reason):
                     if damaged == "": damaged = "workaround fragment {name}: {reason}"
@@ -265,11 +265,11 @@ pub fn workaround_fold(root: text) -> Result<[WorkaroundFragment], text>:
                 var paths: [text] = []
                 for link in index.links:
                     if not paths.contains(link.path): paths.push(link.path)
-                fragments.push(WorkaroundFragment(revision: index.revision, base: true,
+                fragments.push(WorkaroundFragment(revision: index.revision, base: WorkaroundFragmentKind.Base,
                     complete: index.complete, paths: paths, links: index.links))
             case Err(reason): damaged = reason
     for file in workaround_fragment_files(root)?:
-        if file.fragment.base: damaged = ""
+        if file.fragment.base == WorkaroundFragmentKind.Base: damaged = ""
         fragments.push(file.fragment)
     if damaged != "": return Err(damaged)
     Ok(fragments)
@@ -428,12 +428,12 @@ fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, disco
             val link_id: text = link.bug_id
             val needle: [u8] = text_to_utf8_bytes(link_id)
             if not byte_array_contains(db_bytes, needle):
-                return Err("{link.path}:{link.line}: unknown canonical bug ID: {link.bug_id}")
+                return Err("{link.path}:{link.line.value}: unknown canonical bug ID: {link.bug_id}")
     var base = previous
     if fullscan: base = empty_workaround_index(revision)
     var updated = replace_workaround_paths(base, paths, links)
     updated.revision = revision
-    updated.complete = fullscan or (previous.complete and previous.revision == revision)
+    updated.complete = if fullscan or (previous.complete == WorkaroundCompleteness.Complete and previous.revision == revision): WorkaroundCompleteness.Complete else: WorkaroundCompleteness.Partial
     val encoded = encode_workaround_index(updated)
     if encoded.len() > 16777216: return Err("workaround index exceeded bound")
     # Validate the exact publication payload before touching the old index.
@@ -473,10 +473,10 @@ fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, disco
         for link in checked.links:
             if not fragment_paths.contains(link.path): fragment_paths.push(link.path)
     val fragment = if base:
-        WorkaroundFragment(revision: revision, base: true, complete: checked.complete,
+        WorkaroundFragment(revision: revision, base: WorkaroundFragmentKind.Base, complete: checked.complete,
             paths: fragment_paths, links: checked.links)
     else:
-        WorkaroundFragment(revision: revision, base: false, complete: checked.complete,
+        WorkaroundFragment(revision: revision, base: WorkaroundFragmentKind.Delta, complete: checked.complete,
             paths: paths, links: links)
     # Delta: 0 -> the publisher stamps the clock after staging, right before
     # the rename. Full scan: `started`, the clock before its own reads, so a
