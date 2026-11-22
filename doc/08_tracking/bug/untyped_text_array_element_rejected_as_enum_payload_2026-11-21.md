@@ -1,6 +1,7 @@
 # Untyped text array element rejected from a `text` enum payload slot (2026-11-21)
 
-**Status:** open (compiler). Source site already worked around by `8b3445e503b`
+**Status:** fixed in source, verification pending (compiler; fix on branch
+`work/untyped-text-array-payload`, see "Fix" below). Source site already worked around by `8b3445e503b`
 (`val read_paths: [text] = [...]` in `src/os/kernel/loader/spawn_recipes.spl`).
 That annotation hides this defect; it does not fix it.
 
@@ -77,3 +78,52 @@ Failing-first spec:
 has not been executed: no full-CLI `simple test` binary exists on the host.
 Whether the in-process lowering path reproduces the native-lane failure is
 also unverified.
+
+## Fix (2026-11-22)
+
+Root cause: the first candidate. HIR lowers every literal with
+`has_type_: false` (`expression_core.spl` wrapper at the end of
+`lower_hir_expr`), so `homogeneous_typed_array_element_type` never typed a
+text array literal. The unannotated binding then got no element type
+(`binding_source_type` -> Error -> Let type `Infer`, symbol untyped), and the
+loop / index element reached MIR with a settled no-shape remembered type.
+Annotated `[text]` worked because the annotation supplied `[text]` to both
+the Let and the symbol.
+
+Fix: `homogeneous_typed_array_element_type` now accepts an untyped element
+whose KIND proves `text` (`hir_kind_proves_text`: a string literal, a
+`Var`/`NamedVar` whose symbol is declared `text`, or `a + b` with both sides
+text). The literal is then `[text]`, so the Let type and symbol type equal
+the annotated case. MIR's array-literal lowering ignores the literal type, so
+codegen is unchanged. No other kind is inferred: numeric literals still take
+their width from context, and Any/Error/Infer/Never still reject, so an
+unannotated `[1, 2]` element is still rejected from a `text` slot and
+nothing widens `any`.
+
+Why the index read is covered by the same fix (old-stage2 traces,
+`SIMPLE_ANYQ_PROBE=1 SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1`): for an all-literal
+`val paths = ["/a", "/b"]` MIR records no initializer HIR type
+(`early-Let remember ... init_hir_type=nil`), so the MIR Let arm takes the
+`let_type` branch and remembers the Let type. Before the fix that type was
+`Infer` (nothing remembered); after it, it is `[text]`, the exact state of
+the annotated control (`val paths: [text] = ...` + `paths[0]` traces
+`init_hir_type=Str ... remembered-accept`). Both the for-in
+(`for_collection_declared_type`) and the Index arm (`find_local_hir_type` on
+the base) read that remembered `[text]`.
+
+Separate, NOT fixed here: an unannotated array of typed CALL results,
+`val paths = [fa(), fa()]` with `fn fa() -> text`, already passes for-in but
+`val q = paths[0]` is rejected the same way on the old stage2 (MIR records an
+initializer element type from the call locals that is not `Str`, `q` lowers
+I64 with a no-shape remembered type, and E-MC-ANY-001 fires on the index
+expression). That path copies the initializer's metadata instead of the Let
+type, so this HIR change does not reach it. File separately if it matters.
+
+Verification state: NOT executed. The only runnable compiler on the host is
+the old stage2 (`8d850c22c54`), which predates this source change; it
+reproduces the defect only. The regression spec
+(`test/01_unit/compiler/mir/untyped_text_array_enum_payload_spec.spl`, now
+untagged) and the added HIR case in
+`test/03_system/compiler/hir_homogeneous_array_type_system_spec.spl` must be
+run once a Stage 2 built from this source exists. Close this record only
+after that run.

@@ -1,5 +1,5 @@
 # @req REQ-TEST-DB-REPORT-001
-use std.database.test_extended.{create_test_database_extended, TestRowId, TestRunCount, TestRunAgeHours, TestRunKeepCount, TestStageMs, TestByteCount, TestProcessCount, TestSignalNumber, TestExitCode, TestAnomalyWarning, TestTimingOutcome}
+use std.database.test_extended.{create_test_database_extended, TestRowId, TestRunCount, TestRunAgeHours, TestRunKeepCount, TestStageMs, TestByteCount, TestProcessCount, TestSignalNumber, TestExitCode, TestAnomalyWarning, TestTimingOutcome, TestDurationMs, TestBaselineEligibility, TestFlakiness, TestDbSaveOutcome, TestBaselineGeneration, TestTimestamp}
 
 fn _db():
     create_test_database_extended("/tmp/test_extended_primitive_types_spec.sdn")
@@ -15,7 +15,7 @@ describe "TestDatabaseExtended typed public API":
     it "refuses promotion for an empty cohort and for a cohort without samples":
         var db = _db()
         val run_id = db.start_run()
-        db.update_test_result(file_path: "test/a_spec.spl", suite_name: "spec", test_name: "test/a_spec.spl", status: "passed", duration_ms: 12.0, run_id: run_id, cohort_id: "c1")
+        db.update_test_result(file_path: "test/a_spec.spl", suite_name: "spec", test_name: "test/a_spec.spl", status: "passed", duration_ms: TestDurationMs(value: 12.0), run_id: run_id, cohort_id: "c1")
         val id = db.get_test_id("test/a_spec.spl", "spec", "test/a_spec.spl") ?? TestRowId(value: -1)
         expect(id.value >= 0).to_equal(true)
         expect(db.promote_timing_baseline(id, "") == TestTimingOutcome.Refused).to_equal(true)
@@ -29,3 +29,47 @@ describe "TestDatabaseExtended typed public API":
         expect(pruned.value).to_equal(1)
         val cleaned = db.cleanup_stale_runs(TestRunAgeHours(value: 2))
         expect(cleaned.value).to_equal(0)
+
+
+    it "classifies steady timings Stable and erratic timings Flaky":
+        var db = _db()
+        val run_id = db.start_run()
+        db.update_test_result(file_path: "test/s_spec.spl", suite_name: "spec", test_name: "test/s_spec.spl", status: "passed", duration_ms: TestDurationMs(value: 10.0), run_id: run_id)
+        db.update_test_result(file_path: "test/f_spec.spl", suite_name: "spec", test_name: "test/f_spec.spl", status: "passed", duration_ms: TestDurationMs(value: 1.0), run_id: run_id)
+        val steady = db.get_test_id("test/s_spec.spl", "spec", "test/s_spec.spl") ?? TestRowId(value: -1)
+        val erratic = db.get_test_id("test/f_spec.spl", "spec", "test/f_spec.spl") ?? TestRowId(value: -1)
+        db.add_timing_run(steady, TestDurationMs(value: 10.0), run_id)
+        db.add_timing_run(steady, TestDurationMs(value: 10.0), run_id)
+        db.add_timing_run(erratic, TestDurationMs(value: 100.0), run_id)
+        db.add_timing_run(erratic, TestDurationMs(value: 1.0), run_id)
+        db.add_timing_run(erratic, TestDurationMs(value: 100.0), run_id)
+        expect(db.is_flaky_test(steady) == TestFlakiness.Stable).to_equal(true)
+        expect(db.is_flaky_test(erratic) == TestFlakiness.Flaky).to_equal(true)
+
+    it "keeps Ineligible timing runs out of the flakiness window":
+        var db = _db()
+        val run_id = db.start_run()
+        db.update_test_result(file_path: "test/e_spec.spl", suite_name: "spec", test_name: "test/e_spec.spl", status: "passed", duration_ms: TestDurationMs(value: 1.0), run_id: run_id)
+        db.update_test_result(file_path: "test/g_spec.spl", suite_name: "spec", test_name: "test/g_spec.spl", status: "passed", duration_ms: TestDurationMs(value: 1.0), run_id: run_id)
+        val ineligible = db.get_test_id("test/e_spec.spl", "spec", "test/e_spec.spl") ?? TestRowId(value: -1)
+        val eligible = db.get_test_id("test/g_spec.spl", "spec", "test/g_spec.spl") ?? TestRowId(value: -1)
+        db.add_timing_run(ineligible, TestDurationMs(value: 100.0), run_id, "", TestBaselineEligibility.Ineligible)
+        db.add_timing_run(ineligible, TestDurationMs(value: 100.0), run_id, "", TestBaselineEligibility.Ineligible)
+        db.add_timing_run(eligible, TestDurationMs(value: 100.0), run_id, "", TestBaselineEligibility.Eligible)
+        db.add_timing_run(eligible, TestDurationMs(value: 100.0), run_id, "", TestBaselineEligibility.Eligible)
+        expect(db.is_flaky_test(ineligible) == TestFlakiness.Stable).to_equal(true)
+        expect(db.is_flaky_test(eligible) == TestFlakiness.Flaky).to_equal(true)
+
+    it "promotes an eligible first observation and refuses an ineligible-only cohort":
+        var db = _db()
+        val run_id = db.start_run()
+        db.update_test_result(file_path: "test/p_spec.spl", suite_name: "spec", test_name: "test/p_spec.spl", status: "passed", duration_ms: TestDurationMs(value: 9.0), run_id: run_id, cohort_id: "c2")
+        val id = db.get_test_id("test/p_spec.spl", "spec", "test/p_spec.spl") ?? TestRowId(value: -1)
+        db.add_timing_run(id, TestDurationMs(value: 5.0), run_id, "c3", TestBaselineEligibility.Ineligible)
+        expect(db.promote_timing_baseline(id, "c3") == TestTimingOutcome.Refused).to_equal(true)
+        expect(db.promote_timing_baseline(id, "c2") == TestTimingOutcome.Applied).to_equal(true)
+
+    it "counts a first direct timing run once on a brand-new database":
+        var db = create_test_database_extended("/tmp/test_extended_primitive_types_first_run_spec.sdn")
+        db.add_timing_run(TestRowId(value: 7), TestDurationMs(value: 6.0), "run_x")
+        expect(db.collect_timing_runs(TestRowId(value: 7), TestRunCount(value: 100)).len()).to_equal(1)

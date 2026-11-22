@@ -7,13 +7,18 @@
 # keeps the old "1000000000 and up" contract and fits in i32.
 #
 # Collisions are resolved by re-hashing "<key>|<attempt>" until the slot is free
-# or already owned by the same key. A collision therefore makes the LATER key in
-# visit order take attempt >= 1; that residual order dependence needs two keys
-# hashing to the same 30-bit slot and is the one known gap.
+# or already owned by the same key. `canonical_type_symbol_table_sorted_v1`
+# deduplicates and lexically sorts a unit's type keys before minting ids, so
+# even rare 30-bit slot collisions resolve in deterministic sorted key order
+# rather than module visit order.
 use std.common.hash.djb2.{djb2_hash_text}
 
 val CANONICAL_TYPE_SYMBOL_BASE: i64 = 1000000000
 val CANONICAL_TYPE_SYMBOL_SPAN_MASK: i64 = 1073741823
+
+pub struct CanonicalTypeSymbolTableV1:
+    id_by_key: Dict<text, i64>
+    key_by_id: Dict<i64, text>
 
 fn canonical_type_symbol_candidate_v1(key: text, attempt: i64) -> i64:
     val material = if attempt == 0: key else: "{key}|{attempt}"
@@ -31,3 +36,21 @@ pub fn canonical_type_symbol_id_v1(key: text, taken: Dict<i64, text>) -> i64:
         attempt = attempt + 1
         id = canonical_type_symbol_candidate_v1(key, attempt)
     id
+
+# Sort unique keys lexically and mint canonical symbol ids in sorted order,
+# eliminating residual visit-order dependence on 30-bit hash collisions.
+pub fn canonical_type_symbol_table_sorted_v1(keys: [text]) -> CanonicalTypeSymbolTableV1:
+    var seen: Dict<text, bool> = {}
+    var unique: [text] = []
+    for key in keys:
+        if key != "" and not seen.contains_key(key):
+            seen[key] = true
+            unique.push(key)
+    unique.sort()
+    var id_by_key: Dict<text, i64> = {}
+    var key_by_id: Dict<i64, text> = {}
+    for key in unique:
+        val id = canonical_type_symbol_id_v1(key, key_by_id)
+        id_by_key[key] = id
+        key_by_id[id] = key
+    CanonicalTypeSymbolTableV1(id_by_key: id_by_key, key_by_id: key_by_id)

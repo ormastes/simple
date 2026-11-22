@@ -740,7 +740,7 @@ if val tags = user?.profile?.tags.?:
 | Verbose | Concise | Notes |
 |---------|---------|-------|
 | `if opt.is_some(): use(opt!)` | `if val x = opt.?: use(x)` | Bind + use |
-| `opt.is_none()` | `not opt.?` | Negated existence |
+| `opt.is_none()` | `not opt.?` | Negated existence — **only for scalar `T?`.** On a collection optional (`[T]?`, `text?`) `.?` also treats EMPTY as absent, so `not xs.?` is NOT `xs.is_none()`; keep `is_none()` when empty must mean "present" (e.g. an empty `dir_list_optional` result) |
 | `if s.not_empty: use(s)` | `if val s = s.?: use(s)` | Bind non-empty text |
 | `if s.not_empty: use(s) else: use(d)` | `val s = s.presence ?? d` | With fallback |
 | `s.not_empty` (bool) | `s.presence` (text?) | Value-returning check |

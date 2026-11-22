@@ -75,7 +75,28 @@ pub fn focused_native_build_effective_cache_dir(args: [text], previous: text) ->
     if requested == "": previous else: requested
 
 pub fn focused_native_build_strip(args: [text], exact_stage4_capsule: bool) -> bool:
-    exact_stage4_capsule or focused_native_build_has_flag(args, "--strip")
+    var explicit_strip = false
+    var explicit_value = false
+    var non_strip_profile = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--strip":
+            explicit_strip = true
+            explicit_value = true
+        elif arg == "--no-strip":
+            explicit_strip = true
+            explicit_value = false
+        elif arg == "--debug" or arg == "-g" or arg == "--xray" or arg == "--profile=dev":
+            non_strip_profile = true
+        elif arg == "--profile" and i + 1 < args.len() and args[i + 1] == "dev":
+            non_strip_profile = true
+        i = i + 1
+    if explicit_strip:
+        return explicit_value
+    if non_strip_profile:
+        return false
+    exact_stage4_capsule
 
 pub fn focused_native_build_exact_capsule_entry_allowed(entry: text) -> bool:
     entry == "src/app/cli/main.spl" or entry == "src/app/os/main.spl"
@@ -125,22 +146,26 @@ pub fn focused_native_build_profile_cache_dir_v1(
     val requested = focused_native_build_cache_dir(args)
     if requested != "":
         return requested
-    val segment = _focused_profile_namespace_segment_v1(target_profile)
+    val base_segment = _focused_profile_namespace_segment_v1(target_profile)
+    val segment = if focused_native_build_has_flag(args, "--xray"):
+        base_segment + "-xray"
+    else:
+        base_segment
     if previous != "":
-        if target_profile.managed_build_phase == "":
-            return previous
         if previous.ends_with("/" + segment) or previous.ends_with("-" + segment):
             return previous
         return previous + "/" + segment
     "build/native_cache/" + segment
 
-# reason: computes profile-qualified receipt namespace directory text from target profile and optional base root
+# reason: computes profile-qualified receipt namespace directory text from target profile, optional base root, and xray toggle
 @allow(primitive_api)
 pub fn focused_native_build_profile_receipt_namespace_v1(
     target_profile: FocusedNativeTargetProfileV1,
-    base_dir: text = ""
+    base_dir: text = "",
+    xray_enabled: bool = false
 ) -> text:
-    val segment = _focused_profile_namespace_segment_v1(target_profile)
+    val base_segment = _focused_profile_namespace_segment_v1(target_profile)
+    val segment = if xray_enabled: base_segment + "-xray" else: base_segment
     val trimmed = base_dir.trim()
     if trimmed == "":
         return "build/native_receipts/" + segment
@@ -162,23 +187,29 @@ fn _focused_output_basename_v1(output: text) -> text:
     val base = if slash >= 0: normalized.substring(slash + 1) else: normalized
     if base == "": "focused-artifact" else: base
 
+# reason: resolves profile-qualified receipt directory from env override, target profile, base root, and xray toggle
+@allow(primitive_api)
 pub fn focused_native_build_receipt_dir_from_env_v1(
     env_receipt_dir: text,
     target_profile: FocusedNativeTargetProfileV1,
-    base_dir: text = ""
+    base_dir: text = "",
+    xray_enabled: bool = false
 ) -> text:
     val trimmed = env_receipt_dir.trim()
     if trimmed != "":
         return trimmed
-    focused_native_build_profile_receipt_namespace_v1(target_profile, base_dir)
+    focused_native_build_profile_receipt_namespace_v1(target_profile, base_dir, xray_enabled)
 
+# reason: computes focused build receipt file path from output path, env override, target profile, base root, and xray toggle
+@allow(primitive_api)
 pub fn focused_native_build_receipt_path_v1(
     output: text,
     env_receipt_dir: text,
     target_profile: FocusedNativeTargetProfileV1,
-    base_dir: text = ""
+    base_dir: text = "",
+    xray_enabled: bool = false
 ) -> text:
-    val dir = focused_native_build_receipt_dir_from_env_v1(env_receipt_dir, target_profile, base_dir)
+    val dir = focused_native_build_receipt_dir_from_env_v1(env_receipt_dir, target_profile, base_dir, xray_enabled)
     dir + "/" + _focused_output_basename_v1(output) + ".focused-receipt.sdn"
 
 # reason: default_release boolean controls unmanaged fallback profile when no CLI flag selects dev or prod
@@ -195,7 +226,7 @@ pub fn focused_native_build_target_profile_v1(args: [text], default_release: boo
         var phase_value = ""
         if arg == "--release" or arg == "--release-optimized":
             release_requested = true
-        elif arg == "--debug":
+        elif arg == "--debug" or arg == "-g":
             debug_requested = true
         elif arg == "--profile" or arg == "--managed-build-phase":
             if index + 1 >= args.len() or args[index + 1].starts_with("--"):

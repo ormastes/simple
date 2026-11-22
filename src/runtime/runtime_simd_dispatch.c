@@ -2604,25 +2604,19 @@ int64_t rt_simd_fma_f64x4(int64_t a, int64_t b, int64_t c) {
 
 /* ---- i64x4 (Vec4i64): raw i64 lanes, wrapping arithmetic ---- */
 
-int64_t rt_simd_add_i64x4(int64_t a, int64_t b) {
-    const int64_t* pa = rt_simd_vec_payload(a);
-    const int64_t* pb = rt_simd_vec_payload(b);
-    int64_t out[4];
-    int i;
-    for (i = 0; i < 4; i++)
-        out[i] = (int64_t)(rt_simd_lane_u64(pa, i) + rt_simd_lane_u64(pb, i));
-    return rt_simd_result_vec(out, 4);
-}
+#define RT_SIMD_I64X4_BINOP(NAME, OP)                                       \
+    int64_t NAME(int64_t a, int64_t b) {                                    \
+        const int64_t* pa = rt_simd_vec_payload(a);                         \
+        const int64_t* pb = rt_simd_vec_payload(b);                         \
+        int64_t out[4];                                                     \
+        int i;                                                              \
+        for (i = 0; i < 4; i++)                                             \
+            out[i] = (int64_t)(rt_simd_lane_u64(pa, i) OP rt_simd_lane_u64(pb, i)); \
+        return rt_simd_result_vec(out, 4);                                  \
+    }
 
-int64_t rt_simd_sub_i64x4(int64_t a, int64_t b) {
-    const int64_t* pa = rt_simd_vec_payload(a);
-    const int64_t* pb = rt_simd_vec_payload(b);
-    int64_t out[4];
-    int i;
-    for (i = 0; i < 4; i++)
-        out[i] = (int64_t)(rt_simd_lane_u64(pa, i) - rt_simd_lane_u64(pb, i));
-    return rt_simd_result_vec(out, 4);
-}
+RT_SIMD_I64X4_BINOP(rt_simd_add_i64x4, +)
+RT_SIMD_I64X4_BINOP(rt_simd_sub_i64x4, -)
 
 /* ---- u32x4 (Vec4u32): raw lanes, wrapping u32, stored zero-extended ---- */
 
@@ -2947,6 +2941,23 @@ static void rt_simd_aes_unpack(const int64_t* p, uint8_t out[16]) {
     for (i = 0; i < 16; i++) out[i] = (uint8_t)rt_simd_lane_u64(p, i);
 }
 
+#if !defined(SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16)
+static int64_t rt_simd_aes_round_impl(int64_t state, int64_t key, int last) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    if (!last) rt_simd_aes_mix_columns(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+#endif
+
 /* rt_simd_aes_round_u8x16 / rt_simd_aes_round_last_u8x16 are ALSO defined,
  * with the exact same (I64,I64)->I64 tagged-pointer ABI and RUNTIME_FUNCS
  * registration (codegen/runtime_sffi.rs:594-595), in
@@ -2972,32 +2983,11 @@ static void rt_simd_aes_unpack(const int64_t* p, uint8_t out[16]) {
  * duplicate on any link that also carries the Rust runtime. */
 #elif (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
 __attribute__((weak)) int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
-    const int64_t* ps = rt_simd_vec_payload(state);
-    const int64_t* pk = rt_simd_vec_payload(key);
-    uint8_t s[16], k[16], shifted[16];
-    int64_t out[16];
-    int i;
-    rt_simd_aes_unpack(ps, s);
-    rt_simd_aes_unpack(pk, k);
-    rt_simd_aes_shift_rows(s, shifted);
-    rt_simd_aes_sub_bytes(shifted);
-    rt_simd_aes_mix_columns(shifted);
-    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
-    return rt_simd_result_vec(out, 16);
+    return rt_simd_aes_round_impl(state, key, 0);
 }
 
 __attribute__((weak)) int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
-    const int64_t* ps = rt_simd_vec_payload(state);
-    const int64_t* pk = rt_simd_vec_payload(key);
-    uint8_t s[16], k[16], shifted[16];
-    int64_t out[16];
-    int i;
-    rt_simd_aes_unpack(ps, s);
-    rt_simd_aes_unpack(pk, k);
-    rt_simd_aes_shift_rows(s, shifted);
-    rt_simd_aes_sub_bytes(shifted);
-    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
-    return rt_simd_result_vec(out, 16);
+    return rt_simd_aes_round_impl(state, key, 1);
 }
 #else
 /* MSVC (no weak attribute) and Windows-GNUC both land here; the
@@ -3005,32 +2995,11 @@ __attribute__((weak)) int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_
  * SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16 above, so this branch is only
  * reached by a standalone (non-Rust-linked) Windows C build. */
 int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
-    const int64_t* ps = rt_simd_vec_payload(state);
-    const int64_t* pk = rt_simd_vec_payload(key);
-    uint8_t s[16], k[16], shifted[16];
-    int64_t out[16];
-    int i;
-    rt_simd_aes_unpack(ps, s);
-    rt_simd_aes_unpack(pk, k);
-    rt_simd_aes_shift_rows(s, shifted);
-    rt_simd_aes_sub_bytes(shifted);
-    rt_simd_aes_mix_columns(shifted);
-    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
-    return rt_simd_result_vec(out, 16);
+    return rt_simd_aes_round_impl(state, key, 0);
 }
 
 int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
-    const int64_t* ps = rt_simd_vec_payload(state);
-    const int64_t* pk = rt_simd_vec_payload(key);
-    uint8_t s[16], k[16], shifted[16];
-    int64_t out[16];
-    int i;
-    rt_simd_aes_unpack(ps, s);
-    rt_simd_aes_unpack(pk, k);
-    rt_simd_aes_shift_rows(s, shifted);
-    rt_simd_aes_sub_bytes(shifted);
-    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
-    return rt_simd_result_vec(out, 16);
+    return rt_simd_aes_round_impl(state, key, 1);
 }
 #endif
 

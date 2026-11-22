@@ -1,0 +1,71 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Boot-runtime C twins (C-MIG-0044/0045): pure-Simple twins for helpers PR
+# #10638 added to examples/09_embedded/simple_os/arch/riscv64/boot/
+# baremetal_runtime_core.inc.c, per doc/07_guide/os/hal/pure_simple_hal.md §2.
+#
+# Only these two of the 16 are value-comparable: their oracle is REGISTERED in
+# the tree-walk interpreter extern dispatch and has a value (text/bool) ABI.
+# The rest are raw-handle memory-ABI helpers or unregistered, and are tracked
+# as migration debt in doc/08_tracking/c_migration/c_migration_inventory.sdn
+# (C-MIG-0046, and C-MIG-0047 for arm32 rt_string_new_literal).
+#
+# HONEST LIMITATION: the `ref` side is the HOST runtime's symbol of the same
+# name, not the freestanding boot C. This pair proves the twin matches the
+# host contract; the boot C is held to that contract by the riscv64
+# --link-only gate only. Engine is the tree-walk interpreter (`simple test`).
+# text_from_bytes_pure decodes well-formed UTF-8 only; malformed-input
+# behaviour is not part of the compared contract and is not exercised.
+#
+# @dual_pair: text_is_ascii_pure_vs_rt_text_is_ascii mode=value-legacy ref=rt_text_is_ascii cand=std.common.text_ascii.text_is_ascii_pure id=C-MIG-0044
+# @dual_pair: text_from_bytes_pure_vs_rt_string_from_byte_array mode=value-legacy ref=rt_string_from_byte_array cand=std.common.text_ascii.text_from_bytes_pure id=C-MIG-0045
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.common.spec.dual_run.{dual_check_text, dual_check_bool, dual_summarize}
+use std.common.text_ascii.{text_is_ascii_pure, text_from_bytes_pure}
+use std.common.text_bytes.{text_to_bytes}
+
+extern fn rt_text_is_ascii(s: text) -> bool
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+
+describe "dual_run boot-runtime C twins (riscv64 #10638)":
+    # @manual scenario evidence
+    it "text_is_ascii_pure vs rt_text_is_ascii agrees on empty, ASCII and non-ASCII input":
+        # @req REQ-SSPEC-LIB
+        step("text_is_ascii_pure vs rt_text_is_ascii agrees on empty, ASCII and non-ASCII input")
+        val cases = ["", "A", "hello world", "~!@#$%^&*()_+", "\t\n", "é", "日本語", "abc日", "Ωz"]
+        var verdicts = [dual_check_bool("text_is_ascii", text_is_ascii_pure(cases[0]), rt_text_is_ascii(cases[0]))]
+        var i = 1
+        while i < cases.len():
+            verdicts = verdicts.push(dual_check_bool(
+                "text_is_ascii", text_is_ascii_pure(cases[i]), rt_text_is_ascii(cases[i])))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 9)
+        assert_equal(summary.divergent, 0)
+        # Non-vacuity: both verdicts must occur.
+        assert_true(text_is_ascii_pure("abc"))
+        assert_true(not text_is_ascii_pure("abc日"))
+
+    # @manual scenario evidence
+    it "text_from_bytes_pure vs rt_string_from_byte_array agrees on well-formed UTF-8":
+        # @req REQ-SSPEC-LIB
+        step("text_from_bytes_pure vs rt_string_from_byte_array agrees on well-formed UTF-8")
+        val cases = ["", "A", "hello", "é", "日本語", "a€b", "😀", "mix é 日 😀 z"]
+        var verdicts = [dual_check_text("string_from_byte_array",
+            text_from_bytes_pure(text_to_bytes(cases[0])), rt_string_from_byte_array(text_to_bytes(cases[0])))]
+        var i = 1
+        while i < cases.len():
+            val b = text_to_bytes(cases[i])
+            verdicts = verdicts.push(dual_check_text(
+                "string_from_byte_array", text_from_bytes_pure(b), rt_string_from_byte_array(b)))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 8)
+        assert_equal(summary.divergent, 0)
+        # Non-vacuity: round-trip of 1..4-byte sequences.
+        assert_equal(text_from_bytes_pure(text_to_bytes("a€😀")), "a€😀")

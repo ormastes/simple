@@ -32,9 +32,28 @@ pub fn unit_order_index_digest_v1(paths: [text]) -> text:
 # resolution roots/mode, not just the path list, so an import edit with an
 # unchanged inventory must invalidate the index. Per-source hashes are joined
 # so no separator inside a source can alias two inventories.
-pub fn unit_order_index_stamp_v1(contents: [text], roots: [text], library_mode: text) -> text:
+fn _uoi_valid_sha256_hex_v1(digest: text) -> bool:
+    if digest.byte_len() != 64: return false
+    var i = 0
+    while i < 64:
+        val b = digest.byte_at(i)
+        val ok = (b >= 48 and b <= 57) or (b >= 97 and b <= 102) or (b >= 65 and b <= 70)
+        if not ok: return false
+        i = i + 1
+    true
+
+fn _uoi_row_sha256_v1(contents: [text], precomputed: [text], index: i64) -> text:
+    if index >= 0 and index < precomputed.len() and _uoi_valid_sha256_hex_v1(precomputed[index]):
+        return precomputed[index].lower()
+    sha256_text(contents[index])
+
+pub fn unit_order_index_stamp_v1(contents: [text], roots: [text], library_mode: text,
+        precomputed_hashes: [text] = []) -> text:
     var parts: [text] = []
-    for c in contents: parts.push(sha256_text(c))
+    var idx = 0
+    while idx < contents.len():
+        parts.push(_uoi_row_sha256_v1(contents, precomputed_hashes, idx))
+        idx = idx + 1
     parts.push(sha256_text(roots.join("\n")))
     parts.push(sha256_text(library_mode))
     sha256_text(parts.join(","))
@@ -47,9 +66,12 @@ fn _uoi_clean_v1(s: text) -> text:
 
 # Per-source content hashes, stored as an optional third row column so phase 1
 # can tell which sources are unchanged since the build that wrote the index.
-pub fn unit_order_content_hashes_v1(contents: [text]) -> [text]:
+pub fn unit_order_content_hashes_v1(contents: [text], precomputed_hashes: [text] = []) -> [text]:
     var out: [text] = []
-    for c in contents: out.push(sha256_text(c))
+    var idx = 0
+    while idx < contents.len():
+        out.push(_uoi_row_sha256_v1(contents, precomputed_hashes, idx))
+        idx = idx + 1
     out
 
 pub fn unit_order_index_encode_v1(paths: [text], stamp: text, graph: WorkerAdmittedGraphV1,
@@ -116,17 +138,17 @@ pub fn unit_order_index_publish_v1(queue: text, paths: [text], stamp: text, grap
 # Unit child entry: decode the shared index when on and valid; otherwise run
 # the full admitted-graph walk (and, when on, publish it for later units).
 pub fn unit_admitted_graph_v1(enabled: bool, queue: text, paths: [text], contents: [text], names: [text],
-        roots: [text], library_mode: text) -> Result<WorkerAdmittedGraphV1, text>:
+        roots: [text], library_mode: text, precomputed_hashes: [text] = []) -> Result<WorkerAdmittedGraphV1, text>:
     if not enabled:
         return worker_admitted_edges_v1(paths, contents, names, roots, library_mode)
-    val stamp = unit_order_index_stamp_v1(contents, roots, library_mode)
+    val stamp = unit_order_index_stamp_v1(contents, roots, library_mode, precomputed_hashes)
     val hit = unit_order_index_load_v1(queue, paths, stamp)
     if hit.is_ok():
         return hit
     val computed = worker_admitted_edges_v1(paths, contents, names, roots, library_mode)
     if computed.is_ok():
         val _published = unit_order_index_publish_v1(queue, paths, stamp, computed.unwrap(),
-            unit_order_content_hashes_v1(contents))
+            unit_order_content_hashes_v1(contents, precomputed_hashes))
     computed
 
 # Phase 1 skip-fresh (SIMPLE_UNIT_ORDER_SKIP_FRESH=1, requires the index).
@@ -148,7 +170,8 @@ fn _uosf_hir_artifact_ok_v1(queue: text, path: text) -> bool:
 # digest; its stamp may differ because other sources changed) carries a hash
 # row equal to sha256(contents[i]) and the HIR artifact exists. Must be read
 # BEFORE unit_admitted_graph_v1 republishes the index. Any doubt -> false.
-pub fn unit_order_fresh_flags_v1(enabled: bool, queue: text, paths: [text], contents: [text]) -> [bool]:
+pub fn unit_order_fresh_flags_v1(enabled: bool, queue: text, paths: [text], contents: [text],
+        precomputed_hashes: [text] = []) -> [bool]:
     var fresh: [bool] = []
     for _p in paths: fresh.push(false)
     if not enabled or queue == "" or contents.len() != paths.len():
@@ -165,7 +188,7 @@ pub fn unit_order_fresh_flags_v1(enabled: bool, queue: text, paths: [text], cont
     var i = 0
     while i < paths.len():
         val cols = lines[i + 1].split("\t")
-        if cols.len() == 3 and cols[2] == sha256_text(contents[i]) and _uosf_hir_artifact_ok_v1(queue, paths[i]):
+        if cols.len() == 3 and cols[2] == _uoi_row_sha256_v1(contents, precomputed_hashes, i) and _uosf_hir_artifact_ok_v1(queue, paths[i]):
             fresh[i] = true
         i = i + 1
     fresh
