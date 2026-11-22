@@ -28,6 +28,8 @@ extern fn rt_mmio_read_u32(addr: i64) -> i64
 @cfg(arm32)
 extern fn rt_mmio_read_u64(addr: i64) -> i64
 
+use os.kernel.arch.common.rt_value.{rv_truthy, rv_box_int, rv_any_to_int_scalar, rv_enum_id_offset, rv_enum_disc_offset, rv_enum_payload_offset, rv_array_item_addr, rv_array_len_offset}
+
 val A32_OPTION_ENUM_ID: i64 = 1
 # FNV-style variant hashes: plain u32 values (the discriminant is read zero-extended).
 val A32_HASH_SOME: i64 = 4053299545
@@ -57,25 +59,6 @@ fn _a32_array_ptr(v: i64) -> i64:
         return 0
     p
 
-@cfg(arm32)
-fn _a32_truthy(v: i64) -> i64:
-    val tag = v & 7
-    if tag == 3:
-        if v == 11:
-            return 1
-        return 0
-    if tag == 0:
-        if (v >> 3) != 0:
-            return 1
-        return 0
-    if tag == 2:
-        # +0.0 and -0.0 are falsy: all bits except sign (and the tag) clear.
-        if ((v & (0 - 8)) << 1) != 0:
-            return 1
-        return 0
-    if (v & (0 - 8)) != 0:
-        return 1
-    0
 
 @cfg(arm32)
 fn _a32_is_none(v: i64) -> i64:
@@ -84,9 +67,9 @@ fn _a32_is_none(v: i64) -> i64:
     val p = _a32_enum_ptr(v)
     if p == 0:
         return 0
-    if rt_mmio_read_u32(p + 8) != A32_OPTION_ENUM_ID:
+    if rt_mmio_read_u32(p + rv_enum_id_offset()) != A32_OPTION_ENUM_ID:
         return 0
-    val disc = rt_mmio_read_u32(p + 12)
+    val disc = rt_mmio_read_u32(p + rv_enum_disc_offset())
     if disc == 1 or disc == A32_HASH_NONE:
         return 1
     0
@@ -106,15 +89,15 @@ fn rt_for_iterable(v: i64) -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_value_truthy(v: i64) -> i8:
-    if _a32_truthy(v) != 0:
+    if rv_truthy(v) != 0:
         return 1
     0
 
 @cfg(arm32)
 @export("C")
 fn rt_any_to_int(v: i64) -> i64:
-    if (v & 7) == 0:
-        return v >> 3
+    if (v & 7) == 0 or (v & 7) == 2:
+        return rv_any_to_int_scalar(v)
     if v == 3:
         return 0
     if v == 11:
@@ -126,7 +109,7 @@ fn rt_any_to_int(v: i64) -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_value_u64(bits: i64) -> i64:
-    bits << 3
+    rv_box_int(bits)
 
 @cfg(arm32)
 @export("C")
@@ -141,7 +124,7 @@ fn rt_enum_id(v: i64) -> i64:
     val p = _a32_enum_ptr(v)
     if p == 0:
         return 0 - 1
-    rt_mmio_read_u32(p + 8)
+    rt_mmio_read_u32(p + rv_enum_id_offset())
 
 @cfg(arm32)
 @export("C")
@@ -149,10 +132,10 @@ fn rt_enum_check_variant(v: i64, enum_id: i64, disc: i64) -> i8:
     val p = _a32_enum_ptr(v)
     if p == 0:
         return 0
-    if rt_mmio_read_u32(p + 12) != disc:
+    if rt_mmio_read_u32(p + rv_enum_disc_offset()) != disc:
         return 0
     # ID zero is the legacy untyped enum lane (including Result).
-    val id = rt_mmio_read_u32(p + 8)
+    val id = rt_mmio_read_u32(p + rv_enum_id_offset())
     if enum_id == 0 or id == 0 or id == enum_id:
         return 1
     0
@@ -170,16 +153,16 @@ fn rt_unwrap_or_trap(v: i64) -> i64:
     val p = _a32_enum_ptr(v)
     if p == 0:
         return v
-    val id = rt_mmio_read_u32(p + 8)
-    val disc = rt_mmio_read_u32(p + 12)
+    val id = rt_mmio_read_u32(p + rv_enum_id_offset())
+    val disc = rt_mmio_read_u32(p + rv_enum_disc_offset())
     if id == A32_OPTION_ENUM_ID:
         if disc == 0 or disc == A32_HASH_SOME:
-            return rt_mmio_read_u64(p + 16)
+            return rt_mmio_read_u64(p + rv_enum_payload_offset())
         if disc == 1 or disc == A32_HASH_NONE:
             return _a32_trap()
         return v
     if disc == A32_HASH_OK:
-        return rt_mmio_read_u64(p + 16)
+        return rt_mmio_read_u64(p + rv_enum_payload_offset())
     if disc == A32_HASH_ERR:
         return _a32_trap()
     v
@@ -191,10 +174,10 @@ fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
     val p = _a32_array_ptr(array)
     if p == 0:
         return 0
-    val n = rt_mmio_read_u32(p + 8)
+    val n = rt_mmio_read_u32(p + rv_array_len_offset())
     var i: i64 = 0
     while i < n:
-        val item = rt_mmio_read_u64(p + 16 + i * 8)
+        val item = rt_mmio_read_u64(rv_array_item_addr(p, i))
         if item == value or ((item & 7) == 0 and (item >> 3) == value):
             return 1
         i = i + 1

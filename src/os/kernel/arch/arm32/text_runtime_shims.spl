@@ -1,0 +1,185 @@
+# ARM32 kernel text runtime shims (pure Simple).
+#
+# Text entry points the arm32 kernel closure references but the arm32 boot C
+# runtime (arch/arm32/boot/baremetal_stubs.c) does not define: rt_text_eq_any,
+# rt_slice_text_bytes, rt_string_char_count, rt_string_parse_int. Twin:
+# src/os/kernel/arch/arm64/text_runtime_shims.spl (64-bit string layout); this
+# file differs only in the arm32 RuntimeString layout:
+#   {HeapHeader {u32 type=1; u32 size} 8; u32 len @8; char data[] @12}
+# Text words are heap strings (tag 1); like arm64, a plausible aligned raw
+# pointer (NUL-terminated) is also accepted because literals on this lane can
+# be raw. Scalar results are tagged ints (v << 3), nil is 3, per common/rt_value.
+# No text-typed locals or text methods here: text ==, .len() and .slice() lower
+# to the very symbols defined in this file. No i64 `/` or `%` either: on arm32
+# they lower to a libcall that this kernel does not link. Exports never call
+# each other.
+
+use os.kernel.arch.common.rt_value.{rv_box_int}
+
+@cfg(arm32)
+extern fn rt_mmio_read_u8(addr: i64) -> i64
+@cfg(arm32)
+extern fn rt_mmio_read_u32(addr: i64) -> i64
+@cfg(arm32)
+extern fn rt_string_new(data: i64, len: i64) -> i64
+
+val A32T_NIL: i64 = 3
+val A32T_HEAP_STRING: i64 = 1
+val A32T_DATA_OFFSET: i64 = 12
+val A32T_RAW_PTR_FLOOR: i64 = 0x10000
+val A32T_RAW_STRLEN_CAP: i64 = 0x100000
+# i64::MIN / 10 truncated toward zero, and its remainder magnitude.
+val A32T_MIN_DIV10: i64 = -922337203685477580
+val A32T_MIN_REM10: i64 = 8
+
+@cfg(arm32)
+fn _a32t_heap_string(v: i64) -> i64:
+    if (v & 7) != 1:
+        return 0
+    val p = v - 1
+    if p < 4096:
+        return 0
+    if rt_mmio_read_u32(p) != A32T_HEAP_STRING:
+        return 0
+    p
+
+@cfg(arm32)
+fn _a32t_is_raw_ptr(v: i64) -> bool:
+    v >= A32T_RAW_PTR_FLOOR and (v & 7) == 0
+
+# Data pointer of a text word, or 0.
+@cfg(arm32)
+fn _a32t_data(v: i64) -> i64:
+    val s = _a32t_heap_string(v)
+    if s != 0:
+        return s + A32T_DATA_OFFSET
+    if _a32t_is_raw_ptr(v):
+        return v
+    0
+
+# Byte length of a text word, or -1 when it is not text.
+@cfg(arm32)
+fn _a32t_len(v: i64) -> i64:
+    val s = _a32t_heap_string(v)
+    if s != 0:
+        return rt_mmio_read_u32(s + 8)
+    if not _a32t_is_raw_ptr(v):
+        return -1
+    var n: i64 = 0
+    while n < A32T_RAW_STRLEN_CAP and rt_mmio_read_u8(v + n) != 0:
+        n = n + 1
+    n
+
+@cfg(arm32)
+fn _a32t_byte(data: i64, i: i64) -> i64:
+    rt_mmio_read_u8(data + i) & 255
+
+# text ==/!= : nil words compare raw, two texts compare by content, any other
+# word is never equal to text.
+@cfg(arm32)
+@export("C")
+fn rt_text_eq_any(left: i64, right: i64) -> i64:
+    if left == A32T_NIL or right == A32T_NIL:
+        if left == right:
+            return 1
+        return 0
+    val la = _a32t_len(left)
+    val lb = _a32t_len(right)
+    if la < 0 or lb < 0 or la != lb:
+        return 0
+    val a = _a32t_data(left)
+    val b = _a32t_data(right)
+    var i: i64 = 0
+    while i < la:
+        if _a32t_byte(a, i) != _a32t_byte(b, i):
+            return 0
+        i = i + 1
+    1
+
+# Unicode scalar count (UTF-8 lead bytes); -1 for a non-text receiver.
+@cfg(arm32)
+@export("C")
+fn rt_string_char_count(value: i64) -> i64:
+    val len = _a32t_len(value)
+    if len < 0:
+        return -1
+    val data = _a32t_data(value)
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < len:
+        if (_a32t_byte(data, i) & 0xC0) != 0x80:
+            count = count + 1
+        i = i + 1
+    count
+
+# `.slice(a, b)` on text at BYTE offsets clamped to 0..=len. A non-text receiver
+# or step < 1 is nil (what the lane's C rt_slice answers for a non-string).
+@cfg(arm32)
+@export("C")
+fn rt_slice_text_bytes(value: i64, start: i64, end: i64, step: i64) -> i64:
+    val len = _a32t_len(value)
+    if len < 0 or step < 1:
+        return A32T_NIL
+    var hi = end
+    if hi > len:
+        hi = len
+    if hi < 0:
+        hi = 0
+    var lo = start
+    if lo > hi:
+        lo = hi
+    if lo < 0:
+        lo = 0
+    if step != 1 or lo >= hi:
+        return rt_string_new(_a32t_data(value), 0)
+    if lo == 0 and hi == len and _a32t_heap_string(value) != 0:
+        return value
+    rt_string_new(_a32t_data(value) + lo, hi - lo)
+
+# Whitespace the Rust runtime's str::trim() strips (ASCII subset).
+@cfg(arm32)
+fn _a32t_is_space(b: i64) -> bool:
+    b == 32 or (b >= 9 and b <= 13)
+
+# Strict text -> int: tagged int on success, nil on failure (no overflow past
+# i64, no trailing junk), like rt_string_parse_int in runtime_native.c.
+# Accumulates negatively so i64::MIN parses without a wider type.
+@cfg(arm32)
+@export("C")
+fn rt_string_parse_int(value: i64) -> i64:
+    val len = _a32t_len(value)
+    if len < 0:
+        return A32T_NIL
+    val data = _a32t_data(value)
+    var begin: i64 = 0
+    var finish: i64 = len
+    while begin < finish and _a32t_is_space(_a32t_byte(data, begin)):
+        begin = begin + 1
+    while finish > begin and _a32t_is_space(_a32t_byte(data, finish - 1)):
+        finish = finish - 1
+    if begin >= finish:
+        return A32T_NIL
+    var negative = false
+    val first = _a32t_byte(data, begin)
+    if first == 43 or first == 45:
+        negative = first == 45
+        begin = begin + 1
+    if begin >= finish:
+        return A32T_NIL
+    var acc: i64 = 0
+    var i = begin
+    while i < finish:
+        val digit = _a32t_byte(data, i) - 48
+        if digit < 0 or digit > 9:
+            return A32T_NIL
+        if acc < A32T_MIN_DIV10:
+            return A32T_NIL
+        if acc == A32T_MIN_DIV10 and digit > A32T_MIN_REM10:
+            return A32T_NIL
+        acc = acc * 10 - digit
+        i = i + 1
+    if negative:
+        return rv_box_int(acc)
+    if acc == 0 - 9223372036854775807 - 1:
+        return A32T_NIL
+    rv_box_int(0 - acc)
