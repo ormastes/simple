@@ -21,6 +21,9 @@
 # and must not acquire bootstrap ownership or create its own process group.
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+# Caller's Stage 3 SIMPLE_FRONTEND_CACHE (W24/W27), captured before the Stage 2
+# cache setup (bootstrap_cache_enable_persistence) exports SIMPLE_FRONTEND_CACHE=1.
+bootstrap_caller_frontend_cache=${SIMPLE_FRONTEND_CACHE-}
 
 # Pinned-archive source (owner decision 2026-11-09): build committed content from
 # a `git archive` snapshot, never the live shared working copy, so concurrent
@@ -5313,9 +5316,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     0|1) stage3_mir_sharding_env="SIMPLE_MIR_SHARDING=${SIMPLE_MIR_SHARDING}" ;;
     *) echo "error: SIMPLE_MIR_SHARDING must be unset, 0 or 1" >&2; exit 1 ;;
   esac
-  case "${SIMPLE_FRONTEND_CACHE:-}" in
+  # The caller's value (captured at entry): Stage 2 cache setup has since
+  # exported SIMPLE_FRONTEND_CACHE=1 into this shell.
+  case "${bootstrap_caller_frontend_cache:-}" in
     '') ;;
-    0|1) stage3_frontend_cache=${SIMPLE_FRONTEND_CACHE} ;;
+    0|1) stage3_frontend_cache=${bootstrap_caller_frontend_cache} ;;
     *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 1 ;;
   esac
   stage3_build_args_sha256=$(
@@ -6730,6 +6735,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     [ -z "${native_verbose_arg}" ] || BSTAGE3_FOCUSED_STAGE2_VERBOSE=1
     BSTAGE3_FOCUSED_STAGE2_TIMEOUT=${SIMPLE_NATIVE_FILE_TIMEOUT:-}
     BSTAGE3_FOCUSED_MISSION_CRITICAL=${SIMPLE_STAGE3_MISSION_CRITICAL:-0}
+    # Validated at the Stage 3 launch above (unset | 0 | 1); recorded only when set.
+    BSTAGE3_FOCUSED_FRONTEND_CACHE=${bootstrap_caller_frontend_cache:-}
+    BSTAGE3_FOCUSED_MIR_SHARDING=${SIMPLE_MIR_SHARDING:-}
+    export BSTAGE3_FOCUSED_FRONTEND_CACHE BSTAGE3_FOCUSED_MIR_SHARDING
     export BSTAGE3_INVOCATION_CONTRACT BSTAGE3_FOCUSED_K1_POLICY \
       BSTAGE3_FOCUSED_K1_ROOT BSTAGE3_FOCUSED_K1_SHA256 BSTAGE3_FOCUSED_CUDA_ROOT \
       BSTAGE3_FOCUSED_CUDA_MANIFEST_SHA256 BSTAGE3_FOCUSED_CUDA_TEMPLATE_SHA256 \

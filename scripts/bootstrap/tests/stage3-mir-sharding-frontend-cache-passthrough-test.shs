@@ -173,6 +173,75 @@ case "$hash_block" in *'${stage3_mir_sharding_env}'*'"SIMPLE_FRONTEND_CACHE=${st
 *) echo "FAIL: bootstrap-from-scratch.sh Stage 3 args hash lacks the knobs" >&2; fail=1 ;;
 esac
 
+checked=$((checked + 1))
+# The caller's value must be captured before Stage 2 cache setup exports
+# SIMPLE_FRONTEND_CACHE=1 (bootstrap_cache_enable_persistence).
+if grep -q '^bootstrap_caller_frontend_cache=\${SIMPLE_FRONTEND_CACHE-}$' "$scratch_file" &&
+   grep -q 'case "\${bootstrap_caller_frontend_cache:-}" in' "$scratch_file" &&
+   grep -q 'BSTAGE3_FOCUSED_FRONTEND_CACHE=\${bootstrap_caller_frontend_cache:-}' "$scratch_file"; then
+  echo "PASS: bootstrap-from-scratch.sh reads the caller's SIMPLE_FRONTEND_CACHE, not the Stage 2 cache export"
+else
+  echo "FAIL: bootstrap-from-scratch.sh Stage 3 reads SIMPLE_FRONTEND_CACHE after the Stage 2 export" >&2; fail=1
+fi
+
+# Manifest verification (scripts/check/lib/bootstrap-stage3/manifest-verify.shs):
+# the recorded transcript value is the authority and must agree with the
+# manifest's focused_* field (absent = pinned). Real function bodies, sliced.
+verify_file="$repo/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+snapshot_file="$repo/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+fn_slice() { awk -v s="$2() {" -v s2="$2() (" '
+  !on && (index($0, s) == 1 || index($0, s2) == 1) { on = 1 }
+  on { print } on && /^[})]$/ { exit }' "$1"; }
+{
+  fn_slice "$snapshot_file" bootstrap_stage3_transcript_explicit_env_value
+  fn_slice "$snapshot_file" bootstrap_stage3_manifest_value
+  printf '%s\n' 'bootstrap_stage3_verify_value() { bootstrap_stage3_manifest_value "$@"; }'
+  fn_slice "$verify_file" bootstrap_stage3_focused_stage3_cache_knobs
+  printf '%s\n' 'bootstrap_stage3_manifest=$1' \
+    'bootstrap_stage3_focused_stage3_cache_knobs "$2" || exit 1' \
+    'printf "fc=%s ms=%s\n" "$bsfc_frontend_cache" "$bsfc_mir_sharding"'
+} >"$tmp/knobs.sh"
+grep -q '^bootstrap_stage3_focused_stage3_cache_knobs() {' "$tmp/knobs.sh" || {
+  echo "ERROR — nothing was checked (manifest-verify knob helper missing)"; exit 2; }
+env_row() { printf 'explicit-env:%s:%s\n' "${#1}" "$1"; }
+# knob_case NAME WANT_RC MANIFEST_LINES TRANSCRIPT_WORDS...
+knob_case() {
+  name=$1 want=$2 mlines=$3; shift 3
+  checked=$((checked + 1))
+  printf 'schema=simple-bootstrap-stage3-provenance-v5\n%s' "$mlines" >"$tmp/m.env"
+  : >"$tmp/t.txt"
+  for w in "$@"; do env_row "$w" >>"$tmp/t.txt"; done
+  rc=0; sh "$tmp/knobs.sh" "$tmp/m.env" "$tmp/t.txt" >"$tmp/kout" 2>&1 || rc=$?
+  if { [ "$want" = 0 ] && [ "$rc" -eq 0 ]; } || { [ "$want" != 0 ] && [ "$rc" -ne 0 ]; }; then
+    echo "PASS: manifest-verify $name (rc=$rc $(cat "$tmp/kout"))"
+  else
+    echo "FAIL: manifest-verify $name rc=$rc want=$want" >&2; cat "$tmp/kout" >&2; fail=1
+  fi
+}
+nl='
+'
+knob_case 'legacy manifest + pinned transcript' 0 '' SIMPLE_FRONTEND_CACHE=1
+knob_case 'transcript =0 + manifest =0' 0 "focused_frontend_cache=0$nl" SIMPLE_FRONTEND_CACHE=0
+knob_case 'transcript =0 + manifest assumes 1 (absent)' 1 '' SIMPLE_FRONTEND_CACHE=0
+knob_case 'transcript =0 + manifest =1' 1 "focused_frontend_cache=1$nl" SIMPLE_FRONTEND_CACHE=0
+knob_case 'transcript garbage frontend cache' 1 "focused_frontend_cache=yes$nl" SIMPLE_FRONTEND_CACHE=yes
+knob_case 'manifest garbage frontend cache' 1 "focused_frontend_cache=2$nl" SIMPLE_FRONTEND_CACHE=1
+knob_case 'transcript missing frontend cache' 1 ''
+knob_case 'W27 recipe recorded on both sides' 0 "focused_frontend_cache=0${nl}focused_mir_sharding=1$nl" \
+  SIMPLE_MIR_SHARDING=1 SIMPLE_FRONTEND_CACHE=0
+knob_case 'transcript sharding, manifest absent' 1 '' SIMPLE_MIR_SHARDING=1 SIMPLE_FRONTEND_CACHE=1
+knob_case 'manifest sharding, transcript absent' 1 "focused_mir_sharding=1$nl" SIMPLE_FRONTEND_CACHE=1
+knob_case 'transcript garbage sharding' 1 "focused_mir_sharding=x$nl" SIMPLE_MIR_SHARDING=x SIMPLE_FRONTEND_CACHE=1
+# The focused vector carries the recorded values, not a literal 1.
+checked=$((checked + 1))
+if grep -q '"SIMPLE_FRONTEND_CACHE=${bsfc_frontend_cache:-1}"' "$verify_file" &&
+   grep -q 'set -- "$@" "SIMPLE_MIR_SHARDING=$bsfc_mir_sharding"' "$verify_file" &&
+   ! grep -q '"SIMPLE_FRONTEND_CACHE=0"\|set -- "$@" SIMPLE_FRONTEND_CACHE=1 ' "$verify_file"; then
+  echo "PASS: manifest-verify rebuilds the Stage 3 vector from the recorded knob values"
+else
+  echo "FAIL: manifest-verify still hardcodes a SIMPLE_FRONTEND_CACHE value" >&2; fail=1
+fi
+
 if [ "$checked" -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
 if [ "$fail" -ne 0 ]; then echo "FAIL — $checked case(s) checked, failures above"; exit 1; fi
 echo "PASS — $checked case(s) checked, MIR sharding / frontend cache pass-through hashed + transcribed, unset pinned"

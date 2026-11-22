@@ -96,7 +96,8 @@ class WorkerLoweringLane(unittest.TestCase):
                            "memory_snapshot", "evidence_run_id", "stage3_requested_route",
                            "stage3_fallback_route"), args[:20]))
         values.update(stage3_mc_env="", stage3_cold_init_env="", stage3_diagnostic_env="",
-                      stage3_compiler_ceiling_env="", resume_abi_policy="v1",
+                      stage3_compiler_ceiling_env="", stage3_mir_sharding_env="",
+                      stage3_frontend_cache="1", resume_abi_policy="v1",
                       stage2_admission="/fixture/admission", stage3_timeout_args="--timeout 600")
         # Fail if a newly added recipe input was not deliberately bound here.
         variables = set(re.findall(r"\$(?:\{)?([A-Za-z_][A-Za-z_0-9]*)", DIGEST))

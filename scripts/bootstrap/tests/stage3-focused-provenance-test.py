@@ -98,6 +98,8 @@ class FocusedProvenance(unittest.TestCase):
             SIMPLE_COMPILER_TRACE="1" if diagnostics else "",
             SIMPLE_MIR_TAG_PROBE="1" if diagnostics else "",
             SIMPLE_KEEP_SOURCE_CONTENTS="",
+            stage3_mir_sharding_env="",
+            stage3_frontend_cache="1",
             stage3_mc_env=(
                 "SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1"
                 if mission_critical else ""

@@ -47,6 +47,24 @@ Files: `scripts/bootstrap/resume-stage3-from-admitted.sh`,
 `scripts/bootstrap/lib/stage3-native-build-worker.sh`,
 `scripts/bootstrap/bootstrap-from-scratch.sh`.
 
+Follow-up fixes in the same PR:
+
+- `bootstrap-from-scratch.sh` captures the caller's `SIMPLE_FRONTEND_CACHE` at
+  entry. Before this, the Stage 2 cache setup (`bootstrap_cache_enable_persistence`,
+  `bootstrap-cache-lineage.shs:271`) exported `SIMPLE_FRONTEND_CACHE=1` before
+  Stage 3 read it, so a caller's `0` was silently replaced by `1`.
+- Manifest verification (`scripts/check/lib/bootstrap-stage3/manifest-verify.shs`)
+  no longer assumes the value. The focused-v5 Stage 3 vector reads
+  `SIMPLE_FRONTEND_CACHE` / `SIMPLE_MIR_SHARDING` from the recorded transcript
+  (only unset|0|1 is accepted). It also requires the transcript to agree with
+  the manifest's new optional `focused_frontend_cache` / `focused_mir_sharding`
+  fields. An absent field means the pinned value. `manifest-write.shs` writes
+  those fields only when they are set, so an unset run keeps the same manifest
+  bytes as before. The legacy-v4 recipe used to hard-code `SIMPLE_FRONTEND_CACHE=0`;
+  it now uses the value the transcript recorded, validated to 0|1.
+- Updated the test fixtures that bind every recipe variable:
+  `stage3-focused-provenance-test.py` and `stage3-worker-lowering-lane-test.py`.
+
 ## Verification
 
 `sh scripts/bootstrap/tests/stage3-mir-sharding-frontend-cache-passthrough-test.shs`
@@ -65,9 +83,32 @@ and compiles nothing:
   recorded. `bootstrap-from-scratch.sh` Stage 3 hashes and transcribes both
   knobs.
 
-Result: `PASS — 17 case(s) checked`. Control: the same test run against the
-`origin/release/1.0.0` scripts passes the two unset arms (pinned argv
-unchanged) and fails all 15 new-transport arms.
+- manifest-verify, run on the real helper functions: these PASS: legacy
+  manifest + pinned transcript, transcript `=0` + manifest `=0`, and the W27
+  recipe recorded on both sides. These are refused: transcript `=0` with the
+  manifest absent (pinned 1) or `=1`, garbage values on either side, a
+  transcript missing `SIMPLE_FRONTEND_CACHE`, and a `SIMPLE_MIR_SHARDING`
+  mismatch in either direction.
+
+Result: `PASS — 30 case(s) checked`. Control: the first 17 cases run against
+the `origin/release/1.0.0` scripts pass the two unset arms (pinned argv
+unchanged) and fail all 15 new-transport arms.
+
+Pre-existing failures, identical on an unmodified `origin/release/1.0.0`
+worktree on this host and unchanged by this PR:
+- `stage3-worker-lowering-lane-p-f-test.shs`: the "repo config default" arm
+  fails because `config/host/<host>.sdn` pins `stage3_file_workers=0`.
+- `stage3-focused-provenance-test.py`: 6 failures, transcript writer exit 90.
+- `stage3-worker-lowering-lane-test.py`: 3 failures, stale fixture missing
+  `stage3_streaming_surfaces`.
+- `stage3-invocation-consistency-test.py`: 4 failures,
+  `'sh' != 'fixture-stage2_admitted_absolute'`.
+
+Observed, not changed here: the resume lane writes a legacy-v4 manifest
+(`BSTAGE3_INVOCATION_CONTRACT` is unset in `resume-stage3-from-admitted.sh`).
+The v4 recipe in manifest-verify omits words the resume args hash contains,
+such as `SIMPLE_ABI_POLICY` and the per-file lane env. Whether the resume
+lane's final `manifest-verify` can pass at all needs its own investigation.
 
 ## Still open
 
