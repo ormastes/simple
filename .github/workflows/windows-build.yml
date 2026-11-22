@@ -2,15 +2,19 @@ name: Windows Build (LLVM 23.1.1 clang-cl)
 
 on:
   push:
-    branches: [main]
+    branches: [main, release_windows, release_phase3, 'release/**']
     paths:
       - 'src/compiler_rust/**'
+      - 'src/compiler/**'
       - 'src/compiler/70.backend/**'
       - 'src/lib/nogc_sync_mut/ffi/llvm.spl'
+      - 'bin/simple.cmd'
       - 'scripts/check/lib/bootstrap-stage3/command-snapshot.shs'
       - 'scripts/check/lib/bootstrap-stage3/authority.shs'
       - 'scripts/resource/process-tree-rss-watchdog.pl'
+      - 'scripts/bootstrap/**'
       - 'scripts/bootstrap/bootstrap-session-exec.c'
+      - 'test/01_unit/scripts/*'
       - 'test/01_unit/scripts/bootstrap_rss_retry_test.shs'
       - 'test/01_unit/scripts/bootstrap_windows_transcribed_rss_inherit_test.shs'
       - 'scripts/check/check-bootstrap-windows-c-admission.shs'
@@ -25,6 +29,8 @@ on:
       - 'scripts/bootstrap/bootstrap-windows.sh'
       - 'scripts/bootstrap/bootstrap-windows.cmd'
       - 'config/check/bootstrap_protected_scripts.sdn'
+      - 'config/check/sdn_seal_policy.sdn'
+      - 'scripts/check/*bootstrap*'
       - 'scripts/check/fast-verify-bootstrap-scripts.shs'
       - 'scripts/check/check-bootstrap-path-matrix-windows.shs'
       - '.github/workflows/windows-build.yml'
@@ -75,9 +81,41 @@ jobs:
           echo "SIMPLE_WINDOWS_BOOTSTRAP_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "Windows bootstrap jobs: $jobs"
 
-      - name: Verify Windows bootstrap path-alive matrix
+      - name: Verify Windows bootstrap path-alive matrix and unified contract
         shell: bash
-        run: sh scripts/check/check-bootstrap-path-matrix-windows.shs
+        run: |
+          if ! command -v xxhsum >/dev/null 2>&1; then
+            xxh_bin="$(cygpath -u "$RUNNER_TEMP")/xxhash-bin"
+            mkdir -p "$xxh_bin"
+            if [ -x /c/msys64/usr/bin/pacman.exe ]; then
+              if /c/msys64/usr/bin/pacman.exe -Sy --noconfirm --needed mingw-w64-x86_64-xxhash; then
+                :
+              fi
+              if [ -x /c/msys64/mingw64/bin/xxhsum.exe ]; then
+                cp -f /c/msys64/mingw64/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                for dll in /c/msys64/mingw64/bin/libxxhash*.dll /c/msys64/mingw64/bin/libwinpthread*.dll /c/msys64/mingw64/bin/libgcc_s_*.dll; do
+                  if [ -f "$dll" ]; then
+                    cp -f "$dll" "$xxh_bin/"
+                  fi
+                done
+              fi
+            fi
+            if [ ! -x "$xxh_bin/xxhsum.exe" ] && command -v choco >/dev/null 2>&1; then
+              choco install xxhash -y --no-progress
+              if [ -x /c/ProgramData/chocolatey/bin/xxhsum.exe ]; then
+                cp -f /c/ProgramData/chocolatey/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+              fi
+            fi
+            test -x "$xxh_bin/xxhsum.exe"
+            "$xxh_bin/xxhsum.exe" -V
+            cygpath -w "$xxh_bin" >> "$GITHUB_PATH"
+            export PATH="$xxh_bin:$PATH"
+          fi
+          command -v xxhsum
+          xxhsum -V
+          sh scripts/check/check-bootstrap-path-matrix-windows.shs
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
 
       - name: Cache LLVM 23.1.1
         id: llvm-cache

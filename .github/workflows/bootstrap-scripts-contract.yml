@@ -1,0 +1,102 @@
+name: Bootstrap Scripts Contract
+
+on:
+  push:
+    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
+  pull_request:
+    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bootstrap-scripts-contract:
+    name: Bootstrap Scripts Contract (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: Linux
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            bin
+            config
+            doc/04_architecture/compiler/plugin_arch
+            scripts/bootstrap
+            scripts/check
+            scripts/lib
+            scripts/os
+            scripts/resource
+            scripts/setup
+            src/app/cli
+            src/compiler
+            src/compiler_rust/compiler
+            src/compositions
+            src/plugins
+            src/runtime
+            test/01_unit/scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Install xxhsum for .csm seal verification
+        shell: bash
+        run: |
+          if ! command -v xxhsum >/dev/null 2>&1; then
+            case "$RUNNER_OS" in
+              Linux)
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq --no-install-recommends xxhash
+                ;;
+              macOS)
+                HOMEBREW_NO_AUTO_UPDATE=1 brew install xxhash
+                ;;
+              Windows)
+                xxh_bin="$(cygpath -u "$RUNNER_TEMP")/xxhash-bin"
+                mkdir -p "$xxh_bin"
+                if [ -x /c/msys64/usr/bin/pacman.exe ]; then
+                  if /c/msys64/usr/bin/pacman.exe -Sy --noconfirm --needed mingw-w64-x86_64-xxhash; then
+                    :
+                  fi
+                  if [ -x /c/msys64/mingw64/bin/xxhsum.exe ]; then
+                    cp -f /c/msys64/mingw64/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                    for dll in /c/msys64/mingw64/bin/libxxhash*.dll /c/msys64/mingw64/bin/libwinpthread*.dll /c/msys64/mingw64/bin/libgcc_s_*.dll; do
+                      if [ -f "$dll" ]; then
+                        cp -f "$dll" "$xxh_bin/"
+                      fi
+                    done
+                  fi
+                fi
+                if [ ! -x "$xxh_bin/xxhsum.exe" ] && command -v choco >/dev/null 2>&1; then
+                  choco install xxhash -y --no-progress
+                  if [ -x /c/ProgramData/chocolatey/bin/xxhsum.exe ]; then
+                    cp -f /c/ProgramData/chocolatey/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                  fi
+                fi
+                test -x "$xxh_bin/xxhsum.exe"
+                "$xxh_bin/xxhsum.exe" -V
+                cygpath -w "$xxh_bin" >> "$GITHUB_PATH"
+                export PATH="$xxh_bin:$PATH"
+                ;;
+            esac
+          fi
+          command -v xxhsum
+          xxhsum -V
+
+      - name: Run unified bootstrap scripts contract gate
+        shell: bash
+        run: |
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
