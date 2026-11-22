@@ -751,8 +751,10 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
     for rec in records:
         if _resolve(d, rec.agent_id) < 0:
             val status = if rec.state == "crashed": "crashed: exit " + rec.exit_code.to_text() else: rec.state
+            val rec_pid = if rec.state == "running": rec.pid else: -1
+            val rec_pane_id = if rec.state == "running": rec.pane_id else: ""
             agents.push(CsAgent(agent_id: rec.agent_id, spec: rec.spec,
-                status: status, pid: rec.pid, pane_id: rec.pane_id, cpu_pct: -1.0,
+                status: status, pid: rec_pid, pane_id: rec_pane_id, cpu_pct: -1.0,
                 rss_mb: -1, detail: rec.worktree_path))
     # The header derives agent and running counts from the roster itself.
     _with_screen(_dash(d, "connected: " + backend, agents, d.selected, d.log))
@@ -1139,8 +1141,10 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         # running container cleans it up, while an already-crashed container
         # still closes any remaining pane slot yet preserves its worktree.
         var already_crashed = false
+        var rec_agent_id = target_id
         for rec in cs_container_reconcile_v1(d.session, live_before_close):
             if rec.agent_id == target_id or rec.name == target_id:
+                rec_agent_id = rec.agent_id
                 if rec.state == "crashed":
                     already_crashed = true
                 if pane_id == "" and rec.pane_id != "" and live_before_close.contains(rec.pane_id):
@@ -1153,10 +1157,10 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
             (if already_crashed: live_before_close else: []), not already_crashed)
         if not cleaned:
             return (cs_refresh(d), note)
-        if cs_container_launched(d.session, target_id):
-            val _reap = cs_container_reap(d.session, target_id)
-        val _spool = file_remove(cs_stderr_path(d.session, target_id))
-        val detached = if _resolve(d, target_id) >= 0: _detach(d, target_id) else: d
+        if cs_container_launched(d.session, rec_agent_id):
+            val _reap = cs_container_reap(d.session, rec_agent_id)
+        val _spool = file_remove(cs_stderr_path(d.session, rec_agent_id))
+        val detached = if _resolve(d, rec_agent_id) >= 0: _detach(d, rec_agent_id) else: d
         return (cs_refresh(detached), if note != "": note else: "closed " + target_id)
     if head.starts_with("orchestrator:"):
         val orch_line = action.substring(13, action.byte_len())
@@ -1270,7 +1274,8 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
             return _cs_launch_in_container(d, agent_id, spec_shown, exe, args,
                 worktree_path, worktree_owned, container)
         if worktree_owned:
-            return _cs_launch_owned_worktree(d, agent_id, spec_shown, exe, args,
+            val launch_exe = if exe.starts_with("/"): exe else: macos_seatbelt_canonical_path_v1(exe)
+            return _cs_launch_owned_worktree(d, agent_id, spec_shown, launch_exe, args,
                 macos_seatbelt_canonical_path_v1(cs_repo_root()), worktree_path)
         if worktree_path != "":
             val cd_cmd = "cd " + cs_quote_word_if_needed(worktree_path) + " && exec " + exe

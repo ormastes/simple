@@ -298,8 +298,8 @@ fn _orch_caret_handle_request_v1(info: OrchestratorCaretServerInfoV1, dash: CsDa
         for rec in cs_container_crashed_records_v1(d.session, live_ids):
             if rec.agent_id == target or rec.name == target:
                 val (removed, outcome) = cs_container_close_record_v1(d.session, rec.agent_id, live_ids, true)
-                val deleted = removed and not dir_exists(rec.attempt_dir) and
-                    (not rec.worktree_owned or not dir_exists(rec.worktree_path))
+                val deleted = removed and (rec.attempt_dir == "" or not dir_exists(rec.attempt_dir)) and
+                    (not rec.worktree_owned or rec.worktree_path == "" or not dir_exists(rec.worktree_path))
                 return (cs_refresh(d), uid_seq, false, _orch_caret_encode_reply_v1({
                     "ok": SdnValue.Bool(deleted),
                     "status": SdnValue.String(if deleted: "cleaned" else: "cleanup-failed"),
@@ -310,21 +310,28 @@ fn _orch_caret_handle_request_v1(info: OrchestratorCaretServerInfoV1, dash: CsDa
             "code": SdnValue.String("no-matching-crashed-session")}))
 
     if action == "close":
+        if target == "":
+            return (d, uid_seq, false, _orch_caret_encode_reply_v1({
+                "ok": SdnValue.Bool(false), "status": SdnValue.String("error"),
+                "code": SdnValue.String("close-target-required")}))
         var wt_before = ""
+        var wt_owned_before = false
         var attempt_before = ""
         var agent_key = target
         for rec in cs_container_records_load_v1(d.session):
             if rec.agent_id == target or rec.name == target:
                 agent_key = rec.agent_id
                 wt_before = rec.worktree_path
+                wt_owned_before = rec.worktree_owned
                 attempt_before = rec.attempt_dir
         val (d1, cl_action) = cs_handle_command(d, "/close " + agent_key)
         val (d2, outcome) = cs_apply_action(d1, cl_action)
         d = cs_refresh(d2)
         val preserved = outcome.contains("preserved worktree")
-        val wt_deleted = wt_before == "" or not dir_exists(wt_before)
+        val wt_deleted = if wt_owned_before and wt_before != "": not dir_exists(wt_before) else: wt_before == ""
+        val wt_ok = (not wt_owned_before) or wt_before == "" or not dir_exists(wt_before)
         val temp_deleted = attempt_before == "" or not dir_exists(attempt_before)
-        val closed = wt_deleted and temp_deleted and not outcome.starts_with("could not close pane ")
+        val closed = wt_ok and temp_deleted and not outcome.starts_with("could not close pane ") and not outcome.starts_with("worktree still present:")
         var status = if closed: "closed" else: "close-failed"
         if preserved:
             status = "crashed-preserved"
