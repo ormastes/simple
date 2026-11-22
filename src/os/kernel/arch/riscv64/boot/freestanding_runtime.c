@@ -1015,25 +1015,37 @@ spl_i64 rt_any_add(spl_i64 lhs, spl_i64 rhs) {
     return lhs + rhs;
 }
 
-/* Width-specific MMIO accessors; only the access type differs per width. */
-#define RT_MMIO_READ_FN(name, ctype) \
-spl_i64 name(spl_i64 addr) { \
-    return (spl_i64)(*(volatile ctype *)(spl_u64)addr); \
+spl_i64 rt_mmio_read_u8(spl_i64 addr) {
+    return (spl_i64)(*(volatile unsigned char *)(spl_u64)addr);
 }
-#define RT_MMIO_WRITE_FN(name, ctype) \
-void name(spl_i64 addr, spl_i64 value) { \
-    *(volatile ctype *)(spl_u64)addr = (ctype)value; \
+
+spl_i64 rt_mmio_read_u16(spl_i64 addr) {
+    return (spl_i64)(*(volatile unsigned short *)(spl_u64)addr);
 }
-RT_MMIO_READ_FN(rt_mmio_read_u8, unsigned char)
-RT_MMIO_READ_FN(rt_mmio_read_u16, unsigned short)
-RT_MMIO_READ_FN(rt_mmio_read_u32, unsigned int)
-RT_MMIO_READ_FN(rt_mmio_read_u64, spl_u64)
-RT_MMIO_WRITE_FN(rt_mmio_write_u8, unsigned char)
-RT_MMIO_WRITE_FN(rt_mmio_write_u16, unsigned short)
-RT_MMIO_WRITE_FN(rt_mmio_write_u32, unsigned int)
-RT_MMIO_WRITE_FN(rt_mmio_write_u64, spl_u64)
-#undef RT_MMIO_READ_FN
-#undef RT_MMIO_WRITE_FN
+
+spl_i64 rt_mmio_read_u32(spl_i64 addr) {
+    return (spl_i64)(*(volatile unsigned int *)(spl_u64)addr);
+}
+
+spl_i64 rt_mmio_read_u64(spl_i64 addr) {
+    return (spl_i64)(*(volatile spl_u64 *)(spl_u64)addr);
+}
+
+void rt_mmio_write_u8(spl_i64 addr, spl_i64 value) {
+    *(volatile unsigned char *)(spl_u64)addr = (unsigned char)value;
+}
+
+void rt_mmio_write_u16(spl_i64 addr, spl_i64 value) {
+    *(volatile unsigned short *)(spl_u64)addr = (unsigned short)value;
+}
+
+void rt_mmio_write_u32(spl_i64 addr, spl_i64 value) {
+    *(volatile unsigned int *)(spl_u64)addr = (unsigned int)value;
+}
+
+void rt_mmio_write_u64(spl_i64 addr, spl_i64 value) {
+    *(volatile spl_u64 *)(spl_u64)addr = (spl_u64)value;
+}
 
 /* Bridge aliases: arch-neutral kernel modules (VFS readdir, ssh_auth,
  * fs_exec_spawn) call the runtime_native.c API names, but this freestanding
