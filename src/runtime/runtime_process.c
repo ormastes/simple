@@ -4634,7 +4634,7 @@ int64_t rt_pty_spawn(int32_t handle, int64_t program) {
     free(command);
     return pid;
 }
-bool rt_pty_write(int64_t handle, int64_t data) {
+int64_t rt_pty_write(int64_t handle, int64_t data) {
     int64_t length = rt_string_len(data);
     const uint8_t* bytes = rt_string_data(data);
     if (length < 0 || (length > 0 && !bytes)) return false;
@@ -4644,17 +4644,17 @@ int64_t rt_pty_read(int64_t handle, int64_t timeout_ms) {
     const char* text = win_pty_read(handle, timeout_ms);
     return rt_string_new((const uint8_t*)text, (uint64_t)strlen(text));
 }
-bool rt_pty_close(int64_t handle) { return win_pty_close(handle); }
+int64_t rt_pty_close(int64_t handle) { return win_pty_close(handle); }
 
-bool rt_pty_is_running(int64_t handle) {
+int64_t rt_pty_is_running(int64_t handle) {
     struct WinPtySlot* slot = win_pty_acquire(handle);
     if (!slot) return false;
     bool running = slot->process && WaitForSingleObject(slot->process, 0) == WAIT_TIMEOUT;
     win_pty_release(slot);
     return running;
 }
-#else
-bool rt_pty_is_running(int64_t handle) {
+#elif !defined(__linux__)
+int64_t rt_pty_is_running(int64_t handle) {
     if (handle < 0) return false;
     struct pollfd probe;
     probe.fd = (int)handle;
@@ -4667,15 +4667,8 @@ bool rt_pty_is_running(int64_t handle) {
 }
 #endif
 
-/* C lane of rt_pty_resize. Same scope as rt_pty_is_running above: no C pty
- * implementation exists to mirror, and this needs none of its state.
- *
- * POSIX: `handle` is the pty master fd. TIOCSWINSZ stores the size and the
- * kernel delivers SIGWINCH to the terminal's foreground process group. Unlike
- * the Rust lane this cannot also signal the spawned child directly, because it
- * has no child table. NOT exercised on any POSIX host at the time of writing.
- *
- * Windows: ResizePseudoConsole on this lane's own ConPTY session. */
+/* Windows resolves a ConPTY session. On non-Linux POSIX hosts this fallback
+ * accepts a PTY master descriptor and lets the kernel deliver SIGWINCH. */
 #ifdef _WIN32
 bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
     if (rows < 1 || rows > 32767 || cols < 1 || cols > 32767) return false;
@@ -4688,7 +4681,7 @@ bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
     win_pty_release(slot);
     return ok;
 }
-#else
+#elif !defined(__linux__)
 bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
     if (handle < 0 || rows < 1 || rows > 65535 || cols < 1 || cols > 65535) return false;
     struct winsize size;
@@ -4700,6 +4693,9 @@ bool rt_pty_resize(int64_t handle, int32_t rows, int32_t cols) {
 }
 #endif
 
+#if defined(__linux__)
+#include "runtime_linux_pty_private.h"
+#else
 /* C lane of rt_pty_hangup. Same scope as rt_pty_is_running above: the Rust
  * lane signals the child it spawned (SIGHUP to its session group) and stamps
  * its child-table record so the following rt_pty_close shares one grace
@@ -4734,6 +4730,8 @@ int64_t rt_pty_exit_code_v1(int64_t handle) {
     (void)handle;
     return -2;
 }
+
+#endif /* __linux__ */
 
 #include "runtime_piped_byte_endpoint_v1_impl.h"
 int64_t rt_process_validate_byte_endpoint_v1(int64_t generation,const char* binding,int64_t binding_bytes) {
