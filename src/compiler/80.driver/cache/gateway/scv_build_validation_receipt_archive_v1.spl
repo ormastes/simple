@@ -5,22 +5,50 @@ use std.io_runtime.{file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive,
     file_read_regular_no_follow_bounded, file_exists, file_lock, file_unlock,
     file_publish_noreplace, file_fsync}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
 use compiler.driver.cache.gateway.scv_build_validation_receipt_v1.*
 
-fn _archive_root_valid_v1(root: text) -> bool:
-    if (root == "" or not root.starts_with("/") or root.ends_with("/") or
-            root.contains("\\") or root.contains("\u0000")): return false
-    # Refuse parent symlink traversal rather than checking only the last leaf.
-    var current = ""
-    val segments = root.split("/")
-    for index in 1..segments.len():
+fn _archive_is_ascii_alpha(ch: text) -> bool:
+    (ch >= "A" and ch <= "Z") or (ch >= "a" and ch <= "z")
+
+fn _archive_walk_segments_valid_v1(prefix: text, segments: [text], start_index: i64,
+        reject_colon: bool) -> bool:
+    var current = prefix
+    for index in start_index..segments.len():
         val segment = segments[index]
-        if segment == "" or segment == "." or segment == "..": return false
+        if segment == "" or segment == "." or segment == "..":
+            return false
+        if reject_colon and segment.contains(":"):
+            return false
         current = current + "/" + segment
         if not dir_is_real_no_follow(current): return false
     true
+
+fn _archive_root_valid_v1(root: text) -> bool:
+    if root == "" or root.contains("\u0000") or root.ends_with("/"):
+        return false
+    val is_windows = host_is_windows_host()
+    if not is_windows:
+        if not root.starts_with("/") or root.contains("\\"):
+            return false
+        # Refuse parent symlink traversal rather than checking only the last leaf.
+        return _archive_walk_segments_valid_v1("", root.split("/"), 1, false)
+    if root.ends_with("\\"):
+        return false
+    val normalized = root.replace("\\", "/")
+    if normalized.starts_with("//"):
+        return false
+    # Refuse parent symlink traversal rather than checking only the last leaf.
+    if root.starts_with("/"):
+        if root.contains("\\"): return false
+        return _archive_walk_segments_valid_v1("", normalized.split("/"), 1, true)
+    if (normalized.byte_len() >= 4 and _archive_is_ascii_alpha(normalized.substring(0, 1)) and
+            normalized.substring(1, 3) == ":/"):
+        val rest = normalized.substring(3, normalized.byte_len())
+        return _archive_walk_segments_valid_v1(normalized.substring(0, 2), rest.split("/"), 0, true)
+    false
 
 pub fn scv_build_validation_receipt_read_v1(root: text, accepted_receipt_id: text,
         expected: ScvBuildValidationReceiptV1) -> Result<ScvBuildValidationReceiptV1, text>:
