@@ -601,6 +601,57 @@ pub fn windows_clang_env_dirs_v1(llvm_bin: text, llvm_mingw_root: text) -> [text
 
 # reason: Windows C-driver probe helper exported for unit specs
 @allow(primitive_api)
+pub fn windows_llvm_mingw_home_bin_dirs_v1(home: text, entries: [text]) -> [text]:
+    """Default GNU-lane toolchains: `{home}/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin`,
+    newest (lexically greatest date stamp) first. Installed by
+    scripts/setup/bootstrap-prereqs.shs; probed before PATH and Program Files."""
+    var names: [text] = []
+    if home == "":
+        return names
+    for e in entries:
+        val n = e.replace("\r", "").trim()
+        if n.starts_with("llvm-mingw-") and n.ends_with("-ucrt-x86_64"):
+            # insertion sort, descending
+            var i = 0
+            while i < names.len() and names[i] > n:
+                i = i + 1
+            names.insert(i, n)
+    var dirs: [text] = []
+    for n in names:
+        dirs.push("{home}/.simple/toolchains/{n}/bin")
+    dirs
+
+# reason: Windows C-driver probe helper exported for unit specs
+@allow(primitive_api)
+pub fn windows_clang_triple_is_msvc_v1(triple: text) -> bool:
+    """`clang -dumpmachine` of an MSVC-flavoured LLVM (e.g. Program Files\\LLVM)
+    ends in `-msvc`; its GNU link lacks libclang_rt.builtins.a."""
+    triple.replace("\r", "").trim().ends_with("-msvc")
+
+# reason: Windows C-driver probe helper exported for unit specs
+@allow(primitive_api)
+pub fn windows_only_msvc_llvm_diagnostic_v1(paths: [text]) -> text:
+    "[cc-detect] error: only MSVC-flavoured LLVM found ({paths.join(', ')}); the default GNU lane needs llvm-mingw UCRT under ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 (scripts/setup/bootstrap-prereqs.shs install), SIMPLE_LLVM_MINGW_ROOT or SIMPLE_LLVM_BIN. MSVC LLVM is never used on this lane (--msvc selects the MSVC lane)."
+
+fn _windows_home_llvm_mingw_dirs() -> [text]:
+    var home = _env_text("USERPROFILE")
+    if home == "":
+        home = _env_text("HOME")
+    if home == "":
+        return []
+    val root = "{_msys_drive_path(home)}/.simple/toolchains"
+    val win_root = root.replace("/", "\\")
+    val (out, err, code) = _cc_probe_run_retrying("dir /b /ad \"{win_root}\" 2>nul", [], true)
+    if code != 0:
+        return []
+    windows_llvm_mingw_home_bin_dirs_v1(_msys_drive_path(home), out.split("\n"))
+
+fn _windows_clang_is_msvc(cc: text) -> bool:
+    val (out, err, code) = _cc_probe_run_retrying(cc, ["-dumpmachine"], false)
+    code == 0 and windows_clang_triple_is_msvc_v1(out)
+
+# reason: Windows C-driver probe helper exported for unit specs
+@allow(primitive_api)
 pub fn cc_probe_exit_is_transient_v1(code: i64) -> bool:
     """0xC0000142 STATUS_DLL_INIT_FAILED (signed or unsigned): a Windows process
     failed to START under memory / desktop-heap pressure. It says nothing about
@@ -639,6 +690,12 @@ fn _find_c_compiler_windows() -> text:
             tried.push(direct)
             if file_exists(direct) and _cc_verify_compiles(direct):
                 return direct
+        # Default: ~/.simple/toolchains llvm-mingw UCRT, newest first, before PATH.
+        for dir in _windows_home_llvm_mingw_dirs():
+            val direct = "{dir}/clang.exe"
+            tried.push(direct)
+            if file_exists(direct) and _cc_verify_compiles(direct):
+                return direct
 
     # MSVC lane: clang-cl BEFORE cl.exe. cl.exe passes the trivial
     # _cc_verify_compiles probe and then cannot compile the C runtime at all:
@@ -650,11 +707,17 @@ fn _find_c_compiler_windows() -> text:
     # also the compiler the stage-2 candidate itself was built with, so probing
     # the candidate with a DIFFERENT compiler than built it is its own defect.
     # These are reached ONLY on the MSVC lane; the default lane is clang-only.
+    var msvc_only: [text] = []
     for candidate in windows_c_compiler_candidates_v1(if mingw: "gnu" else: "msvc"):
         tried.push(candidate)
-        val resolved = _first_verified_windows_compiler(candidate)
-        if resolved != "":
+        val resolved = _first_verified_windows_compiler(candidate, mingw)
+        if resolved.starts_with("msvc:"):
+            msvc_only.push(resolved.substring(5))
+        elif resolved != "":
             return resolved
+    if mingw and msvc_only.len() > 0:
+        print windows_only_msvc_llvm_diagnostic_v1(msvc_only)
+        return ""
 
     # Returning "" here yields the bare message "No C compiler found" at two
     # DIFFERENT call sites with identical text, and names neither the
@@ -668,19 +731,31 @@ fn _find_c_compiler_windows() -> text:
     print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
     ""
 
-fn _first_verified_windows_compiler(candidate: text) -> text:
+fn _first_verified_windows_compiler(candidate: text, gnu_lane: bool) -> text:
     """Return the first executable reported by `where` that really compiles.
 
     `where` may report multiple installations. Verifying the bare candidate
     name only retries the first PATH hit and can never reach a later healthy
-    toolchain when the first executable has a missing DLL."""
+    toolchain when the first executable has a missing DLL.
+    On the GNU lane an MSVC-flavoured clang (`-dumpmachine` ends in -msvc) is
+    skipped; if nothing else works, returns "msvc:<path>" so the caller can
+    name it instead of producing a broken GNU link."""
     val (out, err, code) = _cc_probe_run_retrying("where {candidate} 2>nul", [], true)
     if code != 0:
         return ""
+    var msvc_hit = ""
     for path in out.split("\n"):
         val resolved = path.trim()
-        if resolved != "" and _cc_verify_compiles(resolved):
+        if resolved == "":
+            continue
+        if gnu_lane and _windows_clang_is_msvc(resolved):
+            if msvc_hit == "":
+                msvc_hit = resolved
+            continue
+        if _cc_verify_compiles(resolved):
             return resolved
+    if msvc_hit != "":
+        return "msvc:" + msvc_hit
     ""
 
 # ============================================================================
