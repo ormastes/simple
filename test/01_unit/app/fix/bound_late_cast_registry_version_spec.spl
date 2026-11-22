@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Pin that the `simple fix` registry path for the SPL-BOUND-002 variants
+binds every proposal to the live snapshot version, so a document that is not
+at its first revision never fails validation as a stale proposal.
+Audience: compiler and tooling engineers maintaining robust-boundary fixes.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+The registry builders stamp FixCandidate version 0, but EasyFix carries no
+integer version: run_fix_producers rebinds base_version to the unit snapshot
+(a content hash), and validate_fix_proposals checks against that.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.tools.fix.builtins.{run_fix_producers}
+use compiler.tools.fix.producer.{fix_producer, fix_unit_from_source}
+use compiler.tools.fix.source_edits.{validate_fix_proposals}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot}
+
+val FILE = "/w/client.spl"
+
+fn edited_src() -> text:
+    # A second revision: the author already edited the file once.
+    "# revision 2\nunit Port: i32 in 1..=65535\nextern fn c_read_port() -> i32\n# reason: ABI verified by hand\nfn get_port() -> Port?:\n    Port(c_read_port())\n"
+
+describe "SPL-BOUND-002 registry path document version":
+    it "binds every variant proposal to the live snapshot and validates":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run the registry producers over a non-initial revision")
+        val src = edited_src()
+        val snap = source_snapshot(FILE, src)
+        val producers = [fix_producer("SPL-BOUND-002"), fix_producer("SPL-BOUND-002-MOVE"),
+            fix_producer("SPL-BOUND-002-CONSTRAINED"), fix_producer("SPL-BOUND-002-ALLOW")]
+        val fixes = run_fix_producers(producers, fix_unit_from_source(FILE, src))
+        expect(fixes.len() > 1).to_equal(true)
+        for f in fixes:
+            expect(f.base_version).to_equal(snap.version)
+            expect(f.base_version == "0").to_equal(false)
+        step("Validate each proposal against the live snapshot")
+        var snaps: Dict<text, SourceSnapshot> = {}
+        snaps[FILE] = snap
+        for f in fixes:
+            val v = validate_fix_proposals([f], snaps)
+            expect(v.report.stage == "version").to_equal(false)
+
+    it "still rejects a proposal computed against an older revision":
+        # @req: REQ-DIAG-POLICY-001
+        step("Bind against revision 1, validate against revision 2")
+        val old = "unit Port: i32 in 1..=65535\nextern fn c_read_port() -> i32\nfn get_port() -> Port?:\n    Port(c_read_port())\n"
+        val fixes = run_fix_producers([fix_producer("SPL-BOUND-002")], fix_unit_from_source(FILE, old))
+        expect(fixes.len()).to_equal(1)
+        var snaps: Dict<text, SourceSnapshot> = {}
+        snaps[FILE] = source_snapshot(FILE, edited_src())
+        expect(validate_fix_proposals(fixes, snaps).report.stage).to_equal("version")

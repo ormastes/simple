@@ -71,11 +71,19 @@ fn _doctor_today() -> text:
 
 # Every unit reachable from the given root dirs, dependencies first, each once
 # (a unit reached from two roots or as a diamond is listed a single time).
+# With `glob_missing`, a root dir with no simple.sdn is not in the registry and
+# stays a single default-glob unit instead of being an error.
 @allow(primitive_api)  # CLI boundary: root dir texts in, registry or error text out
-fn _doctor_registry(dirs: [text]) -> Result<[LibraryUnitManifestV1], text>:
+fn _doctor_registry(dirs: [text], glob_missing: bool) -> Result<[LibraryUnitManifestV1], text>:
     var out: [LibraryUnitManifestV1] = []
     var seen: {text: bool} = {}
     for dir in dirs:
+        if glob_missing and not file_exists(dir + "/simple.sdn"):
+            if not seen.contains_key(dir):
+                seen[dir] = true
+                out.push(LibraryUnitManifestV1(name: dir, version: "", kind: "library", dir: dir,
+                    deps: [], includes: ["**/*.spl"], excludes: []))
+            continue
         val units = match build_units_registry(dir):
             case Ok(us): us
             case Err(e): return Err(e)
@@ -89,25 +97,12 @@ pub struct DoctorOwnershipScanV1:
     units: [SourceInventoryUnitV1]
     scanned: [text]
 
-# Source-ownership inputs, one inventory unit per registry unit. A root dir with
-# no simple.sdn is not in the registry and stays a single default-glob unit.
+# Source-ownership inputs, one inventory unit per registry unit.
 @allow(primitive_api)  # CLI boundary: root dir texts in, scan or error text out
 pub fn doctor_ownership_scan(dirs: [text]) -> Result<DoctorOwnershipScanV1, text>:
-    var manifests: [LibraryUnitManifestV1] = []
-    var seen: {text: bool} = {}
-    for dir in dirs:
-        if file_exists(dir + "/simple.sdn"):
-            val units = match build_units_registry(dir):
-                case Ok(us): us
-                case Err(e): return Err(e)
-            for u in units:
-                if not seen.contains_key(u.dir):
-                    seen[u.dir] = true
-                    manifests.push(u)
-        elif not seen.contains_key(dir):
-            seen[dir] = true
-            manifests.push(LibraryUnitManifestV1(name: dir, version: "", kind: "library", dir: dir,
-                deps: [], includes: ["**/*.spl"], excludes: []))
+    val manifests = match _doctor_registry(dirs, true):
+        case Ok(ms): ms
+        case Err(e): return Err(e)
     var units: [SourceInventoryUnitV1] = []
     var scanned: [text] = []
     for m in manifests:
@@ -123,7 +118,7 @@ pub fn doctor_ownership_scan(dirs: [text]) -> Result<DoctorOwnershipScanV1, text
 fn _doctor_run_roles(dirs: [text], robust: bool, today: text) -> i64:
     var findings: [text] = []
     var checked = 0
-    val units = match _doctor_registry(dirs):
+    val units = match _doctor_registry(dirs, false):
         case Ok(us): us
         case Err(e):
             print("build-doctor-error: {e}")
