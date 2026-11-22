@@ -109,25 +109,55 @@ int main(int argc, char** argv) {
 
     VkInstance instance = NULL;
     {
+        u32 inst_ext_count = 0;
+        b32 has_portability_enum = 0;
+        if (vkEnumerateInstanceExtensionProperties(NULL, &inst_ext_count, NULL) == VK_SUCCESS && inst_ext_count > 0) {
+            VkExtensionProperties* inst_exts = malloc(sizeof(VkExtensionProperties) * inst_ext_count);
+            if (inst_exts) {
+                if (vkEnumerateInstanceExtensionProperties(NULL, &inst_ext_count, inst_exts) == VK_SUCCESS) {
+                    for (u32 i = 0; i < inst_ext_count; i++) {
+                        if (strcmp(inst_exts[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) {
+                            has_portability_enum = 1;
+                            break;
+                        }
+                    }
+                }
+                free(inst_exts);
+            }
+        }
         const char* portability_ext = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-        vkCreateInstance(&(VkInstanceCreateInfo){
+        VkResult inst_rc = vkCreateInstance(&(VkInstanceCreateInfo){
             .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+            .flags = has_portability_enum ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0,
             .pApplicationInfo = &(VkApplicationInfo){
                 .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                 .apiVersion = VK_API_VERSION_1_0
             },
-            .enabledExtensionCount = 1,
-            .ppEnabledExtensionNames = &portability_ext,
+            .enabledExtensionCount = has_portability_enum ? 1u : 0u,
+            .ppEnabledExtensionNames = has_portability_enum ? &portability_ext : NULL,
         }, NULL, &instance);
-        if (!instance) { fprintf(stderr, "vkCreateInstance failed\n"); return 1; }
+        if (inst_rc != VK_SUCCESS || !instance) {
+            fprintf(stderr, "vkCreateInstance failed (%d)\n", (int)inst_rc);
+            return 1;
+        }
     }
 
     VkPhysicalDevice physical_device = NULL;
     VkPhysicalDeviceProperties device_props = { 0 };
     {
-        u32 n = 1;
+        u32 n = 0;
+        if (vkEnumeratePhysicalDevices(instance, &n, NULL) != VK_SUCCESS || n == 0) {
+            fprintf(stderr, "vkEnumeratePhysicalDevices found 0 devices\n");
+            vkDestroyInstance(instance, NULL);
+            return 1;
+        }
+        n = 1;
         vkEnumeratePhysicalDevices(instance, &n, &physical_device);
+        if (!physical_device) {
+            fprintf(stderr, "vkEnumeratePhysicalDevices returned null physical_device\n");
+            vkDestroyInstance(instance, NULL);
+            return 1;
+        }
         vkGetPhysicalDeviceProperties(physical_device, &device_props);
         printf("device: %s\n", device_props.deviceName);
     }
@@ -143,8 +173,25 @@ int main(int argc, char** argv) {
             if (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { queue_family_index = i; break; }
         }
         free(qp);
+        u32 dev_ext_count = 0;
+        b32 has_portability_subset = 0;
+        if (vkEnumerateDeviceExtensionProperties(physical_device, NULL, &dev_ext_count, NULL) == VK_SUCCESS && dev_ext_count > 0) {
+            VkExtensionProperties* dev_exts = malloc(sizeof(VkExtensionProperties) * dev_ext_count);
+            if (dev_exts) {
+                if (vkEnumerateDeviceExtensionProperties(physical_device, NULL, &dev_ext_count, dev_exts) == VK_SUCCESS) {
+                    for (u32 i = 0; i < dev_ext_count; i++) {
+                        if (strcmp(dev_exts[i].extensionName, "VK_KHR_portability_subset") == 0) {
+                            has_portability_subset = 1;
+                            break;
+                        }
+                    }
+                }
+                free(dev_exts);
+            }
+        }
+        const char* portability_subset_ext = "VK_KHR_portability_subset";
         f32 priority = 0.0f;
-        vkCreateDevice(physical_device, &(VkDeviceCreateInfo){
+        VkResult dev_rc = vkCreateDevice(physical_device, &(VkDeviceCreateInfo){
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             .queueCreateInfoCount = 1,
             .pQueueCreateInfos = &(VkDeviceQueueCreateInfo){
@@ -153,7 +200,14 @@ int main(int argc, char** argv) {
                 .queueCount = 1,
                 .pQueuePriorities = &priority,
             },
+            .enabledExtensionCount = has_portability_subset ? 1u : 0u,
+            .ppEnabledExtensionNames = has_portability_subset ? &portability_subset_ext : NULL,
         }, NULL, &device);
+        if (dev_rc != VK_SUCCESS || !device) {
+            fprintf(stderr, "vkCreateDevice failed (%d)\n", (int)dev_rc);
+            vkDestroyInstance(instance, NULL);
+            return 1;
+        }
     }
 
     const u64 fb_size = (u64)fb_w * (u64)fb_h * sizeof(u32);

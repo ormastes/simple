@@ -72,3 +72,10 @@ Per `.claude/rules/testing.md` the spec is correct and **must stay RED** until
 this is fixed. Do not weaken the assertion, mark it pending, or delete the
 fixture.
 
+## 2026-11-22 Source & Runtime Audit Confirmation (work/mac-bugs-vulkan-20261122)
+
+Confirmed in current source:
+- `rt_vulkan_submit_no_wait` is implemented in both `src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs` (backed by non-blocking `device.submit_compute_command_no_wait(...)` in `device.rs`) and `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` (`queue_submit` without `wait_for_fences`).
+- `VulkanLaneSession.dispatch_once` (`src/lib/gc_async_mut/gpu_lane/vulkan_lane_session.spl:262`) calls `vulkan_sffi_submit_no_wait(command)` and then performs its own bounded `vulkan_sffi_wait_fence(fence, timeout_ns)`, quarantining in-flight resources and returning `VulkanLaneDispatchOutcome.TimedOut` (`GMB-1`) when `timeout_ms` expires before fence signaling.
+- Remains RESOLVED via `vulkan_submit_and_wait_fence_blocks_unconditionally_2026-08-07`.
+
