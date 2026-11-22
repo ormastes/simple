@@ -1,6 +1,31 @@
 # Windows Docker process-provider integration
 
-Status: AWAITING_VERIFICATION. There is no qualified Windows runtime result.
+Status: AWAITING_VERIFICATION. One live lifecycle probe passed (below). That is
+evidence, not deployment qualification: the controller launch schema, SPipe and
+manual gates are still NOT_RUN.
+
+## Live probe evidence (2026-11-22)
+
+Host: Windows 11 Pro build 26300.10075 (DESKTOP-VMF96U6). Engine: Docker CE 29.10.0
+(`dockerd` service `docker-ce`, `C:\Program Files\DockerCE\docker.exe`) listening on
+`npipe:////./pipe/docker_engine`, which is the only endpoint the provider admits.
+Docker Desktop and its WSL Linux engine were stopped, because Desktop's Linux engine
+owns `docker_engine` while it runs. Engine ID `844f2a31-da1d-40b2-8e4d-7a8daf2e56cf`,
+kernel `10.0 26300 (26100.1.amd64fre.ge_release.240331-1435)`. Image:
+`mcr.microsoft.com/windows/servercore@sha256:a43c2d41a3d6e940dec865731e2f5db5c3e03f705f5300ef0b5817d3e01ecfb1`
+(tag `ltsc2025`), image ID `sha256:793f7bf4733a1846f4c7f31c14dff835a8ad348613e979c943cd804c54a3ba16`,
+OsVersion `10.0.26100.33828`. Before this run no image pin existed anywhere: specs use
+placeholder digests. The 26100 image runs process-isolated on the 26300 host.
+
+Entry: `src/app/test/windows_docker_live_probe.spl`, run by
+`sh scripts/check/check-windows-docker-live-probe.shs <probe.exe> <image-ref>`. The
+wrapper reads the pins from the engine and the image and passes them in.
+
+| check | Phase 1 (seed `ac2e90625c2a`, interpreter) | Phase 2 (admitted Stage 2, native-build) |
+|---|---|---|
+| live prepare/create/start/wait/logs/destroy, `cmd.exe /c echo` | N/A by design: refused before any Docker effect (`child environment capture requires the matching native C provider`, `process_ops.spl:1959`) | PASS: logs `simple-wdp-ok`, wait exit 0, exact-ID absence confirmed |
+| non-zero exit propagation (`WDP_EXIT=3`) | N/A (same refusal) | PASS: wait exit 3 |
+| Windows provider scripted specs (10 files) | 121/122 after realigning 3 stale V6 expectations (`doc/08_tracking/bug/windows_docker_specs_stale_after_v6_network_2026-11-22.md`). One RED: `docker_server_network_v6_spec.spl:288`, see `doc/08_tracking/bug/windows_scripted_docker_progress_needs_native_thread_on_seed_2026-11-22.md` | N/A (bootstrap CLI has no `test`) |
 
 Use the Windows provider's typed request and explicit policy. Its host kernel and
 image OS-version strings must exactly match the selected observed pair; choosing
