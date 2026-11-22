@@ -2,8 +2,9 @@ use std.io.{file_read}
 use std.spec.{describe, it, expect}
 use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
-use compiler.core.ast.{ast_reset, decl_count, expr_count, stmt_count}
-use compiler.core.parser.{parser_error_count, parser_release_parse_globals}
+use compiler.core.ast.{ast_prepare_persistent_owner_v1, ast_reset, decl_count, expr_count, stmt_count}
+use compiler.core.parser.{parser_error_count}
+use compiler.core.tokens.{TOK_EOF}
 use compiler.frontend.core.lexer.{
     lexer_release_parse_source_globals,
     lex_cur_kind_get,
@@ -12,10 +13,15 @@ use compiler.frontend.core.lexer.{
     lex_cur_col_get
 }
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.frontend.flat_ast_bridge.{frontend_prepare_transient_parse_scope}
-use compiler.frontend.frontend_parse_ownership.{frontend_discard_failed_parse_registries, frontend_promote_compilation_registries}
+use compiler.frontend.retained_parse_owners_v1.{frontend_promote_retained_parse_owners_v1}
+use compiler.frontend.aspect_registry.{aspect_registry_reset_module, aspect_pending_reset}
+use compiler.frontend.effect_registry.{effect_registry_reset_module, effect_pending_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset_module, layer_field_pending_reset}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset_module}
+use compiler.frontend.resource_registry.{resource_registry_reset}
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceParserOwner,
+    module_surface_from_owner,
     module_surface_promote
 }
 
@@ -29,16 +35,23 @@ fn dict_key_count<T>(values: Dict<text, T>) -> i64:
     val keys = values.keys()
     keys.len()
 
+fn discard_failed_parse_registries(path: text):
+    aspect_registry_reset_module(path)
+    aspect_pending_reset()
+    effect_registry_reset_module(path)
+    effect_pending_reset()
+    layer_eq_registry_reset_module(path)
+    layer_field_pending_reset()
+    rt_criticality_reset_module(path)
+    resource_registry_reset()
+
 fn finish_transient_surface_scope() -> bool:
     # Idempotent pause makes this helper cover success and pre-pause parse
     # errors with the production ordering.
     val paused = rt_transient_array_scope_pause()
-    parser_release_parse_globals()
-    lexer_release_parse_source_globals()
-    val promoted = if paused: frontend_promote_compilation_registries() else: false
+    val promoted = if paused: frontend_promote_retained_parse_owners_v1(true) else: false
     val ended = rt_transient_array_scope_end()
-    # Match the production driver's load-bearing cleanup order: reset the
-    # process-lifetime parser arenas only after transient allocations are gone.
+    lexer_release_parse_source_globals()
     ast_reset()
     paused and promoted and ended
 
@@ -52,27 +65,15 @@ describe "module surface parser owner transient value semantics":
 
         # First-touch process-lifetime AST/parser/lexer owners outside every
         # transient scope, matching both production streaming phases.
-        frontend_prepare_transient_parse_scope()
+        ast_prepare_persistent_owner_v1()
 
         # Ordinary module 1: extract, promote, and tear down its parse arena.
         expect(rt_transient_array_scope_begin()).to_equal(true)
         val first_module = parse_full_frontend(
             first_content, "owner_transient_first.spl", "owner_transient.first", logger)
-        var first_owner = ModuleSurfaceParserOwner(
-            parsed_path: first_module.name,
-            imports: first_module.imports,
-            exports: first_module.exports,
-            functions: first_module.functions,
-            function_headers: first_module.function_headers,
-            classes: first_module.classes,
-            actors: first_module.actors,
-            structs: first_module.structs,
-            enums: first_module.enums,
-            traits: first_module.traits,
-            impls: first_module.impls,
-            type_aliases: first_module.type_aliases,
-            constants: first_module.constants)
-        val first_result = first_owner.surface(
+        val first_owner = ModuleSurfaceParserOwner.new(first_module)
+        val first_result = module_surface_from_owner(
+            first_owner,
             SourceFile(
                 path: "owner_transient_first.spl",
                 content: first_content,
@@ -109,21 +110,9 @@ describe "module surface parser owner transient value semantics":
         expect(second_lex_text_len).to_be_greater_than(-1)
         expect(second_lex_line).to_be_greater_than(0)
         expect(second_lex_col).to_be_greater_than(-1)
-        var second_owner = ModuleSurfaceParserOwner(
-            parsed_path: second_module.name,
-            imports: second_module.imports,
-            exports: second_module.exports,
-            functions: second_module.functions,
-            function_headers: second_module.function_headers,
-            classes: second_module.classes,
-            actors: second_module.actors,
-            structs: second_module.structs,
-            enums: second_module.enums,
-            traits: second_module.traits,
-            impls: second_module.impls,
-            type_aliases: second_module.type_aliases,
-            constants: second_module.constants)
-        val second_result = second_owner.surface(
+        val second_owner = ModuleSurfaceParserOwner.new(second_module)
+        val second_result = module_surface_from_owner(
+            second_owner,
             SourceFile(
                 path: "owner_transient_second.spl",
                 content: second_content,
@@ -138,12 +127,8 @@ describe "module surface parser owner transient value semantics":
         expect(dict_key_count(second_surface.callables)).to_equal(0)
         expect(dict_key_count(second_surface.composites)).to_equal(1)
 
-        # The Stage3 failure appeared here: after two ordinary modules, this
-        # import-only facade had empty declaration dictionaries. Copying the
-        # whole ParserModule through ModuleSurfaceParserOwner.new(module)
-        # corrupted the first empty keys() walk and materialized geometric
-        # transient arrays. Capture every consumed field on both sides of the
-        # owner construction before asking extraction to walk those keys.
+        # Capture every consumed field on both sides of the owner construction
+        # before asking extraction to walk those keys.
         expect(rt_transient_array_scope_begin()).to_equal(true)
         val facade_module = parse_full_frontend(
             facade_content, facade_path, "compiler.common.driver_core_types", logger)
@@ -160,20 +145,7 @@ describe "module surface parser owner transient value semantics":
         val before_aliases = dict_key_count(facade_module.type_aliases)
         val before_constants = dict_key_count(facade_module.constants)
 
-        var facade_owner = ModuleSurfaceParserOwner(
-            parsed_path: facade_module.name,
-            imports: facade_module.imports,
-            exports: facade_module.exports,
-            functions: facade_module.functions,
-            function_headers: facade_module.function_headers,
-            classes: facade_module.classes,
-            actors: facade_module.actors,
-            structs: facade_module.structs,
-            enums: facade_module.enums,
-            traits: facade_module.traits,
-            impls: facade_module.impls,
-            type_aliases: facade_module.type_aliases,
-            constants: facade_module.constants)
+        val facade_owner = ModuleSurfaceParserOwner.new(facade_module)
         val owner_imports = facade_owner.imports.len()
         val owner_exports = facade_owner.exports.len()
         val owner_functions = dict_key_count(facade_owner.functions)
@@ -187,7 +159,8 @@ describe "module surface parser owner transient value semantics":
         val owner_aliases = dict_key_count(facade_owner.type_aliases)
         val owner_constants = dict_key_count(facade_owner.constants)
 
-        val facade_result = facade_owner.surface(
+        val facade_result = module_surface_from_owner(
+            facade_owner,
             SourceFile(
                 path: facade_path,
                 content: facade_content,
@@ -212,7 +185,7 @@ describe "module surface parser owner transient value semantics":
         # Scalar snapshots prove construction and extraction preserved the
         # import-only shape. The bounded empty-map walks are also the regression
         # gate: the old geometric allocation never reached these assertions.
-        expect(before_imports).to_equal(4)
+        expect(before_imports).to_equal(5)
         expect(before_exports).to_equal(0)
         expect(before_functions).to_equal(0)
         expect(before_headers).to_equal(0)
@@ -251,7 +224,7 @@ describe "module surface parser owner transient value semantics":
         # has been reclaimed and parser globals have been reset for a reparse.
         expect(dict_key_count(first_surface.callables)).to_equal(1)
         expect(dict_key_count(second_surface.composites)).to_equal(1)
-        expect(facade_surface.imports.len()).to_equal(4)
+        expect(facade_surface.imports.len()).to_equal(5)
         expect(dict_key_count(facade_surface.callables)).to_equal(0)
         expect(first_surface.callable_names).to_equal(["first_value"])
         expect(second_surface.composite_names).to_equal(["SecondValue"])
@@ -261,12 +234,14 @@ describe "module surface parser owner transient value semantics":
             "compiler.common.driver_core_modes")
         expect(facade_surface.imports[3].module).to_equal(
             "compiler.common.driver_source_file")
+        expect(facade_surface.imports[4].module).to_equal(
+            "compiler.backend.backend_types")
 
     it "recovers after a malformed first module without stale frontend owners":
         val logger = Logger(level: 0)
         val failed_path = "owner_transient_malformed.spl"
         val valid_path = "owner_transient_recovered.spl"
-        frontend_prepare_transient_parse_scope()
+        ast_prepare_persistent_owner_v1()
 
         # This exits before the normal success-path pause.  Snapshot every
         # owner family while live, discard the failed module's registry rows,
@@ -286,12 +261,12 @@ describe "module surface parser owner transient value semantics":
         expect(failed_stmt_count).to_be_greater_than(-1)
         expect(failed_lex_kind).to_be_greater_than(-2)
         expect(failed_lex_text_len).to_be_greater_than(-1)
-        frontend_discard_failed_parse_registries(failed_path)
+        discard_failed_parse_registries(failed_path)
         expect(finish_transient_surface_scope()).to_equal(true)
         expect(decl_count()).to_equal(0)
         expect(expr_count()).to_equal(0)
         expect(stmt_count()).to_equal(0)
-        expect(lex_cur_kind_get()).to_equal(0)
+        expect(lex_cur_kind_get()).to_equal(TOK_EOF)
         expect(lex_cur_text_get()).to_equal("")
 
         # A valid second file must populate the same durable shells and remain
@@ -316,4 +291,4 @@ describe "module surface parser owner transient value semantics":
         expect(recovered_lex_col).to_be_greater_than(-1)
         expect(finish_transient_surface_scope()).to_equal(true)
         expect(decl_count()).to_equal(0)
-        expect(lex_cur_kind_get()).to_equal(0)
+        expect(lex_cur_kind_get()).to_equal(TOK_EOF)
