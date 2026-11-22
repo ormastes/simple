@@ -19,11 +19,16 @@ use compiler.backend.llvm_native_link_orchestrator.{
     llvm_darwin_link_input_snapshot_path, _llvm_darwin_snapshot_link_inputs,
     _llvm_darwin_prune_unreferenced_snapshots
 }
+use compiler.driver.driver_types.{CompileContext, CompileOptions, SourceFile}
 use compiler.driver.driver_aot_native_output.{
     driver_native_build_cache_scope_for_compiler_id,
     driver_native_frozen_source_lookup,
     driver_native_frozen_source_table,
-    _driver_frozen_arrays_signature_v1
+    driver_native_module_cache_source,
+    driver_native_module_source_identity,
+    _driver_frozen_arrays_signature_v1,
+    _driver_frozen_projected_signature_v1,
+    _driver_build_projected_frozen_source_index_v1
 }
 use compiler.driver.driver_build.library_unit_iface_v1.{library_unit_source_digest_v1}
 use compiler.driver.driver_build.library_unit_archive_v1.{library_unit_receipt_read_v1}
@@ -279,6 +284,101 @@ describe "Cache scope unification, O(1) frozen source table, Darwin link snapsho
             ["m.0", "m.interior", "m.last"])
         expect(sig_v1.len()).to_equal(64)
         expect(sig_v1 == sig_v2).to_equal(false)
+
+        # Phase-1 full-inventory aliases (`std.*` + `lib.*`, numbered compiler layers)
+        # resolve uniquely once the Phase-2 entry-closure projection selects one module
+        # per physical file and all Phase-1 alias rows agree on a non-empty SHA-256.
+        val io_sha = sha256_text("fn file_exists(p: text) -> bool: true")
+        val bad_sha1 = sha256_text("v1")
+        val bad_sha2 = sha256_text("v2")
+        val p1_paths = [
+            "src/lib/nogc_sync_mut/io_runtime.spl",
+            "src/lib/nogc_sync_mut/io_runtime.spl",
+            "src/drift.spl",
+            "src/drift.spl",
+            "src/both_selected.spl",
+            "src/both_selected.spl"
+        ]
+        val p1_ids = [io_sha, io_sha, bad_sha1, bad_sha2, io_sha, io_sha]
+        val p1_mods = [
+            "std.io_runtime",
+            "lib.nogc_sync_mut.io_runtime",
+            "mod.drift_a",
+            "mod.drift_b",
+            "mod.sel_a",
+            "mod.sel_b"
+        ]
+        val sel_paths = [
+            "src/lib/nogc_sync_mut/io_runtime.spl",
+            "src/drift.spl",
+            "src/both_selected.spl",
+            "src/both_selected.spl"
+        ]
+        val sel_mods = [
+            "lib.nogc_sync_mut.io_runtime",
+            "mod.drift_a",
+            "mod.sel_a",
+            "mod.sel_b"
+        ]
+        val proj_idx = _driver_build_projected_frozen_source_index_v1(
+            p1_paths, p1_ids, p1_mods, sel_paths, sel_mods)
+        expect(proj_idx.contains_key("lib.nogc_sync_mut.io_runtime")).to_equal(true)
+        expect(proj_idx.contains_key("std.io_runtime")).to_equal(false)
+        val (_, resolved_io_path, resolved_io_sha) = proj_idx["lib.nogc_sync_mut.io_runtime"]
+        expect(resolved_io_path).to_equal("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(resolved_io_sha).to_equal(io_sha)
+        # Disagreed Phase-1 alias hashes and multi-selected physical paths stay fail-closed.
+        expect(proj_idx.contains_key("mod.drift_a")).to_equal(false)
+        expect(proj_idx.contains_key("mod.sel_a")).to_equal(false)
+        expect(proj_idx.contains_key("mod.sel_b")).to_equal(false)
+        val proj_sig_a = _driver_frozen_projected_signature_v1(
+            p1_paths, p1_ids, p1_mods, ["src/lib/nogc_sync_mut/io_runtime.spl"], ["lib.nogc_sync_mut.io_runtime"])
+        val proj_sig_b = _driver_frozen_projected_signature_v1(
+            p1_paths, p1_ids, p1_mods, ["src/lib/nogc_sync_mut/io_runtime.spl"], ["std.io_runtime"])
+        expect(proj_sig_a == proj_sig_b).to_equal(false)
+
+        # Empty content digest (`sha256_text("")`) is rejected even when `p_count == 1`.
+        val empty_idx = _driver_build_projected_frozen_source_index_v1(
+            ["src/empty.spl"], [sha256_text("")], ["mod.empty"], ["src/empty.spl"], ["mod.empty"])
+        expect(empty_idx.contains_key("mod.empty")).to_equal(false)
+
+        # Per-CompileContext isolation + streaming-surfaces alias disambiguation:
+        #   - `ctx_a` retains duplicate alias rows in `sources` (streaming-surfaces shape)
+        #     and freezes schedule `["lib.nogc_sync_mut.io_runtime"]`.
+        #   - `ctx_b` has identical array lengths (`n == 2`, `sources.len() == 2`)
+        #     but freezes schedule `["std.io_runtime"]`.
+        #   Neither leaks cached hits into the other, and both capsule + driver lookups agree.
+        var ctx_a = CompileContext.create(CompileOptions.default())
+        ctx_a.source_paths_owner = ["src/lib/nogc_sync_mut/io_runtime.spl", "src/lib/nogc_sync_mut/io_runtime.spl"]
+        ctx_a.source_identities_owner = [io_sha, io_sha]
+        ctx_a.source_module_names_owner = ["std.io_runtime", "lib.nogc_sync_mut.io_runtime"]
+        ctx_a.sources = [
+            SourceFile(path: "src/lib/nogc_sync_mut/io_runtime.spl", authored_path: "src/lib/nogc_sync_mut/io_runtime.spl", content: "", module_name: "std.io_runtime"),
+            SourceFile(path: "src/lib/nogc_sync_mut/io_runtime.spl", authored_path: "src/lib/nogc_sync_mut/io_runtime.spl", content: "", module_name: "lib.nogc_sync_mut.io_runtime")
+        ]
+        expect(ctx_a.freeze_storage_registry_for_schedule(["lib.nogc_sync_mut.io_runtime"]) == "invalid").to_equal(false)
+        expect(driver_native_module_cache_source(ctx_a, "lib.nogc_sync_mut.io_runtime")).to_equal("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(driver_native_module_source_identity(ctx_a, "lib.nogc_sync_mut.io_runtime")).to_equal(io_sha)
+        expect(driver_native_module_cache_source(ctx_a, "std.io_runtime")).to_equal("")
+        expect(ctx_a.frozen_native_cache_source_v1("lib.nogc_sync_mut.io_runtime")).to_equal("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(ctx_a.frozen_native_cache_source_identity_v1("lib.nogc_sync_mut.io_runtime")).to_equal(io_sha)
+        expect(ctx_a.frozen_native_cache_source_v1("std.io_runtime")).to_equal("")
+
+        var ctx_b = CompileContext.create(CompileOptions.default())
+        ctx_b.source_paths_owner = ["src/lib/nogc_sync_mut/io_runtime.spl", "src/lib/nogc_sync_mut/io_runtime.spl"]
+        ctx_b.source_identities_owner = [io_sha, io_sha]
+        ctx_b.source_module_names_owner = ["std.io_runtime", "lib.nogc_sync_mut.io_runtime"]
+        ctx_b.sources = [
+            SourceFile(path: "src/lib/nogc_sync_mut/io_runtime.spl", authored_path: "src/lib/nogc_sync_mut/io_runtime.spl", content: "", module_name: "std.io_runtime"),
+            SourceFile(path: "src/lib/nogc_sync_mut/io_runtime.spl", authored_path: "src/lib/nogc_sync_mut/io_runtime.spl", content: "", module_name: "lib.nogc_sync_mut.io_runtime")
+        ]
+        expect(ctx_b.freeze_storage_registry_for_schedule(["std.io_runtime"]) == "invalid").to_equal(false)
+        expect(driver_native_module_cache_source(ctx_b, "lib.nogc_sync_mut.io_runtime")).to_equal("")
+        expect(driver_native_module_cache_source(ctx_b, "std.io_runtime")).to_equal("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(driver_native_module_source_identity(ctx_b, "std.io_runtime")).to_equal(io_sha)
+        # Re-querying ctx_a proves ctx_b never clobbered ctx_a's lookup table.
+        expect(driver_native_module_cache_source(ctx_a, "lib.nogc_sync_mut.io_runtime")).to_equal("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(driver_native_module_cache_source(ctx_a, "std.io_runtime")).to_equal("")
 
     it "stages Darwin link snapshots atomically without index prefix, preserves young sibling .d dirs, and prunes when min_age_s=0":
         val root = "build/spec_perf_darwin_snap"

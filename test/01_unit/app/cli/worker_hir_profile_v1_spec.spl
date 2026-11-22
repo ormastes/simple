@@ -184,7 +184,16 @@ describe "worker HIR profile admission":
             "SIMPLE_STAGE3_LIB_DYNLIB", "SIMPLE_NATIVE_LIBRARY_UNITS",
             "SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "SIMPLE_DYNLIB_EMBED_CACHE_RPATH",
             "SIMPLE_NATIVE_BUILD_MODE",
-            "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR", "CC", "INCLUDE", "LIB", "LIBPATH", "OS"]
+            "SIMPLE_STAGE3_HOST_TAG", "SIMPLE_STAGE3_NATIVE_HOST_MATCH",
+            "SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE", "SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES",
+            "SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS", "SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS",
+            "STAGE3_RESOLVED_TARGET", "STAGE3_RESOLVED_COMPILE_MODE", "STAGE3_POLICY_SOURCE_ARGS",
+            "STAGE3_POLICY_SDN",
+            "SIMPLE_BACKEND_COMPOSITION", "SIMPLE_NATIVE_CODEGEN_WORKER_KIB", "SIMPLE_NATIVE_FILE_WORKERS",
+            "SIMPLE_LINKER", "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256",
+            "LLVM_PREFIX", "LLVM_SYS_231_PREFIX", "SIMPLE_LLVM_PATH",
+            "HOMEBREW_PREFIX", "CPATH", "CFLAGS",
+            "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR", "CC", "CL", "INCLUDE", "LIB", "LIBPATH", "OS"]
         expect(worker_hir_stage3_capsule_environment_keys_v1()).to_equal(stage3)
         for name in stage3:
             expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
@@ -291,7 +300,9 @@ describe "worker HIR profile admission":
             "SIMPLE_LINKER_FLAVOR",
             "SIMPLE_SHARD_MEM_CLAMP", "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS",
             "SIMPLE_BUILD_MEMORY_RESERVE_BYTES",
-            "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "DEVELOPER_DIR"]
+            "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "DEVELOPER_DIR",
+            "SIMPLE_STAGE4_STREAMING_SURFACES", "SIMPLE_XRAY", "LDFLAGS",
+            "SIMPLE_LINKER", "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "CL"]
         expect(worker_hir_tool_build_environment_keys_v1()).to_equal(tools)
         for name in tools:
             expect(worker_hir_environment_key_admitted_v1(name)).to_equal(true)
@@ -324,7 +335,8 @@ describe "worker HIR profile admission":
         # Membership alone let a widened list pass review (#8610 post-merge review).
         val pinned = [
             "HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
-            "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_", "SIMPLE_BIN",
+            "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_",
+            "__CF_USER_TEXT_ENCODING", "SIMPLE_BIN",
             "SIMPLE_BINARY", "SIMPLE_LIB", "SIMPLE_EXECUTION_MODE",
             "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "SIMPLE_NATIVE_BUILD_WORKER",
             "SIMPLE_HIR_WORKER_PROFILE_V1", "SIMPLE_BUILD_PROGRESS_EVENTS",
@@ -361,6 +373,27 @@ describe "worker HIR profile admission":
         expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "native")).to_equal("")
         expect(worker_hir_environment_value_error_v1("SIMPLE_EXECUTION_MODE", "interpret") == "").to_equal(false)
         expect(worker_hir_environment_value_error_v1("HOME", "")).to_equal("")
+        expect(worker_hir_environment_key_admitted_v1("__CF_USER_TEXT_ENCODING")).to_equal(true)
+        expect(worker_hir_environment_value_error_v1("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0")).to_equal("")
+        for good in ["", "0", "1"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_STAGE4_STREAMING_SURFACES", good)).to_equal("")
+            expect(worker_hir_environment_value_error_v1("SIMPLE_XRAY", good)).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_STAGE4_STREAMING_SURFACES", "2") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_XRAY", "yes") == "").to_equal(false)
+        for good_cm in ["", "shard", "phase", "file"]:
+            expect(worker_hir_environment_value_error_v1("STAGE3_RESOLVED_COMPILE_MODE", good_cm)).to_equal("")
+        expect(worker_hir_environment_value_error_v1("STAGE3_RESOLVED_COMPILE_MODE", "bogus") == "").to_equal(false)
+        for good_lnk in ["", "internal", "mold", "lld", "ld.lld", "lld-link", "ld", "gnu", "bfd"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_LINKER", good_lnk)).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_LINKER", "custom-ld") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "0123456789abcdef".repeat(4))).to_equal("")
+        for bad_vec in ["none", "ABCDEF".repeat(10) + "abcd", "short", "0123456789abcdef".repeat(3) + "0123456789abcdeg"]:
+            expect(worker_hir_environment_value_error_v1("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", bad_vec) == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("CL", "")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("CL", "/TC")).to_equal("")
+        expect(worker_hir_environment_value_error_v1("CL", "@evil.rsp") == "").to_equal(false)
+        expect(worker_hir_environment_value_error_v1("LDFLAGS", "-Wl,-s\nBAD") == "").to_equal(false)
 
     it "names every unsupported key in one refusal":
         val captured = [("HOME", "/h"), ("SIMPLE_NATIVE_BUILD_ENTRY", "x.spl"), ("PATH", "/bin"),
