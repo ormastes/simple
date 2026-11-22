@@ -680,10 +680,10 @@ impl LlvmBackend {
             })
         };
 
-        // Build a static i8 data global for `bytes`, return its i64 pointer value.
+        // Build a static i8 data global for `bytes`, return its pointer.
         let mut str_const_counter: u32 = 0;
         let make_str_ptr =
-            |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            |bytes: &[u8], counter: &mut u32| -> Result<inkwell::values::PointerValue<'static>, CompileError> {
                 let cval = ctx.const_string(bytes, false);
                 let name = format!("{}.str.{}", init_name, *counter);
                 *counter += 1;
@@ -691,13 +691,26 @@ impl LlvmBackend {
                 g.set_initializer(&cval);
                 g.set_constant(true);
                 g.set_linkage(inkwell::module::Linkage::Private);
-                let p = builder
-                    .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))?;
                 builder
-                    .build_ptr_to_int(p, i64_type, "str_pi")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptrtoint", &e))
+                    .build_pointer_cast(g.as_pointer_value(), ptr_type, "str_p")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("str ptr cast", &e))
             };
+        // rt_string_new(bytes: ptr, len) — the pointer is never ptrtoint'd.
+        let call_string_new = |ptr: inkwell::values::PointerValue<'static>,
+                               len: inkwell::values::IntValue<'static>,
+                               tag: &str|
+         -> Result<inkwell::values::IntValue<'static>, CompileError> {
+            let f = self.declare_rt_string_new(m);
+            f.set_linkage(inkwell::module::Linkage::External);
+            let cs = builder
+                .build_call(f, &[ptr.into(), len.into()], tag)
+                .map_err(|e| crate::error::factory::llvm_build_failed(tag, &e))?;
+            Ok(cs
+                .try_as_basic_value()
+                .basic()
+                .map(|v| v.into_int_value())
+                .unwrap_or_else(|| i64_type.const_int(0, false)))
+        };
 
         // Resolve the global symbol for `global_name`, trying the direct key then
         // the `<prefix>__<name>` mangled form (struct keys are not pre-mangled).
@@ -813,12 +826,11 @@ impl LlvmBackend {
         let mut sorted_strings: Vec<_> = module_ir.global_init_strings.iter().collect();
         sorted_strings.sort_by_key(|(name, _)| (*name).clone());
         if !sorted_strings.is_empty() {
-            let string_new = get_rt("rt_string_new", 2);
             for (global_name, string_val) in sorted_strings {
                 let bytes = string_val.as_bytes();
                 let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                 let len = i64_type.const_int(bytes.len() as u64, false);
-                let rv = call_i64(string_new, &[ptr, len], "init_str")?;
+                let rv = call_string_new(ptr, len, "init_str")?;
                 store_to_global(global_name, rv)?;
             }
         }
@@ -844,13 +856,12 @@ impl LlvmBackend {
             let array_rv = if let Some(strings) = &init.string_values {
                 let array_new = get_rt("rt_array_new", 1);
                 let array_push = get_rt("rt_array_push", 2);
-                let string_new = get_rt("rt_string_new", 2);
                 let mut array = call_i64(array_new, &[capacity], "init_arr")?;
                 for string_val in strings {
                     let bytes = string_val.as_bytes();
                     let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                     let len = i64_type.const_int(bytes.len() as u64, false);
-                    let s = call_i64(string_new, &[ptr, len], "init_arr_str")?;
+                    let s = call_string_new(ptr, len, "init_arr_str")?;
                     let pushed = call_i64(array_push, &[array, s], "init_arr_push")?;
                     if fam_push {
                         array = pushed;
@@ -997,11 +1008,10 @@ impl LlvmBackend {
                     let field_val = match field {
                         crate::hir::HirGlobalFieldInit::Value(v) => i64_type.const_int(*v as u64, true),
                         crate::hir::HirGlobalFieldInit::Str(string_val) => {
-                            let string_new = get_rt("rt_string_new", 2);
                             let bytes = string_val.as_bytes();
                             let ptr = make_str_ptr(bytes, &mut str_const_counter)?;
                             let len = i64_type.const_int(bytes.len() as u64, false);
-                            call_i64(string_new, &[ptr, len], "init_struct_str")?
+                            call_string_new(ptr, len, "init_struct_str")?
                         }
                         crate::hir::HirGlobalFieldInit::EmptyArray => {
                             let array_new = get_rt("rt_array_new", 1);
@@ -1215,6 +1225,106 @@ impl LlvmBackend {
             let fn_type = word.fn_type(&[ptr.into(), word.into(), word.into(), ptr.into()], false);
             module.add_function("rt_interp_call", fn_type, None)
         })
+    }
+
+    /// Get or declare `rt_string_data(string: RuntimeValue) -> *const u8`.
+    /// The return is a real pointer: declaring it as a 64-bit word makes an
+    /// i686 caller read the garbage EDX half of the return.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_string_data(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_string_data").unwrap_or_else(|| {
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = ptr.fn_type(&[self.runtime_int_type().into()], false);
+            module.add_function("rt_string_data", fn_type, None)
+        })
+    }
+
+    /// Get or declare `rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue`.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_string_new(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_string_new").unwrap_or_else(|| {
+            let word = self.runtime_int_type();
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[ptr.into(), word.into()], false);
+            module.add_function("rt_string_new", fn_type, None)
+        })
+    }
+
+    /// Function type for calling a runtime symbol with exactly `args`: return
+    /// type from `ret_from`, params from the args' own types. Used when a text
+    /// argument expanded to a real `ptr` but the symbol was declared from the
+    /// all-word Cranelift spec, so the pointer is not widened to 8 bytes.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn call_type_from_args(
+        &self,
+        ret_from: inkwell::types::FunctionType<'static>,
+        args: &[inkwell::values::BasicMetadataValueEnum<'static>],
+    ) -> inkwell::types::FunctionType<'static> {
+        use inkwell::types::BasicType;
+        let params: Vec<inkwell::types::BasicMetadataTypeEnum<'static>> = args
+            .iter()
+            .map(|a| match inkwell::values::BasicValueEnum::try_from(*a) {
+                Ok(v) => v.get_type().into(),
+                Err(_) => self.runtime_int_type().into(),
+            })
+            .collect();
+        match ret_from.get_return_type() {
+            Some(ret) => ret.fn_type(&params, false),
+            None => self.context_ref().void_type().fn_type(&params, false),
+        }
+    }
+
+    /// True when some `args[i]` is a pointer but the declared param is not.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn ptr_arg_needs_typed_call(
+        declared: &[inkwell::types::BasicMetadataTypeEnum<'static>],
+        args: &[inkwell::values::BasicMetadataValueEnum<'static>],
+    ) -> bool {
+        args.iter()
+            .zip(declared)
+            .any(|(a, t)| a.is_pointer_value() && !t.is_pointer_type())
+    }
+
+    /// `inttoptr` any word arg sitting in a declared `ptr` param slot (a Simple
+    /// extern call to e.g. `rt_string_new` hands the pointer over as a word).
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn words_to_declared_ptrs(
+        &self,
+        declared: &[inkwell::types::BasicMetadataTypeEnum<'static>],
+        args: &mut [inkwell::values::BasicMetadataValueEnum<'static>],
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        for (a, t) in args.iter_mut().zip(declared) {
+            if t.is_pointer_type() && a.is_int_value() {
+                let p = builder
+                    .build_int_to_ptr(a.into_int_value(), t.into_pointer_type(), "word_to_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("word inttoptr", &e))?;
+                *a = p.into();
+            }
+        }
+        Ok(())
+    }
+
+    /// A runtime `ptr` return stored into a vreg becomes a word.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn ptr_result_to_word(
+        &self,
+        v: inkwell::values::BasicValueEnum<'static>,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        if !v.is_pointer_value() {
+            return Ok(v);
+        }
+        Ok(builder
+            .build_ptr_to_int(v.into_pointer_value(), self.runtime_int_type(), "ptr_ret_word")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr return ptrtoint", &e))?
+            .into())
     }
 
     /// Get or declare `rt_string_new_literal` with the runtime prototype
@@ -1890,6 +2000,16 @@ impl NativeBackend for LlvmBackend {
                     if spec.name == "rt_string_new_literal" {
                         // `bytes` is a real pointer, not a RuntimeValue word.
                         self.declare_rt_string_new_literal(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+                    if spec.name == "rt_string_data" {
+                        self.declare_rt_string_data(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+                    if spec.name == "rt_string_new" {
+                        self.declare_rt_string_new(m)
                             .set_linkage(inkwell::module::Linkage::External);
                         continue;
                     }

@@ -2303,10 +2303,7 @@ impl LlvmBackend {
                 let i64_type = self.runtime_int_type();
 
                 // Declare runtime functions — all i64 to match tagged-value ABI
-                let string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
-                    let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-                    module.add_function("rt_string_new", fn_type, None)
-                });
+                let string_new = self.declare_rt_string_new(module);
                 let string_concat = module.get_function("rt_string_concat").unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                     module.add_function("rt_string_concat", fn_type, None)
@@ -2319,7 +2316,7 @@ impl LlvmBackend {
                 // Start with empty string (ptr=0, len=0)
                 let zero = i64_type.const_int(0, false);
                 let empty_call = builder
-                    .build_call(string_new, &[zero.into(), zero.into()], "empty_str")
+                    .build_call(string_new, &[self.context_ref().ptr_type(inkwell::AddressSpace::default()).const_null().into(), zero.into()], "empty_str")
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
                 let mut result = empty_call
                     .try_as_basic_value()
@@ -2558,7 +2555,7 @@ impl LlvmBackend {
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -2631,9 +2628,13 @@ impl LlvmBackend {
                         let recv_val = self.get_vreg(receiver, vreg_map)?;
                         let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                         let rt_fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                        let rt_func = module
-                            .get_function(rt_name)
-                            .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None));
+                        let rt_func = if rt_name == "rt_string_data" {
+                            self.declare_rt_string_data(module)
+                        } else {
+                            module
+                                .get_function(rt_name)
+                                .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None))
+                        };
                         let rt_call = builder
                             .build_call(rt_func, &[recv_casted.into()], "builtin_method")
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin method redirect", &e))?;
@@ -2641,6 +2642,12 @@ impl LlvmBackend {
                             .try_as_basic_value()
                             .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if result.is_pointer_value() {
+                            result = builder
+                                .build_ptr_to_int(result.into_pointer_value(), i64_type, "builtin_ptr")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("ptr method ptrtoint", &e))?
+                                .into();
+                        }
                         if compare_zero {
                             let as_int = self
                                 .coerce_value_to_type(result, Some(i64_type.into()), builder)?
@@ -3642,6 +3649,7 @@ impl LlvmBackend {
                             .get(i)
                             .copied()
                             .and_then(|ty| ty.try_into().ok())
+                            .filter(|ty: &inkwell::types::BasicTypeEnum| !ty.is_pointer_type())
                             .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
@@ -3653,19 +3661,11 @@ impl LlvmBackend {
                         .map(|(indices, _)| indices)
                         .or_else(|| crate::codegen::instr::calls::text_arg_indices(runtime_name));
                     if let Some(boxed_indices) = boxed_indices {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                            module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None)
-                        });
+                        let rt_string_data = self.declare_rt_string_data(module);
                         let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
                             module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
                         });
-                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
-                            module.add_function(
-                                "rt_string_new",
-                                i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
-                                None,
-                            )
-                        });
+                        let rt_string_new = self.declare_rt_string_new(module);
                         for (i, val) in raw_arg_vals.iter().enumerate() {
                             if boxed_indices.contains(&i) {
                                 let ptr = builder
@@ -3692,10 +3692,7 @@ impl LlvmBackend {
                             }
                         }
                     } else if let Some(text_indices) = text_indices {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                            module.add_function("rt_string_data", fn_type, None)
-                        });
+                        let rt_string_data = self.declare_rt_string_data(module);
                         let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
                             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_string_len", fn_type, None)
@@ -3728,19 +3725,22 @@ impl LlvmBackend {
                         );
                     }
                     let declared_params = func.get_type().get_param_types().len();
-                    let call_site = if declared_params != arg_vals.len() {
+                    let typed = Self::ptr_arg_needs_typed_call(&func.get_type().get_param_types(), &arg_vals);
+                    let call_site = if declared_params != arg_vals.len() || typed {
                         let fn_ptr = func.as_global_value().as_pointer_value();
+                        let call_ty = if typed { self.call_type_from_args(func.get_type(), &arg_vals) } else { fallback_fn_type };
                         builder
-                            .build_indirect_call(fallback_fn_type, fn_ptr, &arg_vals, "mcall")
+                            .build_indirect_call(call_ty, fn_ptr, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     } else {
+                        self.words_to_declared_ptrs(&func.get_type().get_param_types(), &mut arg_vals, builder)?;
                         builder
                             .build_call(func, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -3897,7 +3897,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -5316,9 +5316,10 @@ mod tests {
                 .and_then(|(_, args)| args.rsplit_once(')'))
                 .map(|(args, _)| args)
                 .expect("malformed rt_process_run call");
-            assert_eq!(call_args.matches("i64 ").count(), 3, "{call}\n{ir}");
+            assert_eq!(call_args.matches("ptr ").count(), 1, "{call}\n{ir}");
+            assert_eq!(call_args.matches("i64 ").count(), 2, "{call}\n{ir}");
         }
-        assert!(ir.contains("call i64 @rt_string_data("), "{ir}");
+        assert!(ir.contains("call ptr @rt_string_data("), "{ir}");
         assert!(ir.contains("call i64 @rt_string_len("), "{ir}");
         assert!(!ir.contains("process_args_raw_ptr"), "{ir}");
         backend.verify().unwrap();
