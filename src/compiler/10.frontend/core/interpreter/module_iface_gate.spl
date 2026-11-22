@@ -1,0 +1,38 @@
+# Interface-digest admission gate for interpreter module loads.
+#
+# A caller that pins a module's interface (SmfManifestEntry.iface_digest, the
+# value interface_digest_of produced at build time) registers it here. The
+# loaders then refuse to parse/expose the module when its live source no longer
+# hashes to that digest. Unpinned modules are unaffected; a pinned module whose
+# source is unreadable or mismatching is refused (fail closed).
+
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+
+var _expected_iface_digests: {text: text} = {}
+
+# reason: path and digest are opaque tokens keyed for exact-match admission
+@allow(primitive_api)
+fn import_expected_iface_set(resolved_path: text, digest: text):
+    _expected_iface_digests[resolved_path] = digest
+
+fn import_expected_iface_clear():
+    _expected_iface_digests = {}
+
+# reason: verdict is a diagnostic text; "" means admit
+@allow(primitive_api)
+fn module_iface_gate_for(path: text, source: text) -> text:
+    if not _expected_iface_digests.has(path):
+        return ""
+    module_iface_gate(path, source, _expected_iface_digests[path])
+
+# reason: verdict is a diagnostic text; "" means admit
+@allow(primitive_api)
+fn module_iface_gate(path: text, source: text, expected_digest: text) -> text:
+    if expected_digest == "":
+        return ""
+    if source == "":
+        return "SMF-E-IFACE-MISSING: {path}: source unreadable, cannot verify interface digest"
+    val actual = interface_digest_of_source(source)
+    if actual != expected_digest:
+        return "SMF-E-IFACE-MISMATCH: {path}: expected interface digest {expected_digest}, source has {actual}"
+    ""

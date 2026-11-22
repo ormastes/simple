@@ -21,7 +21,7 @@ use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes, smf_u64_to_bytes, text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 use compiler.driver.smf_elf_parser.{extract_code_from_object, extract_elf_relocations, elf_reloc_type_to_smf, ElfRelocEntry, ElfSymEntry}
 use compiler.backend.linker.smf_writer.{smf_build_aspect_pack_image}
-use compiler.backend.linker.smf_meta.{smf_meta_compile_options_record, SMF_META_SECTION_NAME}
+use compiler.backend.linker.smf_meta.{smf_meta_compile_options_record, smf_meta_unit_identity_record, SMF_META_SECTION_NAME}
 
 # Target platform information
 struct Target:
@@ -46,6 +46,7 @@ struct SmfBuildOptions:
     driver_manifest_bytes: [u8] # Concatenated DRVS records from @driver/@native_lib
     launch_metadata_bytes: [u8] # SDN launch metadata for startup policy
     compile_options_bytes: [u8] # 16-byte compile-options hash -> .simple_meta record kind 2 (empty = absent)
+    unit_identity_bytes: [u8]   # canonical unit identity text -> .simple_meta record kind 3 (empty = absent)
     source_hash: i64
 
 impl SmfBuildOptions:
@@ -56,11 +57,12 @@ impl SmfBuildOptions:
             driver_manifest_bytes: [],
             launch_metadata_bytes: [],
             compile_options_bytes: [],
+            unit_identity_bytes: [],
             source_hash: 0
         )
 
     fn has_any_sections() -> bool:
-        self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0 or self.compile_options_bytes.len() > 0
+        self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0 or self.compile_options_bytes.len() > 0 or self.unit_identity_bytes.len() > 0
 
 # ============================================================================
 # Dependency Tracking for SMF Staleness
@@ -162,6 +164,16 @@ fn char_from_byte_smf(b: u8) -> text:
         "?"
 
 
+# .simple_meta TLV stream for the options: compile-options hash (kind 2) then
+# unit identity (kind 3); empty when neither is present.
+fn smf_build_meta_bytes(options: SmfBuildOptions) -> [u8]:
+    var meta: [u8] = []
+    if options.compile_options_bytes.len() > 0:
+        meta = bytes_concat_copy_v1(meta, smf_meta_compile_options_record(options.compile_options_bytes))
+    if options.unit_identity_bytes.len() > 0:
+        meta = bytes_concat_copy_v1(meta, smf_meta_unit_identity_record(options.unit_identity_bytes))
+    meta
+
 # Generate SMF from object code with build options
 fn generate_smf_with_options(object_code: [u8], options: SmfBuildOptions) -> [u8]:
     val code_bytes = extract_code_from_object(object_code)
@@ -204,10 +216,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val has_launch_metadata = options.launch_metadata_bytes.len() > 0
     # .simple_meta TLV section (smf_v1_2.sdn): the compile-options hash lives
     # here since v1.3; the 96-byte header has no reserved area for it.
-    val meta_bytes = if options.compile_options_bytes.len() > 0:
-        smf_meta_compile_options_record(options.compile_options_bytes)
-    else:
-        []
+    val meta_bytes = smf_build_meta_bytes(options)
     val has_meta = meta_bytes.len() > 0
 
     # Calculate section count
@@ -527,10 +536,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val has_deps = deps_bytes.len() > 0
     val has_driver_manifest = options.driver_manifest_bytes.len() > 0
     val has_launch_metadata = options.launch_metadata_bytes.len() > 0
-    val meta_bytes = if options.compile_options_bytes.len() > 0:
-        smf_meta_compile_options_record(options.compile_options_bytes)
-    else:
-        []
+    val meta_bytes = smf_build_meta_bytes(options)
     val has_meta = meta_bytes.len() > 0
 
     # Build SMF with Code + Reloc sections
