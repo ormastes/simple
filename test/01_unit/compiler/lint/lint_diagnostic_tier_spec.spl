@@ -10,6 +10,7 @@ Run this spec with the test runner and read the SPEC FILE VERDICT line.
 
 use std.spec.*
 use compiler.tools.lint.main.{Linter, lint_cli_source, LintCliPolicy}
+use compiler.tools.lint._LintMain.config_and_model.{PerfLintProfile}
 use app.io.cli_lint_commands.{lint_option_error, run_lint_command}
 use std.nogc_sync_mut.io.file_ops.{file_write, dir_remove_all, secure_temp_dir}
 use compiler.tools.lint._LintMain.rule_cost_tier.{
@@ -90,3 +91,24 @@ describe "simple lint --diagnostic tier":
         expect(lint_rule_invocation_count_v1("collection_performance")).to_be_greater_than(0)
 
         val _rm = dir_remove_all(tmp_dir)
+
+    it "both parsers lowercase the tier the same way":
+        """Checks LintCliPolicy.from_args and lint_option_error agree on mixed-case tiers."""
+        expect(LintCliPolicy.from_args(["--diagnostic=MEDIUM"]).diagnostic).to_equal("medium")
+        expect(LintCliPolicy.from_args(["--diagnostic", "High"]).diagnostic).to_equal("high")
+        expect(lint_option_error(["a.spl", "--diagnostic=MEDIUM"])).to_equal("")
+        expect(lint_option_error(["a.spl", "--diagnostic", "High"])).to_equal("")
+
+    it "rejects --profile combined with --diagnostic":
+        """Checks the combination is a named error instead of the profile being silently overridden."""
+        expect(LintCliPolicy.from_args(["--profile=perf", "--diagnostic=high"]).error).to_contain("cannot be combined")
+        expect(LintCliPolicy.from_args(["--diagnostic", "medium", "--profile", "strict"]).error).to_contain("cannot be combined")
+        expect(lint_option_error(["a.spl", "--profile=perf", "--diagnostic=medium"])).to_contain("cannot be combined")
+        expect(lint_option_error(["a.spl", "--diagnostic", "high", "--profile", "strict"])).to_contain("cannot be combined")
+
+    it "--diagnostic=high clears an earlier perf profile":
+        """Checks the high tier does not leave a previously set perf profile active."""
+        val linter = Linter.new()
+        linter.config.perf_profile = Some(PerfLintProfile.Perf)
+        lint_apply_diagnostic_profile(linter.config, "high")
+        expect(linter.config.perf_profile.is_some()).to_equal(false)
