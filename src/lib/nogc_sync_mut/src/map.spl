@@ -1,11 +1,11 @@
-# Map - Hash map / dictionary type
-# Basic key-value store with O(1) average lookup
+# Map - Compact flat SoA open-addressing hash map
+# Zero inner allocations when empty (`capacity == 0`), zero `MapEntry` heap structs per entry.
 
 use std.math
 use std.hash.Hash
 
 # ============================================================================
-# Map Entry
+# Map Entry (preserved for facade export compatibility)
 # ============================================================================
 
 struct MapEntry<K, V>:
@@ -13,448 +13,456 @@ struct MapEntry<K, V>:
     value: V
     hash: i64
 
+val MAP_SLOT_EMPTY: i64 = -1
+val MAP_SLOT_TOMBSTONE: i64 = -2
+val MAP_SLOT_MASK31: i64 = 0x7FFFFFFF
+
+fn map_pack_slot(hash: i64, dense_idx: i32) -> i64:
+    val htag = hash & MAP_SLOT_MASK31
+    (htag << 31) | ((dense_idx as i64) & MAP_SLOT_MASK31)
+
+fn map_slot_for_hash(hash: i64, cap: i32) -> i32:
+    val cap64 = cap as i64
+    if (cap64 & (cap64 - 1)) == 0:
+        return (hash & (cap64 - 1)) as i32
+    var bi = hash % cap64
+    if bi < 0:
+        bi = 0 - bi
+    bi as i32
+
 # ============================================================================
-# Map Type
+# Map Type — Open-Addressing Index Table + Dense Parallel SoA Arrays
 # ============================================================================
 
 struct Map<K, V> where K: Hash + Eq:
-    buckets: [List<MapEntry<K, V>>]
+    slots: [i64]
+    entry_hashes: [i64]
+    entry_keys: [K]
+    entry_values: [V]
     size: i32
+    tombstones: i32
     capacity: i32
 
     static fn new() -> Map<K, V>:
-        """Create a new empty map.
-
-        Returns:
-            Empty map with default capacity
-
-        Example:
-            val map = Map.new()
-        """
-        val capacity = 16
-        var buckets = []
-        for _ in 0..capacity:
-            buckets.append([])
-
+        """Create a new empty map with lazy zero-allocation backing (`capacity == 0`)."""
         Map(
-            buckets: buckets,
+            slots: [],
+            entry_hashes: [],
+            entry_keys: [],
+            entry_values: [],
             size: 0,
-            capacity: capacity
+            tombstones: 0,
+            capacity: 0
         )
 
     static fn with_capacity(capacity: i32) -> Map<K, V>:
-        """Create a new map with specified capacity.
-
-        Args:
-            capacity: Initial capacity (number of buckets)
-
-        Returns:
-            Empty map with specified capacity
-
-        Example:
-            val map = Map.with_capacity(32)
-        """
-        var buckets = []
-        for _ in 0..capacity:
-            buckets.append([])
-
+        """Create a new map reserving `capacity` slots lazily on first insert."""
+        val cap = if capacity > 0: capacity else: 0
         Map(
-            buckets: buckets,
+            slots: [],
+            entry_hashes: [],
+            entry_keys: [],
+            entry_values: [],
             size: 0,
-            capacity: capacity
+            tombstones: 0,
+            capacity: cap
         )
 
     fn len(self) -> i32:
-        """Get number of entries in map.
-
-        Returns:
-            Number of key-value pairs
-
-        Example:
-            print map.len()
-        """
+        """Get number of entries in map."""
         self.size
 
     fn is_empty(self) -> bool:
-        """Check if map is empty.
-
-        Returns:
-            true if map has no entries
-
-        Example:
-            if map.is_empty():
-                print "Empty map"
-        """
+        """Check if map is empty."""
         self.size == 0
 
     fn hash_key(key: K) -> i64:
-        """Compute hash for key using Hash trait.
-
-        Args:
-            key: Key to hash
-
-        Returns:
-            Hash value (64-bit integer)
-
-        The hash function used depends on the key type:
-        - text: FNV-1a hash
-        - i32/i64: Fibonacci/MurmurHash3
-        - Compound types: Combined element hashes
-        """
+        """Compute hash for key using Hash trait."""
         key.hash()
 
     fn bucket_for(self, hash: i64) -> i32:
-        """Compute bucket index from hash, handling negative hashes."""
-        var bi = hash % (self.capacity as i64)
-        if bi < 0:
-            bi = 0 - bi
-        bi as i32
+        """Compute initial probe slot index from hash."""
+        if self.capacity <= 0:
+            return 0
+        map_slot_for_hash(hash, self.capacity)
+
+    me _ensure_for_insert(self):
+        if self.slots.len() == 0:
+            val init_cap = if self.capacity > 0: self.capacity else: 16
+            var new_slots: [i64] = []
+            var i: i32 = 0
+            while i < init_cap:
+                new_slots.push(MAP_SLOT_EMPTY)
+                i = i + 1
+            self.slots = new_slots
+            self.capacity = init_cap
+            self.tombstones = 0
+            return
+
+        val used64 = (self.size as i64) + (self.tombstones as i64)
+        val cap64 = self.capacity as i64
+        if used64 * 4 > cap64 * 3 or used64 >= cap64:
+            if (self.size as i64) * 2 <= cap64 and self.capacity >= 16:
+                self._rebuild_slots(self.capacity)
+            else:
+                if cap64 * 2 > MAP_SLOT_MASK31:
+                    panic("Map exceeded maximum i32 slot capacity")
+                val next_cap = if self.capacity < 8: 16 else: ((cap64 * 2) as i32)
+                self._rebuild_slots(next_cap)
+
+    me _rebuild_slots(self, new_capacity: i32):
+        var new_slots: [i64] = []
+        var i: i32 = 0
+        while i < new_capacity:
+            new_slots.push(MAP_SLOT_EMPTY)
+            i = i + 1
+
+        var d: i32 = 0
+        while d < self.size:
+            val h = self.entry_hashes[d]
+            var slot = map_slot_for_hash(h, new_capacity)
+            while new_slots[slot] != MAP_SLOT_EMPTY:
+                slot = slot + 1
+                if slot >= new_capacity:
+                    slot = 0
+            new_slots[slot] = map_pack_slot(h, d)
+            d = d + 1
+
+        self.slots = new_slots
+        self.capacity = new_capacity
+        self.tombstones = 0
 
     me insert(self, key: K, value: V):
-        """Insert or update a key-value pair.
+        """Insert or update a key-value pair."""
+        self._ensure_for_insert()
 
-        Args:
-            key: Key to insert
-            value: Value to associate with key
-
-        Example:
-            map.insert("name", "Alice")
-        """
         val hash = self.hash_key(key)
-        val bucket_idx = self.bucket_for(hash)
+        val htag = hash & MAP_SLOT_MASK31
+        var slot = map_slot_for_hash(hash, self.capacity)
+        var first_tomb: i32 = -1
 
-        # Get the bucket - make a mutable copy
-        var bucket_ = self.buckets[bucket_idx]
-
-        # Check if key already exists in bucket (compare hash first to skip expensive key ==)
-        for i in 0..bucket_.len():
-            if bucket_[i].hash == hash and bucket_[i].key == key:
-                # Update existing entry
-                bucket_[i] = MapEntry(key: key, value: value, hash: hash)
-                # Write back the modified bucket
-                self.buckets[bucket_idx] = bucket_
+        while true:
+            val s = self.slots[slot]
+            if s == MAP_SLOT_EMPTY:
+                val target = if first_tomb >= 0: first_tomb else: slot
+                if first_tomb >= 0:
+                    self.tombstones = self.tombstones - 1
+                val d = self.size
+                self.entry_hashes.push(hash)
+                self.entry_keys.push(key)
+                self.entry_values.push(value)
+                self.slots[target] = map_pack_slot(hash, d)
+                self.size = self.size + 1
                 return
+            elif s == MAP_SLOT_TOMBSTONE:
+                if first_tomb < 0:
+                    first_tomb = slot
+            else:
+                if ((s >> 31) & MAP_SLOT_MASK31) == htag:
+                    val d = (s & MAP_SLOT_MASK31) as i32
+                    if self.entry_hashes[d] == hash and self.entry_keys[d] == key:
+                        self.entry_keys[d] = key
+                        self.entry_values[d] = value
+                        return
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
 
-        # Add new entry
-        bucket_.append(MapEntry(key: key, value: value, hash: hash))
-        # Write back the modified bucket
-        self.buckets[bucket_idx] = bucket_
-        self.size = self.size + 1
-
-        # Check if we need to rehash
-        if self.size > self.capacity * 3 / 4:
-            self.rehash()
+    me set(self, key: K, value: V):
+        """Alias for insert."""
+        self.insert(key, value)
 
     fn get(self, key: K) -> Option<V>:
-        """Get value for key.
+        """Get value for key."""
+        if self.size == 0 or self.slots.len() == 0:
+            return None
 
-        Args:
-            key: Key to look up
-
-        Returns:
-            Some(value) if key exists, nil otherwise
-
-        Example:
-            match map.get("name"):
-                Some(v): print v
-                nil: print "Not found"
-        """
         val hash = self.hash_key(key)
-        val bucket_idx = self.bucket_for(hash)
+        val htag = hash & MAP_SLOT_MASK31
+        var slot = map_slot_for_hash(hash, self.capacity)
+        var step: i32 = 0
 
-        val bucket = self.buckets[bucket_idx]
-        for entry in bucket:
-            if entry.hash == hash and entry.key == key:
-                return Some(entry.value)
+        while step < self.capacity:
+            val s = self.slots[slot]
+            if s == MAP_SLOT_EMPTY:
+                return None
+            if s >= 0 and ((s >> 31) & MAP_SLOT_MASK31) == htag:
+                val d = (s & MAP_SLOT_MASK31) as i32
+                if self.entry_hashes[d] == hash and self.entry_keys[d] == key:
+                    return Some(self.entry_values[d])
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
 
-        nil
+        None
+
+    fn get_observed(self, key: K) -> (Option<V>, bool, i64, i64):
+        """Look up once and return (value, present, probes, collisions)."""
+        if self.slots.len() == 0 or self.capacity <= 0:
+            return (None, false, 1, 0)
+
+        val hash = self.hash_key(key)
+        val htag = hash & MAP_SLOT_MASK31
+        var slot = map_slot_for_hash(hash, self.capacity)
+        var probes: i64 = 0
+        var collisions: i64 = 0
+        var step: i32 = 0
+
+        while step < self.capacity:
+            val s = self.slots[slot]
+            probes = probes + 1
+            if s == MAP_SLOT_EMPTY:
+                return (None, false, probes, collisions)
+            if s >= 0:
+                val d = (s & MAP_SLOT_MASK31) as i32
+                if ((s >> 31) & MAP_SLOT_MASK31) == htag and self.entry_hashes[d] == hash and self.entry_keys[d] == key:
+                    return (Some(self.entry_values[d]), true, probes, collisions)
+                collisions = collisions + 1
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
+
+        (None, false, probes + 1, collisions)
 
     fn has(self, key: K) -> bool:
-        """Check if map contains key.
+        """Check if map contains key."""
+        if self.size == 0 or self.slots.len() == 0:
+            return false
 
-        Args:
-            key: Key to check
-
-        Returns:
-            true if key exists
-
-        Example:
-            if map.has("name"):
-                print "Found!"
-        """
         val hash = self.hash_key(key)
-        val bucket_idx = self.bucket_for(hash)
+        val htag = hash & MAP_SLOT_MASK31
+        var slot = map_slot_for_hash(hash, self.capacity)
+        var step: i32 = 0
 
-        val bucket = self.buckets[bucket_idx]
-        for entry in bucket:
-            if entry.hash == hash and entry.key == key:
-                return true
+        while step < self.capacity:
+            val s = self.slots[slot]
+            if s == MAP_SLOT_EMPTY:
+                return false
+            if s >= 0 and ((s >> 31) & MAP_SLOT_MASK31) == htag:
+                val d = (s & MAP_SLOT_MASK31) as i32
+                if self.entry_hashes[d] == hash and self.entry_keys[d] == key:
+                    return true
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
 
         false
 
+    fn contains_key(self, key: K) -> bool:
+        """Alias for has."""
+        self.has(key)
+
     me remove(self, key: K) -> Option<V>:
-        """Remove key-value pair.
+        """Remove key-value pair."""
+        if self.size == 0 or self.slots.len() == 0:
+            return None
 
-        Args:
-            key: Key to remove
-
-        Returns:
-            Some(value) if key existed, nil otherwise
-
-        Example:
-            match map.remove("name"):
-                Some(v): print "Removed: {v}"
-                nil: print "Not found"
-        """
         val hash = self.hash_key(key)
-        val bucket_idx = self.bucket_for(hash)
+        val htag = hash & MAP_SLOT_MASK31
+        var slot = map_slot_for_hash(hash, self.capacity)
+        var step: i32 = 0
 
-        var bucket = self.buckets[bucket_idx]
-        for i in 0..bucket.len():
-            if bucket[i].hash == hash and bucket[i].key == key:
-                val value = bucket[i].value
-                val last_idx = bucket.len() - 1
-                if i != last_idx:
-                    bucket[i] = bucket[last_idx]
-                bucket.pop()
-                self.buckets[bucket_idx] = bucket
-                self.size = self.size - 1
-                return Some(value)
+        while step < self.capacity:
+            val s = self.slots[slot]
+            if s == MAP_SLOT_EMPTY:
+                return None
+            if s >= 0 and ((s >> 31) & MAP_SLOT_MASK31) == htag:
+                val d = (s & MAP_SLOT_MASK31) as i32
+                if self.entry_hashes[d] == hash and self.entry_keys[d] == key:
+                    val removed_val = self.entry_values[d]
+                    self.slots[slot] = MAP_SLOT_TOMBSTONE
+                    self.tombstones = self.tombstones + 1
 
-        nil
+                    val last_d = self.size - 1
+                    if d != last_d:
+                        val moved_hash = self.entry_hashes[last_d]
+                        self.entry_hashes[d] = moved_hash
+                        self.entry_keys[d] = self.entry_keys[last_d]
+                        self.entry_values[d] = self.entry_values[last_d]
+
+                        var m_slot = map_slot_for_hash(moved_hash, self.capacity)
+                        var m_step: i32 = 0
+                        while m_step < self.capacity:
+                            val ms = self.slots[m_slot]
+                            if ms >= 0 and ((ms & MAP_SLOT_MASK31) as i32) == last_d:
+                                self.slots[m_slot] = map_pack_slot(moved_hash, d)
+                                break
+                            m_slot = m_slot + 1
+                            if m_slot >= self.capacity:
+                                m_slot = 0
+                            m_step = m_step + 1
+
+                    self.entry_hashes.pop()
+                    self.entry_keys.pop()
+                    self.entry_values.pop()
+                    self.size = self.size - 1
+                    return Some(removed_val)
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
+
+        None
 
     me clear(self):
-        """Remove all entries from map.
-
-        Example:
-            map.clear()
-        """
-        for i in 0..self.capacity:
-            self.buckets[i] = []
+        """Remove all entries from map."""
+        val slot_len = self.slots.len() as i32
+        var i: i32 = 0
+        while i < slot_len:
+            self.slots[i] = MAP_SLOT_EMPTY
+            i = i + 1
+        self.entry_hashes = []
+        self.entry_keys = []
+        self.entry_values = []
         self.size = 0
+        self.tombstones = 0
 
     fn keys(self) -> [K]:
-        """Get all keys in map.
-
-        Returns:
-            List of all keys
-
-        Example:
-            for key in map.keys():
-                print key
-        """
+        """Get all keys in map."""
         var result: [K] = []
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.append(entry.key)
+        var i: i32 = 0
+        while i < self.size:
+            result.append(self.entry_keys[i])
+            i = i + 1
         result
 
     fn values(self) -> [V]:
-        """Get all values in map.
-
-        Returns:
-            List of all values
-
-        Example:
-            for value in map.values():
-                print value
-        """
+        """Get all values in map."""
         var result: [V] = []
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.append(entry.value)
+        var i: i32 = 0
+        while i < self.size:
+            result.append(self.entry_values[i])
+            i = i + 1
         result
 
     fn entries(self) -> [(K, V)]:
-        """Get all key-value pairs.
-
-        Returns:
-            List of (key, value) tuples
-
-        Example:
-            for (key, value) in map.entries():
-                print "{key}: {value}"
-        """
+        """Get all key-value pairs."""
         var result: [(K, V)] = []
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.append((entry.key, entry.value))
+        var i: i32 = 0
+        while i < self.size:
+            result.append((self.entry_keys[i], self.entry_values[i]))
+            i = i + 1
         result
 
     me rehash(self):
-        """Resize map to larger capacity.
-
-        Doubles capacity and rehashes all entries.
-        """
-        val new_capacity = self.capacity * 2
-        var new_buckets = []
-        for _ in 0..new_capacity:
-            new_buckets.append([])
-
-        # Rehash all entries
-        for bucket in self.buckets:
-            for entry in bucket:
-                var bi = entry.hash % (new_capacity as i64)
-                if bi < 0:
-                    bi = 0 - bi
-                val bucket_idx = bi as i32
-                var bucket_ = new_buckets[bucket_idx]
-                bucket_.append(entry)
-                new_buckets[bucket_idx] = bucket_
-
-        self.buckets = new_buckets
-        self.capacity = new_capacity
+        """Resize map to larger capacity."""
+        val next_cap = if self.capacity <= 0: 16 else: self.capacity * 2
+        self._rebuild_slots(next_cap)
 
     fn get_or_default(self, key: K, default_value: V) -> V:
-        """Get value or return default if key doesn't exist.
-
-        Args:
-            key: Key to look up
-            default_value: Default value if key not found
-
-        Returns:
-            Value if found, otherwise default
-
-        Example:
-            val count = map.get_or_default("count", 0)
-        """
+        """Get value or return default if key doesn't exist."""
         match self.get(key):
-            Some(v): v
-            nil: default_value
+            case Some(v): v
+            case None: default_value
 
     me insert_if_absent(self, key: K, value: V) -> bool:
-        """Insert only if key doesn't exist.
+        """Insert only if key doesn't exist."""
+        self._ensure_for_insert()
 
-        Args:
-            key: Key to insert
-            value: Value to insert
-
-        Returns:
-            true if inserted, false if key already existed
-
-        Example:
-            if map.insert_if_absent("key", "value"):
-                print "Inserted"
-        """
         val hash = self.hash_key(key)
-        val bucket_idx = self.bucket_for(hash)
+        val htag = hash & MAP_SLOT_MASK31
+        var slot = map_slot_for_hash(hash, self.capacity)
+        var first_tomb: i32 = -1
 
-        var bucket_ = self.buckets[bucket_idx]
-        for entry in bucket_:
-            if entry.hash == hash and entry.key == key:
-                return false
-
-        bucket_.append(MapEntry(key: key, value: value, hash: hash))
-        self.buckets[bucket_idx] = bucket_
-        self.size = self.size + 1
-
-        if self.size > self.capacity * 3 / 4:
-            self.rehash()
-        true
+        while true:
+            val s = self.slots[slot]
+            if s == MAP_SLOT_EMPTY:
+                val target = if first_tomb >= 0: first_tomb else: slot
+                if first_tomb >= 0:
+                    self.tombstones = self.tombstones - 1
+                val d = self.size
+                self.entry_hashes.push(hash)
+                self.entry_keys.push(key)
+                self.entry_values.push(value)
+                self.slots[target] = map_pack_slot(hash, d)
+                self.size = self.size + 1
+                return true
+            elif s == MAP_SLOT_TOMBSTONE:
+                if first_tomb < 0:
+                    first_tomb = slot
+            else:
+                if ((s >> 31) & MAP_SLOT_MASK31) == htag:
+                    val d = (s & MAP_SLOT_MASK31) as i32
+                    if self.entry_hashes[d] == hash and self.entry_keys[d] == key:
+                        return false
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
 
     me update(self, key: K, updater: fn(V) -> V):
-        """Update value if key exists.
-
-        Args:
-            key: Key to update
-            updater: Function to transform value
-
-        Example:
-            map.update("count", _1 + 1)
-        """
+        """Update value if key exists."""
         match self.get(key):
-            Some(v):
+            case Some(v):
                 val new_value = updater(v)
                 self.insert(key, new_value)
-            nil:
+            case None:
                 pass
 
     fn filter(self, predicate: fn(K, V) -> bool) -> Map<K, V>:
-        """Create new map with entries matching predicate.
-
-        Args:
-            predicate: Function to test each entry
-
-        Returns:
-            New map with filtered entries
-
-        Example:
-            val filtered = map.filter(\k, v: v > 10)
-        """
-        val result: Map<K, V> = Map.with_capacity(self.size)
-        for bucket in self.buckets:
-            for entry in bucket:
-                if predicate(entry.key, entry.value):
-                    result.insert(entry.key, entry.value)
+        """Create new map with entries matching predicate."""
+        var result: Map<K, V> = Map.with_capacity(self.size)
+        var i: i32 = 0
+        while i < self.size:
+            val k = self.entry_keys[i]
+            val v = self.entry_values[i]
+            if predicate(k, v):
+                result.insert(k, v)
+            i = i + 1
         result
 
     # @workaround bug=rti007_any_return_rows_2026-11-01 reason=frozen-stage2-RTI-lowers-this-declared-return-to-Any-(E-RTI-007); see doc/08_tracking/bug/rti007_any_return_rows_2026-11-01.md
     fn map_values<U>(self, mapper: fn(V) -> U) -> Map<K, U>:
-        """Transform all values.
-
-        Args:
-            mapper: Function to transform values
-
-        Returns:
-            New map with transformed values
-
-        Example:
-            val doubled = map.map_values(_1 * 2)
-        """
-        val result: Map<K, U> = Map.with_capacity(self.size)
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.insert(entry.key, mapper(entry.value))
+        """Transform all values."""
+        var result: Map<K, U> = Map.with_capacity(self.size)
+        var i: i32 = 0
+        while i < self.size:
+            result.insert(self.entry_keys[i], mapper(self.entry_values[i]))
+            i = i + 1
         result
 
     fn for_each(self, action: fn(K, V)):
-        """Execute action for each entry.
-
-        Args:
-            action: Function to execute
-
-        Example:
-            map.for_each(\k, v: print "{k}: {v}")
-        """
-        for bucket in self.buckets:
-            for entry in bucket:
-                action(entry.key, entry.value)
+        """Execute action for each entry."""
+        var i: i32 = 0
+        while i < self.size:
+            action(self.entry_keys[i], self.entry_values[i])
+            i = i + 1
 
     me merge(self, other: Map<K, V>):
-        """Merge another map into this one.
-
-        Overwrites existing keys with values from other map.
-
-        Args:
-            other: Map to merge
-
-        Example:
-            map1.merge(map2)
-        """
-        for bucket in other.buckets:
-            for entry in bucket:
-                self.insert(entry.key, entry.value)
+        """Merge another map into this one."""
+        var i: i32 = 0
+        while i < other.size:
+            self.insert(other.entry_keys[i], other.entry_values[i])
+            i = i + 1
 
     fn clone(self) -> Map<K, V>:
-        """Create a shallow copy of the map.
+        """Create a shallow copy of the map."""
+        var new_slots: [i64] = []
+        val slen = self.slots.len()
+        var si = 0
+        while si < slen:
+            new_slots.push(self.slots[si])
+            si = si + 1
 
-        Returns:
-            New map with same entries
-
-        Example:
-            val copy = map.clone()
-        """
-        # Direct bucket copy to avoid nested mutation bug with me methods
-        var new_buckets_ = []
-        for bucket in self.buckets:
-            var new_bucket_ = []
-            for entry in bucket:
-                new_bucket_.append(MapEntry(key: entry.key, value: entry.value, hash: entry.hash))
-            new_buckets_.append(new_bucket_)
+        var new_hashes: [i64] = []
+        var new_keys: [K] = []
+        var new_values: [V] = []
+        var i: i32 = 0
+        while i < self.size:
+            new_hashes.push(self.entry_hashes[i])
+            new_keys.push(self.entry_keys[i])
+            new_values.push(self.entry_values[i])
+            i = i + 1
 
         Map(
-            buckets: new_buckets_,
+            slots: new_slots,
+            entry_hashes: new_hashes,
+            entry_keys: new_keys,
+            entry_values: new_values,
             size: self.size,
+            tombstones: self.tombstones,
             capacity: self.capacity
         )
 
@@ -463,24 +471,8 @@ struct Map<K, V> where K: Hash + Eq:
 # ============================================================================
 
 pub fn map_from_entries<K, V>(entries: [(K, V)]) -> Map<K, V>:
-    """Create map from list of key-value pairs.
-
-    Args:
-        entries: List of (key, value) tuples
-
-    Returns:
-        Map containing all entries
-
-    Example:
-        val map = map_from_entries([
-            ("name", "Alice"),
-            ("age", "30")
-        ])
-    """
-    # Annotated 2026-11-14: K/V are not inferable from with_capacity's args,
-    # so the unannotated local left `map` untyped under the self-hosted
-    # compiler and `map.insert(...)` failed MIR lowering (stage-3 cluster).
-    val map: Map<K, V> = Map.with_capacity(entries.len() * 2)
+    """Create map from list of key-value pairs."""
+    var map: Map<K, V> = Map.with_capacity((entries.len() * 2) as i32)
     for (key, value) in entries:
         map.insert(key, value)
     map

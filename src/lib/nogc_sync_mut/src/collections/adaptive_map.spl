@@ -78,7 +78,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             profile: adaptive_set_normalize_profile(profile),
             attribute: AdaptiveSetAttribute.Auto,
             algorithm: AdaptiveSetAlgorithm.Linear,
-            linear_entries: [], hash_entries: Map.with_capacity(1),
+            linear_entries: [], hash_entries: Map.new(),
             ordered_entries: OrderedMap.new(), fallback_order_entries: [],
             site_id: site_id, target_profile_id: target_profile_id,
             size: 0, observed_peak_size: 0, observed_lookups: 0,
@@ -203,18 +203,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         nil
 
     fn hash_lookup_observed(key: K) -> (V?, bool, i64, i64):
-        """Inspect the active Map bucket once and count every examined entry."""
-        val hash = self.hash_entries.hash_key(key)
-        val bucket_index = self.hash_entries.bucket_for(hash)
-        val bucket = self.hash_entries.buckets[bucket_index]
-        var probes = 0
-        var collisions = 0
-        for entry in bucket:
-            probes = probes + 1
-            if entry.hash == hash and entry.key == key:
-                return (Some(entry.value), true, probes, collisions)
-            collisions = collisions + 1
-        (nil, false, probes + 1, collisions)
+        """Inspect the active Map probe chain once and count every examined entry."""
+        self.hash_entries.get_observed(key)
 
     fn storage_has_key(key: K) -> bool:
         match self.algorithm:
@@ -520,7 +510,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
 
     me clear():
         self.linear_entries = []
-        self.hash_entries = Map.with_capacity(1)
+        self.hash_entries = Map.new()
         self.ordered_entries = OrderedMap.new()
         self.fallback_order_entries = []
         self.size = 0
@@ -622,7 +612,8 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                 self.lookups_since_switch < self.profile.lookup_promotion_count and
                 not self.prefer_hash_from_profile:
             return
-        var rebuilt: Map<K, V> = Map.new()
+        val target_cap = if self.size * 2 > 16: (self.size * 2) as i32 else: 16
+        var rebuilt: Map<K, V> = Map.with_capacity(target_cap)
         val rebuilt_entries = as_entries_v1(self.storage_entries())
         for entry in rebuilt_entries:
             rebuilt.insert(entry.key, entry.value)
@@ -651,7 +642,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             rebuilt.put(entry.key, entry.value)
         self.ordered_entries = rebuilt
         self.linear_entries = []
-        self.hash_entries = Map.with_capacity(1)
+        self.hash_entries = Map.new()
         self.algorithm = AdaptiveSetAlgorithm.Ordered
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
@@ -679,7 +670,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         if self.algorithm == AdaptiveSetAlgorithm.Linear:
             return
         self.linear_entries = self.storage_entries()
-        self.hash_entries = Map.with_capacity(1)
+        self.hash_entries = Map.new()
         self.ordered_entries = OrderedMap.new()
         self.algorithm = AdaptiveSetAlgorithm.Linear
         self.lookups_since_switch = 0
