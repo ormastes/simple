@@ -10,11 +10,12 @@ use os.port.qemu_machine_plan_v1.{QemuLaunchPlanV1}
 use os.qemu_compiler_admission_v1.{qemu_compiler_select_v1}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_walk, is_dir}
-use std.nogc_sync_mut.io.env_ops.{env_get, env_set, cwd}
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set, env_unset, cwd}
 use std.nogc_sync_mut.io.env_ops.{host_os}
 use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_read_bytes, secure_temp_dir}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_timeout}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 use std.nogc_sync_mut.ffi.io.{file_write_text, path_absolute}
 use std.nogc_sync_mut.ffi.io.{file_move, path_parent}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
@@ -180,14 +181,14 @@ pub fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         if not _fs_wrapper_artifact_admitted(target): return false
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
         return true
-    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP") ?? ""
-    val old_lib = env_get("SIMPLE_LIB") ?? ""
-    val old_boot_minimal = env_get("SIMPLE_BOOT_MINIMAL") ?? ""
-    val old_stub_env = env_get("SIMPLE_ALLOW_FREESTANDING_STUBS") ?? ""
-    val old_no_stub_fallback = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
-    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
-    val old_path = env_get("PATH") ?? ""
-    val old_build_marker = env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val old_lib = env_get("SIMPLE_LIB")
+    val old_boot_minimal = env_get("SIMPLE_BOOT_MINIMAL")
+    val old_stub_env = env_get("SIMPLE_ALLOW_FREESTANDING_STUBS")
+    val old_no_stub_fallback = env_get("SIMPLE_NO_STUB_FALLBACK")
+    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE")
+    val old_path = env_get("PATH")
+    val old_build_marker = env_get("SIMPLE_SSH_LIVE_BUILD_MARKER")
     if not _prepare_build_output(target, build_marker):
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
@@ -409,11 +410,35 @@ fn _candidate_admission_env_args(candidate: text) -> [text]:
     env_args
 
 fn _run_candidate_with_env(candidate: text, args: [text], timeout_ms: i64, env_args: [text]) -> (text, text, i32):
-    var command_args = env_args
-    command_args.push(candidate)
-    for arg in args:
-        command_args.push(arg)
-    process_run_timeout("env", command_args, timeout_ms)
+    """Run candidate directly without external env binary, preserving caller env."""
+    var saved_keys: [text] = []
+    var saved_present: [bool] = []
+    var saved_values: [text] = []
+    for entry in env_args:
+        val eq_idx = entry.index_of("=")
+        if eq_idx <= 0:
+            continue
+        val key = entry.substring(0, eq_idx)
+        val value = entry.substring(eq_idx + 1, entry.byte_len())
+        val prev_opt = env_get_opt(key)
+        if val prev = prev_opt:
+            saved_present.push(true)
+            saved_values.push(prev)
+        else:
+            saved_present.push(false)
+            saved_values.push("")
+        saved_keys.push(key)
+        val _ = env_set(key, value)
+    val result = process_run_timeout(candidate, args, timeout_ms)
+    var i = saved_keys.len() - 1
+    while i >= 0:
+        val key = saved_keys[i]
+        if saved_present[i]:
+            val _ = env_set(key, saved_values[i])
+        else:
+            val _ = env_unset(key)
+        i = i - 1
+    result
 
 fn _run_candidate_pinned(candidate: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     _run_candidate_with_env(candidate, args, timeout_ms, _candidate_identity_env_args(candidate))
@@ -432,7 +457,8 @@ fn _candidate_backend_smoke(candidate: text, backend_name: text) -> bool:
     val probe_dir = created.unwrap().replace("\\", "/")
     if probe_dir == "" or not probe_dir.starts_with(probe_prefix) or not file_exists(probe_dir):
         return false
-    val probe_output = probe_dir + "/p2_add.exe"
+    val probe_ext = if host_os() == "windows": ".exe" else: ""
+    val probe_output = probe_dir + "/p2_add" + probe_ext
     val probe_log = probe_dir + "/build.log"
     val build_args = [
         "native-build",
@@ -450,8 +476,7 @@ fn _candidate_backend_smoke(candidate: text, backend_name: text) -> bool:
     val log_ok = file_write_text(probe_log, build_stdout + "\n" + build_stderr)
     var accepted = false
     if build_exit == 0 and log_ok and file_exists(probe_output):
-        # Exec via env like the candidate itself so a shebang probe also runs on MSYS hosts.
-        val (run_stdout, _, run_exit) = process_run_timeout("env", [probe_output], 5000)
+        val (run_stdout, _, run_exit) = process_run_timeout(probe_output, [], 5000)
         accepted = run_exit == 0 and _candidate_exact_five(run_stdout)
     val cleanup_ok = dir_remove_all(probe_dir)
     accepted and cleanup_ok
@@ -502,11 +527,11 @@ This capability helper alone is not an artifact admission authority.
 
 fn _find_simple_binary() -> text:
     qemu_compiler_select_v1(
-        env_get("SIMPLE_BINARY") ?? "", env_get("SIMPLE_BIN") ?? "", cwd())
+        env_get("SIMPLE_BINARY"), env_get("SIMPLE_BIN"), cwd())
 
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
-    val env_bin = env_get("SIMPLE_BINARY") ?? ""
-    val env_simple_bin = env_get("SIMPLE_BIN") ?? ""
+    val env_bin = env_get("SIMPLE_BINARY")
+    val env_simple_bin = env_get("SIMPLE_BIN")
     val admitted = qemu_compiler_select_v1(env_bin, env_simple_bin, cwd())
     if admitted == "": return ""
     val candidates = [admitted]
