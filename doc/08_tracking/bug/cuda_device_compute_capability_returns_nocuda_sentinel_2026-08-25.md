@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — LIVE, re-confirmed in source 2026-11-11 (lane ne5) — `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` is
+**Status (2026-11-22): FIXED — see the 2026-11-22 section at the end.** Original status: OPEN — LIVE, re-confirmed in source 2026-11-11 (lane ne5) — `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl` is
 deliberately RED on this (1 of 5 examples).
 **Binary:** deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`. **Host:** 2 NVIDIA GPUs.
 
@@ -108,3 +108,43 @@ this source before the acceptance spec passes on a CUDA host. Runtime verificati
 expect 5/5) needs an NVIDIA CUDA host — none is reachable from this Windows lane, and the
 rebuilt seed binary was NOT committed (per lane rules). The spec's "KNOWN RED" step text stays
 until the refreshed seed is deployed and the spec is re-run.
+
+---
+
+## 2026-11-22 verification + follow-up fix (work/cuda-runtime-bugs, base release/1.0.0 `3c2e4556b6d`)
+
+**Status: FIXED (seed interpreter path, runtime-verified on a live CUDA host).**
+
+Host: Linux aarch64, NVIDIA GB10 (sm_121, `nvidia-smi` compute_cap 12.1), driver at `/usr/local/cuda`.
+
+1. The `-3`-on-a-working-host symptom is gone. Fixture (`use std.cuda.{...}`; init, count,
+   name, capability of device 0), `SIMPLE_EXECUTION_MODE=interpret <seed> run main.spl`:
+   - seed `seed-tip-20261115/simple` (sha256 `5ef615e2b60a80fc`): `PROBE avail=true init=0 count=1` /
+     `PROBE name0=[NVIDIA GB10] cc0=121`.
+2. **The 2026-11-13 fallback had a silent-wrong-value hole.** It returned the raw CUresult on a
+   failing driver call, and CUresult codes are POSITIVE (3 = NOT_INITIALIZED, 101 =
+   INVALID_DEVICE), so a failure read as a plausible capability and passed the spec's `> 0`.
+   Failing-first fixture (`std.nogc_sync_mut.cuda.mod`; capability before `cuda_init`, then of
+   device 64), same seed `5ef615e2b60a80fc`:
+   `CC pre_init=3` / `CC init=0 count=1 dev0=121 dev64=101` / `FAIL failing driver call reported as positive capability`.
+3. Fix: `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` returns `-(CUresult)` on a
+   failing attribute query; the `cuda`-feature provider twin
+   (`src/compiler_rust/runtime/src/cuda_runtime.rs` `rt_cuda_device_compute_capability`) now checks
+   both `cuDeviceGetAttribute` results and returns `-(CUresult)` instead of a zero-initialised
+   `major*10+minor`. `cargo check -p simple-runtime --features cuda` clean.
+4. After, debug seed built from this worktree (`cargo build --bin simple -j4`, sha256
+   `cdc523be583e4c10`): `CC pre_init=-3` / `CC init=0 count=1 dev0=121 dev64=-101` / `OK`; the
+   std.cuda fixture still prints `cc0=121`.
+
+Notes:
+- `-(NOT_INITIALIZED)` is numerically `-3`, the same value as the "built without cuda" sentinel;
+  both mean "no usable capability" and both are <= 0, which is the contract callers rely on.
+- `test/03_system/acceptance/gpu_cuda_programming_acceptance_spec.spl`: KNOWN RED step removed;
+  the example now also asserts a no-such-device query is `<= 0`. Not run: no full-CLI `simple test`
+  binary exists on this host.
+- Native lane is a different defect: a Stage 2 (integ25, sha256 `ef46f0d2ab4274c4`) native build of
+  the same query fails to LINK (`undefined symbol: rt_cuda_device_compute_capability`,
+  `rt_cuda_device_get`, `rt_cuda_get_error_string`) — filed as
+  `native_c_runtime_missing_cuda_provider_forwarders_2026-11-22.md`.
+- The seed's compiled `run` mode (no `SIMPLE_EXECUTION_MODE=interpret`) resolves CUDA externs to the
+  runtime's no-`cuda`-feature stubs and honestly reports `init=3 count=0` (no fake capability).
