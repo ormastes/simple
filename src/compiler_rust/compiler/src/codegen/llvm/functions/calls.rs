@@ -930,7 +930,7 @@ impl LlvmBackend {
         let i64_type = self.runtime_int_type();
         let i8_type = self.context_ref().i8_type();
         let fail = |what: &str, e: &dyn std::fmt::Display| crate::error::factory::llvm_build_failed(what, e);
-        // Never wider than the runtime int (i32 on 32-bit targets), matching
+        // Never wider than the runtime int (i64 on every target), matching
         // the width of the single load this replaces.
         let bytes = width.min(u64::from(i64_type.get_bit_width() / 8));
         let function = builder
