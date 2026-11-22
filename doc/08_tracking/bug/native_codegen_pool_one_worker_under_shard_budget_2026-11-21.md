@@ -1,8 +1,7 @@
 # Native codegen pool admits one worker inside MIR shard processes (serial codegen, ~10 h projected)
 
 Date: 2026-11-21
-Status: open. No code change in this record: no safe fix exists without the
-measurements listed under "Measurements needed".
+Status: FIXED (2026-11-22)
 Area: `src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl`,
 `src/compiler/80.driver/driver_aot_native_output.spl`
 
@@ -123,3 +122,13 @@ processes are already holding.
 Related: `native_build_step5_serial_threads_ignored_2026-09-04.md`,
 `full_cli_native_build_peak_rss_2026-11-13.md`,
 `hir_shard_owners_killed_at_tree_rss_cap_worker_peak_25gb_2026-11-20.md`.
+
+## Root-Cause Fix & Verification (2026-11-22)
+
+Implemented all four safety prerequisites together in `native_codegen_pool_v1.spl` and `_driver_codegen_pool_prefetch_v1` (`driver_aot_native_output.spl`):
+
+1. **Measured per-`llc`-worker estimate (`512 MiB`):** Updated `NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1` from `2097152` (2 GiB) to `524288` (512 MiB, covering `llc`/`clang -c -x ir` child peak RSS while keeping `SIMPLE_NATIVE_CODEGEN_WORKER_KIB` and `worker_mem_mib` overrides).
+2. **Resident-RSS subtraction, peer-shard division, and cgroup bounding:** Extended `native_codegen_pool_workers_v1` with `resident_kib`, `peer_shards`, and `cgroup_spare_kib` (`native_codegen_cgroup_spare_kib_v1` reading cgroup v2 `memory.max - memory.current` and v1 `memory.limit_in_bytes - memory.usage_in_bytes` across the full ancestor chain). Subtracts `resident_kib` from `budget_kib / peer_shards` (preventing over-admission when two ~22 GB shards already saturate a 44 GB budget) and divides `spare` and `cgroup_spare_kib` across `peer_shards` (`native_codegen_live_peer_shards_v1`).
+3. **Shard-tree commit floor (`clamp(total_kib / 8, 2 GiB, 8 GiB)`):** Inside an already-admitted shard worker (`native_codegen_shard_commit_floor_for_v1` / `native_codegen_commit_floor_kib_for_context_v1(true)`), reserves 12.5% RAM clamped to `[2 GiB, 8 GiB]` instead of double-counting a second 24 GiB whole-host floor while keeping explicit `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` / `mem_reserve_free_mib` overrides authoritative.
+4. **Actionable admission diagnostics:** `_driver_codegen_pool_prefetch_v1` reports `cpus`, `budget_kib`, `resident_kib`, `headroom_kib`, `cgroup_spare_kib`, `floor_kib`, `worker_kib`, and `peer_shards` via `native_codegen_admission_summary_v1`.
+- **Verification:** `test/01_unit/compiler/driver/native_codegen_pool_v1_spec.spl` (27/27 PASS).

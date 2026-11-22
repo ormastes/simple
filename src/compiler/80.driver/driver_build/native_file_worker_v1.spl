@@ -95,6 +95,59 @@ pub fn native_file_worker_pool_request_v1(requested: i64, host_cpus: i64) -> i64
 pub fn native_bootstrap_stage3_per_file_selected_v1(file_workers_flag: text, whole_program_env: text) -> bool:
     native_file_workers_selected_v1(file_workers_flag) and whole_program_env != "1"
 
+# Authoritative OutputFormat.Both detector across coordinator, link worker, and
+# per-file unit children (`SIMPLE_FILE_WORKER_UNIT=1` + `SIMPLE_MIR_SHARD`).
+# Compiled Stage-2/3 struct transport can zero enum `CompileOptions.output_format`
+# to `OutputFormat.Native` inside positional unit children even when
+# `bootstrap_main` bound `SIMPLE_NATIVE_BUILD_MODE=dynload` (same struct-enum
+# transport hazard as `CompileOptions.mode`). Using one predicate keeps MIR
+# eviction, `FILE_WORKER_REUSE`, `.smfpart` writing, and `.smfpart` link-time
+# assembly strictly aligned.
+# reason: pure boolean/env-field output-format reconciliation across worker roles
+@allow(primitive_api)
+pub fn native_file_worker_effective_output_is_both_v1(
+    format_is_both: bool,
+    format_is_smf: bool,
+    format_is_self_contained: bool,
+    build_mode_env: text,
+    emit_object_env: text,
+    group_request_path: text,
+    bootstrap_stage3_env: text,
+    bootstrap_stage4_env: text
+) -> bool:
+    if format_is_both:
+        return true
+    if format_is_smf or format_is_self_contained:
+        return false
+    (build_mode_env == "dynload" and
+        emit_object_env == "" and
+        group_request_path == "" and
+        bootstrap_stage3_env != "1" and
+        bootstrap_stage4_env != "1")
+
+# SMF companion sidecars on `OutputFormat.Both` (`emit_both_smf_half_v1`) require
+# ELF relocatable object sections (`extract_code_from_object` rejects Mach-O and
+# COFF). Explicit `--format=smf` still fails closed in `compile_to_smf`, while
+# `OutputFormat.Both` skips the unsupported ELF-only sidecar cleanly on Mach-O /
+# COFF targets instead of emitting a false `phase=smf_package status=failure`.
+# reason: target triple and host OS strings are raw driver configuration scalars
+@allow(primitive_api)
+pub fn native_file_worker_smf_sidecar_supported_for_target_v1(
+    native_target: text, host_os_name: text
+) -> bool:
+    val t = native_target.trim().to_lower()
+    if t != "":
+        if (t.contains("apple") or t.contains("darwin") or t.contains("macho") or
+                t.contains("ios") or t.contains("windows") or t.contains("msvc") or
+                t.contains("mingw") or t.contains("coff")):
+            return false
+        return true
+    val h = host_os_name.trim().to_lower()
+    if (h == "macos" or h == "darwin" or h == "ios" or
+            h == "windows" or h == "win32" or h == "win64"):
+        return false
+    true
+
 # Ordinary pools need two workers. The interface-HIR opt-in clamps a zero-or-one
 # estimate to one live worker so a low-memory host avoids the whole-HIR fallback;
 # the external RSS watchdog remains the authoritative memory limit.
