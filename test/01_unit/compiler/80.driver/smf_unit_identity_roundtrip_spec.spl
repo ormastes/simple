@@ -1,0 +1,92 @@
+# Build -> cache -> load round-trip for the SMF unit identity record (lane lu5).
+# The SMF is written with smf_unit_identity_bytes_v1 (what compile_to_smf
+# emits), its row is written by the REAL manifest writer
+# update_smf_manifest_entry, the row is read back from disk by
+# load_smf_manifest_checked + smf_manifest_find (what try_load_smf_cached
+# does), and the on-disk SMF is admitted by smf_cached_unit_identity_admit.
+# @req REQ-LU2-LOADER-IDENTITY
+use std.spec.step
+
+use std.io_runtime.{dir_create_all, file_exists, hash_text}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_bytes_result, file_write_bytes, file_delete}
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.driver_aot_smf_output.{smf_unit_identity_bytes_v1, smf_entry_source_input_v1, smf_record_manifest_row_v1}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry, load_smf_manifest_checked, smf_manifest_find, smf_manifest_path_for_smf}
+use compiler.driver.driver_api_interpret.{smf_cached_unit_identity_admit}
+
+val DIR: text = "build/tmp/smf_unit_identity_roundtrip_spec"
+val SRC: text = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+val TRIPLE: text = "x86_64-unknown-linux-gnu"
+
+fn src_path() -> text:
+    "{DIR}/unit.spl"
+
+fn smf_path() -> text:
+    "{DIR}/unit.smf"
+
+# Build the SMF for `source` and write the manifest row through the real writer.
+fn build_and_record(smf_source: text, smf_profile: text) -> bool:
+    dir_create_all(DIR)
+    val manifest_path = smf_manifest_path_for_smf(smf_path())
+    if file_exists(manifest_path):
+        file_delete(manifest_path)
+    file_atomic_write(src_path(), SRC)
+    var opts = SmfBuildOptions.create(Target.host())
+    opts.unit_identity_bytes = smf_unit_identity_bytes_v1(smf_source, TRIPLE, smf_profile, ["io"])
+    file_write_bytes(smf_path(), generate_smf_with_options([0xC3], opts))
+    update_smf_manifest_entry(src_path(), smf_path(), hash_text(SRC), "cranelift", 0,
+        false, false, false, "dev", ["io"], TRIPLE)
+
+fn load_admit() -> Result<bool, text>:
+    val manifest = load_smf_manifest_checked(smf_manifest_path_for_smf(smf_path()))?
+    val entry = smf_manifest_find(manifest, src_path())
+    if val row = entry:
+        val image = file_read_bytes_result(smf_path())?
+        return smf_cached_unit_identity_admit(row, image)
+    Err("no manifest row written")
+
+describe "SMF unit identity build/cache/load round-trip":
+    it "admits a fresh SMF against the row the real writer recorded":
+        step("build, record, reload and admit")
+        expect(build_and_record(SRC, "dev")).to_equal(true)
+        val r = load_admit()
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()).to_equal(true)
+
+    it "refuses an SMF whose source no longer matches the recorded row":
+        step("tampered iface is refused")
+        expect(build_and_record("fn other() -> i64:\n    1\n", "dev")).to_equal(true)
+        val r = load_admit()
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IFACE-MISMATCH")).to_equal(true)
+
+    it "refuses an SMF built under a different profile than recorded":
+        step("tampered policy is refused")
+        expect(build_and_record(SRC, "prod")).to_equal(true)
+        val r = load_admit()
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-POLICY-MISMATCH")).to_equal(true)
+
+    it "admits an SMF whose row was recorded by the AOT pipeline writer":
+        step("pipeline row carries the SMF triple, profile and families")
+        dir_create_all(DIR)
+        val manifest_path = smf_manifest_path_for_smf(smf_path())
+        if file_exists(manifest_path):
+            file_delete(manifest_path)
+        file_atomic_write(src_path(), SRC)
+        var options = driver_core_compile_options_default()
+        options.input_files = [DIR, src_path()]
+        options.native_target = TRIPLE
+        options.profile = "dev"
+        options.allowed_families = ["io"]
+        val entry_source = smf_entry_source_input_v1(options.input_files)
+        expect(entry_source).to_equal(src_path())
+        var smf_opts = SmfBuildOptions.create(Target.host())
+        smf_opts.unit_identity_bytes = smf_unit_identity_bytes_v1(
+            SRC, options.native_target, options.profile, options.allowed_families)
+        file_write_bytes(smf_path(), generate_smf_with_options([0xC3], smf_opts))
+        expect(smf_record_manifest_row_v1(options, entry_source, smf_path(), hash_text(SRC))).to_equal(true)
+        val r = load_admit()
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()).to_equal(true)

@@ -11,22 +11,21 @@ use compiler.hir.hir_types.{HirImport}
 # NOTE: these two MUST stay at module scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution, which made the
 # both-format branch below die post-link with `error[E1002]: function
-# 'update_smf_manifest_entry' not found`. See
+# 'smf_record_manifest_row_v1' not found`. See
 # doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
 use compiler.driver.cache.cache_validator.{source_to_cache_path}
 use compiler.driver.cache.cache_root.{machine_cache_root}
-use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
+use compiler.driver.driver_aot_smf_output.{smf_entry_source_input_v1, smf_record_manifest_row_v1}
 use compiler.driver.bootstrap_k1_selected.{
     bootstrap_compile_to_native_local
 }
 use compiler.common.driver_core_types.{
     CompileResult,
-    compileoptions_effective_mir_opt_level,
     driver_output_format_is_smf,
     driver_output_format_is_both,
     driver_output_format_is_self_contained
 }
-use std.io_runtime.{env_get_opt, file_read_result, hash_text, is_file}
+use std.io_runtime.{env_get_opt, file_read_result, hash_text}
 use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1}
 use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1,
@@ -95,17 +94,11 @@ fn _driver_default_output(input_files: [text]) -> text:
     else:
         "build/native/out"
 
-# The SMF manifest row is keyed by the ENTRY source. native-build passes its
-# `--source` DIRECTORIES before the entry (compile_targets.spl) and
-# `--entry-closure` passes the BFS closure with the entry first, so in every
-# producer the entry is the first input that is a regular file. Reading
-# input_files[0] hashed a directory and, once the read failed closed
-# (ec19563b735), turned every default native-build into a CodegenError.
-fn _driver_entry_source_input(input_files: [text]) -> text:
-    for path in input_files:
-        if is_file(path):
-            return path
-    input_files[0]
+# The SMF manifest row is keyed by the ENTRY source (smf_entry_source_input_v1).
+# native-build passes its `--source` DIRECTORIES before the entry
+# (compile_targets.spl); reading input_files[0] hashed a directory and, once
+# the read failed closed (ec19563b735), turned every default native-build into
+# a CodegenError.
 
 impl CompilerDriver:
     me aot_compile() -> CompileResult:
@@ -417,28 +410,16 @@ impl CompilerDriver:
             self.native_staged_codegen.smf_part_objects = smf_object_spool_release_v1(
                 self.native_staged_codegen.smf_part_objects)
             return CompileResult.Success(output)
-        val source_path = _driver_entry_source_input(self.ctx.options.input_files)
+        val source_path = smf_entry_source_input_v1(self.ctx.options.input_files)
         val smf_cache_path = source_to_cache_path(source_path, native_build_cache_dir(), ".smf")
         val smf_result = self.compile_to_smf(smf_cache_path)
         if smf_result.is_success():
-            val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
             val source_result = file_read_result(source_path)
             val src = match source_result:
                 case Ok(content): content
                 case Err(read_error): return CompileResult.CodegenError(read_error)
-            val src_hash = hash_text(src)
-            update_smf_manifest_entry(
-                source_path,
-                smf_cache_path,
-                src_hash,
-                self.ctx.options.backend,
-                smf_opt_level,
-                self.ctx.options.release,
-                self.ctx.options.debug_info,
-                self.ctx.options.gc_off,
-                self.ctx.options.profile,
-                self.ctx.options.allowed_families
-            )
+            # Row identity (triple/profile/families) matches the SMF's record.
+            smf_record_manifest_row_v1(self.ctx.options, source_path, smf_cache_path, hash_text(src))
         return CompileResult.Success(output)
 
     me go_to_end_finish_v1(object_count: i64, built_modules: [text]) -> CompileResult:
