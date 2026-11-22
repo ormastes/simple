@@ -47,6 +47,7 @@ pub struct CsContainerSessionRecordV1:
     pid: i64
     instance: text
     network: text
+    mounts: [text] = []
     env: [text]
     state: text
     exit_code: i64
@@ -55,6 +56,34 @@ pub struct CsOldCleanupResultV1:
     eligible: [text]
     removed: [text]
     failures: [text]
+
+fn _cs_rec_encode_mounts_v1(mounts: [PodmanMountV1]) -> [text]:
+    var out: [text] = []
+    for m in mounts:
+        val mode = if m.read_only: "ro" else: "rw"
+        out.push(m.source + ":" + m.target + ":" + mode)
+    out
+
+fn _cs_rec_decode_mounts_v1(raw: [text], home_dir: text) -> Result<[PodmanMountV1], text>:
+    var out: [PodmanMountV1] = []
+    for entry in raw:
+        val parts = entry.split(":")
+        if parts.len() != 3:
+            return Err("container-mount-record-invalid")
+        val mode = parts[2]
+        if mode != "ro" and mode != "rw":
+            return Err("container-mount-mode-invalid")
+        val read_only = mode == "ro"
+        val src = cs_container_normal_path(parts[0])
+        val dst = cs_container_normal_path(parts[1])
+        if src == "" or dst == "":
+            return Err("container-mount-path-invalid")
+        if not read_only:
+            val mr = cs_container_rw_refusal(src, home_dir)
+            if mr != "":
+                return Err(mr + " (--container-mount)")
+        out.push(PodmanMountV1(source: src, target: dst, read_only: read_only))
+    Ok(out)
 
 pub fn cs_worktree_extract_flag_v1(extras: [text]) -> (bool, [text]):
     var wants_wt = false
@@ -123,6 +152,9 @@ fn _cs_rec_encode_v1(rec: CsContainerSessionRecordV1) -> text:
     var argv_vals: [SdnValue] = []
     for a in rec.argv:
         argv_vals.push(SdnValue.String(a))
+    var mount_vals: [SdnValue] = []
+    for m in rec.mounts:
+        mount_vals.push(SdnValue.String(m))
     var env_vals: [SdnValue] = []
     for e in rec.env:
         env_vals.push(SdnValue.String(e))
@@ -147,6 +179,7 @@ fn _cs_rec_encode_v1(rec: CsContainerSessionRecordV1) -> text:
         "pid": SdnValue.Int(rec.pid),
         "instance": SdnValue.String(rec.instance),
         "network": SdnValue.String(rec.network),
+        "mounts": SdnValue.Array(mount_vals),
         "env": SdnValue.Array(env_vals),
         "state": SdnValue.String(rec.state),
         "exitCode": SdnValue.Int(rec.exit_code)
@@ -212,6 +245,7 @@ fn _cs_rec_decode_v1(source: text) -> Result<CsContainerSessionRecordV1, text>:
         pid: _cs_rec_int_v1(d, "pid", -1),
         instance: _cs_rec_str_v1(d, "instance"),
         network: _cs_rec_str_v1(d, "network"),
+        mounts: _cs_rec_arr_v1(d, "mounts"),
         env: _cs_rec_arr_v1(d, "env"),
         state: _cs_rec_str_v1(d, "state"),
         exit_code: _cs_rec_int_v1(d, "exitCode", -1)
@@ -285,8 +319,9 @@ pub fn cs_container_prepare_macos_seatbelt_v1(session: text, agent_id: text, spe
         backend: "macos-seatbelt", image: request.image, executable: exe, argv: args,
         repo_root: repo_root, worktree_path: worktree_path, worktree_owned: worktree_owned,
         attempt_dir: attempt_dir, stderr_path: stderr_path, pane_id: "", pid: -1,
-        instance: instance, network: request.network, env: request.env,
-        state: "running", exit_code: -1)
+        instance: instance, network: request.network,
+        mounts: _cs_rec_encode_mounts_v1(request.mounts),
+        env: request.env, state: "running", exit_code: -1)
     val run_path = cs_container_write_runner_v1(rec, inner_argv)?
     if not cs_container_record_save_v1(rec):
         return Err("could not persist container session record")
@@ -433,14 +468,17 @@ pub fn cs_container_prepare_relaunch_v1(session: text, key: text, override_args:
             rec.instance = new_instance
             rec.state = "running"
             rec.exit_code = -1
+            rec.pane_id = ""
+            rec.pid = -1
             var inner_argv = [rec.executable] + rec.argv
             if rec.backend != "host-worktree":
                 val workdir = if rec.worktree_path != "": rec.worktree_path else: rec.repo_root
+                val restored_mounts = _cs_rec_decode_mounts_v1(rec.mounts, home_dir)?
                 val sb_spec = MacosSeatbeltSessionSpecV1(
                     name: rec.name, owner: rec.owner, image: rec.image,
                     command: inner_argv, workdir: workdir, repo_root: rec.repo_root,
                     worktree_path: rec.worktree_path, attempt_dir: rec.attempt_dir, home_dir: home_dir,
-                    mounts: [], network: rec.network, env: rec.env, instance: new_instance)
+                    mounts: restored_mounts, network: rec.network, env: rec.env, instance: new_instance)
                 val profile = macos_seatbelt_compile_profile_v1(sb_spec)?
                 val profile_path = rec.attempt_dir + "/profile.sb"
                 if not file_atomic_write(profile_path, profile):

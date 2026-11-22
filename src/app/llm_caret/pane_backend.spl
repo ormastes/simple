@@ -17,7 +17,7 @@ use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_run, sosix_which
 use std.nogc_async_mut.sosix.pty.{sosix_pty_native_exec_argv}
 use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane, smux_toggle_zoom, smux_zoomed_pane,
-    smux_focused_pane, smux_close_pane, smux_pane_close_pty, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
+    smux_focused_pane, smux_close_pane, smux_pane_close_pty, smux_pane_is_pty, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
     smux_send_text, smux_capture, smux_capture_styled,
     smux_paste_text}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
@@ -310,11 +310,14 @@ fn _smux_list(session: text) -> [Pane]:
         # An empty slot (no child, or an exited one) is not an agent pane.
         if alive.is_ok() and alive.unwrap():
             live_ids.push(p.id)
-            out = out + [Pane(pane_id: p.id, title: _smux_title(p.id),
-                pid: _smux_pid(p.id), active: p.id == focused_id,
+            out = out + [Pane(pane_id: p.id, title: _smux_title(session, p.id),
+                pid: _smux_pid(session, p.id), active: p.id == focused_id,
                 zoomed: p.id == smux_zoomed_pane(scope.session_id, scope.window_id), error: "")]
     var kept_info: [SmuxPaneInfo] = []
     for info in _smux_info:
+        if info.session != session:
+            kept_info = kept_info + [info]
+            continue
         var still_live = false
         for lid in live_ids:
             if lid == info.pane_id:
@@ -328,6 +331,7 @@ fn _smux_list(session: text) -> [Pane]:
 
 # smux panes carry no title or pid field; the backend remembers both.
 struct SmuxPaneInfo:
+    session: text
     pane_id: text
     title: text
     pid: i64
@@ -335,25 +339,31 @@ struct SmuxPaneInfo:
 
 var _smux_info: [SmuxPaneInfo] = []
 
-fn _smux_title(pane_id: text) -> text:
+fn _smux_title(session: text, pane_id: text) -> text:
     for info in _smux_info:
-        if info.pane_id == pane_id:
+        if info.session == session and info.pane_id == pane_id:
             return info.title
     ""
 
-fn _smux_pid(pane_id: text) -> i64:
+fn _smux_pid(session: text, pane_id: text) -> i64:
     for info in _smux_info:
-        if info.pane_id == pane_id:
+        if info.session == session and info.pane_id == pane_id:
             return info.pid
     0
 
 # A free pane slot for a new child: the session's first pane while it is still
 # empty, otherwise a fresh split.
-fn _smux_free_pane(scope: SmuxScope) -> Result<text, text>:
+fn _smux_free_pane(session: text, scope: SmuxScope) -> Result<text, text>:
     val panes = smux_list_panes(scope.session_id, scope.window_id)
     for p in panes:
         val alive = smux_pane_alive(scope.session_id, scope.window_id, p.id)
-        if alive.is_ok() and not alive.unwrap() and _smux_pid(p.id) == 0:
+        if alive.is_ok() and not alive.unwrap() and _smux_pid(session, p.id) == 0:
+            val has_pty = smux_pane_is_pty(scope.session_id, scope.window_id, p.id)
+            if has_pty.is_ok() and has_pty.unwrap():
+                if not smux_pane_close_pty(scope.session_id, scope.window_id, p.id):
+                    continue
+            elif has_pty.is_err():
+                continue
             return Ok(p.id)
     if panes.len() == 0:
         return Err("smux window has no pane to split")
@@ -372,7 +382,7 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
         if smux_create_session(session).id == "":
             return _no_pane(title, "smux could not create session: " + session)
         scope = _smux_scope(session)
-    val free = _smux_free_pane(scope)
+    val free = _smux_free_pane(session, scope)
     if free.is_err():
         return _no_pane(title, free.unwrap_err())
     val pane_id = free.unwrap()
@@ -400,7 +410,7 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
     if spawned.is_err():
         posix_pane_launcher_remove(launcher_dir)
         return _no_pane(title, spawned.unwrap_err())
-    _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title,
+    _smux_info = _smux_info + [SmuxPaneInfo(session: session, pane_id: pane_id, title: title,
         pid: spawned.unwrap(), launcher_dir: launcher_dir)]
     val _f = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false, error: "")
@@ -449,10 +459,10 @@ fn pane_kill(session: text, pane_id: text) -> bool:
             return false
         var kept: [SmuxPaneInfo] = []
         for info in _smux_info:
-            if info.pane_id != pane_id:
-                kept = kept + [info]
-            else:
+            if info.session == session and info.pane_id == pane_id:
                 posix_pane_launcher_remove(info.launcher_dir)
+            else:
+                kept = kept + [info]
         _smux_info = kept
         return true
     _tmux_ok(pane_kill_argv(pane_id))
@@ -638,9 +648,13 @@ fn pane_cleanup_session(session: text):
     if not _use_tmux():
         for pane in _smux_list(session):
             val _k = pane_kill(session, pane.pane_id)
+        var kept: [SmuxPaneInfo] = []
         for info in _smux_info:
-            posix_pane_launcher_remove(info.launcher_dir)
-        _smux_info = []
+            if info.session == session:
+                posix_pane_launcher_remove(info.launcher_dir)
+            else:
+                kept = kept + [info]
+        _smux_info = kept
         return
     for pane in pane_list(session):
         val _k = pane_kill(session, pane.pane_id)
