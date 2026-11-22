@@ -90,3 +90,69 @@ Same variable, different phase. Canonical Stage 3 with `SIMPLE_MIR_SHARDING=1`, 
 Root cause is still not named: no minidump. Both occurrences are "a process restores
 frontend-cache entries written by an earlier process, then AVs". The cross-process `.fpc`
 hit-restore path (`frontend.spl:160-172`) is the shared suspect; step 3 above (minidump) still applies.
+
+## Decode-path audit vs. tonight's Phase 2 miscompile families (2026-11-23, read-only)
+Source audited: `origin/release/1.0.0` @ `ccb5a2ef29c`. The failing compiler (`8dae652711e9`) is an
+ancestor of all three fixes (be3ddb1579b, #10920 `cbeb12ce33f`, #10925 `a8bb3822cf2`).
+
+**Format actually in play: `.fpc`, not `.spab`.** The Stage 3 cache dir
+(`.simple/storage/build/bootstrap/stage3/x86_64-pc-windows-msvc/stage3-native-cache/default/frontend`)
+holds 1613 `*.fpc` and zero `*.spab`. So the hit is `frontend.spl:156-169`
+(`frontend_parse_cache_load` -> `build_module_from_flat_pool_blob`) ->
+`module_assembly.spl:1739` `_build_module_from_cache_v1` with `packed = nil` ->
+`flat_pools_restore_all` (`module_assembly.spl:1539`, `FlatPoolReader.new_canonical`).
+
+**Route: scoped.** Native-build sets `cli_mode_text = "aot"` (`bootstrap_main.spl:802`), so both the
+observation and plain routes reach `parse_full_frontend_selected_v1`
+(`driver_source_parse_selected.spl:226`), which wraps the hit in a per-file transient scope and
+promotes `ParserModule` + `driver_promote_retained_frontend_owners_v1` before scope end (`:245-273`).
+
+**Crash window (narrowed).** In the warm run the last line is `phase2:parse:file:done` for file 4
+(`driver_core_types.spl`, `driver_source_parse_retained.spl:254`), and there is no `[build] done=4` line
+(`:302`). Files 1-3 printed both lines. So the AV is AFTER the 4th hit returned and its scope ended,
+inside `:255-304`: `par_had_error_get()`, the bucket probe, and `ParsedEntryModuleBox.new(entry_module)` plus
+push (`:297-298`). This assumes `[BOOTSTRAP-PHASE]` and `[build]` flush the same way, which `done=1..3`
+supports. Not a decode-arithmetic fault: the decode finished and returned a module.
+
+**Known-family audit: no match. Next Phase 2 (a8bb3822cf2) is NOT predicted to clear this AV.**
+- `byte_at(..).to_i64()/to_int()` (#10920): zero occurrences in `10.frontend/{core,_FlatAstBridge,frontend*.spl}`.
+  The integer decode is `flat_pool_parse_i64` -> `raw.to_i64()` on a whole line (`flat_pool_codec.spl:516`),
+  which is not the byte_at shape.
+- untyped optional-bool join / `if val b = dv` (#10925): `FlatPoolReader.decode_bool` is `-> bool?` (typed)
+  and has no caller on the `.fpc` path. The path's `if val` sites (`frontend.spl:150` spab, `module_assembly.spl`
+  `if val view = packed`) bind struct optionals that are nil here, and both ran correctly for hits 1-3.
+- `Record?` local reassigned to None (be3ddb1579b): none in the decode path (`var blob_usable = false`,
+  `var reader: FlatPoolReader = ...` are non-optional).
+- Windows path: `.fpc` path is `dir + "/" + key + ".fpc"` (`frontend_parse_cache.spl:150`), key is xxh3 hex. No
+  `dirname`/backslash split on the read path.
+
+**Remaining hypotheses (ranked; none confirmed):**
+1. *Ownership across scope end, delayed aliasing.* A hit REPLACES ~92 pool globals with arrays born in the
+   transient scope (non-`_into` decoders). Most are reassigned by the next reset (`types.spl:1900-1922`,
+   `decl_nodes.spl:1690`, `lock_level_metadata_reset`), so their dead headers are dropped unread, and
+   that matches the miss path. The one replaced owner whose reset writes IN PLACE is
+   `par_state.par_text_slot` (restored by `flat_pool_dec_text(r)` at `parser.spl:1700`; reset by
+   `par_text_slot[0] = ""` at `parser.spl:433-434`). Its three siblings use `_into`. It IS listed in
+   `parser_promote_transient_owners` (`parser.spl:233`), which runs when `parser_entered` is true. Hits
+   call `parser_init_with_path`, so it should be covered. That makes it a weak candidate, and it becomes a
+   strong one only if `parser_initialization_generation_v1()` does not advance on the hit path.
+   Discriminator: `SIMPLE_INTERP_TRACE=1` plus an `[owner-promote]` eprint (`driver_source_parse_support.spl:356`) on the warm run.
+2. *Box copy walks an unpromoted inner object.* `ParsedEntryModuleBox.new(entry_module)` (`:297`) copies the
+   restored `ParserModule`; any inner heap object built by `flat_ast_to_module` from a scope-born text or
+   array not reached by `rt_transient_heap_promote(m)` would fault here. That only happens on hits, because
+   restored pool texts are slices of the in-scope `blob.split("\n")`, whereas a real parse's texts come from
+   the lexer source.
+3. `par_state.par_imported_type_names` is replaced by both paths and is absent from
+   `parser_promote_transient_owners`. Because the miss path has the same gap, it does not explain a warm-only crash.
+
+**Guard finding (true regardless of root cause).** `scripts/check/check-flat-ast-codec-complete.shs` is RED
+on release/1.0.0: `FAIL - 210 pool(s) checked, 5 not round-tripped`. Three are false positives because
+the restore goes through `expr_extra_load` / `expr_s_val_load` / `expr_i_val_load` (`_AstExpr/nodes.spl:1710-1719`).
+`par_error_records` is excluded by design. `named_type_modules` (`types.spl:801`) is genuinely not encoded,
+so a hit leaves it as the previous module's state (wrong-name risk, not an AV). Separately, the in-place
+detector (`:174`) matches only `.clear()`, so index-write resets such as `par_text_slot[0] = ...` are a blind spot.
+
+**Next step (unchanged in substance):** capture a minidump of the warm shard-0 crash (`claimed=0` comes in
+~1 s, so it is cheap) and run `cdb -z <dmp> -c ".ecxr; k; q"`. Also re-run a sharded Stage 3 with the
+frontend cache ON using the a8bb3822cf2 Phase 2, to confirm the prediction above. Keep
+`SIMPLE_FRONTEND_CACHE=0` until then. Status stays OPEN.
