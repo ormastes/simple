@@ -156,3 +156,20 @@ detector (`:174`) matches only `.clear()`, so index-write resets such as `par_te
 ~1 s, so it is cheap) and run `cdb -z <dmp> -c ".ecxr; k; q"`. Also re-run a sharded Stage 3 with the
 frontend cache ON using the a8bb3822cf2 Phase 2, to confirm the prediction above. Keep
 `SIMPLE_FRONTEND_CACHE=0` until then. Status stays OPEN.
+
+### `named_type_modules` not encoded: checked, does NOT explain the AV (2026-11-23)
+- The omission is deliberate. The restore sets `named_type_modules = []` (`types.spl:2211`), a valid fresh
+  empty array, not a default-initialized or untagged handle. Header comment `types.spl:798-800`:
+  "`named_type_module_at` tolerates a shorter array after a restore".
+- It is a module-private global (`types.spl:801`), not a `ParserModule` field. `ParsedEntryModuleBox.new`,
+  surface_build and HIR never read it. Its consumers are all in `types.spl`, and every one is length-safe:
+  - `named_type_module_at` (`:807-810`) checks the length and returns `""`.
+  - `named_type_register` pads with `push("")` before any index write (`:823-825`, `:833-835`).
+  - `named_type_find` (`:873`) reads only through `named_type_module_at`.
+- Its effect is semantic only: after a hit, `named_type_find` precedence falls back to "first
+  registration" for that module's types. It cannot read out of bounds or dereference nil.
+- Ownership is symmetric too. The `[]` is born in the per-file scope on both hit and miss, because the
+  per-parse reset at `:1901` also reassigns it in scope, and it is not in `type_pools_promote_hir_owners`
+  on either path.
+- So this is a guard false positive in the same class as the `_load` wrappers: an intentionally
+  non-round-tripped, length-tolerant pool. It is not the AV.
