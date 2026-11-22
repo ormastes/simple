@@ -6,7 +6,8 @@
 # raw-return summaries itself and feeds them to check_bound_late_casts_cross.
 # One memo is shared across the whole project: each module's exported summary
 # is computed once, no matter how many importers need it. Import cycles
-# terminate (a module on the current DFS path contributes no summary) and an
+# terminate (a module on the current DFS path contributes no summary; a summary
+# computed under such an exclusion is path-dependent and is never memoized) and an
 # import that is not in the inventory contributes none.
 
 use compiler.semantics.lint.bound_late_cast.{BoundModuleSummary, bound_raw_return_summary_cross, check_bound_late_casts_cross}
@@ -14,6 +15,7 @@ use compiler.semantics.lint.bound_late_cast.{BoundModuleSummary, bound_raw_retur
 struct BoundDriverMemoV1:
     ids: [text]
     raws: [[text]]
+    cuts: [text]
 
 # One finding with the module id that owns it.
 pub struct BoundDriverFindingV1:
@@ -22,6 +24,9 @@ pub struct BoundDriverFindingV1:
     line_num: i64
     message: text
 
+# Only the `use m.{a, b}` form is an edge: the lint binds imported raw names
+# from that form alone (_blc_imported_raw), so plain `use m`, `use m.*` and
+# `use m (a, b)` contribute no summary and are not followed.
 fn _bds_use_modules(source: text) -> [text]:
     var mods: [text] = []
     for raw in source.split("\n"):
@@ -52,7 +57,10 @@ pub fn driver_bound_import_graph_v1(inventory: Dict<text, text>) -> Dict<text, [
 fn _bds_deps_of(inventory: Dict<text, text>, id: text, visiting: [text], memo: BoundDriverMemoV1) -> [BoundModuleSummary]:
     var out: [BoundModuleSummary] = []
     for m in _bds_use_modules(inventory[id]):
-        if not inventory.contains_key(m) or visiting.contains(m):
+        if not inventory.contains_key(m):
+            continue
+        if visiting.contains(m):
+            memo.cuts.push(m)
             continue
         val raw = _bds_raw_of(inventory, m, visiting, memo)
         if raw.len() > 0:
@@ -65,12 +73,14 @@ fn _bds_raw_of(inventory: Dict<text, text>, id: text, visiting: [text], memo: Bo
         if memo.ids[i] == id:
             return memo.raws[i]
         i = i + 1
+    val cuts_before = memo.cuts.len()
     var path = [v for v in visiting]
     path.push(id)
     val deps = _bds_deps_of(inventory, id, path, memo)
     val raw = bound_raw_return_summary_cross(inventory[id], id, deps)
-    memo.ids.push(id)
-    memo.raws.push(raw)
+    if memo.cuts.len() == cuts_before:
+        memo.ids.push(id)
+        memo.raws.push(raw)
     raw
 
 # Summaries of the modules `id` imports, built from the inventory's import
@@ -79,14 +89,14 @@ fn _bds_raw_of(inventory: Dict<text, text>, id: text, visiting: [text], memo: Bo
 pub fn driver_bound_summaries_v1(inventory: Dict<text, text>, id: text) -> [BoundModuleSummary]:
     if not inventory.contains_key(id):
         return []
-    val memo = BoundDriverMemoV1(ids: [], raws: [])
+    val memo = BoundDriverMemoV1(ids: [], raws: [], cuts: [])
     _bds_deps_of(inventory, id, [id], memo)
 
 # SPL-BOUND findings for every inventory module with driver-built summaries.
 # @allow(primitive_api) module ids are the inventory's text keys
 pub fn driver_bound_findings_v1(inventory: Dict<text, text>) -> [BoundDriverFindingV1]:
     var out: [BoundDriverFindingV1] = []
-    val memo = BoundDriverMemoV1(ids: [], raws: [])
+    val memo = BoundDriverMemoV1(ids: [], raws: [], cuts: [])
     for id in inventory.keys():
         val deps = _bds_deps_of(inventory, id, [id], memo)
         for f in check_bound_late_casts_cross(inventory[id], id, deps):

@@ -63,3 +63,21 @@ describe "driver-built SPL-BOUND import graph":
         step("Cycle and dangling modules yield no summaries")
         expect(driver_bound_summaries_v1(inventory(), "cyc_a").len()).to_equal(0)
         expect(driver_bound_summaries_v1(inventory(), "dangling").len()).to_equal(0)
+
+    it "does not reuse a summary truncated by a cycle exclusion":
+        # @req: REQ-DIAG-POLICY-001
+        step("Each ring member re-exports the other's raw fn; both clients must report")
+        val ext = "extern fn c_read() -> i32\n\n"
+        val unit_decl = "\n\nunit DistanceKm: i32 as km\n\nfn get_distance() -> DistanceKm:\n    return DistanceKm("
+        var d: Dict<text, text> = {}
+        d["ring_a"] = "use ring_b.{{b_raw}}\n" + ext + "pub fn a_raw() -> i32:\n    val raw = c_read()\n    return raw\n\npub fn a_via_b() -> i32:\n    b_raw()\n"
+        d["ring_b"] = "use ring_a.{{a_raw}}\n" + ext + "pub fn b_raw() -> i32:\n    val raw = c_read()\n    return raw\n\npub fn b_via_a() -> i32:\n    a_raw()\n"
+        d["ring_client_a"] = "use ring_a.{{a_via_b}}" + unit_decl + "a_via_b())\n"
+        d["ring_client_b"] = "use ring_b.{{b_via_a}}" + unit_decl + "b_via_a())\n"
+        var hits: [text] = []
+        for f in driver_bound_findings_v1(d):
+            if f.code == "SPL-BOUND-002" and f.module.starts_with("ring_client_"):
+                hits.push(f.module)
+        expect(hits.len()).to_equal(2)
+        expect(hits.contains("ring_client_a")).to_equal(true)
+        expect(hits.contains("ring_client_b")).to_equal(true)
