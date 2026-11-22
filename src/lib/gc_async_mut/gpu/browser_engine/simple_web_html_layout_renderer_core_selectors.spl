@@ -23,9 +23,71 @@ fn unquote_css_attr_value(raw: text) -> text:
             return v.substring(1, v.byte_len() - 1)
     v
 
+# reason: hot-path CSS selector scanner returns byte offset or -1
+# @allow(primitive_api)
+pub fn _first_top_level_colon(sel: text) -> i32:
+    val n = sel.byte_len()
+    var quote = ""
+    var bracket = 0
+    var paren = 0
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: single byte scan of ONE compound selector for top-level pseudo colon
+        val ch = sel.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "[":
+            bracket = bracket + 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket = bracket - 1
+        elif ch == "(":
+            paren = paren + 1
+        elif ch == ")":
+            if paren > 0:
+                paren = paren - 1
+        elif ch == ":" and bracket == 0 and paren == 0:
+            return i
+        i = i + 1
+    0 - 1
+
+# reason: hot-path CSS selector pseudo-element detector returns bool
+# @allow(primitive_api)
+pub fn _has_top_level_double_colon(sel: text) -> bool:
+    val n = sel.byte_len()
+    var quote = ""
+    var bracket = 0
+    var i = 0
+    while i < n:  # cpu-lane-loop-ok: single byte scan of ONE compound selector for unquoted/unbracketed ::
+        val ch = sel.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "[":
+            bracket = bracket + 1
+        elif ch == "]":
+            if bracket > 0:
+                bracket = bracket - 1
+        elif ch == ":" and bracket == 0 and i + 1 < n and sel.substring(i + 1, i + 2) == ":":
+            return true
+        i = i + 1
+    false
+
 fn attr_selector_matches(attrs: text, expr: text) -> bool:
     var raw = expr.trim()
-    if raw.len() == 0:
+    if raw.byte_len() == 0:
         return false
     var case_insensitive = false
     if raw.ends_with(" i") or raw.ends_with(" I"):
@@ -39,18 +101,22 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
     if prefix_op >= 0:
         val name = raw.substring(0, prefix_op).trim()
         val want = unquote_css_attr_value(raw.substring(prefix_op + 2, raw.byte_len()))
+        if want.byte_len() == 0:
+            return false
         val actual = attr_value(attrs, name)
         if case_insensitive:
-            return actual.len() > 0 and actual.lower().starts_with(want.lower())
-        return actual.len() > 0 and actual.starts_with(want)
+            return actual.byte_len() > 0 and actual.lower().starts_with(want.lower())
+        return actual.byte_len() > 0 and actual.starts_with(want)
     val suffix_op = text_index_of(raw, "$=")
     if suffix_op >= 0:
         val name = raw.substring(0, suffix_op).trim()
         val want = unquote_css_attr_value(raw.substring(suffix_op + 2, raw.byte_len()))
+        if want.byte_len() == 0:
+            return false
         val actual = attr_value(attrs, name)
         if case_insensitive:
-            return actual.len() > 0 and actual.lower().ends_with(want.lower())
-        return actual.len() > 0 and actual.ends_with(want)
+            return actual.byte_len() > 0 and actual.lower().ends_with(want.lower())
+        return actual.byte_len() > 0 and actual.ends_with(want)
     # Substring, whitespace-token, and dash-match operators must be
     # inspected before the bare "=" scan below: their marker characters
     # (*, ~, |) sit immediately left of the same "=" the exact branch
@@ -60,16 +126,18 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
     if substr_op >= 0:
         val name = raw.substring(0, substr_op).trim()
         val want = unquote_css_attr_value(raw.substring(substr_op + 2, raw.byte_len()))
+        if want.byte_len() == 0:
+            return false
         val actual = attr_value(attrs, name)
         if case_insensitive:
-            return actual.len() > 0 and actual.lower().contains(want.lower())
-        return actual.len() > 0 and actual.contains(want)
+            return actual.byte_len() > 0 and actual.lower().contains(want.lower())
+        return actual.byte_len() > 0 and actual.contains(want)
     val token_op = text_index_of(raw, "~=")
     if token_op >= 0:
         val name = raw.substring(0, token_op).trim()
         val want = unquote_css_attr_value(raw.substring(token_op + 2, raw.byte_len()))
         # CSS Selectors 4: an empty ~= operand can never match.
-        if want.len() == 0:
+        if want.byte_len() == 0:
             return false
         val actual = attr_value(attrs, name)
         val words = split_class_words_trimmed(actual)
@@ -298,11 +366,11 @@ fn simple_match(
     # Pseudo-element selectors (::before, ::after, ::selection, ...) target
     # boxes this engine does not render; they must never match the host
     # element (previously "body::before" applied its decls to <body> itself).
-    if text_index_of(sel, "::") >= 0:
+    if _has_top_level_double_colon(sel):
         return false
     # Split off the base (before the first colon at depth 0)
     var base = sel
-    val colon = text_index_of(base, ":")
+    val colon = _first_top_level_colon(base)
     if colon >= 0:
         base = base.substring(0, colon)
     val attr_start = text_index_of(base, "[")
@@ -913,7 +981,7 @@ fn _list_ctx_matches(negate: bool, opts: [text], nodes: [HNode], ctx: SelectorCo
 # Full-context pseudo-class check. Called after simple_match() passes the base check.
 # Returns true if all pseudo-class conditions on sel are satisfied given node context.
 fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32) -> bool:
-    val colon = text_index_of(sel, ":")
+    val colon = _first_top_level_colon(sel)
     if colon < 0:
         return true
     var pseudo_pos = colon
@@ -1193,19 +1261,25 @@ fn _attr_op_eval_value(
     if op == ATTR_OP_PRESENT:
         return present
     if op == ATTR_OP_PREFIX:
+        if want.byte_len() == 0:
+            return false
         if ci:
-            return actual.len() > 0 and actual.lower().starts_with(want_lower)
-        return actual.len() > 0 and actual.starts_with(want)
+            return actual.byte_len() > 0 and actual.lower().starts_with(want_lower)
+        return actual.byte_len() > 0 and actual.starts_with(want)
     if op == ATTR_OP_SUFFIX:
+        if want.byte_len() == 0:
+            return false
         if ci:
-            return actual.len() > 0 and actual.lower().ends_with(want_lower)
-        return actual.len() > 0 and actual.ends_with(want)
+            return actual.byte_len() > 0 and actual.lower().ends_with(want_lower)
+        return actual.byte_len() > 0 and actual.ends_with(want)
     if op == ATTR_OP_SUBSTR:
+        if want.byte_len() == 0:
+            return false
         if ci:
-            return actual.len() > 0 and actual.lower().contains(want_lower)
-        return actual.len() > 0 and actual.contains(want)
+            return actual.byte_len() > 0 and actual.lower().contains(want_lower)
+        return actual.byte_len() > 0 and actual.contains(want)
     if op == ATTR_OP_TOKEN:
-        if want.len() == 0:
+        if want.byte_len() == 0:
             return false
         val words = split_class_words_trimmed(actual)
         var wi = 0
@@ -1288,23 +1362,29 @@ pub fn _is_interaction_state_pseudo_node(pseudo: text, nd: HNode) -> bool:
 
 fn parsed_attr_matches(attrs: text, t: ParsedAttr) -> bool:
     if t.op == ATTR_OP_PREFIX:
+        if t.want.byte_len() == 0:
+            return false
         val actual = attr_value(attrs, t.name)
         if t.ci:
-            return actual.len() > 0 and actual.lower().starts_with(t.want_lower)
-        return actual.len() > 0 and actual.starts_with(t.want)
+            return actual.byte_len() > 0 and actual.lower().starts_with(t.want_lower)
+        return actual.byte_len() > 0 and actual.starts_with(t.want)
     if t.op == ATTR_OP_SUFFIX:
+        if t.want.byte_len() == 0:
+            return false
         val actual = attr_value(attrs, t.name)
         if t.ci:
-            return actual.len() > 0 and actual.lower().ends_with(t.want_lower)
-        return actual.len() > 0 and actual.ends_with(t.want)
+            return actual.byte_len() > 0 and actual.lower().ends_with(t.want_lower)
+        return actual.byte_len() > 0 and actual.ends_with(t.want)
     if t.op == ATTR_OP_SUBSTR:
+        if t.want.byte_len() == 0:
+            return false
         val actual = attr_value(attrs, t.name)
         if t.ci:
-            return actual.len() > 0 and actual.lower().contains(t.want_lower)
-        return actual.len() > 0 and actual.contains(t.want)
+            return actual.byte_len() > 0 and actual.lower().contains(t.want_lower)
+        return actual.byte_len() > 0 and actual.contains(t.want)
     if t.op == ATTR_OP_TOKEN:
         # CSS Selectors 4: an empty ~= operand can never match.
-        if t.want.len() == 0:
+        if t.want.byte_len() == 0:
             return false
         val words = split_class_words_trimmed(attr_value(attrs, t.name))
         var wi = 0
@@ -1463,10 +1543,10 @@ fn parse_selector_part(part: text) -> ParsedSel:
             pseudo_nth_a: [], pseudo_nth_b: [], src: sel
         )
     # Pseudo-element selectors never match the host element.
-    if text_index_of(sel, "::") >= 0:
+    if _has_top_level_double_colon(sel):
         return _dead_parsed_sel()
     var base = sel
-    val colon = text_index_of(base, ":")
+    val colon = _first_top_level_colon(base)
     if colon >= 0:
         base = base.substring(0, colon)
     var attr_tests: [ParsedAttr] = []
@@ -2032,43 +2112,63 @@ fn split_selector_groups(sel: text) -> [text]:
     var depth = 0
     var i = 0
     val sel_len = sel.byte_len()
+    var quote = ""
     var group_count = 0
     var group_start = 0
     while i < sel_len:  # cpu-lane-loop-ok: counting pass over ONE selector's characters to size the comma-group array; bound is that selector's length
         val ch = sel.substring(i, i + 1)
-        if ch == "(":
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "(" or ch == "[":
             depth = depth + 1
             if depth > 32:
                 return []
-        elif ch == ")":
+        elif ch == ")" or ch == "]":
             depth = depth - 1
             if depth < 0:
                 return []
         elif ch == "," and depth == 0:
-            if sel.substring(group_start, i).trim().len() == 0:
+            if sel.substring(group_start, i).trim().byte_len() == 0:
                 return []
             group_count = group_count + 1
             if group_count >= CSS_SELECTOR_GROUP_CAP:
                 return []
             group_start = i + 1
         i = i + 1
-    if depth != 0:
+    if depth != 0 or quote != "":
         return []
-    if sel.substring(group_start, sel_len).trim().len() == 0:
+    if sel.substring(group_start, sel_len).trim().byte_len() == 0:
         return []
     group_count = group_count + 1
     if group_count == 0 or group_count > CSS_SELECTOR_GROUP_CAP:
         return []
     var groups: [text] = [""; group_count]
     depth = 0
+    quote = ""
     i = 0
     var group_i = 0
     group_start = 0
     while i < sel_len and group_i < group_count:  # cpu-lane-loop-ok: emit pass over the same selector, filling the <=CSS_SELECTOR_GROUP_CAP group array
         val ch = sel.substring(i, i + 1)
-        if ch == "(":
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "(" or ch == "[":
             depth = depth + 1
-        elif ch == ")":
+        elif ch == ")" or ch == "]":
             if depth > 0:
                 depth = depth - 1
         elif ch == "," and depth == 0:
@@ -2078,7 +2178,7 @@ fn split_selector_groups(sel: text) -> [text]:
         i = i + 1
     if group_i < groups.len():
         val tail = sel.substring(group_start, sel_len).trim()
-        if tail.len() > 0:
+        if tail.byte_len() > 0:
             groups[group_i] = tail
     groups
 

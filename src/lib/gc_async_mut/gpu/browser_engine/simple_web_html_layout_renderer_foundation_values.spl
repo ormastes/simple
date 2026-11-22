@@ -1219,32 +1219,77 @@ fn parse_clip_rect_value(raw: text, target: i32) -> i32:
 
 fn parse_opacity_pct(raw: text) -> i32:
     val t = raw.trim()
-    if t.len() == 0:
+    val n = t.byte_len()
+    if n == 0:
         return 100
-    if t == "0":
+    var is_pct = false
+    var end_idx = n
+    if t.ends_with("%"):
+        is_pct = true
+        end_idx = n - 1
+    var start_idx = 0
+    var neg = false
+    if start_idx < end_idx:
+        val sign_ch = t.substring(start_idx, start_idx + 1)
+        if sign_ch == "-":
+            neg = true
+            start_idx = start_idx + 1
+        elif sign_ch == "+":
+            start_idx = start_idx + 1
+    if start_idx >= end_idx:
+        return 100
+    if neg:
         return 0
-    if t == "1":
-        return 100
-    val dot = text_index_of(t, ".")
+    val body = t.substring(start_idx, end_idx)
+    val body_len = body.byte_len()
+    val dot = text_index_of(body, ".")
+    if is_pct:
+        if dot < 0:
+            val pct = parse_int(body)
+            if pct < 0:
+                return 0
+            if pct > 100:
+                return 100
+            return pct
+        val whole = if dot == 0: 0 else: parse_int(body.substring(0, dot))
+        if whole >= 100:
+            return 100
+        var frac = 0
+        var scale = 1
+        var k = dot + 1
+        while k < body_len and scale < 100:
+            val d = body.substring(k, k + 1)
+            if d < "0" or d > "9":
+                break
+            frac = frac * 10 + hex_val(d)
+            scale = scale * 10
+            k = k + 1
+        val rounded = whole + (frac + scale / 2) / scale
+        if rounded > 100:
+            return 100
+        return rounded
     if dot >= 0:
+        val whole = if dot == 0: 0 else: parse_int(body.substring(0, dot))
+        if whole >= 1:
+            return 100
         var frac = 0
         var scale = 1
         var i = dot + 1
-        val t_len = t.byte_len()
-        while i < t_len and scale < 100:
-            val d = t.substring(i, i + 1)
+        while i < body_len and scale < 100:
+            val d = body.substring(i, i + 1)
             if d < "0" or d > "9":
                 break
             frac = frac * 10 + hex_val(d)
             scale = scale * 10
             i = i + 1
-        return (frac * 100 + scale / 2) / scale
-    val pct = parse_int(t)
-    if pct < 0:
+        val pct = (frac * 100 + scale / 2) / scale
+        if pct > 100:
+            return 100
+        return pct
+    val whole = parse_int(body)
+    if whole <= 0:
         return 0
-    if pct > 100:
-        return 100
-    pct
+    100
 
 fn parse_filter_opacity_pct(raw: text) -> i32:
     val t = raw.trim().lower()
@@ -1355,13 +1400,28 @@ fn css_timing_shorthand_tokens(raw: text) -> [text]:
     tokens
 
 fn parse_transition_nth_time_ms(raw: text, target: i32) -> i32:
-    var seen = 0
+    var has_duration = false
+    var duration_ms = 0
+    var has_delay = false
+    var delay_ms = 0
     for part in css_timing_shorthand_tokens(raw):
         val token = part.trim()
         if transition_token_is_time(token):
-            if seen == target:
-                return parse_css_time_ms(token)
-            seen = seen + 1
+            val ms = parse_css_time_ms(token)
+            if token.starts_with("-"):
+                if not has_delay:
+                    delay_ms = ms
+                    has_delay = true
+            elif not has_duration:
+                duration_ms = ms
+                has_duration = true
+            elif not has_delay:
+                delay_ms = ms
+                has_delay = true
+    if target == 0:
+        return duration_ms
+    if target == 1:
+        return delay_ms
     0
 
 val CSS_ANIMATION_MAX_FINITE_ITERATIONS: f64 = 9223372036854774784.0

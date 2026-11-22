@@ -11,10 +11,7 @@
 #
 # Validity oracle: Chrome 159.0.8154.6 headless shell,
 # `d.style.setProperty(prop, value); d.style.getPropertyValue(prop) !== ""`
-# for every validator row below (run 2026-11-15). Rows where this renderer
-# disagrees with Chrome are filed, not asserted:
-# doc/08_tracking/bug/web_opacity_out_of_range_and_one_point_zero_2026-11-15.md,
-# doc/08_tracking/bug/web_animation_shorthand_negative_lone_time_rejected_2026-11-15.md.
+# for every validator row below (run 2026-11-15).
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
@@ -23,6 +20,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
     transition_shorthand_is_valid, transition_declaration_value_is_valid,
     parse_animation_name, parse_animation_iteration_count, parse_animation_direction,
     parse_animation_fill_mode, parse_animation_play_state, css_timing_shorthand_tokens
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{
+    apply_decls, renderer_default_style
 }
 
 describe "Percentages in thousandths":
@@ -53,9 +53,18 @@ describe "Opacity in percent":
         expect(parse_opacity_pct(".25")).to_equal(25)
         expect(parse_opacity_pct(" 0.75 ")).to_equal(75)
 
-    it "reads a percentage and clamps it to 100":
+    it "reads a percentage and clamps out-of-range numbers and percentages to 0..100":
         expect(parse_opacity_pct("50%")).to_equal(50)
         expect(parse_opacity_pct("150%")).to_equal(100)
+        expect(parse_opacity_pct("-20%")).to_equal(0)
+        expect(parse_opacity_pct("1.0")).to_equal(100)
+        expect(parse_opacity_pct("1.5")).to_equal(100)
+        expect(parse_opacity_pct("2")).to_equal(100)
+        expect(parse_opacity_pct("-1")).to_equal(0)
+        expect(parse_opacity_pct("-0.5")).to_equal(0)
+        expect(apply_decls(renderer_default_style(), "opacity:1.0", 16).opacity_pct).to_equal(100)
+        expect(apply_decls(renderer_default_style(), "opacity:-0.5", 16).opacity_pct).to_equal(0)
+        expect(apply_decls(renderer_default_style(), "opacity:1.5;letter-spacing:0px", 16).opacity_pct).to_equal(100)
 
 describe "Gradient colour stops":
 
@@ -104,14 +113,20 @@ describe "Animation shorthand validity":
         it "accepts one of every component":
             expect(animation_shorthand_is_valid("spin 1s 2s ease-in 3 alternate both paused")).to_equal(true)
 
-        it "accepts a negative delay after the duration and a fractional count":
+        it "accepts a negative delay after the duration, a lone negative delay, and a fractional count":
             expect(animation_shorthand_is_valid("spin 1s -1s")).to_equal(true)
+            expect(animation_shorthand_is_valid("spin -1s")).to_equal(true)
             expect(animation_shorthand_is_valid("spin 2.5")).to_equal(true)
+            val st = apply_decls(renderer_default_style(), "animation:spin -1s", 16)
+            expect(st.animation_name).to_equal("spin")
+            expect(st.animation_duration_ms).to_equal(0)
+            expect(st.animation_delay_ms).to_equal(-1000)
 
     context "invalid shorthands (Chrome rejects)":
 
-        it "rejects a third time":
+        it "rejects a third time or two negative times":
             expect(animation_shorthand_is_valid("spin 1s 2s 3s")).to_equal(false)
+            expect(animation_shorthand_is_valid("spin -1s -2s")).to_equal(false)
 
         it "rejects a repeated component":
             expect(animation_shorthand_is_valid("spin ease linear")).to_equal(false)
@@ -161,8 +176,9 @@ describe "Transition validity":
     it "accepts property, duration, timing and delay":
         expect(transition_shorthand_is_valid("opacity 1s ease-in 0.5s")).to_equal(true)
 
-    it "rejects a third time, two timings, a bare number and two properties":
+    it "rejects a third time, a lone negative time, two timings, a bare number and two properties":
         expect(transition_shorthand_is_valid("opacity 1s 2s 3s")).to_equal(false)
+        expect(transition_shorthand_is_valid("opacity -1s")).to_equal(false)
         expect(transition_shorthand_is_valid("opacity ease linear")).to_equal(false)
         expect(transition_shorthand_is_valid("opacity 5")).to_equal(false)
         expect(transition_shorthand_is_valid("opacity width 1s")).to_equal(false)

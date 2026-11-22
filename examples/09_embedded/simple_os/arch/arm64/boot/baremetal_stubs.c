@@ -808,21 +808,58 @@ RuntimeValue rt_store_barrier(void) {
  * baremetal RuntimeString/RuntimeArray model below.
  * =================================================================== */
 
-/* Forward decls for array helpers defined later in this file. */
+/* Forward decls for array and wide-int helpers defined later in this file. */
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val);
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
 RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
+RuntimeValue rt_value_u64(RuntimeValue bits);
+RuntimeValue rt_value_as_u64(RuntimeValue value);
+RuntimeValue rt_value_unbox_int(RuntimeValue value);
 
-/* --- float bit reinterpret (from x86_64 primitives.c) --- */
+/* --- float bit reinterpret & boxing (masked TAG_FLOAT = (bits & ~7ULL) | 2,
+ * matching LLVM codegen box_float and value_runtime_owner.c any_box_f64) --- */
+RuntimeValue rt_value_float(double value)
+{
+    uint64_t bits;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return (RuntimeValue)((bits & ~TAG_MASK) | TAG_FLOAT);
+}
+double rt_value_as_float(RuntimeValue value)
+{
+    if (IS_FLOAT(value)) {
+        uint64_t bits = (uint64_t)value & ~TAG_MASK;
+        double result;
+        __builtin_memcpy(&result, &bits, sizeof(result));
+        return result;
+    }
+    return (double)(int64_t)rt_value_unbox_int(value);
+}
 RuntimeValue f32_from_bits(RuntimeValue bits)
 {
-    uint32_t fbits = (uint32_t)(DECODE_INT(bits) & 0xFFFFFFFF);
-    return (RuntimeValue)(((uint64_t)fbits << 3) | TAG_FLOAT);
+    uint32_t fbits = (uint32_t)(rt_value_as_u64(bits) & 0xFFFFFFFFULL);
+    float fval;
+    __builtin_memcpy(&fval, &fbits, sizeof(fval));
+    return rt_value_float((double)fval);
+}
+RuntimeValue f32_to_bits(RuntimeValue val)
+{
+    double dval = rt_value_as_float(val);
+    float fval = (float)dval;
+    uint32_t fbits;
+    __builtin_memcpy(&fbits, &fval, sizeof(fbits));
+    return ENCODE_INT((int64_t)fbits);
 }
 RuntimeValue f64_from_bits(RuntimeValue bits)
 {
-    uint64_t fbits = (uint64_t)DECODE_INT(bits);
-    return (RuntimeValue)((fbits << 3) | TAG_FLOAT);
+    uint64_t fbits = (uint64_t)rt_value_as_u64(bits);
+    return (RuntimeValue)((fbits & ~TAG_MASK) | TAG_FLOAT);
+}
+RuntimeValue f64_to_bits(RuntimeValue val)
+{
+    uint64_t fbits = IS_FLOAT(val)
+        ? ((uint64_t)val & ~TAG_MASK)
+        : (uint64_t)rt_value_as_u64(val);
+    return rt_value_u64((RuntimeValue)fbits);
 }
 
 /* --- any-add (from x86_64 baremetal_stubs.c) --- */
@@ -836,6 +873,9 @@ int64_t rt_any_add(int64_t left, int64_t right)
      * explicit `text` annotation). Mirror src/runtime/runtime_native.c and
      * src/runtime/simple_core/core_string.spl: dispatch to string
      * concatenation whenever either operand is a heap value. */
+    if (IS_FLOAT(left) || IS_FLOAT(right)) {
+        return (int64_t)rt_value_float(rt_value_as_float(left) + rt_value_as_float(right));
+    }
     if (IS_HEAP(left) || IS_HEAP(right)) {
         return rt_string_concat(left, right);
     }
@@ -6537,7 +6577,16 @@ RuntimeValue rt_slice(RuntimeValue value, RuntimeValue start, RuntimeValue end)
     return NIL_VALUE;
 }
 
-RuntimeValue spl_f64_to_bits(RuntimeValue value) { return value; }
+int64_t spl_f64_to_bits(double value)
+{
+    int64_t bits;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+int64_t rt_f64_to_bits(double value)
+{
+    return spl_f64_to_bits(value);
+}
 
 RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue dir_raw)
 {

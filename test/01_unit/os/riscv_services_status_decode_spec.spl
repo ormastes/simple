@@ -1,0 +1,52 @@
+# @cover src/os/kernel/boot/riscv_services.spl 80%
+"""
+## Purpose and audience
+For SimpleOS RISC-V bring-up engineers: verifies `decode_riscv_status` sign-extends
+negative 32-bit `i32` status values widened into unsigned/64-bit ABI slots on
+riscv32 (as well as 61-bit wrapped tagged ints), and pins the PCI `count` `0..256`
+bounds clamp, `boot_tcp_probe_close` failure check, and `_decode_riscv_status`
+calls on TX/RX/storage probes in `src/os/kernel/boot/riscv_services.spl`.
+## Operator workflow
+`bin/simple test test/01_unit/os/riscv_services_status_decode_spec.spl`
+## Compatibility and limitations
+Runs purely on host without QEMU; imports `decode_riscv_status` directly.
+"""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+use os.kernel.boot.riscv_services.{decode_riscv_status}
+
+fn services_src() -> text:
+    rt_file_read_text("src/os/kernel/boot/riscv_services.spl") ?? ""
+
+describe "RISC-V boot status decoding and probe guards":
+    it "sign-extends negative i32 status values widened into 64-bit ABI slots":
+        expect(decode_riscv_status(4294967295)).to_equal(-1)
+        expect(decode_riscv_status(0xFFFFFFED)).to_equal(-19)
+        expect(decode_riscv_status(0x80000000)).to_equal(-2147483648)
+
+    it "preserves non-negative status codes, signed negative i64s, and 61-bit wrapped negatives":
+        expect(decode_riscv_status(0)).to_equal(0)
+        expect(decode_riscv_status(1)).to_equal(1)
+        expect(decode_riscv_status(0x7FFFFFFF)).to_equal(2147483647)
+        expect(decode_riscv_status(-1)).to_equal(-1)
+        expect(decode_riscv_status((1i64 << 61) - 1)).to_equal(-1)
+
+    it "clamps PCI device count to 0..256 and checks boot_tcp_probe_close":
+        val src = services_src()
+        expect(src).to_contain("if count < 0 or count > 256:")
+        expect(src).to_contain("count = 0")
+        expect(src).to_contain("if not boot_tcp_probe_close(tcp_probe_fd):")
+        expect(src).to_contain("[net-riscv] TCP close probe failed")
+
+    it "decodes TX, RX, and storage probe statuses without resurrecting _sffi_ wrappers":
+        val src = services_src()
+        expect(src).to_contain("val tx_rc = rt_net_tx_test()")
+        expect(src).to_contain("val tx_status = _decode_riscv_status(tx_rc)")
+        expect(src).to_contain("val rx_rc = rt_net_rx_ready()")
+        expect(src).to_contain("val rx_status = _decode_riscv_status(rx_rc)")
+        expect(src).to_contain("val storage_rc = _decode_riscv_status(rt_storage_init())")
+        expect(src).to_contain("val read_rc = _decode_riscv_status(rt_storage_read_probe())")
+        expect(src).to_contain("val nvfs_rc = _decode_riscv_status(rt_storage_nvfs_ready())")
+        expect(src).to_contain("val arena_rc = _decode_riscv_status(rt_storage_nvfs_arena_ready())")
+        expect(src.index_of("_sffi_")).to_equal(-1)
