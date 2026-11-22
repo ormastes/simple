@@ -1,0 +1,101 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: `.to_int()` on an erased receiver is a runtime-dispatched conversion, not a text parse
+
+Bug: doc/08_tracking/bug/erased_receiver_to_int_lowered_as_text_parse_2026-11-23.md.
+An UNTYPED receiver whose method name is in the primitive text table was admitted
+to the erased-receiver text arm. `to_i64` already escaped to the tagged conversion
+owner `rt_any_to_int` (parses text, unboxes numbers), but its alias `to_int` did
+not, so `xs[i].to_int()` on an erased index read boxed the element and parsed it
+with rt_string_to_int_lenient -- a numeric element became 0. Element types that
+ARE known (`[i64]`, `[u8]`, `Dict<text, i64>`) already propagate and stay numeric;
+those cases are pinned here as regressions. A declared text receiver must still parse.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn callees_of(src: text) -> [text]:
+    val file = "testdata/fixture_erased_to_int.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_erased_to_int", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    callees
+
+fn has_callee(callees: [text], name: text) -> bool:
+    for c in callees:
+        if c == name:
+            return true
+    false
+
+describe "to_int on an erased element read":
+    it "erased index read xs[i].to_int() dispatches at runtime instead of parsing text":
+        step("lower `xs[i].to_int()` where `xs` is an untyped parameter")
+        val callees = callees_of("fn f(xs, i: i64) -> i64:\n    xs[i].to_int()\n")
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(false)
+
+    it "an untyped local bound to an erased index read keeps the runtime dispatch":
+        step("bind `val x = xs[i]` without a type, then call `x.to_int()`")
+        val callees = callees_of("fn f(xs, i: i64) -> i64:\n    val x = xs[i]\n    x.to_int()\n")
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(false)
+
+    it "to_i64 on the same erased read keeps its runtime dispatch":
+        step("lower `xs[i].to_i64()` where `xs` is an untyped parameter")
+        val callees = callees_of("fn f(xs, i: i64) -> i64:\n    xs[i].to_i64()\n")
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(false)
+
+describe "to_int / to_i64 near erased receivers":
+    it "an untyped parameter's to_int dispatches at runtime":
+        step("lower `x.to_int()` on an untyped parameter")
+        val callees = callees_of("fn f(x) -> i64:\n    x.to_int()\n")
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(false)
+
+    it "a typed [i64] element stays a numeric conversion":
+        step("lower `xs[i].to_i64()` and `xs[i].to_int()` on `xs: [i64]`")
+        val a = callees_of("fn f(xs: [i64], i: i64) -> i64:\n    xs[i].to_i64()\n")
+        expect(has_callee(a, "rt_string_to_int_lenient")).to_equal(false)
+        val b = callees_of("fn f(xs: [i64], i: i64) -> i64:\n    xs[i].to_int()\n")
+        expect(has_callee(b, "rt_string_to_int_lenient")).to_equal(false)
+
+    it "a typed [u8] element and a Dict<text, i64> value stay numeric":
+        step("lower `.to_int()` on a `[u8]` element and a dict value")
+        val a = callees_of("fn f(xs: [u8], i: i64) -> i64:\n    xs[i].to_int()\n")
+        expect(has_callee(a, "rt_string_to_int_lenient")).to_equal(false)
+        val b = callees_of("fn f(d: Dict<text, i64>) -> i64:\n    d[\"a\"].to_int()\n")
+        expect(has_callee(b, "rt_string_to_int_lenient")).to_equal(false)
+
+    it "a declared text receiver still parses through the text table":
+        step("control: `s.to_int()` on text must keep rt_string_to_int_lenient")
+        val callees = callees_of("fn f(s: text) -> i64:\n    s.to_int()\n")
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(true)
+
+    it "a typed [text] element still parses through the text table":
+        step("control: `xs[i].to_int()` on `xs: [text]` must keep rt_string_to_int_lenient")
+        val callees = callees_of("fn f(xs: [text], i: i64) -> i64:\n    xs[i].to_int()\n")
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(true)
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(false)
