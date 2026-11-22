@@ -91,3 +91,23 @@ The cap itself was raised with `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=209715
 `stage2-compiler-tests/<platform>/stage2-compiler-tests.env`, so it serializes
 the matrix before both phases. The parallel edge was run as two lanes instead:
 canonical Stage 3 resume + `admit-built-stage2-compiler-tests.shs`.
+
+## 9. Planner build aborts when the per-file pool cannot admit two workers (fixed here)
+
+Since `e9bb5e9` the planner admission build defaults to the per-file pool. On
+the ballooned guest (4.7 GB reported free) it logged `per-file worker pool
+refused (hir_workers=0 mir_workers=0, need >= 2)` and `MIR shard aggregate
+failure`, yet `native-build` exited 0 with no executable, so the producer's
+llc-noop retry never ran and the Stage 2 run aborted with
+`planner-build-produced-no-executable`. Fixed here: that signature retries once
+on the phase route (`SIMPLE_FILE_WORKERS=0`). Still open: `native-build` must not
+exit 0 after a MIR shard aggregate failure that produced no artifact.
+
+## 10. Memory pressure source on this host (not a compiler leak)
+
+With only Stage 2 sanity running, processes held ~7 GB while `\Memory\Cache Bytes`
+was 44.6 GB and the Everything indexer 6.8 GB private. The repo had 343 git
+worktrees (each a ~150k-file checkout) plus one pinned bootstrap snapshot per
+attempt under `build/bootstrap/pinned-src/`; NTFS metadata for that file count
+stays in the active system cache. Pinned snapshots are never collected, so every
+restart adds another 151k files. Mitigation: merged worktrees pruned.
