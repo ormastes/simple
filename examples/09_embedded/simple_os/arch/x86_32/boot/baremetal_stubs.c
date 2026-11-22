@@ -729,6 +729,14 @@ void rt_println_value(RuntimeValue val)
     serial_putchar('\n');
 }
 
+/* i686 twin of the x86_64 serial_println (arch/x86_64/boot/baremetal_stubs.c):
+ * print any value then CRLF; the codegen extern is `serial_println(msg: text)`. */
+RuntimeValue serial_println(RuntimeValue val)
+{
+    rt_println_value(val);
+    return NIL_VALUE;
+}
+
 void rt_print_int(RuntimeValue val)
 {
     serial_put_dec(DECODE_INT(val));

@@ -1,0 +1,66 @@
+# Purpose and audience: executable evidence for the 32-bit kernel link-to-zero lane.
+# @req REQ-SSPEC-OS
+# arm32 / riscv32 / i686 kernels left rt_value_int, rt_value_unbox_int,
+# __divdi3/__moddi3 (riscv32), serial_println (i686) and the arm32 text
+# entries undefined. Behaviour is executed here where it is pure; the link
+# result is proven by scripts/check/check-simpleos-{arm32,riscv32,i686}-kernel-link.shs.
+
+use std.spec
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.common.rt_value_scalar_shims.{rt_value_int, rt_value_unbox_int}
+use os.kernel.arch.riscv32.soft_div64.{rv32_sdivmod64}
+
+val ARCH = "examples/09_embedded/simple_os/arch"
+
+describe "shared rt_value_int / rt_value_unbox_int":
+    it "boxes a raw int as v << 3 and unboxes it back":
+        expect(rt_value_int(5)).to_equal(40)
+        expect(rt_value_unbox_int(40)).to_equal(5)
+        expect(rt_value_unbox_int(rt_value_int(-7))).to_equal(-7)
+        expect(rt_value_unbox_int(rt_value_int(0x1000000001))).to_equal(0x1000000001)
+
+describe "riscv32 soft 64-bit division":
+    it "matches truncating signed division":
+        expect(rv32_sdivmod64(100, 7, 0)).to_equal(14)
+        expect(rv32_sdivmod64(100, 7, 1)).to_equal(2)
+        expect(rv32_sdivmod64(-100, 7, 0)).to_equal(-14)
+        expect(rv32_sdivmod64(-100, 7, 1)).to_equal(-2)
+        expect(rv32_sdivmod64(100, -7, 0)).to_equal(-14)
+        expect(rv32_sdivmod64(100, -7, 1)).to_equal(2)
+        expect(rv32_sdivmod64(-100, -7, 0)).to_equal(14)
+
+    it "handles values wider than 32 bits and division by zero":
+        expect(rv32_sdivmod64(0x7000000000, 0x10, 0)).to_equal(0x700000000)
+        expect(rv32_sdivmod64(0x7000000005, 0x10, 1)).to_equal(5)
+        expect(rv32_sdivmod64(9, 0, 0)).to_equal(0)
+
+describe "link-to-zero wiring":
+    it "keeps every new module alive from its arch entry":
+        val a32 = file_read_text(ARCH + "/arm32/os_entry.spl")
+        expect(a32.contains("use os.kernel.arch.arm32.text_runtime_shims.{}")).to_equal(true)
+        expect(a32.contains("use os.kernel.arch.common.rt_value_scalar_shims.{}")).to_equal(true)
+        val r32 = file_read_text(ARCH + "/riscv32/os_entry.spl")
+        expect(r32.contains("use os.kernel.arch.riscv32.soft_div64.{}")).to_equal(true)
+        expect(r32.contains("use os.kernel.arch.common.rt_value_scalar_shims.{}")).to_equal(true)
+        val x32 = file_read_text(ARCH + "/x86_32/os_entry.spl")
+        expect(x32.contains("use os.kernel.arch.common.rt_value_scalar_shims.{}")).to_equal(true)
+
+    it "exports the arm32 text entries and riscv32 division builtins":
+        val t = file_read_text("src/os/kernel/arch/arm32/text_runtime_shims.spl")
+        expect(t.contains("fn rt_text_eq_any(left: i64, right: i64) -> i64:")).to_equal(true)
+        expect(t.contains("fn rt_slice_text_bytes(value: i64, start: i64, end: i64, step: i64) -> i64:")).to_equal(true)
+        expect(t.contains("fn rt_string_char_count(value: i64) -> i64:")).to_equal(true)
+        expect(t.contains("fn rt_string_parse_int(value: i64) -> i64:")).to_equal(true)
+        expect(t.contains("DATA_OFFSET: i64 = 12")).to_equal(true)
+        val d = file_read_text("src/os/kernel/arch/riscv32/soft_div64.spl")
+        expect(d.contains("fn __divdi3(n: i64, d: i64) -> i64:")).to_equal(true)
+        expect(d.contains("fn __moddi3(n: i64, d: i64) -> i64:")).to_equal(true)
+
+    it "defines serial_println in the i686 boot C":
+        val c = file_read_text(ARCH + "/x86_32/boot/baremetal_stubs.c")
+        expect(c.contains("RuntimeValue serial_println(RuntimeValue val)")).to_equal(true)
+
+    it "builds arm32 value shims on the shared rt_value helpers":
+        val s = file_read_text("src/os/kernel/arch/arm32/runtime_value_shims.spl")
+        expect(s.contains("use os.kernel.arch.common.rt_value.{")).to_equal(true)
+        expect(s.contains("fn _a32_truthy")).to_equal(false)
