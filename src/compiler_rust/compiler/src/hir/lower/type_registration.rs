@@ -648,7 +648,60 @@ pub(crate) enum UnitKind {
     Unknown,
 }
 
+/// A callable as authored type names: `(param name, type name)` in order
+/// (`self` excluded) and the return type name.
+pub(crate) type UnitSig = (Vec<(String, Option<String>)>, Option<String>);
+
+/// Outer unit facts saved while a lambda body is lowered.
+pub(crate) type UnitScope = Option<(
+    std::collections::HashMap<String, Option<String>>,
+    std::collections::HashMap<String, String>,
+    std::collections::HashMap<String, (Vec<(String, Option<String>)>, UnitKind)>,
+)>;
+
 impl Lowerer {
+    /// Record `key` (`f` or `Type.m`) for SPL-UNIT-002. Two declarations that
+    /// disagree leave an empty signature, so an ambiguous name is never checked.
+    pub(crate) fn register_unit_sig(&mut self, key: String, f: &ast::FunctionDef) {
+        let sig: UnitSig = (
+            f.params
+                .iter()
+                .filter(|p| p.name != "self")
+                .map(|p| (p.name.clone(), p.ty.as_ref().and_then(Self::simple_type_name)))
+                .collect(),
+            f.return_type.as_ref().and_then(Self::simple_type_name),
+        );
+        match self.fn_sig_type_names.get(&key) {
+            Some(old) if *old != sig => {
+                self.fn_sig_type_names.insert(key, (Vec::new(), None));
+            }
+            _ => {
+                self.fn_sig_type_names.insert(key, sig);
+            }
+        }
+    }
+
+    /// Record a struct/class/impl's fields and methods for SPL-UNIT-002.
+    /// `fields` is `None` for an `impl` block (methods only).
+    pub(crate) fn register_unit_shape(
+        &mut self,
+        type_name: &str,
+        fields: Option<&[ast::Field]>,
+        methods: &[ast::FunctionDef],
+    ) {
+        if let Some(fields) = fields {
+            let mut names: Vec<(String, Option<String>)> =
+                fields.iter().map(|f| (f.name.clone(), Self::simple_type_name(&f.ty))).collect();
+            if self.type_field_type_names.get(type_name).is_some_and(|old| *old != names) {
+                names.clear();
+            }
+            self.type_field_type_names.insert(type_name.to_string(), names);
+        }
+        for m in methods {
+            self.register_unit_sig(format!("{type_name}.{}", m.name), m);
+        }
+    }
+
     pub(crate) fn simple_type_name(ty: &ast::Type) -> Option<String> {
         match ty {
             ast::Type::Simple(n) => Some(n.clone()),
@@ -676,6 +729,92 @@ impl Lowerer {
         }
     }
 
+    /// Authored type name of an expression where it can be read off the
+    /// declarations: a typed local, `p.field`, `p.method()`, `Type.method()`,
+    /// a constructor, or a free-function call.
+    pub(crate) fn type_name_of_expr(&self, e: &ast::Expr, ctx: &FunctionContext) -> Option<String> {
+        use ast::Expr;
+        match e {
+            Expr::Identifier(n) => match ctx.local_unit_kinds.get(n) {
+                Some(Some(u)) => Some(u.clone()),
+                Some(None) => None,
+                None => ctx.local_type_names.get(n).cloned(),
+            },
+            Expr::StructInit { name, .. } => Some(name.clone()),
+            Expr::FieldAccess { receiver, field } => {
+                let owner = self.type_name_of_expr(receiver, ctx)?;
+                let fields = self.type_field_type_names.get(&owner)?;
+                fields.iter().find(|(f, _)| f == field)?.1.clone()
+            }
+            Expr::MethodCall { receiver, method, .. } => self.method_unit_sig(receiver, method, ctx)?.1.clone(),
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Identifier(n) if self.record_unit_scalars.contains_key(n) => Some(n.clone()),
+                Expr::Identifier(n) if ctx.lookup(n).is_some() => None,
+                Expr::Identifier(n) if self.type_field_type_names.contains_key(n) => Some(n.clone()),
+                Expr::Identifier(n) => self.fn_sig_type_names.get(n)?.1.clone(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Signature of `receiver.method(..)`: an instance call on a receiver of
+    /// known type, or a static call `Type.method(..)`.
+    fn method_unit_sig(&self, receiver: &ast::Expr, method: &str, ctx: &FunctionContext) -> Option<&UnitSig> {
+        let owner = self.type_name_of_expr(receiver, ctx).or_else(|| match receiver {
+            ast::Expr::Identifier(n) if ctx.lookup(n).is_none() => Some(n.clone()),
+            _ => None,
+        })?;
+        self.fn_sig_type_names.get(&format!("{owner}.{method}"))
+    }
+
+    /// Bind a lambda's params for its body: a typed param carries its unit
+    /// identity, an untyped one shadows any outer local of the same name.
+    pub(crate) fn enter_lambda_unit_scope(&self, params: &[ast::LambdaParam], ctx: &mut FunctionContext) -> UnitScope {
+        if self.record_unit_scalars.is_empty() {
+            return None;
+        }
+        let saved = (
+            ctx.local_unit_kinds.clone(),
+            ctx.local_type_names.clone(),
+            ctx.local_lambda_unit_sigs.clone(),
+        );
+        for p in params {
+            let name = p.ty.as_ref().and_then(Self::simple_type_name);
+            let kind = name.as_ref().and_then(|n| self.unit_kind_of_type_name(n));
+            let type_name = if kind.is_some() { None } else { name };
+            ctx.bind_local_unit_facts(&p.name, kind, type_name, None);
+        }
+        Some(saved)
+    }
+
+    pub(crate) fn leave_lambda_unit_scope(saved: UnitScope, ctx: &mut FunctionContext) {
+        if let Some((kinds, names, sigs)) = saved {
+            ctx.local_unit_kinds = kinds;
+            ctx.local_type_names = names;
+            ctx.local_lambda_unit_sigs = sigs;
+        }
+    }
+
+    /// Typed params of a lambda and the unit identity of its body.
+    pub(crate) fn lambda_unit_sig(
+        &self,
+        params: &[ast::LambdaParam],
+        body: &ast::Expr,
+        ctx: &mut FunctionContext,
+    ) -> (Vec<(String, Option<String>)>, UnitKind) {
+        let scope = self.enter_lambda_unit_scope(params, ctx);
+        let ret = self.unit_kind_of_expr(body, ctx);
+        Self::leave_lambda_unit_scope(scope, ctx);
+        (
+            params
+                .iter()
+                .map(|p| (p.name.clone(), p.ty.as_ref().and_then(Self::simple_type_name)))
+                .collect(),
+            ret,
+        )
+    }
+
     pub(crate) fn unit_kind_of_expr(&self, e: &ast::Expr, ctx: &FunctionContext) -> UnitKind {
         use ast::{BinOp, Expr};
         if self.record_unit_scalars.is_empty() {
@@ -689,20 +828,20 @@ impl Lowerer {
                 None => UnitKind::Unknown,
             },
             Expr::Unary { op: ast::UnaryOp::Neg, operand } => self.unit_kind_of_expr(operand, ctx),
-            Expr::FieldAccess { receiver, field } if field == "value" => {
-                match self.unit_kind_of_expr(receiver, ctx) {
-                    UnitKind::Unit(_) => UnitKind::Raw,
-                    _ => UnitKind::Unknown,
-                }
+            Expr::FieldAccess { receiver, field }
+                if field == "value" && matches!(self.unit_kind_of_expr(receiver, ctx), UnitKind::Unit(_)) =>
+            {
+                UnitKind::Raw
             }
             Expr::Call { callee, .. } => match callee.as_ref() {
-                Expr::Identifier(n) if self.record_unit_scalars.contains_key(n) => UnitKind::Unit(n.clone()),
-                Expr::Identifier(n) => match self.fn_sig_type_names.get(n) {
-                    Some((_, ret)) => self.unit_kind_from_name(ret.as_ref()),
-                    None => UnitKind::Unknown,
-                },
-                _ => UnitKind::Unknown,
+                Expr::Identifier(n) if ctx.local_lambda_unit_sigs.contains_key(n) => {
+                    ctx.local_lambda_unit_sigs[n].1.clone()
+                }
+                _ => self.unit_kind_from_name(self.type_name_of_expr(e, ctx).as_ref()),
             },
+            Expr::FieldAccess { .. } | Expr::MethodCall { .. } => {
+                self.unit_kind_from_name(self.type_name_of_expr(e, ctx).as_ref())
+            }
             Expr::Binary { op, left, right } => {
                 let (l, r) = (self.unit_kind_of_expr(left, ctx), self.unit_kind_of_expr(right, ctx));
                 let cmp = matches!(
@@ -767,7 +906,48 @@ impl Lowerer {
         }
     }
 
-    /// Passing unit A where unit B is declared is denied at a free-function call.
+    /// Passing unit A where unit B is declared is denied. Positional arguments
+    /// bind by index up to the first named one; named arguments bind by name.
+    fn check_unit_args(
+        &self,
+        callee: &str,
+        params: &[(String, Option<String>)],
+        named_only: bool,
+        args: &[ast::Argument],
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        let mut positional = !named_only;
+        for (i, arg) in args.iter().enumerate() {
+            let slot = match &arg.name {
+                Some(n) => {
+                    positional = false;
+                    params.iter().find(|(p, _)| p == n)
+                }
+                None if positional => params.get(i),
+                None => None,
+            };
+            let Some((param, Some(want))) = slot else {
+                continue;
+            };
+            self.check_unit_passed(&arg.value, want, &format!("parameter `{param}` of `{callee}`"), ctx)?;
+        }
+        Ok(())
+    }
+
+    fn check_unit_passed(&self, value: &ast::Expr, want: &str, target: &str, ctx: &FunctionContext) -> LowerResult<()> {
+        if !self.record_unit_scalars.contains_key(want) {
+            return Ok(());
+        }
+        match self.unit_kind_of_expr(value, ctx) {
+            UnitKind::Unit(got) if got != want => Err(Self::unit_deny(format!(
+                "passing `{got}` for {target} (expects `{want}`)"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// SPL-UNIT-002 at `callee(..)`: a lambda-bound local, a struct/class
+    /// constructor (named field arguments), or a free function.
     pub(crate) fn check_unit_call_args(
         &self,
         callee: &str,
@@ -777,25 +957,57 @@ impl Lowerer {
         if self.record_unit_scalars.is_empty() {
             return Ok(());
         }
-        let Some((params, _)) = self.fn_sig_type_names.get(callee) else {
-            return Ok(());
-        };
-        for (i, arg) in args.iter().enumerate() {
-            if arg.name.is_some() {
-                continue;
-            }
-            let Some(Some(want)) = params.get(i).map(|p| p.as_ref().filter(|n| self.record_unit_scalars.contains_key(*n))) else {
-                continue;
-            };
-            if let UnitKind::Unit(got) = self.unit_kind_of_expr(&arg.value, ctx) {
-                if &got != want {
-                    return Err(Self::unit_deny(format!(
-                        "passing `{got}` for parameter {} of `{callee}` (expects `{want}`)",
-                        i + 1
-                    )));
-                }
-            }
+        if let Some((params, _)) = ctx.local_lambda_unit_sigs.get(callee) {
+            return self.check_unit_args(callee, params, false, args, ctx);
         }
-        Ok(())
+        if ctx.lookup(callee).is_some() {
+            return Ok(());
+        }
+        if let Some(fields) = self.type_field_type_names.get(callee) {
+            return self.check_unit_args(callee, fields, true, args, ctx);
+        }
+        match self.fn_sig_type_names.get(callee) {
+            Some((params, _)) => self.check_unit_args(callee, params, false, args, ctx),
+            None => Ok(()),
+        }
+    }
+
+    /// SPL-UNIT-002 at `receiver.method(..)` / `Type.method(..)`.
+    pub(crate) fn check_unit_method_call_args(
+        &self,
+        receiver: &ast::Expr,
+        method: &str,
+        args: &[ast::Argument],
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        if self.record_unit_scalars.is_empty() {
+            return Ok(());
+        }
+        match self.method_unit_sig(receiver, method, ctx) {
+            Some((params, _)) => self.check_unit_args(method, params, false, args, ctx),
+            None => Ok(()),
+        }
+    }
+
+    /// SPL-UNIT-002 at `Type { field: value }`.
+    pub(crate) fn check_unit_field_init(
+        &self,
+        type_name: &str,
+        field: &str,
+        value: &ast::Expr,
+        ctx: &FunctionContext,
+    ) -> LowerResult<()> {
+        if self.record_unit_scalars.is_empty() {
+            return Ok(());
+        }
+        let want = self
+            .type_field_type_names
+            .get(type_name)
+            .and_then(|fields| fields.iter().find(|(f, _)| f == field))
+            .and_then(|(_, ty)| ty.as_ref());
+        match want {
+            Some(want) => self.check_unit_passed(value, want, &format!("field `{field}` of `{type_name}`"), ctx),
+            None => Ok(()),
+        }
     }
 }

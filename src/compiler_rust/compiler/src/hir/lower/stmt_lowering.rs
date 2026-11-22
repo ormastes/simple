@@ -808,14 +808,17 @@ impl Lowerer {
                     },
                     _ => None,
                 };
-                match unit_kind {
-                    Some(kind) => {
-                        ctx.local_unit_kinds.insert(name.clone(), kind);
-                    }
-                    None => {
-                        ctx.local_unit_kinds.remove(&name);
-                    }
-                }
+                let type_name = match (&let_stmt.ty, &let_stmt.value) {
+                    _ if unit_kind.is_some() => None,
+                    (Some(t), _) => Self::simple_type_name(t),
+                    (None, Some(init)) => self.type_name_of_expr(init, ctx),
+                    _ => None,
+                };
+                let lambda_sig = match (&let_stmt.ty, &let_stmt.value) {
+                    (None, Some(Expr::Lambda { params, body, .. })) => Some(self.lambda_unit_sig(params, body, ctx)),
+                    _ => None,
+                };
+                ctx.bind_local_unit_facts(&name, unit_kind, type_name, lambda_sig);
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {

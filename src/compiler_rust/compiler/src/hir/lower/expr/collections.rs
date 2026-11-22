@@ -230,6 +230,10 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         use crate::hir::lower::error::LowerError;
 
+        for (field, value) in fields {
+            self.check_unit_field_init(name, field, value, ctx)?;
+        }
+
         // Resolve struct type (handle "Self" keyword)
         let struct_ty = if name == "Self" {
             if let Some(class_ty) = self.current_class_type {

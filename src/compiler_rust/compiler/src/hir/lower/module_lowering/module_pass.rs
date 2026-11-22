@@ -461,6 +461,7 @@ impl Lowerer {
     fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
         match item {
             Node::Struct(s) => {
+                self.register_unit_shape(&s.name, Some(&s.fields), &s.methods);
                 let struct_type_id = self.register_struct(s)?;
                 // Register struct constructor in globals so it can be used as a value
                 self.globals.insert(s.name.clone(), struct_type_id);
@@ -477,13 +478,7 @@ impl Lowerer {
                     self.extern_fn_names.insert(extern_sym);
                     self.extern_fn_names.insert(f.name.clone());
                 }
-                self.fn_sig_type_names.insert(
-                    f.name.clone(),
-                    (
-                        f.params.iter().map(|p| p.ty.as_ref().and_then(Self::simple_type_name)).collect(),
-                        f.return_type.as_ref().and_then(Self::simple_type_name),
-                    ),
-                );
+                self.register_unit_sig(f.name.clone(), f);
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
                 // Same symbol `lower_function` emits the body under, so a
                 // cross-module same-named function keeps its own return type.
@@ -531,6 +526,7 @@ impl Lowerer {
                 }
             }
             Node::Class(c) => {
+                self.register_unit_shape(&c.name, Some(&c.fields), &c.methods);
                 let class_type_id = self.register_class(c)?;
                 // Register class constructor in globals so it can be used as a value
                 self.globals.insert(c.name.clone(), class_type_id);
@@ -591,6 +587,7 @@ impl Lowerer {
             }
             Node::Impl(impl_block) => {
                 if let Some(type_name) = Self::impl_target_type_name(&impl_block.target_type) {
+                    self.register_unit_shape(&type_name, None, &impl_block.methods);
                     for method in &impl_block.methods {
                         let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
                         let qualified = format!("{}.{}", type_name, method.name);
