@@ -74,10 +74,14 @@ class Bitmap:
     me set_pixel(x: i64, y: i64, color: SkColor4f):
         if x >= 0 and x < me.width and y >= 0 and y < me.height:
             val idx = (y * me.width + x) * 4
-            me.pixels[idx]     = _clamp_u8(color.r * 255.0)
-            me.pixels[idx + 1] = _clamp_u8(color.g * 255.0)
-            me.pixels[idx + 2] = _clamp_u8(color.b * 255.0)
-            me.pixels[idx + 3] = _clamp_u8(color.a * 255.0)
+            val cr: f64 = color.r
+            val cg: f64 = color.g
+            val cb: f64 = color.b
+            val ca: f64 = color.a
+            me.pixels[idx]     = _clamp_u8(cr * 255.0)
+            me.pixels[idx + 1] = _clamp_u8(cg * 255.0)
+            me.pixels[idx + 2] = _clamp_u8(cb * 255.0)
+            me.pixels[idx + 3] = _clamp_u8(ca * 255.0)
 
     me blend_pixel(x: i64, y: i64, color: SkColor4f, coverage: f64):
         if coverage <= 0.0:
@@ -85,16 +89,20 @@ class Bitmap:
         else:
             if x >= 0 and x < me.width and y >= 0 and y < me.height:
                 val idx = (y * me.width + x) * 4
-                val dr = (me.pixels[idx] as f64) / 255.0
-                val dg = (me.pixels[idx + 1] as f64) / 255.0
-                val db = (me.pixels[idx + 2] as f64) / 255.0
-                val da = (me.pixels[idx + 3] as f64) / 255.0
-                val eff_a = color.a * coverage
-                val ia = 1.0 - eff_a
-                val nr = color.r * eff_a + dr * ia
-                val ng = color.g * eff_a + dg * ia
-                val nb = color.b * eff_a + db * ia
-                val na = eff_a + da * ia
+                val cr: f64 = color.r
+                val cg: f64 = color.g
+                val cb: f64 = color.b
+                val ca: f64 = color.a
+                val dr: f64 = (me.pixels[idx] as f64) / 255.0
+                val dg: f64 = (me.pixels[idx + 1] as f64) / 255.0
+                val db: f64 = (me.pixels[idx + 2] as f64) / 255.0
+                val da: f64 = (me.pixels[idx + 3] as f64) / 255.0
+                val eff_a: f64 = ca * coverage
+                val ia: f64 = 1.0 - eff_a
+                val nr: f64 = cr * eff_a + dr * ia
+                val ng: f64 = cg * eff_a + dg * ia
+                val nb: f64 = cb * eff_a + db * ia
+                val na: f64 = eff_a + da * ia
                 me.pixels[idx]     = _clamp_u8(nr * 255.0)
                 me.pixels[idx + 1] = _clamp_u8(ng * 255.0)
                 me.pixels[idx + 2] = _clamp_u8(nb * 255.0)
@@ -490,8 +498,11 @@ fn fill_path_aa(bitmap: Bitmap, path: SkPath, color: SkColor4f):
                         var pos = xs.len()
                         xs.push(x)
                         dirs.push(e.dir)
-                        while pos > 0 and xs[pos - 1] > x:
-                            xs[pos] = xs[pos - 1]
+                        while pos > 0:
+                            val prev_x: f64 = xs[pos - 1]
+                            if prev_x <= x:
+                                break
+                            xs[pos] = prev_x
                             dirs[pos] = dirs[pos - 1]
                             pos = pos - 1
                         xs[pos] = x
@@ -503,8 +514,8 @@ fn fill_path_aa(bitmap: Bitmap, path: SkPath, color: SkColor4f):
                     val inside = if even_odd: (winding % 2) != 0 else: winding != 0
                     if inside:
                         # exact horizontal overlap of [xa, xb) with each column
-                        var xa = xs[xi]
-                        var xb = xs[xi + 1]
+                        var xa: f64 = xs[xi]
+                        var xb: f64 = xs[xi + 1]
                         if xa < 0.0:
                             xa = 0.0
                         if xb > (w as f64):
@@ -518,16 +529,22 @@ fn fill_path_aa(bitmap: Bitmap, path: SkPath, color: SkColor4f):
                             if eff_pb > max_col:
                                 max_col = eff_pb
                             if pa == pb:
-                                cov[pa] = cov[pa] + (xb - xa) * weight
+                                val prev_pa: f64 = cov[pa]
+                                val next_pa: f64 = prev_pa + (xb - xa) * weight
+                                cov[pa] = next_pa
                             else:
-                                cov[pa] = cov[pa] + ((pa as f64) + 1.0 - xa) * weight
+                                val prev_pa: f64 = cov[pa]
+                                val next_pa: f64 = prev_pa + ((pa as f64) + 1.0 - xa) * weight
+                                cov[pa] = next_pa
                                 var p: i64 = pa + 1
                                 while p < pb:
                                     val prev_cov: f64 = cov[p]
                                     val next_cov: f64 = prev_cov + (1.0 * weight)
                                     cov[p] = next_cov
                                     p = p + 1
-                                cov[pb] = cov[pb] + (xb - (pb as f64)) * weight
+                                val prev_pb: f64 = cov[pb]
+                                val next_pb: f64 = prev_pb + (xb - (pb as f64)) * weight
+                                cov[pb] = next_pb
                     xi = xi + 1
                 sub = sub + 1
             if min_col <= max_col:
@@ -535,12 +552,13 @@ fn fill_path_aa(bitmap: Bitmap, path: SkPath, color: SkColor4f):
                 val px_end = if max_col >= w: w - 1 else: max_col
                 val row_base = py * w
                 while px <= px_end:
-                    val c = cov[px]
+                    val c: f64 = cov[px]
                     if c > 0.0:
                         if opaque and c >= 1.0:
                             bitmap.set_pixel(px, py, color)
                         else:
-                            bitmap.blend_pixel(px, py, color, if c > 1.0: 1.0 else: c)
+                            val clamped_c: f64 = if c > 1.0: 1.0 else: c
+                            bitmap.blend_pixel(px, py, color, clamped_c)
                         cov[px] = 0.0
                     px = px + 1
         py = py + 1

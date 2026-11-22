@@ -12,7 +12,7 @@ use std.common.color.types.{Color, from_rgb}
 use std.common.color.convert.{abs, max3, min3}
 use std.common.color.blend.{average, triadic, analogous, split_complement, tetradic, monochromatic}
 use std.common.color.css.{parse_css_color}
-use common.render_scene.scene.{SceneCommand, RenderScene, scene_clip_push, scene_clip_pop, scene_fill_rect}
+use common.render_scene.scene.{SceneCommand, RenderScene, scene_clip_push, scene_clip_pop, scene_fill_rect, scene_text}
 use common.render_scene.executor.{execute_scene_to_buffer}
 use std.blink.html_parser.tokenizer.{tokenize_html}
 use std.blink.css_parser.selector.{parse_selector, matches_complex}
@@ -21,7 +21,7 @@ use std.blink.url.url_parser.{percent_decode}
 use std.gc_async_mut.gpu.browser_engine.net.cors.{cors_unsafe_request_header_names}
 use common.web.public_suffix.{is_public_suffix, registrable_domain}
 use common.web.host_policy.{is_ip_host_literal}
-use std.nogc_sync_mut.http.http1.{encode_chunked, decode_chunked, decode_chunked_with_trailers, resolve_authority}
+use std.nogc_sync_mut.http.http1.{ChunkedBodyWithTrailers, encode_chunked, decode_chunked, decode_chunked_with_trailers, resolve_authority}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_dylib_candidates}
 use std.nogc_async_mut.http.headers.{chunked_body_end}
 use std.nogc_async_mut.http_server.proxy.{async_proxy_chunked_body_complete, async_proxy_dechunk_body, async_proxy_decode_available_chunks, async_proxy_remaining_after_send}
@@ -211,10 +211,10 @@ describe "macOS font dylib candidates and typed HTTP/1.1 tuple contracts":
         expect(cands).to_contain("lib/libspl_fonts.dylib")
         expect(cands).to_contain("build/lib/libspl_fonts.so")
 
-    it "returns typed tuples from decode_chunked_with_trailers and resolve_authority":
+    it "returns typed ChunkedBodyWithTrailers and authority tuples from http1":
         val res = decode_chunked_with_trailers("5\r\ncafé\r\n0\r\nX-Check: ok\r\n\r\n")
         expect(res.is_ok()).to_equal(true)
-        val decoded_chunk = res.unwrap()
+        val decoded_chunk: ChunkedBodyWithTrailers = res.unwrap()
         expect(decoded_chunk.body).to_equal("café")
         expect(decoded_chunk.trailers.len()).to_equal(1)
         val auth = resolve_authority("https", "example.com")
@@ -222,7 +222,7 @@ describe "macOS font dylib candidates and typed HTTP/1.1 tuple contracts":
         expect(auth.1).to_equal(443)
 
 describe "Skia ARGB packing, AA interior rasterization, Blink border/DrawIR, H3 varint, WebP VP8, and WS 101 regressions":
-    it "packs 32-bit ARGB SkColor without shift-or precedence corruption and rounds fractional channels":
+    it "packs 32-bit ARGB SkColor without shift-or precedence corruption, rounds fractional channels, and guards NaN":
         val green = sk_color_argb(255, 0, 128, 0)
         expect(sk_color_alpha(green)).to_equal(255)
         expect(sk_color_green(green)).to_equal(128)
@@ -232,15 +232,51 @@ describe "Skia ARGB packing, AA interior rasterization, Blink border/DrawIR, H3 
         expect(sk_color_green(packed)).to_equal(128)
         val half = sk_color4f(0.5, 0.5, 0.5, 0.5).to_sk_color()
         expect(sk_color_alpha(half)).to_equal(128)
+        val nan_val: f64 = 0.0 / 0.0
+        val nan_color = sk_color4f(nan_val, nan_val, nan_val, 1.0).to_sk_color()
+        expect(sk_color_alpha(nan_color)).to_equal(255)
+        expect(sk_color_green(nan_color)).to_equal(0)
 
-    it "accumulates subpixel supersample coverage in fill_path_aa without integer truncation":
+    it "accumulates subpixel edge, thin-span, and interior supersample coverage in fill_path_aa without integer truncation":
         val bmp = Bitmap.zeros(8, 8)
         var path = SkPath.new()
-        path = path.add_rect(SkRect(left: 1.0, top: 1.0, right: 7.0, bottom: 7.0))
+        path = path.add_rect(SkRect(left: 1.5, top: 1.0, right: 6.5, bottom: 7.0))
         fill_path_aa(bmp, path, sk_color4f(1.0, 0.0, 0.0, 1.0))
+        val outside_left = (4 * 8 + 0) * 4
+        val left_edge = (4 * 8 + 1) * 4
         val mid = (4 * 8 + 4) * 4
+        val right_edge = (4 * 8 + 6) * 4
+        val outside_right = (4 * 8 + 7) * 4
+        expect(bmp.pixels[outside_left] as i64).to_equal(0)
+        expect(bmp.pixels[outside_right] as i64).to_equal(0)
+        expect(bmp.pixels[left_edge] as i64).to_equal(127)
+        expect(bmp.pixels[left_edge + 3] as i64).to_equal(127)
+        expect(bmp.pixels[right_edge] as i64).to_equal(127)
+        expect(bmp.pixels[right_edge + 3] as i64).to_equal(127)
         expect(bmp.pixels[mid] as i64).to_equal(255)
         expect(bmp.pixels[mid + 3] as i64).to_equal(255)
+
+        val thin_bmp = Bitmap.zeros(4, 4)
+        var thin_path = SkPath.new()
+        thin_path = thin_path.add_rect(SkRect(left: 1.25, top: 0.0, right: 1.75, bottom: 4.0))
+        fill_path_aa(thin_bmp, thin_path, sk_color4f(1.0, 0.0, 0.0, 1.0))
+        val thin_px = (2 * 4 + 1) * 4
+        expect(thin_bmp.pixels[thin_px] as i64).to_equal(127)
+        expect(thin_bmp.pixels[thin_px + 3] as i64).to_equal(127)
+
+    it "advances RenderScene VGA fallback text by UTF-8 codepoint rather than raw byte":
+        var tbuf: [u32] = []
+        var ti = 0
+        while ti < 32 * 16:
+            tbuf.push(0xFF000000u32)
+            ti = ti + 1
+        var tsc = RenderScene.new(32, 16)
+        tsc = tsc.push(scene_text(0, 0, "한A", -1, 16))
+        val tout = execute_scene_to_buffer(tsc, tbuf, 32, 16)
+        # 'A' (0x41) row 2 has bit 0x10 (col 3), so at x=8 (1 codepoint after '한') pixel (11, 2) is white,
+        # while x=24..31 (byte-offset 3 * 8) stays untouched black.
+        expect(tout[2 * 32 + 11]).to_equal(0xFFFFFFFFu32)
+        expect(tout[2 * 32 + 27]).to_equal(0xFF000000u32)
 
     it "paints Blink CSS borders and lowers retained StyledLayout chunks with zero-width root containers":
         var empty_attrs: [HtmlAttribute] = []
@@ -284,3 +320,25 @@ describe "Skia ARGB packing, AA interior rasterization, Blink border/DrawIR, H3 
         val accept = compute_accept_key(key)
         val resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n"
         expect(validate_upgrade_response(resp, key)).to_equal(true)
+
+    it "enforces IEEE-754 NaN/Inf/scientific ordering, lexicographic non-numeric comparison, and exact array/nil matchers":
+        val nan_v: f64 = 0.0 / 0.0
+        val pos_inf: f64 = 1.0 / 0.0
+        val neg_inf: f64 = -1.0 / 0.0
+        expect(nan_v).not_().to_be_greater_than(0.0)
+        expect(nan_v).not_().to_be_less_than(0.0)
+        expect(nan_v).not_().to_be_at_least(0.0)
+        expect(nan_v).not_().to_be_at_most(0.0)
+        expect(nan_v).not_().to_be_at_least(nan_v)
+        expect(nan_v).not_().to_be_at_most(nan_v)
+        expect(pos_inf).to_be_greater_than(1000000.0)
+        expect(neg_inf).to_be_less_than(-1000000.0)
+        expect(1e-05).to_be_less_than(1e-04)
+        expect(1e+20).to_be_greater_than(1e+19)
+        expect("aa").to_be_less_than("zz")
+        expect("zz").to_be_greater_than("aa")
+        expect(["a, b", "c"]).not_().to_contain("a")
+        expect(["a, b", "c"]).to_contain("a, b")
+        expect("Option::None").not_().to_be_nil()
+        val absent: text? = None
+        expect(absent).to_be_nil()

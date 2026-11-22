@@ -124,9 +124,26 @@ static int (*p_SDL_StartTextInput)(void*);
 static int (*p_SDL_StopTextInput)(void*);
 static const char* (*p_SDL_GetError)(void);
 
+static void sdl3_reset_symbols(void) {
+    p_SDL_Init = NULL;
+    p_SDL_Quit = NULL;
+    p_SDL_PollEvent = NULL;
+    p_SDL_CreateWindow = NULL;
+    p_SDL_DestroyWindow = NULL;
+    p_SDL_GetWindowID = NULL;
+    p_SDL_StartTextInput = NULL;
+    p_SDL_StopTextInput = NULL;
+    p_SDL_GetError = NULL;
+}
+
 #define SDL3_LOAD_REQUIRED(name) do { \
     *(void**)(&p_##name) = sdl3_symbol(g_sdl3_library, #name); \
-    if (!p_##name) return 0; \
+    if (!p_##name) { \
+        sdl3_reset_symbols(); \
+        sdl3_close(g_sdl3_library); \
+        g_sdl3_library = NULL; \
+        return 0; \
+    } \
 } while (0)
 
 static int sdl3_load(void) {

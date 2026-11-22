@@ -567,15 +567,43 @@ fn draw_char_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, ch
         row = row + 1
 
 fn draw_text_to_buffer(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_str: text, color: u32, clip_stack: [ClipRect]):
-    """Draw a text string using the 8x16 VGA font (legacy fallback)."""
+    """Draw a text string using the 8x16 VGA font (legacy fallback), stepping by UTF-8 codepoint."""
     var cx = x
-    val n = text_str.byte_len().to_i32()
-    var i: i32 = 0
+    val n = text_str.byte_len()
+    var i: i64 = 0
     while i < n:
-        val ch_code = text_str.byte_at(i).to_i32()
-        draw_char_to_buffer(buffer, buf_w, buf_h, cx, y, ch_code, color, clip_stack)
+        val b0 = text_str.byte_at(i).to_i32() & 0xFF
+        var cp: i32 = 0xFFFD
+        var step: i64 = 1
+        if b0 < 0x80:
+            cp = b0
+        elif (b0 & 0xE0) == 0xC0 and i + 1 < n:
+            val b1 = text_str.byte_at(i + 1).to_i32() & 0xFF
+            if (b1 & 0xC0) == 0x80:
+                val cand = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+                if cand >= 0x80:
+                    cp = cand
+                    step = 2
+        elif (b0 & 0xF0) == 0xE0 and i + 2 < n:
+            val b1 = text_str.byte_at(i + 1).to_i32() & 0xFF
+            val b2 = text_str.byte_at(i + 2).to_i32() & 0xFF
+            if (b1 & 0xC0) == 0x80 and (b2 & 0xC0) == 0x80:
+                val cand = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+                if cand >= 0x800 and (cand < 0xD800 or cand > 0xDFFF):
+                    cp = cand
+                    step = 3
+        elif (b0 & 0xF8) == 0xF0 and i + 3 < n:
+            val b1 = text_str.byte_at(i + 1).to_i32() & 0xFF
+            val b2 = text_str.byte_at(i + 2).to_i32() & 0xFF
+            val b3 = text_str.byte_at(i + 3).to_i32() & 0xFF
+            if (b1 & 0xC0) == 0x80 and (b2 & 0xC0) == 0x80 and (b3 & 0xC0) == 0x80:
+                val cand = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+                if cand >= 0x10000 and cand <= 0x10FFFF:
+                    cp = cand
+                    step = 4
+        draw_char_to_buffer(buffer, buf_w, buf_h, cx, y, cp, color, clip_stack)
         cx = cx + 8
-        i = i + 1
+        i = i + step
 
 # ============================================================================
 # Main executor

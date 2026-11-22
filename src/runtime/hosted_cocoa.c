@@ -303,6 +303,7 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
                 free(title_cstr);
                 return COCOA_INVALID_HANDLE;
             }
+            [ns_window setReleasedWhenClosed:NO];
 
             NSString *ns_title = [NSString stringWithUTF8String:title_cstr];
             if (ns_title) [ns_window setTitle:ns_title];
@@ -314,12 +315,18 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
             [ns_window makeKeyAndOrderFront:nil];
         } @catch (NSException *ex) {
             (void)ex;
+            if (ns_window) {
+                [ns_window orderOut:nil];
+                [ns_window close];
+            }
             free(title_cstr);
             return COCOA_INVALID_HANDLE;
         }
 
         CocoaWindow *wnd = (CocoaWindow *)calloc(1, sizeof(CocoaWindow));
         if (!wnd) {
+            [ns_window orderOut:nil];
+            [ns_window close];
             free(title_cstr);
             return COCOA_INVALID_HANDLE;
         }
@@ -339,6 +346,8 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
 
         free(title_cstr);
         if (!ok) {
+            [ns_window orderOut:nil];
+            [ns_window close];
             CFRelease((__bridge CFTypeRef)wnd->ns_window);
             CFRelease((__bridge CFTypeRef)wnd->ns_view);
             free(wnd);
@@ -377,6 +386,7 @@ bool rt_cocoa_window_close(int64_t win) {
 
     @autoreleasepool {
         [wnd->ns_window orderOut:nil];
+        [wnd->ns_window close];
     }
     CFRelease((__bridge CFTypeRef)wnd->ns_window);
     CFRelease((__bridge CFTypeRef)wnd->ns_view);
