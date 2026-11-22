@@ -304,13 +304,26 @@ fn _smux_list(session: text) -> [Pane]:
         return out
     val focused = smux_focused_pane(scope.session_id, scope.window_id)
     val focused_id = if focused.is_ok(): focused.unwrap().id else: ""
+    var live_ids: [text] = []
     for p in smux_list_panes(scope.session_id, scope.window_id):
         val alive = smux_pane_alive(scope.session_id, scope.window_id, p.id)
         # An empty slot (no child, or an exited one) is not an agent pane.
         if alive.is_ok() and alive.unwrap():
+            live_ids.push(p.id)
             out = out + [Pane(pane_id: p.id, title: _smux_title(p.id),
                 pid: _smux_pid(p.id), active: p.id == focused_id,
                 zoomed: p.id == smux_zoomed_pane(scope.session_id, scope.window_id), error: "")]
+    var kept_info: [SmuxPaneInfo] = []
+    for info in _smux_info:
+        var still_live = false
+        for lid in live_ids:
+            if lid == info.pane_id:
+                still_live = true
+        if still_live:
+            kept_info = kept_info + [info]
+        else:
+            posix_pane_launcher_remove(info.launcher_dir)
+    _smux_info = kept_info
     out
 
 # smux panes carry no title or pid field; the backend remembers both.
@@ -619,6 +632,19 @@ fn pane_spawn_at(session: text, title: text, cmd: text, args: [text], cols: i64,
             return pane
     _no_pane(title, "tmux does not list the new pane: " + pane_id)
 
+fn pane_cleanup_session(session: text):
+    if session == "":
+        return
+    if not _use_tmux():
+        for pane in _smux_list(session):
+            val _k = pane_kill(session, pane.pane_id)
+        for info in _smux_info:
+            posix_pane_launcher_remove(info.launcher_dir)
+        _smux_info = []
+        return
+    for pane in pane_list(session):
+        val _k = pane_kill(session, pane.pane_id)
+
 export Pane, PANE_FORMAT
 export pane_parse_line, pane_parse_lines
 export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv, pane_capture_argv
@@ -629,5 +655,5 @@ export posix_quote_arg, posix_command_line, posix_exec_line
 export posix_pane_launcher_create, posix_pane_launcher_remove, posix_pane_launcher_line
 export pane_backend_name
 export pane_list, pane_select, pane_zoom, pane_spawn, pane_spawn_at, pane_resize
-export pane_kill, pane_send, pane_send_raw, pane_capture, pane_capture_styled
+export pane_kill, pane_cleanup_session, pane_send, pane_send_raw, pane_capture, pane_capture_styled
 export pane_send_key, pane_key_bytes, pane_key_tmux_name
