@@ -50,9 +50,15 @@ describe "native codegen pool worker admission":
         expect(native_codegen_pool_workers_v1(80, 0, 3, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(3)
         expect(native_codegen_pool_workers_v1(80, 0, 0, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(0)
 
-    it "honours an explicit thread request as an upper bound":
+    it "honours an explicit thread request as an upper bound and divides across peer shards":
         step("--threads 6 on an 80-core host")
         expect(native_codegen_pool_workers_v1(80, 6, 100, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(6)
+        step("--threads 40 on 64 CPUs across 2 peer shards admits 20 per shard (never 80 total)")
+        expect(native_codegen_pool_workers_v1(64, 40, 776, 1024 * GIB, 1024 * GIB, 524288,
+            8 * GIB, 0, 2, -1)).to_equal(20)
+        step("--threads 100 on 64 CPUs across 2 peer shards clamps to host_cpus / peers = 32")
+        expect(native_codegen_pool_workers_v1(64, 100, 776, 1024 * GIB, 1024 * GIB, 524288,
+            8 * GIB, 0, 2, -1)).to_equal(32)
 
     it "clamps by the declared tree budget":
         step("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB = 20 GiB at 2 GiB per worker")
@@ -130,7 +136,10 @@ describe "native codegen pool shard-aware and cgroup-aware admission":
         expect(native_codegen_live_peer_shards_v1("0/2", "", "", 8, 0)).to_equal(2)
         expect(native_codegen_live_peer_shards_v1("1/8", "", "", 4, 0)).to_equal(4)
         expect(native_codegen_live_peer_shards_v1("0/8", "", "", 8, 3)).to_equal(3)
-        expect(native_codegen_live_peer_shards_v1("", "1", "4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/1", "1", "4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/1", "1", "0/4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/250", "", "4", 64, 40)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/250", "", "1", 64, 40)).to_equal(1)
 
     it "bounds admission by cgroup v2 and v1 hierarchy spare bytes":
         step("Uncapped cgroup v2 ('max') answers -1")
@@ -153,13 +162,17 @@ describe "native codegen pool shard-aware and cgroup-aware admission":
             8 * GIB, 0, 1, spare_v2)
         expect(cgroup_workers).to_equal(2)
 
-        step("Exhausted cgroup v1 cap answers 0 spare and admits only 1 worker")
+        step("Exhausted cgroup v1 cap (including co-mounted controllers) answers 0 spare and admits only 1 worker")
         val v1_files: {text: text} = {
             "/sys/fs/cgroup/memory/ci/memory.limit_in_bytes": "2147483648\n",
             "/sys/fs/cgroup/memory/ci/memory.usage_in_bytes": "2147483648\n"
         }
         val spare_v1 = native_codegen_cgroup_spare_kib_from_probe_v1("6:memory:/ci\n", v1_files)
         expect(spare_v1).to_equal(0)
+        val spare_v1_comount_a = native_codegen_cgroup_spare_kib_from_probe_v1("6:cpu,memory:/ci\n", v1_files)
+        expect(spare_v1_comount_a).to_equal(0)
+        val spare_v1_comount_b = native_codegen_cgroup_spare_kib_from_probe_v1("6:memory,hugetlb:/ci\n", v1_files)
+        expect(spare_v1_comount_b).to_equal(0)
         expect(native_codegen_pool_workers_v1(8, 0, 100, 0, 64 * GIB, 524288, 8 * GIB, 0, 1, spare_v1)).to_equal(1)
 
     it "formats every admission input into the diagnostic banner summary":

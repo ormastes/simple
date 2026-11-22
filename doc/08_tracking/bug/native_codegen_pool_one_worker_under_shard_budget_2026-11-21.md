@@ -25,9 +25,9 @@ lowering for the same 1601 modules took 1689 s, about 1 s per module.
 
 ## Where the admission is computed
 
-`native_codegen_pool_workers_v1`, `native_codegen_pool_v1.spl:88-113`, called
-from `_driver_codegen_pool_prefetch_v1`, `driver_aot_native_output.spl:4840`.
-The message is printed at `driver_aot_native_output.spl:4849` and `:4862`.
+`native_codegen_pool_workers_v1`, `native_codegen_pool_v1.spl:103-147`, called
+from `_driver_codegen_pool_prefetch_v1`, `driver_aot_native_output.spl:5061`.
+The message is printed at `driver_aot_native_output.spl:5100` and `:5113`.
 
 ```
 n         = min(requested=40, jobs=776)                      = 40
@@ -125,10 +125,13 @@ Related: `native_build_step5_serial_threads_ignored_2026-09-04.md`,
 
 ## Root-Cause Fix & Verification (2026-11-22)
 
-Implemented all four safety prerequisites together in `native_codegen_pool_v1.spl` and `_driver_codegen_pool_prefetch_v1` (`driver_aot_native_output.spl`):
+Implemented all safety prerequisites together across `native_codegen_pool_v1.spl`, `_driver_codegen_pool_prefetch_v1` (`driver_aot_native_output.spl`), and `native_build_main.spl`:
 
 1. **Measured per-`llc`-worker estimate (`512 MiB`):** Updated `NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1` from `2097152` (2 GiB) to `524288` (512 MiB, covering `llc`/`clang -c -x ir` child peak RSS while keeping `SIMPLE_NATIVE_CODEGEN_WORKER_KIB` and `worker_mem_mib` overrides).
-2. **Resident-RSS subtraction, peer-shard division, and cgroup bounding:** Extended `native_codegen_pool_workers_v1` with `resident_kib`, `peer_shards`, and `cgroup_spare_kib` (`native_codegen_cgroup_spare_kib_v1` reading cgroup v2 `memory.max - memory.current` and v1 `memory.limit_in_bytes - memory.usage_in_bytes` across the full ancestor chain). Subtracts `resident_kib` from `budget_kib / peer_shards` (preventing over-admission when two ~22 GB shards already saturate a 44 GB budget) and divides `spare` and `cgroup_spare_kib` across `peer_shards` (`native_codegen_live_peer_shards_v1`).
+2. **CPU cap division, resident-RSS subtraction, live peer-shard propagation, and cgroup v1/v2 bounding:**
+   - Divided the effective CPU cap (`min(requested, host_cpus)` when both `> 0`, else `requested` or `host_cpus`) across `peer_shards` (`>= 1`) regardless of whether `--threads N` (`requested > 0`) was passed so `P` shards never spawn `P * requested` `llc` processes.
+   - Exported `SIMPLE_NATIVE_FILE_WORKERS` from both `NativeFileUnitProcessInvokerV1.run_unit` and non-unit Phase B MIR loops in `native_build_main.spl` (with `SIMPLE_HIR_SHARD` fallback in `_driver_codegen_pool_prefetch_v1` and nonsemantic/module-projection exclusion in `native_build_environment_identity.spl`) so `native_codegen_live_peer_shards_v1` uses actual concurrent worker pool size rather than `--mir-shard=0/<batches>` total batch counts.
+   - Extended `native_codegen_pool_workers_v1` with `resident_kib`, `peer_shards`, and `cgroup_spare_kib` (`native_codegen_cgroup_spare_kib_v1` reading cgroup v2 `memory.max - memory.current` and v1 `memory.limit_in_bytes - memory.usage_in_bytes`, including comma-separated co-mounted v1 controllers such as `cpu,memory`, across the ancestor chain). Subtracts `resident_kib` from `budget_kib / peer_shards` and divides `spare` and `cgroup_spare_kib` across `peer_shards`.
 3. **Shard-tree commit floor (`clamp(total_kib / 8, 2 GiB, 8 GiB)`):** Inside an already-admitted shard worker (`native_codegen_shard_commit_floor_for_v1` / `native_codegen_commit_floor_kib_for_context_v1(true)`), reserves 12.5% RAM clamped to `[2 GiB, 8 GiB]` instead of double-counting a second 24 GiB whole-host floor while keeping explicit `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` / `mem_reserve_free_mib` overrides authoritative.
 4. **Actionable admission diagnostics:** `_driver_codegen_pool_prefetch_v1` reports `cpus`, `budget_kib`, `resident_kib`, `headroom_kib`, `cgroup_spare_kib`, `floor_kib`, `worker_kib`, and `peer_shards` via `native_codegen_admission_summary_v1`.
 - **Verification:** `test/01_unit/compiler/driver/native_codegen_pool_v1_spec.spl` (27/27 PASS).
