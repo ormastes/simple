@@ -20,18 +20,18 @@ use std.nogc_sync_mut.tui.style.{Style, styled, make_style, COLOR_NONE,
 use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
     sosix_platform, sosix_host_os}
 use std.io_runtime.{env_get, file_exists, cwd}
-use app.io.mod.{file_remove}
+use app.io.mod.{file_remove, dir_remove_all}
 use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{macos_seatbelt_image_selected_v1,
     macos_seatbelt_host_capable_v1, macos_seatbelt_canonical_path_v1}
 use app.llm_caret.cs_container.{CsContainerRequest, cs_container_request, cs_container_argv,
-    cs_container_name, cs_container_reap, cs_container_real_path,
+    cs_container_name, cs_container_owner, cs_container_reap, cs_container_real_path,
     cs_container_present, cs_container_reap_session, cs_container_instance,
     cs_container_mark_launched, cs_container_launched}
 use app.llm_caret.cs_container_lifecycle_v1.{CsContainerSessionRecordV1,
     cs_worktree_extract_flag_v1, cs_strip_workspace_for_cli_harness_v1,
     cs_worktree_create_v1, cs_worktree_remove_owned_v1,
-    cs_container_record_save_v1, cs_container_prepare_macos_seatbelt_v1,
-    cs_container_records_load_v1, cs_container_reconcile_v1,
+    cs_container_record_save_v1, cs_container_write_runner_v1, cs_container_prepare_macos_seatbelt_v1,
+    cs_container_records_load_v1, cs_container_reconcile_v1, cs_container_session_store_root_v1,
     cs_container_close_record_v1, cs_container_crashed_records_v1,
     cs_container_prepare_relaunch_v1}
 use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_dispatch_v1}
@@ -905,6 +905,36 @@ fn _cs_launch_macos_seatbelt(d: CsDashboard, agent_id: text, spec_shown: text,
     (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " + pane.pane_id +
         " inside container " + rec.name + " (macos-seatbelt)" + wt_note)
 
+fn _cs_launch_owned_worktree(d: CsDashboard, agent_id: text, spec_shown: text,
+        exe: text, args: [text], repo_root: text, worktree_path: text) -> (CsDashboard, text):
+    val name = cs_container_name(d.session, agent_id)
+    val stderr_path = cs_stderr_path(d.session, agent_id)
+    var rec = CsContainerSessionRecordV1(
+        name: name, owner: cs_container_owner(d.session), session: d.session,
+        agent_id: agent_id, spec: spec_shown, backend: "host-worktree", image: "",
+        executable: exe, argv: args, repo_root: repo_root, worktree_path: worktree_path,
+        worktree_owned: true, attempt_dir: cs_container_session_store_root_v1(d.session) + "/containers/" + name,
+        stderr_path: stderr_path, pane_id: "", pid: -1, instance: cs_container_instance(),
+        network: "", env: [], state: "running", exit_code: -1)
+    val runner = cs_container_write_runner_v1(rec, [exe] + args)
+    if runner.is_err() or not cs_container_record_save_v1(rec):
+        val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
+        val _attempt = dir_remove_all(rec.attempt_dir)
+        return (d, "cannot launch " + agent_id + ": could not prepare worktree session record")
+    val pane = pane_spawn_at(d.session, agent_id, "/bin/sh", [runner.unwrap()],
+        _cs_pane_cols, _cs_pane_rows, stderr_path)
+    if pane.pane_id == "":
+        val _closed = cs_container_close_record_v1(d.session, agent_id, [], true)
+        return (d, "pane backend could not spawn a pane for " + agent_id)
+    rec.pane_id = pane.pane_id
+    rec.pid = pane.pid
+    if not cs_container_record_save_v1(rec):
+        val _k = pane_kill(d.session, pane.pane_id)
+        val _closed = cs_container_close_record_v1(d.session, agent_id, [], true)
+        return (d, "cannot launch " + agent_id + ": could not save worktree pane")
+    (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " + pane.pane_id +
+        " worktree " + worktree_path)
+
 fn cs_repo_root() -> text:
     val explicit = env_get("SIMPLE_CS_REPO_ROOT") ?? ""
     if explicit != "":
@@ -1068,10 +1098,13 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
     if head == "session:close":
         val target_id = if words.len() > 1: words[1] else: ""
         val pane_id = if words.len() > 2: words[2] else: ""
+        val live_before_close = _live_pane_ids_for(d.session)
         if pane_id != "":
-            val _k = pane_kill(d.session, pane_id)
+            val killed = pane_kill(d.session, pane_id)
+            if not killed and _live_pane_ids_for(d.session).contains(pane_id):
+                return (cs_refresh(d), "could not close pane " + pane_id)
         val (cleaned, note) = cs_container_close_record_v1(d.session, target_id,
-            _live_pane_ids_for(d.session), false)
+            live_before_close, false)
         if not cleaned:
             return (cs_refresh(d), note)
         if cs_container_launched(d.session, target_id):
@@ -1178,6 +1211,9 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         if container.image != "":
             return _cs_launch_in_container(d, agent_id, spec_shown, exe, args,
                 worktree_path, worktree_owned, container)
+        if worktree_owned:
+            return _cs_launch_owned_worktree(d, agent_id, spec_shown, exe, args,
+                macos_seatbelt_canonical_path_v1(cs_repo_root()), worktree_path)
         if worktree_path != "":
             val cd_cmd = "cd " + cs_quote_word_if_needed(worktree_path) + " && exec " + exe
             var sh_line = "cd '" + worktree_path.replace("'", "'\\''") + "' && exec '" + exe.replace("'", "'\\''") + "'"
