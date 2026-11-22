@@ -60,6 +60,7 @@ use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, 
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_profile_is_critical, match_coverage_critical_missing_ids, match_coverage_requires_hard_error}
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw, mir_provider_callable_identity}
 
 fn layout_key_bare_name(layout_key: text) -> text:
@@ -1387,6 +1388,8 @@ impl MirLowering:
             return ""
         if val registered = bootstrap_fn_ret_shape_lookup(call_name):
             val shape = registered
+            if shape != "" and shape != "__runtime_array__":
+                self.provider_layout_demand_v1(shape)
             if shape != "__runtime_array__" and not self.mir_layout_or_runtime_key_is_enum(shape):
                 return self.declared_struct_layout_key(shape)
         ""
@@ -1485,6 +1488,8 @@ impl MirLowering:
         result
 
     me checked_array_record_layout(shape: text) -> text:
+        if shape != "":
+            self.provider_layout_demand_v1(shape)
         val owner = self.declared_struct_layout_key(shape)
         val identity = result_err_layout_identity(owner)
         if identity == "" or not self.composite_layout_digests.contains(identity) or (self.composite_layout_owner_counts.get(identity) ?? 0) != 1 or not self.struct_field_order.contains(owner) or not self.struct_field_hir_type.contains(owner):
@@ -1643,6 +1648,7 @@ impl MirLowering:
         # its SymbolId against the caller's unrelated symbol table.
         if val element_shape = bootstrap_fn_ret_array_element_shape_lookup(call_name):
             if element_shape != "__no_struct_element__":
+                self.provider_layout_demand_v1(element_shape)
                 val owner = self.checked_array_record_layout(element_shape)
                 if owner != "": self.array_element_struct_syms[local.id] = owner
 
@@ -9798,6 +9804,7 @@ impl MirLowering:
                         return self.lower_struct_construct(direct_symbol, direct_name, args)
                     val candidate = mir_class_identity_raw(self.symbols, direct_symbol.id)
                     if constructor_info.kind == SymbolKind.Class:
+                        self.provider_layout_demand_v1(constructor_info.name)
                         constructor_name = candidate
                         if not self.class_type_names.has(candidate) or not self.struct_field_order.has(candidate):
                             # Fail closed with a DEFINED placeholder. `return nil`
@@ -10310,6 +10317,8 @@ impl MirLowering:
                                     var sr_shape: text = bootstrap_fn_ret_shape_lookup(source_name) ?? ""
                                     if sr_shape == "":
                                         sr_shape = bootstrap_fn_ret_shape_lookup(resolved_name) ?? ""
+                                    if sr_shape != "" and sr_shape != "__runtime_array__":
+                                        self.provider_layout_demand_v1(sr_shape)
                                     val sr_layout = self.declared_struct_layout_key(sr_shape)
                                     if sr_shape != "" and sr_shape != "__runtime_array__" and not self.mir_layout_or_runtime_key_is_enum(sr_shape) and self.struct_field_order.has(sr_layout):
                                         val sr_bare = layout_key_bare_name(sr_layout)
@@ -10318,6 +10327,8 @@ impl MirLowering:
                                             sr_mir_sym = Some(self.canonical_mir_type_symbol(sr_sym))
                                         elif sr_layout.contains("::"):
                                             sr_mir_sym = Some(self.canonical_mir_type_symbol_for_key_v1(sr_layout.replace("::", ".")))
+                                        elif sr_layout.contains(".") and self.class_type_names.has(sr_layout):
+                                            sr_mir_sym = Some(self.canonical_mir_type_symbol_for_key_v1(sr_layout))
                                         else:
                                             val sr_by_name = self.symbols.lookup_or_invalid(sr_bare)
                                             if sr_by_name.is_valid():

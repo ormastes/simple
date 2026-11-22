@@ -12,6 +12,7 @@ use compiler.common.attributes.{FunctionAttr}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.native_trait_metadata.{NativeTraitLayout, NativeTraitMethodSlot, NativeTraitImplementation}
 use compiler.types.type_layout.{layoutattr_default_}
 use std.io_runtime.{env_get_opt}
 
@@ -972,11 +973,18 @@ impl MirLowering:
             if proof_owner != "" and not self.composite_layout_digests.has("{proof_owner}::{source.name}"):
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
                 self.register_composite_layout_identity(source, fields, class_attr)
+            val bare_owned_by_struct = self.consumer_binds_bare_struct_v1(class_def.name)
             for key in keys:
                 self.register_composite_field_metadata(key, fields, self.symbols, true)
                 self.struct_field_has_default[key] = flags
                 self.struct_field_default_expr[key] = defaults
-                self.class_type_names[key] = true
+                if key == class_def.name:
+                    if local and not bare_owned_by_struct:
+                        self.class_type_names[key] = true
+                    elif bare_owned_by_struct and self.class_type_names.has(key):
+                        self.class_type_names.remove(key)
+                else:
+                    self.class_type_names[key] = true
             if not register_methods:
                 return
             for method_name in class_def.methods.keys():
@@ -1053,6 +1061,41 @@ impl MirLowering:
             # only when the consumer does not declare that name itself and the
             # recorded bare-layout owner is this provider's declaration -- a
             # matching field list alone would let the LAST same-named provider win.
+            # Also clear any stale class_type_names marks (qualified from an
+            # earlier session reclassifying class -> struct, or bare from a
+            # homonym class in another module/provider regardless of provider
+            # ordering when this consumer lexically owns/imports a value struct).
+            if key != struct_def.name and self.class_type_names.has(key):
+                self.class_type_names.remove(key)
+            if proof_owner != "":
+                val dotted_struct_key = "{proof_owner}.{source.name}"
+                val colons_struct_key = "{proof_owner}::{source.name}"
+                if self.class_type_names.has(dotted_struct_key):
+                    self.class_type_names.remove(dotted_struct_key)
+                if self.class_type_names.has(colons_struct_key):
+                    self.class_type_names.remove(colons_struct_key)
+                if dotted_struct_key != key:
+                    if self.struct_field_order.has(dotted_struct_key):
+                        self.struct_field_order.remove(dotted_struct_key)
+                    if self.struct_field_has_default.has(dotted_struct_key):
+                        self.struct_field_has_default.remove(dotted_struct_key)
+                    if self.struct_field_default_expr.has(dotted_struct_key):
+                        self.struct_field_default_expr.remove(dotted_struct_key)
+                    if self.struct_field_hir_type.has(dotted_struct_key):
+                        self.struct_field_hir_type.remove(dotted_struct_key)
+                if colons_struct_key != key:
+                    if self.struct_field_order.has(colons_struct_key):
+                        self.struct_field_order.remove(colons_struct_key)
+                    if self.struct_field_has_default.has(colons_struct_key):
+                        self.struct_field_has_default.remove(colons_struct_key)
+                    if self.struct_field_default_expr.has(colons_struct_key):
+                        self.struct_field_default_expr.remove(colons_struct_key)
+                    if self.struct_field_hir_type.has(colons_struct_key):
+                        self.struct_field_hir_type.remove(colons_struct_key)
+                    if key != struct_def.name:
+                        self.struct_identity_layout_key[colons_struct_key] = key
+            if (consumer_owns_name or self.consumer_binds_bare_struct_v1(struct_def.name)) and self.class_type_names.has(struct_def.name):
+                self.class_type_names.remove(struct_def.name)
             if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
                 return
             if not self.struct_bare_layout_owner.has(struct_def.name):
@@ -1536,6 +1579,7 @@ impl MirLowering:
                     return None
                 if val present_owner_symbol = optional_owner_symbol:
                     val owner_symbol: HirSymbol = present_owner_symbol
+                    self.provider_layout_demand_v1(owner_symbol.name)
                     for owner_key in [mir_class_identity_raw(self.symbols, owner_sym.id), owner_symbol.name]:
                         if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
                             val names = self.struct_field_order[owner_key]
@@ -1573,10 +1617,64 @@ impl MirLowering:
 # state (provider_method_modules / _consumer / _materialized) is reset by
 # lower_module and emptied before the scope pauses.
 impl MirLowering:
+    fn consumer_binds_bare_struct_v1(leaf_name: text) -> bool:
+        """True when the active consumer lexically binds `leaf_name` to a
+        value `struct` (local or imported), so no provider `class` of the same
+        bare leaf may claim `class_type_names[leaf_name]`."""
+        if leaf_name == "":
+            return false
+        val lexical_id = self.symbols.lookup_or_invalid(leaf_name)
+        if lexical_id.id >= 0 and self.symbols.symbols.has(lexical_id.id):
+            # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
+            val optional_lex: HirSymbol? = self.symbols.get_symbol_raw(lexical_id.id)
+            if val present_lex = optional_lex:
+                val lex_symbol: HirSymbol = present_lex
+                if lex_symbol.kind == SymbolKind.Struct:
+                    return true
+        false
+
+    me begin_provider_session_v1(key: text):
+        self.provider_session_requested_key = key
+
+    me clear_previous_session_class_types_v1():
+        """Remove provider-owned `class_type_names` entries recorded during a
+        previous session before rebuilding for a new provider snapshot."""
+        if self.provider_session_names.len() == 0 or self.class_type_names.len() == 0:
+            return
+        var old_prefixes: [text] = []
+        var pi = 0
+        while pi < self.provider_session_names.len():
+            val raw_name: text = self.provider_session_names[pi]
+            pi = pi + 1
+            if raw_name == "" or raw_name == self.provider_method_consumer:
+                continue
+            old_prefixes.push(raw_name + "::")
+            val canon = mir_layout_canonical_module_name(raw_name)
+            if canon != "" and canon != self.current_module_id:
+                old_prefixes.push(canon + ".")
+                old_prefixes.push(canon + "::")
+        if old_prefixes.len() == 0:
+            return
+        val existing_keys: [text] = self.class_type_names.keys()
+        var ki = 0
+        while ki < existing_keys.len():
+            val ck: text = existing_keys[ki]
+            ki = ki + 1
+            var matched = false
+            var pxi = 0
+            while pxi < old_prefixes.len():
+                if ck.starts_with(old_prefixes[pxi]):
+                    matched = true
+                    break
+                pxi = pxi + 1
+            if matched:
+                self.class_type_names.remove(ck)
+
     me ensure_provider_session_v1(providers: [HirModule]):
-        """Build the provider session index unless it already describes
-        exactly this immutable ordered-content snapshot. Names and order are
-        diagnostic shape only and never authorize reuse."""
+        """Build the provider session index unless an explicit non-empty
+        requested session key already matches this immutable ordered-content
+        snapshot. An empty requested key never authorizes cross-call reuse;
+        it builds a fresh one-shot session index for the current module."""
         val requested_key = self.provider_session_requested_key
         if requested_key != "" and requested_key == self.provider_session_content_key and
                 self.provider_session_names.len() == providers.len() and self.provider_session_links_ready.len() == providers.len():
@@ -1589,6 +1687,9 @@ impl MirLowering:
                 check_i = check_i + 1
             if same:
                 return
+        self.provider_default_literal_owners_v1 = {}
+        self.provider_default_literal_consts_v1 = {}
+        self.clear_previous_session_class_types_v1()
         var names: [text] = []
         var links_by_index: [Dict<i64, text>] = []
         var links_ready: [bool] = []
@@ -1602,6 +1703,7 @@ impl MirLowering:
         while provider_i < providers.len():
             val provider_module: HirModule = providers[provider_i]
             names.push(provider_module.name)
+            self.remember_provider_module_default_constants_v1(provider_module)
             var links: Dict<i64, text> = {}
             var built = false
             # Same gate as lower_module's provider class/method pass.
@@ -1692,8 +1794,8 @@ impl MirLowering:
         """Session index of every provider struct/class declaration, filed by
         leaf name in the eager registration order (per provider: structs,
         then classes, each in key order), plus the provider enum rows that
-        register_provider_enums_v1 replays. class_type_names needs no session
-        row: the all-module prescan already publishes every class identity."""
+        register_provider_enums_v1 replays and per-session owner indices for
+        traits, externs and globals."""
         var rows_by_name: Dict<text, [i64]> = {}
         var row_provider: [i64] = []
         var row_kind: [i64] = []
@@ -1706,10 +1808,38 @@ impl MirLowering:
         var enum_variants: [[text]] = []
         var enum_fact: [i64] = []
         var fact_ids: Dict<text, i64> = {}
+        var trait_decl_providers: [i64] = []
+        var trait_impl_providers: [i64] = []
+        var enum_providers: [i64] = []
         var provider_i = 0
         while provider_i < providers.len():
             val provider_module: HirModule = providers[provider_i]
+            if provider_module.traits.len() > 0:
+                trait_decl_providers.push(provider_i)
+            if provider_module.impls.len() > 0:
+                var has_native_trait_impl = false
+                var impl_i = 0
+                while impl_i < provider_module.impls.len():
+                    val impl_entry: HirImpl = provider_module.impls[impl_i]
+                    if impl_entry.has_trait_:
+                        has_native_trait_impl = true
+                        break
+                    impl_i = impl_i + 1
+                if has_native_trait_impl:
+                    trait_impl_providers.push(provider_i)
+            val extern_owner_key = "|mir_session|extern|" + mir_provider_callable_key(provider_module.name, "")
+            var extern_rows: [i64] = rows_by_name.get(extern_owner_key) ?? []
+            extern_rows.push(provider_i)
+            rows_by_name[extern_owner_key] = extern_rows
+            val global_owner_name = mir_layout_canonical_module_name(provider_module.name)
+            if global_owner_name != "":
+                val global_owner_key = "|mir_session|global|" + global_owner_name
+                var global_rows: [i64] = rows_by_name.get(global_owner_key) ?? []
+                global_rows.push(provider_i)
+                rows_by_name[global_owner_key] = global_rows
             val enum_values = provider_module.enums.values()
+            if enum_values.len() > 0:
+                enum_providers.push(provider_i)
             enum_start.push(enum_name.len())
             enum_count.push(enum_values.len())
             var enum_i = 0
@@ -1746,6 +1876,16 @@ impl MirLowering:
                 # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
                 val struct_def: HirStruct = provider_module.structs[struct_keys[position]]
                 if struct_def != None:
+                    if global_owner_name != "":
+                        val dotted_struct = "{global_owner_name}.{struct_def.name}"
+                        val colons_struct = "{global_owner_name}::{struct_def.name}"
+                        if self.class_type_names.has(dotted_struct):
+                            self.class_type_names.remove(dotted_struct)
+                        if self.class_type_names.has(colons_struct):
+                            self.class_type_names.remove(colons_struct)
+                    val raw_struct_key = "{provider_module.name}::{struct_def.name}"
+                    if self.class_type_names.has(raw_struct_key):
+                        self.class_type_names.remove(raw_struct_key)
                     val leaf = mir_provider_layout_leaf_v1(struct_def.name)
                     var rows: [i64] = rows_by_name.get(leaf) ?? []
                     rows.push(row_provider.len())
@@ -1760,6 +1900,9 @@ impl MirLowering:
                 # workaround(p2_add cycles 91-105): per-read draw corruption -- bind once, guard the local.
                 val class_def: HirClass = provider_module.classes[class_keys[position]]
                 if class_def != None:
+                    val canonical_class = mir_class_identity_raw(provider_module.symbols, class_def.symbol.id)
+                    if canonical_class != "" and canonical_class != class_def.name:
+                        self.class_type_names[canonical_class] = true
                     val leaf = mir_provider_layout_leaf_v1(class_def.name)
                     var rows: [i64] = rows_by_name.get(leaf) ?? []
                     rows.push(row_provider.len())
@@ -1769,6 +1912,10 @@ impl MirLowering:
                     row_position.push(position)
                 position = position + 1
             provider_i = provider_i + 1
+        rows_by_name["|mir_session|ready"] = [providers.len()]
+        rows_by_name["|mir_session|trait_decl"] = trait_decl_providers
+        rows_by_name["|mir_session|trait_impl"] = trait_impl_providers
+        rows_by_name["|mir_session|enum"] = enum_providers
         self.provider_layout_rows_by_name = rows_by_name
         self.provider_layout_row_provider = row_provider
         self.provider_layout_row_kind = row_kind
@@ -1780,6 +1927,75 @@ impl MirLowering:
         self.provider_enum_row_eligible = enum_eligible
         self.provider_enum_row_variants = enum_variants
         self.provider_enum_row_fact = enum_fact
+
+    fn provider_session_index_ready_v1(provider_count: i64) -> bool:
+        provider_count > 0 and
+            self.provider_session_names.len() == provider_count and
+            self.provider_session_links_ready.len() == provider_count and
+            self.provider_layout_rows_by_name.has("|mir_session|ready")
+
+    fn session_owner_provider_indices_v1(prefix: text, keys: [text]) -> [i64]:
+        """Ordered, deduplicated provider indices filed under `prefix + key`."""
+        var out: [i64] = []
+        var ki = 0
+        while ki < keys.len():
+            val lookup_key = prefix + keys[ki]
+            ki = ki + 1
+            if not self.provider_layout_rows_by_name.has(lookup_key):
+                continue
+            val bucket: [i64] = self.provider_layout_rows_by_name[lookup_key]
+            var bi = 0
+            while bi < bucket.len():
+                val candidate: i64 = bucket[bi]
+                bi = bi + 1
+                var exists = false
+                var oi = 0
+                while oi < out.len():
+                    if out[oi] == candidate:
+                        exists = true
+                        break
+                    oi = oi + 1
+                if not exists:
+                    out.push(candidate)
+                    var pos = out.len() - 1
+                    while pos > 0 and out[pos - 1] > out[pos]:
+                        val tmp = out[pos - 1]
+                        out[pos - 1] = out[pos]
+                        out[pos] = tmp
+                        pos = pos - 1
+        out
+
+    me register_all_provider_enums_session_v1(consumer_name: text, providers: [HirModule]):
+        """Session-indexed enum replay across only enum-bearing providers,
+        avoiding HirModule value copies whenever every enum row is current."""
+        val enum_providers: [i64] = self.provider_layout_rows_by_name.get("|mir_session|enum") ?? []
+        var epi = 0
+        while epi < enum_providers.len():
+            val provider_index: i64 = enum_providers[epi]
+            epi = epi + 1
+            if provider_index < 0 or provider_index >= providers.len() or provider_index >= self.provider_session_names.len():
+                continue
+            if self.provider_session_names[provider_index] == consumer_name:
+                continue
+            val start: i64 = self.provider_enum_row_start[provider_index]
+            val count: i64 = self.provider_enum_row_count[provider_index]
+            var needs_module = false
+            var position = 0
+            while position < count:
+                val row = start + position
+                val fact: i64 = self.provider_enum_row_fact[row]
+                if self.provider_enum_fact_current.has(fact) and self.provider_enum_fact_current[fact] == self.provider_enum_epoch:
+                    position = position + 1
+                    continue
+                if self.provider_enum_row_current_v1(row):
+                    self.provider_enum_fact_current[fact] = self.provider_enum_epoch
+                    position = position + 1
+                    continue
+                needs_module = true
+                break
+            if needs_module:
+                val provider_module: HirModule = providers[provider_index]
+                self.register_provider_enums_v1(provider_index, provider_module)
 
     me provider_enum_row_current_v1(row: i64) -> bool:
         """enum_registration_is_current_v1 for session enum row `row`, from
@@ -1872,6 +2088,8 @@ impl MirLowering:
         if not self.provider_layout_demand_active:
             return
         val leaf = mir_provider_layout_leaf_v1(name)
+        if leaf == "" or leaf.starts_with("|mir_session|"):
+            return
         if self.provider_layout_materialized.has(leaf):
             return
         if not self.provider_layout_rows_by_name.has(leaf):
@@ -1893,12 +2111,99 @@ impl MirLowering:
         self.provider_layout_pending = []
         self.provider_layout_draining = false
 
+    me demand_provider_hir_type_layouts_v1(type_: HirType):
+        """Demand provider struct/class layouts reachable from an already
+        consumer-relocated HirType (used when a native trait slot or object
+        conversion is actually exercised by the consumer)."""
+        if not self.provider_layout_demand_active:
+            return
+        val kind: HirTypeKind = type_.kind
+        match kind:
+            case Named(id, type_args):
+                if self.symbols.symbols.has(id.id):
+                    val leaf_name = self.symbols.symbol_name_scalar_raw(id.id)
+                    if leaf_name != "":
+                        self.provider_layout_demand_v1(leaf_name)
+                var ai = 0
+                while ai < type_args.len():
+                    self.demand_provider_hir_type_layouts_v1(type_args[ai])
+                    ai = ai + 1
+            case TypeParam(_, bounds):
+                var bi = 0
+                while bi < bounds.len():
+                    self.demand_provider_hir_type_layouts_v1(bounds[bi])
+                    bi = bi + 1
+            case Tuple(items) | Union(items):
+                var ti = 0
+                while ti < items.len():
+                    self.demand_provider_hir_type_layouts_v1(items[ti])
+                    ti = ti + 1
+            case Array(elem, _):
+                self.demand_provider_hir_type_layouts_v1(elem)
+            case Tensor(elem, _, _) | Projection(elem, _):
+                self.demand_provider_hir_type_layouts_v1(elem)
+            case Slice(elem) | Optional(elem) | Isolated(elem) | Unique(elem) | Shared(elem) | Weak(elem):
+                self.demand_provider_hir_type_layouts_v1(elem)
+            case Ref(inner, _) | Ptr(inner, _):
+                self.demand_provider_hir_type_layouts_v1(inner)
+            case Dict(key, value) | Result(key, value):
+                self.demand_provider_hir_type_layouts_v1(key)
+                self.demand_provider_hir_type_layouts_v1(value)
+            case Function(params, ret, effects):
+                var pi = 0
+                while pi < params.len():
+                    self.demand_provider_hir_type_layouts_v1(params[pi])
+                    pi = pi + 1
+                self.demand_provider_hir_type_layouts_v1(ret)
+                var ei = 0
+                while ei < effects.len():
+                    val eff: Effect = effects[ei]
+                    ei = ei + 1
+                    match eff.kind:
+                        case EffectKind.Throws(thrown_type):
+                            self.demand_provider_hir_type_layouts_v1(thrown_type)
+                        case _: ()
+            case _: ()
+
+    me demand_native_trait_layout_v1(layout: NativeTraitLayout):
+        if not self.provider_layout_demand_active:
+            return
+        var si = 0
+        while si < layout.methods.len():
+            val slot: NativeTraitMethodSlot = layout.methods[si]
+            si = si + 1
+            var pi = 0
+            while pi < slot.params.len():
+                self.demand_provider_hir_type_layouts_v1(slot.params[pi])
+                pi = pi + 1
+            self.demand_provider_hir_type_layouts_v1(slot.result)
+            self.demand_provider_hir_type_layouts_v1(slot.declared_result)
+
+    me demand_native_trait_impl_v1(implementation: NativeTraitImplementation):
+        if not self.provider_layout_demand_active:
+            return
+        if implementation.concrete_name != "":
+            self.provider_layout_demand_v1(implementation.concrete_name)
+        self.demand_provider_hir_type_layouts_v1(implementation.concrete_type)
+        var si = 0
+        while si < implementation.signatures.len():
+            val slot: NativeTraitMethodSlot = implementation.signatures[si]
+            si = si + 1
+            var pi = 0
+            while pi < slot.params.len():
+                self.demand_provider_hir_type_layouts_v1(slot.params[pi])
+                pi = pi + 1
+            self.demand_provider_hir_type_layouts_v1(slot.result)
+            self.demand_provider_hir_type_layouts_v1(slot.declared_result)
+
     fn provider_layout_missed_v1(name: text) -> bool:
         """True when layout demand is active, provider rows exist for the
         leaf of `name`, and this consumer never registered them."""
         if not self.provider_layout_demand_active:
             return false
         val leaf = mir_provider_layout_leaf_v1(name)
+        if leaf == "" or leaf.starts_with("|mir_session|"):
+            return false
         self.provider_layout_rows_by_name.has(leaf) and not self.provider_layout_materialized.has(leaf)
 
     me provider_layout_demand_symbols_since_v1(first_symbol_id: i64):
