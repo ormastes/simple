@@ -1,7 +1,7 @@
 # Linux GB10 N2: no runnable qualification executable (seed native-build stall + interpreter "value is not callable")
 
 - **Filed:** 2026-11-18
-- **Status:** open (2, 3, 4 and 7 fixed; 1 diagnosed with a workaround; 8 and 9 open; 5 and 6 are interpreter-only — see the 2026-11-22 section)
+- **Status:** open (2, 3, 4, 7 and 9 fixed; 1 diagnosed with a workaround; 8 and 10 open; 5 and 6 are interpreter-only — see the 2026-11-22 and 2026-11-23 sections)
 - **Blocks:** `doc/08_tracking/todo/simple_2d_skia_renderdoc_linux_n2_2026-09-27.md`
   (cases 01/06/02 on the NVIDIA GB10 have no worker readbacks)
 - **Host:** physical aarch64 Ubuntu 24.04.4 LTS, NVIDIA GB10. There is no
@@ -443,3 +443,153 @@ checked: whether `session.device` (from `vulkan_get_device()`) still equals the
 runtime's `selected_device_token` at capture time (a re-select bumps the
 token), and `device_generation_quarantined`. Until this is fixed there is no
 Engine2D-vs-Skia pixel comparison on the physical device; `run-*` cannot PASS.
+
+## 2026-11-23 — Blocker 9 root cause and fix; Engine2D-vs-Skia pixel comparison on the GB10
+
+Branch `work/webrender-skiadev-20261123` (base release/1.0.0 `ccb5a2ef29c`).
+
+### Blocker 9 (fixed) — the native code split a raw `char*`
+
+**The token and generation hypotheses are wrong.** With `gdb` `dprintf` on the
+diagnostic binary, the token sequence is:
+
+- `rt_vulkan_init`
+- `rt_vulkan_select_device(0)`
+- `rt_vulkan_get_device` returns 2
+- `rt_vulkan_selected_device_identity_v1` is called with `expected_token=2`
+- `rt_vulkan_get_device` returns 2 again
+
+So the device token matches. The device was not enumerated twice and there is
+no re-select.
+
+**The bug is at the call site.** The facade
+`vulkan_sffi_selected_device_identity_v1` disassembles to:
+
+```
+ebc660: blr rt_vulkan_selected_device_identity_v1   ; returns *const c_char
+ebc67c: blr rt_string_new_literal                    ; ":"
+ebc690: blr rt_string_split                          ; receiver = the raw char* <- bug
+```
+
+`vulkan_sffi_device_name` makes the same kind of call, then
+`blr rt_cstring_to_text`. The Rust runtime returns `*const c_char` for every
+GPU name, type and identity query. The seed decodes a C-string return only for
+the names in `C_STRING_RETURNING_RUNTIME_FNS` (`codegen/instr/calls.rs`), a list
+from the 2026-08-20 census. `rt_vulkan_selected_device_identity_v1` was added
+after that census, so it is in neither that list nor `runtime_sffi.rs`. (The
+interpreter extern `rt_vulkan_selected_device_identity_v1_fn` deliberately
+returns "" — it cannot attest the native device owner — so the interpreted
+lane is blocked by design and never exercised this decode.)
+
+**Census re-run 2026-11-23.** Rust `extern "C" fn rt_* -> *const c_char` (19
+symbols) intersected with Simple `extern fn ... -> text` gives 12 symbols. All
+were already listed except this one.
+
+**Fix.** `C_STRING_RETURNING_RUNTIME_FNS` and the
+`RuntimeFuncSpec("rt_vulkan_selected_device_identity_v1", [I64], [I64])` entry
+in the seed.
+
+- **Red:** `cargo test -p simple-compiler --lib cstring_returns` gave 3/5. The
+  new `cstring_returns_native_decodes_selected_device_identity_v1` found 0
+  `rt_cstring_to_text` relocations where 1 was expected.
+- **Green:** 5/5, and 42/42 together with the `runtime_sffi` tests.
+- **Rebuilt facade:** `e4b3f0: blr rt_vulkan_selected_device_identity_v1` is
+  now followed by `e4b3fc: blr rt_cstring_to_text`.
+
+**Pure-Simple backend: unverified.** No C-string decode list was found in
+`src/compiler/` (grep for the 12 names and `rt_cstring_to_text`). Whether the
+self-hosted native backend decodes these returns some other way is unverified.
+Filed as `doc/08_tracking/bug/selfhosted_native_cstring_extern_return_decode_unverified_2026-11-23.md`.
+
+### Executable used for the evidence (diagnostic-grade, Blocker 8 unchanged)
+
+- **Seed:** private seed with the fix, built with clang and lld:
+  `CC=clang CXX=clang++ AR=llvm-ar`, linker `clang -fuse-ld=lld`,
+  `CARGO_TARGET_DIR=~/.cache/cargo-target-wr-skiadev`.
+  **Trap: `cc` on this host is GCC 13.** A cargo build without `CC=clang`
+  compiles its C build scripts with GCC.
+- **Native build:** `SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_CACHE_SCOPE=wr-skiadev-20261123 <seed> native-build ...`
+  (same recipe as above). Result: `compiled=508 failed=0`, 30.99 s, 1.57 GB.
+  The link was then refused with the same 239 missing runtime symbols.
+- **Hand-link:** the 2026-11-22 recipe, but with the default lane's
+  `$O/core_c_runtime/libsimple_runtime.a` in place of the host-gpu supplement.
+  It resolves the same way: 0 undefined symbols, and the strong Rust
+  `rt_vulkan_selected_device_identity_v1` (0x618 bytes) beats the C weak stub.
+  The Rust archive is `~/.cache/cargo-target-wr-nativeall/release/libsimple_native_all.a`
+  (2026-11-22, `--features vulkan`).
+- **Binaries:**
+  - `/home/yoon/skia-n2/artifacts/nb_skiadev_20261123/vulkan_2d_qualification`,
+    sha256 `564c5ef8…94ec`, built from `d3fe115c87b`. The first results below
+    came from it.
+  - `./vulkan_2d_qualification_b113785`, sha256
+    `98ea91fe0a9fe4d4712e5a4d7af82fb397a4a55a82c1e057a952b0e23b5dbd93`, built
+    from `b11378538ed`. It adds the fallback-reason diagnostic, and its re-run
+    gave the same table. `check-skia-web-reference-compare.shs` with this binary:
+    `PASS — 3 scene(s) compared, upstream Skia readback equals the Simple web oracle, 0 mismatching`.
+    That script covers only the Skia leg; the Engine2D leg is covered by `run-*`.
+  It is NOT a sanctioned build. The missing piece is still a seed or
+  self-hosted runtime lane that links the Vulkan runtime (`rt_vulkan_*`,
+  `rt_engine2d_*`) and the provider registry (`runtime_dynload.o`,
+  `rt_gpu_provider_*`) for an ordinary, non-bootstrap entry.
+
+### Results: Engine2D vs upstream Skia on the physical GB10
+
+Both legs ran on the NVIDIA ICD with provider
+`/home/yoon/skia-n2/artifacts/libsimple_upstream_skia_ganesh_vulkan.so`. Each
+`run-*` starts two fresh worker processes and compares their readbacks byte for
+byte.
+
+| scene | `run-*` | Engine2D rgba sha256 | Skia rgba sha256 | oracle | tries |
+|---|---|---|---|---|---|
+| web-box | **pass** (`pair_exact_rgba: pass`) | `204df3a7…7817` | `204df3a7…7817` | `204df3a7…7817` (Simple web oracle; the comparison record carries `oracle_rgba_sha256: none`) | 1 |
+| corpus-case01 | **pass** (`pair_exact_rgba: pass`) | `2f4d3fb1…39e9` | `2f4d3fb1…39e9` | `2f4d3fb1…39e9` | 1 |
+| corpus-case06 | blocked (Blocker 10) | — | (not run: the Skia worker starts only after Engine2D succeeds) | `0372ef52…ebb1` | 4 of 4 |
+
+- **Engine2D receipts attest the GB10:** `device_name: NVIDIA GB10`,
+  `device_type: integrated`,
+  `physical_device_uuid: 1883ff9c30a91b8abc50ef34ac2f5a89`,
+  `driver_uuid: 6d5e1e1841115cbdae1ec369f9e3c390`, `readback_source: device_readback`.
+  This is the same UUID that `nvidia-smi -L` reports.
+- **Repeatability:** `worker-engine2d-web-box` gave `status=candidate` 3 of 3.
+  The 2026-11-22 binary gave the identity error on the same command.
+
+### Blocker 10 (open) — corpus-case06: the strict Vulkan lane rejects a clipped plain rect
+
+The worker now appends the submit fallback reason to a capture failure. That
+is a `main.spl` diagnostic only; no check was relaxed. The failure reads:
+
+```
+status=blocked reason=engine2d-capture:Engine2D strict Vulkan owner receipt incomplete (fallback: strict-vulkan-command-preflight-required)
+```
+
+- **Not a regression.** The 2026-11-22 binary fails the same way on case 06.
+  It never reached the identity query, so "3/3 scenes blocked at identity" was
+  true only for web-box.
+- **Source:** `_engine2d_draw_ir_strict_vulkan_primitive_reason`
+  (`engine2d/draw_ir_adv.spl`) admits `clip_rect` only on an affine coverage
+  rect ("any other clipped command still fails closed"). Case 06 is
+  `corpus-case06-rectangular-clip-only`, so all of its clipped commands are
+  plain rects.
+- **Fix design (not done here):** give the plain-rect kernel the same
+  surface-space clip that the affine coverage kernel already has, as a scissor
+  in its push constants. Then admit `clip_rect.present` for `DRAW_IR_COMMAND_RECT`.
+- **Rejected:** intersecting the clip into the rect on the host is exact only
+  for a solid, integer-aligned fill. It would quietly narrow the scope of the
+  strict lane.
+- **Red spec to write first:** a strict-Vulkan submit of a 1-command clipped
+  rect must give `fallback_required=false`. The pixels must match the case 06
+  oracle `0372ef52…ebb1`.
+
+### Seed lib suite with the fix
+
+Command: `cargo test --release -p simple-compiler --lib` (clang/lld env).
+
+- **With the fix:** 5041 passed, 11 failed, 5 ignored.
+- **Base `ccb5a2ef29c`:** the same 11 tests, run alone, give 10 FAILED.
+- **The 11th** (`enum_discriminant_abi_tests::seed_builtin_discriminants_are_the_declared_ordinal`)
+  passes alone on both base and fix, twice each. It is an order-dependent flake
+  under the full parallel run.
+- **No failure is caused by this change.** The 10 base failures are
+  `collection_capture`, 2 `mir::reachability`, 6 `pipeline::native_project`
+  (bootstrap capsule ABI, core-lane ABI, hosted bundle, partial archive, object
+  cache slice, lsp-mcp startup) — plus `value::tests::shared_text_unicode_index_and_slice`.

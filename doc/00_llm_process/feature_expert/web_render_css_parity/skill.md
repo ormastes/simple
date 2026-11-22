@@ -3734,3 +3734,37 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Box after an auto-width `<button>`:** the box holds the label rounded UP, Chrome keeps the fraction (`Go` 33.785 px in 34, `Submit` 41.484 in 42): `inline_button_width_err_milli`. A device-sized control (default `<input>` 719 device px at k = 4 in a 185 CSS px box) contributes `box_device_extra_w / k`. At k > 1 an atomic inline box records `box_device_dx` (k x its pen error, nearest device px); `_html_draw_ir_device_dx` (`..._paint_layout.spl`) adds it to the box's subtree commands as the draw-IR prop `device-x-offset`, which `draw_ir_device_scale.spl` applies after scaling and strips (never a CSS length). Spec `button_following_box_x_chrome159_spec.spl` (4 rows incl. input/select/textarea at k = 4).
 - **Replaced box sized by a whole-px `width` attribute** (canvas, svg, img, video, iframe, embed, object; no padding/border; laid-out width equal to the attribute) has width error 0, so the collapsed space after it (4.45 px at 16 px sans) keeps its fraction: the animation row's svg / svg / video at 64.45 / 128.9 / 193.34 -> 1x columns 64 / 129 / 193, 4x 258 / 516 / 773 (`inline_replaced_width_is_exact`). Spec `inline_replaced_fractional_x_chrome159_spec.spl` (handover from the animation lane, 0/2 -> 2/2). Any other replaced box (percent / CSS / aspect-ratio width) still ends the error chain (unknown).
 - **Not done (named):** the letter/edge-space kern on `direction:rtl` runs needs the kern lane's per-edge-pair `Style.resolved_lead_space_milli` / `resolved_trail_space_milli`; `inline_space_kern_nowrap_rtl_chrome159_spec.spl` is tagged in-development (nowrap AC-1 green, rtl AC-2 17 runs off by 1-2 px). The button lane narrows a button only when nothing follows it; once it lands, narrow every button and check the following box is not shifted twice (`button_following_box_x` + `button_label_width` together).
+
+## 2026-11-23 — Engine2D and Skia now compared on the GB10 (native C-string return decode)
+
+- **Result.** On the physical NVIDIA GB10, the native Engine2D and upstream Skia
+  Ganesh/Vulkan produce byte-identical pixels for:
+  - web-box: `204df3a7…`
+  - corpus-case01: `2f4d3fb1…`, which also equals the oracle.
+
+  `run-web-box` and `run-corpus-case01` PASS. corpus-case06 is still blocked:
+  the strict Vulkan lane rejects a clipped plain rect
+  (`strict-vulkan-command-preflight-required`, Blocker 10).
+- **Root cause of "selected Vulkan physical device identity unavailable".** It
+  was not the token or the generation; gdb showed `expected_token=2 ==
+  get_device=2`. `rt_vulkan_selected_device_identity_v1` returns `*const c_char`.
+  The seed's native codegen decodes such returns only for the names in
+  `C_STRING_RETURNING_RUNTIME_FNS` (`codegen/instr/calls.rs`), and this symbol
+  was missing from that list. `.split(":")` therefore ran on a raw pointer.
+  Fixed in the list and in `runtime_sffi.rs`, pinned by
+  `cstring_returns_native_decodes_selected_device_identity_v1`.
+- **Trap: an extern `-> text` that "works when interpreted, fails native" is
+  this class.** Disassemble the facade: `rt_cstring_to_text` must follow the
+  call. Whenever a new `-> *const c_char` runtime export lands, re-run the
+  census (Rust c_char returners ∩ Simple `-> text` externs). The pure-Simple
+  backend has no equivalent list yet.
+- **Trap: `cc` on the GB10 host is GCC.** Build the seed with
+  `CC=clang CXX=clang++ AR=llvm-ar` and the `clang -fuse-ld=lld` linker, in a
+  private `CARGO_TARGET_DIR`.
+- **Executable.** Hand-linked, diagnostic-grade (Blocker 8 is unchanged). The
+  final binary is `/home/yoon/skia-n2/artifacts/nb_skiadev_20261123/vulkan_2d_qualification_b113785`
+  (`98ea91fe…`). With it, `check-skia-web-reference-compare.shs` reports PASS 3/3; that
+  script covers the Skia leg only, and `run-*` covers the Engine2D leg. The
+  recipe and sha256 are in
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
+  (2026-11-23).

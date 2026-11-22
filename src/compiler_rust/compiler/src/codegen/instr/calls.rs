@@ -3207,6 +3207,12 @@ fn needs_runtime_value_result_tagging<M: Module>(ctx: &InstrContext<'_, M>, func
 /// Every other `rt_*` text return is already a `RuntimeValue` (e.g.
 /// `rt_env_cwd`, which is why it was always correct on this lane) and must NOT
 /// be double-decoded — hence an explicit list rather than a prefix rule.
+///
+/// 2026-11-23: `rt_vulkan_selected_device_identity_v1` (added after the census)
+/// was missing, so the GB10 Engine2D capture split a raw pointer and reported
+/// "selected Vulkan physical device identity unavailable" (Blocker 9 in
+/// doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md).
+/// Re-run the census whenever a new `-> *const c_char` runtime export lands.
 pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_cuda_device_name",
     "rt_cuda_get_error_string",
@@ -3217,6 +3223,7 @@ pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_vulkan_device_type",
     "rt_vulkan_get_last_error",
     "rt_vulkan_selected_device_driver_identity",
+    "rt_vulkan_selected_device_identity_v1",
     "rt_vulkan_selected_device_name",
     "rt_vulkan_selected_device_type",
 ];
