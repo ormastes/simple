@@ -21,17 +21,35 @@ fn switch_operators_calls_source() -> text:
 fn mir_to_llvm_core_source() -> text:
     rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
 
+fn hir_items_module_build_source() -> text:
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_build.spl") ?? ""
+
+fn mir_llvm_asm_helpers_source() -> text:
+    rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl") ?? ""
+
+fn hir_items_module_lowering_source() -> text:
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+
+fn mir_module_lowering_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+
+fn mir_function_lowering_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLowering/function_lowering.spl") ?? ""
+
+fn method_calls_literals_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+
 describe "bootstrap MIR binary lowering source":
     it "guards optional metadata before nil-comparison lowering":
         # @req REQ-SSPEC-COMPILER
         step("guards optional metadata before nil-comparison lowering")
         val source = expr_dispatch_source()
 
-        expect(source).to_contain("fn hir_expr_is_optional_type(e: HirExpr) -> bool:")
-        expect(source).to_contain("if e == nil or not e.has_type_:")
-        expect(source).to_contain("if t == nil:")
-        expect(source).to_contain("hir_expr_is_optional_type(left) or self.option_value_locals.contains(left_local.id)")
-        expect(source).to_contain("hir_expr_is_optional_type(right) or self.option_value_locals.contains(right_local.id)")
+        expect(source).to_contain("me nil_compare_operand_is_declared_optional(e: HirExpr, local: LocalId) -> bool:")
+        expect(source).to_contain("if e != None and e.has_type_:")
+        expect(source).to_contain("if t != None:")
+        expect(source).to_contain("self.nil_compare_operand_is_declared_optional(left, left_local) or self.option_value_locals.contains(left_local.id)")
+        expect(source).to_contain("self.nil_compare_operand_is_declared_optional(right, right_local) or self.option_value_locals.contains(right_local.id)")
         expect(source.contains("match left.type_.kind:")).to_equal(false)
         expect(source.contains("match right.type_.kind:")).to_equal(false)
 
@@ -42,21 +60,21 @@ describe "bootstrap MIR binary lowering source":
 
         expect(source).to_contain("case PipeForward | Compose | ComposeBack | Parallel | LayerConnect:")
         expect(source).to_contain("case _:")
-        expect(source).to_contain("val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_local), mir_operand_copy(right_local), result_type)")
+        expect(source).to_contain("val binop_result = b.emit_binop(mir_op, mir_operand_copy(left_binop), mir_operand_copy(right_binop), result_type)")
 
     it "defaults only unknown bootstrap indexes to text values":
         # @req REQ-SSPEC-COMPILER
         step("defaults only unknown bootstrap indexes to text values")
         val source = expr_dispatch_source()
 
-        expect(source).to_contain("if (mir_expr_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\":")
+        expect(source).to_contain("if (mir_expr_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\" and not result_type_from_base and not is_tuple_base:")
         expect(source).to_contain("result_type = self.bootstrap_text_type()")
-        expect(source).to_contain("val base_local = self.lower_expr(base)")
-        expect(source).to_contain("if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):")
-        expect(source).to_contain("return cli_arg_local")
+        expect(source).to_contain("var base_local = self.lower_expr(base)")
 
         val helper_source = switch_operators_calls_source()
-        expect(helper_source).to_contain("MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)")
+        expect(helper_source).to_contain("me bootstrap_text_type() -> MirType:")
+        expect(helper_source).to_contain("if name == \"get_args\" or name == \"get_cli_args\":")
+        expect(helper_source).to_contain("return MirType.ptr(self.bootstrap_text_array_type(), false)")
 
     it "preserves explicit branch terminators in lowered if blocks":
         # @req REQ-SSPEC-COMPILER
@@ -71,11 +89,11 @@ describe "bootstrap MIR binary lowering source":
     it "preserves inferred float and bool locals through shared MIR type predicates":
         # @req REQ-SSPEC-COMPILER
         step("preserves inferred float and bool locals through shared MIR type predicates")
-        val expr_source = expr_dispatch_source()
         val stmt_source = mir_lowering_stmts_source()
 
-        expect(expr_source).to_contain("fn local_is_float(local: LocalId) -> bool:")
-        expect(expr_source).to_contain("case MirTypeKind.F32 | MirTypeKind.F64: return true")
+        expect(stmt_source).to_contain("fn local_is_float(local: LocalId) -> bool:")
+        expect(stmt_source).to_contain("MirTypeKind.F64")
+        expect(stmt_source).to_contain("MirTypeKind.F32")
         expect(stmt_source).to_contain("self.local_is_float(init_local)")
         expect(stmt_source).to_contain("fn local_is_bool(local: LocalId) -> bool:")
         expect(stmt_source).to_contain("case MirTypeKind.Bool: return true")
@@ -84,14 +102,14 @@ describe "bootstrap MIR binary lowering source":
     it "preserves class array-field metadata and mutating projection provenance":
         # @req REQ-SSPEC-COMPILER
         step("preserves class array-field metadata and mutating projection provenance")
-        val hir_source = hir_items_module_lowering_source()
+        val hir_build_source = hir_items_module_build_source()
         val mir_source = mir_module_lowering_source()
         val expr_source = expr_dispatch_source()
         val method_source = method_calls_literals_source()
 
-        expect(hir_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_struct.fields)")
-        expect(hir_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_class.fields)")
-        expect(mir_source).to_contain("self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, false)")
+        expect(hir_build_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_struct.fields, prescan_struct.type_params)")
+        expect(hir_build_source).to_contain("self.prescan_composite_field_types(prescan_name, prescan_class.fields, prescan_class.type_params)")
+        expect(mir_source).to_contain("self.register_composite_field_metadata(struct_def.name, struct_def.fields, module_symbols, false)")
         expect(mir_source).to_contain("self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)")
         expect(mir_source).to_contain("if overwrite or not self.struct_field_order.has(name):")
         expect(mir_source).to_contain("if overwrite or not self.struct_field_array_element_type_name.has(name):")
@@ -99,29 +117,24 @@ describe "bootstrap MIR binary lowering source":
         expect(mir_source).to_contain("self.struct_field_array_element_type_name[name] = field_array_element_type_names")
         expect(mir_source).to_contain("if overwrite or not self.struct_field_array_elem_type.has(name):")
         expect(mir_source).to_contain("self.struct_field_array_elem_type[name] = field_elem_types")
-        expect(expr_source.split("self.struct_field_array_elem_type.has(").len() - 1).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(expr_source).to_contain("if self.struct_field_array_element_type_name.contains(name):")
+        expect(expr_source).to_contain("case HirTypeKind.Array(_, _):")
         expect(expr_source.split("self.remember_field_projection_provenance(base, base_local, field_idx").len() - 1).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(method_source).to_contain("self.remember_field_projection_provenance(base, wb_base, wb_field_idx, wb_receiver)")
 
     it "lowers pointer text equality through runtime string compare":
         # @req REQ-SSPEC-COMPILER
         step("lowers pointer text equality through runtime string compare")
-        val source = mir_to_llvm_core_source()
+        val expr_source = expr_dispatch_source()
+        val llvm_source = mir_to_llvm_core_source()
+        val llvm_asm_source = mir_llvm_asm_helpers_source()
 
-        expect(source).to_contain("if eq_cmp_ty == \"ptr\" and self.should_use_bootstrap_strcmp(left, right):")
-        expect(source).to_contain("if ne_cmp_ty == \"ptr\" and self.should_use_bootstrap_strcmp(left, right):")
-        expect(source).to_contain("self.unknown_func_decls[\"rt_strcmp\"] = true")
-        expect(source).to_contain("self.should_use_bootstrap_strcmp(left, right)")
-        expect(source).to_contain("me should_use_bootstrap_strcmp(left: MirOperand, right: MirOperand) -> bool:")
-        expect(source).to_contain("self.is_string_operand(left) or self.is_string_operand(right)")
-        expect(source).to_contain("self.string_locals[dest_id] = true")
-        expect(source).to_contain("self.string_locals.has(self.local_id_value(local))")
-        expect(source).to_contain("call i64 @rt_strcmp(ptr")
-        expect(source).to_contain("declare ptr @spl_get_arg(i64)")
-        expect(source).to_contain("declare i64 @rt_strcmp(ptr, ptr)")
-        expect(source).to_contain("bare_func_name == \"spl_get_arg\"")
-        expect(source).to_contain("self.emit_comparison(dest_name, ty, \"eq\", \"i64\", strcmp_result, \"0\")")
-        expect(source).to_contain("self.emit_comparison(dest_name, ty, \"ne\", \"i64\", strcmp_result, \"0\")")
+        expect(expr_source).to_contain("if self.local_is_str(left_local) or self.local_is_str(right_local):")
+        expect(expr_source).to_contain("MirConstValue.Str(\"rt_text_eq_any\")")
+        expect(llvm_asm_source).to_contain("declare ptr @rt_get_args()")
+        expect(llvm_asm_source).to_contain("declare i64 @rt_text_eq_any(i64, i64)")
+        expect(llvm_source).to_contain("elif bare_func_name == \"rt_get_args\":")
+        expect(llvm_source).to_contain("known_ret_ty = \"ptr\"")
 
     it "lowers raw-pointer offset as a typed, element-scaled MIR operation":
         # @req REQ-SSPEC-COMPILER
@@ -130,27 +143,29 @@ describe "bootstrap MIR binary lowering source":
         val method_source = method_calls_literals_source()
         val llvm_source = mir_to_llvm_core_source()
 
-        expect(type_source).to_contain("case Ptr(inner, mutable):")
+        expect(type_source).to_contain("case HirTypeKind.Ptr(inner, mutable):")
         expect(type_source).to_contain("MirType.ptr(self.lower_type(inner), mutable)")
         expect(method_source).to_contain("if method == \"offset\" and args.len() == 1 and resolution_is_unresolved:")
         expect(method_source).to_contain("case MirTypeKind.Ptr(pointee, _):")
         expect(method_source).to_contain("val pointee_size = pointee.size_bytes()")
         expect(method_source).to_contain("MirBinOp.Mul")
         expect(method_source).to_contain("MirBinOp.Offset")
-        expect(llvm_source).to_contain("{dest_name} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
-        expect(llvm_source.contains("ptrtoint ptr {offset_ptr}")).to_equal(false)
+        expect(llvm_source).to_contain("{{dest_name}} = getelementptr i8, ptr {{left_val}}, {{nit}} {{right_val}}")
+        expect(llvm_source.contains("ptrtoint ptr {{offset_ptr}}")).to_equal(false)
 
     it "lowers bootstrap print calls through runtime println":
         # @req REQ-SSPEC-COMPILER
         step("lowers bootstrap print calls through runtime println")
         val source = switch_operators_calls_source()
         val llvm_source = mir_to_llvm_core_source()
+        val llvm_asm_source = mir_llvm_asm_helpers_source()
 
-        expect(source).to_contain("me lower_bootstrap_print_call(args: [HirCallArg]) -> LocalId:")
-        expect(source).to_contain("MirConstValue.Str(\"rt_println\")")
-        expect(source).to_contain("b.emit_call(func_operand, [mir_operand_copy(arg_local)], MirType.unit())")
-        expect(llvm_source).to_contain("declare void @rt_println(ptr)")
-        expect(llvm_source).to_contain("bare_func_name == \"eprint\" or bare_func_name == \"rt_println\"")
+        expect(source).to_contain("me lower_bootstrap_print_call(args: [HirCallArg], rt_name: text) -> LocalId:")
+        expect(source).to_contain("val writer = if rt_name == \"rt_print\": \"rt_print_str\" elif rt_name == \"rt_eprintln\": \"rt_eprintln_str\" else: \"rt_println_str\"")
+        expect(source).to_contain("b.emit_call(func_operand, [print_arg], MirType.unit())")
+        expect(llvm_asm_source).to_contain("declare void @rt_println(ptr)")
+        expect(llvm_asm_source).to_contain("declare void @rt_println_str(ptr, i64)")
+        expect(llvm_source).to_contain("elif imported_eprint:")
 
     it "qualifies enum-payload sub-pattern Wildcard arms against the HirPatternKind subject, not the parser's PatternKind":
         # @req REQ-SSPEC-COMPILER
@@ -182,7 +197,7 @@ describe "bootstrap MIR binary lowering source":
         val source = mir_lowering_stmts_source()
 
         expect(source).to_contain("fn mir_stmt_caller_debug_enabled() -> bool:")
-        expect(source).to_contain("rt_env_get(\"SIMPLE_MIR_STMT_CALLER_DEBUG\") == \"1\"")
+        expect(source).to_contain("env_get_opt(\"SIMPLE_MIR_STMT_CALLER_DEBUG\") == Some(\"1\")")
         expect(source).to_contain("fn mir_stmt_caller_probe(tag: text, stmt: HirStmt):")
         expect(source).to_contain("mir_stmt_caller_probe(\"before\", stmt)")
         expect(source).to_contain("self.lower_stmt_impl(stmt)")

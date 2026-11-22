@@ -1,6 +1,6 @@
 # `animation: spin -1s` is dropped as invalid; Chrome reads the lone negative time as the delay (2026-11-15)
 
-Status: OPEN. Severity: low (an authored negative-delay start offset is lost;
+Status: FIXED (2026-11-22 — `animation_shorthand_is_valid` and `parse_transition_nth_time_ms` now assign the first non-negative `<time>` to duration and a lone negative `<time>` to `animation-delay`, while preserving CSS Transitions rejection of a lone negative time; verified in `layout_renderer_style_value_parsers_spec.spl`). Severity: low (an authored negative-delay start offset is lost;
 the element does not animate at all).
 
 ## Defect

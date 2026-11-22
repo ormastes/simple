@@ -33,6 +33,7 @@
 # every other CSS property and is not owned by any single PropertyId here).
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{ComputedStyleHot}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation_values.{parse_opacity_pct_or_neg1}
 use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
 
 # NOTE: this file intentionally does NOT `use style_block.{sb_parse_int,
@@ -147,22 +148,12 @@ pub class Declaration:
     flags: i64
 
 fn style_property_id_parse_opacity_pct(value: text) -> i64:
-    """Typed-parse a CSS opacity value ("1", "0.5", "50%") to a 0..100
-    percent i64, ONCE, at Declaration construction — not on every apply."""
-    val v = value.trim()
-    if v.len() == 0:
+    """Typed-parse a CSS opacity value ("1", "1.0", "1.5", "-0.5", "0.5", "50%")
+    to a clamped 0..100 percent i64 (or -1 on invalid syntax), ONCE, at
+    Declaration construction."""
+    if value.trim().byte_len() == 0:
         return 100
-    if v.ends_with("%"):
-        return spid_parse_int(v.slice(0, v.byte_len() - 1)) as i64
-    val dot = spid_find(v, ".", 0)
-    if dot < 999999999:
-        val int_part = spid_parse_int(v.slice(0, dot)) as i64
-        val frac_str = v.slice(dot + 1, v.byte_len())
-        var frac_digit: i64 = 0
-        if frac_str.len() > 0:
-            frac_digit = spid_parse_int(frac_str.slice(0, 1)) as i64
-        return int_part * 100 + frac_digit * 10
-    (spid_parse_int(v) as i64) * 100
+    parse_opacity_pct_or_neg1(value) as i64
 
 pub fn declaration_from_name_value(name: text, value: text, important: bool) -> Declaration:
     """Build a Declaration: property name→PropertyId and value→typed form are
@@ -219,7 +210,8 @@ pub fn apply_declarations(hot: ComputedStyleHot, decls: [Declaration], mut stats
             hot.content_visibility_hidden = d.value_text == "hidden"
             stats["touched"] = stats["touched"] + 1
         elif d.property == PROPERTY_ID_OPACITY:
-            hot.opacity_pct = d.value_id as i32
+            if d.value_id >= 0:
+                hot.opacity_pct = d.value_id as i32
             stats["touched"] = stats["touched"] + 1
         elif d.property == PROPERTY_ID_COLOR:
             hot.fg = d.value_id as u32

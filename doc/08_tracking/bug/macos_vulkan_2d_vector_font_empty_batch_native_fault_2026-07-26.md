@@ -797,3 +797,12 @@ blocked on the admitted compiler from the in-flight bootstrap; the existing
 regression specs (`font_empty_batch_fail_closed_spec.spl`,
 `sfnt_glyf_bungee_native_probe.spl`, `engine_vulkan_font_route_spec.spl`) are
 the rerun set. Status: fix-implemented-verification-pending.
+
+## 2026-11-22 Spec Verification & MoltenVK Runtime Portability Alignment (work/mac-bugs-vulkan-20261122)
+
+- Executed the Vulkan 2D font regression suite on macOS arm64:
+  - `test/01_unit/lib/gpu/engine2d/font_empty_batch_fail_closed_spec.spl` — 5/5 passed
+  - `test/01_unit/lib/gpu/engine2d/vulkan_font_batch_admission_spec.spl` — 8/8 passed
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_flush_promotion_spec.spl` — 3/3 passed
+- Fixed the underlying macOS MoltenVK portability/discovery defects in `instance.rs`, `device.rs`, and `gpu.rs` (`VK_KHR_portability_enumeration` + `VK_KHR_portability_subset` + Homebrew `MoltenVK_icd.json` discovery) and the `_gpu_draw_text_fallback` dirty/mirror-invalidation gap in `backend_vulkan_helpers.spl`.
+- Full native-compiled live window/Metal-device attestation remains gated on the admitted macOS self-hosted compiler build and non-sandboxed `MTLDevice` access.

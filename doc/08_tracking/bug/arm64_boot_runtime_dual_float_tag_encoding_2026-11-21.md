@@ -1,8 +1,9 @@
 # arm64 boot runtime: two incompatible TAG_FLOAT encodings
 
-- Status: open
+- Status: fixed
 - Area: SimpleOS arm64 boot runtime (`examples/09_embedded/simple_os/arch/arm64/boot/`)
 - Found: 2026-11-21, arm64 fs-exec kernel link lane (PR for `runtime_value_shims.spl`)
+- Fixed: 2026-11-22 (`baremetal_stubs.c` unified on canonical masked `(bits & ~7ULL) | TAG_FLOAT` + exact IEEE bit-cast `spl_f64_to_bits` / `rt_f64_to_bits`; verified cross-TU round-trip for `1.0`, `-0.0`, `1e300`, `-42.5`, and `0.0` against `value_runtime_owner.c` and pinned in `test/01_unit/os/arm64_boot_float_tag_encoding_spec.spl`)
 
 ## Defect
 

@@ -1,0 +1,39 @@
+"""
+## Purpose and audience
+Purpose: Prevent regressions in COFF `$`-subsection GC and Mach-O dead-strip atom reachability across linker and obj_taker owners.
+Audience: Compiler linker engineers maintaining COFF, Mach-O, and SMF symbol extraction.
+"""
+# @cover src/compiler/70.backend/linker/coff/coff_link.spl
+# @cover src/compiler/70.backend/linker/macho/hosted_image.spl
+# @cover src/compiler/70.backend/linker/macho/hosted_link.spl
+# @cover src/compiler/70.backend/linker/obj_taker.spl
+# @req REQ-COMPFIX-11
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_linker_source(path: text) -> text:
+    match rt_file_read_text(path):
+        case Some(content): content
+        case None: ""
+
+describe "COFF and Mach-O alias subsection dead-stripping guard":
+    it "treats COFF dollar subsections as GC-eligible in _coff_gc_accepted":
+        step("Verify _coff_section_gc_eligible gates .text$/.rdata$/.data$/.bss$ alongside LNK_COMDAT")
+        val coff = read_linker_source("src/compiler/70.backend/linker/coff/coff_link.spl")
+
+        expect(coff).to_contain("fn _coff_section_gc_eligible(section: CoffSection) -> bool:")
+        expect(coff).to_contain("not _coff_section_gc_eligible(section)")
+
+    it "wires dead_strip into Mach-O request projection, layout, fixups, and hosted_image":
+        step("Verify Mach-O hosted link/image/layout/adapter and obj_taker expose dead-stripping")
+        val hosted_image = read_linker_source("src/compiler/70.backend/linker/macho/hosted_image.spl")
+        val hosted_link = read_linker_source("src/compiler/70.backend/linker/macho/hosted_link.spl")
+        val adapter = read_linker_source("src/compiler/70.backend/linker/macho/native_adapter.spl")
+        val obj_taker = read_linker_source("src/compiler/70.backend/linker/obj_taker.spl")
+
+        expect(hosted_image).to_contain("fn macho_hosted_dead_strip_live(")
+        expect(hosted_link).to_contain("dead_strip: bool = false")
+        expect(adapter).to_contain("\"-dead_strip\"")
+        expect(obj_taker).to_contain("fn objtaker_section_dead_strip_eligible(")

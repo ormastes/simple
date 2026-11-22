@@ -11,6 +11,7 @@ use std.common.markdown.{markdown_slugify}
 use std.editor.services.diagnostics.{EditorDiagnostic}
 use std.editor.services.md_wiki_index.{MdWikiDocument, md_wiki_parse_link_target, md_wiki_target_exists, md_wiki_slug, md_wiki_title_from_path}
 use std.common.diagnostics.{DiagnosticV1, DiagnosticBatchV1, BatchStatus, Severity, Span, DiagnosticFix, FixReplacement, DiagnosticFixConfidence, diagnostic_stable_id, LineStartTable}
+use std.common.encoding.utf8.{utf8_seq_len}
 use std.common.hash.xxh3.{xxh3_128_hex_text}
 
 # Typed Markdown diagnostics ride the shared contract
@@ -48,18 +49,22 @@ fn _md_span_ctx(content: text, path: text) -> MdSpanCtx:
     MdSpanCtx(table: LineStartTable.build(content), lines: content.split("\n"), path: path)
 
 fn _md_byte_col(ctx: MdSpanCtx, line: i64, col: i64) -> i64:
-    if line < 0 or line >= ctx.lines.len():
+    if line < 0 or line >= ctx.lines.len() or col <= 0:
         return col
     val text_line: text = ctx.lines[line]
-    val cp_len = text_line.len()
-    if col >= cp_len:
-        val whole_bytes = text_line.byte_len()
-        return whole_bytes + (col - cp_len)
-    # Bound to a local on purpose: `.byte_len()` on a nested `slice()` result
-    # fails in the seed interpreter ("method 'byte_len' not found on value of
-    # type str in nested call context", observed 2026-11-12).
-    val prefix: text = text_line.slice(0, col)
-    prefix.byte_len()
+    val nbytes = text_line.byte_len()
+    var bpos = 0
+    var cpos = 0
+    while cpos < col and bpos < nbytes:
+        val seq = utf8_seq_len(text_line.byte_at(bpos))
+        val step = if seq > 0: seq else: 1
+        bpos = bpos + step
+        if bpos > nbytes:
+            bpos = nbytes
+        cpos = cpos + 1
+    if cpos < col:
+        return nbytes + (col - cpos)
+    bpos
 
 # Codepoint span of a token on one line -> shared Span (1-based line/col,
 # byte offsets relative to the document start).
@@ -1022,7 +1027,7 @@ fn _md_diag_find_images_with_positions(content: text) -> [MdDiagLinkRef]:
                             var ui = 0
                             while ui < url.len() and url[ui:ui + 1] != " ":
                                 ui = ui + 1
-                            url_clean = url.slice(0, ui).trim()
+                            url_clean = url[0:ui].trim()
                             val img_entry = MdDiagLinkRef(line: line_idx, col: img_start_col, end_col: k + 1, label: alt, url: url_clean)
                             results.push(img_entry)
                             col = k + 1

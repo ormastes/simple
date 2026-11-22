@@ -51,6 +51,11 @@ case "${1:-}" in
     exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
     ;;
 esac
+# Host-config build-start memory reserve (mem_reserve_free_mib, #8931): env
+# SIMPLE_BUILD_MEMORY_RESERVE_BYTES wins; a host without the key is unchanged.
+# Stage 3 knobs are applied in resume-stage3-from-admitted.sh (after --jobs).
+. "${bootstrap_entry_dir}/lib/host-bootstrap-settings.shs"
+bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -182,6 +187,8 @@ case "${1:-}" in
     shift
     [ "$#" -eq 1 ] || { echo 'error: managed resume requires one --bootstrap-receipt planner authority' >&2; exit 2; }
     case "$1" in --bootstrap-receipt=*) managed_resume_planner=${1#*=} ;; *) exit 2 ;; esac
+    . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-materialized-startup.shs"
+    bootstrap_materialized_resume_startup "${bootstrap_early_repo_root}" "${managed_resume_output}" || exit 1
     exec sh "${bootstrap_entry_dir}/run-managed-from-admitted.shs" \
       "--output=${managed_resume_output}" "--planner-receipt=${managed_resume_planner}"
     ;;
@@ -1030,6 +1037,8 @@ if [ -n "${resume_stage3_output}" ]; then
   [ "${fresh_cache}" -eq 0 ] || RESUME_STAGE3_CACHE_ACTION=clean
   [ "${invalidate_cache_scope}" != stage3 ] || RESUME_STAGE3_CACHE_ACTION=invalidate
   export RESUME_STAGE3_CACHE_ACTION
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-materialized-startup.shs"
+  bootstrap_materialized_resume_startup "${bootstrap_early_repo_root}" "${resume_stage3_output}" || exit 1
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 

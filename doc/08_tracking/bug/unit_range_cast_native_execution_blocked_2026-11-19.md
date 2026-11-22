@@ -46,3 +46,40 @@ Fresh stage2 from release tip (diagnostic, `SIMPLE_BUILD_MEMORY_RESERVE_BYTES=64
 Blocker: the fresh stage2 cannot native-build even hello world: `SCV-E-ADMISSION: observed-event-apply:inventory-publication-failed:publish-current-write-failed` (reproduced 3x: default flags; with `SIMPLE_SCV_INVENTORY_COLD_INIT/FREEZE_FALLBACK/NATIVE_INCREMENTAL/CACHE_SCOPE/PROJECT_ROOT` as in the p3mir recipe; with `--source build/rbn --entry-closure`). Source is inside the git checkout root; the write failure message carries no path. No fixture was built or run natively.
 
 Next: root-cause `publish-current-write-failed` (SCV inventory publication under a git worktree), and/or rebuild the llvm seed so text_bytes.spl compiles without the workaround; then re-run the five fixtures with the fresh stage2.
+
+## Lane 4: `publish-current-write-failed` root cause (2026-11-22, branch work/scvpub-20261119)
+Result: fixtures still NOT run natively. Status stays verification-pending.
+
+Root cause of `SCV-E-ADMISSION: observed-event-apply:inventory-publication-failed:publish-current-write-failed`:
+it is not a bug in the tree. The Lane 3 stage2 (`rbn3/stage2.exe`) was built with an incomplete local
+text_bytes workaround. That workaround changed `text_byte_buffer`/`text_byte_extraction_checked` to take
+`i64`, but left the `Capacity(value: ...)`/`Length(value: ...)` call sites in place. In that binary the
+UTF-8 encoder (`file_atomic_write` -> `file_atomic_write_encoded_text` -> `external_byte_buffer` ->
+`text_byte_buffer`) therefore fails. Every encoded `file_atomic_write` returns false, so the CURRENT
+pointer write fails. The generation blobs still publish, because they go through
+`file_publish_noreplace_raw`, which does not encode.
+Evidence:
+- On Nov 19, CURRENT was moved away and the run repeated: a new generation blob was written in the same
+  second, but CURRENT was still not written. Replace-over-existing is ruled out.
+- A stage2 built with the workaround applied to all 14 call sites (`s4/stage2.exe`, local only, never
+  committed) published CURRENT fine in a fresh worktree on a disk that was 100% full.
+- In the same worktree minutes later, `rbn3/stage2.exe` panics with
+  `panic: external text at byte -1: boxed text byte extraction failed`.
+
+Committed change (diagnostic only, not a Windows write fix): the inventory publication reasons now end
+with `path=<target>`. Spec: `test/01_unit/lib/scv/compile_source_inventory_lockless_publish_spec.spl`
+("names the CURRENT path when the pointer write fails"). It failed before the change (6/7) and passes
+after it (7/7, also on the rebased tip 6caedc506bb).
+
+Native runs with `s4/stage2.exe` (seed_llvm build of the pre-rebase tree with the local workaround,
+not admitted):
+- `native-build test/fixtures/unit_native/port_in.spl`: SCV admission, HIR and MIR succeed
+  (`[mir-shard] link modules=1 objects=1`). The link phase then hangs until `timeout 1200` (worker
+  exit 143). No artifact.
+- A second attempt hung before link (`timeout 150`, rc=124).
+- Host C: was 100% full (2.5 GB free); cache writes were refused (`[cache-admission] publish refused`).
+  A fresh stage2 rebuild from the current release tip was not attempted for lack of disk.
+
+Next: on a host with free disk, rebuild stage2 from the current release tip. That tip carries the linker
+and driver fixes that landed after Nov 19. Then re-run the five fixtures. If the link still hangs, check
+whether `native_linking.spl` spawns clang/lld at all.
