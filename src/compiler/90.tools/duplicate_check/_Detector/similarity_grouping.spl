@@ -273,9 +273,21 @@ fn collect_cheap_line_window_candidates(files: [text], config: DuplicationConfig
     # renamed-but-structurally-identical blocks -- cosine's actual target --
     # still register as a candidate pair here. Signal lines come from the
     # shared tokenizer, so comment/string text cannot admit a file by itself.
+    #
+    # Two admission rules, so a file's INTRA-file result never depends on
+    # which unrelated files share the scan (bug
+    # 2026-11-22_dupcheck_cosine_pass0_scope_dependent_recall):
+    #  1. intra-file: some identifier-normalized single signal line occurs
+    #     twice in the file. Decided by the file alone. Two fuzzy (>= 0.85
+    #     cosine) min_lines blocks share at least one structurally equal line
+    #     in practice, while an exact min_lines window usually does not.
+    #  2. cross-file: an identifier-normalized min_lines window occurs in
+    #     another file too (unchanged; cross-file pairs need the other file).
+    # On src/runtime/*.c rule 1 admits 52 of 82 files (rule 2 alone kept 41).
     val window = if config.min_lines > 0: config.min_lines else: 5
     var key_counts: {text: i64} = {}
     var file_keys: {text: [text]} = {}
+    var candidate_files: {text: bool} = {}
 
     for file in files:
         val source = read_detector_source(file)
@@ -283,6 +295,20 @@ fn collect_cheap_line_window_candidates(files: [text], config: DuplicationConfig
         val (signal_prefix, _) = line_window_prefixes(source, config)
         if lines.len() < window:
             continue
+
+        var seen_line: {text: bool} = {}
+        var li = 0
+        while li < lines.len():
+            if window_has_signal(signal_prefix, li, 1):
+                val line_key = normalize_identifiers_for_cheap_key(line_window_key(lines, li, 1))
+                if seen_line.has(line_key):
+                    candidate_files[file] = true
+                    li = lines.len()
+                else:
+                    seen_line[line_key] = true
+                    li = li + 1
+            else:
+                li = li + 1
 
         var seen_in_file: {text: bool} = {}
         var start = 0
@@ -304,7 +330,6 @@ fn collect_cheap_line_window_candidates(files: [text], config: DuplicationConfig
             keys_list.push(k)
         file_keys[file] = keys_list
 
-    var candidate_files: {text: bool} = {}
     for file in file_keys.keys():
         val keys_list = file_keys[file]
         var ki = 0

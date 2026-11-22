@@ -24,12 +24,21 @@ extern fn rt_net_tx_test() -> i64
 extern fn rt_net_rx_ready() -> i64
 extern fn rt_net_stats() -> i64
 
-fn _decode_riscv_status(raw: i64) -> i64:
+# reason: RISC-V 32/64 boot probe status sign-extension helper (widened negative i32 and 61-bit tagged ints)
+# @allow(primitive_api)
+pub fn decode_riscv_status(raw: i64) -> i64:
     val wrapped_negative_floor = 1i64 << 60
     val wrapped_negative_span = 1i64 << 61
     if raw >= wrapped_negative_floor:
         return raw - wrapped_negative_span
+    val rv32_negative_floor = 1i64 << 31
+    val rv32_negative_span = 1i64 << 32
+    if raw >= rv32_negative_floor and raw < rv32_negative_span:
+        return raw - rv32_negative_span
     raw
+
+fn _decode_riscv_status(raw: i64) -> i64:
+    decode_riscv_status(raw)
 extern fn rt_storage_init() -> i64
 extern fn rt_storage_read_probe() -> i64
 extern fn rt_storage_capacity_sectors() -> i64
@@ -128,7 +137,10 @@ fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) ->
         log_raw_println("[net-riscv] Network service disabled")
     else:
         log_raw_println("[net-riscv] Starting network service probe...")
-        val count = rt_pci_device_count()
+        var count = rt_pci_device_count()
+        if count < 0 or count > 256:
+            log_raw_println("[net-riscv] Invalid PCI device count {count}")
+            count = 0
         riscv_network_device_index = -1
         var i: i64 = 0
         while i < count:
@@ -154,15 +166,17 @@ fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) ->
             else:
                 log_raw_println("[net-riscv] Network device ready")
                 val tx_rc = rt_net_tx_test()
-                if tx_rc < 0:
-                    log_raw_println("[net-riscv] Network packet TX unavailable rc={tx_rc}")
+                val tx_status = _decode_riscv_status(tx_rc)
+                if tx_status < 0:
+                    log_raw_println("[net-riscv] Network packet TX unavailable rc={tx_status}")
                     network_ok = 0
                 else:
                     riscv_network_tx_ok = true
                     log_raw_println("[net-riscv] Network packet TX ready")
                     val rx_rc = rt_net_rx_ready()
-                    if rx_rc < 0:
-                        log_raw_println("[net-riscv] Network packet RX unavailable rc={rx_rc}")
+                    val rx_status = _decode_riscv_status(rx_rc)
+                    if rx_status < 0:
+                        log_raw_println("[net-riscv] Network packet RX unavailable rc={rx_status}")
                         network_ok = 0
                     else:
                         riscv_network_rx_ok = true
@@ -188,10 +202,13 @@ fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) ->
                                         log_raw_println("[net-riscv] TCP bind probe failed")
                                         network_ok = 0
                                     else:
-                                        boot_tcp_probe_close(tcp_probe_fd)
-                                        network_ok = 1
-                                        log_raw_println("[net-riscv] TCP bind probe passed")
-                                        log_raw_println("[net-riscv] Network service ready")
+                                        if not boot_tcp_probe_close(tcp_probe_fd):
+                                            log_raw_println("[net-riscv] TCP close probe failed")
+                                            network_ok = 0
+                                        else:
+                                            network_ok = 1
+                                            log_raw_println("[net-riscv] TCP bind probe passed")
+                                            log_raw_println("[net-riscv] Network service ready")
 
     riscv_network_ok = network_ok
     if network_ok == 1:
@@ -226,24 +243,24 @@ fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) ->
 
     log_raw_println("[storage-riscv] Starting storage service probe...")
     var storage_ok: i64 = 0
-    val storage_rc = rt_storage_init()
+    val storage_rc = _decode_riscv_status(rt_storage_init())
     if storage_rc < 0:
         log_raw_println("[storage-riscv] Storage unavailable rc={storage_rc}")
         riscv_storage_capacity = 0
     else:
         log_raw_println("[storage-riscv] Storage device ready")
-        val read_rc = rt_storage_read_probe()
+        val read_rc = _decode_riscv_status(rt_storage_read_probe())
         if read_rc < 0:
             log_raw_println("[storage-riscv] NVFS superblock probe failed rc={read_rc}")
             riscv_storage_capacity = 0
         else:
-            val nvfs_rc = rt_storage_nvfs_ready()
+            val nvfs_rc = _decode_riscv_status(rt_storage_nvfs_ready())
             if nvfs_rc != 1:
                 log_raw_println("[storage-riscv] NVFS superblock unavailable rc={nvfs_rc}")
                 riscv_storage_capacity = 0
             else:
                 log_raw_println("[storage-riscv] NVFS superblock probe passed")
-                val arena_rc = rt_storage_nvfs_arena_ready()
+                val arena_rc = _decode_riscv_status(rt_storage_nvfs_arena_ready())
                 if arena_rc != 1:
                     log_raw_println("[storage-riscv] NVFS arena payload unavailable rc={arena_rc}")
                     riscv_storage_capacity = 0

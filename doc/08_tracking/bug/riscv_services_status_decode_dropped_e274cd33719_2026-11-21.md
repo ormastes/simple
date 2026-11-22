@@ -1,7 +1,8 @@
 # riscv_services: probe status decoding and guards dropped by e274cd33719
 
-- **Status:** open
+- **Status:** fixed
 - **Found:** 2026-11-21, Fable review of PR #10635 (riscv32 kernel link lane)
+- **Fixed:** 2026-11-22 (restored `decode_riscv_status` / `_decode_riscv_status` with riscv32 widened `i32` sign-extension on TX/RX/storage probes, PCI `0..256` count clamp, and `boot_tcp_probe_close` failure guard; verified in `test/01_unit/os/riscv_services_status_decode_spec.spl`)
 - **File:** `src/os/kernel/boot/riscv_services.spl`
 
 ## Symptom
