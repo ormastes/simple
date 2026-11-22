@@ -33,6 +33,9 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.data.attribute_schema_v1.{AttrPlacementV1}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
+@unsafe(reason: "observe live build session id before permanent default caching", capabilities: [ffi])
+extern fn rt_session_heap_id() -> u32
+
 
 # ============================================================================
 # Volatile Attribute Types
@@ -448,8 +451,12 @@ var _decl_attrs_session_active: bool = false
 var _vhdl_hardware_metadata_absent_cached: VhdlHardwareMetadata? = None
 var _driver_manifest_attr_absent_cached: DriverManifestAttr? = None
 
+fn _decl_attrs_live_session_id_v1() -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_session_heap_id()
+
 fn _decl_attrs_can_cache_permanent_v1() -> bool:
-    not _decl_attrs_session_active and transient_array_scope_state_v1() == 0
+    not _decl_attrs_session_active and transient_array_scope_state_v1() == 0 and _decl_attrs_live_session_id_v1() == 0u32
 
 fn decl_attrs_set_session_v1(active: bool):
     _decl_attrs_session_active = active
@@ -1175,10 +1182,10 @@ pub fn parse_embed_attr(attrs: [Attribute]) -> EmbedAttr?:
     ))
 
 pub fn embed_attr_placement_v1(embed: EmbedAttr?) -> AttrPlacementV1:
-    """Map `@embed` metadata to canonical `AttrPlacementV1.Embedded`."""
+    """Map `@embed` metadata to `AttrPlacementV1.Embedded` when present, `SparseHash` when absent."""
     if val _present = embed:
         return AttrPlacementV1.Embedded
-    AttrPlacementV1.Embedded
+    AttrPlacementV1.SparseHash
 
 pub fn apply_embed_layout_attr_v1(base: LayoutAttr, embed: EmbedAttr?) -> LayoutAttr:
     """Apply `@embed` inline/embedded intent onto a `LayoutAttr` (`TypeLayout`)."""
