@@ -2048,10 +2048,15 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
         for command in batch.commands:
             if command.? == None:
                 return "strict-vulkan-command-preflight-required"
-            # Only an affine coverage rect may carry a surface clip here (the
-            # coverage kernel clips in surface space); any other clipped
-            # command still fails closed.
-            if command.clip_rect.present and command.affine_transform == None:
+            # A surface clip is admitted on an affine coverage rect (the
+            # coverage kernel clips in surface space) and on a later plain or
+            # fractional rect (the rect kernel's push-constant scissor). The
+            # first command is the clear, which ignores clip; text, edge and
+            # path executors apply no clip; a negative clip is malformed. All
+            # of those still fail closed.
+            if (command.clip_rect.present and command.affine_transform == None and
+                (first or command.kind != DRAW_IR_COMMAND_RECT or
+                 command.clip_rect.width < 0 or command.clip_rect.height < 0)):
                 return "strict-vulkan-command-preflight-required"
             # Affine commands carry fractional local geometry too, so the v4
             # state test runs before the plain fractional rectangle branch.
@@ -3978,16 +3983,25 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                                     geometry.width, geometry.height,
                                     matrix.a, matrix.b, matrix.c, matrix.d,
                                     matrix.tx, matrix.ty, command.color)
-                elif command.fractional_geometry != None:
-                    val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
-                        command, eng.width(), eng.height())
-                    eng.draw_rect_filled(
-                        pixels.x, pixels.y, pixels.width, pixels.height,
-                        command.color)
                 else:
-                    eng.draw_rect_filled(
-                        command.x, command.y, command.width, command.height,
-                        command.color)
+                    # Preflight admitted this clip only for a non-first,
+                    # non-affine rect; the rect kernel applies it per pixel
+                    # from its push constants, and it is cleared right after.
+                    val clip = command.clip_rect
+                    if clip.present:
+                        eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+                    if command.fractional_geometry != None:
+                        val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
+                            command, eng.width(), eng.height())
+                        eng.draw_rect_filled(
+                            pixels.x, pixels.y, pixels.width, pixels.height,
+                            command.color)
+                    else:
+                        eng.draw_rect_filled(
+                            command.x, command.y, command.width, command.height,
+                            command.color)
+                    if clip.present:
+                        eng.clear_clip()
                 if painted:
                     rendered = rendered + 1
                 else:
