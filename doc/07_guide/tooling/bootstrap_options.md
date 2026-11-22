@@ -1,20 +1,47 @@
 # Bootstrap options, shard knobs and cache protocol state
 
-Dated 2026-10-25, against `release/1.0.0`, with the latest user-directed
-per-file worker default updated 2026-10-26. Each item names the PR or file it
-was checked against. The true per-file worker pipeline is the DEFAULT when
-`SIMPLE_FILE_WORKERS` is unset (2026-11-04); `SIMPLE_FILE_WORKERS=0` opts out.
-See "Default build mode" below.
+Dated 2026-10-25 against `release/1.0.0`, reconciled 2026-11-22 for the unified
+Phase 3 / Phase 4 build architecture. Each item names the PR or file it was
+checked against:
 
-## Default build mode: file-based src → obj + library link (user policy 2026-11-04)
+- **Bootstrap scripts (`scripts/bootstrap/build-phase3-phase4.sh`, `.bat`, and `config/bootstrap.sdn`):**
+  **`--compile-mode=shard` is DEFAULT** (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`,
+  `SIMPLE_MIR_SHARDING=1`); **`--compile-mode=file` is optional** (`SIMPLE_FILE_WORKERS=1`).
+- **Standalone direct `simple native-build` (outside bootstrap scripts):** when
+  `SIMPLE_FILE_WORKERS` is left unset in the environment, the internal driver constant
+  `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (2026-11-04) selects the per-file worker
+  pool; `SIMPLE_FILE_WORKERS=0` opts out. See the standalone driver section below.
 
-- **Default (no flag, no env):** each source file goes src → obj in ONE
+## Shared Cross-Platform Phase 3 & Phase 4 Script (`scripts/bootstrap/build-phase3-phase4.sh`)
+
+**Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS** share a single phased build entrypoint:
+- **POSIX / Bash (Linux, macOS, FreeBSD, Windows Git-Bash/MSYS2, SimpleOS):** `scripts/bootstrap/build-phase3-phase4.sh`
+- **Windows Batch wrapper (2 configs delegating to the same `.sh` script — `mingw` DEFAULT, `msvc` optional):** `scripts/bootstrap/build-phase3-phase4.bat` (`--win-config=mingw` uses `llvm-mingw` clang + `ld.lld` by default; `--win-config=msvc` uses `clang-cl`)
+- **Platform/CPU policy & `native_host_match` tag gate:** `scripts/bootstrap/stage3-native-host-link-policy.sdn` + `scripts/bootstrap/stage3-native-host-link-policy.shs`
+
+Key architectural behaviors:
+- **Interactive Phased Build Menu & Non-Interactive Phases:** Run `sh scripts/bootstrap/build-phase3-phase4.sh --menu` (or invoke interactively without `--phase=...`) to open the interactive Phased Build Menu, or pass non-interactive `--phase=p3a|p3|p4|all`.
+- **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Exists:** In `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)** and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing Phase 3+ compiler without seed fallback.
+- **Shard Build Default, File-Based Optional:** `--compile-mode=shard` is **DEFAULT** in `build-phase3-phase4.sh` (phase-based HIR/MIR shard build: `SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`); `--compile-mode=file` is optional (parallel per-file worker pool: `SIMPLE_FILE_WORKERS=1`).
+- **Platform/CPU Static-Primitive + Dynamic Unit Link (`native_host_match`):** Enforces mandatory **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`), minimizing `simple` to link **only** thin entry + `(platform, cpu)` static primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`) dynamically. **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib` already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+- **Phase 4 Dual-Mode Build (`--xray` + Optimized Release):** Phase 4 builds **both** the optimized production binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`).
+- **Zero-Compile `--path-check` Alive Verification & Protected Script Guard:** Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation (`--path-check`, optionally with `--simulate-host=<platform>-<cpu>`).
+- **Deprecated Standalone Phase 3/4 Scripts (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.):** Retained on disk for historical reference/tests, but invoking them directly pauses with migration instructions showing how to run `build-phase3-phase4.sh` (including phased/shard mode) and returns without building.
+
+See [phase3_phase4_shared_build.md](phase3_phase4_shared_build.md) for complete CLI tables and examples.
+
+## Standalone `native-build` driver mode: file-based src → obj + library link (historical 2026-11-04 note; bootstrap scripts default to `--compile-mode=shard`)
+
+> **Reconciliation note (2026-11-22):** `build-phase3-phase4.sh` and `config/bootstrap.sdn` (`stage3_file_workers: 0`) default Phase 3/4 bootstrap builds to `--compile-mode=shard` (`SIMPLE_FILE_WORKERS=0`), with `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) available as an explicit option. The `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` constant below applies only when invoking standalone `simple native-build` directly with `SIMPLE_FILE_WORKERS` unset.
+
+- **Standalone driver default (no flag, no env, outside bootstrap scripts):** each source file goes src → obj in ONE
   process (parse → HIR → MIR → object, like cc1) via the per-file worker
   pool; objects are then linked into the binary. Selected by
   `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`
   (`src/compiler/80.driver/driver_build/native_file_worker_v1.spl`), pinned
   by `test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`. Applies to
-  bootstrap Stage 3, release builds and plain `native-build`.
+  unconfigured standalone `native-build` invocations (whereas `build-phase3-phase4.sh`
+  explicitly sets `--compile-mode=shard` / `SIMPLE_FILE_WORKERS=0` by default).
 - **Opt-outs (explicit, per invocation only):** `SIMPLE_FILE_WORKERS=0`
   (two-pass HIR-shard then MIR-shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`
   (whole-program single-object route), `SIMPLE_MIR_SHARDING=0` (disables the
@@ -24,8 +51,8 @@ See "Default build mode" below.
 - **Rule: never change a shared default to suit one build.** No config file,
   script-global env default, or constant flip. A launcher that needs a
   non-default mode passes the option at its own call site with a comment
-  saying why (e.g. `scripts/bootstrap/p3-entry-groups.shs` sets
-  `SIMPLE_FILE_WORKERS=0` for its generated launcher only).
+  saying why (note: historical `scripts/bootstrap/p3-entry-groups.shs` is now
+  deprecated and delegates migration instructions to `build-phase3-phase4.sh`).
 - **Exception (2026-11-13, owner request): Stage 3 route in tracked config.**
   While the per-file route still fails on importing units (bug #8504 layers
   2-3; layer 1 fixed by #8746), `config/bootstrap.sdn` sets
@@ -245,11 +272,12 @@ nil_in_non_optional_scalar` lines; the encoder writes a nil token the generated
 decoder refuses, so entries are not stored and HIR shard work is recomputed.
 See `doc/08_tracking/bug/hir_cache_selfcheck_nil_in_non_optional_scalar_2026-10-25.md`.
 
-## Per-file src to obj is the default (#4525)
+## Standalone per-module / per-file lowering notes (#4525, historical 2026-10-25; Phase 3/4 scripts default to `--compile-mode=shard`)
 
 Target design: `doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md`.
 Landed pieces: FileFiber v1 per-file read + TLDR publish (#4453), single-flight
-leaders (#4441), and #4525, which makes per-module lowering the default.
+leaders (#4441), and #4525, which makes per-module lowering the standalone driver default
+(while `scripts/bootstrap/build-phase3-phase4.sh` and `config/bootstrap.sdn` set `--compile-mode=shard` / `SIMPLE_FILE_WORKERS=0` by default and expose per-file workers via `--compile-mode=file`).
 
 - `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` is the only way into the whole-program
   bootstrap-fixed lane (one MirLowering over the closure, flat MIR passes

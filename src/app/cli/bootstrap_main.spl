@@ -590,7 +590,8 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                 val stage3_allow_mir = native_bootstrap_stage3_per_file_selected_v1(
                     env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
-                if stage3_allow_mir:
+                if stage3_allow_mir and not bootstrap_shard_child_active() and
+                        not bootstrap_build_role_child_requested(args):
                     print "[stage3-route] per-file worker pool + per-module link"
                 # go-to-end or explicit MIR sharding on the two-pass route
                 # (SIMPLE_FILE_WORKERS=0): HIR and MIR shard pools, so HIR runs
@@ -622,8 +623,8 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
             print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
             return 1
-        if mode != "one-binary":
-            print "Error: Stage4 compiler capsule requires --mode one-binary"
+        if mode != "one-binary" and mode != "dynload":
+            print "Error: Stage4 compiler capsule requires --mode one-binary or --mode dynload"
             return 1
         val worker_args = bootstrap_native_build_worker_args(args)
         val option_error = cli_native_build_option_error(worker_args, true)
@@ -634,6 +635,27 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             return 3
         native_build_apply_failure_policy_v1(worker_args)
         bootstrap_capsule_shard_child_env(args)
+        val stage4_target = focused_native_build_target(args)
+        val stage4_bindings = library_unit_env_bindings_for_inputs_v1(LibraryUnitModeInputsV1(
+            args: worker_args,
+            build_mode: mode,
+            stage3_env: env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "",
+            stage4_env: "1",
+            stage3_dynlib_env: env_get(STAGE3_LIB_DYNLIB_ENV_V1) ?? "",
+            library_units_env: env_get(LIBRARY_UNITS_ENV_V1) ?? "",
+            whole_program_env: env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "",
+            explicit_emit_mode: requested_output_mode,
+            target_or_os: if stage4_target != "": stage4_target else: host_os(),
+            linker_env: env_get("SIMPLE_LINKER") ?? ""
+        ))
+        if mode != "":
+            env_set("SIMPLE_NATIVE_BUILD_MODE", mode)
+        env_set(LIBRARY_UNITS_ENV_V1, stage4_bindings.library_units_env)
+        env_set(STAGE3_LIB_DYNLIB_ENV_V1, stage4_bindings.stage3_dynlib_env)
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", stage4_bindings.dynlib_explicit_env)
+        if stage4_bindings.mode == LibraryUnitBuildModeV1.DynLibUnits:
+            if not bootstrap_shard_child_active():
+                print "[stage4-route] library-unit dyn-lib build + thin executable link"
         # Seed only the entry. The driver resolves its transitive imports and
         # then enables closure mode; pre-enabling it while passing whole source
         # roots made Stage 4 parse every file before it could prune anything.
