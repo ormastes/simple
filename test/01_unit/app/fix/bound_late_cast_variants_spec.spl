@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: Prove the three extra SPL-BOUND-002 autofix variants: a constrained
+(range-checked, Option-returning) adapter, a move-cast-to-boundary subset, and
+a scoped `@allow(bound_late_cast)` exemption that is only offered with a reason.
+Audience: compiler and tooling engineers maintaining robust-boundary fixes.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+All variants are single-file and review-required (Uncertain, never Safe). The
+fix_transaction supports multi-file candidates but these edits touch one file.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.tools.fix.rules.impl_.bound_late_cast_fix.{bound_late_cast_constrained_candidates, bound_late_cast_move_candidates, bound_late_cast_allow_candidates}
+use std.common.diagnostics.fix_transaction.{DocumentSnapshot, EditTransaction}
+
+val FILE = "/w/client.spl"
+val HASH = "xxh3:b0"
+
+fn tx_for(body: text) -> EditTransaction:
+    EditTransaction.new("/w", HASH).with_document(DocumentSnapshot.new(FILE, 1, HASH, body))
+
+fn ranged_src() -> text:
+    "unit Port: i32 in 1..=65535\nextern fn c_read_port() -> i32\nfn get_port() -> Port?:\n    Port(c_read_port())\n"
+
+fn plain_src() -> text:
+    "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+
+fn move_src() -> text:
+    "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\nfn get_distance() -> DistanceKm:\n    val raw = c_read_distance()\n    DistanceKm(raw)\n"
+
+describe "SPL-BOUND-002 constrained adapter fix":
+    it "adds a range-checked Option adapter for a unit with an `in` range":
+        # @req: REQ-DIAG-POLICY-001
+        step("Compute constrained candidates for a ranged unit")
+        val cs = bound_late_cast_constrained_candidates(ranged_src(), FILE, 1)
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].id).to_equal("SPL-BOUND-002-CONSTRAINED:c_read_port_as_Port_checked")
+        expect(cs[0].confidence.name()).to_equal("uncertain")
+        val r = tx_for(ranged_src()).apply(cs[0])
+        expect(r.status.name()).to_equal("applied")
+        val out = r.text_of(FILE)
+        expect(out).to_contain("fn c_read_port_as_Port_checked() -> Port?:")
+        expect(out).to_contain("    if raw < 1 or raw > 65535:\n        return None\n    Some(Port(raw))")
+        expect(out).to_contain("    c_read_port_as_Port_checked()\n")
+
+    it "offers nothing for a unit with no declared range":
+        # @req: REQ-DIAG-POLICY-001
+        step("A plain unit has no bounds to check")
+        expect(bound_late_cast_constrained_candidates(plain_src(), FILE, 1).len()).to_equal(0)
+
+describe "SPL-BOUND-002 move-cast-to-boundary fix":
+    it "offers only the local-copy move form":
+        # @req: REQ-DIAG-POLICY-001
+        step("A direct cast has no move site; a local copy does")
+        expect(bound_late_cast_move_candidates(plain_src(), FILE, 1).len()).to_equal(0)
+        val cs = bound_late_cast_move_candidates(move_src(), FILE, 1)
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].id).to_equal("SPL-BOUND-002-MOVE:c_read_distance_as_DistanceKm")
+        val out = tx_for(move_src()).apply(cs[0]).text_of(FILE)
+        expect(out).to_contain("    val raw = c_read_distance_as_DistanceKm()\n    raw\n")
+
+describe "SPL-BOUND-002 scoped allow exemption fix":
+    it "requires a non-blank reason":
+        # @req: REQ-DIAG-POLICY-001
+        step("Blank reasons yield no candidate")
+        expect(bound_late_cast_allow_candidates(plain_src(), FILE, 1, "").len()).to_equal(0)
+        expect(bound_late_cast_allow_candidates(plain_src(), FILE, 1, "   ").len()).to_equal(0)
+
+    it "inserts the scoped annotation above the offending function only":
+        # @req: REQ-DIAG-POLICY-001
+        step("Apply the exemption with a reason")
+        val cs = bound_late_cast_allow_candidates(plain_src(), FILE, 1, "legacy HAL, range checked by caller")
+        expect(cs.len()).to_equal(1)
+        expect(cs[0].id).to_equal("SPL-BOUND-002-ALLOW:get_distance")
+        val out = tx_for(plain_src()).apply(cs[0]).text_of(FILE)
+        expect(out).to_contain("@allow(bound_late_cast) # reason: legacy HAL, range checked by caller\nfn get_distance() -> DistanceKm:")
+        expect(out).to_contain("extern fn c_read_distance() -> i32\n@allow")
+
+    it "offers nothing for clean source":
+        # @req: REQ-DIAG-POLICY-001
+        step("No finding, no exemption")
+        expect(bound_late_cast_allow_candidates("fn f() -> i64:\n    1\n", FILE, 1, "r").len()).to_equal(0)
