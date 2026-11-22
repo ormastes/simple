@@ -155,7 +155,18 @@ setInterval(() => {}, 1000);
   descendants.delete(pid);
   await diagnostic.request('ping');
 
-  // Each file-only/visibility dispatch must preserve the bounded owner's error.
+  // Document symbols must work without a Simple CLI child.
+  fs.writeFileSync(path.join(directory, 'fixture.spl'), 'pub fn fixture_symbol() -> i64:\n    42\n');
+  const symbolClient = client({ SIMPLE_BINARY: path.join(directory, 'missing-simple') });
+  await initialize(symbolClient);
+  const symbols = await symbolClient.request('tools/call', {
+    name: 'lsp_symbols', arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
+  });
+  assert(JSON.parse(symbols.content[0].text).some(symbol => symbol.name === 'fixture_symbol'));
+  await symbolClient.close();
+  passed++;
+
+  // Each remaining child-backed query must preserve the bounded owner's error.
   // These are real child deadlines; no marker injection into the server.
   const queryPath = path.join(directory, 'src', 'app', 'cli', 'query_visibility.spl');
   const samlPath = path.join(directory, 'src', 'app', 'saml', 'main.spl');
@@ -164,7 +175,7 @@ setInterval(() => {}, 1000);
   const hangingQuery = "require('node:fs').writeFileSync(process.env.LSP_TEST_QUERY_PID_FILE, String(process.pid)); console.log('partial query'); setInterval(() => {}, 1000);\n";
   fs.writeFileSync(queryPath, hangingQuery);
   fs.writeFileSync(samlPath, hangingQuery);
-  for (const name of ['lsp_visibility', 'lsp_symbols', 'saml_analyze']) {
+  for (const name of ['lsp_visibility', 'saml_analyze']) {
     const queryResponse = diagnostic.request('tools/call', {
       name, arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
     }, 40000, -32001);
