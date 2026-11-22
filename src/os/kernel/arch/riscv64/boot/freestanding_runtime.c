@@ -1521,29 +1521,22 @@ static void rt_mmio_write32_raw(spl_u64 addr, spl_u32 value) {
     *(volatile spl_u32 *)addr = value;
 }
 
-static spl_u8 rt_io_read8(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u8 *)(base + off);
+#define RT_IO_READ_FN(name, ctype) \
+static ctype name(spl_u64 base, spl_u64 off) { \
+    return *(volatile ctype *)(base + off); \
 }
-
-static spl_u16 rt_io_read16(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u16 *)(base + off);
+#define RT_IO_WRITE_FN(name, ctype) \
+static void name(spl_u64 base, spl_u64 off, ctype value) { \
+    *(volatile ctype *)(base + off) = value; \
 }
-
-static spl_u32 rt_io_read32(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u32 *)(base + off);
-}
-
-static void rt_io_write8(spl_u64 base, spl_u64 off, spl_u8 value) {
-    *(volatile spl_u8 *)(base + off) = value;
-}
-
-static void rt_io_write16(spl_u64 base, spl_u64 off, spl_u16 value) {
-    *(volatile spl_u16 *)(base + off) = value;
-}
-
-static void rt_io_write32(spl_u64 base, spl_u64 off, spl_u32 value) {
-    *(volatile spl_u32 *)(base + off) = value;
-}
+RT_IO_READ_FN(rt_io_read8, spl_u8)
+RT_IO_READ_FN(rt_io_read16, spl_u16)
+RT_IO_READ_FN(rt_io_read32, spl_u32)
+RT_IO_WRITE_FN(rt_io_write8, spl_u8)
+RT_IO_WRITE_FN(rt_io_write16, spl_u16)
+RT_IO_WRITE_FN(rt_io_write32, spl_u32)
+#undef RT_IO_READ_FN
+#undef RT_IO_WRITE_FN
 
 static void rt_memzero(void *ptr, spl_u64 bytes) {
     spl_u8 *data = (spl_u8 *)ptr;
