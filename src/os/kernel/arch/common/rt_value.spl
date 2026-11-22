@@ -1,0 +1,187 @@
+# Shared 64-bit RuntimeValue helpers for the SimpleOS kernel value shims.
+#
+# RuntimeValue is 64-bit on every arch (#10816). Tagging:
+#   tags INT=0 HEAP=1 FLOAT=2 SPECIAL=3 (low 3 bits)
+#   int = v << 3; heap = ptr | 1; nil = 3; true = 11; false = 19
+#   FLOAT is MASKED: IEEE bits in place, low 3 replaced by the tag.
+# Heap layout (examples/09_embedded/simple_os/arch/<arch>/boot/baremetal_stubs.c):
+#   HeapHeader {u32 type; u32 size}
+#   RuntimeArray {hdr; u32 len @8; u32 cap @12; RuntimeValue items[] @16}
+#   RuntimeMap   {hdr; u32 len @8; u32 cap @12; keys* @16; values* @16+word}
+#   RuntimeEnum  {hdr; u32 enum_id @8; u32 discriminant @12; payload @16}
+# Only pointer fields differ by word size (4 on arm32/riscv32/x86_32, 8 on
+# arm64/riscv64/x86_64), so layout helpers take `word_bytes` where it matters.
+#
+# SimpleOS shim rules this module obeys: no rt_* exports and no rt_* calls,
+# integer-only bodies, no string literals, and NO memory access. Callers (the
+# per-arch runtime_value_shims) read memory via rt_mmio_* / rt_volatile_* and
+# pass the loaded words in, so every function here is pure and executable in
+# the interpreter (test/01_unit/os/multiarch/arch_common_rt_value_spec.spl).
+
+val RV_TAG_MASK: i64 = 7
+val RV_TAG_INT: i64 = 0
+val RV_TAG_HEAP: i64 = 1
+val RV_TAG_FLOAT: i64 = 2
+val RV_TAG_SPECIAL: i64 = 3
+val RV_NIL: i64 = 3
+val RV_TRUE: i64 = 11
+val RV_FALSE: i64 = 19
+val RV_HEAP_MIN_ADDR: i64 = 4096
+
+val RV_HEAP_STRING: i64 = 1
+val RV_HEAP_ARRAY: i64 = 2
+val RV_HEAP_MAP: i64 = 3
+val RV_HEAP_OBJECT: i64 = 4
+val RV_HEAP_ENUM: i64 = 7
+
+# --- tagging -----------------------------------------------------------------
+
+fn rv_tag(v: i64) -> i64:
+    v & RV_TAG_MASK
+
+fn rv_is_int(v: i64) -> i64:
+    if (v & RV_TAG_MASK) == RV_TAG_INT:
+        return 1
+    0
+
+fn rv_is_heap(v: i64) -> i64:
+    if (v & RV_TAG_MASK) == RV_TAG_HEAP:
+        return 1
+    0
+
+fn rv_is_float(v: i64) -> i64:
+    if (v & RV_TAG_MASK) == RV_TAG_FLOAT:
+        return 1
+    0
+
+fn rv_is_special(v: i64) -> i64:
+    if (v & RV_TAG_MASK) == RV_TAG_SPECIAL:
+        return 1
+    0
+
+# --- boxing ------------------------------------------------------------------
+
+fn rv_box_int(n: i64) -> i64:
+    n << 3
+
+fn rv_unbox_int(v: i64) -> i64:
+    v >> 3
+
+fn rv_box_heap(addr: i64) -> i64:
+    addr | RV_TAG_HEAP
+
+fn rv_heap_addr(v: i64) -> i64:
+    v - RV_TAG_HEAP
+
+fn rv_nil() -> i64:
+    RV_NIL
+
+fn rv_true() -> i64:
+    RV_TRUE
+
+fn rv_false() -> i64:
+    RV_FALSE
+
+fn rv_box_bool(b: i64) -> i64:
+    if b != 0:
+        return RV_TRUE
+    RV_FALSE
+
+# --- truthy / conversions ----------------------------------------------------
+
+fn rv_truthy(v: i64) -> i64:
+    val tag = v & RV_TAG_MASK
+    if tag == RV_TAG_SPECIAL:
+        if v == RV_TRUE:
+            return 1
+        return 0
+    if tag == RV_TAG_INT:
+        if (v >> 3) != 0:
+            return 1
+        return 0
+    if tag == RV_TAG_FLOAT:
+        # +0.0 and -0.0 are falsy: all bits except sign (and the tag) clear.
+        if ((v & (0 - 8)) << 1) != 0:
+            return 1
+        return 0
+    if (v & (0 - 8)) != 0:
+        return 1
+    0
+
+# IEEE-754 binary64 -> i64 truncation toward zero, integer-only. Out-of-range
+# saturates.
+fn rv_f64_bits_to_int(bits: i64) -> i64:
+    val exp = (bits >> 52) & 0x7ff
+    if exp < 1023:
+        return 0
+    val neg = bits < 0
+    if exp >= 1086:
+        if neg:
+            return -9223372036854775807 - 1
+        return 9223372036854775807
+    val mant = (bits & 0xfffffffffffff) | 0x10000000000000
+    val shift = exp - 1075
+    var mag: i64 = 0
+    if shift >= 0:
+        mag = mant << shift
+    else:
+        mag = mant >> (0 - shift)
+    if neg:
+        return 0 - mag
+    mag
+
+# any_to_int for non-string values: tagged int -> int, masked float ->
+# truncated int, anything else (heap handle, special) passes through. Strings
+# need a heap read + parse, which stays in the per-arch shim.
+fn rv_any_to_int_scalar(v: i64) -> i64:
+    val tag = v & RV_TAG_MASK
+    if tag == RV_TAG_INT:
+        return v >> 3
+    if tag == RV_TAG_FLOAT:
+        return rv_f64_bits_to_int(v & (0 - 8))
+    v
+
+# --- heap layout -------------------------------------------------------------
+
+fn rv_heap_addr_valid(addr: i64) -> i64:
+    if addr < RV_HEAP_MIN_ADDR:
+        return 0
+    1
+
+fn rv_heap_type_matches(header_type: i64, expected: i64) -> i64:
+    if header_type == expected:
+        return 1
+    0
+
+fn rv_array_len_offset() -> i64:
+    8
+
+fn rv_array_items_offset() -> i64:
+    16
+
+fn rv_array_item_addr(addr: i64, index: i64) -> i64:
+    addr + 16 + index * 8
+
+fn rv_map_keys_offset() -> i64:
+    16
+
+fn rv_map_values_offset(word_bytes: i64) -> i64:
+    16 + word_bytes
+
+# --- enums -------------------------------------------------------------------
+
+fn rv_enum_id_offset() -> i64:
+    8
+
+fn rv_enum_disc_offset() -> i64:
+    12
+
+fn rv_enum_payload_offset() -> i64:
+    16
+
+fn rv_enum_is_variant(enum_id: i64, disc: i64, want_id: i64, want_disc: i64) -> i64:
+    if enum_id != want_id:
+        return 0
+    if disc != want_disc:
+        return 0
+    1
