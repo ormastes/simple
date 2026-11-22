@@ -1199,10 +1199,11 @@ impl LlvmBackend {
 
     /// Get or declare `rt_interp_call` with the C runtime prototype
     /// (`src/runtime/runtime.h`): `int64_t rt_interp_call(const uint8_t* name,
-    /// uint64_t len, int64_t argc, int64_t argv)`. Only `name` is a real C
-    /// pointer (pointer-width on 32-bit targets); `argv` travels as a 64-bit
-    /// word. The pre-declare pass in `compile()` and both InterpCall emitters
-    /// share this so the declaration and the call sites cannot disagree.
+    /// uint64_t len, int64_t argc, const uint64_t* argv)`, matching the Rust
+    /// runtime's `argv: *const RuntimeValue`. `name` and `argv` are real C
+    /// pointers (pointer-width on 32-bit targets). The pre-declare pass in
+    /// `compile()` and both InterpCall emitters share this so the declaration
+    /// and the call sites cannot disagree.
     #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn declare_rt_interp_call(
         &self,
@@ -1210,9 +1211,26 @@ impl LlvmBackend {
     ) -> inkwell::values::FunctionValue<'static> {
         module.get_function("rt_interp_call").unwrap_or_else(|| {
             let word = self.runtime_int_type();
-            let name_ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
-            let fn_type = word.fn_type(&[name_ptr.into(), word.into(), word.into(), word.into()], false);
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[ptr.into(), word.into(), word.into(), ptr.into()], false);
             module.add_function("rt_interp_call", fn_type, None)
+        })
+    }
+
+    /// Get or declare `rt_string_new_literal` with the runtime prototype
+    /// `rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeValue`.
+    /// `bytes` is a real pointer: passing it as a 64-bit word shifts `len`
+    /// on 32-bit targets (i686 printed an empty string).
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_string_new_literal(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_string_new_literal").unwrap_or_else(|| {
+            let word = self.runtime_int_type();
+            let ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[ptr.into(), word.into()], false);
+            module.add_function("rt_string_new_literal", fn_type, None)
         })
     }
 
@@ -1865,6 +1883,13 @@ impl NativeBackend for LlvmBackend {
                     if spec.name == "rt_interp_call" {
                         // Not an all-word signature: `name` is a real pointer.
                         self.declare_rt_interp_call(m)
+                            .set_linkage(inkwell::module::Linkage::External);
+                        continue;
+                    }
+
+                    if spec.name == "rt_string_new_literal" {
+                        // `bytes` is a real pointer, not a RuntimeValue word.
+                        self.declare_rt_string_new_literal(m)
                             .set_linkage(inkwell::module::Linkage::External);
                         continue;
                     }

@@ -3226,7 +3226,7 @@ impl LlvmBackend {
 
         let argc = i64_type.const_int(args.len() as u64, false);
         let argv = if args.is_empty() {
-            i64_type.const_int(0, false)
+            i8_ptr_type.const_null()
         } else {
             let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
             let alloc_fn = module
@@ -3366,7 +3366,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             }
 
-            argv_raw
+            argv_ptr
         };
 
         let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
@@ -3444,8 +3444,8 @@ mod tests {
 
     fn assert_interp_call_abi(ir: &str) {
         assert!(
-            ir.contains("declare i64 @rt_interp_call(ptr, i64, i64, i64)"),
-            "rt_interp_call must match the C prototype (pointer name, word argv): {ir}"
+            ir.contains("declare i64 @rt_interp_call(ptr, i64, i64, ptr)"),
+            "rt_interp_call must match the C prototype (pointer name, pointer argv): {ir}"
         );
         assert!(!ir.contains("func_name_ptr"), "name pointer must not be ptrtoint'd: {ir}");
     }
@@ -3477,6 +3477,41 @@ mod tests {
         // compile() runs the pre-declare pass and verifies the module.
         backend.compile(&mir_module).unwrap();
         assert_interp_call_abi(&backend.get_ir().unwrap());
+    }
+
+    fn string_literal_function(name: &str, value: &str) -> MirFunction {
+        let mut func = MirFunction::new(name.to_string(), T::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstString {
+            dest: VReg(0),
+            value: value.to_string(),
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+        func
+    }
+
+    fn assert_string_literal_abi(ir: &str) {
+        assert!(
+            ir.contains("declare i64 @rt_string_new_literal(ptr, i64)"),
+            "rt_string_new_literal bytes must be a real pointer: {ir}"
+        );
+        assert!(!ir.contains("ptrtoint"), "literal pointer must not be ptrtoint'd: {ir}");
+    }
+
+    /// i686 printed "" for `print "hello i686"`: the literal pointer went out
+    /// as a 64-bit word, so the 32-bit callee read `len` from the pointer's
+    /// zero high half. Covers the pre-declare pass and both literal shapes.
+    #[test]
+    fn string_literal_i686_windows_pointer_param() {
+        use crate::codegen::backend_trait::NativeBackend;
+
+        for value in ["hello i686", ""] {
+            let mut backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+            let mut mir_module = MirModule::new();
+            mir_module.name = Some("strlit_i686".to_string());
+            mir_module.functions.push(string_literal_function("main", value));
+            backend.compile(&mir_module).unwrap();
+            assert_string_literal_abi(&backend.get_ir().unwrap());
+        }
     }
 
     /// `InterpCall` with an `f64` argument must declare `rt_value_float(double)`

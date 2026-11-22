@@ -57,16 +57,13 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         let i64_type = self.runtime_int_type();
 
-        // Declare rt_string_new_literal if not exists: fn(i64, i64) -> i64.
-        // First arg is ptr-as-i64 (matching the tagged-value ABI).
+        // rt_string_new_literal(bytes: ptr, len) -> RuntimeValue.
         // Interned variant: this instruction re-executes per literal
         // evaluation and the no-GC tier never frees, so per-eval
         // rt_string_new leaked one registered heap string per execution
         // (bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20).
-        let string_new = module.get_function("rt_string_new_literal").unwrap_or_else(|| {
-            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
-            module.add_function("rt_string_new_literal", fn_type, None)
-        });
+        let string_new = self.declare_rt_string_new_literal(module);
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
 
         let builder = self.builder.borrow();
         let builder = builder
@@ -76,7 +73,7 @@ impl LlvmBackend {
         if value.is_empty() {
             let zero = i64_type.const_int(0, false);
             let call = builder
-                .build_call(string_new, &[zero.into(), zero.into()], "str_new")
+                .build_call(string_new, &[ptr_type.const_null().into(), zero.into()], "str_new")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
             if let Some(ret) = call.try_as_basic_value().basic() {
                 vreg_map.insert(dest, ret);
@@ -89,13 +86,9 @@ impl LlvmBackend {
             global.set_constant(true);
             global.set_linkage(inkwell::module::Linkage::Private);
             let str_ptr = global.as_pointer_value();
-            // Convert ptr to i64 to match the ABI
-            let str_ptr_int = builder
-                .build_ptr_to_int(str_ptr, i64_type, "str_ptr_int")
-                .map_err(|e| crate::error::factory::llvm_build_failed("ptrtoint", &e))?;
             let str_len = i64_type.const_int(value.len() as u64, false);
             let call = builder
-                .build_call(string_new, &[str_ptr_int.into(), str_len.into()], "str_new")
+                .build_call(string_new, &[str_ptr.into(), str_len.into()], "str_new")
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
             if let Some(ret) = call.try_as_basic_value().basic() {
                 vreg_map.insert(dest, ret);
