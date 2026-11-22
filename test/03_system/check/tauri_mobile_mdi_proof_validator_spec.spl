@@ -27,10 +27,53 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/tauri_mobile_mdi_proof_valid
 
 - Complete mobile MDI proof logs validate and emit normalized
   `{prefix}_mdi_*` rows.
+- Explicitly requested mobile MDI proof source paths must exist and be
+  nonempty regular files; a valid companion device log cannot hide a missing,
+  empty, symlinked, hardlinked, duplicated, or non-regular requested source
+  artifact.
+- When multiple requested device logs contain MDI proof markers, their latest
+  proof JSON must agree; conflicting render/event/capture/performance/
+  animation proof payloads fail closed instead of letting one log shadow
+  another.
+- The extracted proof JSON output path must not overlap any requested device
+  log source path, including hard-linked aliases, so validation cannot overwrite
+  the source evidence it just consumed.
+- The extracted proof JSON output path must also be a regular destination, not
+  a symlink to another artifact outside the requested device logs.
+- Existing extracted proof JSON output paths must not be hardlinked aliases of
+  unrelated artifacts outside the requested device logs.
+- Existing extracted proof JSON output paths must not be directories or other
+  non-regular artifacts.
 - `performanceNowAvailable=true` is not enough: the proof must include an
-  explicit finite non-negative `performanceNowDeltaMs`.
-- Capture viewport and animation-frame details must also be explicit finite
-  numeric proof values, not defaulted placeholder values.
+  explicit finite positive `performanceNowDeltaMs` from distinct samples, and
+  multi-second timing does not prove responsive mobile rendering.
+- Mobile interaction latency must include an explicit positive
+  `inputToPaintMs` sample after routed MDI input and a following paint; an
+  over-budget multi-second latency sample fails the contract.
+- Capture viewport, device pixel ratio, orientation, and animation-frame details
+  must also be explicit structured proof values, not defaulted placeholders.
+- Render proof must include an explicit rendered image count and HTML render
+  marker; event routing alone is not enough to prove the mobile MDI surface
+  actually rendered.
+- Event proof emits an ordered routed-event sequence plus individual routed
+  click/input/key, drag, window-runtime, control-discovery, and
+  taskbar-visibility rows rather than only a coarse event status.
+- Render counts, event counts, viewport dimensions, device pixel ratio,
+  performance timing deltas, and animation-frame counts must be real JSON
+  numbers; stringified, fractional, unsafe, or exponential integer values do not
+  prove routed events, capture, performance, or full animation frames.
+- Renderability, event-routing, performance, and animation booleans must be
+  real JSON booleans; string booleans are rejected and not normalized as
+  `false` diagnostics.
+- Runtime failure markers in any requested device log fail the MDI proof even
+  when the JSON counters otherwise prove render, event, capture, performance,
+  and animation detail.
+- Passing MDI proof emits the exact marker source path, recorded byte size,
+  actual byte size, and file status so mobile event/capture/performance/
+  animation evidence is bound to a concrete log artifact.
+- Unsupported platform prefixes fail closed with neutral diagnostics instead
+  of minting misleading `ios_mdi_*` or `android_mdi_*` evidence rows.
+
 ## Operator workflow
 
 Each scenario runs the packaged validator (via `node scripts/check/...` or a
@@ -52,11 +95,96 @@ recapture it with the scripts/check command named in the scenario before shippin
 
 # @tag: system, gui, tauri, mobile, ios, android, evidence
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_copy, file_exists, file_read, file_write_exact, process_run}
 use std.spec.*
 
-fn _proof_log_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={count:4,imageCount:1,taskbarItemCount:4,taskbarIconCount:4,viewportWidth:390,viewportHeight:844,devicePixelRatio:3,screenOrientation:\"portrait\",performanceNowAvailable:true,performanceNowDeltaMs:1.25,inputToPaintMs:2.5,animationFrameAvailable:true,animationFrameCount:2,cssAnimationProbe:true,hasDesktop:true,hasDragRuntime:true,hasDragEvents:true,dragMoved:true,hasWindowEventRuntime:true,appActionControlFound:true,appInputControlFound:true,bodyClickRouted:true,bodyInputRouted:true,bodyKeyRouted:true,eventSequence:[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"],taskbarIconsVisible:true,taskbarLabelsVisible:true,htmlRenderable:true};" + mutation + ";fs.writeFileSync(process.argv[1],\"[tauri-shell] mdi proof: \"+JSON.stringify(p)+\"\\n\");' " + path
+struct KV:
+    key: text
+    value: text
+
+fn _kv(key: text, value: text) -> KV:
+    KV(key: key, value: value)
+
+fn _default_log_line() -> text:
+    "[tauri-shell] mdi proof: {{\"count\":4,\"imageCount\":1,\"taskbarItemCount\":4,\"taskbarIconCount\":4,\"viewportWidth\":390,\"viewportHeight\":844,\"devicePixelRatio\":3,\"screenOrientation\":\"portrait\",\"performanceNowAvailable\":true,\"performanceNowDeltaMs\":1.25,\"inputToPaintMs\":2.5,\"animationFrameAvailable\":true,\"animationFrameCount\":2,\"cssAnimationProbe\":true,\"hasDesktop\":true,\"hasDragRuntime\":true,\"hasDragEvents\":true,\"dragMoved\":true,\"hasWindowEventRuntime\":true,\"appActionControlFound\":true,\"appInputControlFound\":true,\"bodyClickRouted\":true,\"bodyInputRouted\":true,\"bodyKeyRouted\":true,\"eventSequence\":[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"],\"taskbarIconsVisible\":true,\"taskbarLabelsVisible\":true,\"htmlRenderable\":true,\"invokeRoundtripStatus\":\"pass\",\"invokeRoundtripReply\":\"pong:1\"}}\n"
+
+fn _prepare_dir(root: text):
+    val _removed = dir_remove_all(root)
+    expect(dir_create_all(root)).to_equal(true)
+
+fn _find_override(overrides: [KV], key: text) -> text:
+    for item in overrides:
+        if item.key == key:
+            return item.value
+    "__DEFAULT__"
+
+fn _write_proof_log(log_path: text, overrides: [KV]):
+    val tmpl = "build/.tmp_tauri_mobile_mdi_default.log"
+    if not file_exists(tmpl):
+        expect(dir_create_all("build")).to_equal(true)
+        expect(file_write_exact(tmpl, _default_log_line())).to_equal(true)
+    if overrides.len() == 0:
+        expect(file_copy(tmpl, log_path)).to_equal(true)
+        return
+    val defaults = [
+        _kv("count", "4"),
+        _kv("imageCount", "1"),
+        _kv("taskbarItemCount", "4"),
+        _kv("taskbarIconCount", "4"),
+        _kv("viewportWidth", "390"),
+        _kv("viewportHeight", "844"),
+        _kv("devicePixelRatio", "3"),
+        _kv("screenOrientation", "\"portrait\""),
+        _kv("performanceNowAvailable", "true"),
+        _kv("performanceNowDeltaMs", "1.25"),
+        _kv("inputToPaintMs", "2.5"),
+        _kv("animationFrameAvailable", "true"),
+        _kv("animationFrameCount", "2"),
+        _kv("cssAnimationProbe", "true"),
+        _kv("hasDesktop", "true"),
+        _kv("hasDragRuntime", "true"),
+        _kv("hasDragEvents", "true"),
+        _kv("dragMoved", "true"),
+        _kv("hasWindowEventRuntime", "true"),
+        _kv("appActionControlFound", "true"),
+        _kv("appInputControlFound", "true"),
+        _kv("bodyClickRouted", "true"),
+        _kv("bodyInputRouted", "true"),
+        _kv("bodyKeyRouted", "true"),
+        _kv("eventSequence", "[\"window_drag:move\",\"app_action:body_click\",\"app_input:body_input\",\"app_key:body_key\"]"),
+        _kv("taskbarIconsVisible", "true"),
+        _kv("taskbarLabelsVisible", "true"),
+        _kv("htmlRenderable", "true"),
+        _kv("invokeRoundtripStatus", "\"pass\""),
+        _kv("invokeRoundtripReply", "\"pong:1\"")
+    ]
+    var json_out = "{{"
+    var first = true
+    for item in defaults:
+        val ov = _find_override(overrides, item.key)
+        if ov != "__OMIT__":
+            val value = if ov == "__DEFAULT__": item.value else: ov
+            if not first:
+                json_out = json_out + ","
+            json_out = json_out + "\"" + item.key + "\":" + value
+            first = false
+    json_out = json_out + "}}"
+    expect(file_write_exact(log_path, "[tauri-shell] mdi proof: " + json_out + "\n")).to_equal(true)
+
+fn _run_validator(prefix: text, json_path: text, files: [text]) -> (text, i64):
+    var args = ["scripts/check/validate-tauri-mobile-mdi-proof.js", prefix, json_path]
+    for f in files:
+        args.push(f)
+    val (stdout, _stderr, code) = process_run("node", args)
+    (stdout, code)
+
+fn _create_symlink(target: text, link_path: text) -> i64:
+    val (_out, _err, code) = process_run("node", ["-e", "require('fs').symlinkSync(process.argv[1], process.argv[2])", target, link_path])
+    code
+
+fn _create_hardlink(existing_path: text, link_path: text) -> i64:
+    val (_out, _err, code) = process_run("node", ["-e", "require('fs').linkSync(process.argv[1], process.argv[2])", existing_path, link_path])
+    code
 
 # Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
 # doc/03_plan/platform/mobile_tauri_gui_parallel_2026-05-29.md ;
@@ -71,13 +199,11 @@ describe "Tauri mobile MDI proof validator":
         step("Verify: accepts complete mobile event capture performance and animation proof")
         # @req: REQ-CHECK-TaurMobiMdiProoVali-001
         val root = "build/test-tauri-mobile-mdi-validator-pass"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized proof rows")
         expect(evidence).to_contain("ios_mdi_proof_status=pass")
         expect(evidence).to_contain("ios_mdi_failure_marker_status=pass")
@@ -91,8 +217,8 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_proof_empty_source_count=0")
         expect(evidence).to_contain("ios_mdi_proof_nonregular_source_count=0")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_path=" + root + "/device.log")
-        expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=759")
-        expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=759")
+        expect(evidence).to_contain("ios_mdi_proof_marker_source_size_bytes=822")
+        expect(evidence).to_contain("ios_mdi_proof_marker_source_actual_size_bytes=822")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_file_status=pass")
         expect(evidence).to_contain("ios_mdi_proof_marker_source_file_reason=pass")
         expect(evidence).to_contain("ios_mdi_proof_window_count=4")
@@ -100,26 +226,47 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("ios_mdi_render_image_count=1")
         expect(evidence).to_contain("ios_mdi_render_html_renderable=true")
         expect(evidence).to_contain("ios_mdi_event_status=pass")
+        expect(evidence).to_contain("ios_mdi_event_taskbar_item_count=4")
+        expect(evidence).to_contain("ios_mdi_event_taskbar_icon_count=4")
+        expect(evidence).to_contain("ios_mdi_event_has_desktop=true")
+        expect(evidence).to_contain("ios_mdi_event_drag_runtime_available=true")
+        expect(evidence).to_contain("ios_mdi_event_drag_events_available=true")
+        expect(evidence).to_contain("ios_mdi_event_drag_moved=true")
+        expect(evidence).to_contain("ios_mdi_event_window_event_runtime_available=true")
+        expect(evidence).to_contain("ios_mdi_event_app_action_control_found=true")
+        expect(evidence).to_contain("ios_mdi_event_app_input_control_found=true")
+        expect(evidence).to_contain("ios_mdi_event_body_click_routed=true")
+        expect(evidence).to_contain("ios_mdi_event_body_input_routed=true")
+        expect(evidence).to_contain("ios_mdi_event_body_key_routed=true")
+        expect(evidence).to_contain("ios_mdi_event_sequence=window_drag:move,app_action:body_click,app_input:body_input,app_key:body_key")
+        expect(evidence).to_contain("ios_mdi_event_taskbar_icons_visible=true")
+        expect(evidence).to_contain("ios_mdi_event_taskbar_labels_visible=true")
         expect(evidence).to_contain("ios_mdi_capture_status=pass")
         expect(evidence).to_contain("ios_mdi_capture_viewport_width=390")
         expect(evidence).to_contain("ios_mdi_capture_viewport_height=844")
+        expect(evidence).to_contain("ios_mdi_capture_device_pixel_ratio=3")
+        expect(evidence).to_contain("ios_mdi_capture_screen_orientation=portrait")
         expect(evidence).to_contain("ios_mdi_performance_status=pass")
+        expect(evidence).to_contain("ios_mdi_performance_now_available=true")
         expect(evidence).to_contain("ios_mdi_performance_now_delta_ms=1.25")
+        expect(evidence).to_contain("ios_mdi_interaction_latency_status=pass")
+        expect(evidence).to_contain("ios_mdi_input_to_paint_ms=2.5")
         expect(evidence).to_contain("ios_mdi_animation_status=pass")
+        expect(evidence).to_contain("ios_mdi_animation_frame_available=true")
         expect(evidence).to_contain("ios_mdi_animation_frame_count=2")
         expect(evidence).to_contain("ios_mdi_css_animation_probe=true")
+        expect(evidence).to_contain("ios_mdi_invoke_roundtrip_status=pass")
+        expect(evidence).to_contain("ios_mdi_invoke_roundtrip_reply=pong:1")
 
     it "rejects missing requested mobile MDI proof log source paths":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-002
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-missing-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log " + root + "/missing.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log", root + "/missing.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm a valid companion MDI proof log cannot hide a missing requested source")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=missing-mdi-proof-source")
@@ -137,14 +284,12 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-003
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-empty-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && : > " + root + "/empty.log && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log " + root + "/empty.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        expect(file_write_exact(root + "/empty.log", "")).to_equal(true)
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log", root + "/empty.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm a valid companion MDI proof log cannot hide an empty requested source")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=empty-mdi-proof-source")
@@ -162,14 +307,12 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-004
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-symlink-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && ln -s device.log " + root + "/linked.log && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log " + root + "/linked.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        expect(_create_symlink("device.log", root + "/linked.log")).to_equal(0)
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log", root + "/linked.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm a valid companion MDI proof log cannot hide a symlinked requested source")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=symlink-mdi-proof-source")
@@ -187,15 +330,13 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-005
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-hardlink-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && " + _proof_log_command(root + "/original.log", "") +
-            " && ln " + root + "/original.log " + root + "/linked.log && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log " + root + "/linked.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        _write_proof_log(root + "/original.log", [])
+        expect(_create_hardlink(root + "/original.log", root + "/linked.log")).to_equal(0)
+        val (evidence, code) = _run_validator("android", root + "/proof.json", [root + "/device.log", root + "/linked.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm a valid companion MDI proof log cannot hide a hardlinked requested source")
         expect(evidence).to_contain("android_mdi_proof_status=fail")
         expect(evidence).to_contain("android_mdi_proof_reason=hardlink-mdi-proof-source")
@@ -213,13 +354,11 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-006
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-duplicate-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log", root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm the same requested log artifact cannot satisfy multiple source channels")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=duplicate-mdi-proof-source")
@@ -237,13 +376,12 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-007
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-nonregular-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + "/not-a-log && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log " + root + "/not-a-log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        expect(dir_create_all(root + "/not-a-log")).to_equal(true)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("android", root + "/proof.json", [root + "/device.log", root + "/not-a-log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm a valid companion MDI proof log cannot hide a non-regular requested source")
         expect(evidence).to_contain("android_mdi_proof_status=fail")
         expect(evidence).to_contain("android_mdi_proof_reason=nonregular-mdi-proof-source")
@@ -261,14 +399,12 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-008
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-conflicting-source-proof"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/dev.log", "") +
-            " && " + _proof_log_command(root + "/stream.log", "p.inputToPaintMs=7.5") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/dev.log " + root + "/stream.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/dev.log", [])
+        _write_proof_log(root + "/stream.log", [_kv("inputToPaintMs", "7.5")])
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/dev.log", root + "/stream.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm one requested mobile log cannot shadow conflicting MDI proof from another")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=conflicting-mdi-proof-log")
@@ -286,13 +422,11 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-009
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-overlap-output"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/device.log " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("ios", root + "/device.log", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         val device_log = file_read(root + "/device.log")
         step("Confirm extracted proof JSON cannot overwrite its source device log")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
@@ -311,14 +445,12 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-010
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-hardlink-output"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && ln " + root + "/device.log " + root + "/proof.json && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        expect(_create_hardlink(root + "/device.log", root + "/proof.json")).to_equal(0)
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         val device_log = file_read(root + "/device.log")
         step("Confirm extracted proof JSON cannot overwrite a hard-linked source device log")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
@@ -338,15 +470,14 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-011
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-symlink-output"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " " + root + "-external && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && printf '{\"stale\":true}\\n' > " + root + "-external/proof.json && " +
-            "ln -s ../test-tauri-mobile-mdi-validator-symlink-output-external/proof.json " + root + "/proof.json && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _prepare_dir(root + "-external")
+        _write_proof_log(root + "/device.log", [])
+        expect(file_write_exact(root + "-external/proof.json", "{{\"stale\":true}}\n")).to_equal(true)
+        expect(_create_symlink("../test-tauri-mobile-mdi-validator-symlink-output-external/proof.json", root + "/proof.json")).to_equal(0)
+        val (evidence, code) = _run_validator("android", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         val external = file_read(root + "-external/proof.json")
         step("Confirm extracted MDI proof cannot be written through a symlinked JSON path")
         expect(evidence).to_contain("android_mdi_proof_status=fail")
@@ -360,21 +491,20 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("android_mdi_proof_hardlink_source_count=0")
         expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
         expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=0")
-        expect(external).to_contain("{\"stale\":true}")
+        expect(external).to_contain("{{\"stale\":true}}")
 
     it "rejects hardlinked proof JSON output paths before writing extracted MDI proof":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-012
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-hardlink-json-output"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " " + root + "-external && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && printf '{\"stale\":true}\\n' > " + root + "-external/proof.json && " +
-            "ln " + root + "-external/proof.json " + root + "/proof.json && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _prepare_dir(root + "-external")
+        _write_proof_log(root + "/device.log", [])
+        expect(file_write_exact(root + "-external/proof.json", "{{\"stale\":true}}\n")).to_equal(true)
+        expect(_create_hardlink(root + "-external/proof.json", root + "/proof.json")).to_equal(0)
+        val (evidence, code) = _run_validator("android", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         val external = file_read(root + "-external/proof.json")
         step("Confirm extracted MDI proof cannot be written through a hardlinked JSON path")
         expect(evidence).to_contain("android_mdi_proof_status=fail")
@@ -388,19 +518,18 @@ describe "Tauri mobile MDI proof validator":
         expect(evidence).to_contain("android_mdi_proof_hardlink_source_count=0")
         expect(evidence).to_contain("android_mdi_proof_empty_source_count=0")
         expect(evidence).to_contain("android_mdi_proof_nonregular_source_count=0")
-        expect(external).to_contain("{\"stale\":true}")
+        expect(external).to_contain("{{\"stale\":true}}")
 
     it "rejects non-regular proof JSON output paths before writing extracted MDI proof":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-013
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-nonregular-output"
-        val command = "rm -rf " + root + " && mkdir -p " + root + "/proof.json && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        expect(dir_create_all(root + "/proof.json")).to_equal(true)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm extracted iOS MDI proof cannot be written through a directory JSON path")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=mdi-proof-json-path-not-regular")
@@ -418,13 +547,11 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-014
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-platform-prefix"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios-simulator " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [])
+        val (evidence, code) = _run_validator("ios-simulator", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         val device_log = file_read(root + "/device.log")
         step("Confirm bad prefixes cannot mint platform-specific MDI proof rows")
         expect(evidence).to_contain("mobile_mdi_proof_status=fail")
@@ -438,16 +565,14 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-015
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-render-proof"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/image.log", "delete p.imageCount") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/image.json " + root + "/image.log > " + root + "/image.env; " +
-            _proof_log_command(root + "/html.log", "p.htmlRenderable=false") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/html.json " + root + "/html.log > " + root + "/html.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/image.log", [_kv("imageCount", "__OMIT__")])
+        _write_proof_log(root + "/html.log", [_kv("htmlRenderable", "false")])
+        val (image, c1) = _run_validator("ios", root + "/image.json", [root + "/image.log"])
+        val (html, c2) = _run_validator("android", root + "/html.json", [root + "/html.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val image = file_read(root + "/image.env")
-        val html = file_read(root + "/html.env")
         step("Confirm mobile MDI render proof is separate from event routing proof")
         expect(image).to_contain("ios_mdi_proof_status=fail")
         expect(image).to_contain("ios_mdi_render_status=fail")
@@ -462,13 +587,11 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-016
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-missing-delta"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "delete p.performanceNowDeltaMs") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [_kv("performanceNowDeltaMs", "__OMIT__")])
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm missing delta does not default to zero")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_performance_status=fail")
@@ -480,31 +603,46 @@ describe "Tauri mobile MDI proof validator":
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects zero malformed negative or over-budget timing deltas")
         val root = "build/test-tauri-mobile-mdi-validator-bad-delta"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "p.performanceNowDeltaMs=-1") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/zero.log", [_kv("performanceNowDeltaMs", "0")])
+        _write_proof_log(root + "/negative.log", [_kv("performanceNowDeltaMs", "-1")])
+        _write_proof_log(root + "/slow.log", [_kv("performanceNowDeltaMs", "1001")])
+        val (zero, c1) = _run_validator("android", root + "/zero.json", [root + "/zero.log"])
+        val (negative, c2) = _run_validator("android", root + "/negative.json", [root + "/negative.log"])
+        val (slow, c3) = _run_validator("ios", root + "/slow.json", [root + "/slow.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val evidence = file_read(root + "/evidence.env")
-        expect(evidence).to_contain("android_mdi_proof_status=fail")
-        expect(evidence).to_contain("android_mdi_performance_status=fail")
-        expect(evidence).to_contain("android_mdi_performance_now_delta_ms=-1")
+        expect(zero).to_contain("android_mdi_proof_status=fail")
+        expect(zero).to_contain("android_mdi_performance_status=fail")
+        expect(zero).to_contain("android_mdi_performance_now_available=true")
+        expect(zero).to_contain("android_mdi_performance_now_delta_ms=0")
+        expect(negative).to_contain("android_mdi_proof_status=fail")
+        expect(negative).to_contain("android_mdi_performance_status=fail")
+        expect(negative).to_contain("android_mdi_performance_now_delta_ms=-1")
+        expect(slow).to_contain("ios_mdi_proof_status=fail")
+        expect(slow).to_contain("ios_mdi_performance_status=fail")
+        expect(slow).to_contain("ios_mdi_performance_now_delta_ms=1001")
 
     it "rejects missing zero over-budget or stringified input-to-paint latency":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-018
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-input-to-paint"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "delete p.viewportWidth") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/missing.log", [_kv("inputToPaintMs", "__OMIT__")])
+        _write_proof_log(root + "/zero.log", [_kv("inputToPaintMs", "0")])
+        _write_proof_log(root + "/string.log", [_kv("inputToPaintMs", "\"2.5\"")])
+        _write_proof_log(root + "/slow.log", [_kv("inputToPaintMs", "1001")])
+        val (missing, c1) = _run_validator("ios", root + "/missing.json", [root + "/missing.log"])
+        val (zero, c2) = _run_validator("android", root + "/zero.json", [root + "/zero.log"])
+        val (string_latency, c3) = _run_validator("ios", root + "/string.json", [root + "/string.log"])
+        val (slow, c4) = _run_validator("android", root + "/slow.json", [root + "/slow.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
 
-        val missing = file_read(root + "/missing.env")
-        val zero = file_read(root + "/zero.env")
-        val string_latency = file_read(root + "/string.env")
-        val slow = file_read(root + "/slow.env")
         step("Confirm mobile MDI proof requires structured input-to-paint timing")
         expect(missing).to_contain("ios_mdi_proof_status=fail")
         expect(missing).to_contain("ios_mdi_interaction_latency_status=fail")
@@ -525,19 +663,17 @@ describe "Tauri mobile MDI proof validator":
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects missing viewport pixel-ratio or orientation capture proof")
         val root = "build/test-tauri-mobile-mdi-validator-missing-capture"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/viewport.log", "delete p.viewportWidth") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
-            _proof_log_command(root + "/dpr.log", "delete p.devicePixelRatio") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/dpr.json " + root + "/dpr.log > " + root + "/dpr.env; " +
-            _proof_log_command(root + "/orientation.log", "delete p.screenOrientation") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/orientation.json " + root + "/orientation.log > " + root + "/orientation.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/viewport.log", [_kv("viewportWidth", "__OMIT__")])
+        _write_proof_log(root + "/dpr.log", [_kv("devicePixelRatio", "__OMIT__")])
+        _write_proof_log(root + "/orientation.log", [_kv("screenOrientation", "__OMIT__")])
+        val (viewport, c1) = _run_validator("ios", root + "/viewport.json", [root + "/viewport.log"])
+        val (dpr, c2) = _run_validator("ios", root + "/dpr.json", [root + "/dpr.log"])
+        val (orientation, c3) = _run_validator("android", root + "/orientation.json", [root + "/orientation.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val viewport = file_read(root + "/viewport.env")
-        val dpr = file_read(root + "/dpr.env")
-        val orientation = file_read(root + "/orientation.env")
         expect(viewport).to_contain("ios_mdi_proof_status=fail")
         expect(viewport).to_contain("ios_mdi_capture_status=fail")
         expect(viewport).to_contain("ios_mdi_capture_viewport_width=")
@@ -553,16 +689,14 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-020
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-fractional-events"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/windows.log", "p.count=4.5") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/windows.json " + root + "/windows.log > " + root + "/windows.env; " +
-            _proof_log_command(root + "/taskbar.log", "p.taskbarItemCount=4.5") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/windows.log", [_kv("count", "4.5")])
+        _write_proof_log(root + "/taskbar.log", [_kv("taskbarItemCount", "4.5")])
+        val (windows, c1) = _run_validator("ios", root + "/windows.json", [root + "/windows.log"])
+        val (taskbar, c2) = _run_validator("android", root + "/taskbar.json", [root + "/taskbar.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val windows = file_read(root + "/windows.env")
-        val taskbar = file_read(root + "/taskbar.env")
         step("Confirm fractional event counts are not accepted as routed-event proof")
         expect(windows).to_contain("ios_mdi_proof_status=fail")
         expect(windows).to_contain("ios_mdi_event_status=fail")
@@ -577,19 +711,17 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-021
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-event-detail"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/body.log", "p.bodyClickRouted=false") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/body.json " + root + "/body.log > " + root + "/body.env; " +
-            _proof_log_command(root + "/taskbar.log", "p.taskbarLabelsVisible=false") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env; " +
-            _proof_log_command(root + "/sequence.log", "p.eventSequence=[\"app_action:body_click\",\"window_drag:move\",\"app_input:body_input\",\"app_key:body_key\"]") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/sequence.json " + root + "/sequence.log > " + root + "/sequence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/body.log", [_kv("bodyClickRouted", "false")])
+        _write_proof_log(root + "/taskbar.log", [_kv("taskbarLabelsVisible", "false")])
+        _write_proof_log(root + "/sequence.log", [_kv("eventSequence", "[\"app_action:body_click\",\"window_drag:move\",\"app_input:body_input\",\"app_key:body_key\"]")])
+        val (body, c1) = _run_validator("ios", root + "/body.json", [root + "/body.log"])
+        val (taskbar, c2) = _run_validator("android", root + "/taskbar.json", [root + "/taskbar.log"])
+        val (sequence, c3) = _run_validator("ios", root + "/sequence.json", [root + "/sequence.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val body = file_read(root + "/body.env")
-        val taskbar = file_read(root + "/taskbar.env")
-        val sequence = file_read(root + "/sequence.env")
         step("Confirm individual event-route diagnostics survive validation")
         expect(body).to_contain("ios_mdi_proof_status=fail")
         expect(body).to_contain("ios_mdi_event_status=fail")
@@ -608,22 +740,20 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-022
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-string-booleans"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/event.log", "p.bodyClickRouted=\"true\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/event.json " + root + "/event.log > " + root + "/event.env; " +
-            _proof_log_command(root + "/html.log", "p.htmlRenderable=\"true\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/html.json " + root + "/html.log > " + root + "/html.env; " +
-            _proof_log_command(root + "/perf.log", "p.performanceNowAvailable=\"true\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/perf.json " + root + "/perf.log > " + root + "/perf.env; " +
-            _proof_log_command(root + "/animation.log", "p.animationFrameAvailable=\"true\";p.cssAnimationProbe=\"true\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/event.log", [_kv("bodyClickRouted", "\"true\"")])
+        _write_proof_log(root + "/html.log", [_kv("htmlRenderable", "\"true\"")])
+        _write_proof_log(root + "/perf.log", [_kv("performanceNowAvailable", "\"true\"")])
+        _write_proof_log(root + "/animation.log", [_kv("animationFrameAvailable", "\"true\""), _kv("cssAnimationProbe", "\"true\"")])
+        val (event, c1) = _run_validator("ios", root + "/event.json", [root + "/event.log"])
+        val (html, c2) = _run_validator("android", root + "/html.json", [root + "/html.log"])
+        val (perf, c3) = _run_validator("ios", root + "/perf.json", [root + "/perf.log"])
+        val (animation, c4) = _run_validator("android", root + "/animation.json", [root + "/animation.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
 
-        val event = file_read(root + "/event.env")
-        val html = file_read(root + "/html.env")
-        val perf = file_read(root + "/perf.env")
-        val animation = file_read(root + "/animation.env")
         step("Confirm mobile string booleans remain malformed diagnostics")
         expect(event).to_contain("ios_mdi_proof_status=fail")
         expect(event).to_contain("ios_mdi_event_status=fail")
@@ -648,19 +778,17 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-023
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-fractional-counts"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/viewport.log", "p.viewportWidth=390.5") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
-            _proof_log_command(root + "/dpr.log", "p.devicePixelRatio=0") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/dpr.json " + root + "/dpr.log > " + root + "/dpr.env; " +
-            _proof_log_command(root + "/animation.log", "p.animationFrameCount=2.5") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/viewport.log", [_kv("viewportWidth", "390.5")])
+        _write_proof_log(root + "/dpr.log", [_kv("devicePixelRatio", "0")])
+        _write_proof_log(root + "/animation.log", [_kv("animationFrameCount", "2.5")])
+        val (viewport, c1) = _run_validator("ios", root + "/viewport.json", [root + "/viewport.log"])
+        val (dpr, c2) = _run_validator("ios", root + "/dpr.json", [root + "/dpr.log"])
+        val (animation, c3) = _run_validator("android", root + "/animation.json", [root + "/animation.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val viewport = file_read(root + "/viewport.env")
-        val dpr = file_read(root + "/dpr.env")
-        val animation = file_read(root + "/animation.env")
         step("Confirm fractional capture and animation values are not accepted as proof")
         expect(viewport).to_contain("ios_mdi_proof_status=fail")
         expect(viewport).to_contain("ios_mdi_capture_status=fail")
@@ -678,19 +806,17 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-024
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-unsafe-integers"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/count.log", "p.count=1e21") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/count.json " + root + "/count.log > " + root + "/count.env; " +
-            _proof_log_command(root + "/viewport.log", "p.viewportWidth=1e21") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
-            _proof_log_command(root + "/animation.log", "p.animationFrameCount=1e21") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/count.log", [_kv("count", "1e21")])
+        _write_proof_log(root + "/viewport.log", [_kv("viewportWidth", "1e21")])
+        _write_proof_log(root + "/animation.log", [_kv("animationFrameCount", "1e21")])
+        val (count, c1) = _run_validator("ios", root + "/count.json", [root + "/count.log"])
+        val (viewport, c2) = _run_validator("ios", root + "/viewport.json", [root + "/viewport.log"])
+        val (animation, c3) = _run_validator("android", root + "/animation.json", [root + "/animation.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val count = file_read(root + "/count.env")
-        val viewport = file_read(root + "/viewport.env")
-        val animation = file_read(root + "/animation.env")
         step("Confirm exponential integer fields produce typed fail-closed rows")
         expect(count).to_contain("ios_mdi_proof_status=fail")
         expect(count).to_contain("ios_mdi_event_status=fail")
@@ -709,37 +835,35 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-025
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-string-numbers"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/image.log", "p.imageCount=\"1\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/image.json " + root + "/image.log > " + root + "/image.env; " +
-            _proof_log_command(root + "/windows.log", "p.count=\"4\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/windows.json " + root + "/windows.log > " + root + "/windows.env; " +
-            _proof_log_command(root + "/taskbar.log", "p.taskbarIconCount=\"4\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/taskbar.json " + root + "/taskbar.log > " + root + "/taskbar.env; " +
-            _proof_log_command(root + "/viewport.log", "p.viewportWidth=\"390\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/viewport.json " + root + "/viewport.log > " + root + "/viewport.env; " +
-            _proof_log_command(root + "/dpr.log", "p.devicePixelRatio=\"3\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/dpr.json " + root + "/dpr.log > " + root + "/dpr.env; " +
-            _proof_log_command(root + "/orientation.log", "p.screenOrientation=\"square\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/orientation.json " + root + "/orientation.log > " + root + "/orientation.env; " +
-            _proof_log_command(root + "/performance.log", "p.performanceNowDeltaMs=\"1.25\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/performance.json " + root + "/performance.log > " + root + "/performance.env; " +
-            _proof_log_command(root + "/latency.log", "p.inputToPaintMs=\"2.5\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/latency.json " + root + "/latency.log > " + root + "/latency.env; " +
-            _proof_log_command(root + "/animation.log", "p.animationFrameCount=\"2\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/animation.json " + root + "/animation.log > " + root + "/animation.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/image.log", [_kv("imageCount", "\"1\"")])
+        _write_proof_log(root + "/windows.log", [_kv("count", "\"4\"")])
+        _write_proof_log(root + "/taskbar.log", [_kv("taskbarIconCount", "\"4\"")])
+        _write_proof_log(root + "/viewport.log", [_kv("viewportWidth", "\"390\"")])
+        _write_proof_log(root + "/dpr.log", [_kv("devicePixelRatio", "\"3\"")])
+        _write_proof_log(root + "/orientation.log", [_kv("screenOrientation", "\"square\"")])
+        _write_proof_log(root + "/performance.log", [_kv("performanceNowDeltaMs", "\"1.25\"")])
+        _write_proof_log(root + "/latency.log", [_kv("inputToPaintMs", "\"2.5\"")])
+        _write_proof_log(root + "/animation.log", [_kv("animationFrameCount", "\"2\"")])
+        val (image, c1) = _run_validator("ios", root + "/image.json", [root + "/image.log"])
+        val (windows, c2) = _run_validator("ios", root + "/windows.json", [root + "/windows.log"])
+        val (taskbar, c3) = _run_validator("android", root + "/taskbar.json", [root + "/taskbar.log"])
+        val (viewport, c4) = _run_validator("android", root + "/viewport.json", [root + "/viewport.log"])
+        val (dpr, c5) = _run_validator("android", root + "/dpr.json", [root + "/dpr.log"])
+        val (orientation, c6) = _run_validator("ios", root + "/orientation.json", [root + "/orientation.log"])
+        val (performance, c7) = _run_validator("ios", root + "/performance.json", [root + "/performance.log"])
+        val (latency, c8) = _run_validator("ios", root + "/latency.json", [root + "/latency.log"])
+        val (animation, c9) = _run_validator("android", root + "/animation.json", [root + "/animation.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
+        expect(c5).to_equal(1)
+        expect(c6).to_equal(1)
+        expect(c7).to_equal(1)
+        expect(c8).to_equal(1)
+        expect(c9).to_equal(1)
 
-        val image = file_read(root + "/image.env")
-        val windows = file_read(root + "/windows.env")
-        val taskbar = file_read(root + "/taskbar.env")
-        val viewport = file_read(root + "/viewport.env")
-        val dpr = file_read(root + "/dpr.env")
-        val orientation = file_read(root + "/orientation.env")
-        val performance = file_read(root + "/performance.env")
-        val latency = file_read(root + "/latency.env")
-        val animation = file_read(root + "/animation.env")
         step("Confirm stringified numeric mobile proof values are rejected")
         expect(image).to_contain("ios_mdi_proof_status=fail")
         expect(image).to_contain("ios_mdi_render_status=fail")
@@ -782,13 +906,11 @@ describe "Tauri mobile MDI proof validator":
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects missing animation frame counts")
         val root = "build/test-tauri-mobile-mdi-validator-missing-animation"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "delete p.animationFrameCount") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _write_proof_log(root + "/device.log", [_kv("animationFrameCount", "__OMIT__")])
+        val (evidence, code) = _run_validator("android", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_mdi_proof_status=fail")
         expect(evidence).to_contain("android_mdi_animation_status=fail")
         expect(evidence).to_contain("android_mdi_animation_frame_count=")
@@ -799,16 +921,14 @@ describe "Tauri mobile MDI proof validator":
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects disabled performance and animation APIs even when detail rows look valid")
         val root = "build/test-tauri-mobile-mdi-validator-disabled-apis"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/perf.log", "p.performanceNowAvailable=false") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/perf.json " + root + "/perf.log > " + root + "/perf.env; " +
-            _proof_log_command(root + "/anim.log", "p.animationFrameAvailable=false") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/anim.json " + root + "/anim.log > " + root + "/anim.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/perf.log", [_kv("performanceNowAvailable", "false")])
+        _write_proof_log(root + "/anim.log", [_kv("animationFrameAvailable", "false")])
+        val (perf, c1) = _run_validator("ios", root + "/perf.json", [root + "/perf.log"])
+        val (anim, c2) = _run_validator("android", root + "/anim.json", [root + "/anim.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val perf = file_read(root + "/perf.env")
-        val anim = file_read(root + "/anim.env")
         expect(perf).to_contain("ios_mdi_proof_status=fail")
         expect(perf).to_contain("ios_mdi_performance_status=fail")
         expect(perf).to_contain("ios_mdi_performance_now_available=false")
@@ -822,22 +942,20 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-028
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-invoke-roundtrip"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/missing.log", "delete p.invokeRoundtripStatus") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/missing.json " + root + "/missing.log > " + root + "/missing.env; " +
-            _proof_log_command(root + "/pending.log", "p.invokeRoundtripStatus=\"pending\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/pending.json " + root + "/pending.log > " + root + "/pending.env; " +
-            _proof_log_command(root + "/mismatch.log", "p.invokeRoundtripStatus=\"mismatch\";p.invokeRoundtripReply=\"pong:999\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/mismatch.json " + root + "/mismatch.log > " + root + "/mismatch.env; " +
-            _proof_log_command(root + "/unavailable.log", "p.invokeRoundtripStatus=\"unavailable\";p.invokeRoundtripReply=\"\"") +
-            " && node scripts/check/validate-tauri-mobile-mdi-proof.js android " + root + "/unavailable.json " + root + "/unavailable.log > " + root + "/unavailable.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        _write_proof_log(root + "/missing.log", [_kv("invokeRoundtripStatus", "__OMIT__")])
+        _write_proof_log(root + "/pending.log", [_kv("invokeRoundtripStatus", "\"pending\"")])
+        _write_proof_log(root + "/mismatch.log", [_kv("invokeRoundtripStatus", "\"mismatch\""), _kv("invokeRoundtripReply", "\"pong:999\"")])
+        _write_proof_log(root + "/unavailable.log", [_kv("invokeRoundtripStatus", "\"unavailable\""), _kv("invokeRoundtripReply", "\"\"")])
+        val (missing, c1) = _run_validator("ios", root + "/missing.json", [root + "/missing.log"])
+        val (pending, c2) = _run_validator("android", root + "/pending.json", [root + "/pending.log"])
+        val (mismatch, c3) = _run_validator("ios", root + "/mismatch.json", [root + "/mismatch.log"])
+        val (unavailable, c4) = _run_validator("android", root + "/unavailable.json", [root + "/unavailable.log"])
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
 
-        val missing = file_read(root + "/missing.env")
-        val pending = file_read(root + "/pending.env")
-        val mismatch = file_read(root + "/mismatch.env")
-        val unavailable = file_read(root + "/unavailable.env")
         step("Confirm the two-way invoke() return path must be proven with a real matching value, not just eval OK")
         expect(missing).to_contain("ios_mdi_proof_status=fail")
         expect(missing).to_contain("ios_mdi_invoke_roundtrip_status=fail")
@@ -855,14 +973,11 @@ describe "Tauri mobile MDI proof validator":
         # @req: REQ-CHECK-TaurMobiMdiProoVali-029
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-mobile-mdi-validator-failure-marker"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_log_command(root + "/device.log", "") +
-            " && printf 'Fatal signal 11 from renderer\\n' >> " + root + "/device.log && " +
-            "node scripts/check/validate-tauri-mobile-mdi-proof.js ios " + root + "/proof.json " + root + "/device.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        expect(file_write_exact(root + "/device.log", _default_log_line() + "Fatal signal 11 from renderer\n")).to_equal(true)
+        val (evidence, code) = _run_validator("ios", root + "/proof.json", [root + "/device.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm valid MDI JSON cannot hide device-log runtime failures")
         expect(evidence).to_contain("ios_mdi_proof_status=fail")
         expect(evidence).to_contain("ios_mdi_proof_reason=mobile-mdi-failure-marker")

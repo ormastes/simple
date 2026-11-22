@@ -129,3 +129,16 @@ not make caller-supplied block I/O authenticated.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.
+---
+
+## Progress 2026-11-22 — lockless claim primitive (verification-pending)
+
+Status: verification-pending for the primitive only; the bug stays open.
+
+`src/os/kernel/fs/lockless_owner_claim_v1.spl` adds the non-blocking CAS claim
+that order step 6 needs ("without holding a lock across reentrant I/O"). It
+fails fast with `Busy` instead of waiting, so a reentrant claim cannot
+deadlock. The open-file-description owner now uses it. `fat32_capsule_mount_owner_v1.spl`
+still uses `Mutex`/`mutex_with_lock`; moving it onto this claim, and steps 7–8
+(committed-unknown receipts, replacing legacy publish), are still open. No
+QEMU or boot verification was run.

@@ -15,8 +15,24 @@ fail() {
     exit 1
 }
 
+_WM_CR=$(printf '\r')
+
+field_into() {
+    _f_var=$1
+    _f_prefix="$2="
+    _f_val=""
+    while IFS= read -r _f_line || [ -n "$_f_line" ]; do
+        _f_line="${_f_line%$_WM_CR}"
+        case "$_f_line" in
+            "$_f_prefix"*) _f_val="${_f_line#"$_f_prefix"}" ;;
+        esac
+    done < "$receipt"
+    eval "$_f_var=\$_f_val"
+}
+
 field() {
-    sed -n "s/^$1=//p" "$receipt" | tail -n 1
+    field_into _f_res "$1"
+    printf '%s\n' "$_f_res"
 }
 
 positive() {
@@ -26,70 +42,148 @@ positive() {
 
 receipt_sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        _sha_out=$(sha256sum "$1")
+        printf '%s\n' "${_sha_out%% *}"
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
+        _sha_out=$(shasum -a 256 "$1")
+        printf '%s\n' "${_sha_out%% *}"
     else
         fail sha256-tool-unavailable
     fi
 }
 
 linked_artifact() {
-    path=$(field "$1")
-    digest=$(field "$2")
-    [ -s "$path" ] || fail "missing-$1"
-    case "$digest" in *[!0-9a-f]*|'') fail "invalid-$2" ;; esac
-    [ "${#digest}" -eq 64 ] || fail "invalid-$2"
-    [ "$(receipt_sha256 "$path")" = "$digest" ] || fail "mismatched-$2"
+    field_into _la_path "$1"
+    field_into _la_digest "$2"
+    [ -s "$_la_path" ] || fail "missing-$1"
+    case "$_la_digest" in *[!0-9a-f]*|'') fail "invalid-$2" ;; esac
+    [ "${#_la_digest}" -eq 64 ] || fail "invalid-$2"
+    _la_actual=$(receipt_sha256 "$_la_path")
+    [ "$_la_actual" = "$_la_digest" ] || fail "mismatched-$2"
 }
 
 validate() {
     receipt=$1
     [ -f "$receipt" ] || fail missing-receipt
-    platform=$(field platform)
-    backend=$(field backend)
-    actual_backend=$(field actual_backend)
+    v_platform=""
+    v_backend=""
+    v_actual_backend=""
+    v_status=""
+    v_fallback=""
+    v_workload=""
+    v_readback_source=""
+    v_readback_mode=""
+    v_source_revision=""
+    v_launch_log_path=""
+    v_checksum_before=""
+    v_checksum_after=""
+    v_viewport_width=""
+    v_viewport_height=""
+    v_sample_frames=""
+    v_warmup_frames=""
+    v_baseline_platform=""
+    v_baseline_backend=""
+    v_baseline_viewport_width=""
+    v_baseline_viewport_height=""
+    v_baseline_source_revision=""
+    v_frame_p50_ns=""
+    v_frame_p95_ns=""
+    v_frame_budget_ns=""
+    v_max_rss_kib=""
+    v_rss_budget_kib=""
+    v_baseline_p95_ns=""
+    v_baseline_max_rss_kib=""
+    while IFS= read -r _r_line || [ -n "$_r_line" ]; do
+        _r_line="${_r_line%$_WM_CR}"
+        case "$_r_line" in
+            platform=*) v_platform="${_r_line#platform=}" ;;
+            backend=*) v_backend="${_r_line#backend=}" ;;
+            actual_backend=*) v_actual_backend="${_r_line#actual_backend=}" ;;
+            status=*) v_status="${_r_line#status=}" ;;
+            fallback=*) v_fallback="${_r_line#fallback=}" ;;
+            workload=*) v_workload="${_r_line#workload=}" ;;
+            readback_source=*) v_readback_source="${_r_line#readback_source=}" ;;
+            readback_mode=*) v_readback_mode="${_r_line#readback_mode=}" ;;
+            source_revision=*) v_source_revision="${_r_line#source_revision=}" ;;
+            launch_log_path=*) v_launch_log_path="${_r_line#launch_log_path=}" ;;
+            checksum_before=*) v_checksum_before="${_r_line#checksum_before=}" ;;
+            checksum_after=*) v_checksum_after="${_r_line#checksum_after=}" ;;
+            viewport_width=*) v_viewport_width="${_r_line#viewport_width=}" ;;
+            viewport_height=*) v_viewport_height="${_r_line#viewport_height=}" ;;
+            sample_frames=*) v_sample_frames="${_r_line#sample_frames=}" ;;
+            warmup_frames=*) v_warmup_frames="${_r_line#warmup_frames=}" ;;
+            baseline_platform=*) v_baseline_platform="${_r_line#baseline_platform=}" ;;
+            baseline_backend=*) v_baseline_backend="${_r_line#baseline_backend=}" ;;
+            baseline_viewport_width=*) v_baseline_viewport_width="${_r_line#baseline_viewport_width=}" ;;
+            baseline_viewport_height=*) v_baseline_viewport_height="${_r_line#baseline_viewport_height=}" ;;
+            baseline_source_revision=*) v_baseline_source_revision="${_r_line#baseline_source_revision=}" ;;
+            frame_p50_ns=*) v_frame_p50_ns="${_r_line#frame_p50_ns=}" ;;
+            frame_p95_ns=*) v_frame_p95_ns="${_r_line#frame_p95_ns=}" ;;
+            frame_budget_ns=*) v_frame_budget_ns="${_r_line#frame_budget_ns=}" ;;
+            max_rss_kib=*) v_max_rss_kib="${_r_line#max_rss_kib=}" ;;
+            rss_budget_kib=*) v_rss_budget_kib="${_r_line#rss_budget_kib=}" ;;
+            baseline_p95_ns=*) v_baseline_p95_ns="${_r_line#baseline_p95_ns=}" ;;
+            baseline_max_rss_kib=*) v_baseline_max_rss_kib="${_r_line#baseline_max_rss_kib=}" ;;
+        esac
+    done < "$receipt"
+    platform=$v_platform
+    backend=$v_backend
+    actual_backend=$v_actual_backend
     case "$platform:$backend" in
         hosted:software|hosted:cpu_simd|hosted:metal|simpleos:software|simpleos:cpu_simd) ;;
         *) fail unsupported-platform-backend ;;
     esac
-    [ "$(field status)" = pass ] || fail unavailable-or-failed-backend
+    [ "$v_status" = pass ] || fail unavailable-or-failed-backend
     [ "$actual_backend" = "$backend" ] || fail backend-fallback
-    [ "$(field fallback)" = none ] || fail backend-fallback
-    [ "$(field workload)" = filesystem-wm-client-live-retained-frame ] || fail non-live-workload
-    case "$backend:$(field readback_source)" in
+    [ "$v_fallback" = none ] || fail backend-fallback
+    [ "$v_workload" = filesystem-wm-client-live-retained-frame ] || fail non-live-workload
+    case "$backend:$v_readback_source" in
         software:presented-pixel-buffer|cpu_simd:presented-pixel-buffer|metal:device-readback) ;;
         *) fail non-live-readback ;;
     esac
-    [ "$(field readback_mode)" = pixels ] || fail missing-pixel-readback
-    [ "$(field source_revision)" != '' ] || fail missing-source-revision
+    [ "$v_readback_mode" = pixels ] || fail missing-pixel-readback
+    [ "$v_source_revision" != '' ] || fail missing-source-revision
     linked_artifact executable_path executable_sha256
     linked_artifact before_capture_path checksum_before
     linked_artifact capture_path checksum_after
     linked_artifact launch_log_path launch_log_sha256
-    [ "$(field checksum_before)" != "$(field checksum_after)" ] || fail unchanged-framebuffer
-    grep -Fqx "wm_retained_web2d_perf_capture backend=$backend viewport=$(field viewport_width)x$(field viewport_height) samples=$(field sample_frames)" "$(field launch_log_path)" || fail missing-live-log-marker
-    [ "$(field baseline_platform)" = "$platform" ] || fail incomparable-baseline
-    [ "$(field baseline_backend)" = "$backend" ] || fail incomparable-baseline
-    [ "$(field baseline_viewport_width)" = "$(field viewport_width)" ] || fail incomparable-baseline
-    [ "$(field baseline_viewport_height)" = "$(field viewport_height)" ] || fail incomparable-baseline
-    [ "$(field baseline_source_revision)" != '' ] || fail missing-baseline-revision
+    [ "$v_checksum_before" != "$v_checksum_after" ] || fail unchanged-framebuffer
+    _expected_marker="wm_retained_web2d_perf_capture backend=$backend viewport=${v_viewport_width}x${v_viewport_height} samples=$v_sample_frames"
+    _marker_found=0
+    while IFS= read -r _ll_line || [ -n "$_ll_line" ]; do
+        _ll_line="${_ll_line%$_WM_CR}"
+        if [ "$_ll_line" = "$_expected_marker" ]; then
+            _marker_found=1
+            break
+        fi
+    done < "$v_launch_log_path"
+    [ "$_marker_found" -eq 1 ] || fail missing-live-log-marker
+    [ "$v_baseline_platform" = "$platform" ] || fail incomparable-baseline
+    [ "$v_baseline_backend" = "$backend" ] || fail incomparable-baseline
+    [ "$v_baseline_viewport_width" = "$v_viewport_width" ] || fail incomparable-baseline
+    [ "$v_baseline_viewport_height" = "$v_viewport_height" ] || fail incomparable-baseline
+    [ "$v_baseline_source_revision" != '' ] || fail missing-baseline-revision
 
-    for name in viewport_width viewport_height warmup_frames sample_frames \
-        frame_p50_ns frame_p95_ns frame_budget_ns max_rss_kib rss_budget_kib \
-        baseline_p95_ns baseline_max_rss_kib; do
-        value=$(field "$name")
-        positive "$value" || fail "invalid-$name"
-    done
-    [ "$(field frame_p95_ns)" -ge "$(field frame_p50_ns)" ] || fail invalid-distribution
-    [ "$(field sample_frames)" -ge 20 ] || fail insufficient-samples
-    [ "$(field frame_p95_ns)" -le "$(field frame_budget_ns)" ] || fail frame-budget-exceeded
-    [ "$(field max_rss_kib)" -le "$(field rss_budget_kib)" ] || fail rss-budget-exceeded
+    positive "$v_viewport_width" || fail "invalid-viewport_width"
+    positive "$v_viewport_height" || fail "invalid-viewport_height"
+    positive "$v_warmup_frames" || fail "invalid-warmup_frames"
+    positive "$v_sample_frames" || fail "invalid-sample_frames"
+    positive "$v_frame_p50_ns" || fail "invalid-frame_p50_ns"
+    positive "$v_frame_p95_ns" || fail "invalid-frame_p95_ns"
+    positive "$v_frame_budget_ns" || fail "invalid-frame_budget_ns"
+    positive "$v_max_rss_kib" || fail "invalid-max_rss_kib"
+    positive "$v_rss_budget_kib" || fail "invalid-rss_budget_kib"
+    positive "$v_baseline_p95_ns" || fail "invalid-baseline_p95_ns"
+    positive "$v_baseline_max_rss_kib" || fail "invalid-baseline_max_rss_kib"
+    [ "$v_frame_p95_ns" -ge "$v_frame_p50_ns" ] || fail invalid-distribution
+    [ "$v_sample_frames" -ge 20 ] || fail insufficient-samples
+    [ "$v_frame_p95_ns" -le "$v_frame_budget_ns" ] || fail frame-budget-exceeded
+    [ "$v_max_rss_kib" -le "$v_rss_budget_kib" ] || fail rss-budget-exceeded
     # Keep memory bounded when a speed improvement is proposed, and keep
     # latency bounded when a memory improvement is proposed.
-    [ "$(field frame_p95_ns)" -le "$(( $(field baseline_p95_ns) * 110 / 100 ))" ] || fail p95-regression
-    [ "$(field max_rss_kib)" -le "$(( $(field baseline_max_rss_kib) * 105 / 100 ))" ] || fail rss-regression
-    echo "wm_retained_web2d_perf_schema_status=pass platform=$platform backend=$backend viewport=$(field viewport_width)x$(field viewport_height) p50_ns=$(field frame_p50_ns) p95_ns=$(field frame_p95_ns) max_rss_kib=$(field max_rss_kib) checksum_after=$(field checksum_after)"
+    [ "$v_frame_p95_ns" -le "$(( v_baseline_p95_ns * 110 / 100 ))" ] || fail p95-regression
+    [ "$v_max_rss_kib" -le "$(( v_baseline_max_rss_kib * 105 / 100 ))" ] || fail rss-regression
+    echo "wm_retained_web2d_perf_schema_status=pass platform=$platform backend=$backend viewport=${v_viewport_width}x${v_viewport_height} p50_ns=$v_frame_p50_ns p95_ns=$v_frame_p95_ns max_rss_kib=$v_max_rss_kib checksum_after=$v_checksum_after"
 }
 
 if [ "${1:-}" = --self-test-retained-perf-receipt ]; then
