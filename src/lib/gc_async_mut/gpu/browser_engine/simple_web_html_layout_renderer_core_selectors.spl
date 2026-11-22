@@ -342,43 +342,10 @@ fn _pseudo_list_matches(
 ) -> bool:
     if recursion_depth > 32:
         return false
-    # Split arg on commas (not inside parens) to get individual options
-    var options: [text] = [""; 16]
-    var opt_count = 0
-    var depth = 0
-    var i = 0
-    val arg_len = arg.byte_len()
-    var option_start = 0
-    while i < arg_len:  # cpu-lane-loop-ok: splits ONE :not()/:is()/:where() argument on top-level commas; bound is that argument's length
-        val ch = arg.substring(i, i + 1)
-        if ch == "(":
-            depth = depth + 1
-            if depth > 32:
-                return false
-        elif ch == ")":
-            depth = depth - 1
-            if depth < 0:
-                return false
-        elif ch == "," and depth == 0:
-            if opt_count >= 16:
-                return false
-            val option = arg.substring(option_start, i).trim()
-            if option.len() == 0:
-                return false
-            options[opt_count] = option
-            opt_count = opt_count + 1
-            option_start = i + 1
-        i = i + 1
-    if depth != 0:
+    val options = _split_pseudo_options(arg)
+    val opt_count = options.len()
+    if opt_count == 0:
         return false
-    val tail = arg.substring(option_start, arg_len).trim()
-    if tail.len() == 0:
-        return false
-    if tail.len() > 0 and opt_count >= 16:
-        return false
-    if tail.len() > 0:
-        options[opt_count] = tail
-        opt_count = opt_count + 1
     if pseudo == "not":
         # :not(sel, ...) — match if NONE of the options match
         var j = 0
@@ -388,7 +355,7 @@ fn _pseudo_list_matches(
             # without the node's sibling context; _list_ctx_matches() decides
             # it in the context phase. Here it is left undecided (no match).
             if (
-                opt.len() > 0 and not _option_needs_ctx(opt) and simple_match(
+                opt.byte_len() > 0 and not _option_needs_ctx(opt) and simple_match(
                     opt, tag, cls, class_words, id, attrs,
                     recursion_depth
                 )
@@ -401,10 +368,10 @@ fn _pseudo_list_matches(
         var j = 0
         while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 parsed :is()/:where() options, returning true at the first option that matches
             val opt = options[j]
-            if opt.len() > 0 and _option_needs_ctx(opt):
+            if opt.byte_len() > 0 and _option_needs_ctx(opt):
                 return true
             if (
-                opt.len() > 0 and simple_match(
+                opt.byte_len() > 0 and simple_match(
                     opt, tag, cls, class_words, id, attrs,
                     recursion_depth
                 )
@@ -1099,39 +1066,10 @@ fn _pseudo_ctx_matches(sel: text, nodes: [HNode], ctx: SelectorContext, idx: i32
             if not _list_ctx_matches(pseudo == "not", _split_pseudo_options(arg), nodes, ctx, idx):
                 return false
         elif pseudo == "has":
-            var opts: [text] = [""; 16]
-            var opt_count = 0
-            var depth = 0
-            var i = 0
-            var option_start = 0
-            while i < arg.byte_len():  # cpu-lane-loop-ok: splits ONE :has() argument on top-level commas; bound is that argument's length
-                val ch = arg.substring(i, i + 1)
-                if ch == "(":
-                    depth = depth + 1
-                    if depth > 32:
-                        return false
-                elif ch == ")":
-                    depth = depth - 1
-                    if depth < 0:
-                        return false
-                elif ch == "," and depth == 0:
-                    if opt_count >= opts.len():
-                        return false
-                    val option = arg.substring(option_start, i).trim()
-                    if option.len() == 0:
-                        return false
-                    opts[opt_count] = option
-                    opt_count = opt_count + 1
-                    option_start = i + 1
-                i = i + 1
-            if depth != 0:
+            val opts = _split_pseudo_options(arg)
+            val opt_count = opts.len()
+            if opt_count == 0:
                 return false
-            val tail = arg.substring(option_start, arg.byte_len()).trim()
-            if tail.len() == 0 or opt_count >= opts.len():
-                return false
-            if tail.len() > 0:
-                opts[opt_count] = tail
-                opt_count = opt_count + 1
             var matched = false
             var j = 0
             while j < opt_count and not matched:  # cpu-lane-loop-ok: walks the <=16 parsed :has() options, stopping at the first that matches
@@ -1433,40 +1371,59 @@ fn parsed_attr_matches(attrs: text, t: ParsedAttr) -> bool:
         return false
     attr_value(attrs, t.name).len() > 0 or attr_name_present(attrs, t.name)
 
-# Split a functional pseudo argument on top-level commas exactly the way
-# _pseudo_list_matches() and the `:has` arm of _pseudo_ctx_matches() do.
-# Returns an empty list when those splitters would have returned false.
+# Split a functional pseudo argument on top-level commas outside quotes,
+# escapes, parentheses, and attribute brackets. Returns an empty list on
+# unbalanced delimiters, unclosed quotes, >16 options, or empty options.
 fn _split_pseudo_options(arg: text) -> [text]:
     var options: [text] = []
     var opt_count = 0
-    var depth = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    var quote = ""
     var i = 0
     val arg_len = arg.byte_len()
     var option_start = 0
-    while i < arg_len:  # cpu-lane-loop-ok: splits ONE functional pseudo argument on top-level commas at parse time (once per selector part); bound is that argument's length
+    while i < arg_len:  # cpu-lane-loop-ok: splits ONE functional pseudo argument on top-level commas at parse/match time; bound is that argument's length
         val ch = arg.substring(i, i + 1)
-        if ch == "(":
-            depth = depth + 1
-            if depth > 32:
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            elif ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i = i + 1
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "(":
+            paren_depth = paren_depth + 1
+            if paren_depth + bracket_depth > 32:
                 return []
         elif ch == ")":
-            depth = depth - 1
-            if depth < 0:
+            paren_depth = paren_depth - 1
+            if paren_depth < 0:
                 return []
-        elif ch == "," and depth == 0:
+        elif ch == "[":
+            bracket_depth = bracket_depth + 1
+            if paren_depth + bracket_depth > 32:
+                return []
+        elif ch == "]":
+            bracket_depth = bracket_depth - 1
+            if bracket_depth < 0:
+                return []
+        elif ch == "," and paren_depth == 0 and bracket_depth == 0:
             if opt_count >= 16:
                 return []
             val option = arg.substring(option_start, i).trim()
-            if option.len() == 0:
+            if option.byte_len() == 0:
                 return []
             options.push(option)
             opt_count = opt_count + 1
             option_start = i + 1
         i = i + 1
-    if depth != 0:
+    if paren_depth != 0 or bracket_depth != 0 or quote != "":
         return []
     val tail = arg.substring(option_start, arg_len).trim()
-    if tail.len() == 0 or opt_count >= 16:
+    if tail.byte_len() == 0 or opt_count >= 16:
         return []
     options.push(tail)
     options
