@@ -107,3 +107,19 @@ The native import fixture is
 validation evidence are recorded in
 `doc/08_tracking/bug/test_runner_capture_limit_visibility_2026_10_30.md`.
 A compiled fixture is not evidence that native SSpec or HAL/SOSIX suites ran.
+
+## `std.io_runtime` facade imports (2026-11-22)
+
+- Tier-less `use std.io_runtime` binds to the ROOT facade
+  `src/lib/io_runtime.spl` (direct `lib/` path wins before the tier search,
+  `src/compiler/99.loader/module_resolver/resolution.spl`). Its export list is
+  explicit; no tier variant fills the gap. An unlisted name is an HIR
+  `unresolved name` at native-build even though `compile --format=smf` only
+  warns (`[hir-reexport-chase-unresolved] facade=lib.io_runtime ...`).
+- Import unlisted names from their owner: `cpu_count_checked` from
+  `std.nogc_sync_mut.io.sysinfo_ops`, `dir_list` from `.io.dir_ops`,
+  `file_read_text` from `.io.file_ops` (PRs #10770, #10777).
+- Guard: `scripts/check/check-io-runtime-facade-imports.shs` (bootstrap-tier
+  advisory, fatal selftest, fixtures `test/fixtures/io_runtime/`). Scans
+  `src/` + `examples/`, not `test/`. Record:
+  `doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.

@@ -21,7 +21,8 @@ use std.spec.step
 
 use std.spec.*
 use app.ui.renderdoc_capture_lane_receipt.{
-    classify_chrome_vulkan_log, classify_rdc_magic, receipt_verdict, receipt_exit_code}
+    classify_chrome_vulkan_log, classify_rdc_magic, receipt_verdict, receipt_exit_code,
+    receipt_verdict_simple_only}
 
 val CHROME_LOG_WITH_ANGLE = "[INFO:gpu_info_collector.cc(80)] GL_VENDOR: Google Inc. (Mesa)\n[INFO:gpu_info_collector.cc(81)] GL_RENDERER: ANGLE (Mesa, llvmpipe (LLVM 15.0.7), Vulkan 1.3.255)\n"
 val CHROME_LOG_WITHOUT_ANGLE = "[INFO:gpu_info_collector.cc(80)] GL_VENDOR: Google Inc. (Mesa)\n"
@@ -62,3 +63,14 @@ describe "renderdoc capture lane receipt classification":
         expect(receipt_exit_code(receipt_verdict(1, 1, 0))).to_equal(0)  # oracle: PASS exits 0
         expect(receipt_exit_code(receipt_verdict(1, 0, 1))).to_equal(1)  # oracle: FAIL exits 1
         expect(receipt_exit_code(receipt_verdict(0, 0, 0))).to_equal(2)  # oracle: ERROR exits 2
+
+    it "words a Simple-only pass so it cannot read as a two-sided pass":
+        val verdict = receipt_verdict_simple_only(1, 1, 0)
+        expect(verdict).to_equal("PASS — 1 page(s) captured on the Simple side only (Chrome side not attempted)")  # oracle: scope is stated in the verdict
+        expect(verdict.contains("both sides")).to_equal(false)  # oracle: never claims the differential
+        expect(receipt_exit_code(verdict)).to_equal(0)  # oracle: PASS exits 0
+
+    it "fails or errors a Simple-only lane exactly like the two-sided lane":
+        expect(receipt_exit_code(receipt_verdict_simple_only(2, 1, 1))).to_equal(1)  # oracle: one failed page fails the lane
+        expect(receipt_exit_code(receipt_verdict_simple_only(1, 0, 0))).to_equal(1)  # oracle: zero captures is not a pass
+        expect(receipt_verdict_simple_only(0, 0, 0)).to_equal("ERROR — nothing was checked")  # oracle: a zero-page run is ERROR
