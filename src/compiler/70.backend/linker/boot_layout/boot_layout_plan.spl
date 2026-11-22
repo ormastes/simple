@@ -603,14 +603,27 @@ fn _boot_include_path(line: text) -> text:
         p = p.substring(1, p.byte_len() - 1)
     p
 
-fn boot_layout_expand_includes(input: text, search_dirs: [text], depth: i64) -> Result<text, text>:
+fn _boot_in_comment_after(line: text, in_comment: bool) -> bool:
+    """Whether a `/* ... */` block comment is still open after `line`."""
+    var open = in_comment
+    var rest = line
+    while true:
+        val at = if open: rest.find("*/") else: rest.find("/*")
+        if at < 0:
+            return open
+        rest = rest.substring(at + 2)
+        open = not open
+    open
+
+fn boot_layout_expand_includes(input: text, search_dirs: [text], chain: [text]) -> Result<text, text>:
     """Splice every whole-line INCLUDE in place, as ld.lld does: the path as
-    given (relative to the working directory) first, then each -L directory."""
-    if depth > 16:
-        return Err("boot layout: INCLUDE nesting deeper than 16")
+    given (relative to the working directory) first, then each -L directory.
+    `chain` holds the files being expanded, so an include cycle fails closed."""
     var out = ""
+    var in_comment = false
     for line in input.split("\n"):
-        val name = _boot_include_path(line)
+        val name = if in_comment: "" else: _boot_include_path(line)
+        in_comment = _boot_in_comment_after(line, in_comment)
         if name == "":
             out = out + line + "\n"
             continue
@@ -622,14 +635,19 @@ fn boot_layout_expand_includes(input: text, search_dirs: [text], depth: i64) -> 
                     path = d + "/" + name
         if path == "":
             return Err("boot layout: INCLUDE \"{name}\" not found")
-        out = out + boot_layout_expand_includes(file_read(path), search_dirs, depth + 1)? + "\n"
+        if chain.contains(path):
+            return Err("boot layout: INCLUDE cycle through {path}")
+        var next: [text] = []
+        for c in chain: next = next.push(c)
+        next = next.push(path)
+        out = out + boot_layout_expand_includes(file_read(path), search_dirs, next)? + "\n"
     Ok(out)
 
 fn boot_layout_from_file(path: text, search_dirs: [text]) -> Result<BootLayoutPlan, text>:
     """Read a linker script, splice its INCLUDEs, and build its BootLayoutPlan."""
     if not file_exists(path):
         return Err("boot layout: linker script not found: {path}")
-    boot_layout_from_text(boot_layout_expand_includes(file_read(path), search_dirs, 0)?)
+    boot_layout_from_text(boot_layout_expand_includes(file_read(path), search_dirs, [path])?)
 
 fn boot_layout_find_section(plan: BootLayoutPlan, name: text) -> BootSectionPlan?:
     for s in plan.sections:
