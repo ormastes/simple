@@ -1,6 +1,6 @@
 # Unit range-cast / remainder checks: native execution blocked (2026-11-19)
 
-Status: verification-pending. Native machine-code verification NOT achieved.
+Status: verification-pending (partial native pass 2026-11-22: port_in + port_oor verified natively; big_accept, big_reject and div_zero fail to compile natively; see Lane 6).
 
 Fixtures: `test/fixtures/unit_native/{port_oor,port_in,big_reject,big_accept,div_zero}.spl`.
 
@@ -98,3 +98,22 @@ Env: llvm-mingw UCRT first on PATH. Attempts, each `native-build ... -o build/rb
 Exit codes / stdout / stderr of the fixtures: none exist (no executable produced). Build logs: `C:/dev/wt/rbnat4/build/rbnat4/out/port_oor.build{,2,3,4,5}.log` (untracked).
 
 Remaining blockers, in order: (a) link phase of the pure-Simple native-build hangs on Windows before spawning any linker (same symptom as Lane 3's 1500 s `_LinkerWrapper/native_linking.spl` timeout under the cranelift seed build); (b) `SIMPLE_SCV_FREEZE_FALLBACK=1` yields empty root selectors; (c) entries outside `src/{app,lib,compiler,os,plugins}` are absent from the frozen inventory. Next: root-cause (a) (attach to the link phase / trace what native_linking.spl waits on), then rerun the five fixtures.
+
+## Lane 6: native verification with the self-hosted CLI (2026-11-22, after #10894 / 7c1ee5d56b7)
+Compiler: `C:/dev/wt/rbnat4/build/rbnat4/cli_main.exe` (sha256 prefix `b6eb1fefbe705621`, 114,562,560 B, Nov 22 09:16).
+Env: `SIMPLE_LLVM_MINGW_ROOT=C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64`, with its `bin` first on PATH.
+Fixtures copied to scratch `src/app/rbnat_fx/` (uncommitted), because entries outside the default roots are absent from the frozen inventory (Lane 5 (c)).
+Command: `timeout 2400 cli_main.exe native-build src/app/rbnat_fx/<case>.spl -o build/rbnat4/nv/<case>.exe`, then run the exe.
+Warm-up: `hello` built in 14m46s cold (rc=0), printed `hello`, run rc=0. The link phase no longer hangs.
+
+| case | build rc / wall | run rc | stdout / stderr | verdict |
+|---|---|---|---|---|
+| port_in | 0 / 3m05s | 0 | `in-range ok` | PASS (native) |
+| port_oor | 0 / 2m52s | 1 | `in-range ok`; stderr `panic: SPL-UNIT-005: value <runtime value outside 1..65535> violates the constraint of unit `Port` (`1 <= self and self <= 65535`)`; `UNREACHED` not printed | PASS (native SPL-UNIT-005 guard) |
+| big_accept | 1 / 1m36s | - | parse error 1:43 `unsupported constraint predicate for unit `Big`: `0 <= self and self <= 0xFFFF_FFFF_FFFF_FFF0`` | FAIL (native compile: the hex/underscore u64 bound is not accepted by the constraint predicate parser) |
+| big_reject | 1 / 1m34s | - | same parse error as big_accept | FAIL (same cause) |
+| div_zero | 1 / 1m42s | - | MIR: `unresolved method call: operator overload for struct ...::Dist (no matching __add__/.../__div__ impl)` at div_zero.spl:4:5 | FAIL (native MIR: `/` is not lowered on a plain `unit Dist: i64`) |
+
+Logs: `C:/dev/wt/rbnat4/build/rbnat4/nv/<case>.build.log` (untracked).
+Status stays verification-pending: the u64 bound and div0 (SPL-UNIT-002) paths are still not verified natively.
+Handoff: (1) the unit constraint predicate parser rejects hex/underscore literals (`0xFFFF_FFFF_FFFF_FFF0`); (2) native MIR does not lower arithmetic on a unit with no range.
