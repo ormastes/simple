@@ -1,0 +1,40 @@
+use std.spec.*
+use compiler.backend.runtime_compiler.{windows_llvm_mingw_home_bin_dirs_v1, windows_clang_triple_is_msvc_v1, windows_only_msvc_llvm_diagnostic_v1}
+
+# Bug native_build_windows_link_phase_hang_runtime_cache_batch_2026-11-22:
+# with SIMPLE_LLVM_MINGW_ROOT / SIMPLE_LLVM_BIN unset the GNU lane picked
+# C:\Program Files\LLVM\bin\clang.exe (MSVC-flavoured) and the link failed on
+# a missing libclang_rt.builtins.a. Default must be ~/.simple/toolchains
+# llvm-mingw UCRT, newest first; MSVC-only => named diagnostic.
+
+describe "Windows default llvm-mingw toolchain selection":
+    it "probes ~/.simple/toolchains llvm-mingw UCRT dirs newest first":
+        # @req REQ-SSPEC-COMPILER
+        step("filters and orders toolchain dirs")
+        val entries = ["llvm-mingw-20250101-ucrt-x86_64", "other", "llvm-mingw-20260922-ucrt-x86_64", "llvm-mingw-20260922-msvcrt-x86_64", "llvm-mingw-20260101-ucrt-aarch64"]
+        val dirs = windows_llvm_mingw_home_bin_dirs_v1("C:/Users/u", entries)
+        expect(dirs.len()).to_equal(2)
+        expect(dirs[0]).to_equal("C:/Users/u/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin")
+        expect(dirs[1]).to_equal("C:/Users/u/.simple/toolchains/llvm-mingw-20250101-ucrt-x86_64/bin")
+
+    it "yields nothing without a home dir or matching entries":
+        # @req REQ-SSPEC-COMPILER
+        step("empty inputs")
+        expect(windows_llvm_mingw_home_bin_dirs_v1("", ["llvm-mingw-20260922-ucrt-x86_64"]).len()).to_equal(0)
+        expect(windows_llvm_mingw_home_bin_dirs_v1("C:/Users/u", ["x"]).len()).to_equal(0)
+
+    it "classifies MSVC-flavoured clang by its default triple":
+        # @req REQ-SSPEC-COMPILER
+        step("triple classification")
+        expect(windows_clang_triple_is_msvc_v1("x86_64-pc-windows-msvc\r\n")).to_be(true)
+        expect(windows_clang_triple_is_msvc_v1("x86_64-w64-windows-gnu")).to_be(false)
+        expect(windows_clang_triple_is_msvc_v1("x86_64-w64-mingw32")).to_be(false)
+
+    it "names the MSVC-only failure instead of producing a broken link":
+        # @req REQ-SSPEC-COMPILER
+        step("diagnostic text")
+        val msg = windows_only_msvc_llvm_diagnostic_v1(["C:\\Program Files\\LLVM\\bin\\clang.exe"])
+        expect(msg.contains("only MSVC-flavoured LLVM")).to_be(true)
+        expect(msg.contains("C:\\Program Files\\LLVM\\bin\\clang.exe")).to_be(true)
+        expect(msg.contains("llvm-mingw")).to_be(true)
+        expect(msg.contains("SIMPLE_LLVM_MINGW_ROOT")).to_be(true)

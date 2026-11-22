@@ -47,6 +47,18 @@ hello-world links and runs (`hello`, rc=0). This change does not touch it.
 Lanes must export that variable. Probing the default install dir before PATH
 is a separate follow-up.
 
+**Follow-up fixed (2026-11-22, work/tc1-20261122, verification-pending):**
+`_find_c_compiler_windows` (GNU lane) now probes
+`~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin/clang.exe` (newest first,
+`windows_llvm_mingw_home_bin_dirs_v1`) after the env vars and before PATH.
+On the PATH probe a clang whose `-dumpmachine` ends in `-msvc`
+(`windows_clang_triple_is_msvc_v1`, e.g. Program Files LLVM) is skipped; if
+it is the only clang found, detection fails with the named diagnostic
+`[cc-detect] error: only MSVC-flavoured LLVM found (...)`
+(`windows_only_msvc_llvm_diagnostic_v1`) instead of a broken GNU link.
+Spec: `test/01_unit/compiler/backend/windows_llvm_mingw_default_spec.spl` (4/4).
+Native verification (env vars unset, hello-world native-build) still pending.
+
 ## Fix
 
 - `runtime_windows_cached_compile_and_publish_v1` (`runtime_object_cache_windows.spl`)
