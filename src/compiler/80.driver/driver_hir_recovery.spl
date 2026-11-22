@@ -418,6 +418,55 @@ pub fn hir_shard_recovery_crashed_rows_v1(queue: text) -> [text]:
                 rows = rows.push(fields[2])
     rows.sort()
 
+# MIR fork MEMKILL (2026-11-22): the one sanctioned exception to "claims are
+# immutable". The fork root SIGTERMed a child for memory (over its hard cap, or
+# the host fell below its reserve); the child's unterminated rows are not a
+# module failure, so instead of sealing them CRASH the root RELEASES them for a
+# solo retry: an audit record goes to {queue}/memkill/<digest> (a subdirectory,
+# so the seal fallback's queue listing never sees it), then the claim and its
+# own/tree markers are deleted, which makes the row unclaimed again. The root
+# calls this only with NO fork child alive and before forking the solo child,
+# so no claimant can race the delete. A row in `released_before` was released
+# once already and memory-killed again: it is sealed CRASH instead (each row is
+# released at most once, so the loop terminates). Not a MEMKILL terminal: a
+# terminal is immutable and could never become PASS, so the link would fail.
+# Returns the rows released now; None on a ledger read/write failure.
+# reason: ledger queue path, owner key and module-name rows
+@allow(primitive_api)
+pub fn hir_shard_recovery_release_memkill_v1(queue: text, owner: text, released_before: [text]) -> [text]?:
+    val claimed_opt = hir_shard_owner_indexed_paths_v1(queue, owner)
+    if not claimed_opt.?:
+        return None
+    var released: [text] = []
+    val audit_dir = "{queue}/memkill"
+    if not dir_create_all(audit_dir):
+        return None
+    val fork_parts = owner.split(HIR_SHARD_FORK_OWNER_MARK_V1)
+    for path in claimed_opt.unwrap():
+        val base = hir_shard_record_base(queue, path)
+        if file_exists("{base}.terminal"):
+            continue
+        if released_before.contains(path):
+            if not hir_shard_recovery_terminal(queue, owner, path, "CRASH", false):
+                return None
+            continue
+        val digest = sha256_text(path)
+        if hir_shard_record_publish_new("{audit_dir}/{digest}", "{owner}\n{path}\n") < 0:
+            return None
+        if not file_delete("{base}.claim"):
+            return None
+        val _own = file_delete("{hir_shard_owner_dir_v1(queue, owner)}/{digest}.claim")
+        if fork_parts.len() > 1 and fork_parts[0] != "":
+            val _tree = file_delete("{hir_shard_tree_dir_v1(queue, fork_parts[0])}/{digest}-{sha256_text(owner)}.claim")
+        released = released.push(path)
+    Some(released)
+
+# True when the row has a terminal record (any state).
+# reason: ledger queue path and module-name row
+@allow(primitive_api)
+pub fn hir_shard_recovery_row_terminal_v1(queue: text, path: text) -> bool:
+    file_exists("{hir_shard_record_base(queue, path)}.terminal")
+
 pub fn hir_shard_recovery_complete(queue: text, owner: text) -> bool:
     if queue == "" or owner == "" or not dir_exists(queue): return false
     hir_shard_record_publish("{queue}/{sha256_text(owner)}.done", owner)
