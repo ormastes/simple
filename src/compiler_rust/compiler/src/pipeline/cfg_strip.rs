@@ -98,12 +98,29 @@ pub(crate) fn cfg_name_to_arch(name: &str) -> Option<TargetArch> {
 }
 
 fn cfg_line_arch_verdict(line: &str, target_arch: TargetArch) -> Option<bool> {
-    let condition = line.trim().strip_prefix("@cfg(")?.strip_suffix(')')?.trim();
-    let (name, negate) = condition
-        .strip_prefix("not(")
-        .and_then(|inner| inner.strip_suffix(')'))
-        .map_or((condition, false), |name| (name.trim(), true));
-    cfg_name_to_arch(name).map(|arch| (arch == target_arch) != negate)
+    let trimmed = line.trim();
+    let condition = trimmed.strip_prefix("@cfg(")?.strip_suffix(')')?.trim();
+    if condition.is_empty() {
+        return None;
+    }
+    if let Some(arch) = cfg_name_to_arch(condition) {
+        return Some(arch == target_arch);
+    }
+    if let Some(inner) = condition.strip_prefix("not(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(arch) = cfg_name_to_arch(inner.trim()) {
+            return Some(arch != target_arch);
+        }
+    }
+    let snippet = format!("{trimmed}\nfn __cfg_probe():\n    0\n");
+    let module = simple_parser::Parser::new(&snippet).parse().ok()?;
+    let simple_parser::ast::Node::Function(func) = module.items.first()? else {
+        return None;
+    };
+    let attr = func.attributes.first()?;
+    if attr.name != "cfg" {
+        return None;
+    }
+    cfg_attr_arch_verdict(attr, target_arch)
 }
 
 fn is_top_level_global_decl(line: &str) -> bool {
@@ -334,40 +351,96 @@ pub(crate) fn parse_cfg_filtered_module(
     Ok(module)
 }
 
-/// Evaluate a single `@cfg(...)` attribute's architecture verdict for
-/// `target_arch`. Returns:
-///   * `Some(true)`  -- this `@cfg` names an arch that matches the target,
-///   * `Some(false)` -- this `@cfg` names an arch that does NOT match,
-///   * `None`        -- not a bare arch alias (`test`, `baremetal`,
-///                      `("target_arch", "arm")`, empty `@cfg()`, etc.) --
-///                      leave ungated.
-pub(crate) fn cfg_attr_arch_verdict(attr: &Attribute, target_arch: TargetArch) -> Option<bool> {
-    use simple_parser::ast::Expr;
-    let args = attr.args.as_ref()?;
-    // Only a single bare condition is an arch gate; `("key", "value")` string
-    // pairs and an empty `@cfg()` are not.
-    if args.len() != 1 {
-        return None;
-    }
-    match &args[0] {
-        // `@cfg(not(<arch>))`
+/// Recursively evaluate an architecture `@cfg(...)` expression tree
+/// (`<arch>`, `not(...)` / `!`, `or` / `||`, `and` / `&&`, `all(...)`, `any(...)`).
+///
+/// Mirrors `src/compiler/50.mir/mir_cfg_select.spl`: if ANY sub-term is not a
+/// recognized architecture alias (e.g. `test`, `baremetal`, `"key", "value"`),
+/// returns `None` without short-circuiting so mixed non-arch gates stay ungated.
+pub(crate) fn cfg_compound_arch_verdict(
+    expr: &simple_parser::ast::Expr,
+    target_arch: TargetArch,
+) -> Option<bool> {
+    use simple_parser::ast::{BinOp, Expr, UnaryOp};
+    match expr {
+        Expr::Identifier(name) => cfg_name_to_arch(name).map(|arch| arch == target_arch),
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => cfg_compound_arch_verdict(operand, target_arch).map(|v| !v),
+        Expr::Binary {
+            op: BinOp::Or,
+            left,
+            right,
+        } => {
+            let l = cfg_compound_arch_verdict(left, target_arch)?;
+            let r = cfg_compound_arch_verdict(right, target_arch)?;
+            Some(l || r)
+        }
+        Expr::Binary {
+            op: BinOp::And,
+            left,
+            right,
+        } => {
+            let l = cfg_compound_arch_verdict(left, target_arch)?;
+            let r = cfg_compound_arch_verdict(right, target_arch)?;
+            Some(l && r)
+        }
         Expr::Call {
             callee,
             args: call_args,
         } => {
-            if let Expr::Identifier(fname) = callee.as_ref() {
-                if fname == "not" && call_args.len() == 1 {
-                    if let Expr::Identifier(name) = &call_args[0].value {
-                        return cfg_name_to_arch(name).map(|arch| arch != target_arch);
-                    }
-                }
+            let Expr::Identifier(fname) = callee.as_ref() else {
+                return None;
+            };
+            if call_args.iter().any(|arg| arg.name.is_some()) {
+                return None;
             }
-            None
+            match fname.as_str() {
+                "not" if call_args.len() == 1 => {
+                    cfg_compound_arch_verdict(&call_args[0].value, target_arch).map(|v| !v)
+                }
+                "all" | "and" if !call_args.is_empty() => {
+                    let mut all_true = true;
+                    for arg in call_args {
+                        let v = cfg_compound_arch_verdict(&arg.value, target_arch)?;
+                        all_true &= v;
+                    }
+                    Some(all_true)
+                }
+                "any" | "or" if !call_args.is_empty() => {
+                    let mut any_true = false;
+                    for arg in call_args {
+                        let v = cfg_compound_arch_verdict(&arg.value, target_arch)?;
+                        any_true |= v;
+                    }
+                    Some(any_true)
+                }
+                _ => None,
+            }
         }
-        // `@cfg(<arch>)`
-        Expr::Identifier(name) => cfg_name_to_arch(name).map(|arch| arch == target_arch),
         _ => None,
     }
+}
+
+/// Evaluate a single `@cfg(...)` attribute's architecture verdict for
+/// `target_arch`. Returns:
+///   * `Some(true)`  -- this `@cfg` names an arch expression that matches the target,
+///   * `Some(false)` -- this `@cfg` names an arch expression that does NOT match,
+///   * `None`        -- not a pure arch expression (`test`, `baremetal`,
+///                      `("target_arch", "arm")`, empty `@cfg()`, etc.) --
+///                      leave ungated.
+pub(crate) fn cfg_attr_arch_verdict(attr: &Attribute, target_arch: TargetArch) -> Option<bool> {
+    if attr.named_args.is_some() {
+        return None;
+    }
+    let args = attr.args.as_ref()?;
+    // Only a single condition expression is an arch gate; `("key", "value")`
+    // string pairs and an empty `@cfg()` are not.
+    if args.len() != 1 {
+        return None;
+    }
+    cfg_compound_arch_verdict(&args[0], target_arch)
 }
 
 /// True if any `@cfg` attribute names an arch that does NOT match `arch`
@@ -455,20 +528,654 @@ fn warn_duplicate_active_variants(items: &[Node], arch: TargetArch) {
     }
 }
 
-/// Drop top-level `@cfg(<arch>)`-gated function nodes whose architecture does
-/// not match `target_arch`, recording stripped names and warning about
-/// duplicate active variants. Item-list form shared by module- and
-/// interpreter-level callers.
+fn strip_inactive_cfg_arch_imports_in_stmts(stmts: &mut Vec<Node>, target_arch: TargetArch) {
+    use simple_parser::ast::{
+        Attribute, ContractBlock, ContractClause, Decorator, DeferBody, Expr, FStringPart, Field,
+        FunctionDef, MacroArg, MacroContractItem, MacroIntroSpec, MacroStmt, Parameter, SkipBody,
+        TensorMode, TensorSlice, TensorSliceContent,
+    };
+
+    fn strip_in_expr(expr: &mut Expr, target_arch: TargetArch) {
+        match expr {
+            Expr::FString { parts, .. } => {
+                for part in parts {
+                    match part {
+                        FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => {
+                            strip_in_expr(expr, target_arch);
+                        }
+                        FStringPart::Literal(_) => {}
+                    }
+                }
+            }
+            Expr::I18nTemplate { parts, args, .. } => {
+                for part in parts {
+                    match part {
+                        FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => {
+                            strip_in_expr(expr, target_arch);
+                        }
+                        FStringPart::Literal(_) => {}
+                    }
+                }
+                for (_, expr) in args {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Expr::Call { callee, args } => {
+                strip_in_expr(callee, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::KernelLaunch {
+                kernel,
+                grid,
+                block,
+                args,
+            } => {
+                strip_in_expr(kernel, target_arch);
+                strip_in_expr(grid, target_arch);
+                strip_in_expr(block, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } | Expr::OptionalMethodCall { receiver, args, .. } => {
+                strip_in_expr(receiver, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::Lambda { body, .. } => strip_in_expr(body, target_arch),
+            Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
+                strip_inactive_cfg_arch_imports_in_stmts(nodes, target_arch);
+            }
+            Expr::Binary { left, right, .. } => {
+                strip_in_expr(left, target_arch);
+                strip_in_expr(right, target_arch);
+            }
+            Expr::Unary { operand, .. } => strip_in_expr(operand, target_arch),
+            Expr::Index { receiver, index } => {
+                strip_in_expr(receiver, target_arch);
+                strip_in_expr(index, target_arch);
+            }
+            Expr::FieldAccess { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
+                strip_in_expr(receiver, target_arch);
+            }
+            Expr::Tuple(items) | Expr::Array(items) | Expr::VecLiteral(items) => {
+                for item in items {
+                    strip_in_expr(item, target_arch);
+                }
+            }
+            Expr::LabeledTuple(items) => {
+                for item in items {
+                    strip_in_expr(&mut item.value, target_arch);
+                }
+            }
+            Expr::ArrayRepeat { value, count } => {
+                strip_in_expr(value, target_arch);
+                strip_in_expr(count, target_arch);
+            }
+            Expr::GenericInst { expr, .. } => strip_in_expr(expr, target_arch),
+            Expr::Dict(items) => {
+                for (key, value) in items {
+                    strip_in_expr(key, target_arch);
+                    strip_in_expr(value, target_arch);
+                }
+            }
+            Expr::ListComprehension {
+                expr,
+                iterable,
+                condition,
+                ..
+            } => {
+                strip_in_expr(expr, target_arch);
+                strip_in_expr(iterable, target_arch);
+                if let Some(condition) = condition {
+                    strip_in_expr(condition, target_arch);
+                }
+            }
+            Expr::DictComprehension {
+                key,
+                value,
+                iterable,
+                condition,
+                ..
+            } => {
+                strip_in_expr(key, target_arch);
+                strip_in_expr(value, target_arch);
+                strip_in_expr(iterable, target_arch);
+                if let Some(condition) = condition {
+                    strip_in_expr(condition, target_arch);
+                }
+            }
+            Expr::Slice {
+                receiver,
+                start,
+                end,
+                step,
+            } => {
+                strip_in_expr(receiver, target_arch);
+                for bound in [start.as_deref_mut(), end.as_deref_mut(), step.as_deref_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    strip_in_expr(bound, target_arch);
+                }
+            }
+            Expr::StructInit { fields, spread, .. } => {
+                for (_, value) in fields {
+                    strip_in_expr(value, target_arch);
+                }
+                if let Some(spread) = spread {
+                    strip_in_expr(spread, target_arch);
+                }
+            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                strip_in_expr(condition, target_arch);
+                strip_in_expr(then_branch, target_arch);
+                if let Some(branch) = else_branch {
+                    strip_in_expr(branch, target_arch);
+                }
+            }
+            Expr::Match { subject, arms } => {
+                strip_in_expr(subject, target_arch);
+                for arm in arms {
+                    if let Some(guard) = &mut arm.guard {
+                        strip_in_expr(guard, target_arch);
+                    }
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut arm.body.statements, target_arch);
+                }
+            }
+            Expr::Spread(expr)
+            | Expr::DictSpread(expr)
+            | Expr::StructSpread(expr)
+            | Expr::Spawn(expr)
+            | Expr::Await(expr)
+            | Expr::Try(expr)
+            | Expr::ForceUnwrap(expr)
+            | Expr::ExistsCheck(expr)
+            | Expr::ContractOld(expr)
+            | Expr::New { expr, .. }
+            | Expr::Cast { expr, .. }
+            | Expr::CastOrReturn { expr, .. }
+            | Expr::OptionalChain { expr, .. }
+            | Expr::VolatileAccess { address: expr, .. } => strip_in_expr(expr, target_arch),
+            Expr::UnwrapOrReturn { expr, default }
+            | Expr::UnwrapOr { expr, default }
+            | Expr::CastOr { expr, default, .. }
+            | Expr::Coalesce { expr, default } => {
+                strip_in_expr(expr, target_arch);
+                strip_in_expr(default, target_arch);
+            }
+            Expr::UnwrapElse { expr, fallback_fn } | Expr::CastElse { expr, fallback_fn, .. } => {
+                strip_in_expr(expr, target_arch);
+                strip_in_expr(fallback_fn, target_arch);
+            }
+            Expr::Yield(expr) => {
+                if let Some(expr) = expr {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Expr::Go { args, body, .. } => {
+                for arg in args {
+                    strip_in_expr(arg, target_arch);
+                }
+                strip_in_expr(body, target_arch);
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    strip_in_expr(start, target_arch);
+                }
+                if let Some(end) = end {
+                    strip_in_expr(end, target_arch);
+                }
+            }
+            Expr::FunctionalUpdate { target, args, .. } => {
+                strip_in_expr(target, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::MacroInvocation { args, .. } => {
+                for MacroArg::Expr(expr) in args {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Expr::Forall { range, predicate, .. } | Expr::Exists { range, predicate, .. } => {
+                strip_in_expr(range, target_arch);
+                strip_in_expr(predicate, target_arch);
+            }
+            Expr::GridLiteral { rows, .. } => {
+                for row in rows {
+                    for expr in row {
+                        strip_in_expr(expr, target_arch);
+                    }
+                }
+            }
+            Expr::TensorLiteral { mode, .. } => match mode.as_mut() {
+                TensorMode::Flat { default, values } => {
+                    if let Some(default) = default {
+                        strip_in_expr(default, target_arch);
+                    }
+                    for row in values {
+                        for expr in row {
+                            strip_in_expr(expr, target_arch);
+                        }
+                    }
+                }
+                TensorMode::Slice(slices) => {
+                    fn strip_in_slices(slices: &mut [TensorSlice], target_arch: TargetArch) {
+                        for slice in slices {
+                            match &mut slice.content {
+                                TensorSliceContent::NestedSlices(nested) => strip_in_slices(nested, target_arch),
+                                TensorSliceContent::GridRows(rows) => {
+                                    for row in rows {
+                                        for expr in row {
+                                            strip_in_expr(expr, target_arch);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    strip_in_slices(slices, target_arch);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn strip_in_attributes(attributes: &mut [Attribute], target_arch: TargetArch) {
+        for attribute in attributes {
+            if let Some(value) = &mut attribute.value {
+                strip_in_expr(value, target_arch);
+            }
+            if let Some(args) = &mut attribute.args {
+                for arg in args {
+                    strip_in_expr(arg, target_arch);
+                }
+            }
+            if let Some(args) = &mut attribute.named_args {
+                for (_, value) in args {
+                    strip_in_expr(value, target_arch);
+                }
+            }
+        }
+    }
+
+    fn strip_in_decorators(decorators: &mut [Decorator], target_arch: TargetArch) {
+        for decorator in decorators {
+            strip_in_expr(&mut decorator.name, target_arch);
+            if let Some(args) = &mut decorator.args {
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+        }
+    }
+
+    fn strip_in_parameters(parameters: &mut [Parameter], target_arch: TargetArch) {
+        for parameter in parameters {
+            if let Some(default) = &mut parameter.default {
+                strip_in_expr(default, target_arch);
+            }
+        }
+    }
+
+    fn strip_in_fields(fields: &mut [Field], target_arch: TargetArch) {
+        for field in fields {
+            if let Some(default) = &mut field.default {
+                strip_in_expr(default, target_arch);
+            }
+        }
+    }
+
+    fn strip_in_clause(clause: &mut ContractClause, target_arch: TargetArch) {
+        strip_in_expr(&mut clause.condition, target_arch);
+    }
+
+    fn strip_in_contract(contract: &mut ContractBlock, target_arch: TargetArch) {
+        for clause in contract
+            .preconditions
+            .iter_mut()
+            .chain(&mut contract.invariants)
+            .chain(&mut contract.postconditions)
+            .chain(&mut contract.error_postconditions)
+            .chain(contract.decrease_measure.iter_mut())
+        {
+            strip_in_clause(clause, target_arch);
+        }
+    }
+
+    fn strip_in_macro_intro(spec: &mut MacroIntroSpec, target_arch: TargetArch) {
+        match spec {
+            MacroIntroSpec::Decl(_) => {}
+            MacroIntroSpec::For { range, body, .. } => {
+                strip_in_expr(&mut range.start, target_arch);
+                strip_in_expr(&mut range.end, target_arch);
+                for spec in body {
+                    strip_in_macro_intro(spec, target_arch);
+                }
+            }
+            MacroIntroSpec::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                strip_in_expr(condition, target_arch);
+                for spec in then_body.iter_mut().chain(else_body.iter_mut()) {
+                    strip_in_macro_intro(spec, target_arch);
+                }
+            }
+        }
+    }
+
+    fn strip_in_function(function: &mut FunctionDef, target_arch: TargetArch) {
+        strip_in_parameters(&mut function.params, target_arch);
+        strip_in_decorators(&mut function.decorators, target_arch);
+        strip_in_attributes(&mut function.attributes, target_arch);
+        if let Some(contract) = &mut function.contract {
+            strip_in_contract(contract, target_arch);
+        }
+        if let Some(constraint) = &mut function.return_constraint {
+            strip_in_expr(constraint, target_arch);
+        }
+        strip_inactive_cfg_arch_imports_in_stmts(&mut function.body.statements, target_arch);
+        if let Some(bounds) = &mut function.bounds_block {
+            for case in &mut bounds.cases {
+                strip_inactive_cfg_arch_imports_in_stmts(&mut case.body.statements, target_arch);
+            }
+        }
+    }
+
+    fn strip_in_node(stmt: &mut Node, target_arch: TargetArch) {
+        match stmt {
+            Node::Function(f) => strip_in_function(f, target_arch),
+            Node::ModDecl(m) => {
+                strip_in_attributes(&mut m.attributes, target_arch);
+                if let Some(body) = &mut m.body {
+                    strip_inactive_cfg_arch_fn_nodes(body, target_arch);
+                }
+            }
+            Node::Class(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                strip_in_attributes(&mut def.attributes, target_arch);
+                if let Some(invariant) = &mut def.invariant {
+                    for clause in &mut invariant.conditions {
+                        strip_in_clause(clause, target_arch);
+                    }
+                }
+                for invocation in &mut def.macro_invocations {
+                    for MacroArg::Expr(expr) in &mut invocation.args {
+                        strip_in_expr(expr, target_arch);
+                    }
+                }
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Struct(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                strip_in_attributes(&mut def.attributes, target_arch);
+                if let Some(invariant) = &mut def.invariant {
+                    for clause in &mut invariant.conditions {
+                        strip_in_clause(clause, target_arch);
+                    }
+                }
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Bitfield(def) => {
+                for constant in &mut def.constants {
+                    strip_in_expr(&mut constant.value, target_arch);
+                }
+                strip_in_attributes(&mut def.attributes, target_arch);
+            }
+            Node::Enum(def) => {
+                for variant in &mut def.variants {
+                    if let Some(discriminant) = &mut variant.discriminant {
+                        strip_in_expr(discriminant, target_arch);
+                    }
+                }
+                strip_in_attributes(&mut def.attributes, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Trait(def) => {
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Impl(def) => {
+                strip_in_attributes(&mut def.attributes, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Mixin(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Actor(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::TypeAlias(def) => {
+                if let Some(predicate) = &mut def.where_clause {
+                    strip_in_expr(predicate, target_arch);
+                }
+            }
+            Node::ClassAlias(def) => strip_in_decorators(&mut def.decorators, target_arch),
+            Node::FunctionAlias(def) => strip_in_decorators(&mut def.decorators, target_arch),
+            Node::Extern(def) => {
+                strip_in_parameters(&mut def.params, target_arch);
+                strip_in_attributes(&mut def.attributes, target_arch);
+            }
+            Node::ExternClass(def) => {
+                strip_in_attributes(&mut def.attributes, target_arch);
+                for method in &mut def.methods {
+                    strip_in_parameters(&mut method.params, target_arch);
+                    strip_in_attributes(&mut method.attributes, target_arch);
+                }
+            }
+            Node::Macro(def) => {
+                for item in &mut def.contract {
+                    if let MacroContractItem::Intro(intro) = item {
+                        strip_in_macro_intro(&mut intro.spec, target_arch);
+                    }
+                }
+                def.body.retain(|statement| match statement {
+                    MacroStmt::Stmt(Node::UseStmt(u)) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
+                    MacroStmt::Stmt(Node::MultiUse(m)) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
+                    MacroStmt::Stmt(Node::ExportUseStmt(e)) => !fn_inactive_cfg_arch(&e.attributes, target_arch),
+                    _ => true,
+                });
+                for statement in &mut def.body {
+                    match statement {
+                        MacroStmt::ConstEval(block) | MacroStmt::Emit { block, .. } => {
+                            strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                        }
+                        MacroStmt::Stmt(node) => strip_in_node(node, target_arch),
+                    }
+                }
+            }
+            Node::UnitFamily(def) => {
+                if let Some(arithmetic) = &mut def.arithmetic {
+                    for function in &mut arithmetic.custom_fns {
+                        strip_in_function(function, target_arch);
+                    }
+                }
+            }
+            Node::CompoundUnit(def) => {
+                if let Some(arithmetic) = &mut def.arithmetic {
+                    for function in &mut arithmetic.custom_fns {
+                        strip_in_function(function, target_arch);
+                    }
+                }
+            }
+            Node::Extend(def) => {
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::LiteralFunction(def) => {
+                strip_inactive_cfg_arch_imports_in_stmts(&mut def.body.statements, target_arch);
+            }
+            Node::DomainBlock(def) => strip_in_attributes(&mut def.attributes, target_arch),
+            Node::MockDecl(def) => {
+                for expectation in &mut def.expectations {
+                    strip_in_parameters(&mut expectation.params, target_arch);
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut expectation.body, target_arch);
+                }
+            }
+            Node::Expression(expr) => strip_in_expr(expr, target_arch),
+            Node::Let(stmt) => {
+                if let Some(expr) = &mut stmt.value {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Node::Const(stmt) => strip_in_expr(&mut stmt.value, target_arch),
+            Node::Static(stmt) => strip_in_expr(&mut stmt.value, target_arch),
+            Node::Assignment(stmt) => {
+                strip_in_expr(&mut stmt.target, target_arch);
+                strip_in_expr(&mut stmt.value, target_arch);
+            }
+            Node::Return(stmt) => {
+                if let Some(expr) = &mut stmt.value {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Node::Break(stmt) => {
+                if let Some(expr) = &mut stmt.value {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Node::Guard(stmt) => {
+                if let Some(condition) = &mut stmt.condition {
+                    strip_in_expr(condition, target_arch);
+                }
+                strip_in_expr(&mut stmt.result, target_arch);
+            }
+            Node::Assert(stmt) => strip_in_expr(&mut stmt.condition, target_arch),
+            Node::Assume(stmt) => strip_in_expr(&mut stmt.condition, target_arch),
+            Node::Admit(stmt) => strip_in_expr(&mut stmt.condition, target_arch),
+            Node::Calc(stmt) => {
+                for step in &mut stmt.steps {
+                    strip_in_expr(&mut step.expr, target_arch);
+                }
+            }
+            Node::If(if_stmt) => {
+                strip_in_expr(&mut if_stmt.condition, target_arch);
+                strip_inactive_cfg_arch_imports_in_stmts(&mut if_stmt.then_block.statements, target_arch);
+                for (_, condition, block) in &mut if_stmt.elif_branches {
+                    strip_in_expr(condition, target_arch);
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut else_block.statements, target_arch);
+                }
+            }
+            Node::Match(m) => {
+                strip_in_expr(&mut m.subject, target_arch);
+                for arm in &mut m.arms {
+                    if let Some(guard) = &mut arm.guard {
+                        strip_in_expr(guard, target_arch);
+                    }
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut arm.body.statements, target_arch);
+                }
+            }
+            Node::For(f) => {
+                strip_in_expr(&mut f.iterable, target_arch);
+                for clause in &mut f.invariants {
+                    strip_in_clause(clause, target_arch);
+                }
+                strip_inactive_cfg_arch_imports_in_stmts(&mut f.body.statements, target_arch);
+            }
+            Node::While(w) => {
+                strip_in_expr(&mut w.condition, target_arch);
+                for clause in &mut w.invariants {
+                    strip_in_clause(clause, target_arch);
+                }
+                strip_inactive_cfg_arch_imports_in_stmts(&mut w.body.statements, target_arch);
+            }
+            Node::Loop(l) => strip_inactive_cfg_arch_imports_in_stmts(&mut l.body.statements, target_arch),
+            Node::Context(stmt) => {
+                strip_in_expr(&mut stmt.context, target_arch);
+                strip_inactive_cfg_arch_imports_in_stmts(&mut stmt.body.statements, target_arch);
+            }
+            Node::With(stmt) => {
+                strip_in_expr(&mut stmt.resource, target_arch);
+                strip_inactive_cfg_arch_imports_in_stmts(&mut stmt.body.statements, target_arch);
+            }
+            Node::Skip(stmt) => {
+                if let SkipBody::Block(block) = &mut stmt.body {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+            }
+            Node::Defer(stmt) => match &mut stmt.body {
+                DeferBody::Expr(expr) => strip_in_expr(expr, target_arch),
+                DeferBody::Block(block) => {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+            },
+            Node::ErrDefer(stmt) => match &mut stmt.body {
+                DeferBody::Expr(expr) => strip_in_expr(expr, target_arch),
+                DeferBody::Block(block) => {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+            },
+            Node::InlineAsm(stmt) => {
+                for constraint in &mut stmt.constraints {
+                    if let Some(operand) = &mut constraint.operand {
+                        strip_in_expr(operand, target_arch);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    stmts.retain(|stmt| match stmt {
+        Node::UseStmt(u) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
+        Node::MultiUse(m) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
+        Node::ExportUseStmt(e) => !fn_inactive_cfg_arch(&e.attributes, target_arch),
+        _ => true,
+    });
+    for stmt in stmts.iter_mut() {
+        strip_in_node(stmt, target_arch);
+    }
+}
+
+/// Drop top-level `@cfg(<arch>)`-gated function and import nodes whose
+/// architecture does not match `target_arch`, recording stripped function names
+/// and warning about duplicate active variants. Item-list form shared by
+/// module- and interpreter-level callers.
 pub fn strip_inactive_cfg_arch_fn_nodes(items: &mut Vec<Node>, target_arch: TargetArch) {
-    items.retain(|item| {
-        if let Node::Function(f) = item {
+    items.retain(|item| match item {
+        Node::Function(f) => {
             if fn_inactive_cfg_arch(&f.attributes, target_arch) {
                 note_stripped_fn(&f.name);
                 return false;
             }
+            true
         }
-        true
+        Node::UseStmt(u) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
+        Node::MultiUse(m) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
+        Node::ExportUseStmt(e) => !fn_inactive_cfg_arch(&e.attributes, target_arch),
+        _ => true,
     });
+    strip_inactive_cfg_arch_imports_in_stmts(items, target_arch);
     warn_duplicate_active_variants(items, target_arch);
 }
 
@@ -678,5 +1385,117 @@ payload
         // Indented (function-local) uses are not touched by this pass.
         let local = "fn f():\n    @cfg(riscv64)\n    use a.b\n";
         assert_eq!(strip_inactive_cfg_arch_globals(local, TargetArch::Aarch64), local);
+    }
+
+    #[test]
+    fn compound_arch_cfg_evaluates_not_or_and_all_any_and_leaves_non_arch_ungated() {
+        let source = "\
+@cfg(x86_64)
+fn pick() -> i64:
+    1
+@cfg(x86)
+fn pick() -> i64:
+    2
+@cfg(not(x86_64 or x86))
+fn pick() -> i64:
+    3
+@cfg(any(aarch64, riscv64))
+fn wide_arm_or_rv() -> i64:
+    4
+@cfg(all(not(x86_64), not(x86)))
+fn non_x86_all() -> i64:
+    5
+@cfg(x86_64 or baremetal)
+fn mixed_stays_ungated() -> i64:
+    6
+";
+        let surviving_fns = |arch: TargetArch| -> Vec<(String, i64)> {
+            let mut module = parse_cfg_filtered_module(source, arch).expect("parse compound cfg");
+            module
+                .items
+                .drain(..)
+                .filter_map(|item| match item {
+                    Node::Function(f) => {
+                        let Some(Node::Expression(simple_parser::ast::Expr::Integer(v))) = f.body.statements.first()
+                        else {
+                            panic!("expected integer body");
+                        };
+                        Some((f.name, *v))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            surviving_fns(TargetArch::X86_64),
+            vec![("pick".into(), 1), ("mixed_stays_ungated".into(), 6)]
+        );
+        assert_eq!(
+            surviving_fns(TargetArch::X86),
+            vec![("pick".into(), 2), ("mixed_stays_ungated".into(), 6)]
+        );
+        assert_eq!(
+            surviving_fns(TargetArch::Riscv64),
+            vec![
+                ("pick".into(), 3),
+                ("wide_arm_or_rv".into(), 4),
+                ("non_x86_all".into(), 5),
+                ("mixed_stays_ungated".into(), 6),
+            ]
+        );
+        assert_eq!(
+            surviving_fns(TargetArch::Arm),
+            vec![
+                ("pick".into(), 3),
+                ("non_x86_all".into(), 5),
+                ("mixed_stays_ungated".into(), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn cfg_gated_top_level_use_and_export_use_strip_inactive_arches() {
+        let source = "\
+@cfg(x86_64)
+use os.kernel.arch.x86.com1_common.{x86_com1_read_byte}
+@cfg(riscv64)
+use os.kernel.arch.riscv64.console.{serial_read_byte}
+@cfg(arm64)
+export use os.kernel.arch.arm.pl011_common.{pl011_write_byte}
+@cfg(not(x86_64 or x86))
+use os.kernel.hal.generic_timer
+";
+        let kept_paths = |arch: TargetArch| -> Vec<String> {
+            let module = parse_cfg_filtered_module(source, arch).expect("parse cfg use");
+            module
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Node::UseStmt(u) => {
+                        let mut segs = u.path.segments.clone();
+                        if let simple_parser::ast::ImportTarget::Single(last) = &u.target {
+                            segs.push(last.clone());
+                        }
+                        Some(segs.join("."))
+                    }
+                    Node::ExportUseStmt(e) => Some(format!("export:{}", e.path.segments.join("."))),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(kept_paths(TargetArch::X86_64), vec!["os.kernel.arch.x86.com1_common"]);
+        assert_eq!(
+            kept_paths(TargetArch::Riscv64),
+            vec!["os.kernel.arch.riscv64.console", "os.kernel.hal.generic_timer"]
+        );
+        assert_eq!(
+            kept_paths(TargetArch::Aarch64),
+            vec![
+                "export:os.kernel.arch.arm.pl011_common",
+                "os.kernel.hal.generic_timer"
+            ]
+        );
     }
 }
