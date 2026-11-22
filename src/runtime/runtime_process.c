@@ -1151,7 +1151,7 @@ static int64_t win_core_rt_process_write_stdin_some(int64_t, const char*, int64_
 bool rt_process_write_stdin(int64_t pid, const char* data) {
     if (pid <= 0 || pid > UINT32_MAX || !data) return false;
     size_t length = strlen(data);
-    if (length > INT64_MAX) return false;
+    if ((uint64_t)length > (uint64_t)INT64_MAX) return false;
     AcquireSRWLockExclusive(&win_piped_lock);
     struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
     uint64_t generation = slot && !slot->closing && !slot->retiring && slot->stdin_write && slot->stdin_event
@@ -2664,7 +2664,7 @@ static int64_t posix_core_rt_process_write_stdin_some(
 bool rt_process_write_stdin(int64_t pid, const char* data) {
     if (pid <= 0 || !data) return false;
     size_t length = strlen(data);
-    if (length > INT64_MAX || pthread_mutex_lock(&s_proc_lock) != 0) return false;
+    if ((uint64_t)length > (uint64_t)INT64_MAX || pthread_mutex_lock(&s_proc_lock) != 0) return false;
     struct RtProcSlot* slot = proc_find((pid_t)pid);
     uint64_t generation = slot && !slot->closing && slot->stdin_fd >= 0
         ? slot->generation : 0;
