@@ -19,7 +19,7 @@ use compiler.core.interpreter.cli_eval.{cli_parse_argv}
 use compiler.core.interpreter.env.{env_define, env_define_global, env_init, env_pop_scope, env_push_scope}
 use compiler.core.interpreter.eval.{EVAL_DECL_LAZY_VAL, EVAL_STMT_BIND, eval_break_label, eval_breaking, eval_continue_label}
 use compiler.core.interpreter.eval.{eval_continuing, eval_expr, eval_had_error, eval_label_stack, eval_reset}
-use compiler.core.interpreter.eval.{eval_returning, eval_set_error, eval_yield_stack}
+use compiler.core.interpreter.eval.{eval_entry_file, eval_returning, eval_set_error, eval_yield_stack}
 use compiler.core.interpreter.eval_calls.{eval_function_call, val_copy_if_value_struct}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_register_in, func_register_return_type, func_table_lookup, func_table_register, func_table_register_owned}
@@ -27,7 +27,7 @@ use compiler.core.interpreter.eval_tables.{func_table_reset, init_functions, mat
 use compiler.core.interpreter.eval_tables.{struct_table_reset, teardown_functions, when_disabled_decls}
 use compiler.core.interpreter.module_loader_core.{import_admission_set_deny, load_module, load_module_selective, load_module_selective_with_unbraced_alias, module_bind_exports_for_caller}
 use compiler.core.interpreter.module_loader_core.{module_loader_init, register_deferred_module}
-use compiler.core.unit_scope.{unit_scope_record_use, unit_scope_reset}
+use compiler.core.unit_scope.{unit_scope_record_use_in, unit_scope_reset}
 use compiler.core.interpreter.value.{val_get_kind, val_make_array, val_make_int, val_make_nil, val_make_text}
 use compiler.core.interpreter.value.{val_make_thunk, val_reset}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
@@ -151,13 +151,15 @@ fn eval_decl(did: i64) -> i64:
         # Load module and register its exports
         val module_path = d_node.name
         val imported_names = d_node.imports
-        unit_scope_record_use(module_path, imported_names)
         # Append-mode parsing shares one declaration arena across the entry
         # file and every imported module.  module_get_path() remains the entry
         # path, so import resolution must use the immutable owner recorded when
         # this declaration was appended.
         val declared_owner = decl_owner_file_get(did)
         val current_file = if declared_owner != "": declared_owner else: module_get_path()
+        # Unit scope is per file: the import is recorded under the file that
+        # wrote it, the same key eval_caller_file() yields at suffix-use time.
+        unit_scope_record_use_in(if current_file != "": current_file else: "<entry>", module_path, imported_names)
 
         # Check if this is a lazy import — defer loading
         val is_lazy = decl_get_is_lazy(did)
@@ -261,6 +263,7 @@ fn eval_decl(did: i64) -> i64:
 fn eval_module() -> i64:
     val decls = module_get_decls()
     val entry_path = module_get_path()
+    eval_entry_file = entry_path
 
     # Establish provenance before evaluating any use declaration. Recursive
     # module loads append more declarations to this same arena.
