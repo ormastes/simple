@@ -90,15 +90,15 @@ fn cstring_returns_registry_has_every_exact_signature() {
         "rt_cuda_device_name", "rt_cuda_get_error_string", "rt_metal_device_name",
         "rt_metal_get_last_error", "rt_vulkan_device_driver_identity",
         "rt_vulkan_device_name", "rt_vulkan_device_type", "rt_vulkan_get_last_error",
-        "rt_vulkan_selected_device_driver_identity", "rt_vulkan_selected_device_name",
-        "rt_vulkan_selected_device_type",
+        "rt_vulkan_selected_device_driver_identity", "rt_vulkan_selected_device_identity_v1",
+        "rt_vulkan_selected_device_name", "rt_vulkan_selected_device_type",
     ]);
     for &name in C_STRING_RETURNING_RUNTIME_FNS {
         let spec = spec_for(name).unwrap_or_else(|| panic!("missing C-string runtime signature: {name}"));
         let arity = match name {
             "rt_cuda_device_name" | "rt_cuda_get_error_string" | "rt_metal_device_name"
             | "rt_vulkan_device_driver_identity" | "rt_vulkan_device_name"
-            | "rt_vulkan_device_type" => 1,
+            | "rt_vulkan_device_type" | "rt_vulkan_selected_device_identity_v1" => 1,
             "rt_metal_get_last_error" | "rt_vulkan_get_last_error"
             | "rt_vulkan_selected_device_driver_identity" | "rt_vulkan_selected_device_name"
             | "rt_vulkan_selected_device_type" => 0,
@@ -117,7 +117,7 @@ fn cstring_returns_native_calls_decode_each_gpu_result_exactly_once() {
         let arity = usize::from(matches!(name,
             "rt_cuda_device_name" | "rt_cuda_get_error_string" | "rt_metal_device_name"
             | "rt_vulkan_device_driver_identity" | "rt_vulkan_device_name"
-            | "rt_vulkan_device_type"));
+            | "rt_vulkan_device_type" | "rt_vulkan_selected_device_identity_v1"));
         let object = call_object(name, arity, true);
         assert_eq!(relocation_count(&object, name), 1, "{name}");
         assert_eq!(relocation_count(&object, "rt_cstring_to_text"), 1, "{name}");
@@ -138,4 +138,16 @@ fn cstring_returns_native_discarded_result_does_not_allocate_text() {
     let object = call_object("rt_vulkan_get_last_error", 0, false);
     assert_eq!(relocation_count(&object, "rt_vulkan_get_last_error"), 1);
     assert_eq!(relocation_count(&object, "rt_cstring_to_text"), 0);
+}
+
+/// Blocker 9 (doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md):
+/// the selected-device UUID query returns `*const c_char`; without the decode
+/// `.split(":")` ran on the raw pointer and the Engine2D capture reported
+/// "selected Vulkan physical device identity unavailable" on the GB10.
+/// Independent of the registry list, so a dropped entry fails here.
+#[test]
+fn cstring_returns_native_decodes_selected_device_identity_v1() {
+    let object = call_object("rt_vulkan_selected_device_identity_v1", 1, true);
+    assert_eq!(relocation_count(&object, "rt_vulkan_selected_device_identity_v1"), 1);
+    assert_eq!(relocation_count(&object, "rt_cstring_to_text"), 1);
 }
