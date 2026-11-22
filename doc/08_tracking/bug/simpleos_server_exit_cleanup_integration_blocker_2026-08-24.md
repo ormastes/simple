@@ -250,3 +250,19 @@ capsule must not be presented as production Zombie wiring.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.
+
+## 2026-11-22 progress (still open)
+
+Re-audit: `TaskState.PreparingExit`, `task_pre_exit_admission_v1` admission
+predicates, and a shared prepare -> remove-ready -> finalize path now exist for
+both exits. Finalize still discards FD/grant results and publishes `Zombie`.
+Prerequisite landed (no behavior change):
+`server_data_launch_grant_revoke_task_lifecycle_status_v1` returns
+`Applied | AlreadyAbsent | Retry | Quarantined | InvalidIdentity | Indeterminate`
+instead of a Boolean that merged absence, lock failure, and quarantine; the
+legacy Boolean now delegates with identical semantics. Holding `Zombie` on a
+Boolean `false` was rejected (Opus review): a quarantined tombstone would strand
+the task in PreparingExit with waiters never woken. Next: FD cleanup status
+query over `_fd_cleanup_retry_find_v1`, then conditional Zombie with bounded
+retry and an explicit quarantine outcome. Cross-CPU quiescence, capability and
+DBD wiring remain open.
