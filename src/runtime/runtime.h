@@ -650,7 +650,7 @@ int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
                              const uint8_t* method_name, uint64_t method_len);
-int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
+int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, const uint64_t* argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_f64_array_alloc(int64_t len);
 SplArray* rt_f32_array_alloc(int64_t len);
