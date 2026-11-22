@@ -6,7 +6,9 @@
 #   - Uses `use lazy` for CompilerDriver and cache/watcher modules
 
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, OutputFormat, driver_core_compile_options_default)
-use std.io_runtime.{file_exists, file_read_nullable}
+use std.io_runtime.{file_exists, file_read_nullable, file_read_bytes_result}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_check_image}
+use compiler.backend.linker.smf_meta.{smf_meta_unit_identity_text}
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
 use lazy compiler.driver.watcher.smf_manifest (SmfManifestEntry, SmfManifestGateVerdict, IfaceDigestVerdict, load_smf_manifest_default_checked, smf_manifest_find, smf_manifest_entry_new, smf_manifest_entry_matches_source, smf_manifest_entry_iface_verdict, smf_manifest_iface_diagnostic, iface_digest_gate_code, smf_manifest_entry_gate, smf_manifest_gate_code, smf_manifest_host_abi_digest)
 use compiler.driver.cache.cache_types (CacheCheckResult)
@@ -101,6 +103,14 @@ pub fn try_load_smf_cached(path: text) -> Result<CompileResult?, text>:
     if freshness.status != 0:
         return Ok(nil)
 
+    # Unit identity: the manifest row states the iface/ABI digest, target,
+    # policy and capabilities this unit must carry; refuse a mismatch.
+    val smf_image = file_read_bytes_result(smf_path)
+    if smf_image.is_err():
+        return Ok(None)
+    val identity_admitted = smf_cached_unit_identity_admit(resolved, smf_image.unwrap())?
+    if not identity_admitted:
+        return Ok(None)
     print "[interp] Loading pre-compiled SMF: {smf_path}"
     var options = driver_core_compile_options_default()
     options.input_files = [smf_path]
@@ -108,3 +118,19 @@ pub fn try_load_smf_cached(path: text) -> Result<CompileResult?, text>:
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
     Ok(Some(result))
+
+# Check a cached SMF's unit identity record against the expectation its
+# manifest row states. Ok(true) = admitted; Ok(false) = legacy SMF with no
+# identity record (treated as a cache miss -> full interpret, never admitted);
+# Err = SMF-E-UNIT-* mismatch (refused).
+pub fn smf_cached_unit_identity_admit(entry: SmfManifestEntry, image: [u8]) -> Result<bool, text>:
+    if smf_meta_unit_identity_text(image) == "":
+        return Ok(false)
+    val expected = UnitIdentity(
+        iface_digest: entry.iface_digest,
+        abi_digest: entry.abi_digest,
+        target_triple: entry.native_target,
+        policy: entry.profile,
+        capabilities: entry.allowed_families)
+    unit_identity_check_image(expected, image)?
+    Ok(true)
