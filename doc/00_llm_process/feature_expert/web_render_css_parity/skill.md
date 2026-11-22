@@ -3565,3 +3565,13 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - An `<img>` or inline-block on a text line still keeps k x its CSS top; the same rule applies (`bottom_edge_baseline` branch of `align_inline_line_device_dy`) but was left out of this lane.
 - **Spec:** `test/01_unit/browser_engine/form_control_height_dpr_chrome159_spec.spl` (4 cases; base 6b508da8f57 1/4 — the 1x guard — head 4/4).
 - **Catalog 4x:** forms-media 3.06 -> 3.04 (the checkbox and radio rows 664 -> 666, 793 -> 795 as in Chrome; the styled `padding:8px` controls already matched and did not move).
+## 2026-11-22 — media-controls vector parts (animation page lane)
+
+- **Page fact:** the catalog `animation` page has no CSS animation, transition or transform; it is the canvas / svg / audio / video probe tab. Chrome's capture is a plain load-event screenshot and the Simple side a static render, so there is no capture-time mismatch to look for.
+- **Change:** `media_control_chrome.spl` (new) rasterizes Chrome's media-controls icons as device-px spans — Material `play_arrow`, `volume_up`, `more_vert` at 20/24 and the 4 px timeline stadium — and `_html_draw_ir_replaced_media_commands` lowers them like the checkbox parts. Audio 300x54: 1,015 -> 467 px off at 1x, 11,629 -> 3,578 at 4x; video 120x150: 388 -> 0, 6,059 -> 25.
+- **Chrome 159 measured:** audio icon boxes are 20x20 at x 16 / w-68 / w-36, centred on h/2; play and volume are black at 30 % (disabled without a source), the kebab solid black, the track black at 20 % from x 129.27 (129.08 at 1x) to w-90. Video: track x 16..w-16, y h-24..h-20, kebab centred on (w-24, h-48), both white at 30 %.
+- **Open:** the audio `0:00 / 0:00` time text (14 px LCD text at x 48..114) is the rest of the audio residual, and the track's left end follows its advance. A wide video's play / time / volume / fullscreen buttons are not modelled, and a short video's scrim is wrong (Chrome's gradient is not a % of the height).
+- **Trap:** a probe page with no text tag takes the 1x `simple_web_layout_render_html_pixels` route, which paints no media controls at all — add a `<p>` or call the device-scale entry point. `position:absolute` audio/video paint nothing.
+- **Trap:** Skia's 1x kebab dots are a hair narrower than a circle (side pixels 0x78 vs 0x6f on #f1f3f4): 12 px stay 9 off, one over the catalog tolerance.
+- **Handover:** inline replaced boxes after a collapsed space sit one CSS px left (space advance 4 vs 4.45; whole-CSS-px boxes at device scale 4) — red spec `inline_replaced_fractional_x_chrome159_spec.spl`, for the layout lane.
+- **Spec:** `test/01_unit/browser_engine/media_controls_paint_chrome159_spec.spl` (0/7 on base, 7/7 on head).
