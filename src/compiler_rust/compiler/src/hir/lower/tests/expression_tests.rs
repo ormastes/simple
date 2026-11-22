@@ -2197,3 +2197,156 @@ fn record_unit_spl_unit_002_denied_through_hir() {
         parse_and_lower(&format!("{decls}{body}")).unwrap_or_else(|e| panic!("must lower:\n{body}\n{e}"));
     }
 }
+
+fn assert_unit_002(decls: &str, denied: &[&str], allowed: &[&str]) {
+    for body in denied {
+        let err = parse_and_lower(&format!("{decls}{body}")).expect_err(&format!("must deny:\n{body}"));
+        let text = format!("{err}");
+        assert!(text.contains("SPL-UNIT-002") && text.contains("SIMPLE_JIT_STRICT"), "{body}\n{text}");
+    }
+    for body in allowed {
+        parse_and_lower(&format!("{decls}{body}")).unwrap_or_else(|e| panic!("must lower:\n{body}\n{e}"));
+    }
+}
+
+const UNIT_002_SHAPES: &str = "unit A: i64\nunit B: i64\n\nstruct P:\n    a: A\n    b: B\n    n: i64\n\nclass C:\n    a: A\n    b: B\n\n    fn get_a() -> A:\n        self.a\n\n    fn get_b() -> B:\n        self.b\n\n    fn take_b(y: B) -> i64:\n        y.value\n\n    static fn zero() -> A:\n        A(0)\n\nstruct Q:\n    p: P\n\nimpl Q:\n    fn inner_a() -> A:\n        self.p.a\n\n";
+
+/// SPL-UNIT-002 follows struct and class field accesses, including `self.f`
+/// and nested receivers.
+#[test]
+fn record_unit_spl_unit_002_field_access() {
+    assert_unit_002(
+        UNIT_002_SHAPES,
+        &[
+            "fn f(p: P) -> i64:\n    (p.a + p.b).value\n",
+            "fn f(p: P) -> bool:\n    p.a < p.b\n",
+            "fn f(p: P) -> A:\n    p.a + p.n\n",
+            "fn f(p: P) -> A:\n    p.a + 1\n",
+            "fn f(c: C, y: B) -> bool:\n    c.a == y\n",
+            "fn f(q: Q, y: B) -> bool:\n    q.p.a == y\n",
+            "fn f(x: A, y: B) -> bool:\n    val p = P(a: x, b: y, n: 1)\n    p.a < p.b\n",
+        ],
+        &[
+            "fn f(p: P, x: A) -> A:\n    p.a + x\n",
+            "fn f(p: P) -> i64:\n    p.a.value + p.b.value\n",
+            "fn f(p: P) -> i64:\n    p.n + 1\n",
+            "fn f(p: P) -> A:\n    p.a * p.n\n",
+            "fn f(c: C, x: A) -> bool:\n    c.a < x\n",
+            "fn f(q: Q, x: A) -> bool:\n    q.p.a == x\n",
+        ],
+    );
+    // `self.a < self.b` inside a method is denied.
+    let decls = "unit A: i64\nunit B: i64\n\n";
+    assert_unit_002(
+        decls,
+        &["class C:\n    a: A\n    b: B\n\n    fn bad() -> bool:\n        self.a < self.b\n"],
+        &["class C:\n    a: A\n    b: A\n\n    fn ok() -> bool:\n        self.a < self.b\n"],
+    );
+}
+
+/// SPL-UNIT-002 follows method-call results (instance, static, impl) and
+/// checks method arguments.
+#[test]
+fn record_unit_spl_unit_002_method_call() {
+    let shapes = UNIT_002_SHAPES.replace("    fn mixed() -> bool:\n        self.a < self.b\n\n", "");
+    assert_unit_002(
+        &shapes,
+        &[
+            "fn f(c: C) -> bool:\n    c.get_a() < c.get_b()\n",
+            "fn f(c: C, y: B) -> i64:\n    (c.get_a() + y).value\n",
+            "fn f(c: C) -> A:\n    c.get_a() + 1\n",
+            "fn f(y: B) -> bool:\n    C.zero() == y\n",
+            "fn f(q: Q, y: B) -> bool:\n    q.inner_a() < y\n",
+            "fn f(c: C, x: A) -> i64:\n    c.take_b(x)\n",
+            "fn f(c: C) -> i64:\n    c.take_b(c.get_a())\n",
+            "fn f(c: C, y: B) -> bool:\n    val r = c.get_a()\n    r < y\n",
+        ],
+        &[
+            "fn f(c: C, x: A) -> A:\n    c.get_a() + x\n",
+            "fn f(c: C) -> i64:\n    c.get_a().value + c.get_b().value\n",
+            "fn f(x: A) -> bool:\n    C.zero() == x\n",
+            "fn f(q: Q, x: A) -> bool:\n    q.inner_a() < x\n",
+            "fn f(c: C, y: B) -> i64:\n    c.take_b(y)\n",
+            "fn f(c: C) -> i64:\n    c.take_b(c.get_b())\n",
+        ],
+    );
+}
+
+/// SPL-UNIT-002 inside a lambda body (typed params) and through a
+/// lambda-bound local (params and inferred result).
+#[test]
+fn record_unit_spl_unit_002_lambda() {
+    assert_unit_002(
+        "unit A: i64\nunit B: i64\n\n",
+        &[
+            "fn f() -> i64:\n    val g = fn(x: A, y: B): (x + y).value\n    0\n",
+            "fn f(y: B) -> i64:\n    val g = fn(x: A): x < y\n    0\n",
+            "fn f(x: A) -> i64:\n    val g = fn(x: B): x.value\n    g(x)\n",
+            "fn f(x: A, y: B) -> bool:\n    val g = fn(v: A): v + v\n    g(x) < y\n",
+            "fn f(x: A) -> A:\n    val g = fn(v: A): v\n    g(x) + 1\n",
+        ],
+        &[
+            "fn f() -> i64:\n    val g = fn(x: A, y: A): (x + y).value\n    0\n",
+            "fn f(x: A) -> i64:\n    val g = fn(v: A): v.value\n    g(x)\n",
+            "fn f(x: A, y: A) -> bool:\n    val g = fn(v: A): v + v\n    g(x) < y\n",
+            // An untyped lambda param shadows the outer unit local.
+            "fn f(x: A, y: B) -> i64:\n    val g = fn(x): x + 1\n    0\n",
+            // Lambda params do not leak into the enclosing function.
+            "fn f(y: B) -> i64:\n    val g = fn(y: A): y.value\n    y.value\n",
+        ],
+    );
+}
+
+/// SPL-UNIT-002 on named arguments: free functions, methods, lambdas and
+/// constructor fields bind by name, not by position.
+#[test]
+fn record_unit_spl_unit_002_named_args() {
+    let decls = format!("{UNIT_002_SHAPES}fn g(p: A, q: B) -> i64:\n    p.value + q.value\n\n")
+        .replace("    fn mixed() -> bool:\n        self.a < self.b\n\n", "");
+    assert_unit_002(
+        &decls,
+        &[
+            "fn f(x: A, y: B) -> i64:\n    g(p: y, q: x)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(q: x, p: x)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(x, q: x)\n",
+            "fn f(c: C, x: A) -> i64:\n    c.take_b(y: x)\n",
+            "fn f(x: A, y: B) -> P:\n    P(a: y, b: y, n: 1)\n",
+            "fn f(x: A, y: B) -> P:\n    P(b: x, a: x, n: 1)\n",
+            "fn f(p: P, x: A) -> P:\n    P(a: p.b, b: p.b, n: 1)\n",
+        ],
+        &[
+            "fn f(x: A, y: B) -> i64:\n    g(p: x, q: y)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(q: y, p: x)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(x, q: y)\n",
+            "fn f(c: C, y: B) -> i64:\n    c.take_b(y: y)\n",
+            "fn f(x: A, y: B) -> P:\n    P(a: x, b: y, n: 1)\n",
+            "fn f(x: A, y: B) -> P:\n    P(b: y, a: x, n: 1)\n",
+            "fn f(p: P) -> P:\n    P(a: p.a, b: p.b, n: p.n)\n",
+        ],
+    );
+}
+
+/// Two same-named declarations with different signatures are ambiguous by
+/// bare name, so neither is checked (no false SPL-UNIT-002).
+#[test]
+fn record_unit_spl_unit_002_ambiguous_signature_is_unchecked() {
+    let mut lowerer = Lowerer::new();
+    let parse_fn = |src: &str| {
+        let module = simple_parser::Parser::new(src).parse().expect("parse");
+        module
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::Function(f) => Some(f),
+                _ => None,
+            })
+            .expect("function")
+    };
+    let a = parse_fn("fn g(y: A) -> A:\n    y\n");
+    let b = parse_fn("fn g(y: B) -> B:\n    y\n");
+    lowerer.register_unit_sig("g".to_string(), &a);
+    lowerer.register_unit_sig("g".to_string(), &a);
+    assert_eq!(lowerer.fn_sig_type_names["g"].1.as_deref(), Some("A"));
+    lowerer.register_unit_sig("g".to_string(), &b);
+    assert_eq!(lowerer.fn_sig_type_names["g"], (Vec::new(), None));
+}
