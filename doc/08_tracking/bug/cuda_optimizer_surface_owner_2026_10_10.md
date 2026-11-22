@@ -1,6 +1,6 @@
 # CUDA optimizer dependency surface ownership
 
-Status: OPEN compiler defect; explicit owner-import workaround passes actual CUDA HIR.
+Status: RESOLVED-DISAPPEARED 2026-11-22 (defect no longer reproduces on stage2 ef46f0d2; workaround retired; native CUDA port closure passes HIR without the owner imports). See the 2026-11-22 section.
 
 On release/1.0 `c48d5fb07cc5d75777c63252f2e0659b9bd8e248`, native compilation
 of `src/plugins/backend_cuda/cuda_backend.spl` reaches HIR but rejects imported
@@ -119,3 +119,41 @@ bin/simple.exe @ 46fe8f6b6def):
   — blocked here: no stage3-admitted producer / self-hosted check worker on
   this host (policy: no heavy entry-closure builds from bug lanes), and the
   closure still SIGSEGVs at MIR lowering per the bounded evidence above.
+
+## 2026-11-22 verification (lane work/cuda-compiler-bugs) — RESOLVED-DISAPPEARED, workaround retired
+
+Producer: integ25 Stage 2 admitted native-build
+(`.../bootstrap-s2probe-integ25/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`,
+sha256 `ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`,
+runtime `stage2-runtime-authority`), host Linux aarch64 (GB10), base
+`origin/release/1.0.0` `3c2e4556b6d`.
+
+Failing-first probe: deleted the explicit owner imports and their `@workaround`
+tags (inline.spl `LocalId`; loop_opt.spl, loop_licm.spl,
+auto_vectorize_cost.spl `BlockId`; and, for sibling
+`cuda_port_imported_method_surface_type_owner_2026_10_16`,
+cuda_backend_port.spl `MirType, MirSignature`). Each symbol appeared only in
+its import line. Then native-built the fixture
+`test/native/cuda_compiler_bugs/port_owner/main.spl` (imports
+`plugins.backend_cuda.cuda_backend_port`, so the closure covers CudaBackend and
+the four optimizer modules):
+
+```
+SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 \
+  systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=0 <stage2> native-build \
+  --source src/compiler --source src/app --source src/lib --source src/plugins/backend_cuda \
+  --source src/compositions/kernel_llvm_cranelift --source test/native/cuda_compiler_bugs/port_owner \
+  --entry-closure --entry test/native/cuda_compiler_bugs/port_owner/main.spl --runtime-path <stage2-runtime-authority> ...
+```
+
+Result: entry closure 514 modules; **HIR 514/514, failed=0**, including
+`compiler.mir_opt.{inline,loop_opt,loop_licm,auto_vectorize_cost}` and
+`plugins.backend_cuda.cuda_backend_port`; no `LocalId`/`BlockId`/`MirType`
+diagnostic anywhere in the log. The defect this record tracks (HIR rejecting
+imported payload types) does not reproduce, so the workaround imports are
+removed. The build was then OOM-killed by the lane's 8 GiB cgroup cap during
+whole-program MIR (`[mir] 200/514 rss_mib=5670`, systemd `oom-kill`), so no
+binary was produced; the old MIR SIGSEGV is NOT re-assessed by this run. A
+full link needs a run without the 8 GiB cap.
+`cuda_optimizer_owner_imports_spec.spl` docstring updated (still imports the
+owners directly, which is its purpose).

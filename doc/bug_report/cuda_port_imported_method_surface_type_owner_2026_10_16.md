@@ -1,6 +1,6 @@
 # CUDA port imported method surface loses MIR type owners
 
-Status: OPEN; explicit-import workaround awaiting actual HIR/object verification.
+Status: RESOLVED-DISAPPEARED 2026-11-22; workaround retired after actual native HIR passed without it (see below).
 Canonical bug DB reconciliation is pending: the qualified database CLI is not
 available in this diagnostic lane. Bug identifier:
 `cuda_port_imported_method_surface_type_owner_2026_10_16`.
@@ -71,3 +71,24 @@ Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6):
 Status stays open. Code change in this lane: none for this row (the Row 7
 evidence-gate repair — pub widening of five mir_opt constructors/analyzers —
 also keeps this row's closure compilable for the future qualification run).
+
+## 2026-11-22 verification (lane work/cuda-compiler-bugs)
+
+The explicit `use compiler.mir.mir_types.{MirType, MirSignature}` import and its
+`@workaround` tag are removed from `src/plugins/backend_cuda/cuda_backend_port.spl`.
+The fixture `test/native/cuda_compiler_bugs/port_owner/main.spl` imports the port.
+It was native-built with the integ25 Stage 2 admitted producer (sha256
+`ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`, aarch64,
+base `3c2e4556b6d`).
+
+Result: `plugins.backend_cuda.cuda_backend_port` completed HIR, and the 514-module
+closure finished with `failed=0`. Zero `unresolved type: MirType` or
+`MirSignature` diagnostics, against 28 errors in the 2026-10-16 cycle-2 ledger.
+
+Not proven:
+- The build was OOM-killed by the lane's 8 GiB cgroup cap during whole-program
+  MIR (200/514 modules, rss 5670 MiB), so no object or binary was produced.
+- PTX emission is not re-qualified by this run.
+
+The full command and context are in
+`doc/08_tracking/bug/cuda_optimizer_surface_owner_2026_10_10.md` (2026-11-22).

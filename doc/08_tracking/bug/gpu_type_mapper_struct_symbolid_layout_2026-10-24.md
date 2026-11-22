@@ -12,3 +12,32 @@
 - Mapper fix is on origin/release/1.0.0 (`with_type_defs` in cuda/vulkan mappers; `cuda_backend.spl:150` passes `module.types`).
 - Spec `test/01_unit/plugins/gpu_type_mapper/struct_symbolid_layout_spec.spl` now EXECUTED: 3/3 green (interpreter, `bin/simple.exe run`).
 - Remaining open scope only: the two Vulkan backends still do not call `with_type_defs` (their `compile` is not `me`). Next step: make `compile` `me` (or thread `module.types` into a local mapper) and add a Vulkan std430 struct-size spec.
+
+## 2026-11-22 native re-verification attempt (lane work/cuda-compiler-bugs) — BLOCKED, stays verification-pending
+
+Attempt: a native fixture with the same three checks as the spec
+(`struct_symbolid_layout_spec.spl`: vulkan 20/8, cuda 13/8, unknown symbol 8/8).
+It was built with the integ25 Stage 2 admitted producer (sha256
+`ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`, aarch64,
+base `3c2e4556b6d`), entry-closure over `src/compiler` + `src/lib` + both
+GPU plugin dirs.
+
+The mapper imports `compiler.mir.mir_data.*`, which pulls a 504-module closure.
+- HIR: 504/504 modules, `failed=0`.
+- Whole-program MIR: OOM-killed by the lane's mandatory 8 GiB cgroup cap at
+  128/504 modules (systemd `oom-kill`, rc 143). No binary was produced.
+
+Interpreter fallback is also blocked. The available Rust seed
+(`seed-tip-20261115`, sha256 prefix `5ef615e2b60a80fc`) cannot parse current
+`src/lib/common/types.spl:23` (`unit ByteSize: i64`: "expected As, found
+Newline").
+
+Status stays `fix-implemented-verification-pending`. The four live
+`@workaround bug=gpu_type_mapper_struct_symbolid_layout_2026-10-24` tags in
+`cuda_type_mapper.spl` and `vulkan_type_mapper.spl` (absent-symbol 8-byte
+fallback) are untouched.
+
+Unblock: either of these.
+- Rerun the native fixture without the 8 GiB cap (it needs more than 8 GiB at
+  whole-program MIR).
+- Run the spec on a seed or full CLI that is new enough to parse current source.
