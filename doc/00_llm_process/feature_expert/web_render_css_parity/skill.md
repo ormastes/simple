@@ -3768,3 +3768,12 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   recipe and sha256 are in
   `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
   (2026-11-23).
+
+## 2026-11-23: shaped-run spacing — neutrals next to Arabic, glyph xs carry the gaps
+
+- **Re-verified (no change needed):** fractional letter/word-spacing (landed 2026-11-19) — per-glyph first-ink columns at k=1 match Chrome 159 column-for-column for `letter-spacing` 0 / 0.3px / 0.05em / 1.37px and `word-spacing` 2.5px / 0.3px+0.7px. Chrome Range lefts show the pen accumulates the exact float spacing (`0.3px`: 19/64 after 1 char, 38/64 after 2, 57/64 after 3). Fixed-position grayscale text (2026-11-19) spec 5/5.
+- **Open, not this lane (k=4):** at device scale 4, glyph pens inside a run sit on whole CSS px (multiples of 4 device px) with or without spacing: `iiii` Chrome 44 59 73 87 101 vs ours 44 60 72 88 100, `letter-spacing:1.37px` up to 3 device px off. The `_lcd_apply_pen_phases` quarter-pen path returns early above 48 device px (grayscale), and `draw_ir_device_scale` multiplies whole-px advances. Same mechanism as `dpr4_word_pen_fraction_chrome159_spec` (wordpen lane).
+- **Chrome 159 rule (measured, Range widths at 2px):** a digit or punctuation mark takes the script of the nearest strong letter (before it, else after it); next to Arabic it takes no gap. U+0020 always takes it. `مرحبا123` +0, `مرحبا 123` +2, `123مرحبا` +0, `مرحبا.` +0, `مرحبا!x` +2, `abcمرحبا` +6, `abc123` +12.
+- **Change:** `_letter_gap_skipped` (`simple_web_html_layout_renderer_foundation.spl`) resolves those characters for `spaced_advances_milli`. `spaced_glyph_xs_milli` puts the same gaps into a shaped run's glyph xs. Each gap sits right of its codepoint's glyph and moves every glyph further right. `_html_draw_ir_resolved_text_command` applies it. A shaped run with no blank glyph (no space) is painted from xs, so `مرحباabc` at 2px kept its ink (Chrome x1 +4). This was the precondition deva-A named for its empty-glyph skip.
+- **Spec:** `shaped_run_spacing_chrome159_spec` AC-7/AC-8, plus AC-9 at device scale 4 (Chrome k=4 `مرحباabc` ink 84..315 -> 84..331; base +0, head +16). 6/9 on base, 9/9 on head.
+- **Open defect, seen at k=4:** `simple_web_layout_render_html_pixels_engine2d_at_device_scale` returns an EMPTY frame (len 0) for `<html lang="ar">` with `مرحبا123` (unshaped Arabic+digits). This happens on base too. Chrome paints ink 85..317.
