@@ -25,7 +25,7 @@ use std.nogc_async_mut.io.metal_sffi.{
     metal_create_command_queue, metal_destroy_command_queue,
     metal_sffi_run_compute_frame
 }
-use std.nogc_async_mut.io.rocm_sffi.{rocm_available, rocm_init, rocm_device_count}
+use std.gc_async_mut.gpu.rocm.hip_reduce.{HipReduceOp, HipReduceRequest, hip_reduce_device, hip_reduce_i64}
 use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_is_available, vulkan_sffi_init, vulkan_sffi_device_count,
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
@@ -89,7 +89,7 @@ fn gpu_payload_present(backend_name: text) -> bool:
     if backend_name == "metal":
         return metal_available() and metal_device_count() > 0
     if backend_name == "hip":
-        return rocm_available() and rocm_device_count() > 0
+        return hip_reduce_device().is_ok()
     if backend_name == "opencl":
         unsafe(capabilities: [ffi]):
             if rt_opencl_is_available() <= 0:
@@ -557,6 +557,39 @@ fn _dispatch_reduce_metal_sffi(data: [i64], init: i64, op_kind: i64) -> Dispatch
         return DispatchOutcome.failed("metal", "metal-dispatch-or-readback-failed")
     DispatchOutcome.create(out_val, ComputeStats(backend: "metal", ran_on_cpu: false))
 
+# HIP/ROCm: the runtime is loaded on demand by the GPU API (hip_compute). An
+# absent ROCm install is "unavailable" without any library load, and an
+# install with no GPU is "unavailable" once hipInit fails.
+fn _hip_reduce_op(op_kind: i64) -> Option<HipReduceOp>:
+    if op_kind == 0:
+        return Some(HipReduceOp.Add)
+    if op_kind == 1:
+        return Some(HipReduceOp.Mul)
+    if op_kind == 2:
+        return Some(HipReduceOp.Min)
+    if op_kind == 3:
+        return Some(HipReduceOp.Max)
+    if op_kind == 4:
+        return Some(HipReduceOp.Xor)
+    if op_kind == 5:
+        return Some(HipReduceOp.And)
+    if op_kind == 6:
+        return Some(HipReduceOp.Or)
+    None
+
+fn _dispatch_reduce_hip(data: [i64], init: i64, op_kind: i64) -> DispatchOutcome:
+    if hip_reduce_device().is_err():
+        return DispatchOutcome.failed("hip", "gpu-backend-unavailable:hip")
+    match _hip_reduce_op(op_kind):
+        case Some(op):
+            match hip_reduce_i64(HipReduceRequest(data: data, init: init, op: op)):
+                case Ok(run):
+                    DispatchOutcome.create(run.value, ComputeStats(backend: "hip", ran_on_cpu: false))
+                case Err(msg):
+                    DispatchOutcome.failed("hip", "hip-launch-or-readback-failed: " + msg)
+        case None:
+            DispatchOutcome.failed("hip", "hip-reduce-op-unsupported")
+
 fn _dispatch_reduce_gpu_sffi(data: [i64], init: i64, op: fn(i64, i64) -> i64, target: ExecTarget) -> DispatchOutcome:
     val name = dispatch_backend_name(target.backend)
     val op_kind = _probe_reduce_op_kind(op)
@@ -569,9 +602,7 @@ fn _dispatch_reduce_gpu_sffi(data: [i64], init: i64, op: fn(i64, i64) -> i64, ta
     if target.backend == ComputeBackend.Metal:
         return _dispatch_reduce_metal_sffi(data, init, op_kind)
     if target.backend == ComputeBackend.Hip:
-        if not rocm_available() or not rocm_init() or rocm_device_count() <= 0:
-            return DispatchOutcome.failed(name, "gpu-backend-unavailable:hip")
-        return DispatchOutcome.failed(name, "hip-reduce-kernel-unavailable")
+        return _dispatch_reduce_hip(data, init, op_kind)
     DispatchOutcome.failed(name, "gpu-backend-unavailable:" + name)
 
 # Dispatch a reduce.
