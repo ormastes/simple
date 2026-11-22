@@ -225,6 +225,38 @@ if [ "$validate_parent_only" -eq 1 ]; then
     exit 0
 fi
 
+# --- MSVC lane environment for the planner build -----------------------------
+# An MSVC-triple parent must build its planner on the MSVC lane. The compiler
+# selects the Windows ABI from SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI and
+# defaults to the llvm-mingw (gnu) lane when they are unset
+# (src/compiler/70.backend/backend/llvm_target.spl:37-42,
+# runtime_compiler.spl:120-125). bootstrap-from-scratch.sh derives and exports
+# both, but this producer is also run out of band: measured 2026-11-22 (ledger
+# W19), a run with only LIB/INCLUDE exported failed `planner-build-failed`
+# rc=64 while the same command with windows-msvc-bootstrap-env.shs sourced
+# produced the receipt. LIB/INCLUDE carry neither selector, so the planner build
+# fell to the gnu lane against an MSVC runtime authority. Source the canonical
+# lane env when either selector is missing (never when both are already set,
+# so the in-run path is untouched), then fail naming any variable still absent.
+# See doc/08_tracking/bug/planner_smoke_refusal_exit_status_lost_windows_2026-11-22.md
+case "$parent_dir" in
+    *-windows-msvc)
+        if [ "${SIMPLE_WINDOWS_ABI:-}" != msvc ] || [ "${SIMPLE_LINKER_FLAVOR:-}" != msvc ]; then
+            adm_msvc_env="$adm_root/scripts/setup/windows-msvc-bootstrap-env.shs"
+            [ -f "$adm_msvc_env" ] || adm_fail msvc-lane-env-script-missing
+            echo "bootstrap-admission-note: msvc parent with SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI:-<unset>} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR:-<unset>}; sourcing $adm_msvc_env" >&2
+            SIMPLE_PROJECT_ROOT=$adm_root
+            export SIMPLE_PROJECT_ROOT
+            set +u
+            if . "$adm_msvc_env" >&2; then adm_msvc_env_rc=0; else adm_msvc_env_rc=$?; fi
+            set -u
+            [ "$adm_msvc_env_rc" -eq 0 ] || adm_fail msvc-lane-env-unavailable
+        fi
+        [ "${SIMPLE_WINDOWS_ABI:-}" = msvc ] || adm_fail msvc-lane-env-missing-SIMPLE_WINDOWS_ABI
+        [ "${SIMPLE_LINKER_FLAVOR:-}" = msvc ] || adm_fail msvc-lane-env-missing-SIMPLE_LINKER_FLAVOR
+        ;;
+esac
+
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
 bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
 bootstrap_planner_v2_canonical_dir "$adm_runtime" >/dev/null || adm_fail runtime-dir-missing
@@ -406,7 +438,24 @@ env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
     "--planner-source-closure-sha256=$closure_sha" \
     "--planner-sha256=$planner_sha" \
     "--bootstrap-receipt=$stage/smoke.receipt" >"$stage/smoke.out" 2>&1 || smoke_rc=$?
-if [ "$smoke_rc" -eq 0 ]; then
+# The refusal TEXT is authoritative as well as the status. Measured 2026-11-22
+# on the Windows MSVC lane (release 8dae652711e, ledger W19): the in-run planner
+# printed `bootstrap-policy-error: typed-reason-required` yet the process exit
+# status read back here was 0, so the producer reported it had ACCEPTED the
+# untyped reason -- the opposite of what it printed. The status read above is
+# direct (no pipe, tee or subshell); the 0 came from the planner process itself,
+# while a standalone run of the same source exited 2. A planner that refuses
+# in words and writes no receipt has refused; the receipt check below stays
+# unconditional, so a "refusal" that still wrote a receipt is never admitted.
+# See doc/08_tracking/bug/planner_smoke_refusal_exit_status_lost_windows_2026-11-22.md
+smoke_refused_text=no
+if grep -Eq '^bootstrap-policy-error: typed-reason-required[[:space:]]*$' "$stage/smoke.out"; then
+    smoke_refused_text=yes
+fi
+if [ "$smoke_rc" -eq 0 ] && [ "$smoke_refused_text" = yes ]; then
+    echo "bootstrap-admission-note: planner printed typed-reason-required but exited 0; counting the smoke as refused by its text (exit status recorded as 0 in planner-smoke.txt)" >&2
+fi
+if [ "$smoke_rc" -eq 0 ] && [ "$smoke_refused_text" = no ]; then
     # $stage is removed on exit, so keep the transcript in the admission dir;
     # a zero exit is otherwise undiagnosable. The check itself is unchanged.
     cp -- "$stage/smoke.out" "$adm_dir/planner-smoke-accepted.out" 2>/dev/null || :
@@ -419,6 +468,7 @@ fi
 {
     printf 'smoke-schema: simple-planner-smoke-v1\n'
     printf 'untyped-reason-exit: %s\n' "$smoke_rc"
+    printf 'untyped-reason-refusal-text: %s\n' "$smoke_refused_text"
     printf 'untyped-reason-wrote-receipt: no\n'
     cat -- "$stage/smoke.out"
 } >"$adm_dir/planner-smoke.txt"

@@ -19,9 +19,9 @@ set -eu
 focused_configured_output=0
 case "${1:-}" in
     --configured-output-only) focused_configured_output=1 ;;
-    --windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only) ;;
+    --windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only|--windows-smoke-env-only) ;;
     "") ;;
-    *) echo "usage: $0 [--configured-output-only|--windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--configured-output-only|--windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only|--windows-smoke-env-only]" >&2; exit 2 ;;
 esac
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
@@ -111,6 +111,7 @@ done
 case "$backend:$backend_count" in llvm:1|llvm-lib:1|cranelift:1) ;; *)
     echo "fixture-cc: planner build backend was not explicitly selected" >&2; exit 1 ;; esac
 printf '%s\n' "$backend" >"$out.backend-observed"
+printf '%s:%s\n' "${SIMPLE_WINDOWS_ABI:-unset}" "${SIMPLE_LINKER_FLAVOR:-unset}" >"$out.abi-observed"
 [ "$source_roots" = '|src/app/cli|src/lib' ] || {
     echo "fixture-cc: entry-closure source roots must be checkout-relative" >&2; exit 1;
 }
@@ -141,15 +142,25 @@ for a in "$@"; do
         --bootstrap-receipt=*) receipt=${a#*=} ;;
     esac
 done
-if [ "@POLICY@" = strict ]; then
+# strict: refuse with exit 2 (the real planner's contract).
+# refuse-exit0: print the refusal but exit 0 and write no receipt -- the
+#   Windows W19 shape, where the printed refusal and the exit status disagree.
+# refuse-exit0-receipt: print the refusal, exit 0, AND write a receipt; the
+#   text alone must never admit a planner whose refusal left a receipt.
+case "@POLICY@" in strict|refuse-exit0|refuse-exit0-receipt)
     case "$target:$reason" in
         //bootstrap:stage3:seed-missing|\
         //bootstrap:stage4:self-host-convergence-check|\
         //bootstrap:stage4:release-trust-verification|\
         //bootstrap:stage4:diverse-double-compilation) ;;
-        *) echo "bootstrap-policy-error: typed-reason-required"; exit 2 ;;
-    esac
-fi
+        *) printf 'bootstrap-policy-error: typed-reason-required\r\n'
+           case "@POLICY@" in
+               strict) exit 2 ;;
+               refuse-exit0) exit 0 ;;
+               refuse-exit0-receipt) printf 'forged\n' >"$receipt"; exit 0 ;;
+           esac ;;
+    esac ;;
+esac
 printf '%s\n' "simple-bootstrap-authorization-v2|producer=simple-build-planner-v2|target=$target|reason=$reason|parent_sha256=$parent|runtime_sha256=$runtime|source_closure_sha256=$closure|planner_sha256=$planner" >"$receipt"
 echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
 PLANNER
@@ -339,6 +350,106 @@ check_noncanonical_candidate_path() {
         fail "noncanonical candidate path did not yield the typed diagnostic"
     checked=$((checked + 1))
 }
+
+# W19/W20 (2026-11-22, Windows MSVC lane, release 8dae652711e). See
+# doc/08_tracking/bug/planner_smoke_refusal_exit_status_lost_windows_2026-11-22.md
+# and doc/08_tracking/bug/planner_admission_v2_unbound_names_no_binding_2026-11-22.md
+check_windows_smoke_env_and_unbound_detail() {
+    # W19a: refusal printed, exit 0, no receipt -> refused by its text. The
+    # pre-fix producer reported planner-smoke-accepted-untyped-reason here.
+    w19_root="$scratch/w19-refuse-exit0"
+    make_fixture "$w19_root" 'stage2-provenance: pure-simple' refuse-exit0
+    w19_root=$(CDPATH= cd -- "$w19_root" && pwd -P)
+    run_producer "$w19_root" >"$scratch/w19-refuse-exit0.log" 2>&1 ||
+        fail "producer ignored a printed typed-reason-required refusal that exited 0: $(grep 'bootstrap-admission-error' "$scratch/w19-refuse-exit0.log" | head -1)"
+    grep -q 'planner printed typed-reason-required but exited 0' "$scratch/w19-refuse-exit0.log" ||
+        fail "text-only refusal was admitted without the exit-status note"
+    w19_smoke=$(bootstrap_planner_v2_field planner_smoke_path "$w19_root/receipt.env")
+    grep -qx 'untyped-reason-exit: 0' "$w19_smoke" && grep -qx 'untyped-reason-refusal-text: yes' "$w19_smoke" ||
+        fail "smoke transcript does not record the real exit status and refusal text"
+    checked=$((checked + 1))
+
+    # W19b: refusal text, exit 0, but a receipt was written -> still refused.
+    w19r_root="$scratch/w19-refuse-exit0-receipt"
+    make_fixture "$w19r_root" 'stage2-provenance: pure-simple' refuse-exit0-receipt
+    w19r_root=$(CDPATH= cd -- "$w19r_root" && pwd -P)
+    if run_producer "$w19r_root" >"$scratch/w19-refuse-exit0-receipt.log" 2>&1; then
+        fail "producer admitted a planner whose text refusal still wrote a receipt"
+    fi
+    grep -q 'planner-smoke-wrote-receipt-on-refusal' "$scratch/w19-refuse-exit0-receipt.log" ||
+        fail "receipt-writing refusal did not yield the typed diagnostic"
+    checked=$((checked + 1))
+
+    # W19c: MSVC-triple parent, selectors unset. Move the fixture's triple dir
+    # to an *-windows-msvc name; every receipt binds hashes, not this leaf.
+    w19m_root="$scratch/w19-msvc-env"
+    make_fixture "$w19m_root" 'stage2-provenance: pure-simple' strict
+    w19m_root=$(CDPATH= cd -- "$w19m_root" && pwd -P)
+    mv -- "$w19m_root/build/bootstrap/stage2/fixture-triple" \
+        "$w19m_root/build/bootstrap/stage2/fixture-pc-windows-msvc"
+    w19m_parent="$w19m_root/build/bootstrap/stage2/fixture-pc-windows-msvc/simple"
+    run_msvc_producer() {
+        env -u SIMPLE_WINDOWS_ABI -u SIMPLE_LINKER_FLAVOR sh "$producer" --root="$w19m_root" \
+            --parent-compiler="$w19m_parent" --runtime-dir="$w19m_root/src/runtime" \
+            --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+            --out="$w19m_root/receipt.env"
+    }
+    if run_msvc_producer >"$scratch/w19-msvc-noscript.log" 2>&1; then
+        fail "producer built an MSVC planner with no MSVC lane selectors and no env script"
+    fi
+    grep -q 'msvc-lane-env-script-missing' "$scratch/w19-msvc-noscript.log" ||
+        fail "missing MSVC env script did not yield the typed diagnostic"
+    checked=$((checked + 1))
+    mkdir -p "$w19m_root/scripts/setup"
+    printf '%s\n' 'SIMPLE_WINDOWS_ABI=msvc' 'export SIMPLE_WINDOWS_ABI' \
+        >"$w19m_root/scripts/setup/windows-msvc-bootstrap-env.shs"
+    if run_msvc_producer >"$scratch/w19-msvc-partial.log" 2>&1; then
+        fail "producer accepted an MSVC lane env that left SIMPLE_LINKER_FLAVOR unset"
+    fi
+    grep -q 'msvc-lane-env-missing-SIMPLE_LINKER_FLAVOR' "$scratch/w19-msvc-partial.log" ||
+        fail "partial MSVC env did not name the missing variable"
+    checked=$((checked + 1))
+    printf '%s\n' 'SIMPLE_LINKER_FLAVOR=msvc' 'export SIMPLE_LINKER_FLAVOR' \
+        >>"$w19m_root/scripts/setup/windows-msvc-bootstrap-env.shs"
+    run_msvc_producer >"$scratch/w19-msvc-full.log" 2>&1 ||
+        fail "producer refused an MSVC parent after sourcing a complete lane env: $(grep 'bootstrap-admission-error' "$scratch/w19-msvc-full.log" | head -1)"
+    w19m_planner=$(bootstrap_planner_v2_field planner_path "$w19m_root/receipt.env")
+    [ "$(cat -- "$w19m_planner.abi-observed")" = msvc:msvc ] ||
+        fail "MSVC planner build did not see the sourced lane selectors"
+    checked=$((checked + 1))
+
+    # W20: the same valid receipt verified against a DIFFERENT worktree root
+    # must stay refused and must name the binding, expected vs actual.
+    w20_other="$scratch/w20-other-worktree"
+    mkdir -p "$w20_other"
+    w20_other=$(CDPATH= cd -- "$w20_other" && pwd -P)
+    bootstrap_planner_v2_verify "$w19_root/receipt.env" "$w19_root" >/dev/null 2>&1 ||
+        fail "W20 baseline receipt does not verify against its own root"
+    if bootstrap_planner_v2_verify "$w19_root/receipt.env" "$w20_other" 2>"$scratch/w20.err"; then
+        fail "receipt verified against a different worktree root"
+    fi
+    grep -qx 'bootstrap-policy-error: planner-admission-v2-unbound' "$scratch/w20.err" ||
+        fail "unbound refusal lost its generic line"
+    grep -F "planner-admission-v2-unbound-detail: binding=planner_source_path expected=$w20_other/src/app/cli/bootstrap_reason_planner.spl actual=$w19_root/src/app/cli/bootstrap_reason_planner.spl verifier_root=$w20_other" \
+        "$scratch/w20.err" >/dev/null ||
+        fail "unbound refusal does not name the mismatched binding: $(tail -1 "$scratch/w20.err")"
+    checked=$((checked + 1))
+    # A runtime_dir outside the verifier root names that binding too.
+    sed "s#^runtime_dir=.*#runtime_dir=$w20_other#" "$w19_root/receipt.env" >"$scratch/w20-runtime.env"
+    if bootstrap_planner_v2_verify "$scratch/w20-runtime.env" "$w19_root" 2>"$scratch/w20-runtime.err"; then
+        fail "receipt with an out-of-root runtime_dir verified"
+    fi
+    grep -q "planner-admission-v2-unbound-detail: binding=runtime_dir expected=$w19_root/\\* actual=$w20_other" \
+        "$scratch/w20-runtime.err" ||
+        fail "out-of-root runtime_dir refusal does not name runtime_dir: $(tail -1 "$scratch/w20-runtime.err")"
+    checked=$((checked + 1))
+}
+
+if [ "${1:-}" = --windows-smoke-env-only ]; then
+    check_windows_smoke_env_and_unbound_detail
+    echo "PASS — $checked fixture(s) checked (W19/W20 smoke, MSVC env, unbound detail)"
+    exit 0
+fi
 
 # Exercise only the new parent-refresh admission route. It must validate the
 # existing complete evidence without building a planner or re-running probes.
@@ -704,6 +815,9 @@ fi
 grep -q 'typed-reason-not-allowed-for-target' "$scratch/bad.log" ||
     fail "untyped CLI reason did not yield the typed diagnostic"
 checked=$((checked + 1))
+
+# --- fixtures 12-19: W19 smoke text/status, MSVC lane env, W20 detail -------
+check_windows_smoke_env_and_unbound_detail
 
 [ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
 echo "PASS — $checked fixture(s) checked"

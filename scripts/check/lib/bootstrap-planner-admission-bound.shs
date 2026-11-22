@@ -212,10 +212,26 @@ bootstrap_planner_v2_authorization_text() {
     printf '%s\n' "simple-bootstrap-authorization-v2|producer=simple-build-planner-v2|target=$1|reason=$2|parent_sha256=$3|runtime_sha256=$4|source_closure_sha256=$5|planner_sha256=$6"
 }
 
+# Diagnostic for a verify refusal: record WHICH binding mismatched, expected vs
+# actual, then fail closed. Diagnostic only -- every caller still `return 1`s,
+# and bootstrap_planner_v2_verify prints the record after its generic line.
+# Until 2026-11-22 the refusal printed only `planner-admission-v2-unbound`, so a
+# Stage 3 resume launched from a different worktree root than the one that
+# produced the receipt (W19/W20 ledger, release 8dae652711e) gave no hint that
+# the verifier root, not the receipt, was the mismatch. See
+# doc/08_tracking/bug/planner_admission_v2_unbound_names_no_binding_2026-11-22.md
+bootstrap_planner_v2_unbound() {
+    bootstrap_planner_v2_unbound_detail="binding=$1 expected=$2 actual=$3"
+    return 1
+}
+
 bootstrap_planner_v2_verify_structure() {
-    bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") || return 1
-    bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
-    bootstrap_planner_v2_schema=$(bootstrap_planner_v2_field schema "$bootstrap_planner_v2_receipt") || return 1
+    bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") ||
+        bootstrap_planner_v2_unbound receipt_path canonical-existing-file "$1" || return 1
+    bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") ||
+        bootstrap_planner_v2_unbound verifier_root canonical-existing-dir "$2" || return 1
+    bootstrap_planner_v2_schema=$(bootstrap_planner_v2_field schema "$bootstrap_planner_v2_receipt") ||
+        bootstrap_planner_v2_unbound schema exactly-one-line missing-or-duplicated || return 1
     case "$bootstrap_planner_v2_schema" in
         simple-bootstrap-planner-admission-v2)
             bootstrap_planner_v2_keys='schema status platform target reason parent_compiler_path parent_compiler_sha256 parent_stage2_sanity_path parent_stage2_sanity_sha256 parent_stage2_provenance_path parent_stage2_provenance_sha256 runtime_dir runtime_snapshot_path runtime_snapshot_sha256 planner_source_path planner_source_sha256 planner_source_closure_snapshot_path planner_source_closure_snapshot_sha256 git_state_path git_state_sha256 build_argv_sha256 build_env_sha256 cache_scope_key planner_path planner_sha256 planner_smoke_path planner_smoke_sha256 authorization_receipt_path authorization_receipt_sha256'
@@ -225,45 +241,77 @@ bootstrap_planner_v2_verify_structure() {
             bootstrap_planner_v2_keys='schema status platform target reason parent_compiler_path parent_compiler_sha256 parent_stage2_sanity_path parent_stage2_sanity_sha256 parent_stage2_provenance_path parent_stage2_provenance_sha256 runtime_dir runtime_snapshot_path runtime_snapshot_sha256 planner_source_path planner_source_sha256 planner_source_closure_snapshot_path planner_source_closure_snapshot_sha256 git_state_path git_state_sha256 build_argv_sha256 build_env_sha256 planner_build_backend planner_build_argv_sha256 cache_scope_key planner_path planner_sha256 planner_smoke_path planner_smoke_sha256 authorization_receipt_path authorization_receipt_sha256'
             bootstrap_planner_v2_expected_lines=31
             ;;
-        *) return 1 ;;
+        *) bootstrap_planner_v2_unbound schema \
+            simple-bootstrap-planner-admission-v2-or-v3 "$bootstrap_planner_v2_schema"
+            return 1 ;;
     esac
-    [ "$(wc -l <"$bootstrap_planner_v2_receipt" | tr -d ' ')" -eq "$bootstrap_planner_v2_expected_lines" ] || return 1
+    bootstrap_planner_v2_lines=$(wc -l <"$bootstrap_planner_v2_receipt" | tr -d ' ')
+    [ "$bootstrap_planner_v2_lines" -eq "$bootstrap_planner_v2_expected_lines" ] ||
+        bootstrap_planner_v2_unbound line_count "$bootstrap_planner_v2_expected_lines" "$bootstrap_planner_v2_lines" || return 1
     bootstrap_planner_v2_actual=$(cut -d= -f1 "$bootstrap_planner_v2_receipt" | tr '\n' ' ' | sed 's/ $//')
-    [ "$bootstrap_planner_v2_actual" = "$bootstrap_planner_v2_keys" ] || return 1
-    [ "$(bootstrap_planner_v2_field status "$bootstrap_planner_v2_receipt")" = pass ] || return 1
-    bootstrap_planner_v2_target=$(bootstrap_planner_v2_field target "$bootstrap_planner_v2_receipt") || return 1
-    bootstrap_planner_v2_reason=$(bootstrap_planner_v2_field reason "$bootstrap_planner_v2_receipt") || return 1
-    bootstrap_planner_v2_reason_allowed "$bootstrap_planner_v2_target" "$bootstrap_planner_v2_reason" || return 1
-    bootstrap_planner_v2_platform=$(bootstrap_planner_v2_field platform "$bootstrap_planner_v2_receipt") || return 1
-    case "$bootstrap_planner_v2_platform" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ "$bootstrap_planner_v2_actual" = "$bootstrap_planner_v2_keys" ] ||
+        bootstrap_planner_v2_unbound key_order "schema-$bootstrap_planner_v2_schema-keys" "$bootstrap_planner_v2_actual" || return 1
+    bootstrap_planner_v2_got=$(bootstrap_planner_v2_field status "$bootstrap_planner_v2_receipt" || true)
+    [ "$bootstrap_planner_v2_got" = pass ] ||
+        bootstrap_planner_v2_unbound status pass "$bootstrap_planner_v2_got" || return 1
+    bootstrap_planner_v2_target=$(bootstrap_planner_v2_field target "$bootstrap_planner_v2_receipt") ||
+        bootstrap_planner_v2_unbound target exactly-one-line missing-or-duplicated || return 1
+    bootstrap_planner_v2_reason=$(bootstrap_planner_v2_field reason "$bootstrap_planner_v2_receipt") ||
+        bootstrap_planner_v2_unbound reason exactly-one-line missing-or-duplicated || return 1
+    bootstrap_planner_v2_reason_allowed "$bootstrap_planner_v2_target" "$bootstrap_planner_v2_reason" ||
+        bootstrap_planner_v2_unbound target_reason typed-pair "$bootstrap_planner_v2_target:$bootstrap_planner_v2_reason" || return 1
+    bootstrap_planner_v2_platform=$(bootstrap_planner_v2_field platform "$bootstrap_planner_v2_receipt") ||
+        bootstrap_planner_v2_unbound platform exactly-one-line missing-or-duplicated || return 1
+    case "$bootstrap_planner_v2_platform" in ''|*[!A-Za-z0-9._-]*)
+        bootstrap_planner_v2_unbound platform '[A-Za-z0-9._-]+' "$bootstrap_planner_v2_platform"
+        return 1 ;; esac
 
     for bootstrap_planner_v2_stem in parent_compiler parent_stage2_sanity parent_stage2_provenance runtime_snapshot planner_source planner_source_closure_snapshot git_state planner planner_smoke authorization_receipt; do
-        bootstrap_planner_v2_file=$(bootstrap_planner_v2_field "${bootstrap_planner_v2_stem}_path" "$bootstrap_planner_v2_receipt") || return 1
-        bootstrap_planner_v2_file=$(bootstrap_planner_v2_canonical_file "$bootstrap_planner_v2_file") || return 1
-        bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "${bootstrap_planner_v2_stem}_sha256" "$bootstrap_planner_v2_receipt") || return 1
-        bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" || return 1
-        [ "$(bootstrap_planner_v2_hash_file "$bootstrap_planner_v2_file")" = "$bootstrap_planner_v2_sha" ] || return 1
+        bootstrap_planner_v2_got=$(bootstrap_planner_v2_field "${bootstrap_planner_v2_stem}_path" "$bootstrap_planner_v2_receipt") ||
+            bootstrap_planner_v2_unbound "${bootstrap_planner_v2_stem}_path" exactly-one-line missing-or-duplicated || return 1
+        bootstrap_planner_v2_file=$(bootstrap_planner_v2_canonical_file "$bootstrap_planner_v2_got") ||
+            bootstrap_planner_v2_unbound "${bootstrap_planner_v2_stem}_path" canonical-existing-file "$bootstrap_planner_v2_got" || return 1
+        bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "${bootstrap_planner_v2_stem}_sha256" "$bootstrap_planner_v2_receipt") ||
+            bootstrap_planner_v2_unbound "${bootstrap_planner_v2_stem}_sha256" exactly-one-line missing-or-duplicated || return 1
+        bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" ||
+            bootstrap_planner_v2_unbound "${bootstrap_planner_v2_stem}_sha256" sha256-hex "$bootstrap_planner_v2_sha" || return 1
+        bootstrap_planner_v2_measured=$(bootstrap_planner_v2_hash_file "$bootstrap_planner_v2_file")
+        [ "$bootstrap_planner_v2_measured" = "$bootstrap_planner_v2_sha" ] ||
+            bootstrap_planner_v2_unbound "${bootstrap_planner_v2_stem}_sha256" "$bootstrap_planner_v2_sha" "$bootstrap_planner_v2_measured" || return 1
     done
     bootstrap_planner_v2_source=$(bootstrap_planner_v2_field planner_source_path "$bootstrap_planner_v2_receipt") || return 1
-    [ "$bootstrap_planner_v2_source" = "$bootstrap_planner_v2_root/src/app/cli/bootstrap_reason_planner.spl" ] || return 1
-    bootstrap_planner_v2_runtime=$(bootstrap_planner_v2_field runtime_dir "$bootstrap_planner_v2_receipt") || return 1
-    bootstrap_planner_v2_canonical_dir "$bootstrap_planner_v2_runtime" >/dev/null || return 1
+    [ "$bootstrap_planner_v2_source" = "$bootstrap_planner_v2_root/src/app/cli/bootstrap_reason_planner.spl" ] ||
+        bootstrap_planner_v2_unbound planner_source_path \
+            "$bootstrap_planner_v2_root/src/app/cli/bootstrap_reason_planner.spl" "$bootstrap_planner_v2_source" || return 1
+    bootstrap_planner_v2_runtime=$(bootstrap_planner_v2_field runtime_dir "$bootstrap_planner_v2_receipt") ||
+        bootstrap_planner_v2_unbound runtime_dir exactly-one-line missing-or-duplicated || return 1
+    bootstrap_planner_v2_canonical_dir "$bootstrap_planner_v2_runtime" >/dev/null ||
+        bootstrap_planner_v2_unbound runtime_dir canonical-existing-dir "$bootstrap_planner_v2_runtime" || return 1
     bootstrap_planner_v2_names='build_argv_sha256 build_env_sha256 cache_scope_key'
     if [ "$bootstrap_planner_v2_schema" = simple-bootstrap-planner-admission-v3 ]; then
-        bootstrap_planner_v2_build_backend=$(bootstrap_planner_v2_field planner_build_backend "$bootstrap_planner_v2_receipt") || return 1
-        case "$bootstrap_planner_v2_build_backend" in llvm|llvm-lib|cranelift) ;; *) return 1 ;; esac
+        bootstrap_planner_v2_build_backend=$(bootstrap_planner_v2_field planner_build_backend "$bootstrap_planner_v2_receipt") ||
+            bootstrap_planner_v2_unbound planner_build_backend exactly-one-line missing-or-duplicated || return 1
+        case "$bootstrap_planner_v2_build_backend" in llvm|llvm-lib|cranelift) ;; *)
+            bootstrap_planner_v2_unbound planner_build_backend llvm-or-llvm-lib-or-cranelift "$bootstrap_planner_v2_build_backend"
+            return 1 ;; esac
         bootstrap_planner_v2_names="$bootstrap_planner_v2_names planner_build_argv_sha256"
     fi
     for bootstrap_planner_v2_name in $bootstrap_planner_v2_names; do
-        bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_name" "$bootstrap_planner_v2_receipt") || return 1
-        bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" || return 1
+        bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_name" "$bootstrap_planner_v2_receipt") ||
+            bootstrap_planner_v2_unbound "$bootstrap_planner_v2_name" exactly-one-line missing-or-duplicated || return 1
+        bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" ||
+            bootstrap_planner_v2_unbound "$bootstrap_planner_v2_name" sha256-hex "$bootstrap_planner_v2_sha" || return 1
     done
     bootstrap_planner_v2_runtime_sha=$(bootstrap_planner_v2_field runtime_snapshot_sha256 "$bootstrap_planner_v2_receipt") || return 1
     bootstrap_planner_v2_closure_sha=$(bootstrap_planner_v2_field planner_source_closure_snapshot_sha256 "$bootstrap_planner_v2_receipt") || return 1
-    [ "$(printf '%s:%s\n' "$bootstrap_planner_v2_runtime_sha" "$bootstrap_planner_v2_closure_sha" | bootstrap_planner_v2_hash_stdin)" = "$(bootstrap_planner_v2_field cache_scope_key "$bootstrap_planner_v2_receipt")" ] || return 1
+    bootstrap_planner_v2_measured=$(printf '%s:%s\n' "$bootstrap_planner_v2_runtime_sha" "$bootstrap_planner_v2_closure_sha" | bootstrap_planner_v2_hash_stdin)
+    bootstrap_planner_v2_got=$(bootstrap_planner_v2_field cache_scope_key "$bootstrap_planner_v2_receipt")
+    [ "$bootstrap_planner_v2_measured" = "$bootstrap_planner_v2_got" ] ||
+        bootstrap_planner_v2_unbound cache_scope_key "$bootstrap_planner_v2_measured" "$bootstrap_planner_v2_got" || return 1
     bootstrap_planner_v2_auth=$(bootstrap_planner_v2_field authorization_receipt_path "$bootstrap_planner_v2_receipt") || return 1
     bootstrap_planner_v2_expected=$(bootstrap_planner_v2_authorization_text "$bootstrap_planner_v2_target" "$bootstrap_planner_v2_reason" "$(bootstrap_planner_v2_field parent_compiler_sha256 "$bootstrap_planner_v2_receipt")" "$bootstrap_planner_v2_runtime_sha" "$bootstrap_planner_v2_closure_sha" "$(bootstrap_planner_v2_field planner_sha256 "$bootstrap_planner_v2_receipt")")
-    [ "$(cat -- "$bootstrap_planner_v2_auth")" = "$bootstrap_planner_v2_expected" ] || return 1
+    [ "$(cat -- "$bootstrap_planner_v2_auth")" = "$bootstrap_planner_v2_expected" ] ||
+        bootstrap_planner_v2_unbound authorization_receipt_text re-derived-from-receipt-fields "$bootstrap_planner_v2_auth" || return 1
 }
 
 # Canonical admission directory for a receipt: keyed by cache_scope_key, which
@@ -403,27 +451,42 @@ bootstrap_planner_v2_verify_bound() {
     bootstrap_planner_v2_provenance=$(bootstrap_planner_v2_field parent_stage2_provenance_path "$bootstrap_planner_v2_receipt") || return 1
     for bootstrap_planner_v2_got in "$bootstrap_planner_v2_parent" \
         "$bootstrap_planner_v2_sanity" "$bootstrap_planner_v2_provenance"; do
-        case "$bootstrap_planner_v2_got" in *..*) return 1 ;; esac
+        case "$bootstrap_planner_v2_got" in *..*)
+            bootstrap_planner_v2_unbound parent_path no-dotdot-component "$bootstrap_planner_v2_got"
+            return 1 ;; esac
     done
     bootstrap_planner_v2_parent_dir=$(dirname -- "$bootstrap_planner_v2_parent") || return 1
-    [ "$(dirname -- "$bootstrap_planner_v2_sanity")" = "$bootstrap_planner_v2_parent_dir" ] || return 1
-    [ "$(dirname -- "$bootstrap_planner_v2_provenance")" = "$bootstrap_planner_v2_parent_dir" ] || return 1
+    [ "$(dirname -- "$bootstrap_planner_v2_sanity")" = "$bootstrap_planner_v2_parent_dir" ] ||
+        bootstrap_planner_v2_unbound parent_stage2_sanity_path "$bootstrap_planner_v2_parent_dir/*" "$bootstrap_planner_v2_sanity" || return 1
+    [ "$(dirname -- "$bootstrap_planner_v2_provenance")" = "$bootstrap_planner_v2_parent_dir" ] ||
+        bootstrap_planner_v2_unbound parent_stage2_provenance_path "$bootstrap_planner_v2_parent_dir/*" "$bootstrap_planner_v2_provenance" || return 1
     bootstrap_planner_v2_stage2_dir=$(dirname -- "$bootstrap_planner_v2_parent_dir") || return 1
-    [ "$(basename -- "$bootstrap_planner_v2_stage2_dir")" = stage2 ] || return 1
+    [ "$(basename -- "$bootstrap_planner_v2_stage2_dir")" = stage2 ] ||
+        bootstrap_planner_v2_unbound parent_compiler_path '<output>/stage2/<triple>/<compiler>' "$bootstrap_planner_v2_parent" || return 1
     bootstrap_planner_v2_output=$(dirname -- "$bootstrap_planner_v2_stage2_dir") || return 1
     bootstrap_planner_v2_output=$(bootstrap_planner_v2_canonical_dir \
-        "$bootstrap_planner_v2_output") || return 1
+        "$bootstrap_planner_v2_output") ||
+        bootstrap_planner_v2_unbound bootstrap_output canonical-existing-dir "$bootstrap_planner_v2_output" || return 1
     case "$bootstrap_planner_v2_output" in
         "$bootstrap_planner_v2_root"/build/*) ;;
         *)
             bootstrap_planner_v2_external=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}
-            [ -n "$bootstrap_planner_v2_external" ] || return 1
+            [ -n "$bootstrap_planner_v2_external" ] ||
+                bootstrap_planner_v2_unbound bootstrap_output \
+                    "$bootstrap_planner_v2_root/build/*-or-SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT(unset)" \
+                    "$bootstrap_planner_v2_output" || return 1
             bootstrap_planner_v2_external=$(bootstrap_planner_v2_canonical_dir \
-                "$bootstrap_planner_v2_external") || return 1
-            [ "$bootstrap_planner_v2_external" != / ] || return 1
+                "$bootstrap_planner_v2_external") ||
+                bootstrap_planner_v2_unbound SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT canonical-existing-dir \
+                    "$bootstrap_planner_v2_external" || return 1
+            [ "$bootstrap_planner_v2_external" != / ] ||
+                bootstrap_planner_v2_unbound SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT not-filesystem-root / || return 1
             case "$bootstrap_planner_v2_output" in
                 "$bootstrap_planner_v2_external"|"$bootstrap_planner_v2_external"/*) ;;
-                *) return 1 ;;
+                *) bootstrap_planner_v2_unbound bootstrap_output \
+                    "$bootstrap_planner_v2_root/build/*-or-$bootstrap_planner_v2_external/*" \
+                    "$bootstrap_planner_v2_output"
+                   return 1 ;;
             esac
             ;;
     esac
@@ -444,24 +507,33 @@ bootstrap_planner_v2_verify_bound() {
         bootstrap_planner_v2_key=${bootstrap_planner_v2_pair%%:*}
         bootstrap_planner_v2_base=${bootstrap_planner_v2_pair#*:}
         bootstrap_planner_v2_got=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_key" "$bootstrap_planner_v2_receipt") || return 1
-        [ "$bootstrap_planner_v2_got" = "$bootstrap_planner_v2_adm/$bootstrap_planner_v2_base" ] || return 1
+        [ "$bootstrap_planner_v2_got" = "$bootstrap_planner_v2_adm/$bootstrap_planner_v2_base" ] ||
+            bootstrap_planner_v2_unbound "$bootstrap_planner_v2_key" \
+                "$bootstrap_planner_v2_adm/$bootstrap_planner_v2_base" "$bootstrap_planner_v2_got" || return 1
     done
 
     bootstrap_planner_v2_rt=$(bootstrap_planner_v2_field runtime_dir "$bootstrap_planner_v2_receipt") || return 1
     case "$bootstrap_planner_v2_rt" in
         "$bootstrap_planner_v2_root"/*) ;;
-        *) return 1 ;;
+        *) bootstrap_planner_v2_unbound runtime_dir "$bootstrap_planner_v2_root/*" "$bootstrap_planner_v2_rt"
+           return 1 ;;
     esac
-    case "$bootstrap_planner_v2_rt" in *..*) return 1 ;; esac
+    case "$bootstrap_planner_v2_rt" in *..*)
+        bootstrap_planner_v2_unbound runtime_dir no-dotdot-component "$bootstrap_planner_v2_rt"
+        return 1 ;; esac
 
     if [ "$(bootstrap_planner_v2_field schema "$bootstrap_planner_v2_receipt")" = simple-bootstrap-planner-admission-v3 ]; then
         # Bind the exact native-build argv, including its selected codegen
         # backend. The admitted runtime authority is named by parent sanity.
-        [ "$(grep -c '^admission_receipt_path=' "$bootstrap_planner_v2_sanity" 2>/dev/null || true)" -eq 1 ] || return 1
+        [ "$(grep -c '^admission_receipt_path=' "$bootstrap_planner_v2_sanity" 2>/dev/null || true)" -eq 1 ] ||
+            bootstrap_planner_v2_unbound parent_stage2_sanity.admission_receipt_path exactly-one-line \
+                "$bootstrap_planner_v2_sanity" || return 1
         bootstrap_planner_v2_admission=$(sed -n 's/^admission_receipt_path=//p' \
             "$bootstrap_planner_v2_sanity") || return 1
         bootstrap_planner_v2_admission=$(bootstrap_planner_v2_canonical_file \
-            "$bootstrap_planner_v2_admission") || return 1
+            "$bootstrap_planner_v2_admission") ||
+            bootstrap_planner_v2_unbound parent_stage2_sanity.admission_receipt_path canonical-existing-file \
+                "$bootstrap_planner_v2_admission" || return 1
         bootstrap_planner_v2_admission_root=$(dirname -- \
             "$(dirname -- "$bootstrap_planner_v2_admission")") || return 1
         bootstrap_planner_v2_build_backend=$(bootstrap_planner_v2_field \
@@ -471,8 +543,11 @@ bootstrap_planner_v2_verify_bound() {
             "$bootstrap_planner_v2_admission_root/stage2-runtime-authority" \
             "$bootstrap_planner_v2_adm/planner-cache" \
             src/app/cli/bootstrap_reason_planner.spl "$bootstrap_planner_v2_planner")
-        [ "$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_build_argv")" = \
-          "$(bootstrap_planner_v2_field planner_build_argv_sha256 "$bootstrap_planner_v2_receipt")" ] || return 1
+        bootstrap_planner_v2_measured=$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_build_argv")
+        bootstrap_planner_v2_got=$(bootstrap_planner_v2_field planner_build_argv_sha256 "$bootstrap_planner_v2_receipt")
+        [ "$bootstrap_planner_v2_measured" = "$bootstrap_planner_v2_got" ] ||
+            bootstrap_planner_v2_unbound planner_build_argv_sha256 "$bootstrap_planner_v2_measured" \
+                "$bootstrap_planner_v2_got" || return 1
     fi
 
     # Re-derive the argv/env digests instead of shape-checking them. Without
@@ -486,11 +561,17 @@ bootstrap_planner_v2_verify_bound() {
         "$(bootstrap_planner_v2_field planner_source_closure_snapshot_sha256 "$bootstrap_planner_v2_receipt")" \
         "$(bootstrap_planner_v2_field planner_sha256 "$bootstrap_planner_v2_receipt")" \
         "$bootstrap_planner_v2_adm/authorization.receipt")
-    [ "$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_argv")" = \
-      "$(bootstrap_planner_v2_field build_argv_sha256 "$bootstrap_planner_v2_receipt")" ] || return 1
+    bootstrap_planner_v2_measured=$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_argv")
+    bootstrap_planner_v2_got=$(bootstrap_planner_v2_field build_argv_sha256 "$bootstrap_planner_v2_receipt")
+    [ "$bootstrap_planner_v2_measured" = "$bootstrap_planner_v2_got" ] ||
+        bootstrap_planner_v2_unbound build_argv_sha256 "$bootstrap_planner_v2_measured" \
+            "$bootstrap_planner_v2_got" || return 1
     bootstrap_planner_v2_env=$(bootstrap_planner_v2_canonical_env_text "$bootstrap_planner_v2_rt")
-    [ "$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_env")" = \
-      "$(bootstrap_planner_v2_field build_env_sha256 "$bootstrap_planner_v2_receipt")" ] || return 1
+    bootstrap_planner_v2_measured=$(bootstrap_planner_v2_hash_text "$bootstrap_planner_v2_env")
+    bootstrap_planner_v2_got=$(bootstrap_planner_v2_field build_env_sha256 "$bootstrap_planner_v2_receipt")
+    [ "$bootstrap_planner_v2_measured" = "$bootstrap_planner_v2_got" ] ||
+        bootstrap_planner_v2_unbound build_env_sha256 "$bootstrap_planner_v2_measured" \
+            "$bootstrap_planner_v2_got" || return 1
 }
 
 # Public admission predicate. A receipt is admitted only when it is
@@ -498,9 +579,15 @@ bootstrap_planner_v2_verify_bound() {
 # and environment digests re-derive from its own fields — i.e. only a receipt
 # emitted by the canonical producer against a provenance-verified stage2 parent
 # can pass. See the planner-admission-v2 subcommand of bootstrap-from-scratch.sh.
+# The generic line stays byte-identical (callers and docs grep for it). The
+# detail line names the mismatched binding, expected vs actual, plus the root
+# the verifier bound against -- the usual culprit when a resume is launched
+# from a different worktree than the one that produced the receipt.
 bootstrap_planner_v2_verify() {
+    bootstrap_planner_v2_unbound_detail=''
     bootstrap_planner_v2_verify_bound "$1" "$2" || {
         echo "bootstrap-policy-error: planner-admission-v2-unbound" >&2
+        echo "bootstrap-policy-error: planner-admission-v2-unbound-detail: ${bootstrap_planner_v2_unbound_detail:-binding=unclassified} verifier_root=$2 receipt=$1" >&2
         return 1
     }
 }
