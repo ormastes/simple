@@ -1,6 +1,6 @@
 # Frontend cache: `.spab` store refused for non-entry modules; HIR workers miss on skeleton keys (2026-11-22)
 
-Status: OPEN (diagnosis only; no fix landed, see "Not fixed")
+Status: Finding 1 FIXED in source (unverified at runtime, see "Fix"); Finding 2 and HIR adopt OPEN
 Binary measured: integ25 Stage 2 (`pinned-c1a10190b978/build/bootstrap-s2probe-integ25`)
 Context: MIR fork route (`SIMPLE_MIR_FORK_WORKERS=N`). The root and the 8 HIR shard
 workers each spend ~15 min in "parse" (f25: load_sources ends at 0.8 min, parse ends
@@ -26,9 +26,16 @@ from sibling workers.
 Most of each worker's 15 min is therefore real skeleton parsing (~2,300 parses).
 It is not restore cost.
 
-Fix direction, not implemented: have parse-fiber children also parse and store the
-skeleton text, in the same fiber, so every HIR worker hits. Expected effect: worker
-parse time falls to the hit cost. That is bounded by Finding 2.
+Fix (2026-11-22): the coordinator (`native_build_main.spl`) now computes the HIR pool
+size before spawning parse shards and sets `SIMPLE_PARSE_SHARD_SKELETON=1` on them
+only when a HIR pool follows. Each parse-fiber child, after a module is fully done,
+parses `driver_hir_worker_skeleton_text_v1(source)` -- the same function the workers
+use -- through the same `parse_full_frontend_selected_v1`, which stores it under the
+worker key. A skeleton failure only counts `skeleton_failures` in the
+`[parse-fibers]` receipt. Key equality is pinned by
+`test/01_unit/compiler/driver/driver_hir_worker_surface_v1_spec.spl`. Not covered:
+the capsule `--parse-shard` route (`SIMPLE_FILE_FIBERS=0`). Expected effect: worker
+parse time falls to the hit cost, which is bounded by Finding 2.
 
 ## Finding 2: `.spab` packed store refused for every non-entry module
 
@@ -94,6 +101,6 @@ on the same entry. Fix the refusal only if `.spab` is at least 2x faster.
 
 ## Not fixed
 
-No code change. Both candidate fixes touch the shared parse path, and neither is
+`.spab` refusal and HIR adopt: no code change. Both touch the shared parse path, and neither is
 measured on a binary that runs the modified source: the stage2 binary only runs
 prebuilt code, and the seeds cannot interpret the current tree.

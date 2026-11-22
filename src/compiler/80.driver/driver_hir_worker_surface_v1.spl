@@ -19,12 +19,29 @@ use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_
 pub fn driver_hir_worker_skeleton_selected_v1(hir_shard_spec: text, flag: text) -> bool:
     hir_shard_spec != "" and flag != "0"
 
+# The one skeleton a HIR worker parses. Parse-shard children warm the frontend
+# cache with exactly this text (driver_parse_shard_entry.spl), so the cache key
+# (xxh3 of the parsed text) cannot drift between warmer and worker.
+pub fn driver_hir_worker_skeleton_text_v1(source_content: text) -> text:
+    module_surface_skeleton_v1(source_content)
+
+# Set by the native-build coordinator on its parse-shard children only when a
+# HIR shard pool will run after them.
+pub fn parse_shard_skeleton_env_v1() -> text:
+    "SIMPLE_PARSE_SHARD_SKELETON"
+
+# Whether a parse-shard child also warms the skeleton key: the coordinator
+# armed it (`armed` == "1") and the workers will parse skeletons (`flag` is
+# SIMPLE_HIR_WORKER_SKELETON, opt-out "0").
+pub fn driver_parse_shard_skeleton_warm_v1(armed: text, flag: text) -> bool:
+    armed == "1" and flag != "0"
+
 # Text the surface pass parses for one module: the skeleton in an HIR
 # shard worker, the full source everywhere else -- including a per-file unit
 # child, which lowers (and caches) the full HIR of any import not cached yet.
 pub fn driver_surface_parse_text_v1(source_content: text, hir_shard_spec: text, flag: text) -> text:
     if driver_hir_worker_skeleton_selected_v1(hir_shard_spec, flag) and not native_file_worker_unit_active_v1():
-        return module_surface_skeleton_v1(source_content)
+        return driver_hir_worker_skeleton_text_v1(source_content)
     source_content
 
 # Text a worker parses for a PLACEHOLDER surface (a module outside its closure
@@ -55,5 +72,6 @@ pub fn driver_hir_worker_parse_verdict_v1(error_count: i64, poisoned_count: i64,
 pub fn driver_hir_worker_parse_failed_row_v1(hir_shard_mode: bool, poisoned: bool) -> bool:
     hir_shard_mode and poisoned
 
-export driver_hir_worker_skeleton_selected_v1, driver_surface_parse_text_v1, driver_worker_placeholder_parse_text_v1
+export driver_hir_worker_skeleton_selected_v1, driver_hir_worker_skeleton_text_v1,
+    driver_parse_shard_skeleton_warm_v1, parse_shard_skeleton_env_v1, driver_surface_parse_text_v1, driver_worker_placeholder_parse_text_v1
 export driver_hir_worker_parse_verdict_v1, driver_hir_worker_parse_failed_row_v1
