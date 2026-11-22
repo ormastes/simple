@@ -1755,7 +1755,7 @@ bootstrap_reap_descendants() {
       done
       ;;
   esac
-  kill -TERM -- "-$$" 2>/dev/null || true
+  kill -s TERM -- "-$$" 2>/dev/null || true
   bootstrap_reap_i=0
   while [ "${bootstrap_reap_i}" -lt 3 ]; do
     bootstrap_reap_left=
