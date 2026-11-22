@@ -28,11 +28,16 @@ use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_text}
 use std.env.variables.{env_get}
 use std.nogc_sync_mut.io.env_ops.{cwd}
-use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, encode_workaround_index}
+use std.database.test_extended.database.{TestDatabaseExtended}
+use std.database.test_extended.source_revision.{TestSourceRevision}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestBackendName}
+use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, WorkaroundLineNumber, WorkaroundCompleteness, encode_workaround_index}
 
 val CLI_RUN_TIMEOUT_MS: i64 = 120000
 val CLI_RUN_MAX_OUT: i64 = 16777216
 val HEAD = "abcdef0123456789abcdef0123456789abcdef01"
+val OTHER_HEAD = "1234567890abcdef1234567890abcdef12345678"
 
 fn _repo_root() -> text:
     cwd().replace("\\", "/")
@@ -63,7 +68,7 @@ fn _setup_fixture(links: [WorkaroundLink]):
         fail("could not write reproducer fixture")
     if not file_create_exclusive(FIXTURE_DIR + "/test/prevent_spec.spl", "# prevention fixture\n"):
         fail("could not write prevention fixture")
-    val index = WorkaroundIndex(revision: HEAD, complete: true, links: links)
+    val index = WorkaroundIndex(revision: HEAD, complete: WorkaroundCompleteness.Complete, links: links)
     if not file_create_exclusive(FIXTURE_DIR + "/.simple/workarounds.sdn", encode_workaround_index(index)):
         fail("could not write workaround index fixture")
 
@@ -81,7 +86,7 @@ fn _check(extra: [text]) -> (text, text, i64):
     _spawn_cli(["src/app/bug_closure_check/main.spl"] + extra, FIXTURE_DIR)
 
 fn _live_workaround(id: text) -> WorkaroundLink:
-    WorkaroundLink(bug_id: id, path: "src/app/main.spl", line: 7, recover: "", reason: "fixture workaround")
+    WorkaroundLink(bug_id: id, path: "src/app/main.spl", line: WorkaroundLineNumber(value: 7), recover: "", reason: "fixture workaround")
 
 describe "bug closure gate wiring in the CLI":
     it "a blocked close writes nothing to the bug database":
@@ -193,3 +198,96 @@ describe "bug-closure-check":
         expect(ok_out).to_contain("run_evidence=not_observed")
         step("No invocation changed the bug database")
         expect(file_read_text(DB_PATH)).to_equal(clean_before)
+
+fn _record_run_events(owner: RunnerTestDb, run_id: text, path: text, case_name: text, outcome: text, backend_name: text):
+    val start_facts = TraceCaseFacts(backend: Some(TestBackendName(value: backend_name)))
+    val events = [
+        TraceCaseEvent(case_name: case_name, phase: "started", outcome: "not_finished", facts: Some(start_facts)),
+        TraceCaseEvent(case_name: case_name, phase: "finished", outcome: outcome)
+    ]
+    match owner.db.record_trace_case_events(run_id, path, events):
+        case Ok(_): pass
+        case Err(reason): fail("fixture trace write failed: {reason}")
+
+fn _distinct_test_run(owner: RunnerTestDb, rev: TestSourceRevision?) -> text:
+    val prev = owner.current_run_id
+    var next_id = owner.start_run(rev)
+    while next_id == prev:
+        next_id = owner.start_run(rev)
+    next_id
+
+fn _setup_observed_testdb(pre_repro_outcome: text, post_head: text) -> (text, text, text):
+    val test_db_path = FIXTURE_DIR + "/test_db.sdn"
+    var owner = RunnerTestDb(db: TestDatabaseExtended.create(test_db_path), current_run_id: "")
+    val pre_run = _distinct_test_run(owner, Some(TestSourceRevision(value: OTHER_HEAD)))
+    _record_run_events(owner, pre_run, "test/repro_spec.spl", "reproduces", pre_repro_outcome, "interpreter")
+    val post_run = _distinct_test_run(owner, Some(TestSourceRevision(value: post_head)))
+    _record_run_events(owner, post_run, "test/repro_spec.spl", "reproduces", "passed", "interpreter")
+    _record_run_events(owner, post_run, "test/prevent_spec.spl", "prevents", "passed", "interpreter")
+    match owner.save():
+        case Ok(_): pass
+        case Err(reason): fail("fixture TestDB save failed: {reason}")
+    (pre_run, post_run, "test_db.sdn")
+
+describe "bug closure gate wiring with TestDB run evidence":
+    it "allows check and resolve with observed pre-fix RED and post-fix GREEN":
+        # @req BUG-001
+        # @req BUG-002
+        # @req BUG-003
+        _setup_fixture([])
+        _add_bug("wired_obs_001")
+        val (pre_run, post_run, test_db_rel) = _setup_observed_testdb("failed", HEAD)
+        val obs_flags = EVIDENCE + [
+            "--pre-fix-run=" + pre_run,
+            "--post-fix-run=" + post_run,
+            "--required-backend=interpreter",
+            "--test-db=" + test_db_rel
+        ]
+        val (check_out, _ce, check_code) = _check(["--id=wired_obs_001"] + obs_flags)
+        expect(check_code).to_equal(0)
+        expect(check_out).to_contain("verdict=allowed")
+        expect(check_out).to_contain("run_evidence=observed")
+        val (res_out, _re, res_code) = _resolve("wired_obs_001", obs_flags)
+        expect(res_code).to_equal(0)
+        expect(res_out).to_contain("Resolved bug wired_obs_001")
+        val db = file_read_text(DB_PATH)
+        expect(db).to_contain("run_evidence=observed head=" + HEAD)
+        expect(db).to_contain("pre_fix_run=" + pre_run)
+        expect(db).to_contain("post_fix_run=" + post_run)
+
+    it "blocks stale post-fix head, missing pre-fix RED, and unknown runs without modifying bug DB":
+        # @req BUG-001
+        # @req BUG-003
+        _setup_fixture([])
+        _add_bug("wired_obs_block_001")
+        val (pre_run, stale_post, test_db_rel) = _setup_observed_testdb("failed", OTHER_HEAD)
+        val before = file_read_text(DB_PATH)
+        val (stale_out, _se, stale_code) = _resolve("wired_obs_block_001", EVIDENCE + [
+            "--pre-fix-run=" + pre_run,
+            "--post-fix-run=" + stale_post,
+            "--required-backend=interpreter",
+            "--test-db=" + test_db_rel
+        ])
+        expect(stale_code).to_equal(1)
+        expect(stale_out).to_contain("E-BUG-EVIDENCE-003")
+        expect(file_read_text(DB_PATH)).to_equal(before)
+
+        val (bad_pre, ok_post, test_db_rel2) = _setup_observed_testdb("passed", HEAD)
+        val (repro_out, _re2, repro_code) = _resolve("wired_obs_block_001", EVIDENCE + [
+            "--pre-fix-run=" + bad_pre,
+            "--post-fix-run=" + ok_post,
+            "--required-backend=interpreter",
+            "--test-db=" + test_db_rel2
+        ])
+        expect(repro_code).to_equal(1)
+        expect(repro_out).to_contain("E-BUG-REPRO-001")
+        expect(file_read_text(DB_PATH)).to_equal(before)
+
+        val (unk_out, _ue, unk_code) = _check(["--id=wired_obs_block_001"] + EVIDENCE + [
+            "--post-fix-run=run_missing",
+            "--required-backend=interpreter",
+            "--test-db=" + test_db_rel2
+        ])
+        expect(unk_code).to_equal(2)
+        expect(unk_out).to_contain("test database error")
+        expect(file_read_text(DB_PATH)).to_equal(before)

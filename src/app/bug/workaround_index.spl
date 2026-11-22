@@ -1,17 +1,28 @@
 # Pure workaround annotation and derived SDN index transformations.
 # Bug state remains in the canonical BugDatabase; this index stores locations.
 
+pub struct WorkaroundLineNumber:
+    value: i64
+
+pub enum WorkaroundCompleteness:
+    Complete
+    Partial
+
+pub enum WorkaroundFragmentKind:
+    Base
+    Delta
+
 pub struct WorkaroundLink:
     bug_id: text
     path: text
-    line: i64
+    line: WorkaroundLineNumber
     recover: text
     reason: text
     expires: text = ""    # YYYY-MM-DD or ""
 
 pub struct WorkaroundIndex:
     revision: text
-    complete: bool
+    complete: WorkaroundCompleteness
     links: [WorkaroundLink]
 
 pub enum WorkaroundCheckV1:
@@ -19,7 +30,7 @@ pub enum WorkaroundCheckV1:
     Invalid
 
 pub fn empty_workaround_index(revision: text) -> WorkaroundIndex:
-    WorkaroundIndex(revision: revision, complete: false, links: [])
+    WorkaroundIndex(revision: revision, complete: WorkaroundCompleteness.Partial, links: [])
 
 pub fn workaround_bug_id_valid(value: text) -> WorkaroundCheckV1:
     if value == "": return WorkaroundCheckV1.Invalid
@@ -152,7 +163,7 @@ pub fn parse_workaround_source(path: text, content: text) -> Result<[WorkaroundL
         val affected = lines[next].trim()
         if affected == "" or affected.starts_with("#") or affected.starts_with("//") or affected.starts_with("/*"):
             return Err("{location}: workaround must immediately precede the affected block")
-        links.push(WorkaroundLink(bug_id: bug_id, path: path, line: offset + 1,
+        links.push(WorkaroundLink(bug_id: bug_id, path: path, line: WorkaroundLineNumber(value: offset + 1),
             recover: recover, reason: reason, expires: expires))
     Ok(links)
 
@@ -173,7 +184,7 @@ pub fn encode_workaround_index(index: WorkaroundIndex) -> text:
     """Serialize a versioned SDN table without copying mutable bug status."""
     var out = "workaround_index |schema, revision, complete|\n    1, "
     out = out + workaround_sdn_quote(index.revision)
-    val completeness = if index.complete: ", true\n" else: ", false\n"
+    val completeness = if index.complete == WorkaroundCompleteness.Complete: ", true\n" else: ", false\n"
     out = out + completeness
     # The expires column is written only when some link carries one, so
     # indexes without expiry stay byte-identical to the 5-column schema.
@@ -183,7 +194,7 @@ pub fn encode_workaround_index(index: WorkaroundIndex) -> text:
     out = out + (if with_expires: "workarounds |bug_id, path, line, recover, reason, expires|\n" else: "workarounds |bug_id, path, line, recover, reason|\n")
     for link in index.links:
         out = out + "    " + workaround_sdn_quote(link.bug_id) + ", "
-        out = out + workaround_sdn_quote(link.path) + ", {link.line}, "
+        out = out + workaround_sdn_quote(link.path) + ", {link.line.value}, "
         out = out + workaround_sdn_quote(link.recover) + ", " + workaround_sdn_quote(link.reason)
         if with_expires: out = out + ", " + workaround_sdn_quote(link.expires)
         out = out + "\n"
@@ -268,9 +279,10 @@ pub fn decode_workaround_index(content: text) -> Result<WorkaroundIndex, text>:
         val location = fields[1] + ":{line}"
         if locations.contains(location): return Err("duplicate workaround location")
         locations.push(location)
-        links.push(WorkaroundLink(bug_id: fields[0], path: fields[1], line: line,
+        links.push(WorkaroundLink(bug_id: fields[0], path: fields[1], line: WorkaroundLineNumber(value: line),
             recover: fields[3], reason: fields[4], expires: expires))
-    Ok(WorkaroundIndex(revision: header[1], complete: header[2] == "true", links: links))
+    val completeness = if header[2] == "true": WorkaroundCompleteness.Complete else: WorkaroundCompleteness.Partial
+    Ok(WorkaroundIndex(revision: header[1], complete: completeness, links: links))
 
 # One immutable per-writer publication of the index. A `base` fragment
 # replaces everything before it (a full scan, or a compaction of the merged
@@ -279,16 +291,16 @@ pub fn decode_workaround_index(content: text) -> Result<WorkaroundIndex, text>:
 # updates and no writer lock is needed.
 pub struct WorkaroundFragment:
     revision: text
-    base: bool
-    complete: bool
+    base: WorkaroundFragmentKind
+    complete: WorkaroundCompleteness
     paths: [text]
     links: [WorkaroundLink]
 
 pub fn encode_workaround_fragment(fragment: WorkaroundFragment) -> text:
     var out = "workaround_fragment |schema, revision, base, complete|\n    1, "
     out = out + workaround_sdn_quote(fragment.revision)
-    out = out + (if fragment.base: ", true" else: ", false")
-    out = out + (if fragment.complete: ", true\n" else: ", false\n")
+    out = out + (if fragment.base == WorkaroundFragmentKind.Base: ", true" else: ", false")
+    out = out + (if fragment.complete == WorkaroundCompleteness.Complete: ", true\n" else: ", false\n")
     out = out + "refreshed |path|\n"
     for path in fragment.paths:
         out = out + "    " + workaround_sdn_quote(path) + "\n"
@@ -329,8 +341,10 @@ pub fn decode_workaround_fragment(content: text) -> Result<WorkaroundFragment, t
     for link in index.links:
         if not paths.contains(link.path):
             return Err("workaround fragment link outside its refreshed paths")
-    Ok(WorkaroundFragment(revision: header[1], base: header[2] == "true",
-        complete: header[3] == "true", paths: paths, links: index.links))
+    val base_kind = if header[2] == "true": WorkaroundFragmentKind.Base else: WorkaroundFragmentKind.Delta
+    val completeness = if header[3] == "true": WorkaroundCompleteness.Complete else: WorkaroundCompleteness.Partial
+    Ok(WorkaroundFragment(revision: header[1], base: base_kind,
+        complete: completeness, paths: paths, links: index.links))
 
 # Fold fragments (already in publication order) into one index. Completeness
 # follows the single-file semantics it replaces: a base fragment sets it, a
@@ -338,11 +352,11 @@ pub fn decode_workaround_fragment(content: text) -> Result<WorkaroundFragment, t
 pub fn merge_workaround_fragments(fragments: [WorkaroundFragment]) -> WorkaroundIndex:
     var index = empty_workaround_index("")
     for fragment in fragments:
-        if fragment.base:
+        if fragment.base == WorkaroundFragmentKind.Base:
             index = WorkaroundIndex(revision: fragment.revision, complete: fragment.complete,
                 links: fragment.links)
         else:
-            val complete = index.complete and index.revision == fragment.revision
+            val complete = if index.complete == WorkaroundCompleteness.Complete and index.revision == fragment.revision: WorkaroundCompleteness.Complete else: WorkaroundCompleteness.Partial
             val replaced = replace_workaround_paths(index, fragment.paths, fragment.links)
             index = WorkaroundIndex(revision: fragment.revision, complete: complete,
                 links: replaced.links)

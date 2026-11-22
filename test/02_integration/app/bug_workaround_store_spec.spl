@@ -4,7 +4,7 @@
 use std.spec.{describe, it, expect, step}
 use app.bug.workaround_store.{workaround_status_paths, workaround_tracked_paths,
     workaround_source_candidate, refresh_workarounds_at, load_workarounds_at, WorkaroundScanV1}
-use app.bug.workaround_index.{encode_workaround_index}
+use app.bug.workaround_index.{encode_workaround_index, WorkaroundCompleteness}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
     workaround_host_publish, workaround_host_mkdir, workaround_host_process,
     workaround_host_temp_dir, workaround_host_remove, workaround_host_exists,
@@ -71,7 +71,7 @@ describe "workaround store maintenance":
         workaround_test_git(root, ["add", "."])
         workaround_test_git(root, ["-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"])
         val initial = refresh_workarounds_at(root, WorkaroundScanV1.Full, []).unwrap()
-        expect(initial.complete).to_equal(true)
+        expect(initial.complete).to_equal(WorkaroundCompleteness.Complete)
         expect(initial.links.len()).to_equal(1)
         expect(fragment_names(root).len()).to_equal(1)
         step("Fullscan includes untracked source markers already supported by incremental refresh")
@@ -86,7 +86,7 @@ describe "workaround store maintenance":
         step("An unchanged refresh returns the admitted state and publishes nothing")
         val fragments_before = fragment_names(root).len()
         val unchanged = refresh_workarounds_at(root, WorkaroundScanV1.Incremental, ["src/a.spl"]).unwrap()
-        expect(unchanged.complete).to_equal(true)
+        expect(unchanged.complete).to_equal(WorkaroundCompleteness.Complete)
         expect(unchanged.links.len()).to_equal(1)
         expect(unchanged.revision).to_equal(initial.revision)
         expect(admitted_state(root)).to_equal(admitted)
@@ -124,8 +124,8 @@ describe "workaround store maintenance":
 
         step("A new HEAD invalidates complete coverage until explicit fullscan")
         workaround_test_git(root, ["-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "new head"])
-        expect(refresh_workarounds_at(root, WorkaroundScanV1.Incremental, []).unwrap().complete).to_equal(false)
-        expect(refresh_workarounds_at(root, WorkaroundScanV1.Full, []).unwrap().complete).to_equal(true)
+        expect(refresh_workarounds_at(root, WorkaroundScanV1.Incremental, []).unwrap().complete).to_equal(WorkaroundCompleteness.Partial)
+        expect(refresh_workarounds_at(root, WorkaroundScanV1.Full, []).unwrap().complete).to_equal(WorkaroundCompleteness.Complete)
 
         step("Only explicit fullscan repairs a corrupt derived fragment")
         val names = fragment_names(root)
@@ -134,7 +134,7 @@ describe "workaround store maintenance":
         expect(workaround_host_publish(newest, "corrupt\n")).to_equal(true)
         expect(refresh_workarounds_at(root, WorkaroundScanV1.Incremental, []).is_err()).to_equal(true)
         expect(workaround_host_read(newest, 16777216).unwrap()).to_equal("corrupt\n")
-        expect(refresh_workarounds_at(root, WorkaroundScanV1.Full, []).unwrap().complete).to_equal(true)
+        expect(refresh_workarounds_at(root, WorkaroundScanV1.Full, []).unwrap().complete).to_equal(WorkaroundCompleteness.Complete)
         expect(load_workarounds_at(root).is_ok()).to_equal(true)
 
         step("Pending canonical WAL prevents publishing a stale bug snapshot")
@@ -151,7 +151,7 @@ describe "workaround store maintenance":
         expect(workaround_host_publish(source, "fn a(): 1\n")).to_equal(true)
         expect(workaround_host_remove(root + "/doc/08_tracking/bug/bug_db.sdn")).to_equal(true)
         val empty_batch = refresh_workarounds_at(root, WorkaroundScanV1.Incremental, ["src/a.spl"]).unwrap()
-        expect(empty_batch.complete).to_equal(true)
+        expect(empty_batch.complete).to_equal(WorkaroundCompleteness.Complete)
         expect(empty_batch.links.len()).to_equal(0)
 
     it "reads a legacy single-file index until the first fragment is published":
@@ -162,6 +162,6 @@ describe "workaround store maintenance":
         expect(workaround_host_publish(root + "/.simple/workarounds.sdn",
             "workaround_index |schema, revision, complete|\n    1, \"{revision}\", true\nworkarounds |bug_id, path, line, recover, reason|\n    \"legacy_bug\", \"src/l.spl\", 4, \"\", \"legacy\"\n")).to_equal(true)
         val legacy = load_workarounds_at(root).unwrap()
-        expect(legacy.complete).to_equal(true)
+        expect(legacy.complete).to_equal(WorkaroundCompleteness.Complete)
         expect(legacy.links.len()).to_equal(1)
         expect(legacy.links[0].bug_id).to_equal("legacy_bug")

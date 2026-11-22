@@ -1,0 +1,263 @@
+"""
+## Purpose and audience
+Purpose: pin the TestDB -> `BugTestRunV1` adapter (`src/app/bug/closure_testdb.spl`)
+and CLI argument validation for observed bug-closure run evidence (plan 4.2/4.3).
+Covers status qualification, refusal to fabricate source revisions for dirty or
+untagged runs, sound file-level aggregation (partial-pass files never pass),
+read-only `RunnerTestDb` loading, and end-to-end verdicts through
+`bug_closure_evaluate_v1`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.database.test_extended.database.{TestDatabaseExtended}
+use std.database.test_extended.source_revision.{TestSourceRevision}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.common.traceability.case_events.{
+    TraceCaseEvent, TraceCaseFacts, TestBackendName
+}
+use std.common.traceability.test_query.{
+    TestLevel, TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryRow,
+    TestQueryStatus, TestQualification, TestPlannedCaseIdentity, TestAttemptIdentity,
+    TestAttemptOrdinal, TestEvidenceProvenance, TestQueryErrorKind
+}
+use app.bug.closure_gate.{
+    BugIdV1, SnapshotDigestV1, TestCaseIdV1, ReviewerIdV1, ClosureRationaleV1,
+    BackendIdV1, BugClosureDispositionV1, BugClosureCandidateV1, BugClosurePolicyV1,
+    BugRunEvidenceV1, BugRunPhaseV1, BugRunOutcomeV1, BugTestDbViewV1,
+    BugClosureVerdictV1, bug_closure_evaluate_v1, bug_closure_receipt_codes_v1
+}
+use app.bug.workaround_index.{WorkaroundIndex, WorkaroundCompleteness}
+use app.bug.closure_testdb.{
+    bug_run_outcome_from_query_status_v1, bug_test_runs_from_query_rows_v1,
+    bug_closure_load_testdb_runs_v1, bug_closure_load_testdb_runs_from_path_v1
+}
+use app.bug_resolve.closure_cli.{
+    BugClosureRequestV1, bug_closure_argument_problem_v1, bug_closure_parse_required_backends
+}
+use app.test_runner_new.test_query_cli.{TestDbFilePath}
+
+val HEAD = "0123456789abcdef0123456789abcdef01234567"
+val OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
+val SCRATCH_DIR = "build/bug-closure-testdb-spec"
+
+fn _row(path: text, name: text, status: TestQueryStatus, backend_name: text, ordinal: i64) -> TestQueryRow:
+    val qual = match status:
+        case TestQueryStatus.Passed: TestQualification.Pass
+        case _: TestQualification.NotPass
+    val backend = if backend_name == "": None else: Some(TestBackendName(value: backend_name))
+    TestQueryRow(
+        case_key: TestCaseKey(path: TestCasePath(value: path), name: TestCaseName(value: name)),
+        level: TestLevel.Unit,
+        run_id: TestRunId(value: "run_1"),
+        planned_case: TestPlannedCaseIdentity.Missing,
+        attempt: TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)),
+        status: status,
+        qualification: qual,
+        provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation,
+        backend: backend
+    )
+
+fn _find_case_outcome(runs: [app.bug.closure_gate.BugTestRunV1], case_id: text, backend_name: text) -> BugRunOutcomeV1?:
+    for r in runs:
+        if r.case_id.value == case_id and r.backend.value == backend_name:
+            return Some(r.outcome)
+    None
+
+fn _record_events(owner: RunnerTestDb, run_id: text, path: text, case_name: text, outcome: text, backend_name: text):
+    val start_facts = TraceCaseFacts(backend: Some(TestBackendName(value: backend_name)))
+    val events = [
+        TraceCaseEvent(case_name: case_name, phase: "started", outcome: "not_finished", facts: Some(start_facts)),
+        TraceCaseEvent(case_name: case_name, phase: "finished", outcome: outcome)
+    ]
+    match owner.db.record_trace_case_events(run_id, path, events):
+        case Ok(_): pass
+        case Err(reason): fail("record_trace_case_events failed: {reason}")
+
+fn _distinct_run(owner: RunnerTestDb, rev: TestSourceRevision?) -> text:
+    val prev = owner.current_run_id
+    var next_id = owner.start_run(rev)
+    while next_id == prev:
+        next_id = owner.start_run(rev)
+    next_id
+
+describe "bug closure TestDB status and row mapping":
+    it "maps every TestQueryStatus variant fail-closed":
+        expect(bug_run_outcome_from_query_status_v1(TestQueryStatus.Passed) == BugRunOutcomeV1.Passed).to_equal(true)
+        expect(bug_run_outcome_from_query_status_v1(TestQueryStatus.Failed) == BugRunOutcomeV1.Failed).to_equal(true)
+        expect(bug_run_outcome_from_query_status_v1(TestQueryStatus.Cached) == BugRunOutcomeV1.Cached).to_equal(true)
+        for skipped in [TestQueryStatus.Skipped, TestQueryStatus.Ignored, TestQueryStatus.QualifiedIgnore,
+                TestQueryStatus.Pending, TestQueryStatus.InDevelopment, TestQueryStatus.FeatureGated,
+                TestQueryStatus.Blocked]:
+            expect(bug_run_outcome_from_query_status_v1(skipped) == BugRunOutcomeV1.Skipped).to_equal(true)
+        for not_run in [TestQueryStatus.NotFinished, TestQueryStatus.Expired, TestQueryStatus.Unknown(raw: "weird")]:
+            expect(bug_run_outcome_from_query_status_v1(not_run) == BugRunOutcomeV1.NotRun).to_equal(true)
+
+    it "refuses to emit runs when source revision is None":
+        val rows = [_row("test/repro_spec.spl", "repro", TestQueryStatus.Passed, "interpreter", 0)]
+        val mapped = bug_test_runs_from_query_rows_v1(rows, BugRunPhaseV1.PostFix, None)
+        expect(mapped.len()).to_equal(0)
+
+    it "aggregates spec-file outcomes conservatively and emits exact-case rows":
+        val rev = Some(TestSourceRevision(value: HEAD))
+        val mixed_fail = [
+            _row("test/a_spec.spl", "pass_case", TestQueryStatus.Passed, "interpreter", 0),
+            _row("test/a_spec.spl", "fail_case", TestQueryStatus.Failed, "interpreter", 1)
+        ]
+        val runs_fail = bug_test_runs_from_query_rows_v1(mixed_fail, BugRunPhaseV1.PostFix, rev)
+        expect(_find_case_outcome(runs_fail, "test/a_spec.spl::pass_case", "interpreter").unwrap() == BugRunOutcomeV1.Passed).to_equal(true)
+        expect(_find_case_outcome(runs_fail, "test/a_spec.spl::fail_case", "interpreter").unwrap() == BugRunOutcomeV1.Failed).to_equal(true)
+        expect(_find_case_outcome(runs_fail, "test/a_spec.spl", "interpreter").unwrap() == BugRunOutcomeV1.Failed).to_equal(true)
+
+        val mixed_skip = [
+            _row("test/b_spec.spl", "pass_case", TestQueryStatus.Passed, "interpreter", 0),
+            _row("test/b_spec.spl", "skip_case", TestQueryStatus.Skipped, "interpreter", 1)
+        ]
+        val runs_skip = bug_test_runs_from_query_rows_v1(mixed_skip, BugRunPhaseV1.PostFix, rev)
+        expect(_find_case_outcome(runs_skip, "test/b_spec.spl", "interpreter").unwrap() == BugRunOutcomeV1.Skipped).to_equal(true)
+
+        val all_pass = [
+            _row("test/c_spec.spl", "c1", TestQueryStatus.Passed, "interpreter", 0),
+            _row("test/c_spec.spl", "c2", TestQueryStatus.Passed, "interpreter", 1)
+        ]
+        val runs_pass = bug_test_runs_from_query_rows_v1(all_pass, BugRunPhaseV1.PostFix, rev)
+        expect(_find_case_outcome(runs_pass, "test/c_spec.spl", "interpreter").unwrap() == BugRunOutcomeV1.Passed).to_equal(true)
+
+describe "bug closure TestDB round-trip":
+    it "loads clean pre-fix RED and post-fix GREEN runs read-only and gates closure accurately":
+        dir_remove_all(SCRATCH_DIR)
+        dir_create_all(SCRATCH_DIR)
+        val db_path = SCRATCH_DIR + "/test_db.sdn"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(db_path), current_run_id: "")
+        val pre_run = _distinct_run(owner, Some(TestSourceRevision(value: OTHER_HEAD)))
+        _record_events(owner, pre_run, "test/repro_spec.spl", "reproduces", "failed", "interpreter")
+        val post_run = _distinct_run(owner, Some(TestSourceRevision(value: HEAD)))
+        _record_events(owner, post_run, "test/repro_spec.spl", "reproduces", "passed", "interpreter")
+        _record_events(owner, post_run, "test/prevent_spec.spl", "prevents", "passed", "interpreter")
+        val stale_run = _distinct_run(owner, Some(TestSourceRevision(value: OTHER_HEAD)))
+        _record_events(owner, stale_run, "test/repro_spec.spl", "reproduces", "passed", "interpreter")
+        _record_events(owner, stale_run, "test/prevent_spec.spl", "prevents", "passed", "interpreter")
+        val dirty_run = _distinct_run(owner, None)
+        _record_events(owner, dirty_run, "test/repro_spec.spl", "reproduces", "passed", "interpreter")
+        _record_events(owner, dirty_run, "test/prevent_spec.spl", "prevents", "passed", "interpreter")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("save failed: {reason}")
+        val bytes_before = file_read(db_path)
+
+        val candidate = BugClosureCandidateV1(
+            bug_id: BugIdV1(value: "bug_001"),
+            disposition: BugClosureDispositionV1.Fixed,
+            author: ReviewerIdV1(value: "alice"),
+            head: SnapshotDigestV1(value: HEAD),
+            bug_state: SnapshotDigestV1(value: "open"),
+            rationale: ClosureRationaleV1(value: ""),
+            reproducer: Some(TestCaseIdV1(value: "test/repro_spec.spl")),
+            prevention: Some(TestCaseIdV1(value: "test/prevent_spec.spl")),
+            prevention_exception: None,
+            requirements: []
+        )
+        val index = WorkaroundIndex(revision: HEAD, complete: WorkaroundCompleteness.Complete, links: [])
+        val policy = BugClosurePolicyV1(
+            required_backends: [BackendIdV1(value: "interpreter")],
+            run_evidence: BugRunEvidenceV1.Observed
+        )
+
+        step("Clean pre-fix RED + post-fix GREEN on required backend is Allowed")
+        val ok_load = match bug_closure_load_testdb_runs_from_path_v1(
+                TestDbFilePath(value: db_path), Some(TestRunId(value: pre_run)), Some(TestRunId(value: post_run))):
+            case Ok(v): v
+            case Err(e): fail("load failed: {e.detail}")
+        val ok_view = BugTestDbViewV1(
+            head: SnapshotDigestV1(value: HEAD),
+            bug_state: SnapshotDigestV1(value: "open"),
+            known_bugs: [BugIdV1(value: "bug_001")],
+            known_cases: [TestCaseIdV1(value: "test/repro_spec.spl"), TestCaseIdV1(value: "test/prevent_spec.spl")],
+            known_requirements: [],
+            runs: ok_load.runs
+        )
+        val ok_receipt = bug_closure_evaluate_v1(candidate, BugIdV1(value: "bug_001"), policy, ok_view, index)
+        expect(ok_receipt.verdict == BugClosureVerdictV1.Allowed).to_equal(true)
+        expect(bug_closure_receipt_codes_v1(ok_receipt).join(",")).to_equal("")
+
+        step("Stale post-fix head blocks with E-BUG-EVIDENCE-003")
+        val stale_load = match bug_closure_load_testdb_runs_from_path_v1(
+                TestDbFilePath(value: db_path), Some(TestRunId(value: pre_run)), Some(TestRunId(value: stale_run))):
+            case Ok(v): v
+            case Err(e): fail("stale load failed: {e.detail}")
+        val stale_view = BugTestDbViewV1(
+            head: SnapshotDigestV1(value: HEAD), bug_state: SnapshotDigestV1(value: "open"),
+            known_bugs: [BugIdV1(value: "bug_001")],
+            known_cases: [TestCaseIdV1(value: "test/repro_spec.spl"), TestCaseIdV1(value: "test/prevent_spec.spl")],
+            known_requirements: [], runs: stale_load.runs
+        )
+        val stale_receipt = bug_closure_evaluate_v1(candidate, BugIdV1(value: "bug_001"), policy, stale_view, index)
+        expect(bug_closure_receipt_codes_v1(stale_receipt).join(",")).to_equal("E-BUG-EVIDENCE-003,E-BUG-EVIDENCE-003")
+
+        step("Dirty post-fix run without source_head emits note + 0 runs and blocks")
+        val dirty_load = match bug_closure_load_testdb_runs_from_path_v1(
+                TestDbFilePath(value: db_path), Some(TestRunId(value: pre_run)), Some(TestRunId(value: dirty_run))):
+            case Ok(v): v
+            case Err(e): fail("dirty load failed: {e.detail}")
+        expect(dirty_load.notes.join(";")).to_contain("no trustworthy source_head")
+        val dirty_view = BugTestDbViewV1(
+            head: SnapshotDigestV1(value: HEAD), bug_state: SnapshotDigestV1(value: "open"),
+            known_bugs: [BugIdV1(value: "bug_001")],
+            known_cases: [TestCaseIdV1(value: "test/repro_spec.spl"), TestCaseIdV1(value: "test/prevent_spec.spl")],
+            known_requirements: [], runs: dirty_load.runs
+        )
+        val dirty_receipt = bug_closure_evaluate_v1(candidate, BugIdV1(value: "bug_001"), policy, dirty_view, index)
+        expect(bug_closure_receipt_codes_v1(dirty_receipt).join(",")).to_equal("E-BUG-EVIDENCE-003,E-BUG-EVIDENCE-003")
+
+        step("Missing required backend blocks with E-BUG-EVIDENCE-003")
+        val llvm_policy = BugClosurePolicyV1(
+            required_backends: [BackendIdV1(value: "interpreter"), BackendIdV1(value: "llvm")],
+            run_evidence: BugRunEvidenceV1.Observed
+        )
+        val llvm_receipt = bug_closure_evaluate_v1(candidate, BugIdV1(value: "bug_001"), llvm_policy, ok_view, index)
+        expect(bug_closure_receipt_codes_v1(llvm_receipt).join(",")).to_equal("E-BUG-EVIDENCE-003,E-BUG-EVIDENCE-003")
+
+        step("Unknown run id returns UnknownRun error")
+        match bug_closure_load_testdb_runs_from_path_v1(
+                TestDbFilePath(value: db_path), Some(TestRunId(value: "run_missing")), Some(TestRunId(value: post_run))):
+            case Ok(_): fail("unknown run id was accepted")
+            case Err(err): expect(err.kind == TestQueryErrorKind.UnknownRun).to_equal(true)
+
+        step("Read-only loads left the TestDB byte-identical")
+        expect(file_read(db_path)).to_equal(bytes_before)
+
+    it "validates distinct pre/post run flags and parses required-backend options":
+        val dup_req = BugClosureRequestV1(
+            bug: BugIdV1(value: "b1"),
+            disposition: BugClosureDispositionV1.Fixed,
+            reproducer: Some(TestCaseIdV1(value: "test/repro_spec.spl")),
+            prevention: Some(TestCaseIdV1(value: "test/prevent_spec.spl")),
+            rationale: ClosureRationaleV1(value: ""),
+            source_head: Some(SnapshotDigestV1(value: HEAD)),
+            bug_state: SnapshotDigestV1(value: "open"),
+            pre_fix_run: Some(TestRunId(value: "run_same")),
+            post_fix_run: Some(TestRunId(value: "run_same"))
+        )
+        expect(bug_closure_argument_problem_v1(dup_req)).to_contain("distinct runs")
+
+        val empty_be = BugClosureRequestV1(
+            bug: BugIdV1(value: "b1"),
+            disposition: BugClosureDispositionV1.Duplicate,
+            reproducer: None,
+            prevention: None,
+            rationale: ClosureRationaleV1(value: "dup"),
+            source_head: Some(SnapshotDigestV1(value: HEAD)),
+            bug_state: SnapshotDigestV1(value: "open"),
+            required_backends: [BackendIdV1(value: "")]
+        )
+        expect(bug_closure_argument_problem_v1(empty_be)).to_contain("--required-backend")
+
+        val parsed = bug_closure_parse_required_backends([
+            "--required-backend=interpreter,llvm",
+            "--required-backends=cranelift"
+        ])
+        expect(parsed.len()).to_equal(3)
+        expect(parsed[0].value).to_equal("interpreter")
+        expect(parsed[1].value).to_equal("llvm")
+        expect(parsed[2].value).to_equal("cranelift")

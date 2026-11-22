@@ -8,8 +8,10 @@ use nogc_sync_mut.database.bug.{load_bug_database, BugTokenReading, BugTokenCoun
     bug_token_category_to_string}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.log.{error}
-use app.bug_resolve.closure_cli.{BugDbPathV1, BugClosureRequestV1, bug_closure_state_of_v1, bug_closure_cli_evaluate, bug_closure_argument_problem_v1, bug_closure_render_v1}
-use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ClosureRationaleV1, BugClosureDispositionV1, BugClosureKindV1, BugClosureVerdictV1, bug_closure_disposition_parse_v1, bug_closure_disposition_text_v1, bug_closure_disposition_kind_v1}
+use app.bug_resolve.closure_cli.{BugDbPathV1, BugClosureRequestV1, bug_closure_state_of_v1, bug_closure_cli_evaluate, bug_closure_argument_problem_v1, bug_closure_render_v1, bug_closure_parse_required_backends}
+use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ClosureRationaleV1, BugClosureDispositionV1, BugClosureKindV1, BugClosureVerdictV1, bug_closure_disposition_parse_v1, bug_closure_disposition_text_v1, bug_closure_disposition_kind_v1, bug_closure_run_evidence_text_v1}
+use app.test_runner_new.test_query_cli.{TestDbFilePath}
+use std.common.traceability.test_query.{TestRunId}
 use app.bug.workaround_autoretire.{AutoRetireVerdictV1}
 use app.bug.workaround_autoretire_cli.{workaround_auto_retire_print_v1}
 
@@ -35,6 +37,10 @@ fn print_help():
     print "  --disposition=<d>                     fixed (default), closed, triage, duplicate, invalid, wontfix, deferred; non-fix needs --rationale and is not a verified fix"
     print "  --rationale=<text>                    Required for a non-fix disposition"
     print "  --source-head=<rev>                   Source snapshot the closure is pinned to (default: git HEAD)"
+    print "  --pre-fix-run=<run_id>                TestDB run id proving pre-fix reproducer failure"
+    print "  --post-fix-run=<run_id>               TestDB run id proving post-fix pass at --source-head"
+    print "  --required-backend=<name>             Required backend (repeatable or comma-separated)"
+    print "  --test-db=<path>                      TestDB path (default: doc/08_tracking/test/test_db.sdn)"
     print "  --auto-retire                         After resolving, list live workaround sites (path:line); exits 1 while any remain (default off, edits nothing)"
     print "  --json         Output as JSON"
     for line in log_options_help():
@@ -205,11 +211,20 @@ fn main() -> i64:
     val verified_fix = bug_closure_disposition_kind_v1(disposition) == BugClosureKindV1.VerifiedFix
     val source_head_raw = parse_flag(args, "--source-head=")
     val source_head: SnapshotDigestV1? = if source_head_raw == "": None else: Some(SnapshotDigestV1(value: source_head_raw))
+    val pre_fix_run_raw = parse_flag(args, "--pre-fix-run=")
+    val post_fix_run_raw = parse_flag(args, "--post-fix-run=")
+    val test_db_raw = parse_flag(args, "--test-db=")
+    val pre_fix_run: TestRunId? = if pre_fix_run_raw == "": None else: Some(TestRunId(value: pre_fix_run_raw))
+    val post_fix_run: TestRunId? = if post_fix_run_raw == "": None else: Some(TestRunId(value: post_fix_run_raw))
+    val test_db_path: TestDbFilePath? = if test_db_raw == "": None else: Some(TestDbFilePath(value: test_db_raw))
+    val required_backends = bug_closure_parse_required_backends(args)
     val reproducer_case: TestCaseIdV1? = if reproducer == "": None else: Some(TestCaseIdV1(value: reproducer))
     val prevention_case: TestCaseIdV1? = if prevention == "": None else: Some(TestCaseIdV1(value: prevention))
     val request = BugClosureRequestV1(bug: BugIdV1(value: id), disposition: disposition,
         reproducer: reproducer_case, prevention: prevention_case,
-        rationale: ClosureRationaleV1(value: rationale), source_head: source_head, bug_state: bug_state)
+        rationale: ClosureRationaleV1(value: rationale), source_head: source_head, bug_state: bug_state,
+        pre_fix_run: pre_fix_run, post_fix_run: post_fix_run,
+        required_backends: required_backends, test_db_path: test_db_path)
     val argument_problem = bug_closure_argument_problem_v1(request)
     if argument_problem != "":
         print "Error: close rejected: {argument_problem}"
@@ -226,7 +241,12 @@ fn main() -> i64:
             print line
         return 1
     if verified_fix:
-        db.add_investigation_log(id, "close_evidence reproducer={reproducer} prevention={prevention} run_evidence=not_observed head={evaluation.receipt.head.value}")
+        var evidence_log = "close_evidence reproducer={reproducer} prevention={prevention} run_evidence={bug_closure_run_evidence_text_v1(evaluation.receipt.run_evidence)} head={evaluation.receipt.head.value}"
+        if pre_fix_run_raw != "":
+            evidence_log = evidence_log + " pre_fix_run={pre_fix_run_raw}"
+        if post_fix_run_raw != "":
+            evidence_log = evidence_log + " post_fix_run={post_fix_run_raw}"
+        db.add_investigation_log(id, evidence_log)
     else:
         db.add_investigation_log(id, "close_disposition disposition={bug_closure_disposition_text_v1(disposition)} kind=non_fix_disposition not_a_verified_fix rationale={rationale}")
 

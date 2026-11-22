@@ -38,3 +38,15 @@ Remaining (not done):
 - `src/app/cli/check_dbs.spl` (landed in 3bef089a210) calls `workaround_revert_candidates(index, db)` with two
   arguments while `src/app/bug/workaround_revert.spl` declares a third `today` parameter; not touched here.
 - `BugStatus` is unchanged; requirement ids are not passed to the evaluator (`requirements: []`).
+
+[Update 2026-11-23 `work/primitive-fix-20261122`]
+- Run evidence CLI wiring (Items 2b/2c) implemented in `src/app/bug/closure_testdb.spl`,
+  `src/app/bug_resolve/closure_cli.spl`, `src/app/bug_resolve/main.spl`, and
+  `src/app/bug_closure_check/main.spl` (`5dd48e69674`): closure requests can now supply
+  pre-fix and post-fix TestDB run IDs carrying `run_source_revision`, mapping observed runs into
+  `BugTestRunV1` for `bug_closure_evaluate_v1`. Verified in `bug_closure_testdb_spec` (5/5),
+  `bug_closure_wiring_spec` (8/8), `bug_closure_gate_spec` (11/11),
+  `bug_add_resolve_log_modes_spec` (12/12), and `bug_resolve_cli_spec` (4/4).
+- All other remaining items above (feature flag, `BugStatus` variants, `bug show --workarounds`,
+  `retire-workaround` wiring, bypass detection, BUG-007..012, `check_dbs.spl` arity,
+  `requirements: []`) and the Item 1 exit-2 trace gate (`SIMPLE_TRACE_CASE_EVENTS=1`) remain open/gated.

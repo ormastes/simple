@@ -6,21 +6,29 @@
 # bug database, the workaround index, git HEAD and spec-file existence. It never
 # writes; the caller transitions the bug only on an Allowed receipt.
 #
-# Run evidence: the CLI has no TestDB run source yet, so the policy is
-# NotObserved and the receipt says so. Reproducer/prevention are checked for
-# existence and distinctness, never claimed as observed RED/GREEN.
+# Run evidence: when --pre-fix-run / --post-fix-run / --required-backend are
+# supplied, run evidence is Observed from the TestDB (read-only) via
+# bug_closure_load_testdb_runs_from_path_v1. When none are supplied, the policy
+# stays NotObserved and the receipt says so. Reproducer/prevention are checked
+# for existence and distinctness, never claimed as observed RED/GREEN without
+# TestDB runs.
 
 use app.bug.closure_gate.{BugIdV1, SnapshotDigestV1, TestCaseIdV1, ReviewerIdV1, ClosureRationaleV1,
     BackendIdV1, BugClosureDispositionV1, BugClosureCandidateV1, BugClosureKindV1, bug_closure_disposition_kind_v1, BugClosurePolicyV1, BugRunEvidenceV1,
-    BugTestDbViewV1, BugClosureReceiptV1, BugClosureVerdictV1,
+    BugTestDbViewV1, BugTestRunV1, BugClosureReceiptV1, BugClosureVerdictV1,
     bug_closure_evaluate_v1, bug_closure_block_code_v1, bug_closure_disposition_text_v1,
     bug_closure_kind_text_v1, bug_closure_run_evidence_text_v1}
+use app.bug.closure_testdb.{bug_closure_load_testdb_runs_from_path_v1}
 use app.bug_resolve.close_gate.{bug_close_gate}
 use app.bug.workaround_index.{WorkaroundIndex, empty_workaround_index}
 use app.bug.workaround_store.{load_workarounds, workaround_git}
+use app.test_runner_new.test_query_cli.{TestDbFilePath}
+use std.common.traceability.test_query.{TestRunId}
 use nogc_sync_mut.database.bug.{Bug, BugStatus, load_bug_database}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.env_ops.{cwd}
+
+val DEFAULT_TEST_DB_PATH = "doc/08_tracking/test/test_db.sdn"
 
 struct BugDbPathV1:
     value: text
@@ -35,6 +43,10 @@ struct BugClosureRequestV1:
     source_head: SnapshotDigestV1?
     # The bug-record snapshot the caller started from (see bug_closure_bug_state_v1).
     bug_state: SnapshotDigestV1
+    pre_fix_run: TestRunId? = None
+    post_fix_run: TestRunId? = None
+    required_backends: [BackendIdV1] = []
+    test_db_path: TestDbFilePath? = None
 
 struct BugClosureEvaluationV1:
     receipt: BugClosureReceiptV1
@@ -75,31 +87,62 @@ fn _source_head(request: BugClosureRequestV1) -> Result<SnapshotDigestV1, text>:
         return Err("cannot determine source head; pass --source-head=<rev>")
     Ok(SnapshotDigestV1(value: head))
 
+fn _case_file_path(case_id: text) -> text:
+    val sep = case_id.index_of("::") ?? -1
+    if sep > 0 and sep + 2 < case_id.byte_len():
+        return case_id.substring(0, sep)
+    case_id
+
 fn _existing_cases(request: BugClosureRequestV1) -> [TestCaseIdV1]:
     var out: [TestCaseIdV1] = []
     match request.reproducer:
         case Some(case_id):
-            if file_exists(case_id.value): out.push(case_id)
+            if file_exists(_case_file_path(case_id.value)): out.push(case_id)
         case None: pass
     match request.prevention:
         case Some(case_id):
-            if file_exists(case_id.value): out.push(case_id)
+            if file_exists(_case_file_path(case_id.value)): out.push(case_id)
         case None: pass
+    out
+
+pub fn bug_closure_parse_required_backends(args: [text]) -> [BackendIdV1]:
+    """Parse repeatable or comma-separated --required-backend / --required-backends flags."""
+    var out: [BackendIdV1] = []
+    for arg in args:
+        for prefix in ["--required-backend=", "--required-backends="]:
+            if arg.starts_with(prefix):
+                val raw = arg[prefix.len():]
+                if raw.trim() == "":
+                    out.push(BackendIdV1(value: ""))
+                else:
+                    for part in raw.split(","):
+                        out.push(BackendIdV1(value: part.trim()))
     out
 
 pub fn bug_closure_argument_problem_v1(request: BugClosureRequestV1) -> text:
     """Empty when the arguments are well formed: CU-015 spec checks for a fix, a rationale otherwise."""
+    match request.pre_fix_run:
+        case Some(pre_run):
+            match request.post_fix_run:
+                case Some(post_run):
+                    if pre_run.value == post_run.value:
+                        return "--pre-fix-run and --post-fix-run must name distinct runs"
+                case None: pass
+        case None: pass
+    for backend in request.required_backends:
+        if backend.value.trim() == "":
+            return "--required-backend must be non-empty"
     if bug_closure_disposition_kind_v1(request.disposition) == BugClosureKindV1.NonFixDisposition:
         if request.rationale.value == "":
             return "a non-fix disposition needs --rationale=<text>; it is not recorded as a verified fix"
         return ""
     var reproducer = ""
     match request.reproducer:
-        case Some(case_id): reproducer = case_id.value
+        case Some(case_id): reproducer = _case_file_path(case_id.value)
         case None: pass
     var prevention = ""
     match request.prevention:
-        case Some(case_id): prevention = case_id.value
+        case Some(case_id): prevention = _case_file_path(case_id.value)
         case None: pass
     bug_close_gate(reproducer, prevention,
         reproducer != "" and file_exists(reproducer), prevention != "" and file_exists(prevention))
@@ -114,13 +157,25 @@ pub fn bug_closure_cli_evaluate(request: BugClosureRequestV1, db_path: BugDbPath
         case Err(reason):
             notes.push("workaround index unavailable: {reason}")
             empty_workaround_index(head.value)
+    val observed_requested = request.pre_fix_run.? or request.post_fix_run.? or request.required_backends.len() > 0
+    var run_evidence = BugRunEvidenceV1.NotObserved
+    var runs: [BugTestRunV1] = []
+    if observed_requested:
+        val test_db_path = request.test_db_path ?? TestDbFilePath(value: DEFAULT_TEST_DB_PATH)
+        val loaded = match bug_closure_load_testdb_runs_from_path_v1(test_db_path, request.pre_fix_run, request.post_fix_run):
+            case Ok(found): found
+            case Err(err): return Err("test database error ({err.detail})")
+        run_evidence = BugRunEvidenceV1.Observed
+        runs = loaded.runs
+        for note in loaded.notes:
+            notes.push(note)
     val candidate = BugClosureCandidateV1(bug_id: request.bug, disposition: request.disposition,
         author: ReviewerIdV1(value: "bug-closure-cli"), head: head, bug_state: request.bug_state,
         rationale: request.rationale, reproducer: request.reproducer, prevention: request.prevention,
         prevention_exception: None, requirements: [])
-    val policy = BugClosurePolicyV1(required_backends: [], run_evidence: BugRunEvidenceV1.NotObserved)
+    val policy = BugClosurePolicyV1(required_backends: request.required_backends, run_evidence: run_evidence)
     val view = BugTestDbViewV1(head: head, bug_state: fresh_state, known_bugs: [request.bug],
-        known_cases: _existing_cases(request), known_requirements: [], runs: [])
+        known_cases: _existing_cases(request), known_requirements: [], runs: runs)
     val receipt = bug_closure_evaluate_v1(candidate, request.bug, policy, view, index)
     Ok(BugClosureEvaluationV1(receipt: receipt, notes: notes))
 

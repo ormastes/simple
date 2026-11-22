@@ -15,7 +15,7 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.io_runtime.{getpid}
 use std.convert.{try_parse_int}
-use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
+use std.common.perf.execution_metrics.{ResourceUsage, MetricDurationMs, MetricByteCount, MetricProcessCount, MetricSignalNumber, MetricExitCode, ResourceEvidenceQuality, TerminationCause, TerminationEvidence, ResourceBudget, BudgetDecision, evaluate_resource_budget, classify_termination}
 
 @unsafe(reason: "runtime-owned bounded child tree with versioned lifecycle and resource receipts", capabilities: [ffi])
 extern fn rt_process_run_owned_observed_bounded_value(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, [i64])?
@@ -150,13 +150,13 @@ pub fn end_current_execution_resource_scope(lease: CurrentExecutionResourceScope
         output_limit_event: false, externally_terminated: false,
         signal: 0, exit_code: exit_code)
     ResourceUsage(
-        wall_ms: wall_ms, user_cpu_ms: observed.user_cpu_micros / 1000,
-        system_cpu_ms: observed.system_cpu_micros / 1000,
-        peak_tree_charge_bytes: observed.memory_peak_bytes,
-        peak_direct_child_rss_bytes: 0, heap_live_end_bytes: 0, heap_peak_bytes: 0,
-        io_read_bytes: observed.io_read_bytes, io_write_bytes: observed.io_write_bytes, pids_peak: observed.pids_peak,
+        wall_ms: MetricDurationMs(value: wall_ms), user_cpu_ms: MetricDurationMs(value: observed.user_cpu_micros / 1000),
+        system_cpu_ms: MetricDurationMs(value: observed.system_cpu_micros / 1000),
+        peak_tree_charge_bytes: MetricByteCount(value: observed.memory_peak_bytes),
+        peak_direct_child_rss_bytes: MetricByteCount(value: 0), heap_live_end_bytes: MetricByteCount(value: 0), heap_peak_bytes: MetricByteCount(value: 0),
+        io_read_bytes: MetricByteCount(value: observed.io_read_bytes), io_write_bytes: MetricByteCount(value: observed.io_write_bytes), pids_peak: MetricProcessCount(value: observed.pids_peak),
         evidence_quality: ResourceEvidenceQuality.ExactTree,
-        termination: classify_termination(evidence), signal: 0, exit_code: exit_code)
+        termination: classify_termination(evidence), signal: MetricSignalNumber(value: 0), exit_code: MetricExitCode(value: exit_code))
 
 fn _run_in_cgroup_v2(scope: ExecutionResourceScope, scope_path: text, cmd: text, args: [text]) -> ObservedProcessResult:
     var prefix = ""
@@ -169,37 +169,37 @@ fn _run_in_cgroup_v2(scope: ExecutionResourceScope, scope_path: text, cmd: text,
         command = command + " " + _shell_quote(arg)
     val process = process_run_observed_bounded("/bin/sh", ["-c", command], scope.timeout_ms, scope.max_output_bytes)
     val cgroup = read_cgroup_v2_observation(scope_path)
-    val usage = if cgroup.available and process.usage.exit_code != 125:
+    val usage = if cgroup.available and process.usage.exit_code.value != 125:
         val evidence = TerminationEvidence(
             infrastructure_failed: process.runtime_error != 0,
             wall_watchdog_fired: process.usage.termination == TerminationCause.WallTimeout,
             no_progress_watchdog_fired: false,
-            cpu_limit_event: scope.budget.max_cpu_ms > 0 and process.usage.signal == 24,
+            cpu_limit_event: scope.budget.max_cpu_ms > 0 and process.usage.signal.value == 24,
             memory_high_event: cgroup.events.high > 0,
             memory_max_event: cgroup.events.max > 0 or cgroup.events.oom > 0 or cgroup.events.oom_kill > 0,
             process_limit_event: cgroup.events.pids_max > 0,
             output_limit_event: false,
             externally_terminated: false,
-            signal: process.usage.signal,
-            exit_code: process.usage.exit_code)
+            signal: process.usage.signal.value,
+            exit_code: process.usage.exit_code.value)
         ResourceUsage(
             wall_ms: process.usage.wall_ms,
-            user_cpu_ms: cgroup.user_cpu_micros / 1000,
-            system_cpu_ms: cgroup.system_cpu_micros / 1000,
-            peak_tree_charge_bytes: cgroup.memory_peak_bytes,
+            user_cpu_ms: MetricDurationMs(value: cgroup.user_cpu_micros / 1000),
+            system_cpu_ms: MetricDurationMs(value: cgroup.system_cpu_micros / 1000),
+            peak_tree_charge_bytes: MetricByteCount(value: cgroup.memory_peak_bytes),
             peak_direct_child_rss_bytes: process.usage.peak_direct_child_rss_bytes,
             heap_live_end_bytes: process.usage.heap_live_end_bytes,
             heap_peak_bytes: process.usage.heap_peak_bytes,
-            io_read_bytes: cgroup.io_read_bytes,
-            io_write_bytes: cgroup.io_write_bytes,
-            pids_peak: if cgroup.pids_peak > 0: cgroup.pids_peak else: process.usage.pids_peak,
+            io_read_bytes: MetricByteCount(value: cgroup.io_read_bytes),
+            io_write_bytes: MetricByteCount(value: cgroup.io_write_bytes),
+            pids_peak: MetricProcessCount(value: if cgroup.pids_peak > 0: cgroup.pids_peak else: process.usage.pids_peak.value),
             evidence_quality: ResourceEvidenceQuality.ExactTree,
             termination: classify_termination(evidence),
             signal: process.usage.signal,
             exit_code: process.usage.exit_code)
     else:
         process.usage
-    ObservedProcessResult(stdout: process.stdout, stderr: process.stderr, usage: usage, stdout_truncated: process.stdout_truncated, stderr_truncated: process.stderr_truncated, runtime_error: if process.usage.exit_code == 125: 125 else: process.runtime_error)
+    ObservedProcessResult(stdout: process.stdout, stderr: process.stderr, usage: usage, stdout_truncated: process.stdout_truncated, stderr_truncated: process.stderr_truncated, runtime_error: if process.usage.exit_code.value == 125: 125 else: process.runtime_error)
 
 # `ulimit -u` (RLIMIT_NPROC) is not POSIX: dash -- /bin/sh on Debian/Ubuntu -- rejects
 # it with "Illegal option -u", so a pid cap must run under a shell that implements it.
@@ -360,27 +360,27 @@ fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text])
     val oom_kills = if memscope.len() == 3: memscope[0].to_int() else: 0
     val scope_peak = if memscope.len() == 3: memscope[1].to_int() else: 0
     val pids_max_events = if memscope.len() == 3: memscope[2].to_int() else: 0
-    val termination = if process.usage.exit_code == 125:
+    val termination = if process.usage.exit_code.value == 125:
         TerminationCause.InfrastructureFailure
     elif oom_kills > 0:
         TerminationCause.MemoryMax
     elif pids_max_events > 0:
         TerminationCause.ProcessLimit
-    elif scope.budget.max_cpu_ms > 0 and process.usage.signal == 24:
+    elif scope.budget.max_cpu_ms > 0 and process.usage.signal.value == 24:
         TerminationCause.CpuLimit
     else:
         process.usage.termination
     val usage = ResourceUsage(
         wall_ms: process.usage.wall_ms, user_cpu_ms: process.usage.user_cpu_ms,
         system_cpu_ms: process.usage.system_cpu_ms,
-        peak_tree_charge_bytes: if scope_peak > 0: scope_peak else: process.usage.peak_tree_charge_bytes,
+        peak_tree_charge_bytes: MetricByteCount(value: if scope_peak > 0: scope_peak else: process.usage.peak_tree_charge_bytes.value),
         peak_direct_child_rss_bytes: process.usage.peak_direct_child_rss_bytes,
         heap_live_end_bytes: process.usage.heap_live_end_bytes,
         heap_peak_bytes: process.usage.heap_peak_bytes,
         io_read_bytes: process.usage.io_read_bytes, io_write_bytes: process.usage.io_write_bytes,
         pids_peak: process.usage.pids_peak, evidence_quality: process.usage.evidence_quality,
         termination: termination, signal: process.usage.signal, exit_code: process.usage.exit_code)
-    ObservedProcessResult(stdout: process.stdout, stderr: process.stderr, usage: usage, stdout_truncated: process.stdout_truncated, stderr_truncated: process.stderr_truncated, runtime_error: if process.usage.exit_code == 125: 125 else: process.runtime_error)
+    ObservedProcessResult(stdout: process.stdout, stderr: process.stderr, usage: usage, stdout_truncated: process.stdout_truncated, stderr_truncated: process.stderr_truncated, runtime_error: if process.usage.exit_code.value == 125: 125 else: process.runtime_error)
 
 struct CgroupV2Events:
     low: i64
@@ -488,8 +488,8 @@ pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, a
     val main_code = _property_value(shown.stdout, "ExecMainCode").to_int()
     # Non-zero fallback: `.to_int()` fails open to 0, which would mask a real
     # exit code here, so parse explicitly and keep the caller's default.
-    val main_status = try_parse_int(_property_value(shown.stdout, "ExecMainStatus")) ?? executed.usage.exit_code
-    val metrics = resource_scope_systemd_metrics_v1(shown.stdout, shown.usage.exit_code,
+    val main_status = try_parse_int(_property_value(shown.stdout, "ExecMainStatus")) ?? executed.usage.exit_code.value
+    val metrics = resource_scope_systemd_metrics_v1(shown.stdout, shown.usage.exit_code.value,
         shown.runtime_error, shown.stdout_truncated, shown.stderr_truncated)
     # Zero is retained as the compatible absence value, distinguished by
     # Unavailable. A measured zero is accepted only through the strict parser.
@@ -501,7 +501,7 @@ pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, a
     val _cleanup = process_run_observed_bounded("/usr/bin/systemctl", ["--user", "reset-failed", unit + ".service"], 5_000, 4_096)
     val ended = time_now_unix_micros()
     val evidence = TerminationEvidence(
-        infrastructure_failed: result_name == "" or shown.usage.exit_code != 0,
+        infrastructure_failed: result_name == "" or shown.usage.exit_code.value != 0,
         wall_watchdog_fired: result_name == "timeout" or result_name == "watchdog",
         no_progress_watchdog_fired: false,
         # systemd's generic `resources` result does not identify which limit
@@ -514,14 +514,14 @@ pub fn run_in_systemd_resource_scope(scope: ExecutionResourceScope, cmd: text, a
         signal: if external_signal > 0: external_signal elif main_code == 2: main_status else: 0,
         exit_code: main_status)
     val usage = ResourceUsage(
-        wall_ms: if ended >= started: (ended - started) / 1000 else: 0,
-        user_cpu_ms: cpu_ns / 1_000_000, system_cpu_ms: 0,
-        peak_tree_charge_bytes: memory_peak, peak_direct_child_rss_bytes: 0,
-        heap_live_end_bytes: 0, heap_peak_bytes: 0,
-        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
+        wall_ms: MetricDurationMs(value: if ended >= started: (ended - started) / 1000 else: 0),
+        user_cpu_ms: MetricDurationMs(value: cpu_ns / 1_000_000), system_cpu_ms: MetricDurationMs(value: 0),
+        peak_tree_charge_bytes: MetricByteCount(value: memory_peak), peak_direct_child_rss_bytes: MetricByteCount(value: 0),
+        heap_live_end_bytes: MetricByteCount(value: 0), heap_peak_bytes: MetricByteCount(value: 0),
+        io_read_bytes: MetricByteCount(value: 0), io_write_bytes: MetricByteCount(value: 0), pids_peak: MetricProcessCount(value: 0),
         evidence_quality: if metrics.is_some(): ResourceEvidenceQuality.ExactTree else: ResourceEvidenceQuality.Unavailable,
-        termination: classify_termination(evidence), signal: evidence.signal,
-        exit_code: main_status)
+        termination: classify_termination(evidence), signal: MetricSignalNumber(value: evidence.signal),
+        exit_code: MetricExitCode(value: main_status))
     val process = ObservedProcessResult(
         stdout: executed.stdout, stderr: _without_line_prefix(_without_line_prefix(executed.stderr, pids_marker), external_marker), usage: usage,
         stdout_truncated: executed.stdout_truncated,
@@ -613,20 +613,20 @@ fn read_cgroup_v2_observation(scope_path: text) -> CgroupV2Observation:
 
 fn _unavailable_usage(wall_ms: i64, exit_code: i64) -> ResourceUsage:
     ResourceUsage(
-        wall_ms: wall_ms,
-        user_cpu_ms: 0,
-        system_cpu_ms: 0,
-        peak_tree_charge_bytes: 0,
-        peak_direct_child_rss_bytes: 0,
-        heap_live_end_bytes: 0,
-        heap_peak_bytes: 0,
-        io_read_bytes: 0,
-        io_write_bytes: 0,
-        pids_peak: 0,
+        wall_ms: MetricDurationMs(value: wall_ms),
+        user_cpu_ms: MetricDurationMs(value: 0),
+        system_cpu_ms: MetricDurationMs(value: 0),
+        peak_tree_charge_bytes: MetricByteCount(value: 0),
+        peak_direct_child_rss_bytes: MetricByteCount(value: 0),
+        heap_live_end_bytes: MetricByteCount(value: 0),
+        heap_peak_bytes: MetricByteCount(value: 0),
+        io_read_bytes: MetricByteCount(value: 0),
+        io_write_bytes: MetricByteCount(value: 0),
+        pids_peak: MetricProcessCount(value: 0),
         evidence_quality: ResourceEvidenceQuality.Unavailable,
         termination: TerminationCause.InfrastructureFailure,
-        signal: 0,
-        exit_code: exit_code
+        signal: MetricSignalNumber(value: 0),
+        exit_code: MetricExitCode(value: exit_code)
     )
 
 fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64, reported_error: i64) -> ObservedProcessResult:
@@ -637,13 +637,13 @@ fn _legacy_process_fallback(cmd: text, args: [text], timeout_ms: i64, max_output
     val legacy_timed_out = process_bounded_timed_out(legacy_exit, legacy_stderr)
     val legacy_signal = process_bounded_kill_signal(legacy_exit)
     val legacy_usage = ResourceUsage(
-        wall_ms: legacy_wall_ms, user_cpu_ms: 0, system_cpu_ms: 0,
-        peak_tree_charge_bytes: 0, peak_direct_child_rss_bytes: 0,
-        heap_live_end_bytes: 0, heap_peak_bytes: 0,
-        io_read_bytes: 0, io_write_bytes: 0, pids_peak: 0,
+        wall_ms: MetricDurationMs(value: legacy_wall_ms), user_cpu_ms: MetricDurationMs(value: 0), system_cpu_ms: MetricDurationMs(value: 0),
+        peak_tree_charge_bytes: MetricByteCount(value: 0), peak_direct_child_rss_bytes: MetricByteCount(value: 0),
+        heap_live_end_bytes: MetricByteCount(value: 0), heap_peak_bytes: MetricByteCount(value: 0),
+        io_read_bytes: MetricByteCount(value: 0), io_write_bytes: MetricByteCount(value: 0), pids_peak: MetricProcessCount(value: 0),
         evidence_quality: ResourceEvidenceQuality.Unavailable,
         termination: if legacy_timed_out: TerminationCause.WallTimeout elif legacy_signal > 0: TerminationCause.Signal elif legacy_exit == -1: TerminationCause.InfrastructureFailure else: TerminationCause.Exited,
-        signal: legacy_signal, exit_code: legacy_exit)
+        signal: MetricSignalNumber(value: legacy_signal), exit_code: MetricExitCode(value: legacy_exit))
     # `process_run_bounded` (rt_process_run_bounded) has no receipt flag for
     # "hit the cap" — it returns only (stdout, stderr, exit_code). Verified
     # directly against all three parallel runtime implementations that this
@@ -768,20 +768,20 @@ fn process_run_observed_bounded(cmd: text, args: [text], timeout_ms: i64, max_ou
         stdout: stdout,
         stderr: stderr,
         usage: ResourceUsage(
-            wall_ms: wall_ms,
-            user_cpu_ms: fields[21],
-            system_cpu_ms: fields[22],
-            peak_tree_charge_bytes: fields[24],
-            peak_direct_child_rss_bytes: fields[23],
-            heap_live_end_bytes: 0,
-            heap_peak_bytes: 0,
-            io_read_bytes: fields[25],
-            io_write_bytes: fields[26],
-            pids_peak: fields[27],
+            wall_ms: MetricDurationMs(value: wall_ms),
+            user_cpu_ms: MetricDurationMs(value: fields[21]),
+            system_cpu_ms: MetricDurationMs(value: fields[22]),
+            peak_tree_charge_bytes: MetricByteCount(value: fields[24]),
+            peak_direct_child_rss_bytes: MetricByteCount(value: fields[23]),
+            heap_live_end_bytes: MetricByteCount(value: 0),
+            heap_peak_bytes: MetricByteCount(value: 0),
+            io_read_bytes: MetricByteCount(value: fields[25]),
+            io_write_bytes: MetricByteCount(value: fields[26]),
+            pids_peak: MetricProcessCount(value: fields[27]),
             evidence_quality: quality,
             termination: termination,
-            signal: termination_signal,
-            exit_code: exit_code
+            signal: MetricSignalNumber(value: termination_signal),
+            exit_code: MetricExitCode(value: exit_code)
         ),
         stdout_truncated: fields[16] != 0,
         stderr_truncated: fields[17] != 0,
@@ -877,7 +877,7 @@ fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
     match completed:
         case Ok(receipt):
             result.completion = Some(receipt)
-            result.usage.exit_code = receipt.exit_code
+            result.usage.exit_code = MetricExitCode(value: receipt.exit_code)
             result.usage.termination = if receipt.timed_out: TerminationCause.WallTimeout elif receipt.cancelled: TerminationCause.InfrastructureFailure else: TerminationCause.Exited
             result.runtime_error = if receipt.cancelled and not receipt.timed_out: -1 else: 0
         case Err(reason): result.stderr = result.stderr + "\n" + reason

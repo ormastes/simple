@@ -86,10 +86,51 @@ and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enu
   (`src/app/test_runner_new/test_runner_main.spl:1578-1583`, a deliberate fail-closed gate: frozen
   source bytes and effective options are not yet bound to preparation). Facts are therefore recorded
   only via the buildrunner path (`remote_test_runner_v1.spl`) or direct DB calls, not by a local
-  `simple test`; I verified emission by calling `emit_trace_case_event` directly. Unblock: bind the
-  frozen source and worker options to the preparation receipt and lift the gate. The failure
+  `simple test`; I verified emission by calling `emit_trace_case_event` directly. The failure
   summary is clipped to 240 bytes on a character boundary.
+  **Investigated 2026-11-22: the gate stays. Lifting it needs owner decisions, not just wiring.**
+  Most pieces exist but are not connected to `simple test`: the option capture
+  (`src/app/test_runner_new/trace_execution_config.spl`, `capture_trace_execution_configuration`),
+  the SSpec planner with per-file source sha256 (`src/app/traceability/extract/sspec_run_request.spl`,
+  `build_sspec_trace_request_single_owner`), the preparation transport
+  (`src/app/test_runner_new/trace_preparation.spl`, `prepare_trace_sspec_run_via_db_lane`, whose header
+  says "not yet connected to test dispatch"), and the reconciliation of events against the frozen plan
+  (`update_test_database_from_record` with `trace_run_id`, reached through `test_db_lane_main.spl
+  --trace-run=`). Emitted names (`spec.spl` `_execute_it`: `suite > context > leaf`) already match the
+  planner's selector. The blocker: the capture can never be admitted. It always produces
+  `timeout_binding: "per_file_unresolved"`, `cache_policy: "unresolved"` and at least six
+  `unresolved_fields` (effective per-file timeout, slow-file adjustment, `@timeout` header directive,
+  worker environment, feature-gate disposition, cache policy). `validate_trace_execution_configuration`
+  (`src/lib/common/traceability/execution_config.spl:75`) rejects all three, and its binding wrapper
+  `validate_trace_request_configuration` (`execution_config_binding.spl`) has no caller in `src/`. So no
+  local run can produce an admissible `configuration_id` until the runner's execution semantics change.
+  Owner decisions needed:
+  (1) timeout: does one fixed trace timeout override `@timeout` directives and the slow-file
+  adjustment, or does the schema bind a per-file timeout list?
+  (2) cache: force the result cache off in trace mode (the validator requires `disabled`)?
+  (3) worker environment: which env vars are the bound set (precedent: the allowlist at
+  `remote_test_runner_v1.spl:122-130`)?
+  (4) feature-gated specs: refuse in trace mode, or bind the disposition?
+  (5) frozen bytes: the worker re-reads the spec from disk by path (`test_runner_single.spl`
+  `spec_timeout_secs_directive`, compile). Should it execute an owned snapshot (needs path remapping
+  and breaks relative imports), or re-hash before and after (detects change only and leaves a TOCTOU
+  window)? Either way the import closure stays unfrozen.
+  (6) specs with interpolated case names: the planner rejects them. Should trace mode refuse those
+  specs outright?
+  Steps once decided:
+  (a) resolve those fields in `trace_execution_config.spl` under a trace-mode policy so the validator
+  passes, and have runner dispatch enforce the captured config (timeout, cache off, worker env);
+  (b) add a planning child mode, because the planner carries the compiler frontend and must stay out
+  of the runner closure. It reads and hashes the selected files and builds the context
+  (`configuration_id` from the capture, `binary_id` from the executable digest), then calls
+  `prepare_trace_sspec_run_via_db_lane`;
+  (c) apply the frozen-bytes choice from (5);
+  (d) make `record_test_run_via_db_lane` pass `--trace-run=<run_id>`;
+  (e) only then replace the unconditional gate with fail-closed checks on (a) through (d).
+  Lifting the gate without (d) would record events against an unprepared fresh run. Today the gate is
+  the only thing that prevents that.
 - Bug-closure run evidence (plan 4.2/4.3), still blocked on the TestDB side. `bug_closure_evaluate_v1` takes `BugTestRunV1` rows (`case_id`, `backend`, `phase` PreFix/PostFix, `outcome`, `source` head) and the CLI (`src/app/bug_resolve/closure_cli.spl`) passes `runs: []` with `BugRunEvidenceV1.NotObserved`. `TestQueryRow` now supplies case, backend, outcome and the executable and spec digests, but still has no source snapshot (the git head a run was built from; `RunnerTestDb` records none, so "source-matched" cannot be judged) and no pre-fix/post-fix phase (a run is not tagged with whether it preceded the fix). A consumer that mapped rows to `BugTestRunV1` would have to invent both, so none was written. Unblock: record the source head on the run row at `start_run`, and let a closure request name the pre-fix and post-fix run ids.
+  - [Update 2026-11-23 `work/primitive-fix-20261122`] Items 2a/2b/2c completed (`da69b12f085`, `5dd48e69674`): `TestSourceRevision` (`test_source_revision_of`, `run_source_revision`) is recorded at `start_run` with sync/async `test_extended` parity, and `src/app/bug/closure_testdb.spl` + `src/app/bug_resolve/closure_cli.spl` map pre-fix and post-fix run IDs into `BugTestRunV1` for `bug_closure_evaluate_v1` (`bug_closure_testdb_spec` 5/5, `bug_closure_wiring_spec` 8/8, `bug_closure_gate_spec` 11/11). The `SIMPLE_TRACE_CASE_EVENTS=1` exit-2 gate in `src/app/test_runner_new/test_runner_main.spl` (Item 1) stays gated pending the six owner decisions.
 - Perf (scoped query), closed 2026-11-18: `TestDatabaseExtended.get_trace_case_events_by_path(run_id)` decodes the table once per run and groups by path; `query_scoped_attempts` now decodes once per run instead of once per (run, path), and `get_trace_case_events` reuses it. Equality with the per-path read is pinned in `test_query_cli_spec.spl`.
 - `expired` has no `TestQueryStatus` variant; it parses as `Unknown` and is
   never PASS (TESTDB-008), which is safe but not a distinct typed outcome.
@@ -200,3 +241,17 @@ observation because `update_test_result` refreshed timing stats (`update_timing`
 recording the run (`add_timing_run`): the stats lagged one observation and a first run never
 created its `timing` row. The two steps are swapped (as `record_timing_observation` already
 did) and `test_extended_primitive_types_spec` pins `Applied` (old order: 5/6, fixed: 6/6).
+
+[Update 2026-11-23 `work/primitive-fix-20261122`]
+- Item 3 (`553dcae1e53`): replaced bare primitives in `ResourceUsage`, `TestDbFileRow`,
+  `TestDbRunRecord`, `execution_metrics`, and the `test_extended` record structs with semantic
+  wrappers while preserving `simple-test-db-record v1` and `execution-metrics-1` wire/SDN
+  serialization.
+- Item 4 Phase 1 (`f0833659b6d`): upgraded `scripts/check/check-primitive-api-added.shs`
+  (multi-line signatures, `pub(scope)`/`async`/`static`, `?`/`Option<>`/`Result<,>`,
+  `pub struct`/`pub class`/`impl` fields and methods, numeric single-field newtype exemption,
+  `git diff -M` renames) and swept remaining public bare primitives in
+  `src/lib/common/traceability/*_v1.spl` and
+  `src/app/bug/{workaround_index,workaround_retirement,workaround_revert}.spl` to 0 flagged
+  entries (`--selftest` PASS under BSD `awk` and `gawk`, `--changed origin/release/1.0.0..HEAD`
+  PASS across 47 files). Item 4 Phase 2 remains open outside these swept modules.
