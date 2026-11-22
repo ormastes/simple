@@ -200,7 +200,7 @@ config, so the scripts resolve the key and export the env var
 |---|---|---|
 | `mem_reserve_free_mib` | `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` (MiB x 1048576) | `bootstrap-from-scratch.sh` startup, `resume-stage3-from-admitted.sh` |
 | `stage3_tree_rss_cap_kib` | `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` | `resume-stage3-from-admitted.sh` (Stage 3 only) |
-| `stage3_direct_threads` (1..64) | `SIMPLE_STAGE3_DIRECT_THREADS`; skipped if `SIMPLE_NATIVE_BUILD_THREADS` is set; `--jobs` wins | `resume-stage3-from-admitted.sh` |
+| `stage3_threads` | `SIMPLE_NATIVE_BUILD_THREADS` (coordinator route); skipped if either thread variable is set; `--jobs` wins. Direct fan-out (`SIMPLE_STAGE3_DIRECT_THREADS`>1) needs linux/darwin memory evidence and is not a host setting | `resume-stage3-from-admitted.sh` |
 | `stage3_file_workers` (0/1) | `SIMPLE_FILE_WORKERS` lane item | `bootstrap_select_stage3_file_workers` (source `host-config`) |
 
 Note that a user `host.sdn` value beats the tracked per-host file; `--print`
