@@ -8,7 +8,9 @@
 
 use std.spec.step
 
-use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1, empty_composition_image_v1, encode_composition_image_with_cli_option_route_v1, admitted_composition_cli_option_route_section_v1, SimpleCompositionImageV1}
+use std.nogc_sync_mut.composition.cli_option_route.{SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, CLI_MISSING_WARN_SKIP, CLI_AVAILABILITY_OPTIONAL}
+use std.nogc_sync_mut.composition.sci_generator.{SciRouteSourceV1, sci_generate_route_section_v1}
 use std.common.crypto.sha256.{sha256_bytes}
 
 
@@ -22,6 +24,15 @@ fn _encoded(source: text) -> [u8]:
     match parse_composition_source_v1(source):
         case Ok(image): encode_composition_image_v1(image)
         case Err(_): []
+
+fn _provider_image() -> SimpleCompositionImageV1:
+    match parse_composition_source_v1(SOURCE_PROVIDER):
+        case Ok(image): image
+        case Err(_): empty_composition_image_v1()
+
+fn _one_route_section() -> [u8]:
+    val routes = [SciRouteSourceV1(key: "llvm", route_kind: SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, command_id: CLI_MISSING_WARN_SKIP, target: "provider.llvm", component_count: CLI_AVAILABILITY_OPTIONAL, flags: 1)]
+    sci_generate_route_section_v1(routes, 1).bytes
 
 fn _refresh_multi_section_digest(data: [u8]):
     var authenticated: [i64] = []
@@ -177,3 +188,48 @@ describe "SimpleCompositionImageV1 source and codec":
         val rejected = decode_composition_image_v1(required)
         expect(rejected.ok).to_equal(false)
         expect(rejected.diagnostic.code).to_equal("SCI_REQUIRED_SECTION")
+
+    it "REQ-004 starts with an absent cli option route view":
+        # @req REQ-SSPEC-LIB
+        step("REQ-004 starts with an absent cli option route view")
+        expect(empty_composition_image_v1().cli_option_route_view.handle.ok).to_equal(false)
+        expect(empty_composition_image_v1().cli_option_route_view.integrity_verified).to_equal(false)
+
+    it "REQ-004 round-trips a verified cli option route section through the image":
+        # @req REQ-SSPEC-LIB
+        step("REQ-004 round-trips a verified cli option route section through the image")
+        val section = _one_route_section()
+        match encode_composition_image_with_cli_option_route_v1(_provider_image(), section):
+            case Err(e): expect(e).to_equal("encode failed")
+            case Ok(bytes):
+                val decoded = decode_composition_image_v1(bytes)
+                expect(decoded.ok).to_equal(true)
+                expect(decoded.image.cli_option_route_view.integrity_verified).to_equal(true)
+                expect(decoded.image.cli_option_route_view.handle.route_count).to_equal(1)
+                match admitted_composition_cli_option_route_section_v1(decoded.image):
+                    case Err(e): expect(e).to_equal("admitted section missing")
+                    case Ok(admitted): expect(admitted).to_equal(section)
+
+    it "REQ-004 rejects a tampered cli option route section in the image":
+        # @req REQ-SSPEC-LIB
+        step("REQ-004 rejects a tampered cli option route section in the image")
+        match encode_composition_image_with_cli_option_route_v1(_provider_image(), _one_route_section()):
+            case Err(e): expect(e).to_equal("encode failed")
+            case Ok(encoded):
+                var bad = encoded
+                bad[bad.len() - 1] = bad[bad.len() - 1] ^ 1
+                val decoded = decode_composition_image_v1(bad)
+                expect(decoded.ok).to_equal(false)
+                expect(decoded.diagnostic.code).to_equal("SCI_DIGEST")
+
+    it "REQ-004 refuses to encode a route section whose header digest does not verify":
+        # @req REQ-SSPEC-LIB
+        step("REQ-004 refuses to encode a route section whose header digest does not verify")
+        var bad_section = _one_route_section()
+        var i = 0
+        while i < 32:
+            bad_section[64 + i] = 0
+            i = i + 1
+        match encode_composition_image_with_cli_option_route_v1(_provider_image(), bad_section):
+            case Err(e): expect(e).to_contain("cli-option-route")
+            case Ok(_): expect(false).to_equal(true)
