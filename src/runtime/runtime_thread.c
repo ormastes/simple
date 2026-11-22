@@ -2241,6 +2241,17 @@ void spl_thread_yield(void) {
  * Mutex
  * ================================================================ */
 
+#ifdef SPL_THREAD_PTHREAD
+/* Resolves a pthread handle; NULL means invalid, and callers report failure. */
+static pthread_mutex_t* pthread_mutex_of(spl_mutex_handle handle) {
+    return (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
+}
+
+static pthread_cond_t* pthread_cond_of(spl_condvar_handle handle) {
+    return (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
+}
+#endif
+
 spl_mutex_handle spl_mutex_create(void) {
 #ifdef SPL_THREAD_PTHREAD
     pthread_mutex_t* mutex = (pthread_mutex_t*)SPL_MALLOC(sizeof(pthread_mutex_t), "mutex");
@@ -2268,12 +2279,8 @@ spl_mutex_handle spl_mutex_create(void) {
 
 bool spl_mutex_lock(spl_mutex_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
-    if (!mutex) {
-        return false;
-    }
-
-    return (pthread_mutex_lock(mutex) == 0);
+    pthread_mutex_t* mutex = pthread_mutex_of(handle);
+    return mutex && (pthread_mutex_lock(mutex) == 0);
 
 #else  /* Windows */
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
@@ -2288,12 +2295,8 @@ bool spl_mutex_lock(spl_mutex_handle handle) {
 
 bool spl_mutex_try_lock(spl_mutex_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
-    if (!mutex) {
-        return false;
-    }
-
-    return (pthread_mutex_trylock(mutex) == 0);
+    pthread_mutex_t* mutex = pthread_mutex_of(handle);
+    return mutex && (pthread_mutex_trylock(mutex) == 0);
 
 #else  /* Windows */
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
@@ -2307,12 +2310,8 @@ bool spl_mutex_try_lock(spl_mutex_handle handle) {
 
 bool spl_mutex_unlock(spl_mutex_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
-    if (!mutex) {
-        return false;
-    }
-
-    return (pthread_mutex_unlock(mutex) == 0);
+    pthread_mutex_t* mutex = pthread_mutex_of(handle);
+    return mutex && (pthread_mutex_unlock(mutex) == 0);
 
 #else  /* Windows */
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
@@ -2431,12 +2430,8 @@ bool spl_condvar_wait_timeout(spl_condvar_handle cv_handle, spl_mutex_handle mut
 
 bool spl_condvar_signal(spl_condvar_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_cond_t* cond = (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
-    if (!cond) {
-        return false;
-    }
-
-    return (pthread_cond_signal(cond) == 0);
+    pthread_cond_t* cond = pthread_cond_of(handle);
+    return cond && (pthread_cond_signal(cond) == 0);
 
 #else  /* Windows */
     CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)get_handle(handle, HANDLE_CONDVAR);
@@ -2451,12 +2446,8 @@ bool spl_condvar_signal(spl_condvar_handle handle) {
 
 bool spl_condvar_broadcast(spl_condvar_handle handle) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_cond_t* cond = (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
-    if (!cond) {
-        return false;
-    }
-
-    return (pthread_cond_broadcast(cond) == 0);
+    pthread_cond_t* cond = pthread_cond_of(handle);
+    return cond && (pthread_cond_broadcast(cond) == 0);
 
 #else  /* Windows */
     CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)get_handle(handle, HANDLE_CONDVAR);
