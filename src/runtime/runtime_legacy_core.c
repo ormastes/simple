@@ -902,6 +902,17 @@ int64_t rt_term_enable_ansi(void) {
     return rt_value_bool(1);
 }
 
+#if !defined(_WIN32)
+/* argv = { cmd, args..., NULL }; NULL on allocation failure. */
+static char** rt_legacy_spawn_argv(const char* cmd, const char** args, int64_t arg_count) {
+    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    if (!argv) return NULL;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
+    return argv;
+}
+#endif
+
 int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
     if (!cmd || !*cmd || arg_count < 0 ||
             (arg_count > 0 && !args)) return -1;
@@ -910,10 +921,8 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
 #elif defined(__APPLE__)
     if (arg_count > 32768) return -1;
     for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
-    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
     if (!argv) return -1;
-    argv[0] = (char*)cmd;
-    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
     pid_t pid = -1;
     int error = runtime_spawn_async_macos(&pid, cmd, argv);
     free(argv);
@@ -923,10 +932,8 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
     /* argv is built BEFORE fork: a multithreaded parent may hold the
      * allocator lock, so the child must not calloc (it used to). */
-    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
     if (!argv) return -1;
-    argv[0] = (char*)cmd;
-    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
     pid_t pid = fork();
     if (pid < 0) {
         free(argv);
@@ -973,10 +980,8 @@ int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg
     if (worker < 0) _exit(127);
     if (worker == 0) {
         (void)setpgid(0, 0);
-        char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+        char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
         if (!argv) _exit(1);
-        argv[0] = (char*)cmd;
-        for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
         execvp(cmd, argv);
         _exit(127);
     }
