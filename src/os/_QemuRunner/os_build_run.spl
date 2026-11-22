@@ -8,10 +8,16 @@ use os._QemuRunner.scenario_exec.*
 use os.qemu_cli_plan_v1.{qemu_cli_inspect_plan_v1, qemu_cli_dispatch_command_v1, qemu_cli_dispatch_plan_v1}
 use os.port.qemu_machine_plan_v1.{QemuLaunchPlanV1}
 use os.qemu_compiler_admission_v1.{qemu_compiler_select_v1}
-use app.io.mod.{process_run_timeout, file_exists}
-use app.io.env_ops.{env_get, env_set, cwd}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_walk, is_dir}
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set, env_unset, cwd}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_read_bytes, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.ffi.io.{file_write_text, path_absolute}
+use std.nogc_sync_mut.ffi.io.{file_move, path_parent}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -63,24 +69,6 @@ use os.toolchain_vfs_probe_contract.{
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use os.fs_wrapper_artifact.{fs_wrapper_artifact_admitted}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
-
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_rename(old_path: text, new_path: text) -> bool
-extern fn rt_file_read_bytes(path: text) -> [u8]?
-extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
-extern fn rt_dir_remove(path: text, recursive: bool) -> bool
-extern fn rt_path_dirname(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_cwd() -> text?
-extern fn rt_time_now_unix_micros() -> i64
-# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
-extern fn rt_path_absolute(path: text) -> text?
 
 pub fn get_all_targets() -> [OsTarget]:
     """Returns all 6 architecture targets."""
@@ -166,7 +154,7 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
 pub fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     """Builds the OS kernel for the given target.
 
-    Runs the native-build command via rt_process_run_timeout. Returns true on success.
+    Runs the native-build command via process_run_timeout. Returns true on success.
 
     Phase-level diagnostics are printed so a stalled build identifies which phase
     ran long rather than surfacing as a generic 'Process timed out'. The timeout
@@ -185,22 +173,25 @@ pub fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val simple_bin = _find_simple_binary_for_target(target, backend_name)
     if simple_bin == "":
         print "[build][{arch_label}] phase=compiler-admission FAILED: no admitted self-hosted compiler for {backend_name}"
+        if file_exists(target.output):
+            file_delete(target.output)
         return false
     val stamp_content = _native_build_stamp_content(target, backend_name, args, simple_bin, log_mode)
     if build_marker == "" and _native_build_cache_hit(target, stamp_content, simple_bin):
         if not _fs_wrapper_artifact_admitted(target): return false
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
         return true
-    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP") ?? ""
-    val old_lib = env_get("SIMPLE_LIB") ?? ""
-    val old_boot_minimal = env_get("SIMPLE_BOOT_MINIMAL") ?? ""
-    val old_stub_env = env_get("SIMPLE_ALLOW_FREESTANDING_STUBS") ?? ""
-    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
-    val old_path = env_get("PATH") ?? ""
-    val old_build_marker = env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+    val old_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+    val old_lib = env_get("SIMPLE_LIB")
+    val old_boot_minimal = env_get("SIMPLE_BOOT_MINIMAL")
+    val old_stub_env = env_get("SIMPLE_ALLOW_FREESTANDING_STUBS")
+    val old_no_stub_fallback = env_get("SIMPLE_NO_STUB_FALLBACK")
+    val old_log_mode = env_get("SIMPLE_OS_LOG_MODE")
+    val old_path = env_get("PATH")
+    val old_build_marker = env_get("SIMPLE_SSH_LIVE_BUILD_MARKER")
     if not _prepare_build_output(target, build_marker):
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         print "[build][{arch_label}] phase=prepare FAILED output={target.output}"
         return false
 
@@ -208,14 +199,14 @@ pub fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     if _needs_elf32_wrap(target) and objcopy_prefix == "":
         print "[build][{arch_label}] phase=tooling FAILED: llvm-objcopy not found for {target.entry}"
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
 
     val env_prefix = _build_env_prefix(target, objcopy_prefix)
     if not _apply_build_env(target, objcopy_prefix):
         print "[build][{arch_label}] phase=env FAILED could not export build environment"
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
     val started_ms = _now_ms()
     print "[build][{arch_label}] phase=spawn timeout_ms={timeout_ms}"
@@ -234,32 +225,32 @@ pub fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         if stderr != "":
             print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
     if not _ensure_elf32_multiboot_wrapper(target, objcopy_prefix):
         _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=multiboot-wrap FAILED output={target.output}"
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
     if not _fs_wrapper_artifact_admitted(target):
         _write_bootstrap_result(target, false, false, backend_name)
         _cleanup_generated_build_helpers(build_marker)
-        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
         return false
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
     _write_bootstrap_result(target, true, false, backend_name)
     if build_marker == "":
         _write_native_build_stamp(target, stamp_content)
-    _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+    _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_no_stub_fallback, old_log_mode, old_path, old_build_marker)
     true
 
 fn _native_build_stamp_path(target: OsTarget) -> text:
@@ -281,14 +272,26 @@ fn _native_build_stamp_content(target: OsTarget, backend_name: text, args: [text
 
 fn _write_native_build_stamp(target: OsTarget, content: text):
     val stamp_path = _native_build_stamp_path(target)
-    if not rt_file_write_text(stamp_path, content):
+    if not file_write_text(stamp_path, content):
         print "[build] warning: could not write native-build stamp: {stamp_path}"
 
 fn _path_newer_than_output(path: text, output: text) -> bool:
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return false
-    val (stdout, _stderr, exit_code) = rt_process_run_timeout("find", [path, "-newer", output, "-print", "-quit"], 10000)
-    exit_code != 0 or stdout != ""
+    val out_mtime = file_modified_time(output)
+    if out_mtime == 0:
+        return true
+    if is_dir(path):
+        val entries = dir_walk(path)
+        if entries.len() == 0:
+            return false
+        for entry in entries:
+            val mtime = file_modified_time(entry)
+            if mtime == 0 or mtime > out_mtime:
+                return true
+        return false
+    val src_mtime = file_modified_time(path)
+    src_mtime == 0 or src_mtime > out_mtime
 
 fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) -> bool:
     if _path_newer_than_output(target.linker_script, target.output):
@@ -301,12 +304,12 @@ fn _native_build_inputs_newer_than_output(target: OsTarget, simple_bin: text) ->
     false
 
 fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: text) -> bool:
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         return false
     val stamp_path = _native_build_stamp_path(target)
-    if not rt_file_exists(stamp_path):
+    if not file_exists(stamp_path):
         return false
-    if (rt_file_read_text(stamp_path) ?? "") != expected_stamp:
+    if file_read(stamp_path) != expected_stamp:
         return false
     if _needs_elf32_wrap(target) and not _elf32_multiboot_artifact_valid(target.output):
         return false
@@ -321,7 +324,7 @@ pub fn elf32_multiboot_header_valid(bytes: [u8]) -> bool:
         bytes[18] == 3u8 and bytes[19] == 0u8)
 
 fn _elf32_multiboot_artifact_valid(path: text) -> bool:
-    elf32_multiboot_header_valid(rt_file_read_bytes(path) ?? [])
+    elf32_multiboot_header_valid(file_read_bytes(path))
 
 fn _ensure_elf32_multiboot_wrapper(target: OsTarget, objcopy_prefix: text) -> bool:
     """Atomically publish the ELF32 envelope used by x86_64 Multiboot1 code.
@@ -338,55 +341,57 @@ fn _ensure_elf32_multiboot_wrapper(target: OsTarget, objcopy_prefix: text) -> bo
         return true
     if objcopy_prefix == "":
         return false
-    var output_parent = rt_path_dirname(target.output)
+    var output_parent = path_parent(target.output)
     if output_parent == "": output_parent = "."
-    val stage_dir = rt_secure_temp_dir(output_parent, "simpleos-elf32-wrap")
-    if stage_dir == "":
+    val stage_res = secure_temp_dir(output_parent, "simpleos-elf32-wrap")
+    if stage_res.is_err():
         return false
+    val stage_dir = stage_res.unwrap()
     val staged = stage_dir + "/kernel.elf"
-    val objcopy = objcopy_prefix + "/llvm-objcopy"
-    val (_stdout, stderr, exit_code) = rt_process_run_timeout(
+    val objcopy_bin = if host_os() == "windows": "llvm-objcopy.exe" else: "llvm-objcopy"
+    val objcopy = objcopy_prefix + "/" + objcopy_bin
+    val (_stdout, stderr, exit_code) = process_run_timeout(
         objcopy, ["-O", "elf32-i386", target.output, staged], 30000)
     if exit_code != 0 or not _elf32_multiboot_artifact_valid(staged):
         if stderr != "": print "[build] llvm-objcopy stderr: {stderr}"
-        if rt_file_exists(staged): rt_file_delete(staged)
-        rt_dir_remove(stage_dir, false)
+        if file_exists(staged): file_delete(staged)
+        dir_remove(stage_dir, false)
         return false
-    # POSIX rename publishes over the old sibling atomically. Hosts without
-    # replace-existing rename support fail here while retaining the original.
-    if not rt_file_rename(staged, target.output):
-        rt_file_delete(staged)
-        rt_dir_remove(stage_dir, false)
+    # Atomic replace-existing move where supported. Hosts without
+    # replace-existing move support fail here while retaining the original.
+    if not file_move(staged, target.output):
+        file_delete(staged)
+        dir_remove(stage_dir, false)
         return false
-    rt_dir_remove(stage_dir, false)
+    dir_remove(stage_dir, false)
     true
 
 fn _objcopy_path_prefix() -> text:
+    # Windows LLVM locations
+    if file_exists("C:/Program Files/LLVM/bin/llvm-objcopy.exe"):
+        return "C:/Program Files/LLVM/bin"
     # macOS Homebrew locations
     if file_exists("/opt/homebrew/opt/llvm/bin/llvm-objcopy"):
         return "/opt/homebrew/opt/llvm/bin"
-    if rt_file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
+    if file_exists("/usr/local/opt/llvm/bin/llvm-objcopy"):
         return "/usr/local/opt/llvm/bin"
     # Linux system locations (Debian/Ubuntu packaged LLVM)
-    if rt_file_exists("/usr/bin/llvm-objcopy"):
+    if file_exists("/usr/bin/llvm-objcopy"):
         return "/usr/bin"
-    if rt_file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-20/bin/llvm-objcopy"):
         return "/usr/lib/llvm-20/bin"
-    if rt_file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-19/bin/llvm-objcopy"):
         return "/usr/lib/llvm-19/bin"
-    if rt_file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-18/bin/llvm-objcopy"):
         return "/usr/lib/llvm-18/bin"
-    if rt_file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
+    if file_exists("/usr/lib/llvm-17/bin/llvm-objcopy"):
         return "/usr/lib/llvm-17/bin"
     ""
 
 fn _candidate_identity_env_args(candidate: text) -> [text]:
-    var pinned_candidate = candidate
-    # Unresolvable (cwd unreadable): the child is spawned from this same cwd
-    # with this exact spelling, so that spelling is the identity we pin.
-    if val resolved = rt_path_absolute(candidate):
-        if resolved != "":
-            pinned_candidate = resolved
+    var pinned_candidate = path_absolute(candidate)
+    if pinned_candidate == "":
+        pinned_candidate = candidate
     [
         "SIMPLE_BINARY={pinned_candidate}",
         "SIMPLE_BIN={pinned_candidate}",
@@ -405,11 +410,35 @@ fn _candidate_admission_env_args(candidate: text) -> [text]:
     env_args
 
 fn _run_candidate_with_env(candidate: text, args: [text], timeout_ms: i64, env_args: [text]) -> (text, text, i32):
-    var command_args = env_args
-    command_args.push(candidate)
-    for arg in args:
-        command_args.push(arg)
-    process_run_timeout("env", command_args, timeout_ms)
+    """Run candidate directly without external env binary, preserving caller env."""
+    var saved_keys: [text] = []
+    var saved_present: [bool] = []
+    var saved_values: [text] = []
+    for entry in env_args:
+        val eq_idx = entry.index_of("=")
+        if eq_idx <= 0:
+            continue
+        val key = entry.substring(0, eq_idx)
+        val value = entry.substring(eq_idx + 1, entry.byte_len())
+        val prev_opt = env_get_opt(key)
+        if val prev = prev_opt:
+            saved_present.push(true)
+            saved_values.push(prev)
+        else:
+            saved_present.push(false)
+            saved_values.push("")
+        saved_keys.push(key)
+        val _ = env_set(key, value)
+    val result = process_run_timeout(candidate, args, timeout_ms)
+    var i = saved_keys.len() - 1
+    while i >= 0:
+        val key = saved_keys[i]
+        if saved_present[i]:
+            val _ = env_set(key, saved_values[i])
+        else:
+            val _ = env_unset(key)
+        i = i - 1
+    result
 
 fn _run_candidate_pinned(candidate: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     _run_candidate_with_env(candidate, args, timeout_ms, _candidate_identity_env_args(candidate))
@@ -428,7 +457,8 @@ fn _candidate_backend_smoke(candidate: text, backend_name: text) -> bool:
     val probe_dir = created.unwrap().replace("\\", "/")
     if probe_dir == "" or not probe_dir.starts_with(probe_prefix) or not file_exists(probe_dir):
         return false
-    val probe_output = probe_dir + "/p2_add.exe"
+    val probe_ext = if host_os() == "windows": ".exe" else: ""
+    val probe_output = probe_dir + "/p2_add" + probe_ext
     val probe_log = probe_dir + "/build.log"
     val build_args = [
         "native-build",
@@ -443,11 +473,10 @@ fn _candidate_backend_smoke(candidate: text, backend_name: text) -> bool:
     val (build_stdout, build_stderr, build_exit) = _run_candidate_admission_pinned(
         candidate, build_args, 60000
     )
-    val log_ok = rt_file_write_text(probe_log, build_stdout + "\n" + build_stderr)
+    val log_ok = file_write_text(probe_log, build_stdout + "\n" + build_stderr)
     var accepted = false
     if build_exit == 0 and log_ok and file_exists(probe_output):
-        # Exec via env like the candidate itself so a shebang probe also runs on MSYS hosts.
-        val (run_stdout, _, run_exit) = process_run_timeout("env", [probe_output], 5000)
+        val (run_stdout, _, run_exit) = process_run_timeout(probe_output, [], 5000)
         accepted = run_exit == 0 and _candidate_exact_five(run_stdout)
     val cleanup_ok = dir_remove_all(probe_dir)
     accepted and cleanup_ok
@@ -488,8 +517,8 @@ This capability helper alone is not an artifact admission authority.
         # Dedupe key only: an unresolvable candidate is keyed by its spelling
         # and still goes through full backend admission below.
         var identity = candidate
-        if val resolved = rt_path_absolute(candidate):
-            if resolved != "": identity = resolved
+        val resolved = path_absolute(candidate)
+        if resolved != "": identity = resolved
         if seen.contains(identity): continue
         seen.push(identity)
         if simpleos_compiler_candidate_supports_backend(candidate, backend_name):
@@ -498,11 +527,11 @@ This capability helper alone is not an artifact admission authority.
 
 fn _find_simple_binary() -> text:
     qemu_compiler_select_v1(
-        env_get("SIMPLE_BINARY") ?? "", env_get("SIMPLE_BIN") ?? "", cwd())
+        env_get("SIMPLE_BINARY"), env_get("SIMPLE_BIN"), cwd())
 
 fn _find_simple_binary_for_target(target: OsTarget, backend_name: text) -> text:
-    val env_bin = env_get("SIMPLE_BINARY") ?? ""
-    val env_simple_bin = env_get("SIMPLE_BIN") ?? ""
+    val env_bin = env_get("SIMPLE_BINARY")
+    val env_simple_bin = env_get("SIMPLE_BIN")
     val admitted = qemu_compiler_select_v1(env_bin, env_simple_bin, cwd())
     if admitted == "": return ""
     val candidates = [admitted]
@@ -548,16 +577,13 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
-    if _is_arm64_wm_qemu_target(target):
-        envs.push("SIMPLE_BOOTSTRAP=1")
-        envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
-        envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
-    if _is_arm64_desktop_engine2d_target(target):
+    if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
         envs.push("SIMPLE_NO_STUB_FALLBACK=1")
     if _is_arm_fs_exec_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
+        envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if _needs_arm_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
     if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
@@ -612,81 +638,89 @@ fn _simpleos_log_config_source(enabled: bool) -> text:
         "    \"off\"\n"
 
 fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
-    if rt_file_exists(target.output):
-        if not rt_file_delete(target.output):
+    if file_exists(target.output):
+        if not file_delete(target.output):
             print "[build] could not remove stale artifact: {target.output}"
             return false
-    if rt_file_exists(_legacy_simpleos_log_config_path()):
-        rt_file_delete(_legacy_simpleos_log_config_path())
-    if not rt_dir_create_all("build/os/generated/generated"):
+    if file_exists(_legacy_simpleos_log_config_path()):
+        file_delete(_legacy_simpleos_log_config_path())
+    if not dir_create_all("build/os/generated/generated"):
         print "[build] could not create build/os/generated/generated"
         return false
-    if not rt_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
+    if not file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
         print "[build] could not write SimpleOS log compile config"
         return false
     if build_marker != "":
-        if not rt_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
+        if not file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
             print "[build] could not write SSH live build marker"
             return false
-        if not rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
+        if not env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", build_marker):
             print "[build] could not export SIMPLE_SSH_LIVE_BUILD_MARKER"
             return false
     true
 
 fn _cleanup_generated_build_helpers(build_marker: text):
-    if rt_file_exists(_simpleos_log_config_path()):
-        rt_file_delete(_simpleos_log_config_path())
-    if build_marker != "" and rt_file_exists(_ssh_live_build_marker_path()):
-        rt_file_delete(_ssh_live_build_marker_path())
+    if file_exists(_simpleos_log_config_path()):
+        file_delete(_simpleos_log_config_path())
+    if build_marker != "" and file_exists(_ssh_live_build_marker_path()):
+        file_delete(_ssh_live_build_marker_path())
     if build_marker != "":
-        rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
+        env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
 
-fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text, old_stub_env: text, old_log_mode: text, old_path: text, old_build_marker: text):
+fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text, old_stub_env: text, old_no_stub_fallback: text, old_log_mode: text, old_path: text, old_build_marker: text):
     env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
     env_set("SIMPLE_LIB", old_lib)
     env_set("SIMPLE_BOOT_MINIMAL", old_boot_minimal)
     env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", old_stub_env)
+    env_set("SIMPLE_NO_STUB_FALLBACK", old_no_stub_fallback)
     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
     env_set("PATH", old_path)
     env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", old_build_marker)
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
-    val needs_cwd = _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target) or _is_arm_fs_exec_target(target)
-    val cwd_opt = rt_env_cwd()
-    if needs_cwd and cwd_opt == nil:
+    val needs_cwd = _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target) or _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target) or _is_arm_fs_exec_target(target)
+    val cwd_val = cwd()
+    if needs_cwd and cwd_val == "":
         print "[build] could not determine current directory"
         return false
-    val cwd = cwd_opt ?? ""
     if _is_x86_64_kernel_target(target) or _is_x86_32_probe_target(target) or _uses_baremetal_wrapper_profile(target):
-        if not rt_env_set("SIMPLE_BOOTSTRAP", "1"):
+        if not env_set("SIMPLE_BOOTSTRAP", "1"):
             return false
-        if not env_set("SIMPLE_LIB", "{cwd}/src"):
+        if not env_set("SIMPLE_LIB", "{cwd_val}/src"):
             return false
         if not env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
-    if _is_arm_fs_exec_target(target):
-        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
+    if _is_arm64_wm_qemu_target(target) or _is_arm64_desktop_engine2d_target(target):
+        if not env_set("SIMPLE_BOOTSTRAP", "1"):
             return false
-        if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
+        if not env_set("SIMPLE_LIB", "{cwd_val}/src"):
+            return false
+        if not env_set("SIMPLE_NO_STUB_FALLBACK", "1"):
+            return false
+    if _is_arm_fs_exec_target(target):
+        if not env_set("SIMPLE_BOOT_MINIMAL", "1"):
+            return false
+        if not env_set("SIMPLE_LIB", "{cwd_val}/src"):
             return false
     if _needs_arm_freestanding_stub_env(target):
-        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+        if not env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
     if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target) or _is_riscv64_live_helper_target(target):
-        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
+        if not env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
     if _needs_freestanding_stub_env(target):
-        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+        if not env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
             return false
-    if not rt_env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
+    if not env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
         return false
     if objcopy_prefix != "":
-        val old_path = rt_env_get("PATH") ?? ""
+        val old_path = env_get("PATH")
         if old_path == "":
-            if not rt_env_set("PATH", objcopy_prefix):
+            if not env_set("PATH", objcopy_prefix):
                 return false
         else:
-            if not rt_env_set("PATH", "{objcopy_prefix}:{old_path}"):
+            val sep = if host_os() == "windows": ";" else: ":"
+            if not env_set("PATH", "{objcopy_prefix}{sep}{old_path}"):
                 return false
     true
 
@@ -700,7 +734,8 @@ fn _needs_freestanding_stub_env(target: OsTarget) -> bool:
     _is_x86_64_kernel_target(target) or _is_desktop_wrapper_target(target) or _is_gui_engine2d_wrapper_target(target) or _is_js_browser_runtime_probe_target(target) or _is_fs_wrapper_target(target)
 
 fn _is_x86_64_kernel_target(target: OsTarget) -> bool:
-    target.entry == "examples/09_embedded/simple_os/arch/x86_64/os_entry.spl"
+    (target.entry == "examples/09_embedded/simple_os/arch/x86_64/os_entry.spl" or
+        target.entry == "examples/09_embedded/simple_os/arch/x86_64/boot_stage1_entry.spl")
 
 fn _is_x86_32_browser_probe_target(target: OsTarget) -> bool:
     target.entry == "examples/09_embedded/simple_os/arch/x86_32/browser_probe_entry.spl"
@@ -921,7 +956,7 @@ fn _run_os_with_options_impl(target: OsTarget, options: QemuRunOptions, sealed: 
 
     Checks that the binary exists, then spawns QEMU. Returns true on success.
     """
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
@@ -951,7 +986,7 @@ fn _run_os_with_options_impl(target: OsTarget, options: QemuRunOptions, sealed: 
     val (stdout, stderr, exit_code) = if launch_plan != nil:
         qemu_cli_dispatch_plan_v1(launch_plan.unwrap(), timeout)
     else:
-        rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+        process_run_timeout(qemu_bin, qemu_args, timeout)
     if stdout != "":
         print "[run] serial output:\n{stdout}"
     if stderr != "":

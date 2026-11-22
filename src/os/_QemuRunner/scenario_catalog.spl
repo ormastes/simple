@@ -56,24 +56,16 @@ use os.toolchain_vfs_probe_contract.{
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
-
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_cwd() -> text?
-extern fn rt_time_now_unix_micros() -> i64
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 
 pub fn test_os(target: OsTarget, timeout_ms: u64) -> bool:
     """Runs QEMU and checks serial output for 'SimpleOS' within timeout.
 
     Returns true if the kernel boots, prints the expected banner, and exits successfully.
     """
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         print "[test] ERROR: kernel binary not found: {target.output}"
         print "[test] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
@@ -82,7 +74,7 @@ pub fn test_os(target: OsTarget, timeout_ms: u64) -> bool:
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[test] {arch_display_name(target.arch)} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
+    val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
     val serial_output = stdout + stderr
     print "[test] serial output:\n{serial_output}"
     val has_banner = serial_output.contains("SimpleOS")
@@ -496,7 +488,7 @@ fn scenario_x64_wm_simple_web_check() -> QemuScenario:
         arch: Architecture.X86_64,
         machine: "q35",
         cpu: "qemu64",
-        memory: "2G",
+        memory: "32G",
         qemu_extra: [
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-vga", "std"
@@ -707,11 +699,11 @@ fn ovmf_code_candidates() -> [text]:
 
 fn ovmf_code_path() -> text:
     """Resolve the OVMF code image for x86_64 UEFI QEMU boots."""
-    val env_path = rt_env_get("SIMPLEOS_OVMF_CODE") ?? ""
+    val env_path = env_get("SIMPLEOS_OVMF_CODE")
     if env_path != "":
         return env_path
     for candidate in ovmf_code_candidates():
-        if rt_file_exists(candidate):
+        if file_exists(candidate):
             return candidate
     ""
 
@@ -728,11 +720,11 @@ fn desktop_uefi_bootloader_candidates() -> [text]:
 
 fn desktop_uefi_bootloader_path() -> text:
     """Resolve a repo-managed EFI bootloader artifact for the desktop UEFI lane."""
-    val env_path = rt_env_get("SIMPLEOS_UEFI_BOOTLOADER") ?? ""
+    val env_path = env_get("SIMPLEOS_UEFI_BOOTLOADER")
     if env_path != "":
         return env_path
     for candidate in desktop_uefi_bootloader_candidates():
-        if rt_file_exists(candidate):
+        if file_exists(candidate):
             return candidate
     ""
 
@@ -746,7 +738,7 @@ fn desktop_uefi_esp_dir_path() -> text:
 
 fn desktop_uefi_boot_media_ready() -> bool:
     """True when the local disk image can be expected to boot under OVMF."""
-    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != "" and rt_file_exists(desktop_uefi_disk_image_path()) and rt_file_exists(desktop_uefi_esp_dir_path() + "/EFI/BOOT/BOOTX64.EFI")
+    ovmf_code_path() != "" and desktop_uefi_bootloader_path() != "" and file_exists(desktop_uefi_disk_image_path()) and file_exists(desktop_uefi_esp_dir_path() + "/EFI/BOOT/BOOTX64.EFI")
 
 fn _x64_desktop_uefi_args() -> [text]:
     val fw = ovmf_code_path()
@@ -809,6 +801,7 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_riscv64_display_smoke(),
         scenario_riscv64_hosted(),
         scenario_rv64_ssh(),
+        scenario_rv64_x25519_probe(),
         scenario_riscv32_virtio_fat32_smf(),
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),

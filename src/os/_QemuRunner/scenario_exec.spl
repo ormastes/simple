@@ -11,8 +11,12 @@ use os.qemu_cli_plan_v1.{
     qemu_cli_dispatch_command_v1, qemu_cli_dispatch_plan_v1
 }
 use os.port.qemu_machine_plan_v1.{QemuLaunchPlanV1}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.ffi.io.{file_copy}
 # SimpleOS QEMU Runner — Multi-Architecture Boot & Test
 #
 # Provides build + run + test functionality for all 6 architectures.
@@ -78,17 +82,6 @@ use os.ssh_qemu_contract.{run_x64_ssh_probe, run_rv64_ssh_probe}
 use os.fs_exec_fallback_contract.{fs_exec_serial_has_fallback}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text?
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_cwd() -> text?
-extern fn rt_time_now_unix_micros() -> i64
-
 fn ensure_riscv_fs_exec_disk_image(arch: Architecture) -> bool:
     """Ensure the RISC-V FAT32 image has SMF CLI and WM GUI acceptance fixtures."""
     _ensure_catalog_fs_exec_disk_image(
@@ -112,7 +105,7 @@ fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
         "grep -a -q 'fn main' \"{img_path}\" && " +
         "grep -a -q 'SIMPLEOS_FAT32_DIRECT_IO_4K_FIXTURE' \"{img_path}\"; " +
         "fi"
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    val (_stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", cmd], 5000)
     exit_code == 0
 
 fn _ensure_catalog_fs_exec_disk_image(
@@ -123,11 +116,11 @@ fn _ensure_catalog_fs_exec_disk_image(
     platform_name: text,
     arch: Architecture
 ) -> bool:
-    if rt_file_exists(img_path) and _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
+    if file_exists(img_path) and _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
         return true
     print "[{log_prefix}] {img_path} missing or incomplete, invoking scripts/os/make_os_disk.shs for {arch_label}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
-        "/bin/sh", ["scripts/os/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        "sh", ["scripts/os/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
     if stdout != "":
         print "[{log_prefix}] stdout:\n{stdout}"
     if stderr != "":
@@ -135,7 +128,7 @@ fn _ensure_catalog_fs_exec_disk_image(
     if exit_code != 0:
         print "[{log_prefix}] make_os_disk.shs exited {exit_code}"
         return false
-    if not rt_file_exists(img_path):
+    if not file_exists(img_path):
         return false
     if not _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
         print "[{log_prefix}] image exists but {missing_message}"
@@ -159,7 +152,7 @@ fn _x86_32_fs_exec_disk_image_has_required_smf(img_path: text) -> bool:
         "grep -a -q 'BROWSMF' \"{img_path}\" && " +
         "grep -a -q 'SIMPLEOS_X86_32_HELLO_ELF' \"{img_path}\"; " +
         "fi"
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    val (_stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", cmd], 5000)
     exit_code == 0
 
 fn ensure_x86_32_fs_exec_disk_image() -> bool:
@@ -270,7 +263,7 @@ fn _catalog_lane_disk_image_has_required_staged_apps(img_path: text, lane: Simpl
     val grep_cmd = if grep_checks.len() == 0: "true" else: grep_checks.join(" && ")
     val cmd =
         "(" + mtype_cmd + ") || (" + grep_cmd + ")"
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+    val (_stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", cmd], 5000)
     exit_code == 0
 
 fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
@@ -291,7 +284,7 @@ fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) 
             "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
             "grep -a -q 'SMF' \"{img_path}\"; " +
             "fi"
-        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+        val (_stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", cmd], 5000)
         return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
     false
 
@@ -317,7 +310,7 @@ fn _riscv_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture
             "grep -a -q 'BROWSMF' \"{img_path}\" && " +
             "grep -a -q 'SMF' \"{img_path}\"; " +
             "fi"
-        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+        val (_stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", cmd], 5000)
         return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
     false
 
@@ -325,19 +318,19 @@ fn ensure_arm_fs_exec_kernel_binary(scenario: QemuScenario, target: OsTarget) ->
     if not _is_arm_fs_exec_scenario(scenario):
         return true
     if scenario.arch == Architecture.Arm32:
-        return rt_file_exists(target.output)
+        return file_exists(target.output)
     val bin_path = arm_fs_exec_kernel_bin_path(scenario.arch)
     val cmd =
         "if command -v llvm-objcopy >/dev/null 2>&1; then OBJCOPY=llvm-objcopy; " +
         "elif [ -x /opt/homebrew/opt/llvm/bin/llvm-objcopy ]; then OBJCOPY=/opt/homebrew/opt/llvm/bin/llvm-objcopy; " +
         "else echo llvm-objcopy not found >&2; exit 127; fi; " +
         "$OBJCOPY -O binary \"{target.output}\" \"{bin_path}\""
-    val (stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 30000)
+    val (stdout, stderr, exit_code) = process_run_timeout("sh", ["-c", cmd], 30000)
     if stdout != "":
         print "[ensure_arm_fs_exec_kernel_binary] stdout:\n{stdout}"
     if stderr != "":
         print "[ensure_arm_fs_exec_kernel_binary] stderr:\n{stderr}"
-    exit_code == 0 and rt_file_exists(bin_path)
+    exit_code == 0 and file_exists(bin_path)
 
 fn scenario_kernel_path(scenario: QemuScenario, target: OsTarget) -> text:
     if scenario.arch == Architecture.Arm32 and _is_arm_fs_exec_scenario(scenario):
@@ -366,14 +359,14 @@ fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     while i < markers.len():
         val marker = markers[i]
         val shell_cmd = "grep -a -q '{marker}' \"{img_path}\""
-        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], 5000)
+        val (_stdout, _stderr, exit_code) = process_run_timeout("sh", ["-c", shell_cmd], 5000)
         if exit_code != 0:
             return false
         i = i + 1
     val payload_cmd = "if command -v mtype >/dev/null 2>&1; then " +
         "mtype -i \"{img_path}\" ::/SYS/APPS/hello_world 2>/dev/null | strings | grep -q 'SIMPLEOS_DISK_HELLO_ELF'; " +
         "else grep -a -q 'SIMPLEOS_DISK_HELLO_ELF' \"{img_path}\"; fi"
-    val (_payload_stdout, _payload_stderr, payload_exit) = rt_process_run_timeout("/bin/sh", ["-c", payload_cmd], 5000)
+    val (_payload_stdout, _payload_stderr, payload_exit) = process_run_timeout("sh", ["-c", payload_cmd], 5000)
     if payload_exit != 0:
         return false
     val ssh_cmd =
@@ -390,7 +383,7 @@ fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
         "grep -a -q 'shell_remote_main' \"{img_path}\" && " +
         "grep -a -q 'smux_remote_main' \"{img_path}\"; " +
         "fi"
-    val (_ssh_stdout, _ssh_stderr, ssh_exit) = rt_process_run_timeout("/bin/sh", ["-c", ssh_cmd], 5000)
+    val (_ssh_stdout, _ssh_stderr, ssh_exit) = process_run_timeout("sh", ["-c", ssh_cmd], 5000)
     if ssh_exit != 0:
         return false
     true
@@ -568,12 +561,11 @@ fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headl
 fn _prepare_q35_pure_nvme_user_namespace_disk(scenario: QemuScenario) -> bool:
     if scenario.name != "x86_64-q35-pure-nvme-perf":
         return true
-    val cmd =
-        "mkdir -p build/test-artifacts/simpleos-q35-smoke && " +
-        "cp build/os/fat32-x86_64.img build/test-artifacts/simpleos-q35-smoke/q35_user_namespace.img"
-    val (_stdout, stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
-    if exit_code != 0:
-        print "[scenario][{scenario.name}] phase=user-namespace-media FAILED: {stderr}"
+    if not dir_create_all("build/test-artifacts/simpleos-q35-smoke"):
+        print "[scenario][{scenario.name}] phase=user-namespace-media FAILED: could not create dir"
+        return false
+    if not file_copy("build/os/fat32-x86_64.img", "build/test-artifacts/simpleos-q35-smoke/q35_user_namespace.img"):
+        print "[scenario][{scenario.name}] phase=user-namespace-media FAILED: copy failed"
         return false
     true
 
@@ -656,7 +648,7 @@ fn _run_scenario_with_dispatch_v1(scenario: QemuScenario, headless: bool, sealed
     val (stdout, stderr, exit_code) = if launch_plan != nil:
         qemu_cli_dispatch_plan_v1(launch_plan.unwrap(), timeout)
     else:
-        rt_process_run_timeout(qemu_bin, qemu_args, timeout)
+        process_run_timeout(qemu_bin, qemu_args, timeout)
     val serial_output = if scenario.name == "x64-desktop-uefi":
         read_qemu_serial_log(desktop_uefi_serial_log_path())
     else if scenario.name == "arm64-wm-ramfb":
@@ -679,7 +671,7 @@ pub fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     if not ensure_scenario_media(scenario):
         return false
     val target = _resolved_runtime_scenario_target(scenario)
-    if not rt_file_exists(target.output):
+    if not file_exists(target.output):
         print "[test] FAILED: scenario {scenario.name} missing kernel output {target.output}"
         return false
     if scenario.name == "x64-desktop-uefi":
@@ -714,7 +706,7 @@ pub fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     else if scenario.name == "x64-desktop-disk":
         run_x64_desktop_disk_probe(cmd_parts, desktop_disk_serial_log_path(), timeout_ms)
     else:
-        rt_process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
+        process_run_timeout(qemu_bin, qemu_args, timeout_ms as i64)
     val raw_serial_output = if scenario.name == "x64-desktop-uefi":
         read_qemu_serial_log(desktop_uefi_serial_log_path()) + stderr
     else:
@@ -864,7 +856,7 @@ fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: te
     true
 
 fn _scenario_serial_accepts_completion_with_optional_protection(scenario: QemuScenario, serial_output: text) -> bool:
-    val mode_text = rt_env_get("SIMPLEOS_PROTECTION_MODE") ?? ""
+    val mode_text = env_get("SIMPLEOS_PROTECTION_MODE")
     qemu_scenario_serial_acceptance_reason(scenario, mode_text, serial_output) == "ready"
 
 pub fn qemu_scenario_serial_acceptance_reason(scenario: QemuScenario, mode_text: text, serial_output: text) -> text:
@@ -999,7 +991,7 @@ fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):
         "-drive", "file=" + image + ",format=raw,if=virtio",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"
     ]
-    rt_process_run_timeout("qemu-system-x86_64", args, timeout_ms)
+    process_run_timeout("qemu-system-x86_64", args, timeout_ms)
 
 # Absent digest (missing or unreadable file) is an explicit mismatch.
 fn _file_sha256_matches(path: text, expected: text) -> bool:

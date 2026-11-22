@@ -11,17 +11,19 @@ use std.common.base_encoding.base64.{base64_encode}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.ffi.io.{dir_create_all, dir_remove_all, file_write_text}
 use os.sosix.qemu_evidence.{sosix_qemu_collector_root_is_release_admissible}
+use os.sosix.qemu_evidence.matrix_contract.{sosix_qemu_matrix_hosts, sosix_qemu_matrix_guests}
 
 
-val _QEMU_V2_FIXTURE_ROOT: text = "/tmp/simple-sosix-qemu-v2-importer-spec"
+val _QEMU_V2_FIXTURE_ROOT: text = "build/test-sosix-qemu-v2-importer-spec"
 val _QEMU_V2_SOURCE_IDENTITY: text = "git:0123456789abcdef0123456789abcdef01234567:tree:89abcdef0123456789abcdef0123456789abcdef:clean"
+val _QEMU_V2_COMPILER_POLICY_SHA: text = "3c6e3731e238304e28ad182690ee5b3cca67715c8ee40484f6ed15d9e7f624e9"
 
 struct _QemuV2FixtureArtifacts:
     hashes: [text]
 
 fn _qemu_v2_artifact_names() -> [text]:
     ["host-admission.env", "qemu.argv", "qemu.version", "transcript.log",
-        "kernel.elf", "guest.img", "program.elf", "required-markers.txt"]
+        "kernel.elf", "guest.img", "program.elf", "firmware.bin", "required-markers.txt"]
 
 fn _qemu_v2_artifact_content(index: i64, host: text, guest: text) -> text:
     if index == 0: return "host-admission:{host}:{guest}\n"
@@ -31,6 +33,7 @@ fn _qemu_v2_artifact_content(index: i64, host: text, guest: text) -> text:
     if index == 4: return "kernel:{host}:{guest}\n"
     if index == 5: return "image:{host}:{guest}\n"
     if index == 6: return "program:{host}:{guest}\n"
+    if index == 7: return "firmware:{host}:{guest}\n"
     "guest-entry\nTEST PASSED\n"
 
 fn _qemu_v2_write_artifacts(root: text, host: text, guest: text) -> _QemuV2FixtureArtifacts:
@@ -48,35 +51,41 @@ fn _qemu_v2_write_artifacts(root: text, host: text, guest: text) -> _QemuV2Fixtu
 
 fn _qemu_v2_evidence(host: text, guest: text, artifacts: _QemuV2FixtureArtifacts) -> text:
     val h = artifacts.hashes
-    var evidence =
-        "schema_version=2\n" +
-        "host={host}\n" +
-        "guest={guest}\n" +
-        "status=pass\n" +
-        "reason=\n" +
-        "owner=fixture-owner\n" +
-        "reviewer=fixture-reviewer\n" +
-        "resume_command=\n" +
-        "source_identity={_QEMU_V2_SOURCE_IDENTITY}\n" +
-        "compiler_identity=source-simple:fixture\n" +
-        "kernel_identity=sha256:{h[4]}\n" +
-        "image_identity=sha256:{h[5]}\n" +
-        "qemu_identity=sha256:{"a" * 64}:version:qemu-fixture\n" +
-        "qemu_argv=qemu-system-fixture -machine fixture -bios none\n" +
-        "accelerator_identity=tcg\n" +
-        "firmware_identity=firmware:none\n" +
-        "firmware_mode=direct-kernel\n" +
-        "run_nonce=run-{host}-{guest}-20260816\n" +
-        "firmware_path=none\n" +
-        "firmware_version=version:none\n" +
-        "firmware_sha256=none\n" +
-        "firmware_stage_markers=guest-entry\n" +
-        "transcript_identity=sha256:{h[3]}\n" +
-        "program_identity=sha256:{h[6]}\n" +
-        "compiler_in_filesystem=false\n" +
-        "compiler_version_evidence_path=\n" +
-        "compiler_hello_evidence_path=\n" +
-        "artifact_count=8\n"
+    val qemu_sha = "a" * 64
+    val lines = [
+        "schema_version=1",
+        "host={host}",
+        "guest={guest}",
+        "status=pass",
+        "reason=",
+        "owner=fixture-owner",
+        "reviewer=fixture-reviewer",
+        "resume_command=",
+        "source_identity={_QEMU_V2_SOURCE_IDENTITY}",
+        "compiler_identity=source-simple:fixture",
+        "compiler_identity_scope=source-toolchain",
+        "compiler_policy_sha256={_QEMU_V2_COMPILER_POLICY_SHA}",
+        "compiler_policy_value=false",
+        "kernel_identity=sha256:{h[4]}",
+        "image_identity=sha256:{h[5]}",
+        "qemu_identity=sha256:{qemu_sha}:version:qemu-fixture",
+        "qemu_argv=qemu-system-fixture -machine fixture -bios none",
+        "accelerator_identity=tcg",
+        "firmware_identity=firmware:edk2-fixture",
+        "firmware_mode=uefi-pflash",
+        "firmware_path=/usr/share/OVMF/OVMF_CODE.fd",
+        "firmware_version=version:2026.02",
+        "firmware_sha256=sha256:{h[7]}",
+        "firmware_stage_markers=firmware-entry>firmware-handoff>guest-entry",
+        "boot_correlation_marker=boot-marker-{host}-{guest}",
+        "run_nonce=run-{host}-{guest}-20260816",
+        "transcript_identity=sha256:{h[3]}",
+        "program_identity=sha256:{h[6]}",
+        "compiler_in_filesystem=false",
+        "compiler_designation_scope=live-policy",
+        "artifact_count=9",
+    ]
+    var evidence = lines.join("\n") + "\n"
     val names = _qemu_v2_artifact_names()
     var index: i64 = 0
     while index < names.len():
@@ -86,21 +95,63 @@ fn _qemu_v2_evidence(host: text, guest: text, artifacts: _QemuV2FixtureArtifacts
         index = index + 1
     evidence
 
-fn _qemu_v2_admission(evidence_sha: text, artifacts: _QemuV2FixtureArtifacts) -> text:
+fn _qemu_v2_admission(
+    host: text, guest: text, evidence_sha: text, artifacts: _QemuV2FixtureArtifacts
+) -> text:
     val h = artifacts.hashes
-    "manifest_version=2\n" +
-    "status=pass\n" +
-    "evidence_sha256={evidence_sha}\n" +
-    "artifact_count=8\n" +
-    "source_identity={_QEMU_V2_SOURCE_IDENTITY}\n" +
-    "transcript_identity=sha256:{h[3]}\n" +
-    "program_identity=sha256:{h[6]}\n" +
-    "firmware_identity=firmware:none\n" +
-    "firmware_mode=direct-kernel\n" +
-    "firmware_path=none\n" +
-    "firmware_version=version:none\n" +
-    "firmware_sha256=none\n" +
-    "firmware_stage_markers=guest-entry\n"
+    val qemu_sha = "a" * 64
+    val lines = [
+        "manifest_version=1",
+        "host={host}",
+        "guest={guest}",
+        "status=pass",
+        "reason=",
+        "resume_command=",
+        "owner=fixture-owner",
+        "reviewer=fixture-reviewer",
+        "evidence_path=rows/{host}/{guest}/evidence.env",
+        "evidence_sha256={evidence_sha}",
+        "artifact_count=9",
+        "source_identity={_QEMU_V2_SOURCE_IDENTITY}",
+        "compiler_identity=source-simple:fixture",
+        "compiler_identity_scope=source-toolchain",
+        "compiler_policy_sha256={_QEMU_V2_COMPILER_POLICY_SHA}",
+        "compiler_policy_value=false",
+        "compiler_payload_identity=",
+        "compiler_image_identity=",
+        "compiler_alias_identity=",
+        "compiler_manifest_identity=",
+        "kernel_identity=sha256:{h[4]}",
+        "image_identity=sha256:{h[5]}",
+        "qemu_identity=sha256:{qemu_sha}:version:qemu-fixture",
+        "qemu_argv=qemu-system-fixture -machine fixture -bios none",
+        "accelerator_identity=tcg",
+        "transcript_identity=sha256:{h[3]}",
+        "program_identity=sha256:{h[6]}",
+        "firmware_identity=firmware:edk2-fixture",
+        "firmware_mode=uefi-pflash",
+        "firmware_path=/usr/share/OVMF/OVMF_CODE.fd",
+        "firmware_version=version:2026.02",
+        "firmware_sha256=sha256:{h[7]}",
+        "firmware_stage_markers=firmware-entry>firmware-handoff>guest-entry",
+        "boot_correlation_marker=boot-marker-{host}-{guest}",
+        "run_nonce=run-{host}-{guest}-20260816",
+        "compiler_in_filesystem=false",
+        "compiler_designation_scope=live-policy",
+        "compiler_version_evidence_path=",
+        "compiler_hello_evidence_path=",
+        "compiler_alias_evidence_path=",
+        "compiler_manifest_evidence_path=",
+    ]
+    var admission = lines.join("\n") + "\n"
+    val names = _qemu_v2_artifact_names()
+    var index: i64 = 0
+    while index < names.len():
+        val artifact_index = index + 1
+        admission = admission + "artifact_{artifact_index}_path={names[index]}\n" +
+            "artifact_{artifact_index}_sha256={h[index]}\n"
+        index = index + 1
+    admission
 
 fn _qemu_v2_manifest_row(
     row_number: i64,
@@ -114,67 +165,98 @@ fn _qemu_v2_manifest_row(
     val prefix = "sosix_qemu_matrix_row_{row_number}"
     val h = artifacts.hashes
     val owner_b64 = if malformed_owner_b64: "@@" else: base64_encode("fixture-owner")
-    "{prefix}_host={host}\n" +
-    "{prefix}_guest={guest}\n" +
-    "{prefix}_status=pass\n" +
-    "{prefix}_reason_b64=\n" +
-    "{prefix}_evidence_path_b64={base64_encode("rows/" + host + "/" + guest + "/evidence.env")}\n" +
-    "{prefix}_admission_record_path_b64={base64_encode("rows/" + host + "/" + guest + "/admission.env")}\n" +
-    "{prefix}_admission_record_sha256={admission_sha}\n" +
-    "{prefix}_resume_command_b64=\n" +
-    "{prefix}_owner_b64={owner_b64}\n" +
-    "{prefix}_reviewer_b64={base64_encode("fixture-reviewer")}\n" +
-    "{prefix}_compiler_in_filesystem=false\n" +
-    "{prefix}_compiler_version_evidence_path_b64=\n" +
-    "{prefix}_compiler_hello_evidence_path_b64=\n" +
-    "{prefix}_source_identity_b64={base64_encode(_QEMU_V2_SOURCE_IDENTITY)}\n" +
-    "{prefix}_compiler_identity_b64={base64_encode("source-simple:fixture")}\n" +
-    "{prefix}_kernel_identity_b64={base64_encode("sha256:" + h[4])}\n" +
-    "{prefix}_image_identity_b64={base64_encode("sha256:" + h[5])}\n" +
-    "{prefix}_qemu_identity_b64={base64_encode("sha256:" + "a" * 64 + ":version:qemu-fixture")}\n" +
-    "{prefix}_qemu_argv_b64={base64_encode("qemu-system-fixture -machine fixture -bios none")}\n" +
-    "{prefix}_accelerator_identity_b64={base64_encode("tcg")}\n" +
-    "{prefix}_firmware_identity_b64={base64_encode("firmware:none")}\n" +
-    "{prefix}_firmware_mode_b64={base64_encode("direct-kernel")}\n" +
-    "{prefix}_firmware_path_b64={base64_encode("none")}\n" +
-    "{prefix}_firmware_version_b64={base64_encode("version:none")}\n" +
-    "{prefix}_firmware_sha256_b64={base64_encode("none")}\n" +
-    "{prefix}_firmware_stage_markers_b64={base64_encode("guest-entry")}\n" +
-    "{prefix}_run_nonce_b64={base64_encode("run-" + host + "-" + guest + "-20260816")}\n" +
-    "{prefix}_transcript_identity_b64={base64_encode("sha256:" + h[3])}\n" +
-    "{prefix}_program_identity_b64={base64_encode("sha256:" + h[6])}\n" +
-    "{prefix}_evidence_sha256={evidence_sha}\n" +
-    "{prefix}_artifact_count=8\n"
+    val ev_path_b64 = base64_encode("rows/" + host + "/" + guest + "/evidence.env")
+    val adm_path_b64 = base64_encode("rows/" + host + "/" + guest + "/admission.env")
+    val rev_b64 = base64_encode("fixture-reviewer")
+    val src_id_b64 = base64_encode(_QEMU_V2_SOURCE_IDENTITY)
+    val comp_id_b64 = base64_encode("source-simple:fixture")
+    val kern_id_b64 = base64_encode("sha256:" + h[4])
+    val img_id_b64 = base64_encode("sha256:" + h[5])
+    val qemu_id_b64 = base64_encode("sha256:" + ("a" * 64) + ":version:qemu-fixture")
+    val qemu_argv_b64 = base64_encode("qemu-system-fixture -machine fixture -bios none")
+    val accel_b64 = base64_encode("tcg")
+    val fw_id_b64 = base64_encode("firmware:edk2-fixture")
+    val fw_mode_b64 = base64_encode("uefi-pflash")
+    val fw_path_b64 = base64_encode("/usr/share/OVMF/OVMF_CODE.fd")
+    val fw_ver_b64 = base64_encode("version:2026.02")
+    val fw_sha_b64 = base64_encode("sha256:" + h[7])
+    val fw_stage_b64 = base64_encode("firmware-entry>firmware-handoff>guest-entry")
+    val boot_corr_b64 = base64_encode("boot-marker-" + host + "-" + guest)
+    val nonce_b64 = base64_encode("run-" + host + "-" + guest + "-20260816")
+    val tr_id_b64 = base64_encode("sha256:" + h[3])
+    val prog_id_b64 = base64_encode("sha256:" + h[6])
+    val lines = [
+        "{prefix}_host={host}",
+        "{prefix}_guest={guest}",
+        "{prefix}_status=pass",
+        "{prefix}_reason_b64=",
+        "{prefix}_evidence_path_b64={ev_path_b64}",
+        "{prefix}_admission_record_path_b64={adm_path_b64}",
+        "{prefix}_resume_command_b64=",
+        "{prefix}_owner_b64={owner_b64}",
+        "{prefix}_reviewer_b64={rev_b64}",
+        "{prefix}_compiler_in_filesystem=false",
+        "{prefix}_compiler_identity_scope=source-toolchain",
+        "{prefix}_compiler_policy_sha256={_QEMU_V2_COMPILER_POLICY_SHA}",
+        "{prefix}_compiler_policy_value=false",
+        "{prefix}_compiler_designation_scope=live-policy",
+        "{prefix}_compiler_version_evidence_path_b64=",
+        "{prefix}_compiler_hello_evidence_path_b64=",
+        "{prefix}_compiler_alias_evidence_path_b64=",
+        "{prefix}_compiler_manifest_evidence_path_b64=",
+        "{prefix}_source_identity_b64={src_id_b64}",
+        "{prefix}_compiler_identity_b64={comp_id_b64}",
+        "{prefix}_compiler_payload_identity_b64=",
+        "{prefix}_compiler_image_identity_b64=",
+        "{prefix}_compiler_alias_identity_b64=",
+        "{prefix}_compiler_manifest_identity_b64=",
+        "{prefix}_kernel_identity_b64={kern_id_b64}",
+        "{prefix}_image_identity_b64={img_id_b64}",
+        "{prefix}_qemu_identity_b64={qemu_id_b64}",
+        "{prefix}_qemu_argv_b64={qemu_argv_b64}",
+        "{prefix}_accelerator_identity_b64={accel_b64}",
+        "{prefix}_firmware_identity_b64={fw_id_b64}",
+        "{prefix}_firmware_mode_b64={fw_mode_b64}",
+        "{prefix}_firmware_path_b64={fw_path_b64}",
+        "{prefix}_firmware_version_b64={fw_ver_b64}",
+        "{prefix}_firmware_sha256_b64={fw_sha_b64}",
+        "{prefix}_firmware_stage_markers_b64={fw_stage_b64}",
+        "{prefix}_boot_correlation_marker_b64={boot_corr_b64}",
+        "{prefix}_run_nonce_b64={nonce_b64}",
+        "{prefix}_transcript_identity_b64={tr_id_b64}",
+        "{prefix}_program_identity_b64={prog_id_b64}",
+        "{prefix}_evidence_sha256={evidence_sha}",
+        "{prefix}_admission_record_sha256={admission_sha}",
+        "{prefix}_artifact_count=9",
+    ]
+    lines.join("\n") + "\n"
 
 fn _qemu_v2_setup_full_matrix(
     root: text, malformed_last_row: bool, swap_first_two_rows: bool = false
 ) -> text:
     _ = dir_remove_all(root)
     expect(dir_create_all(root)).to_be(true)
-    var manifest = "sosix_qemu_matrix_manifest_version=2\n" +
+    var manifest = "sosix_qemu_matrix_manifest_version=1\n" +
         "sosix_qemu_matrix_row_count=24\n"
     var row_number: i64 = 0
-    for host in ["freebsd", "linux", "macos", "windows"]:
-        val guests = if swap_first_two_rows and host == "freebsd":
-            ["arm64", "arm32", "riscv32", "riscv64", "x86_32", "x86_64"]
+    for host in sosix_qemu_matrix_hosts():
+        val guests = if swap_first_two_rows and host == "linux":
+            ["x86_64", "x86_32", "arm32", "arm64", "riscv32", "riscv64"]
         else:
-            ["arm32", "arm64", "riscv32", "riscv64", "x86_32", "x86_64"]
+            sosix_qemu_matrix_guests()
         for guest in guests:
             row_number = row_number + 1
             val row_root = root + "/rows/" + host + "/" + guest
             val artifacts = _qemu_v2_write_artifacts(root, host, guest)
             val evidence = _qemu_v2_evidence(host, guest, artifacts)
             val evidence_sha = sha256_u8_hex(evidence.to_bytes())
-            val admission = _qemu_v2_admission(evidence_sha, artifacts)
+            val admission = _qemu_v2_admission(host, guest, evidence_sha, artifacts)
             val admission_sha = sha256_u8_hex(admission.to_bytes())
             expect(file_write_text(row_root + "/evidence.env", evidence)).to_be(true)
             expect(file_write_text(row_root + "/admission.env", admission)).to_be(true)
             manifest = manifest + _qemu_v2_manifest_row(
                 row_number, host, guest, artifacts, evidence_sha, admission_sha,
                 malformed_last_row and row_number == 24)
-    manifest = manifest +
-        "sosix_qemu_matrix_promotion_status=pass\n" +
-        "sosix_qemu_matrix_nonpass_row_count=0\n"
     val bundle_id = sha256_u8_hex(manifest.to_bytes()).substring(0, 16)
     manifest = manifest + "sosix_qemu_matrix_bundle_id={bundle_id}\n"
     expect(file_write_text(root + "/matrix.env", manifest)).to_be(true)
@@ -194,6 +276,7 @@ describe "SOSIX QEMU v2 trusted importer":
         val root = _qemu_v2_setup_full_matrix(_QEMU_V2_FIXTURE_ROOT, false)
         expect(sosix_qemu_collector_root_is_release_admissible(root)).to_be(true)
         val mutated = _qemu_v2_admission(
+            "linux", "x86_32",
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             _qemu_v2_write_artifacts(root, "linux", "x86_32"))
         expect(file_write_text(root + "/rows/linux/x86_32/admission.env", mutated)).to_be(true)

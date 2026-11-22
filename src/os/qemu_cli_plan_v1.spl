@@ -132,8 +132,15 @@ fn _qemu_path_directory_v1(path: text) -> text:
         return ""
     normalized[:slash]
 
+fn _qemu_norm_exec_path_v1(path: text) -> text:
+    val slash = path.replace("\\", "/")
+    val has_drive = slash.len() >= 2 and slash[1] == ':'
+    if path.contains("\\") or has_drive or slash.lower().ends_with(".exe"):
+        return slash.lower()
+    slash
+
 pub fn qemu_cli_executable_policy_matches_v1(normal_runner: text, configured: text) -> bool:
-    normal_runner.replace("\\", "/") == configured.replace("\\", "/")
+    _qemu_norm_exec_path_v1(normal_runner) == _qemu_norm_exec_path_v1(configured)
 
 fn _qemu_shell_quote_v1(value: text) -> text:
     "'" + value.replace("'", "'\"'\"'") + "'"
@@ -296,7 +303,8 @@ fn _qemu_cli_inspect_lane_shape_v1(
     val configured_path = _qemu_resolve_executable_v1(settings.host, configured_binary)
     if configured_path == "" or not file_exists(configured_path):
         return _qemu_cli_reject_v1("QEMU executable not found: {configured_binary}")
-    val executable_name = qemu_host_executable_name_v1(target, "")
+    val executable_suffix = if settings.host == "windows": ".exe" else: ""
+    val executable_name = qemu_host_executable_name_v1(target, executable_suffix)
     val executable_path = _qemu_resolve_executable_v1(settings.host, executable_name)
     if executable_path == "" or not file_exists(executable_path):
         return _qemu_cli_reject_v1(
@@ -310,8 +318,7 @@ fn _qemu_cli_inspect_lane_shape_v1(
     val accelerator = selected_accelerator.unwrap()
     val probe = QemuHostProbeInputsV1(
         target_id: target.canonical_name,
-        executable_name: qemu_host_executable_name_v1(
-            target, if settings.host == "windows": ".exe" else: ""),
+        executable_name: executable_name,
         qemu_bin_dir: _qemu_path_directory_v1(executable_path),
         executable_available: true,
         firmware_required: firmware_required,
@@ -332,7 +339,7 @@ fn _qemu_cli_inspect_lane_shape_v1(
         case _: FreeBsdQemuHostV1(probe: probe).resolve(target)
     if not host_outcome.admitted():
         return _qemu_cli_reject_v1(_qemu_host_error_text_v1(host_outcome.error()))
-    if host_outcome.resolution().executable_path != executable_path.replace("\\", "/"):
+    if not qemu_cli_executable_policy_matches_v1(host_outcome.resolution().executable_path, executable_path):
         return _qemu_cli_reject_v1(
             "QEMU executable policy mismatch: settings resolved {executable_path}, " +
             "adapter selected {host_outcome.resolution().executable_path}")

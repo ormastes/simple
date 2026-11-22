@@ -38,11 +38,14 @@ use os.qemu_runner.{
     qemu_scenario_protection_serial_accepts_hardening,
     qemu_scenario_protection_serial_reason,
     _simpleos_log_config_source,
+    _simple_binary_is_valid,
     OsTarget,
     qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
-use os.desktop_qemu_contract.{run_x64_desktop_disk_probe}
+use os.desktop_qemu_contract.{run_x64_desktop_disk_probe, run_x64_wm_simple_web_probe}
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_unset, host_os}
 use os.port.simpleos_multiplatform_build.{SimpleOsLaneKind, simpleos_platform_qemu_lane}
 
 extern fn rt_dir_create_all(path: text) -> bool
@@ -53,7 +56,6 @@ extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_exit(code: i32) -> void
 
 fn scenario_name_or_missing(name: text) -> text:
     val scenario = get_scenario(name)
@@ -266,12 +268,72 @@ describe "Qemu runner desktop UEFI tool app validator":
         val root = "build/test-x64-desktop-disk-probe"
         val serial = root + "/serial.log"
         expect(rt_dir_create_all(root)).to_equal(true)
+        val probe_cmd = if host_os() == "windows":
+            ["cmd", "/c", "echo boot& echo TEST PASSED"]
+        else:
+            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST PASSED\\\\n\"'"]
         val (stdout, _stderr, exit_code) = run_x64_desktop_disk_probe(
-            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST PASSED\\\\n\"'"],
+            probe_cmd,
             serial,
-            1500)
+            5000)
         expect(exit_code).to_equal(0)
         expect(stdout).to_contain("TEST PASSED")
+
+    it "captures TEST FAILED with exit code 2 in x64 wm simple web probe":
+        # @req REQ-SSPEC-OS
+        step("captures TEST FAILED with exit code 2 in x64 wm simple web probe")
+        val root = "build/test-x64-wm-simple-web-probe"
+        val serial = root + "/serial.log"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val probe_cmd = if host_os() == "windows":
+            ["cmd", "/c", "echo boot& echo TEST FAILED"]
+        else:
+            ["/bin/sh", "-c", "'printf \"boot\\\\nTEST FAILED\\\\n\"'"]
+        val (stdout, _stderr, exit_code) = run_x64_wm_simple_web_probe(
+            probe_cmd,
+            serial,
+            5000)
+        expect(exit_code).to_equal(2)
+        expect(stdout).to_contain("TEST FAILED")
+
+    it "executes candidate identity probe directly without external env binary and restores caller env":
+        # @req REQ-SSPEC-OS
+        step("executes candidate identity probe directly without external env binary and restores caller env")
+        expect(_simple_binary_is_valid("")).to_equal(false)
+        expect(_simple_binary_is_valid("build/nonexistent-simple-candidate")).to_equal(false)
+        val candidate = if host_os() == "windows": "bin/simple.exe" else: "bin/simple"
+        if rt_file_exists(candidate):
+            val prev_path = if val p = env_get_opt("PATH"): p else: ""
+            val had_path = env_get_opt("PATH") != nil
+            val had_warn = env_get_opt("SIMPLE_RUST_SEED_WARNING") != nil
+            val before_warn = if val v = env_get_opt("SIMPLE_RUST_SEED_WARNING"): v else: ""
+            val had_delegated = env_get_opt("SIMPLE_FRONTEND_DELEGATED") != nil
+            val before_delegated = if val v = env_get_opt("SIMPLE_FRONTEND_DELEGATED"): v else: ""
+            val before_bootstrap = if val v = env_get_opt("SIMPLE_BOOTSTRAP"): v else: "<unset>"
+            expect(env_set("SIMPLE_RUST_SEED_WARNING", "preserve-me")).to_equal(true)
+            val _ = env_unset("SIMPLE_FRONTEND_DELEGATED")
+            if host_os() == "windows":
+                expect(env_set("PATH", "build/nonexistent-env-dir")).to_equal(true)
+            val valid = _simple_binary_is_valid(candidate)
+            if host_os() == "windows":
+                if had_path:
+                    expect(env_set("PATH", prev_path)).to_equal(true)
+                else:
+                    val _ = env_unset("PATH")
+            val after_warn = if val v = env_get_opt("SIMPLE_RUST_SEED_WARNING"): v else: "<unset>"
+            val after_delegated = if val v = env_get_opt("SIMPLE_FRONTEND_DELEGATED"): v else: "<unset>"
+            val after_bootstrap = if val v = env_get_opt("SIMPLE_BOOTSTRAP"): v else: "<unset>"
+            if had_warn:
+                val _ = env_set("SIMPLE_RUST_SEED_WARNING", before_warn)
+            else:
+                val _ = env_unset("SIMPLE_RUST_SEED_WARNING")
+            if had_delegated:
+                val _ = env_set("SIMPLE_FRONTEND_DELEGATED", before_delegated)
+            expect(after_warn).to_equal("preserve-me")
+            expect(after_delegated).to_equal("<unset>")
+            expect(after_bootstrap).to_equal(before_bootstrap)
+            if host_os() == "windows":
+                expect(valid).to_equal(false)
 
     it "requires clang in the riscv64 hosted acceptance marker set":
         # @req REQ-SSPEC-OS
@@ -286,4 +348,3 @@ describe "Qemu runner desktop UEFI tool app validator":
         else:
             fail("missing riscv64 hosted lane")
 
-rt_exit(0)
