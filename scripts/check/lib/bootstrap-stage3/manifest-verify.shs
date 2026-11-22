@@ -67,6 +67,45 @@ bootstrap_stage3_focused_cuda_setting() {
     ' "$bsfc_manifest"
 }
 
+# Stage 3 SIMPLE_MIR_SHARDING / SIMPLE_FRONTEND_CACHE (W24/W27). Sets
+# bsfc_mir_sharding ('' | 0 | 1) and bsfc_frontend_cache (0 | 1) from the
+# recorded transcript, and fails unless each is a valid value AND equals the
+# manifest's focused_mir_sharding / focused_frontend_cache (absent = pinned:
+# '' and 1). bootstrap-from-scratch.sh writes those fields only when set.
+# Optional manifest key: prints the value, or DEFAULT when the key is absent.
+# A duplicated key (or any other read failure of a present key) is a hard
+# failure, never "absent".
+bootstrap_stage3_focused_optional_value() {
+    if bsfo_value=$(bootstrap_stage3_verify_value "$1" "$bootstrap_stage3_manifest" 2>/dev/null); then
+        printf '%s\n' "$bsfo_value"
+        return 0
+    fi
+    if [ -r "$bootstrap_stage3_manifest" ]; then
+        bsfo_count=$(grep -c "^$1=" "$bootstrap_stage3_manifest" 2>/dev/null) || bsfo_count=0
+        [ "$bsfo_count" = 0 ] || return 1
+    fi
+    printf '%s\n' "$2"
+}
+
+bootstrap_stage3_focused_stage3_cache_knobs() {
+    bsfk_transcript=$1
+    bsfc_frontend_cache=$(bootstrap_stage3_transcript_explicit_env_value \
+        "$bsfk_transcript" SIMPLE_FRONTEND_CACHE) || return 1
+    case "$bsfc_frontend_cache" in 0|1) ;; *) return 1 ;; esac
+    bsfc_mir_sharding=
+    if grep -q '^explicit-env:[0-9][0-9]*:SIMPLE_MIR_SHARDING=' "$bsfk_transcript"; then
+        bsfc_mir_sharding=$(bootstrap_stage3_transcript_explicit_env_value \
+            "$bsfk_transcript" SIMPLE_MIR_SHARDING) || return 1
+        case "$bsfc_mir_sharding" in 0|1) ;; *) return 1 ;; esac
+    fi
+    bsfk_manifest_fc=$(bootstrap_stage3_focused_optional_value focused_frontend_cache 1) || return 1
+    case "$bsfk_manifest_fc" in 0|1) ;; *) return 1 ;; esac
+    bsfk_manifest_ms=$(bootstrap_stage3_focused_optional_value focused_mir_sharding '') || return 1
+    case "$bsfk_manifest_ms" in ''|0|1) ;; *) return 1 ;; esac
+    [ "$bsfk_manifest_fc" = "$bsfc_frontend_cache" ] &&
+        [ "$bsfk_manifest_ms" = "$bsfc_mir_sharding" ]
+}
+
 # action=hash excludes the executable; action=transcript retains the exact
 # env/argv separation expected by the existing byte-for-byte transcript checker.
 bootstrap_stage3_focused_command() (
@@ -80,6 +119,7 @@ bootstrap_stage3_focused_command() (
     bsfc_compat="$bootstrap_stage3_stage2_output_display/stage3/$bootstrap_stage3_platform/phase2-compatibility.manifest"
     bsfc_low=$(bootstrap_stage3_verify_value focused_low_memory "$bootstrap_stage3_manifest") || return 1
     case "$bsfc_low" in 0|1) ;; *) return 1 ;; esac
+    bsfc_frontend_cache= bsfc_mir_sharding=
     set --
     # Frontend shard rows are prepended by run_transcribed AFTER the builder's
     # env-name check and ARE part of the recorded command. Replay them first,
@@ -136,8 +176,15 @@ bootstrap_stage3_focused_command() (
         set -- "$@" \
             "SIMPLE_KEEP_SOURCE_CONTENTS=$(bootstrap_stage3_transcript_explicit_env_value "$bsfc_transcript" SIMPLE_KEEP_SOURCE_CONTENTS)" \
             "SIMPLE_MIR_TAG_PROBE=$(bootstrap_stage3_transcript_explicit_env_value "$bsfc_transcript" SIMPLE_MIR_TAG_PROBE)"
+        # W24/W27 Windows shard-worker workaround (bootstrap-from-scratch.sh
+        # Stage 3 pass-throughs). The recorded transcript is the authority; the
+        # manifest's focused_* fields must agree with it, and an absent field
+        # means the pinned value (SIMPLE_MIR_SHARDING absent,
+        # SIMPLE_FRONTEND_CACHE=1). Only unset|0|1 is accepted on either side.
+        bootstrap_stage3_focused_stage3_cache_knobs "$bsfc_transcript" || return 1
+        [ -z "$bsfc_mir_sharding" ] || set -- "$@" "SIMPLE_MIR_SHARDING=$bsfc_mir_sharding"
     fi
-    set -- "$@" SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=$bsfc_cache/frontend" \
+    set -- "$@" "SIMPLE_FRONTEND_CACHE=${bsfc_frontend_cache:-1}" "SIMPLE_FRONTEND_CACHE_DIR=$bsfc_cache/frontend" \
         SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=$bsfc_cache/hir"
     if [ "$bsfc_phase" = stage2 ]; then
         case "$bootstrap_stage3_platform" in *apple-darwin*)
@@ -1375,6 +1422,11 @@ bootstrap_stage3_verify_manifest_impl() {
         "$bootstrap_stage3_stage2_transcript") || return 1
     bootstrap_stage3_stage3_compiler_ceiling=$(bootstrap_stage3_transcript_compiler_ceiling \
         "$bootstrap_stage3_stage3_transcript") || return 1
+    # Legacy-v4 recipe: the frontend cache value is the one the transcript
+    # recorded (historically 0), validated to 0|1 -- never assumed.
+    bootstrap_stage3_stage3_frontend_cache=$(bootstrap_stage3_transcript_explicit_env_value \
+        "$bootstrap_stage3_stage3_transcript" SIMPLE_FRONTEND_CACHE) || return 1
+    case "$bootstrap_stage3_stage3_frontend_cache" in 0|1) ;; *) return 1 ;; esac
 
     bootstrap_stage3_stage2_library_path=$(
         bootstrap_stage3_transcript_explicit_env_value \
@@ -1536,7 +1588,7 @@ bootstrap_stage3_verify_manifest_impl() {
             "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$bootstrap_stage3_stage3_link_compat" \
             "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
             "SIMPLE_STAGE3_STREAMING_SURFACES=$bootstrap_stage3_stage3_streaming" \
-            "SIMPLE_FRONTEND_CACHE=0" \
+            "SIMPLE_FRONTEND_CACHE=$bootstrap_stage3_stage3_frontend_cache" \
             "MALLOC_ARENA_MAX=$bootstrap_stage3_malloc_arena_max" \
             "MALLOC_TRIM_THRESHOLD_=$bootstrap_stage3_malloc_trim_threshold" \
             "SIMPLE_NATIVE_ARENA_DECLS=$bootstrap_stage3_stage3_arena_decls" \
@@ -1578,7 +1630,7 @@ bootstrap_stage3_verify_manifest_impl() {
         "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$bootstrap_stage3_stage3_link_compat" \
         "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
         "SIMPLE_STAGE3_STREAMING_SURFACES=$bootstrap_stage3_stage3_streaming" \
-        "SIMPLE_FRONTEND_CACHE=0" \
+        "SIMPLE_FRONTEND_CACHE=$bootstrap_stage3_stage3_frontend_cache" \
         "MALLOC_ARENA_MAX=$bootstrap_stage3_malloc_arena_max" \
         "MALLOC_TRIM_THRESHOLD_=$bootstrap_stage3_malloc_trim_threshold" \
         "SIMPLE_NATIVE_ARENA_DECLS=$bootstrap_stage3_stage3_arena_decls" \

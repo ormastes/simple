@@ -21,6 +21,9 @@
 # and must not acquire bootstrap ownership or create its own process group.
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+# Caller's Stage 3 SIMPLE_FRONTEND_CACHE (W24/W27), captured before the Stage 2
+# cache setup (bootstrap_cache_enable_persistence) exports SIMPLE_FRONTEND_CACHE=1.
+bootstrap_caller_frontend_cache=${SIMPLE_FRONTEND_CACHE-}
 
 # Pinned-archive source (owner decision 2026-11-09): build committed content from
 # a `git archive` snapshot, never the live shared working copy, so concurrent
@@ -5301,6 +5304,25 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage3_bootstrap_flag=1 stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
     *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
   esac
+  # Windows shard-worker warm-cache workaround (W24/W27, 2026-11-23): MIR shard
+  # workers AV reading back the frontend parse cache; the working setting is
+  # SIMPLE_MIR_SHARDING=1 + SIMPLE_FRONTEND_CACHE=0. Validated (unset | 0 | 1)
+  # single-variable pass-throughs, hashed and transcribed; unset keeps the
+  # pinned argv byte-for-byte (SIMPLE_MIR_SHARDING absent, SIMPLE_FRONTEND_CACHE
+  # at its pinned 1). Same knobs in resume-stage3-from-admitted.sh.
+  stage3_mir_sharding_env= stage3_frontend_cache=1
+  case "${SIMPLE_MIR_SHARDING:-}" in
+    '') ;;
+    0|1) stage3_mir_sharding_env="SIMPLE_MIR_SHARDING=${SIMPLE_MIR_SHARDING}" ;;
+    *) echo "error: SIMPLE_MIR_SHARDING must be unset, 0 or 1" >&2; exit 1 ;;
+  esac
+  # The caller's value (captured at entry): Stage 2 cache setup has since
+  # exported SIMPLE_FRONTEND_CACHE=1 into this shell.
+  case "${bootstrap_caller_frontend_cache:-}" in
+    '') ;;
+    0|1) stage3_frontend_cache=${bootstrap_caller_frontend_cache} ;;
+    *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 1 ;;
+  esac
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -5320,8 +5342,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_GO_TO_END=${bootstrap_go_to_end}" \
       "SIMPLE_CACHE_SCOPE=stage3" \
       "SIMPLE_KEEP_SOURCE_CONTENTS=${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
-      "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" \
-      "SIMPLE_FRONTEND_CACHE=1" \
+      "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" ${stage3_mir_sharding_env} \
+      "SIMPLE_FRONTEND_CACHE=${stage3_frontend_cache}" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_HIR_CACHE=1" \
       "SIMPLE_HIR_CACHE_DIR=${stage3_cache_absolute}/hir" \
@@ -6458,8 +6480,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
     SIMPLE_CACHE_SCOPE=stage3 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
-    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
-    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" ${stage3_mir_sharding_env} \
+    SIMPLE_FRONTEND_CACHE="${stage3_frontend_cache}" \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
     SIMPLE_HIR_CACHE=1 \
     SIMPLE_HIR_CACHE_DIR="${stage3_cache_absolute}/hir" \
@@ -6713,6 +6735,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     [ -z "${native_verbose_arg}" ] || BSTAGE3_FOCUSED_STAGE2_VERBOSE=1
     BSTAGE3_FOCUSED_STAGE2_TIMEOUT=${SIMPLE_NATIVE_FILE_TIMEOUT:-}
     BSTAGE3_FOCUSED_MISSION_CRITICAL=${SIMPLE_STAGE3_MISSION_CRITICAL:-0}
+    # Validated at the Stage 3 launch above (unset | 0 | 1); recorded only when set.
+    BSTAGE3_FOCUSED_FRONTEND_CACHE=${bootstrap_caller_frontend_cache:-}
+    BSTAGE3_FOCUSED_MIR_SHARDING=${SIMPLE_MIR_SHARDING:-}
+    export BSTAGE3_FOCUSED_FRONTEND_CACHE BSTAGE3_FOCUSED_MIR_SHARDING
     export BSTAGE3_INVOCATION_CONTRACT BSTAGE3_FOCUSED_K1_POLICY \
       BSTAGE3_FOCUSED_K1_ROOT BSTAGE3_FOCUSED_K1_SHA256 BSTAGE3_FOCUSED_CUDA_ROOT \
       BSTAGE3_FOCUSED_CUDA_MANIFEST_SHA256 BSTAGE3_FOCUSED_CUDA_TEMPLATE_SHA256 \

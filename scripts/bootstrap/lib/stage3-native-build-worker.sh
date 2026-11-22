@@ -221,15 +221,29 @@ file_worker_batch_env=
 if [ -n "${SIMPLE_FILE_WORKER_BATCH:-}" ]; then
   file_worker_batch_env="SIMPLE_FILE_WORKER_BATCH=${SIMPLE_FILE_WORKER_BATCH}"
 fi
+# W24/W27 Windows shard-worker workaround: the launcher forwards these two
+# explicitly (empty = unset). Re-validated here so the transcribed invocation
+# carries exactly the words the args hash recorded; unset keeps the pinned argv.
+mir_sharding_env= frontend_cache=1
+case "${SIMPLE_MIR_SHARDING:-}" in
+  '') ;;
+  0|1) mir_sharding_env="SIMPLE_MIR_SHARDING=$SIMPLE_MIR_SHARDING" ;;
+  *) echo 'stage3 worker: SIMPLE_MIR_SHARDING must be unset, 0 or 1' >&2; exit 64 ;;
+esac
+case "${SIMPLE_FRONTEND_CACHE:-}" in
+  '') ;;
+  0|1) frontend_cache=$SIMPLE_FRONTEND_CACHE ;;
+  *) echo 'stage3 worker: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1' >&2; exit 64 ;;
+esac
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP="${bootstrap_flag}" ${whole_program_env} ${per_file_env} \
   SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES="$stage3_streaming_surfaces" \
-  ${mir_interface_hir_env} ${mir_shard_count_env} ${file_worker_batch_env} \
+  ${mir_interface_hir_env} ${mir_shard_count_env} ${file_worker_batch_env} ${mir_sharding_env} \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route" \
-  SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
+  SIMPLE_FRONTEND_CACHE="$frontend_cache" SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend" \
   SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_DIR="$cache/hir" \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 \
   SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1 \

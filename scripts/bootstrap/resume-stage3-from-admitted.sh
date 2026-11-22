@@ -1037,6 +1037,28 @@ stage3_file_worker_batch_env=
 if [ -n "${SIMPLE_FILE_WORKER_BATCH:-}" ]; then
   stage3_file_worker_batch_env="SIMPLE_FILE_WORKER_BATCH=${SIMPLE_FILE_WORKER_BATCH}"
 fi
+# Windows shard-worker warm-cache workaround (W24/W27, 2026-11-23). The Stage 3
+# MIR shard workers AV (0xC0000005 at claimed=0) reading back the frontend
+# parse cache (.fpc); the working configuration is SIMPLE_MIR_SHARDING=1 plus
+# SIMPLE_FRONTEND_CACHE=0. Both are explicit, validated single-variable
+# pass-throughs (unset | 0 | 1, anything else refused), baked into the args
+# hash AND the transcribed invocation (the worker re-validates and emits the
+# same words). Unset reproduces the pinned argv byte-for-byte:
+# SIMPLE_MIR_SHARDING stays absent and SIMPLE_FRONTEND_CACHE stays at its
+# pinned 1, so an explicit SIMPLE_FRONTEND_CACHE=1 is the same invocation.
+# No default changes. Bug:
+# doc/08_tracking/bug/stage3_resume_drops_mir_sharding_frontend_cache_env_2026-11-23.md
+stage3_mir_sharding_env= stage3_frontend_cache=1
+case "${SIMPLE_MIR_SHARDING:-}" in
+  '') ;;
+  0|1) stage3_mir_sharding_env="SIMPLE_MIR_SHARDING=$SIMPLE_MIR_SHARDING" ;;
+  *) echo "error: SIMPLE_MIR_SHARDING must be unset, 0 or 1" >&2; exit 1 ;;
+esac
+case "${SIMPLE_FRONTEND_CACHE:-}" in
+  '') ;;
+  0|1) stage3_frontend_cache=$SIMPLE_FRONTEND_CACHE ;;
+  *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 1 ;;
+esac
 stage3_cold_init_env=
 case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
   '') ;;
@@ -1085,10 +1107,10 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission" \
   "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_STAGE3_STREAMING_SURFACES=$stage3_streaming_surfaces" \
-  ${stage3_mir_interface_hir_env} ${stage3_mir_shard_count_env} ${stage3_file_worker_batch_env} \
+  ${stage3_mir_interface_hir_env} ${stage3_mir_shard_count_env} ${stage3_file_worker_batch_env} ${stage3_mir_sharding_env} \
   "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
   "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
-  "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
+  "SIMPLE_FRONTEND_CACHE=$stage3_frontend_cache" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
   "SIMPLE_HIR_CACHE=1" "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
@@ -1126,7 +1148,7 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     --group "$stage3_guard_unit" \
     --high "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" -- \
-    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" SIMPLE_MIR_SHARDING="${SIMPLE_MIR_SHARDING:-}" SIMPLE_FRONTEND_CACHE="${SIMPLE_FRONTEND_CACHE:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
@@ -1139,7 +1161,7 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     --property=KillMode=control-group \
     --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB}M" \
     --property="MemoryMax=${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB}M" \
-    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" SIMPLE_MIR_SHARDING="${SIMPLE_MIR_SHARDING:-}" SIMPLE_FRONTEND_CACHE="${SIMPLE_FRONTEND_CACHE:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
@@ -1167,7 +1189,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     --max-rss-kib="$stage3_darwin_rss_cap_kib" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="$stage3_log.rss.env" -- \
-    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" SIMPLE_MIR_SHARDING="${SIMPLE_MIR_SHARDING:-}" SIMPLE_FRONTEND_CACHE="${SIMPLE_FRONTEND_CACHE:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
@@ -1176,7 +1198,7 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$SIMPLE_BOOTSTRAP_STAGE3_MEMORY_HIGH_MIB" \
     "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" "$stage3_compiler_ceiling_env" "$stage3_compiler_cap" "$stage3_observation_budget_ms" "$stage3_lowering_lane" "$stage3_rss_cap_mode" --stage3-source-policy-v1 "$@" &
 else
-  env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+  env SIMPLE_MIR_SHARD_INTERFACE_HIR="${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" SIMPLE_MIR_SHARD_COUNT="${SIMPLE_MIR_SHARD_COUNT:-8}" SIMPLE_FILE_WORKER_BATCH="${SIMPLE_FILE_WORKER_BATCH:-}" SIMPLE_MIR_SHARDING="${SIMPLE_MIR_SHARDING:-}" SIMPLE_FRONTEND_CACHE="${SIMPLE_FRONTEND_CACHE:-}" "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
     "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
