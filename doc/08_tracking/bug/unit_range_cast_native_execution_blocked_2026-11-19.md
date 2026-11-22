@@ -117,3 +117,11 @@ Warm-up: `hello` built in 14m46s cold (rc=0), printed `hello`, run rc=0. The lin
 Logs: `C:/dev/wt/rbnat4/build/rbnat4/nv/<case>.build.log` (untracked).
 Status stays verification-pending: the u64 bound and div0 (SPL-UNIT-002) paths are still not verified natively.
 Handoff: (1) the unit constraint predicate parser rejects hex/underscore literals (`0xFFFF_FFFF_FFFF_FFF0`); (2) native MIR does not lower arithmetic on a unit with no range.
+
+## Lane 7: source fixes for the Lane 6 compile failures (2026-11-23, work/nu1-20261123)
+Neither failure was already fixed in release/1.0.0 source (checked at 9526382f4f5).
+- Hex/underscore bound: `unit_constraint.spl` tokenizer, `unit_constraint_parse_number` and `uc_bound_int` now accept `0x`/`0b`/`0o` literals with `_`. New `unit_radix_bound_bits` keeps a hex bound's 64-bit pattern; MIR `unit_range_bound_i64` uses it, so `0xFFFF_FFFF_FFFF_FFF0` becomes the u64 constant instead of `parse_i64`'s `-1`.
+- `/` on a plain `unit Dist: i64`: `emit_unit_div_remainder_check` now panics with `SPL-UNIT-002: unit division by zero` on a zero divisor (it used to skip to the trapping Div) and returns the i64 quotient of the payload words. Same-unit division returns that quotient, so the record-operator path no longer reports a missing `__div__`.
+- Specs: `unit_constraint_decl_spec.spl` (4 new cases, 29/29) and `unit_div_remainder_native_spec.spl` (2 new cases, 7/7; the new cases were red before the fix). `unit_range_cast_native_spec.spl` stays 14/14.
+- Limit: the interpreter evaluates predicates in f64, so it cannot tell `0xFFFF_FFFF_FFFF_FFFF` from the bound `0xFFFF_FFFF_FFFF_FFF0`. The native check compares integers and is exact.
+Native re-verification still needed: rebuild the self-hosted CLI from a tree containing this change, then re-run Lane 6 for big_accept, big_reject and div_zero.

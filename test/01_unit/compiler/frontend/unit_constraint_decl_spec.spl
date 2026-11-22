@@ -21,7 +21,7 @@ use compiler.core.types.{reset_all_pools, unit_decl_find, refinement_type_predic
 use compiler.core.parser.{parser_init_with_path, parser_has_errors, parser_get_errors, parser_diagnostics_suppressed_set}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.core.unit_constraint.{unit_constraint_find, unit_constraint_predicate, unit_constraint_ref_tag}
-use compiler.core.unit_constraint.{unit_constraint_eval, unit_range_predicate, unit_constraint_min_text, unit_constraint_max_text}
+use compiler.core.unit_constraint.{unit_constraint_eval, unit_range_predicate, unit_constraint_min_text, unit_constraint_max_text, unit_radix_bound_bits}
 
 fn declare(src: text):
     reset_all_pools()
@@ -173,3 +173,28 @@ describe "where-only unit bounds: overflow and empty ranges (post-merge review)"
         declare("unit One: i32 as on where self >= 5 and self <= 5\n")
         expect(unit_constraint_min_text("One")).to_equal("5")
         expect(unit_constraint_max_text("One")).to_equal("5")
+
+describe "constrained unit hex / underscore bounds":
+    it "accepts `unit Big: u64 in 0..=0xFFFF_FFFF_FFFF_FFF0`":
+        declare("unit Big: u64 in 0..=0xFFFF_FFFF_FFFF_FFF0\n")
+        expect(errors_joined()).to_equal("")
+        expect(unit_constraint_find("Big") >= 0).to_equal(true)
+        expect(unit_constraint_max_text("Big")).to_equal("0xFFFF_FFFF_FFFF_FFF0")
+
+    it "accepts a hex bound in a where predicate":
+        declare("unit Mask: u32 where 0x10 <= self and self <= 0xFF_FF\n")
+        expect(errors_joined()).to_equal("")
+        expect(unit_constraint_min_text("Mask")).to_equal("16")
+        expect(unit_constraint_max_text("Mask")).to_equal("65535")
+
+    it "evaluates hex and binary literals":
+        expect(unit_constraint_eval("self <= 0xFF", 255.0)).to_equal(1)
+        expect(unit_constraint_eval("self <= 0xFF", 256.0)).to_equal(0)
+        expect(unit_constraint_eval("self == 0b1010", 10.0)).to_equal(1)
+
+    it "keeps the u64 bit pattern of a hex bound above i64::MAX":
+        var ok: [bool] = [false]
+        expect(unit_radix_bound_bits("0xFFFF_FFFF_FFFF_FFF0", ok)).to_equal(-16)
+        expect(ok[0]).to_equal(true)
+        expect(unit_radix_bound_bits("65535", ok)).to_equal(0)
+        expect(ok[0]).to_equal(false)
