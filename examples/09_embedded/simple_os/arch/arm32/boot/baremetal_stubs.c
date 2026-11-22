@@ -95,7 +95,7 @@ RuntimeValue arm32_harden_print_canary(void)
 #define TAG_SPECIAL 0x3ULL
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)((uint64_t)(v) >> 3))
+#define DECODE_INT(v)  ((int64_t)(v) >> 3) /* arithmetic shift: full 61-bit payload, sign preserved */
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)(uintptr_t)((uint64_t)(v) & ~(uint64_t)TAG_MASK))
@@ -990,7 +990,8 @@ RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
     return (RuntimeValue)*(volatile uint16_t *)(uintptr_t)(uint32_t)addr;
 }
 
-/* 64-bit load for the shared pure-Simple value core (RuntimeValue is 64-bit
+/* HEAP SLOTS ONLY: not single-copy atomic, do not use on 64-bit device registers.
+ * 64-bit load for the shared pure-Simple value core (RuntimeValue is 64-bit
  * on every arch). Two aligned 32-bit loads, low word first: ARMv7-A has no
  * single-copy-atomic 64-bit plain load, and the heap words are only written
  * by this core. */

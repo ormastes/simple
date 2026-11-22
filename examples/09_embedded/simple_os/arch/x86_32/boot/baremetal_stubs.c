@@ -178,7 +178,7 @@ static void x86_32_harden_print_canary(void)
 #define TAG_SPECIAL 0x3ULL
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)((uint64_t)(v) >> 3))
+#define DECODE_INT(v)  ((int64_t)(v) >> 3) /* arithmetic shift: full 61-bit payload, sign preserved */
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)(uintptr_t)((uint64_t)(v) & ~(uint64_t)TAG_MASK))
