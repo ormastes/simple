@@ -812,9 +812,24 @@ RuntimeValue rt_store_barrier(void) {
 RuntimeValue rt_array_new_with_cap(RuntimeValue cap_val);
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx);
 RuntimeValue rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue val);
+RuntimeValue rt_value_int(RuntimeValue value);
 RuntimeValue rt_value_u64(RuntimeValue bits);
 RuntimeValue rt_value_as_u64(RuntimeValue value);
 RuntimeValue rt_value_unbox_int(RuntimeValue value);
+RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
+
+#define HEAP_WIDE_INT  20
+#define HEAP_WIDE_UINT 21
+typedef struct { HeapHeader hdr; int64_t value; } RuntimeWideInt;
+typedef struct { HeapHeader hdr; uint64_t value; } RuntimeWideUInt;
+
+static int _rt_is_non_numeric_heap(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (!h) return 0;
+    return h->type != HEAP_WIDE_INT && h->type != HEAP_WIDE_UINT;
+}
 
 /* --- float bit reinterpret & boxing (masked TAG_FLOAT = (bits & ~7ULL) | 2,
  * matching LLVM codegen box_float and value_runtime_owner.c any_box_f64) --- */
@@ -832,7 +847,17 @@ double rt_value_as_float(RuntimeValue value)
         __builtin_memcpy(&result, &bits, sizeof(result));
         return result;
     }
-    return (double)(int64_t)rt_value_unbox_int(value);
+    if (IS_INT(value)) {
+        return (double)((int64_t)value >> 3);
+    }
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_WIDE_INT) return (double)((RuntimeWideInt *)h)->value;
+        if (h && h->type == HEAP_WIDE_UINT) return (double)((RuntimeWideUInt *)h)->value;
+        return 0.0;
+    }
+    if (value == TRUE_VALUE) return 1.0;
+    return 0.0;
 }
 RuntimeValue f32_from_bits(RuntimeValue bits)
 {
@@ -856,9 +881,13 @@ RuntimeValue f64_from_bits(RuntimeValue bits)
 }
 RuntimeValue f64_to_bits(RuntimeValue val)
 {
-    uint64_t fbits = IS_FLOAT(val)
-        ? ((uint64_t)val & ~TAG_MASK)
-        : (uint64_t)rt_value_as_u64(val);
+    uint64_t fbits;
+    if (IS_FLOAT(val)) {
+        fbits = (uint64_t)val & ~TAG_MASK;
+    } else {
+        double dval = rt_value_as_float(val);
+        __builtin_memcpy(&fbits, &dval, sizeof(fbits));
+    }
     return rt_value_u64((RuntimeValue)fbits);
 }
 
@@ -872,12 +901,19 @@ int64_t rt_any_add(int64_t left, int64_t right)
      * type-infer as ANY (e.g. a `.substring().trim()` chain with no
      * explicit `text` annotation). Mirror src/runtime/runtime_native.c and
      * src/runtime/simple_core/core_string.spl: dispatch to string
-     * concatenation whenever either operand is a heap value. */
+     * concatenation whenever either operand is a non-numeric heap value. */
+    if (_rt_is_non_numeric_heap(left) || _rt_is_non_numeric_heap(right)) {
+        return rt_string_concat(left, right);
+    }
     if (IS_FLOAT(left) || IS_FLOAT(right)) {
         return (int64_t)rt_value_float(rt_value_as_float(left) + rt_value_as_float(right));
     }
     if (IS_HEAP(left) || IS_HEAP(right)) {
-        return rt_string_concat(left, right);
+        int64_t l = (IS_INT(left) || IS_HEAP(left) || left == TRUE_VALUE || left == FALSE_VALUE)
+            ? (int64_t)rt_value_unbox_int(left) : 0;
+        int64_t r = (IS_INT(right) || IS_HEAP(right) || right == TRUE_VALUE || right == FALSE_VALUE)
+            ? (int64_t)rt_value_unbox_int(right) : 0;
+        return (int64_t)rt_value_int((RuntimeValue)((uint64_t)l + (uint64_t)r));
     }
     return left + right;
 }
@@ -6757,12 +6793,9 @@ RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
 /* Wide-int boxes for values that do not fit the 61-bit inline tag. Heap kind
  * ids are private to this runtime; rt_value_as_u64/unbox_int below are the
  * only readers, matching the hosted RtCoreWideInt/RtCoreUInt contract
- * (runtime_native.c rt_value_int_wide/rt_value_u64). */
-#define HEAP_WIDE_INT  20
-#define HEAP_WIDE_UINT 21
-
-typedef struct { HeapHeader hdr; int64_t value; } RuntimeWideInt;
-typedef struct { HeapHeader hdr; uint64_t value; } RuntimeWideUInt;
+ * (runtime_native.c rt_value_int_wide/rt_value_u64).
+ * HEAP_WIDE_INT / HEAP_WIDE_UINT and RuntimeWideInt / RuntimeWideUInt are
+ * declared near Slice 2 above so float/any-add unboxing shares them. */
 
 static int _rt_int_fits_tagged(int64_t v)
 {
@@ -6807,6 +6840,7 @@ RuntimeValue rt_value_unbox_int(RuntimeValue value)
     if (IS_HEAP(value)) {
         HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
         if (h && h->type == HEAP_WIDE_INT) return (RuntimeValue)((RuntimeWideInt *)h)->value;
+        if (h && h->type == HEAP_WIDE_UINT) return (RuntimeValue)((RuntimeWideUInt *)h)->value;
     }
     if ((((uint64_t)value) & TAG_MASK) == TAG_INT) return (RuntimeValue)((int64_t)value >> 3);
     if (value == 11) return 1; /* TAG_SPECIAL | SPECIAL_TRUE  */
