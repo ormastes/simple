@@ -158,7 +158,12 @@ fn rt_array_set_text(array: i64, index: i64, value: i64) -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_array_new_with_cap_u64(cap: i64) -> i64:
-    rt_array_new_with_cap(cap)
+    var n = cap
+    if n < 0:
+        n = 0
+    if n > A32_MAX_ELEMS:
+        n = A32_MAX_ELEMS
+    rt_array_new_with_cap(n << 3)
 
 @cfg(arm32)
 @export("C")
@@ -184,22 +189,19 @@ fn rt_array_copy(array: i64) -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_array_repeat(value: i64, count: i64) -> i64:
-    # [value; count]: both args arrive RAW. Elements are stored tagged like the
-    # element-wise push paths; heap values pass through unchanged.
+    # [value; count]: `value` arrives already TAGGED (MIR box_runtime_value), only
+    # `count` is RAW; the tagged value is pushed unchanged.
     var n = count
     if n < 0:
         n = 0
     if n > A32_MAX_ELEMS:
         n = A32_MAX_ELEMS
-    var elem = value << 3
-    if (value & A32_TAG_MASK) == A32_TAG_HEAP:
-        elem = value
     var out = rt_array_new_with_cap(n << 3)
     if (out & A32_TAG_MASK) != A32_TAG_HEAP:
         return A32_NIL
     var i: i64 = 0
     while i < n:
-        out = rt_array_push(out, elem)
+        out = rt_array_push(out, value)
         i = i + 1
     out
 
@@ -221,8 +223,8 @@ fn rt_byte_array_new_len(len: i64) -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_bytes_from_raw(ptr: i64, len: i64) -> i64:
-    val base = _a32_raw_or_encoded(ptr)
-    val n = _a32_raw_or_encoded(len)
+    val base = ptr
+    val n = len
     if base == 0 or n <= 0:
         return rt_array_new(0)
     var out = rt_array_new_with_cap(n << 3)
@@ -323,6 +325,7 @@ fn rt_typed_words_u64_at(array: i64, index: i64) -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_typed_words_u64_push(array: i64, value: i64) -> i64:
+    # Twin of the C rt_typed_words_u32_push/_set pair (push tags, set stores as-is).
     # Push-return ABI: returns the possibly moved header. One 32-bit slot per
     # word (29-bit payload), as rt_typed_words_u32_push.
     rt_array_push(array, _a32_raw_or_encoded(value) << 3)
