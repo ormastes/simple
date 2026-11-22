@@ -4,7 +4,11 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
 use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_selected_v1,
     driver_surface_parse_text_v1, driver_hir_worker_parse_verdict_v1,
-    driver_hir_worker_parse_failed_row_v1}
+    driver_hir_worker_parse_failed_row_v1, driver_hir_worker_skeleton_text_v1,
+    driver_parse_shard_skeleton_warm_v1}
+use compiler.frontend.frontend.{frontend_private_parse_key_v1}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_text_v1}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_render_v1, module_tldr_sections_parse_v1}
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
 
 extern fn rt_file_read_text(path: text) -> text?
@@ -60,3 +64,32 @@ describe "HIR worker surface-pass parse errors (go to the end)":
         expect(driver_hir_worker_parse_failed_row_v1(true, true)).to_equal(true)
         expect(driver_hir_worker_parse_failed_row_v1(true, false)).to_equal(false)
         expect(driver_hir_worker_parse_failed_row_v1(false, true)).to_equal(false)
+
+# Parse shards warm the skeleton key the HIR workers look up
+# (doc/08_tracking/bug/frontend_spab_store_refused_and_hir_worker_skeleton_cache_misses_2026-11-22.md).
+# The shard child runs with SIMPLE_HIR_SHARD unset and hands the skeleton to the
+# same selected parse, so its stored key is the private key of
+# driver_surface_parse_text_v1(skeleton, "", flag).
+describe "parse-shard skeleton warming":
+    it "is armed only by the coordinator and honours the worker opt-out":
+        expect(driver_parse_shard_skeleton_warm_v1("1", "")).to_equal(true)
+        expect(driver_parse_shard_skeleton_warm_v1("1", "1")).to_equal(true)
+        expect(driver_parse_shard_skeleton_warm_v1("1", "0")).to_equal(false)
+        expect(driver_parse_shard_skeleton_warm_v1("0", "")).to_equal(false)
+        expect(driver_parse_shard_skeleton_warm_v1("", "")).to_equal(false)
+
+    it "stores exactly the frontend-cache key every worker route computes":
+        val source = rt_file_read_text(SAMPLE) ?? ""
+        val shard_text = driver_surface_parse_text_v1(driver_hir_worker_skeleton_text_v1(source), "", "")
+        val shard_key = frontend_private_parse_key_v1(shard_text)
+        # retained route and streaming worker_mode 0
+        expect(frontend_private_parse_key_v1(driver_surface_parse_text_v1(source, "1/2", ""))).to_equal(shard_key)
+        # streaming worker_mode 1, no .tldr root
+        expect(frontend_private_parse_key_v1(worker_surface_text_v1(SAMPLE, source, ""))).to_equal(shard_key)
+        # streaming worker_mode 1 via the .tldr `surface|` section the shard publishes
+        val (sections, consumed) = module_tldr_sections_parse_v1(
+            module_tldr_sections_render_v1(["surface|" + module_surface_skeleton_v1(source)]))
+        expect(consumed > 0).to_equal(true)
+        expect(frontend_private_parse_key_v1(sections[0].substring(8))).to_equal(shard_key)
+        # and it is a different key from the full source the shard also stores
+        expect(frontend_private_parse_key_v1(source) != shard_key).to_equal(true)

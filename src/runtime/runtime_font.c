@@ -88,10 +88,20 @@ int64_t rt_font_load(const char* path) {
     size_t read = fread(bytes, 1, (size_t)size, f);
     fclose(f);
     if (read != (size_t)size) { free(bytes); return 0; }
+    if (size < 16 && bytes[0] == 't' && bytes[1] == 't' &&
+        bytes[2] == 'c' && bytes[3] == 'f') {
+        free(bytes);
+        return 0;
+    }
+    int offset = stbtt_GetFontOffsetForIndex(bytes, 0);
+    if (offset < 0 || (long)offset > size - 12) {
+        free(bytes);
+        return 0;
+    }
     FontData* font = (FontData*)malloc(sizeof(FontData));
     if (!font) { free(bytes); return 0; }
     font->file_data = bytes;
-    if (!stbtt_InitFont(&font->info, bytes, stbtt_GetFontOffsetForIndex(bytes, 0))) {
+    if (!stbtt_InitFont(&font->info, bytes, offset)) {
         free(bytes);
         free(font);
         return 0;

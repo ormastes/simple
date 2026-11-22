@@ -2,7 +2,7 @@
 // Run only against a qualified native server: node this-file --server ABSOLUTE_BINARY.
 // No default binary: the tracked Rust seed is not an admitted MCP producer.
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -126,21 +126,23 @@ async function run() {
   await second.close();
   passed++;
 
+  fs.writeFileSync(path.join(directory, 'fixture.spl'), 'pub fn fixture_symbol() -> i64:\n    42\n');
+
   // Real diagnostics handler -> bounded native owner -> delegate + descendant.
   // Node interprets cwd/check as its script when invoked with ["check", file].
   const pidFile = path.join(directory, 'descendant.pid');
   const queryPidFile = path.join(directory, 'query.pid');
   fs.writeFileSync(path.join(directory, 'check'), `
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit', windowsHide: true });
 fs.writeFileSync(process.env.LSP_TEST_PID_FILE, String(child.pid));
 console.log('fixture.spl:2:3: warning: partial diagnostic');
 setInterval(() => {}, 1000);
 `);
-  const diagnostic = client({ SIMPLE_BINARY: process.execPath, SIMPLE_LSP_ENABLE_DIAGNOSTICS: '1', LSP_TEST_PID_FILE: pidFile, LSP_TEST_QUERY_PID_FILE: queryPidFile });
+  const diagnostic = client({ SIMPLE_BINARY: process.execPath, SIMPLE_LSP_ENABLE_DIAGNOSTICS: '1', SIMPLE_LSP_DIAGNOSTICS_MODE: 'native', LSP_TEST_PID_FILE: pidFile, LSP_TEST_QUERY_PID_FILE: queryPidFile });
   await initialize(diagnostic);
-  const response = diagnostic.request('tools/call', { name: 'lsp_diagnostics', arguments: { file: 'fixture.spl' } }, 20000, -32001);
+  const response = diagnostic.request('tools/call', { name: 'lsp_diagnostics', arguments: { file: 'fixture.spl' } }, 20000);
   // Attach immediately so early request failures do not become unhandled rejections.
   response.catch(() => {});
   await until(() => fs.existsSync(pidFile), 5000, 'diagnostics never launched the delegate fixture');
@@ -149,13 +151,57 @@ setInterval(() => {}, 1000);
   descendants.add(pid);
   assert.equal(live(pid), true, 'fixture descendant was never live');
   const result = await response;
-  assert.equal(result.message, 'lsp request timed out after 10000 ms');
+  assert.equal(result.structuredContent.status, 'timed_out');
+  assert.equal(result.structuredContent.reason, 'diagnostics timed out after 10000 ms');
   assert.equal(JSON.stringify(result).includes('partial diagnostic'), false);
   await until(() => !live(pid), 3000, `diagnostics leaked owned descendant ${pid}`);
   descendants.delete(pid);
   await diagnostic.request('ping');
 
-  // Each file-only/visibility dispatch must preserve the bounded owner's error.
+  // Document symbols must work without a Simple CLI child.
+  const symbolClient = client({ SIMPLE_BINARY: path.join(directory, 'missing-simple') });
+  await initialize(symbolClient);
+  const symbols = await symbolClient.request('tools/call', {
+    name: 'lsp_symbols', arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
+  });
+  assert(JSON.parse(symbols.content[0].text).some(symbol => symbol.name === 'fixture_symbol'));
+  await symbolClient.close();
+  passed++;
+
+  // Both native query entrypoints run in the bounded server child without a Simple CLI.
+  const nativeQueryClient = client({ SIMPLE_BINARY: '' });
+  await initialize(nativeQueryClient);
+  const position = { file: 'fixture.spl', line: 0, character: 8 };
+  const hover = await nativeQueryClient.request('tools/call', {
+    name: 'lsp_hover', arguments: position,
+  });
+  assert.match(JSON.parse(hover.content[0].text).contents.value, /fixture_symbol/);
+  const highlights = await nativeQueryClient.request('tools/call', {
+    name: 'lsp_document_highlight', arguments: position,
+  });
+  assert.match(highlights.content[0].text, /^1:7:14:/);
+  const samlFixture = path.join(__dirname, '../../../01_unit/lib/saml/fixtures/resume.saml');
+  fs.copyFileSync(samlFixture, path.join(directory, 'resume.saml'));
+  const analysis = await nativeQueryClient.request('tools/call', {
+    name: 'saml_analyze', arguments: { file: 'resume.saml' },
+  });
+  assert.match(analysis.content[0].text, /module=resume functions=2 errors=0/);
+  await nativeQueryClient.close();
+  passed++;
+
+  // Direct fast-query callers still get the capsule's default public view.
+  const scoped = path.join(directory, 'symbol-scope');
+  fs.mkdirSync(scoped);
+  fs.writeFileSync(path.join(scoped, '__init__.spl'), '');
+  fs.writeFileSync(path.join(scoped, 'fixture.spl'), 'val HIDDEN_SYMBOL = 42\n');
+  const defaultView = JSON.parse(execFileSync(server,
+    ['src/app/lsp/lsp_query.spl', 'symbols', 'symbol-scope/fixture.spl'],
+    { cwd: directory, encoding: 'utf8', timeout: 5000 }));
+  assert(defaultView.some(symbol => symbol.simpleHiddenSummary?.hidden === 1));
+  assert(!defaultView.some(symbol => symbol.name === 'HIDDEN_SYMBOL'));
+  passed++;
+
+  // Each remaining child-backed query must preserve the bounded owner's error.
   // These are real child deadlines; no marker injection into the server.
   const queryPath = path.join(directory, 'src', 'app', 'cli', 'query_visibility.spl');
   const samlPath = path.join(directory, 'src', 'app', 'saml', 'main.spl');
@@ -164,7 +210,7 @@ setInterval(() => {}, 1000);
   const hangingQuery = "require('node:fs').writeFileSync(process.env.LSP_TEST_QUERY_PID_FILE, String(process.pid)); console.log('partial query'); setInterval(() => {}, 1000);\n";
   fs.writeFileSync(queryPath, hangingQuery);
   fs.writeFileSync(samlPath, hangingQuery);
-  for (const name of ['lsp_visibility', 'lsp_symbols', 'saml_analyze']) {
+  for (const name of ['lsp_visibility', 'saml_analyze']) {
     const queryResponse = diagnostic.request('tools/call', {
       name, arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
     }, 40000, -32001);

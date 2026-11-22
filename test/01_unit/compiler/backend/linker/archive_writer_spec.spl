@@ -16,22 +16,21 @@ use compiler.backend.linker.archive_parser.{
     ar_parse, ar_member_count, ar_find_member, ar_member_data, ar_check_magic,
     ar_parse_symbol_index
 }
-use std.io_runtime.{file_write, file_read, file_delete}
+use std.io_runtime.{file_write_bytes, file_delete, dir_create_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.common.text_bytes.{text_to_bytes, bytes_to_text}
 
 # ============================================================================
 # Helper: run external command and capture output
 # ============================================================================
 
-fn run_command_capture_output(cmd: text) -> <text, i64>:
-    # Placeholder: in real execution, would need a process spawn mechanism
-    # For now, return "BLOCKED" status indicating we cannot run external tools
-    ["BLOCKED", 1]
+fn run_command_capture_output(cmd: text, args: [text]) -> [text]:
+    val (stdout, _stderr, exit_code) = process_run_bounded(cmd, args, 5000, 1048576)
+    [stdout, "{exit_code}"]
 
 fn tool_is_available(tool: text) -> bool:
-    # This would check PATH for the tool; for now, return false
-    # indicating tools may not be available
-    false
+    val (_out, _err, exit_code) = process_run_bounded(tool, ["--version"], 5000, 65536)
+    exit_code == 0
 
 # ============================================================================
 # Tests
@@ -95,20 +94,21 @@ describe "archive_write - deterministic headers":
         # Fields: name(16) + mtime(12) + uid(6) + gid(6) + mode(8) + size(10) + fmag(2) = 60
         val hdr_off = 8
 
-        # mtime field (offset 16 in header): should be "0           " (0 left-padded)
+        # mtime field (offset 16 in header): should be "0           " (0 right-padded)
         val mtime_start = hdr_off + 16
-        expect(archive[mtime_start]).to_equal(0x20 as u8)  # space
-        expect(archive[mtime_start + 1]).to_equal(0x20 as u8)
-        expect(archive[mtime_start + 11]).to_equal(0x30 as u8)  # '0'
+        expect(archive[mtime_start]).to_equal(0x30 as u8)      # '0'
+        expect(archive[mtime_start + 1]).to_equal(0x20 as u8)  # space
+        expect(archive[mtime_start + 11]).to_equal(0x20 as u8) # space
 
-        # uid field (offset 28): should be "0     " (0 left-padded)
+        # uid field (offset 28): should be "0     " (0 right-padded)
         val uid_start = hdr_off + 28
-        expect(archive[uid_start]).to_equal(0x20 as u8)  # space
-        expect(archive[uid_start + 5]).to_equal(0x30 as u8)  # '0'
+        expect(archive[uid_start]).to_equal(0x30 as u8)      # '0'
+        expect(archive[uid_start + 5]).to_equal(0x20 as u8)  # space
 
-        # gid field (offset 34): should be "0     " (0 left-padded)
+        # gid field (offset 34): should be "0     " (0 right-padded)
         val gid_start = hdr_off + 34
-        expect(archive[gid_start + 5]).to_equal(0x30 as u8)  # '0'
+        expect(archive[gid_start]).to_equal(0x30 as u8)      # '0'
+        expect(archive[gid_start + 5]).to_equal(0x20 as u8)  # space
 
         # mode field (offset 40): should be "100644  "
         val mode_start = hdr_off + 40
@@ -217,6 +217,7 @@ describe "archive_write - external tool validation":
     it "writes archive readable by llvm-ar t (if available)":
         if not tool_is_available("llvm-ar"):
             pending("llvm-ar not found on PATH")
+            return
 
         val member = ArchiveMemberInput(
             name: "test.o",
@@ -225,22 +226,20 @@ describe "archive_write - external tool validation":
         )
         val archive = archive_write([member])
 
-        # Write to temp file
-        val temp_file = "/tmp/archive_test_writer.a"
-        file_write(temp_file, archive)
+        dir_create_all("build/test_tmp")
+        val temp_file = "build/test_tmp/archive_test_writer.a"
+        expect(file_write_bytes(temp_file, archive)).to_equal(true)
 
-        # Run llvm-ar t
-        val result = run_command_capture_output("llvm-ar t " + temp_file)
+        val result = run_command_capture_output("llvm-ar", ["t", temp_file])
         file_delete(temp_file)
 
-        if result[1] == 0:
-            expect(result[0].len() > 0).to_equal(true)
-        else:
-            pending("llvm-ar execution failed or not available")
+        expect(result[1]).to_equal("0")
+        expect(result[0]).to_contain("test.o")
 
     it "writes archive readable by llvm-nm --print-armap (if available)":
         if not tool_is_available("llvm-nm"):
             pending("llvm-nm not found on PATH")
+            return
 
         val member = ArchiveMemberInput(
             name: "test.o",
@@ -249,15 +248,13 @@ describe "archive_write - external tool validation":
         )
         val archive = archive_write([member])
 
-        # Write to temp file
-        val temp_file = "/tmp/archive_test_nm.a"
-        file_write(temp_file, archive)
+        dir_create_all("build/test_tmp")
+        val temp_file = "build/test_tmp/archive_test_nm.a"
+        expect(file_write_bytes(temp_file, archive)).to_equal(true)
 
-        # Run llvm-nm
-        val result = run_command_capture_output("llvm-nm --print-armap " + temp_file)
+        val result = run_command_capture_output("llvm-nm", ["--print-armap", temp_file])
         file_delete(temp_file)
 
-        if result[1] == 0:
-            expect(result[0].len() >= 0).to_equal(true)
-        else:
-            pending("llvm-nm execution failed or not available")
+        # Dummy 4-byte [0x7F, E, L, F] member triggers member-body ELF warning after armap output.
+        expect(result[0]).to_contain("test_symbol")
+        expect(result[0]).to_contain("test.o")

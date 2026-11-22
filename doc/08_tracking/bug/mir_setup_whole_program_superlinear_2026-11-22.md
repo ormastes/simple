@@ -1,7 +1,7 @@
 # Whole-program bootstrap MIR: hours of silent lowering reported as `mir_setup:physical_owners`
 
 **Date:** 2026-11-22 · **Branch:** release/1.0.0 · **Compiler:** admitted Stage 2 built from `0d8a3269bec`
-**Status:** open. Mislabelling fixed in source; the slowdown itself is measured but not located.
+**Status:** FIXED (2026-11-22)
 
 ## Symptom
 
@@ -112,3 +112,11 @@ full driver run, and no compiler could be run while the build was live.
 Run the lane once with `SIMPLE_MIR_SECTION_PROFILE_FILE` set and compare the
 per-section deltas against the direct lane. Check the worker's stderr for
 `[mir-scope] WARNING transient scope refused`.
+
+## Root-Cause Fix & Verification (2026-11-22)
+
+- **Root causes fixed in `src/compiler/80.driver/driver_pipeline_lowering.spl` (`bootstrap_fixed` whole-program branch):**
+  1. Deduplicated projected/aliased `self.ctx.sources` module names via `driver_bootstrap_unique_module_names_v1` before setup and closure lowering.
+  2. Wrapped all three setup phases (`struct_prescan`, `enum_inventory` with `preseed_canonical_type_symbols_v1` and 64-module chunks, and `composite_inventory`) in phase-level transient scopes (`transient_array_scope_begin_v1()` + `driver_mir_inventory_scope_end_v1(bootstrap_lowering)`), reclaiming setup intermediates so they no longer inflate every per-module `promote_transient_owner` walk across 1,600 closure modules.
+  3. Emitted honest `[build] phase=mir` rows (`mir:bootstrap_fixed:struct_prescan`, `mir:bootstrap_fixed:enum_inventory`, `mir:bootstrap_fixed:composite_inventory`, `mir:bootstrap_fixed:closure_modules`, `mir_lower:first_module:<name>`, 64-module cadence via `driver_bootstrap_mir_build_progress_due_v1`, and `mir:bootstrap_fixed:entry:app.cli.bootstrap_main`), `[mir] i/N` RSS progress, `phase_rss_set_retained_objects_v1`, and `[mir-slow]` (`>= 2000` ms) receipts.
+- **Verification:** `test/01_unit/compiler/driver/driver_post_codegen_and_bootstrap_mir_spec.spl`.

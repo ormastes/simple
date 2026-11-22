@@ -2970,11 +2970,81 @@ bootstrap_stage3_tool_requested_path() {
     fi
 }
 
+# One recorded spelling per file for the tool-authority snapshot. Windows
+# hosts reach one executable as C:/x or /c/x, and as lld-link or lld-link.exe
+# (MSYS resolves the bare name to the .exe), depending only on how PATH or a
+# Cargo linker variable was spelled -- windows-msvc-bootstrap-env.shs exports
+# an absolute C:/.../lld-link.exe. Same bytes must give the same line, or an
+# admitted Stage 3 resume refuses with "tool authority changed". Only an alias
+# that IS the same file (-ef) gains .exe, so a distinct extensionless sibling
+# keeps its own identity; sha256 still binds the bytes. $1 is the host
+# platform (computed once by the caller), $2 the path; the result is left in
+# bootstrap_stage3_tool_identity (no subshell: MSYS forks are slow).
+# Non-Windows platforms pass the path through unchanged.
+bootstrap_stage3_tool_identity_path() {
+    bootstrap_stage3_tool_identity=$2
+    case "$1" in
+        *-pc-windows-*) ;;
+        *) return 0 ;;
+    esac
+    case "$bootstrap_stage3_tool_identity" in
+        [A-Za-z]:[\\/]*)
+            bootstrap_stage3_tool_identity=$(cygpath -u \
+                "$bootstrap_stage3_tool_identity") || return 1 ;;
+    esac
+    case "$bootstrap_stage3_tool_identity" in
+        *.[Ee][Xx][Ee]) ;;
+        *)
+            if [ -f "$bootstrap_stage3_tool_identity.exe" ] &&
+                [ "$bootstrap_stage3_tool_identity" -ef \
+                    "$bootstrap_stage3_tool_identity.exe" ]; then
+                bootstrap_stage3_tool_identity=$bootstrap_stage3_tool_identity.exe
+            fi ;;
+    esac
+}
+
+# EXE OUT ATTEMPTS: run `EXE --version` under a scrubbed env into OUT and set
+# bootstrap_stage3_tool_version_status. Only env(1)'s own exec-failure class
+# (125 env failed, 126 cannot execute, 127 not found) is retried, at most
+# ATTEMPTS times: on Windows/MSYS under memory pressure the SAME lld-link (same
+# sha256, same version text) returned 125 on one probe and 0 on the next, and
+# binding that transient status made the Stage 3 resume refuse "Stage-2 tool
+# authority changed since admission" (W11,
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md).
+# Any other status (BSD tools exit 1 on --version) is a stable binding and is
+# never retried. A failure that persists past the bound is recorded as-is, so
+# a genuinely unrunnable tool still mismatches; sha256 still binds the bytes.
+bootstrap_stage3_tool_version_probe() {
+    bootstrap_stage3_tool_probe_attempt=1
+    while :; do
+        bootstrap_stage3_tool_version_status=0
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$1" --version >"$2" 2>&1 ||
+            bootstrap_stage3_tool_version_status=$?
+        case "$bootstrap_stage3_tool_version_status" in
+            125|126|127) ;;
+            *) return 0 ;;
+        esac
+        [ "$bootstrap_stage3_tool_probe_attempt" -lt "$3" ] || return 0
+        printf 'bootstrap-stage3: %s --version exec status %s (attempt %s of %s); retrying\n' \
+            "$1" "$bootstrap_stage3_tool_version_status" \
+            "$bootstrap_stage3_tool_probe_attempt" "$3" >&2
+        sleep "$bootstrap_stage3_tool_probe_attempt"
+        bootstrap_stage3_tool_probe_attempt=$((bootstrap_stage3_tool_probe_attempt + 1))
+    done
+}
+
 bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_output=$1
     bootstrap_stage3_tool_path=$2
     bootstrap_stage3_tool_root=$3
     bootstrap_stage3_tool_tmp="${bootstrap_stage3_tool_output}.tmp.$$"
+    # Version-probe exec-failure retries are Windows-only (W11); other hosts
+    # keep one probe. Resolved once: every MSYS fork is costly per tool.
+    bootstrap_stage3_tool_probe_attempts=1
+    case "$(bootstrap_stage3_host_platform)" in
+        *-windows-*) bootstrap_stage3_tool_probe_attempts=5 ;;
+    esac
     trap 'rm -f "$bootstrap_stage3_tool_tmp" \
         "${bootstrap_stage3_tool_tmp}.version" \
         "${bootstrap_stage3_tool_tmp}.arch"' EXIT
@@ -3060,6 +3130,8 @@ bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_c_name=$(basename \
         "$bootstrap_stage3_tool_c_path")
     bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
+    bootstrap_stage3_tool_identity_host=$(bootstrap_stage3_host_platform) ||
+        return 1
     bootstrap_stage3_tool_archive_tools='ld ar ranlib'
     case "$(bootstrap_stage3_host_platform)" in
         *-pc-windows-msvc)
@@ -3094,6 +3166,9 @@ bootstrap_stage3_tool_authority_snapshot() (
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
             "$bootstrap_stage3_tool_c_path") || return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_requested" || return 1
+        bootstrap_stage3_tool_requested=$bootstrap_stage3_tool_identity
         case "$bootstrap_stage3_tool_requested" in
             /*) ;;
             *) return 1 ;;
@@ -3103,6 +3178,9 @@ bootstrap_stage3_tool_authority_snapshot() (
                 'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
                 "$bootstrap_stage3_tool_requested"
         ) || return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_canonical" || return 1
+        bootstrap_stage3_tool_canonical=$bootstrap_stage3_tool_identity
         [ -f "$bootstrap_stage3_tool_canonical" ] || return 1
         # macOS /usr/bin/{ld,ar,ranlib} are one xcrun trampoline binary (same
         # sha256 for all three) that dispatches through xcode-select or
@@ -3146,10 +3224,10 @@ bootstrap_stage3_tool_authority_snapshot() (
             rustc) bootstrap_stage3_tool_version_executable=$bootstrap_stage3_real_rustc ;;
             cargo) bootstrap_stage3_tool_version_executable=$bootstrap_stage3_real_cargo ;;
         esac
-        env -i PATH="$PATH" LC_ALL=C LANG=C \
-            "$bootstrap_stage3_tool_version_executable" --version \
-            >"$bootstrap_stage3_tool_version_output" 2>&1 ||
-            bootstrap_stage3_tool_version_status=$?
+        bootstrap_stage3_tool_version_probe \
+            "$bootstrap_stage3_tool_version_executable" \
+            "$bootstrap_stage3_tool_version_output" \
+            "$bootstrap_stage3_tool_probe_attempts"
         # First line via the read builtin, not $(sed -n 1p): on MSYS every
         # fork costs 1-8 s under load and this loop runs per tool. The EXIT
         # trap removes both scratch files; each probe truncates its own.
@@ -3242,11 +3320,17 @@ bootstrap_stage3_tool_authority_snapshot() (
     if command -v "${LLVM_CONFIG:-llvm-config}" >/dev/null 2>&1; then
         bootstrap_stage3_tool_llvm_requested=$(command -v "${LLVM_CONFIG:-llvm-config}") ||
             return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_llvm_requested" || return 1
+        bootstrap_stage3_tool_llvm_requested=$bootstrap_stage3_tool_identity
         bootstrap_stage3_tool_llvm_canonical=$(
             perl -MCwd=abs_path -e \
                 'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
                 "$bootstrap_stage3_tool_llvm_requested"
         ) || return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_llvm_canonical" || return 1
+        bootstrap_stage3_tool_llvm_canonical=$bootstrap_stage3_tool_identity
         [ -f "$bootstrap_stage3_tool_llvm_canonical" ] || return 1
         bootstrap_stage3_tool_llvm_version=$(
             bootstrap_stage3_native_metadata_probe llvm-config-tool-version \

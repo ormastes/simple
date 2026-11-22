@@ -214,3 +214,57 @@ lane clips. Captured the 300x120 repro with the fix and with the base
   clip or mask is set (source read only; no such device on this host).
   Vulkan now bakes the clip into the quads (`composite_font_batch`) and
   reports a fully clipped batch as the admitted status `clipped-out`.
+
+## Replay inspection of the Simple capture — 2026-11-22
+
+`scripts/check/check-simple-renderdoc-capture.shs` proves a Simple `.rdc` is a
+replayable record of the render, not only a file with `RDOC` magic. It is the
+step chained after `check-renderdoc-web-capture-lane.shs --simple-only`.
+
+```sh
+export RDOC_HOME=/home/yoon/toolchains/renderdoc/build      # build tree is fine
+export RDOC_SIMPLE_BIN=<seed or release simple>
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json  # lavapipe
+sh scripts/check/check-simple-renderdoc-capture.shs --page overview --out <dir>
+```
+
+It renders the page with plain Vulkan (`web_render_page_ppm.spl`), captures the
+same page under the RenderDoc layer (`renderdoc_web_page_capture.spl`), replays
+the `.rdc` headless, and requires > 0 draw/dispatch actions and a replayed
+framebuffer equal to the plain render at tolerance 0. No root, no Chrome, no
+native build; the tool is built with clang++ and lld. The run re-executes
+itself under `systemd-run -p MemoryMax=8G` (`RDOC_CAPTURE_MEMORY_MAX`).
+
+- Measured on lavapipe, 900x760 `overview`, seed interpreter: `.rdc` 828580
+  bytes, 199 actions (0 draw, 196 dispatch, one `vkQueueSubmit`), 43 buffers,
+  one of 2736000 bytes; 684000 pixels compared, 0 differ. 59.8 s wall, 1.1 GB
+  peak RSS. A one-byte change in the reference gives
+  `compare_mismatch_pixels=1` and exit 1.
+- **Engine2D is compute-only**: a capture holds no `vkCmdDraw*`. Count
+  `Dispatch` actions as its draw calls.
+- **`renderdoccmd convert -c zip.xml` cannot give the final framebuffer.** It
+  holds only what the application wrote: initial contents and
+  `Coherent Mapped Memory Write` chunks serialised before `vkQueueSubmit`. What
+  the GPU wrote exists only after a replay. `renderdoccmd` has no headless
+  replay-and-save command (`replay` opens a preview window), so the check uses
+  `scripts/tool/renderdoc-replay-buffer-dump.cpp` on the replay API:
+  `OpenCapture`, `SetFrameEvent(last, true)`, `GetBufferData` for every buffer
+  of `W*H*4` bytes; `--compare <buffer.bin> <ref.ppm>` does the pixel compare.
+- **A replay program must export the replay marker**: link with `-rdynamic`.
+  Without it `REPLAY_PROGRAM_MARKER()` is not visible, librenderdoc logs
+  "Initialising replay within non-replaying app", and the replay segfaults in
+  `WrappedVulkan::ContextReplayLog` (`m_Device != 0` assertion).
+  `ResultDetails::Message()` also needs a `DoStringise<ResultCode>` the shared
+  library does not export; print `(uint32_t)result.code`.
+- The framebuffer buffer is u32 `0xAARRGGBB`, so bytes are B,G,R,A. A PPM has
+  no alpha, so alpha is not compared.
+- Replay headers come from the RenderDoc source tree (`RDOC_SOURCE_DIR`,
+  default `$RDOC_HOME/../src`); a binary-only RenderDoc install answers
+  `ERROR — nothing was checked (renderdoc-replay-headers-unavailable:…)`.
+- The Simple side was never blocked on the native build: the capture runs on
+  the interpreter. Only the N2 Skia/Engine2D qualification runner needs a
+  native executable. The Chrome side is still `vulkan-angle-unavailable` on
+  this host (ANGLE Vulkan init -3, no Xvfb).
+- Not done: only `overview` was run through the replay check; GB10 was not
+  tried (lavapipe only); the replay tool is Linux-only
+  (`RENDERDOC_PLATFORM_LINUX`).

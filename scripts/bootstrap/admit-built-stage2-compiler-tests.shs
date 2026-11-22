@@ -31,6 +31,15 @@ done
 [ -n "$src" ] && [ -n "$out" ] && [ -n "$plat" ] || { sed -n '13,17p' "$0" >&2; exit 64; }
 src=$(CDPATH= cd -- "$src" && pwd -P)
 out=$(CDPATH= cd -- "$out" && pwd -P)
+# W13: a standalone run does not inherit bootstrap-windows.sh's toolchain env,
+# so derive it from --platform the way that wrapper and platform-detect.shs do;
+# an explicit environment value wins, a conflicting one is refused. Done before
+# anything is superseded, so an env refusal never replaces a real rejection.
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md
+# This script's own copy (not the source root's): older source roots lack it.
+admit_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+. "$admit_dir/lib/admit-stage2-toolchain-env.shs"
+admit_stage2_toolchain_env "$plat" "$src" || exit 64
 case "$strategy" in full) profile=full ;; normal) profile=slim ;; *) exit 64 ;; esac
 # Windows pins one frontend worker (product-frontend-policy.shs), so the cold
 # full-CLI parse alone is ~1 file/s over ~2950 files; the CLI + runner + tests
@@ -40,7 +49,9 @@ case "$plat" in *windows*) default_timeout=21600 ;; *) default_timeout=3600 ;; e
 # as-is; the default is scaled by the whole-build plan's worker fit below.
 timeout=${timeout:-${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-}}
 compiler="$out/stage3/$plat/stage2-admitted/simple"
-[ -f "$compiler" ] || compiler="$compiler.exe"
+# Prefer the .exe spelling: MSYS `[ -f simple ]` is true when only simple.exe
+# exists, which kept the bare name and broke the admission candidate_path match.
+[ -f "$compiler.exe" ] && compiler="$compiler.exe"
 [ -f "$compiler" ] && [ -f "$(dirname "$compiler")/admission.env" ] ||
   { echo "admit-stage2: no admitted Stage 2 compiler under $out/stage3/$plat/stage2-admitted" >&2; exit 1; }
 sha=$(sha256sum "$compiler" | cut -c1-64)
@@ -55,6 +66,35 @@ if [ -e "$root/rejection.env" ]; then
   mv "$root/rejection.env" "$root/rejection.env.superseded-$stamp"
 fi
 [ ! -f "$log" ] || mv "$log" "$log.superseded-$stamp"
+# W12: after `admit-stage2: REJECTED` the lane's shell stayed alive 9+ minutes
+# until an operator killed the tree. Whatever outlives the verifier in its
+# process group is terminated (TERM, then KILL after a bounded wait) before
+# the verdict, and on INT/TERM/HUP, so this script never exits leaving it.
+pgid_file="$root/verification.pgid.$$"
+rm -f "$pgid_file"
+admit_reap_verifier() {
+  admit_pgid=$(sed -n 1p "$pgid_file" 2>/dev/null || :)
+  rm -f "$pgid_file"
+  case "$admit_pgid" in ''|*[!0-9]*|0|1) return 0 ;; esac
+  kill -0 -- "-$admit_pgid" 2>/dev/null || return 0
+  echo "admit-stage2: terminating processes left in verifier group $admit_pgid" >&2
+  kill -TERM -- "-$admit_pgid" 2>/dev/null || :
+  admit_reap_i=0
+  while [ "$admit_reap_i" -lt 10 ] && kill -0 -- "-$admit_pgid" 2>/dev/null; do
+    sleep 1; admit_reap_i=$((admit_reap_i + 1))
+  done
+  kill -KILL -- "-$admit_pgid" 2>/dev/null || :
+  return 0
+}
+admit_job=
+admit_on_signal() {
+  [ -z "$admit_job" ] || kill -TERM "$admit_job" 2>/dev/null || :
+  admit_reap_verifier
+  exit "$1"
+}
+trap 'admit_on_signal 129' HUP
+trap 'admit_on_signal 130' INT
+trap 'admit_on_signal 143' TERM
 status=0
 (
   cd "$src"
@@ -110,12 +150,23 @@ status=0
   timeout=$BOOTSTRAP_VERIFY_TIMEOUT_SECONDS
   echo "admit-stage2: tree RSS cap ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB, build-threads=${BOOTSTRAP_VERIFY_BUILD_THREADS} ($bootstrap_tree_rss_plan_summary)"
   echo "admit-stage2: timeouts native-internal=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT}s row=${timeout}s campaign=${BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS}s scale=x${BOOTSTRAP_VERIFY_TIMEOUT_SCALE} (${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE})"
+  # The verifier leads its own process group (recorded in $pgid_file) so the
+  # whole tree it started can be reaped after the verdict (W12).
+  perl -e 'setpgrp(0, 0) or die "admit-stage2: setpgrp: $!\n";
+    open(my $f, ">", shift) or die "admit-stage2: pgid file: $!\n";
+    print $f "$$\n"; close($f) or die "admit-stage2: pgid file: $!\n";
+    exec { $ARGV[0] } @ARGV or die "admit-stage2: exec: $!\n"' "$pgid_file" \
   sh "$src/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
     "--backend=$backend" "--compiler=$compiler" "--compiler-sha256=$sha" \
     "--strategy=$strategy" "--profile=$profile" --hash-policy=canonical \
     "--work-root=$work" "--cache-root=$root/cache" "--source-root=$src" \
     "--timeout-seconds=$timeout"
-) >"$log" 2>&1 || status=$?
+) >"$log" 2>&1 &
+# Background + wait: a foreground child would defer the signal traps above.
+admit_job=$!
+wait "$admit_job" || status=$?
+admit_job=
+admit_reap_verifier
 [ "$status" -ne 0 ] || [ -f "$work/summary.env" ] || status=95
 if [ "$status" -eq 0 ]; then
   sh "$src/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish \

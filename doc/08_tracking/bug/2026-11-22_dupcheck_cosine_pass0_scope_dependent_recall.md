@@ -1,6 +1,6 @@
 # dupcheck cosine: Pass 0 makes within-file results depend on scan scope
 
-- **Status:** open
+- **Status:** FIXED (2026-11-22)
 - **Component:** `src/compiler/90.tools/duplicate_check/_Detector/similarity_grouping.spl`
   (`collect_cheap_line_window_candidates`, `scan_duplicate_blocks`)
 - **Found:** 2026-11-22, during runtime C de-duplication (PRs #10677, #10680, #10681, #10685)
@@ -44,3 +44,34 @@ dupcheck a --include-c --mode cosine -q            # Found 0
 mkdir b && cp src/runtime/*.c b/ && rm -f b/miniaudio*
 dupcheck b --include-c --mode cosine -q | grep runtime_db.c   # 16 groups
 ```
+
+## Fix (2026-11-22, intra-file Pass 0 admission)
+
+`collect_cheap_line_window_candidates` now admits a file by either rule:
+
+1. **intra-file** — an identifier-normalized single signal line occurs twice
+   in the file. Decided by the file alone, so intra-file groups no longer
+   depend on the rest of the scan. Two >= 0.85-cosine `min_lines` blocks share
+   at least one structurally equal line in practice; an exact `min_lines`
+   window usually does not.
+2. **cross-file** — unchanged `min_lines` normalized window shared with another
+   file.
+
+Evidence (seed `bin/simple.exe run .../main.spl DIR --include-c --mode cosine`):
+
+| input | before | after |
+|---|---|---|
+| only `runtime_db.c` | 0 groups | 7 groups |
+| 82 `src/runtime/*.c` (rt3) | 250 groups, 41 files kept, 564 s, 2269 MB | 270 groups, 53 files kept, 812 s (1.44x), 2243 MB |
+
+Spec: `detector_grouping_spec.spl` "keeps fuzzy intra-file cosine groups when
+the file is scanned alone" fails before (12/13), passes after; whole
+`test/01_unit/app/duplicate_check/` 96/96 after. Native checker not rebuilt.
+
+## Root-Cause Fix & Verification (2026-11-22 — Default `--no-pass0` & Single-Pass Cached Tokenization)
+
+- **Root cause:** Any cross-file exact `min_lines` structural-window gate (`collect_cheap_line_window_candidates`) is not a mathematical superset of cosine similarity's top-5 token-signature inverted index (`signature_bucket_candidates`), and it previously tokenized every file uncached only to re-tokenize survivors in Pass 2 while using Simple `#`-comment scanning on `.c`/`.h` files.
+- **Fix:**
+  - Added `use_pass0_prefilter: bool = false` to `DuplicationConfig` (`src/compiler/90.tools/duplicate_check/config.spl`) with CLI switches `--no-pass0` (default) and `--pass0` (opt-in approximate prefilter, retaining the intra-file signal-line admission when `--pass0` is explicitly enabled) in `main.spl`.
+  - Updated `cosine_scan_files` and `scan_duplicate_blocks` (`_Detector/similarity_grouping.spl`) to bypass Pass 0 by default so intra-file and cross-file cosine recall is 100% independent of unrelated files in the scan set, tokenizing each file once into `cache_manager`, skipping `featurize` on `is_low_signal_block` windows, and routing `line_window_prefixes_for_path` through path-aware `tokenize_for_path`.
+- **Verification:** `test/01_unit/app/duplicate_check/detector_grouping_spec.spl` and `test/01_unit/app/duplicate_check/target_path_args_spec.spl` PASS.

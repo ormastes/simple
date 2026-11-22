@@ -38,5 +38,6 @@ pub use vulkan_graphics_runtime_buffer::{
     rt_vulkan_copy_to_buffer_array,
 };
 pub use vulkan_graphics_runtime_compute::rt_vulkan_push_constants_array;
+pub use vulkan_graphics_runtime_core::ensure_macos_moltenvk_icd_env;
 pub use vulkan_graphics_runtime_shader::rt_vulkan_compile_spirv_array;
 pub use vulkan_graphics_runtime_swapchain::rt_vulkan_present_buffer_regions;

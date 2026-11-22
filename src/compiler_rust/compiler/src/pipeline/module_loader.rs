@@ -815,6 +815,7 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         target: export_use.target,
                         is_type_only: false,
                         is_lazy: false,
+                        attributes: export_use.attributes,
                     };
                     append_flattened_import_binding_markers(&mut items, &reexport_as_use, module_path, &owner_name);
                 }
@@ -1915,6 +1916,7 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
                         target: target.clone(),
                         is_type_only: multi_use.is_type_only,
                         is_lazy: false,
+                        attributes: multi_use.attributes.clone(),
                     };
                     append_flattened_import_binding_markers(&mut markers, &temp_use, path, "<entry>");
                 }
@@ -2556,6 +2558,7 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
                     target: export_use.target,
                     is_type_only: false,
                     is_lazy: false,
+                    attributes: export_use.attributes,
                 };
                 collect_use_stmt_direct_paths(&temp_use, base_dir, &mut collected)?;
             }
@@ -2607,6 +2610,7 @@ fn collect_imported_module_paths_internal(
                     target: export_use.target,
                     is_type_only: false,
                     is_lazy: false,
+                    attributes: export_use.attributes,
                 };
                 collect_use_stmt_paths(&temp_use, base_dir, visited, collected)?;
             }
@@ -2886,6 +2890,7 @@ fn load_module_with_imports_internal(
             target: ImportTarget::Glob,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         });
         module.items.insert(0, shell_import);
     }
@@ -2956,6 +2961,7 @@ fn load_module_with_imports_internal(
                 target: export_use.target.clone(),
                 is_type_only: false,
                 is_lazy: false,
+                attributes: export_use.attributes.clone(),
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
@@ -3007,6 +3013,7 @@ fn load_module_with_imports_internal(
                 target: common_use.target.clone(),
                 is_type_only: false,
                 is_lazy: false,
+                attributes: vec![],
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 if flatten_imports {
@@ -3060,6 +3067,7 @@ fn load_module_with_imports_internal(
                     target: target.clone(),
                     is_type_only: multi_use.is_type_only,
                     is_lazy: false,
+                    attributes: multi_use.attributes.clone(),
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     if flatten_imports {
@@ -3420,6 +3428,7 @@ mod tests {
             target: ImportTarget::Group(vec![ImportTarget::Single("facade_f".to_string())]),
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         };
         let resolved = resolve_use_to_path(&use_stmt, &src).expect("facade import must resolve to a path");
         assert_eq!(
@@ -3514,6 +3523,7 @@ mod tests {
             target: ImportTarget::Single("pkg_b".to_string()),
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         };
         let resolved = resolve_use_to_path(&use_stmt, &src).expect("import must resolve");
         assert_eq!(
@@ -3597,16 +3607,19 @@ mod tests {
                             alias: "aliased_value".to_string(),
                         },
                     ]),
+                    attributes: vec![],
                 }),
                 Node::ExportUseStmt(ExportUseStmt {
                     span,
                     path: ModulePath::new(vec!["leaf".to_string()]),
                     target: ImportTarget::Glob,
+                    attributes: vec![],
                 }),
                 Node::ExportUseStmt(ExportUseStmt {
                     span,
                     path: ModulePath::new(vec![]),
                     target: ImportTarget::Single("bare_value".to_string()),
+                    attributes: vec![],
                 }),
             ],
         };
@@ -3794,6 +3807,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 

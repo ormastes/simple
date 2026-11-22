@@ -26,6 +26,58 @@ applicable unmerged fixes, freeze identities, and reuse only compatible persiste
 frontend/HIR/native caches. Never alter live builds or retry identical failures
 indefinitely; continue the remaining finite work graph instead.
 
+## Unified Phase 3 / Phase 4 Build, XRay Debug Binary & Alive Path Check
+
+Drive native Phase 3 / Phase 4 reproduction and recovery through the shared
+cross-platform script in [shared Phase 3/4 build](../../tooling/phase3_phase4_shared_build.md)
+and [bootstrap options](../../tooling/bootstrap_options.md):
+
+- **Shared cross-platform phased build (`scripts/bootstrap/build-phase3-phase4.sh` & `.bat`):**
+  One script across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**.
+  Displays the **interactive Phased Build Menu** when invoked interactively without
+  `--phase=...` (or with `--menu`), and accepts non-interactive `--phase=p3a|p3|p4|all`.
+  Windows `scripts/bootstrap/build-phase3-phase4.bat` delegates to `.sh` with 2 configs:
+  **`mingw` DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`) and
+  **`msvc` optional** (`--win-config=msvc`, `clang-cl`). Legacy standalone scripts
+  (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`,
+  `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated —
+  direct invocation pauses with migration instructions for `build-phase3-phase4.sh`
+  (including phased/shard mode) and returns without building.
+- **Default Phase 1 & Phase 2 skip once Phase 3+ exists:** In
+  `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple
+  Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple`
+  without the Rust-seed banner), default bootstrap skips Phase 1 (Cargo Rust seed)
+  and Phase 2 (`seed -> stage2`) and delegates directly to
+  `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` /
+  `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding
+  or debugging Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require
+  an existing Phase 3+ compiler without seed fallback.
+- **Compile mode (`shard` default, `file` optional) & `native_host_match` link policy:**
+  `--compile-mode=shard` is **DEFAULT** in `build-phase3-phase4.sh`
+  (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`);
+  `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional.
+  `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}` enforces mandatory
+  **`native_host_match`** (`target (platform, cpu) == host (os, arch)`), linking
+  `simple` from thin entry + `(platform, cpu)` static primitive archive
+  (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core plus
+  dynamic `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`).
+  **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs,
+  VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib`
+  already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+- **Phase 4 dual-mode build (`--xray` + optimized release):** Phase 4 builds **both**
+  the optimized production binary (`simple`: `--profile=prod --release --strip`) AND
+  the XRay-instrumented debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`,
+  preserving debug symbols and XRay sleds for crash/latency diagnosis), plus Stage 5
+  essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`,
+  `simple_lsp_mcp_server`).
+- **Protected script guard & zero-compile `--path-check`:** Every core bootstrap
+  script carries a top-of-file
+  `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+  banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second
+  check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and
+  `check-bootstrap-path-matrix-all.shs` (`PATH_ACTION|...|status=ALIVE` superset
+  records across Unix/Windows/SimpleOS) before launching heavy LLVM debug runs.
+
 ## Diagnose the earliest broken boundary
 
 Classify the failure before changing a backend:

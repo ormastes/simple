@@ -40,6 +40,48 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
     expr.ty == TypeId::NIL || hir_expr_definitely_returns(expr)
 }
 
+fn expr_is_empty_array_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Array(items) => items.is_empty(),
+        Expr::DoBlock(stmts) => match stmts.last() {
+            Some(ast::Node::Expression(tail)) => expr_is_empty_array_literal(tail),
+            _ => false,
+        },
+        Expr::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => expr_is_empty_array_literal(then_branch) && expr_is_empty_array_literal(else_branch),
+        _ => false,
+    }
+}
+
+fn retype_empty_array_branch(branch: &mut HirExpr, empty_ty: TypeId, slice_ty: TypeId) {
+    match &mut branch.kind {
+        HirExprKind::Array(items) if items.is_empty() => {
+            branch.ty = empty_ty;
+        }
+        HirExprKind::Block(stmts) => {
+            if let Some(HirStmt::Expr(tail)) = stmts.last_mut() {
+                retype_empty_array_branch(tail, empty_ty, slice_ty);
+                branch.ty = tail.ty;
+            }
+        }
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => {
+            retype_empty_array_branch(then_branch, empty_ty, slice_ty);
+            retype_empty_array_branch(else_branch, empty_ty, slice_ty);
+            branch.ty = slice_ty;
+        }
+        _ => {
+            branch.ty = empty_ty;
+        }
+    }
+}
+
 /// Text of the runtime "no arm matched" panic. JIT/native code carries no
 /// source path at this point, so the location is the
 /// line of the match (statement) or of its first arm (expression).
@@ -188,22 +230,30 @@ impl Lowerer {
         if let Some(other) = else_hir.as_mut() {
             // An empty literal's configured default (normally i32) is not
             // evidence about the sibling's elements. Keeping it here narrows
-            // struct keys to i32 when a conditional array is later iterated.
+            // struct elements to i32 when a conditional array (inline or
+            // multiline DoBlock, including `if ...: [] elif ...` chains where
+            // the sibling may be typed Array or dynamic ANY) is later iterated.
             // Restrict contextualization to actual empty literals: a populated
             // or explicitly typed array must never be silently reinterpreted.
-            let then_empty = matches!(then_branch, Expr::Array(items) if items.is_empty());
-            let else_empty = matches!(else_branch, Some(Expr::Array(items)) if items.is_empty());
+            let then_empty = expr_is_empty_array_literal(then_branch);
+            let else_empty = else_branch.is_some_and(expr_is_empty_array_literal);
             if then_empty != else_empty {
                 let sibling_ty = if then_empty { other.ty } else { then_hir.ty };
-                if let Some(HirType::Array { element, .. }) = self.module.types.get(sibling_ty) {
-                    let element = *element;
+                let inferred_elem = match self.module.types.get(sibling_ty) {
+                    Some(HirType::Array { element, .. }) => Some(*element),
+                    Some(HirType::Any) => Some(TypeId::ANY),
+                    _ if sibling_ty == TypeId::ANY => Some(TypeId::ANY),
+                    _ => None,
+                };
+                if let Some(element) = inferred_elem {
                     let empty_ty = self.module.types.register(HirType::Array { element, size: Some(0) });
+                    let slice_ty = self.module.types.register(HirType::Array { element, size: None });
                     if then_empty {
-                        then_hir.ty = empty_ty;
+                        retype_empty_array_branch(&mut then_hir, empty_ty, slice_ty);
                     } else {
-                        other.ty = empty_ty;
+                        retype_empty_array_branch(other, empty_ty, slice_ty);
                     }
-                    ty = self.module.types.register(HirType::Array { element, size: None });
+                    ty = slice_ty;
                 }
             }
         }

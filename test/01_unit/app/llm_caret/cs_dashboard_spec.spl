@@ -31,7 +31,8 @@ measurements — treat that as a product defect, not a test artifact.
 use std.spec.*
 use app.llm_caret.cs_dashboard.{cs_resolve_exe, windows_executable_names,
     CsAgent, CsDashboard, cs_dashboard_new, cs_refresh, cs_render,
-    cs_handle_command, cs_help_text, cs_launch_argv, cs_launch_argv_with_extras, cs_apply_action, cs_fit_sgr
+    cs_handle_command, cs_help_text, cs_shell_words,
+    cs_launch_argv, cs_launch_argv_with_extras, cs_apply_action, cs_fit_sgr
 }
 use app.llm_caret.pane_backend.{pane_spawn, pane_kill}
 
@@ -483,3 +484,31 @@ describe "cs dashboard - agent screen colours":
         expect(row).to_equal("\x1b[0;32mok done\x1b[0m")
         step("A long styled row is cut at the visible width, escapes not counted")
         expect(cs_fit_sgr("\x1b[1mabcdef", 3)).to_equal("\x1b[1mabc\x1b[0m")
+
+describe "cs dashboard - orchestrator, containers, worktree, and agy commands":
+    it "parses quoted prompts and routes /orchestrator, /containers, /crashed, /relaunch, and /close":
+        step("cs_shell_words keeps multi-word quoted prompts intact")
+        val parsed = cs_shell_words("/orchestrator launch agy --container macos-seatbelt --worktree -p \"hello world\"")
+        expect(parsed.len()).to_equal(8)
+        expect(parsed[2]).to_equal("agy")
+        expect(parsed[7]).to_equal("hello world")
+
+        step("agy launch argv maps to agy CLI")
+        val agy_argv = cs_launch_argv("agy")
+        expect(agy_argv.len()).to_equal(1)
+        expect(agy_argv[0]).to_equal("agy")
+
+        step("/orchestrator, /containers, /crashed, /relaunch, and /close produce pure actions")
+        val d0 = cs_dashboard_new("caret")
+        val (d1, launch_act) = cs_handle_command(d0, "/launch agy --container macos-seatbelt --worktree -p \"hello world\"")
+        expect(launch_act).to_equal("launch:a1 agy --container macos-seatbelt --worktree -p \"hello world\"")
+        val (_c1, list_all) = cs_handle_command(d1, "/containers")
+        expect(list_all).to_equal("container:list-all")
+        val (_c2, list_crashed) = cs_handle_command(d1, "/crashed")
+        expect(list_crashed).to_equal("container:list-crashed")
+        val (_c3, relaunch_act) = cs_handle_command(d1, "/relaunch 1 -p \"hello again\"")
+        expect(relaunch_act).to_equal("container:relaunch a1 -p \"hello again\"")
+        val (_c4, close_act) = cs_handle_command(d1, "/close a1")
+        expect(close_act).to_equal("session:close a1")
+        val (_c5, orch_act) = cs_handle_command(d1, "/orchestrator status")
+        expect(orch_act).to_equal("orchestrator:status")

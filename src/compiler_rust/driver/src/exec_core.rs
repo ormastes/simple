@@ -1789,9 +1789,11 @@ fn jit_failure_must_propagate(jit_err: &str, strict_all: bool) -> bool {
 /// circular-import path, skipped the check, and exited 0.
 /// See doc/08_tracking/bug/visibility_error_jit_fallback_fail_open_2026-11-13.md.
 fn is_private_fn_visibility_error(jit_err: &str) -> bool {
-    jit_err.contains("private fn `")
-        && jit_err.contains("is not visible to")
-        && jit_err.contains(simple_compiler::interpreter::PRIVATE_FN_VISIBILITY_HINT)
+    jit_err.contains("is not visible to")
+        && ((jit_err.contains("private fn `")
+            && jit_err.contains(simple_compiler::interpreter::PRIVATE_FN_VISIBILITY_HINT))
+            || (jit_err.contains("friend-scoped symbol `")
+                && jit_err.contains(simple_compiler::interpreter::FRIEND_SYMBOL_VISIBILITY_HINT)))
 }
 
 /// Shared helper for the JIT-compile failure paths that represent a genuine
@@ -2441,8 +2443,11 @@ mod execution_mode_validation_tests {
                            is not visible to /r/app/main.spl; mark it `pub` or `export` it";
         let call_rule = "semantic: private fn `secret_helper` of module `/r/a/m.spl` is not visible to /r/b/c.spl; \
                          mark it `pub` or `export` it";
+        let friend_rule = "semantic: friend-scoped symbol `secret_helper` of module `/r/a/m.spl` is not visible to /r/b/c.spl \
+                           (only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols)";
         assert!(jit_failure_must_propagate(import_rule, false));
         assert!(jit_failure_must_propagate(call_rule, false));
+        assert!(jit_failure_must_propagate(friend_rule, false));
         assert!(!jit_failure_must_propagate("semantic: function secret_helper not found", false));
     }
 
