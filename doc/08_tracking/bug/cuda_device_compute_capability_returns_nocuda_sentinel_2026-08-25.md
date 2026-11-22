@@ -133,7 +133,8 @@ Host: Linux aarch64, NVIDIA GB10 (sm_121, `nvidia-smi` compute_cap 12.1), driver
    both `cuDeviceGetAttribute` results and returns `-(CUresult)` instead of a zero-initialised
    `major*10+minor`. `cargo check -p simple-runtime --features cuda` clean.
 4. After, debug seed built from this worktree (`cargo build --bin simple -j4`, sha256
-   `cdc523be583e4c10`): `CC pre_init=-3` / `CC init=0 count=1 dev0=121 dev64=-101` / `OK`; the
+   `cdc523be583e4c10`): `CC pre_init=-3` / `CC init=0 count=1 dev0=121 dev64=-101` / `OK`; through
+   `std.cuda` (the import the acceptance spec uses) `cuda_device_compute_capability(count + 63)` = `-101`; the
    std.cuda fixture still prints `cc0=121`.
 
 Notes:

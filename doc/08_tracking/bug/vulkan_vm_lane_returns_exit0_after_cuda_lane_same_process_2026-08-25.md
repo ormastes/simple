@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status (2026-11-22): VERIFIED — see the 2026-11-22 section at the end.** Original status: OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
+**Status (2026-11-22): RESOLVED-DISAPPEARED — see the 2026-11-22 section at the end.** Original status: OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
 (`Results: 4 total, 3 passed, 1 failed, 1 skipped`), per the "correct spec that fails" rule.
 **Binary:** Rust seed. **Host:** Linux, 2x NVIDIA, Vulkan 1.4.312 live.
 
@@ -128,7 +128,7 @@ Windows host. No in-lane change.
 
 ## 2026-11-22 live CUDA-then-Vulkan reproduction attempt + CUDA-lane fix (work/cuda-runtime-bugs)
 
-**Status: VERIFIED not reproducing — with a clean live CUDA run first, the Vulkan lane in the
+**Status: RESOLVED-DISAPPEARED (not reproducing) — with a clean live CUDA run first, the Vulkan lane in the
 same process returns `ok=true exit=3 records=1 value=9`.**
 
 Host: Linux aarch64, NVIDIA GB10, Vulkan 1.4.312 (integrated GPU). Fixture copies
