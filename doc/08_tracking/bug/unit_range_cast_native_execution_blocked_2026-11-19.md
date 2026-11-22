@@ -83,3 +83,18 @@ not admitted):
 Next: on a host with free disk, rebuild stage2 from the current release tip. That tip carries the linker
 and driver fixes that landed after Nov 19. Then re-run the five fixtures. If the link still hangs, check
 whether `native_linking.spl` spawns clang/lld at all.
+
+## Lane 5: existing post-11-19 self-hosted CLI, native-build of the fixtures (2026-11-22, worktree rbnat4 @ 6caedc506bb)
+Result: fixtures NOT run natively. Status stays verification-pending (no fixture built, so nothing verified).
+
+Compiler search: `bin/release/**` does not exist; no `stage*` dir under any `C:/dev/wt/*/build/bootstrap` or `*/bootstrap` holds a binary newer than 11-19. Only candidate with `SPL-UNIT-005` in `strings`: `C:/dev/wt/ctorfix-20261121/build/nb/cli_main.exe` (114 MB, 2026-11-22 08:28, full pure-Simple CLI source `src/app/cli` built by the seed; `--version` = `Simple v1.0.0-rc.1`). Copied to `build/rbnat4/cli_main.exe` (untouched original). Every `bin/simple.exe` in the other worktrees is the tracked seed (0 hits). No bootstrap was attempted: the existing binary got further than any prior lane, and a fresh bootstrap would hit the same SCV/link stages.
+
+Env: llvm-mingw UCRT first on PATH. Attempts, each `native-build ... -o build/rbnat4/out/port_oor.exe`:
+1. `test/fixtures/unit_native/port_oor.spl`, default flags: ~8 min, then `SCV-E-ENTRY: entry absent from frozen inventory` / `SCV freeze has no admitted source inventory ... entry closure is empty (source snapshot unavailable)`. (The `publish-current-write-failed` error did NOT recur on this binary.)
+2. Same with `SIMPLE_SCV_FREEZE_FALLBACK=1`, also with `--source test/fixtures/unit_native --entry <f> --entry-closure`: `SCV-W-FREEZE-FALLBACK`, then `SOURCE_ROOT_SELECTORS_MISSING` in phase load_sources. Cause in source: `native_build_closure_source_roots_v1` returns `Ok([])` when `_nb_scv_unfrozen_closure_v1` is set, and `native_source_root_paths_v1` (`driver_build/native_source_root_handoff.spl:8`) rejects empty selectors when a snapshot root is set. The fallback path is therefore unusable together with a snapshot root (new bug candidate).
+3. Fixture copied into a scratch `src/app/rbnat_fx/` (uncommitted, removed) so the default roots cover it, no env: freeze OK, parse/HIR/MIR/optimize/codegen all succeed (`app.rbnat_fx.port_oor`, 1/1 module, ~40 s, rss 876 MiB), then phase=link hangs: no linker child process, no output, no `.exe`; killed by `timeout 1500` (25 min).
+4. Same with `SIMPLE_LINKER=lld`: identical link hang, killed by `timeout 900`.
+
+Exit codes / stdout / stderr of the fixtures: none exist (no executable produced). Build logs: `C:/dev/wt/rbnat4/build/rbnat4/out/port_oor.build{,2,3,4,5}.log` (untracked).
+
+Remaining blockers, in order: (a) link phase of the pure-Simple native-build hangs on Windows before spawning any linker (same symptom as Lane 3's 1500 s `_LinkerWrapper/native_linking.spl` timeout under the cranelift seed build); (b) `SIMPLE_SCV_FREEZE_FALLBACK=1` yields empty root selectors; (c) entries outside `src/{app,lib,compiler,os,plugins}` are absent from the frozen inventory. Next: root-cause (a) (attach to the link phase / trace what native_linking.spl waits on), then rerun the five fixtures.
