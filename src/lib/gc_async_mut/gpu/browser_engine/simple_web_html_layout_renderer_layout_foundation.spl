@@ -2746,3 +2746,32 @@ fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:
     val out = _lay_grid_track_sizes_inner(raw, available_w, gap)
     _wlay_add(6, _wsc_now_us() - t0, 1)
     out
+
+# Device-px width of an auto-width `<button>` minus k x its CSS width. Chrome
+# sizes the label in device px from its fractional width, so `Go` is 135.14
+# device px at k = 4 (33.785 CSS px), where 4 x the whole-px 34 is 136. The
+# fractional shortfall (`form_control_button_frac_delta_milli_px`, <= 0) scaled
+# by k and rounded to the nearest device px.
+# reason: node index in, device-px delta out; both are layout-array scalars.
+# @allow(primitive_api)
+pub fn button_device_extra_w(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, button_i: i32) -> i32:
+    val k = g_layout_device_scale
+    if k <= 1:
+        return 0
+    # A box after the button keeps its CSS-snapped x (it is not shifted to
+    # Chrome's fractional edge), so narrowing the button would open a gap:
+    # only a button with nothing after it, outside a flex/grid row, is sized.
+    val parent = nodes[button_i].parent
+    if parent >= 0:
+        val pd = styles[parent].display
+        if pd == "flex" or pd == "inline-flex" or pd == "grid" or pd == "inline-grid":
+            return 0
+    var sib = child_index.next_sibling[button_i]
+    while sib >= 0:  # cpu-lane-loop-ok: one pass over this button's following siblings; bound is that child list
+        if nodes[sib].tag != "#text" or nodes[sib].text_trimmed.len() > 0:
+            return 0
+        sib = child_index.next_sibling[sib]
+    val delta = form_control_button_frac_delta_milli_px(nodes, styles, child_index, button_i)
+    if delta >= 0:
+        return 0
+    0 - ((0 - delta * k + 500) / 1000)

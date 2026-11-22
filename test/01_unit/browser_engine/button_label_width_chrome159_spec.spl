@@ -1,0 +1,96 @@
+"""
+## Purpose and audience
+Purpose: Pin a `<button>`'s auto width as Chrome 159 has it. At device scale 1
+a label stays on one line without any per-label slack in the text layout (a
+flex row keeps `CSS Paint` at its fractional width), and at device scale 4 the
+button is sized in DEVICE px from its fractional label, not 4 x the
+whole-CSS-px width.
+Audience: maintainers of the web layout engine.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CHROME-PAINT-001 -- `<button>` content width. Chrome
+boxes come from headless Chromium 1255 (Linux arm64, `getBoundingClientRect`,
+`--window-size=400,300`, Liberation Sans 16px body, default UA button font).
+Chrome, tab row `HTML|CSS Layout|CSS Paint|Forms` (flex, default buttons), k=1:
+widths 52.296875 87.125 77.5 53.765625, all 21 high (one line each).
+Chrome, `<button>Go</button>` in a 16px/1.5 page: 33.78125 x 21 at k=1 and
+33.78515625 (135.14 device px) at k=4; with `padding:8px;border:1px solid`
+35.78125 at k=1 and 35.78515625 (143.14 device px) at k=4. The painted box at
+k=4 is the snapped device width: 135 and 143. Two adjacent default buttons: x 0 and
+33.78515625 at k=4 (they touch). A box after a button keeps its CSS-snapped x, so
+only a button with nothing after it (outside a flex/grid row) is narrowed.
+"""
+# @tag: unit, browser_engine, layout, form_control, device_scale, chrome159
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{simple_web_layout_element_geometry_lines}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val BLW_ROW = "<!DOCTYPE html><html><body style='margin:0'><div style='display:flex'><button>HTML</button><button>CSS Layout</button><button>CSS Paint</button><button>Forms</button></div></body></html>"
+
+fn blw_page(btn_style: text) -> text:
+    "<!doctype html><html><head><style>*{{box-sizing:border-box}}body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans'}}button{{{btn_style}}}</style></head><body><button>Go</button></body></html>"
+
+# Heights of the row's buttons: one 21 px line each means no label wrapped.
+fn blw_row_heights() -> text:
+    var out = ""
+    for l in simple_web_layout_element_geometry_lines(BLW_ROW, 400, 300):
+        val f = l.split("|")
+        if f.len() >= 7 and f[2] == "button":
+            out = out + f[6] + " "
+    out
+
+# Width in device px of the non-white box at the top of the page.
+fn blw_ink_width(btn_style: text, k: i32) -> i32:
+    val w = 100
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(blw_page(btn_style), w, 40, k, "cpu_simd")
+    val dw = w * k
+    var x0 = dw
+    var x1 = -1
+    var y = 0
+    while y < 40 * k:
+        var x = 0
+        while x < dw:
+            if (px[y * dw + x] & 0xFFFFFFu32) != 0xFFFFFFu32:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+            x = x + 1
+        y = y + 1
+    x1 - x0 + 1
+
+describe "button label width (Chrome 159)":
+    it "keeps every flex-row button label on one line at k=1":
+        expect(blw_row_heights()).to_equal("21 21 21 21 ")
+
+    it "sizes a default button in device px at k=4 (Chrome 135.14 -> 135)":
+        expect(blw_ink_width("", 4)).to_equal(135)
+
+    it "sizes a padded, bordered button in device px at k=4 (Chrome 143.14 -> 143)":
+        expect(blw_ink_width("padding:8px;border:1px solid #94a3b8;border-radius:5px", 4)).to_equal(143)
+
+    it "keeps the k=1 widths at 34 and 36":
+        expect(blw_ink_width("", 1)).to_equal(34)
+        expect(blw_ink_width("padding:8px;border:1px solid #94a3b8;border-radius:5px", 1)).to_equal(36)
+
+    it "leaves no gap between two adjacent default buttons at k=4":
+        step("Chrome: x 0 and 33.78515625 (135.14 device px), both 33.785 wide, so the boxes touch")
+        val html = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans'}}</style></head><body><button>Go</button><button>Go</button></body></html>"
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, 100, 40, 4, "cpu_simd")
+        val dw = 400
+        val row = 40
+        var first = -1
+        var last = -1
+        var x = 0
+        while x < dw:
+            if (px[row * dw + x] & 0xFFFFFFu32) != 0xFFFFFFu32:
+                if first < 0: first = x
+                last = x
+            x = x + 1
+        var whites = 0
+        x = first
+        while x <= last:
+            if (px[row * dw + x] & 0xFFFFFFu32) == 0xFFFFFFu32:
+                whites = whites + 1
+            x = x + 1
+        expect(first).to_equal(0)
+        expect(whites).to_equal(0)
