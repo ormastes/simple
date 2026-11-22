@@ -1015,37 +1015,25 @@ spl_i64 rt_any_add(spl_i64 lhs, spl_i64 rhs) {
     return lhs + rhs;
 }
 
-spl_i64 rt_mmio_read_u8(spl_i64 addr) {
-    return (spl_i64)(*(volatile unsigned char *)(spl_u64)addr);
+/* Width-specific MMIO accessors; only the access type differs per width. */
+#define RT_MMIO_READ_FN(name, ctype) \
+spl_i64 name(spl_i64 addr) { \
+    return (spl_i64)(*(volatile ctype *)(spl_u64)addr); \
 }
-
-spl_i64 rt_mmio_read_u16(spl_i64 addr) {
-    return (spl_i64)(*(volatile unsigned short *)(spl_u64)addr);
+#define RT_MMIO_WRITE_FN(name, ctype) \
+void name(spl_i64 addr, spl_i64 value) { \
+    *(volatile ctype *)(spl_u64)addr = (ctype)value; \
 }
-
-spl_i64 rt_mmio_read_u32(spl_i64 addr) {
-    return (spl_i64)(*(volatile unsigned int *)(spl_u64)addr);
-}
-
-spl_i64 rt_mmio_read_u64(spl_i64 addr) {
-    return (spl_i64)(*(volatile spl_u64 *)(spl_u64)addr);
-}
-
-void rt_mmio_write_u8(spl_i64 addr, spl_i64 value) {
-    *(volatile unsigned char *)(spl_u64)addr = (unsigned char)value;
-}
-
-void rt_mmio_write_u16(spl_i64 addr, spl_i64 value) {
-    *(volatile unsigned short *)(spl_u64)addr = (unsigned short)value;
-}
-
-void rt_mmio_write_u32(spl_i64 addr, spl_i64 value) {
-    *(volatile unsigned int *)(spl_u64)addr = (unsigned int)value;
-}
-
-void rt_mmio_write_u64(spl_i64 addr, spl_i64 value) {
-    *(volatile spl_u64 *)(spl_u64)addr = (spl_u64)value;
-}
+RT_MMIO_READ_FN(rt_mmio_read_u8, unsigned char)
+RT_MMIO_READ_FN(rt_mmio_read_u16, unsigned short)
+RT_MMIO_READ_FN(rt_mmio_read_u32, unsigned int)
+RT_MMIO_READ_FN(rt_mmio_read_u64, spl_u64)
+RT_MMIO_WRITE_FN(rt_mmio_write_u8, unsigned char)
+RT_MMIO_WRITE_FN(rt_mmio_write_u16, unsigned short)
+RT_MMIO_WRITE_FN(rt_mmio_write_u32, unsigned int)
+RT_MMIO_WRITE_FN(rt_mmio_write_u64, spl_u64)
+#undef RT_MMIO_READ_FN
+#undef RT_MMIO_WRITE_FN
 
 /* Bridge aliases: arch-neutral kernel modules (VFS readdir, ssh_auth,
  * fs_exec_spawn) call the runtime_native.c API names, but this freestanding
@@ -1521,29 +1509,22 @@ static void rt_mmio_write32_raw(spl_u64 addr, spl_u32 value) {
     *(volatile spl_u32 *)addr = value;
 }
 
-static spl_u8 rt_io_read8(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u8 *)(base + off);
+#define RT_IO_READ_FN(name, ctype) \
+static ctype name(spl_u64 base, spl_u64 off) { \
+    return *(volatile ctype *)(base + off); \
 }
-
-static spl_u16 rt_io_read16(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u16 *)(base + off);
+#define RT_IO_WRITE_FN(name, ctype) \
+static void name(spl_u64 base, spl_u64 off, ctype value) { \
+    *(volatile ctype *)(base + off) = value; \
 }
-
-static spl_u32 rt_io_read32(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u32 *)(base + off);
-}
-
-static void rt_io_write8(spl_u64 base, spl_u64 off, spl_u8 value) {
-    *(volatile spl_u8 *)(base + off) = value;
-}
-
-static void rt_io_write16(spl_u64 base, spl_u64 off, spl_u16 value) {
-    *(volatile spl_u16 *)(base + off) = value;
-}
-
-static void rt_io_write32(spl_u64 base, spl_u64 off, spl_u32 value) {
-    *(volatile spl_u32 *)(base + off) = value;
-}
+RT_IO_READ_FN(rt_io_read8, spl_u8)
+RT_IO_READ_FN(rt_io_read16, spl_u16)
+RT_IO_READ_FN(rt_io_read32, spl_u32)
+RT_IO_WRITE_FN(rt_io_write8, spl_u8)
+RT_IO_WRITE_FN(rt_io_write16, spl_u16)
+RT_IO_WRITE_FN(rt_io_write32, spl_u32)
+#undef RT_IO_READ_FN
+#undef RT_IO_WRITE_FN
 
 static void rt_memzero(void *ptr, spl_u64 bytes) {
     spl_u8 *data = (spl_u8 *)ptr;
