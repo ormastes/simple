@@ -1423,7 +1423,8 @@ fn _lcd_hint_knots_cached(font: OtFont, head_offset: i64, units_per_em: i64, siz
 # zone keeps the zone fit and the partner edge follows at the natural width;
 # otherwise the stem centre snaps to a quarter-pixel lattice (width <= 1 px:
 # k + 1/2; 1..1.5 px: k + 26/64; >= 1.5 px: an edge on a row boundary), all in
-# 26.6 integers as FreeType does. Round (curve) extrema are not stems here.
+# 26.6 integers as FreeType does. Round (curve-extremum) edges pair the same
+# way (_hstem_round_extrema): an arc keeps its natural width under its blue zone.
 fn _hs_abs(v: i64) -> i64:
     if v < 0: 0 - v else: v
 
@@ -1475,6 +1476,55 @@ fn _hstem_segments(commands: [SfntGlyfCommand]) -> [f64]:
             px = ex
             py = ey
     segs
+
+# Round edges of one contour, as the same [y, x_min, x_max, dir] quads as
+# _hstem_segments. `pts` are the contour's points in order as [x, y, on]
+# triples (on = 1.0 for an on-curve point). A round edge is an on-curve point
+# with at least one off-curve neighbour whose two neighbours both lie on its
+# near-horizontal tangent (FreeType's 1:14 direction test) and continue in the
+# same x direction: the top or bottom of an arc. FreeType builds the same
+# segment from the control-point / extremum / control-point run.
+fn _hstem_round_contour(pts: [f64]) -> [f64]:
+    var segs: [f64] = []
+    var n = pts.len() / 3
+    if n >= 2 and pts[(n - 1) * 3] == pts[0] and pts[(n - 1) * 3 + 1] == pts[1]:
+        n = n - 1
+    if n < 3: return segs
+    var i: i64 = 0
+    while i < n:
+        val p = (i + n - 1) % n
+        val q = (i + 1) % n
+        if pts[i * 3 + 2] > 0.5 and (pts[p * 3 + 2] < 0.5 or pts[q * 3 + 2] < 0.5):
+            val x = pts[i * 3]
+            val y = pts[i * 3 + 1]
+            val dxp = x - pts[p * 3]
+            val dxn = pts[q * 3] - x
+            var dyp = y - pts[p * 3 + 1]
+            var dyn = pts[q * 3 + 1] - y
+            if dyp < 0.0: dyp = 0.0 - dyp
+            if dyn < 0.0: dyn = 0.0 - dyn
+            val adxp = if dxp < 0.0: 0.0 - dxp else: dxp
+            val adxn = if dxn < 0.0: 0.0 - dxn else: dxn
+            if dxp * dxn > 0.0 and dyp * 14.0 <= adxp and dyn * 14.0 <= adxn:
+                val lo = if dxp < 0.0: pts[q * 3] else: pts[p * 3]
+                val hi = if dxp < 0.0: pts[p * 3] else: pts[q * 3]
+                segs = segs + [y, lo, hi, if dxp < 0.0: -1.0 else: 1.0]
+        i = i + 1
+    segs
+
+# Round (curve-extremum) edges of every contour of the glyph.
+fn _hstem_round_extrema(commands: [SfntGlyfCommand]) -> [f64]:
+    var segs: [f64] = []
+    var pts: [f64] = []
+    for c in commands:
+        if c.verb == SFNT_GLYF_MOVE:
+            segs = segs + _hstem_round_contour(pts)
+            pts = [c.x1, c.y1, 1.0]
+        elif c.verb == SFNT_GLYF_LINE:
+            pts = pts + [c.x1, c.y1, 1.0]
+        elif c.verb == SFNT_GLYF_QUAD:
+            pts = pts + [c.x1, c.y1, 0.0, c.x2, c.y2, 1.0]
+    segs + _hstem_round_contour(pts)
 
 # Index of the best partner of run `i`: the nearest opposite-direction run on
 # the stem side with real x overlap and a plausible thickness, or -1.
@@ -1560,23 +1610,42 @@ fn _hstem_insert(base: [f64], fy: f64, ty: f64) -> [f64]:
         k = k + 1
     out
 
+# `cur` plus the knot (y -> zone fit) when `y` is on a blue zone and the knot
+# does not fold the mapping.
+fn _hstem_edge_knot(cur: [f64], zones: [f64], n: i64, y: f64, tol: f64) -> [f64]:
+    val fit = _hstem_blue_fit(zones, n, y, tol)
+    if fit.len() == 0: return cur
+    val added = _hstem_insert(cur, y, fit[0])
+    if added.len() > 0: added else: cur
+
 fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
     val m = knots.len()
     if m < 4: return knots
     val scale = knots[m - 2]
-    val pairs = _hstem_pairs(_hstem_segments(commands), upem)
-    if pairs.len() == 0: return knots
+    val segs = _hstem_segments(commands) + _hstem_round_extrema(commands)
+    val pairs = _hstem_pairs(segs, upem)
     val bounds = match _outline_bounds(commands):
         Some(value): value
         None: return knots
-    var cur: [f64] = []
+    var zones: [f64] = []
     var z: i64 = 0
     while z < m / 2 - 1:
-        cur = cur + [knots[z * 2], knots[z * 2 + 1]]
+        zones = zones + [knots[z * 2], knots[z * 2 + 1]]
         z = z + 1
-    val zones = cur
     val n = zones.len() / 2
     val tol = upem / 40.0
+    # FreeType fits EDGES, not the y axis: a blue zone moves only the edges this
+    # glyph has on it, and every other point follows the glyph's own edges. So
+    # the glyph's knots are its blue edges (and blue extrema), not every zone:
+    # an `o` has no edge on the flat baseline reference, and a knot there would
+    # squash the arc between the collapsed overshoot and the inner edge.
+    var cur: [f64] = []
+    cur = _hstem_edge_knot(cur, zones, n, bounds.top, tol)
+    cur = _hstem_edge_knot(cur, zones, n, bounds.bottom, tol)
+    var e: i64 = 0
+    while e < segs.len() / 4:
+        cur = _hstem_edge_knot(cur, zones, n, segs[e * 4], tol)
+        e = e + 1
     # The lowest blue extremum anchors the glyph: unanchored stems are placed
     # relative to the shift it receives from its zone fit.
     var shift = 0.0
