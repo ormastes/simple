@@ -12,6 +12,9 @@ use std.spec.step
 use std.io_runtime.{file_read}
 use std.spec.*
 
+fn norm_read(path: text) -> text:
+    file_read(path).replace("\r\n", "\n")
+
 
 describe "Cranelift aggregate runtime ABI":
     # @manual scenario evidence
@@ -19,12 +22,12 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("owns a behavioral aggregate and bounds check")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val check = file_read("scripts/check/check-cranelift-aot-aggregates.shs")
-        val cross_check = file_read("scripts/check/check-cranelift-aot-aggregate-cross.shs")
-        val fixture = file_read("test/fixtures/compiler/stage4_struct_enum_array_probe.spl")
-        val rust_focus_check = file_read("scripts/check/check-rust-cranelift-struct-aggregate-receiver.shs")
-        val rust_focus_fixture = file_read("test/fixtures/compiler/native_struct_aggregate_receiver.spl")
-        val rust_focus_provider = file_read("test/fixtures/compiler/native_struct_aggregate_receiver_provider.spl")
+        val check = norm_read("scripts/check/check-cranelift-aot-aggregates.shs")
+        val cross_check = norm_read("scripts/check/check-cranelift-aot-aggregate-cross.shs")
+        val fixture = norm_read("test/fixtures/compiler/stage4_struct_enum_array_probe.spl")
+        val rust_focus_check = norm_read("scripts/check/check-rust-cranelift-struct-aggregate-receiver.shs")
+        val rust_focus_fixture = norm_read("test/fixtures/compiler/native_struct_aggregate_receiver.spl")
+        val rust_focus_provider = norm_read("test/fixtures/compiler/native_struct_aggregate_receiver_provider.spl")
         expect(check).to_contain("stage4_struct_enum_array_probe.spl")
         expect(check).to_contain("cranelift_array_oob.spl")
         expect(check).to_contain("test ! -s \"$BUILD_DIR/actual.txt\"")
@@ -58,16 +61,18 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("reloads tuple heap pointers as runtime handles")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
         expect(adapter).to_contain("case Struct(_) | Array(_, _) | Dict(_, _) | Slice(_) | Tuple(_): true")
 
     it "keeps dictionaries on the heap runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("keeps dictionaries on the heap runtime ABI")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val core = file_read("src/runtime/simple_core/core_array.spl")
-        val lowering = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
-        assert_false(core.contains("pub fn rt_dict_new"))
+        val core = norm_read("src/runtime/simple_core/core_array.spl")
+        val lowering = norm_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        expect(core).to_contain("pub fn rt_dict_new")
+        expect(core).to_contain("_sffi_core_array_calloc(1, dict_header_bytes_v1())")
+        expect(core).to_contain("dict | 1")
         expect(lowering).to_contain("method == \"values\" or method == \"keys\"")
         expect(lowering).to_contain("\"rt_dict_values\"")
         expect(lowering).to_contain("\"rt_dict_keys\"")
@@ -76,16 +81,16 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("materializes function pointer constants as code addresses")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
-        val wrapper = file_read("src/lib/nogc_sync_mut/sffi/codegen.spl")
-        val resolver = file_read("src/compiler_rust/compiler/src/elf_utils.rs")
-        val interpreter = file_read("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
-        expect(adapter).to_contain("var address = cranelift_function_addr_in_func(ctx, v)")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val wrapper = norm_read("src/lib/nogc_sync_mut/sffi/codegen.spl")
+        val resolver = norm_read("src/compiler_rust/compiler/src/elf_utils.rs")
+        val interpreter = norm_read("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
+        expect(adapter).to_contain("var address = cranelift_function_addr_in_func(ctx, symbol)")
         expect(adapter).to_contain("E-BACKEND-CRANELIFT-FUNCTION-ADDRESS:")
         expect(adapter).to_contain("if target_code < 0:")
         expect(adapter).to_contain("compileerror_target_unsupported(BackendKind.Cranelift")
         expect(adapter).to_contain("case _: -1")
-        expect(adapter).to_not_contain("case _: CL_TARGET_X86_64")
+        expect(adapter.contains("case _: CL_TARGET_X86_64")).to_equal(false)
         expect(wrapper).to_contain("rt_cranelift_function_addr_in_func")
         expect(resolver).to_contain("\"rt_cranelift_function_addr_in_func\"")
         expect(interpreter).to_contain("\"rt_cranelift_function_addr_in_func\"")
@@ -94,15 +99,15 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("separates ordinary local collisions from lowering-owned runtime calls")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
-        val calls = file_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
-        val backend = file_read("src/compiler_rust/compiler/src/codegen/common_backend.rs")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val calls = norm_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
+        val backend = norm_read("src/compiler_rust/compiler/src/codegen/common_backend.rs")
         val call_start = adapter.index_of("fn cl_translate_call(") ?? -1
         val call_body = adapter.substring(call_start, adapter.len())
         val compile_start = adapter.index_of("fn compile_function(") ?? -1
         val compile_body = adapter.substring(compile_start, call_start)
         val reserved_guard = call_body.index_of("val owned_rt = cl_is_lowering_owned_runtime(name)") ?? -1
-        val local_lookup = call_body.index_of("if func_handles.has(name)") ?? -1
+        val local_lookup = call_body.index_of("val func_ref = cranelift_import_function(ctx, handle)") ?? -1
         val extern_fallback = call_body.index_of("# External function - declare the import") ?? -1
         expect(call_start).to_be_greater_than(-1)
         expect(compile_start).to_be_greater_than(-1)
@@ -128,11 +133,11 @@ describe "Cranelift aggregate runtime ABI":
         expect(adapter).to_contain("translate_runtime_import_call_i64(ctx, cl_module, \"rt_string_new\"")
         expect(adapter).to_contain("translate_runtime_import_call_i64(ctx, cl_module, \"rt_string_to_int_lenient\"")
         assert_false(adapter.contains("fn cl_call_runtime_i64"))
-        val fixture = file_read("test/fixtures/compiler/native_runtime_local_name_collision.spl")
-        val non_generic_fixture = file_read("test/fixtures/compiler/native_runtime_local_name_collision_non_generic.spl")
-        val open_repro = file_read("test/fixtures/compiler/native_runtime_generic_call_origin_collision_repro.spl")
-        val portability = file_read("scripts/check/check-bootstrap-portability.shs")
-        val gate = file_read("scripts/check/check-cranelift-aot-aggregates.shs")
+        val fixture = norm_read("test/fixtures/compiler/native_runtime_local_name_collision.spl")
+        val non_generic_fixture = norm_read("test/fixtures/compiler/native_runtime_local_name_collision_non_generic.spl")
+        val open_repro = norm_read("test/fixtures/compiler/native_runtime_generic_call_origin_collision_repro.spl")
+        val portability = norm_read("scripts/check/check-bootstrap-portability.shs")
+        val gate = norm_read("scripts/check/check-cranelift-aot-aggregates.shs")
         expect(fixture).to_contain("fn rt_array_len_safe<T>(array: [T]) -> i64:")
         expect(fixture).to_contain("fn rt_array_len(value: i64) -> i64:")
         expect(fixture).to_contain("fn rt_array_get(array: i64, index: i64) -> i64:")
@@ -150,12 +155,12 @@ describe "Cranelift aggregate runtime ABI":
         expect(open_repro).to_contain("print(rt_array_new(0))")
         expect(portability).to_contain("owned code defines a guarded compiler-generated runtime helper before MIR call origin exists")
     it "expands Cranelift text arguments exactly once":
-        val wrapper = file_read("src/lib/nogc_sync_mut/sffi/codegen.spl")
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
-        val sffi = file_read("src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs")
-        val native_calls = file_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
-        val llvm_calls = file_read("src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs")
-        val global_address = file_read("src/compiler/70.backend/backend/cranelift_global_address.spl")
+        val wrapper = norm_read("src/lib/nogc_sync_mut/sffi/codegen.spl")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val sffi = norm_read("src/compiler_rust/compiler/src/codegen/cranelift_sffi.rs")
+        val native_calls = norm_read("src/compiler_rust/compiler/src/codegen/instr/calls.rs")
+        val llvm_calls = norm_read("src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs")
+        val global_address = norm_read("src/compiler/70.backend/backend/cranelift_global_address.spl")
                 # Each text is expanded once into typed i64 locals (bug codegen_isa_sffi_text_abi_misexpansion_2026_10_22).
         expect(wrapper).to_contain("val name_ptr: i64 = rt_string_data(name)")
         expect(wrapper).to_contain("val name_len: i64 = rt_string_len(name)")
@@ -186,19 +191,19 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("types backend compilation results for driver unwrapping")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val helpers = file_read("src/compiler/70.backend/backend/backend_helpers.spl")
+        val helpers = norm_read("src/compiler/70.backend/backend/backend_helpers.spl")
         expect(helpers).to_contain("opt_level_i64: i64\n) -> Result<CompiledModule, CompileError>:")
 
     it "keeps the f64 text renderer on its native runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("keeps the f64 text renderer on its native runtime ABI")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val imports = file_read("src/compiler/70.backend/backend/cranelift_runtime_imports.spl")
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val imports = norm_read("src/compiler/70.backend/backend/cranelift_runtime_imports.spl")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
         val call_start = adapter.index_of("fn cl_translate_call(") ?? -1
         val call_body = adapter.substring(call_start, adapter.len())
         val typed_guard = call_body.index_of("if name == \"rt_raw_f64_to_string\" and arg_vals.len() == 1:") ?? -1
-        val local_lookup = call_body.index_of("if func_handles.has(name)") ?? -1
+        val local_lookup = call_body.index_of("val func_ref = cranelift_import_function(ctx, handle)") ?? -1
         expect(imports).to_contain("fn translate_runtime_import_call_f64_i64(")
         expect(imports).to_contain("cranelift_sig_add_param(sig, CL_TYPE_F64_FOR_RUNTIME_IMPORT)")
         expect(adapter).to_contain("translate_runtime_import_call_f64_i64(ctx, cl_module, name, arg_vals[0])")
@@ -206,17 +211,17 @@ describe "Cranelift aggregate runtime ABI":
         expect(local_lookup).to_be_greater_than(typed_guard)
 
     it "keeps parse_f64 on the nullable tagged-value ABI":
-        val lowering = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
-        val imports = file_read("src/compiler/70.backend/backend/cranelift_runtime_imports.spl")
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
-        val runtime = file_read("src/runtime/simple_core/core_string.spl")
-        val hosted = file_read("src/runtime/runtime_native.c")
-        val header = file_read("src/runtime/runtime.h")
-        expect(lowering).to_contain("case \"parse_f64\" | \"to_float\": \"rt_string_to_float\"")
+        val lowering = norm_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        val imports = norm_read("src/compiler/70.backend/backend/cranelift_runtime_imports.spl")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val runtime = norm_read("src/runtime/simple_core/core_string.spl")
+        val hosted = norm_read("src/runtime/runtime_native.c")
+        val header = norm_read("src/runtime/runtime.h")
+        expect(lowering).to_contain("case \"parse_f64\" | \"parse_float\" | \"parse_f64_safe\" | \"to_float\" | \"to_f64\" | \"to_f32\": \"rt_string_to_float\"")
         expect(lowering).to_contain("self.mark_runtime_value_local(ts_local.id)")
         expect(lowering).to_contain("HirTypeKind.Optional(float_type)")
         # llvm_lib_translate.spl was removed on release (88aac2ffe28); the Rust LLVM lane owns the declaration.
-        val llvm = file_read("src/compiler_rust/compiler/src/codegen/llvm/functions.rs")
+        val llvm = norm_read("src/compiler_rust/compiler/src/codegen/llvm/functions.rs")
         expect(llvm).to_contain(".unwrap_or_else(|| module.add_function(\"rt_string_to_float\", parse_type, None))")
         expect(runtime).to_contain("pub fn rt_string_to_float(value: i64) -> i64:")
         expect(hosted).to_contain("int64_t rt_string_to_float(int64_t value)")
@@ -231,7 +236,7 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("predispatches colliding MIR Const instructions")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val adapter = norm_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
         expect(adapter).to_contain("val const_disc = rt_enum_discriminant(MirInstKind.Const(")
         expect(adapter).to_contain("val payload = rt_enum_payload(inst_kind)")
         expect(adapter).to_contain("val dest: LocalId = rt_tuple_get(payload, 0)")
@@ -243,7 +248,7 @@ describe "Cranelift aggregate runtime ABI":
         # @req REQ-SSPEC-COMPILER
         step("decodes GEMM operand locals through typed pattern binding")
         # evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
-        val fusion = file_read("src/compiler/70.backend/backend/cranelift_gemm_fusion.spl")
+        val fusion = norm_read("src/compiler/70.backend/backend/cranelift_gemm_fusion.spl")
         # Any-free sources (28df8ceac42) replaced the rt_enum_payload decode with typed pattern binding.
         expect(fusion).to_contain("extern fn rt_enum_discriminant<T>(value: T) -> i64")
         expect(fusion).to_contain("case Copy(local) | Move(local): Some(local.id)")

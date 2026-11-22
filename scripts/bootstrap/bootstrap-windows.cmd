@@ -1,5 +1,19 @@
 @echo off
+rem ==============================================================================
+rem PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER
+rem Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs
+rem ==============================================================================
 setlocal
+rem Forwards flags (including --path-check, --mingw, --msvc) to ./bootstrap-windows.sh.
+if "%~1"=="" if not defined CI if not "%SIMPLE_NONINTERACTIVE%"=="1" (
+  echo DEPRECATED: Do not use scripts\bootstrap\bootstrap-windows.cmd directly for interactive Phase 3/4 builds. 1>&2
+  echo Use 'scripts\bootstrap\build-phase3-phase4.bat' ^(default --win-config=mingw; optional --win-config=msvc^): 1>&2
+  echo   Default / phased shard build: scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p3 --compile-mode=shard 1>&2
+  echo   File-based parallel build:    scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p3 --compile-mode=file 1>&2
+  echo   Phase 4 ^(release + xray^):     scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p4 1>&2
+  pause
+  exit /b 0
+)
 set "BOOTSTRAP_BASH="
 
 rem Prefer the Bash shipped beside Git.  Windows' System32 bash.exe is the

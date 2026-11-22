@@ -369,87 +369,41 @@ impl LlvmBackend {
         &self,
         val: inkwell::values::BasicValueEnum<'static>,
         builder: &Builder<'static>,
-        module: &Module<'static>,
+        _module: &Module<'static>,
     ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
         let rv_type = self.runtime_int_type();
-        let rv_width = rv_type.get_bit_width();
 
-        if rv_width == 64 {
-            let bits = if val.is_float_value() {
-                // f32 values (e.g. struct fields typed f32) must be widened
-                // first: bitcasting f32 straight to i64 is a size mismatch.
-                let f64_type = self.context_ref().f64_type();
-                let fv = val.into_float_value();
-                let fv = if fv.get_type() == f64_type {
-                    fv
-                } else {
-                    builder
-                        .build_float_ext(fv, f64_type, "box_fext")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?
-                };
-                builder
-                    .build_bit_cast(fv, rv_type, "f2i")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
-                    .into_int_value()
+        let bits = if val.is_float_value() {
+            // f32 values (e.g. struct fields typed f32) must be widened
+            // first: bitcasting f32 straight to i64 is a size mismatch.
+            let f64_type = self.context_ref().f64_type();
+            let fv = val.into_float_value();
+            let fv = if fv.get_type() == f64_type {
+                fv
             } else {
-                self.coerce_value_to_type(val, Some(rv_type.into()), builder)?
-                    .into_int_value()
-            };
-            let three = rv_type.const_int(3, false);
-            let tag_float = rv_type.const_int(2, false);
-            let shifted = builder
-                .build_right_shift(bits, three, false, "ushr")
-                .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-            let payload = builder
-                .build_left_shift(shifted, three, "shl")
-                .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-            return builder
-                .build_or(payload, tag_float, "box_float")
-                .map_err(|e| crate::error::factory::llvm_build_failed("or", &e));
-        }
-
-        let f64_type = self.context_ref().f64_type();
-        let f64_val = match val {
-            inkwell::values::BasicValueEnum::FloatValue(fv) if fv.get_type() == f64_type => fv,
-            inkwell::values::BasicValueEnum::FloatValue(fv) => builder
-                .build_float_ext(fv, f64_type, "box_fext")
-                .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?,
-            inkwell::values::BasicValueEnum::IntValue(iv) => builder
-                .build_signed_int_to_float(iv, f64_type, "box_sitofp")
-                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?,
-            inkwell::values::BasicValueEnum::PointerValue(pv) => {
-                let iv = builder
-                    .build_ptr_to_int(pv, rv_type, "box_ptrtoint")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
                 builder
-                    .build_signed_int_to_float(iv, f64_type, "box_ptr_sitofp")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?
-            }
-            _ => f64_type.const_zero(),
+                    .build_float_ext(fv, f64_type, "box_fext")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?
+            };
+            builder
+                .build_bit_cast(fv, rv_type, "f2i")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
+                .into_int_value()
+        } else {
+            self.coerce_value_to_type(val, Some(rv_type.into()), builder)?
+                .into_int_value()
         };
-
-        // `rt_box_float` NEVER EXISTED in any runtime (2026-08-01): there is no
-        // `pub extern "C" fn rt_box_float` under src/compiler_rust/runtime and no
-        // `rt_box_float(` definition in src/runtime/runtime_native.c — only a
-        // stale comment mentions the name. The real f64 tagging helper is
-        // `rt_value_float`, which IS defined in BOTH runtimes. Same defect and
-        // same fix as the Cranelift `wrap_value` path (see
-        // codegen/instr/methods.rs), where emitting the nonexistent
-        // `rt_box_int`/`rt_box_float` made the JIT report "unresolved external
-        // symbol" and silently drop the whole module to the interpreter.
-        let fn_type = rv_type.fn_type(&[f64_type.into()], false);
-        let func = module
-            .get_function("rt_value_float")
-            .unwrap_or_else(|| module.add_function("rt_value_float", fn_type, None));
-        let call = builder
-            .build_call(func, &[f64_val.into()], "rt_value_float")
-            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_float", &e))?;
-        let ret = call
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CompileError::semantic("rt_value_float returned no value".to_string()))?
-            .into_int_value();
-        Ok(ret)
+        let three = rv_type.const_int(3, false);
+        let tag_float = rv_type.const_int(2, false);
+        let shifted = builder
+            .build_right_shift(bits, three, false, "ushr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
+        let payload = builder
+            .build_left_shift(shifted, three, "shl")
+            .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
+        builder
+            .build_or(payload, tag_float, "box_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("or", &e))
     }
 
     #[cfg(feature = "llvm")]
@@ -538,7 +492,7 @@ impl LlvmBackend {
         &self,
         val: inkwell::values::BasicValueEnum<'static>,
         builder: &Builder<'static>,
-        module: &Module<'static>,
+        _module: &Module<'static>,
     ) -> Result<inkwell::values::FloatValue<'static>, CompileError> {
         let rv_type = self.runtime_int_type();
         let f64_type = self.context_ref().f64_type();
@@ -546,37 +500,16 @@ impl LlvmBackend {
         let int_val = self
             .coerce_value_to_type(val, Some(rv_type.into()), builder)?
             .into_int_value();
-        if rv_type.get_bit_width() == 64 {
-            let three = rv_type.const_int(3, false);
-            let shifted = builder
-                .build_right_shift(int_val, three, false, "ushr")
-                .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-            let bits = builder
-                .build_left_shift(shifted, three, "shl")
-                .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-            return Ok(builder
-                .build_bit_cast(bits, f64_type, "i2f")
-                .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
-                .into_float_value());
-        }
-
-        // `rt_unbox_float` never existed either — sibling of the `rt_box_float`
-        // defect above. It has ZERO mentions anywhere under
-        // src/compiler_rust/runtime or src/runtime. The real untagging helper is
-        // `rt_value_as_float`, defined in BOTH runtimes
-        // (`rt_value_as_float(RuntimeValue) -> f64` / `double
-        // rt_value_as_float(int64_t)`), matching this `(rv) -> f64` shape.
-        let fn_type = f64_type.fn_type(&[rv_type.into()], false);
-        let func = module
-            .get_function("rt_value_as_float")
-            .unwrap_or_else(|| module.add_function("rt_value_as_float", fn_type, None));
-        let call = builder
-            .build_call(func, &[int_val.into()], "rt_value_as_float")
-            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_float", &e))?;
-        Ok(call
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| CompileError::semantic("rt_value_as_float returned no value".to_string()))?
+        let three = rv_type.const_int(3, false);
+        let shifted = builder
+            .build_right_shift(int_val, three, false, "ushr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
+        let bits = builder
+            .build_left_shift(shifted, three, "shl")
+            .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
+        Ok(builder
+            .build_bit_cast(bits, f64_type, "i2f")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
             .into_float_value())
     }
 
@@ -5585,17 +5518,14 @@ mod tests {
         backend.verify().unwrap();
     }
 
-    /// REPLACED 2026-08-01. The previous body of this test asserted
-    /// `call i32 @rt_box_float(double` and `call double @rt_unbox_float(i32` —
-    /// i.e. it PINNED a defect: neither `rt_box_float` nor `rt_unbox_float` is
-    /// defined in either runtime (no `pub extern "C" fn` under
-    /// src/compiler_rust/runtime, no definition in src/runtime/runtime_native.c),
-    /// so on every 32-bit target the LLVM backend emitted calls to symbols that
-    /// do not exist. The assertions were not relaxed — they were replaced with
-    /// assertions naming the helpers that DO exist in both runtimes, plus
-    /// explicit negative assertions so the dead names can never come back.
+    /// RuntimeValue is a 64-bit word on EVERY target (`runtime_int_type()`),
+    /// so float boxing on a 32-bit target is the same inline i64
+    /// bitcast/shift/or as on 64-bit targets and emits no runtime call. The
+    /// operand is a function parameter, not a constant, so the IR builder
+    /// cannot constant-fold the sequence away. `rt_box_float` /
+    /// `rt_unbox_float` are defined in no runtime and must never be emitted.
     #[test]
-    fn test_riscv32_float_boxing_uses_runtime_helpers() {
+    fn test_riscv32_float_boxing_is_inline_i64() {
         let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
         let backend = LlvmBackend::new(target).unwrap();
         backend.create_module("rv32_float_boxing").unwrap();
@@ -5605,48 +5535,40 @@ mod tests {
             let module = module_ref.as_ref().unwrap();
             let builder_ref = backend.builder.borrow();
             let builder = builder_ref.as_ref().unwrap();
-            let fn_type = backend.context_ref().void_type().fn_type(&[], false);
+            let f64_type = backend.context_ref().f64_type();
+            let fn_type = backend.context_ref().void_type().fn_type(&[f64_type.into()], false);
             let func = module.add_function("test", fn_type, None);
             let block = backend.context_ref().append_basic_block(func, "entry");
             builder.position_at_end(block);
 
-            let float_val = backend.context_ref().f64_type().const_float(1.5);
-            let boxed = backend
-                .build_box_float_value(float_val.into(), builder, module)
-                .unwrap();
+            let float_val = func.get_nth_param(0).unwrap();
+            let boxed = backend.build_box_float_value(float_val, builder, module).unwrap();
             let unboxed = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
             let _ = unboxed;
             builder.build_return(None).unwrap();
         }
 
         let ir = backend.get_ir().unwrap();
-        // Positive artifacts: the 32-bit boxing path must call the helpers that
-        // are actually EXPORTED by the runtimes.
         assert!(
-            ir.contains("call i32 @rt_value_float(double"),
-            "32-bit float boxing must call rt_value_float; IR was:\n{}",
+            ir.contains("%f2i = bitcast double %0 to i64"),
+            "32-bit float boxing must bitcast to the i64 RuntimeValue; IR was:\n{}",
             ir
         );
+        assert!(ir.contains("%box_float = or i64 %shl, 2"), "IR was:\n{}", ir);
         assert!(
-            ir.contains("call double @rt_value_as_float(i32"),
-            "32-bit float unboxing must call rt_value_as_float; IR was:\n{}",
+            ir.contains("%i2f = bitcast i64 %shl") && ir.contains(" to double"),
+            "32-bit float unboxing must bitcast from the i64 RuntimeValue; IR was:\n{}",
             ir
         );
-        // Negative artifacts: these two symbols do not exist in ANY runtime.
-        // Emitting them is what this test previously asserted.
-        assert!(
-            !ir.contains("rt_box_float"),
-            "rt_box_float does not exist in any runtime"
-        );
-        assert!(
-            !ir.contains("rt_unbox_float"),
-            "rt_unbox_float does not exist in any runtime"
-        );
+        assert!(!ir.contains("rt_value_float"), "boxing must stay inline; IR was:\n{}", ir);
+        assert!(!ir.contains("rt_value_as_float"), "unboxing must stay inline; IR was:\n{}", ir);
+        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
+        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
         assert!(!ir.contains("bitcast i32"));
         backend.verify().unwrap();
     }
 
-    /// True-positive control for the test above: on a 64-bit target the float
+    /// 64-bit sibling of the test above: on a 64-bit target the float
     /// boxing path is INLINE (shift/or + bitcast) and must emit no runtime call
     /// at all. Without this control, "no rt_box_float in the IR" could be
     /// satisfied by the boxing path going silent rather than by it being fixed.

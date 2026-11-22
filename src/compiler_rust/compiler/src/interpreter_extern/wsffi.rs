@@ -360,7 +360,9 @@ pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> 
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
-/// Boundary failures are typed interpreter errors; they never become a symbol.
+/// Returns `0` when `name` is absent from a valid library handle (matching C
+/// `rt_dynlib_symbol`); invalid handles or malformed arguments raise typed
+/// interpreter errors.
 pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
@@ -389,7 +391,7 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         let handle = handle_val as *mut libc::c_void;
         let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
         if sym.is_null() {
-            Err(CompileError::runtime(format!("spl_dlsym: unresolved symbol '{name}'")))
+            Ok(Value::Int(0))
         } else {
             Ok(Value::Int(sym as usize as i64))
         }
@@ -402,7 +404,7 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         }
         let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
         if sym.is_null() {
-            Err(CompileError::runtime(format!("spl_dlsym: unresolved symbol '{name}'")))
+            Ok(Value::Int(0))
         } else {
             Ok(Value::Int(sym as usize as i64))
         }
@@ -1057,6 +1059,31 @@ mod tests {
     #[test]
     fn symbol_lookup_rejects_null_handle_instead_of_returning_zero() {
         assert!(spl_dlsym(&[Value::Int(0), Value::text("missing")]).is_err());
+    }
+
+    #[test]
+    fn symbol_lookup_missing_export_returns_zero_not_abort() {
+        #[cfg(target_os = "macos")]
+        let (lib_path, known_sym) = ("libSystem.B.dylib", "getpid");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let (lib_path, known_sym) = ("libc.so.6", "getpid");
+        #[cfg(windows)]
+        let (lib_path, known_sym) = ("kernel32.dll", "GetCurrentProcessId");
+
+        let handle = match spl_dlopen(&[Value::text(lib_path)]).expect("dlopen platform libc") {
+            Value::Int(h) => h,
+            other => panic!("expected integer handle, got {other:?}"),
+        };
+        assert!(handle > 0, "expected live handle for {lib_path}, got {handle}");
+
+        let found = spl_dlsym(&[Value::Int(handle), Value::text(known_sym)]).expect("known symbol must resolve");
+        assert!(matches!(found, Value::Int(addr) if addr != 0));
+
+        let missing = spl_dlsym(&[Value::Int(handle), Value::text("NoSuchExport_dhr")])
+            .expect("unresolved symbol must return 0 instead of raising");
+        assert_eq!(missing, Value::Int(0));
+
+        let _ = spl_dlclose(&[Value::Int(handle)]);
     }
 
     #[test]

@@ -107,7 +107,7 @@ use compiler.mir_opt.typed_storage_view_producer.{
     MirTypedStorageViewEvidenceV1, MirTypedStorageViewProducerResultV1
 }
 use compiler.driver.native_capsule_mir_identity.{storage_identity_text_v1,
-    native_capsule_function_metadata_identity_v1, native_capsule_type_def_identity_v1}
+    compute_native_capsule_mir_identity_v1}
 export use compiler.driver.native_capsule_mir_identity.{native_capsule_sorted_symbol_ids_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
@@ -206,44 +206,14 @@ class FrozenNativeModuleCapsuleBatchV1:
     ok: bool
     registry_identity: text
     capsules: [FrozenNativeModuleCapsuleV1]
+    capsule_index: {text: i64} = {}
     reason: text
 
     fn find(module_name: text) -> FrozenNativeModuleCapsuleV1:
-        var found = FrozenNativeModuleCapsuleV1(ok: false,
-            module_name: module_name, capsule_identity: "",
-            mir_identity: "",
-            mir_module: MirModule(name: "", functions: {}, statics: {},
-                constants: {}, types: {}, external_layout_traces: [],
-                collection_plan_explanations: [], enum_semantic_declarations: [],
-                attr_sites: [], initializer_plan_v1: None, xray_ring_wrap: false),
-            storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
-                module_name: module_name, registry_identity: "",
-                module_identity: "", sites: [], evidence: [],
-                reason: "capsule-not-found"),
-            cache_source: "", source_identity: "", module_witness: "",
-            module_witness_reason: "", output_base: "", object_path: "",
-            backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
-            is_release: false,
-            reason: "capsule-not-found")
-        var count = 0
-        for capsule in self.capsules:
-            if capsule.module_name == module_name:
-                found = capsule
-                count = count + 1
-        if count != 1:
-            found.ok = false
-            found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
-            return found
-        found
+        frozen_native_capsule_batch_find_v1(self, module_name)
 
-# Keep capsule lookup available as a uniquely named free function.  Bootstrap
-# native lowering can erase a class receiver and bind the common method name
-# `find` to text.find; its integer result is then misread as a capsule pointer.
-# This cold O(n) lookup preserves the batch's deterministic duplicate check.
-pub fn frozen_native_capsule_batch_find_v1(
-    batch: FrozenNativeModuleCapsuleBatchV1, module_name: text
-) -> FrozenNativeModuleCapsuleV1:
-    var found = FrozenNativeModuleCapsuleV1(ok: false,
+fn _frozen_native_capsule_missing_v1(module_name: text, reason: text) -> FrozenNativeModuleCapsuleV1:
+    FrozenNativeModuleCapsuleV1(ok: false,
         module_name: module_name, capsule_identity: "", mir_identity: "",
         mir_module: MirModule(name: "", functions: {}, statics: {},
             constants: {}, types: {}, external_layout_traces: [],
@@ -252,56 +222,58 @@ pub fn frozen_native_capsule_batch_find_v1(
         storage_snapshot: FrozenStorageModuleSnapshotV1(ok: false,
             module_name: module_name, registry_identity: "",
             module_identity: "", sites: [], evidence: [],
-            reason: "capsule-not-found"),
+            reason: reason),
         cache_source: "", source_identity: "", module_witness: "",
         module_witness_reason: "", output_base: "", object_path: "",
         backend_name: "", provider_receipt_hash: "", target: "", target_cpu: "", opt_level: 0,
-        is_release: false, reason: "capsule-not-found")
+        is_release: false, reason: reason)
+
+# Keep capsule lookup available as a uniquely named free function.  Bootstrap
+# native lowering can erase a class receiver and bind the common method name
+# `find` to text.find; its integer result is then misread as a capsule pointer.
+# Uses the immutable `capsule_index` for O(1) zero-allocation lookup on hits,
+# failing closed on duplicate (-1), out-of-bounds, or stale index entries.
+# reason: module_name lookup key is a canonical driver module path text
+@allow(primitive_api)
+pub fn frozen_native_capsule_batch_find_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, module_name: text
+) -> FrozenNativeModuleCapsuleV1:
+    if batch.capsule_index.contains_key(module_name):
+        val idx = batch.capsule_index[module_name]
+        if idx == -1:
+            return _frozen_native_capsule_missing_v1(module_name, "duplicate-capsule")
+        if idx < 0 or idx >= batch.capsules.len():
+            return _frozen_native_capsule_missing_v1(module_name, "capsule-index-invalid")
+        val indexed = batch.capsules[idx]
+        if indexed.module_name != module_name:
+            return _frozen_native_capsule_missing_v1(module_name, "capsule-index-invalid")
+        return indexed
+    if batch.capsule_index.keys().len() > 0 or batch.capsules.len() == 0:
+        return _frozen_native_capsule_missing_v1(module_name, "capsule-not-found")
     var count = 0
-    for capsule in batch.capsules:
-        if capsule.module_name == module_name:
-            found = capsule
+    var match_idx = 0
+    var i = 0
+    while i < batch.capsules.len():
+        if batch.capsules[i].module_name == module_name:
+            match_idx = i
             count = count + 1
-    if count != 1:
-        found.ok = false
-        found.reason = if count == 0: "capsule-not-found" else: "duplicate-capsule"
-    found
+        i = i + 1
+    if count == 0:
+        return _frozen_native_capsule_missing_v1(module_name, "capsule-not-found")
+    if count > 1:
+        return _frozen_native_capsule_missing_v1(module_name, "duplicate-capsule")
+    batch.capsules[match_idx]
 
 extern fn rt_string_free(value: text) -> i64
 
-# Preserve the driver entry point while the pure identity implementation remains
-# independently usable without importing CompileContext and all driver backends.
+# Preserve the driver entry point while delegating to the streaming chunked
+# SHA-256 implementation in native_capsule_mir_identity.spl (avoiding giant
+# contiguous rows.join("\n") buffers and preserving active caller scopes).
 pub fn native_capsule_mir_identity_v1(module: MirModule) -> text:
-    # Canonical serialization is scratch, not a retained build graph. Keep only
-    # the digest after releasing intermediate JSON/identity rows. Missing owner
-    # support is a build error, never an empty identity or a cache bypass.
-    if not transient_scope_begin():
-        panic("native capsule MIR identity scratch scope unavailable")
-    val digest = native_capsule_mir_identity_in_owned_scope_v1(module)
-    val paused = transient_scope_pause()
-    val promoted = paused and transient_promote(digest)
-    val ended = transient_scope_end()
-    if not paused or not promoted or not ended:
+    val digest = compute_native_capsule_mir_identity_v1(module)
+    if digest == "":
         panic("native capsule MIR identity scratch ownership failed")
     digest
-
-fn native_capsule_mir_identity_in_owned_scope_v1(module: MirModule) -> text:
-    var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
-        val function = module.functions[symbol]
-        rows.push("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
-        val constant = module.constants[symbol]
-        rows.push("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
-        val static_value = module.statics[symbol]
-        var init_identity = "none"
-        if val init = static_value.init:
-            init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
-        rows.push("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
-        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
-    sha256_text(rows.join("\n"))
 
 fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
                                    evidence: MirTypedStorageViewEvidenceV1) -> text:
@@ -1218,27 +1190,25 @@ class CompileContext:
             or not self.frozen_storage_registry_well_formed():
             return FrozenNativeModuleCapsuleBatchV1(ok: false,
                 registry_identity: self.storage_binding_identity(), capsules: [],
-                reason: "storage-registry-not-frozen")
+                capsule_index: {}, reason: "storage-registry-not-frozen")
         var capsules: [FrozenNativeModuleCapsuleV1] = []
+        var capsule_index: {text: i64} = {}
         var index = 0
         while index < module_names.len():
             val module_name = module_names[index]
             if module_name == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "invalid-capsule-module-name")
-            var prior = 0
-            while prior < index:
-                if module_names[prior] == module_name:
-                    return FrozenNativeModuleCapsuleBatchV1(ok: false,
-                        registry_identity: self.storage_binding_identity(), capsules: [],
-                        reason: "duplicate-capsule-module")
-                prior = prior + 1
+                    capsule_index: {}, reason: "invalid-capsule-module-name")
+            if capsule_index.contains_key(module_name):
+                return FrozenNativeModuleCapsuleBatchV1(ok: false,
+                    registry_identity: self.storage_binding_identity(), capsules: [],
+                    capsule_index: {}, reason: "duplicate-capsule-module")
             val snapshot = self.frozen_storage_module_snapshot(module_name)
             if not snapshot.ok:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: snapshot.reason)
+                    capsule_index: {}, reason: snapshot.reason)
             var module_found = false
             var module = MirModule(name: "", functions: {}, statics: {},
                 constants: {}, types: {}, external_layout_traces: [],
@@ -1254,11 +1224,11 @@ class CompileContext:
             if not module_found:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "capsule-mir-module-missing")
+                    capsule_index: {}, reason: "capsule-mir-module-missing")
             if module.name != "" and module.name != module_name:
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "capsule-mir-module-name-mismatch")
+                    capsule_index: {}, reason: "capsule-mir-module-name-mismatch")
             val cache_source = self.frozen_native_cache_source_v1(module_name)
             val source_identity = self.frozen_native_cache_source_identity_v1(module_name)
             val module_witness = if module_witnesses.contains_key(module_name):
@@ -1274,7 +1244,7 @@ class CompileContext:
             if mir_identity == "":
                 return FrozenNativeModuleCapsuleBatchV1(ok: false,
                     registry_identity: self.storage_binding_identity(), capsules: [],
-                    reason: "capsule-mir-identity-unavailable")
+                    capsule_index: {}, reason: "capsule-mir-identity-unavailable")
             var capsule = FrozenNativeModuleCapsuleV1(ok: true,
                 module_name: module_name, capsule_identity: "",
                 mir_identity: mir_identity,
@@ -1288,11 +1258,12 @@ class CompileContext:
                 target: target, target_cpu: target_cpu, opt_level: opt_level,
                 is_release: is_release, reason: "ok")
             capsule.capsule_identity = capsule.expected_identity()
+            capsule_index[module_name] = capsules.len()
             capsules.push(capsule)
             index = index + 1
         FrozenNativeModuleCapsuleBatchV1(ok: true,
             registry_identity: self.storage_binding_identity(),
-            capsules: capsules, reason: "ok")
+            capsules: capsules, capsule_index: capsule_index, reason: "ok")
 
     me add_error(message: text):
         # Level-gated (SIMPLE_DUMP_COMPILE_ERRORS=1, default off). Phase 3 loses
@@ -1416,6 +1387,38 @@ class CompileContext:
             if freed == 1:
                 reclaimed = reclaimed + 1
         self.source_contents_owner = []
+        reclaimed
+
+    # Free C-heap `.spl` source buffers for unloaded physical files in `worker_unit`
+    # children before HIR/MIR/LLVM begins. Keyed by `canonical_paths[idx]` so physical
+    # aliases (`lib` vs `std` twins or preclosed alias rows) of a kept module are never
+    # freed while `rt_string_free` safely deduplicates shared handles across dropped twins.
+    me reclaim_unloaded_streaming_sources_v1(kept_canonical_paths: Dict<text, bool>, canonical_paths: [text]) -> i64:
+        var reclaimed: i64 = 0
+        var idx: i64 = 0
+        while idx < self.sources.len():
+            val canon = if idx < canonical_paths.len(): canonical_paths[idx] else: ""
+            if canon != "" and not kept_canonical_paths.contains_key(canon):
+                val freed_src = rt_string_free(self.sources[idx].content)
+                if freed_src == 1:
+                    reclaimed = reclaimed + 1
+                if idx < self.source_contents_owner.len():
+                    val freed_owner = rt_string_free(self.source_contents_owner[idx])
+                    if freed_owner == 1:
+                        reclaimed = reclaimed + 1
+                    self.source_contents_owner[idx] = ""
+                val orig = self.sources[idx]
+                var trimmed = SourceFile(
+                    path: orig.path,
+                    authored_path: orig.authored_path,
+                    content: "",
+                    module_name: orig.module_name
+                )
+                if idx < self.source_manifest_evidence_owner_v1.len():
+                    trimmed = source_file_with_manifest_evidence_v1(trimmed,
+                        self.source_manifest_evidence_owner_v1[idx])
+                self.sources[idx] = trimmed
+            idx = idx + 1
         reclaimed
 
     # Streaming parse reads the promoted SoA owners, not SourceFile.content.

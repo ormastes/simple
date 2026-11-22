@@ -1,0 +1,535 @@
+"""
+# Lock-Free Parallel Claiming, Multi-Worker Step-5 Codegen, and Concurrent Cache Writers
+
+Regression specification proving:
+1. Multi-worker claiming over a 500+ item queue executes locklessly with zero
+   duplicate claims, zero lost items, zero `.lock` files, O(N) (not O(N^2))
+   probes per worker across unit-pick, HIR/MIR shard schedules, and parse-fiber rings,
+   and crash-safe pre-published per-owner / `+fork` tree claim directories.
+2. Parallel backend object compilation and staged codegen dispatch >= 2 concurrent
+   workers when `--threads 4` and sufficient host memory headroom are present,
+   terminate promptly (< 2s) with real compiler diagnostics when a C unit fails,
+   and use responsive 5-15ms adaptive reap polling and O(N) SMF object assembly.
+3. Concurrent cache writers (`BuildCache`, `postbuild_coordinator_v1`, `.fpc`,
+   `.spab`) write via PID+sequence-unique temp files + atomic publish/rename,
+   merge sibling `BuildCache` updates with matching reverse-reference generation
+   receipts and pruning tombstones, and never create global `.lock` files.
+"""
+# @req REQ-COMPILER-DRIVER-LOCKFREE-PARALLEL-001
+# @cover src/compiler/80.driver/driver_hir_recovery.spl 80%
+# @cover src/compiler/80.driver/driver_worker_surface_closure_v1.spl 60%
+# @cover src/compiler/80.driver/driver_build/native_mir_shard.spl 60%
+# @cover src/compiler/80.driver/driver_build/native_staged_codegen.spl 80%
+# @cover src/compiler/70.backend/backend/runtime_c_compile_pool_v1.spl 80%
+# @cover src/compiler/80.driver/cache/postbuild_coordinator_v1.spl 80%
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{
+    dir_create_all, dir_remove_all, dir_list_or_empty,
+    file_exists, file_read, file_write, file_delete, file_size_raw,
+    getpid, process_spawn_async, time_now_monotonic_ms
+}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, time_now_unix_micros}
+use std.nogc_sync_mut.io.env_ops.{env_unset}
+use std.nogc_sync_mut.io.process_ops.{process_wait}
+use app.cli.parse_shard_queue.{parse_shard_strided_start_v1, parse_shard_release_claims, parse_shard_orphaned_paths}
+use app.cli.shard_worker_reap_v1.{SHARD_REAP_POLL_MS_V1, shard_adaptive_poll_ms_v1}
+use compiler.driver.driver_hir_recovery.{
+    HIR_SHARD_FORK_OWNER_MARK_V1,
+    hir_shard_recovery_inventory,
+    hir_shard_recovery_excluded,
+    hir_shard_recovery_claim,
+    hir_shard_recovery_terminal,
+    hir_shard_recovery_seal,
+    hir_shard_recovery_progress,
+    hir_shard_recovery_owner_tree_progress_v1,
+    hir_shard_recovery_close_inventory,
+    hir_shard_recovery_unclaimed_count,
+    hir_shard_claim_probes_v1,
+    hir_shard_claim_probes_reset_v1
+}
+use compiler.driver.driver_worker_surface_closure_v1.{
+    worker_unit_pick_v1,
+    worker_unit_pick_seal_v1,
+    worker_unit_drained_path_v1,
+    worker_unit_pick_probes_v1,
+    worker_unit_pick_probes_reset_v1
+}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_owner_claims_v1}
+use compiler.driver.driver_build.native_mir_shard.{
+    native_mir_shard_lpt_order_v1,
+    native_mir_shard_worker_order_v1,
+    native_mir_shard_note_cursor_v1
+}
+use compiler.driver.driver_build.parse_fiber_claim_window_v1.{parse_fiber_claim_ring_window_v1}
+use compiler.driver.driver_build.native_staged_codegen.{
+    NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1,
+    native_staged_codegen_batch_parse_v1,
+    native_staged_codegen_batch_for_threads_v1
+}
+use compiler.driver.driver_build.native_codegen_pool_v1.{
+    NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1,
+    NATIVE_CODEGEN_WAIT_CAP_QUEUED_MS_V1,
+    native_codegen_commit_floor_for_v1,
+    native_codegen_pool_workers_v1,
+    native_codegen_pool_run_v1
+}
+use compiler.driver.driver_build.smf_staged_parts_v1.{
+    smf_parts_assemble_objects_v1,
+    smf_part_encode_v1,
+    smf_part_decode_object_v1,
+    smf_part_decode_manifest_v1
+}
+use compiler.driver.driver_aot_native_output.{_driver_codegen_pool_lane_reason_v1}
+use compiler.backend.runtime_compiler.{find_c_compiler}
+use compiler.backend.runtime_c_compile_pool_v1.{
+    runtime_c_compile_workers_for_v1,
+    runtime_c_compile_parallel_batch_v1
+}
+use compiler.driver.driver_build.incremental.{
+    BuildCache,
+    FileFingerprint,
+    incremental_detect_changes_at,
+    incremental_reverse_reference_fallback_reason_v1
+}
+use compiler.driver.cache.postbuild_coordinator_v1.{postbuild_record_v1, postbuild_load_v1}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1}
+use compiler.frontend.core.flat_pool_packed_v1.{flat_packed_store_v1, flat_packed_seal_path_v1}
+
+val GIB_KIB: i64 = 1048576
+
+var _spec_fiber_claimed: Dict<text, i64> = {}
+var _spec_shard_idx: i64 = 0
+var _spec_shard_taken: i64 = 0
+
+fn spec_fiber_claim_cb(p: text) -> bool:
+    if _spec_fiber_claimed.contains_key(p) or _spec_shard_taken >= 130:
+        return false
+    _spec_fiber_claimed[p] = _spec_shard_idx
+    _spec_shard_taken = _spec_shard_taken + 1
+    true
+
+fn restore_env_opt(key: text, prev: text?):
+    if prev.?:
+        val _s = env_set(key, prev.unwrap())
+    else:
+        val _u = env_unset(key)
+
+fn fresh_test_dir(tag: text) -> text:
+    val dir = "build/test_tmp/lockfree_parallel_{tag}_{getpid()}_{time_now_unix_micros()}"
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+fn has_any_suffix(dir: text, suffix: text) -> bool:
+    for name in dir_list_or_empty(dir):
+        if name.ends_with(suffix):
+            return true
+    false
+
+fn pool_sleep_writer_emit(index: i64, ir_path: text, obj_path: text) -> [text]:
+    val _ir = file_write(ir_path, "; module {index}\n")
+    ["-c", "'sleep 0.12; echo OBJ_" + "{index}" + " > " + obj_path + "'"]
+
+describe "Pillar 1: lock-free O(N) multi-worker claiming over 500+ item queues":
+    it "claims 512 items across 4 strided unit workers locklessly with zero duplicates, zero lost items, and O(N) probes":
+        val queue = fresh_test_dir("unit_pick_512")
+        val total = 512
+        val batch = 16
+        val worker_count = 4
+        var paths: [text] = []
+        var order: [i64] = []
+        var i = 0
+        while i < total:
+            paths.push("src/mod_{i}.spl")
+            order.push(i)
+            i = i + 1
+
+        step("Publish 512-row inventory and exclusions locklessly without creating .lock")
+        expect(hir_shard_recovery_inventory(queue, "closure-512", paths)).to_equal(true)
+        expect(hir_shard_recovery_excluded(queue, "closure-512", [])).to_equal(true)
+        expect(file_exists("{queue}/.lock")).to_equal(false)
+        expect(hir_shard_recovery_unclaimed_count(queue)).to_equal(total)
+
+        worker_unit_pick_probes_reset_v1()
+        hir_shard_claim_probes_reset_v1()
+
+        var claimed_global: Dict<text, text> = {}
+        var total_claimed = 0
+        var duplicate_claims = 0
+        var drained_workers: [bool] = [false, false, false, false]
+        var rounds: [i64] = [0, 0, 0, 0]
+        var active = worker_count
+
+        step("Interleave 4 workers claiming batches of 16 until all 4 observe drained proofs")
+        while active > 0:
+            var w = 0
+            while w < worker_count:
+                if not drained_workers[w]:
+                    val r = rounds[w]
+                    rounds[w] = r + 1
+                    val unit_owner = "{w}/{worker_count}@0~h{r}"
+                    val picked_res = worker_unit_pick_v1(queue, unit_owner, paths, order, batch)
+                    expect(picked_res.is_ok()).to_equal(true)
+                    val picked = picked_res.unwrap()
+                    if r == 0:
+                        expect(picked[0]).to_equal("src/mod_{(w * total) / worker_count}.spl")
+                    if picked.len() == 0:
+                        expect(file_exists(worker_unit_drained_path_v1(queue, unit_owner))).to_equal(true)
+                        drained_workers[w] = true
+                        active = active - 1
+                    else:
+                        for p in picked:
+                            if claimed_global.contains_key(p):
+                                duplicate_claims = duplicate_claims + 1
+                            claimed_global[p] = unit_owner
+                            expect(hir_shard_recovery_claim(queue, unit_owner, p, "key-{p}")).to_equal(1)
+                            expect(hir_shard_recovery_terminal(queue, unit_owner, p, "PASS", true)).to_equal(true)
+                            total_claimed = total_claimed + 1
+                        expect(hir_shard_recovery_seal(queue, unit_owner, "FAILED")).to_equal(0)
+                        expect(worker_unit_pick_seal_v1(queue, unit_owner)).to_equal(0)
+                        expect(native_file_worker_owner_claims_v1(queue, unit_owner).len()).to_equal(picked.len())
+                        expect(hir_shard_recovery_progress(queue, unit_owner)).to_equal(picked.len())
+                w = w + 1
+
+        val pick_probes = worker_unit_pick_probes_v1()
+        val claim_probes = hir_shard_claim_probes_v1()
+
+        step("Verify zero duplicates, zero lost items, zero .lock/.tmp files, and O(N) probes per worker")
+        expect(duplicate_claims).to_equal(0)
+        expect(total_claimed).to_equal(total)
+        expect(claimed_global.keys().len()).to_equal(total)
+        expect(hir_shard_recovery_unclaimed_count(queue)).to_equal(0)
+        expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(0)
+        expect(file_exists("{queue}/.lock")).to_equal(false)
+        expect(has_any_suffix(queue, ".tmp")).to_equal(false)
+        # 512 claiming probes (zero collisions across all 32 claiming batches!)
+        # + 4 * 512 drained-proof probes = 2,560 == 5 * N (1.25 * N per worker).
+        expect(pick_probes).to_equal(total * (worker_count + 1))
+        expect(claim_probes).to_equal(total)
+        val _clean = dir_remove_all(queue)
+
+    it "partitions 520 MIR LPT items, +fork tree claims, and 520 parse-fiber items with zero collisions":
+        val mir_queue = fresh_test_dir("mir_lpt_520")
+        val total = 520
+        var names: [text] = []
+        var weights: [i64] = []
+        var idx = 0
+        while idx < total:
+            names.push("compiler.mod_{idx}")
+            weights.push((idx * 37) % 1000 + 10)
+            idx = idx + 1
+
+        val lpt = native_mir_shard_lpt_order_v1(names, weights)
+        expect(lpt.len()).to_equal(total)
+        hir_shard_claim_probes_reset_v1()
+
+        var claimed_mir: Dict<text, bool> = {}
+        var s = 0
+        while s < 4:
+            val spec = "{s}/4"
+            val sched = native_mir_shard_worker_order_v1(lpt, spec, mir_queue, spec)
+            expect(sched.len()).to_equal(total)
+            var k = 0
+            while k < 130:
+                val mod_name = names[sched[k]]
+                expect(claimed_mir.contains_key(mod_name)).to_equal(false)
+                claimed_mir[mod_name] = true
+                expect(hir_shard_recovery_claim(mir_queue, spec, mod_name, "mir-key")).to_equal(1)
+                k = k + 1
+            s = s + 1
+
+        step("All 520 MIR items claimed in exactly 520 probes (zero wasted cross-worker probes)")
+        expect(claimed_mir.keys().len()).to_equal(total)
+        expect(hir_shard_claim_probes_v1()).to_equal(total)
+
+        step("Verify +fork child claims index into root tree dir without file_append races and seal on crash")
+        val fork_q = fresh_test_dir("fork_tree_seal")
+        val fork_paths = ["m0.spl", "m1.spl", "m2.spl", "m3.spl"]
+        expect(hir_shard_recovery_inventory(fork_q, "fork-id", fork_paths)).to_equal(true)
+        val root_owner = "0/2@0"
+        val child_a = "{root_owner}{HIR_SHARD_FORK_OWNER_MARK_V1}0/2"
+        val child_b = "{root_owner}{HIR_SHARD_FORK_OWNER_MARK_V1}1/2"
+        expect(hir_shard_recovery_claim(fork_q, child_a, "m0.spl", "k")).to_equal(1)
+        # Same-file sibling contention: `child_b` loses `m0.spl` (returns 0) and must NOT
+        # unlink `child_a`'s disjoint `{digest}-{sha256(child_a)}.claim` tree marker!
+        expect(hir_shard_recovery_claim(fork_q, child_b, "m0.spl", "k")).to_equal(0)
+        expect(hir_shard_recovery_claim(fork_q, child_a, "m1.spl", "k")).to_equal(1)
+        expect(hir_shard_recovery_claim(fork_q, child_b, "m2.spl", "k")).to_equal(1)
+        expect(hir_shard_recovery_claim(fork_q, child_b, "m3.spl", "k")).to_equal(1)
+        expect(hir_shard_recovery_terminal(fork_q, child_a, "m1.spl", "PASS", true)).to_equal(true)
+        expect(hir_shard_recovery_owner_tree_progress_v1(fork_q, root_owner)).to_equal(4)
+        # Simulate root crash: `m0.spl` (contended!), `m2.spl`, and `m3.spl` are all sealed!
+        expect(hir_shard_recovery_seal(fork_q, root_owner, "CRASH")).to_equal(3)
+        expect(hir_shard_recovery_close_inventory(fork_q, false)).to_equal(0)
+
+        step("Verify worker_unit_pick_seal_v1 drops unclaimed orphan picks cleanly under reclaim.lock")
+        val orphan_q = fresh_test_dir("orphan_pick_seal")
+        val orphan_picked = worker_unit_pick_v1(orphan_q, "0/2@0~h0", ["x.spl", "y.spl"], [0, 1], 2).unwrap()
+        expect(orphan_picked.len()).to_equal(2)
+        expect(hir_shard_recovery_claim(orphan_q, "0/2@0~h0", "x.spl", "k")).to_equal(1)
+        expect(worker_unit_pick_seal_v1(orphan_q, "0/2@0~h0")).to_equal(1)
+        val repicked = worker_unit_pick_v1(orphan_q, "1/2@0~h0", ["x.spl", "y.spl"], [0, 1], 2).unwrap()
+        expect(repicked).to_equal(["y.spl"])
+        val _c_orphan = dir_remove_all(orphan_q)
+
+        step("Verify MIR multi-round cursor rotation advances by (start + loop_pos + 1) % total")
+        val rot_q = fresh_test_dir("mir_rot_cursor")
+        val r0 = native_mir_shard_worker_order_v1([10, 20, 30, 40], "0/1", rot_q, "0/1+fork-m0")
+        expect(r0).to_equal([10, 20, 30, 40])
+        native_mir_shard_note_cursor_v1(rot_q, 1, 4)
+        val r1 = native_mir_shard_worker_order_v1([10, 20, 30, 40], "0/1", rot_q, "0/1+fork-m1")
+        expect(r1).to_equal([30, 40, 10, 20])
+        native_mir_shard_note_cursor_v1(rot_q, 0, 4)
+        val r2 = native_mir_shard_worker_order_v1([10, 20, 30, 40], "0/1", rot_q, "0/1+fork-m2")
+        expect(r2).to_equal([40, 10, 20, 30])
+
+        step("Verify parse-fiber ring windows partition 520 files cleanly across 4 shards")
+        expect(parse_shard_strided_start_v1("0/4", total)).to_equal(0)
+        expect(parse_shard_strided_start_v1("1/4", total)).to_equal(130)
+        expect(parse_shard_strided_start_v1("2/4", total)).to_equal(260)
+        expect(parse_shard_strided_start_v1("3/4", total)).to_equal(390)
+        _spec_fiber_claimed = {}
+        var shard_idx = 0
+        while shard_idx < 4:
+            _spec_shard_idx = shard_idx
+            _spec_shard_taken = 0
+            val ring_start = parse_shard_strided_start_v1("{shard_idx}/4", total)
+            var step_cursor = 0
+            while step_cursor < total and _spec_shard_taken < 130:
+                val win = parse_fiber_claim_ring_window_v1(names, ring_start, step_cursor,
+                    fn(p: text) -> bool: spec_fiber_claim_cb(p))
+                step_cursor = win.next_index
+            expect(_spec_shard_taken).to_equal(130)
+            shard_idx = shard_idx + 1
+        expect(_spec_fiber_claimed.keys().len()).to_equal(total)
+
+        step("Verify new parse-shard claim format records path for orphan attribution")
+        val pqueue = fresh_test_dir("parse_orphan_attr")
+        expect(file_write("{pqueue}/999-12.claim", "2/4\nsrc/app/broken.spl")).to_equal(true)
+        expect(parse_shard_release_claims(pqueue, ["2/4"])).to_equal(1)
+        expect(parse_shard_orphaned_paths(pqueue)).to_equal(["src/app/broken.spl"])
+
+        val _c1 = dir_remove_all(mir_queue)
+        val _c2 = dir_remove_all(fork_q)
+        val _c3 = dir_remove_all(rot_q)
+        val _c4 = dir_remove_all(pqueue)
+
+describe "Pillar 2: parallel Step-5 codegen pool, clang -c runtime pool, and responsive polling":
+    it "dispatches >= 2 concurrent codegen pool workers under --threads 4 and scales staged batches":
+        step("Verify --threads 4 with 24 GiB host reserve admits 4 concurrent workers")
+        val floor_24g = native_codegen_commit_floor_for_v1("", 0, 24 * GIB_KIB)
+        expect(floor_24g).to_equal(6 * GIB_KIB)
+        val admitted = native_codegen_pool_workers_v1(8, 4, 8, 0, 14 * GIB_KIB,
+            NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1, floor_24g)
+        expect(admitted).to_equal(4)
+        expect(admitted >= 2).to_equal(true)
+
+        step("Verify staged codegen scales batch size with --threads while keeping default 8 when unset")
+        expect(NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1).to_equal(8)
+        expect(native_staged_codegen_batch_parse_v1("")).to_equal(8)
+        expect(native_staged_codegen_batch_for_threads_v1("", 0)).to_equal(8)
+        expect(native_staged_codegen_batch_for_threads_v1("", 4)).to_equal(16)
+        expect(native_staged_codegen_batch_for_threads_v1("", 16)).to_equal(64)
+        expect(native_staged_codegen_batch_for_threads_v1("12", 16)).to_equal(12)
+
+        step("Verify SIMPLE_CODEGEN_MODULE_SCOPE=1 no longer forces serial concurrency=1 fallback")
+        val prev_scope = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
+        val _set_s = env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "1")
+        val reason = _driver_codegen_pool_lane_reason_v1("llvm", false, true, "")
+        restore_env_opt("SIMPLE_CODEGEN_MODULE_SCOPE", prev_scope)
+        expect(reason == "SIMPLE_CODEGEN_MODULE_SCOPE=1").to_equal(false)
+
+        step("Execute real 4-worker codegen pool over 6 jobs and prove peak_live >= 2 with zero .lock")
+        val stage = fresh_test_dir("codegen_pool_4w")
+        val ledger = stage + "/ledger"
+        expect(dir_create_all(ledger)).to_equal(true)
+        val jobs = ["m.j0", "m.j1", "m.j2", "m.j3", "m.j4", "m.j5"]
+        val res = native_codegen_pool_run_v1("/bin/sh", jobs, 4, stage, ledger,
+            pool_sleep_writer_emit(_1, _2, _3))
+        expect(res.passed).to_equal(6)
+        expect(res.failed).to_equal(0)
+        expect(res.peak_live >= 2).to_equal(true)
+        expect(file_exists("{ledger}/.lock")).to_equal(false)
+        expect(NATIVE_CODEGEN_WAIT_CAP_QUEUED_MS_V1 <= 15).to_equal(true)
+        expect(SHARD_REAP_POLL_MS_V1 <= 15).to_equal(true)
+        expect(shard_adaptive_poll_ms_v1(0)).to_equal(5)
+        expect(shard_adaptive_poll_ms_v1(30)).to_equal(50)
+        val _clean = dir_remove_all(stage)
+
+    it "compiles C units in parallel, aborts promptly with diagnostics on failure, and assembles SMF in O(N)":
+        expect(runtime_c_compile_workers_for_v1(8, 4, 12, 14 * GIB_KIB, 6 * GIB_KIB)).to_equal(4)
+        val cc = find_c_compiler()
+        if cc != "":
+            val cdir = fresh_test_dir("rt_c_parallel")
+            val cache_dir = cdir + "/cache"
+            expect(dir_create_all(cache_dir)).to_equal(true)
+            var names: [text] = []
+            var srcs: [text] = []
+            var objs: [text] = []
+            var caches: [text] = []
+            var argvs: [[text]] = []
+            var i = 0
+            while i < 4:
+                val name = "rt_unit_{i}"
+                val src = "{cdir}/{name}.c"
+                val obj = "{cdir}/{name}.o"
+                val cobj = "{cache_dir}/{name}.o"
+                expect(file_write(src, "int simple_parallel_probe_{i}(void) {{ return {i + 10}; }}\n")).to_equal(true)
+                names.push(name)
+                srcs.push(src)
+                objs.push(obj)
+                caches.push(cobj)
+                argvs.push(["-c", "-O1", "-o", obj, src])
+                i = i + 1
+            val err = runtime_c_compile_parallel_batch_v1(cc, names, srcs, objs, caches, argvs, 4, getpid(), false)
+            expect(err).to_equal("")
+            var check_i = 0
+            while check_i < 4:
+                expect(file_exists(objs[check_i])).to_equal(true)
+                expect(file_size_raw(objs[check_i]) > 0).to_equal(true)
+                expect(file_exists(caches[check_i])).to_equal(true)
+                check_i = check_i + 1
+
+            step("Verify failing C translation unit aborts promptly (< 2000ms), kills siblings, and reports real cc error")
+            val bad_src = "{cdir}/rt_bad.c"
+            val bad_obj = "{cdir}/rt_bad.o"
+            val ok2_src = "{cdir}/rt_ok2.c"
+            val ok2_obj = "{cdir}/rt_ok2.o"
+            val ok3_src = "{cdir}/rt_ok3.c"
+            val ok3_obj = "{cdir}/rt_ok3.o"
+            expect(file_write(bad_src, "int broken_fn(void) {{ SYNTAX_ERROR_TOKEN_XYZ }}\n")).to_equal(true)
+            expect(file_write(ok2_src, "int ok2_fn(void) {{ return 2; }}\n")).to_equal(true)
+            expect(file_write(ok3_src, "int ok3_fn(void) {{ return 3; }}\n")).to_equal(true)
+            val fail_t0 = time_now_monotonic_ms()
+            val fail_err = runtime_c_compile_parallel_batch_v1(
+                cc,
+                ["rt_bad", "rt_ok2", "rt_ok3"],
+                [bad_src, ok2_src, ok3_src],
+                [bad_obj, ok2_obj, ok3_obj],
+                ["", "", ""],
+                [["-c", "-o", bad_obj, bad_src], ["-c", "-o", ok2_obj, ok2_src], ["-c", "-o", ok3_obj, ok3_src]],
+                2, getpid(), false)
+            val fail_dt = time_now_monotonic_ms() - fail_t0
+            expect(fail_dt < 2000).to_equal(true)
+            expect(fail_err).to_contain("Failed to compile rt_bad.c:")
+            expect(fail_err).to_contain("SYNTAX_ERROR_TOKEN_XYZ")
+            expect(has_any_suffix(cdir, ".cc.log")).to_equal(false)
+
+            val _clean = dir_remove_all(cdir)
+
+        step("Verify linear in-place SMF part encoding and sorted assembly")
+        var parts_map: {text: [u8]} = {}
+        parts_map["m.beta"] = [4u8, 5u8]
+        parts_map["m.alpha"] = [1u8, 2u8, 3u8]
+        expect(smf_parts_assemble_objects_v1(parts_map)).to_equal([1u8, 2u8, 3u8, 4u8, 5u8])
+        val encoded_part = smf_part_encode_v1([9u8, 8u8], [7u8])
+        expect(smf_part_decode_object_v1(encoded_part)).to_equal([9u8, 8u8])
+        expect(smf_part_decode_manifest_v1(encoded_part)).to_equal([7u8])
+
+describe "Pillar 3: concurrent cache writers with matching receipts, pruning tombstones, and zero temp collisions":
+    it "merges concurrent BuildCache saves with valid reverse-ref receipts, honors prune tombstones, and settles postbuild/.fpc/.spab":
+        val cdir = fresh_test_dir("concurrent_caches")
+        val src_a = "{cdir}/mod_a.spl"
+        val src_b = "{cdir}/mod_b.spl"
+        val obj_a = "{cdir}/mod_a.o"
+        val obj_b = "{cdir}/mod_b.o"
+        expect(file_write(src_a, "pub fn a() -> i64: 1\n")).to_equal(true)
+        expect(file_write(src_b, "pub fn b() -> i64: 2\n")).to_equal(true)
+        expect(file_write(obj_a, "OBJ_A")).to_equal(true)
+        expect(file_write(obj_b, "OBJ_B")).to_equal(true)
+
+        val manifest_path = "{cdir}/build_cache.sdn"
+        step("Simulate two concurrent workers saving disjoint modules with full reverse-reference receipt publication")
+        var worker1 = BuildCache.load(manifest_path)
+        var worker2 = BuildCache.load(manifest_path)
+        val fp_a = FileFingerprint.from_file(src_a).unwrap()
+        val fp_b = FileFingerprint.from_file(src_b).unwrap()
+        worker1.update_entry(src_a, fp_a, [], [obj_a], "wit-a")
+        worker2.update_entry(src_b, fp_b, [], [obj_b], "wit-b")
+        expect(worker1.save()).to_equal(true)
+        expect(worker2.save()).to_equal(true)
+
+        val merged = BuildCache.load(manifest_path)
+        expect(merged.entries.contains_key(src_a)).to_equal(true)
+        expect(merged.entries.contains_key(src_b)).to_equal(true)
+        expect(has_any_suffix(cdir, ".tmp")).to_equal(false)
+        expect(file_exists("{cdir}/.lock")).to_equal(false)
+
+        step("Verify published reverse-reference receipt matches merged BuildCache (never stale-generation)")
+        val detect_res = incremental_detect_changes_at(manifest_path, [src_a, src_b])
+        expect(detect_res.changes.len()).to_equal(0)
+        expect(incremental_reverse_reference_fallback_reason_v1() == "stale-generation").to_equal(false)
+
+        step("Verify pruning missing outputs records tombstones so stale entries are never resurrected on merge")
+        var pruner = BuildCache.load(manifest_path)
+        expect(file_delete(obj_a)).to_equal(true)
+        expect(pruner.save()).to_equal(true)
+        val after_prune = BuildCache.load(manifest_path)
+        expect(after_prune.entries.contains_key(src_a)).to_equal(false)
+        expect(after_prune.entries.contains_key(src_b)).to_equal(true)
+
+        step("Spawn two real concurrent OS processes updating disjoint BuildCache entries under .merge.lock")
+        val simple_bin = env_get_nullable("SIMPLE_BINARY") ?? ""
+        if simple_bin != "" and file_exists(simple_bin):
+            val src_c = "{cdir}/mod_c.spl"
+            val src_d = "{cdir}/mod_d.spl"
+            val obj_c = "{cdir}/mod_c.o"
+            val obj_d = "{cdir}/mod_d.o"
+            expect(file_write(src_c, "pub fn c() -> i64: 3\n")).to_equal(true)
+            expect(file_write(src_d, "pub fn d() -> i64: 4\n")).to_equal(true)
+            expect(file_write(obj_c, "OBJ_C")).to_equal(true)
+            expect(file_write(obj_d, "OBJ_D")).to_equal(true)
+            val helper_c = "{cdir}/save_c.spl"
+            val helper_d = "{cdir}/save_d.spl"
+            expect(file_write(helper_c,
+                "use compiler.driver.driver_build.incremental.\{build_cache_record_entry_at\}\n" +
+                "val ok = build_cache_record_entry_at(\"{manifest_path}\", \"{src_c}\", [], [\"{obj_c}\"])\n" +
+                "assert ok\n")).to_equal(true)
+            expect(file_write(helper_d,
+                "use compiler.driver.driver_build.incremental.\{build_cache_record_entry_at\}\n" +
+                "val ok = build_cache_record_entry_at(\"{manifest_path}\", \"{src_d}\", [], [\"{obj_d}\"])\n" +
+                "assert ok\n")).to_equal(true)
+            val p_c = process_spawn_async(simple_bin, ["run", helper_c])
+            val p_d = process_spawn_async(simple_bin, ["run", helper_d])
+            expect(p_c > 0 and p_d > 0).to_equal(true)
+            expect(process_wait(p_c, 60000)).to_equal(0)
+            expect(process_wait(p_d, 60000)).to_equal(0)
+            val after_mp = BuildCache.load(manifest_path)
+            expect(after_mp.entries.contains_key(src_b)).to_equal(true)
+            expect(after_mp.entries.contains_key(src_c)).to_equal(true)
+            expect(after_mp.entries.contains_key(src_d)).to_equal(true)
+
+        step("Verify postbuild_record_v1 settles once via atomic noreplace and rejects conflicting bytes")
+        expect(postbuild_record_v1(cdir, "gen-1", "gen-1", "binary", "ready", "sha-ok")).to_equal("")
+        expect(postbuild_record_v1(cdir, "gen-1", "gen-1", "binary", "ready", "sha-ok")).to_equal("")
+        val conflict = postbuild_record_v1(cdir, "gen-1", "gen-1", "binary", "failed", "sha-bad")
+        expect(conflict != "").to_equal(true)
+        val view = postbuild_load_v1(cdir, "gen-1")
+        expect(view.binary).to_equal("ready")
+        expect(view.binary_digest).to_equal("sha-ok")
+
+        step("Verify .fpc immutable store and .spab store leave zero .tmp or .lock artifacts")
+        val old_fe_dir = env_get_nullable("SIMPLE_FRONTEND_CACHE_DIR")
+        val old_fe_scope = env_get_nullable("SIMPLE_FRONTEND_CACHE_SCOPE")
+        val old_fe_on = env_get_nullable("SIMPLE_FRONTEND_CACHE")
+        val fe_dir = "{cdir}/fe"
+        val _s1 = env_set("SIMPLE_FRONTEND_CACHE_DIR", fe_dir)
+        val _s2 = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "lockfree-spec-scope")
+        val _s3 = env_set("SIMPLE_FRONTEND_CACHE", "1")
+        val id_sha = sha256_text("src-identity-1")
+        expect(frontend_parse_cache_store_phase3_immutable_v1("0123456789abcdef0123456789abcdef", "pool_line_1\n", id_sha)).to_equal(true)
+        expect(frontend_parse_cache_store_phase3_immutable_v1("0123456789abcdef0123456789abcdef", "different_blob\n", id_sha)).to_equal(false)
+        expect(has_any_suffix(fe_dir, ".tmp")).to_equal(false)
+        expect(has_any_suffix(fe_dir, ".lock")).to_equal(false)
+        restore_env_opt("SIMPLE_FRONTEND_CACHE_DIR", old_fe_dir)
+        restore_env_opt("SIMPLE_FRONTEND_CACHE_SCOPE", old_fe_scope)
+        restore_env_opt("SIMPLE_FRONTEND_CACHE", old_fe_on)
+
+        val spab_path = "{cdir}/sample.spab"
+        expect(flat_packed_store_v1(spab_path, [1u8, 2u8, 3u8, 4u8])).to_equal(true)
+        expect(file_exists(spab_path)).to_equal(true)
+        expect(file_exists(flat_packed_seal_path_v1(spab_path))).to_equal(false)
+        expect(has_any_suffix(cdir, ".tmp")).to_equal(false)
+
+        val _clean = dir_remove_all(cdir)

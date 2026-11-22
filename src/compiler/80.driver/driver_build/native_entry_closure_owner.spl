@@ -1,5 +1,7 @@
 use compiler.common.cache.visibility_manifest_inventory_v1.{visibility_manifest_inventory_maps_v1}
 use compiler.driver.driver_build.native_entry_closure_receipt.*
+use compiler.common.library_mode_policy_v1.{LibraryModePolicyV1}
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{EnvironmentVariantPolicyCollectionV1}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_open_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_snapshot_cache_root_v1,
     compile_source_inventory_read_at_pointer_v1}
@@ -58,15 +60,16 @@ pub fn native_entry_closure_request_publish_v1(path: text, request: NativeEntryC
         request.source_digest, request.generation.to_text(), binding.entry,
         binding.policy_digest, binding.producer_digest, request.receipt_path,
         request.receipt_digest]
-    var wire = "native-entry-closure-request-v1\n"
+    var parts: [text] = ["native-entry-closure-request-v1\n"]
     for field in fields:
         if field == "" or field.contains("\n") or field.contains("\r"):
             return Err("entry-closure-request-field-invalid")
-        wire = wire + field + "\n"
+        parts.push(field + "\n")
     for root in binding.source_roots:
         if root == "" or root.contains("\n") or root.contains("\r"):
             return Err("entry-closure-request-root-invalid")
-        wire = wire + root + "\n"
+        parts.push(root + "\n")
+    val wire = parts.join("")
     if wire.len() > 65536 or not file_create_exclusive(path, wire):
         return Err("entry-closure-request-publication-failed")
     Ok(sha256_text(wire))
@@ -164,11 +167,64 @@ pub fn native_entry_closure_open_v1(root: text, snapshot: ScvCompileSnapshotV1,
 # nil-guard note in load_sources_impl). Take-once: a later compile in the same
 # process never inherits a consumed request.
 var _g_native_entry_closure_handoff: [NativeEntryClosureRequestV1] = []
+var _g_native_entry_closure_policy_collection: [EnvironmentVariantPolicyCollectionV1] = []
+var _g_native_entry_closure_library_policy: [LibraryModePolicyV1] = []
+
+pub fn native_entry_closure_handoff_clear_v1():
+    _g_native_entry_closure_handoff = []
+    _g_native_entry_closure_policy_collection = []
+    _g_native_entry_closure_library_policy = []
 
 pub fn native_entry_closure_handoff_install_v1(request: NativeEntryClosureRequestV1) -> bool:
     if _g_native_entry_closure_handoff.len() != 0: return false
     _g_native_entry_closure_handoff = [request]
     true
+
+pub fn native_entry_closure_handoff_install_capsule_v1(request: NativeEntryClosureRequestV1,
+        collection: EnvironmentVariantPolicyCollectionV1,
+        library_policy: LibraryModePolicyV1) -> bool:
+    if _g_native_entry_closure_handoff.len() != 0: return false
+    _g_native_entry_closure_handoff = [request]
+    _g_native_entry_closure_policy_collection = [collection]
+    _g_native_entry_closure_library_policy = [library_policy]
+    true
+
+pub fn native_entry_closure_handoff_peek_list_v1() -> [NativeEntryClosureRequestV1]:
+    _g_native_entry_closure_handoff
+
+pub fn native_entry_closure_handoff_peek_v1() -> NativeEntryClosureRequestV1?:
+    if _g_native_entry_closure_handoff.len() == 0: return None
+    Some(_g_native_entry_closure_handoff[0])
+
+pub fn native_entry_closure_handoff_policy_collection_take_list_v1() -> [EnvironmentVariantPolicyCollectionV1]:
+    if _g_native_entry_closure_policy_collection.len() == 0: return []
+    val out = _g_native_entry_closure_policy_collection
+    _g_native_entry_closure_policy_collection = []
+    out
+
+pub fn native_entry_closure_handoff_policy_collection_take_v1() -> EnvironmentVariantPolicyCollectionV1?:
+    if _g_native_entry_closure_policy_collection.len() == 0: return None
+    val collection = _g_native_entry_closure_policy_collection[0]
+    _g_native_entry_closure_policy_collection = []
+    Some(collection)
+
+pub fn native_entry_closure_handoff_library_policy_take_list_v1() -> [LibraryModePolicyV1]:
+    if _g_native_entry_closure_library_policy.len() == 0: return []
+    val out = _g_native_entry_closure_library_policy
+    _g_native_entry_closure_library_policy = []
+    out
+
+pub fn native_entry_closure_handoff_library_policy_take_v1() -> LibraryModePolicyV1?:
+    if _g_native_entry_closure_library_policy.len() == 0: return None
+    val policy = _g_native_entry_closure_library_policy[0]
+    _g_native_entry_closure_library_policy = []
+    Some(policy)
+
+pub fn native_entry_closure_handoff_take_list_v1() -> [NativeEntryClosureRequestV1]:
+    if _g_native_entry_closure_handoff.len() == 0: return []
+    val out = _g_native_entry_closure_handoff
+    _g_native_entry_closure_handoff = []
+    out
 
 pub fn native_entry_closure_handoff_take_v1() -> NativeEntryClosureRequestV1?:
     if _g_native_entry_closure_handoff.len() == 0: return None
@@ -200,4 +256,16 @@ pub fn native_entry_closure_visibility_maps_v1(request: NativeEntryClosureReques
         return Err("visibility-manifest-snapshot-inventory-changed")
     visibility_manifest_inventory_maps_v1(snapshot.snapshot_root, opened.inventory!, bytes)
 
+pub fn native_entry_closure_request_source_roots_v1(request: NativeEntryClosureRequestV1) -> [text]:
+    request.binding.source_roots
+
+pub fn native_entry_closure_request_snapshot_root_v1(request: NativeEntryClosureRequestV1) -> text:
+    request.snapshot.snapshot_root
+
+pub fn native_entry_closure_request_snapshot_id_v1(request: NativeEntryClosureRequestV1) -> text:
+    request.snapshot.revision_id + ":" + request.snapshot.inventory_digest
+
 export native_entry_closure_visibility_maps_v1
+export native_entry_closure_request_source_roots_v1
+export native_entry_closure_request_snapshot_root_v1
+export native_entry_closure_request_snapshot_id_v1

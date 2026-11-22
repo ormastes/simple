@@ -1,6 +1,6 @@
 # `opacity: 1.0` paints the element fully transparent; out-of-range opacity is not clamped (2026-11-15)
 
-Status: OPEN. Severity: high for Simple web paint — `opacity: 1.0` is a common
+Status: FIXED (2026-11-22 — `parse_opacity_pct` and `style_property_id_parse_opacity_pct` now honour the integer part before `.`, handle negative signs, and clamp unitless `<number>` / `<percentage>` values to `0..100`; verified in `layout_renderer_style_value_parsers_spec.spl`). Severity: high for Simple web paint — `opacity: 1.0` is a common
 authored value and makes the element invisible.
 
 ## Defect

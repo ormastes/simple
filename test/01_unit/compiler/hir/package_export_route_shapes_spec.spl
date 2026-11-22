@@ -165,6 +165,34 @@ describe("qualified bare exports resolve through further re-export hops", fn():
             "pkg.consumer|pub use pkg.public_compile.\{aot_impl\}\nfn run() -> i64:\n    1"])
         expect(diagnostics).to_equal("")
     )
+
+    it("routes a package init's qualified export to its sibling, not a same-named module one level up", fn():
+        step("Verify: sibling wins over same-named top-level module")
+        # src/lib/nogc_async_mut/env/__init__.spl: `export platform.detect_os`
+        # means env/platform.spl, never src/lib/platform.spl.
+        val log = bare_export_logger()
+        val top_source = "fn top_only() -> i64:\n    100"
+        val sibling_source = "fn detect_os() -> i64:\n    1"
+        val init_source = "export platform.detect_os"
+        var modules: Dict<text, Module> = {}
+        modules["pkg.platform"] = bare_export_module(top_source, "pkg.platform", log)
+        modules["pkg.env.platform"] = bare_export_module(sibling_source, "pkg.env.platform", log)
+        modules["pkg.env"] = bare_export_module(init_source, "pkg.env", log)
+        var sources: Array<SourceFile> = []
+        sources.push(SourceFile(path: "pkg/platform.spl", content: top_source, module_name: "pkg.platform"))
+        sources.push(SourceFile(path: "pkg/env/platform.spl", content: sibling_source, module_name: "pkg.env.platform"))
+        sources.push(SourceFile(path: "pkg/env/__init__.spl", content: init_source, module_name: "pkg.env"))
+        val surfaces_result = module_surfaces_from_modules(modules, sources)
+        expect(surfaces_result.is_ok()).to_be_truthy()
+        val surfaces = surfaces_result.unwrap()
+        var target_path = ""
+        for surface in surfaces.surfaces:
+            if surface.canonical_path.ends_with("pkg/env/__init__.spl"):
+                val target_index = surface.export_route_target_indices[0]
+                if target_index >= 0:
+                    target_path = surfaces.surfaces[target_index].canonical_path
+        expect(target_path.ends_with("pkg/env/platform.spl")).to_be_truthy()
+    )
 )
 
 describe("real backend facade shape: bare and qualified export of one name", fn():

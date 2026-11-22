@@ -1005,14 +1005,19 @@ fn _hir_cache_write_failed_diagnostic_v1(root: text, module_name: text, module_p
         return ""
     manifest_path
 
+var _hir_diag_tmp_seq: i64 = 0
+
+fn _hir_next_diag_tmp_seq() -> i64:
+    _hir_diag_tmp_seq = _hir_diag_tmp_seq + 1
+    _hir_diag_tmp_seq
+
 fn _hir_cache_publish_diagnostic_file_v1(path: text, content: text) -> bool:
-    val tmp_path = path + ".tmp"
+    val tmp_path = "{path}.{rt_getpid()}.{_hir_next_diag_tmp_seq()}.tmp"
     if not file_create_exclusive(tmp_path, content): return false
     val published = match file_publish_noreplace(tmp_path, path):
         case Ok(created): created
         case Err(_): false
-    if not published:
-        val _discarded = rt_file_delete(tmp_path)
+    val _discarded = rt_file_delete(tmp_path)
     published
 
 # Build an SDN quoted scalar only after checking a small UTF-8 byte bound. If
@@ -1536,6 +1541,75 @@ fn hir_shard_levels(surfaces: ModuleSurfacesByName) -> [i64]:
 
 # Source indices in (level, source index) order; a source with no surface
 # alias goes after every levelled one. Identity order when levels is empty.
+fn _hir_shard_spec_slot_v1(spec: text) -> (i64, i64):
+    val parts = spec.split("/")
+    if parts.len() != 2:
+        return (0, 1)
+    val idx = parts[0].to_i64() ?? -1
+    val count = parts[1].to_i64() ?? 0
+    if count <= 1 or idx < 0 or idx >= count:
+        return (0, 1)
+    (idx, count)
+
+var _g_hir_visit_rotation_start: i64 = 0
+var _g_hir_visit_cursor_path: text = ""
+
+fn _hir_shard_cursor_path_for_slot_v1(queue: text, slot: i64, count: i64) -> text:
+    if count > 1 and slot >= 0 and slot < count:
+        return "{queue}/.hir_claim_cursor.{slot}-{count}"
+    "{queue}/.hir_claim_cursor"
+
+# reason: loop position and schedule length for multi-round HIR shard cursor rotation
+@allow(primitive_api)
+pub fn hir_shard_note_cursor_v1(loop_pos: i64, total: i64):
+    if _g_hir_visit_cursor_path == "" or total <= 0:
+        return
+    val raw_next = (_g_hir_visit_rotation_start + loop_pos + 1) % total
+    val bounded = if raw_next >= 0 and raw_next < total: raw_next else: 0
+    val _ = file_atomic_write(_g_hir_visit_cursor_path, "{bounded}")
+
+# reason: schedule row indices and shard spec/queue strings for HIR shard partitioning
+@allow(primitive_api)
+pub fn hir_shard_worker_visit_order_v1(base_order: [i64], spec: text, queue: text, unit_mode: bool) -> [i64]:
+    _g_hir_visit_rotation_start = 0
+    _g_hir_visit_cursor_path = ""
+    val total = base_order.len()
+    if total <= 1 or unit_mode or spec == "":
+        return base_order
+    val (slot, count) = _hir_shard_spec_slot_v1(spec)
+    var partitioned = base_order
+    if count > 1:
+        # Partition FIRST so concurrent shards (`0/K .. (K-1)/K`) always visit
+        # disjoint `pos % count == slot` home positions before work-stealing tail.
+        var home: [i64] = []
+        var steal: [i64] = []
+        var pos = 0
+        while pos < total:
+            if (pos % count) == slot:
+                home.push(base_order[pos])
+            else:
+                steal.push(base_order[pos])
+            pos = pos + 1
+        for item in steal:
+            home.push(item)
+        partitioned = home
+    val claim_limit = (sosix_env_get_nullable("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? "").to_i64() ?? 0
+    if claim_limit > 0 and queue != "":
+        val cpath = _hir_shard_cursor_path_for_slot_v1(queue, slot, count)
+        _g_hir_visit_cursor_path = cpath
+        val raw_cursor = (file_read_nullable(cpath) ?? "").trim().to_i64() ?? 0
+        val start = if raw_cursor >= 0 and raw_cursor < total: raw_cursor else: 0
+        _g_hir_visit_rotation_start = start
+        if start == 0:
+            return partitioned
+        var rotated: [i64] = []
+        var step = 0
+        while step < total:
+            rotated.push(partitioned[(start + step) % total])
+            step = step + 1
+        return rotated
+    partitioned
+
 fn hir_shard_visit_order(names: [text], surfaces: ModuleSurfacesByName, levels: [i64]) -> [i64]:
     var order: [i64] = []
     if levels.len() == 0:
@@ -1543,22 +1617,33 @@ fn hir_shard_visit_order(names: [text], surfaces: ModuleSurfacesByName, levels: 
         while idx < names.len():
             order.push(idx)
             idx = idx + 1
-        return order
+        return hir_shard_worker_visit_order_v1(order, hir_shard_spec(), _hir_shard_queue_dir(),
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "") == "1")
     val level_count = hir_shard_level_count(levels)
+    var buckets: [[i64]] = []
+    var b = 0
+    while b <= level_count:
+        val empty_bucket: [i64] = []
+        buckets.push(empty_bucket)
+        b = b + 1
+    var idx = 0
+    while idx < names.len():
+        var source_level = level_count
+        if surfaces.index_by_name.contains_key(names[idx]):
+            val surface_idx = surfaces.index_by_name[names[idx]]
+            if surface_idx >= 0 and surface_idx < levels.len():
+                source_level = levels[surface_idx]
+        if source_level < 0 or source_level > level_count:
+            source_level = level_count
+        buckets[source_level].push(idx)
+        idx = idx + 1
     var level = 0
     while level <= level_count:
-        var idx = 0
-        while idx < names.len():
-            var source_level = level_count
-            if surfaces.index_by_name.contains_key(names[idx]):
-                val surface_idx = surfaces.index_by_name[names[idx]]
-                if surface_idx >= 0 and surface_idx < levels.len():
-                    source_level = levels[surface_idx]
-            if source_level == level:
-                order.push(idx)
-            idx = idx + 1
+        for item in buckets[level]:
+            order.push(item)
         level = level + 1
-    order
+    hir_shard_worker_visit_order_v1(order, hir_shard_spec(), _hir_shard_queue_dir(),
+        (sosix_env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "") == "1")
 
 fn hir_shard_level_count(levels: [i64]) -> i64:
     var top = -1
@@ -1702,5 +1787,5 @@ pub fn hir_shard_provider_settle_wait_v1(queue: text, path: text, budget_ms: i64
         if file_exists("{base}.terminal"): return false
         if not scheduled and not file_exists("{base}.claim"): return false
         if current_time_ms() >= deadline: return false
-        sleep_ms(100)
+        sleep_ms(15)
     false

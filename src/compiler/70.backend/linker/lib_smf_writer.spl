@@ -259,34 +259,45 @@ impl LibSmfBuilder:
         header.index_size = (LSMF_INDEX_ENTRY_SIZE * (self.modules.len() as i64)) as u64
         header.data_offset = (LSMF_HEADER_SIZE + header.index_size as i64) as u64
 
-        # Calculate index hash
+        # Calculate index hash (append in place to avoid O(N^2) byte-array copies)
         var index_bytes: [u8] = []
         for entry in index_entries:
-            index_bytes = index_bytes + (entry.to_bytes())
+            val entry_bytes = entry.to_bytes()
+            var bi = 0
+            while bi < entry_bytes.len():
+                index_bytes.push(entry_bytes[bi])
+                bi = bi + 1
         header.index_hash = fnv1a_hash(index_bytes)
 
-        # Build complete file data
+        # Build complete file data and library hash buffer linearly
         var file_data: [u8] = []
-
-        # 1. Header
-        file_data = file_data + (header.to_bytes())
-
-        # 2. Index table
-        file_data = file_data + (index_bytes)
+        val init_hdr = header.to_bytes()
+        var hi = 0
+        while hi < init_hdr.len():
+            file_data.push(init_hdr[hi])
+            hi = hi + 1
+        var content_for_hash: [u8] = []
+        var ii = 0
+        while ii < index_bytes.len():
+            val b = index_bytes[ii]
+            file_data.push(b)
+            content_for_hash.push(b)
+            ii = ii + 1
 
         # 3. Module data (SMF + object files)
         for entry in self.modules:
-            file_data = file_data + (entry.data)
-            if entry.obj_data.len() > 0:
-                file_data = file_data + (entry.obj_data)
-
-        # Calculate library hash (excluding header)
-        var content_for_hash: [u8] = []
-        content_for_hash = content_for_hash + (index_bytes)
-        for entry in self.modules:
-            content_for_hash = content_for_hash + (entry.data)
-            if entry.obj_data.len() > 0:
-                content_for_hash = content_for_hash + (entry.obj_data)
+            var di = 0
+            while di < entry.data.len():
+                val b = entry.data[di]
+                file_data.push(b)
+                content_for_hash.push(b)
+                di = di + 1
+            var oi = 0
+            while oi < entry.obj_data.len():
+                val b = entry.obj_data[oi]
+                file_data.push(b)
+                content_for_hash.push(b)
+                oi = oi + 1
         header.library_hash = fnv1a_hash(content_for_hash)
 
         # Update header with library hash

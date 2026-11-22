@@ -6,7 +6,7 @@
 
 use std.spec.step
 
-use compiler.backend.{MirToLlvm}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
@@ -269,7 +269,7 @@ fn build_local_string_print_module() -> MirModule:
                         MirOperand(kind: MirOperandKind.Const(
                             MirConstValue.Str("rt_print"),
                             MirType(kind: MirTypeKind.FuncPtr(print_signature))
-                        )),
+                        ), call_origin: MirCallOrigin.Runtime),
                         [mir_operand_copy(LocalId(id: 1))]
                     ), span: nil)
                 ],
@@ -298,6 +298,65 @@ fn build_local_string_print_module() -> MirModule:
     var functions: Dict<SymbolId, MirFunction> = {}
     functions[fn_.symbol] = fn_
     MirModule(name: "test.llvm.local_string_print", functions: functions, statics: {}, constants: {}, types: {})
+
+fn build_cross_block_string_const_module() -> MirModule:
+    val str_ty = MirType.ptr(MirType(kind: MirTypeKind.I8), false)
+    val local_ret = MirLocal(id: LocalId(id: 0), name: Some("_ret"), type_: str_ty, kind: LocalKind.Return)
+    val local_str = MirLocal(id: LocalId(id: 1), name: Some("s"), type_: str_ty, kind: LocalKind.Temp)
+    val bb0 = MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: [
+            MirInst(
+                kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("hi"), str_ty),
+                span: nil
+            )
+        ],
+        terminator: MirTerminator.Goto(BlockId(id: 1))
+    )
+    val bb1 = MirBlock(
+        id: BlockId(id: 1),
+        label: Some("exit"),
+        instructions: [],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "cross_block_string_const",
+        signature: MirSignature(params: [], return_type: str_ty, is_variadic: false),
+        locals: [local_ret, local_str],
+        blocks: [bb0, bb1],
+        entry_block: BlockId(id: 0),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: {},
+        layout_phase: None,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: None
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId(id: 1)] = fn_
+    MirModule(
+        name: "test.llvm.cross_block_string_const",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: {}
+    )
 
 describe "LLVM alloc copy move":
     # @manual scenario evidence
@@ -362,7 +421,7 @@ describe "LLVM alloc copy move":
     it "keeps a fresh slotted string constant pointer-typed":
         # @req REQ-SSPEC-UNIT
         step("keeps a fresh slotted string constant pointer-typed")
-        val translator = MirToLlvm.create("test.llvm.cross_block_string_const", CodegenTarget.X86_64, nil)
+        var translator = MirToLlvm.create("test.llvm.cross_block_string_const", CodegenTarget.X86_64, nil)
         val output = translator.translate_module(build_cross_block_string_const_module())
 
         expect(output).to_contain("%l2 = alloca ptr")

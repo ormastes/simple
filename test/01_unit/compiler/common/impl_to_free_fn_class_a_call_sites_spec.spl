@@ -51,7 +51,12 @@ fn def_name_on_line(line: text) -> text:
         return ""
     leading_ident(line.substring(at + 3, line.len()))
 
+var _cached_defs_ready: bool = false
+var _cached_defs: Dict<text, bool> = {}
+
 fn all_definition_names() -> Dict<text, bool>:
+    if _cached_defs_ready:
+        return _cached_defs
     var defs: Dict<text, bool> = {}
     for p in rt_dir_walk("src") ?? []:
         if p.ends_with(".spl"):
@@ -59,7 +64,23 @@ fn all_definition_names() -> Dict<text, bool>:
                 val d = def_name_on_line(line)
                 if d.len() > 0:
                     defs[d] = true
-    defs
+    _cached_defs = defs
+    _cached_defs_ready = true
+    _cached_defs
+
+fn non_docstring_source(src: text) -> text:
+    var out: [text] = []
+    var in_doc = false
+    for line in src.split("\n"):
+        val count = line.split("\"\"\"").len() - 1
+        if in_doc:
+            if count % 2 == 1:
+                in_doc = false
+        elif count % 2 == 1:
+            in_doc = true
+        else:
+            out.push(line)
+    out.join("\n")
 
 describe "impl-to-free-fn Class A call sites resolve to a definition":
     # @manual scenario evidence
@@ -78,34 +99,38 @@ describe "impl-to-free-fn Class A call sites resolve to a definition":
     it "restores the async desugar response accessor":
         # @req REQ-SSPEC-UNIT
         step("restores the async desugar response accessor")
-        val defs = all_definition_names()
-        # src/compiler/10.frontend/desugar/desugar_async.spl:44  (lane: 10.frontend)
-        # src/compiler/90.tools/desugar_async.spl:42             (lane: 90.tools)
-        expect(defs.contains_key("response_text")).to_equal(true)
+        # `response_text` in desugar_async.spl sits inside a docstring sketch (2026-09-12 triage);
+        # verify neither file carries an outside-docstring call site.
+        for path in ["src/compiler/10.frontend/desugar/desugar_async.spl", "src/compiler/90.tools/desugar_async.spl"]:
+            val code = non_docstring_source(rt_file_read_text(path) ?? "")
+            expect(code.contains("response_text(")).to_equal(false)
 
     it "restores the blocks definition parser accessors":
         # @req REQ-SSPEC-UNIT
         step("restores the blocks definition parser accessors")
-        val defs = all_definition_names()
-        # src/compiler/15.blocks/blocks/definition.spl:60,61  (lane: 15.blocks)
-        expect(defs.contains_key("parser_set_mode")).to_equal(true)
-        expect(defs.contains_key("parser_parse_expr")).to_equal(true)
+        # `parser_set_mode` / `parser_parse_expr` sit inside Example docstrings (2026-09-12 triage).
+        val code = non_docstring_source(rt_file_read_text("src/compiler/15.blocks/blocks/definition.spl") ?? "")
+        expect(code.contains("parser_set_mode(")).to_equal(false)
+        expect(code.contains("parser_parse_expr(")).to_equal(false)
 
     it "restores the blocks easy/registry accessors":
         # @req REQ-SSPEC-UNIT
         step("restores the blocks easy/registry accessors")
-        val defs = all_definition_names()
-        # src/compiler/15.blocks/blocks/easy.spl:113      (lane: 15.blocks)
-        # src/compiler/15.blocks/blocks/registry.spl:26,182
-        expect(defs.contains_key("pattern_trim")).to_equal(true)
-        expect(defs.contains_key("blk_lexer_mode")).to_equal(true)
+        # `pattern_trim` / `blk_lexer_mode` sit inside Example docstrings (2026-09-12 triage).
+        val easy_code = non_docstring_source(rt_file_read_text("src/compiler/15.blocks/blocks/easy.spl") ?? "")
+        val reg_code = non_docstring_source(rt_file_read_text("src/compiler/15.blocks/blocks/registry.spl") ?? "")
+        expect(easy_code.contains("pattern_trim(")).to_equal(false)
+        expect(reg_code.contains("blk_lexer_mode(")).to_equal(false)
 
     it "restores the spec markdown formatter path probe":
         # @req REQ-SSPEC-UNIT
         step("restores the spec markdown formatter path probe")
         val defs = all_definition_names()
-        # src/compiler_rust/lib/std/src/spec/formatter/markdown.spl:164
-        expect(defs.contains_key("path_file_exists")).to_equal(true)
+        val src = rt_file_read_text("src/compiler_rust/lib/std/src/spec/formatter/markdown.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src).to_contain("file_exists(path)")
+        expect(src.contains("path_file_exists(")).to_equal(false)
+        expect(defs.contains_key("file_exists")).to_equal(true)
 
     it "restores the engine2d vulkan submission accessors":
         # @req REQ-SSPEC-UNIT
@@ -139,3 +164,13 @@ describe "impl-to-free-fn Class A call sites resolve to a definition":
         expect(src.len() > 0).to_equal(true)
         expect(src).to_contain("Value.String(value)")
         expect(src.contains("value_string(value)")).to_equal(false)
+
+    it "replaces missing sys_exit in exhaustiveness_validator with runtime exit":
+        # @req REQ-SSPEC-UNIT
+        step("replaces missing sys_exit in exhaustiveness_validator with runtime exit")
+        val defs = all_definition_names()
+        val src = rt_file_read_text("src/compiler/70.backend/backend/exhaustiveness_validator.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src).to_contain("exit(1)")
+        expect(src.contains("sys_exit(")).to_equal(false)
+        expect(defs.contains_key("exit")).to_equal(true)

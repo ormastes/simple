@@ -1,0 +1,268 @@
+# Bounded multi-process C translation-unit pool for cold runtime object builds.
+# Preserves host memory reserve, captures compiler diagnostics on the first run
+# without re-invoking `cc`, kills sibling children promptly on first failure,
+# and publishes cached `.o` files atomically without shell `cp`/`mv` forks.
+
+use compiler.backend.runtime_tagged_callback_owner_v1.{runtime_tagged_callback_owner_v1}
+use std.nogc_sync_mut.io_runtime.{
+    host_os, env_get_nullable, file_exists, file_delete, file_read_nullable,
+    file_size_raw, file_read_bytes_result, file_write_bytes, rename_path,
+    process_run, thread_sleep, time_now_unix_micros
+}
+use std.io_runtime.{process_spawn_async}
+use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
+use std.nogc_sync_mut.io.process_ops.{process_kill_tree_support, process_spawn_session, process_spawn_redirected, process_wait, process_kill, process_kill_tree}
+use std.nogc_sync_mut.host_limits.{host_limit_i64, host_limit_mem_reserve_free_kib}
+use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib, host_physmem_total_kib}
+
+const RUNTIME_C_JOB_TIMEOUT_US_V1: i64 = 300000000
+
+fn _shell_quote_posix_v1(arg: text) -> text:
+    "'" + arg.replace("'", "'\"'\"'") + "'"
+
+fn _shell_quote_cmd_v1(arg: text) -> text:
+    if arg == "" or arg.contains(" ") or arg.contains("\""):
+        return "\"" + arg.replace("\"", "\\\"") + "\""
+    arg
+
+fn _runtime_c_shell_invocation_v1(cc: text, argv: [text], log_path: text) -> (text, [text]):
+    if host_os() == "windows":
+        var parts: [text] = [_shell_quote_cmd_v1(cc)]
+        for arg in argv:
+            parts.push(_shell_quote_cmd_v1(arg))
+        val line = parts.join(" ") + " > " + _shell_quote_cmd_v1(log_path) + " 2>&1"
+        return ("cmd.exe", ["/d", "/s", "/c", "\"" + line + "\""])
+    var posix_parts: [text] = [_shell_quote_posix_v1(cc)]
+    for arg in argv:
+        posix_parts.push(_shell_quote_posix_v1(arg))
+    val posix_line = posix_parts.join(" ") + " > " + _shell_quote_posix_v1(log_path) + " 2>&1"
+    ("/bin/sh", ["-c", posix_line])
+
+# reason: scalar core/thread/job counts and KiB memory budgets for pool admission math
+@allow(primitive_api)
+pub fn runtime_c_compile_workers_for_v1(cpus: i64, requested: i64, jobs: i64, avail_kib: i64, reserve_kib: i64) -> i64:
+    if jobs <= 1:
+        return jobs
+    val safe_cpus = if cpus > 0: cpus else: 1
+    var target = if requested > 0: requested else: safe_cpus
+    if requested <= 0 and target > 8:
+        target = 8
+    if target > safe_cpus:
+        target = safe_cpus
+    if target > jobs:
+        target = jobs
+    # ~256 MiB (262144 KiB) per `clang -c` / `cc -c` translation unit above host reserve.
+    if avail_kib > 0 and reserve_kib > 0:
+        if avail_kib <= reserve_kib:
+            return 1
+        val by_mem = (avail_kib - reserve_kib) / 262144
+        if by_mem <= 1:
+            return 1
+        if by_mem < target:
+            target = by_mem
+    if target < 1: 1 else: target
+
+# reason: internal runtime object count -> bounded worker count
+@allow(primitive_api)
+pub fn runtime_c_compile_workers_v1(jobs: i64) -> i64:
+    val req_env = env_get_nullable("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
+    val requested = req_env.trim().to_i64() ?? 0
+    if requested == 1:
+        return 1
+    val detected = match cpu_count_checked():
+        case Ok(c): c
+        case Err(_): 1
+    val max_t = host_limit_i64("max_threads", 0)
+    val cpus = if max_t > 0 and (detected <= 0 or max_t < detected): max_t else: detected
+    val avail = host_commit_avail_kib()
+    val explicit_res = host_limit_mem_reserve_free_kib(0)
+    val total_kib = host_physmem_total_kib()
+    val quarter = if total_kib > 0: total_kib / 4 else: 5242880
+    val default_res = if quarter > 25165824: 25165824 elif quarter < 4194304: 4194304 else: quarter
+    val reserve = if explicit_res > 0: explicit_res else: default_res
+    runtime_c_compile_workers_for_v1(cpus, requested, jobs, avail, reserve)
+
+# reason: atomic byte-preserving staging copy from produced object path to shared cache path
+@allow(primitive_api)
+pub fn runtime_c_cache_publish_object_v1(obj_path: text, cache_obj: text, compile_pid: i64, seq: i64) -> bool:
+    if obj_path == "" or cache_obj == "":
+        return false
+    val bytes_res = file_read_bytes_result(obj_path)
+    if bytes_res.is_err():
+        return false
+    val stage = "{cache_obj}.tmp.{compile_pid}.{seq}"
+    if not file_write_bytes(stage, bytes_res.unwrap()):
+        val _del_bad = file_delete(stage)
+        return false
+    if not rename_path(stage, cache_obj):
+        val _del_stage = file_delete(stage)
+        return false
+    true
+
+fn _runtime_c_cleanup_logs_v1(logs: [text]):
+    for log_path in logs:
+        if log_path != "":
+            val _rm = file_delete(log_path)
+            val _rm_err = file_delete(log_path + ".err")
+
+fn _runtime_c_spawn_job_v1(cc: text, argv: [text], log_path: text, session_supported: bool) -> (i64, bool):
+    if host_os() == "windows":
+        val tok = process_spawn_redirected(cc, argv, log_path, log_path + ".err", 300000, 1048576)
+        if tok > 0:
+            return (tok, true)
+    val (shell_bin, shell_args) = _runtime_c_shell_invocation_v1(cc, argv, log_path)
+    if session_supported:
+        match process_spawn_session(shell_bin, shell_args):
+            case Ok(spid):
+                return (spid, true)
+            case Err(_):
+                pass
+    (process_spawn_async(shell_bin, shell_args), false)
+
+fn _runtime_c_kill_job_v1(pid: i64, tree_owned: bool):
+    if pid <= 0:
+        return
+    if tree_owned:
+        # Session pids (POSIX setsid) and Windows JobObject tokens terminate
+        # every descendant (`clang -cc1`, assemblers) and reap the leader.
+        val _tree_killed = if host_os() == "windows": process_kill(pid) else: process_kill_tree(pid)
+        return
+    val _killed = process_kill(pid)
+    val _reaped = process_wait(pid, 2000)
+
+# reason: batch C compiler invocation arrays and worker/pid parameters owned by runtime_compiler
+@allow(primitive_api)
+pub fn runtime_c_compile_parallel_batch_v1(cc: text, names: [text], srcs: [text], objs: [text],
+        caches: [text], argvs: [[text]], max_workers: i64, compile_pid: i64, core_c_profile: bool) -> text:
+    val count = names.len()
+    if count == 0:
+        return ""
+    if max_workers <= 1 or count == 1:
+        var s_idx = 0
+        while s_idx < count:
+            val (out, err, code) = process_run(cc, argvs[s_idx])
+            if code != 0:
+                var detail = "{out}{err}"
+                if detail.trim() == "":
+                    detail = "(no compiler output; cc='{cc}' exited with code {code} — the compiler crashed or could not start)"
+                return "Failed to compile {names[s_idx]}.c:\n{detail}"
+            if core_c_profile and names[s_idx] == "runtime_native":
+                match runtime_tagged_callback_owner_v1(srcs[s_idx], objs[s_idx]):
+                    case Ok(_): ()
+                    case Err(reason): return reason
+            if caches[s_idx] != "":
+                val _cached = runtime_c_cache_publish_object_v1(objs[s_idx], caches[s_idx], compile_pid, s_idx)
+            s_idx = s_idx + 1
+        return ""
+
+    val session_supported = process_kill_tree_support().is_ok()
+    var pids: [i64] = []
+    var tree_owned: [bool] = []
+    var states: [i64] = []
+    var exit_codes: [i64] = []
+    var started_us: [i64] = []
+    var logs: [text] = []
+    var idx = 0
+    while idx < count:
+        pids.push(0)
+        tree_owned.push(false)
+        states.push(0)
+        exit_codes.push(0)
+        started_us.push(0)
+        logs.push("{objs[idx]}.{compile_pid}.{idx}.cc.log")
+        idx = idx + 1
+
+    var next_job = 0
+    var live = 0
+    var first_failed = -1
+    var first_failure_msg = ""
+
+    while (next_job < count and first_failed < 0) or live > 0:
+        while live < max_workers and next_job < count and first_failed < 0:
+            val (pid, is_tree) = _runtime_c_spawn_job_v1(cc, argvs[next_job], logs[next_job], session_supported)
+            if pid <= 0:
+                states[next_job] = 3
+                exit_codes[next_job] = -1
+                first_failed = next_job
+                first_failure_msg = "Failed to compile {names[next_job]}.c:\n(failed to spawn cc='{cc}')"
+            else:
+                pids[next_job] = pid
+                tree_owned[next_job] = is_tree
+                states[next_job] = 1
+                started_us[next_job] = time_now_unix_micros()
+                live = live + 1
+            next_job = next_job + 1
+
+        if first_failed >= 0 and live > 0:
+            var kill_idx = 0
+            while kill_idx < next_job:
+                if states[kill_idx] == 1:
+                    _runtime_c_kill_job_v1(pids[kill_idx], tree_owned[kill_idx])
+                    states[kill_idx] = 4
+                    live = live - 1
+                kill_idx = kill_idx + 1
+            break
+
+        var reaped_any = false
+        var scan = 0
+        val now_us = time_now_unix_micros()
+        while scan < next_job:
+            if states[scan] == 1:
+                # CRITICAL: timeout_ms >= 1 always (timeout_ms == 0 blocks forever in process_wait!).
+                var code = process_wait(pids[scan], 1)
+                if code > 2147483647:
+                    code = code - 4294967296
+                if code == -2 and (now_us - started_us[scan]) >= RUNTIME_C_JOB_TIMEOUT_US_V1:
+                    _runtime_c_kill_job_v1(pids[scan], tree_owned[scan])
+                    live = live - 1
+                    reaped_any = true
+                    states[scan] = 3
+                    exit_codes[scan] = -2
+                    if first_failed < 0:
+                        first_failed = scan
+                        first_failure_msg = "Failed to compile {names[scan]}.c:\n(cc='{cc}' timed out)"
+                elif code != -2:
+                    live = live - 1
+                    reaped_any = true
+                    exit_codes[scan] = code
+                    if code == 0 and file_exists(objs[scan]) and file_size_raw(objs[scan]) > 0:
+                        states[scan] = 2
+                    else:
+                        states[scan] = 3
+                        if first_failed < 0:
+                            first_failed = scan
+                            val out_txt = file_read_nullable(logs[scan]) ?? ""
+                            val err_txt = file_read_nullable(logs[scan] + ".err") ?? ""
+                            var detail = "{out_txt}{err_txt}"
+                            if detail.trim() == "":
+                                detail = "(no compiler output; cc='{cc}' exited with code {code} — the compiler crashed or could not start)"
+                            first_failure_msg = "Failed to compile {names[scan]}.c:\n{detail}"
+            scan = scan + 1
+
+        if first_failed >= 0 and live > 0:
+            var kill_rem = 0
+            while kill_rem < next_job:
+                if states[kill_rem] == 1:
+                    _runtime_c_kill_job_v1(pids[kill_rem], tree_owned[kill_rem])
+                    states[kill_rem] = 4
+                    live = live - 1
+                kill_rem = kill_rem + 1
+            break
+
+        if not reaped_any and live > 0:
+            thread_sleep(5)
+
+    _runtime_c_cleanup_logs_v1(logs)
+    if first_failed >= 0:
+        return first_failure_msg
+
+    var pub_idx = 0
+    while pub_idx < count:
+        if core_c_profile and names[pub_idx] == "runtime_native":
+            match runtime_tagged_callback_owner_v1(srcs[pub_idx], objs[pub_idx]):
+                case Ok(_): ()
+                case Err(reason): return reason
+        if caches[pub_idx] != "":
+            val _cached = runtime_c_cache_publish_object_v1(objs[pub_idx], caches[pub_idx], compile_pid, pub_idx)
+        pub_idx = pub_idx + 1
+    ""

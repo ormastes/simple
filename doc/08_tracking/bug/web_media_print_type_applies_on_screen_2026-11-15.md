@@ -1,6 +1,6 @@
 # `@media print` rules apply on screen (2026-11-15)
 
-Status: OPEN. Severity: medium for Simple web rendering (print stylesheets
+Status: FIXED (2026-11-22 — `_media_group_applies` now parses `not`/`only` modifiers and media types `all`/`screen` vs `print`/`speech` on screen media; verified in `layout_renderer_media_query_and_alpha_spec.spl`). Severity: medium for Simple web rendering (print stylesheets
 commonly hide navigation, recolour text or reset widths; all of that leaks
 into the screen render).
 

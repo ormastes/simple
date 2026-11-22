@@ -1584,8 +1584,16 @@ pub extern "C" fn rt_cuda_device_compute_capability(device: i64) -> i64 {
     unsafe {
         let mut major = 0i32;
         let mut minor = 0i32;
-        cuDeviceGetAttribute(&mut major, 75, device as CUdevice);
-        cuDeviceGetAttribute(&mut minor, 76, device as CUdevice);
+        let r_major = cuDeviceGetAttribute(&mut major, 75, device as CUdevice);
+        let r_minor = cuDeviceGetAttribute(&mut minor, 76, device as CUdevice);
+        // A failing driver call reports -(CUresult) so it can never be read as
+        // a packed capability; matches the seed interpreter's dlopen arm.
+        if r_major != 0 {
+            return -(r_major as i64);
+        }
+        if r_minor != 0 {
+            return -(r_minor as i64);
+        }
         (major * 10 + minor) as i64
     }
 }

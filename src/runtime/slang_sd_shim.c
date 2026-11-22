@@ -72,7 +72,9 @@ SLANG_SD_API int64_t slang_sd_capabilities(void) {
 static char g_open_error[SLANG_SD_ERR_CAP];
 
 SLANG_SD_API int64_t slang_sd_ctx_open(const char* path, int64_t path_len, int64_t n_threads) {
-    char* p = (char*)malloc((size_t)path_len + 1);
+    char* p;
+    if (path_len < 0) { snprintf(g_open_error, SLANG_SD_ERR_CAP, "negative path length"); return 0; }
+    p = (char*)malloc((size_t)path_len + 1);
     sd_ctx_opt_t* opt = sd_ctx_opt_create();
     slang_sd_t* s = (slang_sd_t*)calloc(1, sizeof(slang_sd_t));
     g_open_error[0] = 0;
@@ -106,6 +108,7 @@ SLANG_SD_API int64_t slang_sd_gen(int64_t h, const char* prompt, int64_t prompt_
     sd_img_gen_opt_t* opt;
     char* p;
     if (!s) return -1;
+    if (prompt_len < 0) return -4;
     sd_result_free(s->result);
     s->result = NULL;
     s->image = NULL;
@@ -135,6 +138,7 @@ SLANG_SD_API int64_t slang_sd_gen(int64_t h, const char* prompt, int64_t prompt_
     s->image = sd_result_get_image_count(s->result) > 0 ? sd_result_get_image(s->result, 0) : NULL;
     if (!s->image || sd_tensor_type(s->image) != SD_TENSOR_U8 || sd_tensor_rank(s->image) != 3) {
         snprintf(s->error, SLANG_SD_ERR_CAP, "generate_image returned no U8 image");
+        s->image = NULL;
         return -6;
     }
     return 0;

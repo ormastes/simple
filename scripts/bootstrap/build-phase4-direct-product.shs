@@ -8,6 +8,20 @@
 # This operation emits build-only evidence; it does not admit a phase or run tests.
 set -eu
 
+if [ "$#" -eq 0 ] && [ -t 0 ] && [ "${CI:-}" != "true" ] && [ "${SIMPLE_NONINTERACTIVE:-0}" != "1" ]; then
+  cat >&2 <<'EOF_DEPRECATED'
+DEPRECATED: Do not use scripts/bootstrap/build-phase4-direct-product.shs interactively without arguments.
+Use 'scripts/bootstrap/build-phase3-phase4.sh' (or 'scripts/bootstrap/build-phase3-phase4.bat' on Windows; default --win-config=mingw):
+  Default / phased shard build: sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard
+  File-based parallel build:    sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file
+  Phase 4 (release + xray):     sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4
+  Windows (mingw default):      scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p4
+EOF_DEPRECATED
+  printf 'Press Enter to return...' >&2
+  if read -r _; then :; fi
+  return 0 2>/dev/null || exit 0
+fi
+
 die() { printf 'phase4-direct-product: %s\n' "$*" >&2; exit 2; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 hash_file() { sha256sum "$1" | awk '{print $1}'; }
@@ -124,17 +138,32 @@ if [ "$authority_mode" = provisional ]; then
 fi
 case "$backend" in llvm|cranelift) ;; *) die "unsupported backend: $backend" ;; esac
 phase4_profile=${PHASE4_PROFILE:-prod}
+phase4_xray=${PHASE4_XRAY:-0}
+case "$phase4_xray" in 0|1) ;; *) die "unsupported PHASE4_XRAY: $phase4_xray (expected 0 or 1)" ;; esac
+phase4_build_mode=dynload
 case "$phase4_profile" in
   prod)
+    [ "$phase4_xray" = 0 ] || die "PHASE4_XRAY=1 requires PHASE4_PROFILE=dev or dev-xray"
     phase4_suffix=
     target_profile_mode=release
     ;;
   dev)
-    phase4_suffix=-dev
+    if [ "$phase4_xray" = 1 ]; then
+      phase4_suffix=-dev-xray
+      phase4_build_mode=one-binary
+    else
+      phase4_suffix=-dev
+    fi
+    target_profile_mode=development
+    ;;
+  dev-xray)
+    phase4_xray=1
+    phase4_suffix=-dev-xray
+    phase4_build_mode=one-binary
     target_profile_mode=development
     ;;
   *)
-    die "unsupported PHASE4_PROFILE: $phase4_profile (expected prod or dev)"
+    die "unsupported PHASE4_PROFILE: $phase4_profile (expected prod, dev, or dev-xray)"
     ;;
 esac
 case "$cuda_source_root" in src/plugins|src/compositions/cuda_dynamic|src/compositions/cuda_disabled) ;; *) die 'unsupported selected CUDA source root' ;; esac
@@ -150,7 +179,10 @@ case "$timeout_seconds" in ''|*[!0-9]*) die 'timeout must be a positive integer'
 [ "$timeout_seconds" -gt 0 ] || die 'timeout must be a positive integer'
 case "$product" in
   bootstrap) entry=src/app/cli/bootstrap_main.spl; output=bin/simple_bootstrap ;;
-  full-cli) entry=src/app/cli/_CliMain/main_and_help.spl; output=bin/simple ;;
+  full-cli)
+    entry=src/app/cli/_CliMain/main_and_help.spl
+    if [ "$phase4_xray" = 1 ]; then output=bin/simple-debug; else output=bin/simple; fi
+    ;;
   interpreter) entry=src/app/cli/interpreter_main.spl; output=bin/simple_interpreter ;;
   mcp) entry=src/app/mcp/main.spl; output=bin/simple_mcp_server ;;
   lsp) entry=src/app/simple_lsp_mcp/main.spl; output=bin/simple_lsp_mcp_server ;;
@@ -333,15 +365,17 @@ verify_source_snapshot
     --target "$target" --backend "$backend"
   if [ "$phase4_profile" = prod ]; then
     set -- "$@" --profile=prod --release --strip
+  elif [ "$phase4_xray" = 1 ]; then
+    set -- "$@" --profile dev --debug --no-strip --xray
   else
-    set -- "$@" --profile dev
+    set -- "$@" --profile dev --debug --no-strip
   fi
   set -- "$@" --managed-build-phase=phase4 --opt-level=standard --low-memory \
     --source "$cuda_source_root" \
     --source src/compositions/kernel_llvm_cranelift \
     --source src/compiler --source src/app --source src/lib \
     --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
-    --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
+    --entry-closure --entry "$entry" --threads "$threads" --mode "$phase4_build_mode" \
     --cache-dir "$cache" --output "$artifact"
   "$@"
 ) || die 'direct native build failed'
@@ -393,6 +427,7 @@ case "$target" in
   x86_64-*-linux-*|aarch64-*-linux-*) image_system=Linux ;;
   x86_64-*-freebsd*|aarch64-*-freebsd*) image_system=FreeBSD ;;
   x86_64-*-windows-*|aarch64-*-windows-*) image_system=MSWin32 ;;
+  aarch64-apple-darwin*|arm64-apple-darwin*|x86_64-apple-darwin*|aarch64-apple-macosx*|arm64-apple-macosx*|x86_64-apple-macosx*) image_system=darwin ;;
   *) die "native image verification does not support target: $target" ;;
 esac
 image_arch=${target%%-*}
@@ -407,25 +442,52 @@ build_args_sha=$(
       native-build --target "$target" --backend "$backend"
     if [ "$phase4_profile" = prod ]; then
       printf '%s\n' --profile=prod --release --strip
+    elif [ "$phase4_xray" = 1 ]; then
+      printf '%s\n' --profile dev --debug --no-strip --xray
     else
-      printf '%s\n' --profile dev
+      printf '%s\n' --profile dev --debug --no-strip
     fi
     printf '%s\n' --managed-build-phase=phase4 --opt-level=standard --low-memory \
       --source "$cuda_source_root" --source src/compositions/kernel_llvm_cranelift \
       --source src/compiler --source src/app --source src/lib --source src/os \
       --source src/plugins --source src/package_ownership --source src/compositions \
-      --entry-closure --entry "$entry" --threads "$threads" --mode dynload \
+      --entry-closure --entry "$entry" --threads "$threads" --mode "$phase4_build_mode" \
       --cache-dir "$cache" --output "$artifact"
   } | sha256sum | awk '{print $1}'
 ) || die 'direct build argument digest unavailable'
+if [ "$phase4_profile" = prod ]; then
+  receipt_opt_level=2
+  receipt_debug_info=0
+  receipt_debug_request=default
+  receipt_trace_resolution=disabled
+  receipt_trace_admission=absent
+elif [ "$phase4_xray" = 1 ]; then
+  receipt_opt_level=2
+  receipt_debug_info=1
+  receipt_debug_request=enabled
+  receipt_trace_resolution=available
+  receipt_trace_admission=xray-static-v1
+else
+  receipt_opt_level=2
+  receipt_debug_info=1
+  receipt_debug_request=enabled
+  receipt_trace_resolution=disabled
+  receipt_trace_admission=absent
+fi
+if [ "$phase4_build_mode" = one-binary ]; then
+  receipt_output_format=native
+else
+  receipt_output_format=both
+fi
 receipt="$output_root/direct-build$phase4_suffix.env"
 umask 077
 {
   printf '%s\n' 'format=SIMPLE-PHASE4-DIRECT-BUILD-2' 'evidence_state=BUILD_ONLY'
   printf '%s\n' 'target_profile_schema=1' 'managed_build_phase=phase4' \
-    "target_profile=$target_profile_mode" 'target_debug_request=default' \
-    'target_trace_resolution=disabled' 'target_trace_reason=' \
-    'target_trace_admission_identity=absent' 'opt_level=2' 'debug_info=1' 'low_memory=1' 'output_format=both'
+    "target_profile=$target_profile_mode" "target_debug_request=$receipt_debug_request" \
+    "target_trace_resolution=$receipt_trace_resolution" 'target_trace_reason=' \
+    "target_trace_admission_identity=$receipt_trace_admission" "opt_level=$receipt_opt_level" \
+    "debug_info=$receipt_debug_info" 'low_memory=1' "output_format=$receipt_output_format"
   printf '%s\n' "authority_mode=$authority_mode"
   if [ "$authority_mode" = provisional ]; then
     printf '%s\n' 'diagnostic_only=1' 'admitted=0' 'producer_status=unadmitted'

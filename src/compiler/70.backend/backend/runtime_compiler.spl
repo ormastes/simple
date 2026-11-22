@@ -16,6 +16,7 @@ use compiler.backend.runtime_object_cache_windows.{runtime_windows_cache_toolcha
 use compiler.backend.runtime_xray_context_policy_v1.{runtime_xray_context_validate_v1, runtime_xray_context_cache_suffix_v1, runtime_xray_context_flags_v1}
 use common.types.{Enabled}
 use compiler.backend.runtime_tagged_callback_owner_v1.{runtime_tagged_callback_owner_v1}
+use compiler.backend.runtime_c_compile_pool_v1.{runtime_c_compile_workers_v1, runtime_c_compile_parallel_batch_v1, runtime_c_cache_publish_object_v1}
 use compiler.backend.runtime_object_cache_posix.{runtime_posix_cache_fingerprint_command_v1}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, file_read, file_write, file_hash_sha256_or_empty, process_run}
@@ -1204,8 +1205,15 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             windows_toolchain = runtime_windows_cache_toolchain_v1(windows_cache_root, cc)
     if trace:
         print "[RT-COMPILE] object cache dir={cache_dir}"
+    val rt_parallel_workers = runtime_c_compile_workers_v1(sources.len())
+    val rt_parallel_eligible = rt_parallel_workers >= 2 and windows_toolchain == "" and not native_tool_strict_requested_v1()
+    var rt_pending_names: [text] = []
+    var rt_pending_srcs: [text] = []
+    var rt_pending_objs: [text] = []
+    var rt_pending_caches: [text] = []
+    var rt_pending_argvs: [[text]] = []
     if trace:
-        print "[RT-COMPILE] starting loop over {sources.len()} sources"
+        print "[RT-COMPILE] starting loop over {sources.len()} sources (workers={rt_parallel_workers})"
 
     for name in sources:
         if trace:
@@ -1349,6 +1357,14 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
                 comp_err = result.stderr
                 comp_code = result.exit_code
                 windows_pending_keys.push(result.pending_key)
+            elif rt_parallel_eligible:
+                rt_pending_names.push(name)
+                rt_pending_srcs.push(src_path)
+                rt_pending_objs.push(obj_path)
+                rt_pending_caches.push(cache_obj)
+                rt_pending_argvs.push(comp_args)
+                object_count = object_count + 1
+                continue
             else:
                 val (run_out, run_err, run_code) = process_run(cc, comp_args)
                 comp_out = run_out
@@ -1377,12 +1393,16 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         if cache_obj != "" and not cache_hit:
             # Publish via a private staging name + rename so concurrent builds
             # never observe a half-written object.
-            val stage = cache_obj + ".tmp." + "{compile_pid}"
-            backend_shell_tuple(
-                "cp -f '" + obj_path + "' '" + stage + "' && mv -f '"
-                + stage + "' '" + cache_obj + "'")
+            val _published_cache_obj = runtime_c_cache_publish_object_v1(obj_path, cache_obj, compile_pid, object_count)
 
         object_count = object_count + 1
+
+    if rt_pending_names.len() > 0:
+        val batch_err = runtime_c_compile_parallel_batch_v1(cc, rt_pending_names, rt_pending_srcs,
+            rt_pending_objs, rt_pending_caches, rt_pending_argvs, rt_parallel_workers, compile_pid, core_c_profile)
+        if batch_err != "":
+            cleanup_runtime_objects(objects)
+            return Err(batch_err)
 
     if windows_toolchain != "" and not runtime_windows_cache_publish_batch_v1(windows_cache_root, cc, windows_toolchain, windows_pending_keys, objects):
         cleanup_runtime_objects(objects)

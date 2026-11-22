@@ -1,0 +1,363 @@
+"""
+## Purpose and audience
+End-to-end SSpec acceptance test for Caret Suite (`cs`) + Simple Orchestrator
+(server and client on the same host via dummy `host.sdn` / `servers.sdn`) +
+Simple Container (macOS Seatbelt on Darwin) + `agy` CLI + git worktree lifecycle.
+
+## Scenarios verified
+1. Dummy same-host `host.sdn` -> `servers.sdn` configuration resolves both
+   `orchestrator` (server) and `caret` (client) on the same host, and Caret Suite
+   launches Simple Orchestrator (`/orchestrator start`) with a real WAL journal.
+2. Client launches `agy` through Caret Suite + Simple Orchestrator inside a
+   Simple Container (`macos-seatbelt`) with an isolated `--worktree`:
+   - Seatbelt blocks writing to the read-only repository root while permitting
+     writes inside the isolated worktree;
+   - `agy` runs hello-world (`HELLO_WORLD`) inside the containerized worktree;
+   - Clean close (`/orchestrator close`) deletes the git worktree and all
+     container/pane temporary files.
+3. Crash retention and relaunch:
+   - When a containerized worktree session crashes (non-zero / signal exit),
+     its uncommitted worktree files and container state remain on disk;
+   - Crashed containers are listable through `/orchestrator crashed` and
+     Caret Suite `/containers` (`/crashed`);
+   - `/orchestrator relaunch` resumes `agy` in the preserved worktree, finishes
+     hello-world cleanly, and subsequent `/orchestrator close` + `/orchestrator stop`
+     delete all worktrees, container state, and temporary files.
+"""
+# @req REQ-ORCH-CARET-AGY-001 REQ-ORCH-CARET-AGY-002 REQ-ORCH-CARET-AGY-003
+# @manual_section: caret-orchestrator-container-agy
+
+use std.spec.*
+use std.spec.{pending}
+use std.common.sdn.value.SdnValue
+use app.io.mod.{env_get, env_set, cwd, file_exists, file_read, file_write,
+    file_atomic_write, dir_exists, dir_create_all, dir_list, dir_remove_all,
+    process_run_timeout, process_is_running, process_kill, sleep_ms}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{
+    MACOS_SEATBELT_PROGRAM_V1, macos_seatbelt_host_capable_v1,
+    macos_seatbelt_canonical_path_v1}
+use app.orchestrator.server_command_v1.{server_selection_v1}
+use app.orchestrator.caret_session_protocol_v1.{orchestrator_caret_parse_dict_v1,
+    orchestrator_caret_bool_v1, orchestrator_caret_str_v1, orchestrator_caret_int_v1,
+    orchestrator_caret_server_info_load_v1, orchestrator_caret_client_call_v1}
+use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
+    cs_handle_command, cs_apply_action, cs_resolve_exe}
+
+struct SameHostAcceptanceEnv:
+    root: text
+    repo_dir: text
+    host_cfg: text
+    servers_cfg: text
+    runtime_dir: text
+    container_store: text
+    tmp_dir: text
+    prev_repo_root: text
+    prev_host_cfg: text
+    prev_servers_cfg: text
+    prev_container_root: text
+    prev_tmpdir: text
+    prev_pane_backend: text
+
+fn _cs_exec(d: CsDashboard, line: text) -> (CsDashboard, text):
+    val (d1, act) = cs_handle_command(d, line)
+    val (d2, out) = cs_apply_action(d1, act)
+    (cs_refresh(d2), out)
+
+fn _setup_dummy_same_host_env(tag: text) -> SameHostAcceptanceEnv:
+    val code_root = cwd()
+    val prev_repo_root = env_get("SIMPLE_CS_REPO_ROOT") ?? ""
+    val prev_host_cfg = env_get("SIMPLE_HOST_CONFIG") ?? ""
+    val prev_servers_cfg = env_get("SIMPLE_SERVERS_CONFIG") ?? ""
+    val prev_container_root = env_get("SIMPLE_CONTAINER_SESSION_ROOT") ?? ""
+    val prev_tmpdir = env_get("TMPDIR") ?? ""
+    val prev_pane_backend = env_get("CS_PANE_BACKEND") ?? ""
+
+    val raw_root = secure_temp_dir("/tmp", "orch-agy-acc-" + tag + "-").unwrap()
+    val root = macos_seatbelt_canonical_path_v1(raw_root)
+    val repo_dir = root + "/repo"
+    val cfg_dir = root + "/config"
+    val runtime_dir = root + "/orch-runtime"
+    val container_store = root + "/container-store"
+    val tmp_dir = root + "/tmp"
+    dir_create_all(repo_dir)
+    dir_create_all(cfg_dir)
+    dir_create_all(tmp_dir)
+
+    # Dummy same-host configuration: both `orchestrator` (server) and `caret` /
+    # `agent` (client) resolve to `same-host` (`transport: local`) on this machine.
+    val servers_cfg = cfg_dir + "/dummy_servers.sdn"
+    val host_cfg = cfg_dir + "/dummy_host.sdn"
+    val servers_sdn = ("version: 1\n" +
+        "currentContext: \"same-host-dev\"\n" +
+        "servers:\n" +
+        "  same-host:\n" +
+        "    transport: \"local\"\n" +
+        "contexts:\n" +
+        "  same-host-dev:\n" +
+        "    sharedServer: \"same-host\"\n" +
+        "    consumers:\n" +
+        "      orchestrator: \"same-host\"\n" +
+        "      caret: \"same-host\"\n" +
+        "      agent: \"same-host\"\n")
+    val host_sdn = ("host_config:\n" +
+        "  schema: \"simple-host-config-v1\"\n" +
+        "  server_config: \"" + servers_cfg + "\"\n")
+    assert(file_atomic_write(servers_cfg, servers_sdn))
+    assert(file_atomic_write(host_cfg, host_sdn))
+
+    # Isolated scratch git repository for worktree creation and Seatbelt RO checks.
+    val _g1 = process_run_timeout("git", ["init", repo_dir], 10000)
+    val _g2 = process_run_timeout("git", ["-C", repo_dir, "config", "user.email", "test@simple.local"], 5000)
+    val _g3 = process_run_timeout("git", ["-C", repo_dir, "config", "user.name", "Simple Acceptance"], 5000)
+    assert(file_write(repo_dir + "/README.md", "# Scratch Repo\n"))
+    val _g4 = process_run_timeout("git", ["-C", repo_dir, "add", "README.md"], 5000)
+    val _g5 = process_run_timeout("git", ["-C", repo_dir, "commit", "-m", "initial"], 10000)
+
+    env_set("SIMPLE_HOST_CONFIG", host_cfg)
+    env_set("SIMPLE_SERVERS_CONFIG", "")
+    env_set("SIMPLE_CONTAINER_SESSION_ROOT", container_store)
+    env_set("SIMPLE_CS_REPO_ROOT", repo_dir)
+    env_set("CS_PANE_BACKEND", "smux")
+    env_set("TMPDIR", tmp_dir)
+    if (env_get("SIMPLE_BINARY") ?? "") == "":
+        val candidate_seed = code_root + "/.local-tools/simple-seed"
+        if file_exists(candidate_seed):
+            env_set("SIMPLE_BINARY", candidate_seed)
+        elif file_exists(code_root + "/bin/simple"):
+            env_set("SIMPLE_BINARY", code_root + "/bin/simple")
+    if (env_get("SIMPLE_LIB") ?? "") == "":
+        env_set("SIMPLE_LIB", code_root + "/src")
+    if (env_get("SIMPLE_ORCHESTRATOR_MAIN") ?? "") == "" and file_exists(code_root + "/src/app/orchestrator/main.spl"):
+        env_set("SIMPLE_ORCHESTRATOR_MAIN", code_root + "/src/app/orchestrator/main.spl")
+
+    SameHostAcceptanceEnv(
+        root: root, repo_dir: repo_dir, host_cfg: host_cfg, servers_cfg: servers_cfg,
+        runtime_dir: runtime_dir, container_store: container_store, tmp_dir: tmp_dir,
+        prev_repo_root: prev_repo_root, prev_host_cfg: prev_host_cfg,
+        prev_servers_cfg: prev_servers_cfg, prev_container_root: prev_container_root,
+        prev_tmpdir: prev_tmpdir, prev_pane_backend: prev_pane_backend)
+
+fn _teardown_dummy_same_host_env(env: SameHostAcceptanceEnv):
+    match orchestrator_caret_server_info_load_v1(env.runtime_dir):
+        case Ok(info):
+            val _stop = orchestrator_caret_client_call_v1(env.runtime_dir, "-", "shutdown", "", [])
+            sleep_ms(200)
+            if info.pid > 0 and process_is_running(info.pid):
+                val _k = process_kill(info.pid)
+        case Err(_): pass
+    env_set("SIMPLE_CS_REPO_ROOT", env.prev_repo_root)
+    env_set("SIMPLE_HOST_CONFIG", env.prev_host_cfg)
+    env_set("SIMPLE_SERVERS_CONFIG", env.prev_servers_cfg)
+    env_set("SIMPLE_CONTAINER_SESSION_ROOT", env.prev_container_root)
+    env_set("TMPDIR", env.prev_tmpdir)
+    env_set("CS_PANE_BACKEND", env.prev_pane_backend)
+    if dir_exists(env.root):
+        val _rm = dir_remove_all(env.root)
+
+fn _git_worktree_count(repo_dir: text) -> i64:
+    val res = process_run_timeout("git", ["-C", repo_dir, "worktree", "list", "--porcelain"], 10000)
+    var count = 0
+    for line in res.0.split("\n"):
+        if line.starts_with("worktree "):
+            count = count + 1
+    count
+
+fn _wait_orchestrator_inspect(d0: CsDashboard, agent_id: text, want_state: text,
+        want_text: text, budget_ms: i64) -> (CsDashboard, Dict<text, SdnValue>):
+    var d = d0
+    var elapsed = 0
+    var last_dict: Dict<text, SdnValue> = {}
+    while elapsed < budget_ms:
+        val (dn, reply) = _cs_exec(d, "/orchestrator inspect " + agent_id)
+        d = dn
+        match orchestrator_caret_parse_dict_v1(reply):
+            case Ok(parsed):
+                last_dict = parsed
+                val st = orchestrator_caret_str_v1(parsed, "containerState")
+                val scr = orchestrator_caret_str_v1(parsed, "screen")
+                val state_ok = want_state == "" or st == want_state
+                val text_ok = want_text == "" or scr.contains(want_text)
+                if state_ok and text_ok:
+                    return (d, parsed)
+            case Err(_): pass
+        sleep_ms(500)
+        elapsed = elapsed + 500
+    (d, last_dict)
+
+describe "Caret Suite + Simple Orchestrator + Simple Container + agy acceptance":
+
+    it "runs server and client on the same host from dummy config, launches containerized agy hello-world with worktree, and cleans all worktrees and temp files on close":
+        if cs_resolve_exe("agy") == "":
+            pending("BLOCKED: agy CLI is not installed on PATH on this host")
+            return
+        if not macos_seatbelt_host_capable_v1():
+            pending("BLOCKED: macOS Seatbelt sandbox-exec cannot run inside an outer sandbox; run directly on the macOS host")
+            return
+
+        val env = _setup_dummy_same_host_env("clean")
+        step("Verify dummy host.sdn -> servers.sdn resolves orchestrator and caret to same-host")
+        val orch_sel = server_selection_v1(["server-resolve", "-", "orchestrator", "-", "-", "host"]).unwrap()
+        val caret_sel = server_selection_v1(["server-resolve", "-", "caret", "-", "-", "host"]).unwrap()
+        expect(orch_sel.record.name).to_equal("same-host")
+        expect(caret_sel.record.name).to_equal("same-host")
+        expect(orch_sel.record.transport).to_equal("local")
+        expect(_git_worktree_count(env.repo_dir)).to_equal(1)
+
+        step("Launch Simple Orchestrator server through Caret Suite")
+        var d = cs_refresh(cs_dashboard_new("acc-client"))
+        val (d1, started) = _cs_exec(d, "/orchestrator start --runtime-dir " + env.runtime_dir)
+        d = d1
+        expect(started).to_contain("orchestrator started")
+        expect(started).to_contain("server=same-host")
+
+        val (d2, status_sdn) = _cs_exec(d, "/orchestrator status")
+        d = d2
+        val status_dict = orchestrator_caret_parse_dict_v1(status_sdn).unwrap()
+        expect(orchestrator_caret_bool_v1(status_dict, "ok")).to_equal(true)
+        expect(orchestrator_caret_str_v1(status_dict, "serverName")).to_equal("same-host")
+        expect(orchestrator_caret_str_v1(status_dict, "clientServer")).to_equal("same-host")
+        val state_root = orchestrator_caret_str_v1(status_dict, "stateRoot")
+        expect(file_exists(state_root + "/controller.sdn")).to_equal(true)
+
+        step("Launch agy on client with macos-seatbelt container and --worktree for hello world")
+        val launch_cmd = ("/orchestrator launch agy --container macos-seatbelt --worktree " +
+            "-p \"Reply with the exact word HELLO_WORLD and nothing else.\" " +
+            "--disable-slash-commands --print-timeout 45s")
+        val (d3, launch_sdn) = _cs_exec(d, launch_cmd)
+        d = d3
+        val launch_dict = orchestrator_caret_parse_dict_v1(launch_sdn).unwrap()
+        expect(orchestrator_caret_bool_v1(launch_dict, "ok")).to_equal(true)
+        expect(orchestrator_caret_str_v1(launch_dict, "status")).to_equal("launched")
+        val agent_id = orchestrator_caret_str_v1(launch_dict, "agentId")
+        val wt_path = orchestrator_caret_str_v1(launch_dict, "worktreePath")
+        val attempt_dir = orchestrator_caret_str_v1(launch_dict, "attemptDir")
+        expect(agent_id).to_equal("a1")
+        expect(dir_exists(wt_path)).to_equal(true)
+        expect(file_exists(attempt_dir + "/profile.sb")).to_equal(true)
+        expect(_git_worktree_count(env.repo_dir)).to_equal(2)
+
+        step("Prove compiled Seatbelt profile blocks writing to repo root while allowing worktree writes")
+        val deny_probe = process_run_timeout(MACOS_SEATBELT_PROGRAM_V1,
+            ["-f", attempt_dir + "/profile.sb", "/bin/sh", "-c",
+             "echo nope > '" + env.repo_dir + "/forbidden.txt'"], 5000)
+        expect((deny_probe.2 as i64) == 0).to_equal(false)
+        expect(file_exists(env.repo_dir + "/forbidden.txt")).to_equal(false)
+        val allow_probe = process_run_timeout(MACOS_SEATBELT_PROGRAM_V1,
+            ["-f", attempt_dir + "/profile.sb", "/bin/sh", "-c",
+             "echo ok > '" + wt_path + "/seatbelt_wt_ok.txt'"], 5000)
+        expect(allow_probe.2 as i64).to_equal(0)
+        expect(file_read(wt_path + "/seatbelt_wt_ok.txt").trim()).to_equal("ok")
+
+        step("Wait for containerized agy hello-world completion")
+        val (d4, inspected) = _wait_orchestrator_inspect(d, "a1", "exited-clean", "HELLO_WORLD", 60000)
+        d = d4
+        expect(orchestrator_caret_str_v1(inspected, "screen")).to_contain("HELLO_WORLD")
+        expect(orchestrator_caret_str_v1(inspected, "containerState")).to_equal("exited-clean")
+        expect(orchestrator_caret_int_v1(inspected, "exitCode", -1)).to_equal(0)
+        expect(file_exists(state_root + "/journal/database-wal/CURRENT")).to_equal(true)
+
+        step("Close session and verify worktree and all temp files are deleted")
+        val (d5, closed_sdn) = _cs_exec(d, "/orchestrator close a1")
+        d = d5
+        val closed_dict = orchestrator_caret_parse_dict_v1(closed_sdn).unwrap()
+        expect(orchestrator_caret_bool_v1(closed_dict, "ok")).to_equal(true)
+        expect(orchestrator_caret_bool_v1(closed_dict, "preservedForRelaunch")).to_equal(false)
+        expect(orchestrator_caret_bool_v1(closed_dict, "worktreeDeleted")).to_equal(true)
+        expect(orchestrator_caret_bool_v1(closed_dict, "tempFilesDeleted")).to_equal(true)
+        expect(dir_exists(wt_path)).to_equal(false)
+        expect(dir_exists(attempt_dir)).to_equal(false)
+        expect(_git_worktree_count(env.repo_dir)).to_equal(1)
+
+        step("Stop Simple Orchestrator and verify runtime and tmp directories are clean")
+        val (_d6, stopped_sdn) = _cs_exec(d, "/orchestrator stop")
+        val stopped_dict = orchestrator_caret_parse_dict_v1(stopped_sdn).unwrap()
+        expect(orchestrator_caret_str_v1(stopped_dict, "status")).to_equal("stopped")
+        sleep_ms(300)
+        expect(dir_exists(state_root)).to_equal(false)
+        expect(file_exists(env.runtime_dir + "/server.sdn")).to_equal(false)
+        expect(dir_list(env.tmp_dir).len()).to_equal(0)
+        _teardown_dummy_same_host_env(env)
+
+    it "preserves worktree and container state on crash, lists crashed containers, relaunches agy to completion, and cleans everything on close":
+        if cs_resolve_exe("agy") == "":
+            pending("BLOCKED: agy CLI is not installed on PATH on this host")
+            return
+        if not macos_seatbelt_host_capable_v1():
+            pending("BLOCKED: macOS Seatbelt sandbox-exec cannot run inside an outer sandbox; run directly on the macOS host")
+            return
+
+        val env = _setup_dummy_same_host_env("crash")
+        var d = cs_refresh(cs_dashboard_new("acc-crash-client"))
+        val (d1, started) = _cs_exec(d, "/orchestrator start --runtime-dir " + env.runtime_dir)
+        d = d1
+        expect(started).to_contain("orchestrator started")
+
+        step("Launch containerized agy with --worktree that exits with a crash status")
+        val crash_cmd = "/orchestrator launch agy --container macos-seatbelt --worktree --nonexistent-crash-flag-xyz"
+        val (d2, launch_sdn) = _cs_exec(d, crash_cmd)
+        d = d2
+        val launch_dict = orchestrator_caret_parse_dict_v1(launch_sdn).unwrap()
+        expect(orchestrator_caret_bool_v1(launch_dict, "ok")).to_equal(true)
+        val wt_path = orchestrator_caret_str_v1(launch_dict, "worktreePath")
+        val attempt_dir = orchestrator_caret_str_v1(launch_dict, "attemptDir")
+        val container_name = orchestrator_caret_str_v1(launch_dict, "containerName")
+        expect(dir_exists(wt_path)).to_equal(true)
+        # Simulate uncommitted work left in the worktree before/at crash time.
+        if wt_path != "" and dir_exists(wt_path):
+            expect(file_write(wt_path + "/wip_preserved.txt", "keep-me-across-crash\n")).to_equal(true)
+
+        step("Observe crashed state and verify close preserves worktree and container state")
+        val (d3, crashed_inspect) = _wait_orchestrator_inspect(d, "a1", "crashed", "", 15000)
+        d = d3
+        expect(orchestrator_caret_str_v1(crashed_inspect, "containerState")).to_equal("crashed")
+
+        val (d4, close_after_crash) = _cs_exec(d, "/orchestrator close a1")
+        d = d4
+        val close_crash_dict = orchestrator_caret_parse_dict_v1(close_after_crash).unwrap()
+        expect(orchestrator_caret_bool_v1(close_crash_dict, "preservedForRelaunch")).to_equal(true)
+        expect(dir_exists(wt_path)).to_equal(true)
+        expect(file_read(wt_path + "/wip_preserved.txt").trim()).to_equal("keep-me-across-crash")
+        expect(dir_exists(attempt_dir)).to_equal(true)
+        expect(_git_worktree_count(env.repo_dir)).to_equal(2)
+
+        step("List crashed containers for relaunch")
+        val (d5, crashed_list_sdn) = _cs_exec(d, "/orchestrator crashed")
+        d = d5
+        val crashed_list = orchestrator_caret_parse_dict_v1(crashed_list_sdn).unwrap()
+        expect(orchestrator_caret_int_v1(crashed_list, "crashedCount", 0)).to_equal(1)
+        expect(crashed_list_sdn).to_contain(container_name)
+        expect(crashed_list_sdn).to_contain(wt_path)
+
+        step("Relaunch crashed container in its preserved worktree with hello-world prompt")
+        val relaunch_cmd = ("/orchestrator relaunch a1 " +
+            "-p \"Reply with the exact word HELLO_WORLD and nothing else.\" " +
+            "--disable-slash-commands --print-timeout 45s")
+        val (d6, relaunch_sdn) = _cs_exec(d, relaunch_cmd)
+        d = d6
+        val relaunch_dict = orchestrator_caret_parse_dict_v1(relaunch_sdn).unwrap()
+        expect(orchestrator_caret_bool_v1(relaunch_dict, "ok")).to_equal(true)
+        expect(orchestrator_caret_str_v1(relaunch_dict, "status")).to_equal("relaunched")
+        expect(orchestrator_caret_str_v1(relaunch_dict, "worktreePath")).to_equal(wt_path)
+        expect(file_read(wt_path + "/wip_preserved.txt").trim()).to_equal("keep-me-across-crash")
+
+        val (d7, after_relaunch) = _wait_orchestrator_inspect(d, "a1", "exited-clean", "HELLO_WORLD", 60000)
+        d = d7
+        expect(orchestrator_caret_str_v1(after_relaunch, "screen")).to_contain("HELLO_WORLD")
+        expect(orchestrator_caret_str_v1(after_relaunch, "containerState")).to_equal("exited-clean")
+
+        step("Close relaunched container after clean finish and verify full worktree & temp cleanup")
+        val (d8, final_close_sdn) = _cs_exec(d, "/orchestrator close a1")
+        d = d8
+        val final_close = orchestrator_caret_parse_dict_v1(final_close_sdn).unwrap()
+        expect(orchestrator_caret_bool_v1(final_close, "preservedForRelaunch")).to_equal(false)
+        expect(orchestrator_caret_bool_v1(final_close, "worktreeDeleted")).to_equal(true)
+        expect(orchestrator_caret_bool_v1(final_close, "tempFilesDeleted")).to_equal(true)
+        expect(dir_exists(wt_path)).to_equal(false)
+        expect(dir_exists(attempt_dir)).to_equal(false)
+        expect(_git_worktree_count(env.repo_dir)).to_equal(1)
+
+        val (_d9, _stopped) = _cs_exec(d, "/orchestrator stop")
+        sleep_ms(300)
+        expect(dir_list(env.tmp_dir).len()).to_equal(0)
+        _teardown_dummy_same_host_env(env)

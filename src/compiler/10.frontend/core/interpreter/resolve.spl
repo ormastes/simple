@@ -12,11 +12,12 @@
 
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
-use compiler.core.ast.{DECL_FN, decl_count, decl_get, expr_get, stmt_get}
-use compiler.core.ast_expr.{EXPR_ASSIGN, EXPR_BLOCK, EXPR_COMPOUND_ASSIGN, EXPR_DO_BLOCK, EXPR_FOR}
-use compiler.core.ast_expr.{EXPR_IDENT, EXPR_IF, EXPR_LAMBDA, EXPR_UNSAFE_BLOCK, EXPR_WHILE, expr_owner_int_set}
-use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_EXPR, STMT_FOR}
-use compiler.core.ast_stmt.{STMT_IF, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
+use compiler.core.ast.{DECL_FN, arm_get_binding, arm_get_body, arm_get_guard, arm_get_pattern}
+use compiler.core.ast.{decl_count, decl_get, elif_get_body, elif_get_cond, elif_get_else, expr_get, stmt_get}
+use compiler.core.ast_expr.{EXPR_ASM_MATCH, EXPR_ASSIGN, EXPR_BLOCK, EXPR_COMPOUND_ASSIGN, EXPR_DICT_COMP, EXPR_DICT_LIT, EXPR_DO_BLOCK, EXPR_FOR}
+use compiler.core.ast_expr.{EXPR_IDENT, EXPR_IF, EXPR_LAMBDA, EXPR_LIST_COMP, EXPR_MATCH, EXPR_SLICE, EXPR_STRUCT_LIT, EXPR_UNSAFE_BLOCK, EXPR_WHILE, expr_owner_int_set}
+use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BIND, STMT_BLOCK, STMT_COMPOUND_ASSIGN, STMT_EXPR, STMT_FOR}
+use compiler.core.ast_stmt.{STMT_IF, STMT_MATCH, STMT_RECEIVE, STMT_RETURN, STMT_USE_IMPORT, STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
 use compiler.core.interpreter.eval.{EVAL_STMT_LAZY_VAL_DECL}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
@@ -148,34 +149,66 @@ pub fn resolve_is_slot_shadowed(decl_id: i64, slot: i64) -> bool:
 
 # ===== Resolution Pass =====
 
+fn rl_register_binding_names(raw_name: text):
+    if raw_name == "": return
+    if raw_name.starts_with("(") and raw_name.ends_with(")") and raw_name.len() >= 2:
+        val inner = raw_name[1:raw_name.len() - 1]
+        for tname in inner.split(","):
+            val trimmed = tname.trim()
+            if trimmed != "" and trimmed != "_":
+                rl_register(trimmed)
+    elif raw_name != "_":
+        rl_register(raw_name)
+
+fn rl_register_pattern_names(pid: i64):
+    if pid < 0: return
+    val p: CoreExpr = expr_get(pid)
+    if p.tag == EXPR_IDENT:
+        if p.s_val != "" and p.s_val != "_":
+            rl_register(p.s_val)
+        return
+    if p.left >= 0: rl_register_pattern_names(p.left)
+    if p.right >= 0: rl_register_pattern_names(p.right)
+    for aid in p.args:
+        rl_register_pattern_names(aid)
+
+fn resolve_prescan_arms(arm_ids: [i64]):
+    for arm_id in arm_ids:
+        rl_register_pattern_names(arm_get_pattern(arm_id))
+        rl_register_binding_names(arm_get_binding(arm_id))
+        resolve_prescan_stmts(arm_get_body(arm_id))
+
 fn resolve_prescan_stmts(stmts: [i64]):
     for sid in stmts:
         val s_node: CoreStmt = stmt_get(sid)
         val tag = s_node.tag
-        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val name = s_node.name
-            if name != "":
-                rl_register(name)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL or tag == STMT_BIND:
+            rl_register_binding_names(s_node.name)
         elif tag == STMT_FOR:
-            val iter_name = s_node.name
-            if iter_name != "":
-                if iter_name.starts_with("("):
-                    # Tuple destructuring pattern: register individual names
-                    val inner = iter_name[1:iter_name.len() - 1]
-                    val names = inner.split(",")
-                    for tname in names:
-                        rl_register(tname)
-                else:
-                    rl_register(iter_name)
-            # Prescan for body
+            rl_register_binding_names(s_node.name)
             resolve_prescan_stmts(s_node.body)
         elif tag == STMT_IF:
+            val elif_idx = s_node.type_tag
+            if elif_idx >= 0:
+                resolve_prescan_stmts(elif_get_body(elif_idx))
+                resolve_prescan_stmts(elif_get_else(elif_idx))
+            else:
+                resolve_prescan_stmts(s_node.body)
+                resolve_prescan_stmts(s_node.else_body)
+        elif tag == STMT_MATCH or tag == STMT_RECEIVE:
+            if tag == STMT_RECEIVE and s_node.type_tag >= 0:
+                resolve_prescan_stmts([s_node.type_tag])
+            resolve_prescan_arms(s_node.body)
+        elif tag == STMT_WHILE or tag == STMT_BLOCK:
             resolve_prescan_stmts(s_node.body)
-            resolve_prescan_stmts(s_node.else_body)
-        elif tag == STMT_WHILE:
-            resolve_prescan_stmts(s_node.body)
-        elif tag == STMT_BLOCK:
-            resolve_prescan_stmts(s_node.body)
+
+fn resolve_arms(arm_ids: [i64]):
+    for arm_id in arm_ids:
+        val guard_eid = arm_get_guard(arm_id)
+        if guard_eid >= 0:
+            resolve_expr(guard_eid)
+        for arm_sid in arm_get_body(arm_id):
+            resolve_stmt(arm_sid)
 
 fn resolve_expr(eid: i64):
     if eid < 0: return
@@ -189,8 +222,45 @@ fn resolve_expr(eid: i64):
             if shadowed == false:
                 expr_owner_int_set(eid, slot)
         return
-    # Recurse into sub-expressions
+    # Every EXPR_LAMBDA (including colon-blocks with i_val == 1) compiles into
+    # a synthesized __lambda_N declaration evaluated inside the callee's frame,
+    # never the enclosing function's frame_locals.
+    if tag == EXPR_LAMBDA or tag == EXPR_ASM_MATCH:
+        return
     val e: CoreExpr = e0
+    if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK or tag == EXPR_UNSAFE_BLOCK or tag == EXPR_FOR or tag == EXPR_WHILE:
+        if e.left >= 0: resolve_expr(e.left)
+        for child_sid in e.stmts:
+            resolve_stmt(child_sid)
+        return
+    if tag == EXPR_MATCH:
+        if e.left >= 0: resolve_expr(e.left)
+        resolve_arms(e.args)
+        return
+    if tag == EXPR_IF or tag == EXPR_SLICE or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP:
+        if e.left >= 0: resolve_expr(e.left)
+        if e.right >= 0: resolve_expr(e.right)
+        if e.extra >= 0: resolve_expr(e.extra)
+        for arg_eid in e.args:
+            resolve_expr(arg_eid)
+        if tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP:
+            for child_eid in e.stmts:
+                resolve_expr(child_eid)
+        return
+    if tag == EXPR_STRUCT_LIT:
+        if e.left >= 0: resolve_expr(e.left)
+        for child_eid in e.stmts:
+            resolve_expr(child_eid)
+        return
+    if tag == EXPR_DICT_LIT:
+        if e.left >= 0: resolve_expr(e.left)
+        if e.right >= 0: resolve_expr(e.right)
+        for arg_eid in e.args:
+            resolve_expr(arg_eid)
+        for child_eid in e.stmts:
+            resolve_expr(child_eid)
+        return
+    # Recurse into sub-expressions
     if e.left >= 0: resolve_expr(e.left)
     if e.right >= 0: resolve_expr(e.right)
     for arg_eid in e.args:
@@ -202,10 +272,41 @@ fn resolve_stmt(sid: i64):
     if sid < 0: return
     val s_node: CoreStmt = stmt_get(sid)
     val tag = s_node.tag
-    # Resolve expressions in statement
+    if tag < 0 or tag == STMT_USE_IMPORT: return
+    # STMT_ASSIGN / STMT_COMPOUND_ASSIGN / decls store RHS expression IDs in
+    # s_node.body, NOT statement IDs (passing veid to resolve_stmt caused
+    # infinite recursion whenever veid == sid).
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL or tag == STMT_BIND:
+        if s_node.expr_idx >= 0:
+            resolve_expr(s_node.expr_idx)
+        for veid in s_node.body:
+            resolve_expr(veid)
+        return
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        if s_node.expr_idx >= 0:
+            resolve_expr(s_node.expr_idx)
+        return
+    if tag == STMT_IF:
+        val elif_idx = s_node.type_tag
+        if elif_idx >= 0:
+            val cond_eid = elif_get_cond(elif_idx)
+            if cond_eid >= 0:
+                resolve_expr(cond_eid)
+            for child_sid in elif_get_body(elif_idx):
+                resolve_stmt(child_sid)
+            for child_sid in elif_get_else(elif_idx):
+                resolve_stmt(child_sid)
+            return
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        if s_node.expr_idx >= 0:
+            resolve_expr(s_node.expr_idx)
+        if tag == STMT_RECEIVE and s_node.type_tag >= 0:
+            resolve_stmt(s_node.type_tag)
+        resolve_arms(s_node.body)
+        return
+    # Control flow / block wrappers: expr_idx is condition/iterable, body holds stmts
     if s_node.expr_idx >= 0:
         resolve_expr(s_node.expr_idx)
-    # Recurse into body
     for child_sid in s_node.body:
         resolve_stmt(child_sid)
     for child_sid in s_node.else_body:
@@ -324,11 +425,19 @@ fn esc_collect_locals(stmts: [i64]):
                     cl_add(iter_name)
             esc_collect_locals(s_node.body)
         elif tag == STMT_IF:
-            esc_collect_locals(s_node.body)
-            esc_collect_locals(s_node.else_body)
-        elif tag == STMT_WHILE:
-            esc_collect_locals(s_node.body)
-        elif tag == STMT_BLOCK:
+            val elif_idx = s_node.type_tag
+            if elif_idx >= 0:
+                esc_collect_locals(elif_get_body(elif_idx))
+                esc_collect_locals(elif_get_else(elif_idx))
+            else:
+                esc_collect_locals(s_node.body)
+                esc_collect_locals(s_node.else_body)
+        elif tag == STMT_MATCH or tag == STMT_RECEIVE:
+            if tag == STMT_RECEIVE and s_node.type_tag >= 0:
+                esc_collect_locals([s_node.type_tag])
+            for arm_id in s_node.body:
+                esc_collect_locals(arm_get_body(arm_id))
+        elif tag == STMT_WHILE or tag == STMT_BLOCK:
             esc_collect_locals(s_node.body)
 
 fn esc_note_assign_target(target_eid: i64):
@@ -354,14 +463,25 @@ fn esc_walk_expr(eid: i64):
             esc_walk_expr(beid)
         esc_in_lambda = prev
         return
+    if tag == EXPR_ASM_MATCH:
+        return
     if tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK or tag == EXPR_UNSAFE_BLOCK or tag == EXPR_FOR or tag == EXPR_WHILE:
         if e.left >= 0: esc_walk_expr(e.left)
         for cs in e.stmts:
             esc_walk_stmt(cs)
         return
+    if tag == EXPR_MATCH:
+        if e.left >= 0: esc_walk_expr(e.left)
+        for arm_id in e.args:
+            val guard_eid = arm_get_guard(arm_id)
+            if guard_eid >= 0: esc_walk_expr(guard_eid)
+            for cs in arm_get_body(arm_id):
+                esc_walk_stmt(cs)
+        return
     if e.left >= 0: esc_walk_expr(e.left)
     if e.right >= 0: esc_walk_expr(e.right)
-    if tag == EXPR_IF and e.extra >= 0: esc_walk_expr(e.extra)
+    if (tag == EXPR_IF or tag == EXPR_SLICE or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP) and e.extra >= 0:
+        esc_walk_expr(e.extra)
     for arg_eid in e.args:
         esc_walk_expr(arg_eid)
     for seid in e.stmts:
@@ -371,12 +491,13 @@ fn esc_walk_stmt(sid: i64):
     if sid < 0: return
     val s_node: CoreStmt = stmt_get(sid)
     val tag = s_node.tag
+    if tag < 0 or tag == STMT_USE_IMPORT: return
     if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
         esc_note_assign_target(s_node.expr_idx)
         for veid in s_node.body:
             esc_walk_expr(veid)
         return
-    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL:
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL or tag == STMT_BIND:
         if s_node.expr_idx >= 0:
             esc_walk_expr(s_node.expr_idx)
         for veid in s_node.body:
@@ -384,6 +505,25 @@ fn esc_walk_stmt(sid: i64):
         return
     if tag == STMT_EXPR or tag == STMT_RETURN:
         esc_walk_expr(s_node.expr_idx)
+        return
+    if tag == STMT_IF and s_node.type_tag >= 0:
+        val elif_idx = s_node.type_tag
+        val cond_eid = elif_get_cond(elif_idx)
+        if cond_eid >= 0: esc_walk_expr(cond_eid)
+        for cs in elif_get_body(elif_idx):
+            esc_walk_stmt(cs)
+        for cs in elif_get_else(elif_idx):
+            esc_walk_stmt(cs)
+        return
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        if s_node.expr_idx >= 0: esc_walk_expr(s_node.expr_idx)
+        if tag == STMT_RECEIVE and s_node.type_tag >= 0:
+            esc_walk_stmt(s_node.type_tag)
+        for arm_id in s_node.body:
+            val guard_eid = arm_get_guard(arm_id)
+            if guard_eid >= 0: esc_walk_expr(guard_eid)
+            for cs in arm_get_body(arm_id):
+                esc_walk_stmt(cs)
         return
     # Control flow / other: expr_idx is a condition/scrutinee, body holds stmts.
     if s_node.expr_idx >= 0:

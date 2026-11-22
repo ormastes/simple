@@ -1,0 +1,62 @@
+#!/bin/sh
+# Selftest: admitted resume lanes (--resume-stage3-from-admitted,
+# --resume-managed-from-admitted) exec their resumer before the wrapper's
+# Windows materialized startup. Each must call the canonical owner first so
+# SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT is exported exactly as for a fresh
+# run; otherwise the resume recomputes plain-mode git state and its dirty
+# fingerprint cannot match the Stage 2 preflight receipt.
+# (Stage 4 resume does not exec early; it reaches the shared startup.)
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+checks=0
+
+# (1)+(2) static ordering: the owner call precedes each early exec.
+for pair in \
+  'managed_resume_output:run-managed-from-admitted.shs' \
+  'resume_stage3_output:resume-stage3-from-admitted.sh'; do
+  var=${pair%%:*} target=${pair#*:}
+  call=$(grep -n "bootstrap_materialized_resume_startup \"\${bootstrap_early_repo_root}\" \"\${$var}\" || exit 1" "$wrapper" | head -1 | cut -d: -f1)
+  ex=$(grep -n "exec .*$target" "$wrapper" | head -1 | cut -d: -f1)
+  [ -n "$call" ] || fail "no materialized resume startup for $var"
+  [ -n "$ex" ] || fail "no exec of $target"
+  [ "$call" -lt "$ex" ] || fail "$target exec (line $ex) precedes materialized startup (line $call)"
+  [ $((ex - call)) -le 2 ] || fail "materialized startup for $target is not adjacent to its exec"
+  checks=$((checks + 1))
+done
+
+. "$root/scripts/bootstrap/bootstrap-materialized-startup.shs"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # (3) a supplied receipt is validated by the consumer and re-exported.
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/mat-resume-order.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    mkdir -p "$tmp/bin" "$tmp/repo" "$tmp/out"
+    : > "$tmp/receipt.env"
+    printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/powershell"; chmod +x "$tmp/bin/powershell"
+    PATH="$tmp/bin:$PATH"; export PATH
+    SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$tmp/receipt.env
+    export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT
+    # `|| exit 1` makes the startup status the subshell status (a trailing
+    # printf alone would mask a failed startup).
+    out=$( bootstrap_materialized_resume_startup "$root" "$tmp/out" || exit 1
+           printf 'receipt=%s\n' "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}" ) ||
+      fail "valid supplied receipt rejected"
+    printf '%s\n' "$out" | grep -q "^receipt=$tmp/receipt.env\$" || fail "receipt not exported: $out"
+    checks=$((checks + 1))
+    # (4) a rejected receipt still fails closed.
+    printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/powershell"
+    ( bootstrap_materialized_resume_startup "$root" "$tmp/out" ) 2>/dev/null &&
+      fail "rejected receipt must fail closed"
+    checks=$((checks + 1))
+    ;;
+  *)
+    # (3) off Windows the resume startup is a no-op.
+    ( unset SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT
+      bootstrap_materialized_resume_startup "$root" "${TMPDIR:-/tmp}/unused"
+      [ -z "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}" ] ) || fail "non-Windows resume startup is not a no-op"
+    checks=$((checks + 1))
+    ;;
+esac
+echo "PASS — $checks checks (resume dispatch ordering, receipt handling)"

@@ -1,0 +1,336 @@
+# ARM32 kernel runtime array / bytes / dict shims (pure Simple).
+#
+# Codegen-called runtime entry points the arm32 kernel closure references but
+# the arm32 boot C runtime does not define:
+#   rt_array_copy rt_array_data_ptr rt_array_fill_span rt_array_get_text
+#   rt_array_is_byte_packed rt_array_new_with_cap_u64 rt_array_repeat
+#   rt_array_set_text rt_byte_array_new_len rt_bytes_from_raw rt_bytes_to_text
+#   rt_collection_remove rt_dict_new rt_typed_bytes_u8_data_at
+#   rt_typed_words_u64_at rt_typed_words_u64_push rt_typed_words_u64_set
+#
+# Layouts are those of
+# examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c:
+#   RuntimeValue is a 32-bit word: int = v << 3, heap = ptr | 1, nil = 3,
+#   true = 11, false = 19.
+#   HeapHeader {u32 type; u32 size}; HEAP_STRING = 1, HEAP_ARRAY = 2
+#   RuntimeArray {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16}, items
+#   INLINE 4-byte tagged words (no items pointer, no byte-packed form).
+#   RuntimeString {HeapHeader 8; u32 len @8; data[len] @12; NUL}.
+# On arm32 every `i64` below is a 32-bit carrier (codegen/llvm/backend_core.rs
+# runtime_int_type: pointer_width() == 32 -> i32; the LLVM backend lowers
+# RuntimeValue / params / locals as i32), so nothing here is 64-bit: the
+# `u64` typed-words entry points keep one 32-bit tagged slot per element
+# (ENCODE_INT payload: 29 significant bits), exactly like the existing C
+# rt_typed_words_u32_* siblings (set_text / u64_set return the tagged TRUE/FALSE
+# word like the C rt_typed_words_u32_set). Values above 2^28 are truncated; there is no
+# boxed-u64 heap kind on arm32.
+#
+# Memory is reached only through the raw rt_mmio_* accessors the arm32 boot C
+# already defines (raw address in, raw value out) and growth/allocation goes
+# through the C rt_array_* / rt_alloc, so the shim shares the C heap.
+# rt_dict_new has no dict implementation behind it on arm32 (the boot C
+# defines no rt_dict_* at all): it FAILS CLOSED (interrupts off, wfi halt) and
+# carries TODO(arm32-dict). That is a named gap, not a dictionary.
+# Exports never call other rt_* exports: a call to an rt_* name is typed ANY by
+# MIR lowering and would leak rt_value_truthy; they delegate to private
+# _a32_* helpers that return plain 1/0 or words.
+# arm64 twin: src/os/kernel/arch/arm64/runtime_value_shims.spl.
+
+@cfg(arm32)
+extern fn rt_mmio_read_u8(addr: i64) -> i64
+@cfg(arm32)
+extern fn rt_mmio_read_u32(addr: i64) -> i64
+@cfg(arm32)
+extern fn rt_mmio_write_u8(addr: i64, value: i64)
+@cfg(arm32)
+extern fn rt_mmio_write_u32(addr: i64, value: i64)
+@cfg(arm32)
+extern fn rt_alloc(size: i64) -> i64
+@cfg(arm32)
+extern fn rt_array_new(cap: i64) -> i64
+@cfg(arm32)
+extern fn rt_array_new_with_cap(cap: i64) -> i64
+@cfg(arm32)
+extern fn rt_array_push(array: i64, value: i64) -> i64
+@cfg(arm32)
+extern fn rt_array_get(array: i64, index: i64) -> i64
+@cfg(arm32)
+extern fn rt_array_set(array: i64, index: i64, value: i64) -> i64
+
+val A32_TAG_MASK: i64 = 7
+val A32_TAG_HEAP: i64 = 1
+val A32_NIL: i64 = 3
+val A32_TRUE: i64 = 11
+val A32_FALSE: i64 = 19
+val A32_HEAP_STRING: i64 = 1
+val A32_HEAP_ARRAY: i64 = 2
+val A32_ARRAY_ITEMS: i64 = 16
+val A32_ITEM_SIZE: i64 = 4
+val A32_MAX_ELEMS: i64 = 0x1000000
+
+# Object pointer when `v` is a heap ref of `heap_type`, else 0.
+@cfg(arm32)
+fn _a32_obj(v: i64, heap_type: i64) -> i64:
+    if (v & A32_TAG_MASK) != A32_TAG_HEAP:
+        return 0
+    val p = v & -8
+    if p == 0:
+        return 0
+    if rt_mmio_read_u32(p) != heap_type:
+        return 0
+    p
+
+@cfg(arm32)
+fn _a32_len(p: i64) -> i64:
+    rt_mmio_read_u32(p + 8)
+
+@cfg(arm32)
+fn _a32_slot(p: i64, i: i64) -> i64:
+    p + A32_ARRAY_ITEMS + i * A32_ITEM_SIZE
+
+# arm32_raw_or_encoded_int: int-tagged (low 3 bits 0) decodes, else raw.
+# A raw 8-aligned value is indistinguishable from an encoded int; the C twin
+# shares that ambiguity.
+@cfg(arm32)
+fn _a32_raw_or_encoded(v: i64) -> i64:
+    if (v & A32_TAG_MASK) == 0:
+        return v >> 3
+    v
+
+@cfg(arm32)
+fn _a32_set_ok(array: i64, index: i64, value: i64) -> i64:
+    if rt_array_set(array, index, value) == A32_NIL:
+        return 0
+    1
+
+@cfg(arm32)
+fn _a32_bool_word(ok: i64) -> i64:
+    if ok == 0:
+        return A32_FALSE
+    A32_TRUE
+
+# ---------------------------------------------------------------------------
+# Array helpers over the inline-items RuntimeArray.
+# ---------------------------------------------------------------------------
+
+@cfg(arm32)
+@export("C")
+fn rt_array_data_ptr(array: i64) -> i64:
+    # Raw address of the first element slot (never tagged).
+    val p = _a32_obj(array, A32_HEAP_ARRAY)
+    if p == 0:
+        return 0
+    p + A32_ARRAY_ITEMS
+
+@cfg(arm32)
+@export("C")
+fn rt_array_is_byte_packed(array: i64) -> i64:
+    # arm32 RuntimeArray has no byte-packed representation.
+    0
+
+@cfg(arm32)
+@export("C")
+fn rt_array_fill_span(array: i64, offset: i64, count: i64, value: i64) -> i64:
+    val p = _a32_obj(array, A32_HEAP_ARRAY)
+    if p == 0 or offset < 0 or count < 0:
+        return -1
+    if count == 0:
+        return 0
+    if offset + count > _a32_len(p):
+        return -1
+    var i: i64 = 0
+    while i < count:
+        rt_mmio_write_u32(_a32_slot(p, offset + i), value)
+        i = i + 1
+    0
+
+@cfg(arm32)
+@export("C")
+fn rt_array_get_text(array: i64, index: i64) -> i64:
+    # [text] arrays share the generic RuntimeArray storage of tagged values.
+    rt_array_get(array, index)
+
+@cfg(arm32)
+@export("C")
+fn rt_array_set_text(array: i64, index: i64, value: i64) -> i64:
+    _a32_bool_word(_a32_set_ok(array, index, value))
+
+@cfg(arm32)
+@export("C")
+fn rt_array_new_with_cap_u64(cap: i64) -> i64:
+    var n = cap
+    if n < 0:
+        n = 0
+    if n > A32_MAX_ELEMS:
+        n = A32_MAX_ELEMS
+    rt_array_new_with_cap(n << 3)
+
+@cfg(arm32)
+@export("C")
+fn rt_array_copy(array: i64) -> i64:
+    val src = _a32_obj(array, A32_HEAP_ARRAY)
+    if src == 0:
+        return A32_NIL
+    val n = _a32_len(src)
+    var cap = rt_mmio_read_u32(src + 12)
+    if n > cap or cap > 0x100000:
+        return A32_NIL
+    if cap == 0:
+        cap = 1
+    var out = rt_array_new_with_cap(cap << 3)
+    if (out & A32_TAG_MASK) != A32_TAG_HEAP:
+        return A32_NIL
+    var i: i64 = 0
+    while i < n:
+        out = rt_array_push(out, rt_mmio_read_u32(_a32_slot(src, i)))
+        i = i + 1
+    out
+
+@cfg(arm32)
+@export("C")
+fn rt_array_repeat(value: i64, count: i64) -> i64:
+    # [value; count]: `value` arrives already TAGGED (MIR box_runtime_value), only
+    # `count` is RAW; the tagged value is pushed unchanged.
+    var n = count
+    if n < 0:
+        n = 0
+    if n > A32_MAX_ELEMS:
+        n = A32_MAX_ELEMS
+    var out = rt_array_new_with_cap(n << 3)
+    if (out & A32_TAG_MASK) != A32_TAG_HEAP:
+        return A32_NIL
+    var i: i64 = 0
+    while i < n:
+        out = rt_array_push(out, value)
+        i = i + 1
+    out
+
+@cfg(arm32)
+@export("C")
+fn rt_byte_array_new_len(len: i64) -> i64:
+    # len is RAW; every element is the encoded byte 0.
+    if len < 0 or len > A32_MAX_ELEMS:
+        return A32_NIL
+    var out = rt_array_new_with_cap(len << 3)
+    if (out & A32_TAG_MASK) != A32_TAG_HEAP:
+        return A32_NIL
+    var i: i64 = 0
+    while i < len:
+        out = rt_array_push(out, 0)
+        i = i + 1
+    out
+
+@cfg(arm32)
+@export("C")
+fn rt_bytes_from_raw(ptr: i64, len: i64) -> i64:
+    val base = ptr
+    val n = len
+    if base == 0 or n <= 0:
+        return rt_array_new(0)
+    var out = rt_array_new_with_cap(n << 3)
+    if (out & A32_TAG_MASK) != A32_TAG_HEAP:
+        return A32_NIL
+    var i: i64 = 0
+    while i < n:
+        out = rt_array_push(out, rt_mmio_read_u8(base + i) << 3)
+        i = i + 1
+    out
+
+@cfg(arm32)
+@export("C")
+fn rt_bytes_to_text(array: i64) -> i64:
+    # Builds a RuntimeString {type=1, size, len, data, NUL} directly (the C
+    # rt_string_new returns nil for the empty string).
+    val src = _a32_obj(array, A32_HEAP_ARRAY)
+    var n: i64 = 0
+    if src != 0:
+        n = _a32_len(src)
+    val total = 12 + n + 1
+    val raw = rt_alloc(total)
+    if (raw & A32_TAG_MASK) != A32_TAG_HEAP:
+        return A32_NIL
+    val s = raw & -8
+    rt_mmio_write_u32(s, A32_HEAP_STRING)
+    rt_mmio_write_u32(s + 4, total)
+    rt_mmio_write_u32(s + 8, n)
+    var i: i64 = 0
+    while i < n:
+        rt_mmio_write_u8(s + 12 + i, _a32_raw_or_encoded(rt_mmio_read_u32(_a32_slot(src, i))) & 255)
+        i = i + 1
+    rt_mmio_write_u8(s + 12 + n, 0)
+    s | A32_TAG_HEAP
+
+@cfg(arm32)
+@export("C")
+fn rt_collection_remove(receiver: i64, key: i64) -> i64:
+    # Arrays only (remove-at-index, shifting the tail down); dict / other -> nil.
+    val p = _a32_obj(receiver, A32_HEAP_ARRAY)
+    if p == 0:
+        return A32_NIL
+    val n = _a32_len(p)
+    val index = _a32_raw_or_encoded(key)
+    if index < 0 or index >= n:
+        return A32_NIL
+    val removed = rt_mmio_read_u32(_a32_slot(p, index))
+    var i = index
+    while i + 1 < n:
+        rt_mmio_write_u32(_a32_slot(p, i), rt_mmio_read_u32(_a32_slot(p, i + 1)))
+        i = i + 1
+    rt_mmio_write_u32(_a32_slot(p, n - 1), A32_NIL)
+    rt_mmio_write_u32(p + 8, n - 1)
+    removed
+
+@cfg(arm32)
+@export("C")
+fn rt_dict_new() -> i64:
+    # TODO(arm32-dict): no dict heap kind or rt_dict_get/set/len exist on arm32
+    # (only this constructor is referenced by the kernel closure, so nothing can
+    # use a dict). Fail closed: halt here instead of handing back a nil that
+    # would silently corrupt the first dict operation. Implement a real dict
+    # (arm32 RuntimeDict + rt_dict_* family) if a caller ever needs one.
+    use os.kernel.arch.arm32.cpu.{cpsid_if, wfi}
+    cpsid_if()
+    while true:
+        wfi()
+    A32_NIL
+
+# ---------------------------------------------------------------------------
+# Typed byte / word views over the same inline-items RuntimeArray.
+# ---------------------------------------------------------------------------
+
+@cfg(arm32)
+@export("C")
+fn rt_typed_bytes_u8_data_at(data: i64, index: i64) -> i64:
+    # Bit 0 is the MIR preheader layout tag: set = 4-byte tagged slots,
+    # clear = byte-packed.
+    val base = data & -2
+    if base == 0 or index < 0:
+        return 0
+    if (data & 1) != 0:
+        return _a32_raw_or_encoded(rt_mmio_read_u32(base + index * A32_ITEM_SIZE)) & 255
+    rt_mmio_read_u8(base + index)
+
+@cfg(arm32)
+@export("C")
+fn rt_typed_words_u64_at(array: i64, index: i64) -> i64:
+    # Index is tagged (like rt_array_get); out of range / not an array -> 0.
+    val p = _a32_obj(array, A32_HEAP_ARRAY)
+    if p == 0:
+        return 0
+    val i = index >> 3
+    if (index & A32_TAG_MASK) != 0 or i < 0 or i >= _a32_len(p):
+        return 0
+    rt_mmio_read_u32(_a32_slot(p, i))
+
+@cfg(arm32)
+@export("C")
+fn rt_typed_words_u64_push(array: i64, value: i64) -> i64:
+    # Twin of the C rt_typed_words_u32_push/_set pair (push tags, set stores as-is).
+    # Push-return ABI: returns the possibly moved header. One 32-bit slot per
+    # word (29-bit payload), as rt_typed_words_u32_push.
+    rt_array_push(array, _a32_raw_or_encoded(value) << 3)
+
+@cfg(arm32)
+@export("C")
+fn rt_typed_words_u64_set(array: i64, index: i64, value: i64) -> i64:
+    _a32_bool_word(_a32_set_ok(array, index, value))

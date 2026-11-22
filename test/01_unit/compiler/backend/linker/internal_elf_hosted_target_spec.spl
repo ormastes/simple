@@ -9,8 +9,8 @@
 # receipt classifies it as UnsupportedFeature, not ResourceFailure.
 use compiler.backend.linker.internal_elf_hosted_target.{internal_elf_hosted_target_v1, internal_elf_hosted_target_sysroot_v1}
 use compiler.backend.linker.reloc_engine.{RelocArch}
-use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC,
-    ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_PIE,
+    ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
 use compiler.backend.linker.link_engine_external.{classify_internal_error}
 use std.common.linker.link_receipt_v1.{LinkOutcomeV1}
 
@@ -20,7 +20,7 @@ fn target_err(os: text, arch: text, host_os: text, host_arch: text) -> text:
         return ""
     r.unwrap_err()
 
-fn rv64_dynamic_err(mode: i64) -> text:
+fn rv64_mode_err(mode: i64) -> text:
     val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
         target: RelocArch.Riscv64, mode: mode, interp: "/lib/ld-linux-riscv64-lp64d.so.1")
     val r = elf_link(req)
@@ -71,8 +71,9 @@ describe "internal ELF hosted target admission":
         val linux = internal_elf_hosted_target_sysroot_v1("linux", "aarch64", "linux", "x86_64", "/sr")
         expect(linux.unwrap_err()).to_contain("unsupported cross-host link")
 
-    it "has the engine refuse a hosted RV64 link as an unsupported feature":
-        val exec_err = rv64_dynamic_err(ELF_LINK_DYNAMIC_EXEC)
-        expect(exec_err).to_contain("unsupported RISC-V output mode")
-        expect(rv64_dynamic_err(ELF_LINK_DYNAMIC_PIE)).to_contain("unsupported RISC-V output mode")
-        expect(classify_internal_error(exec_err) == LinkOutcomeV1.UnsupportedFeature).to_equal(true)
+    it "has the engine refuse an unimplemented RV64 output mode as an unsupported feature":
+        val pie_err = rv64_mode_err(ELF_LINK_STATIC_PIE)
+        expect(pie_err).to_contain("unsupported RISC-V output mode")
+        expect(classify_internal_error(pie_err) == LinkOutcomeV1.UnsupportedFeature).to_equal(true)
+        expect(rv64_mode_err(ELF_LINK_DYNAMIC_EXEC).contains("unsupported RISC-V output mode")).to_equal(false)
+        expect(rv64_mode_err(ELF_LINK_DYNAMIC_PIE).contains("unsupported RISC-V output mode")).to_equal(false)

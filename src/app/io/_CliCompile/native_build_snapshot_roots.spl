@@ -1,5 +1,6 @@
 # Source roots shared by positional native-build snapshot selection and lookup.
 use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 pub fn native_build_snapshot_source_roots_v1(
     entry_relative: text, source_dirs: [text]
@@ -59,13 +60,21 @@ pub fn native_build_selected_snapshot_source_roots_v1(root: text,
     if roots.len() == 0: return []
     if source_dirs.len() == 0:
         roots = native_build_snapshot_drop_missing_default_roots_v1(root, roots)
-    elif roots.contains("src/app") and not roots.contains("src/plugins") and is_dir(root + "/src/plugins"):
-        # src/app imports plugins.*, so an explicit cut holding src/app must
-        # freeze src/plugins too. The sanctioned Stage 3 passes five --source
-        # roots without src/plugins and reaches it only
-        # through the entry closure; without this its SCV snapshot could not
-        # resolve plugins.* and the HIR pool never admitted. Publisher and
-        # consumer both build their cut here, so they stay identical.
-        roots = roots.push("src/plugins")
+    elif roots.contains("src/app"):
+        # src/app imports plugins.* in full CLI builds (and cli/main.spl +
+        # os/main.spl reach os.*), so an explicit cut holding src/app freezes
+        # those companion roots unless Stage 3 / host-only / kernel bootstrap
+        # overrides them. Publisher and consumer both build their cut here, so
+        # signed request identity stays identical.
+        val skip_auto_plugins = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            entry_relative == "src/app/cli/bootstrap_main.spl" or
+            roots.contains("src/compositions/backends_host_only") or
+            roots.contains("src/compositions/kernel_llvm") or
+            roots.contains("src/compositions/kernel_llvm_cranelift")
+        if not skip_auto_plugins and not roots.contains("src/plugins") and is_dir(root + "/src/plugins"):
+            roots = roots.push("src/plugins")
+        if (entry_relative == "src/app/cli/main.spl" or entry_relative == "src/app/os/main.spl") and
+                not roots.contains("src/os") and is_dir(root + "/src/os"):
+            roots = roots.push("src/os")
     if not roots.contains(entry_relative): roots = roots.push(entry_relative)
     roots

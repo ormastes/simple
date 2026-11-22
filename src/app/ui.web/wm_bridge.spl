@@ -441,24 +441,39 @@ fn _parse_window_id(s: text) -> u64:
         return 0u64
     return n as u64
 
+fn _wm_skip_ws_bytes(json: text, start: i64, json_len: i64) -> i64:
+    var i = start
+    while i < json_len:
+        val b = json.byte_at(i)
+        if b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8:
+            i = i + 1
+        else:
+            return i
+    i
+
 fn _extract_text_field(json: text, field: text) -> text?:
     val key = "\"{field}\":"
     val pos = json.find(key)
     if pos < 0:
-        return nil
-    val start = pos + key.len()
-    if start >= json.len():
-        return nil
-    val first_ch = json[start]
-    if first_ch != "\"":
-        return nil
+        return None
+    val json_len = json.byte_len()
+    val start = _wm_skip_ws_bytes(json, pos + key.byte_len(), json_len)
+    if start >= json_len:
+        return None
+    if json.byte_at(start) != 34u8:
+        return None
     val inner_start = start + 1
     var end = inner_start
-    while end < json.len() and json[end] != "\"":
-        if json[end] == "\\":
+    while end < json_len and json.byte_at(end) != 34u8:
+        if json.byte_at(end) == 92u8:
+            if end + 1 >= json_len:
+                return None
+            end = end + 2
+        else:
             end = end + 1
-        end = end + 1
-    return json.slice(inner_start, end)
+    if end >= json_len:
+        return None
+    return Some(json.slice(inner_start, end))
 
 fn _extract_i32_field(json: text, field: text) -> i32:
     val raw = _extract_scalar_field(json, field)
@@ -477,19 +492,20 @@ fn _extract_scalar_field(json: text, field: text) -> text?:
     val key = "\"{field}\":"
     val pos = json.find(key)
     if pos < 0:
-        return nil
-    val start = pos + key.len()
-    if start >= json.len():
-        return nil
-    if json[start] == "\"":
+        return None
+    val json_len = json.byte_len()
+    val start = _wm_skip_ws_bytes(json, pos + key.byte_len(), json_len)
+    if start >= json_len:
+        return None
+    if json.byte_at(start) == 34u8:
         return _extract_text_field(json, field)
     var end = start
-    while end < json.len():
-        val ch = json[end]
-        if ch == "," or ch == "}" or ch == "]":
-            return json.slice(start, end).trim()
+    while end < json_len:
+        val b = json.byte_at(end)
+        if b == 44u8 or b == 125u8 or b == 93u8:
+            return Some(json.slice(start, end).trim())
         end = end + 1
-    return json.slice(start, json.byte_len()).trim()
+    return Some(json.slice(start, json_len).trim())
 
 fn _resolve_surface_id(session: UISession, payload_json: text) -> text:
     val direct = _extract_text_field(payload_json, "surface_id")

@@ -75,6 +75,8 @@ pub class NativeStagedCodegenStateV1:
     shard_queue: text
     shard_claimed_names: [text]
     module_objects: {text: text}
+    module_functions: {text: i64}
+    module_statics: {text: i64}
     # OutputFormat.Both: each emitted module's SMF object + driver-manifest
     # bytes (driver_build/smf_staged_parts_v1.spl), so the SMF half does not
     # re-read a MIR set this lane already released.
@@ -111,7 +113,7 @@ impl NativeStagedCodegenStateV1:
             witness_shadow_mismatch_lines: [],
             phase2_native_items_handled: {}, phase2_native_reuse_hits: 0,
             phase2_native_rejections: 0, shard_queue: "",
-            shard_claimed_names: [], module_objects: {},
+            shard_claimed_names: [], module_objects: {}, module_functions: {}, module_statics: {},
             smf_part_objects: smf_object_spool_begin_v1(smf_object_spool_dir_v1()), smf_part_manifests: {})
 
 # Modules of a batch that emitted no object: the batch size minus how many
@@ -147,10 +149,25 @@ pub fn native_staged_codegen_batch_parse_v1(raw: text) -> i64:
         index = index + 1
     value
 
+# Scale default staged batch with requested --threads (`SIMPLE_NATIVE_BUILD_THREADS`)
+# when `SIMPLE_NATIVE_STAGED_CODEGEN_BATCH` is unset so multi-core codegen pools
+# stay saturated across full worker waves instead of draining every 8 modules.
+# reason: raw env string and requested thread count for staged batch sizing
+@allow(primitive_api)
+pub fn native_staged_codegen_batch_for_threads_v1(raw_batch: text, requested_threads: i64) -> i64:
+    val parsed = native_staged_codegen_batch_parse_v1(raw_batch)
+    if raw_batch != "" or parsed <= 0 or requested_threads <= 2:
+        return parsed
+    val scaled = requested_threads * 4
+    if scaled <= NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1:
+        return NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1
+    if scaled > 64: 64 else: scaled
+
 # Batch size for this process: 0 disables staging, -1 is a malformed knob.
 pub fn native_staged_codegen_batch_size_v1() -> i64:
-    native_staged_codegen_batch_parse_v1(
-        env_get_nullable(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? "")
+    val raw = env_get_nullable(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? ""
+    val threads = (env_get_nullable("SIMPLE_NATIVE_BUILD_THREADS") ?? "").trim().to_i64() ?? 0
+    native_staged_codegen_batch_for_threads_v1(raw, threads)
 
 # A batch is flushed only when it is full AND more modules remain to be
 # lowered. A successful tail stays non-empty for the ordinary aot_compile
@@ -164,3 +181,15 @@ pub fn native_staged_codegen_flush_due_v1(pending: i64, batch_size: i64,
 pub fn native_staged_codegen_recovery_flush_due_v1(
         active: bool, go_to_end: bool, pending: i64, failed_modules: i64) -> bool:
     active and not go_to_end and pending > 0 and failed_modules > 0
+
+# The initializer object receipt (cache/initializer_object_capture_v1.spl) is
+# held only in memory and has one reader, the in-process link join
+# (cache/initializer_link_capture_v1.spl). A MIR shard worker never links: each
+# compile_to_native it runs is a flushing batch that returns before the link,
+# and the link child lowers nothing, so it cannot rebuild a receipt. The capture
+# is dead work there and costs about 5x the module's MIR in scratch per module
+# (doc/08_tracking/bug/native_build_cache_save_memory_blowup_2026-11-21.md).
+# reason: raw staged-state scalars (flushing flag, shard ledger queue path)
+@allow(primitive_api)
+pub fn native_staged_initializer_capture_dead_v1(flushing: bool, shard_queue: text) -> bool:
+    flushing and shard_queue != ""

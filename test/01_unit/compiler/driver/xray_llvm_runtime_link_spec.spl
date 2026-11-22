@@ -1,6 +1,6 @@
 """Linux LLVM runtime link planning; no profile admission is inferred."""
 use std.spec.*
-use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_libraries_v1, xray_llvm_adapter_flags_v1, xray_llvm_runtime_query_args_v1, xray_llvm_runtime_archive_path_valid_v1, xray_llvm_runtime_arch_name_v1, xray_llvm_runtime_arch_path_valid_v1, xray_llvm_resident_args_v1, xray_llvm_semantic_link_flags_v1}
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_libraries_v1, xray_llvm_link_libraries_for_target_v1, xray_llvm_adapter_flags_v1, xray_llvm_runtime_query_args_v1, xray_llvm_runtime_archive_path_valid_v1, xray_llvm_runtime_arch_name_v1, xray_llvm_runtime_arch_path_valid_v1, xray_llvm_resident_args_v1, xray_llvm_semantic_link_flags_v1, xray_llvm_semantic_link_flags_for_target_v1}
 
 describe "LLVM XRay executable runtime link":
     it "does not inspect an unresolved target for Off or native backend":
@@ -19,9 +19,16 @@ describe "LLVM XRay executable runtime link":
     it "refuses shared LLVM Linux images because the adapter only accepts main-image IDs":
         expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-unknown-linux-gnu", true).is_err()).to_equal(true)
 
-    it "leaves other platform link owners unchanged":
+    it "selects Darwin LLVM executable targets and omits ELF-only -lrt and linker flags":
+        expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-apple-darwin", false).unwrap()).to_equal(true)
+        expect(xray_llvm_link_needed_v1(true, "llvm", "x86_64-apple-darwin", false).unwrap()).to_equal(true)
+        expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-apple-darwin", true).is_err()).to_equal(true)
+        val darwin_libs = xray_llvm_link_libraries_for_target_v1(["custom"], "aarch64-apple-darwin")
+        expect(darwin_libs).to_equal(["custom"])
+        expect(xray_llvm_semantic_link_flags_for_target_v1(["-Wl,-dead_strip"], "aarch64-apple-darwin").unwrap()).to_equal(["-Wl,-dead_strip"])
+
+    it "leaves Windows flag-guard link owner unchanged":
         expect(xray_llvm_link_needed_v1(true, "llvm", "x86_64-pc-windows-msvc", false).unwrap()).to_equal(false)
-        expect(xray_llvm_link_needed_v1(true, "llvm", "aarch64-apple-darwin", false).unwrap()).to_equal(false)
 
     it "compiles the adapter without instrumentation and without SIMD or outlined atomics":
         val arm = xray_llvm_adapter_flags_v1("aarch64-unknown-linux-gnu")

@@ -545,8 +545,13 @@ val TEXTAREA_CONTENT_INTERCEPT_PX: i32 = 17
 # The numbers above are the Helvetica / Menlo ones. They are FACE metrics, not
 # browser constants: Chrome's rule (LayoutTextControl) is
 #
-#   <input size=N>     content = (N - 1) * round(avgCharWidth) + round(maxCharWidth)
-#   <textarea cols=N>  content = ceil(N * avgCharWidth) + scrollbar(15)
+#   <input size=N>     content = ceil((N - 1) * c + round(maxCharWidth))
+#   <textarea cols=N>  content = ceil(N * c) + scrollbar(15)
+#
+# where c = max(round(avgCharWidth), avgCharWidth): a column is the rounded
+# average when that rounds UP and the exact one when it rounds down (measured
+# at 12 / 13.3333 / 16 / 20 px, k = 1 and 4; 16 px `<input>` 215, `<textarea>`
+# 221; see form_control_width_dpr_chrome159_spec).
 #
 # with `avgCharWidth` the face's OS/2 xAvgCharWidth and `maxCharWidth` its
 # bounding-box width, both at the control's font size. On Linux Chrome's
@@ -605,12 +610,24 @@ fn form_control_content_w_for_face(tag: text, face_identity: text, cols: i32, sc
     val den = FORM_CONTROL_FACE_UNITS_PER_EM * 1000
     if tag == "textarea":
         if face_identity.contains("DejaVuSansMono"):
-            return (((cols as i64) * units * DEJAVU_MONO_AVG_CHAR_UNITS + den - 1) / den) as i32 + TEXTAREA_SCROLLBAR_PX * k
+            # Columns max(round(a), a) wide, as for `<input>` below: 16 px is
+            # a = 9.633 -> 10 a column (215, not ceil(192.7) = 193).
+            val mono_exact = units * DEJAVU_MONO_AVG_CHAR_UNITS
+            val mono_avg = (mono_exact + den / 2) / den
+            if mono_avg * den >= mono_exact:
+                return ((cols as i64) * mono_avg) as i32 + TEXTAREA_SCROLLBAR_PX * k
+            return (((cols as i64) * mono_exact + den - 1) / den) as i32 + TEXTAREA_SCROLLBAR_PX * k
         return (cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale) * k
     if face_identity.contains("LiberationSans"):
-        val avg = ((units * LIBERATION_SANS_AVG_CHAR_UNITS + den / 2) / den) as i32
-        val widest = ((units * LIBERATION_SANS_MAX_CHAR_UNITS + den / 2) / den) as i32
-        return (cols - 1) * avg + widest
+        # Chrome 159 columns are max(round(a), a) wide, the sum ceiled: a =
+        # 7.728 rounds UP to 8 (13.3333 px, `8N + 17`), but a = 9.273 (16 px)
+        # stays fractional, 19 x 9.273 + 30 = 206.2 -> 207 (box 215, not 209).
+        val avg_exact = units * LIBERATION_SANS_AVG_CHAR_UNITS
+        val avg = (avg_exact + den / 2) / den
+        val widest = (units * LIBERATION_SANS_MAX_CHAR_UNITS + den / 2) / den
+        if avg * den >= avg_exact:
+            return ((cols as i64 - 1) * avg + widest) as i32
+        return (((cols as i64 - 1) * avg_exact + widest * den + den - 1) / den) as i32
     (cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale) * k
 
 fn form_control_cols(node: HNode) -> i32:
@@ -1183,7 +1200,9 @@ fn text_first_line_dx_at(table: [i32], i: i32) -> i32:
 # Every reader of `first_line_dx` / `line_boxes` -- both raster loops, the
 # Draw IR commands, the geometry probe and the CPU layout execution port --
 # goes through these two functions.
-fn text_line_box_dx(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32) -> i32:
+# reason: pre-existing packed line-box coordinate/index decoder shared across browser layout renderer submodules and specs
+# @allow(primitive_api)
+pub fn text_line_box_dx(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32) -> i32:
     if i >= 0 and i < line_boxes.len() and line_boxes[i].len() > 0:
         val pairs = line_boxes[i]
         if line >= 0 and line * 2 + 1 < pairs.len():
@@ -1191,7 +1210,9 @@ fn text_line_box_dx(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32) -> 
         return 0
     if line == 0: text_first_line_dx_at(first_dx, i) else: 0
 
-fn text_line_box_w(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32, box_w: i32) -> i32:
+# reason: pre-existing packed line-box width/index decoder shared across browser layout renderer submodules and specs
+# @allow(primitive_api)
+pub fn text_line_box_w(first_dx: [i32], line_boxes: [[i32]], i: i32, line: i32, box_w: i32) -> i32:
     if i >= 0 and i < line_boxes.len() and line_boxes[i].len() > 0:
         val pairs = line_boxes[i]
         if line >= 0 and line * 2 + 1 < pairs.len():

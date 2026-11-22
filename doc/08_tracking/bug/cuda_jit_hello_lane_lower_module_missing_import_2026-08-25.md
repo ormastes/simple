@@ -90,3 +90,29 @@ Verdict unchanged: SUPERSEDED as far as a CUDA-less host can show. The only
 remaining closure action is the live-device dispatch re-run
 (`SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1` on a CUDA host) with the owning GPU
 lane. No code change in this lane.
+
+## 2026-11-22 live-device attempt on a CUDA host (lane work/cuda-compiler-bugs) — BLOCKED, stays verification-pending
+
+Host: Linux aarch64 with a live NVIDIA GB10, base `origin/release/1.0.0`
+`3c2e4556b6d`. Three paths were checked; none could run the live-device case.
+
+1. **Seed interpreter** (the producer the original repro used).
+   `SIMPLE_GPU_TEST=1 SIMPLE_CUDA_TEST=1 seed-tip-20261115/simple test test/03_system/gpu_lane/cuda_jit_hello_spec.spl --mode=interpreter --no-cache`
+   (seed sha256 prefix `5ef615e2b60a80fc`, 8 GiB scope) returned rc=1 before any
+   example ran. Error: `parse: src/lib/common/types.spl: expected As, found
+   Newline at line 23` (`unit ByteSize: i64`). The seed predates current syntax.
+2. **Native fixture** (prepare -> run_program -> lane_log_records -> sentinel)
+   with the integ25 Stage 2 producer (`ef46f0d2...`). This closure includes the
+   frontend, HIR/MIR lowering and CudaBackend. Two smaller compiler closures
+   (504 and 514 modules) were already OOM-killed by the lane's mandatory 8 GiB
+   cgroup cap during whole-program MIR, so this build was not attempted.
+3. **Runtime link** (observed on the sibling `processing_cuda_fill_probe`). A
+   Stage 2 binary linked against `stage2-runtime-authority` never opens
+   libcuda: `rt_cuda_init` fails with `cuda-init-failed`. This belongs to the
+   CUDA runtime/extern lane (nocuda stub), not this compiler record.
+
+No compiler-side evidence contradicts the 2026-11-10/11 SUPERSEDED verdict.
+
+Unblock: either of these.
+- A seed or full CLI new enough to parse current source.
+- Native builds above 8 GiB, plus a runtime whose `rt_cuda_init` dlopens libcuda.

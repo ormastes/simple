@@ -18,7 +18,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
-use std.io_runtime.{file_exists, file_read, list_dir, is_dir}
+use std.io_runtime.{file_exists, file_read, list_dir, is_dir, dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.driver.cache.action_key.{interface_digest_of}
@@ -28,11 +28,11 @@ use compiler.driver.driver_build.incremental.{cache_key_frame}
 val LIBRARY_UNIT_SOURCE_DIGEST_DOMAIN_V1 = "simple/library-unit-source/v1"
 val LIBRARY_UNIT_IFACE_FORMAT_V1 = "simple/library-unit-iface/v1"
 
-struct LibraryUnitModuleIfaceV1:
+pub struct LibraryUnitModuleIfaceV1:
     module: text    # unit-relative source path
     digest: text    # body-free interface digest of that module
 
-struct LibraryUnitIfaceV1:
+pub struct LibraryUnitIfaceV1:
     unit: text
     modules: [LibraryUnitModuleIfaceV1]
     digest: text    # library_unit_iface_digest_v1(modules)
@@ -147,3 +147,257 @@ pub fn library_unit_iface_read_v1(path: text) -> Result<LibraryUnitIfaceV1, text
     if not file_exists(path):
         return Err("iface.sdn: {path} does not exist")
     library_unit_iface_decode_v1(file_read(path))
+
+pub struct LibraryUnitModuleSkeletonV1:
+    module: text
+    skeleton: text
+
+pub struct LibraryUnitIfaceBuildRequestV1:
+    unit: text
+    root: text
+    rel_files: [text]
+
+pub struct LibraryUnitIfaceBuildResultV1:
+    iface: LibraryUnitIfaceV1
+    source_digest: text
+    skeletons: [LibraryUnitModuleSkeletonV1]
+
+pub struct LibraryUnitIfaceMaterializedDirV1:
+    root_dir: text
+    file_count: i64
+
+fn _iface_leading_spaces_v1(line: text) -> i64:
+    var i: i64 = 0
+    val n = line.byte_len()
+    while i < n and line.byte_at(i) == 32:
+        i = i + 1
+    i
+
+fn _iface_paren_delta_v1(line: text) -> i64:
+    var delta: i64 = 0
+    var quote: i64 = 0
+    var i: i64 = 0
+    val n = line.byte_len()
+    while i < n:
+        val b = line.byte_at(i) as i64
+        if quote != 0:
+            if b == 92:
+                i = i + 1
+            elif b == quote:
+                quote = 0
+        elif b == 34 or b == 39:
+            quote = b
+        elif b == 35:
+            return delta
+        elif b == 40:
+            delta = delta + 1
+        elif b == 41:
+            delta = delta - 1
+        i = i + 1
+    delta
+
+fn _iface_is_ordinary_fn_header_v1(trimmed: text) -> bool:
+    if trimmed.starts_with("extern ") or trimmed.starts_with("pub extern "):
+        return false
+    if trimmed.starts_with("const fn ") or trimmed.starts_with("pub const fn "):
+        return false
+    (trimmed.starts_with("pub async fn ") or trimmed.starts_with("pub static fn ") or
+        trimmed.starts_with("pub fn ") or trimmed.starts_with("static fn ") or
+        trimmed.starts_with("async fn ") or trimmed.starts_with("fn ") or
+        trimmed.starts_with("pub me ") or trimmed.starts_with("me "))
+
+fn _iface_sig_has_generic_params_v1(sig_text: text) -> bool:
+    val open_paren = sig_text.index_of("(")
+    if open_paren <= 0:
+        return false
+    val head = sig_text.substring(0, open_paren)
+    head.contains("<") and head.contains(">")
+
+fn _iface_owner_is_generic_header_v1(trimmed: text) -> bool:
+    if (trimmed.starts_with("class ") or trimmed.starts_with("pub class ") or
+            trimmed.starts_with("struct ") or trimmed.starts_with("pub struct ") or
+            trimmed.starts_with("trait ") or trimmed.starts_with("pub trait ") or
+            trimmed.starts_with("impl ") or trimmed.starts_with("impl<")):
+        val colon = trimmed.index_of(":")
+        val prefix = if colon > 0: trimmed.substring(0, colon) else: trimmed
+        return prefix.contains("<") and prefix.contains(">")
+    false
+
+fn _iface_strip_line_comment_v1(line: text) -> text:
+    val n = line.byte_len()
+    var i = 0
+    var quote: i64 = 0
+    while i < n:
+        val b = line.byte_at(i)
+        if quote != 0:
+            if b == 92 and i + 1 < n:
+                i = i + 2
+                continue
+            if b == quote:
+                quote = 0
+            i = i + 1
+            continue
+        if b == 34 or b == 39:
+            quote = b
+            i = i + 1
+            continue
+        if b == 35:
+            if i + 1 < n and line.byte_at(i + 1) == 91 and line.substring(0, i).trim() == "":
+                i = i + 2
+                continue
+            return line.substring(0, i)
+        i = i + 1
+    line
+
+fn _iface_next_triple_quote_state_v1(line: text, start_in_tq: bool) -> bool:
+    val n = line.byte_len()
+    var i = 0
+    var in_tq = start_in_tq
+    while i < n:
+        val b = line.byte_at(i)
+        if in_tq:
+            if b == 92 and i + 1 < n:
+                i = i + 2
+                continue
+            if b == 34 and i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                in_tq = false
+                i = i + 3
+                continue
+            i = i + 1
+            continue
+        if b == 34 and i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+            in_tq = true
+            i = i + 3
+            continue
+        if b == 34 or b == 39:
+            val q = b
+            i = i + 1
+            while i < n:
+                val qb = line.byte_at(i)
+                if qb == 92 and i + 1 < n:
+                    i = i + 2
+                    continue
+                if qb == q:
+                    i = i + 1
+                    break
+                i = i + 1
+            continue
+        if b == 35:
+            break
+        i = i + 1
+    in_tq
+
+# Produce a parseable, body-stripped Simple interface source where ordinary
+# fn/method bodies are replaced by `panic("library-unit-iface-stub")`, while
+# preserving struct/class fields, enum variants, constants, signatures/defaults,
+# and generic/inline/const bodies (matching hir_function_keeps_body_v1).
+fn _library_unit_iface_source_skeleton_v1(source: text) -> text:
+    val lines = source.split("\n")
+    var out: [text] = []
+    var skipping_body_indent: i64 = -1
+    var capturing_sig = false
+    var sig_indent: i64 = 0
+    var sig_paren_depth: i64 = 0
+    var sig_accum = ""
+    var keep_next_fn_body = false
+    var generic_owner_indent: i64 = -1
+    var in_triple_quote = false
+    for line in lines:
+        val trimmed = line.trim()
+        if skipping_body_indent >= 0:
+            if in_triple_quote:
+                in_triple_quote = _iface_next_triple_quote_state_v1(line, true)
+                continue
+            if trimmed == "" or trimmed.starts_with("#"):
+                continue
+            val indent = _iface_leading_spaces_v1(line)
+            if indent > skipping_body_indent:
+                in_triple_quote = _iface_next_triple_quote_state_v1(line, false)
+                continue
+            skipping_body_indent = -1
+        if in_triple_quote:
+            out.push(line)
+            in_triple_quote = _iface_next_triple_quote_state_v1(line, true)
+            continue
+        val code_trimmed = _iface_strip_line_comment_v1(line).trim()
+        if capturing_sig:
+            out.push(line)
+            in_triple_quote = _iface_next_triple_quote_state_v1(line, false)
+            sig_accum = sig_accum + " " + code_trimmed
+            sig_paren_depth = sig_paren_depth + _iface_paren_delta_v1(code_trimmed)
+            if sig_paren_depth <= 0:
+                capturing_sig = false
+                val keep_body = keep_next_fn_body or _iface_sig_has_generic_params_v1(sig_accum) or generic_owner_indent >= 0
+                keep_next_fn_body = false
+                if code_trimmed.ends_with(":") and not keep_body:
+                    out.push(" ".repeat(sig_indent + 4) + "panic(\"library-unit-iface-stub\")")
+                    skipping_body_indent = sig_indent
+            continue
+        if code_trimmed != "":
+            val cur_indent = _iface_leading_spaces_v1(line)
+            if generic_owner_indent >= 0 and cur_indent <= generic_owner_indent:
+                generic_owner_indent = -1
+            if _iface_owner_is_generic_header_v1(code_trimmed):
+                generic_owner_indent = cur_indent
+            if code_trimmed.starts_with("@inline") or code_trimmed.starts_with("@always_inline"):
+                keep_next_fn_body = true
+            elif _iface_is_ordinary_fn_header_v1(code_trimmed):
+                val pdelta = _iface_paren_delta_v1(code_trimmed)
+                if pdelta > 0:
+                    capturing_sig = true
+                    sig_indent = cur_indent
+                    sig_paren_depth = pdelta
+                    sig_accum = code_trimmed
+                    out.push(line)
+                    in_triple_quote = _iface_next_triple_quote_state_v1(line, false)
+                    continue
+                val keep_body = keep_next_fn_body or _iface_sig_has_generic_params_v1(code_trimmed) or generic_owner_indent >= 0
+                keep_next_fn_body = false
+                out.push(line)
+                in_triple_quote = _iface_next_triple_quote_state_v1(line, false)
+                if code_trimmed.ends_with(":") and not keep_body:
+                    out.push(" ".repeat(cur_indent + 4) + "panic(\"library-unit-iface-stub\")")
+                    skipping_body_indent = cur_indent
+                continue
+            elif not code_trimmed.starts_with("@"):
+                keep_next_fn_body = false
+        out.push(line)
+        in_triple_quote = _iface_next_triple_quote_state_v1(line, false)
+    out.join("\n")
+
+pub fn library_unit_iface_skeleton_of_module_v1(module_rel: text, source: text) -> LibraryUnitModuleSkeletonV1:
+    LibraryUnitModuleSkeletonV1(module: module_rel, skeleton: _library_unit_iface_source_skeleton_v1(source))
+
+pub fn library_unit_iface_build_resolved_v1(req: LibraryUnitIfaceBuildRequestV1) -> LibraryUnitIfaceBuildResultV1:
+    var modules: [LibraryUnitModuleIfaceV1] = []
+    var entries: [(text, text)] = []
+    var skeletons: [LibraryUnitModuleSkeletonV1] = []
+    val ordered = if req.rel_files.len() > 0:
+        canonical_identity_sort_texts(req.rel_files)
+    else:
+        library_unit_source_files_v1(req.root)
+    for rel in ordered:
+        val source = file_read("{req.root}/{rel}")
+        entries.push((rel, source))
+        modules.push(LibraryUnitModuleIfaceV1(module: rel, digest: library_unit_module_iface_digest_v1(source)))
+        skeletons.push(LibraryUnitModuleSkeletonV1(module: rel, skeleton: _library_unit_iface_source_skeleton_v1(source)))
+    val iface = LibraryUnitIfaceV1(unit: req.unit, modules: modules, digest: library_unit_iface_digest_v1(modules))
+    LibraryUnitIfaceBuildResultV1(
+        iface: iface,
+        source_digest: library_unit_source_digest_v1(entries),
+        skeletons: skeletons)
+
+pub fn library_unit_iface_materialize_skeletons_v1(target_dir: text,
+        skeletons: [LibraryUnitModuleSkeletonV1]) -> Result<LibraryUnitIfaceMaterializedDirV1, text>:
+    if not dir_create_all(target_dir):
+        return Err("iface-skeletons: cannot create directory {target_dir}")
+    for item in skeletons:
+        val full_path = "{target_dir}/{item.module}"
+        val slash = full_path.rfind("/")
+        if slash > 0:
+            val parent = full_path.substring(0, slash)
+            if not dir_create_all(parent):
+                return Err("iface-skeletons: cannot create parent directory {parent}")
+        if not file_atomic_write(full_path, item.skeleton):
+            return Err("iface-skeletons: cannot write {full_path}")
+    Ok(LibraryUnitIfaceMaterializedDirV1(root_dir: target_dir, file_count: skeletons.len()))

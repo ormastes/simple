@@ -1,6 +1,6 @@
 # Static ELF engine: no PT_PHDR on static executables; x86 .text padding is 0x00, not 0xCC
 
-- **Status:** open
+- **Status:** fixed (2026-11-22)
 - **Date:** 2026-11-19
 - **Found by:** ssos lane, SimpleOS i686 user link compared with ld.lld 18.1.3
 
@@ -136,3 +136,8 @@ executable sections in place of the per-byte store loop. Timing for 16 MiB on th
 `bin/simple.exe` seed, two runs each: per-byte loop 118/119 ms, `elf_u8_filled` 22/25 ms
 (about 5x faster). Spec: `elf_byte_buffers_fill_spec` covers lengths 0..4097, including
 non-powers of two.
+
+## Resolution Finalization (2026-11-22)
+
+- `PT_PHDR` + leading `PF_R` header `PT_LOAD`, bulk `0xCC` `int3` executable padding on x86/x86_64, `GLOBAL DEFAULT` `__bss_start`, `.riscv.attributes` + `PT_RISCV_ATTRIBUTES`, `.ARM.exidx` + `PT_ARM_EXIDX`, `.ARM.attributes`, and `.comment` preservation are all landed in `src/compiler/70.backend/linker/elf/`.
+- Closed remaining item 4 in `src/compiler/70.backend/linker/elf/elf_static_link.spl` (`elf_build_symtab`): under `--gc-sections`, undefined global/synthetic symbols whose only references were in GC-discarded sections (such as `__udivdi3` in `arm32_main32.o`) are now omitted from `.symtab`, matching `ld.lld`, and asserted in `test/01_unit/compiler/backend/linker/simpleos_user32_link_spec.spl`.

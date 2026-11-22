@@ -11,8 +11,8 @@
 # returns to 0 when the write lands, so a spec can prove the reclaim. The spool
 # has exactly one owner (the driver's NativeStagedCodegenStateV1, or a shard
 # worker process); updates are value transitions, no locks, no shared counter.
-use std.io_runtime.{file_write_bytes, file_read_bytes_result, file_delete, dir_create_all,
-    getpid, env_get_nullable}
+use std.io_runtime.{file_write_bytes, file_read_bytes_result, file_delete, dir_create,
+    dir_exists, dir_list_or_empty, dir_remove, getpid, env_get_nullable}
 
 pub struct SmfObjectSpoolV1:
     dir: text
@@ -37,23 +37,23 @@ pub fn smf_object_spool_has_v1(spool: SmfObjectSpoolV1, name: text) -> bool:
 # a name-derived stem never collides across workers sharing one directory.
 # Returns "" for a character with no escape (put then fails closed).
 pub fn smf_object_spool_file_name_v1(name: text) -> text:
-    var out = ""
+    var parts: [text] = []
     for ch in name.chars():
         if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-":
-            out = out + ch
+            parts.push(ch)
         elif ch == "_":
-            out = out + "__"
+            parts.push("__")
         elif ch == ".":
-            out = out + "_d"
+            parts.push("_d")
         elif ch == "/":
-            out = out + "_s"
+            parts.push("_s")
         elif ch == "\\":
-            out = out + "_b"
+            parts.push("_b")
         elif ch == ":":
-            out = out + "_c"
+            parts.push("_c")
         else:
             return ""
-    out
+    parts.join("")
 
 # Record one module's object. The bytes are written to the spool file and NOT
 # kept; on a write failure `error` is set (fail closed at assembly).
@@ -72,7 +72,7 @@ pub fn smf_object_spool_put_v1(spool: SmfObjectSpoolV1, name: text, bytes: [u8])
         out.error = "smf object spool cannot name part: {name}"
         out.live_bytes = out.live_bytes - size
         return out
-    dir_create_all(out.dir)
+    val _mkdir = dir_create(out.dir, true)
     val target = "{out.dir}/{stem}.o"
     if out.paths.contains_key(name):
         out.spooled_bytes = out.spooled_bytes - out.sizes[name]
@@ -123,6 +123,10 @@ pub fn smf_object_spool_assemble_v1(spool: SmfObjectSpoolV1) -> Result<[u8], tex
 pub fn smf_object_spool_release_v1(spool: SmfObjectSpoolV1) -> SmfObjectSpoolV1:
     for name in spool.paths.keys():
         file_delete(spool.paths[name])
+    if spool.dir != "" and dir_exists(spool.dir):
+        val remaining = dir_list_or_empty(spool.dir) ?? []
+        if remaining.len() == 0:
+            val _rm = dir_remove(spool.dir, false)
     smf_object_spool_begin_v1(spool.dir)
 
 # Per-process spool directory (one owner per process; shard workers and the
