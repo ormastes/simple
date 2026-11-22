@@ -301,21 +301,14 @@ and deploy receipts. Open bug:
 
 ### Worker runtime selection recovery (2026-08-16)
 
-The lightweight owner `src/app/cli/native_build_main.spl` must never revive an
-implicit Rust-seed or unchecked `bin/simple` worker fallback. Runtime candidates
-come only from existing `SIMPLE_BINARY`, `SIMPLE_BIN`, and the invoking
-executable, in that priority order. Canonical paths under
-`src/compiler_rust/target/` are rejected. An empty selection returns nonzero
-before environment export or process spawn.
-
-Pure policy lives with staged compiler identity in
-`src/app/cli/bootstrap_identity.spl`. Behavioral coverage is
-`test/03_system/check/cached_render_entry_closure_runtime_selection_spec.spl`;
-its manually synchronized mirror is under `doc/06_spec/03_system/check/` until
-an admitted full CLI can run test/maintenance/docgen. Do not use the known-bad
-`release/` artifact or any Rust seed to turn `TEST_BLOCKED` into PASS. This
-criterion does not authenticate arbitrarily renamed binaries and does not
-admit Stage 4, build the render carrier, or prove 8K execution.
+**Not implemented.** The intended policy — runtime candidates only from
+existing `SIMPLE_BINARY`, `SIMPLE_BIN`, and the invoking executable, canonical
+`src/compiler_rust/target/` paths rejected, empty selection nonzero before
+spawn — never landed. `resolve_simple_binary()` in
+`src/app/cli/native_build_main.spl` still falls back to `bin/simple` and the
+Rust seed. The policy helpers and their specs had no production caller and
+were removed (2026-11-22); add coverage back only together with the wiring,
+which changes bootstrap behaviour and needs a bootstrap run to verify.
 
 ## Default build mode (2026-11-04)
 
