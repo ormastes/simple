@@ -1,0 +1,81 @@
+# Pure Win32 struct layout math, parameterised by pointer width (4 = i686,
+# 8 = x86_64/arm64) so both widths are testable on any host. Sizes follow the
+# Windows SDK (MSVC natural alignment; 64-bit integers align to 8 on both).
+# p = pointer/SIZE_T/ULONG_PTR/HANDLE width in bytes.
+
+fn windows_layout_align_up(value: i64, align: i64) -> i64:
+    ((value + align - 1) / align) * align
+
+# STARTUPINFOW: cb(4) then 3 pointers, 8 DWORDs (dwFlags is the 8th), 2 WORDs,
+# lpReserved2 pointer, 3 std handles. 104 on x64, 68 on x86.
+fn windows_startupinfo_flags_offset(p: i64) -> i64:
+    4 * p + 28
+
+fn windows_startupinfo_stdin_offset(p: i64) -> i64:
+    windows_layout_align_up(4 * p + 36, p) + p
+
+fn windows_startupinfo_size(p: i64) -> i64:
+    windows_startupinfo_stdin_offset(p) + 3 * p
+
+# STARTUPINFOEXW appends lpAttributeList. 112 on x64, 72 on x86.
+fn windows_startupinfoex_attributes_offset(p: i64) -> i64:
+    windows_startupinfo_size(p)
+
+fn windows_startupinfoex_size(p: i64) -> i64:
+    windows_layout_align_up(windows_startupinfo_size(p) + p, p)
+
+# PROCESS_INFORMATION: hProcess, hThread, DWORD pid, DWORD tid. 24 / 16.
+fn windows_process_info_thread_offset(p: i64) -> i64:
+    p
+
+fn windows_process_info_pid_offset(p: i64) -> i64:
+    2 * p
+
+fn windows_process_info_size(p: i64) -> i64:
+    windows_layout_align_up(2 * p + 8, p)
+
+# SECURITY_ATTRIBUTES: nLength, pointer, BOOL bInheritHandle. 24 / 12.
+fn windows_security_inherit_offset(p: i64) -> i64:
+    2 * p
+
+fn windows_security_size(p: i64) -> i64:
+    windows_layout_align_up(2 * p + 4, p)
+
+# JOBOBJECT_BASIC_LIMIT_INFORMATION: two LARGE_INTEGER, DWORD LimitFlags(16),
+# SIZE_T Min/MaxWorkingSet, DWORD ActiveProcessLimit, ULONG_PTR Affinity,
+# DWORD PriorityClass, DWORD SchedulingClass. 64 on x64, 48 on x86.
+fn windows_job_limit_flags_offset(p: i64) -> i64:
+    16
+
+fn windows_job_basic_limit_size(p: i64) -> i64:
+    val min_ws = windows_layout_align_up(20, p)
+    val active = min_ws + 2 * p
+    val affinity = windows_layout_align_up(active + 4, p)
+    windows_layout_align_up(affinity + p + 8, 8)
+
+# JOBOBJECT_EXTENDED_LIMIT_INFORMATION: basic + IO_COUNTERS(48) + four SIZE_T
+# (ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed).
+# 144 on x64, 112 on x86.
+fn windows_job_extended_base(p: i64) -> i64:
+    windows_job_basic_limit_size(p) + 48
+
+fn windows_job_memory_limit_offset(p: i64) -> i64:
+    windows_job_extended_base(p) + p
+
+fn windows_job_peak_job_memory_offset(p: i64) -> i64:
+    windows_job_extended_base(p) + 3 * p
+
+fn windows_job_extended_limit_size(p: i64) -> i64:
+    windows_job_extended_base(p) + 4 * p
+
+# JOBOBJECT_BASIC_ACCOUNTING_INFORMATION: 4 LARGE_INTEGER + 4 DWORD; no
+# pointer-sized member. 48 on both widths, ActiveProcesses at 40.
+fn windows_job_accounting_size(p: i64) -> i64:
+    48
+
+fn windows_job_accounting_active_offset(p: i64) -> i64:
+    40
+
+# PROC_THREAD_ATTRIBUTE_HANDLE_LIST payload: three HANDLEs.
+fn windows_handle_list_size(p: i64) -> i64:
+    3 * p

@@ -1,10 +1,12 @@
-# Windows x64 owner. Direct documented kernel32 calls; no replacement C runtime.
+# Windows owner shared by x86_64, arm64 and i686 (pointer width from WIN_PTR_BYTES). Direct documented kernel32 calls; no replacement C runtime.
 # Ownership is represented by a nonreused slot, not an OS PID. Copied leases
 # refer to the same slot, so collecting one invalidates every copy before handles
 # can be recycled. This owner is single-threaded and bounded to 100000 starts.
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
-use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{WinSize, WIN_PTR_BYTES, win_ptr_write, win_ptr_read}
+use std.nogc_sync_mut.io.windows_process_layout.{windows_startupinfo_flags_offset, windows_startupinfo_stdin_offset, windows_startupinfoex_attributes_offset, windows_startupinfoex_size, windows_process_info_size, windows_process_info_thread_offset, windows_process_info_pid_offset, windows_security_inherit_offset, windows_security_size, windows_job_limit_flags_offset, windows_job_extended_limit_size, windows_job_memory_limit_offset, windows_job_peak_job_memory_offset, windows_job_accounting_size, windows_job_accounting_active_offset, windows_handle_list_size}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_read_u8, volatile_read_u32}
 use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
 
 struct WindowsProcessInputV1:
@@ -59,7 +61,7 @@ struct WindowsProcessStateV1:
 
 var _windows_process_slots_v1: [WindowsProcessStateV1] = []
 
-# MEMORYSTATUSEX is 64 bytes on Win64; physical and commit headroom are
+# MEMORYSTATUSEX is 64 bytes on both widths; physical and commit headroom are
 # distinct. JobObject memory limits account committed bytes.
 # Only the registered runtime provider (GlobalMemoryStatusEx, min of free
 # physical and free commit) is used. The former raw kernel32 fallback hard-aborts
@@ -146,7 +148,7 @@ fn windows_process_directory_no_follow_v1(path: text) -> bool:
     val heap = GetProcessHeap()
     if heap == 0: return false
     val wide = _windows_process_wide_v1(heap, path)
-    val metadata = HeapAlloc(heap, 8u32, 8u64)
+    val metadata = HeapAlloc(heap, 8u32, 8)
     if wide == 0 or metadata == 0:
         if wide != 0:
             val _free = HeapFree(heap, 0u32, wide)
@@ -181,12 +183,12 @@ fn _windows_process_pin_v1(heap: i64, path: text, digest: text) -> i64:
 # and directories are rejected from handle metadata before any data is read.
 @unsafe(reason: "streaming SHA256 retains file and hash identities until finalization", capabilities: [ffi, raw_ptr])
 fn _windows_process_hash_handle_v1(heap: i64, file: i64) -> text:
-    val metadata = HeapAlloc(heap, 8u32, 8u64)
-    val provider_slot = HeapAlloc(heap, 8u32, 8u64)
-    val hash_slot = HeapAlloc(heap, 8u32, 8u64)
-    val count_slot = HeapAlloc(heap, 8u32, 8u64)
-    val buffer = HeapAlloc(heap, 8u32, 65536u64)
-    val digest_buffer = HeapAlloc(heap, 8u32, 32u64)
+    val metadata = HeapAlloc(heap, 8u32, 8)
+    val provider_slot = HeapAlloc(heap, 8u32, WIN_PTR_BYTES)
+    val hash_slot = HeapAlloc(heap, 8u32, WIN_PTR_BYTES)
+    val count_slot = HeapAlloc(heap, 8u32, 8)
+    val buffer = HeapAlloc(heap, 8u32, 65536)
+    val digest_buffer = HeapAlloc(heap, 8u32, 32)
     val algorithm = _windows_process_wide_v1(heap, "SHA256")
     val allocations = [metadata, provider_slot, hash_slot, count_slot, buffer, digest_buffer, algorithm]
     var valid = true
@@ -204,12 +206,12 @@ fn _windows_process_hash_handle_v1(heap: i64, file: i64) -> text:
         if BCryptOpenAlgorithmProvider(provider_slot, algorithm, 0, 0u32) != 0:
             valid = false
         else:
-            provider = volatile_read_u64(provider_slot)
+            provider = win_ptr_read(provider_slot)
     if valid:
         if BCryptCreateHash(provider, hash_slot, 0, 0u32, 0, 0u32, 0u32) != 0:
             valid = false
         else:
-            hash = volatile_read_u64(hash_slot)
+            hash = win_ptr_read(hash_slot)
     while valid:
         if ReadFile(file, buffer, 65536u32, count_slot, 0) == 0:
             valid = false
@@ -255,8 +257,8 @@ fn windows_process_file_digest_v1(path: text) -> text:
 fn _windows_process_empty_v1(job: i64, accounting: i64, budget_ms: u64) -> bool:
     val deadline = GetTickCount64() + budget_ms
     while true:
-        if QueryInformationJobObject(job, 1, accounting, 48u32, 0) == 0: return false
-        if volatile_read_u32(accounting + 40) == 0: return true
+        if QueryInformationJobObject(job, 1, accounting, windows_job_accounting_size(WIN_PTR_BYTES) as u32, 0) == 0: return false
+        if volatile_read_u32(accounting + windows_job_accounting_active_offset(WIN_PTR_BYTES)) == 0: return true
         if GetTickCount64() >= deadline: return false
         Sleep(10u32)
     false
@@ -289,6 +291,8 @@ fn windows_process_admit_v1(request: WindowsProcessRequestV1, memory_limit_bytes
 @unsafe(reason: "checks current physical headroom after input pins and before child creation", capabilities: [ffi, raw_ptr])
 fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memory_limit_bytes: i64,
         required_available_bytes: i64) -> WindowsProcessAdmissionV1:
+    if WIN_PTR_BYTES == 4 and memory_limit_bytes > 4294967295:
+        return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows job memory limit exceeds 32-bit SIZE_T")
     if memory_limit_bytes < 0 or memory_limit_bytes > 1125899906842624:
         return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows job memory limit exceeds bound")
     if required_available_bytes < 0 or required_available_bytes > 1125899906842624 or
@@ -332,14 +336,14 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     val argv = _windows_process_wide_v1(heap, command)
     val cwd = _windows_process_wide_v1(heap, request.directory)
     val env = _windows_process_wide_v1(heap, environment)
-    val startup = HeapAlloc(heap, 8u32, 112u64)
-    val process_info = HeapAlloc(heap, 8u32, 24u64)
-    val limits = HeapAlloc(heap, 8u32, 144u64)
-    val security = HeapAlloc(heap, 8u32, 24u64)
-    val size_slot = HeapAlloc(heap, 8u32, 8u64)
-    val allowed_handles = HeapAlloc(heap, 8u32, 24u64)
-    val accounting = HeapAlloc(heap, 8u32, 48u64)
-    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    val startup = HeapAlloc(heap, 8u32, windows_startupinfoex_size(WIN_PTR_BYTES))
+    val process_info = HeapAlloc(heap, 8u32, windows_process_info_size(WIN_PTR_BYTES))
+    val limits = HeapAlloc(heap, 8u32, windows_job_extended_limit_size(WIN_PTR_BYTES))
+    val security = HeapAlloc(heap, 8u32, windows_security_size(WIN_PTR_BYTES))
+    val size_slot = HeapAlloc(heap, 8u32, WIN_PTR_BYTES)
+    val allowed_handles = HeapAlloc(heap, 8u32, windows_handle_list_size(WIN_PTR_BYTES))
+    val accounting = HeapAlloc(heap, 8u32, windows_job_accounting_size(WIN_PTR_BYTES))
+    val exit_slot = HeapAlloc(heap, 8u32, 8)
     allocations = [app, argv, cwd, env, startup, process_info, limits, security, size_slot, allowed_handles]
     for allocation in allocations:
         if allocation == 0: error = "Windows process request allocation failed"
@@ -358,8 +362,8 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
                     error = "pre-spawn available memory below required bytes: available={available} required={required_available_bytes}"
             Err(reason): error = reason
     if error == "":
-        volatile_write_u32(security, 24)
-        volatile_write_u32(security + 16, 1)
+        volatile_write_u32(security, windows_security_size(WIN_PTR_BYTES))
+        volatile_write_u32(security + windows_security_inherit_offset(WIN_PTR_BYTES), 1)
         val stdin_handle = _windows_process_file_v1(heap, "NUL", 2147483648u32, 3u32, security, 3u32)
         val stdout_handle = _windows_process_file_v1(heap, request.stdout_path, 1073741824u32, 1u32, security, 1u32)
         val stderr_handle = _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
@@ -367,45 +371,45 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         for handle in handles:
             if handle == 0: error = "cannot create exact inherited stream handles"
         if error == "":
-            volatile_write_u32(startup, 112)
-            volatile_write_u32(startup + 60, 256)
-            volatile_write_u64(startup + 80, stdin_handle)
-            volatile_write_u64(startup + 88, stdout_handle)
-            volatile_write_u64(startup + 96, stderr_handle)
-            volatile_write_u64(allowed_handles, stdin_handle)
-            volatile_write_u64(allowed_handles + 8, stdout_handle)
-            volatile_write_u64(allowed_handles + 16, stderr_handle)
+            volatile_write_u32(startup, windows_startupinfoex_size(WIN_PTR_BYTES))
+            volatile_write_u32(startup + windows_startupinfo_flags_offset(WIN_PTR_BYTES), 256)
+            win_ptr_write(startup + windows_startupinfo_stdin_offset(WIN_PTR_BYTES), stdin_handle)
+            win_ptr_write(startup + windows_startupinfo_stdin_offset(WIN_PTR_BYTES) + WIN_PTR_BYTES, stdout_handle)
+            win_ptr_write(startup + windows_startupinfo_stdin_offset(WIN_PTR_BYTES) + 2 * WIN_PTR_BYTES, stderr_handle)
+            win_ptr_write(allowed_handles, stdin_handle)
+            win_ptr_write(allowed_handles + WIN_PTR_BYTES, stdout_handle)
+            win_ptr_write(allowed_handles + 2 * WIN_PTR_BYTES, stderr_handle)
             val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, size_slot)
-            val required = volatile_read_u64(size_slot)
+            val required = win_ptr_read(size_slot)
             if required <= 0 or required > 1048576:
                 error = "invalid Windows attribute-list size"
             else:
-                attributes = HeapAlloc(heap, 8u32, required as u64)
+                attributes = HeapAlloc(heap, 8u32, required)
                 if attributes == 0:
                     error = "attribute-list allocation failed"
                 elif InitializeProcThreadAttributeList(attributes, 1u32, 0u32, size_slot) == 0:
                     error = "attribute-list initialization failed"
                 else:
                     attributes_initialized = true
-                    if UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed_handles, 24u64, 0, 0) == 0:
+                    if UpdateProcThreadAttribute(attributes, 0u32, 131074, allowed_handles, windows_handle_list_size(WIN_PTR_BYTES), 0, 0) == 0:
                         error = "handle allowlist admission failed"
-                    volatile_write_u64(startup + 104, attributes)
+                    win_ptr_write(startup + windows_startupinfoex_attributes_offset(WIN_PTR_BYTES), attributes)
     if error == "":
-        volatile_write_u32(limits + 16, 8192)
+        volatile_write_u32(limits + windows_job_limit_flags_offset(WIN_PTR_BYTES), 8192)
         if memory_limit_bytes > 0:
             # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY.
-            volatile_write_u32(limits + 16, 8704)
-            volatile_write_u64(limits + 120, memory_limit_bytes)
+            volatile_write_u32(limits + windows_job_limit_flags_offset(WIN_PTR_BYTES), 8704)
+            win_ptr_write(limits + windows_job_memory_limit_offset(WIN_PTR_BYTES), memory_limit_bytes)
         job = CreateJobObjectW(0, 0)
-        if job == 0 or SetInformationJobObject(job, 9, limits, 144u32) == 0:
+        if job == 0 or SetInformationJobObject(job, 9, limits, windows_job_extended_limit_size(WIN_PTR_BYTES) as u32) == 0:
             error = "JobObject admission failed"
-        elif QueryInformationJobObject(job, 9, limits, 144u32, 0) == 0:
+        elif QueryInformationJobObject(job, 9, limits, windows_job_extended_limit_size(WIN_PTR_BYTES) as u32, 0) == 0:
             error = "JobObject limit readback failed"
         elif memory_limit_bytes > 0 and
-                (volatile_read_u32(limits + 16) != 8704u32 or
-                 volatile_read_u64(limits + 120) != memory_limit_bytes as u64):
+                (volatile_read_u32(limits + windows_job_limit_flags_offset(WIN_PTR_BYTES)) != 8704u32 or
+                 win_ptr_read(limits + windows_job_memory_limit_offset(WIN_PTR_BYTES)) != memory_limit_bytes as u64):
             error = "JobObject memory limit readback differs"
-        elif memory_limit_bytes == 0 and volatile_read_u32(limits + 16) != 8192u32:
+        elif memory_limit_bytes == 0 and volatile_read_u32(limits + windows_job_limit_flags_offset(WIN_PTR_BYTES)) != 8192u32:
             error = "JobObject monitor policy readback differs"
     if error == "":
         # CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW.
@@ -413,9 +417,9 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         if CreateProcessW(app, argv, 0, 0, 1, 134743044u32, env, cwd, startup, process_info) == 0:
             error = "CreateProcessW failed: " + str(GetLastError())
         else:
-            process = volatile_read_u64(process_info)
-            thread = volatile_read_u64(process_info + 8)
-            process_id = volatile_read_u32(process_info + 16)
+            process = win_ptr_read(process_info)
+            thread = win_ptr_read(process_info + windows_process_info_thread_offset(WIN_PTR_BYTES))
+            process_id = volatile_read_u32(process_info + windows_process_info_pid_offset(WIN_PTR_BYTES))
             if AssignProcessToJobObject(job, process) == 0:
                 error = "suspended process job assignment failed"
             elif ResumeThread(thread) == 4294967295u32:
@@ -481,9 +485,9 @@ fn windows_process_poll_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsProces
         _windows_process_slots_v1[lease.slot] = state
     val waited = WaitForSingleObject(state.process, 0u32)
     if waited != 0u32 and waited != 258u32: return Err("owned process wait failed")
-    if QueryInformationJobObject(state.job, 1, state.accounting, 48u32, 0) == 0:
+    if QueryInformationJobObject(state.job, 1, state.accounting, windows_job_accounting_size(WIN_PTR_BYTES) as u32, 0) == 0:
         return Err("owned JobObject membership query failed")
-    val active = volatile_read_u32(state.accounting + 40)
+    val active = volatile_read_u32(state.accounting + windows_job_accounting_active_offset(WIN_PTR_BYTES))
     var exit_code: i64 = -1
     if waited == 0u32:
         if GetExitCodeProcess(state.process, state.exit_slot) == 0: return Err("owned exit status unavailable")
@@ -534,8 +538,8 @@ export windows_process_collected_proof_v1
 # the returned allocation/file handle; application facades never expose these.
 export _windows_process_wide_v1, _windows_process_pin_v1
 
-# Microsoft JOBOBJECT_EXTENDED_LIMIT_INFORMATION Win64 layout: 144 bytes,
-# JobMemoryLimit at120, PeakProcessMemoryUsed at128, PeakJobMemoryUsed at136.
+# Microsoft JOBOBJECT_EXTENDED_LIMIT_INFORMATION layout (144 bytes x64, 112 x86),
+# offsets from windows_process_layout.spl: JobMemoryLimit, PeakJobMemoryUsed.
 # This API has NO current aggregate JobMemoryUsed field. Only the lifetime
 # peak may be reported from this row.
 @unsafe(reason: "queries retained JobObject lifetime peak memory accounting", capabilities: [ffi, raw_ptr])
@@ -543,10 +547,10 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
     if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
     val state = _windows_process_slots_v1[lease.slot]
     if state.closed: return Err("Windows owner already collected")
-    val information = HeapAlloc(state.heap, 8u32, 144u64)
+    val information = HeapAlloc(state.heap, 8u32, windows_job_extended_limit_size(WIN_PTR_BYTES))
     if information == 0: return Err("job memory query allocation failed")
-    val queried = QueryInformationJobObject(state.job, 9, information, 144u32, 0)
-    val peak = if queried != 0: volatile_read_u64(information + 136) else: -1
+    val queried = QueryInformationJobObject(state.job, 9, information, windows_job_extended_limit_size(WIN_PTR_BYTES) as u32, 0)
+    val peak = if queried != 0: win_ptr_read(information + windows_job_peak_job_memory_offset(WIN_PTR_BYTES)) else: -1
     val released = HeapFree(state.heap, 0u32, information)
     if queried == 0 or released == 0 or peak < 0:
         return Err("job memory accounting unavailable")

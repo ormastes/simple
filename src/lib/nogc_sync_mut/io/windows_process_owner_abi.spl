@@ -1,20 +1,70 @@
-# Win64 direct platform boundary; no new runtime/C implementation. This module
-# is intentionally outside the builder closure until native qualification.
-# Pointer-valued Win64 ABI slots use i64; DWORD/BOOL slots use u32/i32.
-use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_read_u32, volatile_read_u64}
+# Windows direct platform boundary shared by x86_64, arm64 and i686 (no fork of
+# the x86_64 code); no new runtime/C implementation. This module is
+# intentionally outside the builder closure until native qualification.
+#
+# Pointer width comes from the target: WinPtr/WIN_PTR_BYTES below are the ONLY
+# place the word size is chosen. Pointer-valued ABI slots (pointers, HANDLE,
+# HMODULE, LPVOID, SIZE_T/ULONG_PTR returns, by-reference SIZE_T) use WinPtr;
+# SIZE_T / DWORD_PTR passed by value use WinSize (u64 on 64-bit, u32 on i686);
+# DWORD/BOOL/UINT/ULONG slots use u32/i32; ULONGLONG uses u64.
+# Win32 externs are @abi("system") (stdcall on x86-windows, plain C elsewhere).
+#
+# Struct layouts (pure math in windows_process_layout.spl, p = WIN_PTR_BYTES),
+# checked against the Windows SDK for both widths (x64 / x86 bytes):
+#   STARTUPINFOW 104/68, STARTUPINFOEXW 112/72, PROCESS_INFORMATION 24/16,
+#   SECURITY_ATTRIBUTES 24/12, JOBOBJECT_BASIC_LIMIT_INFORMATION 64/48,
+#   JOBOBJECT_EXTENDED_LIMIT_INFORMATION 144/112 (JobMemoryLimit 120/100,
+#   PeakJobMemoryUsed 136/108), JOBOBJECT_BASIC_ACCOUNTING_INFORMATION 48/48,
+#   handle-list attribute payload 3*p. DWORD-only structs (FILE_ATTRIBUTE_TAG_
+#   INFO, exit code slot, ReadFile byte count) do not depend on pointer width.
+# On x86_64 (WinPtr = i64, WIN_PTR_BYTES = 8) every offset, size and extern
+# type equals the previous Win64-only values.
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.windows_process_layout.{windows_startupinfo_size, windows_process_info_size, windows_job_extended_limit_size, windows_job_accounting_size, windows_job_accounting_active_offset, windows_process_info_thread_offset}
+
+@when(arch="x86"):
+type WinPtr = i32
+type WinSize = u32
+val WIN_PTR_BYTES = 4
+@else:
+type WinPtr = i64
+type WinSize = u64
+val WIN_PTR_BYTES = 8
+@end
+
+# Pointer-width memory slot access; values stay i64 in Simple code.
+@unsafe(reason: "pointer-width store into caller-owned memory", capabilities: [ffi, raw_ptr])
+fn win_ptr_write(address: i64, value: i64):
+    if WIN_PTR_BYTES == 4:
+        volatile_write_u32(address, value)
+    else:
+        volatile_write_u64(address, value)
+
+@unsafe(reason: "pointer-width load from caller-owned memory", capabilities: [ffi, raw_ptr])
+fn win_ptr_read(address: i64) -> i64:
+    if WIN_PTR_BYTES == 4:
+        return volatile_read_u32(address)
+    volatile_read_u64(address)
+
 
 @unsafe(reason: "Win64 kernel32 process heap owner", capabilities: [ffi])
-extern fn GetProcessHeap() -> i64
+@abi("system")
+extern fn GetProcessHeap() -> WinPtr
 @unsafe(reason: "Win64 current process image copied into caller-owned UTF16 storage", capabilities: [ffi, raw_ptr])
-extern fn GetModuleFileNameW(module: i64, buffer: i64, capacity: u32) -> u32
+@abi("system")
+extern fn GetModuleFileNameW(module: WinPtr, buffer: WinPtr, capacity: u32) -> u32
 @unsafe(reason: "Win64 current host memory snapshot", capabilities: [ffi, raw_ptr])
-extern fn GlobalMemoryStatusEx(status: i64) -> i32
+@abi("system")
+extern fn GlobalMemoryStatusEx(status: WinPtr) -> i32
 @unsafe(reason: "Win64 copied system CPU counters", capabilities: [ffi, raw_ptr])
-extern fn GetSystemTimes(idle: i64, kernel: i64, user: i64) -> i32
+@abi("system")
+extern fn GetSystemTimes(idle: WinPtr, kernel: WinPtr, user: WinPtr) -> i32
 @unsafe(reason: "Win64 kernel32 bounded allocation", capabilities: [ffi, raw_ptr])
-extern fn HeapAlloc(heap: i64, flags: u32, size: u64) -> i64
+@abi("system")
+extern fn HeapAlloc(heap: WinPtr, flags: u32, size: WinSize) -> WinPtr
 @unsafe(reason: "Win64 kernel32 owned allocation release", capabilities: [ffi, raw_ptr])
-extern fn HeapFree(heap: i64, flags: u32, allocation: i64) -> i32
+@abi("system")
+extern fn HeapFree(heap: WinPtr, flags: u32, allocation: WinPtr) -> i32
 # Runtime-C memory headroom snapshot; resolves under the bootstrap seed's
 # pure interpreter where the raw kernel32 heap externs above do not. Returns
 # min(ullAvailPhys, ullAvailPageFile), 0 when unavailable (callers fall back).
@@ -29,67 +79,93 @@ extern fn rt_host_commit_headroom_bytes_v1() -> i64
 @unsafe(reason: "registered runtime ABI for the host disk headroom snapshot", capabilities: [ffi])
 extern fn rt_host_disk_headroom_bytes_v1(path: text) -> i64
 @unsafe(reason: "Win64 exact ten-argument process creation ABI", capabilities: [ffi, raw_ptr])
-extern fn CreateProcessW(application: i64, command_line: i64, process_security: i64,
-    thread_security: i64, inherit_handles: i32, flags: u32, environment: i64,
-    directory: i64, startup_info: i64, process_info: i64) -> i32
+@abi("system")
+extern fn CreateProcessW(application: WinPtr, command_line: WinPtr, process_security: WinPtr,
+    thread_security: WinPtr, inherit_handles: i32, flags: u32, environment: WinPtr,
+    directory: WinPtr, startup_info: WinPtr, process_info: WinPtr) -> i32
 @unsafe(reason: "Win64 noninherited JobObject creation", capabilities: [ffi])
-extern fn CreateJobObjectW(attributes: i64, name: i64) -> i64
+@abi("system")
+extern fn CreateJobObjectW(attributes: WinPtr, name: WinPtr) -> WinPtr
 @unsafe(reason: "Win64 owned JobObject limit configuration", capabilities: [ffi, raw_ptr])
-extern fn SetInformationJobObject(job: i64, kind: i32, information: i64, size: u32) -> i32
+@abi("system")
+extern fn SetInformationJobObject(job: WinPtr, kind: i32, information: WinPtr, size: u32) -> i32
 @unsafe(reason: "Win64 suspended child assignment before execution", capabilities: [ffi])
-extern fn AssignProcessToJobObject(job: i64, process: i64) -> i32
+@abi("system")
+extern fn AssignProcessToJobObject(job: WinPtr, process: WinPtr) -> i32
 @unsafe(reason: "Win64 resume of owned primary thread", capabilities: [ffi])
-extern fn ResumeThread(thread: i64) -> u32
+@abi("system")
+extern fn ResumeThread(thread: WinPtr) -> u32
 @unsafe(reason: "Win64 handle-authoritative process wait", capabilities: [ffi])
-extern fn WaitForSingleObject(handle: i64, milliseconds: u32) -> u32
+@abi("system")
+extern fn WaitForSingleObject(handle: WinPtr, milliseconds: u32) -> u32
 @unsafe(reason: "Win64 owned JobObject tree cancellation", capabilities: [ffi])
-extern fn TerminateJobObject(job: i64, exit_code: u32) -> i32
+@abi("system")
+extern fn TerminateJobObject(job: WinPtr, exit_code: u32) -> i32
 @unsafe(reason: "Win64 suspended admission-failure process cancellation", capabilities: [ffi])
-extern fn TerminateProcess(process: i64, exit_code: u32) -> i32
+@abi("system")
+extern fn TerminateProcess(process: WinPtr, exit_code: u32) -> i32
 @unsafe(reason: "Win64 owned handle closure", capabilities: [ffi])
-extern fn CloseHandle(handle: i64) -> i32
+@abi("system")
+extern fn CloseHandle(handle: WinPtr) -> i32
 @unsafe(reason: "Win64 exact owned process exit status", capabilities: [ffi, raw_ptr])
-extern fn GetExitCodeProcess(process: i64, status: i64) -> i32
+@abi("system")
+extern fn GetExitCodeProcess(process: WinPtr, status: WinPtr) -> i32
 @unsafe(reason: "Win64 JobObject active member observation", capabilities: [ffi, raw_ptr])
-extern fn QueryInformationJobObject(job: i64, kind: i32, information: i64, size: u32, returned: i64) -> i32
+@abi("system")
+extern fn QueryInformationJobObject(job: WinPtr, kind: i32, information: WinPtr, size: u32, returned: WinPtr) -> i32
 @unsafe(reason: "Win64 monotonic timeout clock", capabilities: [ffi])
+@abi("system")
 extern fn GetTickCount64() -> u64
 @unsafe(reason: "Win64 bounded process observation delay", capabilities: [ffi])
+@abi("system")
 extern fn Sleep(milliseconds: u32)
 @unsafe(reason: "Win64 file identity and inherited stream handle admission", capabilities: [ffi, raw_ptr])
-extern fn CreateFileW(path: i64, access: u32, sharing: u32, security: i64,
-    disposition: u32, attributes: u32, template_file: i64) -> i64
+@abi("system")
+extern fn CreateFileW(path: WinPtr, access: u32, sharing: u32, security: WinPtr,
+    disposition: u32, attributes: u32, template_file: WinPtr) -> WinPtr
 @unsafe(reason: "Win64 explicit child handle-list sizing and initialization", capabilities: [ffi, raw_ptr])
-extern fn InitializeProcThreadAttributeList(attributes: i64, count: u32, flags: u32, size: i64) -> i32
+@abi("system")
+extern fn InitializeProcThreadAttributeList(attributes: WinPtr, count: u32, flags: u32, size: WinPtr) -> i32
 @unsafe(reason: "Win64 exact child handle allowlist", capabilities: [ffi, raw_ptr])
-extern fn UpdateProcThreadAttribute(attributes: i64, flags: u32, kind: u64,
-    value: i64, size: u64, previous: i64, returned: i64) -> i32
+@abi("system")
+extern fn UpdateProcThreadAttribute(attributes: WinPtr, flags: u32, kind: WinSize,
+    value: WinPtr, size: WinSize, previous: WinPtr, returned: WinPtr) -> i32
 @unsafe(reason: "Win64 owned attribute-list cleanup", capabilities: [ffi, raw_ptr])
-extern fn DeleteProcThreadAttributeList(attributes: i64)
+@abi("system")
+extern fn DeleteProcThreadAttributeList(attributes: WinPtr)
 @unsafe(reason: "Win64 immediate thread-local API error observation", capabilities: [ffi])
+@abi("system")
 extern fn GetLastError() -> u32
 @unsafe(reason: "Win64 metadata query on an already owned file identity", capabilities: [ffi, raw_ptr])
-extern fn GetFileInformationByHandleEx(file: i64, kind: i32, information: i64, size: u32) -> i32
+@abi("system")
+extern fn GetFileInformationByHandleEx(file: WinPtr, kind: i32, information: WinPtr, size: u32) -> i32
 @unsafe(reason: "Win64 bounded read from a pinned file handle", capabilities: [ffi, raw_ptr])
-extern fn ReadFile(file: i64, buffer: i64, capacity: u32, count: i64, overlapped: i64) -> i32
+@abi("system")
+extern fn ReadFile(file: WinPtr, buffer: WinPtr, capacity: u32, count: WinPtr, overlapped: WinPtr) -> i32
 @unsafe(reason: "Windows CNG SHA256 provider acquisition", capabilities: [ffi, raw_ptr])
-extern fn BCryptOpenAlgorithmProvider(provider: i64, algorithm: i64, implementation: i64, flags: u32) -> i32
+@abi("system")
+extern fn BCryptOpenAlgorithmProvider(provider: WinPtr, algorithm: WinPtr, implementation: WinPtr, flags: u32) -> i32
 @unsafe(reason: "Windows CNG owned streaming hash creation", capabilities: [ffi, raw_ptr])
-extern fn BCryptCreateHash(provider: i64, hash_out: i64, object_buffer: i64, object_size: u32, secret: i64, secret_size: u32, flags: u32) -> i32
+@abi("system")
+extern fn BCryptCreateHash(provider: WinPtr, hash_out: WinPtr, object_buffer: WinPtr, object_size: u32, secret: WinPtr, secret_size: u32, flags: u32) -> i32
 @unsafe(reason: "Windows CNG hash of a bounded owned byte buffer", capabilities: [ffi, raw_ptr])
-extern fn BCryptHashData(hash: i64, buffer: i64, count: u32, flags: u32) -> i32
+@abi("system")
+extern fn BCryptHashData(hash: WinPtr, buffer: WinPtr, count: u32, flags: u32) -> i32
 @unsafe(reason: "Windows CNG SHA256 digest finalization", capabilities: [ffi, raw_ptr])
-extern fn BCryptFinishHash(hash: i64, digest: i64, digest_size: u32, flags: u32) -> i32
+@abi("system")
+extern fn BCryptFinishHash(hash: WinPtr, digest: WinPtr, digest_size: u32, flags: u32) -> i32
 @unsafe(reason: "Windows CNG owned hash release", capabilities: [ffi])
-extern fn BCryptDestroyHash(hash: i64) -> i32
+@abi("system")
+extern fn BCryptDestroyHash(hash: WinPtr) -> i32
 @unsafe(reason: "Windows CNG owned provider release", capabilities: [ffi])
-extern fn BCryptCloseAlgorithmProvider(provider: i64, flags: u32) -> i32
+@abi("system")
+extern fn BCryptCloseAlgorithmProvider(provider: WinPtr, flags: u32) -> i32
 
 @when(os="windows"):
 # ASCII-only proof helper. The production owner must provide full UTF16.
 @unsafe(reason: "writes only inside a zeroed owned UTF16 allocation", capabilities: [ffi, raw_ptr])
 fn windows_abi_ascii_v1(heap: i64, value: text) -> i64:
-    val allocation = HeapAlloc(heap, 8u32, ((value.len() + 1) * 2) as u64)
+    val allocation = HeapAlloc(heap, 8u32, ((value.len() + 1) * 2))
     if allocation == 0: return 0
     var index = 0
     while index < value.len():
@@ -108,13 +184,13 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
     val application = windows_abi_ascii_v1(heap, "C:\\Windows\\System32\\cmd.exe")
     val command_line = windows_abi_ascii_v1(heap, command)
     val directory = windows_abi_ascii_v1(heap, "C:\\Windows")
-    # Windows x64 SDK layouts: STARTUPINFOW=104, PROCESS_INFORMATION=24,
-    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION=144, BASIC_ACCOUNTING=48.
-    val startup = HeapAlloc(heap, 8u32, 104u64)
-    val process_info = HeapAlloc(heap, 8u32, 24u64)
-    val limits = HeapAlloc(heap, 8u32, 144u64)
-    val accounting = HeapAlloc(heap, 8u32, 48u64)
-    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    # Windows SDK layouts via windows_process_layout.spl for the target word size:
+    # STARTUPINFOW, PROCESS_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, BASIC_ACCOUNTING.
+    val startup = HeapAlloc(heap, 8u32, windows_startupinfo_size(WIN_PTR_BYTES))
+    val process_info = HeapAlloc(heap, 8u32, windows_process_info_size(WIN_PTR_BYTES))
+    val limits = HeapAlloc(heap, 8u32, windows_job_extended_limit_size(WIN_PTR_BYTES))
+    val accounting = HeapAlloc(heap, 8u32, windows_job_accounting_size(WIN_PTR_BYTES))
+    val exit_slot = HeapAlloc(heap, 8u32, 8)
     var allocations: [i64] = [application, command_line, directory, startup, process_info, limits, accounting, exit_slot]
     var code: i64 = 0
     for address in allocations:
@@ -123,12 +199,12 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
     var process: i64 = 0
     var thread: i64 = 0
     if code == 0:
-        volatile_write_u32(startup, 104)
+        volatile_write_u32(startup, windows_startupinfo_size(WIN_PTR_BYTES))
         # LimitFlags offset16, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE=0x2000.
         volatile_write_u32(limits + 16, 8192)
         job = CreateJobObjectW(0, 0)
         if job == 0: code = 12
-    if code == 0 and SetInformationJobObject(job, 9, limits, 144u32) == 0: code = 13
+    if code == 0 and SetInformationJobObject(job, 9, limits, windows_job_extended_limit_size(WIN_PTR_BYTES) as u32) == 0: code = 13
     if code == 0:
         # CREATE_SUSPENDED | CREATE_NO_WINDOW. No inherited handles.
         val created = CreateProcessW(application, command_line, 0, 0, 0,
@@ -136,8 +212,8 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         if created == 0:
             code = 14
         else:
-            process = volatile_read_u64(process_info)
-            thread = volatile_read_u64(process_info + 8)
+            process = win_ptr_read(process_info)
+            thread = win_ptr_read(process_info + windows_process_info_thread_offset(WIN_PTR_BYTES))
     if code == 0 and AssignProcessToJobObject(job, process) == 0: code = 15
     if code == 0 and ResumeThread(thread) == 4294967295u32: code = 16
     if code == 0 and cancel:
@@ -145,10 +221,10 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         val deadline = GetTickCount64() + 10000u64
         var descendants = false
         while GetTickCount64() < deadline and not descendants:
-            if QueryInformationJobObject(job, 1, accounting, 48u32, 0) == 0:
+            if QueryInformationJobObject(job, 1, accounting, windows_job_accounting_size(WIN_PTR_BYTES) as u32, 0) == 0:
                 code = 17
                 break
-            descendants = volatile_read_u32(accounting + 40) >= 2
+            descendants = volatile_read_u32(accounting + windows_job_accounting_active_offset(WIN_PTR_BYTES)) >= 2
             if not descendants: Sleep(10u32)
         if not descendants: code = 18
         if TerminateJobObject(job, 125u32) == 0: code = 19
@@ -161,10 +237,10 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         val deadline = GetTickCount64() + 10000u64
         var empty = false
         while GetTickCount64() < deadline and not empty:
-            if QueryInformationJobObject(job, 1, accounting, 48u32, 0) == 0:
+            if QueryInformationJobObject(job, 1, accounting, windows_job_accounting_size(WIN_PTR_BYTES) as u32, 0) == 0:
                 code = 23
                 break
-            empty = volatile_read_u32(accounting + 40) == 0
+            empty = volatile_read_u32(accounting + windows_job_accounting_active_offset(WIN_PTR_BYTES)) == 0
             if not empty: Sleep(10u32)
         if not empty: code = 24
     if code != 0 and process != 0:
@@ -189,6 +265,7 @@ fn windows_process_abi_proof_v1() -> i64:
 
 export windows_process_abi_proof_v1
 @end
+export WinPtr, WinSize, WIN_PTR_BYTES, win_ptr_write, win_ptr_read
 export GetModuleFileNameW
 export GetProcessHeap, GlobalMemoryStatusEx, GetSystemTimes, HeapAlloc, HeapFree, CreateProcessW, CreateJobObjectW
 export SetInformationJobObject, AssignProcessToJobObject, ResumeThread
