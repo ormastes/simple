@@ -3,15 +3,17 @@
 # immutable content-addressed directories, so a sweep deletes only entries
 # that are unreferenced (not `keep`), past the min-age floor and provenance-
 # checked, and tolerates a concurrent sweep deleting the same entry first.
-# A managed store (.build-retention-v1.sdn) owns its own pin/lease authority;
-# the unmanaged collectors here refuse to touch one.
+# A managed store (.build-retention-v1.sdn) protects its pinned, leased and
+# authoritative closure while allowing stale unpinned revisions to be swept.
 use std.scv.compile_snapshot_values_v1.*
+use std.scv.build_retention_v1.{build_retention_sdn_v1}
+use std.scv.build_retention_codec_v1.{build_retention_parse_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1, compile_source_inventory_plain_checkout_v1}
 use app.io.mod.{file_exists, file_delete, dir_exists, dir_create}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
-use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_lock, file_unlock}
 use std.nogc_sync_mut.io_runtime.{dir_list_or_empty, dir_remove, getpid}
 use std.nogc_sync_mut.io.process_ops.{process_exists, eprint}
 use std.scv.store.{scv_write_text}
@@ -49,7 +51,8 @@ fn scv_compile_snapshot_gc_unmanaged_v1(
     scv_compile_snapshot_gc_filtered_v1(cache_root, retained_revisions, max_remove, "")
 
 fn scv_compile_snapshot_gc_filtered_v1(
-    cache_root: text, retained_revisions: [text], max_remove: i64, prefix: text
+    cache_root: text, retained_revisions: [text], max_remove: i64, prefix: text,
+    min_age_s: i64 = 0, allowed_victims: [text] = []
 ) -> i64:
     # Managed build stores have a root/pin/reader-lease authority. Legacy
     # callers cannot bypass it by supplying an empty retained-revision list.
@@ -66,8 +69,15 @@ fn scv_compile_snapshot_gc_filtered_v1(
         if removed >= max_remove:
             break
         if (name.starts_with(".") or retained_revisions.contains(name) or
-                (prefix != "" and not name.starts_with(prefix))):
+                (prefix != "" and not name.starts_with(prefix)) or
+                (allowed_victims.len() > 0 and not allowed_victims.contains(name))):
             continue
+        if scv_compile_snapshot_has_live_lease_v1(cache_root, name):
+            continue
+        if min_age_s > 0:
+            val initial_use = scv_compile_snapshot_last_use_v1(cache_root, name)
+            if initial_use <= 0 or time_now_seconds() - initial_use < min_age_s:
+                continue
         val root = "{snapshots_root}/{name}"
         val provenance = scv_compile_snapshot_read_text_v1(
             "{root}/SCV_COMPILE_SNAPSHOT")
@@ -79,11 +89,81 @@ fn scv_compile_snapshot_gc_filtered_v1(
         else: receipt == scv_compile_snapshot_receipt_v1(provenance, name)
         if (header != "" and provenance.starts_with(header + "\n") and
                 provenance.contains("\nrevision={name}\n") and
-                matches and
-                dir_remove(root, true)):
-            if not scv_compile_snapshot_is_bundle_v2(name): file_delete(receipt_path)
-            file_delete("{cache_root}/receipts/{name}.used")
-            removed = removed + 1
+                matches):
+            if file_exists("{cache_root}/.build-retention-v1.sdn"):
+                return removed
+            if scv_compile_snapshot_has_live_lease_v1(cache_root, name):
+                continue
+            if min_age_s > 0:
+                val recheck_use = scv_compile_snapshot_last_use_v1(cache_root, name)
+                if recheck_use <= 0 or time_now_seconds() - recheck_use < min_age_s:
+                    continue
+            if dir_remove(root, true):
+                if not scv_compile_snapshot_is_bundle_v2(name): file_delete(receipt_path)
+                file_delete("{cache_root}/receipts/{name}.used")
+                removed = removed + 1
+    removed
+
+# Under `.build-retention-v1.lock`, sweep ONLY untracked legacy `scv-revision-v1-*`
+# directories that are completely absent from `.build-retention-v1.sdn` nodes.
+# Any snapshot tracked in `.build-retention-v1.sdn` (pinned or unpinned) stays
+# exclusively owned by `build_retention_store_v1`.
+fn _scv_compile_snapshot_sweep_untracked_legacy_v1(
+    cache_root: text, keep: text, min_age_s: i64
+) -> i64:
+    val snapshots_root = "{cache_root}/snapshots"
+    if not dir_exists(snapshots_root):
+        return 0
+    val lock = file_lock("{cache_root}/.build-retention-v1.lock", 1)
+    if lock < 0:
+        return 0
+    val authority_path = "{cache_root}/.build-retention-v1.sdn"
+    val source = scv_compile_snapshot_read_text_v1(authority_path)
+    if source == "":
+        val _u = file_unlock(lock)
+        return 0
+    var tracked: [text] = []
+    match build_retention_parse_v1(source.bytes()):
+        case Err(_):
+            val _u = file_unlock(lock)
+            return 0
+        case Ok(state):
+            if build_retention_sdn_v1(state) != source:
+                val _u = file_unlock(lock)
+                return 0
+            for node in state.nodes:
+                if node.namespace == "snapshot":
+                    tracked.push(node.id)
+    var removed = 0
+    for name in scv_compile_snapshot_sorted_unique_v1(dir_list_or_empty(snapshots_root)):
+        if (not name.starts_with("scv-revision-v1-") or name == keep or
+                tracked.contains(name)):
+            continue
+        if scv_compile_snapshot_has_live_lease_v1(cache_root, name):
+            continue
+        if min_age_s > 0:
+            val last_use = scv_compile_snapshot_last_use_v1(cache_root, name)
+            if last_use <= 0 or time_now_seconds() - last_use < min_age_s:
+                continue
+        val root = "{snapshots_root}/{name}"
+        val provenance = scv_compile_snapshot_read_text_v1("{root}/SCV_COMPILE_SNAPSHOT")
+        val receipt_path = scv_compile_snapshot_receipt_path_v1(cache_root, root, name)
+        val receipt = scv_compile_snapshot_read_text_v1(receipt_path)
+        val header = scv_compile_snapshot_header_for_revision_v1(name)
+        if (header != "" and provenance.starts_with(header + "\n") and
+                provenance.contains("\nrevision={name}\n") and
+                receipt == scv_compile_snapshot_receipt_v1(provenance, name)):
+            if scv_compile_snapshot_has_live_lease_v1(cache_root, name):
+                continue
+            if min_age_s > 0:
+                val recheck_use = scv_compile_snapshot_last_use_v1(cache_root, name)
+                if recheck_use <= 0 or time_now_seconds() - recheck_use < min_age_s:
+                    continue
+            if dir_remove(root, true):
+                file_delete(receipt_path)
+                file_delete("{cache_root}/receipts/{name}.used")
+                removed = removed + 1
+    val _u = file_unlock(lock)
     removed
 
 # Existing store owns the only physical callback used by managed retention.
@@ -265,18 +345,32 @@ fn scv_compile_snapshot_last_use_v1(cache_root: text, name: text) -> i64:
 fn scv_compile_snapshot_retain_newest_v1(
     cache_root: text, keep: text, max_keep: i64, min_age_s: i64
 ) -> i64:
+    if max_keep <= 0:
+        return 0
     scv_compile_snapshot_retain_filtered_v1(cache_root, keep, max_keep, min_age_s, "")
 
 fn scv_compile_snapshot_retain_newest_v2(
     cache_root: text, keep: text, max_keep: i64, min_age_s: i64
 ) -> i64:
-    scv_compile_snapshot_retain_filtered_v1(cache_root, keep, max_keep, min_age_s, "scv-revision-v2-")
+    if max_keep <= 0:
+        return 0
+    if file_exists("{cache_root}/.build-retention-v1.sdn"):
+        return _scv_compile_snapshot_sweep_untracked_legacy_v1(cache_root, keep, min_age_s)
+    val removed_v2 = scv_compile_snapshot_retain_filtered_v1(
+        cache_root, keep, max_keep, min_age_s, "scv-revision-v2-")
+    # In unmanaged stores, also sweep aged legacy scv-revision-v1-* directories
+    # past min_age_s (and cap to max_keep when min_age_s == 0).
+    val legacy_cap = if min_age_s > 0: 0 else: max_keep
+    val removed_v1 = scv_compile_snapshot_retain_filtered_v1(
+        cache_root, keep, legacy_cap, min_age_s, "scv-revision-v1-")
+    removed_v2 + removed_v1
 
 fn scv_compile_snapshot_retain_filtered_v1(
     cache_root: text, keep: text, max_keep: i64, min_age_s: i64, prefix: text
 ) -> i64:
     val snapshots_root = "{cache_root}/snapshots"
-    if max_keep <= 0 or not dir_exists(snapshots_root):
+    if max_keep < 0 or not dir_exists(snapshots_root) or
+            file_exists("{cache_root}/.build-retention-v1.sdn"):
         return 0
     val young_after = time_now_seconds() - min_age_s
     var names: [text] = []
@@ -296,7 +390,7 @@ fn scv_compile_snapshot_retain_filtered_v1(
         while index < names.len():
             if not done[index] and names[index] != keep and
                     not scv_compile_snapshot_has_live_lease_v1(cache_root, names[index]) and
-                    (min_age_s <= 0 or stamps[index] <= young_after):
+                    (min_age_s <= 0 or (stamps[index] > 0 and stamps[index] <= young_after)):
                 if (victim < 0 or stamps[index] < stamps[victim] or
                         (stamps[index] == stamps[victim] and names[index] < names[victim])):
                     victim = index
@@ -307,7 +401,8 @@ fn scv_compile_snapshot_retain_filtered_v1(
         for name in names:
             if name != names[victim]:
                 retained.push(name)
-        if scv_compile_snapshot_gc_filtered_v1(cache_root, retained, 1, prefix) > 0:
+        if scv_compile_snapshot_gc_filtered_v1(
+                cache_root, retained, 1, prefix, min_age_s, [names[victim]]) > 0:
             removed = removed + 1
             live = live - 1
         done[victim] = true
