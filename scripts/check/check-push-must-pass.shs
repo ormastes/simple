@@ -1919,7 +1919,9 @@ fi
 
 if [ "${1:-}" = --self-test ]; then
     _tmp=$(mktemp -d) || exit 2
-    trap 'rm -rf "$_tmp"' EXIT INT TERM
+    trap 'rm -rf "$_tmp"' EXIT
+    trap 'rm -rf "$_tmp"; exit 130' INT
+    trap 'rm -rf "$_tmp"; exit 143' TERM
     cp "$ROOT/$MANIFEST_REL" "$_tmp/manifest"
     cp "$ROOT/$LEDGER_REL" "$_tmp/ledger"
     printf '%s\n' 'self-test authoritative evidence' > "$_tmp/evidence"
@@ -2000,17 +2002,17 @@ if [ "${1:-}" = --self-test ]; then
 
     # Deferred-parallel fixtures: the batch must apply the sequential verdict
     # rules -- a failing, a budget-killed, and an all-pass batch.
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _par_pass_budget_ms=120000; _par_budget_ms=4000; _par_sleep=12 ;;
+        *) _par_pass_budget_ms=5000; _par_budget_ms=1000; _par_sleep=3 ;;
+    esac
     printf '#!/bin/sh\nexit 1\n' > "$_tmp/fail-gate.shs"
-    MUST_CHECK_BUDGET_MS=5000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    MUST_CHECK_BUDGET_MS=$_par_pass_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
     push_gate_defer_begin
     [ -n "$PUSH_PAR_DIR" ] || die "deferred batch did not start"
     run_push_gate "par-pass" true "$_tmp/fast-gate.shs" || die "deferred launch returned non-zero"
     run_push_gate "par-fail" true "$_tmp/fail-gate.shs" || die "deferred launch returned non-zero"
     push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a failing gate passed"
-    case "$(uname -s 2>/dev/null || printf unknown)" in
-        MINGW*|MSYS*|CYGWIN*) _par_budget_ms=4000; _par_sleep=7 ;;
-        *) _par_budget_ms=1000; _par_sleep=3 ;;
-    esac
     printf '#!/bin/sh\nsleep %s\nexit 0\n' "$_par_sleep" > "$_tmp/slow-gate-par.shs"
     MUST_CHECK_BUDGET_MS=$_par_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
     push_gate_defer_begin
@@ -2018,7 +2020,7 @@ if [ "${1:-}" = --self-test ]; then
     run_push_gate "par-pass" true "$_tmp/fast-gate.shs"
     push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a budget-killed gate passed"
     [ "$MUST_CHECK_BUDGET_OVERRUN" = "par-slow" ] || die "deferred overrun did not name the killed gate"
-    MUST_CHECK_BUDGET_MS=5000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    MUST_CHECK_BUDGET_MS=$_par_pass_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
     push_gate_defer_begin
     run_push_gate "par-a" true "$_tmp/fast-gate.shs"
     run_push_gate "par-b" true "$_tmp/fast-gate.shs"
@@ -2094,9 +2096,13 @@ if [ "${1:-}" = --self-test ]; then
     mkdir -p "$ROOT/scripts/check"
     cp "$_saved_root/scripts/check/check-no-conflict-tree-push.shs" "$ROOT/scripts/check/" || die "rebased fixture guard copy failed"
     printf 'refs/heads/replacement %s refs/heads/old %s\n' "$_rebased_tip" "$_rebased_old" > "$_tmp/rebased/refs"
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _union_budget_ms=180000 ;;
+        *) _union_budget_ms=10000 ;;
+    esac
     (
         cd "$ROOT" || exit 1
-        MUST_CHECK_BUDGET_MS=10000
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms
         MUST_CHECK_BUDGET_SPENT_MS=0
         MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/refs"
@@ -2111,13 +2117,13 @@ if [ "${1:-}" = --self-test ]; then
     mkdir -p "$_tmp/rebased/slow-bin"
     _real_git=$(command -v git)
     case "$(uname -s 2>/dev/null || printf unknown)" in
-        MINGW*|MSYS*|CYGWIN*) _slow_remote_sleep=30; _slow_remote_bound=25 ;;
+        MINGW*|MSYS*|CYGWIN*) _slow_remote_sleep=150; _slow_remote_bound=90 ;;
         *) _slow_remote_sleep=10; _slow_remote_bound=8 ;;
     esac
     cat > "$_tmp/rebased/slow-bin/git" <<SLOW_GIT
 #!/bin/sh
 case " \$* " in
-    *' ls-remote '*) sleep $_slow_remote_sleep ;;
+    *' ls-remote '*) exec sleep $_slow_remote_sleep ;;
 esac
 exec "\$REBASE_FIXTURE_REAL_GIT" "\$@"
 SLOW_GIT
@@ -2193,13 +2199,13 @@ SLOW_GIT
     printf 'refs/heads/stale %s refs/heads/stale %s\n' "$_stale_tip" "$_stale_old" > "$_tmp/rebased/stale-refs"
     (
         cd "$ROOT" || exit 1
-        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/stale-refs"
     ) >/dev/null 2>&1 || die "stale branch merging main was rejected by the commit bound"
     (
         cd "$ROOT" || exit 1
         MUST_CHECK_PUSH_REMOTE=missing-remote
-        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/stale-refs"
     ) >/dev/null 2>&1 && die "stale merge admitted without a verifiable remote main"
     git -C "$ROOT" switch -q -c big main
@@ -2209,7 +2215,7 @@ SLOW_GIT
     printf 'refs/heads/big %s refs/heads/big %s\n' "$_big_tip" "$_big_old" > "$_tmp/rebased/big-refs"
     (
         cd "$ROOT" || exit 1
-        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        MUST_CHECK_BUDGET_MS=$_union_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
         run_conflict_tree_union "$_tmp/rebased/big-refs"
     ) >/dev/null 2>&1 && die "65 genuinely new commits passed the 64-commit bound"
     # Release-line merge fixture (2026-11-17): a PR branch based on
