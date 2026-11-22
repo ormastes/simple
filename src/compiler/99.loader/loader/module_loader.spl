@@ -45,8 +45,6 @@ use .smf_cache_manager.{
     SmfCacheManager, smfcachemanager_with_new_cache, smfcachemanager_force_clear
 }
 use .smf_cache.{validated_smf_load}
-use .unit_identity.{UnitIdentity, unit_identity_check_image}
-use std.io_runtime.{file_read_bytes_result}
 use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, LifecycleManager}
 
 export use .module_loader_services.{
@@ -189,9 +187,6 @@ struct LazyModuleLoader:
     semantic_exports: Dict<text, [text]>
     # Public ABI/accessor semantic keys each module compiled against.
     semantic_dependencies: Dict<text, [text]>
-    # Identity the caller requires of a module path before any symbol is
-    # published (iface/ABI digest, triple, policy, capabilities).
-    expected_identities: Dict<text, UnitIdentity>
 
 
 # ============================================================================
@@ -222,24 +217,13 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             native_group_data_sections: {},
             config: config,
             semantic_exports: {},
-            semantic_dependencies: {},
-            expected_identities: {}
+            semantic_dependencies: {}
         )
 
 
 fn lazymoduleloader_with_defaults() -> LazyModuleLoader:
         """Create loader with default configuration."""
         lazymoduleloader_new(lazymoduleloaderconfig_default())
-
-
-fn moduleloader_expect_identity(self: LazyModuleLoader, path: text, identity: UnitIdentity):
-        """Require `path` to carry exactly this unit identity before load.
-
-        moduleloader_load then refuses (fail closed, SMF-E-UNIT-* diagnostic)
-        any module whose iface/ABI digest, target triple, policy or
-        capabilities differ, before a single symbol is published.
-        """
-        self.expected_identities[path] = identity
 
 
 fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
@@ -268,23 +252,7 @@ fn moduleloader_load(self: LazyModuleLoader, path: text) -> LoadResult:
         # Acquire provider bytes before the reader: ObjectProvider.get_reader
         # delegates to get_module_bytes, so calling both on the success path
         # performs a redundant cache lookup and Result handoff.
-        var module_bytes_result = provider.get_module_bytes(path)
-
-        # Identity gate: runs on the exact bytes that will be mapped, before
-        # any symbol is allocated or published. Fail closed when an identity
-        # is expected and the bytes are unavailable or do not match.
-        if self.expected_identities.has(path):
-            # Direct file paths miss the provider index; read the file once
-            # and map those same verified bytes (no verify/map TOCTOU).
-            if module_bytes_result.is_err():
-                module_bytes_result = file_read_bytes_result(path)
-            if module_bytes_result.is_err():
-                lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
-                return LoadResult.Error(message: "SMF-E-UNIT-IDENTITY-MISSING: cannot read {path} to verify unit identity: {module_bytes_result.unwrap_err()}")
-            val identity_check = unit_identity_check_image(self.expected_identities[path], module_bytes_result.unwrap())
-            if identity_check.is_err():
-                lifecycle_unload_module(lifecycle, jit.exec_mapper, path)
-                return LoadResult.Error(message: "{path}: {identity_check.unwrap_err()}")
+        val module_bytes_result = provider.get_module_bytes(path)
         var reader_result = if module_bytes_result.is_ok():
             SmfReaderMemory.from_data(module_bytes_result.unwrap())
         else:
@@ -1035,7 +1003,6 @@ fn moduleloader_destroy(self: LazyModuleLoader):
     self.dependency_semantic_fingerprints = {}
     self.semantic_exports = {}
     self.semantic_dependencies = {}
-    self.expected_identities = {}
 
 # ============================================================================
 # Validated Loading (checks backend/options match)
