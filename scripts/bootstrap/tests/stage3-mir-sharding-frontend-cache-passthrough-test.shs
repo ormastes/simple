@@ -1,0 +1,178 @@
+#!/bin/sh
+# W24/W27 Windows shard-worker workaround transport: SIMPLE_MIR_SHARDING and
+# SIMPLE_FRONTEND_CACHE (unset | 0 | 1) must cross the Stage 3 `env -i`
+# boundary as validated single-variable pass-throughs, hashed AND transcribed.
+#   - unset: no SIMPLE_MIR_SHARDING word, SIMPLE_FRONTEND_CACHE=1 (the pinned
+#     argv), and the vector is identical to an explicit SIMPLE_FRONTEND_CACHE=1;
+#   - 0/1: the word is present in the worker transcript, the resume args-hash
+#     vector equals the worker vector, and the hash differs from unset by
+#     exactly that one word;
+#   - anything else: the resume launcher and the worker both refuse.
+# Only text slices of the real worker/resume scripts run; nothing is compiled.
+# Bug: doc/08_tracking/bug/stage3_resume_drops_mir_sharding_frontend_cache_env_2026-11-23.md
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$temp_parent/simple-stage3-msfc.XXXXXX")
+case "$tmp" in "$temp_parent"/simple-stage3-msfc.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+worker_file="$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh"
+resume_file="$repo/scripts/bootstrap/resume-stage3-from-admitted.sh"
+scratch_file="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+slice() {
+  awk -v s="$2" -v e="$3" -v inc="$4" '
+    { buf = buf $0 "\n" }
+    END {
+      i = index(buf, s); if (i == 0) exit 3
+      rest = substr(buf, i)
+      if (e == "") { printf "%s", rest; exit 0 }
+      j = index(rest, e); if (j == 0) exit 3
+      n = j - 1; if (inc == "1") n += length(e)
+      printf "%s", substr(rest, 1, n)
+    }' "$1"
+}
+awk -v s='BOOTSTRAP_STAGE3_FACADE_PATH=' '{ buf = buf $0 "\n" } END { i = index(buf, s); if (i == 0) exit 3; printf "%s", substr(buf, 1, i - 1) }' "$worker_file" >"$tmp/prefix"
+slice "$worker_file" 'stage3_streaming_surfaces=0' '' 0 >"$tmp/recipe"
+slice "$resume_file" 'stage3_lowering_lane=per-file' 'stage3_cold_init_env=' 0 >"$tmp/lane"
+slice "$resume_file" 'stage3_args=$(bootstrap_stage3_args_sha256' 'src/app/cli/bootstrap_main.spl)' 1 >"$tmp/digest"
+
+{
+  cat "$tmp/prefix"
+  printf '%s\n' 'bootstrap_stage3_run_transcribed() { shift 6; printf "%s\0" "$@" >"$CONTROL_RECORD"; }'
+  printf '%s\n' 'timeout_args=' '[ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"'
+  cat "$tmp/recipe"
+} >"$tmp/worker.sh"
+{
+  printf '%s\n' 'set -eu' transcript=/fixture/transcript "root='$repo'" log=/fixture/log \
+    home=/fixture/home tmp=/fixture/tmp path=/usr/bin:/bin admitted=/fixture/admitted \
+    platform=x86_64-pc-windows-msvc stage2_backend=llvm stage3_threads=10 timeout_seconds=600 \
+    "stage3_cache='/fixture/cache with space'" runtime=/fixture/runtime candidate=/fixture/candidate \
+    progress=/fixture/progress phase_profile=/fixture/phase memory_snapshot=/fixture/memory \
+    evidence_run_id=fixture-id stage3_requested_route=native stage3_fallback_route=none \
+    stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env= stage3_compiler_ceiling_env= \
+    resume_abi_policy=v1 stage2_admission=/fixture/admission "stage3_timeout_args='--timeout 600'"
+  printf '%s\n' 'set -- --source /frozen/k1 --source src/compiler --source src/app --source src/lib --entry-closure'
+  cat "$tmp/lane"
+  printf '%s\n' 'printf "%s" "$stage3_lowering_lane" >"$LANE_RECORD"'
+  printf '%s\n' 'bootstrap_stage3_args_sha256() { printf "%s\0" "$@" >"$CONTROL_RECORD"; }'
+  cat "$tmp/digest"
+} >"$tmp/resume.sh"
+
+aaaa=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+run_worker() { # lane record [env...]
+  lane=$1; rec=$2; shift 2
+  rm -f "$rec"
+  env -i PATH=/usr/bin:/bin CONTROL_RECORD="$rec" "$@" sh -c "$(cat "$tmp/worker.sh")" msfc-test \
+    /fixture/transcript "$repo" /fixture/log /fixture/home /fixture/tmp /usr/bin:/bin \
+    /fixture/admitted x86_64-pc-windows-msvc llvm 10 600 "/fixture/cache with space" \
+    /fixture/runtime /fixture/candidate /fixture/progress /fixture/phase /fixture/memory \
+    fixture-id native none 4194304 "" "" "" 4096 v1 /fixture/admission "$aaaa" \
+    "" "" 1000 "$lane" enforce --stage3-source-policy-v1 \
+    --source /frozen/k1 --source src/compiler --source src/app --source src/lib \
+    --entry-closure >"$tmp/out" 2>"$tmp/err"
+}
+
+fail=0 checked=0
+# vector NAME [ENV...] -> $tmp/NAME.txt (resume hash vector), checked equal to
+# the worker transcript vector; sets vec_ok=1 on success.
+vector() {
+  name=$1; shift
+  vec_ok=0 checked=$((checked + 1))
+  rm -f "$tmp/expected" "$tmp/actual" "$tmp/lane.txt"
+  rc=0
+  env -i PATH=/usr/bin:/bin CONTROL_RECORD="$tmp/expected" LANE_RECORD="$tmp/lane.txt" \
+    SIMPLE_FILE_WORKERS=1 "$@" sh -c "$(cat "$tmp/resume.sh")" msfc-test >"$tmp/out" 2>"$tmp/err" || rc=$?
+  got_lane=$(cat "$tmp/lane.txt" 2>/dev/null || true)
+  wrc=0; run_worker "$got_lane" "$tmp/actual" SIMPLE_FILE_WORKERS=1 "$@" || wrc=$?
+  if [ "$rc" -ne 0 ] || [ "$wrc" -ne 0 ] || [ ! -e "$tmp/expected" ] || [ ! -e "$tmp/actual" ]; then
+    echo "FAIL: $name resume rc=$rc worker rc=$wrc" >&2; cat "$tmp/err" >&2; fail=1; return 0
+  fi
+  tr '\0' '\n' <"$tmp/expected" >"$tmp/$name.txt"
+  tr '\0' '\n' <"$tmp/actual" | awk 'skip > 0 { skip--; next } !done && $0 == "--" { done = 1; skip = 1; next } { print }' >"$tmp/$name.worker"
+  if cmp -s "$tmp/$name.txt" "$tmp/$name.worker" &&
+     awk -F= '/^SIMPLE_[A-Z0-9_]+=/ { if (++seen[$1] > 1) exit 1 }' "$tmp/$name.worker"; then
+    vec_ok=1
+  else
+    echo "FAIL: $name: resume hash vector != worker transcript vector (or duplicate env)" >&2
+    diff "$tmp/$name.txt" "$tmp/$name.worker" >&2 || true; fail=1
+  fi
+}
+digest() { sha256sum "$tmp/$1.txt" | awk '{ print $1 }'; }
+has() { grep -q -x "$2" "$tmp/$1.worker"; }
+lacks_name() { ! grep -q "^$2=" "$tmp/$1.worker"; }
+# only_diff A B LINE_A LINE_B: the two vectors differ by exactly that one word.
+only_diff() {
+  d=$(diff "$tmp/$1.txt" "$tmp/$2.txt" | grep '^[<>]' || true)
+  want=$(printf '%s\n%s' "${3:+< $3}" "${4:+> $4}" | grep . || true)
+  [ "$d" = "$want" ]
+}
+
+vector unset
+if [ "$vec_ok" = 1 ] && lacks_name unset SIMPLE_MIR_SHARDING && has unset SIMPLE_FRONTEND_CACHE=1; then
+  echo "PASS: unset: pinned argv (no SIMPLE_MIR_SHARDING, SIMPLE_FRONTEND_CACHE=1), hash vector == worker vector"
+else
+  echo "FAIL: unset vector is not the pinned argv" >&2; fail=1
+fi
+vector fc1 SIMPLE_FRONTEND_CACHE=1
+if [ "$vec_ok" = 1 ] && [ "$(digest fc1)" = "$(digest unset)" ]; then
+  echo "PASS: SIMPLE_FRONTEND_CACHE=1 is the pinned value: hash identical to unset"
+else
+  echo "FAIL: SIMPLE_FRONTEND_CACHE=1 changed the pinned vector" >&2; fail=1
+fi
+vector fc0 SIMPLE_FRONTEND_CACHE=0
+if [ "$vec_ok" = 1 ] && has fc0 SIMPLE_FRONTEND_CACHE=0 && [ "$(digest fc0)" != "$(digest unset)" ] &&
+   only_diff unset fc0 SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE=0; then
+  echo "PASS: SIMPLE_FRONTEND_CACHE=0 transcribed, hash differs by exactly that word"
+else
+  echo "FAIL: SIMPLE_FRONTEND_CACHE=0 not carried" >&2; fail=1
+fi
+for v in 0 1; do
+  vector "ms$v" SIMPLE_MIR_SHARDING=$v
+  if [ "$vec_ok" = 1 ] && has "ms$v" "SIMPLE_MIR_SHARDING=$v" && [ "$(digest "ms$v")" != "$(digest unset)" ] &&
+     only_diff unset "ms$v" '' "SIMPLE_MIR_SHARDING=$v"; then
+    echo "PASS: SIMPLE_MIR_SHARDING=$v transcribed, hash differs by exactly that word"
+  else
+    echo "FAIL: SIMPLE_MIR_SHARDING=$v not carried" >&2; fail=1
+  fi
+done
+vector w27 SIMPLE_MIR_SHARDING=1 SIMPLE_FRONTEND_CACHE=0
+if [ "$vec_ok" = 1 ] && has w27 SIMPLE_MIR_SHARDING=1 && has w27 SIMPLE_FRONTEND_CACHE=0; then
+  echo "PASS: W27 recipe (SIMPLE_MIR_SHARDING=1 SIMPLE_FRONTEND_CACHE=0) reaches the transcript"
+else
+  echo "FAIL: W27 recipe not carried" >&2; fail=1
+fi
+
+for knob in SIMPLE_MIR_SHARDING SIMPLE_FRONTEND_CACHE; do
+  for bad in 2 yes true 01 ' 1'; do
+    checked=$((checked + 1))
+    rc=0
+    env -i PATH=/usr/bin:/bin CONTROL_RECORD="$tmp/bad" LANE_RECORD="$tmp/lane.txt" SIMPLE_FILE_WORKERS=1 \
+      "$knob=$bad" sh -c "$(cat "$tmp/resume.sh")" msfc-test >"$tmp/out" 2>"$tmp/err" || rc=$?
+    rmsg=0; grep -q "error: $knob must be unset, 0 or 1" "$tmp/err" && rmsg=1
+    wrc=0; run_worker per-file:fw=1:gte=1:msc=9 "$tmp/badw" "$knob=$bad" || wrc=$?
+    wmsg=0; grep -q "stage3 worker: $knob must be unset, 0 or 1" "$tmp/err" && wmsg=1
+    if [ "$rc" -eq 1 ] && [ "$rmsg" = 1 ] && [ ! -e "$tmp/bad" ] &&
+       [ "$wrc" -eq 64 ] && [ "$wmsg" = 1 ] && [ ! -e "$tmp/badw" ]; then
+      echo "PASS: resume and worker refuse $knob='$bad'"
+      continue
+    fi
+    echo "FAIL: $knob='$bad' accepted (resume rc=$rc worker rc=$wrc)" >&2; fail=1
+  done
+done
+
+# bootstrap-from-scratch.sh's own Stage 3: the hashed vector and the
+# transcribed invocation both carry the knobs.
+checked=$((checked + 1))
+hash_block=$(slice "$scratch_file" 'stage3_build_args_sha256=$(' 'src/app/cli/bootstrap_main.spl' 0)
+run_block=$(slice "$scratch_file" 'SIMPLE_BOOTSTRAP="${stage3_bootstrap_flag}" ${stage3_whole_program_env} ${stage3_per_file_env} \' 'src/app/cli/bootstrap_main.spl' 0)
+case "$hash_block" in *'${stage3_mir_sharding_env}'*'"SIMPLE_FRONTEND_CACHE=${stage3_frontend_cache}"'*)
+  case "$run_block" in *'${stage3_mir_sharding_env}'*'SIMPLE_FRONTEND_CACHE="${stage3_frontend_cache}"'*)
+    echo "PASS: bootstrap-from-scratch.sh Stage 3 hashes and transcribes both knobs" ;;
+  *) echo "FAIL: bootstrap-from-scratch.sh Stage 3 transcript lacks the knobs" >&2; fail=1 ;; esac ;;
+*) echo "FAIL: bootstrap-from-scratch.sh Stage 3 args hash lacks the knobs" >&2; fail=1 ;;
+esac
+
+if [ "$checked" -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ "$fail" -ne 0 ]; then echo "FAIL — $checked case(s) checked, failures above"; exit 1; fi
+echo "PASS — $checked case(s) checked, MIR sharding / frontend cache pass-through hashed + transcribed, unset pinned"

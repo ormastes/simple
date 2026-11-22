@@ -201,6 +201,16 @@ Policy lives in `scripts/bootstrap/lib/product-frontend-policy.shs` and
 | `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB` | Positive, enforced process-tree limit |
 | `SIMPLE_HIR_SHARDING` / `SIMPLE_PARSE_SHARDING` | Switch HIR / parse sharding (`0` disables) |
 | `SIMPLE_HIR_WORKER_SKELETON` | Opt-in (`=1`): HIR workers build surfaces from the module skeleton (#4473) |
+| `SIMPLE_MIR_SHARDING` / `SIMPLE_FRONTEND_CACHE` | Stage 3 pass-throughs (unset \| `0` \| `1`, else refused) in `resume-stage3-from-admitted.sh` and `bootstrap-from-scratch.sh`; hashed into the args receipt and transcribed. Unset = pinned argv (sharding absent, frontend cache `1`) |
+
+**Windows Stage 3 shard-worker AV workaround (W24/W27, 2026-11-23).** MIR shard
+workers AV (`0xC0000005`, `claimed=0`) when they read back warm `.fpc`
+frontend parse-cache entries. Run the canonical resume lane with
+`SIMPLE_MIR_SHARDING=1 SIMPLE_FRONTEND_CACHE=0` exported: workers parse cold,
+codegen, and exit per shard (verified 9/9 shards, 1612/1613 modules). This is a
+scoped workaround; the `.fpc` read-back root cause is OPEN
+(`doc/08_tracking/bug/stage3_surface_build_av_items_spl_warm_frontend_cache_2026-11-22.md`;
+transport fix `stage3_resume_drops_mir_sharding_frontend_cache_env_2026-11-23.md`).
 
 ### Repo-tracked bootstrap settings (`config/bootstrap.sdn`)
 

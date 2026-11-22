@@ -5301,6 +5301,23 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     1) stage3_bootstrap_flag=1 stage3_whole_program_env=SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 ;;
     *) echo "error: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM must be unset or exactly 1" >&2; exit 1 ;;
   esac
+  # Windows shard-worker warm-cache workaround (W24/W27, 2026-11-23): MIR shard
+  # workers AV reading back the frontend parse cache; the working setting is
+  # SIMPLE_MIR_SHARDING=1 + SIMPLE_FRONTEND_CACHE=0. Validated (unset | 0 | 1)
+  # single-variable pass-throughs, hashed and transcribed; unset keeps the
+  # pinned argv byte-for-byte (SIMPLE_MIR_SHARDING absent, SIMPLE_FRONTEND_CACHE
+  # at its pinned 1). Same knobs in resume-stage3-from-admitted.sh.
+  stage3_mir_sharding_env= stage3_frontend_cache=1
+  case "${SIMPLE_MIR_SHARDING:-}" in
+    '') ;;
+    0|1) stage3_mir_sharding_env="SIMPLE_MIR_SHARDING=${SIMPLE_MIR_SHARDING}" ;;
+    *) echo "error: SIMPLE_MIR_SHARDING must be unset, 0 or 1" >&2; exit 1 ;;
+  esac
+  case "${SIMPLE_FRONTEND_CACHE:-}" in
+    '') ;;
+    0|1) stage3_frontend_cache=${SIMPLE_FRONTEND_CACHE} ;;
+    *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 1 ;;
+  esac
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -5320,8 +5337,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_GO_TO_END=${bootstrap_go_to_end}" \
       "SIMPLE_CACHE_SCOPE=stage3" \
       "SIMPLE_KEEP_SOURCE_CONTENTS=${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
-      "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" \
-      "SIMPLE_FRONTEND_CACHE=1" \
+      "SIMPLE_MIR_TAG_PROBE=${SIMPLE_MIR_TAG_PROBE:-}" ${stage3_mir_sharding_env} \
+      "SIMPLE_FRONTEND_CACHE=${stage3_frontend_cache}" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_HIR_CACHE=1" \
       "SIMPLE_HIR_CACHE_DIR=${stage3_cache_absolute}/hir" \
@@ -6458,8 +6475,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
     SIMPLE_CACHE_SCOPE=stage3 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
-    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
-    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" ${stage3_mir_sharding_env} \
+    SIMPLE_FRONTEND_CACHE="${stage3_frontend_cache}" \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
     SIMPLE_HIR_CACHE=1 \
     SIMPLE_HIR_CACHE_DIR="${stage3_cache_absolute}/hir" \
