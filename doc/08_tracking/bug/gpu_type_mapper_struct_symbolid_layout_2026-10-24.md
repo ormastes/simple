@@ -41,3 +41,10 @@ Unblock: either of these.
 - Rerun the native fixture without the 8 GiB cap (it needs more than 8 GiB at
   whole-program MIR).
 - Run the spec on a seed or full CLI that is new enough to parse current source.
+
+## 2026-11-22 follow-up
+The coordinator approved a 20 GiB native-build of the port_owner closure. It
+SIGSEGVs at HIR 82/514 under any 20G cgroup (peak RSS 4.0 GB), while the 8G
+control passes that point; details are in
+`cuda_optimizer_surface_owner_2026_10_10.md`. This fixture was not run because
+that prerequisite failed, so the status stays `fix-implemented-verification-pending`.

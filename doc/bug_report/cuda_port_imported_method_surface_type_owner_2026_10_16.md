@@ -96,3 +96,33 @@ The full command and context are in
 Negative control (same producer, env and flags): a fixture with `fn take(x: NoSuchOwnerType)` fails HIR with `[ERROR] HIR lowering error ... unresolved type: NoSuchOwnerType` (build rc=1). So `failed=0` on the 514-module closure is evidence that can fail, not a vacuous pass.
 Importer audit: no file under src/ or test/ that imports the four optimizer modules or `cuda_backend_port` names `LocalId`, `BlockId`, `MirType` or `MirSignature` without the owner import. The only matches are commented-out code in `mir_opt_spec.spl` and the intentional `mir_owner_adapter/cuda_adapter_import_only.spl` fixture.
 **Untracked residual:** the 2026-10-10 CUDA-closure crash at MIR entry (SIGSEGV, exit 139) has no other bug record, and this run could not reach it because of the 8 GiB OOM. It is now UNTRACKED; file a narrow MIR record when a run above 8 GiB reproduces it.
+
+## 2026-11-22 follow-up: 20 GiB run (coordinator-approved) — no binary; cgroup-dependent compiler SIGSEGV
+
+Each run used the same Stage 2 (`ef46f0d2...`) and `stage2-runtime-authority`, with
+`systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=0`, launched serially
+only when MemAvailable was at least 45 GiB (actual 63-70 GiB). Peak RSS comes from
+`/usr/bin/time -v`.
+
+| run | config | result | peak RSS |
+|-----|--------|--------|----------|
+| fx12b | 20G, default threads (HIR worker pool sized to 1) | SIGSEGV (worker exit -139, build rc 117) at HIR 82/514 | 4.01 GB |
+| fx12c | 20G, `--threads 1` | SIGSEGV at HIR 82/514 | 4.01 GB |
+| fx12d | 20G, `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=8388608` (HIR in-process, threads=0, same as the 8G run) | SIGSEGV at HIR 82/514 | 4.01 GB |
+| fx12e | control: original 8G command, unchanged | passed HIR 82 and reached 202/514 (stopped deliberately) | n/a |
+
+The original 8G run (`fx12`) got through HIR 514/514. Only the cgroup
+`memory.max` differs, so the crash is triggered by the cgroup cap, not by
+memory pressure. In the 20G runs the HIR module order diverges right after
+`lib.nogc_sync_mut.io.process_ops` (it goes to `compiler.mir_opt.perf_facts`
+instead of `lib.nogc_sync_mut.sffi.runtime`), and the crash follows.
+
+A crash report exists at
+`/var/crash/_home_yoon_dev_simple-integ5-20261116_..._stage2-admitted_simple.1000.crash`.
+This is a separate compiler defect and is not yet filed.
+
+Result: still no linked binary.
+- Bugs 1 and 2 keep the HIR 514/514 evidence from the 8G run (with the negative control).
+- End-to-end (link + run) evidence is blocked between the 8G OOM at MIR 200/514
+  and the 20G HIR SIGSEGV at 82/514.
+- The bug 3 fixture was not run, since the success of this run was its precondition.
