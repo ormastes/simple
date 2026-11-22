@@ -499,6 +499,20 @@ impl LlvmBackend {
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?
                         .into()),
+                    // Float `%` is truncated (C fmod, sign of the dividend), matching
+                    // the seed interpreter (interpreter/expr/ops.rs, BinOp::Mod, Rust `%`
+                    // on f64/f32) and both `rt_any_mod` runtime twins
+                    // (runtime/src/value/collections.rs, src/runtime/runtime_any_ops.c).
+                    // The cranelift backend is floored instead; that divergence and the
+                    // r == 0 behaviour (interpreter error vs NaN here) are an open owner
+                    // decision, see doc/08_tracking/bug/
+                    // seed_llvm_float_mod_unsupported_blocks_simple_core_archive_2026-11-22.md.
+                    // Without this arm `src/runtime/simple_core/core_any_ops.spl:94` failed
+                    // with `Unsupported float binop: Mod`.
+                    BinOp::Mod => Ok(builder
+                        .build_float_rem(l, r, "frem")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_rem", &e))?
+                        .into()),
                     BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         let pred = match op {
                             BinOp::Eq => FloatPredicate::OEQ,
