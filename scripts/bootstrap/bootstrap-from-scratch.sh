@@ -182,6 +182,8 @@ case "${1:-}" in
     shift
     [ "$#" -eq 1 ] || { echo 'error: managed resume requires one --bootstrap-receipt planner authority' >&2; exit 2; }
     case "$1" in --bootstrap-receipt=*) managed_resume_planner=${1#*=} ;; *) exit 2 ;; esac
+    . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-materialized-startup.shs"
+    bootstrap_materialized_resume_startup "${bootstrap_early_repo_root}" "${managed_resume_output}" || exit 1
     exec sh "${bootstrap_entry_dir}/run-managed-from-admitted.shs" \
       "--output=${managed_resume_output}" "--planner-receipt=${managed_resume_planner}"
     ;;
@@ -1030,6 +1032,8 @@ if [ -n "${resume_stage3_output}" ]; then
   [ "${fresh_cache}" -eq 0 ] || RESUME_STAGE3_CACHE_ACTION=clean
   [ "${invalidate_cache_scope}" != stage3 ] || RESUME_STAGE3_CACHE_ACTION=invalidate
   export RESUME_STAGE3_CACHE_ACTION
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-materialized-startup.shs"
+  bootstrap_materialized_resume_startup "${bootstrap_early_repo_root}" "${resume_stage3_output}" || exit 1
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 

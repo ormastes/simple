@@ -336,6 +336,15 @@ if ! adm_run_planner_build "$adm_requested_fw"; then
         adm_fail planner-build-failed
     fi
 fi
+# A per-file pool that cannot admit two workers (low reported free memory, e.g.
+# a Hyper-V ballooned guest) aborts the closure, yet native-build still exits 0
+# with no executable. Retry once on the phase route, as for the spawn-noop case.
+if [ ! -x "$build_planner_out" ] && [ -z "${SIMPLE_FILE_WORKERS:-}" ] &&
+    grep -q 'per-file worker pool refused' "$adm_dir/planner-build.log"; then
+    cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.pool-refused.log" 2>/dev/null || :
+    rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+    adm_run_planner_build 0 || adm_fail planner-build-failed
+fi
 [ -x "$build_planner_out" ] || adm_fail planner-build-produced-no-executable
 planner_sha=$(bootstrap_planner_v2_hash_file "$build_planner_out")
 
@@ -382,7 +391,12 @@ expected_auth=$(bootstrap_planner_v2_authorization_text \
 # An admitted planner must REFUSE an untyped reason. A planner that accepts
 # anything is not a policy gate, so we prove refusal before trusting its pass.
 smoke_rc=0
+# Same MSYS argv-conversion exclusion as the positive exec above: without it
+# the target reaches a native planner as /bootstrap:stage3, so any refusal is
+# about the mangled TARGET rather than the untyped reason and the smoke stops
+# proving what it claims. Empty on Unix, where this line is unchanged.
 env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
+    ${adm_env_excl_arg} \
     SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
     "$build_planner_out" \
     '--bootstrap-reason=none' \
@@ -392,7 +406,15 @@ env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
     "--planner-source-closure-sha256=$closure_sha" \
     "--planner-sha256=$planner_sha" \
     "--bootstrap-receipt=$stage/smoke.receipt" >"$stage/smoke.out" 2>&1 || smoke_rc=$?
-[ "$smoke_rc" -ne 0 ] || adm_fail planner-smoke-accepted-untyped-reason
+if [ "$smoke_rc" -eq 0 ]; then
+    # $stage is removed on exit, so keep the transcript in the admission dir;
+    # a zero exit is otherwise undiagnosable. The check itself is unchanged.
+    cp -- "$stage/smoke.out" "$adm_dir/planner-smoke-accepted.out" 2>/dev/null || :
+    smoke_bytes=$(wc -c <"$stage/smoke.out" 2>/dev/null || echo unknown)
+    echo "bootstrap-admission-note: smoke transcript ($smoke_bytes bytes) kept at $adm_dir/planner-smoke-accepted.out; first lines:" >&2
+    head -n 20 -- "$stage/smoke.out" >&2 2>/dev/null || :
+    adm_fail planner-smoke-accepted-untyped-reason
+fi
 [ ! -e "$stage/smoke.receipt" ] || adm_fail planner-smoke-wrote-receipt-on-refusal
 {
     printf 'smoke-schema: simple-planner-smoke-v1\n'
