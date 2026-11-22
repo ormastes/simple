@@ -108,6 +108,41 @@ fn _scan_units(lines: [text]) -> [_UnitDecl]:
                     units[idx] = _UnitDecl(name: units[idx].name, abi_type: units[idx].abi_type, range_min: lo, range_max: hi)
     units
 
+# Return-type classes of a parsed extern signature.
+val RET_CSTR: i64 = 1
+val RET_OTHER: i64 = 0
+
+struct _ExternSig:
+    valid: bool
+    name: text
+    params: text
+    ret_type: text
+    ret_kind: i64
+
+# Parse `extern fn name(params) -> Ret  # comment` into its parts. The return
+# type is the text after the `->` that follows the parameter list's closing
+# paren (so a `CStr` in a parameter or comment is never the return), with the
+# trailing comment and any whitespace (spaces or tabs) removed. Dispatch is on
+# `ret_kind`, never on the raw line text.
+fn _parse_extern_sig(raw_line: text) -> _ExternSig:
+    val none = _ExternSig(valid: false, name: "", params: "", ret_type: "", ret_kind: RET_OTHER)
+    val line = raw_line.replace("\t", " ").split("#")[0].trim()
+    if not line.starts_with("extern fn "):
+        return none
+    val rest = line.substring(10).trim()
+    val open = rest.index_of("(")
+    val close = rest.last_index_of(")")
+    if open < 0 or close < open:
+        return none
+    val after = rest.substring(close + 1).trim()
+    if not after.starts_with("->"):
+        return none
+    val ret = after.substring(2).trim()
+    if ret == "":
+        return none
+    val kind = if ret == "CStr": RET_CSTR else: RET_OTHER
+    _ExternSig(valid: true, name: rest.substring(0, open).trim(), params: rest.substring(open + 1, close), ret_type: ret, ret_kind: kind)
+
 fn _arg_names(params: text) -> text:
     var names: [text] = []
     if params.trim() == "":
@@ -122,12 +157,12 @@ pub fn generate_constrained_unit_facades(source: text) -> UnitReturnFacade:
     val units = _scan_units(lines)
     var out = ""
     for raw in lines:
-        val line = raw.trim()
-        if line.starts_with("extern fn ") and line.contains(" -> ") and line.contains("("):
-            val name = line.replace("extern fn ", "").split("(")[0].trim()
-            val params = line.split("(")[1].split(")")[0]
-            val ret = line.split(" -> ")[1].split("#")[0].trim()
-            if ret == "CStr":
+        val sig = _parse_extern_sig(raw)
+        if sig.valid:
+            val name = sig.name
+            val params = sig.params
+            val ret = sig.ret_type
+            if sig.ret_kind == RET_CSTR:
                 val cspec = BorrowedCStrReturn(extern_name: name, params: params, arg_names: _arg_names(params))
                 out = out + generate_borrowed_cstr_facade(cspec).source + "\n"
                 continue
