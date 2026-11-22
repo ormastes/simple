@@ -23,6 +23,7 @@ use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, 
 use lazy compiler.tools.fix.engine.{fix_filter_by_code, fix_validate, fix_outcome_diff, snapshots_from_sources}
 use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
 use lazy compiler.tools.fix.rules.{check_short_grammar_refactor}
+use lazy compiler.tools.fix.rules.impl_.lint_nil_unsafe.{check_nil_unsafe}
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
@@ -896,6 +897,8 @@ pub fn run_fmt_command(all_args: [text]) -> i64:
                     exit_code = 1
     exit_code
 
+val NIL_UNSAFE_FIX_CODE = "NIL-UNSAFE-001"
+
 pub fn run_fix_command(args: [text]) -> i64:
     val option_error = fix_option_error(args)
     if option_error != "":
@@ -911,15 +914,26 @@ pub fn run_fix_command(args: [text]) -> i64:
     var fix_id: text = ""
     var preview = false
     var diagnostic: text = ""
+    var safe_only = false
+    var rule_value_next = false
     var files: [text] = []
     for arg in args:
-        if arg == "--dry-run":
+        if rule_value_next:
+            rule_value_next = false
+            diagnostic = arg
+        elif arg == "--dry-run":
             dry_run = true
         elif arg == "--preview":
             dry_run = true
             preview = true
         elif arg == "--fix-all":
             fix_all = true
+        elif arg == "--safe-only":
+            safe_only = true
+        elif arg == "--rule":
+            rule_value_next = true
+        elif arg.starts_with("--rule="):
+            diagnostic = arg.slice(7)
         elif arg.starts_with("--fix-id="):
             fix_id = arg.slice(9)
         elif arg.starts_with("--diagnostic="):
@@ -927,7 +941,12 @@ pub fn run_fix_command(args: [text]) -> i64:
         elif arg == "fix":
             val _ = 0
         elif not arg.starts_with("-"):
-            files.push(arg)
+            # A directory is expanded only for the opt-in nil rule (`--rule` precedes the paths).
+            if diagnostic == NIL_UNSAFE_FIX_CODE and is_dir(arg):
+                for found in discover_spl_files(arg):
+                    files.push(found)
+            else:
+                files.push(arg)
 
     if files.len() == 0:
         print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
@@ -938,8 +957,13 @@ pub fn run_fix_command(args: [text]) -> i64:
         print "  --fix-all   Apply all fixes regardless of confidence"
         print "  --fix-id=ID Apply only fixes matching ID prefix"
         print "  --diagnostic=CODE Only proposals with this diagnostic code (e.g. PANIC-W-INDEX)"
+        print "  --rule CODE Same as --diagnostic=CODE; NIL-UNSAFE-001 runs the opt-in nil -> None rule (paths may be directories)"
+        print "  --safe-only Keep only Safe-confidence proposals (with --rule / --diagnostic)"
         return 1
 
+    val nil_rule = diagnostic == NIL_UNSAFE_FIX_CODE
+    var nil_fix_total = 0
+    var nil_file_total = 0
     var exit_code = 0
     for file_path in files:
         var source = ""
@@ -951,17 +975,24 @@ pub fn run_fix_command(args: [text]) -> i64:
             case Ok(content):
                 source = content
 
-        val fixes = if fix_id.starts_with("L:short_grammar_"):
+        # NIL-UNSAFE-001 is opt-in (the lint is allow-by-default): it is not in
+        # the built-in producer set, only `--rule NIL-UNSAFE-001` runs it.
+        val fixes = if nil_rule:
+            check_nil_unsafe(source, file_path)
+        elif fix_id.starts_with("L:short_grammar_"):
             check_short_grammar_refactor(source, file_path)
         else:
             collect_fixes_from_source(file_path, source)
         if fixes.len() == 0:
-            print "No fixes available for {file_path}"
+            if not nil_rule:
+                print "No fixes available for {file_path}"
             continue
 
         var filtered = fixes
         if diagnostic != "":
             filtered = fix_filter_by_code(filtered, diagnostic)
+            if safe_only:
+                filtered = FixToolApplicator.filter_by_confidence(filtered, FixConfidence.Safe)
         elif not fix_all:
             filtered = FixToolApplicator.filter_by_confidence(filtered, FixConfidence.Safe)
         if fix_id != "":
@@ -982,6 +1013,9 @@ pub fn run_fix_command(args: [text]) -> i64:
                 else:
                     print "Applied fixes to {file_path}:"
                 print "  {fixreport_applied(report)} fix(es) applied"
+                if nil_rule:
+                    nil_fix_total = nil_fix_total + fixreport_applied(report)
+                    nil_file_total = nil_file_total + 1
                 for detail in fixreport_details(report):
                     print "  {detail}"
                 if preview:
@@ -989,4 +1023,6 @@ pub fn run_fix_command(args: [text]) -> i64:
             case Err(e):
                 _cli_eprint("Error applying fixes to {file_path}: {e}")
                 exit_code = 1
+    if nil_rule:
+        print "NIL-UNSAFE-001: {nil_fix_total} safe fix(es) in {nil_file_total} file(s), {files.len()} file(s) scanned"
     exit_code
