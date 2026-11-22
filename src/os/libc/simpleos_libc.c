@@ -350,15 +350,20 @@ static void fmt_puts(fmt_state *st, const char *s) {
     while (*s) fmt_putc(st, *s++);
 }
 
+/* Emit digits (stored in reverse in tmp) padded to width */
+static void fmt_emit_digits(fmt_state *st, const char *tmp, int len, int width, int zero_pad) {
+    char pad = zero_pad ? '0' : ' ';
+    for (int i = len; i < width; i++) fmt_putc(st, pad);
+    for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
+}
+
 /* Unsigned decimal */
 static void fmt_u64(fmt_state *st, uint64_t v, int width, int zero_pad) {
     char tmp[21];
     int  len = 0;
     if (v == 0) { tmp[len++] = '0'; }
     else { while (v) { tmp[len++] = '0' + (char)(v % 10); v /= 10; } }
-    char pad = zero_pad ? '0' : ' ';
-    for (int i = len; i < width; i++) fmt_putc(st, pad);
-    for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
+    fmt_emit_digits(st, tmp, len, width, zero_pad);
 }
 
 /* Signed decimal */
@@ -384,9 +389,7 @@ static void fmt_hex(fmt_state *st, uint64_t v, int upper, int width, int zero_pa
     int  len = 0;
     if (v == 0) { tmp[len++] = '0'; }
     else { while (v) { tmp[len++] = digits[v & 0xF]; v >>= 4; } }
-    char pad = zero_pad ? '0' : ' ';
-    for (int i = len; i < width; i++) fmt_putc(st, pad);
-    for (int i = len - 1; i >= 0; i--) fmt_putc(st, tmp[i]);
+    fmt_emit_digits(st, tmp, len, width, zero_pad);
 }
 
 /* Float formatting helper — implemented in simpleos_printf_float.c */
