@@ -32,7 +32,7 @@ use app.llm_caret.cs_container_lifecycle_v1.{CsContainerSessionRecordV1,
     cs_worktree_create_v1, cs_worktree_remove_owned_v1,
     cs_container_record_save_v1, cs_container_write_runner_v1, cs_container_prepare_macos_seatbelt_v1,
     cs_container_records_load_v1, cs_container_reconcile_v1, cs_container_session_store_root_v1,
-    cs_container_close_record_v1, cs_container_crashed_records_v1,
+    cs_container_close_record_v1, cs_container_crashed_records_v1, cs_container_cleanup_old_v1,
     cs_container_prepare_relaunch_v1}
 use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_dispatch_v1}
 use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
@@ -145,6 +145,7 @@ fn cs_help_text() -> text:
         "/containers  (/crashed)    list tracked & crashed containers available for relaunch",
         "/relaunch <n|id|name> [args...]  relaunch a crashed container in its preserved worktree",
         "/close <n|id>              close an agent and clean its worktree & temp files",
+        "/cleanup-old [--apply]    preview or remove cleanly exited attempts at least one hour old",
         "/orchestrator <sub>        start|status|launch|inspect|crashed|relaunch|close|stop",
         "    cleanup <id>          remove a crashed orchestrator worktree and artifacts",
         "/reap            remove EVERY container on this session, any cs's (after a killed cs)",
@@ -326,6 +327,13 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
 
     if cmd == "/containers" or cmd == "/crashed":
         return (d, "container:list-" + (if cmd == "/crashed": "crashed" else: "all"))
+
+    if cmd == "/cleanup-old":
+        if arg == "":
+            return (d, "container:cleanup-old-preview")
+        if arg == "--apply":
+            return (d, "container:cleanup-old-apply")
+        return (d, "usage: /cleanup-old [--apply]")
 
     if cmd == "/relaunch":
         val rl_words = cs_shell_words(trimmed)
@@ -1077,6 +1085,17 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         return (cs_refresh(d), _format_container_records(d.session, false))
     if head == "container:list-crashed":
         return (cs_refresh(d), _format_container_records(d.session, true))
+    if head == "container:cleanup-old-preview" or head == "container:cleanup-old-apply":
+        val apply_changes = head == "container:cleanup-old-apply"
+        val result = cs_container_cleanup_old_v1(d.session, _live_pane_ids_for(d.session), apply_changes)
+        if not apply_changes:
+            return (d, "eligible clean attempts: " + result.eligible.len().to_text() +
+                (if result.eligible.len() == 0: "" else: " (" + result.eligible.join(", ") + ")") +
+                "\nRun /cleanup-old --apply to remove their temp files and owned worktrees.")
+        var note = "removed clean attempts: " + result.removed.len().to_text()
+        if result.failures.len() > 0:
+            note = note + "\n" + result.failures.join("\n")
+        return (cs_refresh(d), note)
     if head == "container:relaunch":
         val rl_words = cs_shell_words(action)
         if rl_words.len() < 2:
