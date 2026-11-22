@@ -98,12 +98,29 @@ pub(crate) fn cfg_name_to_arch(name: &str) -> Option<TargetArch> {
 }
 
 fn cfg_line_arch_verdict(line: &str, target_arch: TargetArch) -> Option<bool> {
-    let condition = line.trim().strip_prefix("@cfg(")?.strip_suffix(')')?.trim();
-    let (name, negate) = condition
-        .strip_prefix("not(")
-        .and_then(|inner| inner.strip_suffix(')'))
-        .map_or((condition, false), |name| (name.trim(), true));
-    cfg_name_to_arch(name).map(|arch| (arch == target_arch) != negate)
+    let trimmed = line.trim();
+    let condition = trimmed.strip_prefix("@cfg(")?.strip_suffix(')')?.trim();
+    if condition.is_empty() {
+        return None;
+    }
+    if let Some(arch) = cfg_name_to_arch(condition) {
+        return Some(arch == target_arch);
+    }
+    if let Some(inner) = condition.strip_prefix("not(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(arch) = cfg_name_to_arch(inner.trim()) {
+            return Some(arch != target_arch);
+        }
+    }
+    let snippet = format!("{trimmed}\nfn __cfg_probe():\n    0\n");
+    let module = simple_parser::Parser::new(&snippet).parse().ok()?;
+    let simple_parser::ast::Node::Function(func) = module.items.first()? else {
+        return None;
+    };
+    let attr = func.attributes.first()?;
+    if attr.name != "cfg" {
+        return None;
+    }
+    cfg_attr_arch_verdict(attr, target_arch)
 }
 
 fn is_top_level_global_decl(line: &str) -> bool {
@@ -334,40 +351,96 @@ pub(crate) fn parse_cfg_filtered_module(
     Ok(module)
 }
 
-/// Evaluate a single `@cfg(...)` attribute's architecture verdict for
-/// `target_arch`. Returns:
-///   * `Some(true)`  -- this `@cfg` names an arch that matches the target,
-///   * `Some(false)` -- this `@cfg` names an arch that does NOT match,
-///   * `None`        -- not a bare arch alias (`test`, `baremetal`,
-///                      `("target_arch", "arm")`, empty `@cfg()`, etc.) --
-///                      leave ungated.
-pub(crate) fn cfg_attr_arch_verdict(attr: &Attribute, target_arch: TargetArch) -> Option<bool> {
-    use simple_parser::ast::Expr;
-    let args = attr.args.as_ref()?;
-    // Only a single bare condition is an arch gate; `("key", "value")` string
-    // pairs and an empty `@cfg()` are not.
-    if args.len() != 1 {
-        return None;
-    }
-    match &args[0] {
-        // `@cfg(not(<arch>))`
+/// Recursively evaluate an architecture `@cfg(...)` expression tree
+/// (`<arch>`, `not(...)` / `!`, `or` / `||`, `and` / `&&`, `all(...)`, `any(...)`).
+///
+/// Mirrors `src/compiler/50.mir/mir_cfg_select.spl`: if ANY sub-term is not a
+/// recognized architecture alias (e.g. `test`, `baremetal`, `"key", "value"`),
+/// returns `None` without short-circuiting so mixed non-arch gates stay ungated.
+pub(crate) fn cfg_compound_arch_verdict(
+    expr: &simple_parser::ast::Expr,
+    target_arch: TargetArch,
+) -> Option<bool> {
+    use simple_parser::ast::{BinOp, Expr, UnaryOp};
+    match expr {
+        Expr::Identifier(name) => cfg_name_to_arch(name).map(|arch| arch == target_arch),
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => cfg_compound_arch_verdict(operand, target_arch).map(|v| !v),
+        Expr::Binary {
+            op: BinOp::Or,
+            left,
+            right,
+        } => {
+            let l = cfg_compound_arch_verdict(left, target_arch)?;
+            let r = cfg_compound_arch_verdict(right, target_arch)?;
+            Some(l || r)
+        }
+        Expr::Binary {
+            op: BinOp::And,
+            left,
+            right,
+        } => {
+            let l = cfg_compound_arch_verdict(left, target_arch)?;
+            let r = cfg_compound_arch_verdict(right, target_arch)?;
+            Some(l && r)
+        }
         Expr::Call {
             callee,
             args: call_args,
         } => {
-            if let Expr::Identifier(fname) = callee.as_ref() {
-                if fname == "not" && call_args.len() == 1 {
-                    if let Expr::Identifier(name) = &call_args[0].value {
-                        return cfg_name_to_arch(name).map(|arch| arch != target_arch);
-                    }
-                }
+            let Expr::Identifier(fname) = callee.as_ref() else {
+                return None;
+            };
+            if call_args.iter().any(|arg| arg.name.is_some()) {
+                return None;
             }
-            None
+            match fname.as_str() {
+                "not" if call_args.len() == 1 => {
+                    cfg_compound_arch_verdict(&call_args[0].value, target_arch).map(|v| !v)
+                }
+                "all" | "and" if !call_args.is_empty() => {
+                    let mut all_true = true;
+                    for arg in call_args {
+                        let v = cfg_compound_arch_verdict(&arg.value, target_arch)?;
+                        all_true &= v;
+                    }
+                    Some(all_true)
+                }
+                "any" | "or" if !call_args.is_empty() => {
+                    let mut any_true = false;
+                    for arg in call_args {
+                        let v = cfg_compound_arch_verdict(&arg.value, target_arch)?;
+                        any_true |= v;
+                    }
+                    Some(any_true)
+                }
+                _ => None,
+            }
         }
-        // `@cfg(<arch>)`
-        Expr::Identifier(name) => cfg_name_to_arch(name).map(|arch| arch == target_arch),
         _ => None,
     }
+}
+
+/// Evaluate a single `@cfg(...)` attribute's architecture verdict for
+/// `target_arch`. Returns:
+///   * `Some(true)`  -- this `@cfg` names an arch expression that matches the target,
+///   * `Some(false)` -- this `@cfg` names an arch expression that does NOT match,
+///   * `None`        -- not a pure arch expression (`test`, `baremetal`,
+///                      `("target_arch", "arm")`, empty `@cfg()`, etc.) --
+///                      leave ungated.
+pub(crate) fn cfg_attr_arch_verdict(attr: &Attribute, target_arch: TargetArch) -> Option<bool> {
+    if attr.named_args.is_some() {
+        return None;
+    }
+    let args = attr.args.as_ref()?;
+    // Only a single condition expression is an arch gate; `("key", "value")`
+    // string pairs and an empty `@cfg()` are not.
+    if args.len() != 1 {
+        return None;
+    }
+    cfg_compound_arch_verdict(&args[0], target_arch)
 }
 
 /// True if any `@cfg` attribute names an arch that does NOT match `arch`
@@ -455,20 +528,82 @@ fn warn_duplicate_active_variants(items: &[Node], arch: TargetArch) {
     }
 }
 
-/// Drop top-level `@cfg(<arch>)`-gated function nodes whose architecture does
-/// not match `target_arch`, recording stripped names and warning about
-/// duplicate active variants. Item-list form shared by module- and
-/// interpreter-level callers.
+fn strip_inactive_cfg_arch_imports_in_stmts(stmts: &mut Vec<Node>, target_arch: TargetArch) {
+    stmts.retain(|stmt| match stmt {
+        Node::UseStmt(u) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
+        Node::MultiUse(m) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
+        Node::ExportUseStmt(e) => !fn_inactive_cfg_arch(&e.attributes, target_arch),
+        _ => true,
+    });
+    for stmt in stmts.iter_mut() {
+        match stmt {
+            Node::Function(f) => strip_inactive_cfg_arch_imports_in_stmts(&mut f.body.statements, target_arch),
+            Node::ModDecl(m) => {
+                if let Some(body) = &mut m.body {
+                    strip_inactive_cfg_arch_fn_nodes(body, target_arch);
+                }
+            }
+            Node::Class(c) => {
+                for method in &mut c.methods {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
+                }
+            }
+            Node::Struct(s) => {
+                for method in &mut s.methods {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
+                }
+            }
+            Node::Enum(e) => {
+                for method in &mut e.methods {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
+                }
+            }
+            Node::Impl(imp) => {
+                for method in &mut imp.methods {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
+                }
+            }
+            Node::If(if_stmt) => {
+                strip_inactive_cfg_arch_imports_in_stmts(&mut if_stmt.then_block.statements, target_arch);
+                for (_, _, block) in &mut if_stmt.elif_branches {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut else_block.statements, target_arch);
+                }
+            }
+            Node::While(w) => strip_inactive_cfg_arch_imports_in_stmts(&mut w.body.statements, target_arch),
+            Node::For(f) => strip_inactive_cfg_arch_imports_in_stmts(&mut f.body.statements, target_arch),
+            Node::Loop(l) => strip_inactive_cfg_arch_imports_in_stmts(&mut l.body.statements, target_arch),
+            Node::Match(m) => {
+                for arm in &mut m.arms {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut arm.body.statements, target_arch);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Drop top-level `@cfg(<arch>)`-gated function and import nodes whose
+/// architecture does not match `target_arch`, recording stripped function names
+/// and warning about duplicate active variants. Item-list form shared by
+/// module- and interpreter-level callers.
 pub fn strip_inactive_cfg_arch_fn_nodes(items: &mut Vec<Node>, target_arch: TargetArch) {
-    items.retain(|item| {
-        if let Node::Function(f) = item {
+    items.retain(|item| match item {
+        Node::Function(f) => {
             if fn_inactive_cfg_arch(&f.attributes, target_arch) {
                 note_stripped_fn(&f.name);
                 return false;
             }
+            true
         }
-        true
+        Node::UseStmt(u) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
+        Node::MultiUse(m) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
+        Node::ExportUseStmt(e) => !fn_inactive_cfg_arch(&e.attributes, target_arch),
+        _ => true,
     });
+    strip_inactive_cfg_arch_imports_in_stmts(items, target_arch);
     warn_duplicate_active_variants(items, target_arch);
 }
 
@@ -678,5 +813,117 @@ payload
         // Indented (function-local) uses are not touched by this pass.
         let local = "fn f():\n    @cfg(riscv64)\n    use a.b\n";
         assert_eq!(strip_inactive_cfg_arch_globals(local, TargetArch::Aarch64), local);
+    }
+
+    #[test]
+    fn compound_arch_cfg_evaluates_not_or_and_all_any_and_leaves_non_arch_ungated() {
+        let source = "\
+@cfg(x86_64)
+fn pick() -> i64:
+    1
+@cfg(x86)
+fn pick() -> i64:
+    2
+@cfg(not(x86_64 or x86))
+fn pick() -> i64:
+    3
+@cfg(any(aarch64, riscv64))
+fn wide_arm_or_rv() -> i64:
+    4
+@cfg(all(not(x86_64), not(x86)))
+fn non_x86_all() -> i64:
+    5
+@cfg(x86_64 or baremetal)
+fn mixed_stays_ungated() -> i64:
+    6
+";
+        let surviving_fns = |arch: TargetArch| -> Vec<(String, i64)> {
+            let mut module = parse_cfg_filtered_module(source, arch).expect("parse compound cfg");
+            module
+                .items
+                .drain(..)
+                .filter_map(|item| match item {
+                    Node::Function(f) => {
+                        let Some(Node::Expression(simple_parser::ast::Expr::Integer(v))) = f.body.statements.first()
+                        else {
+                            panic!("expected integer body");
+                        };
+                        Some((f.name, *v))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            surviving_fns(TargetArch::X86_64),
+            vec![("pick".into(), 1), ("mixed_stays_ungated".into(), 6)]
+        );
+        assert_eq!(
+            surviving_fns(TargetArch::X86),
+            vec![("pick".into(), 2), ("mixed_stays_ungated".into(), 6)]
+        );
+        assert_eq!(
+            surviving_fns(TargetArch::Riscv64),
+            vec![
+                ("pick".into(), 3),
+                ("wide_arm_or_rv".into(), 4),
+                ("non_x86_all".into(), 5),
+                ("mixed_stays_ungated".into(), 6),
+            ]
+        );
+        assert_eq!(
+            surviving_fns(TargetArch::Arm),
+            vec![
+                ("pick".into(), 3),
+                ("non_x86_all".into(), 5),
+                ("mixed_stays_ungated".into(), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn cfg_gated_top_level_use_and_export_use_strip_inactive_arches() {
+        let source = "\
+@cfg(x86_64)
+use os.kernel.arch.x86.com1_common.{x86_com1_read_byte}
+@cfg(riscv64)
+use os.kernel.arch.riscv64.console.{serial_read_byte}
+@cfg(arm64)
+export use os.kernel.arch.arm.pl011_common.{pl011_write_byte}
+@cfg(not(x86_64 or x86))
+use os.kernel.hal.generic_timer
+";
+        let kept_paths = |arch: TargetArch| -> Vec<String> {
+            let module = parse_cfg_filtered_module(source, arch).expect("parse cfg use");
+            module
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Node::UseStmt(u) => {
+                        let mut segs = u.path.segments.clone();
+                        if let simple_parser::ast::ImportTarget::Single(last) = &u.target {
+                            segs.push(last.clone());
+                        }
+                        Some(segs.join("."))
+                    }
+                    Node::ExportUseStmt(e) => Some(format!("export:{}", e.path.segments.join("."))),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(kept_paths(TargetArch::X86_64), vec!["os.kernel.arch.x86.com1_common"]);
+        assert_eq!(
+            kept_paths(TargetArch::Riscv64),
+            vec!["os.kernel.arch.riscv64.console", "os.kernel.hal.generic_timer"]
+        );
+        assert_eq!(
+            kept_paths(TargetArch::Aarch64),
+            vec![
+                "export:os.kernel.arch.arm.pl011_common",
+                "os.kernel.hal.generic_timer"
+            ]
+        );
     }
 }
