@@ -13,6 +13,7 @@ use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
+use app.cli.bootstrap_native_worker_runtime.{native_build_select_worker_runtime, native_build_worker_preflight_code}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
@@ -244,28 +245,19 @@ fn native_build_worker_spawn_trace_enabled() -> bool:
 #   - the "bin/simple" fallback is relative, which the timeout wrapper cannot
 #     exec -> worker spawn fails (reported as a spurious timeout).
 # Guard nil, and return an ABSOLUTE path.
+# REQ-RENDER-CLI-002: SIMPLE_BINARY -> SIMPLE_BIN -> invoking exe, never a Rust
+# seed, and no implicit bin/simple fallback: "" fails closed at the caller.
 fn resolve_simple_binary() -> text:
-    val from_binary = env_get("SIMPLE_BINARY")
-    if from_binary != nil and from_binary != "" and file_exists(from_binary):
-        return abs_if_needed(from_binary)
-    val from_bin = env_get("SIMPLE_BIN")
-    if from_bin != nil and from_bin != "" and file_exists(from_bin):
-        return abs_if_needed(from_bin)
-    # Prefer the binary that invoked us during bootstrap.
+    val from_binary = env_get("SIMPLE_BINARY") ?? ""
+    val from_bin = env_get("SIMPLE_BIN") ?? ""
     val se = self_exe()
-    if se != "" and file_exists(se):
-        return abs_if_needed(se)
-    # Windows deploys the compiler as bin/simple.exe; probe it before the
-    # extensionless POSIX name so the fallback names a file that exists. A
-    # tracked bin/simple.exe can be a foreign Windows PE in an isolated clone;
-    # on non-Windows hosts skip it so a runnable bin/simple is preferred.
-    if file_exists("bin/simple.exe") and native_build_worker_binary_host_runnable(abs_path("bin/simple.exe")):
-        return abs_path("bin/simple.exe")
-    if file_exists("bin/simple"):
-        return abs_path("bin/simple")
-    if file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return abs_path("src/compiler_rust/target/bootstrap/simple")
-    "bin/simple"
+    val selected = native_build_select_worker_runtime(
+        from_binary, from_binary != "" and file_exists(from_binary),
+        from_bin, from_bin != "" and file_exists(from_bin),
+        se, se != "" and file_exists(se))
+    if native_build_worker_preflight_code(selected) != 0:
+        return ""
+    abs_if_needed(selected)
 
 val OUTPUT_LIMIT = 12000
 var native_build_stderr_spill_seq: i64 = 0
