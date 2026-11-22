@@ -326,6 +326,30 @@ for required_symbol in \
     fi
 done
 
+# The seed's simple-core lane accepts an archive only if it defines every
+# CORE_REQUIRED_RUNTIME_SYMBOLS entry (find_abi_complete_simple_core_runtime_library);
+# otherwise native-build reports "no simple-core runtime archive was found". Gate the
+# same list here so a missing twin fails at archive time, not in every app build.
+# See doc/08_tracking/bug/simple_core_archive_missing_rt_slice_text_bytes_2026-11-22.md
+CORE_REQUIRED_SOURCE="$ROOT_DIR/src/compiler_rust/common/src/runtime_symbols.rs"
+core_required_symbols="$(awk '/pub const CORE_REQUIRED_RUNTIME_SYMBOLS/{f=1;next} f&&/^\];/{exit} f' "$CORE_REQUIRED_SOURCE" 2>/dev/null |
+    grep -oE '"[A-Za-z0-9_]+"' | tr -d '"' | sed 's/^_*//' | sort -u)"
+if [ -z "$core_required_symbols" ]; then
+    echo "simple_core_archive_complete=unknown"
+    echo "error=core_required_symbol_list_unreadable:$CORE_REQUIRED_SOURCE"
+    exit 2
+fi
+# Same normalisation as the seed's archive_defined_symbols/runtime_archive_has_core_required_symbols:
+# strip ALL leading underscores on both sides (`__simple_runtime_init` is required as-is).
+core_defined_symbols="$(nm -g "$CORE_ARCHIVE" 2>/dev/null | awk '{print $NF}' | sed 's/^_*//' | sort -u)"
+for required_symbol in $core_required_symbols; do
+    if ! printf '%s\n' "$core_defined_symbols" | grep -qx -- "$required_symbol"; then
+        echo "simple_core_archive_complete=false"
+        echo "error=missing_core_required_symbol:$required_symbol"
+        exit 1
+    fi
+done
+
 if archive_has_symbol "__simple_call_module_inits"; then
     echo "simple_core_archive_complete=false"
     echo "error=unexpected_entry_init_aggregator"
