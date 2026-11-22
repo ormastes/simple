@@ -9,6 +9,7 @@ use compiler.backend.runtime_object_cache_windows.{
     runtime_windows_cache_toolchain_v1,
     runtime_windows_cache_publish_batch_v1,
     runtime_windows_cached_compile_with_runner_v1,
+    runtime_windows_cached_compile_and_publish_v1,
     runtime_windows_normalize_dep_path_v1,
     runtime_windows_extract_linemarker_headers_v1,
     runtime_windows_direct_manifest_key_v1,
@@ -355,4 +356,71 @@ describe "Windows runtime direct header-manifest warm hit and invalidation":
         expect(_win_gnu_spec_count_calls("preprocess")).to_equal(1)
         expect(_win_gnu_spec_count_calls("compile")).to_equal(1)
         expect(file_read(obj9)).to_equal("OBJ:VAL=2|BODY=fn_a")
+        expect(dir_remove(root, true)).to_be(true)
+
+# Regression: the native-build link phase on Windows compiled every runtime TU
+# serially and published the cache only after ALL of them finished (~16 min
+# cold). A lane timeout before that point published nothing, so every retry
+# restarted cold and the link phase looked hung forever.
+# doc/08_tracking/bug/native_build_windows_link_phase_hang_runtime_cache_batch_2026-11-22.md
+fn _win_gnu_spec_failing_runner(compiler: text, args: [text]) -> (text, text, i64):
+    _win_gnu_spec_calls.push("failed")
+    ("", "compile error", 1)
+
+describe "Windows runtime cache per-TU publish (killed-run progress)":
+    it "publishes a TU as soon as it compiles, so a later run hits it with zero spawns and no batch publish":
+        val root = secure_temp_dir(".", "win-per-tu-").unwrap()
+        val cache = root + "/cache"
+        val tc_dir = root + "/tc/bin"
+        val rt_dir = root + "/rt"
+        val out_dir = root + "/out"
+        expect(dir_create_all(tc_dir)).to_be(true)
+        expect(dir_create_all(rt_dir + "/sub")).to_be(true)
+        expect(dir_create_all(out_dir)).to_be(true)
+        val compiler = tc_dir + "/clang.exe"
+        expect(file_write(compiler, "fake-llvm-mingw-clang-driver-v1")).to_be(true)
+        val compiler_digest = file_hash_sha256_or_empty(compiler)
+        val toolchain = runtime_windows_cache_toolchain_v1(cache, compiler)
+        val src = rt_dir + "/a.c"
+        expect(file_write(src, "BODY=fn_a\n")).to_be(true)
+        expect(file_write(rt_dir + "/a.h", "VAL=1\n")).to_be(true)
+        val ctx = ["target=host", "profile=ordinary"]
+
+        # Run 1 compiles the TU and is then "killed": no batch publish follows.
+        val obj1 = out_dir + "/run1_a.o"
+        val args1 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj1, src]
+        _win_gnu_spec_reset_calls()
+        val r1 = runtime_windows_cached_compile_and_publish_v1(cache, compiler, compiler_digest, toolchain, args1, src, obj1, ctx, false, _win_gnu_spec_runner)
+        expect(r1.exit_code).to_equal(0)
+        expect(r1.pending_key).to_equal("")
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(1)
+
+        # Run 2 (fresh process after the kill) must reuse run 1's object.
+        val obj2 = out_dir + "/run2_a.o"
+        val args2 = ["-c", "--target=x86_64-w64-windows-gnu", "-O2", "-I", rt_dir, "-o", obj2, src]
+        _win_gnu_spec_reset_calls()
+        val r2 = runtime_windows_cached_compile_and_publish_v1(cache, compiler, compiler_digest, toolchain, args2, src, obj2, ctx, false, _win_gnu_spec_runner)
+        expect(r2.exit_code).to_equal(0)
+        expect(_win_gnu_spec_count_calls("preprocess")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("plan")).to_equal(0)
+        expect(_win_gnu_spec_count_calls("compile")).to_equal(0)
+        expect(file_read(obj2)).to_equal("OBJ:VAL=1|BODY=fn_a")
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "does not publish a TU whose compile failed":
+        val root = secure_temp_dir(".", "win-per-tu-fail-").unwrap()
+        val cache = root + "/cache"
+        val tc_dir = root + "/tc/bin"
+        val out_dir = root + "/out"
+        expect(dir_create_all(tc_dir)).to_be(true)
+        expect(dir_create_all(out_dir)).to_be(true)
+        val compiler = tc_dir + "/clang.exe"
+        expect(file_write(compiler, "fake-llvm-mingw-clang-driver-v1")).to_be(true)
+        val toolchain = runtime_windows_cache_toolchain_v1(cache, compiler)
+        val missing = root + "/rt/missing.c"
+        val obj = out_dir + "/x.o"
+        val args = ["-c", "--target=x86_64-w64-windows-gnu", "-o", obj, missing]
+        val r = runtime_windows_cached_compile_and_publish_v1(cache, compiler, file_hash_sha256_or_empty(compiler), toolchain, args, missing, obj, ["target=host"], false, _win_gnu_spec_failing_runner)
+        expect(r.exit_code == 0).to_be(false)
+        expect(r.pending_key).to_equal("")
         expect(dir_remove(root, true)).to_be(true)
