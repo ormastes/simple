@@ -1,0 +1,131 @@
+# @req REQ-SSPEC-COMPILER
+"""
+NIL-UNSAFE-001 Safe auto-fix: a `nil` finding gets an edit only when the
+optional type is provable from the same file (typed declaration, `-> T?`
+return, a `T?` field of a type declared in the file, a presence test or
+`case nil:` on a proven-optional local or self field). Everything else keeps
+the lint finding and gets no edit.
+Run: bin/simple test test/01_unit/compiler/lint/nil_unsafe_safe_fix_spec.spl
+"""
+
+# @tag: unit, compiler, lint, nil
+
+use std.spec.*
+use std.tooling.easy_fix.types.{FixApplicator, EasyFix}
+use compiler.tools.fix.rules.impl_.lint_nil_unsafe.{check_nil_unsafe}
+use compiler.tools.fix.rules.registry.{registry_fix_producers}
+use app.io.cli_fix_options.{fix_option_error}
+
+fn _fixes(src: text) -> [EasyFix]:
+    check_nil_unsafe(src, "s.spl")
+
+fn _applied(src: text) -> text:
+    val fixes = _fixes(src)
+    if fixes.len() == 0: return src
+    match FixApplicator.apply(fixes, {"s.spl": src}):
+        case Ok(m): m["s.spl"]
+        case Err(e): "ERR " + e
+
+describe "NIL-UNSAFE-001 safe fix: positive cases":
+    it "(a) rewrites a typed optional declaration":
+        expect(_applied("fn f():\n    var x: i64? = nil\n    val y: Option<text> = nil\n")).to_equal("fn f():\n    var x: i64? = None\n    val y: Option<text> = None\n")
+
+    it "(a) rewrites a typed optional field default and parameter default":
+        expect(_applied("class C:\n    a: text? = nil\n\nfn g(p: i64? = nil, q: i64):\n    pass\n")).to_equal("class C:\n    a: text? = None\n\nfn g(p: i64? = None, q: i64):\n    pass\n")
+
+    it "(b) rewrites return nil in a fn declared -> T?":
+        expect(_applied("fn f(a: i64) -> i64?:\n    if a == 0:\n        return nil\n    return nil\n")).to_equal("fn f(a: i64) -> i64?:\n    if a == 0:\n        return None\n    return None\n")
+
+    it "(b) rewrites return nil in a fn declared -> Option<T>, one-line if included":
+        expect(_applied("pub fn f(a: i64) -> Option<text>:\n    if a == 0: return nil\n    Some(\"x\")\n")).to_equal("pub fn f(a: i64) -> Option<text>:\n    if a == 0: return None\n    Some(\"x\")\n")
+
+    it "(c) rewrites a field initializer of a type declared in the file":
+        expect(_applied("struct P:\n    next: P?\n    n: i64\n\nfn mk() -> P:\n    P(next: nil, n: 1)\n")).to_equal("struct P:\n    next: P?\n    n: i64\n\nfn mk() -> P:\n    P(next: None, n: 1)\n")
+
+    it "(c) follows a multi-line constructor call":
+        expect(_applied("class P:\n    next: P?\n    n: i64\n\nfn mk() -> P:\n    P(\n        n: 1,\n        next: nil\n    )\n")).to_equal("class P:\n    next: P?\n    n: i64\n\nfn mk() -> P:\n    P(\n        n: 1,\n        next: None\n    )\n")
+
+    it "(d) rewrites a presence test on an optional parameter and local":
+        expect(_applied("fn f(a: i64?) -> bool:\n    var c: text? = None\n    if a == nil and c != nil:\n        return true\n    false\n")).to_equal("fn f(a: i64?) -> bool:\n    var c: text? = None\n    if a.is_none() and c.is_some():\n        return true\n    false\n")
+
+    it "(d) rewrites a presence test on an optional self field":
+        expect(_applied("class N:\n    next: N?\n\n    fn more() -> bool:\n        self.next != nil\n")).to_equal("class N:\n    next: N?\n\n    fn more() -> bool:\n        self.next.is_some()\n")
+
+    it "(d) resolves self through an impl block of a type declared in the file":
+        expect(_applied("struct N:\n    next: N?\n\nimpl N:\n    fn last() -> bool:\n        return self.next == nil\n")).to_equal("struct N:\n    next: N?\n\nimpl N:\n    fn last() -> bool:\n        return self.next.is_none()\n")
+
+    it "(e) rewrites case nil under a match on an optional value":
+        expect(_applied("fn f(a: i64?) -> i64:\n    match a:\n        case nil: 0\n        case _: 1\n")).to_equal("fn f(a: i64?) -> i64:\n    match a:\n        case None: 0\n        case _: 1\n")
+
+    it "marks every fix Safe with the NIL-UNSAFE-001 code and a real edit":
+        val src = "fn f(a: i64?) -> i64?:\n    if a == nil: return nil\n    a\n"
+        val fixes = _fixes(src)
+        expect(fixes.len()).to_equal(2)
+        for fix in fixes:
+            expect(fix.is_safe()).to_equal(true)
+            expect(fix.id.starts_with("NIL-UNSAFE-001:")).to_equal(true)
+            for rep in fix.replacements:
+                expect(src.substring(rep.start, rep.end) != rep.new_text).to_equal(true)
+
+describe "NIL-UNSAFE-001 safe fix: negative cases":
+    it "leaves untyped and non-optional declarations":
+        expect(_fixes("fn f():\n    var x = nil\n    var y: i64 = nil\n    x = nil\n").len()).to_equal(0)
+
+    it "leaves return nil when the return type is not optional or unknown":
+        expect(_fixes("fn f() -> i64:\n    return nil\n\nfn g():\n    return nil\n\nfn h(cb: fn() -> i64?):\n    return nil\n").len()).to_equal(0)
+
+    it "leaves -> Nil bodies and Ok(nil) to the lint exemption":
+        expect(_fixes("fn f() -> Nil:\n    return nil\n\nfn g() -> Result<Nil, text>:\n    Ok(nil)\n").len()).to_equal(0)
+
+    it "leaves a tail nil and a multi-line fn header":
+        expect(_fixes("fn f() -> i64?:\n    nil\n\nfn g(\n    a: i64\n) -> i64?:\n    return nil\n").len()).to_equal(0)
+
+    it "leaves return nil inside a lambda body":
+        expect(_fixes("fn f() -> i64?:\n    val g = fn(x):\n        return nil\n    xs.each \\x:\n        return nil\n    Some(1)\n").len()).to_equal(0)
+
+    it "leaves extern and rt_ results compared with nil":
+        expect(_fixes("extern fn rt_open(p: text) -> i64\n\nfn f(p: text) -> bool:\n    val h = rt_open(p)\n    if h == nil: return false\n    rt_open(p) != nil\n").len()).to_equal(0)
+
+    it "leaves slot tables and indexed comparisons":
+        expect(_fixes("fn f(tasks: [i64?]) -> bool:\n    tasks.push(nil)\n    tasks[0] == nil\n").len()).to_equal(0)
+
+    it "leaves a presence test on a non-optional or shadowed name":
+        expect(_fixes("fn f(a: i64, b: i64?) -> bool:\n    for b in [1, 2]:\n        if b == nil: return true\n    a == nil\n").len()).to_equal(0)
+
+    it "leaves a name with one untyped declaration in the fn":
+        expect(_fixes("fn f(c: bool) -> bool:\n    if c:\n        var x: i64? = None\n        return x == nil\n    val x = g()\n    x == nil\n").len()).to_equal(0)
+
+    it "leaves a self field that is not optional or whose type is not in the file":
+        expect(_fixes("class N:\n    name: text\n\n    fn a() -> bool:\n        self.name == nil\n\nimpl Other:\n    fn b() -> bool:\n        self.next == nil\n").len()).to_equal(0)
+
+    it "leaves a type declared twice in the file":
+        expect(_fixes("class N:\n    next: N?\n\nclass N:\n    next: i64\n\nfn mk() -> N:\n    N(next: nil)\n").len()).to_equal(0)
+
+    it "leaves named arguments of functions, methods and unknown types":
+        expect(_fixes("struct P:\n    next: P?\n    n: i64\n\nfn mk():\n    other(next: nil)\n    P.create(next: nil)\n    Q(next: nil)\n    P(n: nil)\n    val d = {{next: nil}}\n").len()).to_equal(0)
+
+    it "leaves case nil when the match subject is not a proven optional":
+        expect(_fixes("fn f(a: i64) -> i64:\n    match a:\n        case nil: 0\n        case _: 1\n\nfn g(a: i64?) -> i64:\n    match h(a):\n        case nil: 0\n        case _: 1\n").len()).to_equal(0)
+
+    it "leaves nil inside unsafe, strings, comments and docstrings":
+        expect(_fixes("fn f(a: i64?) -> i64?:\n    unsafe:\n        if a == nil: return nil\n    val s = \"return nil\"  # return nil\n    a\n").len()).to_equal(0)
+
+    it "leaves a non-ASCII line":
+        expect(_fixes("fn f() -> text?:\n    return nil  # é\n").len()).to_equal(0)
+
+    it "leaves fn-typed and union-typed declarations":
+        expect(_fixes("fn f():\n    var cb: fn() -> i64? = nil\n    var u: i64 | text? = nil\n").len()).to_equal(0)
+
+describe "NIL-UNSAFE-001 safe fix: wiring":
+    it "is opt-in, not a default fix producer":
+        for p in registry_fix_producers():
+            expect(p.code != "NIL-UNSAFE-001").to_equal(true)
+
+    it "accepts --rule CODE, --rule=CODE and --safe-only":
+        expect(fix_option_error(["fix", "--rule", "NIL-UNSAFE-001", "--safe-only", "a.spl"])).to_equal("")
+        expect(fix_option_error(["fix", "--rule=NIL-UNSAFE-001", "--safe-only", "--dry-run", "a.spl"])).to_equal("")
+
+    it "rejects --rule without a code":
+        expect(fix_option_error(["fix", "a.spl", "--rule"])).to_equal("--rule requires a CODE")
+        expect(fix_option_error(["fix", "--rule=", "a.spl"])).to_equal("--rule requires a CODE")
+        expect(fix_option_error(["fix", "--rule", "--safe-only", "a.spl"])).to_equal("--rule requires a CODE")
