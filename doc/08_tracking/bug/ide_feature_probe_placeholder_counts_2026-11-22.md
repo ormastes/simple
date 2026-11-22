@@ -24,6 +24,11 @@ The probes do not call the renderer they claim to check; they return constants:
 The spec is correct; the implementation is a placeholder. Both sites now carry
 `@workaround bug=ide_feature_probe_placeholder_counts_2026_11_22`.
 
+Workaround commit: `fix(ide): restore 120-column markdown feature-check row; tag placeholder
+probe counts` on `work/essential-apps-p1p2-20261122` (PR #10797). The markers tag pre-existing
+placeholder code; no intended-code recovery reference exists. Bug DB reconciliation pending
+(no qualified full-CLI `simple check-dbs` on this host).
+
 ## Unblock condition
 
 Call `preview_pane_update` / `preview_pane_render` (`src/lib/editor/view/preview_pane.spl`)

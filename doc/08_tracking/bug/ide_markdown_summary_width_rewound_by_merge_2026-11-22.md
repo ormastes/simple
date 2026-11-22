@@ -30,5 +30,6 @@ Restore the abbreviated keys and the budget comment from `e274cd33719^`.
   columns" (covers every capability row in both modes).
 - System: `ide_office_plugin_suite_spec.spl` width scenario now passes on Phase 1.
 
-Verification (Phase 1 seed, interpreter): unit spec 2/2; system suite 19/21 (the two
+Verification (Phase 1 seed, interpreter): unit spec 0/2 against the pre-fix
+`origin/release/1.0.0` `markdown_render.spl` (both scenarios RED), 2/2 after the fix; system suite 19/21 (the two
 remaining failures are `ide_feature_probe_placeholder_counts_2026-11-22.md`).
