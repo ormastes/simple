@@ -1639,4 +1639,89 @@ mod cfg_use_discovery_tests {
             panic!("entry_and_fixes.spl HIR lowering failed: {err}\nfailing functions: {failing_fns:#?}");
         }
     }
+
+    #[test]
+    fn cfg_gated_use_inside_nested_containers_and_expr_blocks_strips_before_discovery_visit() {
+        let source = concat!(
+            "trait HalOps:\n",
+            "    fn probe():\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.trap\n",
+            "        @cfg(x86_64)\n",
+            "        use os.kernel.arch.x86_64.idt\n",
+            "        ()\n",
+            "mixin PagingHelper:\n",
+            "    fn map_page():\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.sv39\n",
+            "        ()\n",
+            "actor Worker:\n",
+            "    fn step():\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.timer\n",
+            "        ()\n",
+            "struct MyType:\n",
+            "    x: i64\n",
+            "extend MyType:\n",
+            "    fn helper() -> i64:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.sbi\n",
+            "        0\n",
+            "fn run_blocks() -> i64:\n",
+            "    defer:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.defer_mod\n",
+            "        0\n",
+            "    val v = unsafe:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.unsafe_mod\n",
+            "        @cfg(x86_64)\n",
+            "        use os.kernel.arch.x86_64.unsafe_mod\n",
+            "        1\n",
+            "    val w = do:\n",
+            "        @cfg(riscv64)\n",
+            "        use os.kernel.arch.riscv64.do_mod\n",
+            "        2\n",
+            "    v + w\n",
+        );
+
+        let collect_discovered_uses = |arch: simple_common::target::TargetArch| -> Vec<String> {
+            let filtered = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(source, arch);
+            let mut module = simple_parser::Parser::new(&filtered)
+                .parse()
+                .expect("parse nested containers with @cfg use");
+            strip_inactive_cfg_arch_fns(&mut module, arch);
+            let mut found = Vec::new();
+            super::visit_ast_nodes(&module.items, &mut |node| {
+                if let simple_parser::ast::Node::UseStmt(u) = node {
+                    let mut segs = u.path.segments.clone();
+                    if let simple_parser::ast::ImportTarget::Single(last) = &u.target {
+                        segs.push(last.clone());
+                    }
+                    found.push(segs.join("."));
+                }
+            });
+            found
+        };
+
+        assert_eq!(
+            collect_discovered_uses(simple_common::target::TargetArch::X86_64),
+            vec![
+                "os.kernel.arch.x86_64.idt".to_string(),
+                "os.kernel.arch.x86_64.unsafe_mod".to_string(),
+            ]
+        );
+        assert_eq!(
+            collect_discovered_uses(simple_common::target::TargetArch::Riscv64),
+            vec![
+                "os.kernel.arch.riscv64.trap".to_string(),
+                "os.kernel.arch.riscv64.sv39".to_string(),
+                "os.kernel.arch.riscv64.timer".to_string(),
+                "os.kernel.arch.riscv64.sbi".to_string(),
+                "os.kernel.arch.riscv64.defer_mod".to_string(),
+                "os.kernel.arch.riscv64.unsafe_mod".to_string(),
+                "os.kernel.arch.riscv64.do_mod".to_string(),
+            ]
+        );
+    }
 }

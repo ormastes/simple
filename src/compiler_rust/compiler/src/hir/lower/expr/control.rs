@@ -47,15 +47,37 @@ fn expr_is_empty_array_literal(expr: &Expr) -> bool {
             Some(ast::Node::Expression(tail)) => expr_is_empty_array_literal(tail),
             _ => false,
         },
+        Expr::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => expr_is_empty_array_literal(then_branch) && expr_is_empty_array_literal(else_branch),
         _ => false,
     }
 }
 
-fn retype_empty_array_branch(branch: &mut HirExpr, empty_ty: TypeId) {
-    branch.ty = empty_ty;
-    if let HirExprKind::Block(stmts) = &mut branch.kind {
-        if let Some(HirStmt::Expr(tail)) = stmts.last_mut() {
-            retype_empty_array_branch(tail, empty_ty);
+fn retype_empty_array_branch(branch: &mut HirExpr, empty_ty: TypeId, slice_ty: TypeId) {
+    match &mut branch.kind {
+        HirExprKind::Array(items) if items.is_empty() => {
+            branch.ty = empty_ty;
+        }
+        HirExprKind::Block(stmts) => {
+            if let Some(HirStmt::Expr(tail)) = stmts.last_mut() {
+                retype_empty_array_branch(tail, empty_ty, slice_ty);
+                branch.ty = tail.ty;
+            }
+        }
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => {
+            retype_empty_array_branch(then_branch, empty_ty, slice_ty);
+            retype_empty_array_branch(else_branch, empty_ty, slice_ty);
+            branch.ty = slice_ty;
+        }
+        _ => {
+            branch.ty = empty_ty;
         }
     }
 }
@@ -225,12 +247,13 @@ impl Lowerer {
                 };
                 if let Some(element) = inferred_elem {
                     let empty_ty = self.module.types.register(HirType::Array { element, size: Some(0) });
+                    let slice_ty = self.module.types.register(HirType::Array { element, size: None });
                     if then_empty {
-                        retype_empty_array_branch(&mut then_hir, empty_ty);
+                        retype_empty_array_branch(&mut then_hir, empty_ty, slice_ty);
                     } else {
-                        retype_empty_array_branch(other, empty_ty);
+                        retype_empty_array_branch(other, empty_ty, slice_ty);
                     }
-                    ty = self.module.types.register(HirType::Array { element, size: None });
+                    ty = slice_ty;
                 }
             }
         }

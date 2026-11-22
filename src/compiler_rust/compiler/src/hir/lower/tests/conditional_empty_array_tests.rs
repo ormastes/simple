@@ -94,3 +94,80 @@ fn multiline_if_elif_empty_array_never_narrows_struct_or_any_elements_to_i32() {
     let dyn_warning = dyn_fn.locals.iter().find(|l| l.name == "warning").unwrap();
     assert_ne!(dyn_warning.ty, TypeId::I32, "loop element must never degrade to i32");
 }
+
+#[test]
+fn multi_branch_and_nested_if_empty_arrays_propagate_sibling_element_to_all_leaves() {
+    // Shape 1: `if c1: bytes elif c2: [] else: []` where `bytes: [u8]`.
+    // Both trailing `[]` leaves and the inner `If` must retype to `u8` so MIR
+    // emits `rt_byte_array_new` instead of generic `[i32; 0]` `rt_array_new`.
+    let trailing_source = concat!(
+        "fn probe_bytes(c1: bool, c2: bool, bytes: [u8]) -> [u8]:\n",
+        "    val out = if c1: bytes elif c2: [] else: []\n",
+        "    out\n",
+    );
+    let trailing_mod = parse_and_lower(trailing_source).expect("trailing elif/else empty u8 arrays must lower");
+    let trailing_fn = trailing_mod.functions.iter().find(|f| f.name == "probe_bytes").unwrap();
+    let out_local = trailing_fn.locals.iter().find(|l| l.name == "out").unwrap();
+    assert!(
+        matches!(trailing_mod.types.get(out_local.ty), Some(HirType::Array { element, size: None }) if *element == TypeId::U8),
+        "expected [u8] local, got {:?}",
+        trailing_mod.types.get(out_local.ty)
+    );
+    let HirStmt::Let { value: Some(outer_if), .. } = &trailing_fn.body[0] else {
+        panic!("expected out initializer");
+    };
+    let HirExprKind::If {
+        else_branch: Some(inner_if),
+        ..
+    } = &outer_if.kind
+    else {
+        panic!("expected outer If");
+    };
+    assert!(
+        matches!(trailing_mod.types.get(inner_if.ty), Some(HirType::Array { element, .. }) if *element == TypeId::U8),
+        "expected inner If to retype to u8 array, got {:?}",
+        trailing_mod.types.get(inner_if.ty)
+    );
+    let HirExprKind::If {
+        then_branch: inner_then,
+        else_branch: Some(inner_else),
+        ..
+    } = &inner_if.kind
+    else {
+        panic!("expected inner If");
+    };
+    for leaf in [inner_then, inner_else] {
+        assert!(
+            matches!(
+                trailing_mod.types.get(leaf.ty),
+                Some(HirType::Array {
+                    element,
+                    size: Some(0)
+                }) if *element == TypeId::U8
+            ),
+            "expected [u8; 0] leaf, got {:?}",
+            trailing_mod.types.get(leaf.ty)
+        );
+    }
+
+    // Shape 2: `if c1: (if c2: [] else: []) else: make_warnings()`.
+    let leading_source = concat!(
+        "struct OptionMeCallWarning:\n",
+        "    code: text\n",
+        "fn make_warnings() -> [OptionMeCallWarning]:\n",
+        "    []\n",
+        "fn probe_leading(c1: bool, c2: bool) -> text:\n",
+        "    val warnings = if c1: (if c2: [] else: []) else: make_warnings()\n",
+        "    for warning in warnings:\n",
+        "        return warning.code\n",
+        "    \"\"\n",
+    );
+    let leading_mod = parse_and_lower(leading_source).expect("nested leading empty-array If must lower");
+    let leading_fn = leading_mod.functions.iter().find(|f| f.name == "probe_leading").unwrap();
+    let warning_local = leading_fn.locals.iter().find(|l| l.name == "warning").unwrap();
+    assert!(
+        matches!(leading_mod.types.get(warning_local.ty), Some(HirType::Struct { name, .. }) if name == "OptionMeCallWarning"),
+        "expected OptionMeCallWarning loop element, got {:?}",
+        leading_mod.types.get(warning_local.ty)
+    );
+}

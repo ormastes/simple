@@ -529,6 +529,623 @@ fn warn_duplicate_active_variants(items: &[Node], arch: TargetArch) {
 }
 
 fn strip_inactive_cfg_arch_imports_in_stmts(stmts: &mut Vec<Node>, target_arch: TargetArch) {
+    use simple_parser::ast::{
+        Attribute, ContractBlock, ContractClause, Decorator, DeferBody, Expr, FStringPart, Field,
+        FunctionDef, MacroArg, MacroContractItem, MacroIntroSpec, MacroStmt, Parameter, SkipBody,
+        TensorMode, TensorSlice, TensorSliceContent,
+    };
+
+    fn strip_in_expr(expr: &mut Expr, target_arch: TargetArch) {
+        match expr {
+            Expr::FString { parts, .. } => {
+                for part in parts {
+                    match part {
+                        FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => {
+                            strip_in_expr(expr, target_arch);
+                        }
+                        FStringPart::Literal(_) => {}
+                    }
+                }
+            }
+            Expr::I18nTemplate { parts, args, .. } => {
+                for part in parts {
+                    match part {
+                        FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => {
+                            strip_in_expr(expr, target_arch);
+                        }
+                        FStringPart::Literal(_) => {}
+                    }
+                }
+                for (_, expr) in args {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Expr::Call { callee, args } => {
+                strip_in_expr(callee, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::KernelLaunch {
+                kernel,
+                grid,
+                block,
+                args,
+            } => {
+                strip_in_expr(kernel, target_arch);
+                strip_in_expr(grid, target_arch);
+                strip_in_expr(block, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } | Expr::OptionalMethodCall { receiver, args, .. } => {
+                strip_in_expr(receiver, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::Lambda { body, .. } => strip_in_expr(body, target_arch),
+            Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
+                strip_inactive_cfg_arch_imports_in_stmts(nodes, target_arch);
+            }
+            Expr::Binary { left, right, .. } => {
+                strip_in_expr(left, target_arch);
+                strip_in_expr(right, target_arch);
+            }
+            Expr::Unary { operand, .. } => strip_in_expr(operand, target_arch),
+            Expr::Index { receiver, index } => {
+                strip_in_expr(receiver, target_arch);
+                strip_in_expr(index, target_arch);
+            }
+            Expr::FieldAccess { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
+                strip_in_expr(receiver, target_arch);
+            }
+            Expr::Tuple(items) | Expr::Array(items) | Expr::VecLiteral(items) => {
+                for item in items {
+                    strip_in_expr(item, target_arch);
+                }
+            }
+            Expr::LabeledTuple(items) => {
+                for item in items {
+                    strip_in_expr(&mut item.value, target_arch);
+                }
+            }
+            Expr::ArrayRepeat { value, count } => {
+                strip_in_expr(value, target_arch);
+                strip_in_expr(count, target_arch);
+            }
+            Expr::GenericInst { expr, .. } => strip_in_expr(expr, target_arch),
+            Expr::Dict(items) => {
+                for (key, value) in items {
+                    strip_in_expr(key, target_arch);
+                    strip_in_expr(value, target_arch);
+                }
+            }
+            Expr::ListComprehension {
+                expr,
+                iterable,
+                condition,
+                ..
+            } => {
+                strip_in_expr(expr, target_arch);
+                strip_in_expr(iterable, target_arch);
+                if let Some(condition) = condition {
+                    strip_in_expr(condition, target_arch);
+                }
+            }
+            Expr::DictComprehension {
+                key,
+                value,
+                iterable,
+                condition,
+                ..
+            } => {
+                strip_in_expr(key, target_arch);
+                strip_in_expr(value, target_arch);
+                strip_in_expr(iterable, target_arch);
+                if let Some(condition) = condition {
+                    strip_in_expr(condition, target_arch);
+                }
+            }
+            Expr::Slice {
+                receiver,
+                start,
+                end,
+                step,
+            } => {
+                strip_in_expr(receiver, target_arch);
+                for bound in [start.as_deref_mut(), end.as_deref_mut(), step.as_deref_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    strip_in_expr(bound, target_arch);
+                }
+            }
+            Expr::StructInit { fields, spread, .. } => {
+                for (_, value) in fields {
+                    strip_in_expr(value, target_arch);
+                }
+                if let Some(spread) = spread {
+                    strip_in_expr(spread, target_arch);
+                }
+            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                strip_in_expr(condition, target_arch);
+                strip_in_expr(then_branch, target_arch);
+                if let Some(branch) = else_branch {
+                    strip_in_expr(branch, target_arch);
+                }
+            }
+            Expr::Match { subject, arms } => {
+                strip_in_expr(subject, target_arch);
+                for arm in arms {
+                    if let Some(guard) = &mut arm.guard {
+                        strip_in_expr(guard, target_arch);
+                    }
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut arm.body.statements, target_arch);
+                }
+            }
+            Expr::Spread(expr)
+            | Expr::DictSpread(expr)
+            | Expr::StructSpread(expr)
+            | Expr::Spawn(expr)
+            | Expr::Await(expr)
+            | Expr::Try(expr)
+            | Expr::ForceUnwrap(expr)
+            | Expr::ExistsCheck(expr)
+            | Expr::ContractOld(expr)
+            | Expr::New { expr, .. }
+            | Expr::Cast { expr, .. }
+            | Expr::CastOrReturn { expr, .. }
+            | Expr::OptionalChain { expr, .. }
+            | Expr::VolatileAccess { address: expr, .. } => strip_in_expr(expr, target_arch),
+            Expr::UnwrapOrReturn { expr, default }
+            | Expr::UnwrapOr { expr, default }
+            | Expr::CastOr { expr, default, .. }
+            | Expr::Coalesce { expr, default } => {
+                strip_in_expr(expr, target_arch);
+                strip_in_expr(default, target_arch);
+            }
+            Expr::UnwrapElse { expr, fallback_fn } | Expr::CastElse { expr, fallback_fn, .. } => {
+                strip_in_expr(expr, target_arch);
+                strip_in_expr(fallback_fn, target_arch);
+            }
+            Expr::Yield(expr) => {
+                if let Some(expr) = expr {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Expr::Go { args, body, .. } => {
+                for arg in args {
+                    strip_in_expr(arg, target_arch);
+                }
+                strip_in_expr(body, target_arch);
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    strip_in_expr(start, target_arch);
+                }
+                if let Some(end) = end {
+                    strip_in_expr(end, target_arch);
+                }
+            }
+            Expr::FunctionalUpdate { target, args, .. } => {
+                strip_in_expr(target, target_arch);
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+            Expr::MacroInvocation { args, .. } => {
+                for MacroArg::Expr(expr) in args {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Expr::Forall { range, predicate, .. } | Expr::Exists { range, predicate, .. } => {
+                strip_in_expr(range, target_arch);
+                strip_in_expr(predicate, target_arch);
+            }
+            Expr::GridLiteral { rows, .. } => {
+                for row in rows {
+                    for expr in row {
+                        strip_in_expr(expr, target_arch);
+                    }
+                }
+            }
+            Expr::TensorLiteral { mode, .. } => match mode.as_mut() {
+                TensorMode::Flat { default, values } => {
+                    if let Some(default) = default {
+                        strip_in_expr(default, target_arch);
+                    }
+                    for row in values {
+                        for expr in row {
+                            strip_in_expr(expr, target_arch);
+                        }
+                    }
+                }
+                TensorMode::Slice(slices) => {
+                    fn strip_in_slices(slices: &mut [TensorSlice], target_arch: TargetArch) {
+                        for slice in slices {
+                            match &mut slice.content {
+                                TensorSliceContent::NestedSlices(nested) => strip_in_slices(nested, target_arch),
+                                TensorSliceContent::GridRows(rows) => {
+                                    for row in rows {
+                                        for expr in row {
+                                            strip_in_expr(expr, target_arch);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    strip_in_slices(slices, target_arch);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn strip_in_attributes(attributes: &mut [Attribute], target_arch: TargetArch) {
+        for attribute in attributes {
+            if let Some(value) = &mut attribute.value {
+                strip_in_expr(value, target_arch);
+            }
+            if let Some(args) = &mut attribute.args {
+                for arg in args {
+                    strip_in_expr(arg, target_arch);
+                }
+            }
+            if let Some(args) = &mut attribute.named_args {
+                for (_, value) in args {
+                    strip_in_expr(value, target_arch);
+                }
+            }
+        }
+    }
+
+    fn strip_in_decorators(decorators: &mut [Decorator], target_arch: TargetArch) {
+        for decorator in decorators {
+            strip_in_expr(&mut decorator.name, target_arch);
+            if let Some(args) = &mut decorator.args {
+                for arg in args {
+                    strip_in_expr(&mut arg.value, target_arch);
+                }
+            }
+        }
+    }
+
+    fn strip_in_parameters(parameters: &mut [Parameter], target_arch: TargetArch) {
+        for parameter in parameters {
+            if let Some(default) = &mut parameter.default {
+                strip_in_expr(default, target_arch);
+            }
+        }
+    }
+
+    fn strip_in_fields(fields: &mut [Field], target_arch: TargetArch) {
+        for field in fields {
+            if let Some(default) = &mut field.default {
+                strip_in_expr(default, target_arch);
+            }
+        }
+    }
+
+    fn strip_in_clause(clause: &mut ContractClause, target_arch: TargetArch) {
+        strip_in_expr(&mut clause.condition, target_arch);
+    }
+
+    fn strip_in_contract(contract: &mut ContractBlock, target_arch: TargetArch) {
+        for clause in contract
+            .preconditions
+            .iter_mut()
+            .chain(&mut contract.invariants)
+            .chain(&mut contract.postconditions)
+            .chain(&mut contract.error_postconditions)
+            .chain(contract.decrease_measure.iter_mut())
+        {
+            strip_in_clause(clause, target_arch);
+        }
+    }
+
+    fn strip_in_macro_intro(spec: &mut MacroIntroSpec, target_arch: TargetArch) {
+        match spec {
+            MacroIntroSpec::Decl(_) => {}
+            MacroIntroSpec::For { range, body, .. } => {
+                strip_in_expr(&mut range.start, target_arch);
+                strip_in_expr(&mut range.end, target_arch);
+                for spec in body {
+                    strip_in_macro_intro(spec, target_arch);
+                }
+            }
+            MacroIntroSpec::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                strip_in_expr(condition, target_arch);
+                for spec in then_body.iter_mut().chain(else_body.iter_mut()) {
+                    strip_in_macro_intro(spec, target_arch);
+                }
+            }
+        }
+    }
+
+    fn strip_in_function(function: &mut FunctionDef, target_arch: TargetArch) {
+        strip_in_parameters(&mut function.params, target_arch);
+        strip_in_decorators(&mut function.decorators, target_arch);
+        strip_in_attributes(&mut function.attributes, target_arch);
+        if let Some(contract) = &mut function.contract {
+            strip_in_contract(contract, target_arch);
+        }
+        if let Some(constraint) = &mut function.return_constraint {
+            strip_in_expr(constraint, target_arch);
+        }
+        strip_inactive_cfg_arch_imports_in_stmts(&mut function.body.statements, target_arch);
+        if let Some(bounds) = &mut function.bounds_block {
+            for case in &mut bounds.cases {
+                strip_inactive_cfg_arch_imports_in_stmts(&mut case.body.statements, target_arch);
+            }
+        }
+    }
+
+    fn strip_in_node(stmt: &mut Node, target_arch: TargetArch) {
+        match stmt {
+            Node::Function(f) => strip_in_function(f, target_arch),
+            Node::ModDecl(m) => {
+                strip_in_attributes(&mut m.attributes, target_arch);
+                if let Some(body) = &mut m.body {
+                    strip_inactive_cfg_arch_fn_nodes(body, target_arch);
+                }
+            }
+            Node::Class(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                strip_in_attributes(&mut def.attributes, target_arch);
+                if let Some(invariant) = &mut def.invariant {
+                    for clause in &mut invariant.conditions {
+                        strip_in_clause(clause, target_arch);
+                    }
+                }
+                for invocation in &mut def.macro_invocations {
+                    for MacroArg::Expr(expr) in &mut invocation.args {
+                        strip_in_expr(expr, target_arch);
+                    }
+                }
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Struct(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                strip_in_attributes(&mut def.attributes, target_arch);
+                if let Some(invariant) = &mut def.invariant {
+                    for clause in &mut invariant.conditions {
+                        strip_in_clause(clause, target_arch);
+                    }
+                }
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Bitfield(def) => {
+                for constant in &mut def.constants {
+                    strip_in_expr(&mut constant.value, target_arch);
+                }
+                strip_in_attributes(&mut def.attributes, target_arch);
+            }
+            Node::Enum(def) => {
+                for variant in &mut def.variants {
+                    if let Some(discriminant) = &mut variant.discriminant {
+                        strip_in_expr(discriminant, target_arch);
+                    }
+                }
+                strip_in_attributes(&mut def.attributes, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Trait(def) => {
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Impl(def) => {
+                strip_in_attributes(&mut def.attributes, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Mixin(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::Actor(def) => {
+                strip_in_fields(&mut def.fields, target_arch);
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::TypeAlias(def) => {
+                if let Some(predicate) = &mut def.where_clause {
+                    strip_in_expr(predicate, target_arch);
+                }
+            }
+            Node::ClassAlias(def) => strip_in_decorators(&mut def.decorators, target_arch),
+            Node::FunctionAlias(def) => strip_in_decorators(&mut def.decorators, target_arch),
+            Node::Extern(def) => {
+                strip_in_parameters(&mut def.params, target_arch);
+                strip_in_attributes(&mut def.attributes, target_arch);
+            }
+            Node::ExternClass(def) => {
+                strip_in_attributes(&mut def.attributes, target_arch);
+                for method in &mut def.methods {
+                    strip_in_parameters(&mut method.params, target_arch);
+                    strip_in_attributes(&mut method.attributes, target_arch);
+                }
+            }
+            Node::Macro(def) => {
+                for item in &mut def.contract {
+                    if let MacroContractItem::Intro(intro) = item {
+                        strip_in_macro_intro(&mut intro.spec, target_arch);
+                    }
+                }
+                def.body.retain(|statement| match statement {
+                    MacroStmt::Stmt(Node::UseStmt(u)) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
+                    MacroStmt::Stmt(Node::MultiUse(m)) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
+                    MacroStmt::Stmt(Node::ExportUseStmt(e)) => !fn_inactive_cfg_arch(&e.attributes, target_arch),
+                    _ => true,
+                });
+                for statement in &mut def.body {
+                    match statement {
+                        MacroStmt::ConstEval(block) | MacroStmt::Emit { block, .. } => {
+                            strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                        }
+                        MacroStmt::Stmt(node) => strip_in_node(node, target_arch),
+                    }
+                }
+            }
+            Node::UnitFamily(def) => {
+                if let Some(arithmetic) = &mut def.arithmetic {
+                    for function in &mut arithmetic.custom_fns {
+                        strip_in_function(function, target_arch);
+                    }
+                }
+            }
+            Node::CompoundUnit(def) => {
+                if let Some(arithmetic) = &mut def.arithmetic {
+                    for function in &mut arithmetic.custom_fns {
+                        strip_in_function(function, target_arch);
+                    }
+                }
+            }
+            Node::Extend(def) => {
+                for method in &mut def.methods {
+                    strip_in_function(method, target_arch);
+                }
+            }
+            Node::LiteralFunction(def) => {
+                strip_inactive_cfg_arch_imports_in_stmts(&mut def.body.statements, target_arch);
+            }
+            Node::DomainBlock(def) => strip_in_attributes(&mut def.attributes, target_arch),
+            Node::MockDecl(def) => {
+                for expectation in &mut def.expectations {
+                    strip_in_parameters(&mut expectation.params, target_arch);
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut expectation.body, target_arch);
+                }
+            }
+            Node::Expression(expr) => strip_in_expr(expr, target_arch),
+            Node::Let(stmt) => {
+                if let Some(expr) = &mut stmt.value {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Node::Const(stmt) => strip_in_expr(&mut stmt.value, target_arch),
+            Node::Static(stmt) => strip_in_expr(&mut stmt.value, target_arch),
+            Node::Assignment(stmt) => {
+                strip_in_expr(&mut stmt.target, target_arch);
+                strip_in_expr(&mut stmt.value, target_arch);
+            }
+            Node::Return(stmt) => {
+                if let Some(expr) = &mut stmt.value {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Node::Break(stmt) => {
+                if let Some(expr) = &mut stmt.value {
+                    strip_in_expr(expr, target_arch);
+                }
+            }
+            Node::Guard(stmt) => {
+                if let Some(condition) = &mut stmt.condition {
+                    strip_in_expr(condition, target_arch);
+                }
+                strip_in_expr(&mut stmt.result, target_arch);
+            }
+            Node::Assert(stmt) => strip_in_expr(&mut stmt.condition, target_arch),
+            Node::Assume(stmt) => strip_in_expr(&mut stmt.condition, target_arch),
+            Node::Admit(stmt) => strip_in_expr(&mut stmt.condition, target_arch),
+            Node::Calc(stmt) => {
+                for step in &mut stmt.steps {
+                    strip_in_expr(&mut step.expr, target_arch);
+                }
+            }
+            Node::If(if_stmt) => {
+                strip_in_expr(&mut if_stmt.condition, target_arch);
+                strip_inactive_cfg_arch_imports_in_stmts(&mut if_stmt.then_block.statements, target_arch);
+                for (_, condition, block) in &mut if_stmt.elif_branches {
+                    strip_in_expr(condition, target_arch);
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+                if let Some(else_block) = &mut if_stmt.else_block {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut else_block.statements, target_arch);
+                }
+            }
+            Node::Match(m) => {
+                strip_in_expr(&mut m.subject, target_arch);
+                for arm in &mut m.arms {
+                    if let Some(guard) = &mut arm.guard {
+                        strip_in_expr(guard, target_arch);
+                    }
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut arm.body.statements, target_arch);
+                }
+            }
+            Node::For(f) => {
+                strip_in_expr(&mut f.iterable, target_arch);
+                for clause in &mut f.invariants {
+                    strip_in_clause(clause, target_arch);
+                }
+                strip_inactive_cfg_arch_imports_in_stmts(&mut f.body.statements, target_arch);
+            }
+            Node::While(w) => {
+                strip_in_expr(&mut w.condition, target_arch);
+                for clause in &mut w.invariants {
+                    strip_in_clause(clause, target_arch);
+                }
+                strip_inactive_cfg_arch_imports_in_stmts(&mut w.body.statements, target_arch);
+            }
+            Node::Loop(l) => strip_inactive_cfg_arch_imports_in_stmts(&mut l.body.statements, target_arch),
+            Node::Context(stmt) => {
+                strip_in_expr(&mut stmt.context, target_arch);
+                strip_inactive_cfg_arch_imports_in_stmts(&mut stmt.body.statements, target_arch);
+            }
+            Node::With(stmt) => {
+                strip_in_expr(&mut stmt.resource, target_arch);
+                strip_inactive_cfg_arch_imports_in_stmts(&mut stmt.body.statements, target_arch);
+            }
+            Node::Skip(stmt) => {
+                if let SkipBody::Block(block) = &mut stmt.body {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+            }
+            Node::Defer(stmt) => match &mut stmt.body {
+                DeferBody::Expr(expr) => strip_in_expr(expr, target_arch),
+                DeferBody::Block(block) => {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+            },
+            Node::ErrDefer(stmt) => match &mut stmt.body {
+                DeferBody::Expr(expr) => strip_in_expr(expr, target_arch),
+                DeferBody::Block(block) => {
+                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
+                }
+            },
+            Node::InlineAsm(stmt) => {
+                for constraint in &mut stmt.constraints {
+                    if let Some(operand) = &mut constraint.operand {
+                        strip_in_expr(operand, target_arch);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     stmts.retain(|stmt| match stmt {
         Node::UseStmt(u) => !fn_inactive_cfg_arch(&u.attributes, target_arch),
         Node::MultiUse(m) => !fn_inactive_cfg_arch(&m.attributes, target_arch),
@@ -536,52 +1153,7 @@ fn strip_inactive_cfg_arch_imports_in_stmts(stmts: &mut Vec<Node>, target_arch: 
         _ => true,
     });
     for stmt in stmts.iter_mut() {
-        match stmt {
-            Node::Function(f) => strip_inactive_cfg_arch_imports_in_stmts(&mut f.body.statements, target_arch),
-            Node::ModDecl(m) => {
-                if let Some(body) = &mut m.body {
-                    strip_inactive_cfg_arch_fn_nodes(body, target_arch);
-                }
-            }
-            Node::Class(c) => {
-                for method in &mut c.methods {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
-                }
-            }
-            Node::Struct(s) => {
-                for method in &mut s.methods {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
-                }
-            }
-            Node::Enum(e) => {
-                for method in &mut e.methods {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
-                }
-            }
-            Node::Impl(imp) => {
-                for method in &mut imp.methods {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut method.body.statements, target_arch);
-                }
-            }
-            Node::If(if_stmt) => {
-                strip_inactive_cfg_arch_imports_in_stmts(&mut if_stmt.then_block.statements, target_arch);
-                for (_, _, block) in &mut if_stmt.elif_branches {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut block.statements, target_arch);
-                }
-                if let Some(else_block) = &mut if_stmt.else_block {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut else_block.statements, target_arch);
-                }
-            }
-            Node::While(w) => strip_inactive_cfg_arch_imports_in_stmts(&mut w.body.statements, target_arch),
-            Node::For(f) => strip_inactive_cfg_arch_imports_in_stmts(&mut f.body.statements, target_arch),
-            Node::Loop(l) => strip_inactive_cfg_arch_imports_in_stmts(&mut l.body.statements, target_arch),
-            Node::Match(m) => {
-                for arm in &mut m.arms {
-                    strip_inactive_cfg_arch_imports_in_stmts(&mut arm.body.statements, target_arch);
-                }
-            }
-            _ => {}
-        }
+        strip_in_node(stmt, target_arch);
     }
 }
 

@@ -360,7 +360,9 @@ pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> 
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
-/// Boundary failures are typed interpreter errors; they never become a symbol.
+/// Returns `0` when `name` is absent from a valid library handle (matching C
+/// `rt_dynlib_symbol`); invalid handles or malformed arguments raise typed
+/// interpreter errors.
 pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
