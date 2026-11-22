@@ -3212,16 +3212,7 @@ impl LlvmBackend {
         let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
         let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
-        // Declare rt_interp_call if not exists
-        // name and argv are real C pointers (pointer-width on 32-bit targets),
-        // len/argc/result are 64-bit RuntimeValue-width words.
-        let interp_call = module.get_function("rt_interp_call").unwrap_or_else(|| {
-            let fn_type = i64_type.fn_type(
-                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
-                false,
-            );
-            module.add_function("rt_interp_call", fn_type, None)
-        });
+        let interp_call = self.declare_rt_interp_call(module);
 
         // Create string constant for function name
         let name_bytes = func_name.as_bytes();
@@ -3235,7 +3226,7 @@ impl LlvmBackend {
 
         let argc = i64_type.const_int(args.len() as u64, false);
         let argv = if args.is_empty() {
-            i8_ptr_type.const_null()
+            i64_type.const_int(0, false)
         } else {
             let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
             let alloc_fn = module
@@ -3365,7 +3356,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             }
 
-            argv_ptr
+            argv_raw
         };
 
         let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
@@ -3424,17 +3415,12 @@ impl LlvmBackend {
 mod tests {
     use crate::codegen::llvm::LlvmBackend;
     use crate::hir::TypeId as T;
-    use crate::mir::{MirFunction, MirInst, Terminator, VReg};
+    use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
     use simple_common::target::Target;
     use simple_parser::ast::Visibility;
 
-    /// rt_interp_call takes real C pointers for name/argv: on i686 Windows they
-    /// must be `ptr` (32-bit), not the 64-bit RuntimeValue word.
-    #[test]
-    fn interp_call_i686_windows_pointer_params() {
-        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
-        backend.create_module("interp_i686").unwrap();
-        let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
+    fn interp_call_function(name: &str) -> MirFunction {
+        let mut func = MirFunction::new(name.to_string(), T::I64, Visibility::Public);
         func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 42 });
         func.blocks[0].instructions.push(MirInst::InterpCall {
             dest: Some(VReg(1)),
@@ -3443,14 +3429,43 @@ mod tests {
             boxed_result: false,
         });
         func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
-        backend.compile_function(&func).unwrap();
+        func
+    }
 
-        let ir = backend.get_ir().unwrap();
+    fn assert_interp_call_abi(ir: &str) {
         assert!(
-            ir.contains("declare i64 @rt_interp_call(ptr, i64, i64, ptr)"),
-            "rt_interp_call must take pointer name/argv: {ir}"
+            ir.contains("declare i64 @rt_interp_call(ptr, i64, i64, i64)"),
+            "rt_interp_call must match the C prototype (pointer name, word argv): {ir}"
         );
         assert!(!ir.contains("func_name_ptr"), "name pointer must not be ptrtoint'd: {ir}");
+    }
+
+    /// rt_interp_call's name is a real C pointer: on i686 Windows it must be
+    /// `ptr` (32-bit), not the 64-bit RuntimeValue word.
+    #[test]
+    fn interp_call_i686_windows_pointer_params() {
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("interp_i686").unwrap();
+        backend.compile_function(&interp_call_function("test")).unwrap();
+
+        assert_interp_call_abi(&backend.get_ir().unwrap());
         backend.verify().unwrap();
+    }
+
+    /// `compile()` pre-declares codegen-root runtime functions before any
+    /// function body is lowered; that declaration must be the one the
+    /// InterpCall site calls, or module verification rejects the call.
+    #[test]
+    fn interp_call_agrees_with_predeclared_runtime_function() {
+        use crate::codegen::backend_trait::NativeBackend;
+
+        let mut backend = LlvmBackend::new(Target::parse("x86_64-unknown-linux-gnu").unwrap()).unwrap();
+        let mut mir_module = MirModule::new();
+        mir_module.name = Some("interp_predeclared".to_string());
+        mir_module.functions.push(interp_call_function("main"));
+
+        // compile() runs the pre-declare pass and verifies the module.
+        backend.compile(&mir_module).unwrap();
+        assert_interp_call_abi(&backend.get_ir().unwrap());
     }
 }

@@ -1179,6 +1179,25 @@ impl LlvmBackend {
         self.context_ref().i64_type()
     }
 
+    /// Get or declare `rt_interp_call` with the C runtime prototype
+    /// (`src/runtime/runtime.h`): `int64_t rt_interp_call(const uint8_t* name,
+    /// uint64_t len, int64_t argc, int64_t argv)`. Only `name` is a real C
+    /// pointer (pointer-width on 32-bit targets); `argv` travels as a 64-bit
+    /// word. The pre-declare pass in `compile()` and both InterpCall emitters
+    /// share this so the declaration and the call sites cannot disagree.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_rt_interp_call(
+        &self,
+        module: &inkwell::module::Module<'static>,
+    ) -> inkwell::values::FunctionValue<'static> {
+        module.get_function("rt_interp_call").unwrap_or_else(|| {
+            let word = self.runtime_int_type();
+            let name_ptr = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = word.fn_type(&[name_ptr.into(), word.into(), word.into(), word.into()], false);
+            module.add_function("rt_interp_call", fn_type, None)
+        })
+    }
+
     #[cfg(feature = "llvm")]
     fn target_machine_for_module(
         &self,
@@ -1822,6 +1841,13 @@ impl NativeBackend for LlvmBackend {
                     }
                     // Skip if already declared
                     if m.get_function(spec.name).is_some() {
+                        continue;
+                    }
+
+                    if spec.name == "rt_interp_call" {
+                        // Not an all-word signature: `name` is a real pointer.
+                        self.declare_rt_interp_call(m)
+                            .set_linkage(inkwell::module::Linkage::External);
                         continue;
                     }
 
