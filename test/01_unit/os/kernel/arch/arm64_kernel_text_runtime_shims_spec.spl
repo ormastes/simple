@@ -1,0 +1,40 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (arm64 fs-exec kernel link): rt_text_find, rt_text_is_ascii,
+# rt_text_eq_any, rt_string_char_count, rt_slice_text_bytes, rt_tls13_sha256
+# and rt_sosix_collector_nonce_echo had no definition for the arm64 kernel.
+# Source-contract spec: there is no arm64 kernel unit harness; behaviour is
+# proven by the link gate scripts/check/check-simpleos-arm64-user-elf-link.shs.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+
+val SHIMS = "src/os/kernel/arch/arm64/text_runtime_shims.spl"
+val ENTRY = "examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl"
+
+describe "arm64 kernel text runtime shims":
+    it "exports the text primitives over the freestanding string layout":
+        step("RuntimeString: {u32 type=1, u32 size, u64 len@8, data@16}, handle tagged 0b001")
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_text_find(haystack: i64, needle: i64, start: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_text_is_ascii(value: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_text_eq_any(left: i64, right: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_string_char_count(value: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_slice_text_bytes(value: i64, start: i64, end: i64, step: i64) -> i64:")).to_equal(true)
+        expect(src.contains("val A64_HEAP_STRING: u64 = 1")).to_equal(true)
+
+    it "backs rt_tls13_sha256 with the shared pure-Simple sha256 core":
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_tls13_sha256(data: [u8]) -> [u8]:")).to_equal(true)
+        expect(src.contains("use std.common.crypto.sha256_core.")).to_equal(true)
+
+    it "ports the collector nonce echo onto the arm64 VFS":
+        step("same /SOSIXNON.TXT contract as the riscv64 C runtime")
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_sosix_collector_nonce_echo() -> i64:")).to_equal(true)
+        expect(src.contains("SOSIX_COLLECTOR_RUN_NONCE=")).to_equal(true)
+
+    it "keeps the shim module in the fs-exec closure":
+        val src = file_read_text(ENTRY)
+        expect(src.contains("use os.kernel.arch.arm64.text_runtime_shims.{}")).to_equal(true)
