@@ -1,0 +1,149 @@
+# Library-unit identity validation before symbol exposure (lane lu2).
+# The loader must refuse an SMF whose iface digest, ABI digest, target
+# triple, policy or capabilities differ from what the caller expects, and
+# must do so BEFORE any symbol is published.
+# @req REQ-LU2-LOADER-IDENTITY
+use std.spec.step
+use std.io_runtime.{file_write_bytes, file_delete}
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+use compiler.loader.unit_identity.{UnitIdentity, unit_identity_encode, unit_identity_check_image}
+use compiler.backend.linker.smf_meta.{smf_meta_unit_identity_text}
+use compiler.loader.module_loader.{lazymoduleloader_with_defaults, moduleloader_expect_identity, moduleloader_load, LoadResult}
+use compiler.core.interpreter.module_iface_gate.{module_iface_gate, module_iface_gate_for, import_expected_iface_set, import_expected_iface_clear}
+
+val IFACE_SRC = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+
+fn good_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: interface_digest_of_source(IFACE_SRC),
+        abi_digest: "abi-v1-aaaa",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io", "net"])
+
+fn image_for(id: UnitIdentity) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.unit_identity_bytes = unit_identity_encode(id).bytes()
+    generate_smf_with_options([0xC3], opts)
+
+describe "library-unit identity round trip":
+    it "reads the identity record back out of an SMF image":
+        step("reads the identity record back out of an SMF image")
+        val image = image_for(good_identity())
+        expect(smf_meta_unit_identity_text(image)).to_equal(unit_identity_encode(good_identity()))
+
+    it "accepts an image that matches the expectation":
+        step("accepts an image that matches the expectation")
+        val r = unit_identity_check_image(good_identity(), image_for(good_identity()))
+        expect(r.is_ok()).to_equal(true)
+
+    it "accepts an image whose capabilities are a subset of the granted ones":
+        step("accepts a capability subset")
+        var actual = good_identity()
+        actual.capabilities = ["io"]
+        expect(unit_identity_check_image(good_identity(), image_for(actual)).is_ok()).to_equal(true)
+
+    it "refuses a tampered iface digest":
+        step("refuses a tampered iface digest")
+        var bad = good_identity()
+        bad.iface_digest = "0000" + bad.iface_digest
+        val r = unit_identity_check_image(good_identity(), image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IFACE-MISMATCH")).to_equal(true)
+
+    it "refuses a tampered ABI digest":
+        step("refuses a tampered ABI digest")
+        var bad = good_identity()
+        bad.abi_digest = "abi-v1-bbbb"
+        val r = unit_identity_check_image(good_identity(), image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
+
+    it "refuses a tampered target triple":
+        step("refuses a tampered target triple")
+        var bad = good_identity()
+        bad.target_triple = "aarch64-unknown-linux-gnu"
+        val r = unit_identity_check_image(good_identity(), image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-TRIPLE-MISMATCH")).to_equal(true)
+
+    it "refuses a policy mismatch":
+        step("refuses a policy mismatch")
+        var bad = good_identity()
+        bad.policy = "debug"
+        val r = unit_identity_check_image(good_identity(), image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-POLICY-MISMATCH")).to_equal(true)
+
+    it "refuses a capability that was not granted":
+        step("refuses an ungranted capability")
+        var bad = good_identity()
+        bad.capabilities = ["io", "fs_write"]
+        val r = unit_identity_check_image(good_identity(), image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-CAPABILITY-DENIED")).to_equal(true)
+
+    it "refuses an image with no identity record (fail closed)":
+        step("refuses an image with no identity record")
+        val opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        val image = generate_smf_with_options([0xC3], opts)
+        val r = unit_identity_check_image(good_identity(), image)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IDENTITY-MISSING")).to_equal(true)
+
+describe "module loader refuses before exposing symbols":
+    it "passes the identity gate for a matching SMF":
+        step("passes the identity gate for a matching SMF")
+        val path = "build/lu2_match.smf"
+        file_write_bytes(path, image_for(good_identity()))
+        val loader = lazymoduleloader_with_defaults()
+        moduleloader_expect_identity(loader, path, good_identity())
+        val r = moduleloader_load(loader, path)
+        file_delete(path)
+        # Mapping a v1.2 image past the gate needs native batch loading,
+        # so only the identity verdict is asserted here.
+        val msg = match r:
+            case LoadResult.Error(message): message
+            case _: ""
+        expect(msg.contains("SMF-E-UNIT-")).to_equal(false)
+
+    it "refuses a tampered digest and publishes no symbols":
+        step("refuses a tampered digest and publishes no symbols")
+        val path = "build/lu2_tamper.smf"
+        var bad = good_identity()
+        bad.iface_digest = "ffff"
+        file_write_bytes(path, image_for(bad))
+        val loader = lazymoduleloader_with_defaults()
+        moduleloader_expect_identity(loader, path, good_identity())
+        val r = moduleloader_load(loader, path)
+        file_delete(path)
+        val msg = match r:
+            case LoadResult.Error(message): message
+            case _: ""
+        expect(msg.contains("SMF-E-UNIT-IFACE-MISMATCH")).to_equal(true)
+        expect(loader.global_symbols.len()).to_equal(0)
+        expect(loader.modules.has(path)).to_equal(false)
+
+describe "interpreter import gate":
+    it "passes when the source interface matches the expected digest":
+        step("passes when the source interface matches")
+        expect(module_iface_gate("m.spl", IFACE_SRC, interface_digest_of_source(IFACE_SRC))).to_equal("")
+
+    it "passes when no digest is expected":
+        step("passes when no digest is expected")
+        expect(module_iface_gate("m.spl", IFACE_SRC, "")).to_equal("")
+
+    it "refuses when the interface changed":
+        step("refuses when the interface changed")
+        val changed = "fn add(a: i64, b: i64, c: i64) -> i64:\n    a + b + c\n"
+        val msg = module_iface_gate("m.spl", changed, interface_digest_of_source(IFACE_SRC))
+        expect(msg.contains("SMF-E-IFACE-MISMATCH")).to_equal(true)
+
+    it "gates a pinned path and admits it again after clear":
+        step("gates a pinned path and admits it again after clear")
+        import_expected_iface_set("p.spl", interface_digest_of_source(IFACE_SRC))
+        val refused = module_iface_gate_for("p.spl", "fn other() -> i64:\n    1\n")
+        import_expected_iface_clear()
+        expect(refused.contains("SMF-E-IFACE-MISMATCH")).to_equal(true)
+        expect(module_iface_gate_for("p.spl", "fn other() -> i64:\n    1\n")).to_equal("")
