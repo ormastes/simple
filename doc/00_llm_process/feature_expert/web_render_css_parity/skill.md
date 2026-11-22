@@ -3328,7 +3328,7 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Open:**
   - Default controls at k = 4 sit 2-3 device rows above Chrome's (text input top 32 vs 34, select 36 vs 39, checkbox 40 vs 42): the line's device baseline is not applied to an inline control's box. This is most of what is left of the default-control rows at 4x.
   - Boxes after a control on the same line keep their CSS-snapped x at k > 1 (up to `k x w - device w` px right of Chrome's); a `<button>`'s fractional device width is not modelled (135 vs 136 at k = 4).
-  - Chrome's average char width is not linear in the font size: an `<input>` / `<textarea>` at `font-size:16px` is 215 / 221 px, here 209 / 214 (the old rule gave 354).
+  - FIXED 2026-11-20 (see below): an `<input>` / `<textarea>` at `font-size:16px` was 209 / 214 px against Chrome 215 / 221.
   - The k = 3 frame differs from Chrome by one px per corner (Chrome's inner edge is not symmetric there); a button's anti-aliased corner at k = 4 differs by up to 15 levels on ~6 px per corner; a listbox (`<select multiple>`) frame is anti-aliased in Chrome and aliased here.
   - `simple_web_browser_engine_production_hardening_spec` still expects an `id:stage` hit key; hit keys are `path:` routes since 8282e432b3b.
 
@@ -3522,3 +3522,10 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Fix:** such a one-line run's box is `inline_text_width_after_lead` (exact trimmed width + trailing space, rounded once). `inline_item_width_err_milli` also keeps the exact pen error for a run whose box holds one or two edge spaces (`Lead ` = 35.59 + 4.45 -> 40), so the next run keeps its sub-pixel origin.
 - **Spec:** `test/01_unit/browser_engine/inline_tail_pen_chrome159_spec.spl` (base 12 probes off, head 0).
 - **Not fixed:** kerning across a trimmed edge space (`A ` is 14.234 in Chrome, kerned A/space; here 15.117 from trimmed `A` + space), so a line of one-letter runs drifts ~1 px.
+
+## 2026-11-20 — text control columns are max(round(a), a) wide
+
+- **Bug:** `form_control_content_w_for_face` always used the ROUNDED OS/2 average width `a` for Liberation Sans `<input>` columns and the EXACT `a` for DejaVu Sans Mono `<textarea>` columns. Chrome 159 uses `c = max(round(a), a)` for both, in device px: 16 px `<input>` (a = 9.273) was 209 here vs Chrome 215, 16 px `<textarea>` (a = 9.633 -> 10) 214 vs 221. Fitted on 12 / 13.3333 / 16 / 20 px, sizes 1..21 and cols 1..40, at k = 1 and 4 — every point exact.
+- **Rule:** `<input size=N>` content = `ceil((N - 1) c + round(maxCharWidth))`; `<textarea cols=N>` content = `ceil(N c) + 15k`. The UA 13.3333 px rows (`8N + 17`, `ceil(8.0273 N) + 15`) are unchanged.
+- **Spec:** `test/01_unit/browser_engine/form_control_width_dpr_chrome159_spec.spl` (AC-2/3/4/5 red on base, green on head).
+- **Trap:** the ratio is not linear in the font size, so fitting one size's widths (as the 2026-11-17 entry did) cannot predict another; measure two sizes whose `a` rounds in opposite directions.
