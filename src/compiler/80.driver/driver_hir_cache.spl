@@ -234,12 +234,48 @@ fn hir_cache_closure_fallback_count_v1() -> i64:
 # failed: closure identity differs" (spec:
 # hir_worker_placeholder_closure_digest_spec). Interface rows are only sound in
 # a build with no placeholder surfaces, i.e. not on the HIR shard route.
+fn _hir_cache_sort_order_by_keys(sort_keys: [text]) -> [i64]:
+    val n = sort_keys.len()
+    var src: [i64] = []
+    var dst: [i64] = []
+    var i = 0
+    while i < n:
+        src.push(i)
+        dst.push(i)
+        i = i + 1
+    var width = 1
+    while width < n:
+        var base = 0
+        while base < n:
+            var mid = base + width
+            if mid > n:
+                mid = n
+            var end = base + width + width
+            if end > n:
+                end = n
+            var li = base
+            var ri = mid
+            var out_idx = base
+            while out_idx < end:
+                if li < mid and (ri >= end or sort_keys[src[li]] <= sort_keys[src[ri]]):
+                    dst[out_idx] = src[li]
+                    li = li + 1
+                else:
+                    dst[out_idx] = src[ri]
+                    ri = ri + 1
+                out_idx = out_idx + 1
+            base = end
+        val swapped = src
+        src = dst
+        dst = swapped
+        width = width * 2
+    src
+
 fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
     val content_rows = (sosix_env_get_nullable("SIMPLE_HIR_CACHE_CLOSURE_KEY") ?? "") != "interface"
     var rows: [text] = []
     var tokens: [text] = []
     var sort_keys: [text] = []
-    var order: [i64] = []
     var fallbacks = 0
     var i = 0
     while i < surfaces.surfaces.len():
@@ -258,18 +294,8 @@ fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
             rows = rows.push(rel + "|C:{s.content_hash}:{s.content_length}")
         tokens = tokens.push(hir_cache_surface_neutral_token(s.content_hash))
         sort_keys = sort_keys.push(rel)
-        order = order.push(i)
         i = i + 1
-    var left = 0
-    while left < order.len():
-        var right = left + 1
-        while right < order.len():
-            if sort_keys[order[right]] < sort_keys[order[left]]:
-                val held = order[left]
-                order[left] = order[right]
-                order[right] = held
-            right = right + 1
-        left = left + 1
+    val order = _hir_cache_sort_order_by_keys(sort_keys)
     var sorted_rows: [text] = []
     var sorted_tokens: [text] = []
     for index in order:
@@ -426,15 +452,11 @@ fn hir_cache_has(key: text, parser_binding: text = "", library_mode: text = "") 
     val path = hir_cache_path(key, parser_binding != "")
     if not file_exists(path):
         return false
-    # Validate the whole frame, but retain neither its module nor diagnostics.
-    # Preserve any earlier load's warnings before releasing this scratch scope.
-    val previous_warnings = _hir_cache_last_warnings
-    val previous_parser_objectless = _hir_cache_last_parser_objectless
+    # Validate the envelope header, parser classification, body checksum and
+    # codec header without running hir_module_decode(blob) or mutating state.
     if not transient_scope_begin():
         return false
-    val valid = hir_cache_load_in_owned_scope(key, parser_binding, "", library_mode).is_some()
-    _hir_cache_last_warnings = previous_warnings
-    _hir_cache_last_parser_objectless = previous_parser_objectless
+    val valid = _hir_cache_entry_valid_without_decode(path, parser_binding, library_mode)
     val ended = transient_scope_end()
     valid and ended
 
@@ -735,6 +757,71 @@ fn _hir_cache_entry_header_valid(path: text, library_mode: text = "") -> bool:
     val raw = file_read_nullable(path) ?? ""
     var reader: FlatPoolReader = FlatPoolReader.new_canonical(raw)
     reader.ok and reader.next() == hir_cache_header(library_mode)
+
+fn _hir_cache_entry_valid_without_decode(path: text, parser_binding: text = "", library_mode: text = "") -> bool:
+    val content = file_read_nullable(path) ?? ""
+    if content == "":
+        return false
+    val expected_header = if parser_binding != "": "spl-hircache-v4-parser " + hir_cache_header(library_mode) else: hir_cache_header(library_mode)
+    val h_nl: i64 = content.index_of("\n")
+    if h_nl < 0 or content.substring(0, h_nl) != expected_header:
+        return false
+    val c_start: i64 = h_nl + 1
+    val c_nl: i64 = content.index_of("\n", c_start)
+    if c_nl < 0:
+        return false
+    val checksum_line = content.substring(c_start, c_nl)
+    val prefix_bytes = HIR_CACHE_CHECKSUM_PREFIX.byte_len()
+    if not checksum_line.starts_with(HIR_CACHE_CHECKSUM_PREFIX) or checksum_line.byte_len() != prefix_bytes + 64:
+        return false
+    val checksum = checksum_line.substring(prefix_bytes, checksum_line.byte_len())
+    val covered = content.substring(c_nl + 1, content.byte_len())
+    if hir_cache_body_checksum(covered) != checksum:
+        return false
+    var cursor: i64 = 0
+    if expected_header.starts_with("spl-hircache-v4-parser "):
+        val p_nl: i64 = covered.index_of("\n", cursor)
+        if p_nl < 0 or covered.substring(cursor, p_nl) != "P":
+            return false
+        val pc_start: i64 = p_nl + 1
+        val pc_nl: i64 = covered.index_of("\n", pc_start)
+        if pc_nl < 0:
+            return false
+        val parser_classification = covered.substring(pc_start, pc_nl)
+        if not hir_cache_parser_record_valid_v1(parser_classification):
+            return false
+        if parser_binding != "" and (parser_binding.byte_len() != 64 or
+                (parser_classification != "objectless:" + parser_binding and
+                 parser_classification != "bodyful:" + parser_binding)):
+            return false
+        cursor = pc_nl + 1
+    elif parser_binding != "":
+        return false
+    val w_nl: i64 = covered.index_of("\n", cursor)
+    if w_nl < 0 or covered.substring(cursor, w_nl) != "W":
+        return false
+    val n_start: i64 = w_nl + 1
+    val n_nl: i64 = covered.index_of("\n", n_start)
+    if n_nl <= n_start:
+        return false
+    val n_raw = covered.substring(n_start, n_nl)
+    val warning_count = n_raw.to_i64() ?? -1
+    if warning_count < 0 or "{warning_count}" != n_raw:
+        return false
+    cursor = n_nl + 1
+    var wi: i64 = 0
+    while wi < warning_count:
+        val wi_nl: i64 = covered.index_of("\n", cursor)
+        if wi_nl < 0:
+            return false
+        cursor = wi_nl + 1
+        wi = wi + 1
+    val b_nl: i64 = covered.index_of("\n", cursor)
+    if b_nl <= cursor:
+        return false
+    if covered.substring(cursor, b_nl) != hir_codec_header():
+        return false
+    covered.ends_with("\n")
 
 fn hir_cache_last_warnings() -> [text]:
     _hir_cache_last_warnings

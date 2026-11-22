@@ -175,7 +175,7 @@ impl LlvmBackend {
             (inkwell::values::BasicValueEnum::IntValue(l), inkwell::values::BasicValueEnum::IntValue(r)) => {
                 // Ensure both operands have the same bit width as RuntimeValue
                 let rv_type = self.runtime_int_type();
-                let i64_type = rv_type; // alias: RuntimeValue is i64 on every target
+                let i64_type = rv_type; // alias for compatibility (i32 on freestanding 32-bit targets, i64 otherwise)
                 let rv_width = rv_type.get_bit_width();
                 let use_sext_l = matches!(op, BinOp::ShiftRight) && lhs_signed.unwrap_or(true);
                 let l = if l.get_type().get_bit_width() < rv_width {
@@ -499,6 +499,20 @@ impl LlvmBackend {
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?
                         .into()),
+                    // Float `%` is truncated (C fmod, sign of the dividend), matching
+                    // the seed interpreter (interpreter/expr/ops.rs, BinOp::Mod, Rust `%`
+                    // on f64/f32) and both `rt_any_mod` runtime twins
+                    // (runtime/src/value/collections.rs, src/runtime/runtime_any_ops.c).
+                    // The cranelift backend is floored instead; that divergence and the
+                    // r == 0 behaviour (interpreter error vs NaN here) are an open owner
+                    // decision, see doc/08_tracking/bug/
+                    // seed_llvm_float_mod_unsupported_blocks_simple_core_archive_2026-11-22.md.
+                    // Without this arm `src/runtime/simple_core/core_any_ops.spl:94` failed
+                    // with `Unsupported float binop: Mod`.
+                    BinOp::Mod => Ok(builder
+                        .build_float_rem(l, r, "frem")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_rem", &e))?
+                        .into()),
                     BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         let pred = match op {
                             BinOp::Eq => FloatPredicate::OEQ,
@@ -580,10 +594,7 @@ impl LlvmBackend {
                 let result = match op {
                     BinOp::Eq | BinOp::Is => {
                         let rt_func = module.get_function("rt_native_eq").unwrap_or_else(|| {
-                            let fn_type = self
-                                .context_ref()
-                                .i64_type()
-                                .fn_type(&[self.runtime_int_type().into(), self.runtime_int_type().into()], false);
+                            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                             module.add_function("rt_native_eq", fn_type, None)
                         });
                         let call_site = builder
@@ -592,13 +603,13 @@ impl LlvmBackend {
                         let raw = call_site
                             .try_as_basic_value()
                             .basic()
-                            .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into())
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
                         let cmp = builder
                             .build_int_compare(
                                 IntPredicate::NE,
                                 raw,
-                                self.runtime_int_type().const_zero(),
+                                i64_type.const_zero(),
                                 "ptr_eq_bool",
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
@@ -606,10 +617,7 @@ impl LlvmBackend {
                     }
                     BinOp::NotEq => {
                         let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
-                            let fn_type = self
-                                .context_ref()
-                                .i64_type()
-                                .fn_type(&[self.runtime_int_type().into(), self.runtime_int_type().into()], false);
+                            let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
                             module.add_function("rt_native_neq", fn_type, None)
                         });
                         let call_site = builder
@@ -618,13 +626,13 @@ impl LlvmBackend {
                         let raw = call_site
                             .try_as_basic_value()
                             .basic()
-                            .unwrap_or_else(|| self.runtime_int_type().const_int(0, false).into())
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
                         let cmp = builder
                             .build_int_compare(
                                 IntPredicate::NE,
                                 raw,
-                                self.runtime_int_type().const_zero(),
+                                i64_type.const_zero(),
                                 "ptr_neq_bool",
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
@@ -1554,6 +1562,48 @@ mod tests {
         let ir = backend.get_ir().unwrap();
         assert!(!ir.contains("rt_native_cmp"), "{ir}");
         assert!(ir.contains("icmp slt i64"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn rv32_pointer_eq_and_neq_use_runtime_int_width() {
+        let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("rv32_ptr_eq_neq").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let rv_type = backend.runtime_int_type();
+            let ptr_type = backend.context_ref().ptr_type(inkwell::AddressSpace::default());
+            let fn_type = rv_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+
+            let function = module.add_function("ptr_cmp", fn_type, None);
+            let entry = backend.context_ref().append_basic_block(function, "entry");
+            builder.position_at_end(entry);
+            let left = function.get_nth_param(0).unwrap();
+            let right = function.get_nth_param(1).unwrap();
+            let eq = backend
+                .compile_binop(crate::hir::BinOp::Eq, left, right, builder, module, None, None, None)
+                .unwrap()
+                .into_int_value();
+            let neq = backend
+                .compile_binop(crate::hir::BinOp::NotEq, left, right, builder, module, None, None, None)
+                .unwrap()
+                .into_int_value();
+            let sum = builder.build_int_add(eq, neq, "sum").unwrap();
+            builder.build_return(Some(&sum)).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i32 @rt_native_eq(i32"), "{ir}");
+        assert!(ir.contains("call i32 @rt_native_neq(i32"), "{ir}");
+        assert!(ir.contains("icmp ne i32 %eq, 0"), "{ir}");
+        assert!(ir.contains("icmp ne i32 %neq, 0"), "{ir}");
+        assert!(!ir.contains("declare i64 @rt_native_eq"), "{ir}");
+        assert!(!ir.contains("declare i64 @rt_native_neq"), "{ir}");
         backend.verify().unwrap();
     }
 }

@@ -57,6 +57,7 @@ fn gc_warning_trace_enabled() -> bool:
         _gc_warning_trace_state = if env_get_opt("SIMPLE_COMPILER_TRACE") == Some("1"): 1 else: 0
     _gc_warning_trace_state == 1
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
+use compiler.core.interpreter.module_iface_gate.{module_iface_gate_for}
 use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
 use compiler.core.interpreter.eval_decls.{eval_decl}
 use compiler.core.interpreter.env.{env_lookup}
@@ -341,8 +342,17 @@ fn import_admission_get_deny() -> bool:
 # ===== Module Loading =====
 
 fn load_module_source(file_path: text) -> Result<text, text>:
-    # Read module source file
-    file_read_result(file_path)
+    # Read module source file; a pinned interface digest is verified before
+    # the source can be parsed or any of its symbols registered.
+    val read = file_read_result(file_path)
+    match read:
+        case Ok(content):
+            val verdict = module_iface_gate_for(file_path, content)
+            if verdict != "":
+                eprint(verdict)
+                return Err(verdict)
+            read
+        case Err(_): read
 
 fn parse_module_ast(source: text, path: text) -> i64:
     # Parse module into AST using APPEND mode to preserve caller's AST.
@@ -898,6 +908,14 @@ pub fn record_module_surface(resolved_path: text, decls: [i64]):
                     val provided_item = if alias_at > 0: item.substring(alias_at + 1) else: item
                     if provided_item != "":
                         _module_surface_provided[resolved_path + "|" + provided_item] = true
+                        # Braced `export use M.{a, b}` qualifies items as `M.a` in
+                        # _export_record_reexport_surface; importers name `a` bare,
+                        # so record the trailing identifier too.
+                        val dot_at = provided_item.last_index_of(".")
+                        if dot_at >= 0:
+                            val bare_item = provided_item.substring(dot_at + 1)
+                            if bare_item != "":
+                                _module_surface_provided[resolved_path + "|" + bare_item] = true
         if tag == DECL_USE:
             # Bare `export use {A, B}` parses as a use-decl with an empty module
             # path; those names pull from siblings, so the surface is

@@ -96,7 +96,7 @@ fn interpolation_fragment_is_brace_literal(inner: text) -> bool:
         i = i + 1
     if i >= n:
         return false
-    if inner[i:i + 1] != "{":
+    if inner[i:i + 1] != "{{":
         return false
     # A bare "{" with nothing after it is not a literal; leave it to the parser.
     i + 1 < n
@@ -160,7 +160,9 @@ fn decode_interpolation_brace_escapes(value: text) -> text:
     # keeps untouched source spans and joins once, so brace-bearing inputs no
     # longer retain that quadratic accumulator-copy term. See
     # doc/08_tracking/bug/frontend_parse_per_file_cost_2026-08-21.md
-    if not (value.contains("{{") or value.contains("}}")):
+    # Each '{{' / '}}' in a double-quoted literal decodes to one brace, so spell
+    # two consecutive braces as "{{{{" / "}}}}".
+    if not (value.contains("{{{{") or value.contains("}}}}")):
         return value
     # Every index here is a code point (`len()`, `value[i:i+1]`), so the
     # chunks are cut with `[a:b]` too: byte-offset `substring` split a
@@ -173,14 +175,14 @@ fn decode_interpolation_brace_escapes(value: text) -> text:
     while i < n:
         val ch = value[i:i + 1]
         val next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if ch == "{" and next == "{":
+        if ch == "{{" and next == "{{":
             chunks.push(value[copied_until:i])
-            chunks.push("{")
+            chunks.push("{{")
             i = i + 2
             copied_until = i
-        elif ch == "}" and next == "}":
+        elif ch == "}}" and next == "}}":
             chunks.push(value[copied_until:i])
-            chunks.push("}")
+            chunks.push("}}")
             i = i + 2
             copied_until = i
         else:
@@ -244,7 +246,7 @@ pub fn parse_string_interpolation_regions(value: text, literal_span: i64 = -1) -
     # seeing a `{` or a `}`. A literal with neither cannot produce a part and
     # cannot leave `depth != 0`, so it always returns no parts -- reached here
     # without the per-character `value[i:i+1]` substring allocations.
-    if not (value.contains("{") or value.contains("}")):
+    if not (value.contains("{{") or value.contains("}}")):
         return (value, [])
     var parts: [i64] = []
     var chunks: [text] = []
@@ -261,18 +263,18 @@ pub fn parse_string_interpolation_regions(value: text, literal_span: i64 = -1) -
     while i < n:
         val ch = value[i:i + 1]
         val next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if depth == 0 and ch == "{" and next == "{":
+        if depth == 0 and ch == "{{" and next == "{{":
             i = i + 1
-        elif depth == 0 and ch == "\\" and (next == "{" or next == "}"):
+        elif depth == 0 and ch == "\\" and (next == "{{" or next == "}}"):
             # `\{` / `\}` is an escaped brace (seed parity: lexer/escapes.rs
             # allow_braces), never an interpolation opener. Without this the
             # block-DSL examples `"sql\{ SELECT * FROM users }"` leaked
             # SELECT/FROM/users into name resolution
             # (selfhost_noimport_carveouts_error_panic_blockdsl_nilname_2026-08-01).
             i = i + 1
-        elif depth == 0 and ch == "}" and next == "}":
+        elif depth == 0 and ch == "}}" and next == "}}":
             i = i + 1
-        elif depth == 0 and ch == "{":
+        elif depth == 0 and ch == "{{":
             depth = 1
             inner_start = i + 1
             quote = ""
@@ -286,9 +288,9 @@ pub fn parse_string_interpolation_regions(value: text, literal_span: i64 = -1) -
                 quote = ""
         elif depth > 0 and (ch == "\"" or ch == "'"):
             quote = ch
-        elif depth > 0 and ch == "{":
+        elif depth > 0 and ch == "{{":
             depth = depth + 1
-        elif depth > 0 and ch == "}":
+        elif depth > 0 and ch == "}}":
             depth = depth - 1
             if depth == 0:
                 # The old scanner appended one one-character substring at a

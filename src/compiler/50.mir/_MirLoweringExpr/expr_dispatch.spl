@@ -23,6 +23,7 @@ use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLoweringExpr.static_enum_receiver_owner.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
+use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw, mir_nominal_owner_matches}
 use compiler.mir.nominal_owner_diagnostics.{mir_nominal_profile_take_receipt}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
@@ -1311,6 +1312,8 @@ impl MirLowering:
         # owner rebinding, so the marker passes the element through.
         if owner_key == "__no_struct_element__":
             return element
+        if owner_key != "":
+            self.provider_layout_demand_v1(owner_key)
         match element.kind:
             case HirTypeKind.Named(declared_symbol, args):
                 if owner_key == "":
@@ -2039,6 +2042,8 @@ impl MirLowering:
         """Whether lower_struct_structural_eq can compare every field of
         `struct_name` (recursively): a known layout and no erased native
         trait-object field."""
+        if struct_name != "":
+            self.provider_layout_demand_v1(struct_name)
         val layout_key = self.declared_struct_layout_key(struct_name)
         if not self.struct_field_order.has(layout_key):
             return false
@@ -2062,6 +2067,8 @@ impl MirLowering:
         uses rt_native_eq, the same runtime equality enum `==` uses. A null or
         nil operand compares by word identity. A layout already on `chain`
         (a recursive class) is compared by identity. Returns a Bool local."""
+        if struct_name != "":
+            self.provider_layout_demand_v1(struct_name)
         val layout_key = self.declared_struct_layout_key(struct_name)
         # Fail closed on an ambiguous BARE layout: its field count and types
         # would drive this comparison with the FIRST-registered same-named
@@ -4277,6 +4284,8 @@ impl MirLowering:
                     elif self.mir_layout_or_runtime_key_is_enum(raw_shape):
                         self.struct_value_syms[local.id] = raw_shape
                     else:
+                        if raw_shape != "":
+                            self.provider_layout_demand_v1(raw_shape)
                         val shape = self.declared_struct_layout_key(raw_shape)
                         if shape != "":
                             self.struct_value_syms[local.id] = shape
@@ -4389,6 +4398,8 @@ impl MirLowering:
                 val raw_symbol: HirSymbol? = self.symbols.get_symbol_raw(optional_payload_sym.id)
                 if val present_payload_symbol = raw_symbol:
                     val optional_payload_symbol: HirSymbol = present_payload_symbol
+                    if optional_payload_symbol.kind == SymbolKind.Class or optional_payload_symbol.kind == SymbolKind.Struct:
+                        self.provider_layout_demand_v1(optional_payload_symbol.name)
                     var payload_key = ""
                     match optional_payload_symbol.kind:
                         case SymbolKind.Class:
@@ -4409,6 +4420,8 @@ impl MirLowering:
         match type_.kind:
             case HirTypeKind.Named(owner, _):
                 if val declaration = self.symbols.get_symbol_raw(owner.id):
+                    if declaration.kind == SymbolKind.Class or declaration.kind == SymbolKind.Struct:
+                        self.provider_layout_demand_v1(declaration.name)
                     var layout = ""
                     match declaration.kind:
                         case SymbolKind.Struct:
@@ -8976,6 +8989,7 @@ impl MirLowering:
                 match struct_type.kind:
                     case HirTypeKind.Named(struct_symbol, _):
                         if val literal_owner = self.symbols.get_symbol_raw(struct_symbol.id):
+                            self.provider_layout_demand_v1(literal_owner.name)
                             var struct_name = self.declared_struct_layout_key(self.composite_layout_key(literal_owner))
                             if literal_owner.kind == SymbolKind.Class:
                                 struct_name = mir_class_identity_raw(self.symbols, struct_symbol.id)

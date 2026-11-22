@@ -143,10 +143,16 @@ impl LlvmBackend {
                             .build_int_truncate(raw_i64, self.context_ref().i16_type(), "any_to_i16")
                             .map_err(|e| crate::error::factory::llvm_build_failed("trunc any->i16", &e))?
                             .into(),
-                        crate::hir::TypeId::I32 | crate::hir::TypeId::U32 => builder
-                            .build_int_truncate(raw_i64, self.context_ref().i32_type(), "any_to_i32")
-                            .map_err(|e| crate::error::factory::llvm_build_failed("trunc any->i32", &e))?
-                            .into(),
+                        crate::hir::TypeId::I32 | crate::hir::TypeId::U32 => {
+                            if raw_i64.get_type().get_bit_width() > 32 {
+                                builder
+                                    .build_int_truncate(raw_i64, self.context_ref().i32_type(), "any_to_i32")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("trunc any->i32", &e))?
+                                    .into()
+                            } else {
+                                raw_i64.into()
+                            }
+                        }
                         _ => raw_i64.into(),
                     };
                     return Ok(narrowed);
@@ -239,6 +245,9 @@ mod tests {
             }
         }
         assert!(ir.contains("trunc i"), "runtime-width inputs must restore narrow semantics: {ir}");
+        if backend.runtime_int_type().get_bit_width() == 32 {
+            assert!(ir.contains("sext i32") && ir.contains("zext i32"), "32-bit carriers must widen signed/unsigned i64 distinctly: {ir}");
+        }
         assert!(ir.contains("bitcast i64") && ir.contains("to double"), "ABI bitcast disappeared: {ir}");
         assert!(!ir.contains("@rt_value_as_float"), "raw integers must not enter tagged-float decoding: {ir}");
         backend.verify().unwrap();
@@ -257,5 +266,40 @@ mod tests {
     #[test]
     fn explicit_numeric_f64_casts_emit_verified_x86_ir_and_coff() {
         verify_numeric_f64_module_and_object(simple_common::target::TargetArch::X86, [0x4c, 0x01]);
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn rv32_any_to_i32_and_u32_cast_skips_same_width_trunc() {
+        use crate::codegen::llvm::LlvmBackend;
+        use simple_common::target::{Target, TargetArch, TargetOS};
+
+        let backend = LlvmBackend::new(Target::new(TargetArch::Riscv32, TargetOS::SimpleOS)).unwrap();
+        backend.create_module("rv32_any_to_i32").unwrap();
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let i32_ty = backend.context_ref().i32_type();
+            let func = module.add_function("decode_i32", i32_ty.fn_type(&[i32_ty.into()], false), None);
+            let entry = backend.context_ref().append_basic_block(func, "entry");
+            builder.position_at_end(entry);
+            let param = func.get_first_param().unwrap();
+            let s32 = backend
+                .compile_cast(param, &TypeId::ANY, &TypeId::I32, builder, module)
+                .unwrap()
+                .into_int_value();
+            let u32_val = backend
+                .compile_cast(param, &TypeId::ANY, &TypeId::U32, builder, module)
+                .unwrap()
+                .into_int_value();
+            let sum = builder.build_int_add(s32, u32_val, "sum").unwrap();
+            builder.build_return(Some(&sum)).unwrap();
+        }
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i32 @rt_value_as_int(i32"), "{ir}");
+        assert!(!ir.contains("trunc i32"), "must not emit invalid trunc i32 to i32:\n{ir}");
+        backend.verify().unwrap();
     }
 }

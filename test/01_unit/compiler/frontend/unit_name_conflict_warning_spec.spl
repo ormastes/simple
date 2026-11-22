@@ -1,0 +1,50 @@
+# Two units sharing a name with different bounds: the later declaration wins in
+# the constraint pool, and a SPL-UNIT-006 warning is reported through the
+# driver's typecheck receipt (collect_module_typecheck_receipt_v1).
+# Runtime: src/compiler/10.frontend/core/unit_constraint.spl,
+# src/compiler/80.driver/hir_typecheck_consumer_v1.spl.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.core.unit_constraint.{unit_constraint_register, unit_constraint_drain_conflicts}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+
+fn conflict_warnings(src: text) -> [text]:
+    val _stale = unit_constraint_drain_conflicts()
+    val module = parse_full_frontend(src, "unc.spl", "unc.spl", Logger(level: 0))
+    var hl = HirLowering.with_filename("unc.spl")
+    val hir = hl.lower_module(module)
+    val receipt = collect_module_typecheck_receipt_v1("unc", hir, TypecheckPassSeverity.Warn)
+    var out: [text] = []
+    for w in receipt.warnings:
+        if w.contains("SPL-UNIT-006"): out.push(w)
+    out
+
+describe "unit name conflict with different bounds":
+    it "queues one conflict when a re-registration changes the bounds":
+        val _s = unit_constraint_drain_conflicts()
+        unit_constraint_register("UncA", "1 <= self <= 10", 0, "1", "10")
+        unit_constraint_register("UncA", "1 <= self <= 20", 0, "1", "20")
+        val drained = unit_constraint_drain_conflicts()
+        expect(drained.len()).to_equal(1)
+        expect(drained[0]).to_contain("SPL-UNIT-006")
+        expect(drained[0]).to_contain("UncA")
+
+    it "stays silent when the same bounds are re-registered":
+        val _s = unit_constraint_drain_conflicts()
+        unit_constraint_register("UncB", "1 <= self <= 10", 0, "1", "10")
+        unit_constraint_register("UncB", "1 <= self <= 10", 0, "1", "10")
+        expect(unit_constraint_drain_conflicts().len()).to_equal(0)
+
+    it "reaches the typecheck receipt as a warning for two source declarations":
+        val src = "unit UncPort: u16 as uncp in 1..=100\nunit UncPort: u16 as uncp in 1..=200\nfn main():\n    0\n"
+        val ws = conflict_warnings(src)
+        expect(ws.len()).to_equal(1)
+        expect(ws[0]).to_contain("UncPort")
+
+    it "reports nothing for a single declaration":
+        val src = "unit UncOne: u16 as unco in 1..=100\nfn main():\n    0\n"
+        expect(conflict_warnings(src).len()).to_equal(0)

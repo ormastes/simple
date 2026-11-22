@@ -967,7 +967,12 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
                 let marker_slot = unsafe {
                     builder
-                        .build_gep(i64_type, closure_ptr, &[i64_type.const_int(1, false)], "marker_slot")
+                        .build_gep(
+                            ctx.i8_type(),
+                            closure_ptr,
+                            &[ctx.i32_type().const_int(8, false)],
+                            "marker_slot",
+                        )
                         .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
                 };
                 builder
@@ -1006,9 +1011,9 @@ impl LlvmBackend {
                     let slot = unsafe {
                         builder
                             .build_gep(
-                                i64_type,
+                                ctx.i8_type(),
                                 struct_ptr,
-                                &[i64_type.const_int(idx as u64, false)],
+                                &[ctx.i32_type().const_int((idx * 8) as u64, false)],
                                 "field_slot",
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("struct gep", &e))?
@@ -1168,15 +1173,28 @@ impl LlvmBackend {
 
     /// Get the LLVM integer type used for RuntimeValue on this target.
     ///
-    /// RuntimeValue is a 64-bit tagged word on EVERY target: the C runtime
-    /// has `typedef uint64_t RuntimeValue` (`src/runtime/runtime_value.h`) and
-    /// the Rust runtime `RuntimeValue(u64)`, with 61-bit int payloads and
-    /// 8-byte f64 boxing. On 32-bit targets (i686, armv7, riscv32, wasm32)
-    /// pointers are zero-extended into it. `pointer_width()` is for real
-    /// pointers only.
+    /// - Freestanding / bare-metal 32-bit targets (`x86_32`, `arm32`, `riscv32`
+    ///   with `TargetOS::SimpleOS | TargetOS::None`) use `i32` to match their
+    ///   32-bit bare-metal C stubs (`typedef int32_t RuntimeValue` / `intptr_t`)
+    ///   and pure-Simple kernel value shims.
+    /// - Hosted 32-bit targets (`i686` Windows/Linux, `armv7` Linux, `wasm32`)
+    ///   and all 64-bit targets link the standard runtime (`typedef uint64_t
+    ///   RuntimeValue` in `src/runtime/runtime_value.h` / `RuntimeValue(u64)`)
+    ///   and therefore use `i64`.
     #[cfg(feature = "llvm")]
     pub fn runtime_int_type(&self) -> inkwell::types::IntType<'static> {
-        self.context_ref().i64_type()
+        use simple_common::target::{TargetArch, TargetOS};
+        if matches!(
+            (self.target.arch, self.target.os),
+            (
+                TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32,
+                TargetOS::SimpleOS | TargetOS::None
+            )
+        ) {
+            self.context_ref().i32_type()
+        } else {
+            self.context_ref().i64_type()
+        }
     }
 
     /// Get or declare `rt_interp_call` with the C runtime prototype
@@ -2096,5 +2114,81 @@ mod windows_triple_env_tests {
     fn msvc_windows_target_keeps_msvc_triple() {
         let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
         assert_eq!(windows_os_suffix(msvc), "pc-windows-msvc");
+    }
+}
+
+#[cfg(all(test, feature = "llvm"))]
+mod module_init_layout_tests {
+    use super::LlvmBackend;
+    use crate::codegen::backend_trait::NativeBackend;
+    use crate::hir::{HirGlobalFieldInit, HirGlobalStructInit, TypeId as T};
+    use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
+    use simple_common::target::{Target, TargetArch, TargetOS};
+    use simple_parser::ast::Visibility;
+
+    #[test]
+    fn rv32_module_init_closure_and_struct_slots_use_8_byte_stride() {
+        let mut backend = LlvmBackend::new(Target::new(TargetArch::Riscv32, TargetOS::SimpleOS)).unwrap();
+        let mut mir = MirModule::new();
+        mir.name = Some("rv32_modinit".to_string());
+
+        let mut target_fn = MirFunction::new("my_fn".to_string(), T::I64, Visibility::Public);
+        target_fn.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 7 });
+        target_fn.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+        mir.functions.push(target_fn);
+
+        mir.globals.push(("G_FN".to_string(), T::ANY, false));
+        mir.globals.push(("G_STRUCT".to_string(), T::ANY, false));
+        mir.local_globals.insert("G_FN".to_string());
+        mir.local_globals.insert("G_STRUCT".to_string());
+        mir.global_init_functions.insert("G_FN".to_string(), "my_fn".to_string());
+        mir.global_init_structs.insert(
+            "G_STRUCT".to_string(),
+            HirGlobalStructInit {
+                fields: vec![
+                    HirGlobalFieldInit::Value(11),
+                    HirGlobalFieldInit::Value(22),
+                    HirGlobalFieldInit::Value(33),
+                ],
+            },
+        );
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("%marker_slot = getelementptr i8, ptr %closure_ptr, i32 8"),
+            "closure marker slot must be at byte offset 8 on freestanding 32-bit:\n{ir}"
+        );
+        assert!(
+            ir.contains("store i32 11, ptr %struct_ptr")
+                && ir.contains("getelementptr i8, ptr %struct_ptr, i32 8")
+                && ir.contains("getelementptr i8, ptr %struct_ptr, i32 16"),
+            "struct initializer slots must use 8-byte stride on freestanding 32-bit:\n{ir}"
+        );
+        assert!(!ir.contains("getelementptr i32"), "must not use 4-byte i32 GEP stride:\n{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn runtime_value_width_distinguishes_hosted_and_freestanding_32bit_targets() {
+        for triple in ["i686-pc-windows-gnu", "i686-unknown-linux-gnu", "wasm32-unknown-unknown"] {
+            let target = Target::parse(triple).unwrap();
+            let backend = LlvmBackend::new(target).unwrap();
+            assert_eq!(backend.pointer_width(), 32, "{triple}");
+            assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{triple}");
+        }
+        for arch in [TargetArch::Riscv32, TargetArch::Arm, TargetArch::X86] {
+            for os in [TargetOS::SimpleOS, TargetOS::None] {
+                let target = Target::new(arch, os);
+                let backend = LlvmBackend::new(target).unwrap();
+                assert_eq!(backend.pointer_width(), 32, "{arch}-{os}");
+                assert_eq!(backend.runtime_int_type().get_bit_width(), 32, "{arch}-{os}");
+            }
+        }
+        for arch in [TargetArch::Riscv64, TargetArch::Aarch64, TargetArch::X86_64] {
+            let target = Target::new(arch, TargetOS::SimpleOS);
+            let backend = LlvmBackend::new(target).unwrap();
+            assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{arch}-simpleos");
+        }
     }
 }

@@ -97,12 +97,35 @@ pub fn unit_constraint_find(name: text) -> i64:
         i = i + 1
     -1
 
+# Same-name re-declarations whose bounds differ, queued for the driver to
+# report (it drains them as warnings). Re-registering identical bounds is silent.
+var unit_constraint_conflicts: [text] = []
+
+fn unit_constraint_bounds_differ(row: i64, predicate: text, min_text: text, max_text: text) -> bool:
+    val old_min = unit_constraint_min_texts[row]
+    val old_max = unit_constraint_max_texts[row]
+    if old_min != "" or old_max != "" or min_text != "" or max_text != "":
+        return old_min != min_text or old_max != max_text
+    unit_constraint_predicates[row] != predicate
+
+fn unit_constraint_bounds_text(min_text: text, max_text: text, predicate: text) -> text:
+    if min_text == "" and max_text == "": return "`" + predicate + "`"
+    "[" + min_text + ", " + max_text + "]"
+
+# Take (and clear) the queued SPL-UNIT-006 conflict messages.
+pub fn unit_constraint_drain_conflicts() -> [text]:
+    val out = unit_constraint_conflicts
+    unit_constraint_conflicts = []
+    out
+
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
     if not unit_constraint_initialized:
         unit_constraint_pool_reset()
     val existing = unit_constraint_find(name)
     if existing >= 0:
+        if unit_constraint_bounds_differ(existing, predicate, min_text, max_text):
+            unit_constraint_conflicts.push("SPL-UNIT-006: unit `" + name + "` is declared again with different bounds (" + unit_constraint_bounds_text(unit_constraint_min_texts[existing], unit_constraint_max_texts[existing], unit_constraint_predicates[existing]) + " vs " + unit_constraint_bounds_text(min_text, max_text, predicate) + "); the later declaration wins")
         unit_constraint_predicates[existing] = predicate
         unit_constraint_ref_tags[existing] = ref_tag
         unit_constraint_min_texts[existing] = min_text

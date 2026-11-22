@@ -369,41 +369,80 @@ impl LlvmBackend {
         &self,
         val: inkwell::values::BasicValueEnum<'static>,
         builder: &Builder<'static>,
-        _module: &Module<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
         let rv_type = self.runtime_int_type();
+        let rv_width = rv_type.get_bit_width();
 
-        let bits = if val.is_float_value() {
-            // f32 values (e.g. struct fields typed f32) must be widened
-            // first: bitcasting f32 straight to i64 is a size mismatch.
-            let f64_type = self.context_ref().f64_type();
-            let fv = val.into_float_value();
-            let fv = if fv.get_type() == f64_type {
-                fv
-            } else {
+        if rv_width == 64 {
+            let bits = if val.is_float_value() {
+                // f32 values (e.g. struct fields typed f32) must be widened
+                // first: bitcasting f32 straight to i64 is a size mismatch.
+                let f64_type = self.context_ref().f64_type();
+                let fv = val.into_float_value();
+                let fv = if fv.get_type() == f64_type {
+                    fv
+                } else {
+                    builder
+                        .build_float_ext(fv, f64_type, "box_fext")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?
+                };
                 builder
-                    .build_float_ext(fv, f64_type, "box_fext")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?
+                    .build_bit_cast(fv, rv_type, "f2i")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
+                    .into_int_value()
+            } else {
+                self.coerce_value_to_type(val, Some(rv_type.into()), builder)?
+                    .into_int_value()
             };
-            builder
-                .build_bit_cast(fv, rv_type, "f2i")
-                .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
-                .into_int_value()
-        } else {
-            self.coerce_value_to_type(val, Some(rv_type.into()), builder)?
-                .into_int_value()
+            let three = rv_type.const_int(3, false);
+            let tag_float = rv_type.const_int(2, false);
+            let shifted = builder
+                .build_right_shift(bits, three, false, "ushr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
+            let payload = builder
+                .build_left_shift(shifted, three, "shl")
+                .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
+            return builder
+                .build_or(payload, tag_float, "box_float")
+                .map_err(|e| crate::error::factory::llvm_build_failed("or", &e));
+        }
+
+        let f64_type = self.context_ref().f64_type();
+        let f64_val = match val {
+            inkwell::values::BasicValueEnum::FloatValue(fv) if fv.get_type() == f64_type => fv,
+            inkwell::values::BasicValueEnum::FloatValue(fv) => builder
+                .build_float_ext(fv, f64_type, "box_fext")
+                .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?,
+            inkwell::values::BasicValueEnum::IntValue(iv) => builder
+                .build_signed_int_to_float(iv, f64_type, "box_sitofp")
+                .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?,
+            inkwell::values::BasicValueEnum::PointerValue(pv) => {
+                let iv = builder
+                    .build_ptr_to_int(pv, rv_type, "box_ptrtoint")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
+                builder
+                    .build_signed_int_to_float(iv, f64_type, "box_ptr_sitofp")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("int_to_float", &e))?
+            }
+            _ => f64_type.const_zero(),
         };
-        let three = rv_type.const_int(3, false);
-        let tag_float = rv_type.const_int(2, false);
-        let shifted = builder
-            .build_right_shift(bits, three, false, "ushr")
-            .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-        let payload = builder
-            .build_left_shift(shifted, three, "shl")
-            .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-        builder
-            .build_or(payload, tag_float, "box_float")
-            .map_err(|e| crate::error::factory::llvm_build_failed("or", &e))
+
+        // Freestanding 32-bit RuntimeValue (`i32`) cannot inline-tag a 64-bit
+        // IEEE double; delegate to `rt_value_float` (`rt_box_float` never existed).
+        let fn_type = rv_type.fn_type(&[f64_type.into()], false);
+        let func = module
+            .get_function("rt_value_float")
+            .unwrap_or_else(|| module.add_function("rt_value_float", fn_type, None));
+        let call = builder
+            .build_call(func, &[f64_val.into()], "rt_value_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_float", &e))?;
+        let ret = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CompileError::semantic("rt_value_float returned no value".to_string()))?
+            .into_int_value();
+        Ok(ret)
     }
 
     #[cfg(feature = "llvm")]
@@ -492,7 +531,7 @@ impl LlvmBackend {
         &self,
         val: inkwell::values::BasicValueEnum<'static>,
         builder: &Builder<'static>,
-        _module: &Module<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::FloatValue<'static>, CompileError> {
         let rv_type = self.runtime_int_type();
         let f64_type = self.context_ref().f64_type();
@@ -500,16 +539,33 @@ impl LlvmBackend {
         let int_val = self
             .coerce_value_to_type(val, Some(rv_type.into()), builder)?
             .into_int_value();
-        let three = rv_type.const_int(3, false);
-        let shifted = builder
-            .build_right_shift(int_val, three, false, "ushr")
-            .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
-        let bits = builder
-            .build_left_shift(shifted, three, "shl")
-            .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
-        Ok(builder
-            .build_bit_cast(bits, f64_type, "i2f")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
+        if rv_type.get_bit_width() == 64 {
+            let three = rv_type.const_int(3, false);
+            let shifted = builder
+                .build_right_shift(int_val, three, false, "ushr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("ushr", &e))?;
+            let bits = builder
+                .build_left_shift(shifted, three, "shl")
+                .map_err(|e| crate::error::factory::llvm_build_failed("shl", &e))?;
+            return Ok(builder
+                .build_bit_cast(bits, f64_type, "i2f")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bitcast", &e))?
+                .into_float_value());
+        }
+
+        // Freestanding 32-bit RuntimeValue (`i32`) delegates float untagging to
+        // `rt_value_as_float` (`rt_unbox_float` never existed).
+        let fn_type = f64_type.fn_type(&[rv_type.into()], false);
+        let func = module
+            .get_function("rt_value_as_float")
+            .unwrap_or_else(|| module.add_function("rt_value_as_float", fn_type, None));
+        let call = builder
+            .build_call(func, &[int_val.into()], "rt_value_as_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_float", &e))?;
+        Ok(call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| CompileError::semantic("rt_value_as_float returned no value".to_string()))?
             .into_float_value())
     }
 
@@ -5518,14 +5574,12 @@ mod tests {
         backend.verify().unwrap();
     }
 
-    /// RuntimeValue is a 64-bit word on EVERY target (`runtime_int_type()`),
-    /// so float boxing on a 32-bit target is the same inline i64
-    /// bitcast/shift/or as on 64-bit targets and emits no runtime call. The
-    /// operand is a function parameter, not a constant, so the IR builder
-    /// cannot constant-fold the sequence away. `rt_box_float` /
-    /// `rt_unbox_float` are defined in no runtime and must never be emitted.
+    /// Freestanding 32-bit targets (`Riscv32` + `SimpleOS`) use a 32-bit `i32`
+    /// RuntimeValue, so 64-bit IEEE doubles cannot be bitcast inline to `i32`
+    /// and must route through `rt_value_float` / `rt_value_as_float` (never the
+    /// nonexistent `rt_box_float` / `rt_unbox_float`).
     #[test]
-    fn test_riscv32_float_boxing_is_inline_i64() {
+    fn test_riscv32_float_boxing_uses_runtime_helpers() {
         let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
         let backend = LlvmBackend::new(target).unwrap();
         backend.create_module("rv32_float_boxing").unwrap();
@@ -5550,14 +5604,58 @@ mod tests {
 
         let ir = backend.get_ir().unwrap();
         assert!(
+            ir.contains("call i32 @rt_value_float(double"),
+            "freestanding 32-bit float boxing must call rt_value_float; IR was:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("call double @rt_value_as_float(i32"),
+            "freestanding 32-bit float unboxing must call rt_value_as_float; IR was:\n{}",
+            ir
+        );
+        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
+        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
+        assert!(!ir.contains("bitcast i32"));
+        backend.verify().unwrap();
+    }
+
+    /// Hosted 32-bit targets (such as `i686-pc-windows-gnu`) link the standard
+    /// C runtime where `RuntimeValue` is `uint64_t` (`i64`), so float boxing is
+    /// inline `i64` bitcast/shift/or with no runtime call.
+    #[test]
+    fn test_i686_hosted_float_boxing_is_inline_i64() {
+        let target = Target::parse("i686-pc-windows-gnu").unwrap();
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("i686_float_boxing").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let f64_type = backend.context_ref().f64_type();
+            let fn_type = backend.context_ref().void_type().fn_type(&[f64_type.into()], false);
+            let func = module.add_function("test", fn_type, None);
+            let block = backend.context_ref().append_basic_block(func, "entry");
+            builder.position_at_end(block);
+
+            let float_val = func.get_nth_param(0).unwrap();
+            let boxed = backend.build_box_float_value(float_val, builder, module).unwrap();
+            let unboxed = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
+            let _ = unboxed;
+            builder.build_return(None).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(
             ir.contains("%f2i = bitcast double %0 to i64"),
-            "32-bit float boxing must bitcast to the i64 RuntimeValue; IR was:\n{}",
+            "hosted 32-bit float boxing must bitcast to the i64 RuntimeValue; IR was:\n{}",
             ir
         );
         assert!(ir.contains("%box_float = or i64 %shl, 2"), "IR was:\n{}", ir);
         assert!(
             ir.contains("%i2f = bitcast i64 %shl") && ir.contains(" to double"),
-            "32-bit float unboxing must bitcast from the i64 RuntimeValue; IR was:\n{}",
+            "hosted 32-bit float unboxing must bitcast from the i64 RuntimeValue; IR was:\n{}",
             ir
         );
         assert!(!ir.contains("rt_value_float"), "boxing must stay inline; IR was:\n{}", ir);
