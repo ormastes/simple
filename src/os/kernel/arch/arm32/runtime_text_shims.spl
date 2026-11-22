@@ -1,0 +1,512 @@
+# ARM32 kernel runtime text shims (pure Simple).
+#
+# Codegen-called text entry points the arm32 kernel closure references but
+# examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c does not
+# define. Layouts are those of that file (RuntimeValue = int32):
+#   int = v << 3 (29-bit payload), heap = ptr | 1, nil = 3
+#   string: {u32 type=1; u32 size; u32 len @8; data @12; NUL}
+#   array:  {u32 type=2; u32 size; u32 len @8; u32 cap @12; items @16 (4 bytes)}
+# Semantics follow the aarch64 freestanding twin
+# (examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c)
+# and the hosted src/runtime/runtime_native.c. Encodings: cmp_any and
+# parse_int return TAGGED values; eq_any/find/byte_at/char_code_at/char_count/
+# is_ascii return RAW; string producers return a tagged string (never nil for
+# empty text -- rt_string_new rejects length 0, so strings are built here).
+#
+# Exports never call each other: an rt_* call is typed ANY by MIR lowering and
+# an ANY result flowing into a bool leaks rt_value_truthy. Every export
+# delegates to private _a32t_* helpers. Bodies use no text literals/arrays.
+
+@cfg(arm32)
+extern fn rt_mmio_read_u8(addr: u64) -> u64
+@cfg(arm32)
+extern fn rt_mmio_read_u32(addr: u64) -> u64
+@cfg(arm32)
+extern fn rt_mmio_write_u8(addr: u64, value: u64)
+@cfg(arm32)
+extern fn rt_mmio_write_u32(addr: u64, value: u64)
+@cfg(arm32)
+extern fn rt_alloc(size: i64) -> i64
+
+# ---------------------------------------------------------------------------
+# Raw memory and object helpers.
+# ---------------------------------------------------------------------------
+
+@cfg(arm32)
+fn _a32t_ld8(addr: i64) -> i64:
+    (rt_mmio_read_u8(addr as u64) as i64) & 255
+
+@cfg(arm32)
+fn _a32t_ld32(addr: i64) -> i64:
+    rt_mmio_read_u32(addr as u64) as i64
+
+@cfg(arm32)
+fn _a32t_st8(addr: i64, byte: i64):
+    rt_mmio_write_u8(addr as u64, (byte & 255) as u64)
+
+@cfg(arm32)
+fn _a32t_st32(addr: i64, value: i64):
+    rt_mmio_write_u32(addr as u64, value as u64)
+
+@cfg(arm32)
+fn _a32t_heap(v: i64, kind: i64) -> i64:
+    # Untagged object pointer when v is a heap ref of kind, else 0.
+    if (v & 7) != 1:
+        return 0
+    val p = v - 1
+    if p < 4096:
+        return 0
+    if _a32t_ld32(p) != kind:
+        return 0
+    p
+
+@cfg(arm32)
+fn _a32t_strlen(p: i64) -> i64:
+    var n: i64 = 0
+    while _a32t_ld8(p + n) != 0:
+        n = n + 1
+    n
+
+@cfg(arm32)
+fn _a32t_plausible_raw(v: i64) -> i64:
+    # 1 when v looks like a raw char* into RAM (a raw literal, not an int/nil).
+    if (v & 7) != 0:
+        return 0
+    if v < 0x40000000:
+        return 0
+    if v >= 0x80000000:
+        return 0
+    1
+
+@cfg(arm32)
+fn _a32t_data(v: i64) -> i64:
+    # Byte pointer of a heap string or raw NUL-terminated text, else 0.
+    val p = _a32t_heap(v, 1)
+    if p != 0:
+        return p + 12
+    if _a32t_plausible_raw(v) != 0:
+        return v
+    0
+
+@cfg(arm32)
+fn _a32t_len(v: i64) -> i64:
+    val p = _a32t_heap(v, 1)
+    if p != 0:
+        return _a32t_ld32(p + 8)
+    _a32t_strlen(v)
+
+@cfg(arm32)
+fn _a32t_str_alloc(len: i64) -> i64:
+    # Fresh string object (header + NUL set), data left to the caller; 0 on OOM.
+    val total = 12 + len + 1
+    val r = rt_alloc(total)
+    if (r & 7) != 1:
+        return 0
+    val p = r - 1
+    _a32t_st32(p, 1)
+    _a32t_st32(p + 4, total)
+    _a32t_st32(p + 8, len)
+    _a32t_st8(p + 12 + len, 0)
+    p
+
+@cfg(arm32)
+fn _a32t_str_copy(src: i64, len: i64) -> i64:
+    # Tagged string holding len bytes from raw address src (len may be 0).
+    val p = _a32t_str_alloc(len)
+    if p == 0:
+        return 3
+    var i: i64 = 0
+    while i < len:
+        _a32t_st8(p + 12 + i, _a32t_ld8(src + i))
+        i = i + 1
+    p | 1
+
+@cfg(arm32)
+fn _a32t_empty() -> i64:
+    val p = _a32t_str_alloc(0)
+    if p == 0:
+        return 3
+    p | 1
+
+@cfg(arm32)
+fn _a32t_is_ws(b: i64) -> i64:
+    if b == 32 or b == 9 or b == 10 or b == 13 or b == 12 or b == 11:
+        return 1
+    0
+
+@cfg(arm32)
+fn _a32t_bytes_eq(a: i64, b: i64, n: i64) -> i64:
+    var i: i64 = 0
+    while i < n:
+        if _a32t_ld8(a + i) != _a32t_ld8(b + i):
+            return 0
+        i = i + 1
+    1
+
+@cfg(arm32)
+fn _a32t_eq(left: i64, right: i64) -> i64:
+    if left == 3 or right == 3:
+        if left == right:
+            return 1
+        return 0
+    val a = _a32t_data(left)
+    val b = _a32t_data(right)
+    if a == 0 or b == 0:
+        return 0
+    val la = _a32t_len(left)
+    if la != _a32t_len(right):
+        return 0
+    _a32t_bytes_eq(a, b, la)
+
+@cfg(arm32)
+fn _a32t_cmp(left: i64, right: i64) -> i64:
+    # Tagged -1/0/1 (rt_int): bytewise for text, signed value order otherwise.
+    val a = _a32t_data(left)
+    val b = _a32t_data(right)
+    if a != 0 and b != 0:
+        val la = _a32t_len(left)
+        val lb = _a32t_len(right)
+        var n = la
+        if lb < la:
+            n = lb
+        var i: i64 = 0
+        while i < n:
+            val ca = _a32t_ld8(a + i)
+            val cb = _a32t_ld8(b + i)
+            if ca != cb:
+                if ca < cb:
+                    return -8
+                return 8
+            i = i + 1
+        if la == lb:
+            return 0
+        if la < lb:
+            return -8
+        return 8
+    if left == right:
+        return 0
+    if left < right:
+        return -8
+    8
+
+@cfg(arm32)
+fn _a32t_char_code_at(value: i64, index: i64) -> i64:
+    val d = _a32t_data(value)
+    if d == 0 or index < 0:
+        return 0
+    val len = _a32t_len(value)
+    var bi: i64 = 0
+    var ci: i64 = 0
+    while bi < len:
+        val b0 = _a32t_ld8(d + bi)
+        var width: i64 = 1
+        var code: i64 = b0
+        if b0 >= 194 and b0 <= 223 and bi + 1 < len:
+            width = 2
+            code = ((b0 & 31) << 6) | (_a32t_ld8(d + bi + 1) & 63)
+        elif b0 >= 224 and b0 <= 239 and bi + 2 < len:
+            width = 3
+            code = ((b0 & 15) << 12) | ((_a32t_ld8(d + bi + 1) & 63) << 6) | (_a32t_ld8(d + bi + 2) & 63)
+        elif b0 >= 240 and b0 <= 244 and bi + 3 < len:
+            width = 4
+            code = ((b0 & 7) << 18) | ((_a32t_ld8(d + bi + 1) & 63) << 12) | ((_a32t_ld8(d + bi + 2) & 63) << 6) | (_a32t_ld8(d + bi + 3) & 63)
+        if ci == index:
+            return code
+        bi = bi + width
+        ci = ci + 1
+    0
+
+@cfg(arm32)
+fn _a32t_find(value: i64, needle: i64, start: i64) -> i64:
+    val d = _a32t_data(value)
+    val n = _a32t_data(needle)
+    if d == 0 or n == 0:
+        return -1
+    val len = _a32t_len(value)
+    val nlen = _a32t_len(needle)
+    var s = start
+    if s < 0:
+        s = 0
+    if nlen == 0:
+        if s <= len:
+            return s
+        return len
+    if s >= len or nlen > len:
+        return -1
+    var i = s
+    while i + nlen <= len:
+        if _a32t_bytes_eq(d + i, n, nlen) != 0:
+            return i
+        i = i + 1
+    -1
+
+@cfg(arm32)
+fn _a32t_parse_int(value: i64) -> i64:
+    # Tagged int, or nil (3) for non-text / malformed / outside the 29-bit payload.
+    val p = _a32t_heap(value, 1)
+    if p == 0:
+        return 3
+    val d = p + 12
+    var b: i64 = 0
+    var e = _a32t_ld32(p + 8)
+    while b < e and _a32t_is_ws(_a32t_ld8(d + b)) != 0:
+        b = b + 1
+    while e > b and _a32t_is_ws(_a32t_ld8(d + e - 1)) != 0:
+        e = e - 1
+    if b >= e:
+        return 3
+    var neg: i64 = 0
+    val first = _a32t_ld8(d + b)
+    if first == 43 or first == 45:
+        if first == 45:
+            neg = 1
+        b = b + 1
+    if b >= e:
+        return 3
+    var limit: i64 = 268435455
+    if neg != 0:
+        limit = 268435456
+    var mag: i64 = 0
+    while b < e:
+        val digit = _a32t_ld8(d + b) - 48
+        if digit < 0 or digit > 9:
+            return 3
+        if mag > (limit - digit) / 10:
+            return 3
+        mag = mag * 10 + digit
+        b = b + 1
+    if neg != 0:
+        return (0 - mag) << 3
+    mag << 3
+
+@cfg(arm32)
+fn _a32t_decimal(raw: i64) -> i64:
+    var n: i64 = 1
+    var t = raw / 10
+    while t != 0:
+        n = n + 1
+        t = t / 10
+    var len = n
+    if raw < 0:
+        len = n + 1
+    val p = _a32t_str_alloc(len)
+    if p == 0:
+        return 3
+    if raw < 0:
+        _a32t_st8(p + 12, 45)
+    var v = raw
+    var i: i64 = 0
+    while i < n:
+        var digit = v % 10
+        if digit < 0:
+            digit = 0 - digit
+        _a32t_st8(p + 12 + len - 1 - i, 48 + digit)
+        v = v / 10
+        i = i + 1
+    p | 1
+
+@cfg(arm32)
+fn _a32t_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
+    val p = _a32t_heap(value, 1)
+    if p == 0 or step < 1:
+        return 3
+    val len = _a32t_ld32(p + 8)
+    var finish = end
+    if finish < 0:
+        finish = 0
+    if finish > len:
+        finish = len
+    var begin = start
+    if begin < 0:
+        begin = 0
+    if begin > finish:
+        begin = finish
+    if step != 1 or begin >= finish:
+        return _a32t_empty()
+    _a32t_str_copy(p + 12 + begin, finish - begin)
+
+@cfg(arm32)
+fn _a32t_from_bytes(array: i64) -> i64:
+    val p = _a32t_heap(array, 2)
+    if p == 0:
+        return _a32t_empty()
+    val n = _a32t_ld32(p + 8)
+    val s = _a32t_str_alloc(n)
+    if s == 0:
+        return 3
+    var i: i64 = 0
+    while i < n:
+        var item = _a32t_ld32(p + 16 + i * 4)
+        if (item & 7) == 0:
+            item = item >> 3
+        _a32t_st8(s + 12 + i, item & 255)
+        i = i + 1
+    s | 1
+
+# String builder object: {u32 len @0; u32 cap @4; u32 data @8}. Handle = raw ptr.
+@cfg(arm32)
+fn _a32t_sb_new() -> i64:
+    val r = rt_alloc(12)
+    if (r & 7) != 1:
+        return 0
+    val h = r - 1
+    _a32t_st32(h, 0)
+    _a32t_st32(h + 4, 0)
+    _a32t_st32(h + 8, 0)
+    h
+
+@cfg(arm32)
+fn _a32t_sb_push(h: i64, value: i64) -> i64:
+    val src = _a32t_data(value)
+    if h == 0 or src == 0:
+        return 0
+    val slen = _a32t_len(value)
+    if slen == 0:
+        return 1
+    val len = _a32t_ld32(h)
+    val cap = _a32t_ld32(h + 4)
+    val need = len + slen
+    if need > cap:
+        var ncap: i64 = 32
+        if cap > 0:
+            ncap = cap
+        while ncap < need:
+            ncap = ncap * 2
+        val r = rt_alloc(ncap + 1)
+        if (r & 7) != 1:
+            return 0
+        val nd = r - 1
+        val od = _a32t_ld32(h + 8)
+        var i: i64 = 0
+        while i < len:
+            _a32t_st8(nd + i, _a32t_ld8(od + i))
+            i = i + 1
+        _a32t_st32(h + 8, nd)
+        _a32t_st32(h + 4, ncap)
+    val data = _a32t_ld32(h + 8)
+    var j: i64 = 0
+    while j < slen:
+        _a32t_st8(data + len + j, _a32t_ld8(src + j))
+        j = j + 1
+    _a32t_st32(h, need)
+    _a32t_st8(data + need, 0)
+    1
+
+@cfg(arm32)
+fn _a32t_sb_finish(h: i64) -> i64:
+    if h == 0:
+        return _a32t_empty()
+    val len = _a32t_ld32(h)
+    if len == 0:
+        return _a32t_empty()
+    _a32t_str_copy(_a32t_ld32(h + 8), len)
+
+@cfg(arm32)
+fn _a32t_char_count(value: i64) -> i64:
+    val d = _a32t_data(value)
+    if d == 0:
+        return -1
+    val len = _a32t_len(value)
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < len:
+        if (_a32t_ld8(d + i) & 192) != 128:
+            n = n + 1
+        i = i + 1
+    n
+
+@cfg(arm32)
+fn _a32t_is_ascii(value: i64) -> i64:
+    val d = _a32t_data(value)
+    if d == 0:
+        return 1
+    val len = _a32t_len(value)
+    var i: i64 = 0
+    while i < len:
+        if _a32t_ld8(d + i) >= 128:
+            return 0
+        i = i + 1
+    1
+
+@cfg(arm32)
+fn _a32t_byte_at(value: i64, index: i64) -> i64:
+    val d = _a32t_data(value)
+    if d == 0 or index < 0:
+        return 0
+    if index >= _a32t_len(value):
+        return 0
+    _a32t_ld8(d + index)
+
+# ---------------------------------------------------------------------------
+# Exported entry points.
+# ---------------------------------------------------------------------------
+
+@cfg(arm32)
+@export("C")
+fn rt_string_builder_new() -> i64:
+    _a32t_sb_new()
+
+@cfg(arm32)
+@export("C")
+fn rt_string_builder_push(handle: i64, value: i64) -> i64:
+    _a32t_sb_push(handle, value)
+
+@cfg(arm32)
+@export("C")
+fn rt_string_builder_finish(handle: i64) -> i64:
+    _a32t_sb_finish(handle)
+
+@cfg(arm32)
+@export("C")
+fn rt_string_byte_at(value: i64, index: i64) -> i64:
+    _a32t_byte_at(value, index)
+
+@cfg(arm32)
+@export("C")
+fn rt_string_char_code_at(value: i64, index: i64) -> i64:
+    _a32t_char_code_at(value, index)
+
+@cfg(arm32)
+@export("C")
+fn rt_string_char_count(value: i64) -> i64:
+    _a32t_char_count(value)
+
+@cfg(arm32)
+@export("C")
+fn rt_string_from_byte_array(array: i64) -> i64:
+    _a32t_from_bytes(array)
+
+@cfg(arm32)
+@export("C")
+fn rt_string_parse_int(value: i64) -> i64:
+    _a32t_parse_int(value)
+
+@cfg(arm32)
+@export("C")
+fn rt_raw_i64_to_string(raw: i64) -> i64:
+    _a32t_decimal(raw)
+
+@cfg(arm32)
+@export("C")
+fn rt_text_cmp_any(left: i64, right: i64) -> i64:
+    _a32t_cmp(left, right)
+
+@cfg(arm32)
+@export("C")
+fn rt_text_eq_any(left: i64, right: i64) -> i64:
+    _a32t_eq(left, right)
+
+@cfg(arm32)
+@export("C")
+fn rt_text_find(value: i64, needle: i64, start: i64) -> i64:
+    _a32t_find(value, needle, start)
+
+@cfg(arm32)
+@export("C")
+fn rt_text_is_ascii(value: i64) -> i64:
+    _a32t_is_ascii(value)
+
+@cfg(arm32)
+@export("C")
+fn rt_slice_text_bytes(value: i64, start: i64, end: i64, step: i64) -> i64:
+    _a32t_slice(value, start, end, step)
