@@ -6,7 +6,35 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-06
 **Area:** lib/nogc_async_mut/compute, lib/nogc_sync_mut/text_layout, lib/gpu/engine2d
-**Status:** Open (honest gap — device execution unproven off Metal)
+**Status:** Open (HIP/ROCm device execution proven 2026-11-22; CUDA, Vulkan and session parity still open)
+
+## Update 2026-11-22 — HIP/ROCm reduce runs on the device
+
+`dispatch_reduce_i64` on a HIP target now launches a real kernel. The new
+`src/lib/gc_async_mut/gpu/rocm/hip_reduce.spl` compiles an exact i64 reduce
+with hipRTC and runs it through the ROCm leg of the GPU API
+(`hip_compute.spl`, dlopen on demand, no `rt_*` externs). `backend_dispatch.spl`
+calls it from `_dispatch_reduce_gpu_sffi` and uses `hip_reduce_device()`
+for `gpu_payload_present("hip")`. That runs a file check first (no library load when ROCm is absent), then opens HIP to confirm a device. Before this
+change, a resolved HIP target always failed with `hip-reduce-kernel-unavailable`.
+
+Evidence (Windows, AMD Radeon 8065S gfx1151, ROCm 7.2, seed
+`C:/dev/seeds/simple-release.exe`):
+`test/03_system/lib/gpu/hip_reduce_offload_spec.spl` gives `executed=3
+passed=3 failed=0`. The log records `HIP DEVICE: AMD Radeon(TM) 8065S
+Graphics`, and the GPU result equals the CPU fold for all 7 ops (for example,
+add over n=1000 gives `gpu=-5645093940215 cpu=-5645093940215`). Dispatch
+through `std.compute` reports `backend=hip ran_on_cpu=false`. With no ROCm
+present, a required HIP target fails closed (`gpu-backend-unavailable:hip`)
+and a suggested one falls back to the CPU (`fallback_ran_on_cpu=true`).
+
+Remaining items 1, 2 and 4 below are still open. Item 3 is done for reduce.
+
+Layering, also open: `backend_dispatch.spl` (nogc_async_mut) now imports
+`std.gc_async_mut.gpu.rocm.hip_reduce`. The interpreter prints a
+`nogc_imports_gc_family` warning, but it is not fatal. The ROCm GPU API
+(`hip_compute`) lives only in gc_async_mut. Owner decision: either move a
+no-GC HIP launch leg under nogc, or move std.compute dispatch to gc.
 
 ## Summary
 

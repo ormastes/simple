@@ -1,0 +1,170 @@
+# @gc — module uses GC runtime
+#
+# hip_reduce — exact i64 reduction executed on the AMD GPU through the ROCm leg
+# of the GPU API (std.gc_async_mut.gpu.rocm.hip_compute).
+#
+# This is the device kernel behind `std.compute` reduce offload for the HIP
+# backend. Nothing is loaded at import: HIP and hipRTC are dlopen'ed by
+# hip_compute on the first reduce, and the opened device (with its compiled
+# kernel) is kept for later reduces of the same ROCm directory.
+#
+# Device buffer layout: i64[0] = init on entry and the result on exit,
+# i64[1..n] = the data. One block of 256 threads folds a strided slice each,
+# tree-reduces in shared memory, and thread 0 folds the block result into init.
+# Every op is associative and commutative, so the result is exact and equal to
+# the sequential CPU fold. add/mul wrap in two's complement.
+#
+# Kernel op codes (HipReduceOp order, also the std.compute probe order): 0 add,
+# 1 mul, 2 min, 3 max, 4 xor, 5 and, 6 or.
+
+use std.gc_async_mut.gpu.rocm.hip_compute.{RocmDevice, rocm_open_at, rocm_available_at, rocm_bin_default, rocm_buffer_alloc, rocm_buffer_free, rocm_buffer_upload_bytes, rocm_buffer_download_bytes, rocm_kernel, rocm_launch, rocm_sync}
+
+val HIP_REDUCE_KERNEL = "simple_reduce_i64"
+val HIP_REDUCE_BLOCK = 256
+# The kernel takes the element count as a 32-bit int.
+val HIP_REDUCE_MAX_N = 2147483646
+
+val _SRC_REDUCE = r"""static __device__ long long fold_i64(long long a, long long b, int op) {
+  if (op == 0) return (long long)((unsigned long long)a + (unsigned long long)b);
+  if (op == 1) return (long long)((unsigned long long)a * (unsigned long long)b);
+  if (op == 2) return b < a ? b : a;
+  if (op == 3) return b > a ? b : a;
+  if (op == 4) return a ^ b;
+  if (op == 5) return a & b;
+  return a | b;
+}
+extern "C" __global__ void simple_reduce_i64(long long* buf, int n, int op) {
+  long long acc = 0;
+  if (op == 1) acc = 1;
+  else if (op == 2) acc = 0x7fffffffffffffffLL;
+  else if (op == 3) acc = -0x7fffffffffffffffLL - 1;
+  else if (op == 5) acc = -1;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) acc = fold_i64(acc, buf[1 + i], op);
+  __shared__ long long red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s) red[threadIdx.x] = fold_i64(red[threadIdx.x], red[threadIdx.x + s], op); __syncthreads(); }
+  if (threadIdx.x == 0) buf[0] = fold_i64(buf[0], red[0], op);
+}
+"""
+
+# Devices opened so far, by ROCm directory (parallel arrays). Contract: the
+# std.compute dispatch that calls this module is single-threaded, and a
+# RocmDevice handle is not shared across threads. A concurrent caller must
+# open its own device with rocm_open_at instead of using this cache.
+var _open_dirs: [text] = []
+var _open_devs: [RocmDevice] = []
+
+# The reduce ops, in the kernel's op-code order.
+pub enum HipReduceOp:
+    Add
+    Mul
+    Min
+    Max
+    Xor
+    And
+    Or
+
+# One reduce: fold `data` from `init` with `op`. `data`, `init` and the run's
+# `value` are raw two's-complement i64 fold values, the same shape as
+# std.compute dispatch_reduce_i64: they are not a domain quantity.
+pub struct HipReduceRequest:
+    data: [i64]
+    init: i64
+    op: HipReduceOp
+
+pub struct HipReduceRun:
+    value: i64
+    device_name: text
+
+fn _op_code(op: HipReduceOp) -> i64:
+    if op == HipReduceOp.Add:
+        return 0
+    if op == HipReduceOp.Mul:
+        return 1
+    if op == HipReduceOp.Min:
+        return 2
+    if op == HipReduceOp.Max:
+        return 3
+    if op == HipReduceOp.Xor:
+        return 4
+    if op == HipReduceOp.And:
+        return 5
+    6
+
+fn _device_for(bin_dir: text) -> Result<RocmDevice, text>:
+    var i: i64 = 0
+    while i < _open_dirs.len():
+        if _open_dirs[i] == bin_dir:
+            return Ok(_open_devs[i])
+        i = i + 1
+    if not rocm_available_at(bin_dir):
+        return Err("ROCm: HIP/hipRTC library not found in {bin_dir}")
+    val dev = rocm_open_at(bin_dir)?
+    _open_dirs.push(bin_dir)
+    _open_devs.push(dev)
+    Ok(dev)
+
+# Confirms a usable HIP device in `bin_dir` and returns its name. The library
+# file check runs first, so nothing is loaded when ROCm is absent. Otherwise
+# HIP is opened (hipInit plus a device-name query), which fails when no GPU is
+# present.
+pub fn hip_reduce_device_at(bin_dir: text) -> Result<text, text>:
+    val dev = _device_for(bin_dir)?
+    Ok(dev.name)
+
+pub fn hip_reduce_device() -> Result<text, text>:
+    hip_reduce_device_at(rocm_bin_default())
+
+fn _i64_at(bytes: [u8], offset: i64) -> i64:
+    var lo: i64 = 0
+    var hi: i64 = 0
+    var i: i64 = 0
+    while i < 4:
+        lo = lo | ((bytes[offset + i] as i64) << (i * 8))
+        hi = hi | ((bytes[offset + 4 + i] as i64) << (i * 8))
+        i = i + 1
+    (hi << 32) | lo
+
+fn _launch_and_read(dev: RocmDevice, kfn: i64, buf: i64, host: [u8], n: i64, op_kind: i64) -> Result<i64, text>:
+    rocm_buffer_upload_bytes(dev, buf, host, 0, host.len())?
+    rocm_launch(dev, kfn, 1, HIP_REDUCE_BLOCK, [buf], [n, op_kind])?
+    rocm_sync(dev)?
+    val out = rocm_buffer_download_bytes(dev, buf, 8)?
+    if out.len() != 8:
+        return Err("ROCm: reduce readback returned {out.len()} bytes, expected 8")
+    Ok(_i64_at(out, 0))
+
+# Run `req` on the HIP device of `bin_dir`.
+# Err when the libraries are absent, there is no device, or any HIP call
+# fails; the caller decides whether that is a CPU fallback or a failure.
+pub fn hip_reduce_i64_at(bin_dir: text, req: HipReduceRequest) -> Result<HipReduceRun, text>:
+    val data = req.data
+    val init = req.init
+    val op_kind = _op_code(req.op)
+    val n = data.len()
+    if n > HIP_REDUCE_MAX_N:
+        return Err("ROCm: reduce of {n} elements exceeds {HIP_REDUCE_MAX_N}")
+    val dev = _device_for(bin_dir)?
+    val kfn = rocm_kernel(dev, HIP_REDUCE_KERNEL, _SRC_REDUCE)?
+    var host: [u8] = []
+    var k: i64 = 0
+    while k <= n:
+        var x = if k == 0: init else: data[k - 1]
+        var b: i64 = 0
+        while b < 8:
+            host.push((x & 255) as u8)
+            x = x >> 8
+            b = b + 1
+        k = k + 1
+    # rocm_buffer_alloc sizes in 4-byte units: two per i64.
+    val buf = rocm_buffer_alloc(dev, (n + 1) * 2)?
+    val ran = _launch_and_read(dev, kfn, buf, host, n, op_kind)
+    val freed = rocm_buffer_free(dev, buf)
+    # A launch error outranks a free error: report the first failure.
+    val value = ran?
+    freed?
+    Ok(HipReduceRun(value: value, device_name: dev.name))
+
+pub fn hip_reduce_i64(req: HipReduceRequest) -> Result<HipReduceRun, text>:
+    hip_reduce_i64_at(rocm_bin_default(), req)
