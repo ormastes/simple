@@ -11,7 +11,11 @@
 # This module must stay light: test_runner_types and execution_metrics only.
 
 use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
-use std.common.perf.execution_metrics.{resource_evidence_quality_name, termination_cause_name}
+use std.common.perf.execution_metrics.{
+    MetricDurationMs, MetricByteCount, MetricProcessCount, MetricSignalNumber, MetricExitCode,
+    MetricCount, MetricTimestampMs, ResourcePresence,
+    resource_evidence_quality_name, termination_cause_name
+}
 use std.nogc_sync_mut.test_runner.test_db_trace_record.{TestDbTraceFile}
 
 val TEST_DB_RECORD_MAGIC = "simple-test-db-record v1"
@@ -20,24 +24,24 @@ struct TestDbFileRow:
     path: text
     # "passed" | "failed" | "in_development" | "feature_gated" | "blocked"
     status: text
-    duration_ms: i64
+    duration_ms: MetricDurationMs
     cohort_id: text
-    has_resource: bool
+    has_resource: ResourcePresence
     resource_class: text
-    compile_ms: i64
-    execution_ms: i64
-    wall_ms: i64
-    user_cpu_ms: i64
-    system_cpu_ms: i64
-    peak_tree_charge_bytes: i64
-    peak_direct_child_rss_bytes: i64
-    io_read_bytes: i64
-    io_write_bytes: i64
-    pids_peak: i64
+    compile_ms: MetricDurationMs
+    execution_ms: MetricDurationMs
+    wall_ms: MetricDurationMs
+    user_cpu_ms: MetricDurationMs
+    system_cpu_ms: MetricDurationMs
+    peak_tree_charge_bytes: MetricByteCount
+    peak_direct_child_rss_bytes: MetricByteCount
+    io_read_bytes: MetricByteCount
+    io_write_bytes: MetricByteCount
+    pids_peak: MetricProcessCount
     evidence_quality: text
     termination: text
-    signal: i64
-    exit_code: i64
+    signal: MetricSignalNumber
+    exit_code: MetricExitCode
     budget_status: text
     anomaly_status: text
     # In-memory SDN transport only; excluded from legacy v1 rows.
@@ -45,12 +49,12 @@ struct TestDbFileRow:
 
 struct TestDbRunRecord:
     files: [TestDbFileRow]
-    test_count: i64
-    passed: i64
-    failed: i64
-    timed_out: i64
-    run_start: i64
-    run_end: i64
+    test_count: MetricCount
+    passed: MetricCount
+    failed: MetricCount
+    timed_out: MetricCount
+    run_start: MetricTimestampMs
+    run_end: MetricTimestampMs
 
 fn _test_db_row_status(file_result: TestFileResult) -> text:
     # In-development is checked FIRST: a neutralised file has failed == 0, so
@@ -70,17 +74,19 @@ fn _test_db_row_status(file_result: TestFileResult) -> text:
 pub fn test_db_file_row_from_result(file_result: TestFileResult) -> TestDbFileRow:
     var row = TestDbFileRow(
         path: file_result.path, status: _test_db_row_status(file_result),
-        duration_ms: file_result.duration_ms, cohort_id: file_result.cohort_id,
-        has_resource: false, resource_class: file_result.resource_class,
-        compile_ms: file_result.compile_ms, execution_ms: file_result.execution_ms,
-        wall_ms: 0, user_cpu_ms: 0, system_cpu_ms: 0, peak_tree_charge_bytes: 0,
-        peak_direct_child_rss_bytes: 0, io_read_bytes: 0, io_write_bytes: 0,
-        pids_peak: 0, evidence_quality: "", termination: "", signal: 0, exit_code: 0,
+        duration_ms: MetricDurationMs(value: file_result.duration_ms), cohort_id: file_result.cohort_id,
+        has_resource: ResourcePresence.Absent, resource_class: file_result.resource_class,
+        compile_ms: MetricDurationMs(value: file_result.compile_ms), execution_ms: MetricDurationMs(value: file_result.execution_ms),
+        wall_ms: MetricDurationMs(value: 0), user_cpu_ms: MetricDurationMs(value: 0), system_cpu_ms: MetricDurationMs(value: 0),
+        peak_tree_charge_bytes: MetricByteCount(value: 0), peak_direct_child_rss_bytes: MetricByteCount(value: 0),
+        io_read_bytes: MetricByteCount(value: 0), io_write_bytes: MetricByteCount(value: 0),
+        pids_peak: MetricProcessCount(value: 0), evidence_quality: "", termination: "",
+        signal: MetricSignalNumber(value: 0), exit_code: MetricExitCode(value: 0),
         budget_status: file_result.budget_status, anomaly_status: file_result.anomaly_status
     )
     match file_result.resource_usage:
         case Some(usage):
-            row.has_resource = true
+            row.has_resource = ResourcePresence.Present
             row.wall_ms = usage.wall_ms
             row.user_cpu_ms = usage.user_cpu_ms
             row.system_cpu_ms = usage.system_cpu_ms
@@ -101,9 +107,9 @@ fn test_db_run_record_from_result(result: TestRunResult, run_start: i64, run_end
     for file_result in result.files:
         rows.push(test_db_file_row_from_result(file_result))
     TestDbRunRecord(
-        files: rows, test_count: result.files.len(), passed: result.total_passed,
-        failed: result.total_failed, timed_out: result.total_timed_out,
-        run_start: run_start, run_end: run_end
+        files: rows, test_count: MetricCount(value: result.files.len()), passed: MetricCount(value: result.total_passed),
+        failed: MetricCount(value: result.total_failed), timed_out: MetricCount(value: result.total_timed_out),
+        run_start: MetricTimestampMs(value: run_start), run_end: MetricTimestampMs(value: run_end)
     )
 
 # Fields are tab-separated, records newline-separated; backslash, tab, CR and
@@ -137,14 +143,14 @@ fn _test_db_field_unescape(s: text) -> text:
 
 fn test_db_run_record_encode(record: TestDbRunRecord) -> text:
     var lines: [text] = [TEST_DB_RECORD_MAGIC]
-    lines.push("run\t{record.test_count}\t{record.passed}\t{record.failed}\t{record.timed_out}\t{record.run_start}\t{record.run_end}")
+    lines.push("run\t{record.test_count.value}\t{record.passed.value}\t{record.failed.value}\t{record.timed_out.value}\t{record.run_start.value}\t{record.run_end.value}")
     for row in record.files:
-        val res = if row.has_resource: "1" else: "0"
-        lines.push("file\t" + _test_db_field_escape(row.path) + "\t" + _test_db_field_escape(row.status) + "\t{row.duration_ms}\t" + _test_db_field_escape(row.cohort_id) +
-            "\t{res}\t" + _test_db_field_escape(row.resource_class) + "\t{row.compile_ms}\t{row.execution_ms}\t{row.wall_ms}" +
-            "\t{row.user_cpu_ms}\t{row.system_cpu_ms}\t{row.peak_tree_charge_bytes}\t{row.peak_direct_child_rss_bytes}" +
-            "\t{row.io_read_bytes}\t{row.io_write_bytes}\t{row.pids_peak}\t" + _test_db_field_escape(row.evidence_quality) +
-            "\t" + _test_db_field_escape(row.termination) + "\t{row.signal}\t{row.exit_code}\t" + _test_db_field_escape(row.budget_status) +
+        val res = if row.has_resource == ResourcePresence.Present: "1" else: "0"
+        lines.push("file\t" + _test_db_field_escape(row.path) + "\t" + _test_db_field_escape(row.status) + "\t{row.duration_ms.value}\t" + _test_db_field_escape(row.cohort_id) +
+            "\t{res}\t" + _test_db_field_escape(row.resource_class) + "\t{row.compile_ms.value}\t{row.execution_ms.value}\t{row.wall_ms.value}" +
+            "\t{row.user_cpu_ms.value}\t{row.system_cpu_ms.value}\t{row.peak_tree_charge_bytes.value}\t{row.peak_direct_child_rss_bytes.value}" +
+            "\t{row.io_read_bytes.value}\t{row.io_write_bytes.value}\t{row.pids_peak.value}\t" + _test_db_field_escape(row.evidence_quality) +
+            "\t" + _test_db_field_escape(row.termination) + "\t{row.signal.value}\t{row.exit_code.value}\t" + _test_db_field_escape(row.budget_status) +
             "\t" + _test_db_field_escape(row.anomaly_status))
     lines.join("\n") + "\n"
 
@@ -155,7 +161,7 @@ fn test_db_run_record_decode(content: text) -> Result<TestDbRunRecord, text>:
     val lines = content.replace("\r\n", "\n").split("\n")
     if lines.len() == 0 or lines[0] != TEST_DB_RECORD_MAGIC:
         return Err("not a test-db run record (missing '{TEST_DB_RECORD_MAGIC}' header)")
-    var record = TestDbRunRecord(files: [], test_count: 0, passed: 0, failed: 0, timed_out: 0, run_start: 0, run_end: 0)
+    var record = TestDbRunRecord(files: [], test_count: MetricCount(value: 0), passed: MetricCount(value: 0), failed: MetricCount(value: 0), timed_out: MetricCount(value: 0), run_start: MetricTimestampMs(value: 0), run_end: MetricTimestampMs(value: 0))
     var rows: [TestDbFileRow] = []
     var saw_run = false
     var line_no = 0
@@ -167,26 +173,27 @@ fn test_db_run_record_decode(content: text) -> Result<TestDbRunRecord, text>:
         if f[0] == "run":
             if f.len() != 7:
                 return Err("line {line_no}: run record has {f.len()} fields, expected 7")
-            record.test_count = _test_db_int(f, 1)
-            record.passed = _test_db_int(f, 2)
-            record.failed = _test_db_int(f, 3)
-            record.timed_out = _test_db_int(f, 4)
-            record.run_start = _test_db_int(f, 5)
-            record.run_end = _test_db_int(f, 6)
+            record.test_count = MetricCount(value: _test_db_int(f, 1))
+            record.passed = MetricCount(value: _test_db_int(f, 2))
+            record.failed = MetricCount(value: _test_db_int(f, 3))
+            record.timed_out = MetricCount(value: _test_db_int(f, 4))
+            record.run_start = MetricTimestampMs(value: _test_db_int(f, 5))
+            record.run_end = MetricTimestampMs(value: _test_db_int(f, 6))
             saw_run = true
         elif f[0] == "file":
             if f.len() != 23:
                 return Err("line {line_no}: file record has {f.len()} fields, expected 23")
+            val has_resource = if f[5] == "1": ResourcePresence.Present else: ResourcePresence.Absent
             rows.push(TestDbFileRow(
-                path: _test_db_field_unescape(f[1]), status: _test_db_field_unescape(f[2]), duration_ms: _test_db_int(f, 3), cohort_id: _test_db_field_unescape(f[4]),
-                has_resource: f[5] == "1", resource_class: _test_db_field_unescape(f[6]),
-                compile_ms: _test_db_int(f, 7), execution_ms: _test_db_int(f, 8),
-                wall_ms: _test_db_int(f, 9), user_cpu_ms: _test_db_int(f, 10),
-                system_cpu_ms: _test_db_int(f, 11), peak_tree_charge_bytes: _test_db_int(f, 12),
-                peak_direct_child_rss_bytes: _test_db_int(f, 13), io_read_bytes: _test_db_int(f, 14),
-                io_write_bytes: _test_db_int(f, 15), pids_peak: _test_db_int(f, 16),
+                path: _test_db_field_unescape(f[1]), status: _test_db_field_unescape(f[2]), duration_ms: MetricDurationMs(value: _test_db_int(f, 3)), cohort_id: _test_db_field_unescape(f[4]),
+                has_resource: has_resource, resource_class: _test_db_field_unescape(f[6]),
+                compile_ms: MetricDurationMs(value: _test_db_int(f, 7)), execution_ms: MetricDurationMs(value: _test_db_int(f, 8)),
+                wall_ms: MetricDurationMs(value: _test_db_int(f, 9)), user_cpu_ms: MetricDurationMs(value: _test_db_int(f, 10)),
+                system_cpu_ms: MetricDurationMs(value: _test_db_int(f, 11)), peak_tree_charge_bytes: MetricByteCount(value: _test_db_int(f, 12)),
+                peak_direct_child_rss_bytes: MetricByteCount(value: _test_db_int(f, 13)), io_read_bytes: MetricByteCount(value: _test_db_int(f, 14)),
+                io_write_bytes: MetricByteCount(value: _test_db_int(f, 15)), pids_peak: MetricProcessCount(value: _test_db_int(f, 16)),
                 evidence_quality: _test_db_field_unescape(f[17]), termination: _test_db_field_unescape(f[18]),
-                signal: _test_db_int(f, 19), exit_code: _test_db_int(f, 20),
+                signal: MetricSignalNumber(value: _test_db_int(f, 19)), exit_code: MetricExitCode(value: _test_db_int(f, 20)),
                 budget_status: _test_db_field_unescape(f[21]), anomaly_status: _test_db_field_unescape(f[22])
             ))
         else:
