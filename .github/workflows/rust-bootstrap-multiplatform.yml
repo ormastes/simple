@@ -2,7 +2,7 @@ name: Rust Bootstrap Multiplatform
 
 on:
   push:
-    branches: [main]
+    branches: [main, release_windows, release_phase3, 'release/**']
     paths:
       - 'src/compiler_rust/**'
       - 'src/compiler/**'
@@ -17,14 +17,19 @@ on:
       - 'src/app/simple_lsp_mcp/**'
       - 'src/lib/**'
       - 'src/runtime/**'
+      - 'bin/simple.cmd'
+      - 'scripts/bootstrap/**'
       - 'scripts/bootstrap/bootstrap-from-scratch.sh'
       - 'scripts/bootstrap/build-phase3-phase4.sh'
       - 'scripts/bootstrap/stage3-native-host-link-policy.shs'
       - 'scripts/bootstrap/stage3-native-host-link-policy.sdn'
       - 'config/check/bootstrap_protected_scripts.sdn'
+      - 'config/check/sdn_seal_policy.sdn'
+      - 'scripts/check/*bootstrap*'
       - 'scripts/check/fast-verify-bootstrap-scripts.shs'
       - 'scripts/check/check-bootstrap-path-matrix-unix.shs'
       - 'scripts/check/check-bootstrap-path-matrix-all.shs'
+      - 'test/01_unit/scripts/*'
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
@@ -97,6 +102,7 @@ on:
       - '.github/workflows/rust-bootstrap-multiplatform.yml'
   pull_request:
     types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
+    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
     paths:
       - 'src/compiler_rust/**'
       - 'src/compiler/**'
@@ -111,14 +117,19 @@ on:
       - 'src/app/simple_lsp_mcp/**'
       - 'src/lib/**'
       - 'src/runtime/**'
+      - 'bin/simple.cmd'
+      - 'scripts/bootstrap/**'
       - 'scripts/bootstrap/bootstrap-from-scratch.sh'
       - 'scripts/bootstrap/build-phase3-phase4.sh'
       - 'scripts/bootstrap/stage3-native-host-link-policy.shs'
       - 'scripts/bootstrap/stage3-native-host-link-policy.sdn'
       - 'config/check/bootstrap_protected_scripts.sdn'
+      - 'config/check/sdn_seal_policy.sdn'
+      - 'scripts/check/*bootstrap*'
       - 'scripts/check/fast-verify-bootstrap-scripts.shs'
       - 'scripts/check/check-bootstrap-path-matrix-unix.shs'
       - 'scripts/check/check-bootstrap-path-matrix-all.shs'
+      - 'test/01_unit/scripts/*'
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
@@ -308,13 +319,46 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             command -v xxhsum >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends xxhash)
+            xxhsum -V
             sh scripts/check/fast-verify-bootstrap-scripts.shs
             sh scripts/check/check-bootstrap-path-matrix-unix.shs
           elif [ "$RUNNER_OS" = "Windows" ]; then
+            if ! command -v xxhsum >/dev/null 2>&1; then
+              xxh_bin="$(cygpath -u "$RUNNER_TEMP")/xxhash-bin"
+              mkdir -p "$xxh_bin"
+              if [ -x /c/msys64/usr/bin/pacman.exe ]; then
+                if /c/msys64/usr/bin/pacman.exe -Sy --noconfirm --needed mingw-w64-x86_64-xxhash; then
+                  :
+                fi
+                if [ -x /c/msys64/mingw64/bin/xxhsum.exe ]; then
+                  cp -f /c/msys64/mingw64/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                  for dll in /c/msys64/mingw64/bin/libxxhash*.dll /c/msys64/mingw64/bin/libwinpthread*.dll /c/msys64/mingw64/bin/libgcc_s_*.dll; do
+                    if [ -f "$dll" ]; then
+                      cp -f "$dll" "$xxh_bin/"
+                    fi
+                  done
+                fi
+              fi
+              if [ ! -x "$xxh_bin/xxhsum.exe" ] && command -v choco >/dev/null 2>&1; then
+                choco install xxhash -y --no-progress
+                if [ -x /c/ProgramData/chocolatey/bin/xxhsum.exe ]; then
+                  cp -f /c/ProgramData/chocolatey/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                fi
+              fi
+              test -x "$xxh_bin/xxhsum.exe"
+              "$xxh_bin/xxhsum.exe" -V
+              cygpath -w "$xxh_bin" >> "$GITHUB_PATH"
+              export PATH="$xxh_bin:$PATH"
+            fi
+            xxhsum -V
             sh scripts/check/check-bootstrap-path-matrix-windows.shs
           else
+            command -v xxhsum >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install xxhash
+            xxhsum -V
             sh scripts/check/check-bootstrap-path-matrix-unix.shs
           fi
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
 
       - name: Validate bootstrap portability contracts
         id: portability_contract

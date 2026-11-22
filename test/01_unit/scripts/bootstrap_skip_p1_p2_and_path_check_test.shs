@@ -7,7 +7,11 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-scratch=$(mktemp -d "/tmp/bfs-skip-p1p2-pathcheck.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/bfs-skip-p1p2-pathcheck.XXXXXX")
+if scratch=$(mktemp -d "${TMPDIR:-/tmp}/bfs-skip-p1p2-pathcheck.XXXXXX" 2>/dev/null); then
+  :
+else
+  scratch=$(mktemp -d "/tmp/bfs-skip-p1p2-pathcheck.XXXXXX")
+fi
 scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
 TMPDIR="$scratch"
 export TMPDIR
@@ -143,15 +147,17 @@ assert_eq "$conflict_rc" "2" "--skip-seed + --from-seed conflict exits 2"
 # ---------------------------------------------------------------------------
 # 3. bootstrap-windows.sh --path-check & simpleos-native-build.shs --path-check
 # ---------------------------------------------------------------------------
-win_def_out=$(bash "$root/scripts/bootstrap/bootstrap-windows.sh" --path-check)
-assert_contains "$win_def_out" "PATH_ACTION|script=bootstrap-windows.sh|platform=windows|" "bootstrap-windows.sh action"
-assert_contains "$win_def_out" "|win_config=mingw|phase=init|step=windows-toolchain-select|" "bootstrap-windows.sh mingw default"
-assert_contains "$win_def_out" "PATH_SUMMARY|script=bootstrap-windows.sh|platform=windows|" "bootstrap-windows.sh summary"
-assert_contains "$win_def_out" "-pc-windows-gnu|" "bootstrap-windows.sh gnu target"
+if command -v bash >/dev/null 2>&1; then
+  win_def_out=$(bash "$root/scripts/bootstrap/bootstrap-windows.sh" --path-check)
+  assert_contains "$win_def_out" "PATH_ACTION|script=bootstrap-windows.sh|platform=windows|" "bootstrap-windows.sh action"
+  assert_contains "$win_def_out" "|win_config=mingw|phase=init|step=windows-toolchain-select|" "bootstrap-windows.sh mingw default"
+  assert_contains "$win_def_out" "PATH_SUMMARY|script=bootstrap-windows.sh|platform=windows|" "bootstrap-windows.sh summary"
+  assert_contains "$win_def_out" "-pc-windows-gnu|" "bootstrap-windows.sh gnu target"
 
-win_msvc_out=$(bash "$root/scripts/bootstrap/bootstrap-windows.sh" --msvc --path-check --compile-mode=file)
-assert_contains "$win_msvc_out" "|win_config=msvc|phase=init|step=windows-toolchain-select|compile_mode=file|" "bootstrap-windows.sh msvc + file mode"
-assert_contains "$win_msvc_out" "-pc-windows-msvc|" "bootstrap-windows.sh msvc target"
+  win_msvc_out=$(bash "$root/scripts/bootstrap/bootstrap-windows.sh" --msvc --path-check --compile-mode=file)
+  assert_contains "$win_msvc_out" "|win_config=msvc|phase=init|step=windows-toolchain-select|compile_mode=file|" "bootstrap-windows.sh msvc + file mode"
+  assert_contains "$win_msvc_out" "-pc-windows-msvc|" "bootstrap-windows.sh msvc target"
+fi
 
 for sos_pair in \
   "x86_64-unknown-simpleos:x86_64" \
@@ -254,7 +260,24 @@ acc_out=$(SIMPLE_PHASE3_COMPILER="$scratch/valid_p3/simple" SIMPLE_DEFAULT_RELEA
   --path-check --output="$scratch/empty_out")
 assert_contains "$acc_out" "mode=skip-p1-p2|" "valid Phase3 candidate selects skip-p1-p2"
 
-# Synthesize a canonical 29-field planner-admission-v2 receipt bound under scratch
+# Live native Linux/macOS non---path-check / --deploy integration checks (on Windows, non---path-check
+# bootstrap-from-scratch.sh runs materialize-symlinks-windows.shs, and --deploy sets full_cli=1
+# which requires native Linux or macOS; other hosts verify entrypoints via --path-check / cmd.exe).
+case "$(uname -s 2>/dev/null)" in
+  Linux|Darwin)
+# Synthesize a canonical 29-field planner-admission-v2 receipt bound under scratch.
+# Always initialize SIMPLE_BOOTSTRAP_PROCESS_OBSERVER on Darwin (even when /bin/ps
+# works, e.g. macos-latest CI), because bootstrap-from-scratch.sh sets
+# SIMPLE_BOOTSTRAP_RSS_CAP_MODE and portable-hardlink-lock.pl requires the
+# observer whenever SIMPLE_BOOTSTRAP_RSS_CAP_MODE is present on Darwin.
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ -z "${SIMPLE_BOOTSTRAP_PROCESS_OBSERVER:-}" ]; then
+  perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=20 \
+    --receipt="$scratch/darwin-observer.receipt" -- /usr/bin/true
+  SIMPLE_BOOTSTRAP_PROCESS_OBSERVER=$(sed -n 's/^observer_path=//p' "$scratch/darwin-observer.receipt")
+  SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256=$(sed -n 's/^observer_sha256=//p' "$scratch/darwin-observer.receipt")
+  export SIMPLE_BOOTSTRAP_PROCESS_OBSERVER SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256
+fi
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 ext_root="$scratch/ext-output"
 mkdir -p "$ext_root/stage2/host"
@@ -380,7 +403,10 @@ fi
 assert_eq "$live_rc" "0" "live default-skip-P1-P2 run exits 0"
 
 live_text=$(cat "$live_log")
-recorded_args=$(cat "$args_record")
+recorded_args=""
+if [ -f "$args_record" ]; then
+  recorded_args=$(cat "$args_record")
+fi
 assert_contains "$live_text" "Skipping Phase 1 (Cargo seed) & Phase 2" "live run logs P1/P2 skip"
 assert_contains "$live_text" "VERDICT — ADMITTED: stage=complete mode=shared-phase3-phase4" "live run emits ADMITTED verdict"
 assert_contains "$recorded_args" "--non-interactive" "shared builder receives --non-interactive"
@@ -428,7 +454,10 @@ if [ "$default_live_rc" -ne 0 ]; then
 fi
 assert_eq "$default_live_rc" "0" "default run without --skip-seed or SIMPLE_PHASE3_COMPILER bypasses strategy & L1343 and exits 0"
 default_live_text=$(cat "$default_live_log")
-default_recorded_args=$(cat "$default_args_record")
+default_recorded_args=""
+if [ -f "$default_args_record" ]; then
+  default_recorded_args=$(cat "$default_args_record")
+fi
 assert_contains "$default_live_text" "Skipping Phase 1 (Cargo seed) & Phase 2" "default run without --skip-seed logs P1/P2 skip"
 assert_contains "$default_live_text" "VERDICT — ADMITTED: stage=complete mode=shared-phase3-phase4" "default run without --skip-seed emits ADMITTED verdict"
 assert_contains "$default_recorded_args" "--p4-link-mode=one-binary" "default run forwards --p4-link-mode=one-binary"
@@ -457,6 +486,42 @@ missing_rc=$?
 set -e
 assert_eq "$missing_rc" "2" "live --skip-seed without Phase 3+ compiler exits 2"
 assert_contains "$(cat "$missing_log")" "reason=missing-phase3-compiler" "live --skip-seed emits missing-phase3-compiler verdict"
+
+# Negative --deploy guard: SIMPLE_SHARED_PHASE34_BUILDER exits 0 without producing p4-from-p3b/bin/simple
+mock_noop_builder="$scratch/mock-noop-phase3-phase4.sh"
+cat >"$mock_noop_builder" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$mock_noop_builder"
+
+noop_out_dir="$scratch/live-noop-p4-out"
+noop_deploy_dest="$scratch/deploy-noop-dest"
+noop_log="$scratch/noop-deploy.log"
+set +e
+SIMPLE_BOOTSTRAP_LIVE_TREE=1 \
+SIMPLE_BOOTSTRAP_MIN_FREE_GB=0 \
+SIMPLE_BOOTSTRAP_PROGRESS_LOG= \
+SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$ext_root" \
+SIMPLE_PHASE3_COMPILER="$scratch/valid_p3/simple" \
+SIMPLE_RUNTIME_PATH="$scratch/valid_p3/runtime" \
+SIMPLE_SHARED_PHASE34_BUILDER="$mock_noop_builder" \
+SIMPLE_SHARED_DEPLOY_DIR="$noop_deploy_dest" \
+  sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --bootstrap-receipt="$valid_receipt" \
+    --output="$noop_out_dir" \
+    --deploy >"$noop_log" 2>&1
+noop_rc=$?
+set -e
+assert_eq "$noop_rc" "1" "live --deploy with missing p4-from-p3b/bin/simple fails closed (exit 1)"
+assert_contains "$(cat "$noop_log")" "shared-phase4-missing" "live --deploy missing Phase 4 output emits shared-phase4-missing"
+if [ ! -e "$noop_deploy_dest/simple" ]; then
+  ok
+else
+  fail "negative --deploy must not populate deploy destination when p4-from-p3b/bin/simple is missing"
+fi
+    ;;
+esac
 
 if [ "$failures" -ne 0 ]; then
   printf 'FAIL — %s failure(s) across %s check(s)\n' "$failures" "$checks" >&2

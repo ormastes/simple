@@ -10,7 +10,7 @@ name: Required Gates
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
   pull_request:
     branches: [main, master, develop, release_windows, release_phase3, 'release/**']
   workflow_dispatch:
@@ -87,6 +87,7 @@ jobs:
           # read so the checks genuinely run here instead of failing on absent
           # inputs. Total added material is ~28 MB / ~1750 files.
           sparse-checkout: |
+            bin
             scripts/check
             scripts/vcs
             scripts/bootstrap
@@ -94,6 +95,7 @@ jobs:
             scripts/lib
             scripts/resource
             scripts/os
+            config
             config/check
             .github/workflows
             cmake
@@ -107,9 +109,13 @@ jobs:
             src/compiler_rust/compiler
             src/compiler_rust/runtime
             src/compiler_rust/native_all
+            src/compositions
+            src/plugins
             src/lib/nogc_sync_mut/sffi
             src/app/cli
+            src/app/hash
             src/os/port/llvm
+            test/01_unit/scripts
             test/fixtures/xray
             test/05_perf/ctype
             test/perf/ctype
@@ -121,8 +127,10 @@ jobs:
       # the published empty-input digest before it trusts it; with no hasher the
       # gate ERRORS (fail closed), so install it best-effort here.
       - name: Install xxhsum for .csm seal verification
+        shell: sh
         run: |
-          command -v xxhsum >/dev/null 2>&1 || sudo -n apt-get install -y --no-install-recommends xxhash || echo "xxhsum unavailable: the .csm gate will fail closed"
+          command -v xxhsum >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xxhash)
+          xxhsum -V
 
       # local-runtime-link-completeness compiles the core-C runtime with clang
       # and reads symbols with llvm-nm (src/compiler, src/runtime and the
@@ -143,6 +151,12 @@ jobs:
       - name: Pure provider runtime capsule admission contract controls
         shell: sh
         run: sh scripts/check/check-pure-provider-runtime-capsule.shs --selftest
+
+      - name: Unified bootstrap build-scripts contract gate
+        if: github.event_name != 'pull_request'
+        shell: sh
+        run: |
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest && sh scripts/check/check-bootstrap-unified-scripts-contract.shs
 
       - name: Fast push-tier gates on the PR range
         shell: sh

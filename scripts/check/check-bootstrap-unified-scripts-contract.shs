@@ -1,0 +1,1041 @@
+#!/bin/sh
+# check-bootstrap-unified-scripts-contract.shs
+#
+# Unified fail-closed CI contract gate for cross-platform bootstrap & phased
+# build scripts (Linux, macOS, FreeBSD, Windows mingw/msvc, SimpleOS).
+#
+# Verifies:
+#   1. Protected script SHA-256 + banner + .csm seals (`fast-verify-bootstrap-scripts.shs`
+#      --selftest + full) and xxh3 `.csm` seal on `stage3-native-host-link-policy.sdn`,
+#      plus dual-shell syntax (`sh -n`, `dash -n` when available, `bash -n`, and POSIX
+#      bashism rejection) across active and deprecated bootstrap scripts.
+#   2. Full cross-OS `--path-check` alive matrix (`check-bootstrap-path-matrix-all.shs`).
+#   3. Phase isolation (`p3a`, `p3`, `p4`, `all`), compile modes (`shard`, `file`),
+#      link modes (`dynlib`, `one-binary`, `dynload`), internal linker gate toggles,
+#      interactive `--menu` (`0..6` + invalid `9`), `--dry-run`, and CLI refusal matrix.
+#   4. All 10 legacy script deprecation guards (5 unconditional `p3-*.shs` + 5 interactive
+#      no-arg guards, including live PTY Enter-key return on Unix when python3 is present).
+#   5. Unit contract suites (`stage3_native_host_link_policy_test.shs` and
+#      `bootstrap_skip_p1_p2_and_path_check_test.shs` including negative `--deploy`).
+#   6. Windows `.bat`/`.cmd` static lint on all OSes (`@echo off`, `setlocal`, balanced
+#      unescaped parentheses, resolved `:label` targets, `MSYS2_ARG_CONV_EXCL`, WSL
+#      `bash.exe` exclusion, `%*` forwarding) + native `cmd.exe` matrix on Windows.
+#
+# Verdict (last stdout line):
+#   PASS — bootstrap unified scripts contract verified (<N> checks)   exit 0
+#   FAIL — bootstrap unified scripts contract failed (<F>/<N>)        exit 1
+#   ERROR — nothing was checked (<reason>)                            exit 2
+
+set -u
+
+SELF_SCRIPT=$0
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || {
+  echo "ERROR — nothing was checked (cannot locate script directory)"
+  exit 2
+}
+DEFAULT_ROOT=$(CDPATH= cd -- "$HERE/../.." 2>/dev/null && pwd -P) || {
+  echo "ERROR — nothing was checked (cannot resolve default repo root)"
+  exit 2
+}
+
+if [ ! -f "$HERE/sdn-seal-lib.shs" ]; then
+  echo "ERROR — nothing was checked (missing $HERE/sdn-seal-lib.shs)"
+  exit 2
+fi
+. "$HERE/sdn-seal-lib.shs"
+
+MODE="full"
+ROOT_DIR=""
+REQUIRE_UNIT_SUITES=0
+SKIP_MATRIX=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --selftest)
+      MODE="selftest"
+      shift
+      ;;
+    --require-unit-suites)
+      REQUIRE_UNIT_SUITES=1
+      shift
+      ;;
+    --skip-matrix)
+      SKIP_MATRIX=1
+      shift
+      ;;
+    --root)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR — nothing was checked (--root requires a directory)"
+        exit 2
+      fi
+      ROOT_DIR=$2
+      shift 2
+      ;;
+    --root=*)
+      ROOT_DIR=${1#*=}
+      shift
+      ;;
+    --help|-h)
+      echo "usage: sh scripts/check/check-bootstrap-unified-scripts-contract.shs [--selftest] [--require-unit-suites] [--root DIR]"
+      exit 0
+      ;;
+    *)
+      echo "ERROR — nothing was checked (unknown option '$1')"
+      exit 2
+      ;;
+  esac
+done
+
+IS_DEFAULT_ROOT=0
+if [ -z "$ROOT_DIR" ]; then
+  ROOT_DIR="$DEFAULT_ROOT"
+  IS_DEFAULT_ROOT=1
+else
+  if [ ! -d "$ROOT_DIR" ]; then
+    echo "ERROR — nothing was checked (--root '$ROOT_DIR' is not a directory)"
+    exit 2
+  fi
+  ROOT_DIR=$(CDPATH= cd -- "$ROOT_DIR" 2>/dev/null && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot canonicalize --root '$ROOT_DIR')"
+    exit 2
+  }
+  if [ "$ROOT_DIR" = "$DEFAULT_ROOT" ]; then
+    IS_DEFAULT_ROOT=1
+  fi
+fi
+
+CHECKS=0
+FAILS=0
+ACTIVE_TMP_WORK=""
+ACTIVE_TMP_ST=""
+
+cleanup_contract_tmps() {
+  if [ -n "$ACTIVE_TMP_WORK" ] && [ -d "$ACTIVE_TMP_WORK" ]; then
+    rm -rf "$ACTIVE_TMP_WORK"
+  fi
+  if [ -n "$ACTIVE_TMP_ST" ] && [ -d "$ACTIVE_TMP_ST" ]; then
+    rm -rf "$ACTIVE_TMP_ST"
+  fi
+  return 0
+}
+trap 'cleanup_contract_tmps' EXIT HUP INT TERM
+
+pass_check() {
+  CHECKS=$((CHECKS + 1))
+  return 0
+}
+
+fail_check() {
+  CHECKS=$((CHECKS + 1))
+  FAILS=$((FAILS + 1))
+  echo "FAIL [$1]: $2"
+  return 0
+}
+
+check_contains() {
+  _hay=$1
+  _needle=$2
+  _tag=$3
+  _msg=$4
+  if printf '%s\n' "$_hay" | grep -Fq -- "$_needle"; then
+    pass_check
+  else
+    fail_check "$_tag" "$_msg (missing '$_needle')"
+  fi
+  return 0
+}
+
+check_not_contains() {
+  _hay=$1
+  _needle=$2
+  _tag=$3
+  _msg=$4
+  if printf '%s\n' "$_hay" | grep -Fq -- "$_needle"; then
+    fail_check "$_tag" "$_msg (unexpected '$_needle')"
+  else
+    pass_check
+  fi
+  return 0
+}
+
+# Check POSIX sh -n (+ dash -n and bash -n when present) + static POSIX bashism guard.
+check_posix_and_bash_syntax() {
+  _file=$1
+  _rel=$2
+  if [ ! -f "$_file" ]; then
+    fail_check "syntax:$_rel" "missing script $_file"
+    return 0
+  fi
+  _err_out=""
+  _err_out=$(sh -n "$_file" 2>&1)
+  _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    fail_check "syntax:sh:$_rel" "sh -n failed: $_err_out"
+    return 0
+  fi
+  if command -v dash >/dev/null 2>&1; then
+    _err_out=$(dash -n "$_file" 2>&1)
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+      fail_check "syntax:dash:$_rel" "dash -n failed: $_err_out"
+      return 0
+    fi
+  fi
+  if command -v bash >/dev/null 2>&1; then
+    _err_out=$(bash -n "$_file" 2>&1)
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+      fail_check "syntax:bash:$_rel" "bash -n failed: $_err_out"
+      return 0
+    fi
+  fi
+  # Static POSIX bashism guard so `[[ ... ]]` or `arr=(...)` in a POSIX-compatible
+  # script fails closed even where `/bin/sh` is bash (macOS/Windows) or where `dash -n`
+  # treats `[[` as an external command name at parse time.
+  _bashism=$(awk '
+    { sub(/\r$/, "", $0) }
+    /^[ \t]*#/ { next }
+    /(^|[ \t;|&(])\[\[[ \t]/ { printf "line %d: bashism [[ ... ]]: %s\n", NR, $0; found=1; exit }
+    /^[ \t]*(local[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=\(/ { printf "line %d: bashism array assignment: %s\n", NR, $0; found=1; exit }
+    END { exit (found ? 1 : 0) }
+  ' "$_file" 2>&1)
+  _brc=$?
+  if [ "$_brc" -ne 0 ]; then
+    fail_check "syntax:posix-bashism:$_rel" "$_bashism"
+    return 0
+  fi
+  pass_check
+  return 0
+}
+
+# Static structural linter for Windows .bat / .cmd entrypoints on all OSes.
+lint_batch_file() {
+  _bfile=$1
+  _brel=$2
+  if [ ! -f "$_bfile" ]; then
+    fail_check "bat-lint:$_brel" "missing batch file $_bfile"
+    return 0
+  fi
+  _lint_msg=$(awk '
+    BEGIN { has_echo = 0; has_setlocal = 0; depth = 0; bad = 0 }
+    {
+      sub(/\r$/, "", $0)
+      low = tolower($0)
+      if (NR <= 5 && low ~ /^[ \t]*@echo[ \t]+off([ \t]|$)/) has_echo = 1
+      if (low ~ /^[ \t]*setlocal([ \t]|$)/) has_setlocal = 1
+      if (low ~ /^[ \t]*(rem([ \t]|$)|::)/) next
+      if (low ~ /^[ \t]*:[a-z0-9_.-]+([ \t]|$)/) {
+        lbl = low
+        sub(/^[ \t]*:/, "", lbl)
+        sub(/[ \t].*$/, "", lbl)
+        defs[lbl] = 1
+        next
+      }
+      rest = low
+      while (match(rest, /(^|[ \t(&|])(call|goto)[ \t]+:[a-z0-9_.-]+/)) {
+        seg = substr(rest, RSTART, RLENGTH)
+        sub(/^.*:/, "", seg)
+        if (seg != "eof") {
+          calls[seg] = NR
+        }
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      in_q = 0
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (c == "^") { i++; continue }
+        if (c == "\"") { in_q = 1 - in_q; continue }
+        if (!in_q) {
+          if (c == "(") {
+            depth++
+          } else if (c == ")") {
+            depth--
+            if (depth < 0) {
+              printf "unbalanced closing parenthesis on line %d; ", NR
+              bad++
+              depth = 0
+            }
+          }
+        }
+      }
+    }
+    END {
+      if (!has_echo) { printf "missing @echo off in top 5 lines; "; bad++ }
+      if (!has_setlocal) { printf "missing setlocal; "; bad++ }
+      if (depth != 0) { printf "unclosed parenthesis block (depth=%d); ", depth; bad++ }
+      for (c in calls) {
+        if (!(c in defs)) {
+          printf "unresolved call/goto :%s on line %d; ", c, calls[c]
+          bad++
+        }
+      }
+      exit (bad > 0 ? 1 : 0)
+    }
+  ' "$_bfile" 2>&1)
+  _lrc=$?
+  if [ "$_lrc" -ne 0 ]; then
+    fail_check "bat-lint:$_brel" "$_lint_msg"
+  else
+    pass_check
+  fi
+  return 0
+}
+
+verify_root() {
+  _vroot=$1
+  CHECKS=0
+  FAILS=0
+
+  _fast_verify="$HERE/fast-verify-bootstrap-scripts.shs"
+  _path_matrix_all="$HERE/check-bootstrap-path-matrix-all.shs"
+  if [ ! -f "$_fast_verify" ] || [ ! -f "$_path_matrix_all" ]; then
+    echo "ERROR — nothing was checked (missing companion check scripts in $HERE)"
+    return 2
+  fi
+
+  _is_full_tree=0
+  if [ "$IS_DEFAULT_ROOT" -eq 1 ] || [ -d "$_vroot/test/01_unit/scripts" ]; then
+    _is_full_tree=1
+  fi
+  if [ "$REQUIRE_UNIT_SUITES" -eq 1 ]; then
+    if [ -d "$_vroot/test/01_unit/scripts" ]; then
+      _is_full_tree=1
+    else
+      fail_check "unit-suites-dir" "--require-unit-suites set but missing $_vroot/test/01_unit/scripts"
+    fi
+  fi
+
+  _work=$(mktemp -d "${TMPDIR:-/tmp}/bs-unified-contract.XXXXXX" 2>/dev/null) || _work=$(mktemp -d) || {
+    echo "ERROR — nothing was checked (mktemp failed)"
+    return 2
+  }
+  ACTIVE_TMP_WORK="$_work"
+
+  # Poison heavy compiler/linker binaries during --path-check / --menu / deprecation probes
+  _poison="$_work/poison-bin"
+  mkdir -p "$_poison"
+  for _t in cargo rustc clang clang++ clang-cl lld ld.lld lld-link llvm-ar; do
+    cat > "$_poison/$_t" <<'EOF_POISON'
+#!/bin/sh
+echo "FATAL: heavy compiler/linker invoked during contract gate ($0 $*)" >&2
+exit 99
+EOF_POISON
+    chmod +x "$_poison/$_t"
+    cat > "$_poison/$_t.cmd" <<'EOF_POISON_CMD'
+@echo FATAL: heavy compiler/linker invoked during contract gate 1>&2
+@exit /b 97
+EOF_POISON_CMD
+  done
+
+  # -------------------------------------------------------------------------
+  # 1. Integrity, .csm Seals & Dual-Shell Syntax
+  # -------------------------------------------------------------------------
+  if [ "$_is_full_tree" -eq 1 ]; then
+    _fv_st_out=$(sh "$_fast_verify" --selftest --root "$_vroot" 2>&1)
+    _fv_st_rc=$?
+    if [ "$_fv_st_rc" -eq 0 ]; then
+      pass_check
+    else
+      fail_check "fast-verify-selftest" "fast-verify-bootstrap-scripts.shs --selftest failed (rc=$_fv_st_rc): $_fv_st_out"
+    fi
+  fi
+
+  _fv_out=$(sh "$_fast_verify" --root "$_vroot" 2>&1)
+  _fv_rc=$?
+  if [ "$_fv_rc" -eq 0 ]; then
+    pass_check
+  else
+    fail_check "fast-verify-full" "fast-verify-bootstrap-scripts.shs failed (rc=$_fv_rc): $_fv_out"
+  fi
+
+  _pol_sdn_rel="scripts/bootstrap/stage3-native-host-link-policy.sdn"
+  _pol_sdn="$_vroot/$_pol_sdn_rel"
+  _seal_policy="$_vroot/config/check/sdn_seal_policy.sdn"
+  if [ ! -f "$_pol_sdn" ]; then
+    fail_check "policy-sdn-missing" "missing $_pol_sdn_rel"
+  else
+    _pol_algo=$(csm_policy_algo_strict "$_seal_policy" "$_pol_sdn_rel")
+    if [ "$_pol_algo" = "xxh3" ]; then
+      pass_check
+    else
+      fail_check "policy-sdn-algo" "expected xxh3 policy for $_pol_sdn_rel, got '$_pol_algo'"
+    fi
+    # shellcheck disable=SC2046
+    _pol_state=$(csm_state "$_pol_sdn" $(csm_fs_tags "$_pol_sdn"))
+    if [ "$_pol_state" = "OK xxh3" ]; then
+      pass_check
+    else
+      fail_check "policy-sdn-csm" "$_pol_sdn_rel seal state is '$_pol_state' (expected 'OK xxh3')"
+    fi
+  fi
+
+  for _dual_rel in \
+    scripts/bootstrap/build-phase3-phase4.sh \
+    scripts/bootstrap/bootstrap-from-scratch.sh \
+    scripts/bootstrap/stage3-native-host-link-policy.shs \
+    scripts/bootstrap/continue-macos-self-host-chain.shs \
+    scripts/os/simpleos-native-build.shs \
+    scripts/bootstrap/p3-entry-groups.shs \
+    scripts/bootstrap/p3-selfbuild-stage3.shs \
+    scripts/bootstrap/p3-manual-link-stage3.shs \
+    scripts/bootstrap/p3-smoke-stage3.shs \
+    scripts/bootstrap/p3-targeted-stage2-build.shs \
+    scripts/bootstrap/run-provisional-phase3-phase4.shs \
+    scripts/bootstrap/build-phase4-direct-product.shs \
+    scripts/bootstrap/stage4-tools-only.sh; do
+    check_posix_and_bash_syntax "$_vroot/$_dual_rel" "$_dual_rel"
+  done
+
+  _win_sh="$_vroot/scripts/bootstrap/bootstrap-windows.sh"
+  if [ ! -f "$_win_sh" ]; then
+    fail_check "syntax:bootstrap-windows.sh" "missing $_win_sh"
+  elif command -v bash >/dev/null 2>&1; then
+    _win_sh_err=$(bash -n "$_win_sh" 2>&1)
+    _win_sh_rc=$?
+    if [ "$_win_sh_rc" -eq 0 ]; then
+      pass_check
+    else
+      fail_check "syntax:bash:bootstrap-windows.sh" "bash -n failed: $_win_sh_err"
+    fi
+  fi
+
+  # -------------------------------------------------------------------------
+  # 2. Full Cross-OS Path-Alive Matrix
+  # -------------------------------------------------------------------------
+  if [ "$SKIP_MATRIX" -eq 0 ]; then
+    if [ "$_is_full_tree" -eq 1 ]; then
+      _pm_out=$(sh "$_path_matrix_all" --root "$_vroot" 2>&1)
+      _pm_rc=$?
+    else
+      _pm_out=$(sh "$_path_matrix_all" --fast --root "$_vroot" 2>&1)
+      _pm_rc=$?
+    fi
+    if [ "$_pm_rc" -eq 0 ]; then
+      pass_check
+    else
+      fail_check "path-matrix-all" "check-bootstrap-path-matrix-all.shs failed (rc=$_pm_rc): $_pm_out"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 3. Phase Isolation, Modes, --menu (0..6 + invalid), --dry-run, & CLI Refusals
+    # -------------------------------------------------------------------------
+    _u_sh="$_vroot/scripts/bootstrap/build-phase3-phase4.sh"
+
+  # 3a. Phase isolation (--phase=p3a | p3 | p4 | all)
+  _out_p3a=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p3a 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "phase:p3a:rc" "exited $_rc"; fi
+  check_contains "$_out_p3a" "|phase=p3a|step=compile-bootstrap-stage3|" "phase:p3a" "emits p3a"
+  check_not_contains "$_out_p3a" "|phase=p3b|" "phase:p3a" "forbids p3b"
+  check_not_contains "$_out_p3a" "|phase=p4|" "phase:p3a" "forbids p4"
+
+  _out_p3=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p3 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "phase:p3:rc" "exited $_rc"; fi
+  check_contains "$_out_p3" "|phase=p3a|step=compile-bootstrap-stage3|" "phase:p3" "emits p3a"
+  check_contains "$_out_p3" "|phase=p3b|step=compile-bootstrap-stage3-selfhost|" "phase:p3" "emits p3b"
+  check_not_contains "$_out_p3" "|phase=p4|" "phase:p3" "forbids p4"
+
+  _out_p4=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p4 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "phase:p4:rc" "exited $_rc"; fi
+  check_contains "$_out_p4" "|phase=p4|step=cli-release|" "phase:p4" "emits p4 cli-release"
+  check_contains "$_out_p4" "|phase=p4|step=cli-debug-xray|" "phase:p4" "emits p4 cli-debug-xray"
+  check_not_contains "$_out_p4" "|phase=p3a|" "phase:p4" "forbids p3a"
+  check_not_contains "$_out_p4" "|phase=p3b|" "phase:p4" "forbids p3b"
+
+  _out_all=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=all 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "phase:all:rc" "exited $_rc"; fi
+  check_contains "$_out_all" "|phase=p3a|" "phase:all" "emits p3a"
+  check_contains "$_out_all" "|phase=p3b|" "phase:all" "emits p3b"
+  check_contains "$_out_all" "|phase=p4|" "phase:all" "emits p4"
+
+  # 3b. Compile modes (shard vs file), link modes, and internal linker gate toggles
+  _out_cm_shard=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p3 --compile-mode=shard 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "cmode:shard:rc" "exited $_rc: $_out_cm_shard"; fi
+  check_contains "$_out_cm_shard" "|phase=p3a|step=compile-bootstrap-stage3|compile_mode=shard|" "cmode:shard" "p3a shard"
+  check_contains "$_out_cm_shard" "|phase=p3b|step=compile-bootstrap-stage3-selfhost|compile_mode=shard|" "cmode:shard" "p3b shard"
+
+  _out_cm_file=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p3 --compile-mode=file 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "cmode:file:rc" "exited $_rc: $_out_cm_file"; fi
+  check_contains "$_out_cm_file" "|phase=p3a|step=compile-bootstrap-stage3|compile_mode=file|" "cmode:file" "p3a file"
+  check_contains "$_out_cm_file" "|phase=p3b|step=compile-bootstrap-stage3-selfhost|compile_mode=file|" "cmode:file" "p3b file"
+
+  _out_lm_dyn=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p3a --link-mode=dynlib 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "lmode:dynlib:rc" "exited $_rc: $_out_lm_dyn"; fi
+  check_contains "$_out_lm_dyn" "|phase=p3a|step=compile-bootstrap-stage3|compile_mode=shard|link_mode=dynlib|" "lmode:dynlib" "p3a link_mode=dynlib"
+
+  _out_lm_one=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p3a --link-mode=one-binary 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "lmode:one-binary:rc" "exited $_rc: $_out_lm_one"; fi
+  check_contains "$_out_lm_one" "|phase=p3a|step=compile-bootstrap-stage3|compile_mode=shard|link_mode=one-binary|" "lmode:one-binary" "p3a link_mode=one-binary"
+
+  _out_p4_dyn=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p4 --p4-link-mode=dynload 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "p4lmode:dynload:rc" "exited $_rc: $_out_p4_dyn"; fi
+  check_contains "$_out_p4_dyn" "|phase=p4|step=cli-release|compile_mode=shard|link_mode=dynlib|" "p4lmode:dynload" "p4 dynload label"
+
+  _out_p4_one=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=p4 --p4-link-mode=one-binary 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "p4lmode:one-binary:rc" "exited $_rc: $_out_p4_one"; fi
+  check_contains "$_out_p4_one" "|phase=p4|step=cli-release|compile_mode=shard|link_mode=one-binary|" "p4lmode:one-binary" "p4 one-binary label"
+
+  _out_ilg_on=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=linux-x86_64 --phase=all --with-internal-linker-gate 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "ilg:on:rc" "exited $_rc: $_out_ilg_on"; fi
+  check_contains "$_out_ilg_on" "|phase=p3b|step=internal-linker-gate|" "ilg:on" "p3b internal-linker-gate enabled"
+  check_contains "$_out_ilg_on" "|phase=p4|step=cli-internal-linker|" "ilg:on" "p4 cli-internal-linker enabled"
+
+  _out_ilg_off=$(PATH="$_poison:$PATH" sh "$_u_sh" --path-check --simulate-host=darwin-aarch64 --phase=all --no-internal-linker-gate 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "ilg:off:rc" "exited $_rc: $_out_ilg_off"; fi
+  check_not_contains "$_out_ilg_off" "step=internal-linker-gate" "ilg:off" "p3b internal-linker-gate suppressed"
+  check_not_contains "$_out_ilg_off" "step=cli-internal-linker" "ilg:off" "p4 cli-internal-linker suppressed"
+
+  # 3c. --dry-run mode checks
+  _dry_one=$(PATH="$_poison:$PATH" sh "$_u_sh" --dry-run --simulate-host=darwin-aarch64 --phase=all --link-mode=one-binary --p4-link-mode=one-binary --backend=cranelift 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "dry-run:one-binary:rc" "exited $_rc"; fi
+  check_contains "$_dry_one" "LINK_MODE=one-binary" "dry-run:lmode" "LINK_MODE=one-binary"
+  check_contains "$_dry_one" "P4_LINK_MODE=one-binary" "dry-run:p4lmode" "P4_LINK_MODE=one-binary"
+  check_contains "$_dry_one" "--backend cranelift" "dry-run:backend" "cranelift forwarded"
+  check_contains "$_dry_one" "--mode one-binary" "dry-run:mode-flag" "one-binary mode flag"
+
+  # 3d. Interactive --menu via stdin for 0..6 and invalid 9
+  _m0=$(printf '0\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:0:rc" "exited $_rc"; fi
+  check_contains "$_m0" "Exiting phased build menu." "menu:0" "clean exit message"
+  check_not_contains "$_m0" "PATH_ACTION|" "menu:0" "no actions executed on exit"
+
+  _m1=$(printf '1\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:1:rc" "exited $_rc"; fi
+  check_contains "$_m1" "|phase=p3a|" "menu:1" "selects p3a"
+  check_not_contains "$_m1" "|phase=p3b|" "menu:1" "forbids p3b"
+  check_not_contains "$_m1" "|phase=p4|" "menu:1" "forbids p4"
+
+  _m2=$(printf '2\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:2:rc" "exited $_rc"; fi
+  check_contains "$_m2" "|phase=p3a|" "menu:2" "selects p3a"
+  check_contains "$_m2" "|phase=p3b|" "menu:2" "selects p3b"
+  check_not_contains "$_m2" "|phase=p4|" "menu:2" "forbids p4"
+
+  _m3=$(printf '3\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:3:rc" "exited $_rc"; fi
+  check_contains "$_m3" "|phase=p4|" "menu:3" "selects p4"
+  check_not_contains "$_m3" "|phase=p3a|" "menu:3" "forbids p3a"
+  check_not_contains "$_m3" "|phase=p3b|" "menu:3" "forbids p3b"
+
+  _m4=$(printf '4\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:4:rc" "exited $_rc"; fi
+  check_contains "$_m4" "|phase=p3a|" "menu:4" "selects p3a"
+  check_contains "$_m4" "|phase=p3b|" "menu:4" "selects p3b"
+  check_contains "$_m4" "|phase=p4|" "menu:4" "selects p4"
+
+  _m5=$(printf '5\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:5:rc" "exited $_rc"; fi
+  check_contains "$_m5" "|phase=p3a|step=compile-bootstrap-stage3|compile_mode=file|" "menu:5" "selects p3 file mode"
+  check_contains "$_m5" "|phase=p3b|step=compile-bootstrap-stage3-selfhost|compile_mode=file|" "menu:5" "selects p3b file mode"
+  check_not_contains "$_m5" "|phase=p4|" "menu:5" "forbids p4"
+
+  _m6=$(printf '6\n' | PATH="$_poison:$PATH" SIMPLE_P3_COMPILE_MODE=file sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "menu:6:rc" "exited $_rc"; fi
+  check_contains "$_m6" "|phase=p3a|step=compile-bootstrap-stage3|compile_mode=shard|" "menu:6" "selects p3 shard mode"
+  check_contains "$_m6" "|phase=p3b|step=compile-bootstrap-stage3-selfhost|compile_mode=shard|" "menu:6" "selects p3b shard mode"
+  check_not_contains "$_m6" "|phase=p4|" "menu:6" "forbids p4"
+
+  printf '9\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 >"$_work/m9.out" 2>&1
+  _rc=$?
+  if [ "$_rc" -eq 2 ]; then
+    pass_check
+  else
+    fail_check "menu:9:invalid" "expected exit 2 for invalid menu choice 9, got $_rc"
+  fi
+
+  # 3e. CLI Refusal Matrix (all must exit 2)
+  PATH="$_poison:$PATH" sh "$_u_sh" --simulate-host=darwin-aarch64 --non-interactive </dev/null >"$_work/ref_nophase.out" 2>&1
+  _rc=$?
+  if [ "$_rc" -eq 2 ]; then
+    pass_check
+  else
+    fail_check "refusal:missing-phase" "expected exit 2 on non-interactive missing --phase, got $_rc"
+  fi
+
+  for _bad_arg in \
+    "--phase=bogus" \
+    "--compile-mode=bogus" \
+    "--win-config=bogus" \
+    "--link-mode=bogus" \
+    "--p4-link-mode=bogus" \
+    "--backend=bogus" \
+    "--unknown-bogus-flag"; do
+    PATH="$_poison:$PATH" sh "$_u_sh" --simulate-host=darwin-aarch64 --path-check "$_bad_arg" </dev/null >"$_work/ref.out" 2>&1
+    _rc=$?
+    if [ "$_rc" -eq 2 ]; then
+      pass_check
+    else
+      fail_check "refusal:$_bad_arg" "expected exit 2 for $_bad_arg, got $_rc"
+    fi
+  done
+  fi
+
+  # -------------------------------------------------------------------------
+  # 4. All 10 Legacy Script Deprecation Guards
+  # -------------------------------------------------------------------------
+  for _p3_legacy in \
+    scripts/bootstrap/p3-entry-groups.shs \
+    scripts/bootstrap/p3-selfbuild-stage3.shs \
+    scripts/bootstrap/p3-manual-link-stage3.shs \
+    scripts/bootstrap/p3-smoke-stage3.shs \
+    scripts/bootstrap/p3-targeted-stage2-build.shs; do
+    _lfile="$_vroot/$_p3_legacy"
+    if [ ! -f "$_lfile" ]; then
+      fail_check "legacy:$_p3_legacy" "missing $_lfile"
+      continue
+    fi
+    _lout=$(unset SIMPLE_ALLOW_LEGACY_P3_SCRIPT; PATH="$_poison:$PATH" sh "$_lfile" </dev/null 2>&1)
+    _lrc=$?
+    if [ "$_lrc" -eq 0 ]; then
+      pass_check
+    else
+      fail_check "legacy:$_p3_legacy:rc" "expected exit 0, got $_lrc"
+    fi
+    check_contains "$_lout" "DEPRECATED: Do not use" "legacy:$_p3_legacy" "deprecation banner"
+    check_contains "$_lout" "--compile-mode=shard" "legacy:$_p3_legacy" "shard guidance"
+    check_contains "$_lout" "--compile-mode=file" "legacy:$_p3_legacy" "file guidance"
+  done
+
+  for _interactive_legacy in \
+    scripts/bootstrap/run-provisional-phase3-phase4.shs \
+    scripts/bootstrap/build-phase4-direct-product.shs \
+    scripts/bootstrap/stage4-tools-only.sh \
+    scripts/bootstrap/bootstrap-windows.sh \
+    scripts/bootstrap/bootstrap-windows.cmd; do
+    _ifile="$_vroot/$_interactive_legacy"
+    if [ ! -f "$_ifile" ]; then
+      fail_check "legacy-static:$_interactive_legacy" "missing $_ifile"
+      continue
+    fi
+    _itext=$(tr -d '\r' < "$_ifile")
+    check_contains "$_itext" "DEPRECATED: Do not use" "legacy-static:$_interactive_legacy" "deprecation banner"
+    check_contains "$_itext" "build-phase3-phase4" "legacy-static:$_interactive_legacy" "unified builder reference"
+    check_contains "$_itext" "--compile-mode=shard" "legacy-static:$_interactive_legacy" "shard guidance"
+    check_contains "$_itext" "--compile-mode=file" "legacy-static:$_interactive_legacy" "file guidance"
+  done
+
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 >/dev/null 2>&1; then
+    if python3 -c 'import pty' >/dev/null 2>&1; then
+      for _pty_pair in \
+        "sh:scripts/bootstrap/run-provisional-phase3-phase4.shs" \
+        "sh:scripts/bootstrap/build-phase4-direct-product.shs" \
+        "sh:scripts/bootstrap/stage4-tools-only.sh" \
+        "bash:scripts/bootstrap/bootstrap-windows.sh"; do
+        _p_interp=${_pty_pair%%:*}
+        _p_rel=${_pty_pair#*:}
+        _p_file="$_vroot/$_p_rel"
+        [ -f "$_p_file" ] || continue
+        command -v "$_p_interp" >/dev/null 2>&1 || continue
+        _pty_out=$(PATH="$_poison:$PATH" python3 -c '
+import os, pty, select, subprocess, sys
+interp, scr = sys.argv[1], sys.argv[2]
+m, s = pty.openpty()
+env = dict(os.environ)
+env.pop("CI", None)
+env.pop("SIMPLE_NONINTERACTIVE", None)
+p = subprocess.Popen([interp, scr], stdin=s, stdout=s, stderr=s, env=env, close_fds=True)
+os.close(s)
+os.write(m, b"\n")
+out = bytearray()
+while True:
+    r, _, _ = select.select([m], [], [], 5.0)
+    if not r:
+        break
+    try:
+        chunk = os.read(m, 4096)
+        if not chunk:
+            break
+        out.extend(chunk)
+    except OSError:
+        break
+os.close(m)
+rc = p.wait(timeout=5)
+sys.stdout.write(out.decode("utf-8", "replace"))
+sys.exit(rc)
+' "$_p_interp" "$_p_file" 2>&1)
+        _pty_rc=$?
+        if [ "$_pty_rc" -eq 0 ]; then
+          pass_check
+        else
+          fail_check "legacy-pty:$_p_rel:rc" "PTY no-arg invocation exited $_pty_rc: $_pty_out"
+        fi
+        check_contains "$_pty_out" "DEPRECATED: Do not use" "legacy-pty:$_p_rel" "live PTY deprecation notice"
+      done
+    fi
+  fi
+
+  # -------------------------------------------------------------------------
+  # 5. Both Unit Contract Suites (when full/sparse tree has test/01_unit/scripts)
+  # -------------------------------------------------------------------------
+  if [ "$_is_full_tree" -eq 1 ]; then
+    for _unit_rel in \
+      test/01_unit/scripts/stage3_native_host_link_policy_test.shs \
+      test/01_unit/scripts/bootstrap_skip_p1_p2_and_path_check_test.shs; do
+      _ufile="$_vroot/$_unit_rel"
+      if [ ! -f "$_ufile" ]; then
+        fail_check "unit:$_unit_rel" "missing required unit suite $_ufile"
+        continue
+      fi
+      _uout=$(sh "$_ufile" 2>&1)
+      _urc=$?
+      if [ "$_urc" -eq 0 ]; then
+        pass_check
+      else
+        fail_check "unit:$_unit_rel" "exited $_urc: $_uout"
+      fi
+    done
+  fi
+
+  # -------------------------------------------------------------------------
+  # 6. Windows Batch Static Lint (All OSes) + Native cmd.exe Matrix (Windows)
+  # -------------------------------------------------------------------------
+  _bat_p34="$_vroot/scripts/bootstrap/build-phase3-phase4.bat"
+  _cmd_win="$_vroot/scripts/bootstrap/bootstrap-windows.cmd"
+  _cmd_simple="$_vroot/bin/simple.cmd"
+
+  lint_batch_file "$_bat_p34" "scripts/bootstrap/build-phase3-phase4.bat"
+  lint_batch_file "$_cmd_win" "scripts/bootstrap/bootstrap-windows.cmd"
+  lint_batch_file "$_cmd_simple" "bin/simple.cmd"
+
+  if [ -f "$_bat_p34" ]; then
+    _bat_txt=$(tr -d '\r' < "$_bat_p34")
+    check_contains "$_bat_txt" "MSYS2_ARG_CONV_EXCL=" "bat:p34:msys-excl" "MSYS2_ARG_CONV_EXCL set"
+    check_contains "$_bat_txt" "/msvc" "bat:p34:excl-msvc" "/msvc in MSYS2_ARG_CONV_EXCL"
+    check_contains "$_bat_txt" "/mingw" "bat:p34:excl-mingw" "/mingw in MSYS2_ARG_CONV_EXCL"
+    check_contains "$_bat_txt" "--win-config=" "bat:p34:excl-wincfg" "--win-config= in MSYS2_ARG_CONV_EXCL"
+    check_contains "$_bat_txt" "CL=" "bat:p34:excl-cl" "CL= in MSYS2_ARG_CONV_EXCL"
+    check_contains "$_bat_txt" 'System32\bash.exe' "bat:p34:wsl-sys32" "WSL System32 bash.exe exclusion"
+    check_contains "$_bat_txt" 'WindowsApps\bash.exe' "bat:p34:wsl-winapps" "WSL WindowsApps bash.exe exclusion"
+    check_contains "$_bat_txt" "%*" "bat:p34:arg-forward" "%* argument forwarding"
+  fi
+
+  if [ -f "$_cmd_win" ]; then
+    _cwin_txt=$(tr -d '\r' < "$_cmd_win")
+    check_contains "$_cwin_txt" 'System32\bash.exe' "cmd:win:wsl-sys32" "WSL System32 bash.exe exclusion"
+    check_contains "$_cwin_txt" 'WindowsApps\bash.exe' "cmd:win:wsl-winapps" "WSL WindowsApps bash.exe exclusion"
+    check_contains "$_cwin_txt" "%*" "cmd:win:arg-forward" "%* argument forwarding"
+  fi
+
+  if [ -f "$_cmd_simple" ]; then
+    _csim_txt=$(tr -d '\r' < "$_cmd_simple")
+    check_contains "$_csim_txt" "%*" "cmd:simple:arg-forward" "%* argument forwarding"
+    check_contains "$_csim_txt" 'scripts\bootstrap\build-phase3-phase4.bat' "cmd:simple:p34-hint" "build-phase3-phase4.bat guidance"
+  fi
+
+  if [ "$SKIP_MATRIX" -eq 0 ] && [ "${OS:-}" = "Windows_NT" ] && command -v cmd.exe >/dev/null 2>&1 && [ -f "$_bat_p34" ] && [ -f "$_cmd_win" ]; then
+    # Run from $_vroot with relative backslash paths and unquoted separate tokens so MSYS2
+    # spawnve never injects literal '\"' into cmd.exe's command line.
+
+    # 6a. mingw default
+    _w1=$(cd "$_vroot" && unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\build-phase3-phase4.bat' --simulate-host=windows-x86_64 --phase=all --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:mingw-default:rc" "exited $_rc: $_w1"; fi
+    check_contains "$_w1" "|platform=windows|cpu=x86_64|win_config=mingw|" "win-cmd:mingw-default" "mingw default"
+    check_contains "$_w1" "target=x86_64-pc-windows-gnu|actions=" "win-cmd:mingw-default" "gnu target"
+
+    # 6b. /msvc slash flag + file compile mode
+    _w2=$(cd "$_vroot" && unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\build-phase3-phase4.bat' /msvc --simulate-host=windows-x86_64 --phase=p3 --compile-mode=file --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:slash-msvc:rc" "exited $_rc: $_w2"; fi
+    check_contains "$_w2" "|win_config=msvc|phase=p3a|step=compile-bootstrap-stage3|compile_mode=file|" "win-cmd:slash-msvc" "/msvc + file mode"
+    check_not_contains "$_w2" "|phase=p4|" "win-cmd:slash-msvc" "phase=p3 forbids p4"
+    check_contains "$_w2" "target=x86_64-pc-windows-msvc|actions=" "win-cmd:slash-msvc" "msvc target"
+
+    # 6c. --msvc --phase=p3 --dry-run checking CL="/TC" and MSYS2_ENV_CONV_EXCL="CL="
+    _w3=$(cd "$_vroot" && unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\build-phase3-phase4.bat' --msvc --simulate-host=windows-x86_64 --phase=p3 --dry-run </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:dry-msvc:rc" "exited $_rc: $_w3"; fi
+    check_contains "$_w3" 'export CL="/TC"' "win-cmd:dry-msvc" "CL=/TC exported"
+    check_contains "$_w3" 'export MSYS2_ENV_CONV_EXCL="CL="' "win-cmd:dry-msvc" "MSYS2_ENV_CONV_EXCL=CL= exported"
+
+    # 6d. /mingw --simulate-host=windows-aarch64 --phase=p4 --path-check
+    _w4=$(cd "$_vroot" && unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\build-phase3-phase4.bat' /mingw --simulate-host=windows-aarch64 --phase=p4 --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:arm64-p4:rc" "exited $_rc: $_w4"; fi
+    check_contains "$_w4" "|platform=windows|cpu=aarch64|win_config=mingw|phase=p4|step=cli-release|" "win-cmd:arm64-p4" "windows-aarch64 p4"
+    check_not_contains "$_w4" "|phase=p3a|" "win-cmd:arm64-p4" "phase=p4 forbids p3a"
+
+    # 6e. SIMPLE_WIN_CONFIG=msvc env + /mingw CLI override
+    _w5a=$(cd "$_vroot" && SIMPLE_WIN_CONFIG=msvc MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\build-phase3-phase4.bat' --simulate-host=windows-x86_64 --phase=p3a --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:env-msvc:rc" "exited $_rc: $_w5a"; fi
+    check_contains "$_w5a" "|win_config=msvc|phase=p3a|" "win-cmd:env-msvc" "SIMPLE_WIN_CONFIG=msvc honored"
+
+    _w5b=$(cd "$_vroot" && SIMPLE_WIN_CONFIG=msvc MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\build-phase3-phase4.bat' /mingw --simulate-host=windows-x86_64 --phase=p3a --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:env-override:rc" "exited $_rc: $_w5b"; fi
+    check_contains "$_w5b" "|win_config=mingw|phase=p3a|" "win-cmd:env-override" "/mingw overrides SIMPLE_WIN_CONFIG=msvc"
+
+    # 6f. bootstrap-windows.cmd (--path-check and --msvc --compile-mode=file --path-check)
+    _w6a=$(cd "$_vroot" && unset SIMPLE_WIN_CONFIG SIMPLE_WINDOWS_ABI SIMPLE_P3_COMPILE_MODE && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\bootstrap-windows.cmd' --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:bw-default:rc" "exited $_rc: $_w6a"; fi
+    check_contains "$_w6a" "PATH_ACTION|script=bootstrap-windows.sh|platform=windows|" "win-cmd:bw-default" "bootstrap-windows.cmd action"
+    check_contains "$_w6a" "|win_config=mingw|phase=init|step=windows-toolchain-select|" "win-cmd:bw-default" "bootstrap-windows.cmd mingw default"
+
+    _w6b=$(cd "$_vroot" && unset SIMPLE_WIN_CONFIG SIMPLE_WINDOWS_ABI SIMPLE_P3_COMPILE_MODE && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' cmd.exe /d /c call 'scripts\bootstrap\bootstrap-windows.cmd' --msvc --compile-mode=file --path-check </dev/null 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "win-cmd:bw-msvc-file:rc" "exited $_rc: $_w6b"; fi
+    check_contains "$_w6b" "|win_config=msvc|phase=init|step=windows-toolchain-select|compile_mode=file|" "win-cmd:bw-msvc-file" "bootstrap-windows.cmd msvc + file"
+  fi
+
+  rm -rf "$_work"
+  ACTIVE_TMP_WORK=""
+
+  if [ "$CHECKS" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 contract checks executed)"
+    return 2
+  fi
+
+  if [ "$FAILS" -gt 0 ]; then
+    echo "FAIL — bootstrap unified scripts contract failed ($FAILS/$CHECKS checks failed)"
+    return 1
+  fi
+
+  echo "PASS — bootstrap unified scripts contract verified ($CHECKS checks)"
+  return 0
+}
+
+run_selftest() {
+  _st=$(csm_mktemp_dir) || {
+    echo "ERROR — nothing was checked (mktemp failed in selftest)"
+    return 2
+  }
+  ACTIVE_TMP_ST="$_st"
+  mkdir -p \
+    "$_st/bin" \
+    "$_st/config/check" \
+    "$_st/doc/04_architecture/compiler/plugin_arch" \
+    "$_st/scripts/bootstrap/lib" \
+    "$_st/scripts/check/lib" \
+    "$_st/scripts/lib" \
+    "$_st/scripts/os"
+
+  # Provide deterministic xxhsum shim ONLY if host lacks native xxhsum / bin/simple
+  _used_fake_xxh=0
+  if ! csm_hasher_kat xxh3 2>/dev/null; then
+    _used_fake_xxh=1
+    mkdir -p "$_st/fake-xxh"
+    cat > "$_st/fake-xxh/xxhsum" <<'EOF_XXH'
+#!/bin/sh
+bytes=$(wc -c | tr -d ' ')
+if [ "$bytes" = "0" ]; then
+  echo "XXH3_2d06800538d394c2  stdin"
+  exit 0
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  h=$(sha256sum | cut -c1-16)
+else
+  h=$(shasum -a 256 | cut -c1-16)
+fi
+echo "XXH3_${h}  stdin"
+EOF_XXH
+    chmod +x "$_st/fake-xxh/xxhsum"
+    _fake_xxh_path="$_st/fake-xxh"
+    if command -v cygpath >/dev/null 2>&1; then
+      _fake_xxh_path=$(cygpath -u "$_fake_xxh_path")
+    fi
+    PATH="$_fake_xxh_path:$PATH"
+    export PATH
+  fi
+
+  for _rel in \
+    bin/simple.cmd \
+    config/check/bootstrap_protected_scripts.sdn \
+    doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn \
+    scripts/bootstrap/build-phase3-phase4.sh \
+    scripts/bootstrap/build-phase3-phase4.bat \
+    scripts/bootstrap/stage3-native-host-link-policy.shs \
+    scripts/bootstrap/stage3-native-host-link-policy.sdn \
+    scripts/bootstrap/bootstrap-from-scratch.sh \
+    scripts/bootstrap/bootstrap-windows.sh \
+    scripts/bootstrap/bootstrap-windows.cmd \
+    scripts/bootstrap/bootstrap-windows-cl-mode.shs \
+    scripts/bootstrap/bootstrap-seed-stop-policy.shs \
+    scripts/bootstrap/bootstrap-cache-policy.shs \
+    scripts/bootstrap/bootstrap-materialized-startup.shs \
+    scripts/bootstrap/bootstrap-build-jobs-policy.shs \
+    scripts/bootstrap/continue-macos-self-host-chain.shs \
+    scripts/bootstrap/lib/centralized-storage.shs \
+    scripts/bootstrap/lib/host-bootstrap-settings.shs \
+    scripts/bootstrap/lib/host-shared-cache.shs \
+    scripts/check/lib/bootstrap-planner-admission-bound.shs \
+    scripts/check/lib/portable-session-exec.pl \
+    scripts/lib/storage-roots.shs \
+    scripts/os/simpleos-native-build.shs \
+    scripts/bootstrap/p3-entry-groups.shs \
+    scripts/bootstrap/p3-selfbuild-stage3.shs \
+    scripts/bootstrap/p3-manual-link-stage3.shs \
+    scripts/bootstrap/p3-smoke-stage3.shs \
+    scripts/bootstrap/p3-targeted-stage2-build.shs \
+    scripts/bootstrap/run-provisional-phase3-phase4.shs \
+    scripts/bootstrap/build-phase4-direct-product.shs \
+    scripts/bootstrap/stage4-tools-only.sh; do
+    if [ ! -f "$ROOT_DIR/$_rel" ]; then
+      rm -rf "$_st"
+      echo "ERROR — nothing was checked (selftest missing fixture input $ROOT_DIR/$_rel)"
+      return 2
+    fi
+    cp "$ROOT_DIR/$_rel" "$_st/$_rel"
+  done
+
+  for _csm_src in \
+    "$ROOT_DIR"/config/check/bootstrap_protected_scripts.*.csm \
+    "$ROOT_DIR"/scripts/bootstrap/stage3-native-host-link-policy.*.csm; do
+    if [ -e "$_csm_src" ]; then
+      case "$_csm_src" in
+        *bootstrap_protected_scripts*) cp "$_csm_src" "$_st/config/check/" ;;
+        *stage3-native-host-link-policy*) cp "$_csm_src" "$_st/scripts/bootstrap/" ;;
+      esac
+    fi
+  done
+
+  cat > "$_st/config/check/sdn_seal_policy.sdn" <<'EOF_POL'
+seal_policy |glob, algo|
+    config/check/bootstrap_protected_scripts.sdn, xxh3
+    scripts/bootstrap/stage3-native-host-link-policy.sdn, xxh3
+EOF_POL
+  csm_seal_file "$_st/config/check/sdn_seal_policy.sdn" xxh3 >/dev/null || {
+    rm -rf "$_st"
+    echo "ERROR — nothing was checked (selftest failed to seal sdn_seal_policy.sdn)"
+    return 2
+  }
+
+  if [ "$_used_fake_xxh" -eq 1 ]; then
+    csm_seal_file "$_st/config/check/bootstrap_protected_scripts.sdn" xxh3 >/dev/null
+    csm_seal_file "$_st/scripts/bootstrap/stage3-native-host-link-policy.sdn" xxh3 >/dev/null
+  fi
+
+  _st_fails=0
+
+  # (0) Clean fixture must PASS (exit 0)
+  _st_out=$(sh "$SELF_SCRIPT" --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 0 ]; then
+    echo "selftest FAIL (clean): expected exit 0, got $_st_rc: $_st_out"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  # (a1) Missing .csm on stage3-native-host-link-policy.sdn must FAIL (exit 1)
+  mkdir -p "$_st/bak-csm"
+  mv "$_st"/scripts/bootstrap/stage3-native-host-link-policy.*.csm "$_st/bak-csm/"
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ]; then
+    echo "selftest FAIL (a1-missing-csm): expected exit 1, got $_st_rc"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  # (a2) Corrupted .csm on stage3-native-host-link-policy.sdn must FAIL (exit 1)
+  : > "$_st/scripts/bootstrap/stage3-native-host-link-policy.xxh3_0000000000000000.csm"
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ]; then
+    echo "selftest FAIL (a2-corrupt-csm): expected exit 1, got $_st_rc"
+    _st_fails=$((_st_fails + 1))
+  fi
+  rm -f "$_st"/scripts/bootstrap/stage3-native-host-link-policy.*.csm
+  mv "$_st/bak-csm"/stage3-native-host-link-policy.*.csm "$_st/scripts/bootstrap/"
+
+  # (b) POSIX sh -n / bashism (`[[ 1 == 1 ]]`) injected into a .shs script must FAIL (exit 1)
+  cp "$_st/scripts/bootstrap/p3-smoke-stage3.shs" "$_st/p3-smoke.bak"
+  printf '\nif [[ 1 == 1 ]]; then echo bad; fi\n' >> "$_st/scripts/bootstrap/p3-smoke-stage3.shs"
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ]; then
+    echo "selftest FAIL (b1-bashism): expected exit 1 on [[ 1 == 1 ]], got $_st_rc"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  cp "$_st/p3-smoke.bak" "$_st/scripts/bootstrap/p3-smoke-stage3.shs"
+  printf '\nif [ 1 -eq 1 ]; then\n' >> "$_st/scripts/bootstrap/p3-smoke-stage3.shs"
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ]; then
+    echo "selftest FAIL (b2-sh-syntax): expected exit 1 on unclosed if, got $_st_rc"
+    _st_fails=$((_st_fails + 1))
+  fi
+  mv "$_st/p3-smoke.bak" "$_st/scripts/bootstrap/p3-smoke-stage3.shs"
+
+  # (c) Stripping `DEPRECATED: Do not use` banner from a legacy script must FAIL (exit 1)
+  cp "$_st/scripts/bootstrap/p3-smoke-stage3.shs" "$_st/p3-smoke.bak"
+  sed 's/DEPRECATED: Do not use/NOTICE: legacy wrapper/g' "$_st/p3-smoke.bak" > "$_st/scripts/bootstrap/p3-smoke-stage3.shs"
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ]; then
+    echo "selftest FAIL (c-stripped-deprecation): expected exit 1, got $_st_rc"
+    _st_fails=$((_st_fails + 1))
+  fi
+  mv "$_st/p3-smoke.bak" "$_st/scripts/bootstrap/p3-smoke-stage3.shs"
+
+  # (d) Unresolved `call :missing_label` in .bat must FAIL (exit 1) via static batch lint
+  cp "$_st/scripts/bootstrap/build-phase3-phase4.bat" "$_st/p34.bat.bak"
+  cp "$_st/config/check/bootstrap_protected_scripts.sdn" "$_st/mf.sdn.bak"
+  mkdir -p "$_st/bak-mf-csm"
+  cp "$_st"/config/check/bootstrap_protected_scripts.*.csm "$_st/bak-mf-csm/"
+  awk '
+    /^setlocal/ { print; print "if defined NEVER_SET call :missing_label"; next }
+    { print }
+  ' "$_st/p34.bat.bak" > "$_st/scripts/bootstrap/build-phase3-phase4.bat"
+  sh "$HERE/fast-verify-bootstrap-scripts.shs" --update-manifest --root "$_st" >/dev/null 2>&1
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ] || ! printf '%s\n' "$_st_out" | grep -Fq "missing_label"; then
+    echo "selftest FAIL (d-unresolved-bat-label): expected exit 1 naming missing_label, got rc=$_st_rc: $_st_out"
+    _st_fails=$((_st_fails + 1))
+  fi
+  mv "$_st/p34.bat.bak" "$_st/scripts/bootstrap/build-phase3-phase4.bat"
+  mv "$_st/mf.sdn.bak" "$_st/config/check/bootstrap_protected_scripts.sdn"
+  rm -f "$_st"/config/check/bootstrap_protected_scripts.*.csm
+  mv "$_st/bak-mf-csm"/bootstrap_protected_scripts.*.csm "$_st/config/check/"
+
+  # (e) --require-unit-suites must FAIL (exit 1) when test/01_unit/scripts is absent
+  _st_out=$(sh "$SELF_SCRIPT" --skip-matrix --root "$_st" --require-unit-suites 2>&1)
+  _st_rc=$?
+  if [ "$_st_rc" -ne 1 ] || ! printf '%s\n' "$_st_out" | grep -Fq "unit-suites-dir"; then
+    echo "selftest FAIL (e-require-unit-suites): expected exit 1 naming unit-suites-dir, got rc=$_st_rc: $_st_out"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  rm -rf "$_st"
+  ACTIVE_TMP_ST=""
+
+  if [ "$_st_fails" -gt 0 ]; then
+    echo "FAIL — check-bootstrap-unified-scripts-contract selftest failed ($_st_fails/8 fixtures failed)"
+    return 1
+  fi
+
+  echo "PASS — check-bootstrap-unified-scripts-contract selftest verified (8/8 fixtures)"
+  return 0
+}
+
+case "$MODE" in
+  selftest)
+    run_selftest
+    exit $?
+    ;;
+  full)
+    verify_root "$ROOT_DIR"
+    exit $?
+    ;;
+esac
