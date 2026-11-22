@@ -588,6 +588,35 @@ fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
         font_milli_of(st.font_size, st.font_size_milli), 1
     )
 
+# Content-box width of an auto-width `<input>`: a push button (`submit`,
+# `button`, `reset`) is sized from its label like a `<button>`, every other
+# type from its `size` columns. Chrome 159, 13.333px Liberation Sans:
+# `value="Go"` 33.78, `type=submit` 57.48, `type=reset` 50.83, `type=button`
+# with no value 16 (getBoundingClientRect), painted 34 / 57 / 51 / 16 px.
+# reason: column count in, CSS px out; layout scalars.
+# @allow(primitive_api)
+pub fn input_auto_content_w(node: HNode, st: Style, cols: i32) -> i32:
+    val kind = attr_value(node.attrs_raw, "type").trim().lower()
+    if node.tag != "input" or not (kind == "submit" or kind == "button" or kind == "reset"):
+        return form_control_intrinsic_content_w(node, st, cols)
+    var label = attr_value(node.attrs_raw, "value")
+    if label == "" and kind == "submit":
+        label = "Submit"
+    elif label == "" and kind == "reset":
+        label = "Reset"
+    if label == "":
+        return 0
+    # The label at the control's real (13.333 px) size, in milli-px: `Submit`
+    # 41.481 (Chrome 41.484), where the oversampled whole-px measure reads
+    # 41.500 and rounds the wrong way.
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language_milli(family, label, font_milli_of(st.font_size, st.font_size_milli), "")
+    if not metrics.valid or metrics.width_milli < 0:
+        return form_control_label_width_px(st, label)
+    # The box keeps the label's fractional width; a box at a whole-px x
+    # paints it rounded (57.48 -> 57), unlike a `<select>`'s ceiled label.
+    (metrics.width_milli + 500) / 1000
+
 # reason: column count and device scale in, device px out; all layout scalars.
 # @allow(primitive_api)
 pub fn form_control_intrinsic_content_device_w(node: HNode, st: Style, cols: i32, k: i32) -> i32:
@@ -764,7 +793,7 @@ fn text_control_auto_outer_w(node: HNode, st: Style) -> i32:
         if input_type == "hidden":
             return 0
     # min-width / max-width clamp it, as they clamp the laid-out control.
-    constrained_outer_width(node, st, form_control_intrinsic_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r)
+    constrained_outer_width(node, st, input_auto_content_w(node, st, form_control_cols(node)) + st.pad_l + st.pad_r + st.border_l + st.border_r)
 
 # Max-content width of a flex item, used as its flex base size when it has
 # neither `flex-basis` nor a `width` (CSS: `flex-basis: content`).
