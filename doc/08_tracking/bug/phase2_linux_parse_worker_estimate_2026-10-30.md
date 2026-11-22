@@ -72,3 +72,25 @@ not full CLI success, a guarantee for later phases, or a causal percentage
 memory/performance improvement: the combined source contains other changes.
 The reduced parse pool trades concurrency for admission headroom; throughput
 remains unqualified. Independent Astra source review found no P0/P1/P2 issues.
+
+## Re-check 2026-11-22 (aarch64 Linux) — still verification-pending
+
+- `sh test/01_unit/scripts/product_frontend_worker_estimates_test.shs` ->
+  `PASS: measured product worker estimates, unchanged caps, and Windows owner` (rc 0).
+- The price is live in production: `scripts/bootstrap/lib/product-frontend-policy.shs:48`
+  exports `SIMPLE_PARSE_SHARD_WORKER_KB=25165824` on Linux, read by
+  `native_build_main.spl:833`. The integ25 Stage 2 compiler-CLI verification
+  (compiler `ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`,
+  `stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/summary.env`)
+  records `verification_frontend_policy=SIMPLE_PARSE_SHARD_WORKER_KB=25165824`
+  under a 62,914,560 KiB tree budget and admitted 2 parse shards
+  (`fits 2 x 25165824 kB`), with no tree-cap refusal.
+- Not verified: that CLI build never completed. Both parse shards died with
+  `exit=-139` (SIGSEGV), tracked as `stage2_parse_shard_segv_named_type_find_2026-11-13.md`,
+  and `compiler_cli_build.max-rss-kib` is empty, so no whole-run tree peak
+  exists under the 24 GiB price. The old `file_is_symlink` blocker is gone
+  (no longer referenced in `src/app/stats/inventory_scan_v2.spl`).
+- The p4 `cli-f26` direct `native-build` is NOT evidence here: it never sources
+  the product policy, and its 10 parse shards use the compiler's 3.8 GB clamp.
+- Missing evidence: one completed bootstrap-script Phase 2 CLI build with this
+  policy plus its `simple-process-tree-rss.*.env` receipt (status complete, peak <= cap).
