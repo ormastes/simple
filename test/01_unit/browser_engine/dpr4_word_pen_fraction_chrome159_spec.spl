@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Purpose: Pin where each WORD of a text run starts at device scale 4, against
+Chrome 159. Chrome lays a line out in fractional units and keeps the fraction
+at paint: in `a b c d e f g h` (16px Liberation Sans, left edge 10) the words
+start at 10, 23.344, 36.688, 49.133 .. CSS px, which is device px 40, 93.4,
+146.8, 196.5 at scale 4. This engine starts every word on a whole CSS px (a
+multiple of 4 device px), so a word sits up to 2 device px left or right of
+Chrome's. Catalog css-layout at 4x: the best per-word horizontal shift
+recovers about 26k of the 170k mismatched text px (7.5% of the page mismatch);
+51 of 117 word clusters want a shift of 1 to 3 device px.
+Audience: web renderer text layout / Draw IR device-scale maintainers
+(layout_text, layout_foundation pen origin, draw_ir text at device scale).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4
+--window-size=500,300`, the page below). Word `Range.getBoundingClientRect()`
+left, CSS px: line 1 `b` 23.344, `c` 36.688; line 2 `—` 22.445, `y` 42.891;
+line 3 `y` 30.445.
+
+Measured from the screenshot, device px: first column holding a pixel with
+red < 128, searched from the given column inside the line's 96-row band.
+
+| word            | band rows | search from | Chrome | base (ecff7320c13) |
+|-----------------|-----------|-------------|--------|--------------------|
+| `b` in line 1   | 0..96     | 80          | 98     | 96                 |
+| `c` in line 1   | 0..96     | 135         | 150    | 151                |
+| `—` in line 2   | 96..192   | 78          | 90     | 88                 |
+| `y` in line 2   | 96..192   | 160         | 172    | 172                |
+| `y` in line 3   | 192..288  | 110         | 122    | 120                |
+
+Base matches a whole CSS px pen: `b` 23 (Chrome 23.344), `—` 22 (22.445),
+`y` 30 (30.445). The tolerance is 1 device px: glyph edges differ by up to one
+antialiased column between the two rasterisers.
+"""
+
+"""
+Traceability: REQ-WEB-DPR4-WORD-PEN-001 — at device scale k>1 a word starts at Chrome's fractional pen position, not on a whole CSS px.
+"""
+# @tag: unit, browser_engine, text, device_scale, chrome159
+# @tag:in-development
+# Tracks: red (0/3) — at k>1 word pens stay at k x whole-CSS-px; advances measured at k x font size drifted +0..+18 device px over a long line and raised the 4x catalog (tried commit 0ac1581f05a on local branch wip/pd-layout-word-pen-drift-20261122). Next: probe with the paint-path language/size, add a long-line case. Delete this tag in the commit that turns it green.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 500
+val CSS_H: i32 = 150
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px}} div{{margin:0 0 0 10px;width:200px}}</style></head><body>" +
+    "<p>a b c d e f g h</p><p>x — y</p><p>— y</p>" +
+    "<div><code>ab</code> plain words here that wrap onto a second line</div><p>tail</p></body></html>"
+
+fn _red(px: u32) -> i32:
+    ((px >> 16u32) & 0xFFu32) as i32
+
+# First device column from x0 that holds ink (red < 128) in rows y0..y0+96.
+fn _first_ink_col(px: [u32], x0: i32, y0: i32) -> i32:
+    val w = CSS_W * 4
+    if px.len() != (w * CSS_H * 4) as i64:
+        return -2
+    var x = x0
+    while x < x0 + 80:
+        var y = y0
+        while y < y0 + 96:
+            if _red(px[y * w + x]) < 128:
+                return x
+            y = y + 1
+        x = x + 1
+    -1
+
+fn _near(got: i32, chrome: i32) -> bool:
+    got >= chrome - 1 and got <= chrome + 1
+
+describe "Words start at Chrome's fractional pen at device scale 4 (Chrome 159)":
+    it "AC-1: `b` and `c` of `a b c ..` start at device columns 98 and 150":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_near(_first_ink_col(px, 80, 0), 98)).to_equal(true)
+        expect(_near(_first_ink_col(px, 135, 0), 150)).to_equal(true)
+
+    it "AC-2: the em dash of `x — y` starts at device column 90 and `y` at 172":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_near(_first_ink_col(px, 78, 96), 90)).to_equal(true)
+        expect(_near(_first_ink_col(px, 160, 96), 172)).to_equal(true)
+
+    it "AC-3: `y` of `— y` starts at device column 122":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_near(_first_ink_col(px, 110, 192), 122)).to_equal(true)
