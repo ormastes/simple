@@ -581,12 +581,25 @@ impl CompilerDriver:
             val entry_mir: MirModule = entry_mir_opt.unwrap()
             if self.ctx.mir_modules[entry_mir.name] == nil:
                 bootstrap_only = bootstrap_only.push(entry_mir)
+        # Bind each dict value with a typed statement-form read, not `dict[k]!`
+        # inside an if-expression arm: the frozen Phase 2 pin lowers `!` on a
+        # struct-valued dict read as rt_unwrap_or_self + rt_value_as_int_wide,
+        # so the MirModule pointer was decoded as a tagged int and
+        # `module.name` faulted (0xC0000005 in the MIR shard worker). The names
+        # come from keys() of the same dict, so the read cannot miss.
+        var verify_modules: [MirModule] = []
+        var name_idx = 0
+        while name_idx < mir_module_names.len():
+            val named_module: MirModule = self.ctx.mir_modules[mir_module_names[name_idx]]
+            verify_modules = verify_modules.push(named_module)
+            name_idx = name_idx + 1
+        var extra_idx = 0
+        while extra_idx < bootstrap_only.len():
+            verify_modules = verify_modules.push(bootstrap_only[extra_idx])
+            extra_idx = extra_idx + 1
         var idx = 0
-        while idx < mir_module_names.len() + bootstrap_only.len():
-            val module: MirModule = if idx < mir_module_names.len():
-                self.ctx.mir_modules[mir_module_names[idx]]!
-            else:
-                bootstrap_only[idx - mir_module_names.len()]
+        while idx < verify_modules.len():
+            val module: MirModule = verify_modules[idx]
             idx = idx + 1
             log_phase("mir_verify:module:start idx={idx} module={module.name}")
             val report = mir_verify_module(module)
