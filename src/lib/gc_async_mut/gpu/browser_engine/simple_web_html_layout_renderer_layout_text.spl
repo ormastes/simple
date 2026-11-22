@@ -980,8 +980,11 @@ pub fn inline_text_width_after_lead(node: HNode, st: Style) -> i32:
     val trimmed_cps = text_codepoints(node.text_trimmed)
     if trimmed_cps.len() == 0 or st.resolved_font_advances.len() != trimmed_cps.len():
         return -1
-    val trail: i64 = if text_ends_with_collapsible_space(node.text_data): 1 else: 0
-    ((st.resolved_font_width_milli + trail * st.resolved_space_milli + 500) / 1000) as i32
+    # The trailing edge space is measured WITH the run when the face kerns the
+    # (letter, space) pair (`A ` 14.234, not 10.672 + 4.453).
+    val trail_m: i64 = if st.resolved_trail_space_milli > 0: st.resolved_trail_space_milli else: st.resolved_space_milli
+    val trail: i64 = if text_ends_with_collapsible_space(node.text_data): trail_m else: 0
+    ((st.resolved_font_width_milli + trail + 500) / 1000) as i32
 
 fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
@@ -1017,14 +1020,19 @@ fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
         val trimmed_cps = text_codepoints(trimmed)
         if st.resolved_font_advances.len() == trimmed_cps.len():
             var edges = 0
+            var edge_milli: i64 = 0
+            val lead_m: i64 = if st.resolved_lead_space_milli > 0: st.resolved_lead_space_milli else: st.resolved_space_milli
+            val trail_m: i64 = if st.resolved_trail_space_milli > 0: st.resolved_trail_space_milli else: st.resolved_space_milli
             if cps.len() > 0 and codepoint_is_space(cps[0]):
                 edges = edges + 1
+                edge_milli = edge_milli + lead_m
             if cps.len() > 1 and codepoint_is_space(cps[cps.len() - 1]):
                 edges = edges + 1
+                edge_milli = edge_milli + trail_m
             # Round the exact run plus its exact edge spaces once: `, ` is
             # 4.4453 + 4.4453 = 8.89 -> 9 in Chrome 159, not 4 + 4.
             if edges > 0 and st.resolved_font_width_milli >= 0 and st.resolved_space_milli > 0:
-                return ((st.resolved_font_width_milli + (edges as i64) * st.resolved_space_milli + 500) / 1000) as i32
+                return ((st.resolved_font_width_milli + edge_milli + 500) / 1000) as i32
             return st.resolved_font_width + edges * resolved_space_advance(st, trimmed_cps)
     if raw == " " and node.text_trimmed == "":
         # The inline loop already charges this space as the next run's lead
