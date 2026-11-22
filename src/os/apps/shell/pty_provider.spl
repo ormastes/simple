@@ -9,6 +9,8 @@ Design: doc/05_design/pty_shell_kinds_shs_default.md section 5 phase 3.
 """
 use os.apps.shell.shell_app.{ShellApp}
 use std.sys.pty_shell.{PTY_SHS_SIMPLEOS_COMMAND}
+use std.sys.pty_input_codec.{pty_input_prefix}
+export use std.sys.pty_launch.{PtyLaunchV1, PtyLaunchModeV1, PtyEnvironmentChangeV1}
 
 var _shells: [ShellApp] = []
 var _open: [bool] = []
@@ -60,8 +62,11 @@ pub fn read(handle: i32, timeout_ms: i32) -> text:
 pub fn is_running(handle: i32) -> bool:
     _valid(handle) and _running[handle]
 
+# Idempotent like the host providers (rt_pty_close, windows_pty_close_v1): a
+# handle this provider opened answers true again once closed. Only a number it
+# never issued is refused.
 pub fn close(handle: i32) -> bool:
-    if not _valid(handle):
+    if handle < 0 or (handle as i64) >= _open.len():
         return false
     _open[handle] = false
     _running[handle] = false
@@ -70,4 +75,58 @@ pub fn close(handle: i32) -> bool:
 pub fn platform_default_shell() -> text:
     PTY_SHS_SIMPLEOS_COMMAND
 
+# Remaining std.sys.pty operations. An in-process ShellApp has no terminal
+# geometry, no child process, no exit status and no deferred teardown, so each
+# one refuses explicitly instead of being absent: a missing name would fail the
+# SOSIX facade import the moment this provider is selected.
+pub fn write_some(handle: i32, data: [u8]) -> i64:
+    if not _valid(handle):
+        return -1
+    val prefix = pty_input_prefix(data)
+    if prefix.is_err():
+        return -1
+    val accepted = prefix.unwrap()
+    if accepted.accepted == 0:
+        return 0
+    if not write(handle, accepted.content):
+        return -1
+    accepted.accepted
+
+pub fn input_pending(handle: i32) -> Result<bool, text>:
+    if not _valid(handle):
+        return Err("invalid pty handle")
+    Ok(false)
+
+pub fn spawn_configured_v1(handle: i32, launch: PtyLaunchV1) -> Result<i64, text>:
+    Err("structured PTY launch unavailable on simpleos")
+
+pub fn configured_launch_probe_v1() -> bool:
+    false
+
+pub fn literal_bytes_supported_v1() -> bool:
+    false
+
+pub fn write_literal_some_v1(handle: i32, data: [u8]) -> Result<i64, text>:
+    Err("literal PTY bytes unsupported on simpleos")
+
+pub fn hangup(handle: i32) -> bool:
+    false
+
+pub fn can_resize() -> bool:
+    false
+
+pub fn resize(handle: i32, rows: i32, cols: i32) -> bool:
+    false
+
+pub fn cleanup_pending() -> i64:
+    0
+
+pub fn exit_code(handle: i32) -> Result<i64, text>:
+    if not _valid(handle):
+        return Err("invalid pty handle")
+    Err("PTY exit status unavailable on simpleos")
+
 export open, spawn, spawn_v1, write, read, is_running, close, platform_default_shell
+export write_some, input_pending, spawn_configured_v1, configured_launch_probe_v1
+export literal_bytes_supported_v1, write_literal_some_v1, hangup, can_resize, resize
+export cleanup_pending, exit_code
