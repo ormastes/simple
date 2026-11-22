@@ -96,24 +96,25 @@ fn parser_is_canonical_custom_block_kind(kind: text) -> bool:
 # remain literal text, while a non-empty balanced interpolation region makes
 # the suffixed form unsupported (and therefore an explicit parse error).
 fn parser_path_literal_has_interpolation(value: text) -> bool:
+    val n = value.byte_len()
     var i: i64 = 0
-    while i < value.len():
-        val ch = value.substring(i, i + 1)
-        val next = if i + 1 < value.byte_len() then value.substring(i + 1, i + 2) else ""
-        if ch == "{{" and next == "{{":
+    while i < n:
+        val ch = value.byte_at(i)
+        val next = if i + 1 < n then value.byte_at(i + 1) else -1
+        if ch == 123 and next == 123:
             i = i + 2
             continue
-        if ch == "{{" and next == "}":
+        if ch == 123 and next == 125:
             i = i + 2
             continue
-        if ch == "{{":
+        if ch == 123:
             var depth: i64 = 1
             var j: i64 = i + 1
-            while j < value.len():
-                val inner = value.substring(j, j + 1)
-                if inner == "{{":
+            while j < n:
+                val inner = value.byte_at(j)
+                if inner == 123:
                     depth = depth + 1
-                elif inner == "}":
+                elif inner == 125:
                     depth = depth - 1
                     if depth == 0:
                         return true
@@ -406,6 +407,7 @@ pub fn parse_primary_expr() -> i64:
                 return expr_asm("", 0)
             parser_advance()
             var asm_lines: [text] = []
+            var collector = asm_operand_collector_new()
             while true:
                 parser_skip_newlines()
                 if par_kind_get() == 182:
@@ -417,6 +419,9 @@ pub fn parse_primary_expr() -> i64:
                     asm_lines.push(par_text_get())
                     parser_advance()
                     continue
+                if par_kind_get() == 6 or par_kind_get() == TOK_KW_IN:
+                    collector.parse_next_directive(true)
+                    continue
                 parser_error("expected string literal in asm block")
                 while true:
                     val is_nl = par_kind_get() == 180
@@ -425,6 +430,8 @@ pub fn parse_primary_expr() -> i64:
                     if is_nl or is_ded or is_eof:
                         break
                     parser_advance()
+            if collector.values.len() > 0 or collector.clobbers.len() > 0:
+                return expr_asm_operands(asm_lines.join("\n"), collector.values, collector.names, collector.kinds, collector.locations, collector.outputs, collector.clobbers, 0)
             return expr_asm(asm_lines.join("\n"), 0)
 
         if par_kind_get() == 142:
@@ -529,6 +536,17 @@ pub fn parse_primary_expr() -> i64:
         if par_kind_get() == TOK_IDENT and par_text_get() == "_path":
             parser_error("_path suffix must be adjacent to its string literal")
             parser_advance()
+        if str_suffix == "path":
+            if is_triple:
+                parser_error("_path does not support triple-quoted strings")
+                if no_interp:
+                    return expr_raw_string_lit(str_text, 0)
+                return expr_string_lit(str_text, 0)
+            if not no_interp and parser_path_literal_has_interpolation(lex_source_slice(str_start, str_end)):
+                parser_error("_path does not support interpolated strings")
+                return expr_string_lit(str_text, 0)
+            return expr_call_named(
+                expr_ident("Path", 0), [expr_string_lit(str_text, 0)], ["path"], 0)
         if str_suffix != "":
             return expr_suffixed_string(str_text, str_suffix, 0)
         if no_interp:

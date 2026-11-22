@@ -143,6 +143,16 @@ impl TreeSitter:
 
     me parse_function_outline(visibility: Visibility, is_mutable: bool, doc: text?) -> FunctionOutline:
         """Parse function signature, skipping body."""
+        self.parse_function_outline_inner(visibility, is_mutable, doc, true)
+
+
+    me parse_trait_method_outline(visibility: Visibility, is_mutable: bool, doc: text?) -> FunctionOutline:
+        """Parse trait method signature with optional default body."""
+        self.parse_function_outline_inner(visibility, is_mutable, doc, false)
+
+
+    me parse_function_outline_inner(visibility: Visibility, is_mutable: bool, doc: text?, require_body: bool) -> FunctionOutline:
+        """Parse function or method signature; skip body when required or ':' is present."""
         val start = self.current.span
         self.advance()  # Consume 'fn' or 'me'
 
@@ -166,23 +176,28 @@ impl TreeSitter:
             has_return_type = true
             return_type = self.parse_type_outline()
 
-        # Body
-        self.expect(TokenKind.Colon, "expected ':' before function body")
-        self.skip_newlines()
+        var body_start: i64 = 0
+        var body_end: i64 = 0
+        if require_body or self.check(TokenKind.Colon):
+            # Body
+            self.expect(TokenKind.Colon, "expected ':' before function body")
+            self.skip_newlines()
 
-        # Set context for block tracking
-        val prev_context = self.current_context
-        val prev_has_context = self.has_current_context
-        self.has_current_context = true
-        self.current_context = name
+            # Set context for block tracking
+            val prev_context = self.current_context
+            val prev_has_context = self.has_current_context
+            self.has_current_context = true
+            self.current_context = name
 
-        val body_start = self.current.span.start
-        self.skip_block()
-        val body_end = self.previous.span.end_pos
+            body_start = self.current.span.start
+            self.skip_block()
+            body_end = self.previous.span.end_pos
 
-        # Restore previous context
-        self.current_context = prev_context
-        self.has_current_context = prev_has_context
+            # Restore previous context
+            self.current_context = prev_context
+            self.has_current_context = prev_has_context
+        else:
+            self.skip_newlines()
 
         FunctionOutline(
             name: name,
@@ -358,7 +373,19 @@ impl TreeSitter:
 
         self.expect(TokenKind.Colon, "expected ':' after class name")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented class body")
+        if not self.expect(TokenKind.Indent, "expected indented class body"):
+            return ClassOutline(
+                name: name,
+                type_params: type_params,
+                fields: [],
+                methods: [],
+                visibility: visibility,
+                is_public: visibility == Visibility.Public,
+                has_doc_comment: doc.?,
+                doc_comment: doc ?? "",
+                attributes: attrs,
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()
@@ -430,7 +457,19 @@ impl TreeSitter:
 
         self.expect(TokenKind.Colon, "expected ':' after actor name")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented actor body")
+        if not self.expect(TokenKind.Indent, "expected indented actor body"):
+            return ActorOutline(
+                name: name,
+                type_params: type_params,
+                fields: [],
+                methods: [],
+                visibility: visibility,
+                is_public: visibility == Visibility.Public,
+                has_doc_comment: doc.?,
+                doc_comment: doc ?? "",
+                attributes: attrs,
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Try to parse body docstring
         val body_doc = self.try_parse_body_docstring()
@@ -501,7 +540,18 @@ impl TreeSitter:
 
         self.expect(TokenKind.Colon, "expected ':' after struct name")
         self.skip_newlines()
-        self.expect(TokenKind.Indent, "expected indented struct body")
+        if not self.expect(TokenKind.Indent, "expected indented struct body"):
+            return StructOutline(
+                name: name,
+                type_params: type_params,
+                fields: [],
+                visibility: visibility,
+                is_public: visibility == Visibility.Public,
+                has_doc_comment: doc.?,
+                doc_comment: doc ?? "",
+                attributes: attrs,
+                span: merge_spans(start, self.previous.span)
+            )
 
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()

@@ -1,113 +1,115 @@
-# Feature: Tree-Sitter Lexer Module
-# Category: Parser
-# Status: Active
+"""
+## Purpose and audience
+Purpose: Verify the pure-Simple core lexer stream (`lex_init`, `lex_next`, `CoreLexer`,
+`core_lexer_next_token`) across empty inputs, keywords, identifiers, literals,
+operators, delimiters, indentation, and comments.
+Audience: compiler and frontend engineers maintaining `src/compiler/10.frontend/core/`.
 
-Purpose: core language semantics hold under execution.  Audience: compiler and runtime engineers
-reading this spec to confirm the behavior still holds.
-
-# Mock Token type
-fn check(condition: bool):
-    expect(condition).to_equal(true)
-fn check_msg(condition: bool, message: text):
-    if not condition:
-        expect(message).to_equal("")
-class Token:
-    type: text
-    value: text
-
+## Operator workflow
 1. Run `bin/simple test test/01_unit/compiler/parser/treesitter_lexer_spec.spl`.
-2. Every scenario must pass; a failure is a regression in the
-   behavior under test.
+2. Every scenario must pass with real lexer assertions.
 
 ## Compatibility and limitations
-
-Covers the interpreter and native lanes for the constructs
-asserted here; platform-specific behavior is out of scope.
+Executed on the interpreter test lane; covers token wire kinds, text, and line/col spans.
 """
+# @req: REQ-COMPILER-FRONTEND-LEXER-001
+# @cover src/compiler/10.frontend/core/lexer.spl 80%
+# @cover src/compiler/10.frontend/core/lexer_struct.spl 80%
 
-use std.spec
+use std.spec.*
+use std.spec.step
+use compiler.core.lexer.{lex_init, lex_next, lex_token_text, lex_token_line, lex_token_col}
+use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text}
+use compiler.core.tokens.{
+    TOK_EOF, TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR, TOK_KW_RETURN,
+    TOK_IDENT, TOK_INT_LIT, TOK_STRING_LIT,
+    TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_EQ, TOK_NOT_EQ, TOK_LT_EQ, TOK_ARROW, TOK_ASSIGN,
+    TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE, TOK_LBRACKET, TOK_RBRACKET,
+    TOK_COMMA, TOK_COLON, TOK_INDENT, TOK_DEDENT, TOK_NEWLINE
+}
 
-# doc-path: doc/01_research/local/treesitter_lexer.md
-# doc-path: doc/03_plan/sys_test/treesitter_lexer.md
-# doc-path: doc/04_architecture/treesitter_lexer.md
-# doc-path: doc/05_design/treesitter_lexer.md
+fn collect_non_layout_kinds(source: text) -> [i64]:
+    lex_init(source)
+    var kinds: [i64] = []
+    for _ in 0..64:
+        val kind = lex_next()
+        if kind == TOK_EOF:
+            break
+        if kind != TOK_NEWLINE and kind != TOK_INDENT and kind != TOK_DEDENT:
+            kinds.push(kind)
+    kinds
 
-# @manual: primary
+describe "Core Lexer Stream":
+    it "tokenizes empty source immediately to EOF":
+        step("Lex empty source and expect TOK_EOF")
+        lex_init("")
+        expect(lex_next()).to_equal(TOK_EOF)
 
-describe "Executed behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
+    it "tokenizes keywords and preserves spellings":
+        step("Lex fn, val, var, and return keywords")
+        lex_init("fn val var return")
+        expect(lex_next()).to_equal(TOK_KW_FN)
+        expect(lex_token_text()).to_equal("fn")
+        expect(lex_next()).to_equal(TOK_KW_VAL)
+        expect(lex_token_text()).to_equal("val")
+        expect(lex_next()).to_equal(TOK_KW_VAR)
+        expect(lex_token_text()).to_equal("var")
+        expect(lex_next()).to_equal(TOK_KW_RETURN)
+        expect(lex_token_text()).to_equal("return")
+        expect(lex_next()).to_equal(TOK_EOF)
 
-    it "numeric comparison helpers":
-        step("Verify: numeric comparison helpers")
-        # @req: REQ-COMPILER-PARSER-001
-        expect(abs(-7)).to_equal(7)  # oracle: absolute value
-        expect(max(3, 9)).to_equal(9)  # oracle: larger operand
-        expect(min(3, 9)).to_equal(3)  # oracle: smaller operand
+    it "tokenizes identifiers, integers, and strings":
+        step("Lex identifier, integer, and quoted string literal")
+        lex_init("answer = 42\nlabel = \"hello\"")
+        expect(lex_next()).to_equal(TOK_IDENT)
+        expect(lex_token_text()).to_equal("answer")
+        expect(lex_next()).to_equal(TOK_ASSIGN)
+        expect(lex_next()).to_equal(TOK_INT_LIT)
+        expect(lex_token_text()).to_equal("42")
+        expect(lex_next()).to_equal(TOK_NEWLINE)
+        expect(lex_next()).to_equal(TOK_IDENT)
+        expect(lex_token_text()).to_equal("label")
+        expect(lex_next()).to_equal(TOK_ASSIGN)
+        expect(lex_next()).to_equal(TOK_STRING_LIT)
+        expect(lex_token_text()).to_equal("hello")
 
-    it "while with break and continue":
-        step("Verify: while with break and continue")
-        # @req: REQ-COMPILER-PARSER-001
-        var i = 0
-        var acc = 0
-        while i < 10:
-            i = i + 1
-            if i == 3: continue
-            if i == 7: break
-            acc = acc + i
-        expect(acc).to_equal(18)  # oracle: 1+2+4+5+6
+    it "tokenizes multi-character operators and delimiters":
+        step("Lex arithmetic, comparison, arrow, and brackets")
+        val kinds = collect_non_layout_kinds("+ - * == != <= -> () {} [] , :")
+        expect(kinds).to_equal([
+            TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_EQ, TOK_NOT_EQ, TOK_LT_EQ, TOK_ARROW,
+            TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE, TOK_LBRACKET, TOK_RBRACKET,
+            TOK_COMMA, TOK_COLON
+        ])
 
-    it "array filtering and membership":
-        step("Verify: array filtering and membership")
-        # @req: REQ-COMPILER-PARSER-001
-        expect([1, 2, 3].filter(fn(x: i64): x > 1)).to_equal([2, 3])
-        expect([1, 2, 3].contains(2)).to_equal(true)
-        expect([1, 2].concat([3])).to_equal([1, 2, 3])
+    it "skips comments and tracks indentation and line numbers":
+        step("Lex indented function body following a comment")
+        val src = "# header comment\nfn f():\n    42\n"
+        lex_init(src)
+        expect(lex_next()).to_equal(TOK_KW_FN)
+        expect(lex_token_line()).to_equal(2)
+        expect(lex_token_col()).to_equal(1)
+        expect(lex_next()).to_equal(TOK_IDENT)
+        expect(lex_next()).to_equal(TOK_LPAREN)
+        expect(lex_next()).to_equal(TOK_RPAREN)
+        expect(lex_next()).to_equal(TOK_COLON)
+        expect(lex_next()).to_equal(TOK_NEWLINE)
+        expect(lex_next()).to_equal(TOK_INDENT)
+        expect(lex_next()).to_equal(TOK_INT_LIT)
+        expect(lex_next()).to_equal(TOK_NEWLINE)
+        expect(lex_next()).to_equal(TOK_DEDENT)
+        expect(lex_next()).to_equal(TOK_EOF)
 
-describe "Additional behavior oracles":
-    """
-    Real executed assertions over core language semantics; each scenario asserts observable results of the language runtime.
-    """
-
-describe "Lexer":
-    # Tests lexical analysis with mock implementations
-    it "tokenizes empty source":
-        val lexer = MockLexer.new()
-        val tokens = lexer.tokenize_empty()
-        check(tokens.len() == 0)
-
-    it "tokenizes keywords":
-        val lexer = MockLexer.new()
-        val result = lexer.tokenize_keywords("val x = 42")
-        check(result)
-
-    it "tokenizes identifiers":
-        val lexer = MockLexer.new()
-        val tokens = lexer.tokenize_identifiers("foo")
-        check(tokens.len() > 0)
-
-    it "tokenizes numbers":
-        val lexer = MockLexer.new()
-        val tokens = lexer.tokenize_numbers("123")
-        check(tokens.len() > 0)
-
-    it "tokenizes strings":
-        val lexer = MockLexer.new()
-        val tokens = lexer.tokenize_strings("\"hello\"")
-        check(tokens.len() > 0)
-
-    it "tokenizes operators":
-        val lexer = MockLexer.new()
-        val tokens = lexer.tokenize_operators("+")
-        check(tokens.len() > 0)
-
-    it "handles whitespace":
-        val lexer = MockLexer.new()
-        val result = lexer.handle_whitespace("   x   ")
-        check(result)
-
-    it "handles comments":
-        val lexer = MockLexer.new()
-        val result = lexer.handle_comments("# comment")
-        check(result)
+    it "advances CoreLexer tuples deterministically without globals":
+        step("Drive CoreLexer via core_lexer_next_token")
+        val lx0 = make_core_lexer("alpha + 7")
+        val (lx1, k1) = core_lexer_next_token(lx0)
+        expect(k1).to_equal(TOK_IDENT)
+        expect(core_lexer_token_text(lx1)).to_equal("alpha")
+        val (lx2, k2) = core_lexer_next_token(lx1)
+        expect(k2).to_equal(TOK_PLUS)
+        val (lx3, k3) = core_lexer_next_token(lx2)
+        expect(k3).to_equal(TOK_INT_LIT)
+        expect(core_lexer_token_text(lx3)).to_equal("7")
+        val (_, k4) = core_lexer_next_token(lx3)
+        expect(k4).to_equal(TOK_EOF)

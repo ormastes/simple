@@ -124,9 +124,9 @@ fn infer_function_effect(func: FunctionInfo, env: Dict<text, Effect>) -> Effect:
 
     # Calls any async function
     for callee in func.called_functions:
-        val callee_effect = env_get(env, callee)
-        if val callee_effect_value = callee_effect.?:
-            if callee_effect_value.is_async():
+        val callee_effect = env.get(callee)
+        if val callee_effect_value = callee_effect:
+            if effect_is_async(callee_effect_value):
                 return Effect.Async
 
     Effect.Sync
@@ -161,11 +161,11 @@ fn infer_mutual_effects(functions: [FunctionInfo], env: Dict<text, Effect>) -> D
 
         for raw_func in functions:
             val func: FunctionInfo = raw_func
-            if env_contains(env_mut, func.name):
+            if env_mut.contains_key(func.name):
                 continue
 
             val inferred = infer_function_effect(func, env_mut)
-            val old = env_get(env_mut, func.name)
+            val old = env_mut.get(func.name)
 
             if not old.? or old.unwrap() != inferred:
                 env_mut[func.name] = inferred
@@ -232,16 +232,15 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
 
         var any_explicit_async = false
         for name in scc:
-            val env_entry = env_get(env, name)
-            if env_entry != nil:
-                if env_entry.is_async():
+            val env_entry = env.get(name)
+            if val entry = env_entry:
+                if effect_is_async(entry):
                     any_explicit_async = true
 
         var any_suspension = false
         for name in scc:
             val f = func_map.get(name)
-            if has_f:
-                val func = f_value
+            if val func = f:
                 if not func.is_sync and func.contains_suspension:
                     any_suspension = true
 
@@ -250,9 +249,9 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
             val callees = call_graph.get(name) ?? []
             for callee in callees:
                 if not scc_members.contains(callee):
-                    val callee_entry = env_get(env, callee)
-                    if callee_entry != nil:
-                        if callee_entry.is_async():
+                    val callee_entry = env.get(callee)
+                    if val entry = callee_entry:
+                        if effect_is_async(entry):
                             any_calls_async = true
 
         val scc_effect = if any_explicit_async or any_suspension or any_calls_async:
@@ -340,7 +339,7 @@ fn validate_suspension_context(func: FunctionInfo, env: Dict<text, Effect>) -> t
 
 fn needs_promise_wrapping(func: FunctionInfo, env: Dict<text, Effect>) -> bool:
     """Check if function's return type needs Promise wrapping."""
-    infer_function_effect(func, env).is_async()
+    effect_is_async(infer_function_effect(func, env))
 
 fn get_return_wrap_mode(func: FunctionInfo, env: Dict<text, Effect>) -> ReturnWrapMode:
     """Determine how a return statement should be wrapped."""
@@ -373,8 +372,8 @@ fn unwrap_promise(type_name: text) -> text:
 
 fn needs_await(callee_name: text, env: Dict<text, Effect>) -> AwaitMode:
     """Check if calling a function needs automatic await insertion."""
-    val effect = env_get(env, callee_name)
-    val is_async = if val effect_value = effect.?: effect_value.is_async() else: false
+    val effect = env.get(callee_name)
+    val is_async = if val effect_value = effect: effect_is_async(effect_value) else: false
     if is_async:
         AwaitMode.Implicit
     else:
@@ -382,9 +381,9 @@ fn needs_await(callee_name: text, env: Dict<text, Effect>) -> AwaitMode:
 
 fn needs_await_typed(callee_name: text, env: Dict<text, Effect>, expected_type: text?) -> TypedAwaitMode:
     """Check if expression needs await based on target type."""
-    val effect = env_get(env, callee_name)
+    val effect = env.get(callee_name)
     val effect_value = effect ?? Effect.Sync
-    if effect_value.is_sync():
+    if effect_is_sync(effect_value):
         return TypedAwaitMode.None
 
     # Expression is async call - check expected type

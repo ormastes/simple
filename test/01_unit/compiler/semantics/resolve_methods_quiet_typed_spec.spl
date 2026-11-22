@@ -46,14 +46,21 @@ fn repro_source() -> text:
      "    for k in d.keys():\n" +
      "        print k\n")
 
-fn lower_repro() -> HirModule:
-    val parsed = parse_full_frontend(repro_source(), "quiet_repro", "quiet_repro", Logger(level: 0))
-    var lowering = HirLowering.with_filename("quiet_repro.spl")
+fn repro_loud_source() -> text:
+    repro_source() + "\nclass CandidateGate:\n    value: i64\n"
+
+fn lower_source(src: text, tag: text) -> HirModule:
+    val parsed = parse_full_frontend(src, tag, tag, Logger(level: 0))
+    var lowering = HirLowering.with_filename(tag + ".spl")
     lowering.lower_module(parsed)
+
+fn lower_repro() -> HirModule:
+    lower_source(repro_source(), "quiet_repro")
 
 # Find the receiver type_ of the first MethodCall named `wanted` anywhere in
 # the module. Returns "absent" when no such call exists, "nil" when the
-# receiver carries no type, else a coarse type-kind label.
+# receiver carries no resolved/attached type (`has_type_ == false` or `nil`),
+# else a coarse type-kind label.
 fn find_receiver_type_brief(m: HirModule, wanted: text) -> text:
     var found = "absent"
     for f in m.functions.values():
@@ -78,6 +85,8 @@ fn scan_expr_for_receiver(e: HirExpr, wanted: text) -> text:
     match e.kind:
         case HirExprKind.MethodCall(receiver, method, _, _):
             if method == wanted:
+                if not receiver.has_type_:
+                    return "nil"
                 return type_brief(receiver.type_)
             scan_expr_for_receiver(receiver, wanted)
         case HirExprKind.Call(callee, _, _):
@@ -119,11 +128,11 @@ describe "resolve_methods quiet typed mode (SIMPLE_RESOLVE_METHODS experiment)":
     it "loud pass errors on the untyped receiver (Gap B baseline)":
         # @req: REQ-COMPILER-SEMANTICS-001
         step("Verify: loud pass errors on the untyped receiver (Gap B baseline)")
-        val hir = lower_repro()
+        val hir = lower_source(repro_loud_source(), "loud_repro")
         val (_, loud_errors) = resolve_methods(hir)
-        # The receiver `d` reaches resolve_method with type_ == nil, which the
-        # loud pass treats as a hard error. This is exactly why Gap A cannot
-        # be wired without Gap B (bug record, "Gap B").
+        # The receiver `d` reaches resolve_method untyped (`Infer`, not resolved
+        # to Dict), which the loud pass treats as a hard error once candidate
+        # walking runs. This is why Gap A cannot be wired without Gap B.
         expect(loud_errors.len() > 0).to_equal(true)
 
     it "quiet pass records zero errors on the same module":
