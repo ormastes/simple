@@ -256,6 +256,7 @@ printf '%s\n' "$RUNTIME_DIR/test/rt_rc_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_scope_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_promote_share_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/rt_transient_scope_object_cap_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_enum_unit_variant_scope_singleton_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_transient_heap_thread_affinity_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 printf '%s\n' "$RUNTIME_DIR/test/rt_session_heap_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
@@ -316,6 +317,9 @@ REPEAT_ARCHIVE_SHA256=$(hash_file "$REPEAT_ARCHIVE")
 [ "$ARCHIVE_SHA256" = "$REPEAT_ARCHIVE_SHA256" ] ||
     die "repeat-build-archive-mismatch"
 record_check
+# Defined before the receipt below records it (set -u).
+SELF_CHECK_LIBS="-lm -lpthread"
+[ "$PLATFORM" != "Linux" ] || SELF_CHECK_LIBS="$SELF_CHECK_LIBS -ldl"
 {
     echo "repeated_build_equal=true"
     echo "archive_sha256=$ARCHIVE_SHA256"
@@ -472,8 +476,6 @@ done
 
 SELF_CHECK_BIN="$TMP_DIR/rt_string_free_selfcheck"
 SELF_CHECK_LOG="$TMP_DIR/rt_string_free_selfcheck.out"
-SELF_CHECK_LIBS="-lm -lpthread"
-[ "$PLATFORM" != "Linux" ] || SELF_CHECK_LIBS="$SELF_CHECK_LIBS -ldl"
 # shellcheck disable=SC2086
 "$CC_PATH" -std=gnu11 -O1 \
     "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" \
@@ -619,6 +621,24 @@ grep -q '^PASS: lock-free registry reads' "$REGISTRY_LOCKFREE_SELF_CHECK_LOG" ||
     die "rt-immortal-registry-lockfree-read-selfcheck-receipt-missing"
 record_check
 
+# One transient scope may track any number of objects (Rust-twin parity); the
+# advisory warning fires once per scope. Same standalone #include build as the
+# lock-free probe above; the probe lowers the threshold itself, so it runs in
+# milliseconds. doc/08_tracking/bug/stage3_transient_scope_object_cap_panic_2026-11-20.md
+SCOPE_CAP_SELF_CHECK_BIN="$TMP_DIR/rt_transient_scope_object_cap_selfcheck"
+SCOPE_CAP_SELF_CHECK_LOG="$TMP_DIR/rt_transient_scope_object_cap_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    "$RUNTIME_DIR/test/rt_transient_scope_object_cap_selfcheck.c" \
+    $REGISTRY_LOCKFREE_STRIP $SELF_CHECK_LIBS -o "$SCOPE_CAP_SELF_CHECK_BIN" \
+    >"$TMP_DIR/rt_transient_scope_object_cap_selfcheck.link.out" 2>&1 ||
+    die "rt-transient-scope-object-cap-selfcheck-link-failed"
+"$SCOPE_CAP_SELF_CHECK_BIN" >"$SCOPE_CAP_SELF_CHECK_LOG" 2>&1 ||
+    die "rt-transient-scope-object-cap-selfcheck-failed"
+grep -q '^rt_transient_scope_object_cap_selfcheck: PASS ' "$SCOPE_CAP_SELF_CHECK_LOG" ||
+    die "rt-transient-scope-object-cap-selfcheck-receipt-missing"
+record_check
+
 ENUM_UNIT_SINGLETON_SELF_CHECK_BIN="$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck"
 ENUM_UNIT_SINGLETON_SELF_CHECK_LOG="$TMP_DIR/rt_enum_unit_variant_scope_singleton_selfcheck.out"
 # shellcheck disable=SC2086
@@ -706,7 +726,7 @@ record_check
 # A run that reached here having executed fewer checks than the capsule
 # declares is a vacuous pass, not a pass. The floor is raised whenever a
 # check is added; it is never lowered to make a run green.
-CHECKS_EXPECTED=68
+CHECKS_EXPECTED=69
 [ "$CHECKS_RUN" = "$CHECKS_EXPECTED" ] ||
     die "checks-executed-below-floor:$CHECKS_RUN/$CHECKS_EXPECTED"
 
@@ -765,6 +785,8 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_transient_heap_scope_selfcheck_output_sha256=$(hash_file "$TRANSIENT_SELF_CHECK_LOG")"
     echo "rt_transient_promote_share_selfcheck=pass"
     echo "rt_immortal_registry_lockfree_read_selfcheck=pass"
+    echo "rt_transient_scope_object_cap_selfcheck=pass"
+    echo "rt_transient_scope_object_cap_selfcheck_output_sha256=$(hash_file "$SCOPE_CAP_SELF_CHECK_LOG")"
     echo "rt_enum_unit_variant_scope_singleton_selfcheck=pass"
     echo "rt_transient_heap_thread_affinity_selfcheck=pass"
     echo "rt_transient_heap_thread_affinity_selfcheck_output_sha256=$(hash_file "$THREAD_AFFINITY_SELF_CHECK_LOG")"
