@@ -582,6 +582,36 @@ impl MirLowering:
             case _: ()
         false
 
+    fn call_arg_optional_into_non_optional_message(callee_name: text, index: i64, declared: HirType, expression: HirExpr, arg_local: LocalId) -> text?:
+        # The call-argument twin of the payload check above. `[T].pop()`,
+        # `.first()` and `.last()` lower to a typed `T?` (remembered on the
+        # result local by lower_array_first_or_last); handed straight to a
+        # non-optional `T` parameter the callee received the Option word and
+        # a total `match` on it fell through at runtime. Never widen nil:
+        # refuse at compile time. Scoped to these builtin producers, whose
+        # result cannot be flow-narrowed; a bound local (`if v != nil: g(v)`)
+        # still remembers `T?` and is deliberately not judged here.
+        # doc/08_tracking/bug/mir_enum_payload_mismatch_loopregion_2026-11-20.md
+        match declared.kind:
+            case HirTypeKind.Optional(_) | HirTypeKind.Any: return None
+            case _: ()
+        var method_name = ""
+        match expression.kind:
+            case HirExprKind.MethodCall(_, method, method_args, _):
+                if method_args.len() == 0: method_name = method
+            case _: ()
+        if method_name != "pop" and method_name != "first" and method_name != "last": return None
+        if val actual = self.find_local_hir_type(arg_local.id):
+            match actual.kind:
+                case HirTypeKind.Optional(actual_inner):
+                    if enum_payload_types_alias_compatible(declared, actual_inner, self.symbols):
+                        val declared_name = self.enum_payload_declared_name(declared)
+                        val callee = if callee_name != "": callee_name else: "<indirect>"
+                        val context = "; function={self.mir_tag_probe_active_function} module={self.current_module_id} arg_at={expression.span.file}:{expression.span.line}:{expression.span.col}"
+                        return Some("call '{callee}': argument type mismatch at {index}: optional '{declared_name}?' value from `.{method_name}()` into non-optional parameter (declared '{declared_name}'); unwrap it first (`if val`, or `.unwrap()` under a length guard){context}")
+                case _: ()
+        None
+
     fn enum_payload_declared_name(declared_type: HirType) -> text:
         match declared_type.kind:
             case HirTypeKind.Named(owner, _):
