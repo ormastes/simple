@@ -22,6 +22,7 @@ use std.database.test_extended.types.{
     TestAnomalyWarning, TestTimingOutcome, TestStatusCounts, TestTimingStats, TestCaseCounts,
     TestBaselineGeneration, TestTimestamp, TestBaselineEligibility, TestFlakiness, TestDbSaveOutcome
 }
+use std.database.test_extended.source_revision.{TestSourceRevision}
 use std.database.test_extended.database_queries.{
     run_record_from_row, counter_record_from_row, timing_summary_from_row,
     db_get_file_path, db_get_suite_info, db_get_test_timing, db_get_test_counts,
@@ -585,7 +586,8 @@ class TestDatabaseExtended:
         # Also add test_runs table (from base implementation)
         val runs_table = SdnTable.new("test_runs", [
             "run_id", "start_time", "end_time", "pid", "hostname",
-            "status", "test_count", "passed", "failed", "crashed", "timed_out", "valid"
+            "status", "test_count", "passed", "failed", "crashed", "timed_out", "valid",
+            "source_head"
         ])
         db.set_table("test_runs", runs_table)
 
@@ -804,7 +806,9 @@ class TestDatabaseExtended:
     # ========================================================================
 
     # Start new test run
-    me start_run() -> text:
+    # `source` is the commit the run executes against (see source_revision.spl);
+    # None records an empty source_head, i.e. no source claim.
+    me start_run(source: TestSourceRevision? = None) -> text:
         val run_id = "run_{timestamp_now()}"
 
         var runs_table_opt = self.db.get_table_mut("test_runs")
@@ -815,6 +819,10 @@ class TestDatabaseExtended:
                 table
             case None:
                 return run_id
+        if not runs_table.columns.contains("source_head"):
+            var run_columns = runs_table.columns
+            run_columns.push("source_head")
+            runs_table.columns = run_columns
         val row = SdnRow.empty()
         row.set("run_id", run_id)
         row.set("start_time", "{timestamp_now()}")
@@ -828,11 +836,29 @@ class TestDatabaseExtended:
         row.set("crashed", "0")
         row.set("timed_out", "0")
         row.set("valid", "true")
+        val source_head = match source:
+            case Some(revision): revision.value
+            case None: ""
+        row.set("source_head", source_head)
 
         runs_table.add_row(row)
         self.db.set_table("test_runs", runs_table)
 
         run_id
+
+    # Source revision recorded by start_run for `run_id`; None when the run is
+    # unknown or recorded no trustworthy source.
+    fn run_source_revision(run_id: text) -> TestSourceRevision?:
+        val runs = match self.db.get_table("test_runs"):
+            case Some(table): table
+            case None: return None
+        for row in runs.rows:
+            if (row.get("run_id") ?? "") == run_id:
+                val head = row.get("source_head") ?? ""
+                if head == "":
+                    return None
+                return Some(TestSourceRevision(value: head))
+        None
 
     # Complete test run
     me complete_run(
