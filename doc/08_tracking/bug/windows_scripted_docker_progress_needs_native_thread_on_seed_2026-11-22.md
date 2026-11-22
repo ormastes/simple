@@ -1,6 +1,6 @@
 # Scripted Windows Docker cooperative progress refuses under the seed on a Windows host
 
-- **Status:** OPEN (2026-11-22) — spec left RED
+- **Status:** RESOLVED (2026-11-22) by owner decision (b): native lane only, the guard stays strict
 - **Component:** `src/lib/nogc_sync_mut/io/windows_command_domain_v4.spl:10-16`
   (`windows_command_registry_thread_v4`), used by
   `src/lib/nogc_async_mut/container/providers/windows/docker_runtime_v1.spl:525-575`
@@ -33,3 +33,19 @@ on other hosts (scripted turns never enter the native registry), or (b) the requ
 is deliberate and this example must run only on a native core-C lane, in which case the
 spec needs that host/runtime precondition stated. Until then the example stays RED on the
 Windows seed lane.
+
+## Decision and change (2026-11-22)
+
+Owner decision: (b), native lane only. `windows_command_registry_thread_v4` is not
+relaxed. The example in `docker_server_network_v6_spec.spl` is now gated by that same
+predicate: when `windows_command_registry_thread_v4(true)` returns an error, the spec calls
+the existing describe-level `skip(name, reason)` with reason
+`NOT_RUN: native Phase 2+ lane only; registry thread unavailable here: <error>`. Otherwise
+the example runs unchanged. The skip sits at describe level and not inside the `it`. An
+`it` whose body skips is still tallied as passed, which would turn a skip into a pass.
+
+Phase 1 on this Windows host: `Results: 22 total, 22 passed, 0 failed, 1 skipped`, verdict
+`skipped=1`. The skip line carries the NOT_RUN reason
+`windows-command-canonical-thread-required`. The native-lane run of this example has not
+been done yet. It needs a native test runner (Phase 4 full CLI); the Phase 2 bootstrap CLI
+has no `test`.
