@@ -2,7 +2,8 @@ use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
 use compiler.driver.cache.action_key.{interface_digest_of_source}
-use compiler.driver.watcher.smf_manifest.{smf_manifest_host_abi_digest}
+use compiler.driver.watcher.smf_manifest.{smf_manifest_host_abi_digest, update_smf_manifest_entry}
+use std.io_runtime.{is_file}
 # Driver AOT SMF and self-contained outputs.
 
 use compiler.backend.backend_helpers.{
@@ -26,6 +27,7 @@ use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes}
 use compiler.driver.smf_elf_parser.{elf_relocated_non_code_section}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{
+    CompileOptions,
     CompileResult,
     compileoptions_effective_mir_opt_level
 }
@@ -299,7 +301,7 @@ impl CompilerDriver:
         # this SMF only when it matches its manifest row (smf_cached_unit_identity_admit).
         var identity_source = ""
         if ctx.options.input_files.len() > 0:
-            identity_source = file_read_text(ctx.options.input_files[0])
+            identity_source = file_read_text(smf_entry_source_input_v1(ctx.options.input_files))
         val identity_bytes = smf_unit_identity_bytes_v1(
             identity_source, ctx.options.native_target, ctx.options.profile, ctx.options.allowed_families)
         val smf_bytes = if mode == "elf_embedded":
@@ -425,3 +427,29 @@ fn smf_unit_identity_bytes_v1(source: text, native_target: text, profile: text, 
         policy: profile,
         capabilities: allowed_families)
     unit_identity_encode(id).bytes()
+
+# The entry source of a build: the first input that is a regular file
+# (`--entry-closure` may lead with a directory). The SMF identity record and
+# its manifest row both hash this file, so they must pick the same one.
+fn smf_entry_source_input_v1(input_files: [text]) -> text:
+    for path in input_files:
+        if is_file(path):
+            return path
+    input_files[0]
+
+# Record the manifest row for an SMF written by compile_to_smf, stating the
+# same triple/profile/families that smf_unit_identity_bytes_v1 put in the SMF.
+fn smf_record_manifest_row_v1(options: CompileOptions, source_path: text, smf_path: text, source_hash: i64) -> bool:
+    update_smf_manifest_entry(
+        source_path,
+        smf_path,
+        source_hash,
+        options.backend,
+        compileoptions_effective_mir_opt_level(options),
+        options.release,
+        options.debug_info,
+        options.gc_off,
+        options.profile,
+        options.allowed_families,
+        options.native_target
+    )
