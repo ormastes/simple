@@ -2,7 +2,7 @@
 
 - ID: `linux_group_observation_nullable_receipt_2026_11_14`
 - Severity: P2
-- Status: fix-implemented-verification-pending; source review pending, runtime NOT_RUN.
+- Status: fix-implemented-verification-pending; decoder cases + native Some-path ABI run 2026-11-22; NULL->None leg NOT_RUN.
 - Base: `d2d6a695724b8e3645b3b6e73127fba0b0caaff4`.
 - Owner: `src/lib/nogc_sync_mut/io/linux_process_owner.spl`.
 

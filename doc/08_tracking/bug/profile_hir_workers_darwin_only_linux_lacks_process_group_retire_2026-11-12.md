@@ -62,5 +62,14 @@ The `/proc` scan is local to the owner, side-effect free, and matches the Darwin
   probe log shows `[hir-shard] done shard=N/6 ... claimed=1` (the HIR pool goes
   through `worker_hir_owner_start_v1` with `ProcessObservationDescendantPolicyV4.ProcessGroup`,
   `native_build_main.spl:1316`) and zero `process-group-retire` / `reason:` refusals.
-  The live p4 `cli-f26` CLI build on the same Stage 2 shows 8 admitted HIR
-  workers (`[rt-pin] dynamic ELF admitted`), each running as its own process-group leader.
+  The p4 `cli-f26` full-CLI build on the same Stage 2 (log read-only) admitted
+  `threads=8` HIR owners, each its own process-group leader, and reported
+  `[hir-shard] completed_workers=7 failed_workers=1 failed_modules=2 unfinished=0`;
+  the failed owner is `status=FAILED exit=1 ... finished=true` (module compile
+  errors in `codegen.spl` and `os_build_run.spl`), i.e. it too was retired.
+- First-hand: this session's own native-build probe on the same Stage 2
+  (`MemoryMax=8G`) logged 69 `[hir-shard] done` lines through the ProcessGroup
+  owner, rc 0, zero `process-group-retire` / `reason:` lines.
+- Substitution, stated: the record's literal gates (3-file pre-flight
+  `completed_workers=2`, Stage 3-shape probe) were not re-run as named; the
+  6-owner sanity pools, the cli-f26 8-owner pool and the probe above stand in.
