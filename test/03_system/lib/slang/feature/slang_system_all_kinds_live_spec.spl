@@ -1,0 +1,276 @@
+"""
+# slang system test: every model kind through the OpenAI HTTP surface
+
+## Purpose and audience
+Purpose: one end-to-end use of slang as a local model server on this host, through the same `slang_api_dispatch` router the HTTP server uses. It touches every model kind slang serves:
+- chat (with the KV prefix cache on and off);
+- image and video input;
+- speech to text;
+- image generation;
+- embeddings and rerank;
+- text to speech.
+
+Audience: release reviewers who want a single run that says "slang works on this machine".
+
+## Operator workflow
+1. Put models under `SLANG_MODEL_ROOT`:
+   - `gemma-3-270m-it-GGUF`;
+   - `SmolVLM2-256M-Video-Instruct-GGUF`;
+   - `Qwen3-ASR-0.6B-GGUF`;
+   - `sd-turbo`;
+   - `bge-small-en-v1.5-gguf`;
+   - `bge-reranker-v2-m3-GGUF`;
+   - `OuteTTS-0.2-500M-GGUF`.
+2. Point `SLANG_GGML_LIB` at an mtmd-enabled `slang_ggml` shim and `SLANG_SD_LIB` at `slang_sd`, and set `SLANG_FFMPEG` for the video case.
+3. Run with `SLANG_LIVE=1`.
+
+Each example writes one `SYSTEM` line to `build/probe/slang_system.txt` with its status and wall time.
+
+## Compatibility and limitations
+The test needs the live environment above. Without it, each example writes a `SKIPPED:` line to the same file, because `skip()` inside an `it` body is currently counted as a pass (`doc/08_tracking/bug/spec_skip_reported_as_pass_2026-11-19.md`). So read the file, not just the verdict.
+
+The KV comparison sends the same long chat prompt twice with the prefix cache off and twice with it on, through the router. It checks that all four answers are identical and that only the cache-on repeat reuses prefix tokens (hits, reused tokens, fewer prefilled tokens). Each request writes one `SYSTEM_KV` row with its wall time; the times are recorded, not asserted. For the wider workload table, see `slang_kv_cache_live_spec`.
+
+The KV prompt stays under 512 tokens on purpose. That is Gemma-3's sliding window (`n_swa`). llama.cpp's per-sequence state write drops SWA-masked cells even with a full-size SWA cache, so a snapshot of a longer prompt restores without its early SWA cells. The shim then refuses the restore (`restore_failures`), and nothing is reused (`doc/08_tracking/bug/slang_snapshot_prefix_cache_swa_long_prompt_2026-11-22.md`).
+
+The video clip is 640x480. SmolVLM2 upscales every frame and tiles it, so a square frame costs 17 x 64 positions; four of those overflow the 4096-token context (HTTP 503). A 4:3 frame costs 13 x 64.
+
+Helper names carry a `_sys_` prefix on purpose: a private helper named like one in the server modules (`_text_part`) resolves to the server's function under the interpreter and corrupts the request JSON.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_prefix_cache_limits, engine_prefix_cache_stats, engine_unload}
+use std.common.base_encoding.base64.{base64_encode_bytes, base64_decode_bytes}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_bytes}
+use std.io_runtime.{env_get, is_dir, file_exists, file_read_bytes, file_append_text, dir_create_all, time_now_monotonic_ms}
+
+val CHAT_ID = "gemma-3-270m-it-GGUF"
+val VLM_ID = "SmolVLM2-256M-Video-Instruct-GGUF"
+val ASR_ID = "Qwen3-ASR-0.6B-GGUF"
+val SD_ID = "sd-turbo"
+val EMBED_ID = "bge-small-en-v1.5-gguf"
+val RERANK_ID = "bge-reranker-v2-m3-GGUF"
+val TTS_ID = "OuteTTS-0.2-500M-GGUF"
+
+fn _sys_root() -> text:
+    val root = (env_get("SLANG_MODEL_ROOT") ?? "").trim()
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _sys_live() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _sys_root() != "" and engine_backend_available()
+
+fn _sys_have(id: text) -> bool:
+    is_dir(_sys_root() + "/" + id)
+
+fn _sys_record(line: text):
+    dir_create_all("build/probe")
+    file_append_text("build/probe/slang_system.txt", line + "\n")
+
+# Records why an example did not run and leaves the spec visibly incomplete.
+fn _sys_skipped(name: text, why: text):
+    _sys_record("SKIPPED: " + name + " -- " + why)
+    skip(name, why)
+
+fn _sys_asset(name: text) -> text:
+    val configured = (env_get("SLANG_MM_ASSET_DIR") ?? "").trim()
+    val dir = if configured != "": configured else: "C:/dev/tools/llama.cpp/tools/mtmd"
+    dir + "/" + name
+
+fn _sys_wav() -> text:
+    val configured = (env_get("SLANG_ASR_WAV") ?? "").trim()
+    if configured != "": configured else: "C:/dev/tools/whisper.cpp/samples/jfk.wav"
+
+# POST through the router, timed; returns (status, body, body_bytes, ms).
+fn _sys_post(route: text, body: text) -> (i64, text, [u8], i64):
+    val t0 = time_now_monotonic_ms()
+    val r = slang_api_dispatch("POST", route, body, _sys_root())
+    val ms = time_now_monotonic_ms() - t0
+    (r.status as i64, r.body, r.body_bytes, ms)
+
+# The completion text of a 200 response, or the status and body of a failure.
+fn _sys_answer(status: i64, body: text) -> text:
+    if status != 200:
+        return "HTTP " + status.to_text() + " " + body
+    json_string_field(body, "content")
+
+fn _sys_chat_body(model: text, content: text, max_tokens: i64) -> text:
+    "{\"model\":\"" + model + "\",\"max_tokens\":" + max_tokens.to_text() + ",\"temperature\":0,\"messages\":[{\"role\":\"user\",\"content\":" + content + "}]}"
+
+fn _sys_text_part(t: text) -> text:
+    "{\"type\":\"text\",\"text\":\"" + t + "\"}"
+
+fn _sys_media_part(kind: text, mime: text, bytes: [u8]) -> text:
+    "{\"type\":\"" + kind + "\",\"" + kind + "\":{\"url\":\"data:" + mime + ";base64," + base64_encode_bytes(bytes) + "\"}}}}"
+
+fn _sys_starts_with_bytes(b: [u8], prefix: [u8]) -> bool:
+    if b.len() < prefix.len():
+        return false
+    var i = 0
+    while i < prefix.len():
+        if b[i] != prefix[i]:
+            return false
+        i = i + 1
+    true
+
+# One chat request with the prefix-cache counter deltas it caused.
+struct SysKvRequest:
+    status: i64
+    answer: text
+    ms: i64
+    hits: i64
+    reused: i64
+    prefilled: i64
+
+fn _sys_kv_counters() -> (i64, i64, i64):
+    if val s = engine_prefix_cache_stats():
+        return (s.hits, s.tokens_reused, s.tokens_prefilled)
+    (0, 0, 0)
+
+# Runs `body` once and writes one KV table row to the record file.
+fn _sys_kv_request(label: text, body: text) -> SysKvRequest:
+    val before = _sys_kv_counters()
+    val r = _sys_post("/v1/chat/completions", body)
+    val after = _sys_kv_counters()
+    val out = SysKvRequest(status: r.0, answer: json_string_field(r.1, "content"), ms: r.3,
+        hits: after.0 - before.0, reused: after.1 - before.1, prefilled: after.2 - before.2)
+    _sys_record("SYSTEM_KV | " + label + " | status=" + out.status.to_text() + " | ms=" + out.ms.to_text() + " | hits=" + out.hits.to_text() + " | reused_tokens=" + out.reused.to_text() + " | prefilled_tokens=" + out.prefilled.to_text() + " | answer=" + out.answer + " |")
+    out
+
+describe "slang system: every model kind through the HTTP surface":
+
+    it "lists every kind on /v1/models":
+        if not _sys_live():
+            _sys_skipped("lists every kind on /v1/models", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT and SLANG_GGML_LIB")
+            return
+        val r = slang_api_dispatch("GET", "/v1/models", "", _sys_root())
+        _sys_record("SYSTEM kind=models status=" + r.status.to_text())
+        expect(r.status).to_equal(200)
+        for k in ["chat", "asr", "tts", "image_gen", "embedding", "rerank"]:
+            step("/v1/models names a " + k + " model")
+            expect(r.body.contains("\"slang_kind\":\"" + k + "\"")).to_equal(true)
+
+    it "chats, and the KV prefix cache reuses a repeated long prompt":
+        if not _sys_live() or not _sys_have(CHAT_ID):
+            _sys_skipped("chats, and the KV prefix cache reuses a repeated long prompt", "needs the live env and " + CHAT_ID)
+            return
+        var context = ""
+        var i = 0
+        while i < 20:
+            context = context + "Slang serves local models on the AMD GPU through the ggml shim. "
+            i = i + 1
+        val body = _sys_chat_body(CHAT_ID, "\"" + context + "In one word, what does slang serve?\"", 8)
+
+        step("Load the chat model with a short unrelated request")
+        engine_unload()
+        val warmup = _sys_post("/v1/chat/completions", _sys_chat_body(CHAT_ID, "\"Say hi.\"", 1))
+        expect(warmup.0).to_equal(200)
+
+        step("Cache-off lane: zero entries, so nothing is admitted or reused")
+        expect(engine_set_prefix_cache_limits(0, 0)).to_equal(true)
+        val off_cold = _sys_kv_request("off_cold", body)
+        val off_repeat = _sys_kv_request("off_repeat", body)
+
+        step("Cache-on lane: the engine default bound")
+        expect(engine_set_prefix_cache_limits(4, 2147483648)).to_equal(true)
+        val on_cold = _sys_kv_request("on_cold", body)
+        val on_repeat = _sys_kv_request("on_repeat", body)
+        engine_unload()
+
+        _sys_record("SYSTEM kind=chat status=" + off_cold.status.to_text() + "/" + off_repeat.status.to_text() + "/" + on_cold.status.to_text() + "/" + on_repeat.status.to_text() + " off_repeat_ms=" + off_repeat.ms.to_text() + " on_repeat_ms=" + on_repeat.ms.to_text() + " reused_tokens=" + on_repeat.reused.to_text() + " answer=" + on_repeat.answer)
+        for r in [off_cold, off_repeat, on_cold, on_repeat]:
+            expect(r.status).to_equal(200)
+        expect(off_cold.answer.trim() != "").to_equal(true)
+        # Gemma-3's sliding window is 512 tokens. A longer prompt cannot be
+        # restored from a snapshot (see the docstring), so keep it inside.
+        expect(off_cold.prefilled < 512).to_equal(true)
+
+        step("The answer is the same with the cache off and on")
+        expect(off_repeat.answer).to_equal(off_cold.answer)
+        expect(on_cold.answer).to_equal(off_cold.answer)
+        expect(on_repeat.answer).to_equal(off_cold.answer)
+
+        step("Only the cache-on repeat reuses prefix tokens")
+        expect(off_repeat.hits).to_equal(0)
+        expect(off_repeat.reused).to_equal(0)
+        expect(on_repeat.hits).to_be_greater_than(0)
+        expect(on_repeat.reused).to_be_greater_than(0)
+        expect(on_repeat.prefilled < off_repeat.prefilled).to_equal(true)
+
+    it "describes an image (vision chat)":
+        val img = _sys_asset("test-1.jpeg")
+        if not _sys_live() or not _sys_have(VLM_ID) or not file_exists(img):
+            _sys_skipped("describes an image (vision chat)", "needs the live env, " + VLM_ID + " and test-1.jpeg")
+            return
+        val r = _sys_post("/v1/chat/completions", _sys_chat_body(VLM_ID, "[" + _sys_media_part("image_url", "image/jpeg", file_read_bytes(img)) + "," + _sys_text_part("Describe this image in one sentence.") + "]", 48))
+        val answer = _sys_answer(r.0, r.1)
+        _sys_record("SYSTEM kind=vision status=" + r.0.to_text() + " ms=" + r.3.to_text() + " answer=" + answer)
+        expect(r.0).to_equal(200)
+        expect(answer.trim() != "").to_equal(true)
+
+    it "describes a video (frames sampled by ffmpeg)":
+        val ffmpeg = (env_get("SLANG_FFMPEG") ?? "").trim()
+        val img = _sys_asset("test-1.jpeg")
+        if not _sys_live() or not _sys_have(VLM_ID) or ffmpeg == "" or not file_exists(img):
+            _sys_skipped("describes a video (frames sampled by ffmpeg)", "needs the live env, " + VLM_ID + ", SLANG_FFMPEG and test-1.jpeg")
+            return
+        dir_create_all("build/probe")
+        val mp4 = "build/probe/slang_system.mp4"
+        val made = process_run_bounded_bytes(ffmpeg, ["-v", "error", "-y", "-loop", "1", "-i", img, "-t", "2", "-r", "2", "-vf", "scale=640:480", "-pix_fmt", "yuv420p", mp4], 120000, 1048576)
+        expect(made.2).to_equal(0)
+        val r = _sys_post("/v1/chat/completions", _sys_chat_body(VLM_ID, "[" + _sys_media_part("video_url", "video/mp4", file_read_bytes(mp4)) + "," + _sys_text_part("What is shown in this video?") + "]", 48))
+        val answer = _sys_answer(r.0, r.1)
+        _sys_record("SYSTEM kind=video status=" + r.0.to_text() + " ms=" + r.3.to_text() + " answer=" + answer)
+        expect(r.0).to_equal(200)
+        expect(answer.trim() != "").to_equal(true)
+
+    it "transcribes speech (asr)":
+        if not _sys_live() or not _sys_have(ASR_ID) or not file_exists(_sys_wav()):
+            _sys_skipped("transcribes speech (asr)", "needs the live env, " + ASR_ID + " and the jfk wav")
+            return
+        val r = _sys_post("/v1/audio/transcriptions", "{\"model\":\"" + ASR_ID + "\",\"file_b64\":\"" + base64_encode_bytes(file_read_bytes(_sys_wav())) + "\",\"format\":\"wav\"}")
+        val heard = json_string_field(r.1, "text")
+        _sys_record("SYSTEM kind=asr status=" + r.0.to_text() + " ms=" + r.3.to_text() + " text=" + heard)
+        expect(r.0).to_equal(200)
+        expect(heard.to_lower().contains("country")).to_equal(true)
+
+    it "generates an image (stable diffusion)":
+        val sd_lib = (env_get("SLANG_SD_LIB") ?? "").trim()
+        if not _sys_live() or not _sys_have(SD_ID) or sd_lib == "":
+            _sys_skipped("generates an image (stable diffusion)", "needs the live env, " + SD_ID + " and SLANG_SD_LIB")
+            return
+        val r = _sys_post("/v1/images/generations", "{\"model\":\"" + SD_ID + "\",\"prompt\":\"a red apple on a wooden table\",\"size\":\"512x512\",\"steps\":1,\"seed\":7}")
+        val png = base64_decode_bytes(json_string_field(r.1, "b64_json"))
+        _sys_record("SYSTEM kind=image_gen status=" + r.0.to_text() + " ms=" + r.3.to_text() + " png_bytes=" + png.len().to_text())
+        expect(r.0).to_equal(200)
+        val png_magic: [u8] = [137, 80, 78, 71]
+        expect(_sys_starts_with_bytes(png, png_magic)).to_equal(true)
+
+    it "embeds text and ranks documents":
+        if not _sys_live() or not _sys_have(EMBED_ID) or not _sys_have(RERANK_ID):
+            _sys_skipped("embeds text and ranks documents", "needs the live env, " + EMBED_ID + " and " + RERANK_ID)
+            return
+        val e = _sys_post("/v1/embeddings", "{\"model\":\"" + EMBED_ID + "\",\"input\":[\"a cat\",\"a kitten\"]}")
+        _sys_record("SYSTEM kind=embedding status=" + e.0.to_text() + " ms=" + e.3.to_text())
+        expect(e.0).to_equal(200)
+        expect(e.1.contains("\"index\":1,\"embedding\":[")).to_equal(true)
+        val r = _sys_post("/v1/rerank", "{\"model\":\"" + RERANK_ID + "\",\"query\":\"What is the capital of France?\",\"documents\":[\"Berlin is the capital of Germany.\",\"Paris is the capital of France.\",\"Bananas are yellow.\"],\"top_n\":1}")
+        _sys_record("SYSTEM kind=rerank status=" + r.0.to_text() + " ms=" + r.3.to_text() + " body=" + r.1)
+        expect(r.0).to_equal(200)
+        expect(r.1.contains("\"results\":[{\"index\":1,")).to_equal(true)
+
+    it "speaks a sentence (tts) that is a valid wav":
+        if not _sys_live() or not _sys_have(TTS_ID):
+            _sys_skipped("speaks a sentence (tts) that is a valid wav", "needs the live env and " + TTS_ID)
+            return
+        val r = _sys_post("/v1/audio/speech", "{\"model\":\"" + TTS_ID + "\",\"input\":\"Slang speaks.\",\"response_format\":\"wav\"}")
+        val wav = base64_decode_bytes(json_string_field(r.1, "audio"))
+        _sys_record("SYSTEM kind=tts status=" + r.0.to_text() + " ms=" + r.3.to_text() + " wav_bytes=" + wav.len().to_text())
+        expect(r.0).to_equal(200)
+        val riff: [u8] = [82, 73, 70, 70]
+        expect(_sys_starts_with_bytes(wav, riff)).to_equal(true)
+        expect(wav.len()).to_be_greater_than(44)
