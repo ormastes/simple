@@ -469,6 +469,43 @@ impl LlvmBackend {
         self.target.os == TargetOS::Windows && self.target.arch == TargetArch::X86
     }
 
+    /// Call a stdcall (`@abi("system")`) function: coerce every argument to its
+    /// declared parameter type (word -> i32 truncation etc.), refuse any arity
+    /// mismatch (a stdcall callee pops its declared byte count, so a call built
+    /// from the actual argument types would corrupt the stack), and put the
+    /// callee's convention on the call site.
+    #[cfg(feature = "llvm")]
+    pub(super) fn build_system_abi_call(
+        &self,
+        func: inkwell::values::FunctionValue<'static>,
+        args: &[inkwell::values::BasicMetadataValueEnum<'static>],
+        builder: &Builder<'static>,
+        label: &str,
+    ) -> Result<inkwell::values::CallSiteValue<'static>, CompileError> {
+        let declared = func.get_type().get_param_types();
+        let name = func.get_name().to_string_lossy().into_owned();
+        if declared.len() != args.len() {
+            return Err(CompileError::semantic(format!(
+                "stdcall extern `{name}` (@abi(\"system\")) expects {} argument(s) ({declared:?}) but the call passes {}",
+                declared.len(),
+                args.len()
+            )));
+        }
+        let mut coerced = Vec::with_capacity(args.len());
+        for (arg, ty) in args.iter().zip(declared) {
+            let value = inkwell::values::BasicValueEnum::try_from(*arg)
+                .map_err(|_| CompileError::semantic("metadata value used as a stdcall call argument"))?;
+            let ty = inkwell::types::BasicTypeEnum::try_from(ty)
+                .map_err(|_| CompileError::semantic("metadata type used as a stdcall call parameter"))?;
+            coerced.push(self.coerce_value_to_type(value, Some(ty), builder)?.into());
+        }
+        let call = builder
+            .build_call(func, &coerced, label)
+            .map_err(|e| crate::error::factory::llvm_build_failed("stdcall call", &e))?;
+        call.set_call_convention(func.get_call_conventions());
+        Ok(call)
+    }
+
     /// Widen a narrow integer return of a stdcall `@abi("system")` extern to
     /// the runtime word (sext for signed Simple types, zext otherwise). Any
     /// other callee/value is returned unchanged.
@@ -506,45 +543,62 @@ impl LlvmBackend {
     /// x86 mangler emits `_Name@N`. Must run before anything can `add_function`
     /// the same name (LLVM would rename ours to `Name.1`). No-op off Windows x86.
     #[cfg(feature = "llvm")]
-    pub(super) fn declare_system_abi_externs(&self, module_ir: &MirModule) {
+    pub(super) fn declare_system_abi_externs(&self, module_ir: &MirModule) -> Result<(), CompileError> {
         use inkwell::types::{BasicMetadataTypeEnum, BasicType};
         use crate::hir::TypeId as T;
         if !self.system_abi_is_stdcall() || module_ir.extern_system_abi.is_empty() {
-            return;
+            return Ok(());
         }
         let m = self.module.borrow();
-        let Some(m) = m.as_ref() else { return };
+        let Some(m) = m.as_ref() else { return Ok(()) };
         let ctx = self.context_ref();
-        let to_basic = |ty: T| -> inkwell::types::BasicTypeEnum<'static> {
-            match ty {
+        // Only primitive scalars have a C layout. Anything else (`text`,
+        // structs, `Any`, ...) is a runtime word, not a C buffer/struct.
+        let to_basic = |ty: T| -> Option<inkwell::types::BasicTypeEnum<'static>> {
+            Some(match ty {
                 T::BOOL | T::I8 | T::U8 => ctx.i8_type().into(),
                 T::I16 | T::U16 => ctx.i16_type().into(),
                 T::I32 | T::U32 | T::CHAR => ctx.i32_type().into(),
                 T::I64 | T::U64 => ctx.i64_type().into(),
                 T::F32 => ctx.f32_type().into(),
                 T::F64 => ctx.f64_type().into(),
-                _ => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
-            }
+                _ => return None,
+            })
         };
         let mut names: Vec<&String> = module_ir.extern_system_abi.keys().collect();
         names.sort();
         for name in names {
-            if m.get_function(name).is_some() {
-                continue;
-            }
             let (params, ret) = &module_ir.extern_system_abi[name];
-            let param_types: Vec<BasicMetadataTypeEnum> = params.iter().map(|p| to_basic(*p).into()).collect();
+            let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(params.len());
+            for (i, p) in params.iter().enumerate() {
+                let ty = to_basic(*p).ok_or_else(|| {
+                    CompileError::semantic(format!(
+                        "@abi(\"system\") extern `{name}`: parameter {i} has type {p:?}, which has no C layout; use bool, i8-i64, u8-u64, char, f32 or f64"
+                    ))
+                })?;
+                param_types.push(ty.into());
+            }
             let fn_type = if *ret == T::VOID {
                 ctx.void_type().fn_type(&param_types, false)
             } else {
-                to_basic(*ret).fn_type(&param_types, false)
+                to_basic(*ret)
+                    .ok_or_else(|| {
+                        CompileError::semantic(format!(
+                            "@abi(\"system\") extern `{name}`: return type {ret:?} has no C layout; use void, bool, i8-i64, u8-u64, char, f32 or f64"
+                        ))
+                    })?
+                    .fn_type(&param_types, false)
             };
+            if m.get_function(name).is_some() {
+                continue;
+            }
             let f = m.add_function(name, fn_type, None);
             f.set_linkage(inkwell::module::Linkage::External);
             // LLVMX86_StdCall
             f.set_call_conventions(64);
             self.system_abi_rets.borrow_mut().insert(name.clone(), *ret);
         }
+        Ok(())
     }
 
     #[cfg(feature = "llvm")]
@@ -2140,7 +2194,7 @@ impl NativeBackend for LlvmBackend {
         }
 
         #[cfg(feature = "llvm")]
-        self.declare_system_abi_externs(module);
+        self.declare_system_abi_externs(module)?;
         #[cfg(feature = "llvm")]
         self.declare_globals(module);
         #[cfg(feature = "llvm")]

@@ -2971,7 +2971,9 @@ impl LlvmBackend {
         let declared_param_types = called_func.get_type().get_param_types();
         let declared_params = declared_param_types.len();
         let typed = Self::ptr_arg_needs_typed_call(&declared_param_types, &arg_vals);
-        let call_site = if declared_params != arg_vals.len() || typed {
+        let call_site = if called_func.get_call_conventions() == 64 {
+            self.build_system_abi_call(called_func, &arg_vals, builder, "call")?
+        } else if declared_params != arg_vals.len() || typed {
             // Arity mismatch or a real pointer arg vs a word param: call through a
             // fn type built from the actual args (pointers stay pointers).
             let fn_type = if typed {
@@ -3599,7 +3601,7 @@ mod tests {
         let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
         backend.create_module("system_abi_i686").unwrap();
         let (mir, func) = system_abi_module();
-        backend.declare_system_abi_externs(&mir);
+        backend.declare_system_abi_externs(&mir).unwrap();
         backend.declare_globals(&mir);
         backend.compile_function(&func).unwrap();
         let ir = backend.get_ir().unwrap();
@@ -3623,15 +3625,95 @@ mod tests {
 
     #[test]
     fn system_abi_extern_is_plain_c_on_x86_64_windows() {
-        let backend = LlvmBackend::new(Target::parse("x86_64-pc-windows-gnu").unwrap()).unwrap();
-        backend.create_module("system_abi_x64").unwrap();
-        let (mir, func) = system_abi_module();
-        backend.declare_system_abi_externs(&mir);
+        let ir_for = |with_abi: bool| {
+            let backend = LlvmBackend::new(Target::parse("x86_64-pc-windows-gnu").unwrap()).unwrap();
+            backend.create_module("system_abi_x64").unwrap();
+            let (mut mir, func) = system_abi_module();
+            if !with_abi {
+                mir.extern_system_abi.clear();
+            }
+            backend.declare_system_abi_externs(&mir).unwrap();
+            backend.declare_globals(&mir);
+            backend.compile_function(&func).unwrap();
+            backend.verify().unwrap();
+            backend.get_ir().unwrap()
+        };
+        let with_abi = ir_for(true);
+        assert!(!with_abi.contains("x86_stdcallcc"), "no-op off x86 windows: {with_abi}");
+        let sorted = |s: &str| {
+            let mut l: Vec<String> = s.lines().map(str::to_string).collect();
+            l.sort();
+            l
+        };
+        // vreg alloca order is HashMap-driven, so compare the line multiset.
+        assert_eq!(sorted(&with_abi), sorted(&ir_for(false)), "extern_system_abi must not change x86_64 IR");
+    }
+
+    #[test]
+    fn system_abi_method_call_path_is_stdcall_with_truncated_args() {
+        use crate::mir::CallTarget;
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("system_abi_mcall").unwrap();
+        let mut func = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 10 });
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "SleepEx2".to_string(),
+            args: vec![],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        let mut mir = MirModule::new();
+        mir.functions = vec![func.clone()];
+        mir.extern_fn_names.insert("SleepEx2".to_string());
+        mir.extern_system_abi.insert("SleepEx2".to_string(), (vec![T::U32], T::U32));
+        backend.declare_system_abi_externs(&mir).unwrap();
         backend.declare_globals(&mir);
         backend.compile_function(&func).unwrap();
         let ir = backend.get_ir().unwrap();
-        assert!(!ir.contains("x86_stdcallcc"), "no-op off x86 windows: {ir}");
+        let call = ir
+            .lines()
+            .find(|l| l.contains("= call ") && l.contains("@SleepEx2("))
+            .unwrap_or_else(|| panic!("no SleepEx2 call: {ir}"));
+        assert!(call.contains("x86_stdcallcc i32 @SleepEx2(i32 "), "{call}\n{ir}");
+        assert!(ir.contains("trunc i64"), "i64 word arg must be truncated to i32: {ir}");
+        assert!(ir.contains("zext i32"), "u32 return widened: {ir}");
         backend.verify().unwrap();
+    }
+
+    #[test]
+    fn system_abi_arity_mismatch_is_a_compile_error() {
+        use crate::mir::CallTarget;
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("system_abi_arity").unwrap();
+        let (mir, _) = system_abi_module();
+        let mut func = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 10 });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: None,
+            target: CallTarget::from_name("Sleep"),
+            args: vec![VReg(0), VReg(0)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+        backend.declare_system_abi_externs(&mir).unwrap();
+        backend.declare_globals(&mir);
+        let err = backend.compile_function(&func).expect_err("stdcall arity mismatch must fail");
+        assert!(err.to_string().contains("Sleep"), "{err}");
+    }
+
+    #[test]
+    fn system_abi_rejects_non_scalar_param_and_return_types() {
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("system_abi_text").unwrap();
+        for (params, ret) in [(vec![T::STRING], T::VOID), (vec![], T::STRING), (vec![T::ANY], T::I32)] {
+            let mut mir = MirModule::new();
+            mir.extern_fn_names.insert("PutsLike".to_string());
+            mir.extern_system_abi.insert("PutsLike".to_string(), (params, ret));
+            let err = backend
+                .declare_system_abi_externs(&mir)
+                .expect_err("non-scalar system extern type must be rejected");
+            assert!(err.to_string().contains("PutsLike"), "{err}");
+        }
     }
 
     /// `InterpCall` with an `f64` argument must declare `rt_value_float(double)`
