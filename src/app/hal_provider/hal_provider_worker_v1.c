@@ -87,36 +87,38 @@ static int prefix(const unsigned char *p, size_t n, const char *s, size_t z) {
     return n >= z && memcmp(p, s, z) == 0;
 }
 
-static int u64_field(const unsigned char *p, size_t n, size_t *at,
-                     uint64_t *out, int terminal) {
+/* Parses one decimal digit run that must not exceed `limit`, followed by the
+ * '|' separator (or newline when `terminal`). */
+static int digits_field(const unsigned char *p, size_t n, size_t *at,
+                        uint64_t limit, uint64_t *magnitude, int terminal) {
     uint64_t value = 0;
     int digits = 0;
     while (*at < n && p[*at] >= '0' && p[*at] <= '9') {
         unsigned d = (unsigned)(p[*at] - '0');
-        if (value > (UINT64_MAX - d) / 10) return 0;
+        if (value > (limit - d) / 10) return 0;
         value = value * 10 + d;
         (*at)++; digits++;
     }
     if (!digits || *at >= n || p[*at] != (terminal ? '\n' : '|')) return 0;
     (*at)++;
-    *out = value;
+    *magnitude = value;
     return 1;
+}
+
+static int u64_field(const unsigned char *p, size_t n, size_t *at,
+                     uint64_t *out, int terminal) {
+    return digits_field(p, n, at, UINT64_MAX, out, terminal);
 }
 
 static int i64_field(const unsigned char *p, size_t n, size_t *at,
                      int64_t *out, int terminal) {
     uint64_t magnitude = 0;
-    int negative = 0, digits = 0;
+    int negative = 0;
     if (*at < n && p[*at] == '-') { negative = 1; (*at)++; }
-    while (*at < n && p[*at] >= '0' && p[*at] <= '9') {
-        unsigned d = (unsigned)(p[*at] - '0');
-        uint64_t limit = negative ? UINT64_C(9223372036854775808)
-                                  : UINT64_C(9223372036854775807);
-        if (magnitude > (limit - d) / 10) return 0;
-        magnitude = magnitude * 10 + d; (*at)++; digits++;
-    }
-    if (!digits || *at >= n || p[*at] != (terminal ? '\n' : '|')) return 0;
-    (*at)++;
+    if (!digits_field(p, n, at,
+                      negative ? UINT64_C(9223372036854775808)
+                               : UINT64_C(9223372036854775807),
+                      &magnitude, terminal)) return 0;
     if (negative)
         *out = magnitude == UINT64_C(9223372036854775808)
             ? INT64_MIN : -(int64_t)magnitude;
@@ -223,12 +225,9 @@ static int parse_bytes_request_v2(const unsigned char *p, size_t n,
 
 static int parse_reset(const unsigned char *p, size_t n, uint64_t out[3]) {
     size_t at = 10;
-    int i;
     if (!prefix(p, n, "HALRESET1|", 10)) return 0;
-    for (i = 0; i < 3; ++i)
-        if (!u64_field(p, n, &at, &out[i], i == 2)) return 0;
-    return at == n && out[0] > 0 && out[1] > 0 && out[2] > 0 &&
-        out[0] <= INT64_MAX && out[1] <= INT64_MAX && out[2] <= INT64_MAX;
+    return parse_u64_fields(p, n, &at, out, 3) && at == n &&
+        out[0] > 0 && out[1] > 0 && out[2] > 0;
 }
 
 static uint64_t hash_request(const HalRequestV1 *r, uint64_t seed) {
