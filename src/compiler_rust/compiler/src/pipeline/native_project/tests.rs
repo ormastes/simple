@@ -10723,3 +10723,32 @@ fn compiler_rt_builtins_env_override_selects_explicit_archive() {
     assert_ne!(fallback, Some(missing));
     assert_ne!(gcc_pick, Some(gcc));
 }
+
+/// Perf regression (bug seed_native_build_per_file_compile_minutes_windows_2026-11-23):
+/// `build_use_map_from_ast` walks the whole `all_mangled` table per imported
+/// name. On the full-CLI closure that cost 65% of all per-file CPU
+/// (`pre_hir`, up to 190 s for one file). Pin a wide table x many imports
+/// under a budget, and keep the module-qualified (`mod.fn`) binding intact.
+#[test]
+fn build_use_map_wide_closure_stays_within_budget() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for i in 0..20_000 {
+        let name = format!("f{i}");
+        let owners = vec![format!("pkg__m{}__{name}", i % 97), format!("other__m{}__{name}", i % 89)];
+        all_mangled.insert(name, owners);
+    }
+    all_mangled.insert("helper".to_string(), vec!["pkg__m1__helper".to_string()]);
+    let mut source = String::new();
+    for m in 0..40 {
+        source.push_str(&format!("use pkg.m{m}\n"));
+    }
+    source.push_str("fn main():\n    0\n");
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let started = std::time::Instant::now();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    let elapsed = started.elapsed();
+    assert_eq!(use_map.get("m1.helper").map(String::as_str), Some("pkg__m1__helper"));
+    assert_eq!(use_map.get("m3.f3").map(String::as_str), Some("pkg__m3__f3"));
+    assert!(use_map.get("m3.f4").is_none());
+    assert!(elapsed.as_secs_f64() < 10.0, "build_use_map_from_ast took {elapsed:?}");
+}
