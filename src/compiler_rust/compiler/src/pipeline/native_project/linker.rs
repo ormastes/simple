@@ -537,18 +537,20 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
 /// clang driver adds implicitly (`--unwindlib=libunwind`, mingw CRT). Each is
 /// looked up in the `-L` dirs first, then via the driver's own sysroot search
 /// (`-print-file-name`, i.e. llvm-mingw's x86_64-w64-mingw32/lib).
-#[cfg(target_os = "windows")]
-fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str, driver_target: &str) -> Vec<PathBuf> {
+fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str, driver_target: Option<&str>) -> Vec<PathBuf> {
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     let search_dirs: Vec<PathBuf> = args.iter().filter_map(|a| a.strip_prefix("-L")).map(PathBuf::from).collect();
     let mut names: Vec<&str> = args.iter().filter_map(|a| a.strip_prefix("-l")).collect();
     names.extend(["unwind", "mingw32", "mingwex", "msvcrt", "kernel32"]);
     resolve_gnu_link_libraries(&names, &search_dirs, |c| {
         let out = std::process::Command::new(cc)
-            .arg(driver_target)
+            .args(driver_target)
             .arg(format!("-print-file-name={c}"))
             .output()
             .ok()?;
+        if !out.status.success() {
+            return None;
+        }
         Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
     })
 }
@@ -2923,8 +2925,21 @@ int main(int argc, char** argv) {
                     provider_paths.push(mutex_runtime.as_path());
                 }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
+                // Provider ownership follows the output target, not the build
+                // host. A Linux -> Windows link must scan the same MinGW
+                // import archives as a native Windows link before generating
+                // bootstrap shims (in particular the ToolHelp process APIs).
+                let system_libs = if cross_target.os == TargetOS::Windows && !is_msvc && !is_clang_cl {
+                    gnu_link_line_libraries(
+                        &cmd,
+                        &cc,
+                        windows_gnu_target_flag(cross_target, &cc),
+                    )
+                } else {
+                    Vec::new()
+                };
                 let stubs_o = super::stubs::generate_stub_object_with_policy(
-                    temp_dir, object_paths, &main_o, &provider_paths, imports, &[], self.piped_observer.is_rust())?;
+                    temp_dir, object_paths, &main_o, &provider_paths, imports, &system_libs, self.piped_observer.is_rust())?;
                 cmd.arg(&stubs_o);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
@@ -2962,7 +2977,7 @@ int main(int argc, char** argv) {
             let system_libs = gnu_link_line_libraries(
                 &cmd,
                 &cc,
-                windows_gnu_target_flag(cross_target, &cc).unwrap_or("--target=x86_64-w64-windows-gnu"),
+                windows_gnu_target_flag(cross_target, &cc),
             );
             let stubs_o = super::stubs::generate_stub_object_with_policy(
                 temp_dir,
