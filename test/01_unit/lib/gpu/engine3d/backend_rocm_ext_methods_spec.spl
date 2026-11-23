@@ -1,0 +1,116 @@
+# Regression: engine3d_ext_impl_blocks_never_imported_2026-07-02 (ROCm part).
+# Calls every one of the 26 RenderBackend3D methods that used to live in the
+# never-imported plain `impl RocmBackend3D:` block of backend_rocm_ext.spl.
+# The backend is reached through the extension compatibility path
+# (gc_sync_mut facade -> gc_async_mut ext -> primary owner) and every call
+# dispatches through a RenderBackend3D-typed argument.
+# RocmBackend3D has no HIP dispatch: it is a software rasterizer, so these
+# cases prove method attachment and framebuffer behavior, not GPU execution.
+use std.spec.*
+use std.gc_async_mut.gpu.engine3d.backend.{RenderBackend3D}
+use std.gc_async_mut.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D}
+use std.gc_sync_mut.gpu.engine3d.backend_rocm_ext.{RocmBackend3D}
+
+val ROCM_EXT_BLACK: u32 = 0xFF000000u32
+val ROCM_EXT_WHITE: u32 = 0xFFFFFFFFu32
+
+# 3x3 frame, black except a white centre pixel.
+fn rocm_ext_centre_frame(backend: RenderBackend3D):
+    expect(backend.init(3, 3)).to_equal(true)
+    backend.clear(ROCM_EXT_BLACK)
+    backend.draw_image(1, 1, 1, 1, [ROCM_EXT_WHITE])
+
+fn rocm_ext_fxaa_centre(backend: RenderBackend3D) -> u32:
+    rocm_ext_centre_frame(backend)
+    backend.apply_fxaa()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels[4]
+
+fn rocm_ext_depth_passes_keep_frame(backend: RenderBackend3D) -> [u32]:
+    rocm_ext_centre_frame(backend)
+    backend.apply_ssao(1.0, 0.0, 1.0)
+    backend.apply_ssr(8, 0.5)
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+fn rocm_ext_occlusion_counts(backend: RenderBackend3D) -> [i32]:
+    rocm_ext_centre_frame(backend)
+    val whole = backend.occlusion_query(0, 0, 3, 3)
+    val corner = backend.occlusion_query(0, 0, 1, 1)
+    val clipped = backend.occlusion_query(1, 1, 5, 5)
+    backend.shutdown()
+    [whole, corner, clipped]
+
+fn rocm_ext_resource_ids(backend: RenderBackend3D) -> [i32]:
+    rocm_ext_centre_frame(backend)
+    val shader = backend.create_shader("vs", "fs")
+    val pipeline = backend.create_pipeline(shader, true, 0, 1)
+    backend.bind_pipeline(pipeline)
+    backend.delete_shader(shader)
+    val buffer = backend.create_storage_buffer(16)
+    backend.update_buffer(buffer, [1u8, 2u8])
+    val buffer_len = backend.read_buffer(buffer).len() as i32
+    backend.shutdown()
+    [shader, pipeline, buffer, buffer_len]
+
+fn rocm_ext_texture_ids(backend: RenderBackend3D) -> [i32]:
+    rocm_ext_centre_frame(backend)
+    val texture = backend.create_texture_ex(TextureDescriptor3D.create_2d(1, 1, 0), [255u8, 255u8, 255u8, 255u8])
+    val sampler = backend.create_sampler(SamplerDescriptor3D.create_default())
+    val view = backend.create_texture_view(texture, 1, 0, 0, 1, 0, 1)
+    backend.write_texture(texture, 0, 0, 0, 1, 1, 1, [0u8, 0u8, 0u8, 255u8])
+    backend.copy_texture_to_texture(texture, texture, [0, 0, 0], [0, 0, 0], [1, 1, 1])
+    backend.generate_mipmaps_ex(texture, 0)
+    val compressed = backend.compress_texture(texture, 0)
+    val texel_len = backend.read_texture(texture, 0, 0).len() as i32
+    backend.destroy_sampler(sampler)
+    backend.destroy_texture_ex(texture)
+    backend.shutdown()
+    [texture, sampler, view, compressed, texel_len]
+
+fn rocm_ext_passthrough_frame(backend: RenderBackend3D) -> [u32]:
+    rocm_ext_centre_frame(backend)
+    backend.begin_render_pass(0, 0)
+    backend.upload_bone_transforms([], 0)
+    backend.draw_indirect(0, 0, 1)
+    backend.pipeline_barrier()
+    backend.end_render_pass()
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+describe "ROCm 3D backend extension methods are attached to the trait impl":
+    it "names the ROCm owner behind the extension import path":
+        step("Resolve RocmBackend3D through the sync extension facade")
+        val backend = RocmBackend3D.create()
+        expect(backend.name()).to_equal("rocm3d")
+
+    it "runs FXAA on the ROCm framebuffer":
+        step("Average the white centre pixel with its two black row neighbours")
+        expect(rocm_ext_fxaa_centre(RocmBackend3D.create())).to_equal(0xFF555555u32)
+
+    it "runs SSAO and SSR without changing a flat-depth frame":
+        step("Apply both depth passes at uniform far depth")
+        val black = ROCM_EXT_BLACK
+        expect(rocm_ext_depth_passes_keep_frame(RocmBackend3D.create())).to_equal(
+            [black, black, black, black, ROCM_EXT_WHITE, black, black, black, black])
+
+    it "counts occluding pixels on the ROCm framebuffer":
+        step("Query whole frame, an empty corner and a clipped rectangle")
+        expect(rocm_ext_occlusion_counts(RocmBackend3D.create())).to_equal([1, 0, 1])
+
+    it "reports shader, pipeline and storage buffers as unsupported":
+        step("Call the shader, pipeline and buffer extension methods")
+        expect(rocm_ext_resource_ids(RocmBackend3D.create())).to_equal([-1, -1, -1, 0])
+
+    it "reports extended textures as unsupported":
+        step("Call all ten extended texture methods")
+        expect(rocm_ext_texture_ids(RocmBackend3D.create())).to_equal([-1, -1, -1, -1, 0])
+
+    it "keeps the frame across render-pass, skinning, indirect and barrier calls":
+        step("Call the five pass-through extension methods")
+        val black = ROCM_EXT_BLACK
+        expect(rocm_ext_passthrough_frame(RocmBackend3D.create())).to_equal(
+            [black, black, black, black, ROCM_EXT_WHITE, black, black, black, black])
