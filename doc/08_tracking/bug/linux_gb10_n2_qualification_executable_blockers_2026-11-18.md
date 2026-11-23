@@ -832,3 +832,72 @@ the Engine2D leg first, before Skia runs. Still open with
 Blocker 8 is fixed. The owner accepted the architecture amendment on
 2026-11-23: native_all is admitted for a non-bootstrap entry only when the
 `host-gpu-native-all` bundle is named explicitly.
+
+## 2026-11-23 (later) — corpus case 02: the Engine2D leg is fixed; Skia's edge policy is still open
+
+### Root cause: a native conversion defect, not edge AA
+
+The oracle and the AA are correct. Under the interpreter, strict Vulkan output
+for case 02 passes the analytic area oracle on both lavapipe
+(edge_max=1, edge_sum=12/2742) and the NVIDIA GB10 ICD (edge_max=1, 6/2742).
+Only the native executable failed.
+
+A native probe on the GB10 printed the affine dispatch box as `(0,0,2,2)` for
+both the tile and the bar. The correct boxes are `(33,38,196,126)` and
+`(288,38,7,285)`. With those boxes nothing was painted (exact_mismatch=18288,
+edge_excess=846, edge_max=219).
+
+The cause is `floor_f64(min_x).to_i32()`. Natively, `.to_i32()` on an
+f64-returning **call** converts the raw IEEE bits, so 47.0 becomes 0. Filed as
+`native_call_result_f64_to_int_conversion_bits_2026-11-23.md` with a minimal
+repro.
+
+**Fix (pure Simple workaround, names the real fix):** `draw_ir_adv.spl` binds
+the floor/ceil results to typed f64 locals before `.to_i32()`. It does this in
+the affine box and in the fractional-rect pixel box. No check or tolerance
+changed. The case 02 oracle-mismatch errors (Engine2D and Skia) now append the
+verdict numbers, as a diagnostic only.
+
+### Red to green
+
+- **Red:** binary `nb_case02_20261123/qual_red`, sha256 `2504e05f…6cb2`, built
+  from the rebased tree with no fix.
+  `run-corpus-case02` → `engine2d-owner:Engine2D corpus case 02 edge oracle mismatch`.
+- **Green:** the native probe gives `vk: passed=true exact_mismatch=0
+  edge_excess=0 edge_sum=6/2742 edge_max=1`.
+- **Spec:** `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_case02_edges_spec.spl`
+  (2/2 on lavapipe). It pins both dispatch boxes and checks the full
+  640x480 strict-Vulkan readback against the oracle. It runs interpreted, so
+  it was green before the fix too: the red evidence is the native run above.
+
+### Sanctioned build and GB10 results
+
+Built with the Blocker 8 recipe on `origin/release/1.0.0` after PR #11030:
+`SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 --runtime-bundle
+host-gpu-native-all`, with no hand-link, clang, and 0 stubs. The seed is the
+`cargo-target-wr-gpulink` seed. Its Rust and C inputs differ from HEAD in 30
+files (cc_detect, const-default call sites, runtime pool and process tree); none
+of them is in the Vulkan or Engine2D paths.
+
+Binary: `/home/yoon/skia-n2/artifacts/nb_case02_20261123/vulkan_2d_qualification`,
+sha256 `fc3f8d73f06c75764b9100da507c2ff17eacb4c3a35f03056e07b6462c2784a7`. Runs
+used the NVIDIA ICD and provider `libsimple_upstream_skia_ganesh_vulkan.so`.
+
+| scene | `run-*` | Engine2D rgba sha256 | Skia | tries |
+|---|---|---|---|---|
+| web-box | pass | `204df3a7…7817` | equal | 1/1 |
+| corpus-case01 | pass | `2f4d3fb1…39e9` | equal | 1/1 |
+| corpus-case06 | pass | `0372ef52…ebb1` | equal | 1/1 |
+| corpus-case02 | blocked in the **Skia** leg | `962ca9e4a2cd2366bebd9f8db604803efab1df976f7a35f5fcd0d9fc5981c306` (Engine2D `status=candidate`, oracle pass) | `upstream Skia corpus case 02 edge oracle mismatch (exact_mismatch=0 edge_excess=4 edge_max=30 edge_sum=1004/2742)` | 3/3, identical each time |
+
+The Skia numbers on the GB10 are the same as the 2026-09-27 macOS measurement:
+4 edge pixels over 16 and a max delta of 30. They are deterministic Skia
+coverage-AA edge policy, so the owner decision in
+`skia_case02_edge_tolerance_exceedance_2026-09-27.md` still blocks a case 02
+`run-*` pass. Even after that decision, a `pair_exact_rgba` comparison of
+Engine2D (an ideal area sampler) against Skia cannot hold on the AA edges of
+case 02.
+
+Separate finding, not fixed here: the CPU engine's DrawIR composition skips v4
+affine commands (`affine-or-raster-policy-unsupported`). Case 02 on the CPU
+engine is therefore four white clears only.
