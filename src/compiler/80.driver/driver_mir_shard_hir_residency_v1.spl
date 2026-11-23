@@ -79,6 +79,51 @@ pub fn hir_residency_any_nogc_strict_v1(surfaces: [ModuleSurface]) -> bool:
         if surface.nogc_strict: return true
     false
 
+# ===== per-file unit residency (pure) =======================================
+#
+# A module-scoped per-file unit child (closure-walk route,
+# SIMPLE_UNIT_TLDR_IMPORTS=0) knows its MIR targets and advice modules BEFORE
+# the HIR stage, and lowers only its targets: every other held row is a MIR
+# placeholder that only provides declarations (driver_mir_owner_disposition_v1,
+# driver_mir_unit_provider_keys_v1) -- the same contract under which the PM3
+# route already holds its imports interface-only (hir_unit_import_interface_load_v1).
+# So its non-target, non-advice closure rows load interface-only from the HIR
+# cache with no claim race and no reload. This is separate from the MIR shard
+# arm above, which keeps refusing `file-worker-unit` (its claim-time reload is
+# the shard route's own mechanism). Default ON in a scoped unit; "0" opts out.
+pub const FILE_WORKER_INTERFACE_HIR_ENV_V1: text = "SIMPLE_FILE_WORKER_INTERFACE_HIR"
+
+# "" when this per-file unit may hold interface-only HIR for its non-target
+# rows; otherwise the named refusal. `unit_scoped` is
+# driver_mir_unit_scoped_v1(...) (the ONLY_PATHS skip that keeps non-targets
+# placeholders is active), `keep_full_count` the recorded target + advice rows.
+# The NoGC and bootstrap flat-row refusals mirror the shard arm (fail closed).
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_interface_hir_refusal_v1(flag: text, unit_scoped: bool,
+        keep_full_count: i64, bootstrap_flat_rows: bool, entry_closure_flat: bool,
+        aot_mode: bool, any_nogc_strict: bool) -> text:
+    if flag == "0": return "flag-off"
+    if not unit_scoped: return "not-scoped-unit"
+    if keep_full_count == 0: return "no-targets"
+    if not aot_mode: return "not-aot-compile"
+    if any_nogc_strict: return "nogc-strict-module"
+    if bootstrap_flat_rows and entry_closure_flat: return "bootstrap-flat-rows"
+    ""
+
+# Selection rule: one HIR cache load is interface-only when the unit arm is
+# set, the row is not the requested entry, and neither its source path nor its
+# surface canonical path names a target or advice module (an alias row of a
+# target shares its HirModule through the canonical reuse, so it stays full).
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_row_interface_only_v1(armed: bool, is_entry: bool,
+        source_path: text, canonical_path: text, keep_full: Dict<text, bool>) -> bool:
+    if not armed or is_entry: return false
+    if keep_full.contains_key(source_path): return false
+    if canonical_path != "" and keep_full.contains_key(canonical_path): return false
+    true
+
 # The retained-owner HIR route (SIMPLE_STAGE3_STREAMING_SURFACES unset/0) has
 # no interface-only load: "" when the flag is unset, else the one refusal line
 # that route prints so the flag is never silently ignored.
@@ -243,10 +288,60 @@ pub fn mir_shard_hir_residency_arm_v1(refusal: text) -> bool:
 pub fn mir_shard_hir_residency_armed_v1() -> bool:
     _res_armed
 
+# Per-file unit arm and its keep-full rows (target + advice source and
+# canonical paths), both set once per process.
+var _unit_armed: bool = false
+var _unit_decided: bool = false
+var _unit_keep_full_recorded: bool = false
+var _unit_keep_full: Dict<text, bool> = {}
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_keep_full_record_v1(paths: [text]):
+    if _unit_keep_full_recorded:
+        return
+    _unit_keep_full_recorded = true
+    for p in paths:
+        if p != "": _unit_keep_full[p] = true
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_keep_full_v1() -> Dict<text, bool>:
+    _unit_keep_full
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_keep_full_count_v1() -> i64:
+    _unit_keep_full.keys().len()
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_interface_hir_arm_v1(refusal: text) -> bool:
+    if not _unit_decided:
+        _unit_decided = true
+        _unit_armed = refusal == ""
+    _unit_armed
+
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn file_worker_unit_interface_hir_armed_v1() -> bool:
+    _unit_armed
+
+# Either arm: the HIR stage notes loads in the registry below and the claim
+# loop reloads any claimed module that is still interface-only.
+# reason: driver-internal arm/selection state over raw env values, process flags and source-path text
+@allow(primitive_api)
+pub fn hir_residency_any_armed_v1() -> bool:
+    _res_armed or _unit_armed
+
 # Tests only: a fresh process state.
 pub fn mir_shard_hir_residency_reset_v1():
     _res_armed = false
     _res_decided = false
+    _unit_armed = false
+    _unit_decided = false
+    _unit_keep_full_recorded = false
+    _unit_keep_full = {}
     _res_kind = {}
     _res_module = {}
     _res_key = {}

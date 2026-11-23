@@ -307,3 +307,38 @@ Findings:
   residency (run-21's old rule) or from run-to-run nondeterminism. Required
   before defaulting the flag: an A-vs-A rerun, then a B run on a Stage 2 that
   carries the new keep rule.
+
+## Per-file unit route (2026-11-23, unmeasured)
+
+The shard arm still refuses `file-worker-unit` / `module-scoped-unit`: its
+mechanism is a claim-time reload, and those children are scoped differently.
+They get their own arm instead, because a module-scoped unit (closure-walk
+route, `SIMPLE_UNIT_TLDR_IMPORTS=0`) knows its targets and advice modules at
+phase-2 freeze, before any HIR load, and lowers only its targets — every other
+held row is a declaration-only provider placeholder
+(`driver_mir_owner_disposition_v1`, `driver_mir_unit_provider_keys_v1`), the
+same contract the default PM3 route already relies on when it holds imports
+interface-only (`hir_unit_import_interface_load_v1`). Without this, such a unit
+promotes full bodies for its whole ~460-514 module closure per batch of 8
+targets (~5 GB RSS, ~10 GB on late `compiler.mir._MirLoweringExpr.*` units).
+
+- `driver_source_parse_streaming.spl` records the keep-full set (targets +
+  advice, source and canonical paths) at the closure walk:
+  `file_worker_unit_keep_full_record_v1`.
+- The HIR stage arms once (`file_worker_unit_interface_hir_refusal_v1`):
+  requires `driver_mir_unit_scoped_v1` (ONLY_PATHS skip active) and a non-empty
+  keep-full set; refuses `not-aot-compile`, `nogc-strict-module` and
+  `bootstrap-flat-rows` like the shard arm. Default ON; `SIMPLE_FILE_WORKER_INTERFACE_HIR=0`
+  opts out (`SIMPLE_UNIT_TLDR_IMPORTS` precedent). Prints
+  `[file-worker] hir-residency armed|refused reason=…` and, after the loop,
+  `[file-worker] hir-residency loaded … bodies_dropped=<n>`.
+- Selection (`file_worker_unit_row_interface_only_v1`): interface-only iff armed,
+  not the entry, and neither source nor canonical path is in the keep-full set
+  (an alias row of a target reuses the target's `HirModule`, so it stays full).
+- Safety net: loads are noted in the residency registry; the claim loop reloads
+  any claimed module still marked `interface` (`hir_residency_any_armed_v1`).
+- Only HIR cache hits shrink; a closure module lowered in-process on a miss
+  keeps its bodies. Cache-hit modules are never re-stored, so no projection is
+  published. Measure: peak RSS of a unit child in a per-file native-build,
+  A (`SIMPLE_FILE_WORKER_INTERFACE_HIR=0`) vs B (unset), same batch, plus object
+  identity A-vs-A and A-vs-B.
