@@ -48,7 +48,28 @@
 #define RT_MEM_GUARD_AVAILABLE 0
 #endif
 
-#define RT_MEM_GUARD_PAGE_SIZE ((size_t)4096)
+/* Guard boundaries must use the host VM page size: Apple Silicon uses 16 KiB,
+ * and 4 KiB offsets make mprotect fail and silently disable sampled guards.
+ * Resolve before recording any slot or installing the signal handler. After
+ * publication every read (including the fault reporter) is just an atomic
+ * load; the signal path never calls sysconf. */
+static size_t rt_mem_guard_host_page_size;
+#define RT_MEM_GUARD_PAGE_SIZE \
+    __atomic_load_n(&rt_mem_guard_host_page_size, __ATOMIC_ACQUIRE)
+
+static size_t rt_mem_guard_resolve_page_size(void) {
+    size_t cached = RT_MEM_GUARD_PAGE_SIZE;
+    if (cached != 0) return cached;
+#if RT_MEM_GUARD_AVAILABLE
+    long detected = sysconf(_SC_PAGESIZE);
+    if (detected <= 0) return 0;
+    cached = (size_t)detected;
+    __atomic_store_n(&rt_mem_guard_host_page_size, cached, __ATOMIC_RELEASE);
+    return cached;
+#else
+    return 0;
+#endif
+}
 #define RT_MEM_GUARD_FREE_RING_CAP 256
 #define RT_MEM_GUARD_MAX_SLOTS 4096
 #define RT_MEM_GUARD_OWNER_MAX 48
@@ -234,6 +255,7 @@ static void rt_mem_guard_install_handler(void) {
  * allocator in either case. */
 static void* rt_mem_guard_alloc_sampled(size_t size) {
     if (size == 0) return NULL;
+    if (rt_mem_guard_resolve_page_size() == 0) return NULL;
 
     size_t data_pages = (size + RT_MEM_GUARD_PAGE_SIZE - 1) / RT_MEM_GUARD_PAGE_SIZE;
     if (data_pages == 0) data_pages = 1;
