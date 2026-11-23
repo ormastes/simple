@@ -94,3 +94,27 @@ pruning leaves ~4,300 functions. Each one went through translate, verify and
   would let translation run per worker on a read-only view.
 - **HIR Pass 0.5b** (`load_imported_types`, ~370 ms) is memoized per
   `(unit, import target)`. That key re-walks one module once per symbol group.
+
+## HIR import type loads — probe, 2026-11-24 (no change made)
+
+Measured on tab-bar with the JIT, using a probe build that was not committed.
+
+- `load_imported_types`:
+  - 2,817 calls: 1,985 cache hits and 832 misses.
+  - The misses cover 369 units; 148 of those units are loaded under more than
+    one symbol group.
+  - Most repeated: `io_runtime.spl` ×30, `simple_web_html_layout_renderer_foundation.spl` ×20,
+    `draw_ir.spl` ×16, `engine2d/backend.spl` ×15, `sfnt.spl` ×14.
+- `register_imported_symbols_from_items`: 302 ms in total. These timers are
+  inclusive, because `load_reexported_symbols_from_items` recurses.
+  - Pass 0: ~0 ms.
+  - Pass 1: 10 ms.
+  - Pass 2 (transitive): 36 ms.
+  - Tail: 251 ms. This is re-exports, which recurse into nested loads, plus
+    the trait capture and `materialize_import_aliases`.
+- **Next step:** profile the tail exclusively, nested loads excluded, before
+  choosing a cache. A per-unit cache (instead of per `(unit, target)`) would
+  remove up to 463 repeated loads. The per-target filter in Pass 1 and in the
+  alias materialization is load-bearing for type correctness (see the comments
+  in `load_imported_types`), so it needs a union-of-targets design, not a plain
+  key change.

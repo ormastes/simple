@@ -4168,3 +4168,10 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - Animation 4x text has x offsets.
   - A 16px round-glyph LCD residual at 1x is unclaimed.
   - Bug doc: `doc/08_tracking/bug/web_render_device_scale_vertical_row_low_2026-11-24.md`.
+## 2026-11-24 — JIT calls a user `fn f32`/`fn i32`/`fn int`, not the cast (seed correctness)
+
+- **Bug:** HIR lowering turned every one-argument call on a cast name (`i8..u64`, `f32`, `f64`, `int`, `float`, `bool`, `text`, `str`, `String`, `char`) into a `Cast` before it checked for user functions. So under the JIT a user `fn f32(x)` returned `17.0`, while the interpreter called the user function and returned `18`.
+- **Rule:** the interpreter's decided rule (`builtin_wins_over_user_fn`): a module-level or imported `fn` wins, and only `exit`/`dprint`/`panic` are unshadowable. The spec says nothing about function names; built-in TYPE-name shadowing (`struct text`) is still an open question and was not touched.
+- **Fix:** `lower_utility_builtin` skips the cast when `declared_function_returns` holds the name. That map is filled for both the flattened lane and the project lane; `own_declared_function_names` is empty on the flattened lane, so it could not be used.
+- **Evidence:** the spec `jit_user_fn_named_like_primitive.rs` was red (171717) and is now green (201918), and a call with no user function still casts. All 8 pages match JIT == interpreter at 1x and 4x, and JIT output is unchanged from before the fix. Failure counts match the base, and `batch_pipeline` and `native_link` pass.
+- **Bug record:** `doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md`.

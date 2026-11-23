@@ -1054,6 +1054,11 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
+        // A module-level or imported `fn` of the same name wins over the cast,
+        // as in the interpreter (`builtin_wins_over_user_fn`; only `exit`,
+        // `dprint`, `panic` are unshadowable, and none is a cast).
+        // doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md
+        let user_fn = self.declared_function_returns.contains_key(name);
         if args.len() == 1 {
             let cast_target = match name {
                 "i8" => Some(TypeId::I8),
@@ -1071,7 +1076,7 @@ impl Lowerer {
                 "char" => Some(TypeId::CHAR),
                 _ => None,
             };
-            if let Some(target) = cast_target {
+            if let Some(target) = cast_target.filter(|_| !user_fn) {
                 let inner = self.lower_expr(&args[0].value, ctx)?;
                 // The CALL form `f64(text)` / `i32(text)` PARSES its text, like
                 // `text.to_f64()` / `text.to_int()` and the interpreter's `T(x)`
