@@ -7,6 +7,32 @@ Base matrix: `cross_compile_linker_matrix_2026-11-17.md`.
 
 Legend: ✅ done · 🔧 WIP branch pushed · ⏳ not started · ❌ blocked
 
+## Follow-up evidence snapshot (2026-11-23)
+
+This snapshot supersedes the original handover tables and remaining-work list
+below where they differ. Those sections are retained as Claude's original cut.
+Checked the remote handover ref, local cross-compile worktrees, retained build
+logs, and GitHub PR state. No running Claude process was visible on this host;
+this does not establish the state of a session on Windows or another host.
+No new compiler builds or test runs were performed for this documentation update.
+
+| Lane | Observed progress | Remaining / admission limit |
+|------|-------------------|-----------------------------|
+| SimpleOS riscv64, lld | [#10972](https://github.com/ormastes/simple/pull/10972) merged into `release/1.0.0`; PR records link-only PASS, 0 undefined, 209940392-byte ELF, and soft-float tests 7/7. Retained `/private/tmp/xc-out-rv64-link/kernel-build.log` confirms 32 compiled, 0 failed and successful link. | Link-only evidence with LLVM 23.1.1 bootstrap seed; no boot/runtime or phase-2 lint/test-runner claim. The fixes are not incorporated into this handover branch by this docs-only commit. |
+| SimpleOS x86_64, lld | [#10994](https://github.com/ormastes/simple/pull/10994) is open, non-draft; branch `work/ssos-x64-kernel-link-fix-20261123`, commit `80d7a8eabfb`. PR records 926 modules compiled, 0 compile failures and 9 OS unit specs passed. | Link still fails: 52 entries in retained `xc-out-x64-link/undefined.txt`, including runtime/GPU symbols and `RenderBackend.read_pixels_region`. Review and resolve before claiming gate PASS. |
+| SimpleOS arm64, Pure Simple linker | Uncommitted staged/unstaged work in `/private/tmp/wt-xc-a64-simple-link` on `work/a64-simple-link-gate-verify-20261123`; gate, CLI, linker scripts, linker implementation and fixtures are being changed. | Retained `/private/tmp/xc-out-a64-simple/simple-link.log` ends with orphan section `,.text.simple.0` in `object3.o`. The lld comparison built an ELF, but its retained object list includes `_stubs_freestanding.o`; this does not admit a strict no-stub Pure Simple link. |
+| Windows i686 PE layout | [#10992](https://github.com/ormastes/simple/pull/10992) merged; PR records all 19 `coff_*` / `pe_*` unit specs passing with LLVM 23.1.1 seed. | Section merge/order parity fix landed; no new evidence here that lint/test runner cross-link and run. |
+| Windows GNU compiler selection | [#10995](https://github.com/ormastes/simple/pull/10995) merged; arch-matching llvm-mingw selection rejects an MSVC-target clang ahead on PATH. | Compiler-selection defect addressed; target-width process/image owner ABI work remains unverified. |
+| Bootstrap seed section/cfg fixes | `/private/tmp/wt-xc-seed-fixes`, branch `work/seed-xcompile-section-and-cfg-20261123`, has dirty `backend_core.rs` and `cond_compile.rs`. | Uncommitted work; no admission or completion inferred. Preserve this lane separately. |
+
+Next actions: resolve the arm64 orphan-section failure and verify the strict
+no-stub gate; finish x86_64 runtime closure/link defects and review #10994;
+verify Windows i686 owner ABI and actual lint/test-runner execution; then resume
+the outstanding Linux/FreeBSD and SimpleOS userland phase-2 matrix. The original
+Linux/Windows matrix marks below were not independently reverified in this pass.
+Local `/private/tmp` evidence paths are host-local and may later be removed;
+the linked merged PRs retain the reported validation provenance.
+
 ## Native linker (lld)
 
 | OS | x86_64 | i686 | arm64 | arm32 | riscv64 | riscv32 |
