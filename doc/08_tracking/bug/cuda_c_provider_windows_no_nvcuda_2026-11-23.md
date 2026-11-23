@@ -25,3 +25,13 @@ failures are the named `CUDA-E001` / `CUDA-E002` errors
 and a real context on this Windows GPU host (llvm-mingw clang); E001/E002 cases
 also pass on Linux. Follow-up: the provider's embedded PTX is rejected by this
 driver, see `cuda_bitmap_provider_ptx_invalid_on_windows_gpu_2026-11-23.md`.
+
+## Seed loader native check (2026-11-23, sd1)
+The seed was built from `origin/release/1.0.0` @ `84ea108c7c9` (includes `7f610c22789`, a dlsym fix). Its sha256 prefix is `a72695a600b21163`.
+
+| Check | Result |
+|---|---|
+| `test/01_unit/lib/gc_async_mut/cuda/cuda_driver_loader_spec.spl`, including the missing-symbol CUDA-E002 case | PASS 4/4 |
+
+The seed's loader side passes. The status stays `verification-pending`: this bug's subject, the C provider
+(`bitmap_provider_v1.c`), is not exercised by this spec.

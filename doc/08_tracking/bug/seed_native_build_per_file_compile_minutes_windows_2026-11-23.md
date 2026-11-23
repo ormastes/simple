@@ -49,7 +49,7 @@ That is 2.3x, so the CLI rebuild switched to seed B. The per-file cost is still 
    explicitly as an uncommitted, build-only workaround tagged `WA(nv2)`. The release tree is
    unchanged. Fix candidates: treat an enum-variant default as a call-site constant in the seed,
    or pass the argument explicitly in the source.
-   Fix (verification-pending, branch `work/ed1-20261123`): enum-variant defaults are legal
+   Fix (natively verified 2026-11-23, PR #10999): enum-variant defaults are legal
    (63 `.spl` files use them), so the seed now treats a payload-free `E.V`/`E::V` default as a
    call-site constant (`is_unit_enum_variant`, `hir/lower/expr/calls.rs`). Needs a seed rebuild.
 
@@ -60,3 +60,16 @@ superlinear phase. The Lane 8 report may add seed A/B timings.
 ## Seed B, full CLI, 48 threads
 4,100 files in 27m17s, so the 1,689 s outlier did not recur. The final composition build
 (4,125 files) took 31m00s. Per-file cost still runs to minutes on some files, against the 10 s target.
+
+## Native verification of the enum-default fix (2026-11-23, sd1)
+The seed was built from `origin/release/1.0.0` @ `84ea108c7c9` (includes #10999 and `7f610c22789`) with
+`cargo build --release --bin simple` (clang-cl, Windows). The binary's sha256 prefix is `a72695a600b21163`.
+
+| Check | Result |
+|---|---|
+| `compile src/lib/nogc_sync_mut/test_runner/test_db_compat.spl`; the call at `:399` omits arg 5, no `WA(nv2)` | PASS, rc=0, 4.8 MB `.o`, 0 "call-site constant" errors |
+| `native-build` of a minimal fixture (`fn pick(a, e: Elig = Elig.Eligible)`, called as `pick(41)`), then run | PASS, linked via llvm-mingw, prints `r=42` |
+| `default_param_enum_variant_fill_spec` | PASS 3/3 |
+| `unit_div_remainder_native_spec` (sanity) | PASS 8/8 |
+
+The enum-default item (3) is verified. The per-file slowness this bug tracks remains open.
