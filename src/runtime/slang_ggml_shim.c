@@ -280,6 +280,14 @@ static int64_t slang_request_handle(int64_t slot, uint64_t generation) {
     return (int64_t)(generation * SLANG_REQUEST_MAX_ENTRIES + (uint64_t)slot + 1);
 }
 
+/* Guard shared by the entry points that decode on a live, uncancelled context. */
+static int64_t slang_request_decodable(const struct slang_request *request) {
+    if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    return 0;
+}
+
 static struct slang_request *slang_request_get(int64_t handle) {
     if (handle <= 0) return NULL;
     uint64_t raw = (uint64_t)(handle - 1);
@@ -1665,9 +1673,8 @@ static int slang_request_warm(struct slang_request *request) {
  * recomputed so the backend produces fresh boundary logits. */
 static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
-    if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL) return SLANG_ERR_INVALID;
-    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    int64_t guard = slang_request_decodable(request);
+    if (guard != 0) return guard;
     if (request->tree) return slang_tree_prepare_locked(request);
     slang_request_release_lease_locked(request);
     request->eval_start = 0;
@@ -1836,9 +1843,8 @@ static void slang_prefix_admit(struct slang_request *request) {
  * scheduling decision — slang still chose what to prefill and when. */
 int64_t slang_ggml_request_eval_prompt(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
-    if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL) return SLANG_ERR_INVALID;
-    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    int64_t guard = slang_request_decodable(request);
+    if (guard != 0) return guard;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     request->paged_logits_valid = 0;
 #endif
@@ -1899,9 +1905,8 @@ int64_t slang_ggml_eval_prompt(void) {
  * keeps the generation loop on the Simple side of the boundary. */
 int64_t slang_ggml_request_eval(int64_t handle, int64_t token) {
     struct slang_request *request = slang_request_get(handle);
-    if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL) return SLANG_ERR_INVALID;
-    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    int64_t guard = slang_request_decodable(request);
+    if (guard != 0) return guard;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     request->paged_logits_valid = 0;
 #endif
