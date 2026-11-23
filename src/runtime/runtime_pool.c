@@ -1185,68 +1185,54 @@ int64_t rt_pool_state_join_idle_v1(int64_t state_handle) {
     return 1;
 }
 
-int64_t rt_pool_state_outstanding_v1(int64_t state_handle) {
+typedef enum {
+    RT_POOL_COUNTER_OUTSTANDING,
+    RT_POOL_COUNTER_PENDING,
+    RT_POOL_COUNTER_RUNNING,
+    RT_POOL_COUNTER_COMPLETED
+} RtPoolCounter;
+
+static int64_t rt_pool_state_counter_field(const RtPoolState* state, RtPoolCounter which) {
+    switch (which) {
+        case RT_POOL_COUNTER_OUTSTANDING: return state->outstanding;
+        case RT_POOL_COUNTER_PENDING: return state->pending;
+        case RT_POOL_COUNTER_RUNNING: return state->running;
+        case RT_POOL_COUNTER_COMPLETED: return state->completed;
+    }
+    return -1;
+}
+
+/* Reads one counter under the state lock; the lock pair exists once per lane. */
+static int64_t rt_pool_state_read_counter(int64_t state_handle, RtPoolCounter which) {
     RtPoolState* state = rt_pool_state_handle_get(state_handle);
     if (state == NULL) return -1;
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&state->lock);
-    int64_t value = state->outstanding;
+    int64_t value = rt_pool_state_counter_field(state, which);
     pthread_mutex_unlock(&state->lock);
 #else
     EnterCriticalSection(&state->lock);
-    int64_t value = state->outstanding;
+    int64_t value = rt_pool_state_counter_field(state, which);
     LeaveCriticalSection(&state->lock);
 #endif
     rt_pool_state_handle_put(state_handle);
     return value;
+}
+
+int64_t rt_pool_state_outstanding_v1(int64_t state_handle) {
+    return rt_pool_state_read_counter(state_handle, RT_POOL_COUNTER_OUTSTANDING);
 }
 
 int64_t rt_pool_state_pending_v1(int64_t state_handle) {
-    RtPoolState* state = rt_pool_state_handle_get(state_handle);
-    if (state == NULL) return -1;
-#ifdef RT_POOL_PTHREAD
-    pthread_mutex_lock(&state->lock);
-    int64_t value = state->pending;
-    pthread_mutex_unlock(&state->lock);
-#else
-    EnterCriticalSection(&state->lock);
-    int64_t value = state->pending;
-    LeaveCriticalSection(&state->lock);
-#endif
-    rt_pool_state_handle_put(state_handle);
-    return value;
+    return rt_pool_state_read_counter(state_handle, RT_POOL_COUNTER_PENDING);
 }
 
 int64_t rt_pool_state_running_v1(int64_t state_handle) {
-    RtPoolState* state = rt_pool_state_handle_get(state_handle);
-    if (state == NULL) return -1;
-#ifdef RT_POOL_PTHREAD
-    pthread_mutex_lock(&state->lock);
-    int64_t value = state->running;
-    pthread_mutex_unlock(&state->lock);
-#else
-    EnterCriticalSection(&state->lock);
-    int64_t value = state->running;
-    LeaveCriticalSection(&state->lock);
-#endif
-    rt_pool_state_handle_put(state_handle);
-    return value;
+    return rt_pool_state_read_counter(state_handle, RT_POOL_COUNTER_RUNNING);
 }
 
 int64_t rt_pool_state_completed_v1(int64_t state_handle) {
-    RtPoolState* state = rt_pool_state_handle_get(state_handle);
-    if (state == NULL) return -1;
-#ifdef RT_POOL_PTHREAD
-    pthread_mutex_lock(&state->lock);
-    int64_t value = state->completed;
-    pthread_mutex_unlock(&state->lock);
-#else
-    EnterCriticalSection(&state->lock);
-    int64_t value = state->completed;
-    LeaveCriticalSection(&state->lock);
-#endif
-    rt_pool_state_handle_put(state_handle);
-    return value;
+    return rt_pool_state_read_counter(state_handle, RT_POOL_COUNTER_COMPLETED);
 }
 
 int64_t rt_pool_state_destroy_v1(int64_t state_handle) {
