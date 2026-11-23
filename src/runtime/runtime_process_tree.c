@@ -231,6 +231,25 @@ static int64_t ptree_status_code(int status) {
     return -1;
 }
 
+/* waitpid(2) restarted across EINTR. */
+static pid_t ptree_waitpid_eintr(pid_t pid, int* status, int flags) {
+    pid_t waited;
+    do {
+        waited = waitpid(pid, status, flags);
+    } while (waited < 0 && errno == EINTR);
+    return waited;
+}
+
+/* Non-reaping waitid(WNOWAIT) probe, restarted across EINTR. Returns rc. */
+static int ptree_waitid_probe(pid_t pid, siginfo_t* info) {
+    int rc;
+    memset(info, 0, sizeof(*info));
+    do {
+        rc = waitid(P_PID, (id_t)pid, info, WEXITED | WNOHANG | WNOWAIT);
+    } while (rc < 0 && errno == EINTR);
+    return rc;
+}
+
 #endif /* RT_PTREE_HAVE_OWNER */
 
 /* ------------------------------------------------------------------------- */
@@ -337,7 +356,7 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
     close(err_pipe[0]);
     if (got == sizeof(child_errno) && child_errno != 0) {
         int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        (void)ptree_waitpid_eintr(pid, &status, 0);
         return -(int64_t)child_errno;
     }
     return (int64_t)pid;
@@ -355,10 +374,7 @@ int64_t rt_process_session_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 1 || pid > INT32_MAX) return -1;
     int status = 0;
     if (timeout_ms <= 0) {
-        pid_t waited;
-        do {
-            waited = waitpid((pid_t)pid, &status, 0);
-        } while (waited < 0 && errno == EINTR);
+        pid_t waited = ptree_waitpid_eintr((pid_t)pid, &status, 0);
         if (waited < 0) return -1;
         return ptree_status_code(status);
     }
@@ -385,11 +401,7 @@ int64_t rt_process_owned_child_state(int64_t pid) {
 #else
     if (pid <= 1 || pid > INT32_MAX) return -EINVAL;
     siginfo_t info;
-    memset(&info, 0, sizeof(info));
-    int rc;
-    do {
-        rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
-    } while (rc < 0 && errno == EINTR);
+    int rc = ptree_waitid_probe((pid_t)pid, &info);
     if (rc < 0) return -(int64_t)(errno ? errno : EIO);
     if (info.si_pid == (pid_t)pid) return 0;
     if (info.si_pid == 0) return 1;
@@ -405,11 +417,7 @@ int64_t rt_process_session_is_running(int64_t pid) {
     if (pid <= 1 || pid > INT32_MAX) return 0;
     /* WNOWAIT leaves the zombie for rt_process_session_wait to reap. */
     siginfo_t info;
-    memset(&info, 0, sizeof(info));
-    int rc;
-    do {
-        rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
-    } while (rc < 0 && errno == EINTR);
+    int rc = ptree_waitid_probe((pid_t)pid, &info);
     if (rc == 0) {
         if (info.si_pid == (pid_t)pid) return 0; /* exited, reapable */
         return 1;                                 /* our child, still running */
