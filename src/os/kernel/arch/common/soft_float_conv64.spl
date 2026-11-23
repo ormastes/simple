@@ -1,0 +1,58 @@
+# Integer-only i64 <-> IEEE-754 binary64 conversions (pure Simple, no libgcc).
+# A double crosses the compiler-rt libcall boundary as raw bits in an integer
+# register on soft-float targets, so both sides are i64 bit patterns.
+# Semantics match compiler-rt: int->double rounds to nearest even; double->int
+# truncates toward zero, |x| >= 2^63 and NaN/inf saturate by sign bit
+# (+NaN/+inf -> i64 max, -NaN/-inf -> i64 min).
+
+val SF64_MANT_MASK: u64 = 0x000FFFFFFFFFFFFF
+val SF64_HIDDEN: u64 = 0x0010000000000000
+
+fn sf64_i64_to_f64_bits(a: i64) -> i64:
+    if a == 0:
+        return 0
+    var sign: u64 = 0
+    var mag: u64 = a as u64
+    if a < 0:
+        sign = 1
+        mag = (~mag) + 1
+    # n = index of the highest set bit of mag
+    var n: i64 = 63
+    while ((mag >> n) & 1) == 0:
+        n = n - 1
+    var e: u64 = (1023 + n) as u64
+    var keep: u64 = 0
+    if n <= 52:
+        keep = mag << (52 - n)
+    else:
+        val shift = n - 52
+        keep = mag >> shift
+        val rem = mag & (((1 as u64) << shift) - 1)
+        val half = (1 as u64) << (shift - 1)
+        if rem > half or (rem == half and (keep & 1) == 1):
+            keep = keep + 1
+            if keep == (SF64_HIDDEN << 1):
+                keep = keep >> 1
+                e = e + 1
+    ((sign << 63) | (e << 52) | (keep & SF64_MANT_MASK)) as i64
+
+fn sf64_f64_bits_to_i64(bits: i64) -> i64:
+    val b: u64 = bits as u64
+    val neg = (b >> 63) == 1
+    val e: i64 = ((b >> 52) & 0x7FF) as i64
+    if e < 1023:
+        return 0
+    val ue = e - 1023
+    if ue >= 63:
+        if neg:
+            return (1 as i64) << 63
+        return 0x7FFFFFFFFFFFFFFF
+    val mant: u64 = (b & SF64_MANT_MASK) | SF64_HIDDEN
+    var v: u64 = 0
+    if ue < 52:
+        v = mant >> (52 - ue)
+    else:
+        v = mant << (ue - 52)
+    if neg:
+        return 0 - (v as i64)
+    v as i64
