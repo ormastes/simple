@@ -33,6 +33,7 @@ use compiler.core.ast_coverage_inventory.{
     compiler_coverage_inventory_release_parse_scratch}
 use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.driver_parse_shard_rows_v1.{driver_parse_shard_row_plan_v1}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
@@ -338,15 +339,22 @@ impl CompilerDriver:
             for _p in source_paths:
                 worker_built.push(false)
         val parse_shard_start = if parse_shard: driver_parse_shard_strided_start_v1(frozen_source_count) else: 0
+        # Rotation can begin at a logical alias of a physical source whose
+        # canonical row appears earlier. Establish the authoritative first
+        # rows before rotation/claims, rather than admitting that alias as a
+        # canonical source in an otherwise empty shard-local registry.
+        val parse_shard_rows = if parse_shard:
+            driver_parse_shard_row_plan_v1(canonical_paths, parse_shard_start)
+        else: []
+        val parse_step_count = if parse_shard: parse_shard_rows.len() else: frozen_source_count
         var source_step = 0
-        while source_step < frozen_source_count:
-            source_index = if parse_shard: (parse_shard_start + source_step) % frozen_source_count else: source_step
+        while source_step < parse_step_count:
+            source_index = if parse_shard: parse_shard_rows[source_step] else: source_step
             source_step = source_step + 1
             # A parse shard exists only to warm the front-end cache for the
             # files it owns (static hash slice, or a claim from the shared
-            # queue). Starting at `parse_shard_start` and wrapping modulo
-            # `frozen_source_count` gives each shard a disjoint initial partition
-            # while still work-stealing stragglers across the full ring.
+            # queue). The rotated plan retains the full physical-file ring
+            # for work-stealing while excluding nonauthoritative alias rows.
             if parse_shard and not _driver_parse_shard_owns(source_paths[source_index]):
                 continue
             val canonical_path = canonical_paths[source_index]
