@@ -5,7 +5,8 @@ use compiler.driver.cache.native_build_environment_identity.{
     native_build_module_environment_snapshot_fingerprint_v1}
 use compiler.driver.driver_build.incremental.{
     native_build_admitted_abi_identity, native_build_producer_identity,
-    native_build_unadmitted_producer_identity, native_build_cache_scope_key}
+    native_build_unadmitted_producer_identity, native_build_cache_scope_key,
+    native_build_unadmitted_identity_decision_v1}
 
 val FIXTURE_EXECUTABLE_SHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val FIXTURE_SOURCE_SHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -152,9 +153,9 @@ describe "native cache producer identity":
         # thread count, memory budget or cgroup limit: two calls with the same
         # authorities are equal whatever process or schedule made them.
         val first = native_build_unadmitted_producer_identity(
-            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 1, false, "")
+            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 1, false)
         val rerun = native_build_unadmitted_producer_identity(
-            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 1, false, "")
+            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 1, false)
         expect(rerun).to_equal(first)
         expect(first.starts_with("uncacheable")).to_equal(false)
         expect(first).to_contain("simple-abi-admission=13:unadmitted-v1")
@@ -164,13 +165,13 @@ describe "native cache producer identity":
         expect(scope_b).to_equal(scope_a)
         # Genuinely different producers, backends and opt levels stay apart.
         expect(native_build_unadmitted_producer_identity(
-            FIXTURE_SOURCE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 1, false, "") == first).to_equal(false)
+            FIXTURE_SOURCE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 1, false) == first).to_equal(false)
         expect(native_build_unadmitted_producer_identity(
-            FIXTURE_EXECUTABLE_SHA256, "compiler-b", "runtime-a", "core-c-bootstrap", 1, false, "") == first).to_equal(false)
+            FIXTURE_EXECUTABLE_SHA256, "compiler-b", "runtime-a", "core-c-bootstrap", 1, false) == first).to_equal(false)
         expect(native_build_unadmitted_producer_identity(
-            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-b", "core-c-bootstrap", 1, false, "") == first).to_equal(false)
+            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-b", "core-c-bootstrap", 1, false) == first).to_equal(false)
         expect(native_build_unadmitted_producer_identity(
-            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 2, false, "") == first).to_equal(false)
+            FIXTURE_EXECUTABLE_SHA256, "compiler-a", "runtime-a", "core-c-bootstrap", 2, false) == first).to_equal(false)
         expect(native_build_cache_scope_key(Some("cranelift"), nil, [], 2, first) == scope_a).to_equal(false)
         expect(native_build_cache_scope_key(Some("llvm"), nil, [], 0, first) == scope_a).to_equal(false)
         # An admitted compiler never shares the unadmitted identity.
@@ -215,7 +216,32 @@ describe "native cache producer identity":
             ("SIMPLE_ICE_DIR", "/c/ice/73743_cd34")])
         expect(launch_a.valid).to_equal(true)
         expect(launch_b.digest).to_equal(launch_a.digest)
-        # The absent-admission branch must not reach the pid/clock identity.
-        val incremental_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
-        expect(incremental_src).to_contain("return native_build_unadmitted_producer_identity(hash, compiler_fp,")
-        expect(incremental_src.contains("explicit-policy-or-receipt-absent")).to_equal(false)
+
+    it "grants the stable unadmitted identity only to the running image with no admission claim":
+        # Both admission variables absent and the hashed path IS the running
+        # image: stable. The old code answered a per-process identity here.
+        expect(native_build_unadmitted_identity_decision_v1(
+            FIXTURE_EXECUTABLE_SHA256, FIXTURE_EXECUTABLE_SHA256, "", "")).to_equal("stable")
+        # A stale SIMPLE_BINARY (or a binary replaced on disk mid-run) hashes
+        # to another compiler: this process's objects must not be filed under
+        # that identity.
+        expect(native_build_unadmitted_identity_decision_v1(
+            FIXTURE_EXECUTABLE_SHA256, FIXTURE_SOURCE_SHA256, "", "")).to_equal(
+            "per-process:hashed-path-is-not-the-running-image")
+        # No way to hash the running image (no /proc/self/exe): per-process.
+        expect(native_build_unadmitted_identity_decision_v1(
+            FIXTURE_EXECUTABLE_SHA256, "", "", "")).to_equal(
+            "per-process:running-image-unhashable")
+        expect(native_build_unadmitted_identity_decision_v1(
+            "not-a-sha256", "not-a-sha256", "", "")).to_equal(
+            "per-process:executable-digest-not-canonical")
+        # A half-made admission claim is not "no admission claimed".
+        expect(native_build_unadmitted_identity_decision_v1(
+            FIXTURE_EXECUTABLE_SHA256, FIXTURE_EXECUTABLE_SHA256, "v1", "")).to_equal(
+            "per-process:half-claimed-admission")
+        expect(native_build_unadmitted_identity_decision_v1(
+            FIXTURE_EXECUTABLE_SHA256, FIXTURE_EXECUTABLE_SHA256, "", "/b/admission.env")).to_equal(
+            "per-process:half-claimed-admission")
+        # A full claim is decided by the receipt, never by this shortcut.
+        expect(native_build_unadmitted_identity_decision_v1(
+            FIXTURE_EXECUTABLE_SHA256, FIXTURE_EXECUTABLE_SHA256, "v1", "/b/admission.env")).to_equal("claimed")

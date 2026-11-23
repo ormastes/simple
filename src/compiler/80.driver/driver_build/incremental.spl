@@ -105,6 +105,7 @@ var _stdlib_src_fingerprint_memo: text = "@@unset@@"
 # sha256) and were recomputed on every call: twice per staged-codegen batch
 # (cache config + cache scope), i.e. ~190 batches x 2 in a stage-3 build.
 var _compiler_exe_hash_memo: text = "@@unset@@"
+var _running_image_hash_memo: text = "@@unset@@"
 var _runtime_provider_fp_memo_path: text = "@@unset@@"
 var _runtime_provider_fp_memo: text = ""
 var _frontend_portable_root_memo_v1: text = ""
@@ -647,27 +648,63 @@ fn native_build_uncacheable_abi_identity(reason: text) -> text:
     val reason_digest = sha256_text(reason).substring(0, 16)
     "uncacheable-abi-admission-{reason_digest}-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
+fn native_build_unadmitted_identity_decision_v1(hashed_executable_hash: text,
+        running_image_hash: text, abi_policy: text, abi_receipt_path: text) -> text:
+    """Whether a compiler WITHOUT an ABI admission may use the stable
+    `unadmitted-v1` producer identity. Returns "claimed" (go on to the receipt
+    check), "stable", or "per-process:<reason>".
+
+    - Stable needs BOTH admission variables absent. A policy without a receipt,
+      or a receipt without a policy, is a half-made claim and stays
+      per-process as before.
+    - Stable needs the hashed path (SIMPLE_BINARY, else argv[0]) to be the
+      image this process is executing: its sha256 must equal the sha256 of
+      the kernel's own handle on the running image. A stale SIMPLE_BINARY, or
+      a binary replaced on disk mid-run, would otherwise store this compiler's
+      objects under another compiler's identity. Where the running image
+      cannot be hashed (no /proc/self/exe) the identity stays per-process."""
+    if abi_policy != "" and abi_receipt_path != "":
+        return "claimed"
+    if abi_policy != "" or abi_receipt_path != "":
+        return "per-process:half-claimed-admission"
+    if not native_build_canonical_sha256_v1(hashed_executable_hash):
+        return "per-process:executable-digest-not-canonical"
+    if not native_build_canonical_sha256_v1(running_image_hash):
+        return "per-process:running-image-unhashable"
+    if running_image_hash != hashed_executable_hash:
+        return "per-process:hashed-path-is-not-the-running-image"
+    "stable"
+
+fn native_build_running_image_hash() -> text:
+    if _running_image_hash_memo == "@@unset@@":
+        _running_image_hash_memo = ""
+        if rt_file_exists("/proc/self/exe"):
+            if val image_hash = rt_file_hash_sha256("/proc/self/exe"):
+                _running_image_hash_memo = image_hash
+    _running_image_hash_memo
+
 fn native_build_unadmitted_producer_identity(executable_hash: text,
         compiler_source_fingerprint: text, runtime_provider_fingerprint: text,
         runtime_bundle: text, simple_abi_version: i64,
-        simple_abi_deferred: bool, simple_abi_policy: text) -> text:
+        simple_abi_deferred: bool) -> text:
     """Producer identity of a compiler launched with NO ABI admission claimed
-    (SIMPLE_ABI_POLICY or SIMPLE_ABI_ADMISSION_RECEIPT unset).
+    (SIMPLE_ABI_POLICY and SIMPLE_ABI_ADMISSION_RECEIPT both unset) whose
+    hashed executable is the running image
+    (native_build_unadmitted_identity_decision_v1 == "stable").
 
     This used to be `uncacheable-abi-admission-<reason>-<pid>-<micros>`: a
     fresh identity per PROCESS. Every per-file unit child therefore got its
     own `s<hex>` object scope and its own module-witness config fingerprint,
-    so a batch never reused another batch's objects and an identical re-run
-    recompiled everything (p3r, 2026-11-24: 85 scope dirs for ~85 batches; 77
-    modules built by both runs had byte-identical objects). The executable
-    hash, compiler/stdlib sources, runtime provider, bundle and runtime ABI
-    epoch are all still bound, and the fixed admission value cannot equal an
-    admitted identity (`policy=...;receipt-sha256=...`), so an unadmitted
-    compiler shares entries only with itself. A receipt that is NAMED but
-    unreadable or rejected stays per-process below."""
+    so no batch reused another batch's objects (p3r, 2026-11-24: 85 scope
+    dirs for ~85 batches; 77 modules built by two runs had byte-identical
+    objects). The executable hash, compiler/stdlib sources, runtime provider,
+    bundle and runtime ABI epoch are all still bound, and the fixed admission
+    value cannot equal an admitted identity
+    (`policy=...;receipt-sha256=...`), so an unadmitted compiler shares
+    entries only with itself."""
     native_build_producer_identity(executable_hash, compiler_source_fingerprint,
         runtime_provider_fingerprint, runtime_bundle, simple_abi_version,
-        simple_abi_deferred, simple_abi_policy, "unadmitted-v1")
+        simple_abi_deferred, "", "unadmitted-v1")
 
 fn native_build_compiler_identity() -> text:
     val src_fp = native_build_compiler_source_fingerprint()
@@ -686,8 +723,17 @@ fn native_build_compiler_identity() -> text:
         val abi_version = rt_simple_abi_version()
         val abi_deferred = rt_simple_abi_version_deferred() != 0
         if abi_policy == "" or abi_receipt_path == "":
-            return native_build_unadmitted_producer_identity(hash, compiler_fp,
-                runtime_fp, runtime_bundle, abi_version, abi_deferred, abi_policy)
+            val running_hash = if abi_policy == "" and abi_receipt_path == "":
+                native_build_running_image_hash()
+            else:
+                ""
+            val decision = native_build_unadmitted_identity_decision_v1(
+                hash, running_hash, abi_policy, abi_receipt_path)
+            if decision == "stable":
+                return native_build_unadmitted_producer_identity(hash, compiler_fp,
+                    runtime_fp, runtime_bundle, abi_version, abi_deferred)
+            eprint("[native-build] no ABI admission and no stable compiler identity ({decision}); native object cache is per-process this run\n")
+            return native_build_uncacheable_abi_identity("unadmitted:{decision}")
         val abi_receipt = incremental_file_read_text(abi_receipt_path)
         if abi_receipt == nil:
             return native_build_uncacheable_abi_identity("receipt-unreadable:{abi_receipt_path}")
@@ -2404,7 +2450,7 @@ fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> 
 
 
 
-export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity, native_build_unadmitted_producer_identity
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity, native_build_unadmitted_producer_identity, native_build_unadmitted_identity_decision_v1
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
 # losing both methods and fields). All parameters and results are plain data.
