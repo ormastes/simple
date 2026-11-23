@@ -9,27 +9,39 @@
 # no state migration across an ABI change.
 # The commit point is one lockless CAS on the slot generation.
 #
-# Generation -> image: every admitted image is published as a HotSwapImage
-# keyed by its generation. Readers pin the newest published image for the
-# duration of one call (hot_swap_read_begin / hot_swap_read_end) through a
-# per-image atomic reader count. Reclamation is lockless refcounting: an old
-# image is freed only by a CAS of its reader count 0 -> RECLAIMED, and a reader
-# pins only by a CAS c -> c+1 with c >= 0, so a freed image can never be pinned
-# and a pinned image can never be freed.
+# Threading contract: ONE writer thread (hot_swap_try + hot_swap_reclaim),
+# any number of reader threads (hot_swap_read_begin / hot_swap_read_end).
+#
+# Generation -> image: a fixed-capacity table of HotSwapImage entries,
+# allocated once with the slot and never resized, so readers never race a
+# reallocation. Generation g lives in entry g % HOT_SWAP_CAPACITY. Readers
+# never scan: they load the slot generation, pin its entry with a CAS of the
+# reader count c -> c+1 (only for c >= 0), and only then confirm the entry
+# still holds that generation (else unpin and retry).
+# Reclamation is lockless refcounting: the writer frees an old entry only by a
+# CAS of its reader count 0 -> RECLAIMED, and refills an entry only while it is
+# RECLAIMED, publishing it by storing the reader count back to 0. So a pinned
+# image is never freed or overwritten, and a freed image is never pinned.
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_try_new}
 use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
 use compiler.driver.driver_api_interpret.{smf_cached_unit_identity_admit}
 
 val HOT_SWAP_RECLAIMED: i64 = -1
+val HOT_SWAP_CAPACITY: i64 = 8
+val HOT_SWAP_RETRIES: i64 = 1024
 
 class HotSwapImage:
-    generation: i64
+    generation: AtomicI64
     image: [u8]
     readers: AtomicI64
 
     fn reader_count() -> i64:
         val r = self.readers
         r.load(MemoryOrdering.SeqCst)
+
+    fn holds_generation() -> i64:
+        val g = self.generation
+        g.load(MemoryOrdering.SeqCst)
 
     fn is_reclaimed() -> bool:
         self.reader_count() == HOT_SWAP_RECLAIMED
@@ -43,30 +55,51 @@ class HotSwapSlot:
         val gen = self.generation
         gen.load(MemoryOrdering.SeqCst)
 
+    fn entry_for(generation: i64) -> HotSwapImage:
+        self.images[generation % HOT_SWAP_CAPACITY]
+
 # A reader pin on one generation image; release it with hot_swap_read_end.
 class HotSwapRead:
     entry: HotSwapImage
+    pinned_generation: i64
 
     fn generation() -> i64:
-        self.entry.generation
+        self.pinned_generation
 
     fn image() -> [u8]:
         self.entry.image
 
+# An empty, reclaimed table entry.
 # reason: Result carries the loader diagnostic text
 @allow(primitive_api)
-fn hot_swap_image_new(generation: i64, image: [u8]) -> Result<HotSwapImage, text>:
-    match atomic_i64_try_new(0):
-        Some(readers): Ok(HotSwapImage(generation: generation, image: image, readers: readers))
-        None: Err("SMF-E-HOTSWAP-ATOMIC: reader-count atomic allocation failed")
+fn hot_swap_image_empty() -> Result<HotSwapImage, text>:
+    match atomic_i64_try_new(0 - 1):
+        Some(gen):
+            match atomic_i64_try_new(HOT_SWAP_RECLAIMED):
+                Some(readers): Ok(HotSwapImage(generation: gen, image: [], readers: readers))
+                None: Err("SMF-E-HOTSWAP-ATOMIC: reader-count atomic allocation failed")
+        None: Err("SMF-E-HOTSWAP-ATOMIC: entry generation atomic allocation failed")
 
-# Fails closed when the runtime cannot allocate the generation atomic.
+# Fails closed when the runtime cannot allocate the slot atomics.
 # reason: Result carries the loader diagnostic text
 @allow(primitive_api)
 fn hot_swap_slot_new(pinned: SmfManifestEntry) -> Result<HotSwapSlot, text>:
+    var table: [HotSwapImage] = []
+    var i = 0
+    while i < HOT_SWAP_CAPACITY:
+        table.push(hot_swap_image_empty()?)
+        i = i + 1
     match atomic_i64_try_new(0):
-        Some(gen): Ok(HotSwapSlot(pinned: pinned, generation: gen, images: []))
+        Some(gen): Ok(HotSwapSlot(pinned: pinned, generation: gen, images: table))
         None: Err("SMF-E-HOTSWAP-ATOMIC: generation atomic allocation failed")
+
+# Writer only: fill a RECLAIMED entry and make it pinnable.
+fn hot_swap_fill(entry: HotSwapImage, generation: i64, image: [u8]):
+    entry.image = image
+    val g = entry.generation
+    g.store(generation, MemoryOrdering.SeqCst)
+    val r = entry.readers
+    r.store(0, MemoryOrdering.SeqCst)
 
 # Loader entry point: a slot whose generation 0 is `image`, admitted against
 # `pinned` exactly like a swap (no legacy fallback).
@@ -77,14 +110,14 @@ fn hot_swap_slot_load(pinned: SmfManifestEntry, image: [u8]) -> Result<HotSwapSl
     if not admitted:
         return Err("SMF-E-UNIT-IDENTITY-MISSING: hot swap load refused, image carries no unit identity record")
     val slot = hot_swap_slot_new(pinned)?
-    val first = hot_swap_image_new(0, image)?
-    slot.images.push(first)
+    hot_swap_fill(slot.entry_for(0), 0, image)
     Ok(slot)
 
 # Admit `image` against the pinned row, then publish it by advancing the
 # generation from `observed` with a single CAS. Ok = new generation.
-# Err = SMF-E-UNIT-* (identity refusal) or SMF-E-HOTSWAP-STALE (another swap
-# committed first; caller re-reads the generation and retries).
+# Err = SMF-E-UNIT-* (identity refusal), SMF-E-HOTSWAP-FULL (the target entry
+# still holds an unreclaimed generation; reclaim and retry), or
+# SMF-E-HOTSWAP-STALE (`observed` is not current).
 # On any refusal the previously published image stays the one readers pin.
 # reason: Result carries the loader diagnostic text
 @allow(primitive_api)
@@ -92,56 +125,59 @@ fn hot_swap_try(slot: HotSwapSlot, observed: i64, image: [u8]) -> Result<i64, te
     val admitted = smf_cached_unit_identity_admit(slot.pinned, image)?
     if not admitted:
         return Err("SMF-E-UNIT-IDENTITY-MISSING: hot swap refused, replacement carries no unit identity record")
-    val entry = hot_swap_image_new(observed + 1, image)?
-    val gen = slot.generation
-    if not gen.compare_exchange(observed, observed + 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+    if slot.current_generation() != observed:
         return Err("SMF-E-HOTSWAP-STALE: generation {observed} is no longer current")
-    slot.images.push(entry)
-    Ok(observed + 1)
+    val next = observed + 1
+    val entry = slot.entry_for(next)
+    if not entry.is_reclaimed():
+        return Err("SMF-E-HOTSWAP-FULL: entry for generation {next} still holds generation {entry.holds_generation()}; reclaim first")
+    hot_swap_fill(entry, next, image)
+    val gen = slot.generation
+    if not gen.compare_exchange(observed, next, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        hot_swap_retire(entry)
+        return Err("SMF-E-HOTSWAP-STALE: generation {observed} is no longer current")
+    Ok(next)
 
-fn hot_swap_newest_index(slot: HotSwapSlot) -> i64:
-    var best = -1
-    var best_gen = -1
-    var i = 0
-    for e in slot.images:
-        if not e.is_reclaimed() and e.generation > best_gen:
-            best = i
-            best_gen = e.generation
-        i = i + 1
-    best
+# Writer only: take back an entry that was filled but never published. A
+# reader can hold it only transiently (generation mismatch makes it unpin).
+fn hot_swap_retire(entry: HotSwapImage):
+    val readers = entry.readers
+    var n = 0
+    while n < HOT_SWAP_RETRIES:
+        if readers.compare_exchange(0, HOT_SWAP_RECLAIMED, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+            entry.image = []
+            return
+        n = n + 1
 
-# Pin the newest published image for one call. The pin is a CAS c -> c+1 on a
-# non-reclaimed count; losing to a reclaim or another reader retries.
+# Pin the current generation image for one call.
 # reason: Result carries the loader diagnostic text
 @allow(primitive_api)
 fn hot_swap_read_begin(slot: HotSwapSlot) -> Result<HotSwapRead, text>:
     var attempts = 0
-    while attempts < 64:
-        val idx = hot_swap_newest_index(slot)
-        if idx < 0:
-            return Err("SMF-E-HOTSWAP-NO-IMAGE: slot has no published image")
-        val entry = slot.images[idx]
+    while attempts < HOT_SWAP_RETRIES:
+        val cur = slot.current_generation()
+        val entry = slot.entry_for(cur)
         val readers = entry.readers
         val c = readers.load(MemoryOrdering.SeqCst)
         if c >= 0 and readers.compare_exchange(c, c + 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
-            return Ok(HotSwapRead(entry: entry))
+            if entry.holds_generation() == cur:
+                return Ok(HotSwapRead(entry: entry, pinned_generation: cur))
+            readers.fetch_sub(1, MemoryOrdering.SeqCst)
         attempts = attempts + 1
-    Err("SMF-E-HOTSWAP-CONTENDED: reader pin did not settle")
+    Err("SMF-E-HOTSWAP-NO-IMAGE: no pinnable image for the current generation")
 
 fn hot_swap_read_end(read: HotSwapRead):
     val readers = read.entry.readers
     readers.fetch_sub(1, MemoryOrdering.SeqCst)
 
-# Free every image older than the newest published one that no reader pins.
-# Returns the number of images freed by this call.
+# Writer only: free every entry older than the current generation that no
+# reader pins. Returns the number of images freed by this call.
 fn hot_swap_reclaim(slot: HotSwapSlot) -> i64:
-    val newest = hot_swap_newest_index(slot)
-    if newest < 0:
-        return 0
-    val newest_gen = slot.images[newest].generation
+    val cur = slot.current_generation()
     var freed = 0
     for e in slot.images:
-        if e.generation < newest_gen:
+        val g = e.holds_generation()
+        if g >= 0 and g < cur:
             val readers = e.readers
             if readers.compare_exchange(0, HOT_SWAP_RECLAIMED, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
                 e.image = []
@@ -149,10 +185,8 @@ fn hot_swap_reclaim(slot: HotSwapSlot) -> i64:
     freed
 
 fn hot_swap_image_live(slot: HotSwapSlot, generation: i64) -> bool:
-    for e in slot.images:
-        if e.generation == generation:
-            return not e.is_reclaimed()
-    false
+    val e = slot.entry_for(generation)
+    e.holds_generation() == generation and not e.is_reclaimed()
 
 export HotSwapSlot, HotSwapImage, HotSwapRead, hot_swap_slot_new, hot_swap_slot_load, hot_swap_try
 export hot_swap_read_begin, hot_swap_read_end, hot_swap_reclaim, hot_swap_image_live
