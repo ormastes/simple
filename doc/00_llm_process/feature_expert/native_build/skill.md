@@ -44,6 +44,14 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
 - **Seed-lane cache identity quirk:** pre-stage4 seed binaries have an uncacheable
   identity (cache validation fails on seed-compiled artifacts; rebuild after
   stage4 redeploy)
+- **Unadmitted compiler identity is stable (2026-11-24):** with `SIMPLE_ABI_POLICY` /
+  `SIMPLE_ABI_ADMISSION_RECEIPT` unset, `native_build_compiler_identity()` used to
+  return `uncacheable-abi-admission-…-<pid>-<micros>` — one object scope (`s<hex>`)
+  and witness config per PROCESS, so no per-file batch or re-run ever hit. It is now
+  `native_build_unadmitted_producer_identity` (exe hash + sources + runtime + ABI
+  epoch, admission `unadmitted-v1`). A receipt that is named but unreadable/rejected
+  is still per-process. Modules whose witness is `…-witness-v1-invalid` (e.g.
+  `ambiguous-resolution-fact`) still never hit.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 
