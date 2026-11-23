@@ -1,6 +1,6 @@
 # Unit range-cast / remainder checks: native execution blocked (2026-11-19)
 
-Status: verification-pending (Lane 8, 2026-11-23: port_in, port_oor, big_accept and big_reject verified natively; div_zero builds but its executable segfaults (rc 139) before printing, see Lane 8).
+Status: fixed (Lane 9, 2026-11-23: native-verified. All five fixtures pass natively, including div_zero, which now prints `10/5 ok` and then panics with SPL-UNIT-002; root cause and fix in Lane 9).
 
 Fixtures: `test/fixtures/unit_native/{port_oor,port_in,big_reject,big_accept,div_zero}.spl`.
 
@@ -150,3 +150,16 @@ Command: `timeout 2400 cli_main.exe native-build src/app/rbnat_fx/<case>.spl -o 
 The five builds ran in parallel. Logs and executables are in `C:/dev/wt/nv2/build/nv2/nv/` (untracked).
 Result: the compile failures from Lane 6 are gone. The u64 hex bound is verified natively. The `/` lowering now compiles, but the div_zero executable crashes even on the non-zero `10 / 5` call, so SPL-UNIT-002 is not verified natively.
 Handoff: debug `div_zero.exe` (the `ratio(a: Dist, b: Dist) -> i64: a / b` path from `emit_unit_div_remainder_check`). The crash happens before the first `print`.
+
+## Lane 9: div_zero SIGSEGV root cause and fix (2026-11-23, worktree dz1, branch work/dz1-20261123)
+Root cause: the crash was not in the `/` lowering. Disassembling Lane 8's `div_zero.exe` shows `__simple_main` passes `10 as Dist` / `5 as Dist` as raw words (`movl $0xa,%ecx; movl $0x5,%edx`), but `app.rbnat_fx.div_zero.ratio`'s prologue nil-checks each `Dist` param, untags it, does `movq (%rdx),...`, and copies the result into `rt_alloc(8)`. That is the Bug #167 struct-param value-copy (`copy_struct_value_recursive`), so it dereferences address 0xa. `parser_lower_unit_decl` registers a unit as a one-field struct, which puts it in `struct_field_order`. The param arm in `function_lowering.spl` then treated it as a record, while `lower_type` (and therefore the caller) passes a unit or newtype over a primitive as its word. The old MIR spec "loads a record-wrapped unit operand" asserted a `Load` in `ratio`. It was green only because of this value-copy.
+Fix: in the param prologue, `is_named_struct` now excludes custom primitives, using a symbol-keyed or name-keyed `custom_primitive_underlying_type_tag_by_*` check. The same dual check is in `box_runtime_value_local_is_record`. The bad spec was replaced by one that asserts that `ratio` has no `Load` and no `Alloc` (`test/01_unit/compiler/mir/unit_div_remainder_native_spec.spl`). That spec was not run on this host: the seed interpreter fails on an unrelated `phase_memo_ownership` visibility error, and `cli_main.exe run` ends in `binary operator not implemented`.
+Compiler: `C:/dev/wt/dz1/build/dz1/cli_main.exe`, sha256 `9b6c75f516cc648b923dfb88f6a65ccf83e6bf018e9f31323e47d50f6c2dd231`. Same recipe as Lane 8 (seedB, 48 threads, llvm-mingw CC/CXX, 31m38s, BUILD_RC=0), plus the same uncommitted `test_db_compat.spl` build-only workaround, which was reverted afterwards. Fixtures were in scratch `src/app/dz1_fx/` (deleted), built in parallel (408-414 s each):
+
+| case | source | run rc | stdout / stderr | verdict |
+|---|---|---|---|---|
+| uu | `ratio(10 as Dist, 5 as Dist)` (unit/unit) | 0 | `ratio=2` | PASS |
+| ui | `half(10 as Dist, 2) -> Dist` (unit/i64, rewrap path) | 0 | `half ok` | PASS |
+| rem | `10/5` then `10/3` | 1 | `10/5 ok`; `panic: SPL-UNIT-002: integer unit division is inexact ...` | PASS |
+| div_zero | `10/5` then `10/0` | 1 | `10/5 ok`; `panic: SPL-UNIT-002: unit division by zero` | PASS (was rc 139) |
+| port_in | `mk(8080)` (regression) | 0 | `in-range ok` | PASS |
