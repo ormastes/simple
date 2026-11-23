@@ -20,7 +20,7 @@ pub struct LocalGatewayResponseV1:
     request_id: text
     exit_code: i64
     payload: text
-    output_handoff: LocalGatewayOutputHandoffV1? = nil
+    output_handoff: LocalGatewayOutputHandoffV1? = None
 
 # Internal-only descriptor staging request. The domain keeps its full process
 # owner and journal authority. Metadata is encoded by the domain's common
@@ -48,7 +48,7 @@ pub struct LocalGatewayConnectionV1:
     reply_part: i64
     reply_offset: i64
     error: text
-    ready_request: LocalGatewayRequestV1? = nil
+    ready_request: LocalGatewayRequestV1? = None
 
 pub struct LocalGatewayReceiveTurnV2:
     connection: LocalGatewayConnectionV1
@@ -73,13 +73,13 @@ pub struct LocalGatewayOwnedTurnV1<T>:
 pub fn local_gateway_accept_v1(listener: LocalUnixListenerV1, expected_client_uid: i64,
         timeout_ms: i64) -> LocalGatewayAcceptTurnV1:
     if timeout_ms <= 0 or timeout_ms > 30000:
-        return LocalGatewayAcceptTurnV1(listener: listener, connection: nil, error: "gateway-timeout-bound")
+        return LocalGatewayAcceptTurnV1(listener: listener, connection: None, error: "gateway-timeout-bound")
     val accepted = local_unix_accept_v1(listener, expected_client_uid)
     if accepted.connection.is_none():
-        return LocalGatewayAcceptTurnV1(listener: accepted.listener, connection: nil, error: accepted.error)
+        return LocalGatewayAcceptTurnV1(listener: accepted.listener, connection: None, error: accepted.error)
     var connection = LocalGatewayConnectionV1(native: accepted.connection.unwrap(),
-        expected_peer_uid: expected_client_uid, deadline_monotonic_ms: 0, reader: nil, phase: 4,
-        response: nil, reply_prefix: [], reply_header: [], reply_payload: [], reply_part: 0,
+        expected_peer_uid: expected_client_uid, deadline_monotonic_ms: 0, reader: None, phase: 4,
+        response: None, reply_prefix: [], reply_header: [], reply_payload: [], reply_part: 0,
         reply_offset: 0, error: accepted.error)
     if accepted.error != "":
         return LocalGatewayAcceptTurnV1(accepted.listener, Some(connection), accepted.error)
@@ -132,7 +132,7 @@ pub fn local_gateway_receive_v2(connection: LocalGatewayConnectionV1) -> LocalGa
         if not ready.readable and not ready.hangup:
             return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), "")
     if current.phase == 0:
-        if current.reader == nil:
+        if current.reader.is_none():
             current.phase = 4
             current.error = "gateway-frame-owner-missing"
             return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
@@ -181,7 +181,7 @@ pub fn local_gateway_receive_v2(connection: LocalGatewayConnectionV1) -> LocalGa
             current.phase = 4
             current.error = "gateway-peer-mismatch"
             return LocalGatewayReceiveTurnV2(current, gateway_ready_request_v2(current), current.error)
-        if current.reader == nil or current.reader.unwrap().header == nil:
+        if current.reader.is_none() or current.reader.unwrap().header == nil:
             current.phase = 4
             current.error = "gateway-frame-owner-missing"
             return LocalGatewayReceiveTurnV2(current, nil, current.error)
@@ -210,7 +210,7 @@ pub fn local_gateway_dispatch_owned_v2<T>(owner: T, connection: LocalGatewayConn
     var handled = false
     if current.phase == 3 or current.phase == 4:
         return LocalGatewayOwnedTurnV1(current_owner, current, false, current.error)
-    if current.phase != 5 or current.ready_request == nil:
+    if current.phase != 5 or current.ready_request.is_none():
         return LocalGatewayOwnedTurnV1(current_owner, current, false, "gateway-request-not-ready")
     val request = current.ready_request.unwrap()
     val peer = local_unix_peer_v1(current.native)
@@ -247,7 +247,7 @@ pub fn local_gateway_dispatch_owned_v2<T>(owner: T, connection: LocalGatewayConn
     val response_header = LocalGatewayHeaderV1(response: true, request_id: request.request_id,
         action: "", operation_id: "", exit_code: result.response.exit_code,
         payload_bytes: str_len(result.response.payload),
-        handoff_metadata: if result.response.output_handoff == nil: "" else: result.response.output_handoff.unwrap().metadata)
+        handoff_metadata: if result.response.output_handoff.is_none(): "" else: result.response.output_handoff.unwrap().metadata)
     val encoded = match local_gateway_header_encode_v1(response_header):
         case Ok(value): value
         case Err(reason):
@@ -271,7 +271,7 @@ pub fn local_gateway_dispatch_owned_v2<T>(owner: T, connection: LocalGatewayConn
         case Err(reason):
             current.error = reason
             return LocalGatewayOwnedTurnV1(current_owner, current, handled, reason)
-    if result.response.output_handoff != nil:
+    if result.response.output_handoff.is_some():
         val handoff = result.response.output_handoff.unwrap()
         val staged = local_unix_stage_stdout_v1(current.native, handoff.source, handoff.binding_digest)
         current.native = staged.owner
