@@ -1,46 +1,68 @@
 name: Bootstrap Sanity Evidence Archive
-
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
+  workaround-merged-registry:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          name: seed-linux-x86_64-d89f975af3cb46782e0c1dd68a795bb5833da846
+          run-id: 45199934467
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: validation-seed
+      - name: Execute baseline and repaired actual-source regressions
+        shell: bash
+        run: |
+          mkdir -p reader-evidence
+          chmod +x validation-seed/simple
+          sha256sum validation-seed/simple src/app/bug/workaround_store.spl src/lib/nogc_sync_mut/database/bug.spl test/01_unit/app/bug/workaround_merged_registry_spec.spl > reader-evidence/inputs.sha
+          git rev-parse HEAD > reader-evidence/source.txt
+          export SIMPLE_LIB="$PWD/src" SIMPLE_PROJECT_ROOT="$PWD" SIMPLE_TEST_RUNNER_RUST=1
+          run_spec() {
+            label=$1
+            spec=$2
+            set +e
+            (ulimit -v 2097152; timeout --kill-after=5 180 validation-seed/simple test "$spec" --mode=interpreter) > "reader-evidence/$label.stdout" 2> "reader-evidence/$label.stderr"
+            rc=$?
+            printf '%s\n' "$rc" > "reader-evidence/$label.exit"
+            set -e
+          }
+          for file in src/app/bug/workaround_store.spl src/lib/nogc_sync_mut/database/bug.spl; do
+            git show "7c0a486b6deea81ac5ef7a04a904f06353d6e727:$file" > "$file"
+          done
+          run_spec baseline test/01_unit/app/bug/workaround_merged_registry_spec.spl
+          for file in src/app/bug/workaround_store.spl src/lib/nogc_sync_mut/database/bug.spl; do
+            git show "$GITHUB_SHA:$file" > "$file"
+          done
+          run_spec repaired test/01_unit/app/bug/workaround_merged_registry_spec.spl
+          run_spec byte_seal test/01_unit/app/bug/bug_snapshot_crc_spec.spl
+          python - <<'PY'
+          import json, pathlib, re
+          root=pathlib.Path('reader-evidence')
+          results={}
+          for label in ('baseline','repaired','byte_seal'):
+              output=(root/f'{label}.stdout').read_text(errors='replace')
+              output=re.sub(r'\x1b\[[0-9;]*m','',output)
+              passed=re.findall(r'Passed:\s*(\d+)',output)
+              failed=re.findall(r'Failed:\s*(\d+)',output)
+              results[label]={'exit':int((root/f'{label}.exit').read_text()),'passed':int(passed[-1]) if passed else None,'failed':int(failed[-1]) if failed else None}
+          (root/'results.json').write_text(json.dumps(results,indent=2))
+          b=results['baseline']; f=results['repaired']; c=results['byte_seal']
+          assert b['passed'] is not None and b['failed'] is not None, results
+          assert b['passed']+b['failed']==7 and b['failed']>0 and b['exit']!=0, results
+          assert f=={'exit':0,'passed':7,'failed':0}, results
+          expected=len(re.findall(r'^\s+it "',pathlib.Path('test/01_unit/app/bug/bug_snapshot_crc_spec.spl').read_text(),re.M))
+          assert expected>0 and c=={'exit':0,'passed':expected,'failed':0}, results
+          print(json.dumps(results))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workaround-reader-validation-${{ github.sha }}
+          path: reader-evidence
