@@ -1,46 +1,54 @@
-name: Windows retained process helper DLL intake
+name: Windows retained full-link baseline comparison
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  actual-bounded-process:
-    runs-on: windows-latest
-    timeout-minutes: 12
-    defaults:
-      run:
-        shell: bash
+  retained-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
           github-token: ${{ github.token }}
-          run-id: 45276843909
-          name: windows-import-proof-43518c5540b57a825dddaf8ebbf1e95eb799720e
-          path: build/windows-import-proof
-      - name: Intake exact cross-toolchain target DLL
+          run-id: 45254122525
+          name: windows-stage2-link-inputs-d3422d488768713c1e6153bd2a7766ff22cbbd23
+          path: retained-link
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45254122525
+          name: native-authority-mingw-x86_64-d3422d488768713c1e6153bd2a7766ff22cbbd23
+          path: retained-native
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45254122525
+          name: binary-windows-mingw-x86_64-d3422d488768713c1e6153bd2a7766ff22cbbd23
+          path: retained-reference
+      - name: Pin canonical source and final-link toolchain
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          git fetch --no-tags --depth=1 origin d3422d488768713c1e6153bd2a7766ff22cbbd23
           name=llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64
           gh release download 20260922 --repo mstorsjo/llvm-mingw --pattern "$name.tar.xz" --dir "$RUNNER_TEMP"
           printf 'bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21  %s\n' "$RUNNER_TEMP/$name.tar.xz" | sha256sum --check -
-          python scripts/check/verify-windows-process-dll-intake.py --archive "$RUNNER_TEMP/$name.tar.xz" build/windows-import-proof
-      - name: Unchanged native helper normal and inner timeout proof
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
+          echo "PROOF_TOOLCHAIN=$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+      - name: Original-object baseline only, no module compilation
         run: |
-          out=build/windows-import-proof
-          printf '298e3ec7e6816f51813ea32a180b0a698ae806f4cc8cae286f7b41aff773fe84  %s/process-provider.exe\n' "$out" | sha256sum --check -
-          sha256sum --check "$out/dll.sha"
-          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=262144 --interval-ms=100 --timeout-seconds=30 --receipt="$out/execution.env" -- "$out/process-provider.exe" > "$out/execution.stdout" 2> "$out/execution.stderr"
-          grep -qx 'quiescent=1' "$out/execution.env"
-          grep -q 'normal=PASS' "$out/execution.stdout"
-          grep -q 'timeout=PASS.*child_quiescent=1' "$out/execution.stdout"
-          sha256sum --check "$out/process-provider.sha"
-          sha256sum --check "$out/dll.sha"
+          mkdir -p build
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=4194304 --interval-ms=100 --timeout-seconds=600 --receipt=build/windows-baseline-owner.env -- python scripts/check/replay-windows-cross-import-baseline.py --retained retained-link --native retained-native/libsimple_native_all.a --reference retained-reference/simple_stage2.exe --cc "$PROOF_TOOLCHAIN/bin/x86_64-w64-mingw32-clang" --nm "$PROOF_TOOLCHAIN/bin/llvm-nm" --out build/windows-link-baseline > build/windows-baseline.stdout 2> build/windows-baseline.stderr
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: windows-import-execution-with-dll-${{ github.sha }}
-          path: build/windows-import-proof/
+          name: windows-link-baseline-${{ github.sha }}
+          path: |
+            build/windows-link-baseline/
+            build/windows-baseline-owner.env
+            build/windows-baseline.stdout
+            build/windows-baseline.stderr
           retention-days: 14
