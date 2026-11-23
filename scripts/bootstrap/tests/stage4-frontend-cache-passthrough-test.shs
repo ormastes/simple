@@ -1,0 +1,172 @@
+#!/bin/sh
+# W24/W27 Stage 4 half of the Windows shard-worker workaround: the Stage 4
+# full-CLI launch must honour a validated caller SIMPLE_FRONTEND_CACHE
+# (unset | 0 | 1) instead of forcing 1, and bind it into what Stage 4 records.
+#   - unset: launch env carries SIMPLE_FRONTEND_CACHE=1, no build-log line,
+#     no provenance key (pinned bytes);
+#   - 0/1: launch env carries that value, the build log carries exactly one
+#     `stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=<v>` line, and the
+#     provenance carries stage4_frontend_cache=<v>;
+#   - anything else: the Stage 4 entry and the provenance writer refuse.
+# The provenance verifier treats an absent key as 1, rejects duplicates, bad
+# values and any disagreement with the build log.
+# Only text slices of the real scripts run; nothing is compiled.
+# Bug: doc/08_tracking/bug/stage4_forces_frontend_cache_ignores_caller_2026-11-23.md
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$temp_parent/simple-stage4-fc.XXXXXX")
+case "$tmp" in "$temp_parent"/simple-stage4-fc.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+scratch_file="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+helper_file="$repo/scripts/check/lib/stage4-candidate-provenance.shs"
+snapshot_file="$repo/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+
+slice() {
+  awk -v s="$2" -v e="$3" -v inc="$4" '
+    { buf = buf $0 "\n" }
+    END {
+      i = index(buf, s); if (i == 0) exit 3
+      rest = substr(buf, i)
+      if (e == "") { printf "%s", rest; exit 0 }
+      j = index(rest, e); if (j == 0) exit 3
+      n = j - 1; if (inc == "1") n += length(e)
+      printf "%s", substr(rest, 1, n)
+    }' "$1"
+}
+
+slice "$scratch_file" 'stage4_frontend_cache=1 stage4_frontend_cache_caller=' \
+  'bootstrap_build_host_vector_provider || exit 1' 0 >"$tmp/derive"
+slice "$scratch_file" 'bootstrap_native_build_main() {' \
+  '# Bootstrap pipeline' 0 >"$tmp/main"
+slice "$helper_file" 'case "${STAGE4_FRONTEND_CACHE:-}" in' "    esac
+" 1 >"$tmp/writer"
+slice "$helper_file" 'stage4_verify_frontend_cache_binding() (' "
+)
+" 1 >"$tmp/binding"
+slice "$snapshot_file" 'bootstrap_stage3_manifest_value() (' "
+)
+" 1 >"$tmp/manifest_value"
+
+{
+  printf '%s\n' 'set -eu' 'bootstrap_caller_frontend_cache=${CALLER_FC-}'
+  cat "$tmp/derive"
+  printf '%s\n' \
+    'log_dir=/fixture/log PLATFORM=x86_64-pc-windows-msvc backend=llvm' \
+    'cuda_source_root=/fixture/cuda plugin_policy_source_root=/fixture/plugin' \
+    'NATIVE_FILE_TIMEOUT_SECONDS=600 NATIVE_LOW_MEMORY=0 selfhost_jobs=4' \
+    'native_cache_dir=/fixture/cache bootstrap_runtime_authority_path=/fixture/rt' \
+    'repo_root=/fixture/repo bootstrap_stream_batch=1 bootstrap_go_to_end=0' \
+    'build_progress_events=0 bootstrap_vector_provider_pin=' \
+    'bootstrap_tree_rss_resolve() { bootstrap_tree_rss_source=env bootstrap_tree_rss_summary=fixture bootstrap_tree_rss_cap_kib=1 bootstrap_tree_rss_bound=env; }' \
+    'absolute_path() { printf "%s\n" "$1"; }' \
+    'perl() { printf "%s\n" "$@" >"$CONTROL_RECORD"; }'
+  cat "$tmp/main"
+  printf '%s\n' 'bootstrap_native_build_main /fixture/parent /fixture/out'
+} >"$tmp/stage4.sh"
+
+fail=0 checked=0
+pass() { checked=$((checked + 1)); }
+bad() { checked=$((checked + 1)); fail=$((fail + 1)); echo "FAIL: $*" >&2; }
+
+# launch CASE [CALLER] -> rc; argv in $tmp/CASE.argv, stderr in $tmp/CASE.err
+launch() {
+  name=$1; shift
+  rm -f "$tmp/$name.argv"
+  set +e
+  if [ "$#" -gt 0 ]; then
+    env -i PATH="$PATH" CONTROL_RECORD="$tmp/$name.argv" CALLER_FC="$1" \
+      sh "$tmp/stage4.sh" >"$tmp/$name.out" 2>"$tmp/$name.err"
+  else
+    env -i PATH="$PATH" CONTROL_RECORD="$tmp/$name.argv" \
+      sh "$tmp/stage4.sh" >"$tmp/$name.out" 2>"$tmp/$name.err"
+  fi
+  launch_rc=$?
+  set -e
+}
+
+# 1. unset keeps the pinned launch: =1, no transcript line.
+launch unset
+if [ "$launch_rc" = 0 ] && [ "$(grep -Fxc SIMPLE_FRONTEND_CACHE=1 "$tmp/unset.argv")" = 1 ] &&
+   ! grep -q '^stage4-frontend-cache:' "$tmp/unset.err"; then pass; else bad "unset: launch not pinned"; fi
+# 1b. explicit empty behaves as unset (same as the Stage 3 lane).
+launch empty ''
+if [ "$launch_rc" = 0 ] && cmp -s "$tmp/unset.argv" "$tmp/empty.argv" &&
+   ! grep -q '^stage4-frontend-cache:' "$tmp/empty.err"; then pass; else bad "empty: differs from unset"; fi
+
+# 2. 0 and 1 are honoured and transcribed; argv differs from unset by one word.
+for v in 0 1; do
+  launch "v$v" "$v"
+  if [ "$launch_rc" = 0 ] && [ "$(grep -Fxc "SIMPLE_FRONTEND_CACHE=$v" "$tmp/v$v.argv")" = 1 ] &&
+     [ "$(grep -c '^SIMPLE_FRONTEND_CACHE=' "$tmp/v$v.argv")" = 1 ] &&
+     [ "$(grep -Fxc "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=$v" "$tmp/v$v.err")" = 1 ]; then
+    pass
+  else
+    bad "value $v: not honoured/transcribed"
+  fi
+done
+if cmp -s "$tmp/unset.argv" "$tmp/v1.argv"; then pass; else bad "explicit 1 argv differs from unset"; fi
+if [ "$(diff "$tmp/unset.argv" "$tmp/v0.argv" | grep -c '^[<>]')" = 2 ]; then pass; else bad "0 differs from unset by more than one word"; fi
+
+# 3. invalid values are refused before any launch.
+for v in 2 yes ' 0' '1 '; do
+  launch inv "$v"
+  if [ "$launch_rc" != 0 ] && [ ! -e "$tmp/inv.argv" ] &&
+     grep -Fq 'SIMPLE_FRONTEND_CACHE must be unset, 0 or 1' "$tmp/inv.err"; then pass; else bad "invalid '$v' accepted"; fi
+done
+
+# 4. no forced literal remains in the Stage 4 launch or its cache context.
+if ! grep -q 'SIMPLE_FRONTEND_CACHE=1' "$tmp/main"; then pass; else bad "Stage 4 launch still forces =1"; fi
+slice "$scratch_file" 'if [ "$1" = stage4 ] || [ "$1" = stage4-debug ]; then' \
+  'elif [ "$1" = stage4b-ui-backend ]; then' 0 >"$tmp/cachectx"
+if grep -Fq '"SIMPLE_FRONTEND_CACHE=${stage4_frontend_cache:?}"' "$tmp/cachectx" &&
+   ! grep -q 'SIMPLE_FRONTEND_CACHE=1' "$tmp/cachectx"; then pass; else bad "Stage 4 cache context not bound"; fi
+if grep -Fq 'STAGE4_FRONTEND_CACHE="${stage4_frontend_cache_caller}"' "$scratch_file"; then pass; else bad "provenance writer not fed"; fi
+
+# 5. provenance writer: unset omits the key, 0|1 writes it, else refuses.
+write_prov() {
+  set +e
+  env -i PATH="$PATH" STAGE4_FRONTEND_CACHE="$1" sh -c "$(cat "$tmp/writer")" >"$tmp/prov.out" 2>/dev/null
+  write_rc=$?
+  set -e
+}
+write_prov ''
+if [ "$write_rc" = 0 ] && [ ! -s "$tmp/prov.out" ]; then pass; else bad "writer: unset wrote a key"; fi
+for v in 0 1; do
+  write_prov "$v"
+  if [ "$write_rc" = 0 ] && [ "$(cat "$tmp/prov.out")" = "stage4_frontend_cache=$v" ]; then pass; else bad "writer: $v"; fi
+done
+write_prov 2
+if [ "$write_rc" != 0 ]; then pass; else bad "writer accepted 2"; fi
+
+# 6. verifier binding: provenance key vs build log.
+{ cat "$tmp/manifest_value"; cat "$tmp/binding"; printf '%s\n' 'stage4_verify_frontend_cache_binding "$1" "$2"'; } >"$tmp/verify.sh"
+verify() { # expect(value|refuse) provenance-lines log-lines
+  printf '%s' "$2" >"$tmp/p.env"; printf '%s' "$3" >"$tmp/b.log"
+  set +e
+  got=$(sh "$tmp/verify.sh" "$tmp/p.env" "$tmp/b.log" 2>/dev/null)
+  rc=$?
+  set -e
+  if [ "$1" = refuse ]; then
+    [ "$rc" != 0 ] && pass || bad "verifier accepted: [$2] / [$3]"
+  else
+    [ "$rc" = 0 ] && [ "$got" = "$1" ] && pass || bad "verifier: want $1 got rc=$rc '$got' for [$2] / [$3]"
+  fi
+}
+nl='
+'
+verify 1 "schema=x${nl}" "command: x${nl}"
+verify 0 "schema=x${nl}stage4_frontend_cache=0${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=0${nl}"
+verify 1 "stage4_frontend_cache=1${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=1${nl}"
+verify refuse "stage4_frontend_cache=0${nl}stage4_frontend_cache=0${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=0${nl}"
+verify refuse "stage4_frontend_cache=2${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=2${nl}"
+verify refuse "stage4_frontend_cache=${nl}" "x${nl}"
+verify refuse "stage4_frontend_cache=0${nl}" "command: x${nl}"
+verify refuse "stage4_frontend_cache=0${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=1${nl}"
+verify refuse "schema=x${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=0${nl}"
+verify refuse "stage4_frontend_cache=0${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=0${nl}stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=0${nl}"
+verify refuse "stage4_frontend_cache=0${nl}" "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=0${nl}stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=1${nl}"
+
+if [ "$checked" = 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ "$fail" -ne 0 ]; then echo "FAIL — $fail of $checked case(s) failed"; exit 1; fi
+echo "PASS — $checked case(s) checked, Stage 4 SIMPLE_FRONTEND_CACHE honoured and bound"

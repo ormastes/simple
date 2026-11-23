@@ -211,6 +211,12 @@ codegen, and exit per shard (verified 9/9 shards, 1612/1613 modules). This is a
 scoped workaround; the `.fpc` read-back root cause is OPEN
 (`doc/08_tracking/bug/stage3_surface_build_av_items_spl_warm_frontend_cache_2026-11-22.md`;
 transport fix `stage3_resume_drops_mir_sharding_frontend_cache_env_2026-11-23.md`).
+Stage 4 (full-CLI relink, release and debug-xray, including `--resume-stage4`)
+honours the same caller `SIMPLE_FRONTEND_CACHE` (unset keeps the forced `1`;
+`0`/`1` used; else refused), binds it into the Stage 4 cache context, the
+build log (`stage4-frontend-cache:` line) and the provenance
+(`stage4_frontend_cache=`, absent = `1`)
+(`stage4_forces_frontend_cache_ignores_caller_2026-11-23.md`).
 
 ### Repo-tracked bootstrap settings (`config/bootstrap.sdn`)
 
