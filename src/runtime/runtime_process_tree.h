@@ -39,7 +39,8 @@
 extern "C" {
 #endif
 
-/* "No implementation on this host." Distinct from every -errno. */
+/* "No private session owner available here." A managed parent also makes a
+ * nested private owner unavailable. Distinct from every -errno. */
 #define RT_PTREE_UNSUPPORTED (-100000)
 /* "pid is alive but is not a session leader this API spawned." */
 #define RT_PTREE_NOT_SESSION_LEADER (-100001)
@@ -49,12 +50,16 @@ extern "C" {
  * the race the second sweep guards against may remain. */
 #define RT_PTREE_SWEEP_FAILED_AFTER_REAP (-100002)
 
-/* 0 when session ownership works on this host, RT_PTREE_UNSUPPORTED otherwise. */
+/* 0 when a new private session is available, RT_PTREE_UNSUPPORTED otherwise.
+ * A managed bootstrap session already has a parent owner: nested private
+ * sessions are unavailable, and callers should use inherited-session async
+ * children under that parent's cleanup authority. */
 int64_t rt_process_tree_support(void);
 
 /* fork + setsid + execvp. args has arg_count entries (argv[1..]).
  *   > 0  child pid (== its session id)
  *   -errno  fork/pipe/exec failure (the child never ran user code)
+ *   -EPERM  a managed bootstrap parent owns this session (no child created)
  *   RT_PTREE_UNSUPPORTED  on hosts without the owner */
 int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg_count);
 

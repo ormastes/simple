@@ -54,8 +54,19 @@
 #define RT_PTREE_HAVE_OWNER 0
 #endif
 
+/* A bootstrap supervisor already owns the session and all of its descendants.
+ * Starting a nested private session would escape that owner. Presence of either
+ * reserved contract variable is sufficient to refuse: malformed/partial
+ * contracts must not silently restore permission to escape. Ordinary async
+ * children inherit the managed session and remain under its cleanup authority. */
+static int ptree_parent_session_owned(void) {
+    return getenv("SIMPLE_BOOTSTRAP_SESSION_ID") != NULL ||
+           getenv("SIMPLE_BOOTSTRAP_SESSION_EXEC") != NULL;
+}
+
 int64_t rt_process_tree_support(void) {
-    return RT_PTREE_HAVE_OWNER ? 0 : RT_PTREE_UNSUPPORTED;
+    return RT_PTREE_HAVE_OWNER && !ptree_parent_session_owned()
+               ? 0 : RT_PTREE_UNSUPPORTED;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -270,6 +281,7 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
     (void)cmd; (void)args; (void)arg_count;
     return RT_PTREE_UNSUPPORTED;
 #else
+    if (ptree_parent_session_owned()) return -EPERM;
     if (!cmd || !*cmd || arg_count < 0 || (arg_count > 0 && !args)) return -EINVAL;
     if ((uint64_t)arg_count > (uint64_t)INT32_MAX) return -E2BIG;
     for (int64_t i = 0; i < arg_count; i++) {
