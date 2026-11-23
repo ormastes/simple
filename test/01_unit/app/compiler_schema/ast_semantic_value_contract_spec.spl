@@ -8,7 +8,40 @@ use compiler.frontend.generated.ast_semantic_value.{
 }
 use std.io_runtime.{read_file_text}
 use app.compiler_schema.fold_gen.{load_ast_semantic_universe, emit_one_ast_semantic_encoder}
+use app.compiler_schema.fold_gen.{prepare_fold_inputs, all_dialects, emit_fold_file, emit_ast_semantic_file, emit_fold_init}
+use app.compiler_schema.visitor_gen.{DeclUniverse, emit_visit_file, emit_children_file, emit_hash_file, emit_init_file}
+use std.io_runtime.{cwd}
 use std.spec.step
+
+fn stale_generated_files() -> [text]:
+    """Regenerate every visitor/fold artifact in memory; list checked-in files that differ byte-for-byte."""
+    val root = cwd()
+    var stale: [text] = []
+    val hir_dir = "src/compiler/20.hir/generated/"
+    val u = DeclUniverse.load(root)
+    val visitor_rows = [
+        [hir_dir + "hir_visit.spl", emit_visit_file(u)],
+        [hir_dir + "hir_children.spl", emit_children_file(u)],
+        [hir_dir + "hir_hash.spl", emit_hash_file(u)],
+        [hir_dir + "__init__.spl", emit_init_file()]
+    ]
+    for row in visitor_rows:
+        if read_file_text(root + "/" + row[0]) != row[1]: stale.push(row[0])
+    val inputs = prepare_fold_inputs(root)
+    if inputs.len() == 0:
+        stale.push("<fold inputs refused>")
+        return stale
+    val dialects = all_dialects()
+    val semantic: DeclUniverse = inputs[dialects.len()]
+    var index = 0
+    for d in dialects:
+        val dir = d.out_dir + "/"
+        if read_file_text(root + "/" + dir + d.out_file) != emit_fold_file(inputs[index], d): stale.push(dir + d.out_file)
+        if d.key != "hir":
+            if read_file_text(root + "/" + dir + "ast_semantic_value.spl") != emit_ast_semantic_file(semantic): stale.push(dir + "ast_semantic_value.spl")
+            if read_file_text(root + "/" + dir + "__init__.spl") != emit_fold_init(d): stale.push(dir + "__init__.spl")
+        index = index + 1
+    stale
 
 fn semantic_digest(expr: Expr) -> text:
     val state = ast_semantic_hash_seed()
@@ -78,6 +111,20 @@ describe "generated AST semantic fingerprint contracts":
         val gate = read_file_text("scripts/check/check-generated-visitors-fresh.shs")
         expect(gate.contains("src/compiler/10.frontend/generated/ast_semantic_value.spl")).to_equal(true)
         expect(gate.contains("src/compiler/10.frontend/generated/__init__.spl")).to_equal(true)
+
+    it "keeps every checked-in visitor/fold artifact byte-identical to a fresh regeneration":
+        step("Regenerate all 8 visitor/fold files in memory and compare with the checked-in files")
+        expect(stale_generated_files()).to_equal([])
+
+    it "keeps generated visitor/fold guards nil-free (Option-safe presence checks only)":
+        step("The generators emit `case None` / `.?` instead of nil outside unsafe")
+        val visitor_src = read_file_text("src/app/compiler_schema/visitor_gen.spl")
+        val fold_src = read_file_text("src/app/compiler_schema/fold_gen.spl")
+        expect(visitor_src.contains("case nil")).to_equal(false)
+        expect(fold_src.contains("case nil")).to_equal(false)
+        expect(visitor_src.contains("== nil")).to_equal(false)
+        expect(fold_src.contains("== nil")).to_equal(false)
+        expect(fold_src.contains("!= nil")).to_equal(false)
 
     it "encodes a literal-sized array type through an explicit presence projection":
         step("Verify the generator projects an optional node payload with `!` after its nil guard")

@@ -82,4 +82,33 @@ for scenario in good version-only compile-fail missing empty wrong-output run-fa
     [ "$status" -ne 0 ] && [ ! -f "$dir/dependent-producer" ] || { echo "FAIL: $scenario allowed dependent producer"; cat "$dir/result.log"; exit 1; }
   fi
 done
-echo 'PASS — real phase functions: valid fixture progresses; six Hello failures block dependent producer (mock evidence only)'
+# Exercise the actual standalone Phase 4 dispatch, not a duplicated gate.
+# The all route already qualifies its freshly built P3b in run_stage3_step.
+awk '/^case "\$PHASE" in$/ {body=""; capture=1; next} capture {body=body $0 "\n"} END {printf "%s", body}' \
+  "$repo/scripts/bootstrap/build-phase3-phase4.sh" >"$scratch/dispatch-body"
+{ printf 'case "$PHASE" in\n'; cat "$scratch/dispatch-body"; } >"$scratch/dispatch"
+for scenario in good version-only compile-fail missing empty wrong-output run-fail; do
+  dir="$scratch/p4-$scenario"
+  mkdir -p "$dir/logs"
+  (
+    set -eu
+    . "$scratch/functions"
+    SOURCE_ROOT=$repo SCRIPT_DIR=$repo/scripts/bootstrap
+    RUNTIME_PATH=$scratch/runtime STAGE3_RESOLVED_TARGET=fixture
+    COMPILE_MODE=shard WIN_CONFIG=mingw BACKEND=llvm BACKEND_PLUGIN= EXE_EXT=
+    PHASE=p4 P3B_BIN=$scratch/candidate P4_DIR=$dir LOG_DIR=$dir/logs
+    export SIMPLE_MOCK_CASE=$scenario SIMPLE_MOCK_RUNTIME=$RUNTIME_PATH
+    stage3_apply_native_host_link_policy() { export SIMPLE_BOOTSTRAP_STAGE3=1 SIMPLE_FILE_WORKERS=0; }
+    apply_windows_toolchain_env() { :; }
+    sign_stage_outputs() { :; }
+    run_stage4_all() { echo invoked >"$dir/dependent-producer"; }
+    . "$scratch/dispatch"
+  ) >"$dir/result.log" 2>&1 && status=0 || status=$?
+  if [ "$scenario" = good ]; then
+    [ "$status" -eq 0 ] && [ -f "$dir/dependent-producer" ] || { cat "$dir/result.log"; exit 1; }
+  else
+    [ "$status" -ne 0 ] && [ ! -f "$dir/dependent-producer" ] || { echo "FAIL: standalone p4 $scenario allowed dependent producer"; cat "$dir/result.log"; exit 1; }
+  fi
+done
+
+echo 'PASS: Phase 3 and standalone Phase 4: valid fixture progresses; six Hello failures block dependent producer (mock evidence only)'

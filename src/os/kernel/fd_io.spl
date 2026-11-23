@@ -20,6 +20,14 @@ use os.kernel.fs.active_fd_context_owner_v1.{
     active_fd_context_end_v1
 }
 use os.kernel.async_io_rw.{sync_read, sync_write}
+use os.kernel.async_io_rw.{sync_write_observed_v1}
+use os.sosix.io_rw.{SosixSerialWriteObserverV1}
+use os.kernel.fd_table.{fd_execution_output_role_v1, FdExecutionOutputRoleV1}
+use os.kernel.scheduler.process_execution_observation.{
+    scheduler_execution_output_capture_begin_v1,
+    scheduler_execution_output_capture_append_v1,
+    scheduler_execution_output_capture_finish_v1
+}
 use os.kernel.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.kernel.socket_compat.{posix_close_socket}
 use os.userlib.fs.{vfs_ipc_request_status_bytes}
@@ -360,6 +368,35 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
         total = total + bytes_read
 
     _posix_pread_exact_after_restore(fd, original_offset, PosixPreadExactBytes(status: total as i64, len: total, data: data))
+
+# @allow(primitive_api) syscall boundary: caller-owned fd, validated user address/count and scheduler task id retain their native ABI representation
+pub(package) fn posix_write_for_task_observation_v1(
+        fd: i32, buf: u64, count: u64, caller_id: u64) -> i64:
+    """Bind a syscall's actual caller and descriptor sink before serial output.
+
+    A changed descriptor context or failed owner reservation rejects the write
+    before emission with EAGAIN. Only a positively unobserved task or redirected
+    sink uses ordinary writing. A pending owner lease precedes every emitted byte.
+    """
+    if caller_id == 0u64: return posix_write(fd, buf, count)
+    if fd_current_task() != caller_id or not fd_task_context_exists(caller_id):
+        return -11
+    val role = fd_execution_output_role_v1(fd)
+    if role == FdExecutionOutputRoleV1.Unobserved:
+        return posix_write(fd, buf, count)
+    val started = scheduler_execution_output_capture_begin_v1(
+        caller_id, role == FdExecutionOutputRoleV1.Stderr)
+    if started.is_err(): return -11
+    val maybe_lease = started.unwrap()
+    if not maybe_lease.?: return posix_write(fd, buf, count)
+    val lease = maybe_lease.unwrap()
+    val observer = SosixSerialWriteObserverV1(on_emitted_batch: \bytes, accepted:
+        scheduler_execution_output_capture_append_v1(lease, bytes, accepted)
+    )
+    val result = sync_write_observed_v1(fd, buf, count, observer)
+    val emitted = if result > 0: result as u64 else: 0u64
+    _ = scheduler_execution_output_capture_finish_v1(lease, emitted)
+    result
 
 fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     """Write to a file descriptor. Returns bytes written or -errno.

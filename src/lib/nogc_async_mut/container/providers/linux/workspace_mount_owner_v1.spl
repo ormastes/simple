@@ -169,11 +169,11 @@ struct LinuxWorkspaceSourceStateV1:
     var agent_effect_attempted: bool = false
     var agent_creation_plan: [text] = []
     var agent_creations: [LinuxAgentWorkspaceCreationV1] = []
-    var agent_runtime_binding: LinuxFreshWorkspaceBindingV3? = nil
+    var agent_runtime_binding: LinuxFreshWorkspaceBindingV3? = None
     var agent_runtime_request: text = ""
     var agent_request_bytes: text = ""
     var agent_dedicated_empty_observed: bool = false
-    var agent_retained_metadata: LinuxWorkspaceRetainedMetadataV3? = nil
+    var agent_retained_metadata: LinuxWorkspaceRetainedMetadataV3? = None
     # milestone_0030 op (i): remote-build staging in the SAME canonical slot. Disjoint from the
     # agent fields so the agent arm is unchanged; a source carries at most one staged primary.
     var build_profile_source: text = ""
@@ -425,7 +425,7 @@ pub class LinuxWorkspaceSourceOwnerV1:
                 state.agent_manifest_digest != sha256_text(manifest_bytes) or state.agent_invocation_digest != invocation_digest):
             return Err("agent-binding-actual-staging-not-retained")
         val request_source = container_execution_request_encode_v2(request)?
-        if state.agent_runtime_binding != nil:
+        if state.agent_runtime_binding.is_some():
             if state.agent_runtime_request != request_source: return Err("agent-binding-existing-request-differs")
             val binding = state.agent_runtime_binding.unwrap()
             val observed = binding.current_v3()?
@@ -449,7 +449,7 @@ pub class LinuxWorkspaceSourceOwnerV1:
     pub fn creation_retained_metadata_v3() -> Result<LinuxWorkspaceCreationRetainedMetadataV3, text>:
         val state = workspace_source_state_v1(self.slot, self.generation)?
         if not state.agent_effect_attempted: return Err("agent-creation-no-effects-recorded")
-        if state.agent_retained_metadata != nil: return Err("agent-creation-already-native-retired")
+        if state.agent_retained_metadata.is_some(): return Err("agent-creation-already-native-retired")
         val identities = workspace_retained_identities_v3(self)?
         val (parent_identity, root_identity) = identities
         Ok(LinuxWorkspaceCreationRetainedMetadataV3(parent_identity: parent_identity, root_identity: root_identity,
@@ -465,7 +465,7 @@ pub class LinuxWorkspaceSourceOwnerV1:
         val result = if workspace_source_build_arm_v3(self): workspace_retire_build_native_v3(self, token, invocation_source)
             else: workspace_retire_native_v3(self, token, invocation_source)
         match result:
-            case Err(reason): LinuxWorkspaceRetirementTurnV3(owner: self, metadata: nil, retired: false, error: reason)
+            case Err(reason): LinuxWorkspaceRetirementTurnV3(owner: self, metadata: None, retired: false, error: reason)
             case Ok(metadata): LinuxWorkspaceRetirementTurnV3(owner: self, metadata: Some(metadata), retired: true, error: "")
 
     # Historical event survives lower observer closure. Actual source/root/quota
@@ -473,7 +473,7 @@ pub class LinuxWorkspaceSourceOwnerV1:
     pub fn retained_metadata_v3() -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
         val state = workspace_source_state_v1(self.slot, self.generation)?
         if state.build_effect_attempted: return workspace_build_retained_metadata_v3(self)
-        if state.agent_stage_phase != "native-retired-retained" or state.agent_retained_metadata == nil:
+        if state.agent_stage_phase != "native-retired-retained" or state.agent_retained_metadata.is_none():
             return Err("agent-workspace-not-native-retired-retained")
         val (parent, root) = workspace_retained_identities_v3(self)?
         val metadata = state.agent_retained_metadata.unwrap()
@@ -792,7 +792,7 @@ fn workspace_retained_identities_v3(owner: LinuxWorkspaceSourceOwnerV1) -> Resul
 fn workspace_retire_native_v3(owner: LinuxWorkspaceSourceOwnerV1, token: LinuxFreshWorkspaceNativeRetirementV3,
         invocation_source: text) -> Result<LinuxWorkspaceRetainedMetadataV3, text>:
     val state = workspace_source_state_v1(owner.slot, owner.generation)?
-    if (not state.agent_effect_attempted or not state.agent_dedicated_empty_observed or state.agent_runtime_binding == nil or
+    if (not state.agent_effect_attempted or not state.agent_dedicated_empty_observed or state.agent_runtime_binding.is_none() or
             state.agent_runtime_request == "" or state.agent_stage_error != "" or
             (state.agent_stage_phase != "staged" and state.agent_stage_phase != "native-retired-retained")):
         return Err("agent-retirement-no-staged-runtime-binding")
@@ -825,7 +825,7 @@ fn workspace_retire_native_v3(owner: LinuxWorkspaceSourceOwnerV1, token: LinuxFr
         creation_receipts_digest: metadata.creation_receipts_digest, uncertain_creation: false)
     if linux_workspace_retained_metadata_encode_v3(metadata) != linux_workspace_retained_metadata_encode_v3(after_metadata):
         return Err("agent-retirement-observation-changed")
-    if state.agent_retained_metadata != nil:
+    if state.agent_retained_metadata.is_some():
         if linux_workspace_retained_metadata_encode_v3(state.agent_retained_metadata.unwrap()) != linux_workspace_retained_metadata_encode_v3(metadata):
             return Err("agent-retirement-existing-event-differs")
         return owner.retained_metadata_v3()

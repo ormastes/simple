@@ -53,16 +53,42 @@ mkdir -p "$work_dir" || exit 2
 qualifies() {
   cand=$1
   [ -f "$cand" ] || return 1
-  "$cand" --version >/dev/null 2>&1 || return 1
-  probe=$work_dir/probe
-  rm -rf "$probe" && mkdir -p "$probe" || return 1
-  printf 'fn main():\n    print "bootstrap-compiler-probe"\n' > "$probe/hello.spl"
-  "$cand" native-build "$probe/hello.spl" -o "$probe/hello$exe" >"$probe/build.log" 2>&1 || {
+  candidate_path=$(CDPATH= cd -- "$(dirname "$cand")" && printf '%s/%s' "$(pwd -P)" "$(basename "$cand")") || return 1
+  # SCV admits source only within the caller's checkout, even when downloads,
+  # outputs and retained logs use an external --work-dir. Never share/delete a
+  # probe directory: concurrent candidate selection must not destroy evidence.
+  checkout_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  checkout_root=$(CDPATH= cd -- "$checkout_root" && pwd -P) || return 1
+  # SCV takes the compiler's CWD as its admission root, not its Git ancestor.
+  # Preserve the caller-facing candidate spelling but execute absolute paths
+  # from the actual checkout root, including subdirectory invocations.
+  (CDPATH= cd -- "$checkout_root" && "$candidate_path" --version) >/dev/null 2>&1 || return 1
+  source_parent=$checkout_root/build/bootstrap/compiler-probes
+  mkdir -p "$source_parent" || return 1
+  source_parent=$(CDPATH= cd -- "$source_parent" && pwd -P) || return 1
+  case $source_parent in "$checkout_root"/*) ;; *)
+    printf 'resolve-bootstrap-compiler: probe source directory escapes caller checkout\n' >&2
+    return 1 ;;
+  esac
+  probe_source=$(mktemp -d "$source_parent/probe.XXXXXX") || return 1
+  probe=$(mktemp -d "$work_dir/probe.XXXXXX") || return 1
+  probe=$(CDPATH= cd -- "$probe" && pwd -P) || return 1
+  printf '%s\n' "$probe_source/hello.spl" > "$probe/source-path"
+  printf 'fn main():\n    print "bootstrap-compiler-probe"\n' > "$probe_source/hello.spl"
+  (CDPATH= cd -- "$checkout_root" &&
+    SIMPLE_CACHE_SCOPE="bootstrap-compiler-${probe_source##*/}" \
+    "$candidate_path" native-build "$probe_source/hello.spl" -o "$probe/hello$exe") >"$probe/build.log" 2>&1 || {
     printf 'resolve-bootstrap-compiler: %s failed the hello build:\n' "$cand" >&2
     tail -5 "$probe/build.log" >&2
     return 1
   }
-  "$probe/hello$exe" 2>/dev/null | grep -q bootstrap-compiler-probe
+  probe_run_status=0
+  (CDPATH= cd -- "$checkout_root" && "$probe/hello$exe") >"$probe/run.log" 2>"$probe/run.stderr" || probe_run_status=$?
+  printf '%s\n' "$probe_run_status" > "$probe/run-exit-status"
+  [ "$probe_run_status" -eq 0 ] || return 1
+  printf 'bootstrap-compiler-probe\n' > "$probe/expected-lf"
+  printf 'bootstrap-compiler-probe\r\n' > "$probe/expected-crlf"
+  cmp -s "$probe/expected-lf" "$probe/run.log" || cmp -s "$probe/expected-crlf" "$probe/run.log"
 }
 
 try_local() {

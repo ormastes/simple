@@ -4,7 +4,8 @@ use app.cli.worker_hir_profile_v1.{worker_hir_argument_error_v1, worker_hir_stag
     worker_hir_tool_build_environment_keys_v1, worker_hir_base_environment_keys_v1, worker_hir_environment_value_error_v1,
     worker_hir_unsupported_environment_keys_v1,
     worker_hir_environment_key_admitted_v1, worker_hir_child_validate_v1,
-    worker_hir_pool_skip_without_closure_v1, worker_hir_environment_admit_v1, worker_hir_profile_admit_v1}
+    worker_hir_pool_skip_without_closure_v1, worker_hir_environment_admit_v1, worker_hir_profile_admit_v1,
+    worker_hir_configuration_digest_v1}
 use app.cli.worker_hir_owner_v1.{worker_hir_cleanup_deadline_v1,
     worker_hir_remaining_budget_v1, worker_hir_environment_sort_v1}
 use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
@@ -152,6 +153,24 @@ describe "worker HIR profile admission":
         expect(worker_hir_argument_error_v1(["--entry-closure", "--source"])).to_contain("missing")
         expect(worker_hir_argument_error_v1(["--entry-closure", "--source="])).to_contain("empty")
 
+    it "admits supported runtime owners exactly and binds their captured bytes":
+        var digests: [text] = []
+        for owner in ["", "c", "rust", "C", "RuSt"]:
+            val environment = worker_hir_environment_admit_v1([("SIMPLE_RUNTIME_OWNER", owner)]).unwrap()
+            expect(environment.len()).to_equal(1)
+            expect(environment[0].key).to_equal("SIMPLE_RUNTIME_OWNER")
+            expect(environment[0].value).to_equal(owner)
+            val digest = worker_hir_configuration_digest_v1("receipt", "policy", "producer", 123,
+                environment, ["--entry-closure"])
+            expect(digest.len()).to_equal(64)
+            expect(digests.contains(digest)).to_equal(false)
+            digests.push(digest)
+
+    it "refuses unsupported runtime owners and keeps unknown keys fail closed":
+        for owner in ["simple", "other", " c", "c ", "rust\n", "rust;evil"]:
+            expect(admit_error([("SIMPLE_RUNTIME_OWNER", owner)])).to_contain("SIMPLE_RUNTIME_OWNER")
+        expect(admit_error([("SIMPLE_RUNTIME_OWNER_FUTURE", "c")])).to_contain("unsupported")
+
     it "admits canonical source authority and rejects loader injection":
         expect(worker_hir_environment_key_admitted_v1("SIMPLE_SCV_INVENTORY_DIGEST")).to_equal(true)
         for name in ["DYLD_INSERT_LIBRARIES", "LD_PRELOAD", "LD_LIBRARY_PATH",
@@ -289,7 +308,7 @@ describe "worker HIR profile admission":
             "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB",
             "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_STAGE4",
             "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
-            "SIMPLE_RUNTIME_PATH", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
+            "SIMPLE_RUNTIME_PATH", "SIMPLE_RUNTIME_OWNER", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
             "XDG_CACHE_HOME", "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP", "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS",
             "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_BOOTSTRAP_RSS_CAP_MODE",
             "SIMPLE_PROCESS_TREE_RSS_RECEIPT", "SIMPLE_TOOLCHAINS_ROOT", "SIMPLE_HOST_CONFIG",

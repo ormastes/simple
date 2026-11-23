@@ -28,6 +28,7 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256_or_shell, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
+use compiler.backend.aot_target_normalization.{backend_aot_simpleos_target_triple}
 fn is_simpleos_riscv64_link(user_objects: [text], output: text) -> bool:
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if is_simpleos_riscv64_target(target):
@@ -109,6 +110,10 @@ fn is_simpleos_riscv32_target(target: text) -> bool:
 # Canonical `*-simpleos` triple -> user-process arch. `*-none*` and
 # filename-selected builds return "" and keep their kernel link lanes.
 pub fn simpleos_user_link_arch(target: text) -> text:
+    val normalized = backend_aot_simpleos_target_triple(target)
+    if normalized == "i686-unknown-none-elf": return "i686"
+    if normalized == "armv7a-none-eabi": return "arm32"
+    if normalized == "riscv32imac-unknown-none-elf": return "riscv32"
     match target.trim().lower():
         case "simpleos" | "simpleos-x86_64" | "x86_64-simpleos" | "x86_64-unknown-simpleos" | "x86_64-unknown-simpleos-elf":
             "x86_64"
@@ -122,12 +127,15 @@ pub fn simpleos_user_sysroot_default(arch: text) -> text:
     match arch:
         case "aarch64": "build/os/sysroot-aarch64"
         case "riscv64": "build/os/sysroot-riscv64"
+        case "i686": "build/os/sysroot-i686"
+        case "arm32": "build/os/sysroot-arm32"
+        case "riscv32": "build/os/sysroot-riscv32"
         case _: "build/os/sysroot"
 
 # Per-arch env override, then the shared SIMPLEOS_SYSROOT the
 # simpleos-native-build-{aarch64,riscv64}.shs lanes export, then the default.
 pub fn simpleos_user_sysroot(arch: text) -> text:
-    val key = if arch == "aarch64": "SIMPLEOS_SYSROOT_AARCH64" else: "SIMPLEOS_SYSROOT_RISCV64"
+    val key = "SIMPLEOS_SYSROOT_{arch.upper()}"
     val per_arch = env_get(key) ?? ""
     if per_arch != "":
         return per_arch
@@ -137,11 +145,23 @@ pub fn simpleos_user_sysroot(arch: text) -> text:
     simpleos_user_sysroot_default(arch)
 
 pub fn simpleos_user_entry_clang_target(arch: text) -> text:
-    if arch == "riscv64": "riscv64-unknown-elf" else: "aarch64-unknown-none-elf"
+    match arch:
+        case "aarch64": "aarch64-unknown-none-elf"
+        case "riscv64": "riscv64-unknown-elf"
+        case "i686": "i686-unknown-none-elf"
+        case "riscv32": "riscv32-unknown-elf"
+        case "arm32": "armv7a-none-eabi"
+        case _: ""
 
 pub fn simpleos_user_c_flags(arch: text) -> [text]:
     if arch == "riscv64":
         return ["--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-ffreestanding", "-nostdlib", "-O2"]
+    if arch == "riscv32":
+        return ["--target=riscv32-unknown-elf", "-march=rv32imac", "-mabi=ilp32", "-mno-relax", "-fno-pic", "-ffreestanding", "-nostdlib", "-O2"]
+    if arch == "i686":
+        return ["--target=i686-unknown-none-elf", "-march=i686", "-fno-pic", "-ffreestanding", "-nostdlib", "-O2"]
+    if arch == "arm32":
+        return ["--target=armv7a-none-eabi", "-marm", "-mfloat-abi=soft", "-fno-pic", "-ffreestanding", "-nostdlib", "-O2"]
     ["--target=aarch64-unknown-none-elf", "-ffreestanding", "-nostdlib", "-O2"]
 
 # ld.lld argv for a filesystem-launched SimpleOS user ELF (aarch64/riscv64).

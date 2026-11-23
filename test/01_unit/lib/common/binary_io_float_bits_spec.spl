@@ -1,0 +1,46 @@
+# f32/f64 bit-pattern helpers: visibility from importers and NaN / -0.0 fidelity.
+#
+# Regression for two defects: f32_to_bits was private in std.common.binary_io
+# (importers could not see it), and gc_async_mut/binary_io.spl carried a private
+# divergent copy of the decoders that turned NaN into 0.0 and lost -0.0.
+
+use std.spec.{describe, it, expect}
+use std.common.binary_io.{f32_from_bits, f32_to_bits, f64_from_bits, f64_to_bits}
+use std.gc_async_mut.binary_io.{BinaryReader, BinaryWriter, ByteOrder}
+
+describe "binary_io float bit helpers":
+    it "exposes all four helpers and round-trips an ordinary value":
+        expect(f32_to_bits(1.0 as f32)).to_equal(0x3F800000u32)
+        expect(f32_from_bits(0x3F800000u32) as f64).to_equal(1.0)
+        expect(f64_to_bits(1.0)).to_equal(0x3FF0000000000000u64)
+        expect(f64_from_bits(0x3FF0000000000000u64)).to_equal(1.0)
+
+    it "decodes NaN bit patterns to NaN, not 0.0":
+        val n32 = f32_from_bits(0x7FC00000u32) as f64
+        val n64 = f64_from_bits(0x7FF8000000000000u64)
+        expect(n32 != n32).to_equal(true)
+        expect(n64 != n64).to_equal(true)
+
+    it "keeps the sign of negative zero":
+        val z32 = f32_from_bits(0x80000000u32)
+        val z64 = f64_from_bits(0x8000000000000000u64)
+        expect(f64_to_bits(z64)).to_equal(0x8000000000000000u64)
+        expect(f32_to_bits(z32)).to_equal(0x80000000u32)
+
+describe "gc_async_mut BinaryReader uses the shared decoders":
+    it "reads a NaN f32 as NaN":
+        var r = BinaryReader.new([0x00u8, 0x00u8, 0xC0u8, 0x7Fu8])
+        val v = r.read_f32(ByteOrder.LittleEndian).unwrap() as f64
+        expect(v != v).to_equal(true)
+
+    it "reads a NaN f64 as NaN":
+        var r = BinaryReader.new([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0xF8u8, 0x7Fu8])
+        val v = r.read_f64(ByteOrder.LittleEndian).unwrap()
+        expect(v != v).to_equal(true)
+
+    it "round-trips -0.0 through BinaryWriter and BinaryReader":
+        var w = BinaryWriter.new()
+        w.write_f64(f64_from_bits(0x8000000000000000u64), ByteOrder.LittleEndian)
+        var r = BinaryReader.new(w.to_bytes())
+        val v = r.read_f64(ByteOrder.LittleEndian).unwrap()
+        expect(f64_to_bits(v)).to_equal(0x8000000000000000u64)

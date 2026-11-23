@@ -386,8 +386,13 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "simple_runtime".into(),
         ],
         TargetOS::MacOS => vec!["System".into(), "simple_runtime".into()],
+        TargetOS::Windows if target.linker_flavor() == crate::target::LinkerFlavor::Gnu => {
+            let mut libraries: Vec<String> = PlatformLinkConfig::windows_mingw().libraries
+                .into_iter().map(String::from).collect();
+            libraries.push("simple_runtime".into());
+            libraries
+        }
         TargetOS::Windows => vec![
-            "c".into(),
             "msvcrt".into(),
             "kernel32".into(),
             "ws2_32".into(),
@@ -412,6 +417,28 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_windows_uses_crt_without_unix_libc() {
+        for triple in ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"] {
+            let libraries = default_libraries_for_target(&Target::parse(triple).unwrap());
+            assert!(!libraries.iter().any(|library| library == "c"), "{triple}");
+            assert!(libraries.iter().any(|library| library == "msvcrt"), "{triple}");
+        }
+        let linux = default_libraries_for_target(&Target::parse("x86_64-unknown-linux-gnu").unwrap());
+        assert!(linux.iter().any(|library| library == "c"));
+    }
+
+    #[test]
+    fn standalone_windows_gnu_covers_runtime_imports_for_each_architecture() {
+        for triple in ["x86_64-pc-windows-gnu", "aarch64-pc-windows-gnu", "i686-pc-windows-gnu"] {
+            let libraries = default_libraries_for_target(&Target::parse(triple).unwrap());
+            for library in PlatformLinkConfig::windows_mingw().libraries {
+                assert!(libraries.iter().any(|item| item == library), "{triple}: {library}");
+            }
+            assert_eq!(libraries.iter().filter(|item| *item == "simple_runtime").count(), 1);
+        }
+    }
 
     #[test]
     fn coff_links_do_not_tolerate_unresolved_symbols() {

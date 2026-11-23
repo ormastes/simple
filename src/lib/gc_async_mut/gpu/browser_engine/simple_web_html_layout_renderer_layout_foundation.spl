@@ -1325,6 +1325,11 @@ pub fn text_pen_origin_record(node_count: i32, i: i32, origin_milli: i32):
 pub fn text_pen_origin_at(table: [i32], i: i32) -> i32:
     if i >= 0 and i < table.len().to_i32(): table[i] else: 0
 
+# Left edges of the auto table columns just resolved, as Chrome-minus-integer
+# milli-px (table_column_edge_frac_milli); read by the table right after
+# `explicit_auto_table_column_offsets` returns.
+pub var g_table_column_edge_frac_milli: [i32] = []
+
 # Exact-minus-integer x (milli-px) of a box's content edge, where the layout
 # that placed the box knows it (an auto table cell). The box's inline loop
 # starts every line with this pen error instead of 0. Reset with the pen
@@ -2188,6 +2193,10 @@ fn explicit_auto_table_column_offsets(
     # Sub-pixel remainder (milli-px) of each column's max-content width, so the
     # slack split below runs on Chrome's fractional widths, not rounded ones.
     var col_frac: [i32] = [0; column_count]
+    # True while the column's max-content width is one this layout measures
+    # exactly (table_cell_text_width_exact); the Chrome column edges below are
+    # derived only then.
+    var col_exact: [bool] = [false; column_count]
     for row in rows.rows:
         var column = 0
         var cell = child_index.first_child[row]
@@ -2243,13 +2252,19 @@ fn explicit_auto_table_column_offsets(
                         if cell_width < min_width:
                             cell_width = min_width
                     var cell_frac = 0
+                    var cell_exact = false
                     if cell_style.width_px <= 0 and cell_style.min_width_px <= 0 and cell_style.max_width_px <= 0:
                         cell_frac = table_cell_text_frac_milli(nodes, styles, child_index, cell)
+                        cell_exact = table_cell_text_width_exact(nodes, styles, child_index, cell)
                     if cell_width > widths[column]:
                         widths[column] = cell_width
                         col_frac[column] = cell_frac
-                    elif cell_width == widths[column] and cell_frac > col_frac[column]:
-                        col_frac[column] = cell_frac
+                        col_exact[column] = cell_exact
+                    elif cell_width == widths[column]:
+                        if cell_frac > col_frac[column]:
+                            col_frac[column] = cell_frac
+                        if not cell_exact:
+                            col_exact[column] = false
                     # The column's FLOOR. A cell with a stated width is its own
                     # floor; an auto cell's floor is its longest unbreakable
                     # word. Never above the ceiling just computed.
@@ -2329,6 +2344,7 @@ fn explicit_auto_table_column_offsets(
                                 col_min[grow_column] = (
                                     col_min[grow_column] + grow_share
                                 )
+                                col_exact[grow_column] = false
                                 grow_column = grow_column + 1
                     span_column = next_column
                 span_cell = child_index.next_sibling[span_cell]
@@ -2396,7 +2412,53 @@ fn explicit_auto_table_column_offsets(
         edge_milli = edge_milli + used[offset_column]
         offsets[offset_column + 1] = (edge_milli + 500) / 1000
         offset_column = offset_column + 1
+    g_table_column_edge_frac_milli = table_column_edge_frac_milli(
+        max_milli, col_exact, target, offsets
+    )
     offsets
+
+# Chrome 159 column edges minus the whole-pixel `offsets` (milli-px), one per
+# column's LEFT edge; empty when they are not known. Chrome sizes auto columns
+# in LayoutUnits (1/64 px): a table with room to spare gives column i
+# `floor(width * max_i / sum(max))` (the last one takes the rest), and a
+# shrink-to-fit table gives each its max-content width. Measured on
+# `width:61px` over cells 455/64, 228/64, 228/64 wide: edges 0, 1949, 2926
+# (table_cell_pen_origin_chrome159_spec). Known only when every column's
+# max-content width is exact and the columns are not being compressed.
+# reason: per-column milli-px and px tables from the column distribution.
+# @allow(primitive_api)
+fn table_column_edge_frac_milli(max_milli: [i32], col_exact: [bool], target: i32, offsets: [i32]) -> [i32]:
+    val column_count = max_milli.len().to_i32()
+    var max64: [i64] = []
+    var sum64: i64 = 0
+    var column = 0
+    while column < column_count:
+        if not col_exact[column]:
+            return []
+        val unit = ((max_milli[column] as i64) * 64 + 500) / 1000
+        max64.push(unit)
+        sum64 = sum64 + unit
+        column = column + 1
+    val total64 = (target as i64) * 64
+    if sum64 <= 0 or (target != 0 and total64 < sum64):
+        return []
+    var fracs: [i32] = []
+    var edge64: i64 = 0
+    column = 0
+    while column < column_count:
+        fracs.push(((edge64 * 1000) / 64 - (offsets[column] as i64) * 1000) as i32)
+        edge64 = edge64 + (if target == 0: max64[column] else: total64 * max64[column] / sum64)
+        column = column + 1
+    fracs
+
+# True when `table_cell_text_frac_milli` measured the cell: its max-content
+# width is one text run at milli precision.
+fn table_cell_text_width_exact(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> bool:
+    val only = child_index.first_child[cell]
+    if only < 0 or child_index.next_sibling[only] >= 0 or nodes[only].tag != "#text":
+        return false
+    val st = styles[only]
+    nodes[only].text_trimmed.len() > 0 and st.resolved_font_width > 0 and st.resolved_font_width_milli >= 0
 
 # Sub-pixel remainder (milli-px, -500..500) of a table cell's max-content text
 # width when the cell holds exactly one text run measured at milli precision;

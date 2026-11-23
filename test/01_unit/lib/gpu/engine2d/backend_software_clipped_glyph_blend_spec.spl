@@ -1,0 +1,108 @@
+# @tag: unit, gpu, engine2d, software, simd, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 5%
+#
+# Text paints its glyph quads through `draw_image_blend` with a clip band set
+# (the command's laid-out extent). With a clip on, every quad pixel took the
+# per-pixel `sw_set_pixel_blend` path: ~38 us/px interpreted, 24 s of the 65 s
+# 4x css-layout render. The quads here are glyph-sized, partly transparent,
+# straddle the clip and the surface edges, and land partly on a translucent
+# destination. Pixels and damage are pinned by hashes measured on the base
+# implementation (release/1.0.0 0354c53a8be), the cost by a wall budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+val QUAD_W = 40
+val QUAD_H = 64
+# Measured on the base implementation (release/1.0.0 0354c53a8be).
+val GLYPH_HASH: i64 = 2115477958
+val DAMAGE_HASH: i64 = 2720019351
+
+fn band_hash(pixels: [u32], w: i32, rows: i32) -> i64:
+    var acc: i64 = 17
+    var i: i64 = 0
+    val n = (w * rows).to_i64()
+    # cpu-lane-loop-ok: spec probe over every pixel of the painted band
+    while i < n:
+        acc = (acc * 31 + (pixels[i] as i64)) % 4294967291
+        i = i + 1
+    acc
+
+fn damage_hash(tiles: [bool]) -> i64:
+    var acc: i64 = 7
+    var i: i64 = 0
+    while i < tiles.len():
+        if tiles[i]:
+            acc = (acc * 131 + i + 1) % 4294967291
+        i = i + 1
+    acc
+
+fn glyph_pixels(seed: i32) -> [u32]:
+    var out: [u32] = [0u32; QUAD_W * QUAD_H]
+    var i = 0
+    while i < QUAD_W * QUAD_H:
+        val k = (i * 37 + seed * 11) % 7
+        out[i] = if k < 3:
+            0u32
+        elif k < 5:
+            0xff102030u32
+        elif k == 5:
+            0x80c04010u32
+        else:
+            0x25ffffffu32
+        i = i + 1
+    out
+
+fn paint_glyphs(simd: bool) -> ([u32], i64, i64):
+    var backend = if simd:
+        SoftwareBackend.create_cpu_simd()
+    else:
+        SoftwareBackend.create()
+    expect(backend.init(FRAME_W, FRAME_H)).to_equal(true)
+    backend.clear(0xffeef0ffu32)
+    # A translucent destination patch (an opacity-group layer).
+    var patch: [u32] = [0x80404040u32; 400 * 100]
+    backend.draw_image(300, 40, 400, 100, patch)
+    # Damage below is only what the quads mark.
+    val tile_count = backend.dirty_tiles.len()
+    backend.dirty_tiles = [false; tile_count]
+    val glyphs = [glyph_pixels(0), glyph_pixels(1), glyph_pixels(2)]
+    val t0 = time_now_unix_micros()
+    backend.set_clip(100, 20, 3000, 300)
+    var q = 0
+    # cpu-lane-loop-ok: spec drives one glyph quad per iteration
+    while q < 180:
+        val x = -20 + (q % 90) * 41
+        val y = if q < 90: -30 else: 270
+        backend.draw_image_blend(x, y, QUAD_W, QUAD_H, glyphs[q % 3])
+        q = q + 1
+    # An empty clip draws nothing.
+    backend.set_clip(500, 500, 0, 100)
+    backend.draw_image_blend(480, 480, QUAD_W, QUAD_H, glyphs[0])
+    backend.clear_clip()
+    val elapsed = time_now_unix_micros() - t0
+    val dmg = damage_hash(backend.dirty_tiles)
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    (pixels, elapsed, dmg)
+
+describe "software backend clipped glyph-quad blend":
+    it "paints the measured pixels and damage within a time budget (cpu_simd)":
+        val r = paint_glyphs(true)
+        val px = r.0
+        print "clipped_glyph simd elapsed_us={r.1} hash={band_hash(px, FRAME_W, 600)} damage={r.2}"
+        expect(px.len()).to_equal(FRAME_W * FRAME_H)
+        expect(band_hash(px, FRAME_W, 600)).to_equal(GLYPH_HASH)
+        expect(r.2).to_equal(DAMAGE_HASH)
+        expect(r.1 < 3000000).to_equal(true)
+
+    it "matches the scalar backend pixel for pixel":
+        val simd = paint_glyphs(true)
+        val scalar = paint_glyphs(false)
+        print "clipped_glyph scalar elapsed_us={scalar.1}"
+        expect(simd.0 == scalar.0).to_equal(true)
+        expect(scalar.2).to_equal(DAMAGE_HASH)
+        expect(scalar.1 < 3000000).to_equal(true)
