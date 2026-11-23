@@ -396,13 +396,40 @@ jobs:
 
       - name: Install cross-build tools (MinGW)
         if: matrix.target == 'mingw'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if command -v clang >/dev/null && command -v ld.lld >/dev/null && command -v llvm-nm >/dev/null && command -v x86_64-w64-mingw32-ld >/dev/null; then
-            echo "Clang/LLD/LLVM and the MinGW sysroot tools are already available"
-          else
-            sudo -n apt-get update
-            sudo -n apt-get install -y clang lld llvm gcc-mingw-w64-x86-64
-          fi
+          # Same LLVM-MinGW UCRT release as the native Windows seed, using its
+          # Linux-hosted distribution. GCC sysroot packages do not provide the
+          # target-qualified clang driver or LLVM runtime required by this lane.
+          toolchain=llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64
+          archive="$RUNNER_TEMP/$toolchain.tar.xz"
+          gh release download 20260922 --repo mstorsjo/llvm-mingw \
+            --pattern "$toolchain.tar.xz" --dir "$RUNNER_TEMP"
+          printf 'bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21  %s\n' "$archive" | sha256sum --check -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          root="$RUNNER_TEMP/$toolchain"
+          cc="$root/bin/x86_64-w64-mingw32-clang"
+          cxx="$root/bin/x86_64-w64-mingw32-clang++"
+          ar="$root/bin/llvm-ar"
+          for tool in "$cc" "$cxx" "$ar" "$root/bin/ld.lld" "$root/bin/llvm-nm"; do
+            test -x "$tool" || { echo "Missing Windows GNU tool: $tool" >&2; exit 1; }
+          done
+          # Exercise target CRT, compiler-rt, libunwind and LLD now, not after
+          # compiling the compiler closure. This is a cross-link check, not an
+          # execution or produced-compiler qualification claim.
+          printf '#include <stdio.h>\nint main(void) { puts("Windows GNU toolchain"); return 0; }\n' > "$RUNNER_TEMP/windows-gnu-toolchain.c"
+          "$cc" --target=x86_64-w64-windows-gnu -fuse-ld=lld --rtlib=compiler-rt --unwindlib=libunwind \
+            "$RUNNER_TEMP/windows-gnu-toolchain.c" -o "$RUNNER_TEMP/windows-gnu-toolchain.exe"
+          file "$RUNNER_TEMP/windows-gnu-toolchain.exe" | grep -q 'PE32+'
+          "$cc" --version
+          {
+            echo "CC=$cc"
+            echo "CXX=$cxx"
+            echo "AR=$ar"
+            echo "SIMPLE_LLVM_MINGW_ROOT=$root"
+          } >> "$GITHUB_ENV"
+          echo "$root/bin" >> "$GITHUB_PATH"
 
       - name: Restore native_all library (MinGW)
         if: matrix.target == 'mingw'
@@ -430,7 +457,7 @@ jobs:
           # SIMPLE_PARSE_SHARDING=0: cache-warming shards never complete on
           # GitHub runners and leak memory that starves the worker (beta.9).
           # Keep the same selected K1 composition as the native Linux lane.
-          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 SIMPLE_CC=clang \
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
             "$SEED" native-build \
             --backend cranelift --runtime-bundle core-c-bootstrap --threads 1 \
             --source src/compositions/kernel_llvm_cranelift \
