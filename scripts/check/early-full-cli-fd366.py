@@ -153,6 +153,14 @@ def main():
         (evidence/'linked-product.json').write_text(json.dumps(result, indent=2))
         # Qualification runs the new product only; the parent cannot stand in.
         env['SIMPLE_BINARY'] = str(binary)
+        smoke_root = root/'product-smoke'
+        for name in ('cache', 'storage', 'tmp', 'xdg-cache'):
+            (smoke_root/name).mkdir(parents=True, exist_ok=False)
+        env.update(SIMPLE_CACHE=str(smoke_root/'cache'),
+            SIMPLE_NATIVE_BUILD_CACHE_DIR=str(smoke_root/'cache'),
+            SIMPLE_CACHE_PROJECT='fd366-full-cli-smoke-'+result['product_sha256'],
+            SIMPLE_USER_STORAGE_ROOT=str(smoke_root/'storage'),
+            XDG_CACHE_HOME=str(smoke_root/'xdg-cache'), TMPDIR=str(smoke_root/'tmp'))
         env['SIMPLE_BOOTSTRAP_WHOLE_PROGRAM'] = '1'
         for key in ('SIMPLE_FILE_WORKERS', 'SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY', 'SIMPLE_PARSE_SHARDING',
                     'SIMPLE_FRONTEND_CACHE_DIR', 'SIMPLE_HIR_CACHE_DIR'):
