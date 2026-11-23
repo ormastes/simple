@@ -72,35 +72,35 @@ fn _auth_read_config() -> DashboardAuthConfig?:
     # Bounded 4KiB reread intentionally gives immediate revocation on the next
     # check. Native latency/RSS qualification must include this file access.
     val path = env_get("DASH_AUTH_FILE")
-    if path.len() < 1 or path.len() > 4096: return nil
+    if path.len() < 1 or path.len() > 4096: return None
     val absolute = path.starts_with("/") or
         (path.byte_len() > 2 and path.substring(1, 2) == ":" and (path.substring(2, 3) == "/" or path.substring(2, 3) == "\\"))
-    if not absolute: return nil
+    if not absolute: return None
     val content = file_read_regular_no_follow_bounded(path, 4096)
-    if content.is_err(): return nil
+    if content.is_err(): return None
     val parsed = parse_with_issues(content.unwrap())
-    if parsed.is_err(): return nil
+    if parsed.is_err(): return None
     val pair = parsed.unwrap()
-    if pair.1.len() != 0 or not pair.0.is_dict(): return nil
+    if pair.1.len() != 0 or not pair.0.is_dict(): return None
     val username = _auth_string(pair.0, "username")
     val salt = _auth_string(pair.0, "password_salt_hex")
     val verifier = _auth_string(pair.0, "password_hash_hex")
     val iterations = _auth_integer(pair.0, "iterations", -1)
     val seconds = _auth_integer(pair.0, "session_ttl_seconds", 3600)
     val capacity = _auth_integer(pair.0, "max_sessions", 64)
-    if not _auth_username_valid(username): return nil
-    if not entropy_hex_valid_for(salt, 16) or not entropy_hex_valid_for(verifier, 32): return nil
-    if iterations < 600000 or iterations > 1000000: return nil
-    if seconds < 1 or seconds > 86400 or capacity < 1 or capacity > 64: return nil
+    if not _auth_username_valid(username): return None
+    if not entropy_hex_valid_for(salt, 16) or not entropy_hex_valid_for(verifier, 32): return None
+    if iterations < 600000 or iterations > 1000000: return None
+    if seconds < 1 or seconds > 86400 or capacity < 1 or capacity > 64: return None
     Some(DashboardAuthConfig(identity: path + "\n" + content.unwrap(), username: username,
         salt: salt, verifier: verifier, iterations: iterations,
         ttl_ms: seconds * 1000, capacity: capacity))
 
 fn _auth_config() -> DashboardAuthConfig?:
     val config = _auth_read_config()
-    if config == nil:
+    if config.is_none():
         _auth_revoke_all()
-        return nil
+        return None
     if config!.identity != _auth_identity:
         _auth_leases = []
         _auth_identity = config!.identity
@@ -124,7 +124,7 @@ fn auth_ensure_bootstrap():
     # Read only operator configuration; never manufacture an account.
     val config = _auth_config()
     val now = _auth_now()
-    if config != nil and now > 0: _auth_prune(now)
+    if config.is_some() and now > 0: _auth_prune(now)
 
 fn auth_login_page(message: text, username: text) -> text:
     var html = "<!DOCTYPE html><html><head><title>LLM Dashboard Login</title></head><body>"
@@ -143,11 +143,11 @@ fn _auth_form_component(encoded: text) -> text?:
     var i = 0
     while i < encoded.byte_len():
         val b = encoded.byte_at(i)
-        if b < 32 or b == 127: return nil
+        if b < 32 or b == 127: return None
         if b == 37:
-            if i + 2 >= encoded.byte_len(): return nil
+            if i + 2 >= encoded.byte_len(): return None
             val octet = hex_to_bytes(encoded.substring(i + 1, i + 3))
-            if octet.len() != 1: return nil
+            if octet.len() != 1: return None
             bytes.push(octet[0] as u8)
             i = i + 2
         elif b == 43:
@@ -156,9 +156,9 @@ fn _auth_form_component(encoded: text) -> text?:
             bytes.push(b as u8)
         i = i + 1
     val decoded = validated_utf8_bytes_to_text_linear(bytes)
-    if decoded.is_err(): return nil
+    if decoded.is_err(): return None
     if decoded.unwrap().contains("\x00") or decoded.unwrap().contains("\r") or decoded.unwrap().contains("\n"):
-        return nil
+        return None
     Some(decoded.unwrap())
 
 fn _auth_token_hash(token: text) -> text:
@@ -177,7 +177,7 @@ fn _auth_form(body: text) -> [text]:
         if equals < 1: return []
         val key = _auth_form_component(pair[0:equals])
         val value = _auth_form_component(pair[equals + 1:])
-        if key == nil or value == nil: return []
+        if key.is_none() or value.is_none(): return []
         if key! == "username":
             if user_seen: return []
             user_seen = true
@@ -194,7 +194,7 @@ fn _auth_form(body: text) -> [text]:
 fn auth_authenticate_form(body: text) -> (DashboardAuthSession?, text, text):
     val config = _auth_config()
     val now = _auth_now()
-    if config == nil or now < 0: return (nil, "Authentication unavailable", "")
+    if config.is_none() or now < 0: return (nil, "Authentication unavailable", "")
     _auth_prune(now)
     if _auth_attempt_start == 0 or now - _auth_attempt_start >= 60000:
         _auth_attempt_start = now
@@ -210,7 +210,7 @@ fn auth_authenticate_form(body: text) -> (DashboardAuthSession?, text, text):
     if not verified or form[0] != config!.username: return (nil, "Invalid credentials", form[0])
     # Rotation/removal during derivation must not issue an old credential lease.
     val fresh = _auth_config()
-    if fresh == nil or fresh!.identity != config!.identity: return (nil, "Authentication unavailable", "")
+    if fresh.is_none() or fresh!.identity != config!.identity: return (nil, "Authentication unavailable", "")
     val issued = _auth_now()
     if issued < 0: return (nil, "Authentication unavailable", "")
     _auth_prune(issued)
@@ -229,30 +229,30 @@ fn auth_authenticate_form(body: text) -> (DashboardAuthSession?, text, text):
     (Some(session), "", "")
 
 fn auth_session_from_headers(headers: text) -> DashboardAuthSession?:
-    if headers.len() > 32768: return nil
+    if headers.len() > 32768: return None
     var token = ""
     var found = false
     for line in headers.replace("\r\n", "\n").split("\n"):
-        if line.starts_with(" ") or line.starts_with("\t"): return nil
+        if line.starts_with(" ") or line.starts_with("\t"): return None
         val colon = line.index_of(":")
         if colon > 0 and line[0:colon].lower() == "cookie":
             for cookie in line[colon + 1:].split(";"):
                 val part = cookie.trim()
                 val equals = part.index_of("=")
                 if equals > 0 and part[0:equals] == "llm_dashboard_session":
-                    if found: return nil
+                    if found: return None
                     found = true
                     token = part[equals + 1:]
-    if not found: return nil
+    if not found: return None
     auth_session_lookup(token)
 
 fn auth_session_lookup(session_id: text) -> DashboardAuthSession?:
     val config = _auth_config()
     val now = _auth_now()
-    if config == nil or now < 0 or not entropy_hex_valid_for(session_id, 32): return nil
+    if config.is_none() or now < 0 or not entropy_hex_valid_for(session_id, 32): return None
     _auth_prune(now)
     val token_hash = _auth_token_hash(session_id)
-    if token_hash.len() != 64: return nil
+    if token_hash.len() != 64: return None
     for lease in _auth_leases:
         if constant_time_compare(lease.token_hash, token_hash):
             return Some(DashboardAuthSession.new(session_id, lease.username))
@@ -268,7 +268,7 @@ fn auth_delete_session(session_id: text):
     _auth_leases = remaining
 
 fn auth_login_cookie_header(session: DashboardAuthSession) -> text:
-    if auth_session_lookup(session.session_id) == nil: return auth_clear_cookie_header()
+    if auth_session_lookup(session.session_id).is_none(): return auth_clear_cookie_header()
     "Set-Cookie: llm_dashboard_session=" + session.session_id + "; Path=/; HttpOnly; SameSite=Strict"
 
 fn auth_clear_cookie_header() -> text:
