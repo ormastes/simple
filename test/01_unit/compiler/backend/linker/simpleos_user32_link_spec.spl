@@ -98,6 +98,36 @@ fn s32_link(arch: text, out: text) -> Result<text, text>:
     link_simpleos_internal(["{S32_FIX}/{arch}_start.o"], out, "simpleos-{arch}", cfg)
 
 describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
+    it "applies wrap before extracting an ELF32 archive provider and relocating calls":
+        # Fixture: clang --target=i686-unknown-none-elf -march=i686 -fno-pic
+        # -ffreestanding -nostdlib -fno-stack-protector -fno-unwind-tables
+        # -fno-asynchronous-unwind-tables -O2 -Dmain=__wrap_main -c main32.c
+        # -o i686_wrap_main32.o; llvm-ar rcsD libi686_wrap_main32.a i686_wrap_main32.o
+        # Archive defines only __wrap_main, so this cannot link if --wrap is lost.
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.libraries = ["{S32_FIX}/libi686_wrap_main32.a"]
+        cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static",
+            "--gc-sections", "--wrap=main"]
+        val out = "build/simpleos_user32_i686_wrap.elf"
+        expect(link_simpleos_internal(["{S32_FIX}/i686_start.o"], out, "simpleos-i686", cfg).is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(s32_sym_info(b, "__wrap_main")).to_be_greater_than(-1)
+        expect(s32_sym_info(b, "main")).to_equal(-1)
+        val t = s32_phdr(b, 2, 4)
+        expect(b[t] as i64).to_equal(232) # CALL rel32 in _start
+        expect(s32_u32(b, t + 1)).to_equal(11) # resolves to the archive's wrapper
+
+    it "rejects a missing ELF32 wrapper rather than binding the original definition":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.libraries = ["{S32_FIX}/libi686_main32.a"]
+        cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static", "--wrap=main"]
+        val r = link_simpleos_internal(["{S32_FIX}/i686_start.o"],
+            "build/simpleos_user32_i686_missing_wrap.elf", "simpleos-i686", cfg)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("__wrap_main")
+
     it "links an i686 user ELF32 with ld.lld's segments, entry and .text":
         val out = "build/simpleos_user32_i686.elf"
         val r = s32_link("i686", out)
