@@ -24,6 +24,8 @@ use compiler.common.structural_contracts.environment_variant_policy_collection_v
     EnvironmentVariantPolicyCollectionV1}
 use compiler.common.structural_contracts.environment_variant_policy_v1.{
     environment_variant_policy_resolve_v1}
+use compiler.common.structural_contracts.environment_variant_startup_port_v1.{
+    environment_variant_startup_reference_cache_identity_v2}
 use compiler.frontend.frontend_advisory_preprocess_port_v1.{
     frontend_advisory_policy_from_environment_decision_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1}
@@ -41,7 +43,8 @@ use compiler.driver.cache.module_artifacts_v1.{module_artifact_module_id_v1,
     module_tldr_companion_view_sections_v1, module_artifact_publish_atomic_v1}
 use compiler.core.parser.{par_had_error_get, par_had_error_clear_v1}
 use compiler.core.types.{reset_all_pools}
-use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_hits, frontend_parse_cache_misses}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
 use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_text_v1,
     driver_parse_shard_skeleton_warm_v1, parse_shard_skeleton_env_v1}
 use std.nogc_sync_mut.io_runtime.{env_get}
@@ -71,10 +74,15 @@ fn driver_options_add_bootstrap_input(options: CompileOptions, input_path: text)
 # Runs phase 1 (load sources) and phase 2 (parse) only. In shard mode phase 2
 # exits the process itself; if it returns, the shard simply did not own any
 # module, and the caller treats that as success (sharding is best-effort).
-fn driver_parse_shard_apply_environment_variant_policy_v1(
+# reason: boolean policy-application verdict matching _driver_run_parse_shard
+@allow(primitive_api)
+pub fn driver_parse_shard_apply_environment_variant_policy_v1(
     driver: CompilerDriver, collection: EnvironmentVariantPolicyCollectionV1
 ) -> bool:
     val decision = match environment_variant_policy_resolve_v1(collection.policy_inputs):
+        case Ok(value): value
+        case Err(_): return false
+    val cache_identity: text = match environment_variant_startup_reference_cache_identity_v2(decision.policy_digest):
         case Ok(value): value
         case Err(_): return false
     driver.ctx.frontend_advisory_policy =
@@ -85,7 +93,7 @@ fn driver_parse_shard_apply_environment_variant_policy_v1(
     driver.ctx.environment_variant_frontend_owner_id = 0u64
     driver.ctx.environment_variant_frontend_session_id = 0u64
     driver.ctx.environment_variant_frontend_generation = 0u64
-    driver.ctx.environment_variant_frontend_cache_identity = decision.policy_digest
+    driver.ctx.environment_variant_frontend_cache_identity = cache_identity
     true
 
 # The admitted request was already bound to this child's --source roots
@@ -263,8 +271,13 @@ fn _driver_run_parse_fibers(
     var import_parks = 0
     var errors = 0
     var window_ordinal = 0
-    val warm_skeletons = driver_parse_shard_skeleton_warm_v1(env_get(parse_shard_skeleton_env_v1()) ?? "",
-        env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+    # Streaming HIR workers reuse the warm full-source frontend cache entry
+    # directly inside their per-file transient surface scope, so only retained
+    # non-streaming routes need a separate skeleton cache entry warmed here.
+    val streaming_reuses_full_fpc = driver_streaming_surface_enabled(driver.ctx) and frontend_parse_cache_enabled()
+    val warm_skeletons = (not streaming_reuses_full_fpc) and
+        driver_parse_shard_skeleton_warm_v1(env_get(parse_shard_skeleton_env_v1()) ?? "",
+            env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
     var skeletons = 0
     var skeleton_failures = 0
     while source_index < sources.len():

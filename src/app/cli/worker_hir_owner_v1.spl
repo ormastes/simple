@@ -63,6 +63,44 @@ pub fn worker_hir_environment_sort_v1(input: [ProcessObservationEnvironmentV4]) 
         index = index + 1
     result
 
+pub enum WorkerHirExecPinActionV1:
+    RetainActive
+    DetachBorrowed
+    CloseOwned
+
+pub enum WorkerHirPoolPinActionV1:
+    NoOp
+    ClosePoolPin
+    RetainUnstopped
+
+# reason: pure state-machine decision over worker ownership flags for unit verification
+@allow(primitive_api)
+pub fn worker_hir_exec_pin_close_action_v1(owns_exec_pin: bool,
+        reservations_empty: bool) -> WorkerHirExecPinActionV1:
+    if not reservations_empty:
+        return WorkerHirExecPinActionV1.RetainActive
+    if owns_exec_pin:
+        return WorkerHirExecPinActionV1.CloseOwned
+    WorkerHirExecPinActionV1.DetachBorrowed
+
+# reason: pure state-machine decision over pool termination flags for unit verification
+@allow(primitive_api)
+pub fn worker_hir_pool_pin_close_action_v1(all_stopped: bool, has_pin: bool,
+        already_closed: bool) -> WorkerHirPoolPinActionV1:
+    if already_closed or not has_pin:
+        return WorkerHirPoolPinActionV1.NoOp
+    if all_stopped:
+        return WorkerHirPoolPinActionV1.ClosePoolPin
+    WorkerHirPoolPinActionV1.RetainUnstopped
+
+pub class WorkerHirSharedExecPinV1:
+    var _executable: [OwnedExecutablePin]
+    var _digest: [u8]
+    var _capability_bits: i64
+    var _reason: text
+    var _uncertain_launch: bool
+    var _closed: bool
+
 pub class WorkerHirOwnerV1:
     var executable: [OwnedExecutablePin]
     var directory: [OwnedCwdPinV4]
@@ -76,10 +114,13 @@ pub class WorkerHirOwnerV1:
     var code: i64
     var reason: text
     var budget_ms: i64
+    var _owns_exec_pin: bool
 
     # Always retain partially acquired owners, including a refused pin close.
     me fn close_pins():
-        if not self.reservations.is_empty(): return
+        val exec_action = worker_hir_exec_pin_close_action_v1(
+            self._owns_exec_pin, self.reservations.is_empty())
+        if exec_action == WorkerHirExecPinActionV1.RetainActive: return
         if not self.directory.is_empty():
             var directory = self.directory[0]
             match directory.close():
@@ -91,15 +132,20 @@ pub class WorkerHirOwnerV1:
                     self.code = -1
                     return
         if not self.executable.is_empty():
-            var executable = self.executable[0]
-            match executable.close():
-                case Ok(_): self.executable = []
-                case Err(message):
-                    self.executable = [executable]
-                    self.reason = message
-                    self.cancelled = true
-                    self.code = -1
-                    return
+            if exec_action == WorkerHirExecPinActionV1.CloseOwned:
+                var executable = self.executable[0]
+                match executable.close():
+                    case Ok(_): self.executable = []
+                    case Err(message):
+                        self.executable = [executable]
+                        self.reason = message
+                        self.cancelled = true
+                        self.code = -1
+                        return
+            else:
+                # Borrowed pool pin: detach this retired worker's handle
+                # reference without closing while sibling workers may still run.
+                self.executable = []
         if not self.uncertain_launch:
             self.stopped = true
             self.done = true
@@ -212,42 +258,19 @@ pub class WorkerHirOwnerV1:
             self.done = true
             self.stopped = false
 
-pub fn worker_hir_owner_start_v1(profile: WorkerHirProfileV1, binary: text,
-        shard: text) -> WorkerHirOwnerV1:
-    var owner = WorkerHirOwnerV1(executable: [], directory: [], reservations: [],
+fn _worker_hir_has_unretired_authority_v1() -> bool:
+    not _worker_hir_retained_failures_v1.is_empty() or
+        not _worker_hir_retained_shared_pins_v1.is_empty()
+
+fn _worker_hir_owner_start_with_pin_v1(profile: WorkerHirProfileV1, binary: text,
+        shard: text, executable: OwnedExecutablePin, digest: [u8],
+        capability_bits: i64, owns_exec_pin: bool) -> WorkerHirOwnerV1:
+    var owner = WorkerHirOwnerV1(executable: [executable], directory: [], reservations: [],
         deadline_ms: profile.deadline_ms, cleanup_deadline_ms: 0, cancelled: false,
-        uncertain_launch: false, done: false, stopped: false, code: -1, reason: "", budget_ms: 0)
-    if not _worker_hir_retained_failures_v1.is_empty():
-        owner.reason = "an earlier HIR owner still lacks retirement authority"
-        owner.uncertain_launch = true
-        owner.done = true
-        return owner
-    val capabilities = match process_observation_capabilities_v4():
-        case Ok(value): value
-        case Err(message):
-            owner.reason = message
-            owner.close_pins()
-            return owner
-    val gap = process_observation_monitor_group_gap_v4(capabilities.capability_bits)
-    if not capabilities.available or gap != "":
-        owner.reason = "HIR worker process observation unavailable: " + gap
-        owner.close_pins()
-        return owner
-    var executable = match OwnedExecutablePin.pin(binary):
-        case Ok(value): value
-        case Err(message):
-            owner.reason = message
-            owner.close_pins()
-            return owner
-    owner.executable = [executable]
-    val digest = match executable.digest():
-        case Ok(value): value
-        case Err(message):
-            owner.reason = message
-            owner.close_pins()
-            return owner
-    if worker_hir_digest_hex_v1(digest) != profile.closure.binding.producer_digest:
-        owner.reason = "HIR worker launch pin differs from admitted closure producer"
+        uncertain_launch: false, done: false, stopped: false, code: -1, reason: "",
+        budget_ms: 0, _owns_exec_pin: owns_exec_pin)
+    if executable.closed:
+        owner.reason = "HIR worker shared launch pin is closed"
         owner.close_pins()
         return owner
     val directory = match OwnedCwdPinV4.pin(profile.closure.source_root):
@@ -274,7 +297,7 @@ pub fn worker_hir_owner_start_v1(profile: WorkerHirProfileV1, binary: text,
     val request = ProcessObservationRequestV4(argv: argv, environment: environment,
         canonical_cwd: profile.closure.source_root, canonical_pinned_directory: profile.closure.source_root,
         executable_pin: 1, executable_digest: digest, cwd_pin_claim: 1,
-        cwd_identity_digest: directory.identity_digest, capability_bits: capabilities.capability_bits,
+        cwd_identity_digest: directory.identity_digest, capability_bits: capability_bits,
         wall_budget_ns: remaining_ms * 1000000, term_grace_ns: 250000000,
         cleanup_budget_ns: 4750000000, stdout_limit_bytes: 1048576,
         stderr_limit_bytes: 1048576, memory_limit_bytes: 0,
@@ -310,10 +333,159 @@ pub fn worker_hir_owner_start_v1(profile: WorkerHirProfileV1, binary: text,
 
     owner
 
+pub fn worker_hir_shared_exec_pin_open_v1(profile: WorkerHirProfileV1,
+        binary: text) -> WorkerHirSharedExecPinV1:
+    var shared = WorkerHirSharedExecPinV1(_executable: [], _digest: [],
+        _capability_bits: 0, _reason: "", _uncertain_launch: false, _closed: false)
+    if _worker_hir_has_unretired_authority_v1():
+        shared._reason = "an earlier HIR owner still lacks retirement authority"
+        shared._uncertain_launch = true
+        return shared
+    val capabilities = match process_observation_capabilities_v4():
+        case Ok(value): value
+        case Err(message):
+            shared._reason = message
+            return shared
+    val gap = process_observation_monitor_group_gap_v4(capabilities.capability_bits)
+    if not capabilities.available or gap != "":
+        shared._reason = "HIR worker process observation unavailable: " + gap
+        return shared
+    shared._capability_bits = capabilities.capability_bits
+    var executable = match OwnedExecutablePin.pin(binary):
+        case Ok(value): value
+        case Err(message):
+            shared._reason = message
+            return shared
+    val digest = match executable.digest():
+        case Ok(value): value
+        case Err(message):
+            match executable.close():
+                case Ok(_): shared._reason = message
+                case Err(close_message):
+                    shared._executable = [executable]
+                    shared._reason = close_message
+                    shared._uncertain_launch = true
+                    _worker_hir_retained_shared_pins_v1.push(shared)
+            return shared
+    if worker_hir_digest_hex_v1(digest) != profile.closure.binding.producer_digest:
+        match executable.close():
+            case Ok(_):
+                shared._reason = "HIR worker launch pin differs from admitted closure producer"
+            case Err(close_message):
+                shared._executable = [executable]
+                shared._reason = close_message
+                shared._uncertain_launch = true
+                _worker_hir_retained_shared_pins_v1.push(shared)
+        return shared
+    shared._executable = [executable]
+    shared._digest = digest
+    shared
+
+pub fn worker_hir_owner_start_borrowed_v1(profile: WorkerHirProfileV1, binary: text,
+        shard: text, shared_pin: WorkerHirSharedExecPinV1) -> WorkerHirOwnerV1:
+    var owner = WorkerHirOwnerV1(executable: [], directory: [], reservations: [],
+        deadline_ms: profile.deadline_ms, cleanup_deadline_ms: 0, cancelled: false,
+        uncertain_launch: false, done: false, stopped: false, code: -1, reason: "",
+        budget_ms: 0, _owns_exec_pin: false)
+    if _worker_hir_has_unretired_authority_v1():
+        owner.reason = if shared_pin._reason != "": shared_pin._reason else: "an earlier HIR owner still lacks retirement authority"
+        owner.uncertain_launch = true
+        owner.done = true
+        return owner
+    if shared_pin._closed:
+        owner.reason = "HIR worker shared launch pin is closed"
+        owner.close_pins()
+        return owner
+    if shared_pin._executable.is_empty():
+        owner.reason = if shared_pin._reason != "": shared_pin._reason else: "HIR worker shared launch pin unavailable"
+        owner.uncertain_launch = shared_pin._uncertain_launch
+        if owner.uncertain_launch:
+            owner.done = true
+        else:
+            owner.close_pins()
+        return owner
+    if worker_hir_digest_hex_v1(shared_pin._digest) != profile.closure.binding.producer_digest:
+        owner.reason = "HIR worker launch pin differs from admitted closure producer"
+        owner.close_pins()
+        return owner
+    _worker_hir_owner_start_with_pin_v1(profile, binary, shard,
+        shared_pin._executable[0], shared_pin._digest, shared_pin._capability_bits, false)
+
+pub fn worker_hir_shared_exec_pin_close_stopped_v1(
+        shared_pin: WorkerHirSharedExecPinV1) -> Result<(), text>:
+    val action = worker_hir_pool_pin_close_action_v1(
+        true, not shared_pin._executable.is_empty(), shared_pin._closed)
+    if action == WorkerHirPoolPinActionV1.NoOp:
+        shared_pin._closed = true
+        return Ok(())
+    var executable = shared_pin._executable[0]
+    match executable.close():
+        case Ok(_):
+            shared_pin._executable = []
+            shared_pin._closed = true
+            Ok(())
+        case Err(message):
+            shared_pin._executable = [executable]
+            shared_pin._reason = message
+            shared_pin._uncertain_launch = true
+            _worker_hir_retained_shared_pins_v1.push(shared_pin)
+            Err(message)
+
+pub fn worker_hir_shared_exec_pin_retain_unstopped_v1(shared_pin: WorkerHirSharedExecPinV1):
+    val action = worker_hir_pool_pin_close_action_v1(
+        false, not shared_pin._executable.is_empty(), shared_pin._closed)
+    if action == WorkerHirPoolPinActionV1.RetainUnstopped:
+        shared_pin._uncertain_launch = true
+        _worker_hir_retained_shared_pins_v1.push(shared_pin)
+
+pub fn worker_hir_owner_start_v1(profile: WorkerHirProfileV1, binary: text,
+        shard: text) -> WorkerHirOwnerV1:
+    var owner = WorkerHirOwnerV1(executable: [], directory: [], reservations: [],
+        deadline_ms: profile.deadline_ms, cleanup_deadline_ms: 0, cancelled: false,
+        uncertain_launch: false, done: false, stopped: false, code: -1, reason: "",
+        budget_ms: 0, _owns_exec_pin: true)
+    if _worker_hir_has_unretired_authority_v1():
+        owner.reason = "an earlier HIR owner still lacks retirement authority"
+        owner.uncertain_launch = true
+        owner.done = true
+        return owner
+    val capabilities = match process_observation_capabilities_v4():
+        case Ok(value): value
+        case Err(message):
+            owner.reason = message
+            owner.close_pins()
+            return owner
+    val gap = process_observation_monitor_group_gap_v4(capabilities.capability_bits)
+    if not capabilities.available or gap != "":
+        owner.reason = "HIR worker process observation unavailable: " + gap
+        owner.close_pins()
+        return owner
+    var executable = match OwnedExecutablePin.pin(binary):
+        case Ok(value): value
+        case Err(message):
+            owner.reason = message
+            owner.close_pins()
+            return owner
+    owner.executable = [executable]
+    val digest = match executable.digest():
+        case Ok(value): value
+        case Err(message):
+            owner.reason = message
+            owner.close_pins()
+            return owner
+    if worker_hir_digest_hex_v1(digest) != profile.closure.binding.producer_digest:
+        owner.reason = "HIR worker launch pin differs from admitted closure producer"
+        owner.close_pins()
+        return owner
+    _worker_hir_owner_start_with_pin_v1(profile, binary, shard,
+        executable, digest, capabilities.capability_bits, true)
+
 # Failed cleanup is retained for process lifetime, not dropped on slot reuse.
 # Admission limits the containing HIR pool; a failed retirement blocks it.
 var _worker_hir_retained_failures_v1: [WorkerHirOwnerV1] = []
+var _worker_hir_retained_shared_pins_v1: [WorkerHirSharedExecPinV1] = []
 
 pub fn worker_hir_owner_retain_failure_v1(owner: WorkerHirOwnerV1):
-    if not owner.stopped and (not owner.executable.is_empty() or not owner.reservations.is_empty()):
+    if not owner.stopped and (not owner.executable.is_empty() or
+            not owner.directory.is_empty() or not owner.reservations.is_empty()):
         _worker_hir_retained_failures_v1.push(owner)
