@@ -6,18 +6,19 @@
 # greedy reference, a seeded run is reproducible and seed-sensitive, and a stop
 # string spanning tokens ends generation with the text truncated before it.
 # Gate: runs only when the stories15M model directory exists
-# (SLANG_PURE_MODEL, default C:/dev/model/llama2c-stories15M). Slow on the seed
+# (SLANG_PURE_MODEL, or llama2c-stories15M under SLANG_MODEL_ROOT). Slow on the seed
 # interpreter (~0.1 tok/s): token counts are kept small and one session is
 # threaded through every run, so the shared "Once upon a time" prompt is reused.
 
 use std.spec.{describe, it, expect, skip}
-use std.io_runtime.{env_get, is_dir, file_append_text, dir_create_all}
+use std.io_runtime.{file_append_text, dir_create_all}
 use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load}
 use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new}
 use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_load, pure_tokenizer_encode}
 use std.gc_async_mut.slang.model_executor.pure.sampler.{SamplerConfig, sampler_config_greedy}
 use std.gc_async_mut.slang.model_executor.pure.stop.{StopConfig}
 use std.gc_async_mut.slang.model_executor.pure.generate.{GenConfig, generate}
+use test.fixtures.slang_pure.model_dir.{pure_model_dir}
 
 # The runner does not keep stdout of passing examples and counts skip() as a
 # pass, so evidence (and every skip reason) is also appended to a file.
@@ -33,27 +34,14 @@ fn _skip(name: text, why: text):
 # llama.cpp greedy continuation of "Once upon a time" for this model, cut at max_new_tokens=8 (the 8th token is " L").
 val REFERENCE = ", there was a little girl named L"
 
-# env_get returns "" (not None) when unset, so `??` never applied the default.
-fn _pure_model_env() -> text:
-    val e = env_get("SLANG_PURE_MODEL")
-    if e != "":
-        return e
-    "C:/dev/model/llama2c-stories15M"
-
-fn _model_dir() -> text:
-    val d = _pure_model_env()
-    if is_dir(d):
-        return d
-    ""
-
 fn _cfg(sampler: SamplerConfig, seed: i64, max_new: i64, stops: [text]) -> GenConfig:
     GenConfig(sampler: sampler, seed: seed, stop: StopConfig(eos_ids: [2], max_new_tokens: max_new, stop_strings: stops))
 
 describe "slang pure sampling on stories15M":
     it "reproduces greedy at temperature 0, is seeded, and honours stop strings":
-        val dir = _model_dir()
+        val dir = pure_model_dir()
         if dir == "":
-            _skip("reproduces greedy at temperature 0, is seeded, and honours stop strings", "stories15M model directory not present")
+            _skip("reproduces greedy at temperature 0, is seeded, and honours stop strings", "stories15M model directory not present (set SLANG_PURE_MODEL or SLANG_MODEL_ROOT)")
         else:
             val m = llama_load(dir).unwrap()
             val tok = pure_tokenizer_load(dir).unwrap()
