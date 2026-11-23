@@ -14,11 +14,19 @@ use app.io.env_ops.{env_get, env_set, env_unset}
 use app.io.file_ops.{path_absolute}
 use app.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{dir_create_all, dir_remove_all, file_write}
-use app.cli.native_build_main.{native_build_bind_cache_dirs_from_args_v1}
 use compiler.frontend.frontend.{parse_full_frontend, Logger}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_hits, frontend_parse_cache_misses}
 use compiler.frontend._FlatAstBridge.module_assembly.{flat_parse_module_body_calls}
 '''
+# Preserve the actual cache-binding functions without importing the unrelated
+# full native-build CLI/backend closure (which exhausted the diagnostic cap).
+owner_path = root / 'src/app/cli/native_build_main.spl'
+owner = owner_path.read_text(encoding='utf-8')
+binding_start = owner.index('pub fn native_build_cache_dir_base_for_v1(')
+binding_end = owner.index('pub fn native_build_normalize_exit_code(', binding_start)
+binding = owner[binding_start:binding_end]
+assert binding.count('pub fn ') == 2
+header += binding
 lines = []
 calls = 0
 for line in block.splitlines():
@@ -37,6 +45,8 @@ out.mkdir(exist_ok=False)
     'source': 'b63dce1068c2fc515a4e3ad05e137476909ed105',
     'original_spec_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
     'exact_case_sha256': hashlib.sha256(block.encode()).hexdigest(),
+    'cache_binding_owner_sha256': hashlib.sha256(owner_path.read_bytes()).hexdigest(),
+    'exact_cache_binding_projection_sha256': hashlib.sha256(binding.encode()).hexdigest(),
     'instrumentation': 'before/after markers only around six unchanged parse calls',
     'producer_source': '042a7e14d251bee7309cfae1b3bd38aeb67745c8',
     'producer_differs_from_original_b63': True, 'admission': 'none'
