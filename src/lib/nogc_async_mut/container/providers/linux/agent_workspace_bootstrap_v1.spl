@@ -256,13 +256,13 @@ pub fn linux_agent_bootstrap_step_v1(owner: LinuxAgentBootstrapOwnerV1) -> Linux
             bootstrap_states_v1[owner.slot].git = nil
             return bootstrap_fail_v1(owner, "bootstrap-git-start-rejected")
         return bootstrap_turn_v1(owner)
-    if state.checkout == nil and state.replacement == nil:
+    if state.checkout == nil and state.replacement.is_none():
         val verified = agent_worktree_verify_v1(state.root.unwrap(), state.root_path, state.workspace)
         if verified.is_err(): return bootstrap_fail_v1(owner, verified.unwrap_err())
         bootstrap_states_v1[owner.slot].checkout = Some(verified.unwrap())
         bootstrap_states_v1[owner.slot].phase = "worktree-verified"
         return bootstrap_turn_v1(owner)
-    if state.replacement == nil:
+    if state.replacement.is_none():
         val request = LinuxProcessReplaceRequestV1(program: state.manifest.inner_argv[0],
             expected_digest: state.workspace.agent_digest, expected_size_bytes: state.executable_profile.image_size_bytes,
             max_image_bytes: state.executable_profile.max_image_bytes, architecture: state.executable_profile.architecture,
@@ -273,17 +273,17 @@ pub fn linux_agent_bootstrap_step_v1(owner: LinuxAgentBootstrapOwnerV1) -> Linux
         # before yielding. Bootstrap retains original independently on ALL turns.
         val opened = linux_process_replace_open_v1(request, state.checkout.unwrap())
         bootstrap_states_v1[owner.slot].replacement = opened.owner
-        if opened.cwd != nil: bootstrap_states_v1[owner.slot].checkout = opened.cwd
-        if opened.cwd == nil: return bootstrap_fail_v1(owner, "bootstrap-original-cwd-return-missing")
+        if opened.cwd.is_some(): bootstrap_states_v1[owner.slot].checkout = opened.cwd
+        if opened.cwd.is_none(): return bootstrap_fail_v1(owner, "bootstrap-original-cwd-return-missing")
         if opened.error != "": return bootstrap_fail_v1(owner, opened.error)
-        if opened.owner == nil: return bootstrap_fail_v1(owner, "bootstrap-replacement-owner-unavailable")
+        if opened.owner.is_none(): return bootstrap_fail_v1(owner, "bootstrap-replacement-owner-unavailable")
         bootstrap_states_v1[owner.slot].phase = "preparing-agent-exec"
         return bootstrap_turn_v1(owner)
     val prepared = linux_process_replace_prepare_step_v1(state.replacement.unwrap())
     bootstrap_states_v1[owner.slot].replacement = prepared.owner
     if prepared.error != "": return bootstrap_fail_v1(owner, prepared.error)
     if prepared.phase != "ready": return bootstrap_turn_v1(owner)
-    if prepared.owner == nil: return bootstrap_fail_v1(owner, "bootstrap-prepared-owner-missing")
+    if prepared.owner.is_none(): return bootstrap_fail_v1(owner, "bootstrap-prepared-owner-missing")
     # Actual success never returns; same primary task/TTY remains outside this module.
     val failed = linux_process_replace_replace_v1(prepared.owner.unwrap())
     bootstrap_states_v1[owner.slot].replacement = failed.owner
@@ -295,10 +295,10 @@ pub fn linux_agent_bootstrap_close_v1(owner: LinuxAgentBootstrapOwnerV1) -> Linu
     val state = loaded.unwrap()
     if state.uncertain_birth: return bootstrap_fail_v1(owner, "bootstrap-unknown-cleanup-retained-for-host-control")
     if state.git != nil: return bootstrap_git_drive_v1(owner, true)
-    if state.replacement != nil:
+    if state.replacement.is_some():
         val closed = linux_process_replace_close_v1(state.replacement.unwrap())
         bootstrap_states_v1[owner.slot].replacement = closed.owner
-        if closed.owner != nil or closed.cleanup_pending: return bootstrap_fail_v1(owner, "bootstrap-replacement-cleanup-retained")
+        if closed.owner.is_some() or closed.cleanup_pending: return bootstrap_fail_v1(owner, "bootstrap-replacement-cleanup-retained")
     if bootstrap_states_v1[owner.slot].checkout != nil:
         var child = bootstrap_states_v1[owner.slot].checkout.unwrap()
         bootstrap_states_v1[owner.slot].checkout = nil
