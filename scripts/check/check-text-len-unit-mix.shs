@@ -896,6 +896,13 @@ if [ -n "$range" ]; then
   # under the roots; a deleted file is kept in scope so its rows go stale.
   case "$range" in *..*) ;; *) echo "ERROR — nothing was checked (--changed needs BASE..HEAD)"; exit 2 ;; esac
   scope_files=$(mktemp); scope_tip="${range##*..}"
+  # Scope from the merge-base, not the base tip: a PR head behind its base
+  # would otherwise pull every base-side change into scope and report the
+  # base's newer rows as "new" against the head's older content (PR #10981:
+  # 71 files for a 1-commit PR). No merge-base (shallow) keeps the wider,
+  # stricter two-dot scope rather than failing open.
+  scope_base="${range%%..*}"
+  scope_mb=$(git merge-base "$scope_base" "$scope_tip" 2>/dev/null) && range="$scope_mb..$scope_tip"
   # shellcheck disable=SC2086
   git diff --name-only "$range" -- $roots 2>/dev/null | grep "[.]spl$" | sort -u > "$scope_files" || true
   [ -s "$scope_files" ] || { echo "PASS — 0 touched .spl file(s) in $range under $roots; nothing to ratchet"; exit 0; }
