@@ -22,9 +22,12 @@
 #define INT_MAX    2147483647
 #define UINT_MAX   4294967295U
 
-#define LONG_MIN   (-9223372036854775807L - 1L)
-#define LONG_MAX   9223372036854775807L
-#define ULONG_MAX  18446744073709551615UL
+/* `long` follows the target C ABI, not the compiler host or the Simple i64
+ * value representation. Clang supplies a correctly typed native-long limit
+ * for ILP32, LP64 and LLP64; deriving the other bounds avoids narrowing. */
+#define LONG_MAX   __LONG_MAX__
+#define LONG_MIN   (-LONG_MAX - 1L)
+#define ULONG_MAX  (2UL * LONG_MAX + 1UL)
 
 #define LLONG_MIN  (-9223372036854775807LL - 1LL)
 #define LLONG_MAX  9223372036854775807LL
@@ -37,7 +40,8 @@
 
 #define SSIZE_MAX  LONG_MAX
 #ifndef SIZE_MAX
-#define SIZE_MAX   ULONG_MAX
+/* size_t can be wider than unsigned long under LLP64. */
+#define SIZE_MAX   __SIZE_MAX__
 #endif
 
 #endif /* _SIMPLEOS_LIMITS_H */
