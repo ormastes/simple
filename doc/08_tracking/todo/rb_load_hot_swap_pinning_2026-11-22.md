@@ -12,6 +12,9 @@ Remaining:
 - Wire `HotSwapSlot` into the production loader (segment mapping, generation -> image
   publication, reclaim through `unload_ownership.spl` once no reader pins an old generation).
 - State migration across an ABI change (currently refused).
-- Bug: `atomic_i64_new` resolves to the i64-returning `src/lib/nogc_sync_mut/io/debug_stubs.spl`
-  twin under interpreter co-compilation even when imported from `std.nogc_sync_mut.atomic`
-  (receiver is `i64`, `.load` not found). Workaround: `atomic_i64_try_new`.
+- Bug (FIXED-VERIFICATION-PENDING 2026-11-23, work/at1-20261123): `atomic_i64_new` resolved to an
+  i64-returning stub in `io/debug_stubs.spl`, re-exported by `std.nogc_sync_mut.io`, which shadowed
+  the `std.nogc_sync_mut.atomic` import under co-compilation. e1b7d525592 renamed the stubs to
+  `debug_stub_atomic_*`; since they had zero callers, they and their re-exports are now deleted
+  from all io debug_stubs twins. Guard: `test/01_unit/lib/atomic_import_shadow_spec.spl`.
+  `hot_swap_pin` keeps `atomic_i64_try_new` on purpose: it is the non-panicking API for the Err path.
