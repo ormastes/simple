@@ -107,8 +107,8 @@ struct TransientHeapScope {
     /// two full rescans were ~50% of parse-phase samples.
     by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
     indexed: usize,
-    /// Two tracked objects share a header address; fall back to the exact
-    /// original linear scans for this scope.
+    /// Two tracked objects share a header address. Ownership remains indexed;
+    /// removal defers duplicate compaction using the exact-bit promoted set.
     index_ambiguous: bool,
     /// Exact value bits promoted while the index is ambiguous. Compaction of
     /// `objects` is deferred to ONE filter at scope end instead of a
