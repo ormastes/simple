@@ -9,7 +9,7 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.memory.user_copy.{user_copyout_bytes, user_copyin_bytes_validated}
-use os.kernel.text_checked.{kernel_text_checked}
+use os.kernel.text_checked.{kernel_text_checked, kernel_utf8_valid}
 # TEMP DIAG (lane-C1 bring-up): stage markers in _handle_file_stat.
 extern fn serial_println(msg: text)
 use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek, posix_write_for_task_observation_v1}
@@ -956,6 +956,10 @@ fn _handle_chdir(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
     val resolved = path_resolve(current.id, raw)
+    # cwd is stored as bytes and prefixed onto every later relative path by
+    # path_resolve, so invalid UTF-8 must be rejected here, not stored.
+    if not kernel_utf8_valid(resolved):
+        return SyscallResult(value: _FS_EILSEQ)
     # NOTE: the target directory's existence is NOT verified — no FAT32
     # directory-kind probe is reachable from Simple today (stream_open opens
     # files only). The cwd state change itself is real and getcwd observes it;
