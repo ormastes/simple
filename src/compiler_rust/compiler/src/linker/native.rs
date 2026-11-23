@@ -322,6 +322,12 @@ impl NativeLinker {
                     .into(),
             ));
         }
+        // Hosted GNU Windows executables need the selected C driver's sysroot
+        // and CRT startup graph. Raw ld cannot discover these from import names.
+        // Explicit-entry and shared links retain their existing low-level path.
+        if gnu_pe && options.entry_point.is_none() && !options.shared && matches!(self, Self::Lld | Self::Ld) {
+            return self.link_gnu_pe_hosted(objects, output, options, target.unwrap());
+        }
         let mut cmd = Command::new(program);
         if gnu_pe && matches!(self, Self::Lld | Self::Ld) {
             let emulation = match target.unwrap().arch {
@@ -478,6 +484,46 @@ impl NativeLinker {
         ["/lib", "/lib64", "/usr/lib", "/usr/lib64"]
             .iter()
             .any(|prefix| path.starts_with(prefix))
+    }
+
+    fn link_gnu_pe_hosted(
+        &self,
+        objects: &[PathBuf],
+        output: &Path,
+        options: &LinkOptions,
+        target: &Target,
+    ) -> LinkerResult<()> {
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(target);
+        let mut cmd = Command::new(cc);
+        cmd.arg(format!("--target={}", target.triple_str()))
+            .arg(if matches!(self, Self::Lld) { "-fuse-ld=lld" } else { "-fuse-ld=bfd" })
+            .arg("-o").arg(output)
+            .args(objects);
+        if let Some(extra) = std::env::var_os("SIMPLE_LINK_OBJECTS") {
+            cmd.args(std::env::split_paths(&extra));
+        }
+        for path in &options.library_paths {
+            cmd.arg("-L").arg(path);
+        }
+        for lib in ordered_libraries_for_static_runtime(&options.libraries) {
+            if lib.starts_with("simple_") { cmd.args(["-Xlinker", "-Bstatic"]); }
+            cmd.arg(format!("-l{lib}"));
+            if lib.starts_with("simple_") { cmd.args(["-Xlinker", "-Bdynamic"]); }
+        }
+        let mut flags = Command::new("unused");
+        self.add_gnu_pe_flags(&mut flags, options);
+        for flag in flags.get_args().chain(options.extra_flags.iter().map(std::ffi::OsStr::new)) {
+            cmd.arg("-Xlinker").arg(flag);
+        }
+        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
+            eprintln!("Link command: {:?}", cmd);
+        }
+        let result = cmd.output()?;
+        if result.status.success() {
+            Ok(())
+        } else {
+            self.classify_link_error(result.status.code().unwrap_or(-1), &String::from_utf8_lossy(&result.stderr))
+        }
     }
 
     /// MSVC-specific link invocation using /OUT:, /LIBPATH:, etc.
@@ -899,6 +945,30 @@ mod tests {
         let result = NativeLinker::Lld.link_for_target(&[object], &output, &options, &target);
         assert!(matches!(result, Err(LinkerError::InvalidConfig(message)) if message.contains("GNU PE")));
         assert!(!output.exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires a selected GNU clang driver and ld.lld; executes a real PE"]
+    fn test_gnu_pe_hosted_main_discovers_crt_and_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(&target);
+        let source = temp.path().join("main.c");
+        let object = temp.path().join("main.o");
+        std::fs::write(&source, "#include <stdio.h>\nint main(int argc, char **argv) { if (argc != 2 || argv[1][0] != 'x') return 71; puts(\"Hello, World!\"); return 0; }\n").unwrap();
+        let compiled = Command::new(cc).arg(format!("--target={}", target.triple_str()))
+            .args(["-c", "-o"]).arg(&object).arg(&source).output().unwrap();
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+        let mut options = LinkOptions::new();
+        options.libraries = ["msvcrt", "kernel32", "ws2_32", "winhttp", "mswsock", "advapi32", "d3d11", "dxgi"]
+            .into_iter().map(String::from).collect();
+        // No hand-supplied import paths, startup objects, or __main definition.
+        let executable = temp.path().join("hello.exe");
+        NativeLinker::Lld.link_for_target(&[object], &executable, &options, &target).unwrap();
+        let ran = Command::new(executable).arg("x").output().unwrap();
+        assert!(ran.status.success(), "{:?}", ran);
+        assert_eq!(String::from_utf8(ran.stdout).unwrap().replace("\r\n", "\n"), "Hello, World!\n");
     }
 
     /// Compile real COFF/ELF objects, then exercise the public builder and native linker.
