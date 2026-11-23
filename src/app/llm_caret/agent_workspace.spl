@@ -241,7 +241,7 @@ fn _smux_state_dir() -> text?:
 
 fn _smux_owner_path(ws: AgentWorkspace) -> text?:
     val dir = _smux_state_dir()
-    if dir == nil:
+    if dir.is_none():
         return None
     (dir ?? "") + "/" + ws.session + "-" + _hash(_norm_path(ws.repo)).to_text() + ".owner"
 
@@ -302,7 +302,7 @@ fn _smux_req(ws: AgentWorkspace, command: text) -> text?:
     while attempt < SMUX_REQ_ATTEMPTS:
         attempt = attempt + 1
         val owner = _smux_owner(ws)
-        if owner == nil:
+        if owner.is_none():
             return None
         val o = owner ?? SmuxOwner(addr: "", token: "", pid: 0)
         if not _smux_listener_is(o.addr, o.pid):
@@ -332,14 +332,14 @@ fn _smux_owner_forget(ws: AgentWorkspace):
     # is dropped as soon as the owner stops answering.
     val deadline = current_time_ms() + 30000
     while current_time_ms() < deadline:
-        if _smux_req(ws, "list-sessions") == nil:
+        if _smux_req(ws, "list-sessions").is_none():
             val _gone = file_delete(path)
             return
         sleep_ms(100)
 
 fn _smux_req_ok(ws: AgentWorkspace, command: text) -> bool:
     val r = _smux_req(ws, command)
-    r != nil and smux_remote_reply_ok(r ?? "")
+    r.is_some() and smux_remote_reply_ok(r ?? "")
 
 # Removes inherited ACEs and grants the current user alone; files created in
 # the directory afterwards inherit that.
@@ -385,7 +385,7 @@ fn _simple_root() -> text?:
 # hands the owner this process's stdout/stderr, so a caller reading this CLI
 # through a pipe (process_run) never sees EOF while the owner lives.
 pub fn smux_owner_start(ws: AgentWorkspace, exe: text) -> text:
-    if _smux_req(ws, "list-sessions") != nil:
+    if _smux_req(ws, "list-sessions").is_some():
         return ""
     val fail = "smux owner did not start: "
     val path = _smux_owner_path(ws) ?? ""
@@ -418,7 +418,7 @@ pub fn smux_owner_start(ws: AgentWorkspace, exe: text) -> text:
         # allows 900s per scenario.
         val deadline = current_time_ms() + 240000
         while current_time_ms() < deadline:
-            if _smux_req(ws, "list-sessions") != nil:
+            if _smux_req(ws, "list-sessions").is_some():
                 return ""
             sleep_ms(500)
     _smux_retire(path, token)
@@ -451,7 +451,7 @@ fn _smux_retire(path: text, token: text):
 fn _ws_panes(ws: AgentWorkspace) -> [WsPane]:
     var out: [WsPane] = []
     val r = _smux_req(ws, "pane-pids " + ws.session)
-    if r == nil:
+    if r.is_none():
         return out
     var seen: [text] = []
     for line in (r ?? "").split("\n"):
@@ -500,7 +500,7 @@ fn _smux_pane_spawn(ws: AgentWorkspace, title: text, cwd: text, command: text, r
     val script = "unset SIMPLE_BINARY; cd " + posix_quote_arg(cwd) + " && " + body
     val line = windows_spawn_command_line("sh", ["-c", script])
     val r = _smux_req(ws, "spawn-window " + ws.session + " " + title + " " + SMUX_PANE_COLS.to_text() + " " + SMUX_PANE_ROWS.to_text() + " " + line)
-    if r == nil or not smux_remote_reply_ok(r ?? ""):
+    if r.is_none() or not smux_remote_reply_ok(r ?? ""):
         return _err(reason: reason, out: r ?? "smux owner unavailable")
     _ok(r ?? "")
 
@@ -509,14 +509,14 @@ fn _smux_pane_spawn(ws: AgentWorkspace, title: text, cwd: text, command: text, r
 pub fn session_alive(ws: AgentWorkspace) -> bool:
     if _smux():
         val r = _smux_req(ws, "has-session " + ws.session)
-        return r != nil and (r ?? "").starts_with("smux: session exists")
+        return r.is_some() and (r ?? "").starts_with("smux: session exists")
     _tmux(ws: ws, args: ["has-session", "-t", ws.session], reason: "no_session").status == "ok"
 
 # Whether the workspace's server still answers at all (smux owner process or the
 # private tmux server), independent of whether it holds the session.
 pub fn workspace_server_alive(ws: AgentWorkspace) -> bool:
     if _smux():
-        return _smux_req(ws, "list-sessions") != nil
+        return _smux_req(ws, "list-sessions").is_some()
     _tmux(ws: ws, args: ["list-sessions"], reason: "no_server").status == "ok"
 
 # smux only: the owner's loopback address and the private file holding its
@@ -525,7 +525,7 @@ pub fn workspace_server_address(ws: AgentWorkspace) -> text?:
     if not _smux():
         return None
     val owner = _smux_owner(ws)
-    if owner == nil:
+    if owner.is_none():
         return None
     (owner ?? SmuxOwner(addr: "", token: "", pid: 0)).addr
 
@@ -542,7 +542,7 @@ pub fn session_ensure(ws: AgentWorkspace, cwd: text) -> WorkspaceResult:
         if up != "":
             return _err(reason: "new_session_failed", out: up)
         val r = _smux_req(ws, "new " + ws.session)
-        if r == nil or not smux_remote_reply_ok(r ?? ""):
+        if r.is_none() or not smux_remote_reply_ok(r ?? ""):
             return _err(reason: "new_session_failed", out: r ?? "smux owner unavailable")
         # `new` runs the platform shell in the OWNER's directory. As tmux
         # `new-session -c cwd` does, the first window must be `sh` in `cwd`:
@@ -685,7 +685,7 @@ pub fn capture_pane(ws: AgentWorkspace, target: text) -> text:
         val _w = _smux_req(ws, "select-window " + ws.session + " " + pane.window_id)
         val _p = _smux_req(ws, "select-pane " + ws.session + " " + pane.pane_id)
         val h = _smux_req(ws, "history-joined " + ws.session + " 2000")
-        if h == nil:
+        if h.is_none():
             return ""
         val lines = (h ?? "").split("\n")
         if lines.len() > 0 and lines[0].starts_with("smux: history["):
