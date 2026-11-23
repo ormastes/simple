@@ -643,6 +643,24 @@ fn string_ptr(value: i64) -> i64:
         return 0
     return ptr
 
+# Match the C owner's validated counted-string data borrow. Registry membership
+# precedes reading a candidate header, so foreign/rodata pointers are not probed.
+fn string_ptr_or_data(value: i64) -> i64:
+    if (value & 7) == 1:
+        val tagged = value & -8
+        if tagged < 4096 or string_registry_find_raw(tagged) != tagged:
+            return 0
+        return string_ptr(value)
+    if value <= 65552 or (value & 7) != 0:
+        return 0
+    val candidate = value - 16
+    if string_registry_find_raw(candidate) != candidate:
+        return 0
+    val kind = _sffi_core_string_spl_load_i64(candidate, 0) & 4294967295
+    if kind != 1398034993:
+        return 0
+    candidate
+
 fn string_data_ptr_value(ptr: i64) -> i64:
     return ptr + 16
 
@@ -937,7 +955,7 @@ pub fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:
 # would desync the frame at the first multi-byte codepoint.
 # O(1): straight buffer read, no codepoint walk needed.
 pub fn rt_string_byte_at(value: i64, index: i64) -> i64:
-    val ptr = string_ptr(value)
+    val ptr = string_ptr_or_data(value)
     if index < 0:
         return 0
     var data = value
