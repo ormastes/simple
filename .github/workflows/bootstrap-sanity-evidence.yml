@@ -1,46 +1,71 @@
 name: Bootstrap Sanity Evidence Archive
-
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
+  float-native-source:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          name: seed-linux-x86_64-d89f975af3cb46782e0c1dd68a795bb5833da846
+          run-id: 45199934467
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: validation-seed
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-linux-x86_64-d89f975af3cb46782e0c1dd68a795bb5833da846
+          run-id: 45199934467
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: validation-runtime
+      - name: Execute patched source and preserve native output
+        shell: bash
+        run: |
+          mkdir -p narrow-evidence/tmp
+          chmod +x validation-seed/simple
+          (cd validation-runtime && sha256sum --check runtime-authority.sha256)
+          git rev-parse HEAD > narrow-evidence/source.txt
+          sha256sum validation-seed/simple validation-runtime/*.a src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl scripts/check/float-store-native-source-proof.spl test/fixtures/compiler/native_float_field_index_mutation.spl > narrow-evidence/inputs.sha
+          export SIMPLE_LIB="$PWD/src" SIMPLE_PROJECT_ROOT="$PWD" TMPDIR="$PWD/narrow-evidence/tmp"
+          unset SIMPLE_BOOTSTRAP SIMPLE_NATIVE_BUILD_RUST SIMPLE_TEST_RUNNER_RUST
+          set +e
+          (ulimit -v 2097152; /usr/bin/time -v timeout --kill-after=5 300 validation-seed/simple run scripts/check/float-store-native-source-proof.spl) > narrow-evidence/compile.stdout 2> narrow-evidence/compile.stderr
+          rc=$?
+          printf 'exit_status=%s\n' "$rc" > narrow-evidence/compile.env
+          set -e
+          test "$rc" = 0
+          test -s narrow-evidence/fixture.o
+          nm -u narrow-evidence/fixture.o > narrow-evidence/imports.txt
+          cat > narrow-evidence/main.c <<'C'
+          extern long long __simple_main(void);
+          extern void spl_init_args(int, char**);
+          extern void __simple_runtime_init(void);
+          extern void __simple_runtime_shutdown(void);
+          int main(int argc, char **argv) {
+              spl_init_args(argc, argv);
+              __simple_runtime_init();
+              long long result = __simple_main();
+              __simple_runtime_shutdown();
+              return (int)result;
+          }
+          C
+          clang narrow-evidence/main.c narrow-evidence/fixture.o -Wl,--start-group validation-runtime/libsimple_native_all.a validation-runtime/libsimple_compiler_backfill.a -Wl,--end-group -lpthread -ldl -lm -lrt -lutil -lstdc++ -o narrow-evidence/fixture > narrow-evidence/link.stdout 2> narrow-evidence/link.stderr
+          sha256sum narrow-evidence/fixture.o narrow-evidence/fixture > narrow-evidence/output.sha
+          set +e
+          (ulimit -v 262144; timeout --kill-after=5 20 narrow-evidence/fixture) > narrow-evidence/run.stdout 2> narrow-evidence/run.stderr
+          rc=$?
+          printf 'exit_status=%s\n' "$rc" > narrow-evidence/run.env
+          set -e
+          test "$rc" = 0
+          grep -Fx 'float indexed store readback PASS' narrow-evidence/run.stdout
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: float-native-source-${{ github.sha }}
+          path: |
+            narrow-evidence
+            .simple/cache

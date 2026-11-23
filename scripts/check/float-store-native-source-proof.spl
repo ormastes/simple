@@ -1,0 +1,33 @@
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir_opt.mir_opt_integration.{optimize_mir_speed}
+use compiler.backend.cranelift_codegen_adapter.{cranelift_compile_module_direct}
+use compiler.backend.backend.backend_types.{compileoptions_release_options}
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_write_text(path: text, value: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn main() -> i64:
+    val source_path = "test/fixtures/compiler/native_float_field_index_mutation.spl"
+    val source = rt_file_read_text(source_path).unwrap()
+    val filename = "float_fixture.spl"
+    assert(source.len() > 0)
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hl = HirLowering.with_filename(filename)
+    val hir = hl.lower_module(module)
+    var ml = MirLowering.new(hir.symbols)
+    val lowered = ml.lower_module(hir)
+    assert(rt_file_write_text("narrow-evidence/lowered.mir", serialize_mir_module(lowered)))
+    val optimized = optimize_mir_speed(lowered)
+    assert(rt_file_write_text("narrow-evidence/optimized.mir", serialize_mir_module(optimized)))
+    val output = cranelift_compile_module_direct(compileoptions_release_options(), optimized,
+        "x86_64-unknown-linux-gnu", "generic", []).unwrap()
+    assert(output.object_code.len() > 0)
+    assert(rt_file_write_bytes("narrow-evidence/fixture.o", output.object_code))
+    print "actual-source optimized object PASS"
+    return 0
