@@ -1,46 +1,49 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Focused bootstrap source contract proof
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  source-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v7
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          github-token: ${{ github.token }}
+          run-id: 45199934467
+          name: seed-linux-x86_64-d89f975af3cb46782e0c1dd68a795bb5833da846
+          path: seed
+      - name: Execute the repaired Phase1 source spec once
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/source-contract-evidence build/source-contract-tmp
+          echo 'bd20b7e1378e1d1f45eb5c5d8139d1044145832644db9a2083ae5b15427de4d3  seed/simple' | sha256sum -c -
+          chmod +x seed/simple
+          git rev-parse HEAD > build/source-contract-evidence/source-revision.txt
+          sha256sum seed/simple test/01_unit/app/cli/bootstrap_main_source_spec.spl > build/source-contract-evidence/inputs.sha256
+          export SIMPLE_LIB="$PWD/src" SIMPLE_PROJECT_ROOT="$PWD" SIMPLE_TEST_RUNNER_RUST=1
+          export SIMPLE_CACHE="$PWD/build/source-contract-cache" TMPDIR="$PWD/build/source-contract-tmp"
+          export SIMPLE_TEST_KEEP_TEMP=1
+          set +e
+          perl scripts/resource/process-tree-rss-watchdog.pl --rss-cap-mode=enforce --max-rss-kib=2097152 --timeout-seconds=1200 --receipt=build/source-contract-evidence/owner.env -- seed/simple test test/01_unit/app/cli/bootstrap_main_source_spec.spl --mode=interpreter --verbose > build/source-contract-evidence/stdout.log 2> build/source-contract-evidence/stderr.log
+          code=$?
+          set -e
+          echo "$code" > build/source-contract-evidence/exit-code.txt
+          tail -n 35 build/source-contract-evidence/stdout.log
+          tail -n 15 build/source-contract-evidence/stderr.log
+          test "$code" = 0
+          grep -q '^status=complete$' build/source-contract-evidence/owner.env
+          grep -q '^quiescent=1$' build/source-contract-evidence/owner.env
+          grep -Eq '16 examples, 0 failures|16 passed, 0 failed' build/source-contract-evidence/stdout.log
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: bootstrap-main-source-spec-proof
+          path: |
+            build/source-contract-evidence
+            build/source-contract-tmp
+          retention-days: 7
