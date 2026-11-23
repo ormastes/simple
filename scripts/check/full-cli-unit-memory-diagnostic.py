@@ -77,7 +77,8 @@ def main():
     argv = argv[argv.index('--')+1:] + ['--hir-shard=0/1']
     argv[argv.index('--output')+1] = str(evidence/'never-admitted-output')
     config = {'queue': str(queue), 'snapshot': str(snapshot), 'targets': TARGETS,
-              'events': str(evidence/'boundaries.jsonl')}
+              'events': str(evidence/'boundaries.jsonl'), 'binary_sha256': PARENT,
+              'required_worker_arg': 'src/app/cli/native_build_worker.spl'}
     (evidence/'gdb-config.json').write_text(json.dumps(config))
     env['UNIT_DIAGNOSTIC_CONFIG'] = str(evidence/'gdb-config.json')
     (evidence/'environment.json').write_text(json.dumps({k:v for k,v in env.items()
@@ -102,7 +103,9 @@ def main():
     events = [json.loads(x) for x in (evidence/'boundaries.jsonl').read_text().splitlines()] if (evidence/'boundaries.jsonl').exists() else []
     owner = dict(x.split('=', 1) for x in (evidence/'owner.env').read_text().splitlines() if '=' in x)
     targets_equal = any(x.get('target_equality') is True for x in events)
-    full_graph = 'phase2:surface:admitted-graph:done scanned=7114 inventory=7114' in (evidence/'stdout').read_text(errors='replace')
+    stdout_text = (evidence/'stdout').read_text(errors='replace')
+    full_graph = ('phase1:streaming_preparse_source_reclaim:done sources=4175 owners=7114' in stdout_text and
+                  sha(queue/'unit_order.idx') == sha(original/'unit_order.idx'))
     valid = targets_equal and full_graph
     stages = [x['stage'] for x in events if x.get('comparable')]
     expected = ['finish:entry', 'freeze:entry', 'freeze:return', 'finish:return', 'promote:entry', 'promote:return']
