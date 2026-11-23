@@ -1,0 +1,115 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/compute_backend.spl 70%
+# Purpose and audience: backend selection and error contract of the common GPU
+# compute interface of the pure runner, plus the CPU arm's numeric identity with
+# tensor_ops (the CPU reference). Needs no GPU.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get}
+use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
+use std.gc_async_mut.slang.model_executor.pure.compute_backend.{ComputeKind, DeviceTensor, compute_open, compute_kind_name, compute_parse_kind, compute_upload, compute_download, compute_matvec, compute_rmsnorm, compute_add, compute_mul, compute_silu, compute_kv_write, compute_row, compute_argmax, compute_alloc, compute_free, compute_sync, compute_gpu_library_loaded}
+
+fn _cpu():
+    compute_open("cpu").unwrap()
+
+fn _vals(t: PureTensor) -> [f64]:
+    t.data
+
+describe "compute_backend loads no GPU library until a GPU kind is requested":
+    it "import plus opening cpu maps no GPU library":
+        # Must stay the first example: later ones legitimately open ROCm.
+        expect(compute_gpu_library_loaded()).to_equal(false)
+        val ops = compute_open("cpu").unwrap()
+        expect(compute_kind_name(ops.kind)).to_equal("cpu")
+        expect(compute_gpu_library_loaded()).to_equal(false)
+
+describe "compute_open selection and errors":
+    it "names every kind":
+        expect(compute_kind_name(ComputeKind.Cpu)).to_equal("cpu")
+        expect(compute_kind_name(ComputeKind.Rocm)).to_equal("rocm")
+
+    it "parses backend names case-insensitively":
+        expect(compute_parse_kind("ROCm").is_some()).to_equal(true)
+        expect(compute_kind_name(compute_parse_kind("ROCm").unwrap())).to_equal("rocm")
+        expect(compute_parse_kind("metal").is_none()).to_equal(true)
+
+    it "opens cpu explicitly":
+        val ops = compute_open("cpu").unwrap()
+        expect(compute_kind_name(ops.kind)).to_equal("cpu")
+
+    it "rejects an unknown backend name":
+        val r = compute_open("tpu")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("unknown compute backend 'tpu'")
+
+    it "auto tries rocm then falls back to cpu and records each failure":
+        val ops = compute_open("auto").unwrap()
+        val name = compute_kind_name(ops.kind)
+        # SLANG_GPU overrides the auto order (no fallback, no diag): then auto
+        # must have opened exactly the overridden kind.
+        val env = env_get("SLANG_GPU").lower()
+        val overridden = env != "" and env != "auto"
+        if overridden:
+            expect(name).to_equal(env)
+            expect(ops.diag).to_equal("")
+        if not overridden and rocm_available_at(rocm_bin_default()):
+            expect(name).to_equal("rocm")
+        if not overridden and name == "cpu":
+            expect(ops.diag).to_contain("rocm:")
+
+
+    it "auto opens some backend and records why earlier ones failed":
+        val ops = compute_open("auto").unwrap()
+        val name = compute_kind_name(ops.kind)
+        expect(name == "rocm" or name == "cpu").to_equal(true)
+        if name == "cpu":
+            expect(ops.diag).to_contain("rocm:")
+
+describe "compute_* cpu arm equals the CPU reference":
+    it "uploads, runs elementwise ops and downloads":
+        val ops = _cpu()
+        val a = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
+        val b = compute_upload(ops, tensor_from_values([4.0, 5.0, 6.0], [3])).unwrap()
+        expect(_vals(compute_download(ops, compute_add(ops, a, b).unwrap()).unwrap())).to_equal([5.0, 7.0, 9.0])
+        expect(_vals(compute_download(ops, compute_mul(ops, a, b).unwrap()).unwrap())).to_equal([4.0, 10.0, 18.0])
+        val s = _vals(compute_download(ops, compute_silu(ops, a).unwrap()).unwrap())
+        expect(s.len()).to_equal(3)
+        expect(s[0] > 0.73 and s[0] < 0.74).to_equal(true)
+
+    it "matvec, row and argmax":
+        val ops = _cpu()
+        val w = compute_upload(ops, tensor_from_values([1.0, 0.0, 0.0, 2.0, 1.0, 1.0], [3, 2])).unwrap()
+        val x = compute_upload(ops, tensor_from_values([3.0, 4.0], [2])).unwrap()
+        val y = compute_matvec(ops, w, x).unwrap()
+        expect(_vals(compute_download(ops, y).unwrap())).to_equal([3.0, 8.0, 7.0])
+        expect(compute_argmax(ops, y).unwrap()).to_equal(1)
+        expect(_vals(compute_download(ops, compute_row(ops, w, 2).unwrap()).unwrap())).to_equal([1.0, 1.0])
+
+    it "rmsnorm of ones with unit weight is ones":
+        val ops = _cpu()
+        val x = compute_upload(ops, tensor_from_values([2.0, 2.0], [2])).unwrap()
+        val w = compute_upload(ops, tensor_from_values([1.0, 1.0], [2])).unwrap()
+        val o = _vals(compute_download(ops, compute_rmsnorm(ops, x, w, 0.0).unwrap()).unwrap())
+        expect(o[0] > 0.999 and o[0] < 1.001).to_equal(true)
+
+    it "kv_write returns the buffer to keep":
+        val ops = _cpu()
+        val buf = compute_alloc(ops, [2, 2]).unwrap()
+        val row = compute_upload(ops, tensor_from_values([7.0, 8.0], [2])).unwrap()
+        val nb = compute_kv_write(ops, buf, 1, row).unwrap()
+        expect(_vals(compute_download(ops, nb).unwrap())).to_equal([0.0, 0.0, 7.0, 8.0])
+        expect(compute_free(ops, nb).unwrap()).to_equal(0)
+        expect(compute_sync(ops).unwrap()).to_equal(0)
+
+describe "compute_* rejects a tensor of another backend kind":
+    # A foreign tensor's ptr must never reach a provider (a Cpu tensor is ptr 0,
+    # a HIP pointer is not another backend handle). Fabricated handles; no GPU is touched.
+    it "cpu ops reject a rocm tensor with an Err":
+        val ops = _cpu()
+        val g = DeviceTensor(kind: ComputeKind.Rocm, ptr: 4096, n: 3, shape: [3], host: [])
+        val a = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
+        val r = compute_add(ops, a, g)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("rocm tensor passed to a cpu op")
+        expect(compute_argmax(ops, g).is_err()).to_equal(true)
+
