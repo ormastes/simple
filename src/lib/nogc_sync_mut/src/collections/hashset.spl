@@ -25,6 +25,10 @@ class HashSet:
     size: i64
     capacity: i64
 
+    static fn empty() -> HashSet:
+        """Create new empty HashSet with lazy zero-allocation backing (`capacity = 0`)."""
+        HashSet(slot_keys: [], slot_used: [], size: 0, capacity: 0)
+
     static fn new() -> HashSet:
         """Create new empty HashSet."""
         HashSet.with_capacity(16)
@@ -73,7 +77,9 @@ class HashSet:
         Returns:
             true if newly inserted, false if already present
         """
-        if self.size * 4 > self.capacity * 3:
+        if self.capacity <= 0:
+            self._rebuild_storage(16)
+        elif self.size * 4 > self.capacity * 3:
             self._resize()
 
         val hash = hash_text(value)
@@ -95,7 +101,9 @@ class HashSet:
         This preserves the table representation used by insert() but skips the
         duplicate string comparison on occupied probe slots.
         """
-        if self.size * 4 > self.capacity * 3:
+        if self.capacity <= 0:
+            self._rebuild_storage(16)
+        elif self.size * 4 > self.capacity * 3:
             self._resize()
 
         val hash = hash_text(value)
@@ -111,6 +119,9 @@ class HashSet:
 
     me insert_known_new_no_resize(value: text) -> bool:
         """Insert a known-new value into a table with sufficient capacity."""
+        if self.capacity <= 0:
+            self._rebuild_storage(16)
+
         val hash = hash_text(value)
         val mask = self.capacity - 1
         var slot = hash & mask
@@ -124,6 +135,8 @@ class HashSet:
 
     fn contains(value: text) -> bool:
         """Check if value exists."""
+        if self.capacity <= 0 or self.size == 0:
+            return false
         val hash = hash_text(value)
         val mask = self.capacity - 1
         val keys = self.slot_keys
@@ -139,6 +152,8 @@ class HashSet:
 
     fn contains_observed(value: text) -> HashSetProbeResult:
         """Look up once and report inspected slots and nonmatching occupied slots."""
+        if self.capacity <= 0:
+            return HashSetProbeResult(found: false, probes: 1, collisions: 0)
         val hash = hash_text(value)
         val mask = self.capacity - 1
         val keys = self.slot_keys
@@ -157,21 +172,33 @@ class HashSet:
         HashSetProbeResult(found: false, probes: probes, collisions: collisions)
 
     me remove(value: text) -> bool:
-        """Remove value from set.
+        """Remove value from set in place without reallocating storage.
 
         Returns:
             true if value was present
         """
+        if self.capacity <= 0 or self.size == 0:
+            return false
         val hash = hash_text(value)
         val mask = self.capacity - 1
         var slot = hash & mask
         var probes = 0
         while probes < self.capacity and self.slot_used[slot] != 0u8:
             if self.slot_keys[slot] == value:
-                self.slot_used[slot] = 0u8
-                self.slot_keys[slot] = ""
+                var hole = slot
+                self.slot_used[hole] = 0u8
+                self.slot_keys[hole] = ""
                 self.size = self.size - 1
-                self._rebuild_storage(self.capacity)
+                var next = (hole + 1) & mask
+                while self.slot_used[next] != 0u8:
+                    val natural = hash_text(self.slot_keys[next]) & mask
+                    if ((next - natural) & mask) >= ((next - hole) & mask):
+                        self.slot_keys[hole] = self.slot_keys[next]
+                        self.slot_used[hole] = 1u8
+                        hole = next
+                        self.slot_used[hole] = 0u8
+                        self.slot_keys[hole] = ""
+                    next = (next + 1) & mask
                 return true
             probes = probes + 1
             slot = (slot + 1) & mask
@@ -179,6 +206,9 @@ class HashSet:
 
     me clear():
         """Remove all values."""
+        if self.capacity <= 0:
+            self.size = 0
+            return
         var i = 0
         while i < self.capacity:
             self.slot_keys[i] = ""
@@ -189,6 +219,9 @@ class HashSet:
     me clear_retaining_storage():
         """Remove all values without clearing retained key slots."""
         val cap = self.capacity
+        if cap <= 0:
+            self.size = 0
+            return
         var i = 0
         while i < cap:
             self.slot_used[i] = 0u8
@@ -205,6 +238,8 @@ class HashSet:
 
     fn to_vec() -> [text]:
         """Convert to vector."""
+        if self.capacity <= 0 or self.size == 0:
+            return []
         var out: [text] = []
         val keys = self.slot_keys
         val used = self.slot_used
@@ -334,6 +369,8 @@ class HashSet:
 
     fn _bucket_index_hash(hash: i64) -> u64:
         val cap = self.capacity
+        if cap <= 0:
+            return 0u64
         if (cap & (cap - 1)) == 0:
             (hash & (cap - 1)).to_u64()
         elif hash < 0:
@@ -342,7 +379,7 @@ class HashSet:
             (hash % cap).to_u64()
 
     me _resize():
-        val new_capacity = self.capacity * 2
+        val new_capacity = if self.capacity <= 0: 16 else: self.capacity * 2
         self._rebuild_storage(new_capacity)
 
     me _rebuild_storage(new_capacity: i64):

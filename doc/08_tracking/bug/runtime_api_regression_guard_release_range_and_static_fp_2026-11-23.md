@@ -1,6 +1,6 @@
 # runtime-api-regression push gate: false FAIL on release/1.0.0 PRs (2026-11-23)
 
-Status: open. Gate: `push-runtime-api-regression` (`scripts/check/check-runtime-api-regression-push.shs`).
+Status: open (defect 2 fixed, verification-pending; defect 1 open). Gate: `push-runtime-api-regression` (`scripts/check/check-runtime-api-regression-push.shs`).
 
 ## Symptom
 Pushing `work/mu1-20261122` (PR #10783, merged as `c3bb41538e4` into release/1.0.0)
@@ -49,3 +49,12 @@ when that fails the push exits 2 and must be re-pushed after `git fetch` (intend
 fail-closed). Note: `--self-test`'s pre-existing slow-remote and release_phase3
 fixtures are timing-sensitive on a loaded Windows host (passed with
 `MUST_CHECK_REMOTE_QUERY_TIMEOUT_S=60`, 34/34).
+
+## Defect 2 fix (2026-11-23, branch work/gs1-20261123)
+`defined_symbols_c` now drops literal C definitions whose declaration prefix
+contains `static` (`static`, `static inline`, ...) before extracting names.
+Test-first: new selftest fixture F renames 5 `static rt_core_dict_*` helpers
+and must PASS (red before the fix, green after: 6/6 fixtures). The incident
+fixture A still FAILs.
+Real range `65e3a69e676..c3bb41538e4^2` with the fix:
+`PASS — 3282 symbol(s) checked, 0 removed` (pre-fix: `FAIL — 3813 checked, 9 removed`; the 531-symbol drop is the excluded `static` helpers).

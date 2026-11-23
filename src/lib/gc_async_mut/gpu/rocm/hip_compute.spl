@@ -7,7 +7,8 @@
 # runtime kernel compile through hipRTC (cached per device by kernel name),
 # kernel launch, synchronize. HIP and hipRTC are loaded with the dynamic helper
 # the slang backend uses (spl_dlopen / spl_dlsym / spl_wffi_call_i64); every
-# HIP status other than 0 surfaces as Err(text).
+# HIP status other than 0 surfaces as Err(text); unavailable-path errors
+# start with a named ROCm[hip-...] code (doc/05_design/runtime/gpu/hip_fail_closed_2026-11-23.md).
 #
 # Host memory is handled without any rt_* extern: blocks come from the C
 # runtime's malloc/free/memcpy (called through spl_wffi_call_i64 and
@@ -80,7 +81,7 @@ pub class RocmDevice:
 fn _need(lib: i64, sym: text) -> Result<i64, text>:
     val f = spl_dlsym(lib, sym)
     if f == 0:
-        return Err("ROCm: missing symbol {sym}")
+        return Err("ROCm[hip-symbol-missing]: missing symbol {sym}")
     Ok(f)
 
 fn _hip_err(what: text, rc: i64) -> text:
@@ -143,12 +144,12 @@ pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
     val hip_path = _find_lib(bin_dir, hip_lib_names(os))
     val rtc_path = _find_lib(bin_dir, hiprtc_lib_names(os))
     if hip_path == "" or rtc_path == "":
-        return Err("ROCm: HIP/hipRTC library not found in {bin_dir} for {os}")
+        return Err("ROCm[hip-library-missing]: HIP/hipRTC library not found in {bin_dir} for {os}")
     val ucrt = spl_dlopen(host_libc_name(os))
     val hip = spl_dlopen(hip_path)
     val rtc = spl_dlopen(rtc_path)
     if ucrt == 0 or hip == 0 or rtc == 0:
-        return Err("ROCm: dlopen failed for libc, HIP or hipRTC")
+        return Err("ROCm[hip-dlopen-failed]: dlopen failed for libc, HIP or hipRTC")
     val f_init = _need(hip, "hipInit")?
     val f_name = _need(hip, "hipDeviceGetName")?
     val c_malloc = _need(ucrt, "malloc")?
@@ -178,10 +179,10 @@ pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
     )
     val rc_init = spl_wffi_call_i64(f_init, [0], 1)
     if rc_init != 0:
-        return Err(_hip_err("hipInit", rc_init))
+        return Err("ROCm[hip-init-failed]: " + _hip_err("hipInit", rc_init))
     val rc_name = spl_wffi_call_i64(f_name, [dev.scratch, 256, 0], 3)
     if rc_name != 0:
-        return Err(_hip_err("hipDeviceGetName", rc_name))
+        return Err("ROCm[hip-device-query-failed]: " + _hip_err("hipDeviceGetName", rc_name))
     dev.name = _text_at(dev.scratch, 256)
     Ok(dev)
 

@@ -22,6 +22,12 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Verify protected bootstrap build scripts
+        shell: sh
+        run: |
+          command -v xxhsum >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xxhash)
+          sh scripts/check/fast-verify-bootstrap-scripts.shs
+
       - name: Detect version
         id: detect
         run: |
@@ -108,6 +114,47 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Verify protected bootstrap build scripts
+        shell: bash
+        run: |
+          if ! command -v xxhsum >/dev/null 2>&1; then
+            case "$RUNNER_OS" in
+              Linux)
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq --no-install-recommends xxhash
+                ;;
+              macOS)
+                HOMEBREW_NO_AUTO_UPDATE=1 brew install xxhash
+                ;;
+              Windows)
+                xxh_bin="$(cygpath -u "$RUNNER_TEMP")/xxhash-bin"
+                mkdir -p "$xxh_bin"
+                if [ -x /c/msys64/usr/bin/pacman.exe ]; then
+                  if /c/msys64/usr/bin/pacman.exe -Sy --noconfirm --needed mingw-w64-x86_64-xxhash; then
+                    :
+                  fi
+                  if [ -x /c/msys64/mingw64/bin/xxhsum.exe ]; then
+                    cp -f /c/msys64/mingw64/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                    for dll in /c/msys64/mingw64/bin/libxxhash*.dll /c/msys64/mingw64/bin/libwinpthread*.dll /c/msys64/mingw64/bin/libgcc_s_*.dll; do
+                      if [ -f "$dll" ]; then
+                        cp -f "$dll" "$xxh_bin/"
+                      fi
+                    done
+                  fi
+                fi
+                if [ ! -x "$xxh_bin/xxhsum.exe" ] && command -v choco >/dev/null 2>&1; then
+                  choco install xxhash -y --no-progress
+                  if [ -x /c/ProgramData/chocolatey/bin/xxhsum.exe ]; then
+                    cp -f /c/ProgramData/chocolatey/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                  fi
+                fi
+                test -x "$xxh_bin/xxhsum.exe"
+                export PATH="$xxh_bin:$PATH"
+                ;;
+            esac
+          fi
+          sh scripts/check/fast-verify-bootstrap-scripts.shs
 
       - name: Setup Rust toolchain (macOS/Windows/Linux arm64)
         if: runner.os == 'macOS' || runner.os == 'Windows' || matrix.platform == 'linux-aarch64'

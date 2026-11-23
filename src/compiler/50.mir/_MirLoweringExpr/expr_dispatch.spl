@@ -524,15 +524,19 @@ impl MirLowering:
                             # `s.field` cannot resolve the owner struct, and a
                             # `for x in s.items` over a declared `[T]` field falls
                             # into the #143 non-array fallback.
-                            match global_elem_type.kind:
-                                case HirTypeKind.Named(global_elem_symbol, _):
-                                    # Presence alone does not unwrap HirSymbol?: the
-                                    # .name read needs the concrete payload (same
-                                    # ABI defect class as 4710b22a991).
-                                    if val present_global_elem = self.symbols.get_symbol_raw(global_elem_symbol.id):
-                                        val global_elem: HirSymbol = present_global_elem
-                                        self.array_element_struct_syms[dest.id] = global_elem.name
-                                case _: ()
+                            val global_elem_owner = self.optional_payload_struct_name(global_elem_type)
+                            if global_elem_owner != "":
+                                self.array_element_struct_syms[dest.id] = global_elem_owner
+                            else:
+                                match global_elem_type.kind:
+                                    case HirTypeKind.Named(global_elem_symbol, _):
+                                        # Presence alone does not unwrap HirSymbol?: the
+                                        # .name read needs the concrete payload (same
+                                        # ABI defect class as 4710b22a991).
+                                        if val present_global_elem = self.symbols.get_symbol_raw(global_elem_symbol.id):
+                                            val global_elem: HirSymbol = present_global_elem
+                                            self.array_element_struct_syms[dest.id] = self.struct_value_provenance_key(global_elem)
+                                    case _: ()
                         case _: ()
             # Register struct provenance for the loaded local, mirroring every
             # other struct-value-producing site (mir_lowering_stmts.spl:291,
@@ -5726,6 +5730,24 @@ impl MirLowering:
             word = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
         self.builder = b
         word
+    me rewrap_unit_word_like(unit_local: LocalId, word: LocalId) -> LocalId:
+        """Box an i64 payload `word` in the same one-field record layout as
+        the record-shaped unit `unit_local` (the inverse of unit_div_payload_word)."""
+        match self.find_local_hir_type(unit_local.id):
+            case Some(found_type):
+                match found_type.kind:
+                    case HirTypeKind.Named(unit_sym, _):
+                        val canonical_symbol = self.canonical_mir_type_symbol(unit_sym)
+                        var b = self.builder
+                        val dest = b.emit_aggregate(AggregateKind.Struct(canonical_symbol), [mir_operand_copy(word)], MirType(kind: MirTypeKind.Struct(canonical_symbol)))
+                        self.builder = b
+                        if self.struct_value_syms.contains(unit_local.id):
+                            self.struct_value_syms[dest.id] = self.struct_value_syms[unit_local.id]
+                        dest
+                    case _: word
+            case None:
+                word
+
     me emit_unit_panic_if(cond: LocalId, block_label: text, msg: text):
         """Branch to a panicking block when `cond` holds, else continue."""
         var b = self.builder
@@ -6021,12 +6043,18 @@ impl MirLowering:
                             # Same-unit ratio is a dimensionless i64: return
                             # it directly (a plain `unit Dist: i64` has no
                             # __div__, so the record-operator path below
-                            # would reject it). Unit-by-scalar only needs the
-                            # guard; the division itself happens below.
-                            if self.local_is_declared_unit(left_local) and self.local_is_declared_unit(right_local):
+                            # would reject it). Unit-by-integer (`Dist / i64`)
+                            # is the same base integer division; its quotient
+                            # is re-wrapped as the left unit when that unit is
+                            # record-shaped.
+                            val left_unit = self.local_is_declared_unit(left_local)
+                            val unit_by_int = left_unit and self.local_is_integer_scalar_v1(right_local)
+                            if unit_by_int or (left_unit and self.local_is_declared_unit(right_local)):
                                 var b_div = self.builder
                                 val unit_quotient = b_div.emit_binop(MirBinOp.Div, mir_operand_copy(unit_words.0), mir_operand_copy(unit_words.1), MirType.i64())
                                 self.builder = b_div
+                                if unit_by_int and self.box_runtime_value_local_is_record(left_local):
+                                    return self.rewrap_unit_word_like(left_local, unit_quotient)
                                 return unit_quotient
                 else:
                     val eq_negate = match op:
@@ -7293,9 +7321,12 @@ impl MirLowering:
                                         case _:
                                             field_type = self.lower_type(declared_field_type_pre)
                                             declared_field_resolved = true
-                        if not declared_field_resolved:
+                        if not declared_field_resolved and expr_value.has_type_:
                             if val expr_type = expr_value.type_:
-                                field_type = self.lower_type(expr_type)
+                                match expr_type.kind:
+                                    case HirTypeKind.Unit | HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                                    case _:
+                                        field_type = self.lower_type(expr_type)
                     val projected_struct_name = self.resolve_base_struct_name(base, base_local)
                     if val psn = projected_struct_name:
                         if self.struct_field_repr_name.contains(psn):
@@ -8890,9 +8921,12 @@ impl MirLowering:
                                     case _:
                                         field_type = self.lower_type(declared_field_type3)
                                         declared_field_resolved = true
-                    if not declared_field_resolved:
+                    if not declared_field_resolved and expr_value.has_type_:
                         if val expr_type = expr_value.type_:
-                            field_type = self.lower_type(expr_type)
+                            match expr_type.kind:
+                                case HirTypeKind.Unit | HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                                case _:
+                                    field_type = self.lower_type(expr_type)
                 val projected_struct_name2 = self.resolve_base_struct_name(base, base_local)
                 if val psn2 = projected_struct_name2:
                     if self.struct_field_repr_name.contains(psn2):
@@ -8902,11 +8936,19 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                 self.builder = b
-                # Same rationale as the disc-guarded Field arm above: the
-                # field_elem_type_override2 computed above already gave
-                # field_type the real Array(elem) shape when known, so no
-                # separate local_hir_types registration is needed here.
                 self.remember_field_projection_provenance(base, base_local, field_idx, result)
+                if val field_owner2 = projected_struct_name2:
+                    if self.struct_field_hir_type.contains(field_owner2):
+                        val field_types_post2: [HirType] = self.struct_field_hir_type[field_owner2]
+                        if field_idx >= 0 and field_idx < field_types_post2.len():
+                            val declared_field_type_post2 = self.declared_field_type_in_current_table(field_owner2, field_idx, field_types_post2[field_idx])
+                            self.remember_local_hir_type(result.id, declared_field_type_post2, 0, 0)
+                            match declared_field_type_post2.kind:
+                                case HirTypeKind.Optional(_):
+                                    self.option_value_locals[result.id] = true
+                                    self.mark_runtime_value_local(result.id)
+                                case _:
+                                    ()
                 result
 
             # Type cast: expr as Type

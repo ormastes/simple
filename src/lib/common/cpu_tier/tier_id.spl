@@ -210,3 +210,44 @@ pub fn tier_admits(artifact: TierId, host: TierId) -> bool:
         i = i + 1i64
 
     return true
+
+# SIMD class of a tier: the vector ISA family artifacts built for it may use.
+# Names match the seed's SimdTier::as_str ("scalar", "x86_64_avx2",
+# "aarch64_sve2", "riscv64_rvv", ...) so one spelling keys every cache.
+# armv9-a mandates SVE2 architecturally, so it classes as aarch64_sve2 even
+# when "sve2" is not listed. Returns "" for an unknown arch.
+@allow(primitive_api)  # SIMD class name is the shared cache-key spelling (seed SimdTier::as_str)
+pub fn tier_simd_class(t: TierId) -> text:
+    val feats = t.features + tier_implied_features(t.arch, t.base)
+    match t.arch:
+        case "x86_64":
+            if feats.contains("avx512f"): return "x86_64_avx512"
+            if feats.contains("avx2"): return "x86_64_avx2"
+            "x86_64_sse2"
+        case "aarch64":
+            if feats.contains("sve2") or t.base == "armv9-a": return "aarch64_sve2"
+            if feats.contains("sve"): return "aarch64_sve"
+            if feats.contains("neon"): return "aarch64_neon"
+            "scalar"
+        case "riscv64":
+            if feats.contains("v"): return "riscv64_rvv"
+            "scalar"
+        case _:
+            ""
+
+# SIMD class of a tier spec whose arch is implied by its base level
+# ("armv9-a+sve" -> aarch64, "rv64gcv" -> riscv64). "" when no arch parses it
+# or the spec has no base level (a bare "+feat" names no arch).
+@allow(primitive_api)  # tier spec text in, SIMD class name out; both are the build-config contract spellings
+pub fn tier_spec_simd_class(spec: text) -> text:
+    if spec.len() == 0 or spec.starts_with("+"): return ""
+    for arch in ["x86_64", "aarch64", "riscv64"]:
+        val parsed = tier_parse(arch, spec)
+        if parsed.is_ok():
+            return tier_simd_class(parsed.unwrap())
+    ""
+
+# True for the scalable-vector classes (SVE, SVE2, RVV).
+@allow(primitive_api)  # predicate over the SIMD class name spelling
+pub fn simd_class_is_scalable(simd_class: text) -> bool:
+    simd_class == "aarch64_sve" or simd_class == "aarch64_sve2" or simd_class == "riscv64_rvv"

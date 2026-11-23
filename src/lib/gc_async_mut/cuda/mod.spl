@@ -3,6 +3,7 @@
 # Thin, hand-maintained wrapper over the canonical runtime CUDA ABI.
 
 use std.gc_async_mut.cuda.ffi.*
+use std.gc_async_mut.cuda.driver_loader.{cuda_driver}
 extern fn rt_cuda_module_load_data_array(bytes: [u8]) -> i64
 
 val CUDA_SUCCESS = 0
@@ -11,11 +12,23 @@ val CUDA_ERROR_OUT_OF_MEMORY = -2
 val CUDA_ERROR_NOT_INITIALIZED = -3
 val CUDA_ERROR_NO_DEVICE = -100
 
+# First GPU use: the driver is opened through cuda_driver(), so a missing
+# driver is CUDA-E001 and an incomplete one CUDA-E002.
+fn cuda_init_checked() -> Result<i64, text>:
+    val driver = unsafe(capabilities: [ffi, raw_ptr]):
+        cuda_driver()
+    if driver.is_err(): return Err(driver.unwrap_err())
+    Ok(rt_cuda_init())
+
 fn cuda_available() -> bool:
-    rt_cuda_available() != 0
+    val driver = unsafe(capabilities: [ffi, raw_ptr]):
+        cuda_driver()
+    driver.is_ok() and rt_cuda_available() != 0
 
 fn cuda_init() -> i64:
-    rt_cuda_init()
+    val result = cuda_init_checked()
+    if result.is_err(): return CUDA_ERROR_NOT_INITIALIZED
+    result.unwrap()
 
 fn cuda_device_count() -> i64:
     rt_cuda_device_count()

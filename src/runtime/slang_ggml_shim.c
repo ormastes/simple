@@ -280,6 +280,14 @@ static int64_t slang_request_handle(int64_t slot, uint64_t generation) {
     return (int64_t)(generation * SLANG_REQUEST_MAX_ENTRIES + (uint64_t)slot + 1);
 }
 
+/* Guard shared by the entry points that decode on a live, uncancelled context. */
+static int64_t slang_request_decodable(const struct slang_request *request) {
+    if (request == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    return 0;
+}
+
 static struct slang_request *slang_request_get(int64_t handle) {
     if (handle <= 0) return NULL;
     uint64_t raw = (uint64_t)(handle - 1);
@@ -1665,9 +1673,8 @@ static int slang_request_warm(struct slang_request *request) {
  * recomputed so the backend produces fresh boundary logits. */
 static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
-    if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL) return SLANG_ERR_INVALID;
-    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    int64_t guard = slang_request_decodable(request);
+    if (guard != 0) return guard;
     if (request->tree) return slang_tree_prepare_locked(request);
     slang_request_release_lease_locked(request);
     request->eval_start = 0;
@@ -1836,9 +1843,8 @@ static void slang_prefix_admit(struct slang_request *request) {
  * scheduling decision — slang still chose what to prefill and when. */
 int64_t slang_ggml_request_eval_prompt(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
-    if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL) return SLANG_ERR_INVALID;
-    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    int64_t guard = slang_request_decodable(request);
+    if (guard != 0) return guard;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     request->paged_logits_valid = 0;
 #endif
@@ -1899,9 +1905,8 @@ int64_t slang_ggml_eval_prompt(void) {
  * keeps the generation loop on the Simple side of the boundary. */
 int64_t slang_ggml_request_eval(int64_t handle, int64_t token) {
     struct slang_request *request = slang_request_get(handle);
-    if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL) return SLANG_ERR_INVALID;
-    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    int64_t guard = slang_request_decodable(request);
+    if (guard != 0) return guard;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     request->paged_logits_valid = 0;
 #endif
@@ -2799,6 +2804,9 @@ int64_t slang_ggml_request_embed_eval(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL || request->ctx == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
+    /* A tree request decodes on the shared tree context: clearing its memory
+     * here would drop every other request's cached sequences. */
+    if (request->tree) return SLANG_ERR_INVALID;
     request->embed_valid = 0;
     if (request->tok_len <= 0) return SLANG_ERR_TOKENIZE;
     int32_t trained = llama_model_n_ctx_train(request->model);
@@ -2891,6 +2899,9 @@ int64_t slang_ggml_request_rerank_tokenize(int64_t handle, int64_t query_len) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL || request->model == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
+    /* request->tok is the path a tree request's lease pins; only
+     * request_tokenize releases that lease before overwriting it. */
+    if (request->tree) return SLANG_ERR_INVALID;
     if (query_len < 0 || query_len > request->str_len) return SLANG_ERR_INVALID;
     request->embed_valid = 0;
     request->legacy_logits_valid = 0;
@@ -2933,6 +2944,7 @@ int64_t slang_ggml_request_tokens_set(int64_t handle, const uint8_t *ptr, int64_
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL || request->model == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
+    if (request->tree) return SLANG_ERR_INVALID; /* as rerank_tokenize */
     if (len < 0 || (len % 4) != 0 || (len > 0 && ptr == NULL)) return SLANG_ERR_INVALID;
     int64_t count = len / 4;
     if (count > SLANG_TOK_CAP) return SLANG_ERR_OVERFLOW;

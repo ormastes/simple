@@ -1,0 +1,172 @@
+# Focused parity specification for HIR surface-freeze scalar hash-bucket lookup,
+# precomputed preferred registry aliases, and per-surface bucketed selected-export
+# glob/projection passes.
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, hir, perf
+
+use std.spec.{describe, it, expect}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfaceBuilder,
+    ModuleSurfacesByName
+}
+use compiler.hir.hir_lowering.module_surface_types.{
+    ModuleSurfaceExportCategoryV1,
+    ModuleSurfaceExportSelectionStateV1,
+    module_surface_export_origin_index_lookup
+}
+use compiler.hir.hir_lowering.module_surface_registry_index.{
+    module_surface_registry_index,
+    module_surface_registry_index_build_count
+}
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{
+    module_surface_selected_export_lookup_v1,
+    module_surface_selected_exports_project_v1
+}
+
+fn build_parsed_registry_v1(names: [text], bodies: [text]) -> ModuleSurfacesByName:
+    expect(names.len()).to_equal(bodies.len())
+    var builder = ModuleSurfaceBuilder.new()
+    var row = 0
+    while row < names.len():
+        val path = "perf_parity/" + names[row].replace(".", "/") + ".spl"
+        val parsed = parse_and_build_module(bodies[row], path)
+        val source = SourceFile(path: path, content: bodies[row], module_name: names[row])
+        expect(builder.add_parsed(parsed, source, row).is_ok()).to_equal(true)
+        row = row + 1
+    val finished = builder.finish()
+    expect(finished.is_ok()).to_equal(true)
+    finished.unwrap()
+
+describe "HIR module surface freeze hash-bucket and selected-export parity":
+    it "builds the frozen registry hash index once per generation and preserves alias parity":
+        var builder = ModuleSurfaceBuilder.new()
+        var surfaces: [ModuleSurface] = []
+        var idx = 0
+        while idx < 16:
+            val primary = "pkg.mod_{idx}"
+            val early_alias = "a_short_{idx}"
+            val late_alias = "z_alias_{idx}"
+            expect(builder.add_indexed_name(primary, idx).is_ok()).to_equal(true)
+            expect(builder.add_indexed_name(late_alias, idx).is_ok()).to_equal(true)
+            expect(builder.add_indexed_name(early_alias, idx).is_ok()).to_equal(true)
+            surfaces = surfaces.push(ModuleSurface.empty(primary))
+            idx = idx + 1
+        builder.surfaces = surfaces
+        val registry_res = builder.finish()
+        expect(registry_res.is_ok()).to_equal(true)
+        val registry = registry_res.unwrap()
+
+        # Freeze already warmed the hash-bucket index for this generation;
+        # subsequent probes must hit in O(1) with zero additional table builds.
+        val builds_after_freeze = module_surface_registry_index_build_count()
+        var check_idx = 0
+        while check_idx < 16:
+            expect(module_surface_registry_index(registry, "pkg.mod_{check_idx}")).to_equal(check_idx)
+            expect(module_surface_registry_index(registry, "a_short_{check_idx}")).to_equal(check_idx)
+            expect(module_surface_registry_index(registry, "z_alias_{check_idx}")).to_equal(check_idx)
+            expect(module_surface_registry_index(registry, "absent_{check_idx}")).to_equal(-1)
+            # Precomputed preferred alias selects lexicographical minimum across aliases.
+            expect(registry.surfaces[check_idx].preferred_registry_name).to_equal("a_short_{check_idx}")
+            check_idx = check_idx + 1
+        expect(module_surface_registry_index_build_count()).to_equal(builds_after_freeze)
+
+        # A newly frozen generation invalidates the cached buckets cleanly.
+        val next_registry = build_parsed_registry_v1(
+            ["only_a", "only_b", "only_c", "only_d", "only_e", "only_f", "only_g", "only_h"],
+            [
+                "pub fn f0() -> i64:\n    0\n",
+                "pub fn f1() -> i64:\n    1\n",
+                "pub fn f2() -> i64:\n    2\n",
+                "pub fn f3() -> i64:\n    3\n",
+                "pub fn f4() -> i64:\n    4\n",
+                "pub fn f5() -> i64:\n    5\n",
+                "pub fn f6() -> i64:\n    6\n",
+                "pub fn f7() -> i64:\n    7\n"
+            ]
+        )
+        expect(module_surface_registry_index(next_registry, "only_h")).to_equal(7)
+        expect(module_surface_registry_index(next_registry, "pkg.mod_0")).to_equal(-1)
+        expect(module_surface_registry_index_build_count()).to_equal(builds_after_freeze + 1)
+
+    it "preserves first-occurrence-wins and bounds-check sentinels in hash lookup":
+        val s0 = ModuleSurface.empty("s0")
+        val s1 = ModuleSurface.empty("s1")
+        val synthetic = ModuleSurfacesByName(
+            surfaces: [s0, s1],
+            index_by_name: {},
+            ordered_names: ["dup", "k1", "k2", "k3", "k4", "k5", "bad_range", "dup"],
+            ordered_indices: [0, 1, 0, 1, 0, 1, 99, 1],
+            generation: 999999,
+            frozen: true
+        )
+        expect(module_surface_registry_index(synthetic, "dup")).to_equal(0)
+        expect(module_surface_registry_index(synthetic, "k5")).to_equal(1)
+        expect(module_surface_registry_index(synthetic, "bad_range")).to_equal(-1)
+        expect(module_surface_registry_index(synthetic, "missing")).to_equal(-1)
+
+    it "preserves transitive glob exports, multi-surface digests, and fail-closed row checks":
+        val names = [
+            "pkg.alpha_provider",
+            "pkg.beta_provider",
+            "pkg.mid_glob",
+            "pkg.top_facade",
+            "pkg.peer_consumer"
+        ]
+        val bodies = [
+            "pub struct AlphaItem:\n    value: i64\npub fn alpha_fn() -> i64:\n    1\nexport AlphaItem, alpha_fn\n",
+            "pub fn beta_fn() -> i64:\n    2\npub fn zeta_fn() -> i64:\n    3\nexport beta_fn, zeta_fn\n",
+            "use pkg.beta_provider.\{beta_fn as mid_beta\}\nexport alpha_provider.*\nexport mid_beta\n",
+            "export mid_glob.*\nexport beta_provider.zeta_fn\n",
+            "use .top_facade.\{alpha_fn, mid_beta, zeta_fn\}\npub fn total() -> i64:\n    alpha_fn() + mid_beta() + zeta_fn()\n"
+        ]
+        val first = build_parsed_registry_v1(names, bodies)
+        val second = build_parsed_registry_v1(names, bodies)
+
+        val alpha_sel = module_surface_selected_export_lookup_v1(first, 3, ModuleSurfaceExportCategoryV1.Function, "alpha_fn")
+        val struct_sel = module_surface_selected_export_lookup_v1(first, 3, ModuleSurfaceExportCategoryV1.Struct, "AlphaItem")
+        val beta_sel = module_surface_selected_export_lookup_v1(first, 3, ModuleSurfaceExportCategoryV1.Function, "mid_beta")
+        val zeta_sel = module_surface_selected_export_lookup_v1(first, 3, ModuleSurfaceExportCategoryV1.Function, "zeta_fn")
+
+        expect(alpha_sel.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(alpha_sel.terminal_surface).to_equal(0)
+        expect(alpha_sel.terminal_name).to_equal("alpha_fn")
+
+        expect(struct_sel.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(struct_sel.terminal_surface).to_equal(0)
+        expect(struct_sel.terminal_name).to_equal("AlphaItem")
+
+        expect(beta_sel.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(beta_sel.terminal_surface).to_equal(1)
+        expect(beta_sel.terminal_name).to_equal("beta_fn")
+
+        expect(zeta_sel.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(zeta_sel.terminal_surface).to_equal(1)
+        expect(zeta_sel.terminal_name).to_equal("zeta_fn")
+
+        val top_origins = first.surfaces[3].export_origin_index
+        expect(module_surface_export_origin_index_lookup(top_origins, "alpha_fn").owner_module).to_equal("pkg.alpha_provider")
+        expect(module_surface_export_origin_index_lookup(top_origins, "mid_beta").owner_module).to_equal("pkg.beta_provider")
+        expect(module_surface_export_origin_index_lookup(top_origins, "zeta_fn").owner_module).to_equal("pkg.beta_provider")
+
+        # Relative import resolution in peer_consumer resolves to top_facade (index 3).
+        expect(first.surfaces[4].import_target_indices).to_equal([3])
+        expect(first.surfaces[4].import_resolution_traces[0].selected).to_equal("pkg.top_facade")
+
+        # Per-surface bucketed projection preserves deterministic surface digests.
+        expect(first.selected_exports_v1.surface_digests).to_equal(second.selected_exports_v1.surface_digests)
+        expect(first.selected_exports_v1.snapshot_digest).to_equal(second.selected_exports_v1.snapshot_digest)
+
+        # Fail-closed bounds check on corrupted lookup_rows in projection.
+        var broken = second
+        var broken_exports = broken.selected_exports_v1
+        var broken_lookup_rows = broken_exports.lookup_rows
+        broken_lookup_rows[0] = -1
+        broken_exports.lookup_rows = broken_lookup_rows
+        broken_exports.surface_digests = []
+        broken.selected_exports_v1 = broken_exports
+        val project_err = module_surface_selected_exports_project_v1(broken)
+        expect(project_err.is_err()).to_equal(true)
+        expect(project_err.unwrap_err()).to_equal("selected export lookup row is invalid")

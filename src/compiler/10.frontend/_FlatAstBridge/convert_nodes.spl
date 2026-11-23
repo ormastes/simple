@@ -15,6 +15,7 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_error, parser_error_at, parser_parse_type, parser_advance, par_kind_get}
+use compiler.core.parser_expr.{expr_is_arrow_update}
 use compiler.frontend.core.lexer.{lex_init_with_path, lex_source_byte_offset, lex_source_char_offset, lexer_state_take,
     lexer_state_install}
 use compiler.core.tokens.{TOK_EOF}
@@ -180,17 +181,22 @@ fn flat_bootstrap_body_at(index: i64) -> Block:
 fn make_span() -> Span:
     Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
 
-fn flat_expr_span(idx: i64) -> Span:
-    val span_id = expr_get_span(idx)
+fn flat_span_from_id(span_id: i64) -> Span:
     if not span_is_valid(span_id):
         return make_span()
     # Expression parsers record lexer CHAR offsets; declaration and import
-    # spans (and LexSpan) are UTF-8 BYTE offsets. Normalise here, the single
-    # expression-span owner, while the source lexer is still current.
+    # spans (and LexSpan) are UTF-8 BYTE offsets. Normalise here while the
+    # source lexer is still current.
     val start = lex_source_byte_offset(span_start(span_id))
     val end = lex_source_byte_offset(span_end(span_id))
     Span(start: start, end: end, line: span_line(span_id), col: span_col(span_id),
         file: module_get_path(), length: end - start)
+
+fn flat_expr_span(idx: i64) -> Span:
+    flat_span_from_id(expr_get_span(idx))
+
+fn flat_stmt_span(idx: i64) -> Span:
+    flat_span_from_id(stmt_get_span(idx))
 
 # Lane NIL1 (convert-nodes-loud-fallback, doc/08_tracking/bug/
 # spawn_call_expr_silently_becomes_nillit_2026-07-29.md): convert_flat_expr and
@@ -1073,7 +1079,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
                 span: span
             ))
             mai = mai + 1
-        return Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span)
+        return Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span, arrow_update: expr_is_arrow_update(idx))
     if tag == EXPR_INDEX:
         val obj = convert_flat_expr(expr_get_left(idx))
         val index = convert_flat_expr(expr_get_right(idx))
@@ -2084,7 +2090,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         val nil_span = make_span()
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: nil_span)), span: nil_span)
     val tag = stmt_get_tag(idx)
-    val span = make_span()
+    val span = flat_stmt_span(idx)
     if tag <= 0:
         print "[flat-bridge] missing stmt tag idx={idx} tag={tag}"
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)

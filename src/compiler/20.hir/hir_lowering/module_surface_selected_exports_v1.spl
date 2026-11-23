@@ -235,8 +235,11 @@ pub(package) fn module_surface_selected_exports_build_v1(registry: ModuleSurface
         keys.buckets = keys.buckets.push(-1)
         bucket = bucket + 1
     val categories: [text] = ["function", "class", "struct", "enum", "trait", "type_alias", "constant", "bitfield"]
+    val surf_count = registry.surfaces.len()
+    var glob_sources: [i64] = []
+    var glob_targets: [i64] = []
     var source = 0
-    while source < registry.surfaces.len():
+    while source < surf_count:
         val surface = registry.surfaces[source]
         val authority = surface.declaration_authority_index
         var declaration = 0
@@ -261,6 +264,8 @@ pub(package) fn module_surface_selected_exports_build_v1(registry: ModuleSurface
             if surface.export_route_is_glob[route]:
                 if surface.export_route_target_indices[route] < 0:
                     return Err("selected export glob has no configured target: {surface.module_name}")
+                glob_sources = glob_sources.push(source)
+                glob_targets = glob_targets.push(surface.export_route_target_indices[route])
             else:
                 for category in categories:
                     selected_binding_add_v1(index, keys, source, 1, category, surface.export_route_locals[route])
@@ -268,24 +273,41 @@ pub(package) fn module_surface_selected_exports_build_v1(registry: ModuleSurface
         source = source + 1
     # A glob adds only names already present in its configured target. No
     # sibling scan or generated textual hint supplies route authority.
-    var changed = true
+    var changed = glob_sources.len() > 0
+    var glob_head_by_surface: [i64] = []
+    var glob_tail_by_surface: [i64] = []
+    var glob_next_row: [i64] = []
+    if changed:
+        var glob_fill = 0
+        while glob_fill < surf_count:
+            glob_head_by_surface = glob_head_by_surface.push(-1)
+            glob_tail_by_surface = glob_tail_by_surface.push(-1)
+            glob_fill = glob_fill + 1
+    var bucketed_up_to: i64 = 0
     while changed:
         changed = false
         val prior_count = index.names.len()
-        source = 0
-        while source < registry.surfaces.len():
-            val surface = registry.surfaces[source]
-            var route = 0
-            while route < surface.export_route_sources.len():
-                if surface.export_route_is_glob[route]:
-                    val target = surface.export_route_target_indices[route]
-                    var row = 0
-                    while row < prior_count:
-                        if index.source_surfaces[row] == target:
-                            selected_binding_add_v1(index, keys, source, 1, index.categories[row], index.names[row])
-                        row = row + 1
-                route = route + 1
-            source = source + 1
+        while bucketed_up_to < prior_count:
+            val row_surf = index.source_surfaces[bucketed_up_to]
+            glob_next_row = glob_next_row.push(-1)
+            if row_surf >= 0 and row_surf < surf_count:
+                val prev_tail = glob_tail_by_surface[row_surf]
+                if prev_tail < 0:
+                    glob_head_by_surface[row_surf] = bucketed_up_to
+                else:
+                    glob_next_row[prev_tail] = bucketed_up_to
+                glob_tail_by_surface[row_surf] = bucketed_up_to
+            bucketed_up_to = bucketed_up_to + 1
+        var glob_idx = 0
+        while glob_idx < glob_sources.len():
+            val glob_src = glob_sources[glob_idx]
+            val target = glob_targets[glob_idx]
+            if target >= 0 and target < surf_count:
+                var row = glob_head_by_surface[target]
+                while row >= 0:
+                    selected_binding_add_v1(index, keys, glob_src, 1, index.categories[row], index.names[row])
+                    row = glob_next_row[row]
+            glob_idx = glob_idx + 1
         changed = index.names.len() != prior_count
     var row = 0
     while row < index.names.len():
@@ -516,10 +538,38 @@ pub fn module_surface_selected_export_hop_v1(registry: ModuleSurfacesByName, sel
 pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfacesByName) -> Result<(), text>:
     val index = registry.selected_exports_v1
     if not selected_arrays_aligned_v1(index): return Err("selected export backing arrays are misaligned")
+    val surf_count = registry.surfaces.len()
+    var proj_head_by_surface: [i64] = []
+    var proj_tail_by_surface: [i64] = []
+    var proj_next_pos: [i64] = []
+    if surf_count > 0:
+        var fill_surf = 0
+        while fill_surf < surf_count:
+            proj_head_by_surface = proj_head_by_surface.push(-1)
+            proj_tail_by_surface = proj_tail_by_surface.push(-1)
+            fill_surf = fill_surf + 1
+        val lookup_len = index.lookup_rows.len()
+        var lookup_pos = 0
+        while lookup_pos < lookup_len:
+            val check_row = index.lookup_rows[lookup_pos]
+            if check_row < 0 or check_row >= index.source_surfaces.len():
+                return Err("selected export lookup row is invalid")
+            proj_next_pos = proj_next_pos.push(-1)
+            val row_surf = index.source_surfaces[check_row]
+            if row_surf >= 0 and row_surf < surf_count:
+                val prev_pos = proj_tail_by_surface[row_surf]
+                if prev_pos < 0:
+                    proj_head_by_surface[row_surf] = lookup_pos
+                else:
+                    proj_next_pos[prev_pos] = lookup_pos
+                proj_tail_by_surface[row_surf] = lookup_pos
+            lookup_pos = lookup_pos + 1
     var surface_complete: [bool] = []
     var source = 0
-    while source < registry.surfaces.len():
+    while source < surf_count:
         val surface = registry.surfaces[source]
+        val prior_origin_index = surface.export_origin_index
+        val prior_origins = surface.export_origins
         surface.export_origin_index = module_surface_export_origin_index_empty()
         surface.export_origins = {}
         var selected_names: Dict<text, i64> = {}
@@ -549,9 +599,10 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
             raw_route = raw_route + 1
         # Sorted keys make declaration ordering irrelevant. Edge order preserves
         # exact source item positions, which are part of route semantics.
-        for row in index.lookup_rows:
-            if row < 0 or row >= index.source_surfaces.len(): return Err("selected export lookup row is invalid")
-            if index.source_surfaces[row] != source: continue
+        var lookup_cursor = proj_head_by_surface[source]
+        while lookup_cursor >= 0:
+            val row = index.lookup_rows[lookup_cursor]
+            lookup_cursor = proj_next_pos[lookup_cursor]
             if not selected_window_valid_v1(index, row): return Err("selected export edge window is invalid")
             digest = module_surface_semantic_mix(digest, "role", "{index.roles[row]}")
             digest = module_surface_semantic_mix(digest, "category", index.categories[row])
@@ -603,6 +654,29 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
             val row = selected_names[name]
             val terminal = registry.surfaces[index.terminal_surfaces[row]]
             module_surface_export_origin_index_put(surface.export_origin_index, name, terminal.preferred_registry_name, index.terminal_names[row], "selected-typed-v1")?
+        # Preserve non-comment pre-freeze origins (e.g. explicit synthetic entries)
+        # while always dropping "generated-comment" hints and unresolved/incompatible exports.
+        var prior_row = 0
+        while prior_row < prior_origin_index.names.len() and prior_row < prior_origin_index.owner_modules.len() and prior_row < prior_origin_index.source_names.len() and prior_row < prior_origin_index.resolution_kinds.len():
+            val prior_name = prior_origin_index.names[prior_row]
+            val prior_kind = prior_origin_index.resolution_kinds[prior_row]
+            if prior_kind != "generated-comment" and not selected_names.contains_key(prior_name) and not incompatible_names.contains_key(prior_name) and module_surface_export_origin_index_position(surface.export_origin_index, prior_name) < 0:
+                module_surface_export_origin_index_put(
+                    surface.export_origin_index,
+                    prior_name,
+                    prior_origin_index.owner_modules[prior_row],
+                    prior_origin_index.source_names[prior_row],
+                    prior_kind)?
+            prior_row = prior_row + 1
+        for prior_name in prior_origins.keys():
+            val prior_origin = prior_origins[prior_name]
+            if prior_origin.resolution_kind != "generated-comment" and not selected_names.contains_key(prior_name) and not incompatible_names.contains_key(prior_name) and module_surface_export_origin_index_position(surface.export_origin_index, prior_name) < 0:
+                module_surface_export_origin_index_put(
+                    surface.export_origin_index,
+                    prior_name,
+                    prior_origin.owner_module,
+                    prior_origin.source_name,
+                    prior_origin.resolution_kind)?
         surface.export_origins = surface.export_origin_index.origins
         index.surface_digests = index.surface_digests.push(module_surface_semantic_finish(digest))
         surface_complete.push(complete)
