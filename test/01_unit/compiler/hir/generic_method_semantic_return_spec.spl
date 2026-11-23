@@ -1,6 +1,7 @@
 """Owned generic methods retain semantic returns independently of physical ABI."""
 # @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
 use std.spec.*
+use std.env.variables.{env_get, env_has, env_set, env_unset}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -12,14 +13,28 @@ describe "generic method semantic return publication":
     it "publishes the owned zero-method-binder result and preserves an ordinary signature":
         val path = "src/rti_generic_method/provider.spl"
         val source = "class Store<T>:\n    values: [T]\nimpl Store<T>:\n    fn get(node: i64) -> Result<T, text>:\n        Err(\"empty\")\nfn ordinary() -> text:\n    \"unchanged\"\n"
+        # Bootstrap parsing intentionally omits non-entry modules. Bind this
+        # actual fixture as the entry, as bootstrap_declaration_origin_spec does.
+        val had_entry = env_has("SIMPLE_NATIVE_BUILD_ENTRY")
+        val prior_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val entry_bound = env_set("SIMPLE_NATIVE_BUILD_ENTRY", path)
         val ast = parse_full_frontend(source, path, path, Logger(level: 0))
         var lowering = HirLowering.with_filename(path)
         val bootstrap = lowering.ambient_bootstrap_enabled()
         val hir = lowering.lower_module(ast)
+        val restored = if had_entry: env_set("SIMPLE_NATIVE_BUILD_ENTRY", prior_entry)
+            else: env_unset("SIMPLE_NATIVE_BUILD_ENTRY")
+        expect(entry_bound).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(ast.functions.len()).to_be_greater_than(0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.functions.len()).to_be_greater_than(0)
+        print "generic-method-proof parsed={ast.functions.len()} impls={ast.impls.len()} lowered={hir.functions.len()} bootstrap={bootstrap}"
         var checked_methods = 0
         var checked_ordinary = 0
         for function in hir.functions.values():
             val symbol = hir.symbols.get_symbol_raw(function.symbol.id).unwrap()
+            print "generic-method-proof function={function.name} symbol={symbol.name}"
             if symbol.name.ends_with("Store::get"):
                 checked_methods = checked_methods + 1
                 expect(function.type_params.len()).to_equal(0)
