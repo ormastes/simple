@@ -4127,3 +4127,15 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - seal blocks once all MIR predecessors are emitted (~200 ms);
   - parallel translation, which needs callees and data pre-declared;
   - HIR Pass 0.5b import-type loads (~370 ms).
+
+## 2026-11-24 — form-control text keeps the line's pen (forms-media 1x 1.11 -> 0.88)
+
+- **Measure the text-only residual on a control fixture before blaming glyph shape.** forms-media 1x's top regions (input `Simple`, select `Alpha`, textarea `Editable text`, the labels after checkbox/radio) were pen and size bugs, not raster bugs: plain `lllll` on a line matched Chrome exactly while the same run inside or after a control did not.
+- **Three causes, one per AC in `form_control_text_pen_chrome159_spec`:**
+  - `inline_item_width_err_milli` returned UNKNOWN for every atomic box, so the label after a 13 px checkbox/radio lost the line's fraction. A default checkbox/radio is a whole box, so its delta is 0.
+  - Control text (input value, a select's option `#text`, textarea `#text`) painted from the integer box column. The inline loop now records the control's `run_pen_origin` at k=1 in the per-node pen table. The input value command and the text children of select/textarea carry it as `pen-origin-milli`.
+  - The input value command had no `font-size-milli`, so `_lcd_apply_pen_phases` staged 13 px pens against 13.333 px advances, and every phase was silently dropped. Before this fix, a pen origin on that command changed **zero bytes**. When a pen-origin probe does nothing, trace `size_milli`/`pens_known` in `_lcd_apply_pen_phases` first.
+- **Open (not fixed):**
+  - At k=4, giving the input value `font-size-milli` puts its first gray ink row at 46 against Chrome's 45 (`form_control_paint_chrome159_spec` AC-11). The prop is therefore scoped to 1x. The gray fractional-size glyph's vertical placement is a separate bug.
+  - Multi-line textarea `_line{n}` commands carry no origin.
+  - The 16px round-glyph LCD residual (~7 px per round glyph on a whole-px grid; straight glyphs are exact) is analysed but unfixed. A per-point IUP model of weak points only moved a 62-glyph grid from 476 to 458 px.
