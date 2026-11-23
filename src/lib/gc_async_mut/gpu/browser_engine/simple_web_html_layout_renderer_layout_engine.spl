@@ -20,6 +20,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_device_dy_rest_add}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{button_device_extra_w}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_auto_content_w}
 
@@ -831,6 +832,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
     float_ctx_reset()
     text_first_line_dx_reset()
     text_pen_origin_reset()
+    box_line_start_err_reset()
     text_line_boxes_reset()
     text_device_dy_reset()
     box_device_top_reset()
@@ -1375,6 +1377,47 @@ fn grid_stretched_item_style(node: HNode, authored: Style, resolved: Style, oute
     if style_h < 1:
         style_h = 1
     style_with_height(resolved, style_h)
+
+# Whole px nearest `milli`, halves up (Chrome's pixel snapping).
+fn snap_milli_px(milli: i32) -> i32:
+    val shifted = milli + 500
+    if shifted >= 0: shifted / 1000 else: 0 - ((999 - shifted) / 1000)
+
+# Sub-pixel y (milli CSS px) of box `i`'s own top: its block cursor's start
+# residual at k == 1, the device top it paints with at k > 1.
+fn absolute_parent_y_frac(nodes: [HNode], i: i32, origin_frac: i32) -> i32:
+    val k = layout_device_scale()
+    if k > 1: box_device_top_inherited_milli(nodes, i) / k else: origin_frac
+
+# Chrome keeps an absolute box's insets in LayoutUnits: it paints the box from
+# round(k x exact edge) device px and starts the box's text at the exact pen
+# (`left:40.5px` paints the background from x 41, its `l` at pen 40.5).
+# `absolute_child_x` / `_y` placed box `c` at whole px (ax, ay); this adds
+# the sub-pixel parts (`absolute_child_x_frac_milli` / `_y_`), returns the
+# snapped [x, y] and records what the box's own layout continues from: the x
+# remainder as its line-start pen error, the y remainder as its block
+# cursor's start residual and, at device scale k > 1, its device x shift and
+# device top. A box at its static y (`static_y`) keeps ay and records no y.
+fn absolute_box_snap(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32, cst: Style, ax: i32, ay: i32, absolute_w: i32, parent_x_err: i32, parent_y_frac: i32, static_y: bool) -> [i32]:
+    val n = nodes.len() as i32
+    val k = layout_device_scale()
+    val auto_w_frac = if cst.width_px == 0 and not cst.width_zero: flex_item_text_frac_delta_milli_px(nodes, styles, child_index, c, cst, absolute_w) else: 0
+    val fx = absolute_child_x_frac_milli(nodes, styles, c, cst, auto_w_frac, parent_x_err)
+    val sx = snap_milli_px(fx)
+    var err_x = fx - sx * 1000
+    if k > 1:
+        # The box moves to its device column; its text keeps what is left.
+        val dx = box_device_top_px(err_x * k)
+        box_device_dx_record(n, c, dx)
+        err_x = (err_x * k - dx * 1000) / k
+    box_line_start_err_record(n, c, err_x)
+    if static_y:
+        return [ax + sx, ay]
+    val fy = absolute_child_y_frac_milli(nodes, styles, c, cst, parent_y_frac)
+    val sy = snap_milli_px(fy)
+    g_origin_frac_milli = fy - sy * 1000
+    box_device_top_record(n, c, g_origin_frac_milli)
+    [ax + sx, ay + sy]
 
 fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], st: Style) -> LayoutResult:
     var out_bx = bx
@@ -2551,7 +2594,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val ay = absolute_child_y(nodes, styles, fc_wrap, y, st, nodes[fc_wrap], style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0), absolute_containing_h, viewport_h)
                     val absolute_w = absolute_outer_width(nodes, styles, child_index, fc_wrap, st, nodes[fc_wrap], cst, absolute_containing_w)
                     val resolved_cst = absolute_child_style(st, cst, absolute_containing_w, absolute_containing_h, nodes[fc_wrap].tag)
-                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                    val abs_xy = absolute_box_snap(nodes, styles, child_index, fc_wrap, cst, ax, ay, absolute_w, box_line_start_err_at(i) as i32, absolute_parent_y_frac(nodes, i, origin_frac), false)
+                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, abs_xy[0], abs_xy[1], absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -2911,7 +2955,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val ay = absolute_child_y(nodes, styles, fc, y, st, nodes[fc], style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0), absolute_containing_h, viewport_h)
                 val absolute_w = absolute_outer_width(nodes, styles, child_index, fc, st, nodes[fc], cst, absolute_containing_w)
                 val resolved_cst = absolute_child_style(st, cst, absolute_containing_w, absolute_containing_h, nodes[fc].tag)
-                val child = layout_with_style(nodes, styles, child_index, fc, ax, ay, absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                val abs_xy = absolute_box_snap(nodes, styles, child_index, fc, cst, ax, ay, absolute_w, box_line_start_err_at(i) as i32, absolute_parent_y_frac(nodes, i, origin_frac), false)
+                val child = layout_with_style(nodes, styles, child_index, fc, abs_xy[0], abs_xy[1], absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -3279,7 +3324,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val ay = absolute_child_y(nodes, styles, flex_c, y, st, nodes[flex_c], style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0), absolute_containing_h, viewport_h)
                 val absolute_w = absolute_outer_width(nodes, styles, child_index, flex_c, st, nodes[flex_c], cst, absolute_containing_w)
                 val resolved_cst = absolute_child_style(st, cst, absolute_containing_w, absolute_containing_h, nodes[flex_c].tag)
-                val child = layout_with_style(nodes, styles, child_index, flex_c, ax, ay, absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+                val abs_xy = absolute_box_snap(nodes, styles, child_index, flex_c, cst, ax, ay, absolute_w, box_line_start_err_at(i) as i32, absolute_parent_y_frac(nodes, i, origin_frac), false)
+                val child = layout_with_style(nodes, styles, child_index, flex_c, abs_xy[0], abs_xy[1], absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
                 out_bw = child.bw
@@ -3430,6 +3476,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # cursor stays at (`inline_err_x`, line `inline_err_y`); see inline_pen_err.
     var inline_err_milli: i64 = 0
     var inline_err_x = -1
+    # Error every line of this box starts with (an auto table cell: its
+    # column edge is fractional in Chrome).
+    val line_start_err: i64 = box_line_start_err_at(i)
     var inline_err_y = -1
     var inline_line_h = 0
     var inline_baseline_nodes: [i32] = []
@@ -3499,8 +3548,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # `top` and `bottom` both auto: the static position (CSS 2.2 10.6.4),
             # i.e. the flow cursor after the pending sibling margin. ponytail:
             # block flow only; an inline run and position:fixed keep the old y.
+            # `top_px` of an auto top is the box's translation (decl_apply).
             val static_y = cst.top_auto and cst.bottom_px < 0 and not cst.position_fixed and not in_inline_run
-            val ay = if static_y: cy + cursor_advance_px(cy_frac, prev_margin_b) + absolute_margin_t(style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0)) else: absolute_child_y(nodes, styles, c, y, st, nodes[c], style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0), absolute_containing_h, viewport_h)
+            val ay = if static_y: cy + cursor_advance_px(cy_frac, prev_margin_b) + absolute_margin_t(style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0)) + cst.top_px else: absolute_child_y(nodes, styles, c, y, st, nodes[c], style_with_resolved_percent_margins(cst, iw + st.pad_l + st.pad_r, 0), absolute_containing_h, viewport_h)
             var absolute_w = absolute_outer_width(nodes, styles, child_index, c, st, nodes[c], cst, absolute_containing_w)
             var resolved_cst = absolute_child_style(st, cst, absolute_containing_w, absolute_containing_h, nodes[c].tag)
             if st.display == "inline" and not cst.position_fixed and replaced_default_box_w(nodes[c].tag) > 0:
@@ -3532,7 +3582,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 )
                 if cst.left_auto and cst.right_px >= 0:
                     ax = abs_cb_x + abs_cb_w - cst.right_px - absolute_w
-            val child = layout_with_style(nodes, styles, child_index, c, ax, ay, absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
+            val abs_xy = absolute_box_snap(nodes, styles, child_index, c, cst, ax, ay, absolute_w, box_line_start_err_at(i) as i32, absolute_parent_y_frac(nodes, i, origin_frac), static_y)
+            val child = layout_with_style(nodes, styles, child_index, c, abs_xy[0], abs_xy[1], absolute_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
             out_bx = child.bx
             out_by = child.by
             out_bw = child.bw
@@ -4021,7 +4072,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     text_starts_with_collapsible_space(nodes[c].text_data)
                 ):
                     lead_charged = true
-                    val lead_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli)
+                    val lead_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
                     val lead_space = resolved_space_advance(
                         cst, text_codepoints(nodes[c].text_trimmed)
                     )
@@ -4147,7 +4198,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # content before it: `<span>ll</span> l` puts the `l` at
                 # 12.5547, this loop at 13). Left-aligned LTR lines only: an
                 # aligned line moves by a whole-pixel free space.
-                val run_pen_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli)
+                val run_pen_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
                 val run_pen_origin = if (
                     run_pen_err != INLINE_PEN_ERR_UNKNOWN and
                     text_run_aligns_line_left(st) and text_run_aligns_line_left(cst)
@@ -4321,7 +4372,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_baseline_margin_bs = inline_baseline_margin_bs.push(
                         vertical_margin_px_in(cst, false, viewport_h, iw)
                     )
-                val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli)
+                val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
                 val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
                 inline_x = (
                     inline_x + inline_margin_l + out_bw[c] +
@@ -4473,6 +4524,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var trial_end_frac = 0
             var trial_end_valid = false
             val cy_before_beside = cy
+            # An in-flow block starts its lines at this box's content-edge
+            # fraction (`<p>` in an abspos box at 200.5 px paints from 200.5).
+            box_line_start_err_record(nodes.len() as i32, c, line_start_err as i32)
             if float_ctx_count() > g_float_base and cy < g_float_max_y1 and float_ctx_establishes_bfc(nodes, styles, c, cst):
                 val beside_x0 = child_x
                 val beside_w0 = child_w
