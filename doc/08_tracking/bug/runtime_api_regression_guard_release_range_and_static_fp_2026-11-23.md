@@ -1,6 +1,6 @@
 # runtime-api-regression push gate: false FAIL on release/1.0.0 PRs (2026-11-23)
 
-Status: open (defect 2 fixed, verification-pending; defect 1 open). Gate: `push-runtime-api-regression` (`scripts/check/check-runtime-api-regression-push.shs`).
+Status: open (defects 1 and 2 fixed, verification-pending). Gate: `push-runtime-api-regression` (`scripts/check/check-runtime-api-regression-push.shs`).
 
 ## Symptom
 Pushing `work/mu1-20261122` (PR #10783, merged as `c3bb41538e4` into release/1.0.0)
