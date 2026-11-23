@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import re
+from mir_phase2_restore import restore_cache
 
 SOURCE = 'ce231b5b898d797c98d44a9b59a4859a7d792a7b'
 PARENT = 'ed5e03685a3c9233395306f6fcb2c7c5fa9a6ada36fc1158c20e6d3be91fcf73'
@@ -22,14 +24,16 @@ def main():
     assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip() == SOURCE
     subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', 'src', 'config'], cwd=source, check=True)
     parent.chmod(0o755)
+    reuse = restore_cache(source, evidence)
     available = int(next(row.split()[1] for row in Path('/proc/meminfo').read_text().splitlines() if row.startswith('MemAvailable:')))
     cap = available * 3 // 4
-    assert cap >= 10*1024*1024, 'insufficient real headroom for the two-worker canonical route'
+    assert cap >= 10*1024*1024, 'insufficient real headroom for the single-worker canonical route'
     env = {key:value for key,value in os.environ.items() if not key.startswith('SIMPLE_')}
     env.update(SIMPLE_BOOTSTRAP_COMPILER=str(parent), SIMPLE_BOOTSTRAP_COMPILER_PHASE='1',
                SIMPLE_PROJECT_ROOT=str(source), SIMPLE_LIB=str(source/'src'),
-               SIMPLE_NATIVE_FILE_TIMING='1', SIMPLE_HOST_MAX_THREADS='2',
-               SIMPLE_HOST_MAX_BUILD_JOBS='2', SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS='2',
+               SIMPLE_NATIVE_FILE_TIMING='1', SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY='1',
+               SIMPLE_FILE_WORKER_BATCH='4', SIMPLE_HOST_MAX_THREADS='1',
+               SIMPLE_HOST_MAX_BUILD_JOBS='1', SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS='1',
                SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=str(cap),
                SIMPLE_PROCESS_TREE_RSS_CAP_KIB=str(cap),
                SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=str(cap),
@@ -38,7 +42,7 @@ def main():
     result = {'source':SOURCE, 'parent_sha256':PARENT, 'parent_run':45254614898,
               'parent_artifact':14858799081, 'admission':'none', 'status':'FAILED',
               'available_kib':available, 'cap_kib':cap, 'fraction':'75%',
-              'threads':2, 'phase':2, 'fallback':'none; exact absolute parent',
+              'threads':1, 'batch':4, 'prior_cache':reuse, 'phase':2, 'fallback':'none; exact absolute parent',
               'source_runtime_pairing':'candidate Hello establishes only the exercised path'}
     (evidence/'lineage.json').write_text(json.dumps(result, indent=2))
     (evidence/'environment.json').write_text(json.dumps({key:value for key,value in env.items() if key.startswith('SIMPLE_')}, indent=2))
@@ -57,7 +61,9 @@ def main():
 
     try:
         result['stage'] = 'canonical-phase2'
-        owned('phase2', ['sh', 'scripts/bootstrap/build-next-phase-ci.shs', 'linux-x86_64', '2'], 14400, cap, env)
+        build_argv = ['sh', 'scripts/bootstrap/build-next-phase-ci.shs', 'linux-x86_64', '1']
+        assert build_argv[-1] == '1'
+        owned('phase2', build_argv, 14400, cap, env)
         expected_parent_line = f'Building phase 2 with {parent} (phase 1)'
         assert expected_parent_line in (evidence/'phase2.stdout').read_text(errors='replace').splitlines(), 'canonical owner selected a different compiler'
         result['canonical_parent_line'] = expected_parent_line
@@ -71,6 +77,8 @@ def main():
         hello.mkdir()
         (hello/'hello.spl').write_text('fn main():\n    print "phase-ladder-2-ok"\n')
         hello_env = env.copy()
+        hello_env.pop('SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY', None)
+        hello_env.pop('SIMPLE_FILE_WORKER_BATCH', None)
         hello_env['SIMPLE_BOOTSTRAP_WHOLE_PROGRAM'] = '1'
         hello_env['SIMPLE_CACHE'] = str(hello/'cache')
         hello_env['SIMPLE_NATIVE_BUILD_CACHE_DIR'] = str(hello/'cache')
@@ -83,6 +91,22 @@ def main():
     except Exception as error:
         result['error'] = str(error)
     finally:
+        observed = {'configured_threads':1, 'configured_batch':4,
+                    'scope':'observed log records, not inferred successful admission',
+                    'scc_note':'picked count may exceed batch for an indivisible SCC',
+                    'route_lines':[], 'unit_specs':[], 'picked_counts':[]}
+        for stream in ['phase2.stdout', 'phase2.stderr']:
+            log = evidence/stream
+            if not log.exists(): continue
+            for line in log.read_text(errors='replace').splitlines():
+                if '[coordinator-route]' in line or 'admission worker estimate=' in line or 'worker_count=' in line:
+                    if len(observed['route_lines']) < 96: observed['route_lines'].append(line[:1000])
+                match = re.search(r'unit=([^ ]+)', line)
+                if match and match[1] not in observed['unit_specs'] and len(observed['unit_specs']) < 512:
+                    observed['unit_specs'].append(match[1])
+                match = re.search(r'\[file-worker\] unit picked=(\d+)', line)
+                if match: observed['picked_counts'].append(int(match[1]))
+        (evidence/'observed-topology.json').write_text(json.dumps(observed, indent=2))
         with (evidence/'scv-capture.log').open('wb') as out:
             capture = subprocess.run(['python3', 'scripts/bootstrap/capture-ladder-scv-evidence.py', str(source), str(evidence/'scv-failure')], cwd=source, stdout=out, stderr=subprocess.STDOUT)
         result['scv_capture_exit'] = capture.returncode

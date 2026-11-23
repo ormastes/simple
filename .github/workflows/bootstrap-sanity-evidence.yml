@@ -1,4 +1,4 @@
-name: Pinned candidate Phase2 acceptance
+name: Pinned candidate single-worker Phase2 continuation
 on:
   workflow_dispatch:
 permissions:
@@ -58,6 +58,27 @@ jobs:
           run-id: '45254614898'
           github-token: ${{ github.token }}
           path: source/build/ladder/in
+      - name: Verify and retain prior resource-failed cache artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts/14864330203 > intake/prior-artifact.json
+          gh api repos/${{ github.repository }}/actions/artifacts/14864330203/zip > intake/prior.zip
+          echo 'ca449818e913fa64b1abcd0b7af20b03305c5176c5c00d9a6c1976b8dbb5eb8c  intake/prior.zip' | sha256sum --check --strict
+          python - <<'PY'
+          import json, zipfile
+          from pathlib import Path
+          a=json.loads(Path('intake/prior-artifact.json').read_text())
+          assert a['workflow_run']['id']==45262236182 and not a['expired']
+          assert a['workflow_run']['head_sha']=='ffd10f554a143586753f4c9b8fb253f42cf41fb3'
+          with zipfile.ZipFile('intake/prior.zip') as z:
+              assert sum(i.file_size for i in z.infolist()) < 200*1024*1024
+              for i in z.infolist():
+                  p=Path(i.filename)
+                  assert not p.is_absolute() and '..' not in p.parts
+                  assert (i.external_attr >> 16) & 0o170000 != 0o120000
+              z.extractall('intake/prior')
+          PY
       - name: Canonical Linux toolchain and bounded swap
         run: |
           sudo apt-get update -qq
@@ -69,12 +90,12 @@ jobs:
           sudo chmod 600 /mnt/candidate-phase2.swap
           sudo mkswap /mnt/candidate-phase2.swap
           sudo swapon /mnt/candidate-phase2.swap
-      - name: One canonical Phase2 with an absolute hash-checked parent
+      - name: One canonical single-worker Phase2 with verified cache candidates
         run: python control/scripts/check/mir-phase2-pinned-continuation.py
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: pinned-candidate-phase2-${{ github.run_id }}
+          name: pinned-candidate-phase2-single-worker-${{ github.run_id }}
           path: |
             intake
             source/build/ladder/evidence
