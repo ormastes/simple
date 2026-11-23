@@ -3796,3 +3796,19 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   `nb_vkclip_20261123`, sha256 `e7c05e55…f68e`. The recipe is in
   `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
   (2026-11-23, later).
+
+## 2026-11-23 — LCD glyphs through Skia's path route (glyph raster shape, 16 px)
+
+- **Finding (Skia source `~/skia-n2/skia`, checked against Chrome 159 pixels):** Chrome draws LCD glyphs as hinted PATHS, not FreeType LCD bitmaps. `SkScalerContext::GenerateImageFromPath` scales the path 4x in x into an A8 mask; `SkScan::AntiFillPath` always takes the analytic AA (`AAAFillPath`), i.e. exact area per quarter-pixel sample; `pack4xHToMask` turns each 4 samples into R,G,B with one 12-tap FIR per channel (sum 272, /256, clamp 255); the SkMaskGamma preblend and the 5-bit LCD16 pack follow.
+- **Change (`sfnt_glyf.spl`, `lcd_s32_tables.spl`):**
+  - `sfnt_lcd_outline_raster`: exact-area accumulation (`_lcd_area_*`, font-rs signed area/cover) into 4 samples per pixel, then `_SFNT_LCD_FIR` (Skia's table). Replaces 4 point-sampled sub-rows + a fitted 5-tap FIR on 1/3-px bins.
+  - Line ends snap to a quarter row (`SkAnalyticEdge::SnapY`). Quads are chopped at their y extremum and cut into `2^shift` chords from Skia's flatness rule (`diff_to_shift`), inner chord ends snapped. Sixteen fixed chords with snapped ends drew round tops a step heavy.
+  - `_hint_commands` puts every hinted point on the 26.6 grid (x too): the 16 px `i` stem (136..316 units) and `l` stem (138..318) are both 69/64..159/64 px in Chrome.
+  - `_hstem_knots`: the stem origin is `anchor.pos + (opos - anchor.opos)` in rounded 26.6 integers (FreeType), not one float shift rounded once. That tie decided the 16 px `5` bowl a whole row high.
+  - Preblend: Skia's `SkTMaskGamma_build_correcting_lut` (3 luminance bits, gamma 1.2, contrast 0.2125). It replaces the fitted exponent + cubic lift, which compensated the old raster. Contrast fitted jointly on the `l` stem (4 phases) and the `n` stems, 0 of 90 samples off. 0.2 leaves 9 one step light.
+- **Evidence:** `glyph_raster_shape_chrome159_spec` 0/3 -> 3/3. 30-glyph fixture (`a s o q g e c d b p u 0-9 i l n m h R S O Q`, phase 0, 16 px): 687 -> 328 mismatching px, ink ratio 0.987 -> 0.999. Same fixture at 11 px x k=4 (44 device px, LCD): 4524 -> 4371. 16 px x k=4 (64 device px, grayscale) is byte-identical. `small_text_vertical_hint` AC-3 is re-pinned to Chrome's measured `6f7777` / `f7ffff`. The old pins were the engine's own values, and the spec text already named Chrome's.
+- **Traps:**
+  - FreeType 2.13.2 (system `libfreetype.so.6`, scratch probe) is NOT Chrome's oracle. Its ClearType filter fits the `l` stem but its gray raster and filter are wrong for every round glyph: 742 px on the fixture, worse than before.
+  - Supersampled AA (`SkScan_AntiPath`) does not fit the `n` stems. Only the analytic model fits.
+  - Abs-pos `left: 4.25px` text renders at phase 0 here (layout claim filed). Build phase fixtures with inline runs or letter-spacing.
+- **Open:** round TOP arcs. The `a` top-arc underside at 16 px is `afafa7` in Chrome and `bfbfbf` here. The 18.72 px `m` hump tops are too heavy, in base too. The inner edge hints to 7.875 px like FreeType. Chrome's sits slightly lower, likely skrifa's autohinter.
