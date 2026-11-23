@@ -1332,6 +1332,7 @@ pub(crate) fn build_use_map_from_ast(
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 ) -> std::collections::HashMap<String, String> {
     let mut use_map = std::collections::HashMap::new();
+    let mut scan = UseMapScan::default();
 
     super::discovery::visit_ast_nodes(&ast.items, &mut |item| match item {
         simple_parser::ast::Node::UseStmt(use_stmt) => {
@@ -1341,6 +1342,7 @@ pub(crate) fn build_use_map_from_ast(
                 all_mangled,
                 re_exports,
                 &mut use_map,
+                &mut scan,
             );
         }
         simple_parser::ast::Node::ExportUseStmt(export_use) => {
@@ -1350,11 +1352,12 @@ pub(crate) fn build_use_map_from_ast(
                 all_mangled,
                 re_exports,
                 &mut use_map,
+                &mut scan,
             );
         }
         simple_parser::ast::Node::MultiUse(multi_use) => {
             for (path, target) in &multi_use.imports {
-                collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map);
+                collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map, &mut scan);
             }
         }
         _ => {}
@@ -1369,6 +1372,7 @@ fn collect_use_imports(
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     use_map: &mut std::collections::HashMap<String, String>,
+    scan: &mut UseMapScan,
 ) {
     let segments: Vec<&str> = path_segments
         .iter()
@@ -1386,8 +1390,9 @@ fn collect_use_imports(
             // of exposing the ambiguous bare `env_get` name.
             let mut module_segments = segments.clone();
             module_segments.push(name.as_str());
-            for raw_name in all_mangled.keys().filter(|raw_name| !raw_name.contains('.')) {
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &module_segments, all_mangled, re_exports) {
+            let module_scope = StrictImportScope::new(&module_segments, re_exports);
+            for raw_name in scan.module_keys(&module_scope, name, all_mangled) {
+                if let Some(mangled) = module_scope.resolve(&raw_name, all_mangled) {
                     use_map.insert(format!("{name}.{raw_name}"), mangled);
                 }
             }
@@ -1405,7 +1410,15 @@ fn collect_use_imports(
             // all_mangled, so the prefix loop above misses it.  Walk all bare (non-dotted)
             // names and use resolve_import_name_strict with the current use-path segments
             // to find ones that uniquely belong to this module.
-            for (raw_name, candidates) in all_mangled.iter() {
+            // Every Single item of one `use a.b.{x, y}` group shares these segments and
+            // the scan only fills absent keys, so a repeat pass is a no-op.
+            let use_scope = StrictImportScope::new(&segments, re_exports);
+            let bare_names = if scan.bare_scanned.insert(use_scope.joined.clone()) {
+                Some(all_mangled)
+            } else {
+                None
+            };
+            for (raw_name, candidates) in bare_names.into_iter().flatten() {
                 // Skip dotted names (already handled above) and names already resolved.
                 if raw_name.contains('.') || use_map.contains_key(raw_name) {
                     continue;
@@ -1415,7 +1428,7 @@ fn collect_use_imports(
                 if candidates.len() <= 1 {
                     continue;
                 }
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
+                if let Some(mangled) = use_scope.resolve(raw_name, all_mangled) {
                     use_map.insert(raw_name.clone(), mangled);
                 }
             }
@@ -1431,20 +1444,22 @@ fn collect_use_imports(
             // doc/08_tracking/bug/jit_lowering_module_alias_and_panic_2026-07-02.md
             let mut module_segments = segments.clone();
             module_segments.push(name.as_str());
-            for raw_name in all_mangled.keys().filter(|raw_name| !raw_name.contains('.')) {
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &module_segments, all_mangled, re_exports) {
+            let module_scope = StrictImportScope::new(&module_segments, re_exports);
+            for raw_name in scan.module_keys(&module_scope, name, all_mangled) {
+                if let Some(mangled) = module_scope.resolve(&raw_name, all_mangled) {
                     use_map.insert(format!("{alias}.{raw_name}"), mangled);
                 }
             }
         }
         simple_parser::ast::ImportTarget::Group(items) => {
             for item in items {
-                collect_use_imports(path_segments, item, all_mangled, re_exports, use_map);
+                collect_use_imports(path_segments, item, all_mangled, re_exports, use_map, scan);
             }
         }
         simple_parser::ast::ImportTarget::Glob => {
+            let glob_scope = StrictImportScope::new(&segments, re_exports);
             for raw_name in all_mangled.keys().filter(|name| !name.starts_with('_')) {
-                if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
+                if let Some(mangled) = glob_scope.resolve(raw_name, all_mangled) {
                     use_map.insert(raw_name.clone(), mangled);
                 }
             }
@@ -1466,70 +1481,141 @@ fn resolve_import_name(
     (candidates.len() == 1).then(|| candidates[0].clone())
 }
 
+/// `resolve_import_name_strict` with every per-`use_segments` lookup hoisted
+/// out. `collect_use_imports` resolves each whole-table key of `all_mangled`
+/// against one use path; recomputing the joins, the re-export map lookups and
+/// the five family `format!`s per key made a single `use` cost O(table) heavy
+/// allocations, so files with many `use` lines spent minutes in `pre_hir` on
+/// the full-CLI closure (bug seed_native_build_per_file_compile_minutes_windows).
+#[derive(Default)]
+struct UseMapScan {
+    /// Joined use paths whose bare multi-candidate scan already ran.
+    bare_scanned: std::collections::HashSet<String>,
+    /// Lazily built: normalised mangled part -> bare `all_mangled` keys with
+    /// an owner containing that part (the same split `mangled_matches_use_path`
+    /// uses). A module-only import `use a.m` can only own keys listed under `m`.
+    part_index: Option<std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl UseMapScan {
+    /// Bare keys `scope.resolve` can map for module import `name`: owners that
+    /// carry `name` as a part, plus re-export entries. Falls back to every bare
+    /// key when `name` could be split or produced by owner normalisation.
+    fn module_keys(
+        &mut self,
+        scope: &StrictImportScope<'_, '_>,
+        name: &str,
+        all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<String> {
+        let bare = |key: &&String| !key.contains('.');
+        if name.is_empty() || name.contains("__") || name.contains('.') || name.contains("dot") {
+            return all_mangled.keys().filter(bare).cloned().collect();
+        }
+        let index = self.part_index.get_or_insert_with(|| {
+            let mut index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (raw_name, owners) in all_mangled.iter().filter(|(key, _)| bare(key)) {
+                let mut parts = std::collections::HashSet::new();
+                for owner in owners {
+                    let normalized = owner.replace("_dot_", "__").replace('.', "__");
+                    parts.extend(normalized.split("__").map(str::to_string));
+                }
+                for part in parts {
+                    index.entry(part).or_default().push(raw_name.clone());
+                }
+            }
+            index
+        });
+        let mut keys: std::collections::BTreeSet<String> = index.get(name).into_iter().flatten().cloned().collect();
+        for re_export in scope.direct.iter().chain(scope.stripped.iter()).chain(scope.families.iter()) {
+            keys.extend(re_export.keys().filter(|key| all_mangled.contains_key(*key) && bare(key)).cloned());
+        }
+        keys.into_iter().collect()
+    }
+}
+
+struct StrictImportScope<'s, 'r> {
+    segments: &'s [&'s str],
+    joined: String,
+    direct: Option<&'r std::collections::HashMap<String, String>>,
+    stripped: Option<&'r std::collections::HashMap<String, String>>,
+    families: Vec<&'r std::collections::HashMap<String, String>>,
+    /// Every owner-matching route needs the last use segment as a mangled
+    /// part. When it has no `_`, the normalisation in `mangled_matches_use_path`
+    /// cannot synthesise it, so a candidate lacking it as a substring is a miss.
+    required_part: Option<&'s str>,
+}
+
+impl<'s, 'r> StrictImportScope<'s, 'r> {
+    fn new(
+        segments: &'s [&'s str],
+        re_exports: &'r std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    ) -> Self {
+        let joined = segments.join("__");
+        let direct = re_exports.get(&joined);
+        let stripped = if segments.len() > 1 {
+            re_exports.get(&segments[1..].join("__"))
+        } else {
+            None
+        };
+        let families = match segments.split_first() {
+            Some((root, rest)) if *root == "lib" && !rest.is_empty() => {
+                let rest = rest.join("__");
+                FAMILY_ROOTS
+                    .iter()
+                    .filter_map(|family| re_exports.get(&format!("lib__{family}__{rest}")))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        Self {
+            segments,
+            joined,
+            direct,
+            stripped,
+            families,
+            required_part: segments.last().copied().filter(|last| !last.is_empty() && !last.contains('_')),
+        }
+    }
+
+    fn resolve(&self, func_name: &str, all_mangled: &std::collections::HashMap<String, Vec<String>>) -> Option<String> {
+        if let Some(hit) = self.direct.and_then(|m| m.get(func_name)) {
+            return Some(hit.clone());
+        }
+        if let Some(hit) = self.stripped.and_then(|m| m.get(func_name)) {
+            return Some(hit.clone());
+        }
+        let mut owners = self.families.iter().filter_map(|m| m.get(func_name));
+        if let Some(first) = owners.next() {
+            if owners.all(|owner| owner == first) {
+                return Some(first.clone());
+            }
+        }
+        let candidates = all_mangled.get(func_name)?;
+        if let Some(part) = self.required_part {
+            if !candidates.iter().any(|candidate| candidate.contains(part)) {
+                return None;
+            }
+        }
+        let matching = matching_import_owners_joined(func_name, self.segments, &self.joined, candidates);
+        (matching.len() == 1).then(|| matching[0].clone())
+    }
+}
+
+const FAMILY_ROOTS: [&str; 5] = [
+    "common",
+    "nogc_sync_mut",
+    "nogc_async_mut",
+    "gc_async_mut",
+    "nogc_async_mut_noalloc",
+];
+
 fn resolve_import_name_strict(
     func_name: &str,
     use_segments: &[&str],
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
     re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 ) -> Option<String> {
-    let expected_prefix = use_segments.join("__");
-    if let Some(module_re_exports) = re_exports.get(&expected_prefix) {
-        if let Some(actual_mangled) = module_re_exports.get(func_name) {
-            return Some(actual_mangled.clone());
-        }
-    }
-
-    if use_segments.len() > 1 {
-        let stripped_prefix = use_segments[1..].join("__");
-        if let Some(module_re_exports) = re_exports.get(&stripped_prefix) {
-            if let Some(actual_mangled) = module_re_exports.get(func_name) {
-                return Some(actual_mangled.clone());
-            }
-        }
-    }
-
-    if let Some(forwarded) = resolve_family_re_export(func_name, use_segments, re_exports) {
-        return Some(forwarded);
-    }
-
-    let candidates = all_mangled.get(func_name)?;
-    let matching = matching_import_owners(func_name, use_segments, candidates);
-    if matching.len() == 1 {
-        return Some(matching[0].clone());
-    }
-
-    None
-}
-
-/// `std.sosix.pty` names a module that physically lives under a runtime family
-/// (`src/lib/nogc_sync_mut/sosix/pty.spl`), so its re-export table is keyed with
-/// the family segment and the two exact lookups above miss it. Without this, a
-/// re-export alias lost its chain and later bound by bare name: with both
-/// `std.sosix.terminal_console` and `std.sosix.pty` in a closure,
-/// `sosix_console_write` called the PTY `write`. Families that disagree stay
-/// unresolved rather than pick one.
-fn resolve_family_re_export(
-    func_name: &str,
-    use_segments: &[&str],
-    re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
-) -> Option<String> {
-    const FAMILIES: [&str; 5] = [
-        "common",
-        "nogc_sync_mut",
-        "nogc_async_mut",
-        "gc_async_mut",
-        "nogc_async_mut_noalloc",
-    ];
-    let (root, rest) = use_segments.split_first()?;
-    if *root != "lib" || rest.is_empty() {
-        return None;
-    }
-    let rest = rest.join("__");
-    let mut owners = FAMILIES
-        .iter()
-        .filter_map(|family| re_exports.get(&format!("lib__{family}__{rest}"))?.get(func_name));
-    let first = owners.next()?;
-    owners.all(|owner| owner == first).then(|| first.clone())
+    StrictImportScope::new(use_segments, re_exports).resolve(func_name, all_mangled)
 }
 
 fn collect_target_names(target: &simple_parser::ast::ImportTarget, names: &mut Vec<String>) {
@@ -1598,8 +1684,18 @@ fn matching_import_owners<'a>(
     use_segments: &[&str],
     candidates: &'a [String],
 ) -> Vec<&'a String> {
+    matching_import_owners_joined(func_name, use_segments, &use_segments.join("__"), candidates)
+}
+
+/// `matching_import_owners` with `use_segments.join("__")` supplied by the caller.
+fn matching_import_owners_joined<'a>(
+    func_name: &str,
+    use_segments: &[&str],
+    joined: &str,
+    candidates: &'a [String],
+) -> Vec<&'a String> {
     if !use_segments.is_empty() {
-        let exact_name = format!("{}__{}", use_segments.join("__"), func_name);
+        let exact_name = format!("{joined}__{func_name}");
         if let Some(exact) = candidates.iter().find(|candidate| *candidate == &exact_name) {
             return vec![exact];
         }
