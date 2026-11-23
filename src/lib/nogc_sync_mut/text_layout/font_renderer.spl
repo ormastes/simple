@@ -68,6 +68,9 @@ var _adv_overflow_cursor: i32 = 0
 val _GID_SLOTS: i32 = 4
 var _gid_identity: [text] = [""; 4]
 var _gid_vals: [[i64]] = [[0; 95]; 4]
+# The face's parsed kern index (`sfnt_blob_kern_face_info`), warmed with the
+# glyph ids so a kern-cache miss no longer re-parses the table directory.
+var _gid_kern: [[i64]] = [[0]; 4]
 var _gid_cursor: i32 = 0
 
 fn _gid_slot(identity: text) -> i32:
@@ -96,6 +99,7 @@ fn _gid_warm(identity: text, blob: [u8]) -> i32:
     _gid_cursor = (_gid_cursor + 1) % _GID_SLOTS
     _gid_identity[slot] = identity
     _gid_vals[slot] = ids
+    _gid_kern[slot] = sfnt_blob_kern_face_info(blob)
     slot
 
 # Batched ASCII advance warm (2026-09-13, round 13), keyed by (loaded-face
@@ -384,7 +388,7 @@ use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdGlyph, SfntLcdOutline}
 use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -2265,7 +2269,7 @@ class FontRenderer:
         val right_gid = _gid_lookup(gid_slot, right_codepoint)
         if left_gid <= 0 or right_gid <= 0:
             return 0
-        sfnt_blob_kern_pair_milli_px(blob, left_gid, right_gid, font_size.to_i64()) as i32
+        sfnt_kern_face_pair_milli_px(blob, _gid_kern[gid_slot], left_gid, right_gid, font_size.to_i64()) as i32
 
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
@@ -3246,23 +3250,38 @@ class FontRenderer:
             row_height = 0
         if y + padded_height > FONT_ATLAS_HEIGHT:
             return -1
-        var row = 0
         var _probe_glyph_nz = 0
         val lcd = glyph.lcd_pixels.len() == glyph.width.to_i64() * glyph.height.to_i64() * 3
-        while row < glyph.height:
-            var col = 0
-            while col < glyph.width:
-                val alpha = glyph.pixels[row * glyph.width + col].to_u32()
-                if alpha > 0u32:
+        # Each glyph row is built in a local line and written as one span into
+        # the atlas taken off the field (an element store per pixel into the
+        # `self.atlas_pixels` field was ~9 us a pixel on the interpreter lane:
+        # 0.8 s of the 4x css-layout text paint).
+        # bug=interpreter_field_array_write_span_copies_whole_array_2026-11-23
+        val gw = glyph.width.to_i64()
+        val gh = glyph.height.to_i64()
+        val gray = glyph.pixels
+        val subpixels = glyph.lcd_pixels
+        var atlas = self.atlas_pixels
+        self.atlas_pixels = []
+        var line: [u32] = [0u32; gw]
+        var row: i64 = 0
+        while row < gh:
+            var col: i64 = 0
+            val base = row * gw
+            while col < gw:
+                val alpha = gray[base + col].to_u32()
+                if _VEC_ATLAS_PROBE and alpha > 0u32:
                     _probe_glyph_nz = _probe_glyph_nz + 1
-                var cell = (alpha << 24) | 0x00FFFFFFu32
                 if lcd:
-                    val sub = (row * glyph.width + col).to_i64() * 3
-                    cell = (alpha << 24) | (glyph.lcd_pixels[sub].to_u32() << 16) |
-                        (glyph.lcd_pixels[sub + 1].to_u32() << 8) | glyph.lcd_pixels[sub + 2].to_u32()
-                self.atlas_pixels[(y + row) * FONT_ATLAS_WIDTH + x + col] = cell
+                    val sub = (base + col) * 3
+                    line[col] = (alpha << 24) | (subpixels[sub].to_u32() << 16) |
+                        (subpixels[sub + 1].to_u32() << 8) | subpixels[sub + 2].to_u32()
+                else:
+                    line[col] = (alpha << 24) | 0x00FFFFFFu32
                 col = col + 1
+            atlas.write_span(line, (y.to_i64() + row) * FONT_ATLAS_WIDTH.to_i64() + x.to_i64(), 0, gw)
             row = row + 1
+        self.atlas_pixels = atlas
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] insert cp={glyph.codepoint} w={glyph.width} h={glyph.height} src_pixels_len={glyph.pixels.len()} src_nz={_probe_glyph_nz} ax={x} ay={y}")

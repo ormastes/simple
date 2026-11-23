@@ -11,6 +11,8 @@
 # Block size is 8 bytes minimum (16 for AES-256-GCM).
 # Total of (packet_length + 4) must be a multiple of the cipher block size.
 
+use std.common.encoding.external_text.{bytes_to_text_checked}
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -152,10 +154,23 @@ fn ssh_get_text(data: [u8], offset: u64) -> Result<SshTextResult, text>:
         Ok(sr):
             var sr_data: [u8] = sr.data
             var sr_next: u64 = sr.next_offset
-            var txt: text = ssh_ascii_bytes_to_text(sr_data)
+            # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=bind Result<text,_> through a typed match, not `?`
+            val txt: text = match ssh_utf8_bytes_to_text(sr_data):
+                case Ok(v): v
+                case Err(e): return Err("ssh_get_text: " + e)
             Ok(SshTextResult(value: txt, next_offset: sr_next))
         Err(_):
             Err("ssh_get_text: string decode failed")
+
+fn ssh_utf8_bytes_to_text(data: [u8]) -> Result<text, text>:
+    """Strict UTF-8 decode for SSH textual fields (RFC 4251 string as UTF-8).
+
+    Invalid UTF-8 is a protocol error (owner decision 2026-11-23): never
+    lossy, never raw bytes. Binary payloads must stay [u8] and not come here.
+    """
+    match bytes_to_text_checked(data):
+        case Ok(v): Ok(v)
+        case Err(e): Err("protocol error: invalid UTF-8 at byte " + e.byte_offset.to_text() + ": " + e.reason)
 
 fn ssh_put_mpint(buf: [u8], val_bytes: [u8]) -> [u8]:
     """Append SSH mpint: uint32 length + value (big-endian, two's complement).

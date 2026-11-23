@@ -3981,3 +3981,99 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Fix (`draw_ir_adv.spl`):** a RECT with an empty `computed_style` goes straight to `draw_rect_filled` (it still checks alpha). `set_clip` is skipped when the rect lies wholly inside the clip, and the restore is keyed on `clip_set`. `text_paint_clip` is computed only for TEXT. `_engine2d_draw_ir_plain_fill` checks the cheap fields first. Result: 494 -> 142 us/rect. The rest is v4 checks, bounds, coalescing and the backend fill (~71 us/rect, which lives in `backend_software`).
 - **Evidence:** 16/16 catalog frames byte-identical to base (1x and 4x), and gates match base. On the catalog, perf is flat (every page within +-1.1% over 3 alternated rounds) because those pages draw few unstyled rects. The gain is on dashed-border scenes: six 1px dashed 800 px boxes, k=1 paint 1374 -> ~580 ms, k=4 paint 3210 -> ~1900 ms. RSS for 4x css-layout is 2.966 GB on both sides.
 - **Trap:** the device-scale fast path in `draw_ir_device_scale.spl` only saved 451 -> 381 ms at k=4, so it was not worth its own code path. It was reverted.
+
+## 2026-11-23 — text paint: span coverage kernel, glyph-quad memo, atlas row spans (perf, byte-identical)
+
+- **Profile (4x css-layout, cpu_simd, interpreter; text Draw-IR 12.06 s):** cold glyph raster 5.4 s (alpha kernel 4.7 s), quad blend 2.7 s, atlas subrect 2.4 s, staging 0.8 s, LCD prescan 0.3 s. At 1x the cost is the LCD lane: `_lcd_apply_pen_phases` 1.2 s, LCD raster 0.9 s, LCD composite 1.2 s (its destination read went through the readback checksum).
+- **Gray kernel (`_glyf_raster_alpha_rows`):** the 4x4 supersample now adds each inside run between sorted crossings at once (first sample of crossing c = `ceil((8c-1)/2)`, exact in f64) plus a +4/-4 prefix for whole pixels, and gathers all 4 scanlines in one pass over the row's edges. Alpha 4.7 -> 1.1 s. Oracle: `sfnt_glyf_span_coverage_spec` keeps the old per-sample sweep verbatim (crossings on sample x, vertices on sample y, hole, winding 2); mutation-checked (`<`/`<=` in the ceil, `>=`/`>` at y_bottom both fail).
+- **Glyph-quad memo (`_draw_glyph_quad_memo`, engine.spl):** a quad over a uniform OPAQUE destination is a pure function of (cells, color, bg, LCD flag); the composed quad is kept (512 entries, <= 64K px), validated by native array `==` on the cells, and drawn with `draw_image` (one span per row; opaque over opaque = copy inside the clip). Consulted before the LCD prescan, so a hit skips that scan too. Eligible only on cpu/cpu_simd/software with no mask (`mask_active`). Uniformity test = `dst == [bg; n]` on `read_pixels_region_raw` (native, ~1 us).
+- **Atlas insert:** `_insert_font_atlas_glyph` stored per pixel into the `self.atlas_pixels` field; now take-field + one `write_span` per row.
+- **LCD A8 accumulate:** a zero area cell leaves `acc`, so it keeps the previous sample; `(cov*255+0.5) as i64` replaces `_floor_glyf` (value >= 0.5, truncation == floor).
+- **Result (3 serial rounds, alternating first side, 4x):** css-layout paint median 13.33 s vs 20.67 s base, html 15.78 vs 22.84 s; document equal (6.8/6.7, 6.0/6.1 s); peak RSS 2.97 GB both. All 16 catalog frames (8 pages x 1x/4x) byte-identical to base 77fd0470d67. Pin: `engine_text_paint_large_glyph_spec` 6.68 -> 3.8 s (budget 5.5 s, hash on base).
+- **1x (3 serial rounds, alternating):** post-document time (paint + encode) median css-layout 7.78 vs 8.28 s base, html 8.10 vs 8.56 s: only ~0.5 s of the 4.1 s 1x text paint, because 1x text is the LCD lane and most quads overlap a neighbour (memo declines).
+- **Remaining:** cold LCD raster at 1x (`_lcd_area_cells` 0.5 s, filter 0.7 s per css-layout), LCD hinting 0.36 s, `_lcd_apply_pen_phases` 1.2 s, memo `draw_image` ~18 us a row (per-row `_span_copy_safe_count` / `native_pixel_rows_enabled` calls), memo misses where the destination is not uniform (~70 % at 1x: glyph boxes overlap neighbours).
+
+## 2026-11-23 — web render under the seed JIT (`SIMPLE_EXECUTION_MODE=jit`): three seed fixes
+
+- **`any as i64` on one-char text parses a digit.** `char_at` is untyped (ANY), so `"6" as i64` lowered to `rt_any_to_int`, which parses text and gives 6 instead of 54. It now lowers to `rt_any_cast_int`: one code point gives that code point, as the interpreter does. The C twin is in `runtime_native.c`. Spec: `compiler/tests/any_text_cast_jit.rs`. Bug: `char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md`.
+- **An `if` arm ending in an `if`/`else` statement was typed NIL.** The `[]` sibling then defaulted to `[i32]`, text pointers were narrowed, and italic runs lost their face. `lower_do_block` now types the tail `if` (`hir_tail_if_value_type`). html at 1x went from 4482 differing bytes to 0. Bug: `jit_if_arm_tail_if_stmt_typed_nil_italic_lost_2026-11-23.md`.
+- **The take idiom (`var x = self.buf; self.buf = []; ...; self.buf = x`) copied the surface twice per call.** The JIT never frees those copies, so every 4x page was OOM-killed at 8 GB. `array_move.rs` `collect_take_sites` now moves instead. tab-bar 4x JIT: OOM becomes 2.4 GB in 11.5 s. Bug: `jit_take_field_array_idiom_copies_and_leaks_surface_2026-11-23.md`.
+- **Result:** all 8 catalog pages give JIT output equal to the interpreter, byte for byte, at 1x AND 4x. Peak RSS at 4x under the JIT is 2.4 to 4.2 GB, except forms-media at 8.34 GB, right at the 8 GB cap: that page has about 1.2 K font-blob copies. Interpreter output is unchanged vs base.
+- **Trap — JIT start cost:** every JIT run spends about 9.5 s in `compile_all` (4302 functions; see `SIMPLE_JIT_STAGE_TRACE=1`). Wall time is therefore roughly 11 to 13 s whatever the page. Pages that take under 10 s in the interpreter run slower under the JIT.
+- **Trap — attributing leaks:** run with `SIMPLE_JIT_TRACE_ADDR=1` and a scratch `backtrace()` in `rt_array_copy`, then map return addresses to the nearest `[jit-addr]` symbol. `SIMPLE_BIG_ALLOC_MB` hides anything under its 256 MB floor.
+- **Open, deferred (needs refcount/ownership):**
+  - `val blob = self.selected_outline_blob` copies a 410 K-element font blob in `horizontal_kern_milli` / `get_glyph_advance_milli`.
+  - `var out = fb` re-binds parameters in `fb_fill_rows_const`.
+
+## 2026-11-24 — PPM encode and readback checksum reuse repeated rows (perf, byte-identical)
+
+- **Where the time went (4x css-layout, interpreter):** `encode_ppm_p6` took 6.7 s and the final readback checksum took 3.6 s. Measured on real 4x frames: about half the rows equal the row above, and 62 % of mixed 64-px blocks equal the block above. Only about 8 % of pixels are fresh mixed pixels.
+- **Encode:** each row is built in a row buffer that still holds the previous row.
+  - A repeated row is re-copied with one `write_span`.
+  - A block equal to the block above is already in the buffer.
+  - Flat rows and flat blocks are pattern spans.
+  - Fresh mixed blocks use `for p in seg` with three stores per pixel (cheaper than indexed reads).
+- **Checksum:** `engine2d_pixel_checksum(pixels, row_len)` sums per row and per 256-px block, all exact.
+  - A repeated row or a block equal to the one above reuses its earlier sum.
+  - A flat block is value × count.
+  - `CpuBackend` and `SoftwareBackend.read_pixels_with_source` pass the width. Other callers fall back to 256-px rows.
+- **Trap — packed `[u32]` frames:** the seed stores big `[u32]` arrays packed (`ArrayStore::Packed`).
+  - `.slice`, `.min`, `.max` and `==` on one go through `Deref`, which materializes and caches a boxed `Vec<Value>` view of the whole frame: +0.7 GB peak RSS at 4x.
+  - Only indexing, `for` iteration and `write_span` are packed-aware.
+  - Copy the row out with `row.write_span(pixels, 0, off, n)`, then slice the local row.
+  - The old encode already sliced the frame; that was its 1.2 GB transient.
+- **Trap — `[u32].sum()` returns 0 under the interpreter**, but the right value under the JIT. Bug: `doc/08_tracking/bug/interp_unsigned_array_sum_returns_zero_2026-11-23.md`. Once fixed, the checksum drops to about 45 ms.
+- **Pins on the 3600x3040 fixture (base 1d407c5f2dd):**
+  - `ppm_encode_frame_rows_spec`: 7.9 -> 3.4 s (budget 5.5 s); bytes are hash-pinned and equal a per-pixel reference on a small frame.
+  - `readback_checksum_frame_rows_spec`: cpu 3.5 -> 0.9 s (budget 1.8 s), generic 3.4 -> 1.5 s (budget 2.6 s); equal to the per-pixel sum including 0xFFFFFFFF pixels and partial rows.
+- **Page wall (3 alternated rounds, medians, on 77244eef35a):**
+  - 4x css-layout: 27.9 -> 21.3 s
+  - 4x html: 31.5 -> 25.5 s
+  - 4x tab-bar: 10.8 -> 7.3 s
+  - 1x css-layout: 13.6 -> 13.3 s
+  - Peak RSS for 4x css-layout: 2.965 GB on both sides.
+## 2026-11-23 — JIT startup: block-entry var sync was O(vars x blocks)
+
+- **Where the ~9.5 s per JIT run went** (tab-bar, `SIMPLE_JIT_STAGE_TRACE=1` + `SIMPLE_NATIVE_BUILD_RUST_TRACE=1`):
+  - About 1.9 s before codegen: load 0.36 s, HIR 0.85 s, MIR 0.5 s, all for 9,021 lowered functions. Reachability pruning then cuts them to 4,305.
+  - About 9 s in `compile_all`: translate (MIR -> CLIF) 3.8 s, Cranelift define 4.0 s.
+  - Rendering itself takes 0.06 s.
+- **Root cause:** `sync_vars_to_vregs` did `use_var` on every cross-block Variable at every block entry, with blocks sealed only at the end. That cost vars x blocks: `layout_with_style_flow` (2.2 K x 3.1 K) and `_apply_decls_without_grid_inner` took about 1 s each.
+- **Fix:** sync only the block's live-in vregs, and drop stale cross-block values so the terminator sync cannot write them back. Liveness now iterates in reverse order. The JIT keeps a single verify that fails closed, with Cranelift's internal verifier off. Translate went 3.8 s -> 1.55 s and define 4.0 s -> 2.1 s.
+- **Result:** catalog JIT wall time went from 11–14 s to 5.5–7 s at 1x and on 7 of 8 pages at 4x. Output is unchanged: all 8 pages match the interpreter byte for byte at 1x and 4x. Clean A/B medians at 1x: tab-bar JIT 5.48 s vs interpreter 4.78 s (the JIT still loses), html 5.74 s vs 14.11 s, css-paint 5.81 s vs 16.61 s. forms-media 4x still sits at the 8 GB cap (font-blob copies): JIT 49.6 s vs interpreter 32.5 s.
+- **Trap — repro shape:** a long run of if-expressions such as `s = s + (if x > i: a else: b)`. Plain `val` locals do not create cross-block vregs.
+- **Trap — measuring:** print per-function times around `compile_function` (translate / verify / define) in a probe worktree. A whole-run wall time can hide a JIT fallback: the first prototype failed the verifier, the run silently fell back to the interpreter, and it looked slower but correct. Always check for `compile_all:done`.
+- **Open — uncalled code:** at least 58% of the remaining compile time (2.1 s of 3.6 s, 2,862 functions) is never called on tab-bar. It is mostly Vulkan / SPIR-V / Metal backend code, reachable only through runtime backend selection. The options are lazy compile-on-first-call stubs or parallel Cranelift codegen; both are recorded as designs in the bug doc. Pruning before HIR lowering would also save part of the 1.35 s spent in HIR+MIR.
+- **Open — font-blob copy:** this is deferred to the ownership work. `blob` is passed to user functions (`_gid_warm`, `sfnt_blob_kern_pair_milli_px`, `read_u16_be`), so an in-function borrow rule cannot prove that no call mutates or frees the field's buffer. forms-media 4x still peaks at the 8 GB cap.
+
+## 2026-11-24 — engine acquire (CPU kernel table probes) and the 120deg header gradient (perf, byte-identical)
+
+- **Re-ranked profile on 3a28b397fd7 (interpreter, cpu_simd, ms):**
+
+  | page | total | top phases |
+  |---|---|---|
+  | 4x html | 25275 | encode 4624, text 4260, box background 4013, style 2885, acquire 1786 |
+  | 4x css-layout | 21207 | text 4363, encode 2969, style 2786, layout 2289, acquire 1792 |
+  | 1x tab-bar | 4254 | acquire 1647, startup 907, text 712 |
+
+- **Engine acquire + clear (1.65–1.8 s on every page):** this is not the engine or the clear. The first `clear()` of a process runs `SoftwareBackend.ensure_kernel_table()`, which runs 16 timing probes (4 ops x 4 buckets) racing an interpreted scalar oracle against the SIMD-ISA kernel with fixed rep counts.
+  - Each probe now times the scalar side until its reps are done or `KERNEL_PROBE_WINDOW_US` (2 ms) has passed, then times the SIMD side for the same rep count. Both loops read the clock once per rep, so the comparison stays fair.
+  - The blend probes count their bit-exact pre-pass as rep 1.
+  - The gate itself is unchanged: a slot is registered iff the kernel is exact AND faster.
+  - Result: 1.62 s -> 0.22 s (`backend_software_kernel_table_first_clear_spec`, budget 0.4 s).
+- **Trap — the mask probe races the oracle against itself:** `simd_isa_mask_src_over` calls `oracle_mask_src_over`, so its FASTER bit is noise. It flips between runs on base too, and it can never change pixels.
+- **Box background (4x html, 4.0 s):** 3.35 s of it is ONE box, the `linear-gradient(120deg, ...)` header at 3240 x 388, evaluated per pixel in `emu_draw_linear_gradient_stops`.
+  - A colour run is only about 14 px wide, so "estimate the run end, then call the per-pixel index a few times" saved only 10 %.
+  - What works: per box, give each LUT colour change its exact numerator threshold, i.e. the smallest N with `N * 32768 / len_q16 >= 64b - 32768`, found by binary search on that exact expression.
+  - Per row, `N = 2s * px + K` is monotonic, so each run end is one division plus a direct comparison. Each run is one `write_span`.
+  - This path applies to boxes of 65536 px or more. Smaller boxes keep the per-pixel walk.
+  - Result: 3.36 s -> 0.54 s (`emu_linear_gradient_stops_runs_spec`). The spec compares against the per-pixel walk at 15 angles, including the corner directions, three stop shapes and translucent stops. Interpreter and JIT match base.
+
+## 2026-11-24 — style-phase kern misses and 4x PPM encode (perf, byte-identical)
+
+- **Re-ranked profile on b4595a3c0f4 (interpreter, cpu_simd, `SIMPLE_WEB_STYLE_COUNTERS=1`):** style is ~2.9 s on html/css-layout but only 0.25 s on tab-bar; it scales with text nodes. On 4x html the top style sections are `sec_metrics` 1726 ms (of which `sec_resolve` 1389 ms = font metric resolution), `sec_cascade` 545, `sec_inherit` 417, `sec_select` 246. Inside resolve: 193 uncached measures = 1088 ms, of which 691 kern-cache misses = 603 ms and 235 advance misses = 283 ms. Selector matching itself is small (`sel_match` 116 ms).
+- **Kern miss = 0.75 ms of table-directory parsing:** `sfnt_blob_kern_pair_milli_px` ran `parse_offset_table` twice (kern, then head) per pair. `sfnt_blob_kern_face_info` now parses it once and `font_renderer` warms it with the per-face glyph-id slot (`_gid_kern`, same identity key as `_gid_vals`); `sfnt_kern_face_pair_milli_px` is one binary search. 324 distinct Liberation Sans pairs: 434 ms -> 122 ms (`kern_pair_cache_miss_cost_spec`). The remaining ~0.3 ms per miss is the foreign kern call + `cache_identity()` + gid lookup.
+- **Trap — `measure_text_width_milli` re-runs the pen walk:** but on the second pass every advance and kern is a cache hit, so it is only ~85 ms of the 1068 ms measure bucket. Not worth a combined API.
+- **PPM encode on 4x html (4.6 s):** 3.0 s was the per-pixel stores of 29,051 changed 64-px blocks, yet ~96 % of those pixels equal the pixel above. `rowb` still holds the row above, so a changed block now compares 16-px pieces, then 4-px pieces, against the row above and stores only differing pieces. Real frame: 4.6 s -> 3.5 s; `ppm_encode_sparse_change_rows_spec` 14.8 s -> 12.3 s.
+- **Trap — per-element cost model under the interpreter:** a `slice` + `!=` piece compare costs ~10 µs (as much as ~6 pixels of stores), and a `while i < n: row[i]` store loop is slower than `for px in slice`. So a block with no vertical coherence pays MORE: the synthetic `ppm_encode_frame_rows_spec` went 3.8 -> 5.7 s with naive refinement. Mitigation: a 16-px piece that changed in all four 4-px pieces marks the block dense (rest stored directly) and the next 3 changed blocks of the row skip the compares; stores use `for px in piece`. Residual: that synthetic frame is still 3.8 -> 4.1 s (+8 %), while every real catalog frame got faster.
+- **Acceptance (vs 54d47e3ab38, 3 alternated rounds, ms):** 4x html 21157/21498/21258 -> 19221/19382/19161; 4x css-layout 19858/19972/20700 -> 18948/19035/19235; 1x tab-bar 2834/2866/2819 -> 2785/2748/2719; 1x css-layout 12073/12085/12090 -> 11273/11467/11893. 16/16 catalog frames byte-identical, RSS flat (2.955 -> 2.961 GB).

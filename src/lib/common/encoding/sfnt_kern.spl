@@ -181,11 +181,48 @@ pub fn sfnt_units_per_em(blob: [u8]) -> i64:
 # must contribute -0.625 to the cumulative. The rounding stays at the single
 # boundary-difference step in `measure_text_advances`.
 pub fn sfnt_blob_kern_pair_milli_px(blob: [u8], left_glyph_id: i64, right_glyph_id: i64, size_px: i64) -> i64:
+    sfnt_kern_face_pair_milli_px(blob, sfnt_blob_kern_face_info(blob), left_glyph_id, right_glyph_id, size_px)
+
+# The face-level half of a kern lookup, parsed once: [upem, then the
+# format-0 ranges of `_kern_format0_ranges`], or [0] when the face has no
+# applicable subtable or no usable `head`. Every pair lookup used to re-parse
+# the table directory twice (kern, then head): 0.75 ms per pair, 384 ms of
+# the 1x css-layout style stage. Callers memoise it per face.
+# reason: a face blob and its parsed kern index are plain data shared with
+# the cmap/hmtx readers beside it; no wrapper type exists for either.
+# @allow(primitive_api)
+pub fn sfnt_blob_kern_face_info(blob: [u8]) -> [i64]:
+    val font_opt = parse_offset_table(blob)
+    if val Some(font) = font_opt:
+        val table_opt = find_table(font, SFNT_KERN_TAG)
+        if val Some(table) = table_opt:
+            val ranges = _kern_format0_ranges(blob, table.offset as i64, table.length as i64)
+            if ranges.len() > 0:
+                val upem = sfnt_units_per_em(blob)
+                if upem > 0:
+                    var info: [i64] = [upem]
+                    for r in ranges:
+                        info.push(r)
+                    return info
+    [0]
+
+# `sfnt_blob_kern_pair_milli_px` with the face info already parsed.
+# reason: mirrors sfnt_blob_kern_pair_milli_px(blob, left, right, size).
+# @allow(primitive_api)
+pub fn sfnt_kern_face_pair_milli_px(blob: [u8], face_info: [i64], left_glyph_id: i64, right_glyph_id: i64, size_px: i64) -> i64:
     if size_px <= 0 or size_px > 512: return 0
-    val units = sfnt_blob_kern_pair_units(blob, left_glyph_id, right_glyph_id)
-    if units == 0: return 0
-    val upem = sfnt_units_per_em(blob)
+    if left_glyph_id <= 0 or right_glyph_id <= 0: return 0
+    if left_glyph_id > 65535 or right_glyph_id > 65535: return 0
+    if face_info.len() < 4: return 0
+    val upem = face_info[0]
     if upem <= 0: return 0
+    val key = (left_glyph_id << 16) | right_glyph_id
+    var units: i64 = 0
+    var i: i64 = 1
+    while i + 2 < face_info.len():
+        units = units + _kern_lookup_range(blob, face_info[i], face_info[i + 1], key)
+        i = i + 3
+    if units == 0: return 0
     # Symmetric rounding about zero: kern values are predominantly negative and
     # a floor-toward-negative-infinity division would bias every pair one
     # milli-pixel tighter than its mirror.

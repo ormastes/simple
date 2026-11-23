@@ -662,9 +662,10 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_bytes"
             // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
             // during Cranelift lowering, so it is absent from MIR call names.
-            // (`rt_any_to_int` is ALSO a MIR call now, for `any as <int>`.)
+            // `rt_any_cast_int` is the MIR call for `any as <int>`.
             | "rt_to_int_dynamic"
             | "rt_any_to_int"
+            | "rt_any_cast_int"
             | "rt_string_builder_new"
             | "rt_string_builder_push"
             | "rt_string_builder_finish"
@@ -1047,6 +1048,11 @@ pub struct BackendSettings {
     /// Populated from `SIMPLE_CPU_FEATURES` env var when calling `aot()`, `jit()`,
     /// or `aot_for_target()`.
     pub cpu_features: CpuFeatureConfig,
+    /// Cranelift's own verifier, run inside `define_function` (after each
+    /// pass). `compile_function` always verifies the translated IR once and
+    /// fails closed, so the JIT turns this repeat off (~0.7 s of the web
+    /// catalog's per-run compile).
+    pub verifier: bool,
 }
 
 impl Default for BackendSettings {
@@ -1057,6 +1063,7 @@ impl Default for BackendSettings {
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
             cpu_features: CpuFeatureConfig::default(),
+            verifier: true,
         }
     }
 }
@@ -1071,6 +1078,7 @@ impl BackendSettings {
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
             cpu_features: CpuFeatureConfig::from_env(),
+            verifier: true,
         }
     }
 
@@ -1084,6 +1092,7 @@ impl BackendSettings {
             target,
             cpu: TargetCpu::builtin_default_for_arch(target.arch),
             cpu_features: CpuFeatureConfig::from_env(),
+            verifier: true,
         }
     }
 
@@ -1117,6 +1126,7 @@ impl BackendSettings {
             target: Target::host(),
             cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
             cpu_features: CpuFeatureConfig::from_env(),
+            verifier: false,
         }
     }
 
@@ -1159,6 +1169,7 @@ type IsaCacheKey = (
     &'static str, // opt_level
     bool,         // is_pic
     String,       // cpu_features — Debug-stringified (no Hash impl)
+    bool,         // verifier
 );
 
 /// Process-wide ISA cache. ISA construction (especially `cranelift_native::builder_with_options`
@@ -1177,6 +1188,7 @@ pub fn create_isa_and_flags(
         settings.opt_level,
         settings.is_pic,
         format!("{:?}", settings.cpu_features),
+        settings.verifier,
     );
 
     // Fast path: return cached ISA.
@@ -1191,6 +1203,9 @@ pub fn create_isa_and_flags(
     let mut settings_builder = settings::builder();
     settings_builder
         .set("opt_level", settings.opt_level)
+        .map_err(|e| BackendError::Compilation(e.to_string()))?;
+    settings_builder
+        .set("enable_verifier", if settings.verifier { "true" } else { "false" })
         .map_err(|e| BackendError::Compilation(e.to_string()))?;
 
     if settings.is_pic {
@@ -2031,12 +2046,19 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        // Verify the function before defining - log errors but try to compile anyway
+        // Verify the translated IR once, fail closed. `define_function` would
+        // reject it too while Cranelift's own verifier is on, but the JIT turns
+        // that repeat off (`BackendSettings::verifier`).
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
             eprintln!(
                 "[CODEGEN VERIFY] Function '{}' has verifier errors: {}",
                 func.name, errors
             );
+            self.module.clear_context(&mut self.ctx);
+            return Err(BackendError::ModuleError(format!(
+                "Compilation error in '{}': Compilation error: Verifier errors",
+                func.name
+            )));
         }
 
         // SIMPLE_DUMP_CLIF=<function name> prints that function's Cranelift IR
