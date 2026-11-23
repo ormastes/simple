@@ -1,0 +1,46 @@
+use std.spec.*
+use os.kernel.fd_table.{
+    fd_table_init, fd_activate_task, fd_dup, fd_dup2, fd_close, fd_set,
+    fd_prepare_fork_to_task, fd_execution_output_role_v1,
+    FdExecutionOutputRoleV1, FD_TYPE_FILE, FD_TYPE_SERIAL, O_WRONLY
+}
+
+describe "Execution output belongs to the original open file description":
+    it "follows dup and dup2 instead of relabeling output by descriptor number":
+        fd_table_init()
+        fd_activate_task(8101u64)
+        expect(fd_execution_output_role_v1(0)).to_equal(FdExecutionOutputRoleV1.Unobserved)
+        expect(fd_execution_output_role_v1(1)).to_equal(FdExecutionOutputRoleV1.Stdout)
+        expect(fd_execution_output_role_v1(2)).to_equal(FdExecutionOutputRoleV1.Stderr)
+        val saved_stdout = fd_dup(1)
+        expect(saved_stdout).to_equal(3)
+        expect(fd_dup2(2, 1)).to_equal(1)
+        expect(fd_execution_output_role_v1(1)).to_equal(FdExecutionOutputRoleV1.Stderr)
+        expect(fd_execution_output_role_v1(saved_stdout)).to_equal(FdExecutionOutputRoleV1.Stdout)
+
+    it "does not turn file redirection or a freshly opened serial fd into stdout":
+        fd_table_init()
+        fd_activate_task(8102u64)
+        expect(fd_set(3, FD_TYPE_FILE, O_WRONLY, 91u64)).to_equal(0)
+        expect(fd_dup2(3, 1)).to_equal(1)
+        expect(fd_execution_output_role_v1(1)).to_equal(FdExecutionOutputRoleV1.Unobserved)
+        expect(fd_set(4, FD_TYPE_SERIAL, O_WRONLY, 0u64)).to_equal(0)
+        expect(fd_execution_output_role_v1(4)).to_equal(FdExecutionOutputRoleV1.Unobserved)
+
+    it "clears provenance when the final reference is closed and its object reused":
+        fd_table_init()
+        fd_activate_task(8103u64)
+        expect(fd_close(2)).to_equal(0)
+        expect(fd_execution_output_role_v1(2)).to_equal(FdExecutionOutputRoleV1.Unobserved)
+        expect(fd_set(2, FD_TYPE_SERIAL, O_WRONLY, 0u64)).to_equal(0)
+        expect(fd_execution_output_role_v1(2)).to_equal(FdExecutionOutputRoleV1.Unobserved)
+
+    it "preserves inherited sink identity when the child has redirected descriptor numbers":
+        fd_table_init()
+        fd_activate_task(8104u64)
+        val saved_stdout = fd_dup(1)
+        expect(fd_dup2(2, 1)).to_equal(1)
+        expect(fd_prepare_fork_to_task(8105u64)).to_equal(4u32)
+        fd_activate_task(8105u64)
+        expect(fd_execution_output_role_v1(1)).to_equal(FdExecutionOutputRoleV1.Stderr)
+        expect(fd_execution_output_role_v1(saved_stdout)).to_equal(FdExecutionOutputRoleV1.Stdout)

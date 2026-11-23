@@ -209,7 +209,7 @@ pub fn worker_hir_tool_build_environment_keys_v1() -> [text]:
         "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB",
         "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_STAGE4",
         "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
-        "SIMPLE_RUNTIME_PATH", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
+        "SIMPLE_RUNTIME_PATH", "SIMPLE_RUNTIME_OWNER", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
         "XDG_CACHE_HOME", "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP", "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS",
         "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_BOOTSTRAP_RSS_CAP_MODE",
         "SIMPLE_PROCESS_TREE_RSS_RECEIPT", "SIMPLE_TOOLCHAINS_ROOT", "SIMPLE_HOST_CONFIG",
@@ -243,6 +243,10 @@ fn _worker_hir_is_lower_hex_64_v1(s: text) -> bool:
 
 # Value gates for admitted keys whose value selects a route. "" when admitted.
 pub fn worker_hir_environment_value_error_v1(key: text, value: text) -> text:
+    # Match runtime_owner_select_v1: empty selects c, case is normalized, and
+    # whitespace is not trimmed. Preserve the exact captured value for identity.
+    if key == "SIMPLE_RUNTIME_OWNER" and value != "" and value.lower() != "c" and value.lower() != "rust":
+        return "HIR profile requires SIMPLE_RUNTIME_OWNER to be empty, c, or rust (case-insensitive)"
     if key == "SIMPLE_EXECUTION_MODE" and value != "" and value != "native":
         return "HIR profile requires compiled internal worker dispatch"
     # A HIR-profile worker belongs to the two-pass route; the per-file unit
@@ -315,6 +319,22 @@ pub fn worker_hir_environment_admit_v1(
         environment.push(ProcessObservationEnvironmentV4(key: pair.0, value: pair.1))
     Ok(environment)
 
+# The production identity calculation, exposed for focused native policy
+# regressions without manufacturing a frozen source-closure receipt. Keep the
+# original field order, exact environment bytes, and argv hashes unchanged.
+# reason: byte-exact profile identity hashes captured protocol text and the parent's absolute millisecond deadline
+@allow(primitive_api)
+pub fn worker_hir_configuration_digest_v1(closure_receipt_digest: text,
+        policy_digest: text, producer_digest: text, deadline_ms: i64,
+        environment: [ProcessObservationEnvironmentV4], args: [text]) -> text:
+    var parts: [text] = ["worker-hir-profile-v1", closure_receipt_digest,
+        policy_digest, producer_digest, "{deadline_ms}"]
+    for pair in environment:
+        parts.push(sha256_text(pair.key))
+        parts.push(sha256_text(pair.value))
+    for arg in args: parts.push(sha256_text(arg))
+    sha256_text(parts.join("\n"))
+
 pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
         sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
     val opened = match environment_variant_policy_handoff_extract_v1(args):
@@ -333,15 +353,12 @@ pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
     # accepting whichever policy digest the closure request claims for itself.
     val selected = native_entry_closure_request_open_v1(closure, opened.handoff.policy_digest)?
     if selected.identities.is_empty(): return Err("HIR worker frozen closure is empty")
-    var parts: [text] = ["worker-hir-profile-v1", closure.receipt_digest,
-        closure.binding.policy_digest, closure.binding.producer_digest, "{deadline_ms}"]
     val environment = worker_hir_environment_admit_v1(env_list_checked()?)?
-    for pair in environment:
-        parts.push(sha256_text(pair.key))
-        parts.push(sha256_text(pair.value))
-    for arg in args: parts.push(sha256_text(arg))
+    val digest = worker_hir_configuration_digest_v1(closure.receipt_digest,
+        closure.binding.policy_digest, closure.binding.producer_digest,
+        deadline_ms, environment, args)
     Ok(WorkerHirProfileV1(argv: args, environment: environment, closure: closure,
-        configuration_digest: sha256_text(parts.join("\n")), deadline_ms: deadline_ms))
+        configuration_digest: digest, deadline_ms: deadline_ms))
 
 pub fn worker_hir_profile_for_owner_v1(profile: WorkerHirProfileV1,
         ledger_owner: text, dataset_bytes: i64) -> WorkerHirProfileV1:
