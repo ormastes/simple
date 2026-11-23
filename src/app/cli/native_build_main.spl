@@ -2,7 +2,10 @@ use app.io.time_ops.{sleep_ms}
 use std.common.string_core.{str_split}
 use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1,
     worker_hir_pool_skip_without_closure_v1}
-use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
+use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, WorkerHirSharedExecPinV1,
+    worker_hir_shared_exec_pin_open_v1, worker_hir_owner_start_borrowed_v1,
+    worker_hir_shared_exec_pin_close_stopped_v1, worker_hir_shared_exec_pin_retain_unstopped_v1,
+    worker_hir_owner_retain_failure_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
     native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
     native_build_hir_warmup_admits_mir_v1, native_build_mir_outcome_after_hir_failures_v1}
@@ -1211,6 +1214,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true, refused_before_spawn: true)
     var hir_profiles: [WorkerHirProfileV1] = []
+    var hir_shared_pins: [WorkerHirSharedExecPinV1] = []
     var hir_pool_cleanup_deadline: i64 = 0
     if label == "hir-shard":
         if base.len() < 3 or base[0] != "run" or base[1] != "src/app/cli/native_build_worker.spl":
@@ -1323,8 +1327,11 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
                 if label == "hir-shard":
+                    if hir_shared_pins.is_empty():
+                        hir_shared_pins = [worker_hir_shared_exec_pin_open_v1(hir_profiles[0], simple_bin)]
                     val profile = worker_hir_profile_for_owner_v1(hir_profiles[0], owner, est_kib * 1024)
-                    val hir_owner = worker_hir_owner_start_v1(profile, simple_bin, "{index}/{count}")
+                    val hir_owner = worker_hir_owner_start_borrowed_v1(
+                        profile, simple_bin, "{index}/{count}", hir_shared_pins[0])
                     hir_owners.push(hir_owner)
                     # Occupancy marker only: HIR never passes it to PID APIs.
                     pids.push(1)
@@ -1515,6 +1522,16 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     native_build_env_restore_v1(queue_env, old_queue)
     native_build_env_restore_v1(owner_env, old_owner)
     native_build_env_restore_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
+    if not hir_shared_pins.is_empty():
+        if all_stopped:
+            match worker_hir_shared_exec_pin_close_stopped_v1(hir_shared_pins[0]):
+                case Ok(_): pass
+                case Err(pin_close_reason):
+                    all_stopped = false
+                    failed_workers = failed_workers + 1
+                    val _blocked = hir_shard_recovery_block(queue_dir, pin_close_reason)
+        else:
+            worker_hir_shared_exec_pin_retain_unstopped_v1(hir_shared_pins[0])
     if observed_peak_kib > 0:
         val _peak_written = file_atomic_write(peak_record, "{observed_peak_kib}")
         print "[{label}] measured worker peak commit={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"

@@ -2265,10 +2265,16 @@ impl CompilerDriver:
                 # functions Dict. Reparse the one authoritative entry source
                 # immediately before HIR lowering so real bodies are owned by
                 # this lowering pass rather than a stale arena-backed cache.
-                val bootstrap_module_for_hir: ParserModule = if src.content != "":
-                    parse_full_frontend_stage4_streaming(src.content, src.path, name, self.ctx.logger)
+                val bootstrap_parsed: Result<ParserModule, text> = if src.content != "":
+                    self.parse_exact_frontend_selected_v1(src.content, src.path, name)
                 else:
-                    self.ctx.modules[name]
+                    Ok(self.ctx.modules[name])
+                if bootstrap_parsed.is_err():
+                    self.ctx.add_error(bootstrap_parsed.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                val bootstrap_module_for_hir: ParserModule = bootstrap_parsed.unwrap()
                 val bootstrap_lower_result = self.lower_retained_surface_module(
                     lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry, src)
                 if bootstrap_lower_result.is_err():
@@ -2284,8 +2290,14 @@ impl CompilerDriver:
                 # module's full source before lowering -- the bootstrap-entry
                 # pattern above -- so its HIR equals the parent's.
                 dtrace("[DRV] branch=hir_worker_full_reparse")
-                val claimed_module_for_hir: ParserModule = parse_full_frontend_stage4_streaming(
-                    src.content, src.path, name, self.ctx.logger)
+                val claimed_parsed: Result<ParserModule, text> = self.parse_exact_frontend_selected_v1(
+                    src.content, src.path, name)
+                if claimed_parsed.is_err():
+                    self.ctx.add_error(claimed_parsed.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                val claimed_module_for_hir: ParserModule = claimed_parsed.unwrap()
                 val claimed_lower_result = self.lower_retained_surface_module(
                     lowering, claimed_module_for_hir, src.path, is_bootstrap_entry, src)
                 if claimed_lower_result.is_err():
@@ -2314,7 +2326,14 @@ impl CompilerDriver:
                 # (same-name sibling on MirLowering; iteration 17) and the real
                 # HIR lowering body never runs.
                 dtrace("[DRV] branch=unstub_reparse")
-                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                val reparsed_selected: Result<ParserModule, text> = self.parse_exact_frontend_selected_v1(
+                    src.content, src.path, name)
+                if reparsed_selected.is_err():
+                    self.ctx.add_error(reparsed_selected.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                val entry_module_for_hir: ParserModule = reparsed_selected.unwrap()
                 val reparsed_lower_result = self.lower_retained_surface_module(
                     lowering, entry_module_for_hir, src.path, is_bootstrap_entry, src)
                 if reparsed_lower_result.is_err():

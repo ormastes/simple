@@ -1,0 +1,185 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{dir_create_all, file_write, file_delete, file_read, env_set, getpid}
+use std.nogc_sync_mut.io_runtime.{cwd, time_now_unix_micros}
+use std.nogc_sync_mut.env.variables.{env_snapshot, env_restore}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_apply_environment_variant_policy_v1}
+use compiler.driver.driver_parse_shard_entry.{driver_parse_shard_apply_environment_variant_policy_v1}
+use app.cli.environment_variant_startup_owner_v1.{
+    AppEnvironmentVariantStartupOwnerV1,
+    app_environment_variant_startup_open_driver_v1,
+    app_environment_variant_startup_close_v1
+}
+use compiler.common.structural_contracts.environment_variant_startup_port_v1.{
+    EnvironmentVariantStartupRequestV1,
+    EnvironmentVariantStartupReceiptV1,
+    EnvironmentVariantStartupHandleV1,
+    EnvironmentVariantStartupStatusV1,
+    environment_variant_startup_cache_identity_v2,
+    environment_variant_startup_reference_cache_identity_v2
+}
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{
+    EnvironmentVariantRawValueV1,
+    EnvironmentVariantRawPolicyLayerV1,
+    EnvironmentVariantPolicyCollectionV1,
+    environment_variant_policy_collect_v1
+}
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    environment_variant_admin_restrictions_empty_v1,
+    environment_variant_policy_resolve_v1
+}
+use compiler.driver.driver_hir_worker_surface_v1.{
+    driver_frontend_advisory_cache_key_v1,
+    driver_hir_worker_warm_full_cache_present_v1,
+    driver_hir_worker_skeleton_text_v1
+}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{EnvironmentDigest256V1}
+use app.cli.worker_hir_owner_v1.{
+    WorkerHirExecPinActionV1,
+    WorkerHirPoolPinActionV1,
+    worker_hir_exec_pin_close_action_v1,
+    worker_hir_pool_pin_close_action_v1
+}
+
+fn spec_absent_raw() -> EnvironmentVariantRawValueV1:
+    EnvironmentVariantRawValueV1(present: false, value: "")
+
+fn spec_empty_raw_layer() -> EnvironmentVariantRawPolicyLayerV1:
+    EnvironmentVariantRawPolicyLayerV1(
+        parser_impl: spec_absent_raw(),
+        parser_prefer: spec_absent_raw(),
+        parser_require: spec_absent_raw(),
+        host_cpu_max: spec_absent_raw(),
+        frontend_offload: spec_absent_raw(),
+        frontend_fallback: spec_absent_raw(),
+        target_cpu: spec_absent_raw(),
+        target_cpu_features: spec_absent_raw())
+
+fn spec_policy_collection(prefer_simd: bool) -> EnvironmentVariantPolicyCollectionV1:
+    var cli = spec_empty_raw_layer()
+    if prefer_simd:
+        cli.parser_prefer = EnvironmentVariantRawValueV1(present: true, value: "simd")
+    environment_variant_policy_collect_v1(
+        cli, spec_empty_raw_layer(), spec_empty_raw_layer(), spec_empty_raw_layer(),
+        environment_variant_admin_restrictions_empty_v1()).unwrap()
+
+describe "unified .fpc frontend cache identity and warm full-source reuse":
+    it "computes the identical V2 cache identity across parse-shard, coordinator driver, and startup owner":
+        val collection = spec_policy_collection(false)
+        val decision = environment_variant_policy_resolve_v1(collection.policy_inputs).unwrap()
+
+        val parse_driver = compiler_driver_create(driver_core_compile_options_default())
+        expect(driver_parse_shard_apply_environment_variant_policy_v1(parse_driver, collection)).to_equal(true)
+
+        val main_driver = compiler_driver_create(driver_core_compile_options_default())
+        expect(compiler_driver_apply_environment_variant_policy_v1(main_driver, collection)).to_equal(Ok(()))
+
+        val startup_owner = AppEnvironmentVariantStartupOwnerV1.create()
+        val hir_driver = compiler_driver_create(driver_core_compile_options_default())
+        val receipt = app_environment_variant_startup_open_driver_v1(
+            startup_owner, EnvironmentVariantStartupRequestV1(collection: collection), hir_driver).unwrap()
+        expect(receipt.status).to_equal(EnvironmentVariantStartupStatusV1.Reference)
+
+        val expected = environment_variant_startup_reference_cache_identity_v2(decision.policy_digest).unwrap()
+        expect(expected.len()).to_equal(64)
+        expect(expected == decision.policy_digest).to_equal(false)
+        expect(parse_driver.ctx.environment_variant_frontend_cache_identity).to_equal(expected)
+        expect(main_driver.ctx.environment_variant_frontend_cache_identity).to_equal(expected)
+        expect(hir_driver.ctx.environment_variant_frontend_cache_identity).to_equal(expected)
+        expect(app_environment_variant_startup_close_v1(startup_owner)).to_equal(Ok(()))
+
+    it "changes reference cache identity when policy changes and separates Selected from Reference":
+        val default_col = spec_policy_collection(false)
+        val simd_col = spec_policy_collection(true)
+        val default_decision = environment_variant_policy_resolve_v1(default_col.policy_inputs).unwrap()
+        val simd_decision = environment_variant_policy_resolve_v1(simd_col.policy_inputs).unwrap()
+        val default_id = environment_variant_startup_reference_cache_identity_v2(default_decision.policy_digest).unwrap()
+        val simd_id = environment_variant_startup_reference_cache_identity_v2(simd_decision.policy_digest).unwrap()
+        expect(default_id == simd_id).to_equal(false)
+
+        val startup_owner = AppEnvironmentVariantStartupOwnerV1.create()
+        val driver = compiler_driver_create(driver_core_compile_options_default())
+        val ref_receipt = app_environment_variant_startup_open_driver_v1(
+            startup_owner, EnvironmentVariantStartupRequestV1(collection: default_col), driver).unwrap()
+        val selected_receipt = EnvironmentVariantStartupReceiptV1(
+            handle: EnvironmentVariantStartupHandleV1(owner_id: 1u64, session_id: 1u64, generation: 1u64),
+            policy_digest: ref_receipt.policy_digest,
+            provider_identity: EnvironmentDigest256V1(w0: 7u64, w1: 0u64, w2: 0u64, w3: 0u64),
+            variant_identity: EnvironmentDigest256V1(w0: 8u64, w1: 0u64, w2: 0u64, w3: 0u64),
+            artifact_identity: EnvironmentDigest256V1(w0: 9u64, w1: 0u64, w2: 0u64, w3: 0u64),
+            environment_identity: EnvironmentDigest256V1(w0: 10u64, w1: 0u64, w2: 0u64, w3: 0u64),
+            environment_generation: 1u64,
+            status: EnvironmentVariantStartupStatusV1.Selected,
+            rejection_code: "")
+        val selected_id = environment_variant_startup_cache_identity_v2(selected_receipt).unwrap()
+        expect(selected_id == default_id).to_equal(false)
+        expect(app_environment_variant_startup_close_v1(startup_owner)).to_equal(Ok(()))
+
+    it "detects warm full-source .fpc entries and preserves exact surface canonical digest":
+        val saved_env = env_snapshot()
+        val root = cwd() + "/build/test_tmp/fpc_warm_reuse_" + getpid().to_text() + "_" + time_now_unix_micros().to_text()
+        val cache_dir = root + "/frontend"
+        val src_path = root + "/sample.spl"
+        expect(dir_create_all(cache_dir)).to_equal(true)
+        val source_content = "pub struct Widget:\n    id: i64\n\npub fn compute(w: Widget) -> i64:\n    val doubled = w.id * 2\n    doubled + 1\n"
+        expect(file_write(src_path, source_content)).to_equal(true)
+
+        val collection = spec_policy_collection(false)
+        val decision = environment_variant_policy_resolve_v1(collection.policy_inputs).unwrap()
+        val cache_id = environment_variant_startup_reference_cache_identity_v2(decision.policy_digest).unwrap()
+
+        expect(env_set("SIMPLE_FRONTEND_CACHE", "1")).to_equal(true)
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "fpc-warm-reuse-spec-scope")).to_equal(true)
+        expect(env_set("SIMPLE_FRONTEND_CACHE_DIR", cache_dir)).to_equal(true)
+        expect(env_set("SIMPLE_FRONTEND_SPAB", "0")).to_equal(true)
+
+        # Cold before parse-shard writes the full-source .fpc
+        expect(driver_hir_worker_warm_full_cache_present_v1(source_content, src_path, cache_id)).to_equal(false)
+
+        val fpc_key = driver_frontend_advisory_cache_key_v1(source_content, cache_id)
+        expect(fpc_key.len()).to_equal(32)
+        val fpc_path = cache_dir + "/" + fpc_key + ".fpc"
+        expect(file_write(fpc_path, "warm-entry\n")).to_equal(true)
+
+        # Warm for the exact unified identity; miss for a foreign identity
+        expect(driver_hir_worker_warm_full_cache_present_v1(source_content, src_path, cache_id)).to_equal(true)
+        expect(driver_hir_worker_warm_full_cache_present_v1(source_content, src_path, decision.policy_digest)).to_equal(false)
+
+        # Full-source surface digest equals skeleton surface digest
+        val skeleton = driver_hir_worker_skeleton_text_v1(source_content)
+        expect(skeleton == source_content).to_equal(false)
+        val full_mod = parse_full_frontend(source_content, src_path, "sample", Logger(level: 0))
+        val skel_mod = parse_full_frontend(skeleton, src_path, "sample", Logger(level: 0))
+        expect(module_surface_canonical_digest_v1(full_mod)).to_equal(module_surface_canonical_digest_v1(skel_mod))
+
+        expect(file_delete(fpc_path)).to_equal(true)
+        expect(file_delete(src_path)).to_equal(true)
+        env_restore(saved_env)
+
+describe "shared OwnedExecutablePin pool lifecycle":
+    it "retains active reservations, detaches borrowed worker pins, and closes single-owner pins":
+        expect(worker_hir_exec_pin_close_action_v1(true, false)).to_equal(WorkerHirExecPinActionV1.RetainActive)
+        expect(worker_hir_exec_pin_close_action_v1(false, false)).to_equal(WorkerHirExecPinActionV1.RetainActive)
+        expect(worker_hir_exec_pin_close_action_v1(false, true)).to_equal(WorkerHirExecPinActionV1.DetachBorrowed)
+        expect(worker_hir_exec_pin_close_action_v1(true, true)).to_equal(WorkerHirExecPinActionV1.CloseOwned)
+
+    it "closes the pool pin once when all workers stopped and retains it on unstopped failure":
+        expect(worker_hir_pool_pin_close_action_v1(true, true, false)).to_equal(WorkerHirPoolPinActionV1.ClosePoolPin)
+        expect(worker_hir_pool_pin_close_action_v1(true, true, true)).to_equal(WorkerHirPoolPinActionV1.NoOp)
+        expect(worker_hir_pool_pin_close_action_v1(true, false, false)).to_equal(WorkerHirPoolPinActionV1.NoOp)
+        expect(worker_hir_pool_pin_close_action_v1(false, true, false)).to_equal(WorkerHirPoolPinActionV1.RetainUnstopped)
+        expect(worker_hir_pool_pin_close_action_v1(false, true, true)).to_equal(WorkerHirPoolPinActionV1.NoOp)
+
+    it "wires run_ledger_shards to one shared pool pin while keeping single-worker start intact":
+        val coordinator = file_read("src/app/cli/native_build_main.spl")
+        val owner = file_read("src/app/cli/worker_hir_owner_v1.spl")
+        expect(coordinator).to_contain("worker_hir_shared_exec_pin_open_v1(hir_profiles[0], simple_bin)")
+        expect(coordinator).to_contain("worker_hir_owner_start_borrowed_v1(")
+        expect(coordinator).to_contain("worker_hir_shared_exec_pin_close_stopped_v1(hir_shared_pins[0])")
+        expect(coordinator).to_contain("worker_hir_shared_exec_pin_retain_unstopped_v1(hir_shared_pins[0])")
+        expect(owner).to_contain("pub fn worker_hir_owner_start_v1(")
+        expect(owner).to_contain("_owns_exec_pin: true")
+        expect(owner).to_contain("_owns_exec_pin: false")
