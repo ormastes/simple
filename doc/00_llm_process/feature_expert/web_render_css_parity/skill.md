@@ -3878,3 +3878,50 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   owner decision; do not widen the tolerance.
 - The worker's oracle-mismatch errors now carry the verdict numbers.
 - Spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_case02_edges_spec.spl`.
+## Abspos fractional insets (2026-11-23, abspos lane)
+
+- **Cause:** `left`/`top` went through `_decl_signed_int_or_zero` and
+  `right`/`bottom` through `parse_int`, so `10.5px` painted at 10, `6.33em`
+  at 6 px, and abspos text always started on a whole pixel.
+- **Fix, parse:** insets now parse to LayoutUnit milli-px (px/em/rem) in
+  decl_apply. `*_px` rounds half up and the remainder goes in the new
+  `Style.left_milli`/`top_milli`/`right_milli`/`bottom_milli` fields. They
+  default to 0 and are copied wherever `left_auto` is copied: style.spl copy,
+  `style_with_height`/`_width`, `tag_defaults`. A field missing from one of
+  those rebuilds silently resets to 0.
+- **Fix, layout:** `absolute_box_snap` (layout_engine) wraps all four abspos
+  call sites. It takes `absolute_child_x_frac_milli`/`_y_` (layout_foundation),
+  which mirror `absolute_child_x`/`_y` branch for branch, plus the containing
+  block's fraction. It then snaps the box and records the remainder:
+  - x goes to `box_line_start_err` (same mechanism as the tablepen lane), so
+    the first run starts at the exact pen;
+  - in-flow block children inherit it (`<p>` inside an abspos at 200.5);
+  - y goes to `g_origin_frac_milli` plus `box_device_top_record`;
+  - at k>1, `box_device_dx_record` gets `round(k*exact) - k*x` and the text
+    keeps only the leftover.
+- **Fix, auto width:** a right-anchored auto-width box subtracts its own
+  max-content fraction via `flex_item_text_frac_delta_milli_px`.
+  `right:300.25px` puts an `l` at Chrome's 89.19.
+- **ICB `bottom`:** an abspos box with no positioned ancestor resolved
+  `bottom` against the body's content height, putting the box off-screen. It
+  now resolves against the viewport (`abspos_icb_bottom_chrome159_spec`).
+- **Translate:** an abspos box with `transform: translate`/`translate:` was
+  moved twice, because decl_apply also set `position_relative` and the
+  relative pass re-applied `left + translate`. Now the translation folds into
+  the abspos insets in milli-px. An `auto` left/top still carries it for
+  right/bottom anchoring and the static y.
+  `parse_signed_nth_length` split `0.3px` into the numbers 0 and 3; it is now
+  `parse_signed_nth_length_milli`.
+- **Open, Chrome antialiases translated boxes:** a fractional translation of
+  a box edge (`40(179)..60(77)` at k=1) is antialiased, not snapped. Here it
+  is snapped. That is paint-transform work.
+- **Open, wrapped lines (measured):** only the first line of a run carries
+  `pen-origin-milli`. Line 2 of an abspos `width:22px` box at `left:10.25px`
+  holding `ll ll ll` has its `l` centroid at 13.011 here and 13.250 in Chrome,
+  so it stays on the whole px.
+- **Open, wrap decision (observed, cause not investigated):** an abspos
+  `width:30px` box holding `ll ll ll` (about 30.2 px) wraps in Chrome and
+  stays on one line here.
+- **Specs:** `abspos_fractional_inset_chrome159_spec` (k=1 + k=4, centroids
+  minus a whole-px reference `l`), `abspos_icb_bottom_chrome159_spec`,
+  `abspos_transform_translate_chrome159_spec`.
