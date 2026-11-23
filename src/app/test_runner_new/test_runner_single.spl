@@ -1568,6 +1568,19 @@ fn _single_temp_dir_prefix() -> text:
     "{temp_root}{sep}"
 
 fn run_single_target(args: [text]) -> i64:
+    # --mode=<compiled lane> / --compile / --native-backend=<b>: this lane
+    # always interprets (SIMPLE_EXECUTION_MODE=interpret is pinned below), so
+    # `simple test <spec> --mode native --no-session-daemon` used to run the
+    # interpreter and report PASS for a lane that never ran. Refuse loudly,
+    # naming every dropped flag — same rule and helper as the client lane
+    # (test_runner_client.spl). Checked before parse_child_run, which would
+    # otherwise read the value of `--native-backend llvm` as a second spec
+    # path and fail with an unrelated message. Bug:
+    # test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
+    val dropped_exec_flags = client_dropped_execution_flags(args)
+    if dropped_exec_flags.len() > 0:
+        print "ERROR: test-runner: {dropped_exec_flags.join(", ")}: the --no-session-daemon single-spec lane always executes the interpreter; compiled lanes run via the directory runner (without --no-session-daemon): simple test <dir> {dropped_exec_flags.join(" ")} — refusing to run rather than silently downgrade"
+        return 2
     if args.contains("--spl-doctest") and not _single_has_md_target(args):
         return _single_run_spl_doctest(args)
     if _single_is_md_run(args):
@@ -1577,17 +1590,6 @@ fn run_single_target(args: [text]) -> i64:
         print "Simple Test Runner child"
         print "error: {run.error}: {run.path}"
         return 1
-    # --mode=<compiled lane> / --compile / --native-backend=<b>: this lane
-    # always interprets (SIMPLE_EXECUTION_MODE=interpret is pinned below), so
-    # `simple test <spec> --mode native --no-session-daemon` used to run the
-    # interpreter and report PASS for a lane that never ran. Refuse loudly,
-    # naming every dropped flag — same rule and helper as the client lane
-    # (test_runner_client.spl). Bug:
-    # test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
-    val dropped_exec_flags = client_dropped_execution_flags(args)
-    if dropped_exec_flags.len() > 0:
-        print "ERROR: test-runner: {dropped_exec_flags.join(", ")}: the --no-session-daemon single-spec lane always executes the interpreter; compiled lanes run via the directory runner (without --no-session-daemon): simple test <dir> {dropped_exec_flags.join(" ")} — refusing to run rather than silently downgrade"
-        return 2
     # --tag applies to the explicit path here too: an untagged file used to run
     # and PASS under `--tag slow --no-session-daemon`.
     val tag = client_tag_value(args)
