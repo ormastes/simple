@@ -85,6 +85,9 @@ run([exe, '/bin/sh', 'expect-empty:'+str(rejected)], 'failed-driver-is-not-autho
 run([exe, '/bin/sh', str(rejected), '-L'+str(pathlib.Path(resolved.splitlines()[0]).parent), '-lkernel32', '-lpsapi'], 'explicit-search-directory')
 fixture = root/'scripts/check/fixtures/windows-bounded-process-provider.c'
 run([a.cc, '--target=x86_64-w64-windows-gnu', '-fuse-ld=lld', '--rtlib=compiler-rt', '--unwindlib=libunwind', fixture, a.runtime, *['-l'+lib for lib in libs], '-o', a.out/'process-provider.exe'], 'process-provider-link')
+imports = run([pathlib.Path(a.nm).with_name('llvm-readobj'), '--coff-imports', a.out/'process-provider.exe'], 'process-provider-imports')
+for symbol in ['Thread32First', 'Thread32Next', 'ResumeThread', 'CreateToolhelp32Snapshot']:
+    assert re.search(r'Symbol: '+symbol+r'\s*\(', imports), ('missing genuine PE import', symbol)
 inputs = [owner/'linker.rs', owner/'stubs.rs', fixture, a.runtime]
 (a.out/'inputs.json').write_text(json.dumps({str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in inputs}, indent=2))
 (a.out/'result.json').write_text(json.dumps({'required_imports': required, 'negative_local_control': True, 'qualification': 'actual owner import discovery and retained-runtime PE link; Windows execution pending'}, indent=2))
