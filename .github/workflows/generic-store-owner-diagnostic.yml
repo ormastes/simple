@@ -1,0 +1,154 @@
+name: Generic store owner bootstrap diagnostic
+
+# Manual, exact-producer compiler diagnosis only. Never suite/release evidence.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: generic-store-owner-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCER_RUN: '45117792074'
+      PRODUCER_ARTIFACT: '14793483758'
+      PRODUCER_SOURCE: 5a2f91bde27568dab2fabfced5a8cdda3078f34f
+      PRODUCER_SHA256: 43b5261fc229f57e5e20dd64b08b6c6bf89a103f78f244fe858960c9704f8295
+      PRODUCER_BYTES: '58460496'
+      DIAGNOSTIC_OUT: build/verify/generic-store-owner-diagnostic
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Verify exact retained run and artifact provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAGNOSTIC_OUT"
+          # JSON here is explicit interoperability with the GitHub API.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN" > "$DIAGNOSTIC_OUT/producer-run.github.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PRODUCER_ARTIFACT" > "$DIAGNOSTIC_OUT/producer-artifact.github.json"
+          jq -e --argjson run "$PRODUCER_RUN" --arg source "$PRODUCER_SOURCE" \
+            '.id == $run and .head_sha == $source and .status == "completed"' \
+            "$DIAGNOSTIC_OUT/producer-run.github.json" > /dev/null
+          jq -e --argjson run "$PRODUCER_RUN" --argjson artifact "$PRODUCER_ARTIFACT" --arg source "$PRODUCER_SOURCE" \
+            '.id == $artifact and .name == "ladder-linux-x86_64-r1" and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $source' \
+            "$DIAGNOSTIC_OUT/producer-artifact.github.json" > /dev/null
+
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14793483758'
+          run-id: '45117792074'
+          github-token: ${{ github.token }}
+          path: build/verify/generic-store-owner-diagnostic/producer
+
+      - name: Verify immutable Phase 1 compiler bytes
+        run: |
+          set -euo pipefail
+          compiler="$PWD/$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/simple"
+          phase="$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/PHASE"
+          test -f "$phase"
+          printf '1\n' > "$DIAGNOSTIC_OUT/expected-phase"
+          cmp -s "$phase" "$DIAGNOSTIC_OUT/expected-phase"
+          test -f "$compiler"
+          test "$(stat -c '%s' "$compiler")" = "$PRODUCER_BYTES"
+          printf '%s  %s\n' "$PRODUCER_SHA256" "$compiler" | sha256sum --check --status
+          chmod +x "$compiler"
+          {
+            printf 'schema: exact-producer-bootstrap-diagnostic-v1\n'
+            printf 'status: BOOTSTRAP_DIAGNOSTIC\nadmission: none\nidentity_verified: true\n'
+            printf 'producer_run: %s\nproducer_artifact: %s\nproducer_source: %s\n' "$PRODUCER_RUN" "$PRODUCER_ARTIFACT" "$PRODUCER_SOURCE"
+            printf 'producer_phase: 1\nproducer_sha256: %s\nproducer_bytes: %s\n' "$PRODUCER_SHA256" "$PRODUCER_BYTES"
+            printf 'fixture_source_revision: %s\n' "$(git rev-parse HEAD)"
+            printf 'available_runtime_source_tree: %s\n' "$(git rev-parse HEAD:src/runtime)"
+            printf 'available_library_source_tree: %s\n' "$(git rev-parse HEAD:src/lib)"
+            printf 'runtime_provider: native-build-default-source-selection-see-logs\n'
+            printf 'supplied_runtime_archive: none\n'
+            printf 'backend: native-build-default-matching-build-next-phase-ci\n'
+            printf 'artifact_execution: NOT_RUN\nsuite_execution: NOT_RUN\n'
+          } > "$DIAGNOSTIC_OUT/producer.sdn"
+
+      - name: Install canonical Linux native build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev
+          clang --version > "$DIAGNOSTIC_OUT/clang-version.txt"
+          llc --version > "$DIAGNOSTIC_OUT/llc-version.txt"
+          ld.lld --version > "$DIAGNOSTIC_OUT/lld-version.txt"
+
+      - name: Collect three isolated native compile diagnostics
+        run: |
+          set -euo pipefail
+          compiler="$PWD/$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/simple"
+          fixture_root=test/fixtures/compiler/generic_store_factory_result_owner
+          failed=0
+          for fixture in parameter_receiver pattern_receiver alias_receiver; do
+            lane="$PWD/$DIAGNOSTIC_OUT/$fixture"
+            mkdir -p "$lane/source" "$lane/cache"
+            # One source per closure: never scan all src/ as the fixture root.
+            cp "$fixture_root/$fixture.spl" "$lane/source/main.spl"
+            args=(native-build --source "$lane/source" --entry-closure --entry "$lane/source/main.spl"
+              --mode dynload --low-memory --threads 4 --cache-dir "$lane/cache" --output "$lane/program")
+            printf '%q ' "$compiler" "${args[@]}" > "$lane/command.txt"
+            printf '\n' >> "$lane/command.txt"
+            set +e
+            # Same default backend and bootstrap lane as build-next-phase-ci.
+            # TERM at 175s, KILL after another 5s: at most 180s per fixture.
+            /usr/bin/time -v -o "$lane/resources.txt" timeout --verbose --signal=TERM --kill-after=5s 175s \
+              env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_MONO_ROOT_DISCOVERY=1 \
+                SIMPLE_HOST_MAX_THREADS=4 SIMPLE_HOST_MAX_BUILD_JOBS=4 SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS=4 \
+                SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=1 \
+                SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_RTI_DIAGNOSTICS=1 \
+                "$compiler" "${args[@]}" > "$lane/native-build.log" 2>&1
+            code=$?
+            set -e
+            outcome=COMPILE_LINK_ONLY
+            if [ "$code" -ne 0 ]; then outcome=NATIVE_BUILD_FAILED; failed=1; fi
+            if [ "$code" -eq 0 ] && [ ! -s "$lane/program" ]; then outcome=OUTPUT_MISSING; failed=1; fi
+            {
+              printf 'schema: generic-store-owner-fixture-diagnostic-v1\n'
+              printf 'status: BOOTSTRAP_DIAGNOSTIC\nadmission: none\n'
+              printf 'fixture: %s\nfixture_source_sha256: %s\n' "$fixture" "$(sha256sum "$lane/source/main.spl" | cut -d' ' -f1)"
+              printf 'producer_sha256: %s\nnative_build_exit_status: %s\n' "$PRODUCER_SHA256" "$code"
+              printf 'outcome: %s\nsoft_deadline_seconds: 175\nhard_deadline_seconds: 180\n' "$outcome"
+              printf 'runtime_provider: native-build-default-source-selection-see-native-build-log\n'
+              printf 'emitted_program_execution: NOT_RUN\nsuite_execution: NOT_RUN\n'
+            } > "$lane/receipt.sdn"
+            if [ -s "$lane/program" ]; then
+              sha256sum "$lane/program" > "$lane/program.sha256"
+              file "$lane/program" > "$lane/program.file.txt"
+            fi
+            printf '%s native-build rc=%s outcome=%s (BOOTSTRAP_DIAGNOSTIC, no admission)\n' "$fixture" "$code" "$outcome"
+          done
+          exit "$failed"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: generic-store-owner-bootstrap-diagnostic-${{ github.run_id }}
+          path: |
+            build/verify/generic-store-owner-diagnostic/**/receipt.sdn
+            build/verify/generic-store-owner-diagnostic/producer.sdn
+            build/verify/generic-store-owner-diagnostic/*.github.json
+            build/verify/generic-store-owner-diagnostic/*version.txt
+            build/verify/generic-store-owner-diagnostic/**/source/main.spl
+            build/verify/generic-store-owner-diagnostic/**/command.txt
+            build/verify/generic-store-owner-diagnostic/**/native-build.log
+            build/verify/generic-store-owner-diagnostic/**/resources.txt
+            build/verify/generic-store-owner-diagnostic/**/program.sha256
+            build/verify/generic-store-owner-diagnostic/**/program.file.txt
+          retention-days: 14
+          if-no-files-found: warn
