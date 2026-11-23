@@ -18,7 +18,8 @@ use std.common.contracts.orchestration.host_service_operation_v6.host_service_he
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
-use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
     distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3,
     distributed_operation_journal_linux_current_v3}
@@ -84,6 +85,7 @@ struct AuthPublicationStateV1:
     extra_file: Option<WindowsPrivateFileV1> = None
     extra_reader_root: Option<WindowsPrivateReadRootV2> = None
     content: [u8] = []
+    content_text: text = ""
     original_bytes: [u8] = []
     uid: text = ""
     digest: text = ""
@@ -290,6 +292,7 @@ fn auth_publication_cleanup_v1(slot: i64):
     if not attempted:
         state.closed = true
         state.content = []
+        state.content_text = ""
         state.original_bytes = []
         state.endpoint = ""
         state.incarnation = ""
@@ -352,8 +355,12 @@ fn auth_publication_advance_v1(slot: i64):
                 if record.is_err(): state = auth_publication_fail_v1(state, "host-auth-setup-encoding")
                 else:
                     state.content = record.unwrap()
-                    state.digest = sha256_text(bytes_to_text(state.content))
-                    state.phase = "stage"
+                    match bytes_to_text_checked(state.content):
+                        case Err(_): state = auth_publication_fail_v1(state, "host-auth-setup-encoding")
+                        case Ok(content_text):
+                            state.content_text = content_text
+                            state.digest = sha256_text(content_text)
+                            state.phase = "stage"
             auth_publications_v1[slot] = state
         case "stage":
             val current = auth_publication_setup_current_v1(slot)
@@ -527,8 +534,12 @@ fn auth_ready_advance_v1(slot: i64, journal: DistributedOperationJournalV2):
                 else:
                     state.content = record.unwrap()
                     state.ready_relative = relative.unwrap()
-                    state.ready_digest = sha256_text(bytes_to_text(state.content))
-                    state.phase = "journal-publish"
+                    match bytes_to_text_checked(state.content):
+                        case Err(_): state = auth_publication_fail_v1(state, "host-ready-journal-record-encoding")
+                        case Ok(content_text):
+                            state.content_text = content_text
+                            state.ready_digest = sha256_text(content_text)
+                            state.phase = "journal-publish"
             auth_publications_v1[slot] = state
         case "journal-publish":
             val setup_current = auth_publication_setup_current_v1(slot)
@@ -540,7 +551,7 @@ fn auth_ready_advance_v1(slot: i64, journal: DistributedOperationJournalV2):
             auth_publications_v1[slot] = state
             # Sole writer is the provided actual Host journal. No second open,
             # writer/store capture, journal close or publication retry exists.
-            val published = distributed_operation_journal_publish_v3(journal, state.ready_relative, bytes_to_text(state.content))
+            val published = distributed_operation_journal_publish_v3(journal, state.ready_relative, state.content_text)
             if published.is_err(): state = auth_publication_fail_v1(state, "host-ready-journal-publication-unknown")
             elif not published.unwrap():
                 state.publication = "conflict"
@@ -554,7 +565,7 @@ fn auth_ready_advance_v1(slot: i64, journal: DistributedOperationJournalV2):
             val after = auth_ready_snapshot_v1(journal)
             val setup_current = auth_publication_setup_current_v1(slot)
             state = auth_publications_v1[slot]
-            if (read.is_err() or read.unwrap() != bytes_to_text(state.content) or after.is_err() or
+            if (read.is_err() or read.unwrap() != state.content_text or after.is_err() or
                     after.unwrap().lease_digest != state.journal_lease or setup_current.is_err()):
                 state = auth_publication_fail_v1(state, "host-ready-journal-readback-rejected")
             else:
@@ -654,13 +665,17 @@ fn auth_publication_advance_linux_v1(slot: i64):
                 if record.is_err(): state = auth_publication_fail_v1(state, "host-auth-setup-encoding")
                 else:
                     state.content = record.unwrap()
-                    state.digest = sha256_text(bytes_to_text(state.content))
-                    state.phase = "publish"
+                    match bytes_to_text_checked(state.content):
+                        case Err(_): state = auth_publication_fail_v1(state, "host-auth-setup-encoding")
+                        case Ok(content_text):
+                            state.content_text = content_text
+                            state.digest = sha256_text(content_text)
+                            state.phase = "publish"
         case "publish":
             state.publication = "unknown"
             auth_publications_v1[slot] = state
             var resources = state.linux_resources.unwrap()
-            val published = resources.publish_v1(state.names.setup_leaf, bytes_to_text(state.content))
+            val published = resources.publish_v1(state.names.setup_leaf, state.content_text)
             if published.is_err(): state = auth_publication_fail_v1(state, published.unwrap_err())
             elif not published.unwrap():
                 state.publication = "conflict"
@@ -696,6 +711,7 @@ fn auth_publication_cleanup_linux_v1(slot: i64, before: AuthPublicationStateV1):
     else:
         state.closed = true
         state.content = []
+        state.content_text = ""
         state.original_bytes = []
         state.endpoint = ""
         state.incarnation = ""
