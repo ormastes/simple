@@ -8,15 +8,67 @@ import shutil
 import statistics
 import subprocess
 import time
+import zipfile
+from pathlib import PurePosixPath
 
 SOURCE = 'ce231b5b898d797c98d44a9b59a4859a7d792a7b'
 PARENT = 'ed5e03685a3c9233395306f6fcb2c7c5fa9a6ada36fc1158c20e6d3be91fcf73'
 RUNTIME = {'libsimple_native_all.a':'7ceed2e9b0edbf719a6fb4422578d2e322e7ea33f71a9cf700fc8f16df2208ae',
            'libsimple_compiler_backfill.a':'637d252e535f0773347af467335918133b2d83c52759eff64c33ac7932d2a41e'}
 OWNER = 'src/compiler/20.hir/hir_lowering/module_surface_selected_exports_v1.spl'
+PRIOR_SHA = 'd11481bc11ff8a3d84386e56892739f3fedfcceb95f36f280bafdbb4b00caf19'
+DEPENDENCY_FILES = ['module_surface_declarations.spl', 'module_surface_from_tldr_v1.spl',
+                    'module_surface_manifest_evidence_v1.spl', 'module_surface_registry.spl',
+                    'module_surface_source_identity.spl', 'module_surface_types.spl']
 
 def sha(path):
     with path.open('rb') as stream: return hashlib.file_digest(stream,'sha256').hexdigest()
+
+def restore_prior_cache(destination):
+    """Restore immutable cache candidates; do not reuse an old verdict/queue."""
+    archive=Path('intake/prior.zip')
+    assert sha(archive)==PRIOR_SHA
+    prefix='source/build/freeze-owner-probe/'
+    with zipfile.ZipFile(archive) as z:
+        names=set()
+        folded=set()
+        assert sum(i.file_size for i in z.infolist())<256*1024*1024
+        for item in z.infolist():
+            path=PurePosixPath(item.filename)
+            canonical=path.as_posix()
+            assert not path.is_absolute() and '..' not in path.parts
+            assert canonical==item.filename.rstrip('/')
+            assert not any(c in item.filename for c in ['\\',':','\0'])
+            assert canonical not in names and canonical.casefold() not in folded
+            names.add(canonical)
+            folded.add(canonical.casefold())
+            assert (item.external_attr>>16)&0o170000 != 0o120000
+        result=json.loads(z.read(prefix+'result.json'))
+        assert result['source']==SOURCE and result['producer_sha256']==PARENT
+        assert result['runtime_sha256']==RUNTIME and result['stage']=='compile-baseline'
+        assert result['status']=='FAILED' and result['samples']==[]
+        assert result['owner_restored'] and result['parent_unchanged']
+        receipt=dict(r.split('=',1) for r in z.read(prefix+'compile-baseline.owner.env').decode().splitlines() if '=' in r)
+        assert receipt['status']=='rss-cap-exceeded' and receipt['exit_status']=='88'
+        assert receipt['quiescent']=='1' and receipt['rss_cap_enforced']=='1'
+        assert receipt['rss_limit_kib']=='6291456'
+        copied=[]
+        for item in z.infolist():
+            cache_prefix=prefix+'baseline/cache/'
+            if not item.filename.startswith(cache_prefix) or item.is_dir(): continue
+            relative=PurePosixPath(item.filename[len(cache_prefix):])
+            if any(part.startswith(('queue-','mir-queue-')) for part in relative.parts): continue
+            data=z.read(item)
+            target=destination/str(relative)
+            target.parent.mkdir(parents=True,exist_ok=True)
+            assert not target.exists()
+            target.write_bytes(data)
+            digest=hashlib.sha256(data).hexdigest()
+            assert sha(target)==digest
+            copied.append({'path':str(relative),'sha256':digest,'bytes':len(data)})
+        return {'prior_run':45271594927,'prior_artifact':14866627876,
+                'archive_sha256':PRIOR_SHA,'copied_candidates':copied,
+                'reuse_status':'candidates only; normal source/producer/cache checks decide'}
 
 def main():
     source=Path('source').resolve()
@@ -93,7 +145,30 @@ def main():
         return {'elapsed_seconds':elapsed,'peak_rss_kib':int(fields['peak_rss_kib']),
                 'stdout_sha256':sha(root/(name+'.stdout'))}
 
+    dependency_originals={}
     try:
+        # The facade already exports this exact physical declaration. Only its
+        # unrelated BackendCompileOptions dependency is removed; no type is copied.
+        facade=(source/'src/compiler/00.common/driver_core_types.spl').read_text()
+        assert 'pub use compiler.common.driver_source_file.{' in facade
+        declaration=source/'src/compiler/00.common/driver_source_file.spl'
+        assert 'struct SourceFile:' in declaration.read_text()
+        result['sourcefile_declaration_sha256']=sha(declaration)
+        result['dependency_overlay']=[]
+        for filename in DEPENDENCY_FILES:
+            path=source/'src/compiler/20.hir/hir_lowering'/filename
+            data=path.read_bytes()
+            dependency_originals[path]=data
+            text=data.decode()
+            old='use compiler.common.driver_core_types.{SourceFile}'
+            new='use compiler.common.driver_source_file.{SourceFile}'
+            assert text.count(old)==1
+            changed=text.replace(old,new)
+            path.write_text(changed)
+            result['dependency_overlay'].append({'path':str(path.relative_to(source)),
+                'baseline_sha256':hashlib.sha256(data).hexdigest(),'fixture_owner_sha256':sha(path)})
+        result['dependency_scope']='same six SourceFile-only physical-owner imports in both variants; freeze/selection baseline algorithm unchanged'
+        result['prior_closure_modules']=503
         for variant in ['baseline','candidate']:
             result['stage']='compile-'+variant
             if variant=='candidate': owner.write_text(after)
@@ -101,6 +176,8 @@ def main():
             lane.mkdir()
             lane_env=env.copy()
             for sub in ['cache','storage','tmp','xdg']: (lane/sub).mkdir()
+            cache_intake=restore_prior_cache(lane/'cache')
+            (lane/'cache-intake.json').write_text(json.dumps(cache_intake,indent=2))
             lane_env.update(SIMPLE_CACHE=str(lane/'cache'),SIMPLE_NATIVE_BUILD_CACHE_DIR=str(lane/'cache'),
                             SIMPLE_CACHE_PROJECT='freeze-'+variant+'-'+result['candidate_owner_sha256'][:16],
                             SIMPLE_USER_STORAGE_ROOT=str(lane/'storage'),TMPDIR=str(lane/'tmp'),XDG_CACHE_HOME=str(lane/'xdg'))
@@ -112,6 +189,33 @@ def main():
                   '--cache-dir',lane/'cache','--low-memory',
                   '--source','src/compiler','--source','src/lib']
             result[variant+'_compile_metrics']=owned('compile-'+variant,argv,900,cap,lane_env)
+            log=(root/('compile-'+variant+'.stdout')).read_text(errors='replace')
+            import re
+            source_trace=log+(root/('compile-'+variant+'.stderr')).read_text(errors='replace')
+            snapshot_bindings=[]
+            for filename in DEPENDENCY_FILES+[Path(OWNER).name]:
+                # Retain actual source-view read paths, not just the mutable
+                # checkout hash; a stale snapshot must fail the A/B intake.
+                pattern=r'(/[^\s\"\']*/build/scv/snapshots/scv-revision-v2-[0-9a-f]+/src/compiler/20\.hir/hir_lowering/'+re.escape(filename)+r')'
+                paths=sorted(set(re.findall(pattern,source_trace)))
+                if not paths:
+                    assert filename not in [Path(OWNER).name,'module_surface_types.spl','module_surface_registry.spl'], 'missing required actual source-view read trace: '+filename
+                    snapshot_bindings.append({'filename':filename,'status':'not present in observed source-view reads'})
+                    continue
+                expected=sha(source/'src/compiler/20.hir/hir_lowering'/filename)
+                for path in paths:
+                    assert sha(Path(path))==expected, 'stale source-view owner: '+path
+                    retained=lane/'source-views'/filename
+                    retained.parent.mkdir(exist_ok=True)
+                    shutil.copyfile(path,retained)
+                    assert sha(retained)==expected
+                    snapshot_bindings.append({'path':path,'sha256':expected,'retained':str(retained.relative_to(root))})
+            result[variant+'_actual_source_views']=snapshot_bindings
+            closure_counts=sorted({int(x) for x in re.findall(r'phase=hir state=running unit_kind=modules done=\d+ total=(\d+)',log)})
+            result[variant+'_closure_modules']=closure_counts
+            result[variant+'_generated_hir_codec_seen']='current=compiler.hir.generated.hir_codec' in log
+            assert len(closure_counts)==1, 'missing or inconsistent actual HIR closure count'
+            assert closure_counts[0]<503 and not result[variant+'_generated_hir_codec_seen'], 'dependency reduction not established'
             assert binary.is_file()
             result[variant+'_binary_sha256']=sha(binary)
         # One detailed semantic capture per immutable binary, separate from timing.
@@ -156,6 +260,16 @@ def main():
         result['error']=str(error)
     finally:
         owner.write_bytes(original)
+        for path,data in dependency_originals.items(): path.write_bytes(data)
+        result['dependency_owners_restored']=all(path.read_bytes()==data for path,data in dependency_originals.items())
+        # Capture closure progress even if compilation or a later gate fails.
+        import re
+        for variant in ['baseline','candidate']:
+            log_path=root/('compile-'+variant+'.stdout')
+            if log_path.exists():
+                log=log_path.read_text(errors='replace')
+                result[variant+'_closure_modules']=sorted({int(x) for x in re.findall(r'phase=hir state=running unit_kind=modules done=\d+ total=(\d+)',log)})
+                result[variant+'_generated_hir_codec_seen']='current=compiler.hir.generated.hir_codec' in log
         result['owner_restored']=sha(owner)==result['baseline_owner_sha256']
         result['parent_unchanged']=sha(parent)==PARENT
         (root/'result.json').write_text(json.dumps(result,indent=2))
