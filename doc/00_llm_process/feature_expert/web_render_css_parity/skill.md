@@ -4175,3 +4175,36 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Fix:** `lower_utility_builtin` skips the cast when `declared_function_returns` holds the name. That map is filled for both the flattened lane and the project lane; `own_declared_function_names` is empty on the flattened lane, so it could not be used.
 - **Evidence:** the spec `jit_user_fn_named_like_primitive.rs` was red (171717) and is now green (201918), and a call with no user function still casts. All 8 pages match JIT == interpreter at 1x and 4x, and JIT output is unchanged from before the fix. Failure counts match the base, and `batch_pipeline` and `native_link` pass.
 - **Bug record:** `doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md`.
+
+## 2026-11-24 — svgaudio: clip follows device-y-offset; audio time text
+
+- **A command's `clip_rect` now moves with its `device-y-offset`** (`_dir_scale_command`,
+  `src/lib/common/ui/draw_ir_device_scale.spl`). Before, an svg snapped up one device row
+  kept its viewport clip at k x the CSS y and lost its top row (Chrome inks row 383, we cut
+  at 384). Pinned by `line_start_fraction_device_rows_chrome159_spec` AC-4. Only the
+  y offset is applied; `device-x-offset` and `device-rect` still leave the clip alone.
+  Gates and both catalogs showed nothing that depends on them.
+- **`<audio controls>` paints Chrome's `0:00 / 0:00` time text.** Measured by rendering
+  candidate spans in Chrome against its own audio control:
+  - The face is 14px Liberation Sans in `#1f1f1f`. DejaVu Sans does not match.
+  - It is two boxes. `0:00` starts at x 47 and `/ 0:00` at x 78.25 of the content box.
+    These offsets reproduce Chrome's 4x pixels exactly (0 px differ). With one run, the
+    slash drifts.
+  - The line is centred in DEVICE px, with the half px rounding down the page:
+    (216 - 63) / 2 = 76.5, so the top is 77 and the baseline 128.
+  - Our CSS-centred top plus the device ascent gave 127. `centred_line_device_dy`
+    (layout_foundation) computes the difference, and the label carries it as
+    `device-y-offset`.
+  - The 78.25 start is `pen-origin-milli` 250, which `draw_ir_adv` honours at k=1 as well.
+  - Pinned by `media_controls_paint_chrome159_spec` AC-8 (ink box and count at 1x and 4x).
+- **The "animation 4x text x offsets" are not offsets.** The largest remaining animation
+  regions are text rows, and their ink centroids are within 0.13-0.23 device px of Chrome.
+  An isolated `<code>x</code> — partial; …` fixture is within 0.2 px on every line. What
+  remains is glyph anti-aliasing, not pen placement. Do not chase it as a layout bug.
+- Catalog: 1x animation 0.98 -> 0.92, and dpr4 animation 0.35 -> 0.33. Every other page
+  is identical. Perf (animation k=4, 6 alternated rounds): median 15268 -> 15434 ms (+1.1%),
+  RSS flat. Earlier 6-round sets read +3.9% at load 12-23; a clip-only vs full bisect
+  showed the label costs nothing, so that was host noise. Use 6+ alternated rounds here.
+- Method note: measure UA-chrome text by rendering candidate spans in Chrome itself and
+  running a box pixel diff (`boxdiff.spl`) against the real control, sweeping font, colour
+  and x. That settles the face and the subpixel offsets before any code is written.
