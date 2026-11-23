@@ -93,7 +93,7 @@ use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
 use app.cli.native_build_hir_warmup_outcome.{mir_shard_pool_parallel_v1}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
-use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1, hir_shard_recovery_blocked_reason_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_reap_deadline_rearm_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1, hir_shard_recovery_blocked_reason_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
     hir_shard_recovery_failed_rows_v1, hir_shard_recovery_replacements_dispatchable}
 use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_from_inputs_v1,
@@ -1181,9 +1181,13 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
 # time (a free slot is refilled at once), reaps and seals each, replaces a
 # crashed owner that made progress (unless fail-fast), closes the inventory,
 # and returns the aggregate exit with the evidence behind it (LedgerShardRunV1).
-# timeout_ms (0 = none) runs from each
-# worker's own spawn; the old sequential waits let the k-th worker of a wave
-# run up to k x timeout_ms. Reap (and log) order is exit order, not index.
+# timeout_ms (0 = none) is a per-worker no-progress watchdog, not a worker-age
+# limit: it runs from the worker's spawn and is re-armed whenever the deadline
+# fires and the owner tree has claimed new rows since the last arming, so a
+# hang is reaped within 2 x timeout_ms and a worker that never claims at
+# 1 x. (A 6 h age limit reaped four healthy file workers 20 s into a batch,
+# 1539 claims in, and sealed that batch TIMEOUT.) Reap (and log) order is exit
+# order, not index.
 const SHARD_POOL_POLL_MS: i64 = 10
 # Host headroom re-probe period for the slot pool (shard_pool_headroom_probe_due_v1).
 const SHARD_POOL_HEADROOM_PROBE_MS: i64 = 1000
@@ -1311,6 +1315,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         var owners: [text] = []
         var indices: [i64] = []
         var started_ms: [i64] = []
+        var armed_claims: [i64] = []
         var now_headroom: i64 = -1
         var live_private: [i64] = []
         var probe_at_ms: i64 = -1
@@ -1350,6 +1355,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 owners = owners.push(owner)
                 indices = indices.push(index)
                 started_ms = started_ms.push(time_now_monotonic_ms())
+                armed_claims = armed_claims.push(0)
                 live_private = live_private.push(0)
                 if pids.len() > peak_live: peak_live = pids.len()
             if pids.len() == 0:
@@ -1393,7 +1399,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     # SHARD_POOL_POLL_MS x live.
                     val polled = native_build_normalize_exit_code(process_wait(pids[i],
                         shard_pool_poll_quantum_v1(live_workers, SHARD_POOL_POLL_MS)))
-                    val deadline_now = hir_shard_reap_deadline_hit_v1(polled, timeout_ms, time_now_monotonic_ms() - started_ms[i])
+                    var deadline_now = hir_shard_reap_deadline_hit_v1(polled, timeout_ms, time_now_monotonic_ms() - started_ms[i])
+                    if deadline_now:
+                        # Read the ledger only when the deadline fires, never per poll.
+                        val claims_now = hir_shard_recovery_owner_tree_progress_v1(queue_dir, owners[i])
+                        if hir_shard_reap_deadline_rearm_v1(armed_claims[i], claims_now):
+                            armed_claims[i] = claims_now
+                            started_ms[i] = time_now_monotonic_ms()
+                            deadline_now = false
                     if polled != -2 or deadline_now:
                         reap_at = i
                         code = polled
@@ -1419,6 +1432,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             var kept_owners: [text] = []
             var kept_indices: [i64] = []
             var kept_started: [i64] = []
+            var kept_armed: [i64] = []
             i = 0
             while i < pids.len():
                 if i != reap_at:
@@ -1427,12 +1441,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                     kept_owners = kept_owners.push(owners[i])
                     kept_indices = kept_indices.push(indices[i])
                     kept_started = kept_started.push(started_ms[i])
+                    kept_armed = kept_armed.push(armed_claims[i])
                 i = i + 1
             pids = kept_pids
             hir_owners = kept_hir
             owners = kept_owners
             indices = kept_indices
             started_ms = kept_started
+            armed_claims = kept_armed
             # -1 is a wait error, not proof of exit. Even a false liveness
             # probe also means invalid handle; require a real reap result.
             var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
