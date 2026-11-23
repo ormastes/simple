@@ -36,9 +36,9 @@ pub enum SimpleContainerOwnerV2:
     Windows(ContainerHostScopeV2, WindowsSimpleContainerAdapterV2)
 
 pub struct SimpleContainerFreshOpenV2:
-    owner: Option<SimpleContainerOwnerV2> = nil
-    admission_cleanup: Option<MachineFreshEpochAdmissionTurnV1> = nil
-    fresh_cleanup: Option<LinuxFreshWorkloadOwnerV2> = nil
+    owner: Option<SimpleContainerOwnerV2> = None
+    admission_cleanup: Option<MachineFreshEpochAdmissionTurnV1> = None
+    fresh_cleanup: Option<LinuxFreshWorkloadOwnerV2> = None
     error: text = ""
 
 pub struct SimpleContainerCloseV2:
@@ -296,18 +296,18 @@ fn container_logs_capture_finish_v1(owner: SimpleContainerOwnerV2, original: Con
     if native.owner.?:
         return ContainerExecutionLogsCaptureTurnV1(owner: owner,
             capture: Some(ContainerExecutionLogsCaptureOwnerV1(original_request: original, scope: scope, runtime: runtime,
-                native: native.owner.unwrap(), first_error: error)), observation: nil, error: error)
+                native: native.owner.unwrap(), first_error: error)), observation: None, error: error)
     if not native.evidence.?:
-        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: nil,
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: None, observation: None,
             error: if error != "": error else: "container-logs-capture-evidence-unavailable")
     val evidence = native.evidence.unwrap()
     val observation = ContainerExecutionLogsCaptureObservationV1(scope: scope, runtime: runtime,
         request_digest: original.plan.request_digest, evidence: evidence)
     if not evidence.retirement_confirmed_v1():
-        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: Some(observation),
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: None, observation: Some(observation),
             error: "container-logs-capture-retirement-unconfirmed")
     if cancelled:
-        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: Some(observation),
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: None, observation: Some(observation),
             error: if error != "": error else: "container-logs-capture-cancelled")
     # Native log-process EOF/retirement does not prove workload exit. Recheck
     # this exact runtime binding; consumers separately use workload wait.
@@ -317,13 +317,13 @@ fn container_logs_capture_finish_v1(owner: SimpleContainerOwnerV2, original: Con
     val result = evidence.process_result_v1()
     if result.is_none() or result.unwrap().exit_code != 0 or result.unwrap().limit_exceeded:
         if error == "": error = "container-logs-command-failed-limited-or-text-unavailable"
-    ContainerExecutionLogsCaptureTurnV1(owner: checked.owner, capture: nil, observation: Some(observation), error: error)
+    ContainerExecutionLogsCaptureTurnV1(owner: checked.owner, capture: None, observation: Some(observation), error: error)
 
 pub fn simple_container_logs_capture_v1(owner: SimpleContainerOwnerV2,
         original_request: ContainerExecutionRequestV2) -> ContainerExecutionLogsCaptureTurnV1:
     val projected = simple_container_project_v2(owner, original_request)
     if projected.is_err():
-        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: nil, observation: nil, error: projected.unwrap_err())
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: None, observation: None, error: projected.unwrap_err())
     val scope = simple_container_scope_v2(owner)
     match owner:
         case SimpleContainerOwnerV2.Linux(_, adapter):
@@ -342,7 +342,7 @@ pub fn simple_container_logs_capture_step_v1(owner: SimpleContainerOwnerV2,
     val expected = container_host_scope_bytes_v2(capture.scope)
     val current = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
     if not cancel and (expected.is_err() or current.is_err() or expected.unwrap() != current.unwrap()):
-        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: Some(capture), observation: nil,
+        return ContainerExecutionLogsCaptureTurnV1(owner: owner, capture: Some(capture), observation: None,
             error: "container-logs-capture-owner-scope-mismatch")
     # Cleanup consumes only the genuine already-retained native lease. It does
     # not require a live provider/current launch policy or start a new child.
@@ -356,10 +356,10 @@ pub fn simple_container_configuration_observe_v1(owner: SimpleContainerOwnerV2,
         original_request: ContainerExecutionRequestV2) -> ContainerExecutionConfigurationTurnV1:
     val turn = simple_container_read_v2(owner, "configuration", original_request)
     if turn.operation.status != "ok" or turn.operation.exit_code != 0:
-        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: turn.operation.reason)
+        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: None, error: turn.operation.reason)
     val observed = match container_execution_configuration_decode_v1(turn.operation.stdout):
         case Ok(value): value
-        case Err(reason): return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: reason)
+        case Err(reason): return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: None, error: reason)
     val identity = turn.operation.state.identity
     val plan = original_request.plan
     val actual = observed.runtime
@@ -370,11 +370,11 @@ pub fn simple_container_configuration_observe_v1(owner: SimpleContainerOwnerV2,
             actual.attempt != identity.attempt or actual.operation_id != identity.operation_id or
             actual.provider_generation != identity.provider_generation or actual.node_boot_id != identity.node_boot_id or
             actual.engine != identity.engine):
-        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: "container-configuration-request-runtime-mismatch")
+        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: None, error: "container-configuration-request-runtime-mismatch")
     val expected_scope = container_host_scope_bytes_v2(simple_container_scope_v2(turn.owner))
     val found_scope = container_host_scope_bytes_v2(observed.scope)
     if expected_scope.is_err() or found_scope.is_err() or expected_scope.unwrap() != found_scope.unwrap():
-        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: nil, error: "container-configuration-scope-mismatch")
+        return ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: None, error: "container-configuration-scope-mismatch")
     ContainerExecutionConfigurationTurnV1(owner: turn.owner, observation: Some(observed), error: "")
 
 # Separate versioned wrapper. The existing V1 producer/wire stays unchanged;
@@ -383,10 +383,10 @@ pub fn simple_container_input_configuration_observe_v1(owner: SimpleContainerOwn
         original_request: ContainerExecutionRequestV2) -> ContainerExecutionInputConfigurationTurnV1:
     val turn = simple_container_read_v2(owner, "input-configuration", original_request)
     if turn.operation.status != "ok" or turn.operation.exit_code != 0:
-        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil, error: turn.operation.reason)
+        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: None, error: turn.operation.reason)
     val observed = match container_execution_input_configuration_decode_v1(turn.operation.stdout):
         case Ok(value): value
-        case Err(reason): return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil, error: reason)
+        case Err(reason): return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: None, error: reason)
     val core = observed.configuration
     val actual = core.runtime
     val plan = original_request.plan
@@ -394,12 +394,12 @@ pub fn simple_container_input_configuration_observe_v1(owner: SimpleContainerOwn
             actual.attempt != plan.attempt or actual.operation_id != plan.operation_id or
             actual.provider_generation != plan.provider_generation or actual.native_id == "" or
             not container_logs_identity_equal_v1(actual, turn.operation.state.identity)):
-        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil,
+        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: None,
             error: "container-input-configuration-request-runtime-mismatch")
     val expected_scope = container_host_scope_bytes_v2(simple_container_scope_v2(turn.owner))
     val found_scope = container_host_scope_bytes_v2(core.scope)
     if expected_scope.is_err() or found_scope.is_err() or expected_scope.unwrap() != found_scope.unwrap():
-        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: nil,
+        return ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: None,
             error: "container-input-configuration-scope-mismatch")
     ContainerExecutionInputConfigurationTurnV1(owner: turn.owner, observation: Some(observed), error: "")
 
@@ -656,19 +656,19 @@ fn container_api_absence_turn_v2(owner: SimpleContainerOwnerV2, request: Contain
         expected: RuntimeIdentityV1, result: Result<ContainerAbsenceReceiptV2, text>) -> ContainerAbsenceTurnV2:
     val receipt = match result:
         case Ok(value): value
-        case Err(reason): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: reason)
+        case Err(reason): return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: reason)
     val encoded = container_absence_receipt_encode_v2(receipt)
-    if encoded.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: encoded.unwrap_err())
+    if encoded.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: encoded.unwrap_err())
     val matching = container_api_runtime_identity_v2(owner, request, receipt.identity)
-    if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: matching.unwrap_err())
     val scope_bytes = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
     val receipt_scope = container_host_scope_bytes_v2(receipt.scope)
     if scope_bytes.is_err() or receipt_scope.is_err():
-        return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: "container-api-absence-scope-invalid")
+        return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: "container-api-absence-scope-invalid")
     if scope_bytes.unwrap() != receipt_scope.unwrap() or receipt.backend != request.plan.backend or
             receipt.identity.native_id != expected.native_id or receipt.request_digest != request.plan.request_digest or
             receipt.provider_identity_digest != simple_container_observation_v2(owner).provider_identity_digest:
-        return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: "container-api-absence-receipt-mismatch")
+        return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: "container-api-absence-receipt-mismatch")
     ContainerAbsenceTurnV2(owner: owner, receipt: Some(receipt), error: "")
 
 # Independent read-only native absence query. The returned owner survives every
@@ -677,9 +677,9 @@ fn container_api_absence_turn_v2(owner: SimpleContainerOwnerV2, request: Contain
 pub fn simple_container_absence_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
         expected: RuntimeIdentityV1) -> ContainerAbsenceTurnV2:
     val projected = simple_container_project_v2(owner, request)
-    if projected.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: projected.unwrap_err())
+    if projected.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: projected.unwrap_err())
     val matching = container_api_runtime_identity_v2(owner, request, expected)
-    if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: None, error: matching.unwrap_err())
     match owner:
         case SimpleContainerOwnerV2.Linux(scope, adapter):
             var active = adapter
@@ -694,19 +694,19 @@ fn container_api_execution_user_turn_v2(owner: SimpleContainerOwnerV2, request: 
         expected: RuntimeIdentityV1, result: Result<ContainerExecutionUserReceiptV2, text>) -> ContainerExecutionUserTurnV2:
     val receipt = match result:
         case Ok(value): value
-        case Err(reason): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: reason)
+        case Err(reason): return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: reason)
     val encoded = container_execution_user_receipt_encode_v2(receipt)
-    if encoded.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: encoded.unwrap_err())
+    if encoded.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: encoded.unwrap_err())
     val matching = container_api_runtime_identity_v2(owner, request, receipt.identity)
-    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: matching.unwrap_err())
     val scope_bytes = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
     val receipt_scope = container_host_scope_bytes_v2(receipt.scope)
     if scope_bytes.is_err() or receipt_scope.is_err():
-        return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: "container-api-execution-user-scope-invalid")
+        return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: "container-api-execution-user-scope-invalid")
     if scope_bytes.unwrap() != receipt_scope.unwrap() or receipt.backend != request.plan.backend or
             receipt.identity.native_id != expected.native_id or receipt.request_digest != request.plan.request_digest or
             receipt.provider_identity_digest != simple_container_observation_v2(owner).provider_identity_digest:
-        return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: "container-api-execution-user-receipt-mismatch")
+        return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: "container-api-execution-user-receipt-mismatch")
     ContainerExecutionUserTurnV2(owner: owner, receipt: Some(receipt), error: "")
 
 # Fresh exact native selected-user query. Actual effective process identity
@@ -714,9 +714,9 @@ fn container_api_execution_user_turn_v2(owner: SimpleContainerOwnerV2, request: 
 pub fn simple_container_execution_user_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
         expected: RuntimeIdentityV1) -> ContainerExecutionUserTurnV2:
     val projected = simple_container_project_v2(owner, request)
-    if projected.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: projected.unwrap_err())
+    if projected.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: projected.unwrap_err())
     val matching = container_api_runtime_identity_v2(owner, request, expected)
-    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: None, error: matching.unwrap_err())
     match owner:
         case SimpleContainerOwnerV2.Linux(scope, adapter):
             var active = adapter
