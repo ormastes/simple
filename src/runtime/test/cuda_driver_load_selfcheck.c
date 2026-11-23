@@ -42,8 +42,29 @@ int main(void) {
     int dev = -1; void *ctx = NULL;
     CHECK(driver.DeviceGet(&dev, 0) == 0 && dev >= 0);
     CHECK(driver.CtxCreate(&ctx, 0, dev) == 0 && ctx != NULL);
+    /* The embedded PTX must JIT on this device and the kernel must run. */
+    CHECK(ptx_header(1, 3) == NULL && ptx_header(2, 1) != NULL && ptx_header(12, 0) != NULL);
+    CHECK(load_module(dev) == 0);
+    void *fn = NULL;
+    CHECK(driver.ModuleGetFunction(&fn, state.module, "bitmap_and") == 0 && fn != NULL);
+    enum { N = 300 };
+    uint32_t a[N], b[N], o[N];
+    for (uint32_t i = 0; i < N; i++) { a[i] = 0xF0F0F0F0u ^ i; b[i] = 0x0FF00FF0u + i * 7u; o[i] = 0; }
+    DevPtr da = 0, db = 0, dout = 0;
+    CHECK(driver.MemAlloc(&da, sizeof(a)) == 0 && driver.MemAlloc(&db, sizeof(b)) == 0 &&
+          driver.MemAlloc(&dout, sizeof(o)) == 0);
+    CHECK(driver.MemcpyHtoD(da, a, sizeof(a)) == 0 && driver.MemcpyHtoD(db, b, sizeof(b)) == 0);
+    uint32_t n = N;
+    void *args[] = {&da, &db, &dout, &n};
+    CHECK(driver.LaunchKernel(fn, (N + 127) / 128, 1, 1, 128, 1, 1, 0, NULL, args, NULL) == 0);
+    CHECK(driver.CtxSynchronize() == 0);
+    CHECK(driver.MemcpyDtoH(o, dout, sizeof(o)) == 0);
+    for (uint32_t i = 0; i < N; i++) CHECK(o[i] == (a[i] & b[i]));
+    CHECK(driver.MemFree(da) == 0 && driver.MemFree(db) == 0 && driver.MemFree(dout) == 0);
+    CHECK(driver.ModuleUnload(state.module) == 0);
+    state.module = NULL;
     CHECK(driver.CtxDestroy(ctx) == 0);
     CHECK(shutdown_provider() == OK && published_driver() == NULL);
-    printf("cuda_driver_load=pass library=%s devices=%d real_context=ok\n", CUDA_DRIVER_PRIMARY, count);
+    printf("cuda_driver_load=pass library=%s devices=%d real_context=ok kernel_launch=ok\n", CUDA_DRIVER_PRIMARY, count);
     return 0;
 }
