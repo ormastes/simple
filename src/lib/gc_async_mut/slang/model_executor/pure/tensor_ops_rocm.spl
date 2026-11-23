@@ -9,12 +9,33 @@
 # CPU op's, computed in f32 (compare with ~1e-4 relative tolerance). Every
 # status is surfaced as Result<_, text>.
 #
-# Also on the device: rope, kv_write (in place), row lookup, argmax (one i32
-# readback). Not on the device: standalone softmax.
+# Also on the device: softmax, rope, kv_write (in place), row lookup, argmax
+# (one i32 readback). Shapes are validated on the host first, because a
+# mismatched device buffer would be an out-of-bounds GPU read, not an error.
 
 use std.gc_async_mut.gpu.rocm.hip_compute.{RocmDevice, rocm_open_at, rocm_bin_default, rocm_buffer_alloc, rocm_buffer_free, rocm_upload_f32, rocm_buffer_upload_bytes, rocm_buffer_download_bytes, rocm_kernel, rocm_launch, rocm_sync, rocm_f32_word}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_decode_f32_le}
 use std.gc_async_mut.slang.model_executor.pure.gpu_kernel_sources.{SLANG_SRC_MATVEC, SLANG_SRC_RMSNORM, SLANG_SRC_ADD, SLANG_SRC_MUL, SLANG_SRC_SILU, SLANG_SRC_ATTENTION, SLANG_SRC_ROPE, SLANG_SRC_KV_WRITE, SLANG_SRC_ROW, SLANG_SRC_ARGMAX}
+
+# One block; max and sum reduced in shared memory (same math as tensor_softmax).
+val SRC_SOFTMAX = r"""extern "C" __global__ void softmax_f32(const float* x, float* out, int n) {
+  __shared__ float red[256];
+  float mx = x[0];
+  for (int i = threadIdx.x; i < n; i += blockDim.x) if (x[i] > mx) mx = x[i];
+  red[threadIdx.x] = mx;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s && red[threadIdx.x + s] > red[threadIdx.x]) red[threadIdx.x] = red[threadIdx.x + s]; __syncthreads(); }
+  float m = red[0];
+  __syncthreads();
+  float acc = 0.0f;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) acc += expf(x[i] - m);
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s]; __syncthreads(); }
+  float inv = 1.0f / red[0];
+  for (int i = threadIdx.x; i < n; i += blockDim.x) out[i] = expf(x[i] - m) * inv;
+}
+"""
 
 pub struct RocmTensor:
     ptr: i64
@@ -43,6 +64,8 @@ fn _numel(shape: [i64]) -> i64:
 # Upload a host tensor (weights: call once, keep the handle).
 pub fn rocm_tensor_upload(ops: RocmOps, t: PureTensor) -> Result<RocmTensor, text>:
     val n = t.data.len()
+    if n != _numel(t.shape):
+        return Err("ROCm upload: {n} values do not fit shape of {_numel(t.shape)} elements")
     val ptr = rocm_buffer_alloc(ops.dev, n)?
     rocm_upload_f32(ops.dev, ptr, t.data)?
     Ok(RocmTensor(ptr: ptr, n: n, shape: t.shape))
@@ -86,6 +109,8 @@ pub fn rocm_buffer_alloc_tensor(ops: RocmOps, shape: [i64]) -> Result<RocmTensor
 
 # y = W x for W stored [out, in].
 pub fn rocm_tensor_matvec(ops: RocmOps, w: RocmTensor, x: RocmTensor) -> Result<RocmTensor, text>:
+    if w.shape.len() != 2 or x.n != w.shape[1]:
+        return Err("ROCm matvec: weight shape {w.shape} does not match input of {x.n}")
     val rows = w.shape[0]
     val cols = w.shape[1]
     val k = rocm_kernel(ops.dev, "sgemv_rows", SLANG_SRC_MATVEC)?
@@ -96,12 +121,16 @@ pub fn rocm_tensor_matvec(ops: RocmOps, w: RocmTensor, x: RocmTensor) -> Result<
 # reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
 # @allow(primitive_api)
 pub fn rocm_tensor_rmsnorm(ops: RocmOps, x: RocmTensor, w: RocmTensor, eps: f64) -> Result<RocmTensor, text>:
+    if x.n < 1 or w.n != x.n:
+        return Err("ROCm rmsnorm: input {x.n} and weight {w.n} must be equal and non-empty")
     val k = rocm_kernel(ops.dev, "rmsnorm_f32", SLANG_SRC_RMSNORM)?
     val out = _out_like(ops, x.shape)?
     rocm_launch(ops.dev, k, 1, 256, [x.ptr, w.ptr, out.ptr], [x.n, rocm_f32_word(eps)])?
     Ok(out)
 
 fn _elementwise2(ops: RocmOps, name: text, src: text, a: RocmTensor, b: RocmTensor) -> Result<RocmTensor, text>:
+    if a.n != b.n:
+        return Err("ROCm {name}: operand sizes {a.n} and {b.n} differ")
     val k = rocm_kernel(ops.dev, name, src)?
     val out = _out_like(ops, a.shape)?
     rocm_launch(ops.dev, k, (a.n + 255) / 256, 256, [a.ptr, b.ptr, out.ptr], [a.n])?
@@ -112,6 +141,15 @@ pub fn rocm_tensor_add(ops: RocmOps, a: RocmTensor, b: RocmTensor) -> Result<Roc
 
 pub fn rocm_tensor_mul(ops: RocmOps, a: RocmTensor, b: RocmTensor) -> Result<RocmTensor, text>:
     _elementwise2(ops, "mul_f32", SLANG_SRC_MUL, a, b)
+
+# Softmax over the whole tensor (one block).
+pub fn rocm_tensor_softmax(ops: RocmOps, x: RocmTensor) -> Result<RocmTensor, text>:
+    if x.n < 1:
+        return Err("ROCm softmax: empty tensor")
+    val k = rocm_kernel(ops.dev, "softmax_f32", SRC_SOFTMAX)?
+    val out = _out_like(ops, x.shape)?
+    rocm_launch(ops.dev, k, 1, 256, [x.ptr, out.ptr], [x.n])?
+    Ok(out)
 
 pub fn rocm_tensor_silu(ops: RocmOps, x: RocmTensor) -> Result<RocmTensor, text>:
     val k = rocm_kernel(ops.dev, "silu_f32", SLANG_SRC_SILU)?
@@ -126,6 +164,8 @@ pub fn rocm_tensor_attention(ops: RocmOps, q: RocmTensor, k_buf: RocmTensor, v_b
     if n_pos > 1024 or n_pos < 1:
         return Err("ROCm attention: n_pos {n_pos} outside 1..1024")
     val dim = n_heads * head_dim
+    if n_heads < 1 or head_dim < 1 or q.n != dim or k_buf.n < n_pos * dim or v_buf.n < n_pos * dim:
+        return Err("ROCm attention: q {q.n} / k {k_buf.n} / v {v_buf.n} too small for {n_heads} heads x {head_dim} over {n_pos} positions")
     val k = rocm_kernel(ops.dev, "attention_f32", SLANG_SRC_ATTENTION)?
     val out = _out_like(ops, [dim])?
     rocm_launch(ops.dev, k, n_heads, 128, [q.ptr, k_buf.ptr, v_buf.ptr, out.ptr], [n_pos, head_dim, dim])?
@@ -135,6 +175,8 @@ pub fn rocm_tensor_attention(ops: RocmOps, q: RocmTensor, k_buf: RocmTensor, v_b
 # reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
 # @allow(primitive_api)
 pub fn rocm_tensor_rope(ops: RocmOps, x: RocmTensor, pos: i64, n_heads: i64, head_dim: i64, theta: f64) -> Result<RocmTensor, text>:
+    if head_dim < 2 or head_dim % 2 != 0 or n_heads < 1 or x.n != n_heads * head_dim:
+        return Err("ROCm rope: input {x.n} is not {n_heads} heads x even head_dim {head_dim}")
     val k = rocm_kernel(ops.dev, "rope_f32", SLANG_SRC_ROPE)?
     val out = _out_like(ops, x.shape)?
     val pairs = n_heads * (head_dim / 2)
@@ -145,6 +187,8 @@ pub fn rocm_tensor_rope(ops: RocmOps, x: RocmTensor, pos: i64, n_heads: i64, hea
 # reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
 # @allow(primitive_api)
 pub fn rocm_tensor_kv_write(ops: RocmOps, buf: RocmTensor, pos: i64, row: RocmTensor) -> Result<i64, text>:
+    if buf.shape.len() != 2:
+        return Err("ROCm kv_write: buffer must be 2-D")
     val dim = buf.shape[1]
     if pos < 0 or (pos + 1) * dim > buf.n or row.n != dim:
         return Err("ROCm kv_write: pos {pos} / row size {row.n} does not fit buffer {buf.n} (dim {dim})")
@@ -156,6 +200,8 @@ pub fn rocm_tensor_kv_write(ops: RocmOps, buf: RocmTensor, pos: i64, row: RocmTe
 # reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
 # @allow(primitive_api)
 pub fn rocm_tensor_row(ops: RocmOps, table: RocmTensor, row: i64) -> Result<RocmTensor, text>:
+    if table.shape.len() != 2:
+        return Err("ROCm row: table must be 2-D")
     val cols = table.shape[1]
     if row < 0 or (row + 1) * cols > table.n:
         return Err("ROCm row: index {row} outside table of {table.n / cols} rows")
@@ -164,17 +210,24 @@ pub fn rocm_tensor_row(ops: RocmOps, table: RocmTensor, row: i64) -> Result<Rocm
     rocm_launch(ops.dev, k, (cols + 255) / 256, 256, [table.ptr, out.ptr], [row, cols])?
     Ok(out)
 
+# Launch, wait and read back the i32 result; the caller frees `out` on every path.
+fn _argmax_read(ops: RocmOps, k: i64, x: RocmTensor, out: i64) -> Result<i64, text>:
+    rocm_launch(ops.dev, k, 1, 256, [x.ptr, out], [x.n])?
+    rocm_sync(ops.dev)?
+    val raw = rocm_buffer_download_bytes(ops.dev, out, 4)?
+    Ok((raw[0] as i64) + (raw[1] as i64) * 256 + (raw[2] as i64) * 65536 + (raw[3] as i64) * 16777216)
+
 # Index of the largest element (lowest index on ties). Only 4 bytes come back.
 # reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
 # @allow(primitive_api)
 pub fn rocm_tensor_argmax(ops: RocmOps, x: RocmTensor) -> Result<i64, text>:
+    if x.n < 1:
+        return Err("ROCm argmax: empty tensor")
     val k = rocm_kernel(ops.dev, "argmax_f32", SLANG_SRC_ARGMAX)?
     val out = rocm_buffer_alloc(ops.dev, 1)?
-    rocm_launch(ops.dev, k, 1, 256, [x.ptr, out], [x.n])?
-    rocm_sync(ops.dev)?
-    val raw = rocm_buffer_download_bytes(ops.dev, out, 4)?
+    val got = _argmax_read(ops, k, x, out)
     rocm_buffer_free(ops.dev, out)?
-    Ok((raw[0] as i64) + (raw[1] as i64) * 256 + (raw[2] as i64) * 65536 + (raw[3] as i64) * 16777216)
+    got
 
 # Block until all launched kernels finished (ops are asynchronous).
 # reason: ROCm tensor-op API passes raw device dims, element counts and handles that mirror HIP kernel scalars
