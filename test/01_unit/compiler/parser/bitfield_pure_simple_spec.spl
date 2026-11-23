@@ -5,14 +5,22 @@
 
 
 
-use std.spec.step
+use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
 
 extern fn rt_file_read_text(path: text) -> text?
 
 fn read_text(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
+fn bitfield_parses_clean(name: text, src: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(src, name)
+    not parser_has_errors()
+
 describe "Bitfield Pure Simple Implementation":
+    """Verifies bitfield token registration, split parser routing, and width validation."""
+
     # @manual scenario evidence
     it "registers bitfield keyword in token table":
         # @req REQ-SSPEC-UNIT
@@ -23,16 +31,24 @@ describe "Bitfield Pure Simple Implementation":
         expect(tokens.contains("if kind == TOK_KW_BITFIELD: return \"bitfield\"")).to_equal(true)
 
     it "routes module declarations to parse_bitfield_decl":
-        val decls2 = read_text("src/compiler/10.frontend/core/parser_decls_part2.spl")
-        expect(decls2.contains("parse_bitfield_decl()")).to_equal(true)
+        val body = read_text("src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl")
+        val bitfield_mod = read_text("src/compiler/10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl")
+        expect(body.contains("parse_bitfield_decl()")).to_equal(true)
+        expect(bitfield_mod.contains("fn parse_bitfield_decl() -> i64:")).to_equal(true)
 
     it "supports backing type and reserved underscore fields":
-        val decls3 = read_text("src/compiler/10.frontend/core/parser_decls_part3.spl")
-        expect(decls3.contains("val backing_type = parser_parse_type()")).to_equal(true)
-        expect(decls3.contains("val is_underscore: bool")).to_equal(true)
+        val decls = read_text("src/compiler/10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl")
+        expect(decls.contains("var backing_type = parser_parse_type()")).to_equal(true)
+        expect(decls.contains("val is_underscore: bool")).to_equal(true)
+        val ok_src = "bitfield Flags(u32):\n    enabled: bool\n    _: u7\n    mode: u8\n"
+        expect(bitfield_parses_clean("bitfield_ok.spl", ok_src)).to_equal(true)
 
     it "enforces backing and field width validation in parser":
-        val decls3 = read_text("src/compiler/10.frontend/core/parser_decls_part3.spl")
-        expect(decls3.contains("bitfield backing type must be u8, u16, u32, or u64")).to_equal(true)
-        expect(decls3.contains("bitfield field type must be bool, uN, or iN")).to_equal(true)
-        expect(decls3.contains("int_to_str(used_bits)")).to_equal(true)
+        val decls = read_text("src/compiler/10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl")
+        expect(decls.contains("bitfield backing type must be u8, u16, u32, or u64")).to_equal(true)
+        expect(decls.contains("bitfield field type must be bool, uN, or iN")).to_equal(true)
+        expect(decls.contains("int_to_str(used_bits)")).to_equal(true)
+        val bad_backing = "bitfield Bad(text):\n    flag: bool\n"
+        val bad_width = "bitfield TooWide(u8):\n    a: u5\n    b: u5\n"
+        expect(bitfield_parses_clean("bitfield_bad_backing.spl", bad_backing)).to_equal(false)
+        expect(bitfield_parses_clean("bitfield_too_wide.spl", bad_width)).to_equal(false)

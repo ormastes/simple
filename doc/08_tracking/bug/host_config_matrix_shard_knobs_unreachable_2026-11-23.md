@@ -63,6 +63,9 @@ Lanes and consumers:
   routes full tools through the Stage 3 dispatcher when SHARDING=1.
 - Stage 3 in `bootstrap-from-scratch.sh`: applied before the W24/W27
   pass-through that hashes/transcribes SHARDING and the caller frontend value.
+- Stage 4 full-CLI relink in `bootstrap-from-scratch.sh` (including
+  `--resume-stage4`): the captured host/caller frontend value is used and
+  recorded in the provenance as `stage4_frontend_cache=0` or `1`.
 - `resume-stage3-from-admitted.sh`: applied before the shard-count read and the
   W24/W27 pass-throughs; forwarded to the worker on the explicit `env` lines.
 

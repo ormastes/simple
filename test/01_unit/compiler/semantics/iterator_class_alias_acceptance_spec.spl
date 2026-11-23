@@ -386,8 +386,8 @@ describe "G7 unsupported alias transfer boundaries":
                 expect(span.file).to_equal("testdata/g7_boundary_loop.spl")
         expect(boundary_records).to_equal(1)
 
-    it "should forget affected alias facts after unsupported match transfer":
-        step("Parse and lower a real unsupported transfer followed by an iterator use")
+    it "should conservatively catch alias mutation across desugared match branches":
+        step("Parse and lower a boolean match that lowers to modeled If alias join")
         val source = "class Bag:\n    items: [i64]\n\nfn walk(flag: bool) -> i64:\n    var owner: Bag = Bag(items: [1, 2])\n    var other: Bag = Bag(items: [3])\n    var alias: Bag = owner\n    match flag:\n        case true:\n            alias = owner\n        case false:\n            alias = other\n    for x in other.items:\n        alias.items.push(x)\n    0\n"
         val parsed = parse_full_frontend(source, "testdata/g7_boundary_match.spl", "boundary_match", Logger(level: 0))
         expect(parsed.functions.len()).to_equal(1)
@@ -395,16 +395,10 @@ describe "G7 unsupported alias transfer boundaries":
         var lowering = HirLowering.with_filename("testdata/g7_boundary_match.spl")
         val hir = lowering.lower_module(parsed)
         expect(lowering.errors.len()).to_equal(0)
-        step("Require unsupported transfer evidence instead of an exact last-visited alias")
+        step("Require modeled If join over desugared match branches to flag E1048")
         val checker = SafetyChecker.create()
         val errors = safetychecker_check_module(checker, hir)
-        expect(errors.len()).to_equal(0)
-        var boundary_records = 0
-        for span in checker.context.place_unmodeled_sites:
-            if span.line == 8 and span.col == 5:
-                boundary_records = boundary_records + 1
-                expect(span.file).to_equal("testdata/g7_boundary_match.spl")
-        expect(boundary_records).to_equal(1)
+        assert_alias_e1048(errors, 1, 14, 9, "testdata/g7_boundary_match.spl")
 
     it "should forget affected alias facts after unsupported for transfer":
         step("Parse and lower a real unsupported transfer followed by an iterator use")

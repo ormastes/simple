@@ -1,5 +1,5 @@
 use compiler.core.ast.{decl_set_manifest_role_v1, decl_set_manifest_facts_v1}
-use compiler.frontend.core.manifest_metadata_v1.{parser_manifest_arch_tokens_v1}
+use compiler.frontend.core.manifest_metadata_v1.{parser_manifest_arch_tokens_with_lines_v1}
 use compiler.core.parser.{parser_lexical_scope_enter, parser_lexical_scope_leave, parser_lexical_bind_value}
 # Declaration parsing: fn, extern fn, struct/class, type params, domain blocks.
 use compiler.frontend.core.parser_decls.*
@@ -304,6 +304,7 @@ fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
     var payload = ""
     var metadata_kinds: [i64] = []
     var metadata_values: [text] = []
+    var metadata_lines: [i64] = []
     if is_metadata_block_kind(kind):
         # Metadata/config blocks are compile-time declarations. Consume their
         # balanced token region rather than source-slicing it: token offsets
@@ -319,6 +320,7 @@ fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
             if depth > 0 and kind == "arch":
                 metadata_kinds.push(par_kind_get())
                 metadata_values.push(par_text_get())
+                metadata_lines.push(par_line_get())
             parser_advance()
         if depth > 0:
             parser_error("unterminated {kind}{...} metadata block")
@@ -350,7 +352,7 @@ fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
     val declaration = decl_val_binding("_expr_" + int_to_str(loop_index), -1, marker, -1)
     decl_set_manifest_role_v1(declaration, "domain")
     if kind == "arch":
-        val facts = parser_manifest_arch_tokens_v1(metadata_kinds, metadata_values)
+        val facts = parser_manifest_arch_tokens_with_lines_v1(metadata_kinds, metadata_values, metadata_lines)
         var fields: [text] = [if facts.valid: "valid" else: "invalid", facts.dimension, facts.layer]
         for path in facts.expose_paths: fields.push(path)
         decl_set_manifest_facts_v1(declaration, fields)
@@ -464,9 +466,12 @@ fn parse_type_params_with_trait_bounds() -> ([text], [[text]]):
         var trait_bounds: [text] = []
         parser_advance()
 
-        # Check for inline constraint: `T limits [...]` or `T: [...]`
-        val is_limits: bool = par_kind_get() == 214
-        val is_candidates: bool = par_kind_get() == 215
+        # Check for inline constraint: `T limits [...]`, `T candidates [...]`, or `T: [...]`
+        # Note: `limits` and `candidates` are contextual words lexed as TOK_IDENT (6)
+        # outside dedicated contexts (matching parser_decls_use.spl), so accept both
+        # the token codes 214/215 and the contextual identifier spellings.
+        val is_limits: bool = par_kind_get() == 214 or (par_kind_get() == 6 and par_text_get() == "limits")
+        val is_candidates: bool = par_kind_get() == 215 or (par_kind_get() == 6 and par_text_get() == "candidates")
         val is_colon_constraint: bool = par_kind_get() == 161
         if is_limits or is_candidates or is_colon_constraint:
             parser_advance()

@@ -19,6 +19,7 @@
 #   - x = x + [item] creates a NEW array each time (O(n) per call → O(n²) in loop)
 #   - The patterns only match when LHS target == LHS of + (same variable)
 
+use compiler.frontend.core._AstExpr.accessors.{expr_get_span, expr_set_span}
 use compiler.frontend.core._AstExpr.nodes.{expr_owner_args, expr_owner_args_set, expr_owner_int, expr_owner_left, expr_owner_left_set, expr_owner_right, expr_owner_right_set, expr_owner_str, expr_owner_str_set, expr_owner_tag, expr_owner_tag_set}
 use compiler.frontend.core._AstExpr.nodes.{
     EXPR_ASSIGN, EXPR_BINARY, EXPR_ARRAY_LIT, EXPR_IDENT,
@@ -28,7 +29,7 @@ use compiler.frontend.core._AstExpr.nodes.{
     EXPR_UNARY, EXPR_INTERPOLATED_STRING, EXPR_SUFFIXED_LIT,
     expr_count
 }
-use compiler.core.ast_stmt.{STMT_FOR, stmt_get_tag, stmt_get_expr, stmt_set_expr, stmt_count}
+use compiler.core.ast_stmt.{STMT_FOR, STMT_ASSIGN, STMT_EXPR, stmt_get_tag, stmt_get_expr, stmt_get_body, stmt_set_expr, stmt_set_tag, stmt_count}
 use compiler.core.tokens.{TOK_PLUS}
 use compiler.blocks.sugar_registry.{
     apply_sugar_rules_ast, has_ast_rewrite_rules, ast_rewrite_rule_generation
@@ -94,12 +95,16 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
 
         i = i + 1
 
-    # Scan statement arena: STMT_FOR stores iterable in stmt_expr
+    # Scan statement arena: STMT_FOR stores iterable in stmt_expr;
+    # STMT_ASSIGN holds `name = rhs` plain identifier assignments.
     var j = stmt_start
     val s_count = stmt_count()
     while j < s_count:
-        if stmt_get_tag(j) == STMT_FOR:
+        val stag = stmt_get_tag(j)
+        if stag == STMT_FOR:
             try_rewrite_chars_iter_stmt(j)
+        elif stag == STMT_ASSIGN:
+            try_rewrite_assign_stmt(j)
         j = j + 1
 
 fn desugar_collections_static(start_from: i64, stmt_start: i64):
@@ -119,8 +124,11 @@ fn desugar_collections_static(start_from: i64, stmt_start: i64):
     var j = stmt_start
     val s_count = stmt_count()
     while j < s_count:
-        if stmt_get_tag(j) == STMT_FOR:
+        val stag = stmt_get_tag(j)
+        if stag == STMT_FOR:
             try_rewrite_chars_iter_stmt(j)
+        elif stag == STMT_ASSIGN:
+            try_rewrite_assign_stmt(j)
         j = j + 1
 
 # ============================================================================
@@ -174,9 +182,9 @@ fn is_definite_scalar_addend(e: i64) -> bool:
 # Pattern A/B/D/E: x = x + [item] / x = x + arr / dict[k] / x = x.push()
 # ============================================================================
 
-fn try_rewrite_assign(e: i64):
-    val target = expr_owner_left(e)
-    val value = expr_owner_right(e)
+fn try_rewrite_assign_pair(target: i64, value: i64, out_expr: i64, assign_stmt: i64):
+    """Rewrite `target = rhs` in-place on `out_expr` (and promote `assign_stmt`
+    to `STMT_EXPR` when `assign_stmt >= 0`)."""
     if target < 0 or value < 0:
         return
 
@@ -187,12 +195,15 @@ fn try_rewrite_assign(e: i64):
         val receiver = expr_owner_left(value)
         if method == "push" or method == "merge":
             if exprs_refer_same(target, receiver):
-                # Rewrite: promote the method call, discard the assign
-                expr_owner_tag_set(e, EXPR_METHOD_CALL)
-                expr_owner_left_set(e, receiver)
-                expr_owner_str_set(e, method)
-                expr_owner_args_set(e, expr_owner_args(value))
-                expr_owner_right_set(e, -1)
+                if assign_stmt >= 0:
+                    stmt_set_expr(assign_stmt, value)
+                    stmt_set_tag(assign_stmt, STMT_EXPR)
+                else:
+                    expr_owner_tag_set(out_expr, EXPR_METHOD_CALL)
+                    expr_owner_left_set(out_expr, receiver)
+                    expr_owner_str_set(out_expr, method)
+                    expr_owner_args_set(out_expr, expr_owner_args(value))
+                    expr_owner_right_set(out_expr, -1)
                 _collection_desugar_rewrites = _collection_desugar_rewrites + 1
                 return
 
@@ -215,31 +226,45 @@ fn try_rewrite_assign(e: i64):
     if expr_owner_tag(rhs_right) == EXPR_ARRAY_LIT:
         val elements = expr_owner_args(rhs_right)
         if elements.len() == 1:
-            # Single element — rewrite to .push(element)
-            expr_owner_tag_set(e, EXPR_METHOD_CALL)
-            expr_owner_left_set(e, target)
-            expr_owner_str_set(e, "push")
-            expr_owner_args_set(e, elements)
-            expr_owner_right_set(e, -1)
+            expr_owner_tag_set(out_expr, EXPR_METHOD_CALL)
+            expr_owner_left_set(out_expr, target)
+            expr_owner_str_set(out_expr, "push")
+            expr_owner_args_set(out_expr, elements)
+            expr_owner_right_set(out_expr, -1)
+            if assign_stmt >= 0:
+                expr_set_span(out_expr, expr_get_span(target))
+                stmt_set_expr(assign_stmt, out_expr)
+                stmt_set_tag(assign_stmt, STMT_EXPR)
             _collection_desugar_rewrites = _collection_desugar_rewrites + 1
             return
         # Multi-element array literal [a, b, c] — don't rewrite
-        # (would need multiple push calls or a different pattern)
         return
 
-    # Scalar-addend gate: a literal/unary/binary addend can only ever be a
-    # scalar or text value -- never a collection -- so leave the plain
-    # Assign(Binary(+, ...)) shape alone (e.g. `x = x + 1`, `s = s + "a"`).
+    # Scalar-addend gate: leave plain Assign(Binary(+, ...)) alone.
     if is_definite_scalar_addend(rhs_right):
         return
 
     # Pattern B: x = x + other_arr → x.merge(other_arr)
-    expr_owner_tag_set(e, EXPR_METHOD_CALL)
-    expr_owner_left_set(e, target)
-    expr_owner_str_set(e, "merge")
-    expr_owner_args_set(e, [rhs_right])
-    expr_owner_right_set(e, -1)
+    expr_owner_tag_set(out_expr, EXPR_METHOD_CALL)
+    expr_owner_left_set(out_expr, target)
+    expr_owner_str_set(out_expr, "merge")
+    expr_owner_args_set(out_expr, [rhs_right])
+    expr_owner_right_set(out_expr, -1)
+    if assign_stmt >= 0:
+        expr_set_span(out_expr, expr_get_span(target))
+        stmt_set_expr(assign_stmt, out_expr)
+        stmt_set_tag(assign_stmt, STMT_EXPR)
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+
+fn try_rewrite_assign(e: i64):
+    try_rewrite_assign_pair(expr_owner_left(e), expr_owner_right(e), e, -1)
+
+fn try_rewrite_assign_stmt(s: i64):
+    val body = stmt_get_body(s)
+    if body.len() < 1:
+        return
+    val value = body[0]
+    try_rewrite_assign_pair(stmt_get_expr(s), value, value, s)
 
 # ============================================================================
 # Pattern C: x += [item] → x.push(item)
