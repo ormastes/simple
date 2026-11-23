@@ -1,0 +1,91 @@
+"""
+## Purpose and audience
+
+`x->m(args)` desugars to `x = x.m(args)` (ROB-ARR-01..07). When `m` returns a
+type other than `x`'s, the checker must name the arrow: the error is
+E-ARROW-UPDATE-MISMATCH and mentions `->`, the receiver type and the method's
+return type. A matching return type still checks, and a hand-written
+`x = x.m()` (no arrow provenance) keeps today's behaviour.
+For compiler engineers changing assignment checking or the arrow desugar.
+"""
+# @req: REQ-COMPILER-FRONTEND-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.inference_control.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_body}
+use compiler.core.ast_expr.{expr_get_right, expr_get_tag, EXPR_METHOD_CALL, EXPR_TRY, expr_get_left}
+use compiler.core.ast_stmt.{stmt_get_expr}
+use compiler.core.parser.{parse_module, parser_has_errors}
+use compiler.core.parser_expr.{expr_is_arrow_update}
+
+fn au_sp() -> Span:
+    lex_span_empty()
+
+fn au_ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: au_sp())
+
+fn au_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: au_ty(HirTypeKind.Unit), span: au_sp())
+
+# x: i64 (symbol 11); method `m` (symbol 12) returns `ret`; checks `x = x.m()`.
+fn au_check(ret: HirType, arrow: bool) -> text:
+    var ctx = HmInferContext.new()
+    ctx.symbol_names[11] = "x"
+    ctx.bind_mono("11", au_ty(HirTypeKind.Int(64, true)))
+    ctx.bind_mono("12", au_ty(HirTypeKind.Function([], ret, [])))
+    val x = SymbolId(id: 11)
+    var call = au_expr(HirExprKind.MethodCall(au_expr(HirExprKind.Var(x)), "m", [],
+        MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 12))))
+    call.arrow_update = arrow
+    val stmt = HirStmt(kind: HirStmtKind.Assign(au_expr(HirExprKind.Var(x)), None, call), span: au_sp())
+    match ctx.infer_stmt(stmt):
+        case Ok(_): "ok"
+        case Err(e): e.message()
+
+fn au_parsed_value(source: text) -> i64:
+    ast_reset()
+    parse_module(source, "arrow_mismatch.spl")
+    if parser_has_errors():
+        return -1
+    for decl in module_get_decls():
+        if decl_get_name(decl) == "f":
+            return expr_get_right(stmt_get_expr(decl_get_body(decl)[1]))
+    -1
+
+describe "arrow update type mismatch (HM checker)":
+    it "names the arrow, receiver type and return type on a mismatch":
+        val msg = au_check(au_ty(HirTypeKind.Str), true)
+        expect(msg).to_contain("E-ARROW-UPDATE-MISMATCH")
+        expect(msg).to_contain("->")
+        expect(msg).to_contain("x->m(...)")
+        expect(msg).to_contain("i64")
+        expect(msg).to_contain("text")
+
+    it "accepts an arrow update whose method returns the receiver type":
+        expect(au_check(au_ty(HirTypeKind.Int(64, true)), true)).to_equal("ok")
+
+    it "leaves a hand-written x = x.m() without the arrow diagnostic":
+        expect(au_check(au_ty(HirTypeKind.Str), false)).to_equal("ok")
+
+describe "arrow update provenance (self-hosted parser)":
+    it "marks the method call desugared from x->m()":
+        val v = au_parsed_value("fn f():\n    var x = 1\n    x->m()\n")
+        expect(expr_get_tag(v)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_is_arrow_update(v)).to_equal(true)
+
+    it "marks the call under ? for x->m()?":
+        val v = au_parsed_value("fn f():\n    var x = 1\n    x->m()?\n")
+        expect(expr_get_tag(v)).to_equal(EXPR_TRY)
+        expect(expr_is_arrow_update(expr_get_left(v))).to_equal(true)
+
+    it "does not mark a hand-written x.v = x.v.m()":
+        val v = au_parsed_value("fn f():\n    var x = 1\n    x.v = x.v.m()\n")
+        expect(expr_get_tag(v)).to_equal(EXPR_METHOD_CALL)
+        expect(expr_is_arrow_update(v)).to_equal(false)

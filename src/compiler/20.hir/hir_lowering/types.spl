@@ -760,6 +760,11 @@ enum LoweringErrorKind:
     Other
     Recovered
 
+fn lowering_error_kind_for_message(message: text) -> LoweringErrorKind:
+    if message.starts_with("unresolved name:") or message.starts_with("unresolved type:"):
+        return LoweringErrorKind.UnresolvedName
+    LoweringErrorKind.Other
+
 fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     val empty_loaded_modules: [text] = []
     val empty_module_surfaces = ModuleSurfacesByName.empty()
@@ -1050,12 +1055,23 @@ impl HirLowering:
             (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
 
     me error(message: text, span: Span):
+        if span.line > 0:
+            for existing in self.errors:
+                val es: Span = existing.span
+                if (existing.message == message and
+                    es.line == span.line and
+                    es.col == span.col and
+                    es.start == span.start and
+                    es.end == span.end and
+                    es.file == span.file):
+                    return
+        val kind = lowering_error_kind_for_message(message)
         if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
             eprint("[simpleos-hir-push] {message}")
         self.errors = self.errors.push(LoweringError(
             message: message,
             span: span,
-            kind: LoweringErrorKind.Other
+            kind: kind
         ))
         # Do not project Span fields here. Span can arrive through a nested
         # aggregate ABI path during self-hosting; message/severity are the

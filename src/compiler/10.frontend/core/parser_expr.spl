@@ -66,6 +66,7 @@ use compiler.core.tokens.{TOK_KW_AS}
 use compiler.frontend.core._ParserPrimary.unit_literal_check.{parser_unit_literal_cast_check, parser_unit_literal_call_check}
 use compiler.core.ast.{asm_arm_new}
 use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_call_args_set, expr_get_span, expr_set_span}
+use compiler.core.ast.{expr_owner_int_set}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get, lex_token_end_get}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
@@ -1222,6 +1223,7 @@ fn parse_arrow_update(base: i64) -> i64:
     val place = stab.0
     var stmts: [i64] = stab.1
     var call = expr_method_call_named(place, name, args, arg_names, span)
+    expr_owner_int_set(call, 1)  # arrow provenance, read by expr_is_arrow_update
     # ROB-ARR-06: `x->f()?` is `x = (x.f())?`; propagation precedes the store.
     while par_kind_get() == TOK_QUESTION:
         parser_advance()
@@ -1794,3 +1796,12 @@ pub fn expr_nest_state_install(s: ExprNestState):
     expr_nest_state = s
 
 export ExprNestState, expr_nest_state_take, expr_nest_state_install, arrow_suppress_set, arrow_scope_enter, arrow_scope_leave, arrow_fn_enter, arrow_note_val, arrow_note_var, arrow_note_tuple
+
+# Arrow provenance: the METHOD_CALL that `x->m()` desugars to carries int 1
+# (method calls use no int slot otherwise), so the type checker can name `->`
+# instead of reporting a plain assignment mismatch.
+# @allow(primitive_api) flat AST node index, like every other expr_* accessor
+@allow(primitive_api)
+pub fn expr_is_arrow_update(e: i64) -> bool:
+    expr_get_tag(e) == EXPR_METHOD_CALL and expr_get_int(e) == 1
+export expr_is_arrow_update

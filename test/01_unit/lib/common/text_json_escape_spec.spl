@@ -1,10 +1,41 @@
-use std.spec.*
+"""
+## Purpose and audience
+
+Verifies `common.text.escape_json` across all RFC 8259 control/escape families
+and pins Simple's string-literal backslash preservation (`\b` / `\f` are literal
+two-byte sequences in Simple literals; control BS/FF are written `\u0008`/`\u000c`).
+
+Audience: standard library text and JSON parser maintainers.
+
+## Operator workflow
+
+bin/simple test test/01_unit/lib/common/text_json_escape_spec.spl
+"""
+use std.spec.{describe, it, expect, step}
 use common.text.{escape_json}
 use std.common.json.parser.{json_parse_with_error}
 
+fn json_string_doc(escaped: text) -> text:
+    "{\"value\":\"" + escaped + "\"}"
+
 describe "common JSON string escaping":
     it "escapes every JSON control family":
-        val escaped = escape_json("a\b\f\u0001z")
+        step("Escape backspace (0x08), formfeed (0x0c), and SOH (0x01) via Unicode escapes")
+        val escaped = escape_json("a\u0008\u000c\u0001z")
         expect(escaped).to_equal("a\\b\\f\\u0001z")
-        val parsed = json_parse_with_error("{\"value\":\"{escaped}\"}")
+        val parsed = json_parse_with_error(json_string_doc(escaped))
+        expect(parsed.1).to_equal("")
+
+    it "escapes standard JSON quotes, backslashes, and whitespace controls":
+        step("Escape quote, backslash, newline, carriage return, and tab")
+        val escaped = escape_json("\"a\\b\nc\rd\te\"")
+        expect(escaped).to_equal("\\\"a\\\\b\\nc\\rd\\te\\\"")
+        val parsed = json_parse_with_error(json_string_doc(escaped))
+        expect(parsed.1).to_equal("")
+
+    it "preserves literal backslashes from non-escape Simple string sequences":
+        step("Simple preserves \\b and \\f as literal backslashes so escape_json doubles them")
+        val escaped = escape_json("a\b\f")
+        expect(escaped).to_equal("a\\\\b\\\\f")
+        val parsed = json_parse_with_error(json_string_doc(escaped))
         expect(parsed.1).to_equal("")

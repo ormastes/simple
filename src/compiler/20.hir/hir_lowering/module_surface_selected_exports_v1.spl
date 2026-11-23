@@ -568,6 +568,8 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
     var source = 0
     while source < surf_count:
         val surface = registry.surfaces[source]
+        val prior_origin_index = surface.export_origin_index
+        val prior_origins = surface.export_origins
         surface.export_origin_index = module_surface_export_origin_index_empty()
         surface.export_origins = {}
         var selected_names: Dict<text, i64> = {}
@@ -652,6 +654,29 @@ pub(package) fn module_surface_selected_exports_project_v1(registry: ModuleSurfa
             val row = selected_names[name]
             val terminal = registry.surfaces[index.terminal_surfaces[row]]
             module_surface_export_origin_index_put(surface.export_origin_index, name, terminal.preferred_registry_name, index.terminal_names[row], "selected-typed-v1")?
+        # Preserve non-comment pre-freeze origins (e.g. explicit synthetic entries)
+        # while always dropping "generated-comment" hints and unresolved/incompatible exports.
+        var prior_row = 0
+        while prior_row < prior_origin_index.names.len() and prior_row < prior_origin_index.owner_modules.len() and prior_row < prior_origin_index.source_names.len() and prior_row < prior_origin_index.resolution_kinds.len():
+            val prior_name = prior_origin_index.names[prior_row]
+            val prior_kind = prior_origin_index.resolution_kinds[prior_row]
+            if prior_kind != "generated-comment" and not selected_names.contains_key(prior_name) and not incompatible_names.contains_key(prior_name) and module_surface_export_origin_index_position(surface.export_origin_index, prior_name) < 0:
+                module_surface_export_origin_index_put(
+                    surface.export_origin_index,
+                    prior_name,
+                    prior_origin_index.owner_modules[prior_row],
+                    prior_origin_index.source_names[prior_row],
+                    prior_kind)?
+            prior_row = prior_row + 1
+        for prior_name in prior_origins.keys():
+            val prior_origin = prior_origins[prior_name]
+            if prior_origin.resolution_kind != "generated-comment" and not selected_names.contains_key(prior_name) and not incompatible_names.contains_key(prior_name) and module_surface_export_origin_index_position(surface.export_origin_index, prior_name) < 0:
+                module_surface_export_origin_index_put(
+                    surface.export_origin_index,
+                    prior_name,
+                    prior_origin.owner_module,
+                    prior_origin.source_name,
+                    prior_origin.resolution_kind)?
         surface.export_origins = surface.export_origin_index.origins
         index.surface_digests = index.surface_digests.push(module_surface_semantic_finish(digest))
         surface_complete.push(complete)
