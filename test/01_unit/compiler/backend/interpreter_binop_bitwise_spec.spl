@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/cli_run_interpreting_compiler_frontend_fails_2026-11-23.md
+
+use std.spec.step
+
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend_types.{Value}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.{HirBinOp}
+use compiler.backend.interpreter_run_abi.{interpreter_run_abi}
+use std.common.hash.xxh3.{xxh3_128_hex}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn binop_int(op: HirBinOp, l: i64, r: i64) -> i64:
+    val backend = InterpreterBackendImpl.new()
+    match backend.eval_binop(op, Value.Int(l), Value.Int(r), Span.default(), false, false):
+        case Ok(v):
+            match v:
+                case Value.Int(n): n
+                case _: -999
+        case Err(_): -998
+
+fn binop_bool(op: HirBinOp, l: Value, r: Value) -> text:
+    val backend = InterpreterBackendImpl.new()
+    match backend.eval_binop(op, l, r, Span.default(), false, false):
+        case Ok(v):
+            match v:
+                case Value.Bool(b): if b: "true" else: "false"
+                case _: "non-bool"
+        case Err(e): "err: {e.message}"
+
+describe "Interpreter binop: bitwise, shift and membership":
+    it "evaluates & | ^ << >> on integers":
+        # @req REQ-SSPEC-COMPILER
+        step("evaluates bitwise and shift ops")
+        expect(binop_int(HirBinOp.BitAnd, 12, 10)).to_equal(8)
+        expect(binop_int(HirBinOp.BitOr, 12, 10)).to_equal(14)
+        expect(binop_int(HirBinOp.BitXor, 12, 10)).to_equal(6)
+        expect(binop_int(HirBinOp.Shl, 1, 5)).to_equal(32)
+        expect(binop_int(HirBinOp.Shr, 256, 4)).to_equal(16)
+
+    it "evaluates in / not in over text, arrays and dicts":
+        # @req REQ-SSPEC-COMPILER
+        step("evaluates membership ops")
+        expect(binop_bool(HirBinOp.In, Value.String("ell"), Value.String("hello"))).to_equal("true")
+        expect(binop_bool(HirBinOp.NotIn, Value.String("z"), Value.String("hello"))).to_equal("true")
+        expect(binop_bool(HirBinOp.In, Value.Int(2), Value.Array([Value.Int(1), Value.Int(2)]))).to_equal("true")
+        expect(binop_bool(HirBinOp.In, Value.Int(3), Value.Array([Value.Int(1), Value.Int(2)]))).to_equal("false")
+        var d: Dict<text, Value> = {}
+        d["k"] = Value.Int(1)
+        expect(binop_bool(HirBinOp.In, Value.String("k"), Value.Dict(d))).to_equal("true")
+
+    it "names the operator and operand kinds for an unsupported binop":
+        # @req REQ-SSPEC-COMPILER
+        step("unsupported binop error is localisable")
+        val msg = binop_bool(HirBinOp.MatMul, Value.Int(1), Value.String("x"))
+        expect(msg.contains("binary operator not implemented")).to_equal(true)
+        expect(msg.contains("op=6")).to_equal(true)
+        expect(msg.contains("i64")).to_equal(true)
+        expect(msg.contains("text")).to_equal(true)
+
+describe "Interpreter extern: rt_xxh3_128_text":
+    it "returns the pure-Simple xxh3-128 digest, not nil":
+        # @req REQ-SSPEC-COMPILER
+        step("rt_xxh3_128_text is backed in the interpreter")
+        var got = "unbacked"
+        if val r = interpreter_run_abi("rt_xxh3_128_text", "std.nogc_sync_mut.sffi.runtime", true, [Value.String("abc")], []):
+            match r:
+                case Ok(v):
+                    match v:
+                        case Value.String(s): got = s
+                        case _: got = "non-text"
+                case Err(e): got = "err: {e.message}"
+        expect(got.len()).to_equal(32)
+        expect(got).to_equal(xxh3_128_hex(text_to_utf8_bytes("abc")))

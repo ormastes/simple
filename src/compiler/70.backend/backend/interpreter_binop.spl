@@ -286,7 +286,53 @@ impl InterpreterBackendImpl:
                 # @workaround bug=imported_value_constructor_static_receiver_native_2026_10_16 recover=67ba74d9acbaa998d5efcb3c162bf61a63f839d0 reason=baked producer lowers imported enum receiver as runtime value
                 Ok(backend_value_bool_v1(left.is_truthy() or right.is_truthy()))
 
+            case HirBinOp.BitAnd | HirBinOp.BitOr | HirBinOp.BitXor | HirBinOp.Shl | HirBinOp.Shr:
+                self.eval_int_bitwise(interp_binop_disc(op_t), left, right, span)
+
+            case HirBinOp.In:
+                match self.eval_membership(left, right, span):
+                    case Ok(found): Ok(backend_value_bool_v1(found))
+                    case Err(e): Err(e)
+            case HirBinOp.NotIn:
+                match self.eval_membership(left, right, span):
+                    case Ok(found): Ok(backend_value_bool_v1(not found))
+                    case Err(e): Err(e)
+
             case _:
-                Err(BackendError.not_implemented("binary operator not implemented"))
+                Err(BackendError.not_implemented("binary operator not implemented: op={interp_binop_disc(op_t)} left={left.type_name()} right={right.type_name()} at {span.file}:{span.line}:{span.col}"))
+
+    # disc is interp_binop_disc: 15 &, 16 |, 17 ^, 18 <<, 19 >>.
+    fn eval_int_bitwise(disc: i64, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+        match left:
+            case Value.Int(l):
+                match right:
+                    case Value.Int(r):
+                        var out: i64 = l >> r
+                        if disc == 15: out = l & r
+                        elif disc == 16: out = l | r
+                        elif disc == 17: out = l ^ r
+                        elif disc == 18: out = l << r
+                        Ok(backend_value_int_v1(out))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for bitwise op={disc}: left={left.type_name()} right={right.type_name()}", Some(span)))
+            case _:
+                Err(BackendError.type_error("invalid operands for bitwise op={disc}: left={left.type_name()} right={right.type_name()}", Some(span)))
+
+    fn eval_membership(needle: Value, haystack: Value, span: Span) -> Result<bool, BackendError>:
+        match haystack:
+            case Value.String(h):
+                match needle:
+                    case Value.String(n): Ok(h.contains(n))
+                    case _: Err(BackendError.type_error("invalid operands for in: left={needle.type_name()} right=text", Some(span)))
+            case Value.Array(items):
+                for item in items:
+                    if self.values_equal(needle, item): return Ok(true)
+                Ok(false)
+            case Value.Dict(entries):
+                match needle:
+                    case Value.String(k): Ok(entries.contains_key(k))
+                    case _: Err(BackendError.type_error("invalid operands for in: left={needle.type_name()} right=dict", Some(span)))
+            case _:
+                Err(BackendError.type_error("invalid operands for in: left={needle.type_name()} right={haystack.type_name()}", Some(span)))
 
 
