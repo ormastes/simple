@@ -1,6 +1,8 @@
 # Catalog policy digest text codepoint native lowering
 
-Status: open compiler owner bug; narrow source workaround.
+Status: source API repair complete; unsupported `text.codepoint()` compiler/language
+owner issue remains open. The supported `char_code_at` implementation is a
+permanent repair and need not be retired when that owner issue is resolved.
 
 Frozen Pure Simple producer `7f2fdf0c577fb330ac6b6996fbce8039e61a088cbdfa763ad6a9514fea01e4dc`
 failed MIR lowering of `environment_variant_catalog_policy_bridge_v1.spl`
