@@ -1,0 +1,73 @@
+# CUDA driver dynamic loader.
+# design: doc/05_design/lib/runtime/cuda_driver_dynamic_load.md
+#
+# The CUDA driver (nvcuda.dll / libcuda.so) is opened at first GPU use and
+# never linked, so a CUDA-enabled binary starts on a machine without CUDA.
+# Missing driver -> CUDA-E001, missing symbol -> CUDA-E002. Symbols resolve
+# once, all-or-nothing, and are published lock-free through an AtomicI64.
+
+use std.nogc_sync_mut.sffi.dynamic.{DynLib, platform_name}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+# Driver API entry points the CUDA lanes call. A driver lacking any of these is
+# rejected as a whole (CUDA-E002) rather than failing later mid-launch.
+val CUDA_DRIVER_SYMBOLS: [text] = [
+    "cuInit", "cuDriverGetVersion", "cuDeviceGetCount", "cuDeviceGet",
+    "cuCtxCreate_v2", "cuCtxDestroy_v2", "cuCtxSynchronize",
+    "cuMemAlloc_v2", "cuMemFree_v2", "cuMemcpyHtoD_v2", "cuMemcpyDtoH_v2",
+    "cuModuleLoadData", "cuModuleGetFunction", "cuLaunchKernel"
+]
+
+val _STATE_UNRESOLVED: i64 = 0
+val _STATE_RESOLVING: i64 = 1
+val _STATE_PUBLISHED: i64 = 2
+
+class CudaDriver:
+    library: text
+    lib: DynLib
+    symbols: {text: i64}
+
+impl CudaDriver:
+    # Resolved address of a required symbol; 0 if it is not in the table.
+    fn symbol(name: text) -> i64:
+        self.symbols.get(name) ?? 0
+
+fn cuda_driver_library_candidates(platform: text) -> [text]:
+    if platform == "windows": return ["nvcuda.dll"]
+    if platform == "linux" or platform == "freebsd": return ["libcuda.so.1", "libcuda.so"]
+    []
+
+@unsafe(reason: "opens a foreign library and resolves raw function pointers", capabilities: [ffi, raw_ptr])
+fn cuda_driver_resolve(candidates: [text], symbols: [text]) -> Result<CudaDriver, text>:
+    for path in candidates:
+        val opened = DynLib.load_checked(path)
+        if opened.is_ok():
+            val lib = opened.unwrap()
+            var table: {text: i64} = {}
+            for name in symbols:
+                val addr = lib.sym_checked(name)
+                if addr.is_err():
+                    return Err("CUDA-E002: CUDA driver {path} is missing required symbol {name} (driver older than the CUDA API this build uses; update the NVIDIA driver)")
+                table[name] = addr.unwrap()
+            return Ok(CudaDriver(library: path, lib: lib, symbols: table))
+    val tried = candidates.join(", ")
+    Err("CUDA-E001: CUDA driver not available: could not load any of [{tried}] (install the NVIDIA driver, or run without GPU features)")
+
+var _cuda_state: AtomicI64 = atomic_i64_new(_STATE_UNRESOLVED)
+var _cuda_published: Result<CudaDriver, text> = Err("CUDA-E001: CUDA driver not resolved")
+
+# The CUDA driver for this process, resolved once at first GPU use.
+@unsafe(reason: "opens a foreign library and resolves raw function pointers", capabilities: [ffi, raw_ptr])
+fn cuda_driver() -> Result<CudaDriver, text>:
+    if _cuda_state.load(MemoryOrdering.Acquire) == _STATE_PUBLISHED:
+        return _cuda_published
+    val resolved = cuda_driver_resolve(cuda_driver_library_candidates(platform_name()), CUDA_DRIVER_SYMBOLS)
+    if _cuda_state.compare_exchange(_STATE_UNRESOLVED, _STATE_RESOLVING, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        _cuda_published = resolved
+        _cuda_state.store(_STATE_PUBLISHED, MemoryOrdering.Release)
+        return resolved
+    # Lost the race: never wait. Use the winner's result once published,
+    # otherwise our own (equivalent, loader-refcounted) resolution.
+    if _cuda_state.load(MemoryOrdering.Acquire) == _STATE_PUBLISHED:
+        return _cuda_published
+    resolved

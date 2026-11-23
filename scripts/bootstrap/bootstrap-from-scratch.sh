@@ -70,6 +70,11 @@ esac
 # Stage 3 knobs are applied in resume-stage3-from-admitted.sh (after --jobs).
 . "${bootstrap_entry_dir}/lib/host-bootstrap-settings.shs"
 bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
+# Host-config frontend_cache (on|off) stands in for an unset caller
+# SIMPLE_FRONTEND_CACHE (W27/W36); resolved here, after the pinned-archive exec,
+# into the same captured caller value the Stage 3 launch and the Stage 2 matrix
+# read. Invalid host value = hard error naming the key.
+bootstrap_host_apply_frontend_cache_default "${bootstrap_early_repo_root}" || exit 64
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -2435,7 +2440,7 @@ ${cache_admission_payload}"
           "SIMPLE_BOOTSTRAP_LOW_MEMORY=${NATIVE_LOW_MEMORY}" SIMPLE_NATIVE_ARENA_DECLS=1 \
           "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
           "SIMPLE_NATIVE_BUILD_CACHE_DIR=${native_cache_dir}" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
-          SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
+          "SIMPLE_FRONTEND_CACHE=${stage4_frontend_cache:?}" "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
           SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
           SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
         if [ "$1" = stage4-debug ]; then
@@ -3471,6 +3476,10 @@ bootstrap_native_build_main() {
     fi
   fi
   echo "  process-tree RSS policy: ${bootstrap_tree_rss_summary}" >&2
+  # W24/W27: a caller-supplied SIMPLE_FRONTEND_CACHE is transcribed into the
+  # (provenance-hashed) build log; unset writes nothing, keeping the log shape.
+  [ -z "${stage4_frontend_cache_caller:-}" ] ||
+    echo "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=${stage4_frontend_cache_caller}" >&2
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="${bootstrap_native_session_mode}" \
     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
@@ -3489,7 +3498,7 @@ bootstrap_native_build_main() {
     SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
     SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
     SIMPLE_CACHE_SCOPE="${stage4_cache_scope}" \
-    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE="${stage4_frontend_cache:?}" \
     SIMPLE_FRONTEND_CACHE_DIR="${native_cache_dir}/frontend" \
     SIMPLE_HIR_CACHE=1 \
     SIMPLE_HIR_CACHE_DIR="${native_cache_dir}/hir" \
@@ -5310,6 +5319,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # single-variable pass-throughs, hashed and transcribed; unset keeps the
   # pinned argv byte-for-byte (SIMPLE_MIR_SHARDING absent, SIMPLE_FRONTEND_CACHE
   # at its pinned 1). Same knobs in resume-stage3-from-admitted.sh.
+  # Host config mir_sharding/mir_shard_count/mir_shard_worker_kib fill an unset
+  # env var (W36); frontend_cache was resolved at entry into
+  # bootstrap_caller_frontend_cache.
+  bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 64
   stage3_mir_sharding_env= stage3_frontend_cache=1
   case "${SIMPLE_MIR_SHARDING:-}" in
     '') ;;
@@ -6318,6 +6331,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # the elevated ceiling when the cap is above the default ceiling, which
       # the campaign and row owners admit under real host headroom). An
       # explicit cap is kept untouched. See bootstrap_tree_rss_whole_build_export.
+      # Host-config matrix knobs (W27/W32/W36) first: an env var left unset is
+      # filled from mir_sharding / mir_shard_count / mir_shard_worker_kib (the
+      # whole-build plan below keeps a set SIMPLE_MIR_SHARD_WORKER_KB), and the
+      # caller/host frontend cache value replaces the SIMPLE_FRONTEND_CACHE=1
+      # the Stage 2 cache setup exported. All four cross into each tool row via
+      # phase-c-backend-commands.shs bootstrap_phase_c_tool_row_environment_keys.
+      bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 125
+      case "${bootstrap_caller_frontend_cache:-}" in
+        '') ;;
+        0|1) SIMPLE_FRONTEND_CACHE=${bootstrap_caller_frontend_cache}; export SIMPLE_FRONTEND_CACHE ;;
+        *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 125 ;;
+      esac
       bootstrap_tree_rss_whole_build_export "${stage2_tests_build_threads}" "${repo_root}" || {
         echo "error: ${bootstrap_tree_rss_refusal}" >&2
         exit 125
@@ -6952,6 +6977,19 @@ fi
 # ===========================================================================
 
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
+# Windows shard-worker warm-cache workaround (W24/W27), Stage 4 half of the
+# Stage 3 pass-through: honour the caller's SIMPLE_FRONTEND_CACHE (captured at
+# entry, before Stage 2 cache setup exported =1). Validated unset | 0 | 1;
+# unset keeps the pinned 1 byte-for-byte (cache context, argv, build log and
+# provenance unchanged). Derived here, not from stage3_frontend_cache, because
+# --resume-stage4 skips the Stage 3 block, and before prepare_native_cache so
+# the Stage 4 cache context records the value actually launched.
+stage4_frontend_cache=1 stage4_frontend_cache_caller=
+case "${bootstrap_caller_frontend_cache:-}" in
+  '') ;;
+  0|1) stage4_frontend_cache=${bootstrap_caller_frontend_cache} stage4_frontend_cache_caller=${bootstrap_caller_frontend_cache} ;;
+  *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 1 ;;
+esac
 bootstrap_build_host_vector_provider || exit 1
 bootstrap_progress_mark stage4-fingerprint ""
 full_dir="${output_dir}/full/${PLATFORM}"
@@ -7078,6 +7116,7 @@ fi
 stage4_provenance="${full_bin}.provenance.env"
 STAGE4_DUAL_MODE="${stage4_dual_mode}" \
 STAGE4_DEBUG_CANDIDATE_PATH="${full_debug_bin}" \
+STAGE4_FRONTEND_CACHE="${stage4_frontend_cache_caller}" \
 stage4_write_candidate_provenance \
   "${full_bin}" "${stage4_provenance}" "${repo_root}" \
   "${bootstrap_script_path}" "${stage4_parent}" \

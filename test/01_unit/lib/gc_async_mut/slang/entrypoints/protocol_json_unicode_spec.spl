@@ -1,0 +1,27 @@
+"""
+## Purpose and audience
+Purpose: Pin that the slang request JSON readers decode unicode escapes (BMP,
+surrogate pairs, malformed) in string fields and in `stop` sequences.
+Audience: engineers touching entrypoints/openai/protocol.spl.
+
+## Compatibility and limitations
+A lone surrogate decodes to U+FFFD; an escape not followed by four hex digits
+is passed through as the letter u, as before.
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, json_stop_sequences}
+
+describe "slang JSON unicode escapes":
+    it "decodes a BMP escape to UTF-8":
+        expect(json_string_field("{\"k\":\"caf\\u00e9\"}", "k")).to_equal("caf\u{e9}")
+    it "decodes a surrogate pair to one scalar":
+        expect(json_string_field("{\"k\":\"\\ud83d\\ude00!\"}", "k")).to_equal("\u{1F600}!")
+    it "replaces a lone surrogate with U+FFFD":
+        expect(json_string_field("{\"k\":\"a\\ud83dz\"}", "k")).to_equal("a\u{FFFD}z")
+    it "passes a malformed escape through as before":
+        expect(json_string_field("{\"k\":\"a\\u12g4\"}", "k")).to_equal("au12g4")
+    it "decodes escapes in stop sequences":
+        val stops = json_stop_sequences("{\"stop\":[\"\\u0041\\u00e9\"]}")
+        expect(stops.len()).to_equal(1)
+        expect(stops[0]).to_equal("A\u{e9}")

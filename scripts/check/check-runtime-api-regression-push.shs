@@ -139,9 +139,12 @@ defined_symbols_c() {
     # C definition: return-type prefix then rt_NAME( at start of line,
     # ending the SAME statement in '{' (not a call site / prototype ending
     # in ';'). One committed-tree grep replaces one `git show` per file.
+    # `static` definitions have internal linkage, are not runtime API, and
+    # are skipped.
     git -C "$ds_repo" grep -h -o -E \
       '^[A-Za-z_][A-Za-z0-9_ \*]*[[:space:]]rt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' \
       "$ds_rev" -- ':(glob)src/runtime/**/*.[ch]' 2>/dev/null \
+      | $GREP -vE '^([A-Za-z0-9_]+[[:space:]]+)*static[[:space:]]' \
       | $GREP -oE 'rt_[A-Za-z0-9_]+' >"$TMPROOT/c_literal.out"
     # Macro-generated definitions: a column-0 instantiation
     # `UPPER_MACRO(rt_NAME, ...)` with no trailing ';' (e.g.
@@ -255,7 +258,7 @@ evaluate() {
 # ===========================================================================
 # SELFTEST — proves all four directions. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=5
+SELFTEST_EXPECTED=6
 
 selftest() {
     st_dir="$TMPROOT/selftest"
@@ -401,12 +404,36 @@ selftest() {
         *) echo "SELFTEST FAIL: macro-export EV_MSG does not name rt_m_xor: $EV_MSG" >&2; st_fail=1 ;;
     esac
 
+    # --- Fixture F: renaming file-internal static rt_* helpers must PASS --
+    # A `static` C function has internal linkage and is not runtime API, so
+    # renaming 5 of them is not a removal (bug doc 2026-11-23, defect 2).
+    {
+        echo 'static int64_t rt_core_dict_a(int64_t x) {'
+        echo 'static inline int64_t rt_core_dict_b(int64_t x) {'
+        echo 'static int64_t rt_core_dict_c(int64_t x) {'
+        echo 'static void *rt_core_dict_d(void *p) {'
+        echo 'static int rt_core_dict_e(void) {'
+        echo 'int64_t rt_dict_public(int64_t x) {'
+    } >"$st_dir/src/runtime/static_defs.c"
+    c_st=$(st_commit "runtime: static helpers") || return 1
+    sed -i 's/rt_core_dict_/rt_core_map_/' "$st_dir/src/runtime/static_defs.c" || return 1
+    c_strn=$(st_commit "runtime: rename static helpers") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$c_st" "$c_strn" "$CFG_MIN_REMOVED"
+    st_got=$?
+    if [ "$st_got" -ne 0 ]; then
+        echo "SELFTEST FAIL: static-rename fixture expected verdict 0, got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+
     if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
         echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (1 incident-replay, 1 forward-progress, 1 single-removal, 1 empty-range, 1 macro-export)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (1 incident-replay, 1 forward-progress, 1 single-removal, 1 empty-range, 1 macro-export, 1 static-rename)"
     return 0
 }
 

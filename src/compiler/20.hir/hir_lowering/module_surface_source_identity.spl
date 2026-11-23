@@ -102,18 +102,30 @@ fn module_surface_strip_verbatim_prefix(path: text) -> text:
             return rest
     path
 
+fn module_surface_is_drive_prefix(path: text) -> bool:
+    if path.byte_len() < 2 or path.char_code_at(1) != 58:
+        return false
+    val drive = path.char_code_at(0)
+    val is_alpha = (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)
+    if not is_alpha:
+        return false
+    path.byte_len() == 2 or path.char_code_at(2) == 47
+
 pub fn module_surface_canonical_path(path: text) -> text:
     val physical = rt_path_absolute(path)
     if physical == nil or physical == "":
         return ""
     val normalized = module_surface_strip_verbatim_prefix(
         physical.unwrap().replace("\\", "/"))
-    val absolute = normalized.starts_with("/")
+    val posix_abs = normalized.starts_with("/")
+    val drive_abs = module_surface_is_drive_prefix(normalized)
+    val absolute = posix_abs or drive_abs
+    val min_parts = if drive_abs: 1 else: 0
     var parts: [text] = []
     for part in normalized.split("/"):
         if part == "" or part == ".":
             continue
-        if part == ".." and parts.len() > 0 and parts[parts.len() - 1] != "..":
+        if part == ".." and parts.len() > min_parts and parts[parts.len() - 1] != "..":
             # Remove the final component in place. Prefix slicing recopied all
             # retained components for every `..`, making deep normalization
             # quadratic in the number of path components.
@@ -123,7 +135,11 @@ pub fn module_surface_canonical_path(path: text) -> text:
         elif part != "..":
             parts = parts.push(part)
     val joined = parts.join("/")
-    if absolute:
+    if drive_abs:
+        if parts.len() == 1:
+            return joined + "/"
+        return joined
+    if posix_abs:
         return "/" + joined
     joined
 

@@ -345,15 +345,41 @@ fn loan_alias_union(left: [LoanAlias], right: [LoanAlias]) -> [LoanAlias]:
 # sanity borrow_check). Same writeback/argument-shape defect family as
 # cce1cddae19 (mir receiver writeback).
 # @workaround bug=nll_live_aliases_method_arg_corruption_2026_10_22 reason=self_receiver_plus_array_arg_method_call_miscompiles_in_native_candidate
-fn nll_live_aliases(aliases: [LoanAlias], live: [i64]) -> [LoanAlias]:
+#
+# Liveness is queried per local instead of materialized per point: keeping a
+# full live set before and after every point cost O(points x live) time and
+# memory, unbudgeted, and pinned a 92-module MIR shard at >100 GB for hours.
+# `local_events[local]` lists that local's events in ascending position order,
+# encoded position*2 + 1 for a use and position*2 for a def without a use (a
+# same-point use wins: use-before-def). Positions number reachable points
+# block by block; `block_end` is one past the block's last position. A local
+# is live before `position` iff its first event at or after `position` in the
+# block is a use, or it has none there and is in the block's `live_out`.
+# Live-after a point is live-before position + 1.
+fn nll_live_aliases_at(aliases: [LoanAlias], local_events: Dict<i64, [i64]>, position: i64, block_end: i64, live_out: [i64]) -> [LoanAlias]:
     var kept: [LoanAlias] = []
     for alias in aliases:
         var keep = true
         match loan_alias_place(alias).base:
-            case PlaceBase.Local(local): keep = nll_sorted_contains(live, local)
+            case PlaceBase.Local(local): keep = nll_local_live_at(local_events[local] ?? [], position, block_end, live_out, local)
             case _: ()
         if keep: kept = kept.push(alias)
     kept
+
+fn nll_local_live_at(events: [i64], position: i64, block_end: i64, live_out: [i64], local: i64) -> bool:
+    val key = position * 2
+    var lo = 0
+    var hi = events.len()
+    while lo < hi:
+        val mid = (lo + hi) / 2
+        if events[mid] < key:
+            lo = mid + 1
+        else:
+            hi = mid
+    if lo < events.len():
+        val event = events[lo]
+        if event / 2 < block_end: return event % 2 == 1
+    nll_sorted_contains(live_out, local)
 
 # Loan liveness sets are sorted, duplicate-free [i64] arrays: membership is a
 # binary search and union/difference/equality are linear merges, so a point
@@ -428,17 +454,23 @@ fn nll_sorted_equal(a: [i64], b: [i64]) -> bool:
         i = i + 1
     true
 
-# Unsorted, possibly duplicated locals -> sorted set (per-point use/def
-# lists hold a handful of locals, so insertion into a merge is cheap).
+# Unsorted, possibly duplicated locals -> sorted set. Halving merge sort over
+# nll_sorted_union (which drops duplicates): O(n log n), so whole-block gen/kill
+# lists stay cheap, not only the handful of locals at one point.
 fn nll_sorted_set(values: [i64]) -> [i64]:
-    var result: [i64] = []
-    for value in values:
-        if not nll_sorted_contains(result, value): result = nll_sorted_union(result, [value])
-    result
+    nll_sorted_set_range(values, 0, values.len())
+
+fn nll_sorted_set_range(values: [i64], lo: i64, hi: i64) -> [i64]:
+    if hi - lo <= 0: return []
+    if hi - lo == 1: return [values[lo]]
+    val mid = (lo + hi) / 2
+    nll_sorted_union(nll_sorted_set_range(values, lo, mid), nll_sorted_set_range(values, mid, hi))
 
 # Fail-closed work budget for the loan solver, in real work units:
 # liveness charges 1 + |live-in| per block transfer of the worklist fixed
-# point; the loan CFG walk charges 1 + |aliases| per point transfer. Both
+# point; the loan CFG walk charges 1 + |aliases| per point transfer. The
+# gen/kill summary and the per-local event index are single linear passes
+# over the recorded uses/defs, so they need no charge. Both
 # liveness pass is monotone over finite sets, so it only fires on a solver
 # defect or a pathological function, never on ordinary large functions.
 # See doc/08_tracking/bug/borrow_loan_work_budget_exhausted_2026-10-24.md
@@ -825,24 +857,26 @@ class NLLChecker:
         # Backward point liveness over actual successors, with use-before-def
         # preserved when both occur at one instruction. Fail closed on budget.
         # Sets are sorted [i64] (see nll_sorted_*). Each block is summarized
-        # once as live_in = gen U (live_out - kill); a postorder worklist then
-        # requeues a block's predecessors only when its live_in changed, and a
-        # single backward walk per block materializes the per-point sets.
-        var before: Dict<i64, [i64]> = {}
-        var after: Dict<i64, [i64]> = {}
+        # once, in one forward pass, as live_in = gen U (live_out - kill); a
+        # postorder worklist then requeues a block's predecessors only when its
+        # live_in changed. Per-point liveness is queried from a per-local event
+        # index (see nll_live_aliases_at), never materialized per point.
         var work = 0
         val work_budget = nll_loan_work_budget()
         val reachable = self.cfg.reverse_postorder()
         var point_ids: Dict<i64, bool> = {}
         for block_id in reachable:
             for point in points[block_id]: point_ids[point] = true
+        var all_point_ids: Dict<i64, bool> = {}
+        var all_points_indexed = false
         for point in self.loan_events.keys():
             if not point_ids.contains_key(point):
                 # Unreachable events are legal, unmapped ones are malformed.
-                var mapped = false
-                for block_id in points.keys():
-                    if points[block_id].contains(point): mapped = true
-                if not mapped:
+                if not all_points_indexed:
+                    for block_id in points.keys():
+                        for mapped_point in points[block_id]: all_point_ids[mapped_point] = true
+                    all_points_indexed = true
+                if not all_point_ids.contains_key(point):
                     self.loan_failure(point, "loan event has no CFG point")
                     return
         # Fast-skip backward variable liveness and loan-alias fixed-point
@@ -861,27 +895,38 @@ class NLLChecker:
                                     case _:
                                         pass
             return
-        var point_uses: Dict<i64, [i64]> = {}
-        var point_defs: Dict<i64, [i64]> = {}
+        var point_position: Dict<i64, i64> = {}
+        var block_end: Dict<i64, i64> = {}
+        var local_events: Dict<i64, [i64]> = {}
         var block_gen: Dict<i64, [i64]> = {}
         var block_kill: Dict<i64, [i64]> = {}
         var predecessors: Dict<i64, [i64]> = {}
+        var position = 0
         for block_id in reachable:
-            val block_points = points[block_id]
-            var gen_set: [i64] = []
-            var kill_set: [i64] = []
-            var index = block_points.len()
-            while index > 0:
-                index = index - 1
-                val point = block_points[index]
+            # gen = locals whose first mention in the block is a use (a
+            # same-point use precedes the def); kill = every defined local.
+            var gen_list: [i64] = []
+            var kill_list: [i64] = []
+            var defined: Dict<i64, bool> = {}
+            for point in points[block_id]:
+                point_position[point] = position
                 val uses = nll_sorted_set(self.point_uses[point] ?? [])
                 val defs = nll_sorted_set(self.point_defs[point] ?? [])
-                point_uses[point] = uses
-                point_defs[point] = defs
-                gen_set = nll_sorted_union(uses, nll_sorted_minus(gen_set, defs))
-                kill_set = nll_sorted_union(kill_set, defs)
-            block_gen[block_id] = gen_set
-            block_kill[block_id] = kill_set
+                for local in uses:
+                    if not (defined[local] ?? false): gen_list = gen_list.push(local)
+                    var events: [i64] = local_events[local] ?? []
+                    local_events[local] = events.push(position * 2 + 1)
+                for local in defs:
+                    if not (defined[local] ?? false):
+                        defined[local] = true
+                        kill_list = kill_list.push(local)
+                    if not nll_sorted_contains(uses, local):
+                        var events: [i64] = local_events[local] ?? []
+                        local_events[local] = events.push(position * 2)
+                position = position + 1
+            block_end[block_id] = position
+            block_gen[block_id] = nll_sorted_set(gen_list)
+            block_kill[block_id] = nll_sorted_set(kill_list)
             for successor in self.cfg.blocks[block_id].successors:
                 var preds: [i64] = predecessors[successor] ?? []
                 predecessors[successor] = preds.push(block_id)
@@ -916,16 +961,6 @@ class NLLChecker:
                     if not (queued[pred] ?? false):
                         queued[pred] = true
                         queue = queue.push(pred)
-        for block_id in reachable:
-            var live: [i64] = live_out[block_id] ?? []
-            val block_points = points[block_id]
-            var index = block_points.len()
-            while index > 0:
-                index = index - 1
-                val point = block_points[index]
-                after[point] = live
-                live = nll_sorted_union(point_uses[point], nll_sorted_minus(live, point_defs[point]))
-                before[point] = live
         # The loan CFG walk is charged against its own budget.
         work = 0
         var incoming: Dict<i64, [LoanAlias]> = {}
@@ -936,10 +971,12 @@ class NLLChecker:
             val block_id = pending[cursor]
             cursor = cursor + 1
             var state: [LoanAlias] = incoming[block_id]
+            val stop = block_end[block_id] ?? 0
+            val exit_live: [i64] = live_out[block_id] ?? []
             for point in points[block_id]:
-                state = nll_live_aliases(state, before[point])
+                state = nll_live_aliases_at(state, local_events, point_position[point], stop, exit_live)
                 state = self.transfer_loans(point, state, false)
-                state = nll_live_aliases(state, after[point])
+                state = nll_live_aliases_at(state, local_events, point_position[point] + 1, stop, exit_live)
                 work = work + 1 + state.len()
                 if work > work_budget:
                     self.loan_failure(point, "loan CFG work budget exhausted")
@@ -953,10 +990,12 @@ class NLLChecker:
         # Replay diagnostics only after all backedges and sibling joins converge.
         for block_id in incoming.keys():
             var state: [LoanAlias] = incoming[block_id]
+            val stop = block_end[block_id] ?? 0
+            val exit_live: [i64] = live_out[block_id] ?? []
             for point in points[block_id]:
-                state = nll_live_aliases(state, before[point])
+                state = nll_live_aliases_at(state, local_events, point_position[point], stop, exit_live)
                 state = self.transfer_loans(point, state, true)
-                state = nll_live_aliases(state, after[point])
+                state = nll_live_aliases_at(state, local_events, point_position[point] + 1, stop, exit_live)
 
     fn get_errors() -> [NLLError]:
         """Get all NLL errors."""

@@ -183,7 +183,17 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
         if tag == STMT_ASSIGN:
             val e = stmt_get_expr(s)
             if e >= 0:
-                if is_concat_assign_expr(e):
+                val assign_body = stmt_get_body(s)
+                if assign_body.len() > 0:
+                    if is_concat_assign_target_value(e, assign_body[0]):
+                        warnings.push(CollectionLintWarning(
+                            code: "COLL001",
+                            severity: "CRITICAL",
+                            message: "array concat in loop (O(n^2))",
+                            hint: "use .push() instead of arr = arr + [x]",
+                            item_name: fn_name
+                        ))
+                elif is_concat_assign_expr(e):
                     warnings.push(CollectionLintWarning(
                         code: "COLL001",
                         severity: "CRITICAL",
@@ -195,7 +205,6 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
                 # assignment stores the TARGET in stmt_expr and the value in
                 # stmt_body[0] (stmt_assign_stmt) -- it is not an EXPR_ASSIGN
                 # node, so the expression matcher below never saw this form.
-                val assign_body = stmt_get_body(s)
                 if assign_body.len() > 0:
                     if is_string_concat_target_value(e, assign_body[0], text_vars, nontext_vars):
                         warnings.push(coll006_warning(fn_name))
@@ -307,6 +316,19 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text, text_vars: [text
 # ============================================================================
 
 # COLL001: Detect arr = arr + [x] pattern
+fn is_concat_assign_target_value(target: i64, value: i64) -> bool:
+    if target < 0 or value < 0:
+        return false
+    if expr_get_tag(value) == EXPR_BINARY and expr_get_int(value) == TOK_PLUS:
+        val rhs_right = expr_get_right(value)
+        if rhs_right >= 0 and expr_get_tag(rhs_right) == EXPR_ARRAY_LIT:
+            val rhs_left = expr_get_left(value)
+            if rhs_left >= 0 and expr_get_tag(rhs_left) == EXPR_IDENT:
+                if expr_get_tag(target) == EXPR_IDENT:
+                    if expr_get_str(rhs_left) == expr_get_str(target):
+                        return true
+    false
+
 fn is_concat_assign_expr(e: i64) -> bool:
     if e < 0:
         return false
@@ -316,16 +338,8 @@ fn is_concat_assign_expr(e: i64) -> bool:
     if tag == EXPR_ASSIGN:
         val target = expr_get_left(e)
         val value = expr_get_right(e)
-        if target >= 0 and value >= 0:
-            if expr_get_tag(value) == EXPR_BINARY and expr_get_int(value) == TOK_PLUS:
-                val rhs_right = expr_get_right(value)
-                if rhs_right >= 0 and expr_get_tag(rhs_right) == EXPR_ARRAY_LIT:
-                    # Check lhs of + matches assign target
-                    val rhs_left = expr_get_left(value)
-                    if rhs_left >= 0 and expr_get_tag(rhs_left) == EXPR_IDENT:
-                        if target >= 0 and expr_get_tag(target) == EXPR_IDENT:
-                            if expr_get_str(rhs_left) == expr_get_str(target):
-                                return true
+        if is_concat_assign_target_value(target, value):
+            return true
 
     # Compound assign: arr += [x]
     if tag == EXPR_COMPOUND_ASSIGN:

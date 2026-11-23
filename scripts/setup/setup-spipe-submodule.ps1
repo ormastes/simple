@@ -14,16 +14,13 @@ Set-Location $RootDir
 if ($DryRun) {
     Write-Output "would_init_submodules .spipe/spipe"
 } else {
-    git submodule update --init --recursive -- .spipe/spipe
-    if ($LASTEXITCODE -ne 0) {
-        throw "setup-spipe-submodule: git submodule update failed with exit code $LASTEXITCODE"
-    }
-}
-
-if (-not $DryRun) {
     & powershell -ExecutionPolicy Bypass -File "scripts\check\check-spipe-submodule-gitlinks.ps1" --check
     if ($LASTEXITCODE -ne 0) {
         throw "setup-spipe-submodule: gitlink check failed with exit code $LASTEXITCODE; index was not repaired"
+    }
+    git submodule update --init --recursive -- .spipe/spipe
+    if ($LASTEXITCODE -ne 0) {
+        throw "setup-spipe-submodule: git submodule update failed with exit code $LASTEXITCODE"
     }
 }
 
@@ -75,6 +72,10 @@ if ((Test-Path $Cli) -and -not $DryRun) {
 
 $setup = Join-Path $ModuleDir "scripts\setup-spipe-links.ps1"
 if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+    if ($DryRun) {
+        Write-Output "would_delegate $setup"
+        return
+    }
     Write-Error "setup-spipe-submodule: missing $setup"
 }
 

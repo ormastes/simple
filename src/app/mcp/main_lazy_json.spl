@@ -12,7 +12,12 @@ fn _slice_text(s: text, start: i64, end: i64) -> text:
     s.substring(start, end)
 
 fn first_n_chars(s: text, n: i64) -> text:
-    val limit = if n < s.len(): n else: s.len()
+    if n <= 0:
+        return ""
+    val blen = s.byte_len()
+    var limit = if n < blen: n else: blen
+    while limit > 0 and limit < blen and s.byte_at(limit) >= 128 and s.byte_at(limit) < 192:
+        limit = limit - 1
     s.substring(0, limit)
 
 fn char_at_index(s: text, target: i64) -> text:
@@ -22,6 +27,11 @@ fn char_at_index(s: text, target: i64) -> text:
             return ch
         i = i + 1
     ""
+
+fn _char_at(s: text, i: i64) -> text:
+    if i < 0 or i >= s.byte_len():
+        return ""
+    char_at_index(s, i)
 
 # --- JSON helpers (inlined for zero-import startup) ---
 
@@ -119,106 +129,105 @@ fn jo4(p1: text, p2: text, p3: text, p4: text) -> text:
 # NOTE: Avoid `match Some(i)` on `index_of()` results here; that pattern has
 # crashed native Cranelift binaries. Use `?? -1` instead.
 
-fn _char_at(s: text, i: i64) -> text:
-    if i < 0 or i >= s.len():
-        return ""
-    _slice_text(s, i, i + 1)
-
-fn _is_ws(ch: text) -> bool:
-    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+fn _is_ws_byte(b: i64) -> bool:
+    b == 32 or b == 10 or b == 13 or b == 9
 
 fn _find_json_value_start(json: text, key: text) -> i64:
     val search = Q() + key + Q()
+    val search_blen = search.byte_len()
+    val blen = json.byte_len()
     var offset = 0
-    while offset < json.len():
+    while offset < blen:
         val found = json.index_of(search, offset) ?? -1
         if found < 0:
             return -1
         offset = found
-        var value_start = offset + search.len()
-        while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+        var value_start = offset + search_blen
+        while value_start < blen and _is_ws_byte(json.byte_at(value_start)):
             value_start = value_start + 1
-        if value_start < json.len() and _char_at(json, value_start) == ":":
+        if value_start < blen and json.byte_at(value_start) == 58:
             value_start = value_start + 1
-            while value_start < json.len() and _is_ws(_char_at(json, value_start)):
+            while value_start < blen and _is_ws_byte(json.byte_at(value_start)):
                 value_start = value_start + 1
             return value_start
-        offset = offset + search.len()
+        offset = offset + search_blen
     return -1
 
 fn extract_field(json: text, key: text) -> text:
     val start = _find_json_value_start(json: json, key: key)
-    if start < 0 or start >= json.len():
+    val blen = json.byte_len()
+    if start < 0 or start >= blen:
         return ""
-    val first = _char_at(json, start)
-    if first == Q():
+    val first = json.byte_at(start)
+    if first == 34:
         var i = start + 1
         var escaped = false
-        while i < json.len():
-            val ch = _char_at(json, i)
+        while i < blen:
+            val b = json.byte_at(i)
             if escaped:
                 escaped = false
-            elif ch == "\\":
+            elif b == 92:
                 escaped = true
-            elif ch == Q():
+            elif b == 34:
                 return json_unescape_string(_slice_text(json, start + 1, i))
             i = i + 1
         return ""
     var end = start
-    while end < json.len():
-        val ch = _char_at(json, end)
-        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+    while end < blen:
+        val b = json.byte_at(end)
+        if b == 44 or b == 125 or b == 93 or _is_ws_byte(b):
             break
         end = end + 1
     return _slice_text(json, start, end)
 
 fn extract_field_raw(json: text, key: text) -> text:
     val start = _find_json_value_start(json: json, key: key)
-    if start < 0 or start >= json.len():
+    val blen = json.byte_len()
+    if start < 0 or start >= blen:
         return "null"
-    val first = _char_at(json, start)
-    if first == Q():
+    val first = json.byte_at(start)
+    if first == 34:
         var i2 = start + 1
         var escaped = false
-        while i2 < json.len():
-            val ch = _char_at(json, i2)
+        while i2 < blen:
+            val b = json.byte_at(i2)
             if escaped:
                 escaped = false
-            elif ch == "\\":
+            elif b == 92:
                 escaped = true
-            elif ch == Q():
+            elif b == 34:
                 return _slice_text(json, start, i2 + 1)
             i2 = i2 + 1
         return "null"
-    if first == LB() or first == SB_L():
+    if first == 123 or first == 91:
         var depth = 0
         var i3 = start
         var in_str = false
         var esc = false
-        while i3 < json.len():
-            val ch = _char_at(json, i3)
+        while i3 < blen:
+            val b = json.byte_at(i3)
             if in_str:
                 if esc:
                     esc = false
-                elif ch == "\\":
+                elif b == 92:
                     esc = true
-                elif ch == Q():
+                elif b == 34:
                     in_str = false
             else:
-                if ch == Q():
+                if b == 34:
                     in_str = true
-                elif ch == LB() or ch == SB_L():
+                elif b == 123 or b == 91:
                     depth = depth + 1
-                elif ch == RB() or ch == SB_R():
+                elif b == 125 or b == 93:
                     depth = depth - 1
                     if depth == 0:
                         return _slice_text(json, start, i3 + 1)
             i3 = i3 + 1
         return "null"
     var end = start
-    while end < json.len():
-        val ch = _char_at(json, end)
-        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+    while end < blen:
+        val b = json.byte_at(end)
+        if b == 44 or b == 125 or b == 93 or _is_ws_byte(b):
             break
         end = end + 1
     val raw = _slice_text(json, start, end)
@@ -456,4 +465,4 @@ fn _mcp_normalize_process_exit(code: i64, stderr: text) -> i64:
     code
 
 fn text_byte_len(s: text) -> i64:
-    s.len()
+    s.byte_len()

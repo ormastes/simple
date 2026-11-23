@@ -35,10 +35,11 @@ Audience: compiler and tooling engineers who maintain the pure-Simple lexer.
 # See doc/08_tracking/bug/lexer_comment_run_recursion_overflow_2026-09-13.md
 
 use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_exists}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
 use std.nogc_sync_mut.io.env_ops.{env_set}
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
-use std.io_runtime.{getpid}
+use std.io_runtime.{getpid, env_get}
 
 fn probe_source(comment_lines: i64) -> text:
     var body = "use compiler.frontend.core.source_facts.\{simple_code_lines\}\n"
@@ -55,16 +56,28 @@ fn probe_source(comment_lines: i64) -> text:
     body = body + "    print \"lex_ok lines=\{lines.len()\}\"\n"
     body
 
+fn lexrec_probe_runner() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured != "" and file_exists(configured):
+        return configured
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    "bin/simple"
+
 fn run_probe(comment_lines: i64) -> text:
-    # pid-qualified: two lanes running this spec at once must not share the file.
-    val path = "/tmp/simple_lexrec_probe_{getpid()}_{comment_lines}.spl"
+    # Write inside workspace build/ so `compiler.frontend.core.source_facts` resolves across Windows and worktrees.
+    if not dir_exists("build"):
+        dir_create_all("build")
+    val path = "build/simple_lexrec_probe_{getpid()}_{comment_lines}.spl"
     if file_exists(path):
         file_delete(path)
     file_write(path, probe_source(comment_lines))
     # The guard only exists on the interpreter path; without this the child
     # JITs the probe and the assertion below cannot fail.
+    val prev_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
     env_set("SIMPLE_EXECUTION_MODE", "interpret")
-    val (out, err, _code) = process_run_timeout("bin/simple", ["run", path], 300000)
+    val (out, err, _code) = process_run_timeout(lexrec_probe_runner(), ["run", path], 300000)
+    env_set("SIMPLE_EXECUTION_MODE", prev_mode)
     if file_exists(path):
         file_delete(path)
     out + "\n" + err

@@ -6,23 +6,26 @@
 #
 # @tag:windows-node-fallback
 use std.spec
-use std.process.{run}
-use std.fs.{write_file}
-use std.io_runtime.{env_get_opt}
+use std.io_runtime.{env_get_opt, file_write, file_delete, process_run}
 
 fn spipe_examples_root() -> text:
     env_get_opt("SPIPE_EXAMPLES_ROOT") ?? "examples/05_stdlib/spipe"
 
 fn tmp_input_path(name: text) -> text:
-    (env_get_opt("TEMP") ?? env_get_opt("TMPDIR") ?? "/tmp") + "/" + name
+    val raw = env_get_opt("TEMP") ?? env_get_opt("TMP") ?? env_get_opt("TMPDIR") ?? "/tmp"
+    val clean = raw.replace("\\", "/")
+    val dir = if clean.byte_len() > 1 and clean.ends_with("/"): clean.substring(0, clean.byte_len() - 1) else: clean
+    dir + "/" + name
 
-fn run_node_lines(tag: text, input: text) -> (text, text, i32):
+fn run_node_lines(tag: text, input: text) -> (text, text, i64):
     val root = spipe_examples_root()
     val infile = tmp_input_path("spipe_mcp_node_fallback_" + tag + ".txt")
-    val ok = write_file(infile, input)
+    val ok = file_write(infile, input)
     expect(ok).to_equal(true)
-    val r = run("/bin/sh", ["-c", "cat '" + infile + "' | node '" + root + "/mcp/server.js'"])
-    (r.stdout, r.stderr, r.exit_code)
+    val node_driver = r"const fs=require('fs'),cp=require('child_process');const r=cp.spawnSync(process.execPath,[process.argv[2]],{input:fs.readFileSync(process.argv[1]),encoding:'utf8'});process.stdout.write(r.stdout||'');process.stderr.write(r.stderr||'');process.exit(r.status??1);"
+    val (stdout, stderr, exit_code) = process_run("node", ["-e", node_driver, infile, root + "/mcp/server.js"])
+    val _ = file_delete(infile)
+    (stdout, stderr, exit_code)
 
 describe "SPipe MCP Node fallback server — CRLF, malformed input, error handling":
     it "answers initialize framed with CRLF line endings":
