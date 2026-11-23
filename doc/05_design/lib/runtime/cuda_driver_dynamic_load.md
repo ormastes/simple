@@ -32,3 +32,14 @@ Pure Simple over the existing hardened SFFI owner
 (`src/runtime/providers/cuda/bitmap_provider_v1.c`) and the Rust seed
 (`cuda_runtime.rs`, `libloading` + `OnceLock`) already load dynamically and are
 unchanged.
+
+## Entry-point wiring
+
+`std.gc_async_mut.cuda` (`cuda.spl` and `cuda/mod.spl`) gates first GPU use on
+`cuda_driver()`: `cuda_init_checked() -> Result<i64, text>` returns the named
+error (CUDA-E001/E002) before calling the runtime provider; `cuda_available()`
+is false and `cuda_init()` returns `CUDA_ERROR_NOT_INITIALIZED` when the driver
+is missing. `SIMPLE_CUDA_DRIVER_LIBRARY`, when set, replaces the platform
+candidate list (used by specs to force the missing-driver path). The C provider
+and the Rust seed loader are unchanged; see
+`doc/08_tracking/bug/cuda_c_provider_windows_no_nvcuda_2026-11-23.md`.

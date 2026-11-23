@@ -8,6 +8,7 @@
 
 use std.nogc_sync_mut.sffi.dynamic.{DynLib, platform_name}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.nogc_sync_mut.io_runtime.{env_get_or}
 
 # Driver API entry points the CUDA lanes call. A driver lacking any of these is
 # rejected as a whole (CUDA-E002) rather than failing later mid-launch.
@@ -37,6 +38,12 @@ fn cuda_driver_library_candidates(platform: text) -> [text]:
     if platform == "linux" or platform == "freebsd": return ["libcuda.so.1", "libcuda.so"]
     []
 
+# SIMPLE_CUDA_DRIVER_LIBRARY, when set, replaces the platform candidates.
+fn cuda_driver_host_candidates() -> [text]:
+    val override = env_get_or("SIMPLE_CUDA_DRIVER_LIBRARY", "")
+    if override != "": return [override]
+    cuda_driver_library_candidates(platform_name())
+
 @unsafe(reason: "opens a foreign library and resolves raw function pointers", capabilities: [ffi, raw_ptr])
 fn cuda_driver_resolve(candidates: [text], symbols: [text]) -> Result<CudaDriver, text>:
     for path in candidates:
@@ -58,10 +65,10 @@ var _cuda_published: Result<CudaDriver, text> = Err("CUDA-E001: CUDA driver not 
 
 # The CUDA driver for this process, resolved once at first GPU use.
 @unsafe(reason: "opens a foreign library and resolves raw function pointers", capabilities: [ffi, raw_ptr])
-fn cuda_driver() -> Result<CudaDriver, text>:
+pub fn cuda_driver() -> Result<CudaDriver, text>:
     if _cuda_state.load(MemoryOrdering.Acquire) == _STATE_PUBLISHED:
         return _cuda_published
-    val resolved = cuda_driver_resolve(cuda_driver_library_candidates(platform_name()), CUDA_DRIVER_SYMBOLS)
+    val resolved = cuda_driver_resolve(cuda_driver_host_candidates(), CUDA_DRIVER_SYMBOLS)
     if _cuda_state.compare_exchange(_STATE_UNRESOLVED, _STATE_RESOLVING, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
         _cuda_published = resolved
         _cuda_state.store(_STATE_PUBLISHED, MemoryOrdering.Release)
