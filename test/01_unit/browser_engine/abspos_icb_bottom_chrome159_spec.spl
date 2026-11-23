@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Pin `bottom` on an absolutely positioned box with NO positioned
+ancestor against Chrome 159. Its containing block is then the initial
+containing block, the viewport (CSS 2.2 10.1), so `bottom:10px` in a 300 px
+tall viewport puts a 10 px box at y 280 whatever the body holds. This engine
+resolved `bottom` against the static parent's content height (the body),
+and with only abspos boxes in it that is 0 high: the box sat above y 0,
+off-screen (the 50 px in-flow div here does not count either).
+Audience: web renderer layout (absolute positioning) maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=k --window-size=400,300
+--screenshot`, 2026-11-23). `<body style="margin:0">` holding a 50 px tall
+in-flow div, then 20x10 black boxes:
+
+| box                              | Chrome k=1 rows | Chrome k=4 device rows | base k=1 y |
+|----------------------------------|-----------------|------------------------|------------|
+| `bottom:10px`                    | 280..289        | 1120..1159             | -20        |
+| `bottom:40.3px` (y 249.7)        | 250..259        | 999..1038              | -50        |
+| `bottom:70.5px` (y 219.5)        | 220..229        | 878..917               | -80        |
+| `bottom:0;margin-bottom:5px`     | 285..294        | 1140..1179             | -15        |
+"""
+
+"""
+Traceability: REQ-WEB-LAYOUT-ABSPOS-ICB-001 - `bottom` of an abspos box with no positioned ancestor is measured from the viewport bottom.
+"""
+# @tag: unit, browser_engine, layout, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val W: i32 = 400
+val H: i32 = 300
+val BOX: text = "position:absolute;width:20px;height:10px;background:#000"
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff\"><div style=\"height:50px;width:5px;background:#f00\"></div>" +
+    "<div id=a style=\"" + BOX + ";left:10px;bottom:10px\"></div>" +
+    "<div id=b style=\"" + BOX + ";left:40px;bottom:40.3px\"></div>" +
+    "<div id=c style=\"" + BOX + ";left:70px;bottom:70.5px\"></div>" +
+    "<div id=d style=\"" + BOX + ";left:100px;bottom:0;margin-bottom:5px\"></div>" +
+    "</body></html>"
+
+fn _y(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, W, H, id, "y")
+
+fn _green(px: [u32], x: i32, y: i32) -> i64:
+    ((px[y * W * 4 + x] >> 8u32) & 0xFFu32).to_i64()
+
+describe "abspos bottom against the initial containing block (Chrome 159)":
+    it "AC-1: k=1 boxes sit at the viewport bottom minus the inset":
+        step("bottom 10 / 40.3 / 70.5 / 0+margin 5: y 280 / 250 / 220 / 285")
+        expect(_y("a")).to_equal("280")
+        expect(_y("b")).to_equal("250")
+        expect(_y("c")).to_equal("220")
+        expect(_y("d")).to_equal("285")
+
+    it "AC-2: k=4 boxes snap to round(4 x exact top)":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        expect(px.len()).to_equal((W * H * 16).to_i64())
+        step("bottom 10: rows 1120..1159; 40.3: 999..1038; 70.5: 878..917")
+        expect(_green(px, 60, 1119)).to_equal(255)
+        expect(_green(px, 60, 1120)).to_equal(0)
+        expect(_green(px, 60, 1159)).to_equal(0)
+        expect(_green(px, 180, 998)).to_equal(255)
+        expect(_green(px, 180, 999)).to_equal(0)
+        expect(_green(px, 180, 1038)).to_equal(0)
+        expect(_green(px, 180, 1039)).to_equal(255)
+        expect(_green(px, 300, 877)).to_equal(255)
+        expect(_green(px, 300, 878)).to_equal(0)
+        expect(_green(px, 300, 917)).to_equal(0)
+        expect(_green(px, 300, 918)).to_equal(255)
