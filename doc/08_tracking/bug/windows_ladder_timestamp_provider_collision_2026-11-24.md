@@ -1,6 +1,7 @@
 # Windows ladder timestamp compatibility providers collide with Simple owners
 
-Status: repair under verification; no release candidate qualification claimed.
+Status: provider repair verified by retained-object native execution; formal
+compiler admission and a complete new ladder run remain separate gates.
 
 Run 45211128098, Windows rung 1 job 137819932685, source
 68bb1b5d22340f9f730d37e584033793a821f0ce compiled 1612 files with zero
@@ -42,7 +43,8 @@ A separate retained-closure replay using that route's actual C supplement,
 owner-member selection and existing overlap policy links and starts
 simple-bootstrap 1.0.0-rc.1. Its candidate SHA-256 is
 0cc0ff0865957b108c77504d30ff1ebb4b9db071759287dcf8f3ff710a7dd716.
-That result is provisional: version output is not native Hello evidence.
+That initial local result was provisional: version output is not native Hello
+evidence.
 
 The hosted replay derives the supplement and link command through a tiny
 strict missing-extern probe, substitutes the retained compiler objects, and
@@ -55,3 +57,17 @@ Local evidence is retained under
 D:/dev/simple-user-storage/build/release-bootstrap-20261123/ladder-provider-relink
 and ladder-provider-regression. The live whole-suite reservation prevented a
 local native Hello admission; hosted verification preserves that reservation.
+
+## Hosted native execution
+
+[Run 45229426680](https://github.com/ormastes/simple/actions/runs/45229426680)
+passed on repair code 10430046222. Artifact 14847877532 retains all command
+lines, input hashes, maps, exits and binaries. The hosted compatibility-only
+and real Simple-owner checks pass; the genuine strong conflict is rejected.
+The retained compiler links, starts, compiles native Hello and runs it with
+exact stdout `retained-ladder-hello-ok` and exit 0. Candidate SHA-256:
+2951bfd7e16ca70a375afd5ffb361b2ca05c708ad346bf382d2faa8dd6c786d1.
+Hello executable SHA-256:
+6f1593ce515339425e861f6b7c2f896b7b6cb5659f9a042f60ba280bafe0d6d8.
+The recorded admission remains `none`: this is a real diagnostic compiler,
+not a formally admitted handoff or a published release.
