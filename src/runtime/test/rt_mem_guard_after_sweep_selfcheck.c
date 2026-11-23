@@ -1,3 +1,5 @@
+/* Guard-page faults are SIGBUS on Darwin and SIGSEGV on Linux;
+ * both are real memory-fault deaths. Other signals remain failures. */
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
@@ -130,7 +132,7 @@ int main(void) {
     for (int i = 0; i < 20; i++) post_sweep_freed[i] = (uint8_t)i;
     rt_free(post_sweep_freed);
     check(child_segfaults(touch_read, post_sweep_freed) == 1,
-          "UAF read right after 4500 rounds of eviction/sweep churn still SIGSEGVs");
+          "UAF read right after 4500 rounds of eviction/sweep churn still faults");
     int64_t after_post_sweep_freed = rt_mem_guard_stats();
 
     /* --- 3. Canary: allocate AFTER all that sweeping and prove it is still
@@ -146,7 +148,7 @@ int main(void) {
     }
     check(canary_in_bounds_ok, "post-sweep allocation is usable in-bounds");
     check(child_segfaults(touch_read, canary + 50) == 1,
-          "post-sweep allocation is STILL guard-protected: one-byte overflow SIGSEGVs");
+          "post-sweep allocation is STILL guard-protected: one-byte overflow faults");
 
     int64_t after_canary = rt_mem_guard_stats();
     check(after_canary - after_post_sweep_freed == 1,

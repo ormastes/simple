@@ -1,3 +1,5 @@
+/* Guard-page faults are SIGBUS on Darwin and SIGSEGV on Linux;
+ * both are real memory-fault deaths. Other signals remain failures. */
 /* Non-Windows test: the POSIX/Linux/macOS APIs it uses have no Windows build here. */
 #if defined(_WIN32)
 #include <stdio.h>
@@ -84,9 +86,9 @@ int main(void) {
     /* --- 2. One byte past the end must SIGSEGV (right-aligned overflow
      *        placement: a[37] lands on the trailing guard page). --- */
     check(child_segfaults(touch_read, a + 37) == 1,
-          "one-byte read overflow on a guarded slot SIGSEGVs");
+          "one-byte read overflow on a guarded slot faults");
     check(child_segfaults(touch_write, a + 37) == 1,
-          "one-byte write overflow on a guarded slot SIGSEGVs");
+          "one-byte write overflow on a guarded slot faults");
 
     /* --- 3. After free, ANY access (even in-bounds) must SIGSEGV --
      *        guard_free_sampled PROT_NONEs the whole mapping, it does not
@@ -94,9 +96,9 @@ int main(void) {
      *        proof the M2 exit criteria call for on the malloc class. --- */
     rt_free(a);
     check(child_segfaults(touch_read, a) == 1,
-          "use-after-free read on a freed guarded slot SIGSEGVs");
+          "use-after-free read on a freed guarded slot faults");
     check(child_segfaults(touch_write, a) == 1,
-          "use-after-free write on a freed guarded slot SIGSEGVs");
+          "use-after-free write on a freed guarded slot faults");
 
     /* --- 4. Double free is refused, not acted on twice (no crash, no
      *        second mprotect/munmap of an already-unmapped region). --- */
