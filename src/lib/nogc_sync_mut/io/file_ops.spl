@@ -41,7 +41,6 @@ extern fn rt_munmap(addr: i64, size: i64) -> bool
 extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
 @unsafe(reason: "raw memory-sync ABI; address and extent must describe a live mapping", capabilities: [ffi, raw_ptr])
 extern fn rt_msync(addr: i64, size: i64) -> bool
-use std.io_runtime.{process_run}
 @unsafe(reason: "raw file-existence predicate; false conflates missing, inaccessible, and provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw no-follow regular-file predicate; false conflates path kind, access, and provider failure", capabilities: [ffi])
@@ -68,36 +67,6 @@ extern fn rt_file_mode(path: text) -> i64
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
 extern fn rt_file_stat(path: text) -> i64
-
-# --- Shell helpers (local copies to avoid circular imports) ---
-# These are minimal copies needed for file operations.
-# The canonical versions live in process_ops.spl.
-
-fn _file_shell(command: text) -> (text, text, i64):
-    process_run("/bin/sh", ["-c", command])
-
-fn _file_shell_bool(command: text) -> bool:
-    val (out, err, code) = _file_shell(command)
-    code == 0
-
-# reason positional io file_ops API
-fn _file_shell_output(command: text, default: text) -> text:
-    val (out, err, code) = _file_shell(command)
-    if code == 0:
-        out
-    else:
-        default
-
-fn _file_shell_int(command: text, default: i64) -> i64:
-    val (out, err, code) = _file_shell(command)
-    if code == 0:
-        val trimmed = out.trim()
-        if trimmed.len() > 0:
-            int(trimmed)
-        else:
-            default
-    else:
-        default
 
 # ============================================================================
 # Core File Operations
@@ -277,7 +246,7 @@ pub fn file_seal_readonly(path: text) -> bool:
 # only wanted chmod.
 pub fn package_chmod(path: text, mode: i32) -> i32:
     unsafe(capabilities: [ffi]):
-        rt_package_chmod(path, mode)
+        rt_package_chmod(host_path_native(path), mode)
 
 fn secure_temp_dir(parent: text, prefix: text) -> Result<text, text>:
     if parent == "" or prefix == "" or prefix.contains("/") or prefix.contains("\\"):

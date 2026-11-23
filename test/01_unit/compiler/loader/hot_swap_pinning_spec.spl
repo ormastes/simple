@@ -1,14 +1,79 @@
-# @tag:in-development
 # @req: REQ-BUILD-SRC-001
-# Non-essential, assert-only fail-fast spec for RB-LOAD-01..02 (hot-swap pinning).
-# todo: doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
-# Expected RED until a loader hot-swap path pins live interface digests.
+# RB-LOAD-01..02: loader hot-swap pinning. A replacement unit is admitted only
+# when its SMF unit identity matches the manifest row the slot was pinned to;
+# the commit is one CAS on the slot generation.
+# todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
 use std.spec.*
 use std.spec.step
-use std.nogc_sync_mut.io.file_ops.{file_exists}
 
-describe "RB-LOAD-01..02: loader hot-swap pinning (not implemented)":
-    it "has a loader hot-swap module that pins the interface digest of live units":
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.hot_swap_pin.{HotSwapSlot, hot_swap_slot_new, hot_swap_try}
+
+fn good_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: "iface-v1-1111",
+        abi_digest: "abi-v1-aaaa",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn image_for(id: UnitIdentity) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.unit_identity_bytes = unit_identity_encode(id).bytes()
+    generate_smf_with_options([0xC3], opts)
+
+fn pinned_slot() -> HotSwapSlot:
+    val id = good_identity()
+    hot_swap_slot_new(smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", "build/hs_unit.smf", 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)).unwrap()
+
+describe "RB-LOAD-01..02: loader hot-swap pinning":
+    it "admits a replacement whose identity matches the pin and advances the generation":
         # @req: REQ-BUILD-SRC-001
-        step("Look for the loader hot-swap pinning module")
-        expect(file_exists("src/compiler/99.loader/hot_swap_pin.spl")).to_equal(true)
+        step("swap a matching unit into a fresh slot")
+        val slot = pinned_slot()
+        val r = hot_swap_try(slot, slot.current_generation(), image_for(good_identity()))
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()).to_equal(1)
+        expect(slot.current_generation()).to_equal(1)
+
+    it "refuses a replacement with a different interface digest":
+        step("stale iface digest refuses the swap")
+        val slot = pinned_slot()
+        var bad = good_identity()
+        bad.iface_digest = "iface-v2-2222"
+        val r = hot_swap_try(slot, 0, image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IFACE-MISMATCH")).to_equal(true)
+        expect(slot.current_generation()).to_equal(0)
+
+    it "refuses a replacement with a different ABI digest":
+        step("ABI change refuses the swap (no state migration)")
+        val slot = pinned_slot()
+        var bad = good_identity()
+        bad.abi_digest = "abi-v1-bbbb"
+        val r = hot_swap_try(slot, 0, image_for(bad))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
+        expect(slot.current_generation()).to_equal(0)
+
+    it "refuses a replacement with no identity record":
+        step("legacy image has no fallback on a swap")
+        val slot = pinned_slot()
+        val opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        val r = hot_swap_try(slot, 0, generate_smf_with_options([0xC3], opts))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IDENTITY-MISSING")).to_equal(true)
+        expect(slot.current_generation()).to_equal(0)
+
+    it "refuses a swap from a stale generation (CAS lost)":
+        step("second swap from the same observed generation loses the CAS")
+        val slot = pinned_slot()
+        expect(hot_swap_try(slot, 0, image_for(good_identity())).is_ok()).to_equal(true)
+        val r = hot_swap_try(slot, 0, image_for(good_identity()))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-HOTSWAP-STALE")).to_equal(true)
+        expect(slot.current_generation()).to_equal(1)

@@ -34,6 +34,12 @@ int64_t slang_ggml_request_prefix_prepare(int64_t);
 int64_t slang_ggml_request_eval_prompt(int64_t);
 int64_t slang_ggml_request_eval(int64_t, int64_t);
 int64_t slang_ggml_request_sample(int64_t);
+int64_t slang_ggml_request_token_at(int64_t, int64_t);
+int64_t slang_ggml_request_embed_eval(int64_t);
+int64_t slang_ggml_request_rerank_tokenize(int64_t, int64_t);
+int64_t slang_ggml_request_tokens_set(int64_t, const uint8_t *, int64_t);
+int64_t mock_llama_memory_clears(void);
+int64_t mock_llama_decode_calls(void);
 int64_t mock_llama_decoded_tokens(void);
 int64_t mock_llama_seq_cp_tokens(void);
 int64_t mock_llama_bad_positions(void);
@@ -119,6 +125,24 @@ int main(void) {
     begin(h, "abcdefgh", 0);
     finish(h);
     assert(slang_ggml_prefix_restore_failures() == failures + 1);
+
+    /* The embedding entries are refused on a tree request: embed_eval would
+     * clear the shared tree context, and rerank_tokenize / tokens_set would
+     * overwrite the token path a held lease pins. Nothing is decoded, cleared
+     * or overwritten, and the request then finishes normally. */
+    begin(h, "abcdefgh", 7);
+    int64_t clears = mock_llama_memory_clears();
+    int64_t decodes = mock_llama_decode_calls();
+    const uint8_t raw_ids[8] = {1, 0, 0, 0, 2, 0, 0, 0};
+    assert(slang_ggml_request_embed_eval(h) == -8);
+    assert(slang_ggml_request_rerank_tokenize(h, 2) == -8);
+    assert(slang_ggml_request_tokens_set(h, raw_ids, 8) == -8);
+    assert(mock_llama_memory_clears() == clears);
+    assert(mock_llama_decode_calls() == decodes);
+    assert(slang_ggml_request_token_at(h, 0) == 10 + 'a');
+    assert(slang_ggml_request_token_at(h, 7) == 10 + 'h');
+    finish(h);
+    assert(slang_ggml_prefix_resident_entries() == 2);
 
     begin(h, "abcdefgh", 7);                       /* decoded tokens extend the cached path */
     assert(slang_ggml_request_eval(h, 10 + 'Q') == 0);

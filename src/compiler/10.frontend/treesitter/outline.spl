@@ -370,6 +370,10 @@ impl TreeSitter:
                 span: merge_spans(ie_start, self.previous.span)
             ))
 
+        # Actor declarations lex `actor` as an identifier contextual keyword.
+        if self.check(TokenKind.Ident) and self.current.text == "actor":
+            return toplevelitem_ActorItem(self.parse_actor_outline(visibility, doc, attrs))
+
         val peeked = self.peek()
         match peeked:
             case TokenKind.KwUse:
@@ -477,6 +481,16 @@ impl TreeSitter:
             # an irrefutable binding rejected by the HIR match-arm strictness.
             # `case _:` below reports the unexpected token. Re-add as
             # `case TokenKind.KwKernel:` if the lexer grows the keyword.
+            case TokenKind.Dedent:
+                # Top-level stray Dedent (e.g. recovering from an unrecognized
+                # indented block): synchronize() intentionally leaves Dedent for
+                # enclosing block parsers, so advance past it at top level.
+                self.advance()
+                TopLevelItem.Error(ParseError(
+                    message: "unexpected dedent at top level",
+                    span: self.previous.span,
+                    severity: ErrorSeverity.Error
+                ))
             case _:
                 self.error("expected top-level declaration")
                 self.synchronize()
@@ -779,6 +793,8 @@ impl TreeSitter:
 
     me parse_asm_braced_outline(start: LexSpan, is_volatile: bool) -> AsmBlockOutline:
         val open_span = self.current.span
+        if self.use_core_lexer:
+            return self.scan_raw_asm_braced_outline(start, is_volatile, open_span)
         self.advance()  # consume {
 
         var depth = 1

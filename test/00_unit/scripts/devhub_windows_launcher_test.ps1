@@ -201,7 +201,12 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 '@
-        & bash.exe -lc ('chmod +x "' + ($Runtime -replace '\\','/') + '"') 2>$null
+        $bash = Join-Path (Split-Path -Parent $sh) 'bash.exe'
+        if (Test-Path -LiteralPath $bash -PathType Leaf) {
+            & $bash -lc ('chmod +x "' + ($Runtime -replace '\\','/') + '"') 2>$null
+        } else {
+            & $sh -c ('chmod +x "' + ($Runtime -replace '\\','/') + '"') 2>$null
+        }
         $hash = (Get-FileHash -LiteralPath $Runtime -Algorithm SHA256).Hash.ToLowerInvariant()
         Write-LfFile ($Runtime + '.provenance.env') @"
 schema=simple-runtime-provenance-v1

@@ -14,42 +14,47 @@ describe "SymbolTable Dict lookup source":
     it "uses the Dict runtime owner for scope symbol lookup":
         # @req REQ-SSPEC-COMPILER
         step("uses the Dict runtime owner for scope symbol lookup")
-        val source = rt_file_read_text("src/compiler/20.hir/hir_types.spl") ?? ""
+        val source = rt_file_read_text("src/compiler/20.hir/hir_symbol_table_methods.spl") ?? ""
+        val fn_start = source.index_of("fn lookup_binding_scope_raw_v1(")
+        val fn_end = source.index_of("fn lookup(", fn_start)
+        expect(fn_start >= 0).to_equal(true)
+        expect(fn_end > fn_start).to_equal(true)
+        val lookup_body = source.substring(fn_start, fn_end)
 
-        expect(source).to_contain("use std.alloc.sffi.\{rt_dict_contains}")
-        expect(source).to_contain("if rt_dict_contains(scope.symbols, name):")
-        expect(source).to_contain("val found: i64 = scope.symbols[name]")
-        expect(source.contains("scope.symbols.get(name)")).to_equal(false)
-        expect(source.contains("rt_dict_get(scope.symbols, name)")).to_equal(false)
+        expect(source).to_contain("extern fn rt_dict_contains<K>(dict: i64, key: K) -> bool")
+        expect(lookup_body).to_contain("if rt_dict_contains(scope.symbols, name):")
+        expect(lookup_body).to_contain("return scope_id.id")
+        expect(lookup_body.contains("scope.symbols.get(name)")).to_equal(false)
+        expect(lookup_body.contains("rt_dict_get(scope.symbols, name)")).to_equal(false)
 
-    it "keeps display names in a symbol-id indexed text array":
+    it "reads symbol display names directly by scalar id":
         # @req REQ-SSPEC-COMPILER
-        step("keeps display names in a symbol-id indexed text array")
-        val source = rt_file_read_text("src/compiler/20.hir/hir_types.spl") ?? ""
+        step("reads symbol display names directly by scalar id")
+        val source = rt_file_read_text("src/compiler/20.hir/hir_symbol_table_methods.spl") ?? ""
 
-        expect(source).to_contain("display_names: [text]")
-        expect(source).to_contain("self.display_names = self.display_names.push(name)")
-        expect(source).to_contain("return self.display_names[raw]")
-        expect(source).to_contain("self.display_names[raw] = new_name")
+        expect(source).to_contain("fn symbol_name_scalar_raw(raw: i64) -> text:")
+        expect(source).to_contain("if self.symbols.has(raw):")
+        expect(source).to_contain("return self.symbols[raw].name")
+        expect(source).to_contain("val display_name: text = self.symbol_name_scalar_raw(id.id)")
 
     it "lowers identifiers through a validated nonoptional symbol id":
         # @req REQ-SSPEC-COMPILER
         step("lowers identifiers through a validated nonoptional symbol id")
-        val source = rt_file_read_text("src/compiler/20.hir/hir_lowering/expressions.spl") ?? ""
+        val source = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl") ?? ""
 
-        expect(source).to_contain("val found_symbol = self.symbols.lookup_or_invalid(ident_name_t)")
-        expect(source).to_contain("if found_symbol.is_valid():")
+        expect(source).to_contain("val symbol_raw: i64 = self.symbols.lookup_or_invalid(ident_name_t).id")
+        expect(source).to_contain("val found_symbol: SymbolId = SymbolId(id: symbol_raw)")
         expect(source.contains("if val found_symbol = symbol:")).to_equal(false)
 
-    it "lowers identifiers through an explicit nil re-check":
-        val source = rt_file_read_text("src/compiler/20.hir/hir_lowering/expressions.spl") ?? ""
+    it "guards missing identifier lookup by scalar id":
+        val source = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl") ?? ""
 
-        expect(source).to_contain("val symbol = self.symbols.lookup(ident_name_t)")
-        expect(source).to_contain("if found_symbol == nil:")
-        expect(source).to_contain("lookup_or_invalid")
+        expect(source).to_contain("lookup_or_invalid(ident_name_t)")
+        expect(source).to_contain("if symbol_raw < 0:")
+        expect(source).to_contain("self.lower_unresolved_ident(ident_name_t, e.span)")
 
     it "keeps display names on the stored symbol with in-place rename":
-        val source = rt_file_read_text("src/compiler/20.hir/hir_types.spl") ?? ""
+        val source = rt_file_read_text("src/compiler/20.hir/hir_symbol_table_methods.spl") ?? ""
 
         expect(source).to_contain("me symbol_display_name(id: SymbolId, fallback: text) -> text:")
         expect(source).to_contain("me rename_symbol(id: SymbolId, new_name: text):")
