@@ -3855,3 +3855,82 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   (2026-11-23, Blocker 8).
 - **Landing.** Owner accepted the amendment on 2026-11-23
   (`doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`).
+
+## 2026-11-23 — GB10 corpus case 02: the Engine2D leg fails natively when `f64call().to_i32()` is used
+
+- **Trap:** natively (seed native-build or `simple run`), `floor_f64(x).to_i32()`,
+  or any `<f64-returning call>.to_i32()/.to_i64()`, converts the raw IEEE
+  bits (47.0 → 0). The interpreted `simple test` gives the right value, so a
+  green interpreted spec proves nothing for this class. Bind the call result to
+  a local first (`val f: f64 = floor_f64(x)`) or use `as i32`. Bug:
+  `doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md`.
+- **Case 02 effect:** the strict Vulkan affine dispatch box collapsed to
+  `(0,0,2,2)`, so the tile and bar were never drawn, which showed up as "edge
+  oracle mismatch". It is fixed in `draw_ir_adv.spl` with typed locals. The
+  Engine2D rgba on the GB10 is `962ca9e4…c306` and passes the oracle with
+  edge_max=1.
+- **How to find this class:** build a tiny native probe entry
+  (`--runtime-bundle host-gpu-native-all`, 8-30 s) that prints intermediate
+  boxes, and compare it with the interpreted spec on the same ICD
+  (`VK_DRIVER_FILES=.../nvidia_icd.json` works for specs on this host).
+- **Still open:** case 02 `run-*` is blocked by Skia's edge policy
+  (edge_excess=4, edge_max=30, the same on macOS and the GB10). This needs an
+  owner decision; do not widen the tolerance.
+- The worker's oracle-mismatch errors now carry the verdict numbers.
+- Spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_case02_edges_spec.spl`.
+## Abspos fractional insets (2026-11-23, abspos lane)
+
+- **Cause:** `left`/`top` went through `_decl_signed_int_or_zero` and
+  `right`/`bottom` through `parse_int`, so `10.5px` painted at 10, `6.33em`
+  at 6 px, and abspos text always started on a whole pixel.
+- **Fix, parse:** insets now parse to LayoutUnit milli-px (px/em/rem) in
+  decl_apply. `*_px` rounds half up and the remainder goes in the new
+  `Style.left_milli`/`top_milli`/`right_milli`/`bottom_milli` fields. They
+  default to 0 and are copied wherever `left_auto` is copied: style.spl copy,
+  `style_with_height`/`_width`, `tag_defaults`. A field missing from one of
+  those rebuilds silently resets to 0.
+- **Fix, layout:** `absolute_box_snap` (layout_engine) wraps all four abspos
+  call sites. It takes `absolute_child_x_frac_milli`/`_y_` (layout_foundation),
+  which mirror `absolute_child_x`/`_y` branch for branch, plus the containing
+  block's fraction. It then snaps the box and records the remainder:
+  - x goes to `box_line_start_err` (same mechanism as the tablepen lane), so
+    the first run starts at the exact pen;
+  - in-flow block children inherit it (`<p>` inside an abspos at 200.5);
+  - y goes to `g_origin_frac_milli` plus `box_device_top_record`;
+  - at k>1, `box_device_dx_record` gets `round(k*exact) - k*x` and the text
+    keeps only the leftover.
+- **Fix, auto width:** a right-anchored auto-width box subtracts its own
+  max-content fraction via `flex_item_text_frac_delta_milli_px`.
+  `right:300.25px` puts an `l` at Chrome's 89.19.
+- **ICB `bottom`:** an abspos box with no positioned ancestor resolved
+  `bottom` against the body's content height, putting the box off-screen. It
+  now resolves against the viewport (`abspos_icb_bottom_chrome159_spec`).
+- **Translate:** an abspos box with `transform: translate`/`translate:` was
+  moved twice, because decl_apply also set `position_relative` and the
+  relative pass re-applied `left + translate`. Now the translation folds into
+  the abspos insets in milli-px. An `auto` left/top still carries it for
+  right/bottom anchoring and the static y.
+  `parse_signed_nth_length` split `0.3px` into the numbers 0 and 3; it is now
+  `parse_signed_nth_length_milli`.
+- **Open, Chrome antialiases translated boxes:** a fractional translation of
+  a box edge (`40(179)..60(77)` at k=1) is antialiased, not snapped. Here it
+  is snapped. That is paint-transform work.
+- **Open, wrapped lines (measured):** only the first line of a run carries
+  `pen-origin-milli`. Line 2 of an abspos `width:22px` box at `left:10.25px`
+  holding `ll ll ll` has its `l` centroid at 13.011 here and 13.250 in Chrome,
+  so it stays on the whole px.
+- **Open, wrap decision (observed, cause not investigated):** an abspos
+  `width:30px` box holding `ll ll ll` (about 30.2 px) wraps in Chrome and
+  stays on one line here.
+- **Specs:** `abspos_fractional_inset_chrome159_spec` (k=1 + k=4, centroids
+  minus a whole-px reference `l`), `abspos_icb_bottom_chrome159_spec`,
+  `abspos_transform_translate_chrome159_spec`.
+## 2026-11-23 — rtl Latin runs: edge-space kern, in-box start, line-end space; every auto-width button narrowed at k > 1
+
+- **rtl edge-space kern (core.spl):** `Style.resolved_lead_space_milli` / `resolved_trail_space_milli` are now also measured on a `direction:rtl` run whose bidi visual text equals its logical text (Latin on an rtl line); a run that reorders keeps the flat space.
+- **rtl run in its box (`text_rtl_run_starts_box`, layout_text; used by `paint_draw_ir` single-line `single_x` and the CPU raster line loop):** a one-line rtl run of left-to-right text ending in a collapsible space, in a box no wider than its own advance, paints from the box's LEFT edge. Chrome keeps that space right of the glyphs (`A <b>B</b> ...` under rtl: `A` 203, `B` 219, the ltr columns + 203). End-aligning inside the box put every such run 3-4 px late. A box widened past the run (sole `#text` child, stretched flex item) still end-aligns.
+- **rtl line-end space (`inline_line_end_space_px`, layout_engine; `align_inline_line_horizontal` now takes `nodes, styles`):** a right-aligned rtl line drops the collapsible space it ends with, so the last glyph ends at the right edge (`A <b>B</b> A ` -> last `A` ends 299). The space is either a Latin run's trailing edge or the lead space the pen took for a whitespace-only run.
+- `inline_space_kern_nowrap_rtl_chrome159_spec` 1/2 -> 3/3 (new AC-3: line-end space), in-development tag removed.
+- **Not done:** LTR `text-align:right|center` multi-run lines go through the same in-box end alignment (Chrome `A <b>B</b> A ` right-aligned: 260 276 290, here 259 271 289). Not changed, not pinned.
+- **Every auto-width button narrowed at k > 1 (supersedes the "skipped for any button followed by a box" clause of "Button width without label_slack" above):** `button_device_extra_w` no longer skips a followed button. The atomic follower's `box_device_dx` is now gated by the LINE's alignment only (`text_run_aligns_line_left(st)`). Before, the box's own `text-align` also gated it, so a button after a button (UA `text-align:center`) never moved: `Go` `Submit` ended at 365, Chrome 364. Where the follower has no exact pen (unknown pen error, centred or rtl line), the inline loop resets the button's extra width (`button_has_inline_follower`), or a 1 px gap opens. `button_follower_device_width_chrome159_spec` 2/3 -> 3/3.
+- **Handed over (in-development, `button_follower_text_and_k1_width_chrome159_spec`):** (1) text after a button at k = 4 (Chrome 138 / 156 / 368, here 139 / 155 / 367). `pen-origin-milli` stays in CSS milli-px through `draw_ir_device_scale`, and `_lcd_apply_pen_phases` is skipped above `FONT_LCD_MAX_SIZE_PX` (48 device px), so k > 1 text drops its pen origin. This belongs to the 4x word-pen lane. (2) At k = 1 a button is ceil(label) + padding (`Submit` 58), while Chrome snaps both edges from the fractional pen (`Submit` 0-56, next `Go` from 57).

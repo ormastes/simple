@@ -304,6 +304,18 @@ pub(super) fn build_vreg_types(
                     {
                         types_map.insert(*d, TypeId::F64);
                     }
+                    // `to_f32` had no arm either, so its dest stayed untyped and a
+                    // chained int cast (`f(x).to_f32().to_i64()`) took the
+                    // untyped-receiver `rt_to_int_dynamic` route, which returned
+                    // the promoted-f64 BIT PATTERN (12.0 -> 0x4028000000000000).
+                    // Bug: native_call_result_f64_to_int_conversion_bits_2026-11-23.md
+                    MirInst::MethodCallStatic {
+                        dest: Some(d),
+                        func_name,
+                        ..
+                    } if func_name == "to_f32" || func_name.ends_with(".to_f32") => {
+                        types_map.insert(*d, TypeId::F32);
+                    }
                     // USER-DEFINED methods returning f32/f64. The arms above only
                     // cover the hard-coded builtin conversion names; a plain
                     // `class B: fn getf(k: i64) -> f64` fell through to the empty
@@ -607,6 +619,47 @@ fn sync_vars_to_vregs(
         };
         vreg_values.insert(vreg, decoded);
     }
+}
+
+/// A call whose callee is declared `-> f64`/`-> f32` returns the float as raw
+/// IEEE-754 bits in an i64 register (the uniform user-function return ABI;
+/// f32 as the bits of its promoted f64). `build_vreg_types` already types the
+/// dest from the callee's declared return type, so decode it here, at the
+/// producer, exactly as `sync_vars_to_vregs` decodes a cross-block float.
+/// Consumers that pick float vs. int lowering from the Cranelift value type
+/// otherwise operated on the bits: `floor(x).to_i32()` gave 0, `.to_i64()`
+/// gave 0x4047800000000000, `f(x).abs()`/`.sqrt()` returned garbage and
+/// `f(x).floor()`/`.max(..)` failed with "function not found: f64.floor".
+/// doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md
+fn decode_float_call_result(
+    builder: &mut FunctionBuilder,
+    inst: &MirInst,
+    vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
+    vreg_types: &HashMap<VReg, TypeId>,
+) {
+    let dest = match inst {
+        MirInst::Call { dest: Some(d), .. }
+        | MirInst::InterpCall { dest: Some(d), .. }
+        | MirInst::IndirectCall { dest: Some(d), .. }
+        | MirInst::MethodCallStatic { dest: Some(d), .. }
+        | MirInst::MethodCallVirtual { dest: Some(d), .. } => *d,
+        _ => return,
+    };
+    let Some(&val) = vreg_values.get(&dest) else {
+        return;
+    };
+    if builder.func.dfg.value_type(val) != types::I64 {
+        return;
+    }
+    let decoded = match vreg_types.get(&dest).copied() {
+        Some(TypeId::F64) => builder.ins().bitcast(types::F64, MemFlags::new(), val),
+        Some(TypeId::F32) => {
+            let wide = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+            builder.ins().fdemote(types::F32, wide)
+        }
+        _ => return,
+    };
+    vreg_values.insert(dest, decoded);
 }
 
 /// Cranelift cannot inline raw assembly. A naked body is therefore emitted as
@@ -1220,6 +1273,7 @@ pub fn compile_function_body<M: Module>(
                     fam_arrays,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
+                decode_float_call_result(&mut builder, inst, &mut vreg_values, &vreg_types);
                 // Ensure all vreg values are i64 (extend smaller int types)
                 // and sync to Variables for cross-block SSA.
                 //
