@@ -797,7 +797,15 @@ fn _html_draw_ir_command(
         # A mid-line run's real pen origin (LayoutResult.pen_origin_milli) for
         # its single or first line; the `_line{n}` commands start at a line
         # box edge and carry none.
-        val run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, i)
+        var run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, i)
+        if run_pen_origin == 0:
+            # Text inside a `<select>` (via its `<option>`) or `<textarea>`
+            # starts from the control box's exact pen.
+            var owner = node.parent as i32
+            if owner >= 0 and nodes[owner].tag == "option":
+                owner = nodes[owner].parent as i32
+            if owner >= 0 and (nodes[owner].tag == "select" or nodes[owner].tag == "textarea"):
+                run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, owner)
         if run_pen_origin != 0:
             computed_style.push(draw_ir_style_prop("pen-origin-milli", "{run_pen_origin}"))
         if _html_draw_ir_fixed_gray_text(nodes, styles, i):
@@ -1555,6 +1563,13 @@ fn _html_draw_ir_input_value_command(
     for advance in resolved.advance_widths:
         real_w = real_w + advance
     resolved.x = input_value_vector_x(plan, content_x, content_w, real_w)
+    # The UA control font is 13.333px; the advances above are its pens, so
+    # the glyph raster takes the float size too (it drew 13 px glyphs). 1x
+    # LCD only: at k = 4 the gray fractional-size glyph inks a device row
+    # below Chrome (first ink row 46, Chrome 45; form_control_paint AC-11).
+    val size_milli = font_milli_of(st.font_size, st.font_size_milli)
+    if layout_device_scale() == 1 and st.font_size_milli > 0 and size_milli % 1000 != 0:
+        resolved.computed_style.push(draw_ir_style_prop("font-size-milli", "{size_milli}"))
     resolved
 
 fn _html_draw_ir_overlay_rect(
