@@ -1,46 +1,38 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Exact-source ce231 Linux runtime provisioning
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          path: control
+          sparse-checkout: scripts/check
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - uses: actions/checkout@v5
+        with:
+          ref: ce231b5b898d797c98d44a9b59a4859a7d792a7b
+          path: source
+          persist-credentials: false
+      - name: Install bounded runtime build prerequisites
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y clang lld llvm libunwind-dev
+          rustup toolchain install nightly-2026-09-15 --profile minimal
+      - name: Build runtime packages only
+        run: python control/scripts/check/ce231-runtime-provision.py
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ce231-linux-runtime-${{ github.run_id }}
+          path: |
+            runtime-evidence/*
+            !runtime-evidence/cargo-target
+            !runtime-evidence/cargo-home
+            !runtime-evidence/tmp
+          retention-days: 7
+          if-no-files-found: error
