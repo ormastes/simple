@@ -7,6 +7,7 @@ use std.nogc_sync_mut.io.windows_stdin_command_contract_v1.{windows_stdin_comman
     windows_stdin_native_line_v1, windows_stdin_completed_prefix_v1, windows_stdin_io_failure_complete_v1,
     windows_stdin_command_freeze_v1}
 use std.nogc_sync_mut.io.windows_stdin_command_abi_v1.*
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_pointer_bytes, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_security_attributes_size, windows_abi_security_attributes_descriptor_offset, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_overlapped_event_offset}
 use std.nogc_sync_mut.io.windows_stdin_executable_pin_v1.*
 use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
 use std.nogc_sync_mut.io.windows_command_contract_v2.{windows_command_admission_clock_v2, windows_command_timeout_due_v2}
@@ -114,7 +115,7 @@ fn prepare(state: StdinCommandState) -> StdinCommandState:
     var environment = ""
     for assignment in sorted: environment = environment + assignment + "\0"
     if environment == "": environment = "\0"
-    changed.heap = GetProcessHeap()
+    changed.heap = windows_abi_get_process_heap()
     if changed.heap == 0: return fail(changed, "windows-command-heap-unavailable")
     changed.app = windows_process_wide_linear_v1(changed.heap, state.canonical_image)
     changed.allocations.push(changed.app)
@@ -124,18 +125,19 @@ fn prepare(state: StdinCommandState) -> StdinCommandState:
     changed.allocations.push(changed.cwd)
     changed.environment = windows_process_wide_linear_v1(changed.heap, environment)
     changed.allocations.push(changed.environment)
-    # arena layout: STARTUPINFOEX112, PROCESS_INFO24 at128, security24 at160,
-    # size8 at192, handlelist24 at208, joblimits144 at240, accounting48 at384,
+    # arena layout: STARTUPINFOEX at0, PROCESS_INFO at128, SECURITY_ATTRIBUTES at160,
+    # size slot at192, handlelist at208, joblimits at240, accounting at384,
     # scratch DWORDs at448/456, pipe HANDLE outputs at464/472, bytes4096 at512.
-    changed.arena = HeapAlloc(changed.heap, 8u32, 8192u64)
+    changed.arena = windows_abi_heap_alloc(changed.heap, 8192)
     changed.allocations.push(changed.arena)
     for allocation in changed.allocations:
         if allocation == 0: return fail(changed, "windows-command-allocation-failed")
-    changed.stdin_buffer = HeapAlloc(changed.heap, 8u32, 4096u64)
+    changed.stdin_buffer = windows_abi_heap_alloc(changed.heap, 4096)
     changed.allocations.push(changed.stdin_buffer)
     if changed.stdin_buffer == 0: return fail(changed, "windows-stdin-buffer-allocation")
-    volatile_write_u32(changed.arena + 160, 24)
-    volatile_write_u32(changed.arena + 176, 1)
+    val sec_bytes = windows_abi_security_attributes_size()
+    volatile_write_u32(changed.arena + 160, sec_bytes)
+    volatile_write_u32(changed.arena + 160 + windows_abi_security_attributes_inherit_offset(), 1)
     changed.stage = "pipes"
     changed
 
@@ -148,8 +150,8 @@ fn prepare_pipes(state: StdinCommandState) -> StdinCommandState:
         volatile_write_u64(arena + 464, 0)
         volatile_write_u64(arena + 472, 0)
         val made = CreatePipe(arena + 464, arena + 472, arena + 160, 4096u32)
-        changed.handles[4 + stream * 2] = volatile_read_u64(arena + 464)
-        changed.handles[5 + stream * 2] = volatile_read_u64(arena + 472)
+        changed.handles[4 + stream * 2] = windows_abi_read_ptr(arena + 464)
+        changed.handles[5 + stream * 2] = windows_abi_read_ptr(arena + 472)
         if made == 0: failed = true
         if made != 0 and SetHandleInformation(changed.handles[4 + stream * 2], 1u32, 0u32) == 0:
             failed = true
@@ -164,8 +166,9 @@ fn open_stdin(state: StdinCommandState) -> StdinCommandState:
     val sddl = windows_process_wide_linear_v1(state.heap, "D:P(A;;GA;;;SY)(A;;GA;;;OW)")
     changed.allocations.push(sddl)
     if sddl == 0: return fail(changed, "windows-stdin-security-text")
+    windows_abi_write_ptr(arena + 4720, 0)
     val converted = ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1u32, arena + 4720, 0)
-    changed.descriptor = volatile_read_u64(arena + 4720)
+    changed.descriptor = windows_abi_read_ptr(arena + 4720)
     if converted == 0 or changed.descriptor == 0: return fail(changed, "windows-stdin-security-descriptor")
     if BCryptGenRandom(0, arena + 4704, 16u32, 2u32) != 0:
         return fail(changed, "windows-stdin-name-random")
@@ -177,8 +180,8 @@ fn open_stdin(state: StdinCommandState) -> StdinCommandState:
     changed.pipe_name = windows_process_wide_linear_v1(state.heap, name)
     changed.allocations.push(changed.pipe_name)
     if changed.pipe_name == 0: return fail(changed, "windows-stdin-name-allocation")
-    volatile_write_u64(arena + 168, changed.descriptor)
-    volatile_write_u32(arena + 176, 0)
+    windows_abi_write_ptr(arena + 160 + windows_abi_security_attributes_descriptor_offset(), changed.descriptor)
+    volatile_write_u32(arena + 160 + windows_abi_security_attributes_inherit_offset(), 0)
     val server = CreateNamedPipeW(changed.pipe_name, 1074266114u32, 8u32, 1u32, 65536u32, 0u32, 0u32, arena + 160)
     if server == -1 or server == 0: return fail(changed, "windows-stdin-server-create")
     changed.handles[8] = server
@@ -186,14 +189,15 @@ fn open_stdin(state: StdinCommandState) -> StdinCommandState:
     changed.handles[10] = CreateEventW(0, 1, 0, 0)
     if changed.handles[9] == 0 or changed.handles[10] == 0:
         return fail(changed, "windows-stdin-event-create")
-    volatile_write_u64(arena + 4632, changed.handles[9])
-    volatile_write_u64(arena + 4664, changed.handles[10])
+    val evt_offset = windows_abi_overlapped_event_offset()
+    windows_abi_write_ptr(arena + 4608 + evt_offset, changed.handles[9])
+    windows_abi_write_ptr(arena + 4640 + evt_offset, changed.handles[10])
     val connected = ConnectNamedPipe(server, arena + 4640)
     if connected == 0:
         val error = GetLastError()
         if error == 997u32: changed.connect_pending = true
         elif error != 535u32: return fail(changed, "windows-stdin-connect-submit:{error}")
-    volatile_write_u32(arena + 176, 1)
+    volatile_write_u32(arena + 160 + windows_abi_security_attributes_inherit_offset(), 1)
     val client = CreateFileW(changed.pipe_name, 2147483648u32, 0u32, arena + 160, 3u32, 128u32, 0)
     if client == -1 or client == 0: return fail(changed, "windows-stdin-client-create")
     changed.handles[3] = client
@@ -281,38 +285,39 @@ fn cancel_pending_io(state: StdinCommandState) -> StdinCommandState:
 fn prepare_attributes(state: StdinCommandState) -> StdinCommandState:
     var changed = state
     val arena = state.arena
-    volatile_write_u32(arena, 112)
-    volatile_write_u32(arena + 60, 256)
-    volatile_write_u64(arena + 80, changed.handles[3])
-    volatile_write_u64(arena + 88, changed.handles[5])
-    volatile_write_u64(arena + 96, changed.handles[7])
-    volatile_write_u64(arena + 208, changed.handles[3])
-    volatile_write_u64(arena + 216, changed.handles[5])
-    volatile_write_u64(arena + 224, changed.handles[7])
+    volatile_write_u32(arena, windows_abi_startupinfoex_size())
+    volatile_write_u32(arena + windows_abi_startupinfo_flags_offset(), 256)
+    windows_abi_write_ptr(arena + windows_abi_startupinfo_std_input_offset(), changed.handles[3])
+    windows_abi_write_ptr(arena + windows_abi_startupinfo_std_output_offset(), changed.handles[5])
+    windows_abi_write_ptr(arena + windows_abi_startupinfo_std_error_offset(), changed.handles[7])
+    windows_abi_write_ptr(arena + 208, changed.handles[3])
+    windows_abi_write_ptr(arena + 208 + windows_abi_pointer_bytes(), changed.handles[5])
+    windows_abi_write_ptr(arena + 208 + windows_abi_pointer_bytes() * 2, changed.handles[7])
     val sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, arena + 192)
-    val size = volatile_read_u64(arena + 192)
+    val size = windows_abi_read_ptr(arena + 192)
     if size <= 0 or size > 1048576: return fail(changed, "windows-command-attribute-size")
-    changed.attributes = HeapAlloc(state.heap, 8u32, size as u64)
+    changed.attributes = windows_abi_heap_alloc(state.heap, size)
     changed.allocations.push(changed.attributes)
     if changed.attributes == 0: return fail(changed, "windows-command-attribute-allocation")
     if InitializeProcThreadAttributeList(changed.attributes, 1u32, 0u32, arena + 192) == 0:
         return fail(changed, "windows-command-attribute-initialize")
     changed.attributes_initialized = true
-    if UpdateProcThreadAttribute(changed.attributes, 0u32, 131074u64, arena + 208, 24u64, 0, 0) == 0:
+    if windows_abi_update_proc_thread_attribute(changed.attributes, 131074, arena + 208, windows_abi_pointer_bytes() * 3) == 0:
         return fail(changed, "windows-command-handle-whitelist")
-    volatile_write_u64(arena + 104, changed.attributes)
+    windows_abi_write_ptr(arena + windows_abi_startupinfoex_attr_list_offset(), changed.attributes)
     changed.stage = "job"
     changed
 
 @unsafe(reason: "kill-on-close job before any suspended process creation", capabilities: [ffi, raw_ptr])
 fn prepare_job(state: StdinCommandState) -> StdinCommandState:
     var changed = state
-    changed.handles[0] = CreateJobObjectW(0, 0)
-    volatile_write_u32(state.arena + 256, 8192)
-    if changed.handles[0] == 0 or SetInformationJobObject(changed.handles[0], 9, state.arena + 240, 144u32) == 0:
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    changed.handles[0] = CreateJobObjectW(0, 0) as i64
+    volatile_write_u32(state.arena + 240 + windows_abi_job_limit_flags_offset(), 8192)
+    if changed.handles[0] == 0 or SetInformationJobObject(changed.handles[0], 9, state.arena + 240, limits_bytes as u32) == 0:
         return fail(changed, "windows-command-job-policy")
-    if QueryInformationJobObject(changed.handles[0], 9, state.arena + 240, 144u32, 0) == 0 or
-            volatile_read_u32(state.arena + 256) != 8192:
+    if QueryInformationJobObject(changed.handles[0], 9, state.arena + 240, limits_bytes as u32, 0) == 0 or
+            volatile_read_u32(state.arena + 240 + windows_abi_job_limit_flags_offset()) != 8192:
         return fail(changed, "windows-command-job-policy-readback")
     changed.stage = "create"
     changed
@@ -326,8 +331,8 @@ fn create(state: StdinCommandState) -> StdinCommandState:
     val created = CreateProcessW(state.app, state.argv, 0, 0, 1, 134743044u32,
         state.environment, state.cwd, state.arena, state.arena + 128)
     val failure = if created == 0: GetLastError() else: 0u32
-    changed.handles[1] = volatile_read_u64(state.arena + 128)
-    changed.handles[2] = volatile_read_u64(state.arena + 136)
+    changed.handles[1] = windows_abi_read_ptr(state.arena + 128 + windows_abi_process_info_process_offset())
+    changed.handles[2] = windows_abi_read_ptr(state.arena + 128 + windows_abi_process_info_thread_offset())
     if created == 0 or changed.handles[1] == 0 or changed.handles[2] == 0:
         return fail(changed, "windows-command-create-unconfirmed:{failure}")
     changed.stage = "assign"
@@ -425,7 +430,7 @@ fn cleanup(state: StdinCommandState) -> StdinCommandState:
         return changed
     for index in 0..changed.allocations.len():
         if changed.allocations[index] != 0:
-            if HeapFree(changed.heap, 0u32, changed.allocations[index]) != 0: changed.allocations[index] = 0
+            if windows_abi_heap_free(changed.heap, changed.allocations[index]) != 0: changed.allocations[index] = 0
             elif changed.error == "": changed.error = "windows-command-allocation-release-pending"
             return changed
     changed.closed = true
