@@ -9,7 +9,7 @@ use std.nogc_sync_mut.sffi.collection_capture.{
 use std.nogc_sync_mut.sffi.fs.{io_file_open}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.common.hash.xxh3.{xxh3_128_hex}
-use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
 
 # Interpreted text has no stable machine address, so `rt_string_data` hands the
 # interpreted `rt_io_file_open_*(ptr, len)` twins an opaque handle (base + index)
@@ -103,6 +103,24 @@ fn interpreter_run_abi(name: text, owner: text, external: bool, args: [Value], p
         match args[0]:
             case Value.String(s): return Some(Ok(Value.String(xxh3_128_hex(text_to_utf8_bytes(s)))))
             case _: return Some(Err(BackendError.type_error("rt_xxh3_128_text argument must be text", None)))
+    # Same class: the text<->[u8] boundary (std.common.text_bytes). [u8] is an
+    # array of Int values in the interpreter.
+    if name == "rt_text_to_bytes":
+        if args.len() != 1: return Some(Err(BackendError.runtime_error("rt_text_to_bytes takes one argument", None)))
+        match args[0]:
+            case Value.String(s): return Some(Ok(interpreter_bytes_value(s)))
+            case _: return Some(Err(BackendError.type_error("rt_text_to_bytes argument must be text", None)))
+    if name == "rt_bytes_to_text":
+        if args.len() != 1: return Some(Err(BackendError.runtime_error("rt_bytes_to_text takes one argument", None)))
+        match args[0]:
+            case Value.Array(items):
+                var raw: [u8] = []
+                for item in items:
+                    match item:
+                        case Value.Int(b): raw.push(b as u8)
+                        case _: return Some(Err(BackendError.type_error("rt_bytes_to_text argument must be [u8]", None)))
+                return Some(Ok(Value.String(bytes_to_text(raw))))
+            case _: return Some(Err(BackendError.type_error("rt_bytes_to_text argument must be [u8]", None)))
     val module_name = if owner.starts_with("std."): "lib." + owner.substring(4) else: owner
     if name == "rt_process_run_bounded_bytes" or name == "rt_io_file_open_read" or name == "rt_io_file_open_write" or name == "rt_io_file_open_append":
         if val r = interpreter_process_abi(name, args): return Some(r)
