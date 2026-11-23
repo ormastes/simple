@@ -745,6 +745,11 @@ impl RenderBackend for SoftwareBackend:
         var marked_ty = -1
         var marked_cs = -1
         var marked_ce = -1
+        # Per-row helper calls cost ~2 us each on the interpreter lane: the SIMD
+        # row switch is read once, and `_span_copy_safe_count` is written out
+        # below (same clamps: both spans in range, count = the shortest).
+        val simd_rows = not mask_active and self.native_simd_spans and native_pixel_rows_enabled()
+        val buf_len = buf.len()
         var row = 0
         # cpu-lane-loop-ok: one iteration per source image row while blitting; each unmasked row is one bulk span
         while row < h:
@@ -779,12 +784,19 @@ impl RenderBackend for SoftwareBackend:
                             if ce > self.clip_x + self.clip_w:
                                 ce = self.clip_x + self.clip_w
                         if ce > cs:
-                            val dst_off = py * self.w + cs
-                            val safe_count = _span_copy_safe_count(buf.len(), dst_off, pixels_len, src_off + cs - start_x, ce - cs)
+                            val dst_off = (py * self.w + cs).to_i64()
+                            val src_at = (src_off + cs - start_x).to_i64()
+                            var safe_count: i64 = 0
+                            if buf_len > 0 and dst_off >= 0 and dst_off < buf_len and pixels_len > 0 and src_at >= 0 and src_at < pixels_len:
+                                safe_count = (ce - cs).to_i64()
+                                if buf_len - dst_off < safe_count:
+                                    safe_count = buf_len - dst_off
+                                if pixels_len - src_at < safe_count:
+                                    safe_count = pixels_len - src_at
                             if safe_count > 0:
-                                if self.native_simd_spans and native_pixel_rows_enabled():
+                                if simd_rows:
                                     record_simd_copy_hit()
-                                buf.write_span(pixels, dst_off as i64, (src_off + cs - start_x) as i64, safe_count as i64)
+                                buf.write_span(pixels, dst_off, src_at, safe_count)
                             val ty = py / TILE_SIZE
                             if ty != marked_ty or cs != marked_cs or ce != marked_ce:
                                 self.mark_span_dirty(cs, py, ce - cs)
