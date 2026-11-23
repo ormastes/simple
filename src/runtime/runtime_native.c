@@ -5048,7 +5048,8 @@ int64_t __simple_rt_string_char_code_at(int64_t string, int64_t index) {
  * (e.g. the web renderer's browser_renderer_protocol.spl scanning for byte
  * 10 '\n' / 44 ',') index the raw UTF-8 buffer directly, so a character
  * index would desync the frame at the first multi-byte codepoint.
- * O(1): straight buffer read, no codepoint walk needed. */
+ * Expected O(1) for counted strings and their validated data borrows.
+ * Foreign C strings retain an O(n) NUL-terminated length scan. */
 int64_t rt_string_byte_at(int64_t string, int64_t index) {
     /* A live counted string retains its length when a text ABI exposes its
      * data pointer. Validate that existing owner before falling back to strlen

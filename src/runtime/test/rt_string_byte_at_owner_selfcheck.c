@@ -30,6 +30,8 @@ static void check_counted_and_foreign(void) {
     int64_t empty = rt_string_new(bytes, 0);
     assert(byte_at_abi(empty, 0) == 0);
     assert(byte_at_abi((int64_t)(uintptr_t)rt_string_data(empty), 0) == 0);
+    /* May be the shared empty singleton; both ownership cases permit release. */
+    (void)rt_string_free(empty);
 
     /* No header read before registry admission for foreign/unaligned data. */
     char foreign[] = {'a', 0, 'b', 0};
