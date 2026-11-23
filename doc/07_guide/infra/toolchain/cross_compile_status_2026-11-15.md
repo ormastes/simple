@@ -34,31 +34,44 @@ verification-pending: none has been verified natively yet (tagged **[U]**).
 `scripts/check/check-cross-compile-matrix.shs` (Linux host, e.g. WSL
 Ubuntu-24.04). For each target x artifact (`lint` = `src/app/cli/lint_entry.spl`,
 `test` = `src/app/test_runner_new/main.spl`) it runs preflight, a free-memory
-gate, one `native-build` at a time with `SIMPLE_CACHE_SCOPE=xc-<target>`, then
+gate, one `native-build` at a time with `SIMPLE_CACHE_SCOPE=xc-<linker>-<target>`, then
 checks the artifact with `file` + `llvm-readelf -h` / `llvm-readobj
 --file-headers` (class and machine) and rejects an ELF with `NEEDED libgcc*`.
 
 ```sh
-sh scripts/check/check-cross-compile-matrix.shs --selftest       # 22 fixtures, fatal
+sh scripts/check/check-cross-compile-matrix.shs --selftest       # checker fixtures, fatal
 sh scripts/check/check-cross-compile-matrix.shs --dry-run         # plan + preflight, builds nothing
 sh scripts/check/check-cross-compile-matrix.shs --list
-sh scripts/check/check-cross-compile-matrix.shs --targets linux-x86_64 --artifacts lint
+sh scripts/check/check-cross-compile-matrix.shs --targets linux-x86_64 --artifacts lint --linkers lld,internal
 sh scripts/check/check-cross-compile-matrix.shs --targets linux-riscv64,linux-armv7 --run
 ```
 
 Options: `--targets a,b|all` (default all), `--artifacts lint,test`,
+`--linkers lld,internal` (default both; `internal` selects the Pure Simple engine),
 `--builder PATH` (default `~/xc/simple-p2`, else
 `bin/release/x86_64-unknown-linux-gnu/simple`), `--min-free-gb N` (default 8;
 waits up to `XC_MEM_WAIT_S`=1800 s, then ERROR), `--run` (`<artifact> --help`
-under qemu-user; wine is never used, so Windows/FreeBSD/SimpleOS rows are not
-run), `--out DIR` (default `build/cross-matrix`). Env: `XC_TOOLCHAINS`
+under qemu-user; wine is never used). An execution request without a target
+runner is BLOCKED, never a passing link-only result. `--out DIR` defaults to
+`build/cross-matrix`. Env: `XC_TOOLCHAINS`
 (default `~/toolchains`), `XC_LLVM_BIN` (default `/usr/lib/llvm-18/bin`),
 `SIMPLE_LLVM_MINGW`, `SIMPLE_CROSS_RT_PREFIX`, `XC_THREADS`, `XC_TIMEOUT`.
 
 Output: `<out>/results.tsv`, a markdown table, logs under `<out>/logs/`, and the
 verdict last. Row status PASS / FAIL / ERROR (missing tool, with a fix hint) /
 BLOCKED (known gap). Verdict FAIL if any row failed, else ERROR if any row could
-not be checked or no row passed, else PASS (exit 0/1/2).
+not be checked, any requested row is BLOCKED, or no row passed, else PASS
+(exit 0/1/2). Dry runs also reject blocked rows and do not prove compilation.
+
+SimpleOS rows cover x86_64, i686, aarch64, armv7 and both RISC-V widths.
+ELF32 rows select LLVM for compilation and simple-core preparation because
+Cranelift does not implement these 32-bit targets. Outputs, logs, compiler
+cache scopes and simple-core archives are separated by linker. The results
+identify the requested engine; runtime qualification still requires retaining
+the actual compiler identity, link diagnostics and target execution evidence.
+Kernel link-only gates and Hello fixtures do not prove lint/test-runner
+execution. An unavailable self-hosted compiler is TEST_BLOCKED; the Rust seed
+must not substitute for that evidence.
 
 Hook for more targets (e.g. the NVMe FW bare-metal lane):
 `XC_MATRIX_EXTRA_TARGETS=<file>`, TAB-separated rows
