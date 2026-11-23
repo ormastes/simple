@@ -676,3 +676,4 @@ route env, file exists/read, directory list and process capture through SOSIX
 - `pooling_runner` refuses an embedding request on a model whose effective pooling is none (it would return one vector per token as if it were one input); the vocoder path still asks for pooling none explicitly.
 - The shim refuses `embed_eval`, `rerank_tokenize` and `tokens_set` on a tree request (shared tree context / leased token path). Test: `tree_cache_test.c` with `mock_llama_memory_clears`.
 - `tts_runner` releases the shim library through `release_backend_library` instead of its own `spl_dlclose` import.
+- `skip()` inside an `it` body is counted as skipped by `spec.spl` (`_execute_it` returns "skip", `test_skipped` rises), not as a pass. This holds on the self-hosted and aggregate path only; the seed's native `it` (bdd.rs) still reports a pass, so live specs keep the explicit `SKIPPED:` line. Pinned by `test/01_unit/lib/nogc_sync_mut/spec_skip_in_body_spec.spl`.
