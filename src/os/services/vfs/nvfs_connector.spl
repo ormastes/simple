@@ -7,6 +7,7 @@ does not link the examples NVFS implementation into the freestanding kernel.
 use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use std.fs_driver.error.{FsError}
+use os.kernel.text_checked.{kernel_text_checked}
 use common.string_core.{str_starts_with, str_slice}
 use std.security.sanitize.{is_path_traversal}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
@@ -20,7 +21,6 @@ use os.services.vfs.nvfs_mount_session_owner_v1.{
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_eprintln(s: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
-extern fn rt_bytes_to_text(data: [u8]) -> text
 
 val NVFS_CONNECTOR_MAX_BYTES: i64 = 16777216   # 16 MiB
 val NVFS_CONNECTOR_MAX_CONNECTIONS: i64 = 256
@@ -334,7 +334,10 @@ fn nvfs_vfs_read_text(conn: NvfsVfsConnection, path: text) -> Result<text, FsErr
     val bytes_r = nvfs_vfs_read_bytes(conn, path)
     if bytes_r.is_err():
         return Err(bytes_r.unwrap_err())
-    Ok(rt_bytes_to_text(bytes_r.unwrap()))
+    val s: text = match kernel_text_checked(bytes_r.unwrap()):
+        case Ok(v): v
+        case Err(_): return Err(FsError.InvalidArg)
+    Ok(s)
 
 fn nvfs_vfs_file_size(conn: NvfsVfsConnection, path: text) -> Result<i64, FsError>:
     """Return file size for a path through the NVFS connection."""
