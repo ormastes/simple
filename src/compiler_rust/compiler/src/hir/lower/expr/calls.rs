@@ -713,7 +713,7 @@ impl Lowerer {
     /// arguments must themselves be fillable, so nothing captures caller scope.
     /// (lean_native_constructor_default_argument_2026_10_21)
     pub(super) fn is_fillable_default(&self, fn_name: &str, expr: &Expr) -> bool {
-        if Self::is_constant_default(expr) {
+        if Self::is_constant_default(expr) || self.is_unit_enum_variant(expr) {
             return true;
         }
         match expr {
@@ -729,6 +729,34 @@ impl Lowerer {
             },
             _ => false,
         }
+    }
+
+    /// `Enum.Variant` / `Enum::Variant` naming a payload-free variant of an
+    /// enum the caller resolves (local registry or `global_enum_defs`, the
+    /// same sources `lower_field_access` uses). It lowers to the variant
+    /// global and captures nothing from caller scope.
+    fn is_unit_enum_variant(&self, expr: &Expr) -> bool {
+        let (enum_name, variant) = match expr {
+            Expr::FieldAccess { receiver, field } => match receiver.as_ref() {
+                Expr::Identifier(name) => (name.as_str(), field.as_str()),
+                _ => return false,
+            },
+            Expr::Path(segments) if segments.len() == 2 => (segments[0].as_str(), segments[1].as_str()),
+            _ => return false,
+        };
+        let scoped = self.module.types.scoped_name(enum_name).to_string();
+        if let Some(HirType::Enum { variants, .. }) = self.module.types.lookup(&scoped).and_then(|id| self.module.types.get(id)) {
+            if !variants.is_empty() {
+                return variants
+                    .iter()
+                    .any(|(name, payload)| name == variant && payload.as_ref().map_or(true, |p| p.is_empty()));
+            }
+        }
+        self.global_enum_defs.as_ref().and_then(|defs| defs.get(&scoped)).is_some_and(|variants| {
+            variants
+                .iter()
+                .any(|(name, payload)| name == variant && payload.as_ref().map_or(true, |p| p.is_empty()))
+        })
     }
 
     /// True for default-value expressions that are self-contained constants —

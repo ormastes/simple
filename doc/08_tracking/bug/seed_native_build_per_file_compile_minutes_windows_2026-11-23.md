@@ -49,6 +49,9 @@ That is 2.3x, so the CLI rebuild switched to seed B. The per-file cost is still 
    explicitly as an uncommitted, build-only workaround tagged `WA(nv2)`. The release tree is
    unchanged. Fix candidates: treat an enum-variant default as a call-site constant in the seed,
    or pass the argument explicitly in the source.
+   Fix (verification-pending, branch `work/ed1-20261123`): enum-variant defaults are legal
+   (63 `.spl` files use them), so the seed now treats a payload-free `E.V`/`E::V` default as a
+   call-site constant (`is_unit_enum_variant`, `hir/lower/expr/calls.rs`). Needs a seed rebuild.
 
 ## Next
 Profile one slow file (`workaround_store.spl`) through parse/HIR/MIR/LLVM phases to find the

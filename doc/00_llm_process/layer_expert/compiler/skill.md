@@ -178,3 +178,13 @@ Mode ints are fixed: 0 direct, 1 column, 2 sparse_hash, 3 array_index.
 Placement to enum goes through `expr_attr_placement_of` only.
 Store API: `00.common/data/attribute_schema_v1.spl`.
 Spec: `doc/07_guide/language/attributes/node_attribute_layouts.md`.
+
+## 2026-11-23 - enum-variant defaults are call-site constants (seed HIR)
+An omitted argument whose default is a payload-free enum variant
+(`E.V` or `E::V`) is filled at the call site by the seed
+(`is_unit_enum_variant` in `compiler_rust/.../hir/lower/expr/calls.rs`).
+`E` must resolve in the caller (type registry or `global_enum_defs`); unknown
+or payload variants still fail with "not a call-site constant". The
+pure-Simple compiler has no such rejection. Specs:
+`hir/lower/tests/const_default_callsite_tests.rs`,
+`test/01_unit/compiler/default_param_enum_variant_fill_spec.spl`.
