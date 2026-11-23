@@ -1,5 +1,6 @@
 # Native: reading an array field off a struct copies the array and never frees it
 
+- Id: native_struct_array_field_read_leaks_copy_2026-11-24
 - Status: open
 - Found: 2026-11-24, duplicate-check RSS work (work/dupchk-mem)
 - Layer: native codegen / runtime (seed `native-build`, `SIMPLE_NATIVE_BUILD_RUST=1`)
