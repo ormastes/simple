@@ -16,7 +16,7 @@ PARENT = 'ed5e03685a3c9233395306f6fcb2c7c5fa9a6ada36fc1158c20e6d3be91fcf73'
 RUNTIME = {'libsimple_native_all.a':'7ceed2e9b0edbf719a6fb4422578d2e322e7ea33f71a9cf700fc8f16df2208ae',
            'libsimple_compiler_backfill.a':'637d252e535f0773347af467335918133b2d83c52759eff64c33ac7932d2a41e'}
 OWNER = 'src/compiler/20.hir/hir_lowering/module_surface_selected_exports_v1.spl'
-PRIOR_SHA = 'd11481bc11ff8a3d84386e56892739f3fedfcceb95f36f280bafdbb4b00caf19'
+PRIOR_SHA = '44605a21b4be48cc21d30d137d876826c5ace71c73f0790e5bd62a88d6107530'
 DEPENDENCY_FILES = ['module_surface_declarations.spl', 'module_surface_from_tldr_v1.spl',
                     'module_surface_manifest_evidence_v1.spl', 'module_surface_registry.spl',
                     'module_surface_source_identity.spl', 'module_surface_types.spl']
@@ -32,7 +32,7 @@ def restore_prior_cache(destination):
     with zipfile.ZipFile(archive) as z:
         names=set()
         folded=set()
-        assert sum(i.file_size for i in z.infolist())<256*1024*1024
+        assert sum(i.file_size for i in z.infolist())<384*1024*1024
         for item in z.infolist():
             path=PurePosixPath(item.filename)
             canonical=path.as_posix()
@@ -47,12 +47,17 @@ def restore_prior_cache(destination):
         assert result['source']==SOURCE and result['producer_sha256']==PARENT
         assert result['runtime_sha256']==RUNTIME and result['stage']=='compile-baseline'
         assert result['status']=='FAILED' and result['samples']==[]
-        assert result['owner_restored'] and result['parent_unchanged']
+        assert result['owner_restored'] and result['parent_unchanged'] and result['dependency_owners_restored']
+        assert result['baseline_closure_modules']==[276]
+        assert result['fixture_sha256']==sha(Path(__file__).with_name('freeze-owner-fixture.spl'))
         receipt=dict(r.split('=',1) for r in z.read(prefix+'compile-baseline.owner.env').decode().splitlines() if '=' in r)
         assert receipt['status']=='rss-cap-exceeded' and receipt['exit_status']=='88'
         assert receipt['quiescent']=='1' and receipt['rss_cap_enforced']=='1'
         assert receipt['rss_limit_kib']=='6291456'
         copied=[]
+        native_objects=0
+        ordinary_receipts=0
+        invalid_receipts=0
         for item in z.infolist():
             cache_prefix=prefix+'baseline/cache/'
             if not item.filename.startswith(cache_prefix) or item.is_dir(): continue
@@ -66,9 +71,14 @@ def restore_prior_cache(destination):
             digest=hashlib.sha256(data).hexdigest()
             assert sha(target)==digest
             copied.append({'path':str(relative),'sha256':digest,'bytes':len(data)})
-        return {'prior_run':45271594927,'prior_artifact':14866627876,
+            if str(relative).endswith('.o'): native_objects+=1
+            if str(relative).endswith('.capsule-receipt'):
+                if b'native-module-cache-witness-v1-invalid|' in data: invalid_receipts+=1
+                else: ordinary_receipts+=1
+        return {'prior_run':45278634128,'prior_artifact':14869192737,
                 'archive_sha256':PRIOR_SHA,'copied_candidates':copied,
-                'reuse_status':'candidates only; normal source/producer/cache checks decide'}
+                'reuse_status':'candidates only; normal source/producer/cache checks decide',
+                'prior_native_objects':native_objects,'ordinary_witness_receipts':ordinary_receipts,'invalid_witness_receipts':invalid_receipts}
 
 def main():
     source=Path('source').resolve()
@@ -120,8 +130,12 @@ def main():
     (root/'baseline-owner.spl').write_bytes(original)
     (root/'candidate-owner.spl').write_text(after)
     available=int(next(r.split()[1] for r in Path('/proc/meminfo').read_text().splitlines() if r.startswith('MemAvailable:')))
-    cap=min(6*1024*1024,available*3//4)
-    assert cap>=6*1024*1024
+    cap=min(8*1024*1024,available*3//4)
+    assert cap>=8*1024*1024, 'insufficient measured headroom for final bounded cohort'
+    result['available_kib']=available
+    result['compile_cap_kib']=cap
+    result['compile_bound']='8GiB ceiling and at most75% of measured MemAvailable; identical both arms'
+    result['attempt']='third and final cohort; no further native retry in session'
     env={k:v for k,v in os.environ.items() if not k.startswith('SIMPLE_')}
     env.update(SIMPLE_BINARY=str(parent),SIMPLE_PROJECT_ROOT=str(source),SIMPLE_LIB=str(source/'src'),
                SIMPLE_RUNTIME_PATH=str(runtime),SIMPLE_NO_STUB_FALLBACK='1',SIMPLE_NATIVE_BUILD_RUST='0',
@@ -188,7 +202,7 @@ def main():
                   '--entry-closure','--mode','one-binary','--entry',fixture,'--output',binary,
                   '--cache-dir',lane/'cache','--low-memory',
                   '--source','src/compiler','--source','src/lib']
-            result[variant+'_compile_metrics']=owned('compile-'+variant,argv,900,cap,lane_env)
+            result[variant+'_compile_metrics']=owned('compile-'+variant,argv,1800,cap,lane_env)
             log=(root/('compile-'+variant+'.stdout')).read_text(errors='replace')
             import re
             source_trace=log+(root/('compile-'+variant+'.stderr')).read_text(errors='replace')
@@ -214,6 +228,7 @@ def main():
             closure_counts=sorted({int(x) for x in re.findall(r'phase=hir state=running unit_kind=modules done=\d+ total=(\d+)',log)})
             result[variant+'_closure_modules']=closure_counts
             result[variant+'_generated_hir_codec_seen']='current=compiler.hir.generated.hir_codec' in log
+            result[variant+'_observed_cache_progress']=[line for line in log.splitlines() if ('phase=native_cache' in line or 'phase=hir ' in line or '[CACHE]' in line) and ('state=complete' in line or 'remaining=0' in line or '[CACHE]' in line)][-80:]
             assert len(closure_counts)==1, 'missing or inconsistent actual HIR closure count'
             assert closure_counts[0]<503 and not result[variant+'_generated_hir_codec_seen'], 'dependency reduction not established'
             assert binary.is_file()
@@ -270,6 +285,7 @@ def main():
                 log=log_path.read_text(errors='replace')
                 result[variant+'_closure_modules']=sorted({int(x) for x in re.findall(r'phase=hir state=running unit_kind=modules done=\d+ total=(\d+)',log)})
                 result[variant+'_generated_hir_codec_seen']='current=compiler.hir.generated.hir_codec' in log
+                result[variant+'_observed_cache_progress']=[line for line in log.splitlines() if ('phase=native_cache' in line or 'phase=hir ' in line or '[CACHE]' in line) and ('state=complete' in line or 'remaining=0' in line or '[CACHE]' in line)][-80:]
         result['owner_restored']=sha(owner)==result['baseline_owner_sha256']
         result['parent_unchanged']=sha(parent)==PARENT
         (root/'result.json').write_text(json.dumps(result,indent=2))
