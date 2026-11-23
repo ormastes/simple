@@ -44,6 +44,17 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
 - **Seed-lane cache identity quirk:** pre-stage4 seed binaries have an uncacheable
   identity (cache validation fails on seed-compiled artifacts; rebuild after
   stage4 redeploy)
+- **Unadmitted compiler identity is stable (2026-11-24):** with `SIMPLE_ABI_POLICY` /
+  `SIMPLE_ABI_ADMISSION_RECEIPT` unset, `native_build_compiler_identity()` used to
+  return `uncacheable-abi-admission-…-<pid>-<micros>` — one object scope (`s<hex>`)
+  and witness config per PROCESS, so no per-file batch or re-run ever hit. It is now
+  `native_build_unadmitted_producer_identity` (exe hash + sources + runtime + ABI
+  epoch, admission `unadmitted-v1`), granted only when BOTH variables are unset and
+  the hashed binary's sha256 equals that of `/proc/self/exe`
+  (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
+  `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
+  receipt is still per-process. Observed in a probe: changing only `-o` gave a new object scope. Modules whose witness is `…-witness-v1-invalid` (e.g.
+  `ambiguous-resolution-fact`) still never hit.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 
