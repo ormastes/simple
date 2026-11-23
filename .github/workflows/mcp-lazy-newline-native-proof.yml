@@ -1,0 +1,72 @@
+name: Native Linux lazy MCP project-info verification
+on:
+  push:
+    branches: [work/mcp-lazy-newline-native-proof-20261124]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native-mcp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 3443d4eadcf37b59fdeebb95a3d0590c697b4fbb
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14839362739'
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: '45205044707'
+          path: build/mcp-proof/compiler
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14833542613'
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: '45205044707'
+          path: build/mcp-proof/runtime
+      - name: Prepare LLVM tools
+        run: sudo -n apt-get update -qq && sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Compile the real MCP entry point
+        run: |
+          set -euo pipefail
+          root="$PWD/build/mcp-proof"
+          mkdir -p "$root/evidence" "$root/product"
+          (cd "$root/compiler" && echo 'f130dde9f91955186ae5e9121917e121d99542871f80e5dc7dd6b8a718c447a3  simple_stage2' | sha256sum -c -)
+          (cd "$root/runtime" && sha256sum -c runtime-authority.sha256)
+          export SIMPLE_BINARY="$root/compiler/simple_stage2" SIMPLE_RUNTIME_PATH="$root/runtime"
+          chmod +x "$SIMPLE_BINARY"
+          export SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
+          git rev-parse HEAD > "$root/evidence/source"
+          sha256sum "$SIMPLE_BINARY" "$root/runtime/libsimple_native_all.a" > "$root/evidence/inputs"
+          cap=$(awk '/MemAvailable/{print int($2*0.75)}' /proc/meminfo)
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib="$cap" --timeout-seconds=18000 --receipt="$root/evidence/build.env" -- "$SIMPLE_BINARY" native-build --backend llvm --target x86_64-unknown-linux-gnu --runtime-path "$SIMPLE_RUNTIME_PATH" --runtime-bundle core-c-bootstrap --threads 1 --source src/compositions/kernel_llvm_cranelift --source src/compositions/cuda_disabled --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions --profile=prod --release --strip --managed-build-phase=phase4 --opt-level=standard --entry-closure --entry src/app/mcp/main.spl --mode dynload --low-memory --cache-dir "$root/cache" --output "$root/product/simple_mcp_server" > "$root/evidence/build.log" 2>&1 || { tail -35 "$root/evidence/build.log"; exit 1; }
+          test -s "$root/product/simple_mcp_server"
+          sha256sum -c "$root/evidence/inputs"
+          (cd "$root/product" && sha256sum simple_mcp_server > SHA256SUMS)
+      - name: Read project info from the compiled server
+        run: |
+          set -euo pipefail
+          root="$PWD/build/mcp-proof"
+          cat > "$root/evidence/requests" <<'JSONL'
+          {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"native-regression","version":"1"}}}
+          {"jsonrpc":"2.0","method":"initialized","params":{}}
+          {"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"project:///info"}}
+          {"jsonrpc":"2.0","id":3,"method":"ping"}
+          {"jsonrpc":"2.0","id":4,"method":"shutdown","params":{}}
+          JSONL
+          timeout 60 "$root/product/simple_mcp_server" < "$root/evidence/requests" > "$root/evidence/responses" 2> "$root/evidence/server.stderr"
+          jq -es --arg cwd "$PWD" 'any(.[]; .id == 2 and .result.contents[0].uri == "project:///info" and .result.contents[0].text == ("Simple MCP (main_lazy)\nWorking Dir: " + $cwd)) and any(.[]; .id == 3 and .result == {})' "$root/evidence/responses"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: lazy-mcp-native-evidence
+          path: build/mcp-proof/evidence
+      - uses: actions/upload-artifact@v6
+        with:
+          name: lazy-mcp-native-product
+          path: build/mcp-proof/product
+          if-no-files-found: error
