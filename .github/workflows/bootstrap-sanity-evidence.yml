@@ -1,48 +1,13 @@
-name: Windows cross import authority proof
+name: Windows retained process helper DLL intake
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  resolve-and-link:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v7
-        with:
-          github-token: ${{ github.token }}
-          run-id: 45254122525
-          name: native-authority-mingw-x86_64-d3422d488768713c1e6153bd2a7766ff22cbbd23
-          path: retained-native
-      - name: Install exact final-link toolchain
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          sudo -n apt-get update -qq
-          sudo -n apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64
-          name=llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64
-          gh release download 20260922 --repo mstorsjo/llvm-mingw --pattern "$name.tar.xz" --dir "$RUNNER_TEMP"
-          printf 'bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21  %s\n' "$RUNNER_TEMP/$name.tar.xz" | sha256sum --check -
-          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
-          echo "PROOF_TOOLCHAIN=$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
-      - name: Real target import discovery and retained-runtime link
-        run: |
-          printf '7fc91928c1ff216caa45375f62aff87c174b31a6893f8ea21ff9b544ad1e40f9  retained-native/libsimple_native_all.a\n' | sha256sum --check -
-          ulimit -v 2097152
-          timeout --kill-after=5 600 python scripts/check/check-windows-cross-import-authority.py --cc "$PROOF_TOOLCHAIN/bin/x86_64-w64-mingw32-clang" --gcc /usr/bin/x86_64-w64-mingw32-gcc --nm "$PROOF_TOOLCHAIN/bin/llvm-nm" --runtime retained-native/libsimple_native_all.a --out build/windows-import-proof
-          sha256sum build/windows-import-proof/process-provider.exe > build/windows-import-proof/process-provider.sha
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: windows-import-proof-${{ github.sha }}
-          path: build/windows-import-proof/
-          retention-days: 14
   actual-bounded-process:
-    needs: resolve-and-link
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     defaults:
       run:
         shell: bash
@@ -50,20 +15,36 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
-          name: windows-import-proof-${{ github.sha }}
+          github-token: ${{ github.token }}
+          run-id: 45276843909
+          name: windows-import-proof-43518c5540b57a825dddaf8ebbf1e95eb799720e
           path: build/windows-import-proof
-      - name: Native normal completion and inner timeout with child quiescence
+      - name: Intake exact cross-toolchain target DLL
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sha256sum --check build/windows-import-proof/process-provider.sha
+          name=llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64
+          gh release download 20260922 --repo mstorsjo/llvm-mingw --pattern "$name.tar.xz" --dir "$RUNNER_TEMP"
+          printf 'bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21  %s\n' "$RUNNER_TEMP/$name.tar.xz" | sha256sum --check -
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP" "$name/x86_64-w64-mingw32/bin/libunwind.dll"
+          cp "$RUNNER_TEMP/$name/x86_64-w64-mingw32/bin/libunwind.dll" build/windows-import-proof/libunwind.dll
+          sha256sum build/windows-import-proof/libunwind.dll > build/windows-import-proof/dll.sha
+          llvm-readobj --coff-imports build/windows-import-proof/libunwind.dll > build/windows-import-proof/dll-imports.txt
+          python scripts/check/verify-windows-process-dll-intake.py build/windows-import-proof
+      - name: Unchanged native helper normal and inner timeout proof
+        run: |
           out=build/windows-import-proof
+          printf '298e3ec7e6816f51813ea32a180b0a698ae806f4cc8cae286f7b41aff773fe84  %s/process-provider.exe\n' "$out" | sha256sum --check -
+          sha256sum --check "$out/dll.sha"
           perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=262144 --interval-ms=100 --timeout-seconds=30 --receipt="$out/execution.env" -- "$out/process-provider.exe" > "$out/execution.stdout" 2> "$out/execution.stderr"
           grep -qx 'quiescent=1' "$out/execution.env"
           grep -q 'normal=PASS' "$out/execution.stdout"
           grep -q 'timeout=PASS.*child_quiescent=1' "$out/execution.stdout"
           sha256sum --check "$out/process-provider.sha"
+          sha256sum --check "$out/dll.sha"
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: windows-import-execution-${{ github.sha }}
+          name: windows-import-execution-with-dll-${{ github.sha }}
           path: build/windows-import-proof/
           retention-days: 14
