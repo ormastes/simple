@@ -11,6 +11,7 @@
 # See also: std.nogc_sync_mut.cuda (same API, different module path)
 
 use std.nogc_sync_mut.cuda.sffi.*
+use std.gc_async_mut.cuda.driver_loader.{cuda_driver}
 
 extern fn rt_is_interpreter_runtime() -> bool
 use std.common.string_core.{text_to_bytes}
@@ -25,11 +26,23 @@ val CUDA_ERROR_OUT_OF_MEMORY = -2
 val CUDA_ERROR_NOT_INITIALIZED = -3
 val CUDA_ERROR_NO_DEVICE = -100
 
+# First GPU use: the driver is opened through cuda_driver(), so a missing
+# driver is CUDA-E001 and an incomplete one CUDA-E002.
+fn cuda_init_checked() -> Result<i64, text>:
+    val driver = unsafe(capabilities: [ffi, raw_ptr]):
+        cuda_driver()
+    if driver.is_err(): return Err(driver.unwrap_err())
+    Ok(rt_cuda_init())
+
 fn cuda_available() -> bool:
-    rt_cuda_available() != 0
+    val driver = unsafe(capabilities: [ffi, raw_ptr]):
+        cuda_driver()
+    driver.is_ok() and rt_cuda_available() != 0
 
 fn cuda_init() -> i64:
-    rt_cuda_init()
+    val result = cuda_init_checked()
+    if result.is_err(): return CUDA_ERROR_NOT_INITIALIZED
+    result.unwrap()
 
 fn cuda_device_count() -> i64:
     rt_cuda_device_count()
@@ -111,7 +124,7 @@ fn cuda_get_error_string(error_code: i64) -> text:
     rt_cuda_get_error_string(error_code)
 
 export CUDA_SUCCESS, CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_OUT_OF_MEMORY, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NO_DEVICE
-export cuda_available, cuda_init, cuda_device_count, cuda_device_get, cuda_device_name
+export cuda_available, cuda_init, cuda_init_checked, cuda_device_count, cuda_device_get, cuda_device_name
 export cuda_device_compute_capability, cuda_ctx_create, cuda_ctx_set_current, cuda_ctx_destroy, cuda_ctx_synchronize
 export cuda_mem_alloc, cuda_mem_free, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_memcpy_dtod
 export cuda_memset, cuda_module_load, cuda_module_load_data
