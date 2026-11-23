@@ -385,7 +385,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdGlyph, SfntLcdOutline}
+use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, sfnt_gray_glyph_outline, sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdGlyph, SfntLcdOutline}
 use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
@@ -1625,6 +1625,11 @@ class FontRenderer:
     fn _lcd_applies(font_size: i32) -> bool:
         self.lcd_text and font_size <= FONT_LCD_MAX_SIZE_PX and self.selected_outline_blob.len() > 0
 
+    # A glyph above the LCD cutoff on the LCD-text lane: gray exact-area cells
+    # at Skia quarter phases (`_gray_glyph`).
+    fn _gray_applies(font_size: i32) -> bool:
+        self.lcd_text and font_size > FONT_LCD_MAX_SIZE_PX and font_size <= 512 and self.selected_outline_blob.len() > 0
+
     # Glyph id of `codepoint` in the selected outline face, read from the
     # per-face ASCII table (`_gid_warm`: one cmap parse per face). The cold
     # glyph path resolved the same id by codepoint three times -- `has_glyph`,
@@ -1658,17 +1663,34 @@ class FontRenderer:
                         bearing_y: g.slg_bearing_y.to_i32(), pixels: gray, lcd_pixels: rgb)
         fallback
 
+    # Gray cell of the selected-outline glyph above the LCD cutoff (no LCD
+    # pixels); `fallback` when the outline cannot be rasterised.
+    fn _gray_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, font_size: i32, fallback: CachedGlyph, phase_q: i64, x_milli: i64) -> CachedGlyph:
+        if val Some(outline) = self._lcd_outline(selector_kind, selector_value, font_size, x_milli, true):
+            if val Some(g) = sfnt_gray_outline_raster(outline, phase_q):
+                val w = g.slg_width
+                val h = g.slg_height
+                if w > 0 and h > 0 and g.slg_gray.len() == w * h:
+                    return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0,
+                        glyph_index: glyph_index, font_size: font_size,
+                        width: w.to_i32(), height: h.to_i32(),
+                        advance: fallback.advance, bearing_x: g.slg_bearing_x.to_i32(),
+                        bearing_y: g.slg_bearing_y.to_i32(), pixels: g.slg_gray)
+        fallback
+
     # The selected face's LCD outline, from `_lcd_outlines` when the rasterizer
     # identity names the selected blob (the `_selected_outline_gid` guard).
-    fn _lcd_outline(selector_kind: i64, selector_value: i64, font_size: i32, x_milli: i64) -> SfntLcdOutline?:
+    # `gray`: the unhinted, gray-framed outline (`sfnt_gray_glyph_outline`) of
+    # a glyph above the LCD cutoff, cached beside the LCD ones.
+    fn _lcd_outline(selector_kind: i64, selector_value: i64, font_size: i32, x_milli: i64, gray: bool = false) -> SfntLcdOutline?:
         var key = ""
         if val Some(rasterizer) = self.ttf_rasterizer:
             if rasterizer.has_glyph_reads_selected_blob():
-                key = "{rasterizer.cache_identity()}|{selector_kind}|{selector_value}|{font_size}|{x_milli}"
+                key = "{rasterizer.cache_identity()}|{selector_kind}|{selector_value}|{font_size}|{x_milli}" + (if gray: "|g" else: "")
         if key != "":
             if val Some(hit) = _lcd_outlines.get(key):
                 return Some(hit)
-        val built = sfnt_lcd_glyph_outline(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli)
+        val built = if gray: sfnt_gray_glyph_outline(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli) else: sfnt_lcd_glyph_outline(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli)
         if key != "":
             if val Some(outline) = built:
                 if _lcd_outline_count >= LCD_OUTLINE_CACHE_LIMIT:
@@ -1732,7 +1754,11 @@ class FontRenderer:
     # rounded each advance from its pen, so the staged pen is the running sum of
     # `advance_widths` and the exact pen adds the spacing before each glyph.
     me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0):
-        if not self._lcd_applies(font_size):
+        # Above the LCD cutoff the same pens take GRAY cells (sfnt_gray_outline_raster):
+        # every glyph, phase 0 included, since even phase 0 keeps the true
+        # bearing and exact-area coverage the whole-pixel gray glyph lacks.
+        val gray = self._gray_applies(font_size)
+        if not gray and not self._lcd_applies(font_size):
             return
         val frac = size_milli > 0 and size_milli < 512000 and size_milli % 1000 != 0
         # More than ~2 px off means the producer's model disagrees with this
@@ -1806,7 +1832,7 @@ class FontRenderer:
         var shifts: [i32] = [0; n]
         var round_shifts: [i32] = [0; n]
         var phases: [i64] = [0; n]
-        var any_phase = frac
+        var any_phase = frac or gray
         # A fractional run whose advances are not the layout's model still
         # takes the float-size outlines, on its integer pens (phase 0).
         var pens_known = true
@@ -1814,7 +1840,10 @@ class FontRenderer:
         var i: i64 = 0
         while i < n:
             val px = whole[i]
-            if advance_widths[i].to_i64() != whole[i + 1] - px:
+            # A gray run's LAST advance moves no glyph: at k > 1 it absorbs the
+            # device-advance rounding (`_dir_anchor_device_advances`), so it
+            # must not decline the whole run.
+            if advance_widths[i].to_i64() != whole[i + 1] - px and not (gray and i == n - 1):
                 if not frac:
                     return
                 pens_known = false
@@ -1845,6 +1874,9 @@ class FontRenderer:
         # glyph_index -1 - phase - 4 * size_milli (whole-px phase cells keep
         # -1 - phase). The atlas matches on glyph_index and font_size.
         val cell_base: i64 = if frac: 4 * size_milli else: 0
+        # Gray cells take -5 - phase: phase 0 must not collide with the plain
+        # whole-pixel glyph (-1) of the same size.
+        val cell_first: i64 = if gray: -5 else: -1
         # The outline is rasterised at the size FreeType gets (font-cache key,
         # 26.6): 18.72 px glyphs are 1197/64 px wide (font_cache_key_size AC-5).
         val x_milli: i64 = if frac: (sfnt_font_cache_key_size_26_6(size_milli) * 1000 + 32) / 64 else: 0
@@ -1863,22 +1895,26 @@ class FontRenderer:
             if phase != 0 or frac:
                 val cp = cps[ci].to_i32()
                 val base = self.get_glyph(cp, font_size)
-                if base.lcd_pixels.len() > 0 or base.lcd_frame_only:
-                    val cell_index = (-1 - phase - cell_base).to_i32()
+                if base.lcd_pixels.len() > 0 or base.lcd_frame_only or (gray and base.width > 0):
+                    val cell_index = (cell_first - phase - cell_base).to_i32()
                     val key = "{self.atlas_font_identity}|{self.atlas_face_generation}|{cp}|{font_size}|{phase}|{x_milli}"
                     var pg = base
+                    var fresh = false
                     if val Some(hit) = _lcd_phase_glyphs.get(key):
                         pg = hit
                     else:
+                        fresh = true
                         # By glyph index when the face table knows it: the
                         # same outline without another cmap parse.
                         val phase_gid = self._selected_outline_gid(cp)
                         val phase_kind = if phase_gid > 0: SFNT_GLYPH_SELECTOR_INDEX else: SFNT_GLYPH_SELECTOR_CODEPOINT
                         val phase_value = if phase_gid > 0: phase_gid else: cp.to_i64()
-                        pg = self._lcd_glyph(phase_kind, phase_value, cp, cell_index, 0, font_size, base, phase, x_milli)
+                        pg = if gray: self._gray_glyph(phase_kind, phase_value, cp, cell_index, font_size, base, phase, x_milli) else: self._lcd_glyph(phase_kind, phase_value, cp, cell_index, 0, font_size, base, phase, x_milli)
                         _lcd_phase_glyphs[key] = pg
                     if pg.glyph_index == cell_index:
-                        var idx = self._lcd_phase_atlas_index(key, pg.glyph_index, cp, font_size)
+                        # A cell built just now has no atlas slot yet: skip the
+                        # whole-atlas scan (O(atlas) per cold cell).
+                        var idx: i32 = if fresh: -1 else: self._lcd_phase_atlas_index(key, pg.glyph_index, cp, font_size)
                         if idx < 0:
                             idx = self._insert_font_atlas_glyph(pg)
                             if idx >= 0:
@@ -1890,7 +1926,7 @@ class FontRenderer:
                             # Same baseline: a fractional cell's ink top moves
                             # with its own bearing (identical rows unless the x
                             # scale flips a near-horizontal stem run).
-                            val dy = if frac: base.bearing_y + base.height - pg.bearing_y - pg.height else: 0
+                            val dy = if frac or gray: base.bearing_y + base.height - pg.bearing_y - pg.height else: 0
                             quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
                                 dst_x: q.dst_x - base.bearing_x + shifts[ci] + pg.bearing_x,
                                 dst_y: q.dst_y + dy,
@@ -2367,7 +2403,7 @@ class FontRenderer:
             "fallback=bitmap"
         else:
             "fallback=none"
-        val raster_lcd = if self._lcd_applies(font_size): ";lcd" else: ""
+        val raster_lcd = if self._lcd_applies(font_size): ";lcd" else if self._gray_applies(font_size): ";gray" else: ""
         val raster_key = "{raster_identity};cp={codepoint};fs={font_size}{raster_lcd}"
         var raster_idx = 0
         var raster_hit: CachedGlyph? = None
@@ -2429,6 +2465,18 @@ class FontRenderer:
                 self.glyph_phase_adapter_pixels_match = true
                 glyph = filled
                 handled = true
+        if filling_frame and known_gid > 0 and not handled and self._gray_applies(font_size):
+            val gray_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: 0, height: 0, advance: frame_advance, bearing_x: 0, bearing_y: 0, pixels: [])
+            val gray_filled = self._gray_glyph(SFNT_GLYPH_SELECTOR_INDEX, known_gid, codepoint, -1, font_size, gray_seed, 0, 0)
+            if gray_filled.width > 0 and gray_filled.pixels.len() > 0:
+                self.glyph_phase_bitmap_non_nil = true
+                self.glyph_phase_bitmap_positive = true
+                self.glyph_phase_adapter_positive = true
+                self.glyph_phase_reconstructed_positive = true
+                self.glyph_phase_bitmap_pixels_match = true
+                self.glyph_phase_adapter_pixels_match = true
+                glyph = gray_filled
+                handled = true
         if rast_has_glyph and not handled:
             if self.selected_outline_blob.len() > 0:
                 var direct_meta: [i64] = [0; 20]
@@ -2439,7 +2487,7 @@ class FontRenderer:
                     sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, known_gid, font_size.to_i64(), direct_meta)
                 else:
                     sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
-                val direct_count = direct_meta[5]
+                var direct_count = direct_meta[5]
                 # LCD first (2026-11-18). An LCD-size glyph keeps nothing of the
                 # grayscale render below except its two receipts: the advance,
                 # which the measure pass already holds, and "the bitmap has
@@ -2497,7 +2545,50 @@ class FontRenderer:
                     # the outline, bounds and coverage are computed from the
                     # identical glyph id, so the bitmap is unchanged.
                     val direct_glyph_id = direct_meta[6]
-                    if direct_glyph_id > 0:
+                    # A gray-size glyph on the LCD-text lane (above the LCD
+                    # cutoff) takes its phase-0 exact-area cell as the base
+                    # (`sfnt_gray_outline_raster`): the quarter-phase cells share
+                    # its frame, phase-0 pens draw it directly, and the 4x4
+                    # supersample (2.5x the cost on the interpreter lane) is
+                    # never run for a glyph whose pixels it would not supply.
+                    var gray_base = false
+                    if direct_glyph_id > 0 and self._gray_applies(font_size):
+                        if val Some(gray_outline) = self._lcd_outline(SFNT_GLYPH_SELECTOR_INDEX, direct_glyph_id, font_size, 0, true):
+                            # Deferred like an LCD cell (`lcd_defer_cells`):
+                            # metrics only; a pen at a quarter phase draws its
+                            # phase cell and `_lcd_resolve_deferred_cells`
+                            # rasters the bases still drawn at phase 0.
+                            val gray_frame = sfnt_gray_outline_frame(gray_outline, 0)
+                            if self.lcd_defer_cells and gray_frame.len() == 4:
+                                val gray_advance_raw = direct_meta[2] as i32
+                                val frame_glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size,
+                                    width: gray_frame[0].to_i32(), height: gray_frame[1].to_i32(),
+                                    advance: if gray_advance_raw > 0: gray_advance_raw else: gray_frame[0].to_i32() + 1,
+                                    bearing_x: gray_frame[2].to_i32(), bearing_y: gray_frame[3].to_i32(), pixels: [], lcd_frame_only: true)
+                                self.glyph_phase_bitmap_non_nil = true
+                                self.glyph_phase_bitmap_positive = true
+                                self.glyph_phase_adapter_positive = true
+                                self.glyph_phase_reconstructed_positive = true
+                                self.glyph_phase_bitmap_pixels_match = true
+                                self.glyph_phase_adapter_pixels_match = true
+                                self.glyph_phase_return_positive = true
+                                _lcd_frame_glyphs[raster_key] = frame_glyph
+                                cache.insert(frame_glyph)
+                                self.cache = cache
+                                return frame_glyph
+                            if val Some(g) = sfnt_gray_outline_raster(gray_outline, 0):
+                                if g.slg_width > 0 and g.slg_height > 0 and g.slg_gray.len() == g.slg_width * g.slg_height:
+                                    direct_meta[0] = g.slg_width
+                                    direct_meta[1] = g.slg_height
+                                    direct_meta[3] = g.slg_bearing_x
+                                    direct_meta[4] = g.slg_bearing_y
+                                    direct_meta[8] = 310032
+                                    direct_meta[9] = 1
+                                    direct_pixels = g.slg_gray
+                                    gray_base = true
+                    if gray_base:
+                        direct_count = direct_pixels.len()
+                    elif direct_glyph_id > 0:
                         direct_meta[15] = SFNT_GLYPH_SELECTOR_INDEX
                         direct_meta[16] = direct_glyph_id
                         sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, direct_glyph_id, font_size.to_i64(), direct_meta, direct_pixels)
@@ -3268,17 +3359,24 @@ class FontRenderer:
         while row < gh:
             var col: i64 = 0
             val base = row * gw
-            while col < gw:
-                val alpha = gray[base + col].to_u32()
-                if _VEC_ATLAS_PROBE and alpha > 0u32:
-                    _probe_glyph_nz = _probe_glyph_nz + 1
-                if lcd:
+            # The mode tests sit outside the pixel loop (a branch per pixel is
+            # a measurable share of a cold cell on the interpreter lane).
+            if lcd:
+                while col < gw:
                     val sub = (base + col) * 3
-                    line[col] = (alpha << 24) | (subpixels[sub].to_u32() << 16) |
+                    line[col] = (gray[base + col].to_u32() << 24) | (subpixels[sub].to_u32() << 16) |
                         (subpixels[sub + 1].to_u32() << 8) | subpixels[sub + 2].to_u32()
-                else:
-                    line[col] = (alpha << 24) | 0x00FFFFFFu32
-                col = col + 1
+                    col = col + 1
+            else:
+                while col < gw:
+                    line[col] = (gray[base + col].to_u32() << 24) | 0x00FFFFFFu32
+                    col = col + 1
+            if _VEC_ATLAS_PROBE:
+                var pc: i64 = 0
+                while pc < gw:
+                    if gray[base + pc] > 0u8:
+                        _probe_glyph_nz = _probe_glyph_nz + 1
+                    pc = pc + 1
             atlas.write_span(line, (y.to_i64() + row) * FONT_ATLAS_WIDTH.to_i64() + x.to_i64(), 0, gw)
             row = row + 1
         self.atlas_pixels = atlas
@@ -3625,7 +3723,7 @@ class FontRenderer:
         # run are drawn from a quarter-phase cell, and the phase-0 cell the
         # staging pass rastered for each of them first (about 13 ms per cold
         # glyph on the interpreter lane) was never drawn.
-        self.lcd_defer_cells = self._lcd_applies(config.size)
+        self.lcd_defer_cells = self._lcd_applies(config.size) or self._gray_applies(config.size)
         self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
         if self.lcd_defer_cells:
             self.lcd_defer_cells = false
