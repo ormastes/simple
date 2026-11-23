@@ -267,10 +267,36 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
 # #777777).
 # Measured: black text over white gives exactly 255 - 8k per channel,
 # e.g. 0xf7 for s=1 and 0x07 for s=31.
+# True when the quad's atlas cells hold LCD coverage: a cell that is not
+# empty and not a gray cell (low 24 bits 0xFFFFFF). Without one the LCD
+# composite always returns [], so callers skip it (and its destination read).
+# A subrect outside the atlas answers true: the composite keeps its own path.
+fn engine2d_lcd_quad_has_lcd_cell(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
+                                  width: i32, height: i32) -> bool:
+    val atlas_w = atlas_width.to_i64()
+    if atlas_x < 0 or atlas_y < 0 or width <= 0 or height <= 0 or
+            atlas_x.to_i64() + width.to_i64() > atlas_w or
+            (atlas_y + height).to_i64() * atlas_w > atlas_pixels.len():
+        return true
+    var row = 0
+    while row < height:
+        # Index reads, not `atlas_pixels.slice(...)`: a slice of the atlas
+        # parameter raised peak RSS of 4x css-layout from 2.96 to 3.78 GB.
+        val start = (atlas_y + row).to_i64() * atlas_w + atlas_x.to_i64()
+        for i in start..(start + width.to_i64()):
+            # low 24 bits not 0 and not 0xFFFFFF, as one test: +1 maps
+            # them to 1 and 0, every other value above 1 (i64: no wrap).
+            if (((atlas_pixels[i] as i64) + 1) & 0xFFFFFF) > 1:
+                return true
+        row = row + 1
+    false
+
 fn engine2d_lcd_quad_composite(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
                                width: i32, height: i32, color: u32, dst: [u32]) -> [u32]:
     val count = width.to_i64() * height.to_i64()
     if width <= 0 or height <= 0 or dst.len() != count:
+        return []
+    if not engine2d_lcd_quad_has_lcd_cell(atlas_pixels, atlas_width, atlas_x, atlas_y, width, height):
         return []
     val src_r = ((color >> 16) & 0xFFu32).to_i64()
     val src_g = ((color >> 8) & 0xFFu32).to_i64()
@@ -2734,7 +2760,8 @@ class Engine2D with DrawIrRenderTarget:
                     quad.atlas_x >= 0 and quad.atlas_y >= 0 and
                     quad.atlas_x.to_i64() + quad.width.to_i64() <= batch.atlas_width.to_i64() and
                     quad.atlas_y.to_i64() + quad.height.to_i64() <= batch.atlas_height.to_i64() and
-                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64():
+                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64() and
+                    engine2d_lcd_quad_has_lcd_cell(batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y, quad.width, quad.height):
                 val dst = self.read_pixels_region(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height).pixels
                 val lcd_pixels = engine2d_lcd_quad_composite(
                     batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y,

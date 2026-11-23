@@ -1,0 +1,54 @@
+# @tag: unit, gpu, engine2d, software, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl 2%
+#
+# A catalog section's border (1px solid #c7d2fe, radius 12px) at device scale
+# 4 on a 3600 x 3040 frame, on a box taller than the frame. Its left and right
+# sides were blended one 4-px row at a time (~0.3 s per side), and its top
+# corner strips classified ~100 us per pixel. Pixels are pinned by a hash
+# measured on the base implementation (release/1.0.0 0354c53a8be), the cost by
+# a wall budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{Engine2dDrawIrCornerRadii, engine2d_draw_ir_render_typed_border_ring}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (release/1.0.0 0354c53a8be).
+val RING_HASH: i64 = 3908529834
+
+fn sampled_hash(pixels: [u32], w: i32, h: i32) -> i64:
+    var acc: i64 = 17
+    var y = 0
+    # cpu-lane-loop-ok: spec probe; the ring is thin, so every column of every 3rd row
+    while y < h:
+        var x = 0
+        while x < w:
+            acc = (acc * 31 + (pixels[y * w + x] as i64)) % 4294967291
+            x = x + 1
+        y = y + 3
+    acc
+
+fn corners(r: i32) -> Engine2dDrawIrCornerRadii:
+    Engine2dDrawIrCornerRadii(schema_present: true, valid: true, top_left: r, top_right: r, bottom_right: r, bottom_left: r)
+
+fn paint_rings() -> ([u32], i64):
+    var eng = Engine2D.create_with_backend(FRAME_W, FRAME_H, "cpu_simd")
+    eng.clear(0xffeef0ffu32)
+    val t0 = time_now_unix_micros()
+    # Opaque section border, and a translucent one (blend path kept).
+    eng = engine2d_draw_ir_render_typed_border_ring(eng, 96, 96, 3408, 50020, [4, 4, 4, 4], [0xffc7d2feu32, 0xffc7d2feu32, 0xffc7d2feu32, 0xffc7d2feu32], corners(48))
+    eng = engine2d_draw_ir_render_typed_border_ring(eng, 180, 1507, 3240, 48428, [4, 8, 4, 8], [0x80304050u32, 0xff112233u32, 0x80304050u32, 0xff112233u32], corners(48))
+    val elapsed = time_now_unix_micros() - t0
+    val pixels = eng.read_pixels()
+    (pixels, elapsed)
+
+describe "border ring of a box taller than the frame":
+    it "paints the measured pixels within a time budget":
+        val r = paint_rings()
+        val h = sampled_hash(r.0, FRAME_W, FRAME_H)
+        print "border_ring elapsed_us={r.1} hash={h}"
+        expect(r.0.len()).to_equal(FRAME_W * FRAME_H)
+        expect(h).to_equal(RING_HASH)
+        expect(r.1 < 500000).to_equal(true)
