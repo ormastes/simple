@@ -1,46 +1,62 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Native closure diagnostic UTF-8 boundary proof
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  native-owner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          path: control
+          sparse-checkout: scripts/check
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - uses: actions/checkout@v5
+        with:
+          ref: 0e3119fe909a1692108d4d3d4e088b4712806c5f
+          path: source
+          persist-credentials: false
+      - name: Bind repaired native producer provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p intake
+          gh api repos/${{ github.repository }}/actions/runs/45254614898 > intake/parent-run.json
+          gh api repos/${{ github.repository }}/actions/artifacts/14858799081 > intake/parent-artifact.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          run=json.loads(Path('intake/parent-run.json').read_text())
+          artifact=json.loads(Path('intake/parent-artifact.json').read_text())
+          assert run['head_sha']=='ce231b5b898d797c98d44a9b59a4859a7d792a7b'
+          assert run['status']=='completed' and run['conclusion']=='success'
+          assert artifact['workflow_run']['id']==45254614898 and not artifact['expired']
+          assert artifact['digest']=='sha256:9e2fd5aac71751d7871c3d2e7209cdc506c6dffd285447b5bb0fdb0dbd4b43ad'
+          PY
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14858799081'
+          run-id: '45254614898'
+          github-token: ${{ github.token }}
+          path: intake/parent
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14833542613'
+          run-id: '45205044707'
+          github-token: ${{ github.token }}
+          path: intake/runtime
+      - name: Native fixture tools
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Compile actual corrected formatter and verify six boundary cases
+        run: python control/scripts/check/closure-gap-utf8-native-proof.py
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: closure-gap-utf8-${{ github.sha }}
+          path: source/build/utf8-gap-proof/
+          retention-days: 7
