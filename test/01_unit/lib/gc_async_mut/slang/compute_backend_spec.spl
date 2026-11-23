@@ -6,6 +6,7 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{env_get}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
+use std.gc_async_mut.gpu.cuda.cuda_compute.{cuda_driver_available}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
 use std.gc_async_mut.slang.model_executor.pure.compute_backend.{ComputeKind, DeviceTensor, compute_open, compute_kind_name, compute_parse_kind, compute_upload, compute_download, compute_matvec, compute_rmsnorm, compute_add, compute_mul, compute_silu, compute_kv_write, compute_row, compute_argmax, compute_alloc, compute_free, compute_upload_f32_bytes, compute_sync, compute_gpu_library_loaded}
 
@@ -27,6 +28,7 @@ describe "compute_open selection and errors":
     it "names every kind":
         expect(compute_kind_name(ComputeKind.Cpu)).to_equal("cpu")
         expect(compute_kind_name(ComputeKind.Rocm)).to_equal("rocm")
+        expect(compute_kind_name(ComputeKind.Cuda)).to_equal("cuda")
 
     it "parses backend names case-insensitively":
         expect(compute_parse_kind("ROCm").is_some()).to_equal(true)
@@ -42,12 +44,22 @@ describe "compute_open selection and errors":
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("unknown compute backend 'tpu'")
 
-    it "offers only rocm and cpu: other provider names are rejected until their lane lands":
-        for name in ["cuda", "vulkan", "metal"]:
+    it "offers rocm, cuda and cpu: other provider names are rejected until their lane lands":
+        for name in ["vulkan", "metal"]:
             val r = compute_open(name)
             expect(r.is_err()).to_equal(true)
-            expect(r.unwrap_err()).to_contain("unknown compute backend '{name}' (expected auto|rocm|cpu)")
+            expect(r.unwrap_err()).to_contain("unknown compute backend '{name}' (expected auto|rocm|cuda|cpu)")
             expect(compute_parse_kind(name).is_none()).to_equal(true)
+
+    it "parses cuda case-insensitively":
+        expect(compute_kind_name(compute_parse_kind("CUDA").unwrap())).to_equal("cuda")
+
+    it "cuda fails to open on a host without an NVIDIA driver, with the cuda reason and no fallback":
+        if not cuda_driver_available():
+            val r = compute_open("cuda")
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_start_with("cuda: ")
+            expect(r.unwrap_err()).to_contain("driver library not found")
 
     it "trims whitespace around the requested backend":
         val ops = compute_open("  CPU ").unwrap()
@@ -67,6 +79,7 @@ describe "compute_open selection and errors":
             expect(name).to_equal("rocm")
         if not overridden and name == "cpu":
             expect(ops.diag).to_contain("rocm:")
+            expect(ops.diag).to_contain("cuda:")
 
 
 describe "compute_* cpu arm equals the CPU reference":
@@ -116,6 +129,14 @@ describe "compute_* rejects a tensor of another backend kind":
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("rocm tensor passed to a cpu op")
         expect(compute_argmax(ops, g).is_err()).to_equal(true)
+
+    it "cpu ops reject a cuda tensor with an Err":
+        val ops = _cpu()
+        val g = DeviceTensor(kind: ComputeKind.Cuda, ptr: 4096, n: 3, shape: [3], host: [])
+        val a = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
+        val r = compute_add(ops, a, g)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("cuda tensor passed to a cpu op")
 
 
 describe "compute_* cpu arm returns Err instead of panicking":

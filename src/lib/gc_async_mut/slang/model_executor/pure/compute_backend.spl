@@ -1,7 +1,7 @@
 # @gc — module uses GC runtime
 #
 # compute_backend — the backend-neutral GPU compute interface of the pure LLM
-# runner:  slang -> pure runner -> compute_* (this file) -> ROCm | CPU. Other GPU providers are added by their own lanes.
+# runner:  slang -> pure runner -> compute_* (this file) -> ROCm | CUDA | CPU. Other GPU providers are added by their own lanes.
 #
 # `DeviceTensor` is one f32 tensor on whichever backend owns it. For the GPU
 # kind `ptr` is the device buffer and `host` is empty. For `Cpu` there is no
@@ -11,8 +11,8 @@
 #
 # `ComputeOps` carries the kind plus the opened provider handle. Each compute_*
 # function dispatches by `match` on the tensor/ops kind to the provider's own
-# functions (`rocm_tensor_*`); providers keep
-# their own files. Every arm is ONE line. The ROCm provider is wired.
+# functions (`rocm_tensor_*`, `cuda_tensor_*`); providers keep
+# their own files. Every arm is ONE line. The ROCm and CUDA providers are wired.
 #
 # Dynamic loading: nothing here (or in any provider module) loads a native
 # library at import or does top-level work; provider modules hold only constants
@@ -30,11 +30,13 @@
 use std.gc_async_mut.slang.host.slang_host.{host_env}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_zeros, tensor_decode_f32_le, tensor_row, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_rope, tensor_kv_write, tensor_attention, tensor_argmax}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{RocmOps, RocmTensor, rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_upload_f32_bytes, rocm_tensor_download, rocm_tensor_free, rocm_tensor_matvec, rocm_tensor_rmsnorm, rocm_tensor_add, rocm_tensor_mul, rocm_tensor_silu, rocm_tensor_rope, rocm_tensor_kv_write, rocm_tensor_row, rocm_tensor_attention, rocm_tensor_argmax, rocm_buffer_alloc_tensor, rocm_ops_sync}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_cuda.{CudaOps, CudaTensor, cuda_ops_open, cuda_ops_device_name, cuda_tensor_upload, cuda_tensor_upload_f32_bytes, cuda_tensor_download, cuda_tensor_free, cuda_tensor_matvec, cuda_tensor_rmsnorm, cuda_tensor_add, cuda_tensor_mul, cuda_tensor_silu, cuda_tensor_rope, cuda_tensor_kv_write, cuda_tensor_row, cuda_tensor_attention, cuda_tensor_argmax, cuda_buffer_alloc_tensor, cuda_ops_sync}
 use std.gc_async_mut.gpu.rocm.hip_compute.{gpu_dll_loaded}
 
 pub enum ComputeKind:
     Cpu
     Rocm
+    Cuda
 
 @allow(primitive_api)  # reason: raw device pointer and element count mirror the provider buffer handle
 pub struct DeviceTensor:
@@ -47,24 +49,28 @@ pub struct DeviceTensor:
 pub struct ComputeOps:
     kind: ComputeKind
     rocm: Option<RocmOps>
+    cuda: Option<CudaOps>
     diag: text
 
-# True when the ROCm provider's native library is mapped in this process (each
+# True when a GPU provider's native library is mapped in this process (each
 # provider lane ORs in its own query here).
-@allow(primitive_api)  # reason: yes/no probe of whether the ROCm runtime library is mapped
+@allow(primitive_api)  # reason: yes/no probe of whether a GPU runtime library is mapped
 pub fn compute_gpu_library_loaded() -> bool:
-    gpu_dll_loaded(["amdhip64_7.dll", "hiprtc0702.dll"])
+    gpu_dll_loaded(["amdhip64_7.dll", "hiprtc0702.dll", "nvcuda.dll"])
 
 pub fn compute_kind_name(k: ComputeKind) -> text:
     match k:
         ComputeKind.Cpu: "cpu"
         ComputeKind.Rocm: "rocm"
+        ComputeKind.Cuda: "cuda"
 
-# "rocm" | "cpu" (case-insensitive) -> kind; None otherwise.
+# "rocm" | "cuda" | "cpu" (case-insensitive) -> kind; None otherwise.
 pub fn compute_parse_kind(name: text) -> Option<ComputeKind>:
     val s = name.lower()
     if s == "rocm":
         return Some(ComputeKind.Rocm)
+    if s == "cuda":
+        return Some(ComputeKind.Cuda)
     if s == "cpu":
         return Some(ComputeKind.Cpu)
     None
@@ -138,33 +144,54 @@ fn _cpu_argmax(x: DeviceTensor) -> Result<i64, text>:
         return Err("compute: argmax of an empty tensor")
     Ok(tensor_argmax(xp))
 
+fn _from_cuda(t: CudaTensor) -> DeviceTensor:
+    DeviceTensor(kind: ComputeKind.Cuda, ptr: t.ptr, n: t.n, shape: t.shape, host: [])
+
+fn _to_cuda(t: DeviceTensor) -> Result<CudaTensor, text>:
+    _expect_kind(t, ComputeKind.Cuda)?
+    Ok(CudaTensor(ptr: t.ptr, n: t.n, shape: t.shape))
+
 fn _wrap_rocm(r: Result<RocmTensor, text>) -> Result<DeviceTensor, text>:
     val t = r?
     Ok(_from_rocm(t))
+
+fn _wrap_cuda(r: Result<CudaTensor, text>) -> Result<DeviceTensor, text>:
+    val t = r?
+    Ok(_from_cuda(t))
 
 fn _rocm_h(ops: ComputeOps) -> Result<RocmOps, text>:
     if val h = ops.rocm:
         return Ok(h)
     Err("compute ops of kind {compute_kind_name(ops.kind)} carry no ROCm handle")
 
+fn _cuda_h(ops: ComputeOps) -> Result<CudaOps, text>:
+    if val h = ops.cuda:
+        return Ok(h)
+    Err("compute ops of kind {compute_kind_name(ops.kind)} carry no CUDA handle")
+
 # ---- open ----
 
 fn _cpu_ops(diag: text) -> ComputeOps:
-    ComputeOps(kind: ComputeKind.Cpu, rocm: None, diag: diag)
+    ComputeOps(kind: ComputeKind.Cpu, rocm: None, cuda: None, diag: diag)
 
 fn _open_kind(kind: ComputeKind) -> Result<ComputeOps, text>:
     match kind:
         ComputeKind.Cpu: Ok(_cpu_ops(""))
         ComputeKind.Rocm: _open_rocm()
+        ComputeKind.Cuda: _open_cuda()
 
 fn _open_rocm() -> Result<ComputeOps, text>:
     val h = rocm_ops_open()?
-    Ok(ComputeOps(kind: ComputeKind.Rocm, rocm: Some(h), diag: ""))
+    Ok(ComputeOps(kind: ComputeKind.Rocm, rocm: Some(h), cuda: None, diag: ""))
 
-# Open a backend. pref: "auto" (or "") | "rocm" | "cpu".
-# For "auto" the env var SLANG_GPU (rocm|cpu) overrides the order; an
+fn _open_cuda() -> Result<ComputeOps, text>:
+    val h = cuda_ops_open()?
+    Ok(ComputeOps(kind: ComputeKind.Cuda, rocm: None, cuda: Some(h), diag: ""))
+
+# Open a backend. pref: "auto" (or "") | "rocm" | "cuda" | "cpu".
+# For "auto" the env var SLANG_GPU (rocm|cuda|cpu) overrides the order; an
 # overridden backend that fails to open is an error (no silent fallback). With
-# no override, auto tries Rocm, Cpu and the first that opens wins;
+# no override, auto tries Rocm, Cuda, Cpu and the first that opens wins;
 # the reasons earlier ones failed are recorded in `ComputeOps.diag`.
 # (host_env returns "" when the variable is unset.)
 pub fn compute_open(pref: text) -> Result<ComputeOps, text>:
@@ -176,18 +203,18 @@ pub fn compute_open(pref: text) -> Result<ComputeOps, text>:
     if want != "" and want != "auto":
         val k = compute_parse_kind(want)
         if k.is_none():
-            return Err("unknown compute backend '{want}' (expected auto|rocm|cpu)")
+            return Err("unknown compute backend '{want}' (expected auto|rocm|cuda|cpu)")
         val kind = k.unwrap()
         val r = _open_kind(kind)
         if r.is_err():
             return Err("{compute_kind_name(kind)}: {r.unwrap_err()}")
         return r
     var diag = ""
-    for kind in [ComputeKind.Rocm]:
+    for kind in [ComputeKind.Rocm, ComputeKind.Cuda]:
         val r = _open_kind(kind)
         if r.is_ok():
             val o = r.unwrap()
-            return Ok(ComputeOps(kind: o.kind, rocm: o.rocm, diag: diag))
+            return Ok(ComputeOps(kind: o.kind, rocm: o.rocm, cuda: o.cuda, diag: diag))
         diag = diag + "{compute_kind_name(kind)}: {r.unwrap_err()}; "
     Ok(_cpu_ops(diag))
 
@@ -195,11 +222,17 @@ pub fn compute_device_name(ops: ComputeOps) -> text:
     match ops.kind:
         ComputeKind.Cpu: "cpu"
         ComputeKind.Rocm: _rocm_name(ops)
+        ComputeKind.Cuda: _cuda_name(ops)
 
 fn _rocm_name(ops: ComputeOps) -> text:
     if val h = ops.rocm:
         return rocm_ops_device_name(h)
     "rocm"
+
+fn _cuda_name(ops: ComputeOps) -> text:
+    if val h = ops.cuda:
+        return cuda_ops_device_name(h)
+    "cuda"
 
 # ---- transfer ----
 
@@ -207,6 +240,7 @@ pub fn compute_upload(ops: ComputeOps, t: PureTensor) -> Result<DeviceTensor, te
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(t))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_upload(_rocm_h(ops)?, t))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_upload(_cuda_h(ops)?, t))
 
 # Little-endian F32 bytes[offset .. offset + numel*4] straight to the backend.
 @allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the provider kernel parameters
@@ -216,23 +250,27 @@ pub fn compute_upload_f32_bytes(ops: ComputeOps, bytes: [u8], offset: i64, shape
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_decode_f32_le(bytes, offset, _numel(shape), shape)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_upload_f32_bytes(_rocm_h(ops)?, bytes, offset, shape))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_upload_f32_bytes(_cuda_h(ops)?, bytes, offset, shape))
 
 pub fn compute_download(ops: ComputeOps, t: DeviceTensor) -> Result<PureTensor, text>:
     match t.kind:
         ComputeKind.Cpu: _to_cpu(t)
         ComputeKind.Rocm: rocm_tensor_download(_rocm_h(ops)?, _to_rocm(t)?)
+        ComputeKind.Cuda: cuda_tensor_download(_cuda_h(ops)?, _to_cuda(t)?)
 
 # Uninitialised (zeroed on Cpu) tensor of `shape`, e.g. a KV buffer.
 pub fn compute_alloc(ops: ComputeOps, shape: [i64]) -> Result<DeviceTensor, text>:
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_zeros(shape)))
         ComputeKind.Rocm: _wrap_rocm(rocm_buffer_alloc_tensor(_rocm_h(ops)?, shape))
+        ComputeKind.Cuda: _wrap_cuda(cuda_buffer_alloc_tensor(_cuda_h(ops)?, shape))
 
 @allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
 pub fn compute_free(ops: ComputeOps, t: DeviceTensor) -> Result<i64, text>:
     match t.kind:
         ComputeKind.Cpu: Ok(0)
         ComputeKind.Rocm: rocm_tensor_free(_rocm_h(ops)?, _to_rocm(t)?)
+        ComputeKind.Cuda: cuda_tensor_free(_cuda_h(ops)?, _to_cuda(t)?)
 
 # Block until all launched work finished (GPU ops are asynchronous).
 @allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
@@ -240,6 +278,7 @@ pub fn compute_sync(ops: ComputeOps) -> Result<i64, text>:
     match ops.kind:
         ComputeKind.Cpu: Ok(0)
         ComputeKind.Rocm: rocm_ops_sync(_rocm_h(ops)?)
+        ComputeKind.Cuda: cuda_ops_sync(_cuda_h(ops)?)
 
 # ---- ops (each returns a new tensor; inputs stay valid) ----
 
@@ -248,27 +287,32 @@ pub fn compute_matvec(ops: ComputeOps, w: DeviceTensor, x: DeviceTensor) -> Resu
     match ops.kind:
         ComputeKind.Cpu: _cpu_matvec(w, x)
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_matvec(_rocm_h(ops)?, _to_rocm(w)?, _to_rocm(x)?))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_matvec(_cuda_h(ops)?, _to_cuda(w)?, _to_cuda(x)?))
 
 @allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the provider kernel parameters
 pub fn compute_rmsnorm(ops: ComputeOps, x: DeviceTensor, w: DeviceTensor, eps: f64) -> Result<DeviceTensor, text>:
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_rmsnorm(_to_cpu(x)?, _to_cpu(w)?, eps)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_rmsnorm(_rocm_h(ops)?, _to_rocm(x)?, _to_rocm(w)?, eps))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_rmsnorm(_cuda_h(ops)?, _to_cuda(x)?, _to_cuda(w)?, eps))
 
 pub fn compute_add(ops: ComputeOps, a: DeviceTensor, b: DeviceTensor) -> Result<DeviceTensor, text>:
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_add(_to_cpu(a)?, _to_cpu(b)?)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_add(_rocm_h(ops)?, _to_rocm(a)?, _to_rocm(b)?))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_add(_cuda_h(ops)?, _to_cuda(a)?, _to_cuda(b)?))
 
 pub fn compute_mul(ops: ComputeOps, a: DeviceTensor, b: DeviceTensor) -> Result<DeviceTensor, text>:
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_mul(_to_cpu(a)?, _to_cpu(b)?)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_mul(_rocm_h(ops)?, _to_rocm(a)?, _to_rocm(b)?))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_mul(_cuda_h(ops)?, _to_cuda(a)?, _to_cuda(b)?))
 
 pub fn compute_silu(ops: ComputeOps, x: DeviceTensor) -> Result<DeviceTensor, text>:
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_silu(_to_cpu(x)?)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_silu(_rocm_h(ops)?, _to_rocm(x)?))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_silu(_cuda_h(ops)?, _to_cuda(x)?))
 
 # Causal multi-head attention for one query against KV rows [0, n_pos).
 @allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the provider kernel parameters
@@ -276,6 +320,7 @@ pub fn compute_attention(ops: ComputeOps, q: DeviceTensor, k_buf: DeviceTensor, 
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_attention(_to_cpu(q)?, _to_cpu(k_buf)?, _to_cpu(v_buf)?, n_pos, n_heads, head_dim)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_attention(_rocm_h(ops)?, _to_rocm(q)?, _to_rocm(k_buf)?, _to_rocm(v_buf)?, n_pos, n_heads, head_dim))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_attention(_cuda_h(ops)?, _to_cuda(q)?, _to_cuda(k_buf)?, _to_cuda(v_buf)?, n_pos, n_heads, head_dim))
 
 # RoPE on a [n_heads * head_dim] vector at position `pos`.
 @allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the provider kernel parameters
@@ -283,6 +328,7 @@ pub fn compute_rope(ops: ComputeOps, x: DeviceTensor, pos: i64, n_heads: i64, he
     match ops.kind:
         ComputeKind.Cpu: Ok(_from_cpu(tensor_rope(_to_cpu(x)?, pos, n_heads, head_dim, theta)))
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_rope(_rocm_h(ops)?, _to_rocm(x)?, pos, n_heads, head_dim, theta))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_rope(_cuda_h(ops)?, _to_cuda(x)?, pos, n_heads, head_dim, theta))
 
 # Write `row` into row `pos` of the [capacity, dim] buffer; returns the buffer to
 # keep using (same handle on GPU, updated value on Cpu).
@@ -291,9 +337,14 @@ pub fn compute_kv_write(ops: ComputeOps, buf: DeviceTensor, pos: i64, row: Devic
     match ops.kind:
         ComputeKind.Cpu: _cpu_kv_write(buf, pos, row)
         ComputeKind.Rocm: _kv_rocm(ops, buf, pos, row)
+        ComputeKind.Cuda: _kv_cuda(ops, buf, pos, row)
 
 fn _kv_rocm(ops: ComputeOps, buf: DeviceTensor, pos: i64, row: DeviceTensor) -> Result<DeviceTensor, text>:
     rocm_tensor_kv_write(_rocm_h(ops)?, _to_rocm(buf)?, pos, _to_rocm(row)?)?
+    Ok(buf)
+
+fn _kv_cuda(ops: ComputeOps, buf: DeviceTensor, pos: i64, row: DeviceTensor) -> Result<DeviceTensor, text>:
+    cuda_tensor_kv_write(_cuda_h(ops)?, _to_cuda(buf)?, pos, _to_cuda(row)?)?
     Ok(buf)
 
 # Row `row` of a [rows, cols] table as a new [cols] tensor.
@@ -302,6 +353,7 @@ pub fn compute_row(ops: ComputeOps, table: DeviceTensor, row: i64) -> Result<Dev
     match ops.kind:
         ComputeKind.Cpu: _cpu_row(table, row)
         ComputeKind.Rocm: _wrap_rocm(rocm_tensor_row(_rocm_h(ops)?, _to_rocm(table)?, row))
+        ComputeKind.Cuda: _wrap_cuda(cuda_tensor_row(_cuda_h(ops)?, _to_cuda(table)?, row))
 
 # Index of the largest element (lowest index on ties).
 @allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
@@ -309,3 +361,4 @@ pub fn compute_argmax(ops: ComputeOps, x: DeviceTensor) -> Result<i64, text>:
     match ops.kind:
         ComputeKind.Cpu: _cpu_argmax(x)
         ComputeKind.Rocm: rocm_tensor_argmax(_rocm_h(ops)?, _to_rocm(x)?)
+        ComputeKind.Cuda: cuda_tensor_argmax(_cuda_h(ops)?, _to_cuda(x)?)
