@@ -1,46 +1,66 @@
 name: Bootstrap Sanity Evidence Archive
-
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  isolated-windows-warm-parse:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          path: control
+      - uses: actions/checkout@v5
+        with:
+          ref: b63dce1068c2fc515a4e3ad05e137476909ed105
+          path: source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14838999225'
+          run-id: '45216232496'
+          github-token: ${{ github.token }}
+          path: producer
+      - name: Prepare exact frozen case and verified Windows producer
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = b63dce1068c2fc515a4e3ad05e137476909ed105
+          printf '%s  %s\n' af40b819c008ffad5b0ff6272dd35451c306f4c1d72388cbfba2026ceae5cf5f producer/simple.exe | sha256sum --check --status
+          python control/scripts/check/prepare-windows-warm-parse-proof.py
+          cd control
+          sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw
+      - name: Execute only warm-cache case with authoritative Windows Job cap
+        run: |
+          set -euo pipefail
+          control="$PWD/control"
+          seed=$(cygpath -am "$PWD/producer/simple.exe")
+          cd control
+          . scripts/setup/windows-gitbash-bootstrap-env.shs
+          cd ../source
+          export SIMPLE_LIB="$PWD/src" SIMPLE_PROJECT_ROOT="$PWD"
+          export SIMPLE_TEST_RUNNER_RUST=1 SIMPLE_COMPILER_TRACE=1
+          export SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$RUNNER_TEMP/warm-parse-helper"
+          set +e
+          perl "$control/scripts/resource/process-tree-rss-watchdog.pl" --rss-cap-mode=enforce --max-rss-kib=2097152 --timeout-seconds=180 --receipt=warm-parse-proof/owner.env -- "$seed" test warm-parse-proof/isolated_spec.spl --mode=interpreter >warm-parse-proof/stdout.log 2>warm-parse-proof/stderr.log
+          code=$?
+          set -e
+          printf '%s\n' "$code" > warm-parse-proof/exit.txt
+          printf '%s  %s\n' af40b819c008ffad5b0ff6272dd35451c306f4c1d72388cbfba2026ceae5cf5f ../producer/simple.exe | sha256sum --check --status
+          exit "$code"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-warm-parse-${{ github.sha }}
+          path: |
+            source/warm-parse-proof
+            source/build/test-artifacts
+            source/build/tests/warm-fe-cache-*
+          include-hidden-files: true
+          retention-days: 14
