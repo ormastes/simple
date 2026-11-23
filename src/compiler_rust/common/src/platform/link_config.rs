@@ -387,7 +387,6 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
         ],
         TargetOS::MacOS => vec!["System".into(), "simple_runtime".into()],
         TargetOS::Windows => vec![
-            "c".into(),
             "msvcrt".into(),
             "kernel32".into(),
             "ws2_32".into(),
@@ -412,6 +411,17 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_windows_uses_crt_without_unix_libc() {
+        for triple in ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"] {
+            let libraries = default_libraries_for_target(&Target::parse(triple).unwrap());
+            assert!(!libraries.iter().any(|library| library == "c"), "{triple}");
+            assert!(libraries.iter().any(|library| library == "msvcrt"), "{triple}");
+        }
+        let linux = default_libraries_for_target(&Target::parse("x86_64-unknown-linux-gnu").unwrap());
+        assert!(linux.iter().any(|library| library == "c"));
+    }
 
     #[test]
     fn coff_links_do_not_tolerate_unresolved_symbols() {
