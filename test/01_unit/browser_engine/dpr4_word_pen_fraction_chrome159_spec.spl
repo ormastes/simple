@@ -38,8 +38,6 @@ antialiased column between the two rasterisers.
 Traceability: REQ-WEB-DPR4-WORD-PEN-001 — at device scale k>1 a word starts at Chrome's fractional pen position, not on a whole CSS px.
 """
 # @tag: unit, browser_engine, text, device_scale, chrome159
-# @tag:in-development
-# Tracks: red (0/3) — at k>1 word pens stay at k x whole-CSS-px; advances measured at k x font size drifted +0..+18 device px over a long line and raised the 4x catalog (tried commit 0ac1581f05a on local branch wip/pd-layout-word-pen-drift-20261122). Next: probe with the paint-path language/size, add a long-line case. Delete this tag in the commit that turns it green.
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
@@ -52,6 +50,13 @@ val CSS_H: i32 = 150
 val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px}} div{{margin:0 0 0 10px;width:200px}}</style></head><body>" +
     "<p>a b c d e f g h</p><p>x — y</p><p>— y</p>" +
     "<div><code>ab</code> plain words here that wrap onto a second line</div><p>tail</p></body></html>"
+
+val PAGE_IIII: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px}}</style></head><body><p>iiii</p><p style=\"letter-spacing:1.37px\">iiii</p></body></html>"
+
+val PAGE_12: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:12px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px}}</style></head><body><p>Sphinx of black quartz, judge my vow</p></body></html>"
+
+val PAGE_LONG: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px;white-space:nowrap}}</style></head><body>" +
+    "<p>Sphinx of black quartz, judge my vow and pack my box with five</p></body></html>"
 
 fn _red(px: u32) -> i32:
     ((px >> 16u32) & 0xFFu32) as i32
@@ -71,6 +76,26 @@ fn _first_ink_col(px: [u32], x0: i32, y0: i32) -> i32:
         x = x + 1
     -1
 
+# Device columns in 0..x_end where ink (red < 128) begins after a blank
+# column, rows y0..y1: one entry per separated glyph.
+fn _ink_starts(px: [u32], x_end: i32, y0: i32, y1: i32) -> [i32]:
+    val w = CSS_W * 4
+    var out: [i32] = []
+    var prev = false
+    var x = 0
+    while x < x_end:
+        var ink = false
+        var y = y0
+        while y < y1 and not ink:
+            if _red(px[y * w + x]) < 128:
+                ink = true
+            y = y + 1
+        if ink and not prev:
+            out.push(x)
+        prev = ink
+        x = x + 1
+    out
+
 fn _near(got: i32, chrome: i32) -> bool:
     got >= chrome - 1 and got <= chrome + 1
 
@@ -88,3 +113,82 @@ describe "Words start at Chrome's fractional pen at device scale 4 (Chrome 159)"
     it "AC-3: `y` of `— y` starts at device column 122":
         val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
         expect(_near(_first_ink_col(px, 110, 192), 122)).to_equal(true)
+
+    # A whole sentence on one line: a per-glyph pen model that drifts shows
+    # here, not on a short line. Chrome word starts (Range left, CSS px):
+    # Sphinx 10.000, of 63.367, black 81.156, quartz, 122.953, judge 176.313,
+    # my 219.906, vow 245.680, and 278.578, pack 309.719, my 347.961,
+    # box 373.734, with 403.977, five 436.875. First ink column (device px)
+    # searched from floor(4 x left) - 6 in rows 0..96.
+    it "AC-4: every word of a full-width sentence starts at Chrome's device column":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_LONG, CSS_W, CSS_H, 4, "cpu_simd")
+        val from: [i32] = [34, 247, 318, 485, 699, 873, 976, 1108, 1232, 1385, 1488, 1609, 1741]
+        val chrome: [i32] = [43, 256, 329, 494, 704, 884, 983, 1117, 1243, 1396, 1499, 1616, 1748]
+        var got = ""
+        var want = ""
+        var i = 0
+        while i < from.len():
+            val col = _first_ink_col(px, from[i], 0)
+            got = got + (if _near(col, chrome[i]): chrome[i].to_text() else: col.to_text()) + " "
+            want = want + chrome[i].to_text() + " "
+            i = i + 1
+        expect(got).to_equal(want)
+
+    # A run laid out mid-line after fractional-width inline content starts at
+    # a fractional pen too: `<code>ab</code>` ends at 29.266 CSS px, so the
+    # run's words start at plain 33.711, words 71.961, here 119.086,
+    # that 155.555 (Range left, CSS px). The run's command sits on a whole CSS
+    # px and carries the rest as `pen-origin-milli`, which must scale by k.
+    it "AC-5: the words of a mid-line run after `<code>` start at Chrome's device columns":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        val from: [i32] = [128, 278, 470, 616]
+        val chrome: [i32] = [139, 288, 481, 623]
+        var got = ""
+        var want = ""
+        var i = 0
+        while i < from.len():
+            val col = _first_ink_col(px, from[i], 288)
+            got = got + (if _near(col, chrome[i]): chrome[i].to_text() else: col.to_text()) + " "
+            want = want + chrome[i].to_text() + " "
+            i = i + 1
+        expect(got).to_equal(want)
+
+    # Per-glyph pens inside one run (from the spacing lane): `iiii` at 16 px,
+    # plain and with letter-spacing 1.37px. Chrome glyph ink starts (device
+    # px, columns where ink begins after a blank column, rows 0..96 / 96..192):
+    # 44 59 73 87 and 44 64 84 103. Base (ccb5a2ef29c) draws 44 60 72 88 and
+    # 44 64 84 104 — already within 1 px — so this pins, not a red-to-green.
+    it "AC-6: each glyph of `iiii` (plain and letter-spacing 1.37px) starts within 1 device px of Chrome":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_IIII, CSS_W, CSS_H, 4, "cpu_simd")
+        val chrome: [i32] = [44, 59, 73, 87, 44, 64, 84, 103]
+        var got = ""
+        var want = ""
+        var i = 0
+        while i < chrome.len():
+            val col = _first_ink_col(px, chrome[i] - 3, if i < 4: 0 else: 96)
+            got = got + (if _near(col, chrome[i]): chrome[i].to_text() else: col.to_text()) + " "
+            want = want + chrome[i].to_text() + " "
+            i = i + 1
+        expect(got).to_equal(want)
+
+    # 12 px text at k=4 is 48 device px, exactly the LCD size cutoff
+    # (FONT_LCD_MAX_SIZE_PX), so the device advances reach the LCD pen-phase
+    # path. Chrome glyph-ink starts (device px, rows 0..72, a column where ink
+    # begins after a blank one) of `Sphinx of black quartz, judge my vow`:
+    # 43 75 102 129 140 164 202 228 257 284 293 320 345 381. Base (cc26757109c)
+    # draws 104 for 102 and 255 for 257 and merges the 320 glyph into its
+    # neighbour.
+    it "AC-7: 12 px text at k=4 (the LCD size cutoff) keeps Chrome's glyph pens":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_12, CSS_W, CSS_H, 4, "cpu_simd")
+        val chrome: [i32] = [43, 75, 102, 129, 140, 164, 202, 228, 257, 284, 293, 320, 345, 381]
+        val starts = _ink_starts(px, 400, 0, 72)
+        var got = ""
+        var want = ""
+        var i = 0
+        while i < chrome.len():
+            val col = if i < starts.len(): starts[i] else: -1
+            got = got + (if _near(col, chrome[i]): chrome[i].to_text() else: col.to_text()) + " "
+            want = want + chrome[i].to_text() + " "
+            i = i + 1
+        expect(got).to_equal(want)
+        expect(starts.len()).to_equal(chrome.len())
