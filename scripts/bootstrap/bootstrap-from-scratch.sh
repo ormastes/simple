@@ -70,6 +70,11 @@ esac
 # Stage 3 knobs are applied in resume-stage3-from-admitted.sh (after --jobs).
 . "${bootstrap_entry_dir}/lib/host-bootstrap-settings.shs"
 bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
+# Host-config frontend_cache (on|off) stands in for an unset caller
+# SIMPLE_FRONTEND_CACHE (W27/W36); resolved here, after the pinned-archive exec,
+# into the same captured caller value the Stage 3 launch and the Stage 2 matrix
+# read. Invalid host value = hard error naming the key.
+bootstrap_host_apply_frontend_cache_default "${bootstrap_early_repo_root}" || exit 64
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -5310,6 +5315,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # single-variable pass-throughs, hashed and transcribed; unset keeps the
   # pinned argv byte-for-byte (SIMPLE_MIR_SHARDING absent, SIMPLE_FRONTEND_CACHE
   # at its pinned 1). Same knobs in resume-stage3-from-admitted.sh.
+  # Host config mir_sharding/mir_shard_count/mir_shard_worker_kib fill an unset
+  # env var (W36); frontend_cache was resolved at entry into
+  # bootstrap_caller_frontend_cache.
+  bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 64
   stage3_mir_sharding_env= stage3_frontend_cache=1
   case "${SIMPLE_MIR_SHARDING:-}" in
     '') ;;
@@ -6318,6 +6327,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # the elevated ceiling when the cap is above the default ceiling, which
       # the campaign and row owners admit under real host headroom). An
       # explicit cap is kept untouched. See bootstrap_tree_rss_whole_build_export.
+      # Host-config matrix knobs (W27/W32/W36) first: an env var left unset is
+      # filled from mir_sharding / mir_shard_count / mir_shard_worker_kib (the
+      # whole-build plan below keeps a set SIMPLE_MIR_SHARD_WORKER_KB), and the
+      # caller/host frontend cache value replaces the SIMPLE_FRONTEND_CACHE=1
+      # the Stage 2 cache setup exported. All four cross into each tool row via
+      # phase-c-backend-commands.shs bootstrap_phase_c_tool_row_environment_keys.
+      bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 125
+      case "${bootstrap_caller_frontend_cache:-}" in
+        '') ;;
+        0|1) SIMPLE_FRONTEND_CACHE=${bootstrap_caller_frontend_cache}; export SIMPLE_FRONTEND_CACHE ;;
+        *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 125 ;;
+      esac
       bootstrap_tree_rss_whole_build_export "${stage2_tests_build_threads}" "${repo_root}" || {
         echo "error: ${bootstrap_tree_rss_refusal}" >&2
         exit 125
