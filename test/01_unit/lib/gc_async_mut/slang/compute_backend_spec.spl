@@ -7,7 +7,7 @@ use std.spec.{describe, it, expect}
 use std.io_runtime.{env_get}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
-use std.gc_async_mut.slang.model_executor.pure.compute_backend.{ComputeKind, DeviceTensor, compute_open, compute_kind_name, compute_parse_kind, compute_upload, compute_download, compute_matvec, compute_rmsnorm, compute_add, compute_mul, compute_silu, compute_kv_write, compute_row, compute_argmax, compute_alloc, compute_free, compute_sync, compute_gpu_library_loaded}
+use std.gc_async_mut.slang.model_executor.pure.compute_backend.{ComputeKind, DeviceTensor, compute_open, compute_kind_name, compute_parse_kind, compute_upload, compute_download, compute_matvec, compute_rmsnorm, compute_add, compute_mul, compute_silu, compute_kv_write, compute_row, compute_argmax, compute_alloc, compute_free, compute_upload_f32_bytes, compute_sync, compute_gpu_library_loaded}
 
 fn _cpu():
     compute_open("cpu").unwrap()
@@ -42,6 +42,17 @@ describe "compute_open selection and errors":
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("unknown compute backend 'tpu'")
 
+    it "offers only rocm and cpu: other provider names are rejected until their lane lands":
+        for name in ["cuda", "vulkan", "metal"]:
+            val r = compute_open(name)
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_contain("unknown compute backend '{name}' (expected auto|rocm|cpu)")
+            expect(compute_parse_kind(name).is_none()).to_equal(true)
+
+    it "trims whitespace around the requested backend":
+        val ops = compute_open("  CPU ").unwrap()
+        expect(compute_kind_name(ops.kind)).to_equal("cpu")
+
     it "auto tries rocm then falls back to cpu and records each failure":
         val ops = compute_open("auto").unwrap()
         val name = compute_kind_name(ops.kind)
@@ -57,13 +68,6 @@ describe "compute_open selection and errors":
         if not overridden and name == "cpu":
             expect(ops.diag).to_contain("rocm:")
 
-
-    it "auto opens some backend and records why earlier ones failed":
-        val ops = compute_open("auto").unwrap()
-        val name = compute_kind_name(ops.kind)
-        expect(name == "rocm" or name == "cpu").to_equal(true)
-        if name == "cpu":
-            expect(ops.diag).to_contain("rocm:")
 
 describe "compute_* cpu arm equals the CPU reference":
     it "uploads, runs elementwise ops and downloads":
@@ -113,3 +117,41 @@ describe "compute_* rejects a tensor of another backend kind":
         expect(r.unwrap_err()).to_contain("rocm tensor passed to a cpu op")
         expect(compute_argmax(ops, g).is_err()).to_equal(true)
 
+
+describe "compute_* cpu arm returns Err instead of panicking":
+    it "matvec rejects mismatched shapes":
+        val ops = _cpu()
+        val w = compute_upload(ops, tensor_from_values([1.0, 0.0, 0.0, 2.0], [2, 2])).unwrap()
+        val x = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
+        val r = compute_matvec(ops, w, x)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("matvec")
+
+    it "matvec rejects a tensor whose data does not match its shape":
+        val ops = _cpu()
+        val bad = DeviceTensor(kind: ComputeKind.Cpu, ptr: 0, n: 1, shape: [2, 2], host: [1.0])
+        val x = compute_upload(ops, tensor_from_values([1.0, 2.0], [2])).unwrap()
+        expect(compute_matvec(ops, bad, x).is_err()).to_equal(true)
+
+    it "row and kv_write reject an out-of-range position":
+        val ops = _cpu()
+        val t = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0, 4.0], [2, 2])).unwrap()
+        expect(compute_row(ops, t, 2).is_err()).to_equal(true)
+        expect(compute_row(ops, t, -1).is_err()).to_equal(true)
+        val row = compute_upload(ops, tensor_from_values([9.0, 9.0], [2])).unwrap()
+        expect(compute_kv_write(ops, t, 2, row).is_err()).to_equal(true)
+        val short = compute_upload(ops, tensor_from_values([9.0], [1])).unwrap()
+        expect(compute_kv_write(ops, t, 0, short).is_err()).to_equal(true)
+
+    it "argmax of an empty tensor is an Err":
+        val ops = _cpu()
+        val e = compute_upload(ops, tensor_from_values([], [0])).unwrap()
+        expect(compute_argmax(ops, e).is_err()).to_equal(true)
+
+    it "upload_f32_bytes rejects a range outside the source":
+        val ops = _cpu()
+        val bytes: [u8] = [0, 0, 128, 63, 0, 0, 0, 64]
+        val ok = compute_upload_f32_bytes(ops, bytes, 0, [2]).unwrap()
+        expect(_vals(compute_download(ops, ok).unwrap())).to_equal([1.0, 2.0])
+        expect(compute_upload_f32_bytes(ops, bytes, 4, [2]).is_err()).to_equal(true)
+        expect(compute_upload_f32_bytes(ops, bytes, -1, [1]).is_err()).to_equal(true)
