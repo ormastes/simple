@@ -1769,7 +1769,13 @@ int main(int argc, char** argv) {
             None
         };
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
-        let host_gpu_core_runtime = if host_gpu_lane {
+        // host-gpu-native-all: the vulkan native_all archive is the primary
+        // runtime (linked first, so one owner holds the argv family); this
+        // supplement follows it for the C-only names. No hosted rlib: the
+        // archive already carries spl_hosted_runtime.
+        let host_gpu_native_all_lane =
+            self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpuNativeAll;
+        let host_gpu_core_runtime = if host_gpu_lane || host_gpu_native_all_lane {
             Some(
                 build_core_c_runtime_supplement_library(&temp_dir.join("host_gpu_core_c_runtime"))
                     .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
@@ -1838,6 +1844,17 @@ int main(int argc, char** argv) {
         let exact_stage4 = !stage4_c_providers.is_empty();
         if exact_stage4 && std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() != Ok("1") {
             return Err("Stage4 exact provider profile requires SIMPLE_NO_STUB_FALLBACK=1".to_string());
+        }
+        // The vulkan native_all closure carries ~36 dead pre-GC references
+        // (rt_metal_*, rt_oneapi_*, ...) that the nm preflight cannot tell from
+        // live ones, and stub fallback would weak-stub names the ICD needs. Only
+        // the strict, GC-aware final link is authoritative for this lane.
+        if host_gpu_native_all_lane && std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() != Ok("1") {
+            return Err(
+                "host-gpu-native-all requires SIMPLE_NO_STUB_FALLBACK=1 (strict final link: no stubs, \
+                 every live undefined symbol fails the link)"
+                    .to_string(),
+            );
         }
         let stage4_rust_runtime = if exact_stage4 {
             let runtime_path = self
@@ -2796,10 +2813,13 @@ int main(int argc, char** argv) {
                 .is_some_and(|(_, is_native_all)| !is_native_all)
             && self.runtime_bundle_prefers_core_lane();
         let require_openssl = is_linux_target && Self::entry_objects_require_openssl(object_paths)?;
+        // host-gpu-native-all never puts the external libsqlite3 on the line
+        // (CLAUDE.md "No external SQLite") unless the entry itself asks for it.
         let omit_sqlite = is_linux_target
-            && selected_runtime
-                .as_ref()
-                .is_some_and(|(_, is_native_all)| !is_native_all)
+            && (host_gpu_native_all_lane
+                || selected_runtime
+                    .as_ref()
+                    .is_some_and(|(_, is_native_all)| !is_native_all))
             && !Self::entry_objects_require_sqlite(object_paths)?;
         if is_msvc {
             for lib in &link_config.libraries {

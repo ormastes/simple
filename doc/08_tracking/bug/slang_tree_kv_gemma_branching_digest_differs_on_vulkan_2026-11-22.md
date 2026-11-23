@@ -1,6 +1,6 @@
 # Tree KV cache (mode 3): not bit-exact against cache-off on Vulkan (Gemma branching digest differs)
 
-- **Status:** open. The cause is identified (two backend-level causes, below). The fix needs an owner decision.
+- **Status:** C1 fixed by option (a) (2026-11-23, `slang_ggml_backend_init` sets `GGML_VK_DISABLE_FUSION`); C2 still open, direction (b) below.
 - **Found:** 2026-11-22, Windows EVO-X5Pro host, Radeon 8065S through the Vulkan llama.cpp build (`build-mingw-vulkan`, llama.cpp `99b9548`)
 - **Seed:** `C:/dev/seeds/simple-release.exe`
 - **Spec:** `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl` (unchanged; it still fails 2/3 on Gemma on Vulkan)
@@ -46,3 +46,11 @@ A diagnostic shim printed an FNV hash of the full logits vector at every sample 
 - **(c)** Upstream fix in llama.cpp/ggml-vulkan: accept the reshape in the fusion matchers when a ubatch uses one stream, and make flash attention independent of masked-cell data.
 
 Exactness needs (a or c) plus (b or c). Until then mode 3 is digest-equal to cache-off on the CPU build only. On Vulkan it gives the same text only while greedy argmax happens not to flip. The live spec's digest check is not evidence of bit exactness on a GPU. Only branching was compared at bit level; boundary and multiturn are digest-only.
+
+## Resolution of C1 (2026-11-23, option (a))
+
+`slang_ggml_backend_init` (`src/runtime/slang_ggml_shim.c`) sets `GGML_VK_DISABLE_FUSION=1` before `llama_backend_init`, so it runs before any ggml-vulkan device exists (the device reads the variable once and is kept for the process). It is set at backend init rather than at mode-3 configure because the cache mode can be configured after a cache-off load in the same process, and the device would then already be fused. A value already in the environment wins. The cost is process-wide, as option (a) states.
+
+- Spec `slang_kv_tree_cache_live_spec.spl` on gemma-3-270m-it, Vulkan, seed `simple-release.exe`: old shim `4 total, 2 passed, 2 failed` (branching digest 81048996d497 vs 4524590e911e, and the new fusion example), `C:/dev/slang-logs/treevk-a/old_gemma.log`; new shim `4 total, 4 passed, 0 failed`, branching off and tree both 4524590e911e, `C:/dev/slang-logs/treevk-a/new_gemma.log`.
+- Perf, one paired run, wall ms old -> new (off/tree): branching 1342/727 -> 1231/628, boundary 296/156 -> 257/121, multiturn 1021/569 -> 1075/491. This run shows no slowdown above host noise (the host is shared); the earlier controlled measurement was about +6% (1293 -> 1373 ms off, 720 -> 749 ms tree). Repeat runs were not possible: `C:/dev/seeds` disappeared mid-session. The cost is documented, not fixed.
+- C2 stays open: exactness on Vulkan still needs option (b) (zero the destination stream from a pristine seq and restore the reused prefix by host `llama_state_seq_get_data`/`set_data`) or (c). The spec's digest check is still argmax-level, not bit-level.

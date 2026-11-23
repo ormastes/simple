@@ -1,0 +1,54 @@
+# Execute the pure-Simple primitive twin, separate from the core-C fixture.
+# Expected output: PASS simple_core_string_byte_at_owner
+use runtime.simple_core.core_string.{rt_string_new, rt_string_data, rt_string_byte_at, __simple_rt_string_byte_at, rt_string_free}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_write_u8}
+
+fn byte_owner_check(value: i64, index: i64, expected: i64) -> bool:
+    rt_string_byte_at(value, index) == expected and __simple_rt_string_byte_at(value, index) == expected
+
+fn byte_owner_checks(input: i64, counted: i64) -> i64:
+    val raw = rt_string_data(counted)
+    if rt_string_free(raw) != 0 or rt_string_free(3) != 0:
+        return 8
+    if not (byte_owner_check(counted, 2, 195) and byte_owner_check(raw, 2, 195)):
+        return 2
+    if not (byte_owner_check(raw, -1, 0) and byte_owner_check(raw, 5, 0)):
+        return 3
+    if not byte_owner_check(input, 2, 0):
+        return 4
+    rt_ptr_write_u8(input, 1, 120)
+    if not byte_owner_check(input, 2, 195):
+        return 5
+    rt_ptr_write_u8(input, 1, 0)
+    if not byte_owner_check(input, 2, 0):
+        return 6
+    return 0
+
+fn main() -> i64:
+    val input = rt_alloc(6)
+    if input == 0:
+        print("FAIL allocation")
+        return 1
+    rt_ptr_write_u8(input, 0, 97)
+    rt_ptr_write_u8(input, 1, 0)
+    rt_ptr_write_u8(input, 2, 195)
+    rt_ptr_write_u8(input, 3, 169)
+    rt_ptr_write_u8(input, 4, 122)
+    rt_ptr_write_u8(input, 5, 0)
+    val counted = rt_string_new(input, 5)
+    if (counted & 7) != 1:
+        rt_free(input)
+        print("FAIL counted allocation")
+        return 2
+    val result = byte_owner_checks(input, counted)
+    val freed = rt_string_free(counted)
+    val freed_twice = rt_string_free(counted)
+    rt_free(input)
+    if freed != 1 or freed_twice != 0:
+        print("FAIL counted cleanup")
+        return 7
+    if result != 0:
+        print("FAIL byte owner checks")
+        return result
+    print("PASS simple_core_string_byte_at_owner")
+    return 0

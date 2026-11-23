@@ -14,10 +14,17 @@ Done (2026-11-23, hs2): generation -> image wiring in `hot_swap_pin.spl` — `ho
 readers 0 -> RECLAIMED; a pin is CAS c -> c+1 only for c >= 0). Spec:
 test/01_unit/compiler/loader/hot_swap_image_spec.spl (4/4).
 
+Done (2026-11-23, hs3): fixed-capacity generation table, so there is no reader scan and no reallocation race. Pinned entries are never reused. The OS-thread stress
+spec is blocked by doc/08_tracking/bug/seed_thread_shared_class_object_crash_2026-11-23.md.
+
 Remaining:
-- Route segment mapping (`smf_segment_load` / `segment_mapper`) callers through `hot_swap_slot_load` /
-  `hot_swap_read_begin` instead of a direct image (slot API exists, no production caller yet).
+- DONE 2026-11-23 hs4: compat `ModuleLoader.reload_with_intent` admits pinned paths through the slot before unload
+  (`moduleloader_pin_hot_swap`, `moduleloader_hot_swap_read_begin`; spec `hot_swap_loader_wiring_spec` 3/3).
+- `LazyModuleLoader.moduleloader_replace_live` (99.loader/loader/module_loader.spl) has no slot yet; callers that
+  pin modules (startup load policy) do not call `moduleloader_pin_hot_swap` yet; a failed load AFTER an
+  admitted swap leaves the slot one generation ahead of the (absent) module.
 - State migration across an ABI change (currently refused).
+- Land the OS-thread pin/reclaim stress spec once the seed shared-object crash is fixed (or on a native binary).
 - Bug (FIXED-VERIFICATION-PENDING 2026-11-23, work/at1-20261123): `atomic_i64_new` resolved to an
   i64-returning stub in `io/debug_stubs.spl`, re-exported by `std.nogc_sync_mut.io`, which shadowed
   the `std.nogc_sync_mut.atomic` import under co-compilation. e1b7d525592 renamed the stubs to

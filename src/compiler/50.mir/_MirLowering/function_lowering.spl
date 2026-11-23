@@ -1,4 +1,5 @@
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
+use compiler.hir.return_type_interface_v1.{rti_method_parts, rti_symbol_module, rti_type_param_names}
 # Part of src/compiler/50.mir/mir_lowering.spl: function/const/type/block/range/inline-asm lowering, field resolution
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
@@ -537,6 +538,27 @@ impl MirLowering:
         false
 
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
+        # Establish context from declarations before entering the existing
+        # lowering body. A wrapper restores it even if that body returns early.
+        val caller_params = self.current_rti_consumer_params
+        self.current_rti_consumer_params = rti_type_param_names(fn_.type_params)
+        if fn_.is_method:
+            if val method_symbol = self.symbols.get_symbol_raw(fn_.symbol.id):
+                val parts = rti_method_parts(method_symbol.name)
+                if parts.len() == 2:
+                    val owner_raw = self.symbols.lookup_qualified_type_raw(rti_symbol_module(self.symbols, fn_.symbol.id), parts[0])
+                    if owner_raw >= 0:
+                        if val owner_method = self.symbols.lookup_method_in_type(SymbolId(id: owner_raw), parts[1]):
+                            if owner_method.id == fn_.symbol.id:
+                                if val owner_symbol = self.symbols.get_symbol_raw(owner_raw):
+                                    val owner_key = self.composite_layout_key(owner_symbol)
+                                    if self.struct_type_param_names.has(owner_key):
+                                        self.current_rti_consumer_params = self.current_rti_consumer_params + self.struct_type_param_names[owner_key]
+        val result = self.lower_function_with_gpu_metadata_scoped_v1(fn_, is_gpu_kernel, gpu_target, gpu_backend_order)
+        self.current_rti_consumer_params = caller_params
+        result
+
+    me lower_function_with_gpu_metadata_scoped_v1(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
         # Lambda bindings contain HIR expression bodies, not module metadata.
         # A nested lowering must restore its caller's bindings; a completed

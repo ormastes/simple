@@ -33,6 +33,7 @@ use compiler.core.ast_coverage_inventory.{
     compiler_coverage_inventory_release_parse_scratch}
 use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.driver_parse_shard_rows_v1.{driver_parse_shard_row_plan_v1}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
@@ -41,6 +42,7 @@ use compiler.frontend.resource_registry.{resource_registry_promote_transient_own
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
 use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1,
     driver_hir_worker_parse_verdict_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{file_worker_unit_keep_full_record_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
     worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
     worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
@@ -338,15 +340,22 @@ impl CompilerDriver:
             for _p in source_paths:
                 worker_built.push(false)
         val parse_shard_start = if parse_shard: driver_parse_shard_strided_start_v1(frozen_source_count) else: 0
+        # Rotation can begin at a logical alias of a physical source whose
+        # canonical row appears earlier. Establish the authoritative first
+        # rows before rotation/claims, rather than admitting that alias as a
+        # canonical source in an otherwise empty shard-local registry.
+        val parse_shard_rows = if parse_shard:
+            driver_parse_shard_row_plan_v1(canonical_paths, parse_shard_start)
+        else: []
+        val parse_step_count = if parse_shard: parse_shard_rows.len() else: frozen_source_count
         var source_step = 0
-        while source_step < frozen_source_count:
-            source_index = if parse_shard: (parse_shard_start + source_step) % frozen_source_count else: source_step
+        while source_step < parse_step_count:
+            source_index = if parse_shard: parse_shard_rows[source_step] else: source_step
             source_step = source_step + 1
             # A parse shard exists only to warm the front-end cache for the
             # files it owns (static hash slice, or a claim from the shared
-            # queue). Starting at `parse_shard_start` and wrapping modulo
-            # `frozen_source_count` gives each shard a disjoint initial partition
-            # while still work-stealing stragglers across the full ring.
+            # queue). The rotated plan retains the full physical-file ring
+            # for work-stealing while excluding nonauthoritative alias rows.
             if parse_shard and not _driver_parse_shard_owns(source_paths[source_index]):
                 continue
             val canonical_path = canonical_paths[source_index]
@@ -662,6 +671,19 @@ impl CompilerDriver:
                             case Err(msg): panic(msg)
                             case Ok(_): pass
                     val closure = worker_surface_import_closure_v1(root_indices, surface_edges)
+                    # Rows that must keep bodies in this unit: every target and
+                    # advice module, by source and canonical path. The HIR stage
+                    # loads the rest of the closure interface-only
+                    # (file_worker_unit_row_interface_only_v1).
+                    var keep_full_paths: [text] = []
+                    for kt in mir_targets:
+                        keep_full_paths.push(kt)
+                    for ka in mir_advice_paths:
+                        keep_full_paths.push(ka)
+                    for kri in root_indices:
+                        keep_full_paths.push(surface_source[kri])
+                        keep_full_paths.push(retained_surfaces.surfaces[kri].canonical_path)
+                    file_worker_unit_keep_full_record_v1(keep_full_paths)
                     var ci = 0
                     while ci < closure.len():
                         if closure[ci] and surface_source[ci] != "":

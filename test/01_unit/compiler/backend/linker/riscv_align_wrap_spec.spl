@@ -1,0 +1,45 @@
+# ALIGN rewrites raw ELF tables; --wrap names exist only in parsed symbols.
+# Both wrap directions must survive normalization without a second projection.
+# @cover src/compiler/70.backend/linker/elf/riscv_align.spl
+use compiler.backend.linker.elf_parser.{ElfObject, elf_parse_object, elf_reloc_type}
+use compiler.backend.linker.elf.symbol_wrap.{elf_wrap_object}
+use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
+use std.io_runtime.{file_read_bytes}
+
+fn align_wrap_parse(name: text) -> ElfObject:
+    var bytes: [i64] = []
+    for byte in file_read_bytes("test/fixtures/linker/elf/simpleos32/{name}"):
+        bytes.push(byte as i64)
+    elf_parse_object(bytes).unwrap()
+
+fn align_wrap_value(object: ElfObject, name: text) -> i64:
+    for symbol in object.symbols:
+        if symbol.name == name: return symbol.st_value
+    -1
+
+fn align_wrap_names(object: ElfObject) -> [text]:
+    var names: [text] = []
+    for symbol in object.symbols:
+        names.push(symbol.name)
+    names
+
+describe "RISC-V ALIGN preserves GNU wrap projections":
+    it "retains both wrap directions and normalized relocation sites for ELF32 and ELF64":
+        for fixture in ["riscv32_align_wrap.o", "riscv64_align_wrap.o"]:
+            val parsed = align_wrap_parse(fixture)
+            expect(align_wrap_value(parsed, "__wrap_target")).to_equal(24)
+            val projected = elf_wrap_object(parsed, ["target"])
+            val normalized = elf_riscv_align_objects([projected]).unwrap()[0]
+            expect(align_wrap_names(normalized)).to_equal(align_wrap_names(projected))
+            expect(align_wrap_names(normalized).contains("__real_target")).to_equal(false)
+            # The existing definition and rewritten undefined target both keep
+            # __wrap_target; __real_target was projected to the real target.
+            expect(normalized.symbols[5].name).to_equal("__wrap_target")
+            expect(normalized.symbols[6].name).to_equal("target")
+            expect(align_wrap_value(normalized, "__wrap_target")).to_equal(16)
+            expect(normalized.relocations[3].r_offset).to_equal(16)
+            expect(elf_reloc_type(normalized.relocations[2])).to_equal(0)
+            # A second normalization must keep the projected name `target`,
+            # rather than applying --wrap to __real_target twice.
+            val again = elf_riscv_align_objects([normalized]).unwrap()[0]
+            expect(align_wrap_names(again)).to_equal(align_wrap_names(projected))

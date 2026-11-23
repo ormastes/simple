@@ -91,7 +91,16 @@ The `publish` job packages each lane's highest phase with
 ```sh
 gh workflow run phase-ladder.yml --ref release/1.0.0                      # all lanes
 gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64,linux-riscv64 -f publish=false
+gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64 -f max_rung=1 -f fresh=false -f publish=false
 ```
+
+For a bounded diagnostic advance, select the isolated work branch and use
+`max_rung=1`, `fresh=false`, and `publish=false`. The manual budget accepts
+1–4 and defaults to 4; push and scheduled runs retain four rungs. A single
+rung attempts the next phase from the highest retained handoff, rather than
+rebuilding Phase 1. Inspect the actual compiler/Hello result and receipts before
+advancing again. A failed attempt requires a repair or new evidence, not another
+unchanged retry. Successful wrapper mocks do not qualify a compiler.
 
 Rung 1 starts from an RC package for the lane or a local stage binary. With
 neither, it builds the Rust seed and phase 1 itself, so a lane with no RC package
