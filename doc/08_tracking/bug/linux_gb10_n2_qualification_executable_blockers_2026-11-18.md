@@ -678,3 +678,157 @@ the NVIDIA ICD. Receipts carry `physical_device_uuid: 1883ff9c30a91b8abc50ef34ac
 
 Blocker 10 is closed. What remains open: Blocker 8 (no sanctioned link lane for
 a GPU entry) and case 02 (Skia edge tolerance).
+
+## 2026-11-23 (later) — Blocker 8: a sanctioned link lane, with no hand-link
+
+Branch `work/webrender-gpulink-20261123`, rebased on release/1.0.0 `3b2c8d8959c`
+(includes #10950 vkclip).
+
+### Root causes
+
+There are two root causes. The second one was found only after the first was
+fixed.
+
+1. **No lane admits the Vulkan runtime for an ordinary entry.**
+   - `core-c-bootstrap` links the C weak stubs (`SPL_HOSTED_UNAVAILABLE_WEAK`
+     in `runtime_native.c`).
+   - `host-gpu` is the core-C loader plus the hosted rlib. The Vulkan provider
+     DSO path covers only 4 `rt_vulkan_*` trampolines.
+   - `selected_runtime_library` refused `libsimple_native_all.a` for any entry
+     other than bootstrap or bootstrap-tools.
+2. **On aarch64 the seed weak-stubbed libc.** `PlatformLinkConfig::linux()`
+   scanned only `/lib/x86_64-linux-gnu/*.so`.
+   - With native_all linked, the stub generator emitted 177 weak stubs
+     (`__memcpy_chk`, `glob`, `accept4`, `_Unwind_RaiseException`, …), and the
+     executable exported them.
+   - Inside the NVIDIA ICD they interposed libc: `rt_vulkan_init` hit SIGSEGV
+     in `eglGetProcAddress` (libGLX_nvidia, gdb backtrace).
+   - The hand-link never ran the stub generator, which is why it worked.
+
+### Fix
+
+**1. A new explicit lane, `--runtime-bundle host-gpu-native-all`.** It is
+never inferred, and it is also accepted through `SIMPLE_NATIVE_RUNTIME_BUNDLE`.
+Code: `pipeline/native_project/config.rs` and `linker.rs`.
+- **Archive:** `<runtime-path>/libsimple_native_all.a`, built with
+  `cargo build --release -p simple-native-all --features vulkan`.
+- **Admission:** the archive is admitted only if it defines `rt_vulkan_init`
+  and `rt_gpu_provider_loaded`. Otherwise the lane fails closed and names the
+  cargo command.
+- **Link order:** native_all first, then the core-C supplement.
+- **SQLite:** the external `-lsqlite3` is omitted unless the entry objects
+  reference sqlite. The qualification binary's `NEEDED` list is `libm`,
+  `libstdc++`, `libgcc_s` and `libc`; `libvulkan` is dlopened by ash.
+- **Strict link required:** the lane requires `SIMPLE_NO_STUB_FALLBACK=1`, the
+  strict final link with no stubs and no `ignore-all`. The nm preflight counts
+  36 dead pre-GC references (`rt_metal_*`, `rt_oneapi_*`, `rt_intel_*`, …), so
+  only the GC-aware lld link is authoritative here.
+- **Other lanes:** `host-gpu`, `auto`, `simple-core` and `core-c-bootstrap` are
+  unchanged.
+
+**2. `native_all`: the 12 `rt_vk_*` noop stubs are now
+`#[cfg(not(feature = "vulkan"))]`.** The vulkan archive now defines each of
+them once, so `-z muldefs` is gone.
+
+**3. `PlatformLinkConfig::for_target` uses the target's multiarch libc
+directory.** aarch64 and riscv64 lists also include `libgcc_s.so.1`. This fix
+is independent of the lane: under the strict link that the lane requires, the
+stub generator emits only aliases, so the lane never stubs libc either way. It
+fixes every non-strict aarch64 Linux link. For example, a default-lane hello
+world on the base seed generated 61 libc weak stubs. On the new seed it
+generates 0, and it still runs (`hello argc=2 last=world`).
+
+**4. Pure-Simple linker.** `native_runtime_bundle_is_known` accepts the bundle,
+and `native_runtime_archive_names` selects `libsimple_native_all.a` alone. This
+path has **not been verified end to end**: no pure-Simple native link of the
+qualification was run.
+
+**5. Architecture.** A *proposed* amendment, awaiting an owner decision, was
+added to `doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`.
+
+### Red/green
+
+**Probe** (`probe/main.spl`; the source, build scripts and logs are under
+`/home/yoon/skia-n2/artifacts/nb_gpulink_20261123/evidence/`):
+
+```
+extern fn rt_vulkan_init() -> i64
+extern fn rt_vulkan_device_count() -> i64
+extern fn sys_get_args() -> [text]
+
+fn main() -> i64:
+    val args = sys_get_args()
+    val init = rt_vulkan_init()
+    print "probe argc={args.len()} last={args[args.len() - 1]} vk_init={init} vk_devices={rt_vulkan_device_count()}"
+    0
+```
+
+- **Base seed, default lane:** the link is refused (`rt_vulkan_init` has no
+  definition). Without `rt_vulkan_init`, it links and prints `vk_devices=0`
+  on the GB10, silently wrong.
+- **Lane, non-strict, before fix 3:** SIGSEGV.
+- **Lane on the final seed, `SIMPLE_NO_STUB_FALLBACK=1`:** 0 stubs, and it
+  prints `probe argc=2 last=hello vk_init=1 vk_devices=1`.
+- **Lane without `SIMPLE_NO_STUB_FALLBACK=1`:** refused with
+  `host-gpu-native-all requires SIMPLE_NO_STUB_FALLBACK=1`.
+- **New seed, default lane:** still refuses the probe.
+
+**Unit tests:**
+- **Rust red:** a compile failure, since `NativeRuntimeLane::HostGpuNativeAll`
+  did not exist.
+- **Rust green:** `cargo test --release -p simple-compiler --lib native_project`
+  gives 435 passed and 6 failed. All 4 new lane tests pass. The 6 failures
+  match, by name, the 6 `pipeline::native_project` base failures listed in this
+  doc's "Seed lib suite with the fix" section: capsule ABI, core-lane ABI,
+  hosted bundle, partial archive, object cache slice and lsp-mcp startup. They
+  were not re-run on base here.
+- **`simple-common` `link_config`:** 8 of 8 pass, including the new
+  `linux_system_scan_libs_follow_target_arch`.
+- **Simple spec** (`test/01_unit/compiler/linker/native_link_hardening_spec.spl`):
+  40/52 to 41/52. The new case was red before the `.spl` change. The 11
+  remaining failures have the same names before and after the change.
+
+**CLI.** `src/app/cli/native_build_main.spl` has no bundle-name validation; it
+passes the bundle through. The seed CLI (`driver/src/cli/native_build.rs`) and
+`native_build_sffi.rs` accept the new name.
+
+### Sanctioned build and GB10 evidence
+
+The seed and the `--features vulkan` archive are private
+(`CARGO_TARGET_DIR=~/.cache/cargo-target-wr-gpulink`), built with clang and
+lld. Both were built from this lane's commits on `1071a08692d`, before the
+rebase. `git diff 1071a08692d 3b2c8d8959c -- src/compiler_rust src/runtime` is
+empty, so the Rust and C inputs are identical. Build command:
+
+```sh
+SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_CACHE_SCOPE=wr-gpulink-20261123 \
+  <seed> native-build --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/test/vulkan_2d_qualification/main.spl \
+  --runtime-bundle host-gpu-native-all --runtime-path ~/.cache/cargo-target-wr-gpulink/release \
+  --strip --output /home/yoon/skia-n2/artifacts/nb_gpulink_20261123/vulkan_2d_qualification
+```
+
+- **Build:** 8.2 s warm, 0.48 GB RSS, 0 stubs, 0 undefined `rt_*`.
+- **Binary:** sha256 `400eb5c19ff8a7ef0487959788a9a5fb690694dafa6870f8ce3d14305b982ef5`.
+- **Run:** NVIDIA ICD, provider `758f717f…bc89`, full resolution, one try each.
+
+| scene | `run-*` | Engine2D = Skia rgba sha256 | equals hand-link / oracle |
+|---|---|---|---|
+| web-box | pass | `204df3a7ca11c4633399761142e60ec5f3775aefe7e91a74863f107b9b647817` | yes |
+| corpus-case01 | pass | `2f4d3fb17e0a1ab65cba1f3b3950f1cf67b51f2f09df5faac247c2dc858039e9` | yes |
+| corpus-case06 | pass | `0372ef52c5e58dfa59d71239609526592e022a00419f25e3eebc902d083debb1` | yes |
+
+Receipts: `device_name: NVIDIA GB10`,
+`physical_device_uuid: 1883ff9c30a91b8abc50ef34ac2f5a89`,
+`readback_source: device_readback`, `pair_exact_rgba: pass`.
+
+**corpus-case02 (checked, not fixed):** 2 of 2 runs gave
+`engine2d-owner:Engine2D corpus case 02 edge oracle mismatch`. It now fails in
+the Engine2D leg first, before Skia runs. Still open with
+`skia_case02_edge_tolerance_exceedance_2026-09-27.md`.
+
+### Status
+
+Blocker 8 is fixed. The owner accepted the architecture amendment on
+2026-11-23: native_all is admitted for a non-bootstrap entry only when the
+`host-gpu-native-all` bundle is named explicitly.

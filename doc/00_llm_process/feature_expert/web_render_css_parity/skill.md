@@ -3831,3 +3831,27 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Status (explicit runs, 2026-11-23):** the nine words' glyph runs equal Chrome's and are pinned LIVE in `devanagari_render_chrome159_spec` (10/10); their 1x ink edges stay in the in-development `devanagari_mark_position_chrome159_spec` (2/9, see its header). `devanagari_glyph_hint_chrome159_spec` 0/1, top row now 29 (was 28) vs Chrome 30 — it was red on the pre-rebase head d0218772158 too (re-run there), so it was never a rebase regression.
 - **Device scale 4 (user rule: render specs stay >= 300 dpi).** `devanagari_render_k4_chrome159_spec` (`@tag:in-development`, 0/10, ~3 min) holds Chrome's k=4 ink boxes. Capture recipe: the 1x page with `--force-device-scale-factor=4 --window-size=400,300`; the same capture at factor 1 reproduced the 1x table exactly. Three defects, recorded in `doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md`: (1) `glyph_run.xs` are whole CSS px scaled by k (4*floor(p) vs Chrome floor(4p); the Latin control is 2 px short too) — design: carry the 26.6 pen in the payload, snap in device px; (2) the shaped-run ink sits 1 device px high while Latin rows match; (3) a skipped command makes `..._engine2d_at_device_scale` return an EMPTY buffer (हिंदी).
 - **Trap — `simple run` probe rendering several words in one process** returned an empty buffer after the first word with `font handle ... is not live` errors; render one word per process. An empty `[u32]` read out of bounds yields 0 in the interpreter, so an ink scan of it reports the whole frame as ink — check `px.len()` first.
+## 2026-11-23 — GB10 GPU entries link through a sanctioned lane (Blocker 8)
+
+- **Building a GPU-capable non-bootstrap binary.** There is no hand-link any
+  more. Pass:
+  - `--runtime-bundle host-gpu-native-all --runtime-path <target>/release`
+  - `SIMPLE_NO_STUB_FALLBACK=1` and `SIMPLE_NATIVE_BUILD_RUST=1`
+  - a `cargo build --release -p simple-native-all --features vulkan` archive
+    in that runtime path.
+
+  The lane fails closed when the archive has no Vulkan runtime or provider
+  registry.
+- **Trap: an aarch64 seed weak-stubbed libc.** Seeds built before this change
+  do it, because the scan list is x86_64-only. The exported stubs crash the
+  NVIDIA ICD with SIGSEGV in `eglGetProcAddress`. Check the build log for
+  `Generating N stub functions`; a sound GPU link prints none.
+- **Trap: the default lane links Vulkan probes silently.** It uses
+  `runtime_native.c` weak stubs, so `rt_vulkan_device_count` returns 0 on a
+  machine that has a GPU. Assert a real value, not just exit 0.
+- **Evidence.** The sanctioned binary reproduces the hand-link hashes exactly
+  for web-box, corpus-case01 and corpus-case06. Table and recipe:
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
+  (2026-11-23, Blocker 8).
+- **Landing.** Owner accepted the amendment on 2026-11-23
+  (`doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`).
