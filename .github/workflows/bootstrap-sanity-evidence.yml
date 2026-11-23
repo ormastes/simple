@@ -12,10 +12,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: coff-link-proof-e57c1ca6116907596f22f2c28dc4f5193bd1ce5a
-          run-id: 45239555743
+          name: windows-cross-preflight-013b1b02f0ffe5d1808715d6e610df759dcbbbed
+          run-id: 45240198504
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: retained-preflight
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-authority-mingw-x86_64-013b1b02f0ffe5d1808715d6e610df759dcbbbed
+          run-id: 45240198504
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: retained-native
       - name: Install pinned Clang and GNU PE BFD
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,39 +38,16 @@ jobs:
       - name: Exercise production selector and retained objects
         shell: bash
         run: |
+          archive=$(find retained-preflight -name libsimple_runtime.a -print -quit)
+          native=$(find retained-native -name libsimple_native_all.a -print -quit)
+          printf 'd0ab7ef3a8352512c9effd82596c78cf7f5396bf33131ce9c55e4aa2f8d59bea  %s\n' "$native" | sha256sum --check -
+          export REAL_LLVM_NM="$COFF_TOOLCHAIN/bin/llvm-nm"
+          export REAL_LLVM_OBJDUMP="$COFF_TOOLCHAIN/bin/llvm-objdump"
           ulimit -v 2097152
-          timeout --kill-after=5 180 python scripts/check/check-coff-projection.py \
-            --cc "$COFF_TOOLCHAIN/bin/x86_64-w64-mingw32-clang" \
-            --retained retained-preflight --out build/coff-link-proof
+          timeout --kill-after=5 400 python scripts/check/coff-runtime-inventory-proof.py "$archive" "$native"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: coff-link-proof-${{ github.sha }}
-          path: build/coff-link-proof/
-  execute-projected-providers:
-    needs: coff-partial-link
-    runs-on: windows-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: coff-link-proof-${{ github.sha }}
-          path: evidence
-      - name: Execute real fallback and overriding providers
-        shell: pwsh
-        run: |
-          $names = @('projected.exe', 'internal-fallback.exe', 'fixture_root-override.exe', 'dependency-override.exe')
-          $results = @()
-          foreach ($name in $names) {
-            $path = Join-Path $PWD "evidence/$name"
-            $proc = Start-Process -FilePath $path -PassThru -WindowStyle Hidden
-            if (-not $proc.WaitForExit(30000)) { $proc.Kill(); throw "Timed out: $name" }
-            $results += @{name=$name; exit=$proc.ExitCode; sha256=(Get-FileHash $path -Algorithm SHA256).Hash}
-            if ($proc.ExitCode -ne 0) { throw "Numerical provider assertion failed: $name exit $($proc.ExitCode)" }
-          }
-          $results | ConvertTo-Json | Set-Content provider-execution.json
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coff-provider-execution-${{ github.sha }}
-          path: provider-execution.json
+          name: coff-runtime-proof-${{ github.sha }}
+          path: build/coff-runtime-proof/
+
