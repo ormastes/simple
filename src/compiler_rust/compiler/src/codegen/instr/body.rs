@@ -17,19 +17,9 @@ use super::{compile_instruction, InstrContext, InstrResult};
 /// Collect VRegs that are live across block boundaries.
 /// Only these need Cranelift Variables for phi node insertion.
 /// Block-local VRegs stay as raw Cranelift Values in vreg_values.
-fn collect_cross_block_vregs(func: &MirFunction) -> HashSet<VReg> {
-    let live_ins = func.compute_live_ins();
-    let mut cross_block = HashSet::new();
-    for live_set in live_ins.values() {
-        for vreg in live_set {
-            cross_block.insert(*vreg);
-        }
-    }
-    cross_block
-}
-
-fn sorted_cross_block_vregs(func: &MirFunction) -> Vec<VReg> {
-    let mut vregs: Vec<_> = collect_cross_block_vregs(func).into_iter().collect();
+fn sorted_cross_block_vregs(live_ins: &HashMap<BlockId, HashSet<VReg>>) -> Vec<VReg> {
+    let cross_block: HashSet<VReg> = live_ins.values().flatten().copied().collect();
+    let mut vregs: Vec<_> = cross_block.into_iter().collect();
     vregs.sort_by_key(|v| v.0);
     vregs
 }
@@ -591,15 +581,27 @@ fn sync_vregs_to_vars(
     }
 }
 
-/// Sync Variables → vreg_values: call use_var for all declared vreg Variables.
+/// Sync Variables -> vreg_values at a block entry: `use_var` for the block's
+/// LIVE-IN vregs only, and forget every other cross-block value, which belongs
+/// to the previously translated block (the terminator sync would otherwise
+/// write it back). Re-reading every declared Variable at every block made
+/// translation O(vars x blocks): each `use_var` on a not-yet-sealed block adds
+/// a block parameter (`layout_with_style_flow`, 2,212 vars x 3,134 blocks, ~1 s).
 /// VRegs are sorted to ensure deterministic block parameter order.
+/// Bug: doc/08_tracking/bug/jit_block_entry_sync_all_vars_quadratic_compile_2026-11-23.md
 fn sync_vars_to_vregs(
     builder: &mut FunctionBuilder,
     vreg_values: &mut HashMap<VReg, cranelift_codegen::ir::Value>,
     vreg_vars: &HashMap<VReg, Variable>,
     vreg_types: &HashMap<VReg, TypeId>,
+    live_in: &HashSet<VReg>,
 ) {
-    let mut sorted: Vec<_> = vreg_vars.iter().collect();
+    for vreg in vreg_vars.keys() {
+        if !live_in.contains(vreg) {
+            vreg_values.remove(vreg);
+        }
+    }
+    let mut sorted: Vec<_> = live_in.iter().filter_map(|v| vreg_vars.get_key_value(v)).collect();
     sorted.sort_by_key(|(v, _)| v.0);
     for (&vreg, &var) in sorted {
         let val = builder.use_var(var);
@@ -829,7 +831,8 @@ pub fn compile_function_body<M: Module>(
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
     // VRegs are sorted to ensure deterministic Variable ID assignment.
-    let sorted_cross_block_vregs = sorted_cross_block_vregs(func);
+    let live_ins = func.compute_live_ins();
+    let sorted_cross_block_vregs = sorted_cross_block_vregs(&live_ins);
     let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
     for vreg in &sorted_cross_block_vregs {
         let var = Variable::from_u32(var_idx);
@@ -1144,7 +1147,7 @@ pub fn compile_function_body<M: Module>(
         if mir_block.id != func.entry_block {
             builder.switch_to_block(cl_block);
             // At block entry, populate vreg_values from Variables (SSA phi resolution)
-            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars, &vreg_types);
+            sync_vars_to_vregs(&mut builder, &mut vreg_values, &vreg_vars, &vreg_types, &live_ins[&mir_block.id]);
         }
 
         if let Some(resume_map) = generator_resume_map.as_ref() {
@@ -1602,7 +1605,7 @@ mod tests {
             };
         }
 
-        assert_eq!(sorted_cross_block_vregs(&func), vec![shared]);
+        assert_eq!(sorted_cross_block_vregs(&func.compute_live_ins()), vec![shared]);
     }
 
     /// FR-DRIVER-0002a: verify `build_vreg_types` populates a TypeId for every

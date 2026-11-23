@@ -4032,3 +4032,16 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - 4x tab-bar: 10.8 -> 7.3 s
   - 1x css-layout: 13.6 -> 13.3 s
   - Peak RSS for 4x css-layout: 2.965 GB on both sides.
+## 2026-11-23 — JIT startup: block-entry var sync was O(vars x blocks)
+
+- **Where the ~9.5 s per JIT run went** (tab-bar, `SIMPLE_JIT_STAGE_TRACE=1` + `SIMPLE_NATIVE_BUILD_RUST_TRACE=1`):
+  - About 1.9 s before codegen: load 0.36 s, HIR 0.85 s, MIR 0.5 s, all for 9,021 lowered functions. Reachability pruning then cuts them to 4,305.
+  - About 9 s in `compile_all`: translate (MIR -> CLIF) 3.8 s, Cranelift define 4.0 s.
+  - Rendering itself takes 0.06 s.
+- **Root cause:** `sync_vars_to_vregs` did `use_var` on every cross-block Variable at every block entry, with blocks sealed only at the end. That cost vars x blocks: `layout_with_style_flow` (2.2 K x 3.1 K) and `_apply_decls_without_grid_inner` took about 1 s each.
+- **Fix:** sync only the block's live-in vregs, and drop stale cross-block values so the terminator sync cannot write them back. Liveness now iterates in reverse order. The JIT keeps a single verify that fails closed, with Cranelift's internal verifier off. Translate went 3.8 s -> 1.55 s and define 4.0 s -> 2.1 s.
+- **Result:** catalog JIT wall time went from 11–14 s to 5.5–7 s at 1x and on 7 of 8 pages at 4x. Output is unchanged: all 8 pages match the interpreter byte for byte at 1x and 4x. Clean A/B medians at 1x: tab-bar JIT 5.48 s vs interpreter 4.78 s (the JIT still loses), html 5.74 s vs 14.11 s, css-paint 5.81 s vs 16.61 s. forms-media 4x still sits at the 8 GB cap (font-blob copies): JIT 49.6 s vs interpreter 32.5 s.
+- **Trap — repro shape:** a long run of if-expressions such as `s = s + (if x > i: a else: b)`. Plain `val` locals do not create cross-block vregs.
+- **Trap — measuring:** print per-function times around `compile_function` (translate / verify / define) in a probe worktree. A whole-run wall time can hide a JIT fallback: the first prototype failed the verifier, the run silently fell back to the interpreter, and it looked slower but correct. Always check for `compile_all:done`.
+- **Open — uncalled code:** at least 58% of the remaining compile time (2.1 s of 3.6 s, 2,862 functions) is never called on tab-bar. It is mostly Vulkan / SPIR-V / Metal backend code, reachable only through runtime backend selection. The options are lazy compile-on-first-call stubs or parallel Cranelift codegen; both are recorded as designs in the bug doc. Pruning before HIR lowering would also save part of the 1.35 s spent in HIR+MIR.
+- **Open — font-blob copy:** this is deferred to the ownership work. `blob` is passed to user functions (`_gid_warm`, `sfnt_blob_kern_pair_milli_px`, `read_u16_be`), so an in-function borrow rule cannot prove that no call mutates or frees the field's buffer. forms-media 4x still peaks at the 8 GB cap.
