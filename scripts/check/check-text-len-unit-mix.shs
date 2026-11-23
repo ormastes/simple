@@ -579,6 +579,18 @@ baseline="${TEXT_LEN_BASELINE:-scripts/check/text_len_bounded_byte_scan_baseline
 mix_baseline="${TEXT_LEN_MIX_BASELINE:-scripts/check/text_len_unit_mix_baseline.txt}"
 gen_baseline=0
 
+# diff_scope RANGE ROOTS... — touched .spl files of BASE..TIP, one per line.
+# Scoped from the merge-base, not the base tip: a PR head behind its base
+# would otherwise pull every base-side change into scope and report the
+# base's newer rows as "new" against the head's older content (PR #10981:
+# 71 files for a 1-commit PR). No merge-base (shallow) keeps the wider,
+# stricter two-dot scope rather than failing open.
+diff_scope() {
+  ds_range="$1"; shift; ds_tip="${ds_range##*..}"
+  ds_mb=$(git merge-base "${ds_range%%..*}" "$ds_tip" 2>/dev/null) && ds_range="$ds_mb..$ds_tip"
+  git diff --name-only "$ds_range" -- "$@" 2>/dev/null | grep "[.]spl$" | sort -u
+}
+
 selftest() {
   fx=$(mktemp -d)
   mkdir -p "$fx/a" "$fx/b" "$fx/c"
@@ -644,6 +656,16 @@ selftest() {
     s.byte_len()
 " > src/lib/t.spl)
   v=$(cd "$gr" && scope_tip=HEAD; scope_files="$fx/scope_t"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: broken tip + clean working copy must FAIL, got rc=$rc: $v"; exit 2; }
+  # Stale head (PR #10981 replay): base fixed bad.spl after the topic branched,
+  # topic touched only t.spl. Scope must be the topic's own file, not bad.spl.
+  sg="$fx/stale"; mkdir -p "$sg/src/lib" && git -c init.defaultBranch=base init -q "$sg"
+  (cd "$sg" && cp "$gr/src/lib/bad.spl" src/lib/bad.spl && printf "fn ok(s: text) -> i64:\n    s.byte_len()\n" > src/lib/t.spl \
+    && git add -A && git -c user.name=t -c user.email=t@t commit -qm root && git branch -q topic \
+    && printf "fn ok(s: text) -> i64:\n    s.byte_len()\n" > src/lib/bad.spl && git -c user.name=t -c user.email=t@t commit -qam fix \
+    && git checkout -q topic && printf "fn ok2(s: text) -> i64:\n    s.byte_len()\n" >> src/lib/t.spl \
+    && git -c user.name=t -c user.email=t@t commit -qam topic)
+  v=$(cd "$sg" && diff_scope base..topic src/lib)
+  [ "$v" = "src/lib/t.spl" ] || { echo "selftest: stale-head scope must be only the topic's src/lib/t.spl, got: $v"; exit 2; }
   # A typed byte array counts bytes with len(). Exemption belongs to the
   # actual simple binding, not its spelling elsewhere in the file/function.
   mkdir -p "$fx/typed" "$fx/shadowed"
@@ -896,15 +918,8 @@ if [ -n "$range" ]; then
   # under the roots; a deleted file is kept in scope so its rows go stale.
   case "$range" in *..*) ;; *) echo "ERROR — nothing was checked (--changed needs BASE..HEAD)"; exit 2 ;; esac
   scope_files=$(mktemp); scope_tip="${range##*..}"
-  # Scope from the merge-base, not the base tip: a PR head behind its base
-  # would otherwise pull every base-side change into scope and report the
-  # base's newer rows as "new" against the head's older content (PR #10981:
-  # 71 files for a 1-commit PR). No merge-base (shallow) keeps the wider,
-  # stricter two-dot scope rather than failing open.
-  scope_base="${range%%..*}"
-  scope_mb=$(git merge-base "$scope_base" "$scope_tip" 2>/dev/null) && range="$scope_mb..$scope_tip"
   # shellcheck disable=SC2086
-  git diff --name-only "$range" -- $roots 2>/dev/null | grep "[.]spl$" | sort -u > "$scope_files" || true
+  diff_scope "$range" $roots > "$scope_files" || true
   [ -s "$scope_files" ] || { echo "PASS — 0 touched .spl file(s) in $range under $roots; nothing to ratchet"; exit 0; }
 fi
 # shellcheck disable=SC2086
