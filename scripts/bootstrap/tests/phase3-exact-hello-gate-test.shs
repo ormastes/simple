@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Exercises real extracted phase functions with fake producers: no bootstrap claim.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/phase3-hello-gate.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+for fn in run_guarded_cmd run_stage3_hello run_stage3_step; do
+  awk -v fn="$fn" '$0 == fn "() {" || $0 == fn "() (" {f=1} f {print} f && /^\}$|^\)$/ {exit}' \
+    "$repo/scripts/bootstrap/build-phase3-phase4.sh" >>"$scratch/functions"
+done
+cat >"$scratch/candidate" <<'CAND'
+#!/usr/bin/env bash
+set -eu
+if [ "$1" = --version ]; then echo simple-bootstrap-fixture; exit 0; fi
+[ "$1" = native-build ] || exit 2
+[ "$SIMPLE_BINARY" = "$0" ] || exit 93
+[ "$SIMPLE_RUNTIME_PATH" = "$SIMPLE_MOCK_RUNTIME" ] || exit 94
+[ "$SIMPLE_PROJECT_ROOT/src" = "$SIMPLE_LIB" ] || exit 95
+for variable in SIMPLE_BOOTSTRAP SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_FILE_WORKERS; do
+  [ -z "${!variable+x}" ] || exit 96
+done
+fixture_seen=0
+for argument in "$@"; do
+  case "$argument" in
+    --source|--source=*|--entry|--entry=*|--entry-closure|--opt-level|--opt-level=*) exit 97 ;;
+    test/04_smoke/bootstrap_hello_world.spl) fixture_seen=1 ;;
+  esac
+done
+[ "$fixture_seen" -eq 1 ] || exit 98
+[ "$SIMPLE_MOCK_CASE" != version-only ] || exit 2
+[ "$SIMPLE_MOCK_CASE" != compile-fail ] || exit 7
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then out=$2; break; fi
+  shift
+done
+[ "$SIMPLE_MOCK_CASE" != missing ] || exit 0
+: >"$out"
+[ "$SIMPLE_MOCK_CASE" != empty ] || { chmod +x "$out"; exit 0; }
+printf '#!/usr/bin/env bash\n' >"$out"
+case "$SIMPLE_MOCK_CASE" in
+  wrong-output) printf 'echo wrong\n' >>"$out" ;;
+  run-fail) printf 'exit 9\n' >>"$out" ;;
+  *) printf 'echo "hello"\n' >>"$out" ;;
+esac
+# Deliberately padded fixture, not a native executable or bootstrap proof.
+printf '# %02048d\n' 0 >>"$out"
+chmod +x "$out"
+CAND
+chmod +x "$scratch/candidate"
+cat >"$scratch/producer" <<'PROD'
+#!/usr/bin/env bash
+set -eu
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then cp "$SIMPLE_MOCK_CANDIDATE" "$2"; chmod +x "$2"; exit 0; fi
+  shift
+done
+exit 2
+PROD
+chmod +x "$scratch/producer"
+for scenario in good version-only compile-fail missing empty wrong-output run-fail; do
+  dir="$scratch/$scenario"
+  mkdir -p "$dir/logs"
+  (
+    set -eu
+    . "$scratch/functions"
+    SOURCE_ROOT=$repo SCRIPT_DIR=$repo/scripts/bootstrap
+    RUNTIME_PATH=$scratch/runtime STAGE3_RESOLVED_TARGET=fixture
+    STAGE3_POLICY_K1_ROOT=fixture-k1 STAGE3_POLICY_HOST_COMP_ROOT=fixture-host
+    COMPILE_MODE=shard LINK_MODE=one-binary WIN_CONFIG=mingw BACKEND=llvm
+    BACKEND_PLUGIN= THREADS=1 EXE_EXT= LOG_DIR=$dir/logs
+    export SIMPLE_MOCK_CASE=$scenario SIMPLE_MOCK_CANDIDATE=$scratch/candidate SIMPLE_MOCK_RUNTIME=$RUNTIME_PATH
+    stage3_apply_native_host_link_policy() { export SIMPLE_BOOTSTRAP_STAGE3=1 SIMPLE_FILE_WORKERS=0; }
+    apply_windows_toolchain_env() { :; }
+    verify_stage3_dynlibs() { :; }
+    sign_stage_outputs() { :; }
+    run_stage3_step P3a "$scratch/producer" "$dir" "$dir/simple" stage3-a || exit $?
+    echo invoked >"$dir/dependent-producer"
+  ) >"$dir/result.log" 2>&1 && status=0 || status=$?
+  if [ "$scenario" = good ]; then
+    [ "$status" -eq 0 ] && [ -f "$dir/dependent-producer" ] || { cat "$dir/result.log"; exit 1; }
+  else
+    [ "$status" -ne 0 ] && [ ! -f "$dir/dependent-producer" ] || { echo "FAIL: $scenario allowed dependent producer"; cat "$dir/result.log"; exit 1; }
+  fi
+done
+echo 'PASS — real phase functions: valid fixture progresses; six Hello failures block dependent producer (mock evidence only)'

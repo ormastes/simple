@@ -77,3 +77,26 @@ describe "RB-LOAD-02: hot-swap generation -> image":
         val r = hot_swap_slot_load(pinned_row(), generate_smf_with_options([0xC3], opts))
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err().contains("SMF-E-UNIT-IDENTITY-MISSING")).to_equal(true)
+
+    it "never overwrites a pinned entry when the table wraps":
+        step("pin generation 0, then swap and reclaim until the table wraps")
+        val slot = loaded_slot()
+        val r0 = hot_swap_read_begin(slot).unwrap()
+        var g: i64 = 0
+        while g < 7:
+            expect(hot_swap_try(slot, g, image_with(good_identity(), 0x94)).is_ok()).to_equal(true)
+            hot_swap_reclaim(slot)
+            g = g + 1
+        step("generation 8 maps onto the pinned entry and is refused")
+        val full = hot_swap_try(slot, 7, image_with(good_identity(), 0x95))
+        expect(full.is_err()).to_equal(true)
+        expect(full.unwrap_err().contains("SMF-E-HOTSWAP-FULL")).to_equal(true)
+        expect(hot_swap_image_live(slot, 0)).to_equal(true)
+        expect(r0.image() == image_with(good_identity(), 0x90)).to_equal(true)
+        step("release the pin; reclaim frees it and the swap succeeds")
+        hot_swap_read_end(r0)
+        expect(hot_swap_reclaim(slot) >= 1).to_equal(true)
+        expect(hot_swap_try(slot, 7, image_with(good_identity(), 0x95)).unwrap()).to_equal(8)
+        val r8 = hot_swap_read_begin(slot).unwrap()
+        expect(r8.generation()).to_equal(8)
+        hot_swap_read_end(r8)

@@ -3796,3 +3796,85 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   `nb_vkclip_20261123`, sha256 `e7c05e55…f68e`. The recipe is in
   `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
   (2026-11-23, later).
+
+## 2026-11-23 — LCD glyphs through Skia's path route (glyph raster shape, 16 px)
+
+- **Finding (Skia source `~/skia-n2/skia`, checked against Chrome 159 pixels):** Chrome draws LCD glyphs as hinted PATHS, not FreeType LCD bitmaps. `SkScalerContext::GenerateImageFromPath` scales the path 4x in x into an A8 mask; `SkScan::AntiFillPath` always takes the analytic AA (`AAAFillPath`), i.e. exact area per quarter-pixel sample; `pack4xHToMask` turns each 4 samples into R,G,B with one 12-tap FIR per channel (sum 272, /256, clamp 255); the SkMaskGamma preblend and the 5-bit LCD16 pack follow.
+- **Change (`sfnt_glyf.spl`, `lcd_s32_tables.spl`):**
+  - `sfnt_lcd_outline_raster`: exact-area accumulation (`_lcd_area_*`, font-rs signed area/cover) into 4 samples per pixel, then `_SFNT_LCD_FIR` (Skia's table). Replaces 4 point-sampled sub-rows + a fitted 5-tap FIR on 1/3-px bins.
+  - Line ends snap to a quarter row (`SkAnalyticEdge::SnapY`). Quads are chopped at their y extremum and cut into `2^shift` chords from Skia's flatness rule (`diff_to_shift`), inner chord ends snapped. Sixteen fixed chords with snapped ends drew round tops a step heavy.
+  - `_hint_commands` puts every hinted point on the 26.6 grid (x too): the 16 px `i` stem (136..316 units) and `l` stem (138..318) are both 69/64..159/64 px in Chrome.
+  - `_hstem_knots`: the stem origin is `anchor.pos + (opos - anchor.opos)` in rounded 26.6 integers (FreeType), not one float shift rounded once. That tie decided the 16 px `5` bowl a whole row high.
+  - Preblend: Skia's `SkTMaskGamma_build_correcting_lut` (3 luminance bits, gamma 1.2, contrast 0.2125). It replaces the fitted exponent + cubic lift, which compensated the old raster. Contrast fitted jointly on the `l` stem (4 phases) and the `n` stems, 0 of 90 samples off. 0.2 leaves 9 one step light.
+- **Evidence:** `glyph_raster_shape_chrome159_spec` 0/3 -> 3/3. 30-glyph fixture (`a s o q g e c d b p u 0-9 i l n m h R S O Q`, phase 0, 16 px): 687 -> 328 mismatching px, ink ratio 0.987 -> 0.999. Same fixture at 11 px x k=4 (44 device px, LCD): 4524 -> 4371. 16 px x k=4 (64 device px, grayscale) is byte-identical. `small_text_vertical_hint` AC-3 is re-pinned to Chrome's measured `6f7777` / `f7ffff`. The old pins were the engine's own values, and the spec text already named Chrome's.
+- **Traps:**
+  - FreeType 2.13.2 (system `libfreetype.so.6`, scratch probe) is NOT Chrome's oracle. Its ClearType filter fits the `l` stem but its gray raster and filter are wrong for every round glyph: 742 px on the fixture, worse than before.
+  - Supersampled AA (`SkScan_AntiPath`) does not fit the `n` stems. Only the analytic model fits.
+  - Abs-pos `left: 4.25px` text renders at phase 0 here (layout claim filed). Build phase fixtures with inline runs or letter-spacing.
+- **Open:** round TOP arcs. The `a` top-arc underside at 16 px is `afafa7` in Chrome and `bfbfbf` here. The 18.72 px `m` hump tops are too heavy, in base too. The inner edge hints to 7.875 px like FreeType. Chrome's sits slightly lower, likely skrifa's autohinter.
+## 2026-11-22 — Devanagari GPOS and shaped-glyph placement (lane B)
+
+- **Oracle for shaped text = Chrome's PDF.** `chrome --headless=new --print-to-pdf` writes each glyph as its own positioned `Tj` in a Type3 font whose `/Differences` names are glyph ids (`/g22A`), so the content stream is HarfBuzz's output: glyph id, pen x (GPOS offset included), y offset. px at 16 px times 62.5 = font units (upem 1000). Scratch decoders were node scripts, not committed.
+- **Mark attachment target (the fix, `ot_layout_gpos.spl` `_attach_candidate`).** HarfBuzz walks back for MarkBasePos / MarkLigPos with IgnoreMarks alone, whatever the lookup flag; MarkMarkPos drops the Ignore* bits, keeps the mark filtering set and needs a mark target. Noto Sans Devanagari's `abvm` / `blwm` MarkBasePos lookups have flag 0, so the old "previous eligible glyph" search left every mark behind another mark unattached (reph behind a u-matra: pen 768 where Chrome has 547). No GDEF class table: every glyph stays a candidate, as before.
+- **Feature set.** HarfBuzz applies `abvm blwm dist kern mark mkmk` to every glyph of a dev2 run. In this face lookups 11-22 are abvm/blwm, 2/4/5/6 dist, 9 kern, 23-32 mark/mkmk. Most anchors have y delta 0 (outlines are pre-positioned); only stacked below-base forms carry y offsets.
+- **Glyph run y rounds, x truncates** (`shaped_run_to_font_glyph_run`). Chrome paints a mark 2.880 px below the baseline 3 rows down and 1.952 px 2 rows down (ink bottoms of ड़ुँ / ऴु / द्धू / पूरा); truncation gave 2 and 1. हिन्दी pens 12.640 / 17.584 paint on Chrome's columns as 12 / 17.
+- **`devanagari_pair_adjustment`** moved from `selected_devanagari.spl` to `devanagari_gpos.spl` (half na before da: -49 units, Chrome's 309-unit advance).
+- **Specs:** `ot_layout_gpos_devanagari_chrome159_spec` (6, glyph sequences in, Chrome positions out), `devanagari_gpos_spec` (2), `shaped_run_glyph_y_round_chrome159_spec` (3), `devanagari_render_chrome159_spec` (1, हिन्दी live on cpu_simd and vulkan), `devanagari_mark_position_chrome159_spec` (`@tag:in-development`, 9, red by design: the other nine Chrome words asserted unconditionally — explicit run 0/9 because the dev2 shaper emits no glyph run for them yet; delete the tag when the GSUB lane makes all nine green). Trap: a conditional `pending()` + `return` inside an `it` is not counted by the runner (the old render spec read `1 total` for 10 examples) — keep not-yet-shaped words in an in-development file instead. `devanagari_glyph_hint_chrome159_spec` is in-development and red by design since it was written (28..45 vs Chrome 30..45, Latin blue zones), not a rebase regression.
+- **Open — हिन्दी ink top is row 28, Chrome 30.** Not positioning (glyph ids, pens, right column, bottom row equal Chrome's; all ys 0). The face carries Latin `x o H`, so `_lcd_hint_knots` warps its Devanagari glyphs with Latin zones; FreeType hints them with Devanagari zones. Red in `devanagari_glyph_hint_chrome159_spec` (`@tag:in-development`), record `doc/08_tracking/bug/web_render_devanagari_latin_blue_zone_hint_2026-11-22.md`.
+- **Trap — probing GPOS with `simple run` costs ~6 GB and 25 s per `gpos_apply` on this face** (validation walks every active lookup under the interpreter). The same call inside `simple test` or the renderer is cheap. Probe through a spec.
+- **Trap — a two-font oracle page.** With `font: Liberation Sans, <Devanagari face>` the space of `नमस्ते दुनिया` comes from Liberation Sans (4.445 px) and the Range is 73.19; with the Devanagari face alone it is 4.16 px and 72.91.
+- **Pre-existing reds, not caused here:** `ot_layout_gpos_spec` 24/28 on the base commit too (three synthetic mark-anchor examples and the Noto Serif lookup 36 ExtensionPos example).
+
+## 2026-11-23 — Devanagari lane B after the dev2 shaper (PR #10934): mark/mkmk, device scale 4
+
+- **mark/mkmk in the dev2 GPOS plan.** `_selected_defaults` (`ot_layout_shaper.spl`) now lists `abvm blwm dist kern mark mkmk` (HarfBuzz's common GPOS features). On Noto Sans Devanagari that adds lookups 23..32 to the plan (17 -> 27 lookups). Lookups are keyed by index with OR'd feature masks (`_active_layout_lookup_indices`), so a lookup two features share is applied once. Spec: `devanagari_gpos_spec` AC-3 (plan-level; the 9 render words and the 35-word corpus give byte-identical results with and without the two features, so no Chrome pixel case for it yet).
+- **Status (explicit runs, 2026-11-23):** the nine words' glyph runs equal Chrome's and are pinned LIVE in `devanagari_render_chrome159_spec` (10/10); their 1x ink edges stay in the in-development `devanagari_mark_position_chrome159_spec` (2/9, see its header). `devanagari_glyph_hint_chrome159_spec` 0/1, top row now 29 (was 28) vs Chrome 30 — it was red on the pre-rebase head d0218772158 too (re-run there), so it was never a rebase regression.
+- **Device scale 4 (user rule: render specs stay >= 300 dpi).** `devanagari_render_k4_chrome159_spec` (`@tag:in-development`, 0/10, ~3 min) holds Chrome's k=4 ink boxes. Capture recipe: the 1x page with `--force-device-scale-factor=4 --window-size=400,300`; the same capture at factor 1 reproduced the 1x table exactly. Three defects, recorded in `doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md`: (1) `glyph_run.xs` are whole CSS px scaled by k (4*floor(p) vs Chrome floor(4p); the Latin control is 2 px short too) — design: carry the 26.6 pen in the payload, snap in device px; (2) the shaped-run ink sits 1 device px high while Latin rows match; (3) a skipped command makes `..._engine2d_at_device_scale` return an EMPTY buffer (हिंदी).
+- **Trap — `simple run` probe rendering several words in one process** returned an empty buffer after the first word with `font handle ... is not live` errors; render one word per process. An empty `[u32]` read out of bounds yields 0 in the interpreter, so an ink scan of it reports the whole frame as ink — check `px.len()` first.
+## 2026-11-23 — GB10 GPU entries link through a sanctioned lane (Blocker 8)
+
+- **Building a GPU-capable non-bootstrap binary.** There is no hand-link any
+  more. Pass:
+  - `--runtime-bundle host-gpu-native-all --runtime-path <target>/release`
+  - `SIMPLE_NO_STUB_FALLBACK=1` and `SIMPLE_NATIVE_BUILD_RUST=1`
+  - a `cargo build --release -p simple-native-all --features vulkan` archive
+    in that runtime path.
+
+  The lane fails closed when the archive has no Vulkan runtime or provider
+  registry.
+- **Trap: an aarch64 seed weak-stubbed libc.** Seeds built before this change
+  do it, because the scan list is x86_64-only. The exported stubs crash the
+  NVIDIA ICD with SIGSEGV in `eglGetProcAddress`. Check the build log for
+  `Generating N stub functions`; a sound GPU link prints none.
+- **Trap: the default lane links Vulkan probes silently.** It uses
+  `runtime_native.c` weak stubs, so `rt_vulkan_device_count` returns 0 on a
+  machine that has a GPU. Assert a real value, not just exit 0.
+- **Evidence.** The sanctioned binary reproduces the hand-link hashes exactly
+  for web-box, corpus-case01 and corpus-case06. Table and recipe:
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
+  (2026-11-23, Blocker 8).
+- **Landing.** Owner accepted the amendment on 2026-11-23
+  (`doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`).
+
+## 2026-11-23 — GB10 corpus case 02: the Engine2D leg fails natively when `f64call().to_i32()` is used
+
+- **Trap:** natively (seed native-build or `simple run`), `floor_f64(x).to_i32()`,
+  or any `<f64-returning call>.to_i32()/.to_i64()`, converts the raw IEEE
+  bits (47.0 → 0). The interpreted `simple test` gives the right value, so a
+  green interpreted spec proves nothing for this class. Bind the call result to
+  a local first (`val f: f64 = floor_f64(x)`) or use `as i32`. Bug:
+  `doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md`.
+- **Case 02 effect:** the strict Vulkan affine dispatch box collapsed to
+  `(0,0,2,2)`, so the tile and bar were never drawn, which showed up as "edge
+  oracle mismatch". It is fixed in `draw_ir_adv.spl` with typed locals. The
+  Engine2D rgba on the GB10 is `962ca9e4…c306` and passes the oracle with
+  edge_max=1.
+- **How to find this class:** build a tiny native probe entry
+  (`--runtime-bundle host-gpu-native-all`, 8-30 s) that prints intermediate
+  boxes, and compare it with the interpreted spec on the same ICD
+  (`VK_DRIVER_FILES=.../nvidia_icd.json` works for specs on this host).
+- **Still open:** case 02 `run-*` is blocked by Skia's edge policy
+  (edge_excess=4, edge_max=30, the same on macOS and the GB10). This needs an
+  owner decision; do not widen the tolerance.
+- The worker's oracle-mismatch errors now carry the verdict numbers.
+- Spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_case02_edges_spec.spl`.
