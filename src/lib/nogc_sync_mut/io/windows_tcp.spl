@@ -5,7 +5,7 @@
 # Exactly one WSAStartup reference belongs to each live slot. Every temporary
 # heap region is freed before return; pointers never enter transport values.
 use std.nogc_sync_mut.io.windows_tcp_abi.*
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, GetTickCount64}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, GetTickCount64, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_write_ptr, windows_abi_wsapollfd_size, windows_abi_wsapollfd_events_offset, windows_abi_wsapollfd_revents_offset}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u16, volatile_read_u32}
 use std.common.text_bytes.{text_to_bytes, bytes_to_text}
 
@@ -47,15 +47,15 @@ fn _tcp_available_slot() -> i64:
     if _windows_tcp_slots_v1.len() < 4096: return _windows_tcp_slots_v1.len()
     -1
 
-@unsafe(reason: "bounded zeroed caller-owned Win64 scratch allocation", capabilities: [ffi, raw_ptr])
+@unsafe(reason: "bounded zeroed caller-owned Windows scratch allocation", capabilities: [ffi, raw_ptr])
 fn _tcp_alloc(size: i64) -> i64:
     if size <= 0 or size > 1048576: return 0
-    HeapAlloc(GetProcessHeap(), 8u32, size as u64)
+    windows_abi_heap_alloc(windows_abi_get_process_heap(), size)
 
 @unsafe(reason: "release caller-owned Winsock scratch storage", capabilities: [ffi, raw_ptr])
 fn _tcp_free(buffer: i64):
     if buffer != 0:
-        val _released = HeapFree(GetProcessHeap(), 0u32, buffer)
+        val _released = windows_abi_heap_free(windows_abi_get_process_heap(), buffer)
 
 @unsafe(reason: "acquire one Winsock reference with bounded WSADATA storage", capabilities: [ffi, raw_ptr])
 fn _tcp_start() -> bool:
@@ -166,18 +166,19 @@ pub fn io_tcp_bind(address: text) -> i64:
     val _closed = io_tcp_close(fd)
     -1
 
-# WSAPOLLFD x64 = SOCKET@0, short events@8, short revents@10, size16.
+# WSAPOLLFD x86 = SOCKET@0, short events@4, short revents@6, size=8.
+# WSAPOLLFD x64 = SOCKET@0, short events@8, short revents@10, size=16.
 # POLLRDNORM=0x100; POLLWRNORM=0x10; error/hangup also wake the caller.
 @unsafe(reason: "finite single owned SOCKET readiness observation", capabilities: [ffi, raw_ptr])
 fn _tcp_poll(fd: i64, events: i64, ms: i64) -> bool:
     val raw = _tcp_socket(fd)
     if raw == -1 or ms <= 0 or ms > 2147483647: return false
-    val descriptor = _tcp_alloc(16)
+    val descriptor = _tcp_alloc(windows_abi_wsapollfd_size())
     if descriptor == 0: return false
-    volatile_write_u64(descriptor, raw)
-    volatile_write_u16(descriptor + 8, events)
+    windows_abi_write_ptr(descriptor, raw)
+    volatile_write_u16(descriptor + windows_abi_wsapollfd_events_offset(), events)
     val status = WSAPoll(descriptor, 1u32, ms as i32)
-    val observed = volatile_read_u16(descriptor + 10)
+    val observed = volatile_read_u16(descriptor + windows_abi_wsapollfd_revents_offset())
     _tcp_free(descriptor)
     status > 0 and (observed & (events | 3)) != 0
 
