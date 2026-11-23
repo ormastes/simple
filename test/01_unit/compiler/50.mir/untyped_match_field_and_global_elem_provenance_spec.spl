@@ -1,0 +1,149 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+"""
+# MIR lowering: untyped `match Result<Class, text>` field projection, nested
+# field method dispatch, and module-global `[Class]` element provenance
+
+Regression coverage for:
+- `phase2_llvm_untyped_match_local_field_void_2026-11-16` &
+  `phase2_llvm_if_val_match_value_void_2026-11-16`: unattributed `Field` HIR
+  nodes (`has_type_: false` with placeholder `HirTypeKind.Unit`) and `Result`
+  class payload matches (`mir_class_identity_raw`) must never lower field
+  projections to `MirTypeKind.Unit` (`void`).
+- `phase2_mir_unresolved_field_receiver_2026-11-15`: `Field` lowering records
+  declared `HirType` on projected locals (`holder.inner.compute()`), and
+  `try_lower_global_read` records canonical element provenance on module-global
+  `var items: [BoxedItem] = []` (`items[0].get_val()`).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct MirFnSummary:
+    fn_count: i64
+    error_count: i64
+    error_text: text
+    getfield_dest_unit: i64
+    getfield_dest_typed: i64
+    getfield_base_unit: i64
+    callees: [text]
+
+fn inspect_fn_mir(mir: MirModule, ml: MirLowering, target_fn: text) -> MirFnSummary:
+    var err_text = ""
+    for e in ml.errors:
+        err_text = err_text + e.message + "\n"
+    var fn_count = 0
+    var dest_unit = 0
+    var dest_typed = 0
+    var base_unit = 0
+    var callees: [text] = []
+    for function in mir.functions.values():
+        if function.name == target_fn or function.name.ends_with(".{target_fn}") or function.name.ends_with("::{target_fn}"):
+            fn_count = fn_count + 1
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.GetField(dest, base, _):
+                            for local in function.locals:
+                                if local.id.id == dest.id:
+                                    if local.type_.kind == MirTypeKind.Unit:
+                                        dest_unit = dest_unit + 1
+                                    else:
+                                        dest_typed = dest_typed + 1
+                            match base.kind:
+                                case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                    for local in function.locals:
+                                        if local.id.id == id.id and local.type_.kind == MirTypeKind.Unit:
+                                            base_unit = base_unit + 1
+                                case _: ()
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    callees = callees.push(name)
+                                case _: ()
+                        case _: ()
+    MirFnSummary(
+        fn_count: fn_count,
+        error_count: ml.errors.len(),
+        error_text: err_text,
+        getfield_dest_unit: dest_unit,
+        getfield_dest_typed: dest_typed,
+        getfield_base_unit: base_unit,
+        callees: callees
+    )
+
+fn lower_two_modules(other_src: text, main_src: text, target_fn: text) -> MirFnSummary:
+    val log = Logger(level: 0)
+    val other_ast = parse_full_frontend(other_src, "lib/other.spl", "lib.other", log)
+    val main_ast = parse_full_frontend(main_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.other"] = other_ast
+    modules["app.main"] = main_ast
+    val sources = [
+        SourceFile(path: "lib/other.spl", content: other_src, module_name: "lib.other"),
+        SourceFile(path: "app/main.spl", content: main_src, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var other_hl = hirlowering_for_module("lib.other", surfaces)
+    var main_hl = hirlowering_for_module("app.main", surfaces)
+    val other_hir = other_hl.lower_module(other_ast)
+    val main_hir = main_hl.lower_module(main_ast)
+    expect(other_hl.errors.len()).to_equal(0)
+    expect(main_hl.errors.len()).to_equal(0)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib.other"] = other_hir
+    prescan_mods["app.main"] = main_hir
+    var ml = MirLowering.new(main_hir.symbols)
+    ml.prescan_module_struct_names(prescan_mods, "lib.other")
+    ml.prescan_module_struct_names(prescan_mods, "app.main")
+    val mir = ml.lower_module(main_hir, [other_hir, main_hir])
+    inspect_fn_mir(mir, ml, target_fn)
+
+fn has_callee_matching(callees: [text], owner_part: text, method_part: text) -> bool:
+    for c in callees:
+        if c.contains(owner_part) and c.contains(method_part):
+            return true
+    false
+
+describe "untyped match Result<Class, text> local field projection":
+    it "never produces a MirTypeKind.Unit local on match-bound or merged class fields":
+        val other_src = "pub class LoadedEntry:\n    unrelated_label: text\n    unrelated_flag: bool\n"
+        val main_src = "class LoadedEntry:\n    code: i64\n    tag: text\n\nfn target(res: Result<LoadedEntry, text>) -> i64:\n    val entry = match res:\n        case Ok(found): found\n        case Err(_): return -1\n    val arm_sum = match res:\n        case Ok(direct): direct.code\n        case Err(_): 0\n    entry.code + arm_sum\n"
+        val summary = lower_two_modules(other_src, main_src, "target")
+        expect(summary.fn_count).to_equal(1)
+        expect(summary.error_text).to_equal("")
+        expect(summary.getfield_dest_unit).to_equal(0)
+        expect(summary.getfield_base_unit).to_equal(0)
+        expect(summary.getfield_dest_typed > 0).to_equal(true)
+
+describe "nested field method dispatch through Field lowering":
+    it "preserves inner field declared HirType for holder.inner.compute()":
+        val other_src = "pub class InnerWorker:\n    label: text\n"
+        val main_src = "class InnerWorker:\n    base_val: i64\n\nimpl InnerWorker:\n    fn compute() -> i64:\n        self.base_val + 7\n\nclass Holder:\n    pad: text\n    inner: InnerWorker\n\nfn target(holder: Holder) -> i64:\n    holder.inner.compute()\n"
+        val summary = lower_two_modules(other_src, main_src, "target")
+        expect(summary.fn_count).to_equal(1)
+        expect(summary.error_text).to_equal("")
+        expect(summary.getfield_dest_unit).to_equal(0)
+        expect(has_callee_matching(summary.callees, "InnerWorker", "compute")).to_equal(true)
+
+describe "module-global [Class] array element provenance":
+    it "resolves direct BoxedItem.get_val call on items[0].get_val() despite conflicting leaf names":
+        val other_src = "pub class BoxedItem:\n    other_name: text\n    other_flag: bool\n"
+        val main_src = "class BoxedItem:\n    stored: i64\n\nimpl BoxedItem:\n    fn get_val() -> i64:\n        self.stored\n\nvar items: [BoxedItem] = []\n\nfn target() -> i64:\n    items[0].get_val()\n"
+        val summary = lower_two_modules(other_src, main_src, "target")
+        expect(summary.fn_count).to_equal(1)
+        expect(summary.error_text).to_equal("")
+        expect(has_callee_matching(summary.callees, "BoxedItem", "get_val")).to_equal(true)
