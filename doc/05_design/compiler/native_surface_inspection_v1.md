@@ -4,6 +4,10 @@
 It accepts the canonical native source/entry/target/cache flags plus one or two
 `--module` selectors, one `--item`, and `--diagnostic-root build/verify`.
 It rejects native output flags and worker/shard contexts.
+An omitted target follows the unchanged canonical factory, including its raw
+empty host-default value. The record distinguishes the CLI spelling, raw target
+before source loading, and implicit ambient/default versus explicit CLI policy;
+it never replaces the empty value with a guessed host triple.
 
 The coordinator publishes source authority and the canonical immutable closure,
 then admits that closure through the existing capsule handoff owner. The focused
