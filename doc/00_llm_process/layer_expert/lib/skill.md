@@ -123,3 +123,16 @@ A compiled fixture is not evidence that native SSpec or HAL/SOSIX suites ran.
   advisory, fatal selftest, fixtures `test/fixtures/io_runtime/`). Scans
   `src/` + `examples/`, not `test/`. Record:
   `doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.
+
+## Engine3D backends: trait methods live in the primary impl (2026-11-22)
+
+A plain `impl Backend:` block in a sibling `backend_*_ext.spl` is never
+imported, so trait-required methods placed there do not attach and the backend
+fails `RenderBackend3D` checking. Required methods belong in
+`impl RenderBackend3D for <Backend>` in `backend_<name>.spl`; the `_ext.spl`
+files of the emulated backends are re-exports only. `RocmBackend3D` and
+`CudaBackend3D` are software rasterizers with `emu_*` fallbacks, not GPU
+dispatch: a passing spec there is interpreter evidence, never GPU evidence.
+ROCm coverage of all 26 former extension methods:
+`test/01_unit/lib/gpu/engine3d/backend_rocm_ext_methods_spec.spl`; record:
+`doc/08_tracking/bug/engine3d_ext_impl_blocks_never_imported_2026-07-02.md`.

@@ -197,7 +197,7 @@ Evidence is a SPEC FILE VERDICT line. "missing" = no spec or gate found by name/
 | RB-BUILD-03 | `app/build/bootstrap_no_gpu_sdk_spec.spl` (rbid2), `compiler/driver/bootstrap_hosted_lane_authority_scope_spec.spl` | OK 4/4, 2/2; default plan, opt-in accelerator groups and seed default cargo features carry no GPU SDK (plan level, not an SDK-free machine run) |
 | RB-BUILD-04 | `compiler/80.driver/library_unit_stage_reuse_v1_spec.spl` (rbid2) | OK 6/6 (stage reuse only on exact cache key; failed/incomplete unit never reused) |
 | RB-LOAD-01 | `compiler/loader/mapping_lifetime_accounting_v1_spec.spl` | OK 10/10 (mapping lifetime only) |
-| RB-LOAD-02 | `compiler/loader/hot_swap_pinning_spec.spl` (rbid2, `@tag:in-development`) | ERROR 0/1 RED by design: no hot-swap path; todo `doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md` |
+| RB-LOAD-02 | `compiler/loader/hot_swap_pinning_spec.spl` (hs1) | GREEN 5/5 (2026-11-23): identity-checked swap in `99.loader/hot_swap_pin.spl` refuses iface/ABI/missing-identity, CAS commit; loader wiring + state migration remain in todo `doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md` |
 | RB-PLUGIN-01 | `compiler/backend_plugin/loader_session_spec.spl` | OK 7/7 |
 | RB-PLUGIN-02 | `compiler/backend_plugin/target_context_v2_spec.spl` | OK 9/9 |
 | RB-PLUGIN-03 | `compiler/backend_plugin/dynamic_loader_spec.spl` | ERROR 2/7: environmental, fixture build needs exact LLVM 23.1.1 clang-cl (absent on this host); unknown-symbol fail-closed unproven here |
@@ -207,7 +207,7 @@ Evidence is a SPEC FILE VERDICT line. "missing" = no spec or gate found by name/
 | RB-DIAG-01 | `compiler/diagnostics/diagnostic_rule_policy_parity_spec.spl` | OK 6/6 (policy parity; CLI/LSP/interpreter same-ID not proven end to end) |
 | RB-RATCHET-01 | `compiler/lint/bound_census_reproducible_spec.spl` (rbid2); gates `check-rt-dual-implementation-ratchet.shs`, `check-primitive-api-semantic-ratchet.shs` not run | OK 3/3 (census findings reproducible, order-stable, no cross-file state; detector level) |
 
-Missing: none (2026-11-22 rbid2). In-development RED: RB-LOAD-02. Partial: RB-BUILD-03 (plan level), RB-DIAG-01. Red: RB-UNIT-01 (known), RB-PLUGIN-03 (env), `sosix/text_boundary_spec` (RB-TEXT-01 sibling).
+Missing: none (2026-11-22 rbid2). In-development RED: none (RB-LOAD-02 green 2026-11-23 hs1, slice). Partial: RB-BUILD-03 (plan level), RB-DIAG-01. Red: RB-UNIT-01 (known), RB-PLUGIN-03 (env), `sosix/text_boundary_spec` (RB-TEXT-01 sibling).
 
 Evidence classes per host/target: compile-only, link, load provider, execute. Perf targets: cold compile <= +3% CPU / +2% RSS, warm <= +1%; zero added runtime work for unconstrained ABI-compatible SFFI returns.
 

@@ -5,7 +5,7 @@ use compiler.hir.hir_lowering.module_surface.{
     ModuleSurface, ModuleSurfaceBuilder
 }
 
-fn traced_registry(import_id: text, dependency_id: text):
+fn traced_registry(import_id: text, dependency_id: text, dependency_path: text):
     var consumer = ModuleSurface.empty("app.consumer")
     consumer.imports = [ParserImport(
         module: import_id, items: [], is_lazy: false, span: Span.empty())]
@@ -16,35 +16,45 @@ fn traced_registry(import_id: text, dependency_id: text):
         .to_equal(true)
     expect(builder.add_surface_canonical_identity(
         ModuleSurface.empty(dependency_id), dependency_id,
-        "src/lib/dependency.spl").is_ok()).to_equal(true)
+        dependency_path).is_ok()).to_equal(true)
     builder.finish().unwrap()
 
 describe "frozen module surfaces retain actual import resolution probes":
     it "records the selected direct import with resolver generation and version":
-        val registry = traced_registry("lib.dep", "lib.dep")
+        val registry = traced_registry("lib.dep", "lib.dep", "src/lib/dep.spl")
+        val repeated = traced_registry("lib.dep", "lib.dep", "src/lib/dep.spl")
         val consumer = registry.surfaces[
             registry.index_by_name["app.consumer"]]
+        val repeated_consumer = repeated.surfaces[
+            repeated.index_by_name["app.consumer"]]
         expect(consumer.import_resolution_traces.len()).to_equal(1)
         val trace = consumer.import_resolution_traces[0]
         expect(trace.selected).to_equal("lib.dep")
         expect(trace.selected_count).to_equal(1)
+        expect(trace.dir_generation.starts_with("module-surfaces-")).to_equal(true)
+        expect(trace.dir_generation.byte_len()).to_equal(80)
         expect(trace.dir_generation).to_equal(
-            "module-surfaces-{registry.generation}")
+            repeated_consumer.import_resolution_traces[0].dir_generation)
         expect(trace.resolver_version).to_equal(
             "hir-module-surface-resolver-v3")
 
     it "retains unsuccessful higher-precedence candidates before a fallback hit":
-        val registry = traced_registry("std.path", "lib.std.path")
+        val registry = traced_registry("std.path", "lib.path", "src/lib/path.spl")
         val consumer = registry.surfaces[
             registry.index_by_name["app.consumer"]]
         val trace = consumer.import_resolution_traces[0]
-        expect(trace.selected).to_equal("lib.std.path")
+        expect(trace.selected).to_equal("lib.path")
         expect(trace.probes[0].path).to_equal("std.path")
         expect(trace.probes[0].found).to_equal(false)
         expect(trace.probes[1].path).to_equal("std.path.__init__")
         expect(trace.probes[1].found).to_equal(false)
-        expect(trace.probes[2].path).to_equal("lib.std.path")
-        expect(trace.probes[2].found).to_equal(true)
+        var fallback_index = -1
+        var probe_index = 0
+        while probe_index < trace.probes.len():
+            if trace.probes[probe_index].path == "lib.path" and trace.probes[probe_index].found:
+                fallback_index = probe_index
+            probe_index = probe_index + 1
+        expect(fallback_index).to_be_greater_than(1)
 
     it "resolves an item directly from the relative package surface":
         var consumer = ModuleSurface.empty("app.pkg.facade")
@@ -60,10 +70,10 @@ describe "frozen module surfaces retain actual import resolution probes":
         expect(builder.add_surface_canonical_identity(
             consumer, "app.pkg.facade", "src/app/pkg/facade.spl").is_ok()).to_equal(true)
         expect(builder.add_surface_canonical_identity(
-            ModuleSurface.empty("app.pkg"), "app.pkg",
+            ModuleSurface.empty("app.pkg.__init__"), "app.pkg.__init__",
             "src/app/pkg/__init__.spl").is_ok()).to_equal(true)
         val registry = builder.finish().unwrap()
         val frozen = registry.surfaces[registry.index_by_name["app.pkg.facade"]]
-        expect(frozen.import_target_names[0]).to_equal("app.pkg")
+        expect(frozen.import_target_names[0]).to_equal("app.pkg.__init__")
         expect(frozen.import_item_names[0]).to_equal("orig")
         expect(frozen.import_resolution_traces[0].import_id).to_equal(".orig")

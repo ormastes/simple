@@ -10,15 +10,29 @@ use std.spec.{describe, it, expect}
 use std.io_runtime.{read_file_text}
 
 
-val MODULE_SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
+val MODULE_SURFACE_FILES = [
+    "src/compiler/20.hir/hir_lowering/module_surface_types.spl",
+    "src/compiler/20.hir/hir_lowering/module_surface_export_index.spl",
+    "src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl",
+    "src/compiler/20.hir/hir_lowering/module_surface_registry.spl",
+    "src/compiler/20.hir/hir_lowering/module_surface_declarations.spl"
+]
 val MODULE_LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
+
+fn read_module_surface_sources() -> text:
+    var combined = ""
+    for path in MODULE_SURFACE_FILES:
+        combined = combined + read_file_text(path) + "\n"
+    combined
 
 describe "module surface scalar index allocation guard":
     # @manual scenario evidence
     it "does not rebuild Dict key/value arrays in module surface lookup":
         # @req REQ-SSPEC-COMPILER
         step("does not rebuild Dict key/value arrays in module surface lookup")
-        val source = read_file_text(MODULE_SURFACE)
+        val source = read_module_surface_sources()
+        val export_source = read_file_text("src/compiler/20.hir/hir_lowering/module_surface_export_index.spl")
+        val registry_index_source = read_file_text("src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl")
         expect(source.index_of("val names = index_by_name.keys()")).to_equal(-1)
         expect(source.index_of("val indices = index_by_name.values()")).to_equal(-1)
         expect(source.index_of("export_origin_index.put(")).to_equal(-1)
@@ -38,28 +52,36 @@ describe "module surface scalar index allocation guard":
         expect(source).to_contain("constant_names: [text]")
         expect(source).to_contain("index_by_name: Dict<text, i64>")
         expect(source.index_of("origin_index.index_by_name.contains_key(name)")).to_equal(-1)
-        expect(source.index_of("origin_index.index_by_name[name]")).to_equal(-1)
-        expect(source).to_contain("while position < origin_index.names.len()")
-        expect(source).to_contain("origin_index.names[position] == name")
+        val pos_start = source.index_of("pub(package) fn module_surface_export_origin_index_position(")
+        val pos_end = source.index_of("pub(package) fn module_surface_export_origin_index_lookup(")
+        expect(pos_start >= 0).to_equal(true)
+        expect(pos_end > pos_start).to_equal(true)
+        val pos_body = source.substring(pos_start, pos_end)
+        expect(pos_body.index_of("index_by_name[")).to_equal(-1)
+        expect(pos_body.index_of("origin_index.index_by_name")).to_equal(-1)
+        expect(pos_body).to_contain("while scan < entry_count:")
+        expect(pos_body).to_contain("if origin_index.names[scan] == name:")
         expect(source).to_contain("fn module_surface_export_origin_index_put(")
         expect(source).to_contain("fn module_surfaces_validate_index_alignment(")
-        expect(source.index_of("val dict_names = index_by_name.keys()")).to_equal(-1)
-        expect(source.index_of("val dict_indices = index_by_name.values()")).to_equal(-1)
-        expect(source.index_of(
-            "fn module_surface_registry_index(registry: ModuleSurfacesByName"))\
-            .to_equal(-1)
-        expect(source.index_of(
-            "fn module_surface_resolve_absolute_key(\n    registry: ModuleSurfacesByName"))\
-            .to_equal(-1)
+        expect(export_source.index_of("val dict_names = index_by_name.keys()")).to_equal(-1)
+        expect(export_source.index_of("val dict_indices = index_by_name.values()")).to_equal(-1)
+        val lookup_start = registry_index_source.index_of("pub(package) fn module_surface_registry_index(")
+        val lookup_end = registry_index_source.index_of("pub(package) fn module_surface_resolve_absolute_key(")
+        expect(lookup_start >= 0).to_equal(true)
+        expect(lookup_end > lookup_start).to_equal(true)
+        val lookup_body = registry_index_source.substring(lookup_start, lookup_end)
+        expect(lookup_body.index_of("registry.index_by_name")).to_equal(-1)
+        expect(lookup_body.index_of("index_by_name[")).to_equal(-1)
+        expect(lookup_body).to_contain("registry.ordered_names[position] == name")
         expect(source).to_contain(
             "source: SourceFile, origins: ModuleSurfaceExportOriginIndex")
         expect(source).to_contain(") -> Result<bool, text>:")
         expect(source).to_contain(
             "val origin_hints = module_surface_export_origin_index_empty()")
-        expect(source.index_of("ModuleSurfaceExportOriginIndex.empty()"))\
+        expect(source.index_of("ModuleSurfaceExportOriginIndex.empty()"))
             .to_equal(-1)
         expect(source).to_contain("if origin_hints_result.is_err():")
-        expect(source.index_of("val origin_hints = origin_hints_result.unwrap()"))\
+        expect(source.index_of("val origin_hints = origin_hints_result.unwrap()"))
             .to_equal(-1)
 
     it "uses the aligned arrays in the module lowering lookup":
@@ -69,11 +91,10 @@ describe "module surface scalar index allocation guard":
         expect(source.index_of("val names = surfaces.index_by_name.keys()")).to_equal(-1)
         expect(source.index_of("val indices = surfaces.index_by_name.values()")).to_equal(-1)
         expect(source.index_of("self.module_surfaces.index_by_name.keys()")).to_equal(-1)
-        expect(source.index_of("self.module_surfaces.index_by_name.contains_key"))\
+        expect(source.index_of("self.module_surfaces.index_by_name.contains_key"))
             .to_equal(-1)
-        expect(source).to_contain("val names = surfaces.ordered_names")
-        expect(source).to_contain("val indices = surfaces.ordered_indices")
-        expect(source).to_contain("if not self.surface_index_by_name_built:")
-        expect(source).to_contain("self.build_surface_index_by_name()")
-        expect(source).to_contain("self.surface_index_by_name.contains_key(name)")
-        expect(source).to_contain("for sibling_name in self.module_surfaces.ordered_names")
+        expect(source).to_contain("val names = self.module_surfaces.ordered_names")
+        expect(source).to_contain("val indices = self.module_surfaces.ordered_indices")
+        expect(source).to_contain("self.surface_index_by_name_built = true")
+        expect(source).to_contain("hir_module_surface_index(self.module_surfaces, name)")
+        expect(source).to_contain("while key_index < self.module_surfaces.ordered_names.len():")

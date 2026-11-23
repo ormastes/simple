@@ -1,0 +1,97 @@
+# @cover src/compiler/30.types/custom_primitive_info.spl 80%
+# @req REQ-TYPES-CUSTOM-PRIMITIVE-001
+"""
+## Custom Primitive Metadata & Target C ABI Mapping Specification
+
+Exercises primitive type classification, C/Rust/LLVM ABI name projection,
+CustomPrimitiveInfo layout derivation, and target-triple C data model scalar
+size/signedness mapping in `compiler.types.custom_primitive_info`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use compiler.types.custom_primitive_info.{
+    PrimitiveTypeResolver,
+    PrimitiveAbiNames,
+    CustomPrimitiveInfo,
+    c_target_data_model,
+    c_scalar_underlying
+}
+
+describe "custom primitive resolver and ABI tables":
+    it "validates supported underlying primitive spellings and rejects composites":
+        step("Check integer, float, bool acceptance and unknown rejection")
+        val r = PrimitiveTypeResolver.create()
+        expect(r.is_valid_underlying("u8")).to_be(true)
+        expect(r.is_valid_underlying("i64")).to_be(true)
+        expect(r.is_valid_underlying("f32")).to_be(true)
+        expect(r.is_valid_underlying("bool")).to_be(true)
+        expect(r.is_valid_underlying("text")).to_be(false)
+        expect(r.is_valid_underlying("usize")).to_be(false)
+
+    it "derives signedness, bit width, byte size, and kind predicates":
+        step("Verify signed, unsigned, float, and bool property resolution")
+        val r = PrimitiveTypeResolver.create()
+        expect(r.resolve_signedness("u32")).to_equal("unsigned")
+        expect(r.resolve_signedness("i16")).to_equal("signed")
+        expect(r.resolve_signedness("f64")).to_equal("none")
+        expect(r.resolve_bit_width("bool")).to_equal(8)
+        expect(r.resolve_byte_size("bool")).to_equal(1)
+        expect(r.resolve_byte_size("i64")).to_equal(8)
+        expect(r.resolve_bit_width("text")).to_equal(0)
+        expect(r.is_integer_type("u64")).to_be(true)
+        expect(r.is_integer_type("f64")).to_be(false)
+        expect(r.is_bool_type("bool")).to_be(true)
+        expect(r.is_float_type("f32")).to_be(true)
+
+    it "projects C, Rust, and LLVM IR names consistently":
+        step("Compare PrimitiveAbiNames across u16, i64, f64, bool, and unknown types")
+        val abi = PrimitiveAbiNames.create()
+        expect(abi.c_name("u16")).to_equal("uint16_t")
+        expect(abi.c_name("i64")).to_equal("int64_t")
+        expect(abi.c_name("f32")).to_equal("float")
+        expect(abi.rust_name("u8")).to_equal("u8")
+        expect(abi.llvm_name("u64")).to_equal("i64")
+        expect(abi.llvm_name("f64")).to_equal("double")
+        expect(abi.llvm_name("bool")).to_equal("i1")
+        expect(abi.c_name("unknown")).to_equal("")
+        expect(abi.llvm_name("unknown")).to_equal("")
+
+    it "constructs CustomPrimitiveInfo with derived layout and empty sentinel":
+        step("Inspect created CustomPrimitiveInfo vs empty sentinel")
+        val port = CustomPrimitiveInfo.create("PortId", "u16", "net.spl:4:1")
+        expect(port.is_custom_primitive()).to_be(true)
+        expect(port.underlying_primitive()).to_equal("u16")
+        expect(port.bit_capacity()).to_equal(16)
+        expect(port.byte_size).to_equal(2)
+        expect(port.alignment).to_equal(2)
+        expect(port.signedness).to_equal("unsigned")
+        expect(port.abi_type()).to_equal("u16")
+        expect(port.is_integer()).to_be(true)
+        expect(port.is_transparent).to_be(true)
+
+        val empty = CustomPrimitiveInfo.empty()
+        expect(empty.name).to_equal("")
+        expect(empty.bit_capacity()).to_equal(0)
+        expect(empty.is_transparent).to_be(false)
+
+describe "target C ABI data model and scalar projection":
+    it "classifies LP64, LLP64, ILP32, and unknown target triples":
+        step("Check data model selection across Linux, Windows, x32, and 32-bit triples")
+        expect(c_target_data_model("x86_64-unknown-linux-gnu")).to_equal("lp64")
+        expect(c_target_data_model("x86_64-pc-windows-msvc")).to_equal("llp64")
+        expect(c_target_data_model("x86_64-unknown-linux-gnux32")).to_equal("ilp32")
+        expect(c_target_data_model("riscv32-unknown-none-eabi")).to_equal("ilp32")
+        expect(c_target_data_model("invalid")).to_equal("")
+        expect(c_target_data_model("sparc64-unknown-linux-gnu")).to_equal("")
+
+    it "maps C long, pointer-sized integers, and plain char according to ABI model":
+        step("Verify target-dependent widths and unsigned-char platforms")
+        expect(c_scalar_underlying("long", "x86_64-unknown-linux-gnu")).to_equal("i64")
+        expect(c_scalar_underlying("long", "x86_64-pc-windows-msvc")).to_equal("i32")
+        expect(c_scalar_underlying("unsigned long", "aarch64-apple-darwin")).to_equal("u64")
+        expect(c_scalar_underlying("size_t", "riscv32-unknown-none-eabi")).to_equal("u32")
+        expect(c_scalar_underlying("ptrdiff_t", "x86_64-unknown-linux-gnu")).to_equal("i64")
+        expect(c_scalar_underlying("char", "aarch64-unknown-linux-gnu")).to_equal("u8")
+        expect(c_scalar_underlying("char", "x86_64-unknown-linux-gnu")).to_equal("i8")
+        expect(c_scalar_underlying("char", "aarch64-apple-darwin")).to_equal("i8")
+        expect(c_scalar_underlying("unknown_t", "x86_64-unknown-linux-gnu")).to_equal("")

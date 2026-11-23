@@ -811,26 +811,9 @@ fn eval_block_expr(eid: i64) -> i64:
     val value_expr = e_node.left
     eval_block(stmts, value_expr)
 
-pub fn eval_block(stmts: [i64], value_expr: i64) -> i64:
-    env_push_scope()
-    eval_defer_depth = eval_defer_depth + 1
-    val my_depth = eval_defer_depth
-
-    var last_val = val_make_nil()
-
-    for sid in stmts:
-        if eval_had_error: break
-        if eval_returning: break
-        if eval_breaking: break
-        if eval_continuing: break
-        last_val = eval_stmt(sid)
-
-    if value_expr >= 0:
-        val ctrl_interrupted = eval_had_error or eval_returning or eval_breaking or eval_continuing
-        if ctrl_interrupted == false:
-            last_val = eval_expr(value_expr)
-
-    # Execute deferred expressions at this depth in reverse order (LIFO)
+# @allow(primitive_api) core-interpreter internal scope depth counter shared with eval_calls/call_method_eval
+pub fn eval_run_scope_defers(my_depth: i64):
+    """Run LIFO defer (and errdefer on error) handlers registered at my_depth."""
     val saved_returning = eval_returning
     val saved_had_error = eval_had_error
     eval_returning = false
@@ -879,6 +862,28 @@ pub fn eval_block(stmts: [i64], value_expr: i64) -> i64:
         eval_errdefer_eids.pop()
         eval_errdefer_depths.pop()
     eval_defer_depth = eval_defer_depth - 1
+
+pub fn eval_block(stmts: [i64], value_expr: i64) -> i64:
+    env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
+
+    var last_val = val_make_nil()
+
+    for sid in stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        if eval_continuing: break
+        last_val = eval_stmt(sid)
+
+    if value_expr >= 0:
+        val ctrl_interrupted = eval_had_error or eval_returning or eval_breaking or eval_continuing
+        if ctrl_interrupted == false:
+            last_val = eval_expr(value_expr)
+
+    # Execute deferred expressions at this depth in reverse order (LIFO)
+    eval_run_scope_defers(my_depth)
 
     env_pop_scope()
     last_val
@@ -1411,7 +1416,7 @@ use compiler.core.interpreter.eval_calls.val_copy_if_value_struct
 
 # ===== Exports =====
 # Symbols defined in this file
-export eval_warnings, eval_clear_warnings, eval_match_exhaustive_check_count
+export eval_warnings, eval_clear_warnings, eval_match_exhaustive_check_count, eval_run_scope_defers
 
 # Re-exports from eval_tables.spl
 
