@@ -9,6 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+import importlib.util
+
+_rss_spec = importlib.util.spec_from_file_location('rss_ring', Path(__file__).with_name('process-rss-ring.py'))
+_rss_module = importlib.util.module_from_spec(_rss_spec)
+_rss_spec.loader.exec_module(_rss_module)
 
 SOURCE = 'fd366d2a3068e9fc0d2ba7af0b915432d56b88c9'
 PARENT = 'f130dde9f91955186ae5e9121917e121d99542871f80e5dc7dd6b8a718c447a3'
@@ -26,13 +31,16 @@ def main():
     parser.add_argument('--source', required=True, type=Path)
     args = parser.parse_args()
     source = args.source.resolve()
+    if str(source) != '/home/runner/work/simple/simple/source':
+        raise RuntimeError('retained cache absolute source path mismatch')
     root = source/'build/early-full-cli-fd366'
-    evidence = root/'evidence'
+    run_id = os.environ['GITHUB_RUN_ID']
+    evidence = root/('evidence-'+run_id)
     evidence.mkdir(parents=True, exist_ok=False)
-    product = root/'product'
+    product = root/('product-'+run_id)
     product.mkdir()
     for name in ('cache/frontend', 'cache/hir', 'tmp', 'storage', 'xdg-cache'):
-        (root/name).mkdir(parents=True)
+        (root/name).mkdir(parents=True, exist_ok=True)
     parent = root/'parent/simple_stage2'
     runtime = root/'runtime'
     current = 'identity'
@@ -48,6 +56,7 @@ def main():
         SIMPLE_NO_STUB_FALLBACK='1', SIMPLE_NATIVE_BUILD_RUST='0',
         SIMPLE_BOOTSTRAP_STAGE3='0', SIMPLE_BOOTSTRAP_STAGE4='0',
         SIMPLE_FILE_WORKERS='1', SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY='1',
+        SIMPLE_FILE_WORKER_BATCH='4',
         SIMPLE_PARSE_SHARDING='1', SIMPLE_FRONTEND_CACHE='1', SIMPLE_HIR_CACHE='1',
         SIMPLE_SCV_INVENTORY_COLD_INIT='1', SIMPLE_NATIVE_BUILD_THREADS='1',
         SIMPLE_PROJECT_ROOT=str(source), SIMPLE_LIB=str(source/'src'),
@@ -82,7 +91,27 @@ def main():
                    f'--timeout-seconds={seconds}', '--receipt='+str(receipt), '--'] + argv
         (evidence/(name+'.argv.json')).write_text(json.dumps(command, indent=2))
         with (evidence/(name+'.stdout')).open('wb') as stdout, (evidence/(name+'.stderr')).open('wb') as stderr:
-            process = subprocess.run(command, cwd=source, env=env, stdout=stdout, stderr=stderr)
+            process = subprocess.Popen(command, cwd=source, env=env, stdout=stdout, stderr=stderr)
+            sampler = None
+            try:
+                if name == 'build':
+                    sampler = _rss_module.ProcessRssRing(process.pid, evidence/(name+'.process-rss.json'))
+                    sampler.start()
+                process.wait()
+            except BaseException:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise
+            finally:
+                if sampler is not None:
+                    try:
+                        sampler.stop()
+                    except Exception as error:
+                        print(name+': telemetry cleanup: '+str(error), file=sys.stderr)
         (evidence/(name+'.exit')).write_text(str(process.returncode)+'\n')
         fields = {}
         for line in receipt.read_text().splitlines():
@@ -91,7 +120,9 @@ def main():
                 raise RuntimeError(name+': duplicate owner receipt field')
             fields[key] = value
         if fields.get('status') != 'complete' or fields.get('quiescent') != '1' or fields.get('rss_cap_enforced') != '1':
-            raise RuntimeError(name+': owner did not complete quiescent under enforced cap')
+            raise RuntimeError(name+': owner status='+str(fields.get('status'))+
+                               ' quiescent='+str(fields.get('quiescent'))+
+                               ' enforced='+str(fields.get('rss_cap_enforced')))
         if fields.get('rss_limit_kib') != str(cap) or fields.get('exit_status') != str(process.returncode):
             raise RuntimeError(name+': owner identity/status mismatch')
         if (process.returncode == 0) != expected_success:
@@ -107,6 +138,21 @@ def main():
 
     try:
         identities()
+        prior = json.loads((root/'evidence/terminal.json').read_text())
+        if (prior['source'], prior['producer_sha256'], prior['runtime_sha256'], prior['failed_stage']) != (SOURCE, PARENT, RUNTIME, 'build'):
+            raise RuntimeError('retained terminal tuple mismatch')
+        prior_owner = dict(line.split('=', 1) for line in (root/'evidence/build.owner.env').read_text().splitlines())
+        if (prior_owner.get('status'), prior_owner.get('exit_status'), prior_owner.get('quiescent')) != ('rss-cap-exceeded', '88', '1'):
+            raise RuntimeError('retained failure is not the reviewed quiescent RSS incident')
+        if list((root/'cache').rglob('*.terminal')) or list((root/'cache').rglob('*.o')):
+            raise RuntimeError('unexpected completed module/object in prior frontend-only cache')
+        old_queues = sorted(str(p.relative_to(root/'cache')) for p in (root/'cache').rglob('queue-*') if p.is_dir())
+        (evidence/'cache-reuse.json').write_text(json.dumps({
+            'prior_run': 45238478116, 'artifact': 14851292242,
+            'artifact_digest': 'sha256:c4b52ef70ccd83cf33c77ededdf412de642139167082b318e93a812ffe02df77',
+            'old_queue_namespaces': old_queues, 'completed_modules_reused': 0,
+            'scope': 'frontend candidates only; normal compiler identity validation; old picks are not results',
+            'batch': 4, 'prior_requested_batch': 16, 'cycle_peers_may_expand_pick': True}, indent=2))
         parent.chmod(0o755)
         tools = {}
         for name in ('clang', 'ld.lld', 'llvm-ar'):
@@ -131,7 +177,8 @@ def main():
         env['SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB'] = str(cap)
         (evidence/'reservation.json').write_text(json.dumps({'available_kib': available,
             'cap_kib': cap, 'fraction': '75%', 'threads': 1, 'route': 'explicit-single-unit-per-file',
-            'worker_estimate': 'canonical unchanged', 'reserve_bytes': 1073741824}, indent=2))
+            'worker_estimate': 'canonical unchanged', 'reserve_bytes': 1073741824,
+            'requested_batch': 4, 'cycle_peers_may_expand_pick': True}, indent=2))
         (evidence/'environment.json').write_text(json.dumps({k:v for k,v in env.items()
             if k.startswith('SIMPLE_') or k in ('TMPDIR', 'XDG_CACHE_HOME', 'CC')}, indent=2))
         result['source_tree'] = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=source, text=True).strip()
@@ -147,6 +194,11 @@ def main():
                      'src/package_ownership', 'src/compositions'):
             args += ['--source', path]
         owner('build', args, 14400, cap)
+        build_log = (evidence/'build.stdout').read_text(errors='replace')
+        new_queues = [p for p in (root/'cache').rglob('queue-*') if p.is_dir()
+                      and str(p.relative_to(root/'cache')) not in old_queues]
+        if '[coordinator-route] per-file worker pool + per-module link' not in build_log or not new_queues:
+            raise RuntimeError('successful build lacks actual per-file route and fresh queue evidence')
         if not binary.is_file() or binary.stat().st_size == 0:
             raise RuntimeError('build produced no full CLI')
         result['product_sha256'] = sha(binary)
@@ -155,7 +207,7 @@ def main():
         (evidence/'linked-product.json').write_text(json.dumps(result, indent=2))
         # Qualification runs the new product only; the parent cannot stand in.
         env['SIMPLE_BINARY'] = str(binary)
-        smoke_root = root/'product-smoke'
+        smoke_root = root/('product-smoke-'+run_id)
         for name in ('cache', 'storage', 'tmp', 'xdg-cache'):
             (smoke_root/name).mkdir(parents=True, exist_ok=False)
         env.update(SIMPLE_CACHE=str(smoke_root/'cache'),
@@ -165,6 +217,7 @@ def main():
             XDG_CACHE_HOME=str(smoke_root/'xdg-cache'), TMPDIR=str(smoke_root/'tmp'))
         env['SIMPLE_BOOTSTRAP_WHOLE_PROGRAM'] = '1'
         for key in ('SIMPLE_FILE_WORKERS', 'SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY', 'SIMPLE_PARSE_SHARDING',
+                    'SIMPLE_FILE_WORKER_BATCH',
                     'SIMPLE_FRONTEND_CACHE_DIR', 'SIMPLE_HIR_CACHE_DIR'):
             env.pop(key, None)
         smoke_cap = min(cap, 4 * 1024 * 1024)
@@ -204,6 +257,16 @@ def main():
         result.update(status='FAILED', failed_stage=current, error=str(error))
         print('FAIL: '+current+': '+str(error), file=sys.stderr)
     finally:
+        if 'old_queues' in locals():
+            current_queues = sorted(str(p.relative_to(root/'cache')) for p in (root/'cache').rglob('queue-*') if p.is_dir())
+            (evidence/'current-queues.json').write_text(json.dumps({'run': run_id,
+                'new_namespaces': [name for name in current_queues if name not in old_queues]}, indent=2))
+        if (evidence/'build.stdout').exists():
+            log = (evidence/'build.stdout').read_text(errors='replace')
+            picked = re.findall(r'\[file-worker\] unit picked=(\d+)', log)
+            (evidence/'observed-batches.json').write_text(json.dumps({
+                'requested_batch': 4, 'actual_picked_counts': list(map(int, picked)),
+                'actual_single_unit_route': '[coordinator-route] per-file worker pool + per-module link' in log}, indent=2))
         (evidence/'terminal.json').write_text(json.dumps(result, indent=2)+'\n')
     return 0 if result['status'] == 'PASS' else 1
 
