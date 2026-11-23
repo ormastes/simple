@@ -1,46 +1,58 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Early full CLI from fd366 Linux Phase2
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  early-full-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - name: Diagnostic controller only
+        uses: actions/checkout@v5
         with:
+          path: control
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          sparse-checkout: scripts/check
+      - name: Immutable compiler source
+        uses: actions/checkout@v5
+        with:
+          ref: fd366d2a3068e9fc0d2ba7af0b915432d56b88c9
+          path: source
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14839362739'
+          run-id: '45205044707'
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: source/build/early-full-cli-fd366/parent
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14833542613'
+          run-id: '45205044707'
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: source/build/early-full-cli-fd366/runtime
+      - name: Prepare native tools
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Build only full CLI and qualify actual commands
+        run: python control/scripts/check/early-full-cli-fd366.py --source "$PWD/source"
+      - name: Retain terminal evidence and actual product even on failure
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: early-full-cli-from-fd366-phase2
+          path: |
+            source/build/early-full-cli-fd366/evidence
+            source/build/early-full-cli-fd366/product
+            source/build/early-full-cli-fd366/cache
+            source/build/early-full-cli-fd366/tmp
+            source/build/scv
+            source/.simple/scv
+            source/test/fixtures/early_full_cli_fd366
+          if-no-files-found: error
+          retention-days: 7
