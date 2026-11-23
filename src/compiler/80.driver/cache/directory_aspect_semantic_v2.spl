@@ -6,7 +6,7 @@ use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerObject
 use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
 use compiler.common.cache_contract.directory_category_projection_v2.{DirectoryCategoryProjectionV2, directory_category_projection_valid_v2}
 use compiler.common.cache_contract.directory_source_epoch_v2.{DirectorySourceEpochV2, directory_source_epoch_equal_v2}
-use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolKind, SymbolId}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolKind}
 use compiler.hir.abi_interface.{hir_abi_function_digest_v1, HirAbiInterfaceEncoderV1}
 use compiler.frontend.core.aop.{AdviceForm}
 use compiler.semantics.join_point_model.{join_point_kind_is_known, join_point_kind_is_prohibited, join_point_kind_is_measurable, join_point_mode_is_implemented}
@@ -46,20 +46,21 @@ pub fn directory_aspect_semantic_capture_v2(draft: DirectoryAspectDraftV2,
     var handlers: [DirectoryAspectHandlerV2] = []
     var signatures: Dict<text, text> = {}
     var effects: Dict<text, text> = {}
-    var functions: Dict<text, SymbolId> = {}
+    # name -> index into function_keys. Every SymbolId-keyed lookup indexes with
+    # the keys() element itself, never a `for key in` binding or a SymbolId read
+    # back out of another dict: a SymbolId copy is a new native struct under the
+    # frozen Phase 2 pin and struct dict keys hash by address in the C runtime,
+    # so the lookup missed and yielded a nil HirFunction.
+    var functions: Dict<text, i64> = {}
     var ambiguous: Dict<text, bool> = {}
+    val function_keys = module.functions.keys()
     if draft.declarations.len() > 0:
-        # Index with the keys() element itself, never a `for key in` binding: a
-        # SymbolId for-binding is a native struct COPY under the frozen Phase 2
-        # pin and struct dict keys hash by address in the C runtime, so the
-        # lookup missed and yielded a nil HirFunction.
-        val function_keys = module.functions.keys()
         var function_i = 0
         while function_i < function_keys.len():
             val function = module.functions[function_keys[function_i]]
             if function_keys[function_i].id != function.symbol.id: return Err("directory-aspect-function-key-mismatch")
             if functions.has(function.name): ambiguous[function.name] = true
-            else: functions[function.name] = function_keys[function_i]
+            else: functions[function.name] = function_i
             function_i = function_i + 1
     var bytes = ""
     for value in ["simple/local-aspect-interface/v2", draft.coverage_schema, module.name, current.cfg_decision_digest]:
@@ -79,7 +80,7 @@ pub fn directory_aspect_semantic_capture_v2(draft: DirectoryAspectDraftV2,
             return Err("directory-aspect-handler-unresolved")
         if not signatures.has(row.handler):
             # Resolve only the actual owning module's unique local function.
-            val function = module.functions[functions[row.handler]]
+            val function = module.functions[function_keys[functions[row.handler]]]
             if not module.symbols.symbols.has(function.symbol.id): return Err("directory-aspect-symbol-missing")
             val symbol = module.symbols.symbols[function.symbol.id]
             if symbol.defining_module.is_none() or symbol.defining_module.unwrap() != source_path or
