@@ -89,15 +89,17 @@ static int wbuf_put(wbuf *b, const wchar_t *s, size_t n) {
     return 1;
 }
 
-/* Always quote (CommandLineToArgvW rules). An unquoted argument would be
- * glob-expanded by the MSYS runtime of the shell that receives it. */
+/* The receiver is MSYS sh.exe, not a CommandLineToArgvW consumer.
+ * MSYS consumes backslash pairs even before ordinary characters: escape
+ * every backslash or UNC/extended-path prefixes lose a separator. Always
+ * quote to prevent MSYS startup glob expansion; quotes need one more slash. */
 static int wbuf_arg(wbuf *b, const wchar_t *arg) {
     if (b->len && !wbuf_put(b, L" ", 1)) return 0;
     if (!wbuf_put(b, L"\"", 1)) return 0;
     for (const wchar_t *p = arg;; ++p) {
         size_t slashes = 0;
         while (*p == L'\\') { ++p; ++slashes; }
-        size_t emit = !*p ? slashes * 2 : *p == L'"' ? slashes * 2 + 1 : slashes;
+        size_t emit = slashes * 2 + (*p == L'"' ? 1 : 0);
         for (size_t i = 0; i < emit; ++i) if (!wbuf_put(b, L"\\", 1)) return 0;
         if (!*p) break;
         if (!wbuf_put(b, p, 1)) return 0;
