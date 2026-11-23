@@ -1817,7 +1817,7 @@ fn coff_defined_weak_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
             continue;
         }
         let defined = if (1..=section_count).contains(&symbol.section_number()) {
-            true
+            return Err("COFF WeakExternal must be an undefined alias with a fallback auxiliary record".into());
         } else if symbol.number_of_aux_symbols() > 0 {
             let aux = table
                 .get::<object::pe::ImageAuxSymbolWeak>(index, 1)
@@ -3547,7 +3547,7 @@ fn project_stage4_archive_closure(
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(&weaken_path, weaken_text + "\n")
+        std::fs::write(&weaken_path, if coff_partial { "\n".to_string() } else { weaken_text.clone() + "\n" })
             .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
         let objcopy = find_stage4_objcopy_tool(target).ok_or_else(|| {
@@ -3586,6 +3586,10 @@ fn project_stage4_archive_closure(
             ));
         }
 
+        if coff_partial {
+            let weak_names = weaken_text.lines().map(str::to_owned).collect();
+            super::coff_weak_projection::project(&localized_object, &weak_names)?;
+        }
         let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
         // LLVM 18 llvm-nm reports GNU objcopy's COFF WeakExternal symbols as
         // strong `T`. Inspect Windows GNU output with the matching GNU reader.
