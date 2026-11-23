@@ -1,0 +1,115 @@
+#!/bin/sh
+# RB-BUILD-03: a native build succeeds on a host with NO GPU SDK.
+#
+# Runs a real `native-build` of a program that imports the CUDA std modules in
+# an environment with every GPU SDK hidden (CUDA_PATH*, CUDA_HOME, HIP_PATH*,
+# ROCM_PATH, VULKAN_SDK, VK_SDK_PATH unset; PATH entries naming
+# cuda/vulkan/rocm/hip/nvidia removed), then:
+#   1. the build must link (exit 0, binary present);
+#   2. the binary must not import any GPU SDK/driver library at load time
+#      (cudart/nvrtc/cublas/nvcuda/libcuda/vulkan-1/libvulkan/amdhip64/hiprtc);
+#   3. with the driver hidden (SIMPLE_CUDA_DRIVER_LIBRARY=<absent>) the GPU call
+#      must fail closed with CUDA-E001 and the program must exit 0.
+#
+# Usage: sh scripts/check/check-build-no-gpu-sdk.shs [--selftest]
+#   SIMPLE_BIN   compiler (default: bin/simple.exe or bin/simple)
+#   NOGPU_CC     C compiler for the link (default: clang on the scrubbed PATH)
+#   NOGPU_TOOLCHAIN_BIN  dir prepended to PATH (Windows: llvm-mingw bin)
+# Verdict (last stdout line): PASS exit 0 / FAIL exit 1 / ERROR exit 2.
+
+set -u
+
+GPU_LIB_RE='cudart|nvrtc|cublas|cufft|curand|cudnn|nvcuda|libcuda|vulkan-1|libvulkan|amdhip64|libamdhip|hiprtc|rocm'
+GPU_ENV_RE='^(CUDA_PATH[A-Z0-9_]*|CUDA_HOME|CUDA_ROOT|HIP_PATH[A-Z0-9_]*|ROCM_PATH|ROCM_HOME|VULKAN_SDK|VK_SDK_PATH)='
+
+# Prints offending GPU library names found in an import listing on stdin.
+gpu_imports() { grep -E 'DLL Name:|NEEDED' | grep -oiE "[A-Za-z0-9_.+-]*($GPU_LIB_RE)[A-Za-z0-9_.+-]*" | sort -u; }
+
+# Prints PATH with GPU SDK directories removed.
+scrub_path() { printf '%s' "$1" | tr ':' '\n' | grep -viE 'cuda|vulkan|rocm|hip|nvidia' | paste -sd: -; }
+
+# Exit 0 when run output shows a fail-closed CUDA-E001 and no successful load.
+fail_closed_ok() { grep -q 'CUDA-E001' "$1" && ! grep -q 'cuda driver loaded' "$1" && grep -q 'nogpu-probe: end' "$1"; }
+
+selftest() {
+    st_fail=0
+    r=$(printf '    DLL Name: KERNEL32.dll\n    DLL Name: cudart64_12.dll\n' | gpu_imports)
+    [ "$r" = "cudart64_12.dll" ] || { echo "selftest: cudart import not flagged ($r)"; st_fail=1; }
+    r=$(printf '  NEEDED               libvulkan.so.1\n  NEEDED  libc.so.6\n' | gpu_imports)
+    [ "$r" = "libvulkan.so.1" ] || { echo "selftest: libvulkan NEEDED not flagged ($r)"; st_fail=1; }
+    r=$(printf '    DLL Name: nvcuda.dll\n    DLL Name: amdhip64.dll\n' | gpu_imports | wc -l | tr -d ' ')
+    [ "$r" = "2" ] || { echo "selftest: nvcuda/amdhip64 not both flagged ($r)"; st_fail=1; }
+    r=$(printf '    DLL Name: KERNEL32.dll\n    DLL Name: WS2_32.dll\n    DLL Name: bcrypt.dll\n' | gpu_imports)
+    [ -z "$r" ] || { echo "selftest: clean imports flagged ($r)"; st_fail=1; }
+    r=$(scrub_path '/usr/bin:/c/VulkanSDK/1.4/Bin:/opt/cuda/bin:/opt/rocm/bin:/bin')
+    [ "$r" = "/usr/bin:/bin" ] || { echo "selftest: PATH scrub wrong ($r)"; st_fail=1; }
+    t=$(mktemp)
+    printf 'nogpu-probe: start\nnogpu-probe: CUDA-E001: x\nnogpu-probe: end\n' > "$t"
+    fail_closed_ok "$t" || { echo "selftest: fail-closed output rejected"; st_fail=1; }
+    printf 'nogpu-probe: start\nnogpu-probe: cuda driver loaded nvcuda.dll\nnogpu-probe: end\n' > "$t"
+    fail_closed_ok "$t" && { echo "selftest: loaded-driver output accepted"; st_fail=1; }
+    printf 'nogpu-probe: start\nnogpu-probe: CUDA-E001: x\n' > "$t"
+    fail_closed_ok "$t" && { echo "selftest: crashed-before-end output accepted"; st_fail=1; }
+    rm -f "$t"
+    [ "$st_fail" = 0 ] || { echo "ERROR — selftest failed, nothing was checked"; exit 2; }
+}
+
+selftest
+if [ "${1:-}" = "--selftest" ]; then echo "PASS — selftest: 9 fixture(s) checked"; exit 0; fi
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR — nothing was checked (not in a git checkout)"; exit 2; }
+cd "$root" || exit 2
+SIMPLE_BIN=${SIMPLE_BIN:-}
+if [ -z "$SIMPLE_BIN" ]; then
+    if [ -x bin/simple.exe ]; then SIMPLE_BIN=$root/bin/simple.exe; else SIMPLE_BIN=$root/bin/simple; fi
+fi
+[ -x "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no compiler at $SIMPLE_BIN)"; exit 2; }
+
+work=$root/build/check-no-gpu-sdk
+rm -rf "$work"; mkdir -p "$work"
+cat > "$work/main.spl" <<'EOF'
+use std.gc_async_mut.cuda.driver_loader.{cuda_driver}
+
+fn main():
+    print "nogpu-probe: start"
+    unsafe:
+        val r = cuda_driver()
+        match r:
+            case Ok(d): print "nogpu-probe: cuda driver loaded {d.library}"
+            case Err(e): print "nogpu-probe: {e}"
+    print "nogpu-probe: end"
+EOF
+exe=$work/probe; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=$work/probe.exe ;; esac
+
+# Scrubbed environment: drop every GPU SDK variable, strip SDK dirs from PATH.
+unset_args=$(env | grep -oE "$GPU_ENV_RE" | tr -d '=' | sed 's/^/-u /' | tr '\n' ' ')
+npath=$(scrub_path "$PATH")
+[ -n "${NOGPU_TOOLCHAIN_BIN:-}" ] && npath=$NOGPU_TOOLCHAIN_BIN:$npath
+# shellcheck disable=SC2086
+env $unset_args -u ORIGINAL_PATH PATH="$npath" CC="${NOGPU_CC:-clang}" SIMPLE_NATIVE_BUILD_RUST=1 \
+    sh -c 'env' > "$work/env.txt" 2>&1
+leaks=$(grep -E "$GPU_ENV_RE" "$work/env.txt" | cut -d= -f1 | tr '\n' ' ')
+[ -z "$leaks" ] || { echo "ERROR — nothing was checked (GPU SDK env still visible: $leaks)"; exit 2; }
+# shellcheck disable=SC2086
+env $unset_args -u ORIGINAL_PATH PATH="$npath" CC="${NOGPU_CC:-clang}" SIMPLE_NATIVE_BUILD_RUST=1 \
+    "$SIMPLE_BIN" native-build "$work/main.spl" -o "$exe" > "$work/build.log" 2>&1
+brc=$?
+if [ "$brc" != 0 ] || [ ! -f "$exe" ]; then
+    echo "FAIL — native-build without GPU SDK failed (rc=$brc): $(grep -iE 'error|cuda|vulkan|hip' "$work/build.log" | head -1)"; exit 1
+fi
+
+objdump_bin=$(command -v llvm-objdump || { [ -n "${NOGPU_TOOLCHAIN_BIN:-}" ] && echo "$NOGPU_TOOLCHAIN_BIN/llvm-objdump"; })
+[ -n "$objdump_bin" ] || { echo "ERROR — nothing was checked (no llvm-objdump for import scan)"; exit 2; }
+"$objdump_bin" -p "$exe" > "$work/imports.txt" 2>&1
+nimports=$(grep -cE 'DLL Name:|NEEDED' "$work/imports.txt")
+[ "$nimports" -gt 0 ] || { echo "ERROR — nothing was checked (import table empty/unreadable)"; exit 2; }
+bad=$(gpu_imports < "$work/imports.txt" | tr '\n' ' ')
+[ -z "$bad" ] || { echo "FAIL — binary links GPU SDK/driver libraries at load time: $bad"; exit 1; }
+
+SIMPLE_CUDA_DRIVER_LIBRARY=nvcuda_absent_nogpu_probe "$exe" > "$work/run.log" 2>&1
+rrc=$?
+[ "$rrc" = 0 ] || { echo "FAIL — probe exited rc=$rrc without a GPU driver"; exit 1; }
+fail_closed_ok "$work/run.log" || { echo "FAIL — GPU call did not fail closed with CUDA-E001: $(tr '\n' '|' < "$work/run.log")"; exit 1; }
+
+echo "PASS — 3 check(s): native-build linked with GPU SDK hidden, $nimports import(s) none GPU, GPU call failed closed ($(grep -o 'CUDA-E001' "$work/run.log" | head -1))"
+exit 0
