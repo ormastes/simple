@@ -13,6 +13,7 @@ use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_decode_f32_le}
 use std.gc_async_mut.slang.model_executor.pure.weights.{pure_weights_f32_ranges, PureF32Range}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_upload_f32_bytes, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_free, rocm_ops_sync}
+use test.fixtures.slang_pure.model_dir.{pure_model_dir}
 
 # The runner does not keep stdout of passing examples and counts skip() as a
 # pass, so evidence (and every skip reason) is also appended to a file.
@@ -23,7 +24,12 @@ fn _record(line: text):
 
 extern fn rt_time_now_nanos() -> i64
 
-val MODEL = "C:/dev/model/llama2c-stories15M/model.safetensors"
+# model.safetensors of the configured stories15M directory, or "" when not configured.
+fn _model_file() -> text:
+    val d = pure_model_dir()
+    if d == "":
+        return ""
+    d + "/model.safetensors"
 
 fn rand_values(n: i64, seed: i64) -> [f64]:
     var out: [f64] = []
@@ -107,16 +113,17 @@ fn find_shape(ranges: [PureF32Range], rows: i64, cols: i64) -> PureF32Range:
 
 describe "slang pure runner ROCm provider (system)":
     it "runs matvec on the Radeon GPU and matches the CPU op":
+        val model = _model_file()
         if not rocm_available_at(rocm_bin_default()):
             _record("SKIPPED: ROCm DLLs not found in {rocm_bin_default()}")
-        elif not file_exists(MODEL):
-            _record("SKIPPED: {MODEL} not found")
+        elif model == "" or not file_exists(model):
+            _record("SKIPPED: stories15M model.safetensors not found (set SLANG_PURE_MODEL or SLANG_MODEL_ROOT)")
         else:
             val ops = rocm_ops_open().unwrap()
             val name = rocm_ops_device_name(ops)
             _record("DEVICE: {name}")
             expect(name).to_contain("Radeon")
-            val bytes = file_read_bytes(MODEL)
+            val bytes = file_read_bytes(model)
             val ranges = pure_weights_f32_ranges(bytes).unwrap()
             val small = find_shape(ranges, 288, 288)
             val head = find_shape(ranges, 32000, 288)

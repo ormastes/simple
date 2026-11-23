@@ -1,0 +1,87 @@
+# @req: REQ-BUILD-SRC-001
+# RB-LOAD-02: the module loader routes hot reload of a pinned SMF module
+# through the identity-checked hot-swap slot. A refused replacement leaves the
+# loaded module and the slot image untouched; an admitted one advances the
+# generation that per-call readers pin.
+# todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_delete}
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.module_loader_compat.{ModuleLoader, LoadResult, moduleloader_with_defaults, moduleloader_load, moduleloader_reload, moduleloader_pin_hot_swap, moduleloader_hot_swap_read_begin}
+use compiler.loader.hot_swap_pin.{hot_swap_read_end}
+
+fn good_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: "iface-v1-1111",
+        abi_digest: "abi-v1-aaaa",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn image_with(id: UnitIdentity, code: u8) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.unit_identity_bytes = unit_identity_encode(id).bytes()
+    generate_smf_with_options([code, 0xC3], opts)
+
+fn pinned_row(path: text) -> SmfManifestEntry:
+    val id = good_identity()
+    smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", path, 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+
+fn is_success(r: LoadResult) -> bool:
+    match r:
+        case LoadResult.Success(_): true
+        case _: false
+
+fn error_text(r: LoadResult) -> text:
+    match r:
+        case LoadResult.Error(message): message
+        case _: ""
+
+describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
+    it "refuses an ABI-changed reload and keeps the old module and image":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_wiring_refuse.smf"
+        val v0 = image_with(good_identity(), 0x90)
+        expect(file_write_bytes(path, v0)).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        step("load and pin generation 0")
+        expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+        expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
+        step("replace the artifact with an ABI-changed image and reload")
+        var bad = good_identity()
+        bad.abi_digest = "abi-v1-bbbb"
+        expect(file_write_bytes(path, image_with(bad, 0x91))).to_equal(true)
+        val r = moduleloader_reload(loader, path)
+        expect(error_text(r).contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
+        expect(loader.modules.has(path)).to_equal(true)
+        val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(read.generation()).to_equal(0)
+        expect(read.image() == v0).to_equal(true)
+        hot_swap_read_end(read)
+        file_delete(path)
+
+    it "admits a matching reload and readers then use the new image":
+        val path = "build/test_tmp/hs_wiring_admit.smf"
+        expect(file_write_bytes(path, image_with(good_identity(), 0x90))).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+        expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
+        step("reload with a matching image")
+        val v1 = image_with(good_identity(), 0x92)
+        expect(file_write_bytes(path, v1)).to_equal(true)
+        expect(is_success(moduleloader_reload(loader, path))).to_equal(true)
+        val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(read.generation()).to_equal(1)
+        expect(read.image() == v1).to_equal(true)
+        hot_swap_read_end(read)
+        file_delete(path)
+
+    it "has no reader image for a path that was never pinned":
+        var loader = moduleloader_with_defaults()
+        expect(moduleloader_hot_swap_read_begin(loader, "build/test_tmp/never.smf").is_err()).to_equal(true)

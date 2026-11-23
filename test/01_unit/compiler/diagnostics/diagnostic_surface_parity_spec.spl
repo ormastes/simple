@@ -1,0 +1,95 @@
+"""
+## Purpose and audience
+End-to-end RB-DIAG-01 parity: one fixture source with policy-governed violations
+is run in-process through the CLI lint engine (`lint_cli_source`, what
+`simple lint` runs) and the LSP lint pass (`_qlint_collect_lint_diagnostics_json`,
+what `query check --format=json` feeds the LSP), and the LSP payload is parsed
+by the real LSP client parser (`_parse_compiler_json_diagnostic`). Each finding
+is projected to `(policy rule_id, severity, 1-based line)` through
+`lint_policy_code_for_rule`; findings whose lint name is not bound in
+`config/policy/diagnostic_policy.sdn` are outside the DiagnosticRulePolicy
+contract and are dropped. The projected sets must be identical per severity
+class (error / warning / suppressed).
+
+Interpreter surface: the interpreter emits no rule-ID-coded diagnostics for any
+policy-bound rule (its only policy projection is the match-fallthrough bool in
+`eval_decls.spl`, and `non_option_pattern_match` has no detector), so it cannot
+be compared on rule IDs; that gap is recorded in the plan §9 RB-DIAG-01 row.
+Audience: diagnostics, lint, and LSP maintainers.
+"""
+# @cover src/app/cli/query_lint.spl
+# @cover src/compiler/90.tools/lint/_LintMain/lint_checks.spl
+# @cover src/lib/nogc_sync_mut/lsp/handlers/diagnostics.spl
+# @req REQ-DIAG-POLICY-002
+# @req REQ-DPOL-001
+
+use std.spec.*
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+use compiler.tools.lint._LintMain.config_and_model.{LintLevel, lint_policy_code_for_rule}
+use app.cli.query_lint.{_qlint_collect_lint_diagnostics_json}
+use std.nogc_sync_mut.lsp.handlers.diagnostics.{_parse_compiler_json_diagnostic}
+
+val FIXTURE = "test/01_unit/compiler/diagnostics/fixtures/diagnostic_surface_parity_fixture.spl"
+
+fn fixture_with(attr: text) -> text:
+    attr + "\n" + file_read_text(FIXTURE)
+
+fn policy_id(lint_name: text) -> text:
+    lint_policy_code_for_rule(lint_name)
+
+fn add_unique(acc: [text], key: text) -> [text]:
+    var out = acc
+    if not out.contains(key):
+        out.push(key)
+    out
+
+fn cli_tuples(src: text) -> [text]:
+    var out: [text] = []
+    for r in lint_cli_source(Linter.new(), FIXTURE, src):
+        val id = policy_id(r.lint.code)
+        if id != "" and id != r.lint.code:
+            val sev = if r.lint.level == LintLevel.Deny: "error" else: if r.lint.level == LintLevel.Warn: "warning" else: "allow"
+            out = add_unique(out, "{id}|{sev}|{r.line}")
+    out.sort()
+
+fn lsp_tuples(src: text) -> [text]:
+    var out: [text] = []
+    val collected = _qlint_collect_lint_diagnostics_json(FIXTURE, src)
+    for raw in collected.1:
+        match _parse_compiler_json_diagnostic(raw):
+            Some(d):
+                val code: text = d["code"] ?? ""
+                val id = policy_id(code)
+                if id != "" and id != code:
+                    val sev_int = d["severity"].to_int()
+                    val sev = if sev_int == 1: "error" else: if sev_int == 2: "warning" else: "info"
+                    val line0: i64 = d["range"]["start"]["line"]
+                    out = add_unique(out, "{id}|{sev}|{line0 + 1}")
+            _: pass_do_nothing
+    out.sort()
+
+# @manual_section: diagnostic_surface_parity
+describe "RB-DIAG-01: same rule ID, severity, and line across CLI lint and LSP":
+    """One fixture, three severity classes, identical (rule_id, severity, line) sets."""
+
+    it "agrees on the error class when the file denies primitive_api":
+        val src = fixture_with("@deny(primitive_api)")
+        val cli = cli_tuples(src)
+        val lsp = lsp_tuples(src)
+        expect(cli).to_equal(["SPL-TYPE-001|error|4"])
+        expect(lsp).to_equal(cli)
+
+    it "agrees on the warning class when the file warns on primitive_api":
+        val src = fixture_with("@warn(primitive_api)")
+        val cli = cli_tuples(src)
+        val lsp = lsp_tuples(src)
+        expect(cli).to_equal(["SPL-TYPE-001|warning|4"])
+        expect(lsp).to_equal(cli)
+
+    it "agrees on the suppressed class when the file allows primitive_api":
+        val src = fixture_with("@allow(primitive_api)")
+        val cli = cli_tuples(src)
+        val lsp = lsp_tuples(src)
+        expect(cli.len()).to_equal(0)
+        expect(lsp).to_equal(cli)

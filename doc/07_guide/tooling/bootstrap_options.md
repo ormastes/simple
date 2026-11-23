@@ -249,6 +249,7 @@ config, so the scripts resolve the key and export the env var
 | `mir_sharding` (0/1) | `SIMPLE_MIR_SHARDING` | Stage 2 matrix subshell + Stage 3 launch in `bootstrap-from-scratch.sh`, `resume-stage3-from-admitted.sh` |
 | `mir_shard_count` (1..128) | `SIMPLE_MIR_SHARD_COUNT` | same as `mir_sharding` (Stage 3 consumes it only on the per-file / interface-HIR lanes) |
 | `mir_shard_worker_kib` | `SIMPLE_MIR_SHARD_WORKER_KB` | Stage 2 matrix only (kept over the whole-build two-worker floor); NOT forwarded across the Stage 3 `env -i` boundary |
+| `sanity_build_timeout_seconds` (positive seconds) | `COMPILER_BUILD_TIMEOUT_SECONDS` (sanity-probe build cap, admission default 180) | `bootstrap-from-scratch.sh` startup and `resume-stage3-from-admitted.sh`, before each script's `:-180` default; explicit env wins, invalid = hard error |
 
 The four matrix/shard keys (W27/W32/W36, 2026-11-23) apply only when their env
 var is unset; an invalid value in any host-config layer is a hard error naming
