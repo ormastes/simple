@@ -4097,3 +4097,33 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Trap — y-hinted outline:** first cut reused the LCD (y-hinted) outline: every gray glyph one device row high, 7 specs red. Gray needs the unhinted `_gray_frame` outline.
 - **Perf traps (interpreter lane):** per-call `blob == memo_blob` compare made an uncached outline 7.5 ms -> cache outlines; per-pixel branches in `_insert_font_atlas_glyph` hoisted; the big one: `_engine2d_glyph_quad_over` built its coverage table per quad — exact-area cells have up to 255 levels, so one `blend` per level per quad doubled draw time (1.47 -> 2.90 s on css-layout). Table now shared per (color, bg). Final alternated A/B: css-layout wall 18.69 vs 18.67 s (paint 8.33 -> 8.17), animation +1.2% wall, RSS flat.
 - **Result:** dpr4 catalog overview 0.47->0.22, html 0.79->0.29, css-layout 1.15->0.50, css-paint 1.11->0.32, forms-media 1.09->0.48, animation 1.15->0.40, evidence 0.35->0.10, tab-bar 0.18->0.17; 1x catalog, matrix (81), mandatory specs equal base. Hg 4x vs Chrome mismatch 445 -> 86.
+## 2026-11-24 — JIT startup 2: codegen on worker threads (seed, byte-identical)
+
+- **What:** Cranelift codegen (verify + `Context::compile`) now runs on worker threads (`SIMPLE_JIT_CODEGEN_THREADS`, default `min(4, cores)`; 0 or 1 is serial, as are modules under 64 functions).
+  - MIR→CLIF translation stays on the main thread, which owns `&mut module`.
+  - Results are defined back in submission order, so code layout is unchanged.
+  - Block liveness is computed one function ahead on a helper thread.
+  - Outlining computes liveness only for functions that own an outlined body.
+  - Bug: `doc/08_tracking/bug/jit_serial_cranelift_codegen_startup_2026-11-24.md`.
+- **Result (3 rounds, alternating, medians, ms; doc = `compose_shaping`):**
+
+  | page | k | JIT new | JIT base | interp | doc new / base / interp |
+  |---|---|---|---|---|---|
+  | tab-bar | 1x | 2992 | 5393 | 2948 | 19 / 18 / 653 |
+  | evidence | 1x | 3060 | 5587 | 3453 | 10 / 9 / 398 |
+  | overview | 1x | 3073 | 5388 | 5147 | 18 / 15 / 699 |
+  | html | 1x | 3251 | 5581 | 12253 | 158 / 143 / 5662 |
+  | css-paint | 1x | 3386 | 5645 | 14686 | 231 / 201 / 8573 |
+  | html | 4x | 3789 | 6129 | — | 178 / 166 |
+  | forms-media | 4x | 21857 | 25328 | — | 112 / 102 |
+
+  - JIT startup is cut by ~2.4 s on every page.
+  - **Tab-bar 1x is at parity with the interpreter, not under it** (2.96–3.11 s vs 2.94–2.96 s).
+- **Correctness:** JIT output is byte-identical to the interpreter on all 8 pages at 1x and at 4x. Interpreter output is unchanged vs base. Strict-vreg runs are clean. Every run reached `compile_all:done`.
+- **Trap — window size:** a codegen window of `workers * 4` contexts stalled translation for 190 ms behind bursts of large functions. Use 1,024; it costs ~50 MB RSS.
+- **Trap — more workers:** they do not help. Translation (~720 ms, of which block sealing is ~200) is the critical path.
+- **Trap — user `fn f32`/`fn i32`:** the JIT calls the cast instead of the user function. Avoid those names in generated tests: `doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md`.
+- **Open:**
+  - seal blocks once all MIR predecessors are emitted (~200 ms);
+  - parallel translation, which needs callees and data pre-declared;
+  - HIR Pass 0.5b import-type loads (~370 ms).
