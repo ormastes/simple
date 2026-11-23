@@ -13,13 +13,12 @@
 # speaker block from edwko/OuteTTS default_speakers.
 
 use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
-use std.gc_async_mut.slang.model_executor.backend.{prepare_request_tokens, GgmlBackend, GgmlModelHandle, GgmlRequest, BackendActiveGenerationRequest, SamplerConfig, POOLING_NONE, open_backend, open_model_handle, close_model_handle, open_request_for, close_backend_request, request_configure_sampler, generate_on_request, request_embed_configure, request_set_tokens, request_embeddings, f32_le_to_floats, backend_error_text}
+use std.gc_async_mut.slang.model_executor.backend.{prepare_request_tokens, GgmlBackend, GgmlModelHandle, GgmlRequest, BackendActiveGenerationRequest, SamplerConfig, POOLING_NONE, open_backend, open_model_handle, close_model_handle, open_request_for, close_backend_request, request_configure_sampler, generate_on_request, request_embed_configure, request_set_tokens, request_embeddings, f32_le_to_floats, backend_error_text, release_backend_library}
 use std.gc_async_mut.slang.model_executor.runners.istft.{wavtokenizer_istft_params, embd_to_audio}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
 use std.gc_async_mut.slang.modality.kinds.{Modality, KindRequest, KindResult, OutputPart}
 use std.gc_async_mut.slang.modality.kind_registry.{kind_override_field, gguf_files, gguf_facts_are_vocoder}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_lib_path, engine_backend_available}
-use std.nogc_sync_mut.sffi.dynamic.{spl_dlclose}
 use std.common.audio.wav_encode.{encode_wav_pcm16}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.gc_async_mut.slang.host.slang_host.{host_file_exists}
@@ -309,9 +308,6 @@ fn tts_vocoder_path(dir: text) -> Result<text, text>:
             return Ok(_join(dir, f.name))
     Err("no WavTokenizer vocoder (wavtokenizer-dec GGUF) in " + dir)
 
-fn _unlink(b: GgmlBackend):
-    unsafe(capabilities: [ffi]): spl_dlclose(b.lib)
-
 fn tts_close():
     match TTS_BACKEND:
         case Some(b):
@@ -321,7 +317,7 @@ fn tts_close():
             match TTS_VOCODER:
                 case Some(h): close_model_handle(b, h)
                 case None: ()
-            _unlink(b)
+            release_backend_library(b)
         case None: ()
     TTS_BACKEND = None
     TTS_LLM = None
@@ -345,13 +341,13 @@ fn tts_open(model: NativeModel) -> Result<(), text>:
         Ok(b):
             match open_model_handle(b, model.entry_path, -1):
                 Err(e):
-                    _unlink(b)
+                    release_backend_library(b)
                     return Err("TTS model load failed for " + model.id + ": " + backend_error_text(e))
                 Ok(llm):
                     match open_model_handle(b, vocoder, -1):
                         Err(e):
                             close_model_handle(b, llm)
-                            _unlink(b)
+                            release_backend_library(b)
                             return Err("vocoder load failed (" + vocoder + "): " + backend_error_text(e))
                         Ok(voc):
                             TTS_BACKEND = Some(b)

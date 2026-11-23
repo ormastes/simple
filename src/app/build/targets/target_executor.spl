@@ -8,6 +8,7 @@
 use app.build.targets.build_targets.{BuildTarget, TargetSet, find_target, validate_targets}
 use app.build.targets.target_resolve.{ResolvePlan, resolve_target, format_target_plan}
 use app.build.targets.backend_contracts.{vector_length_tier_error}
+use std.common.cpu_tier.tier_id.{tier_spec_simd_class, simd_class_is_scalable}
 use app.build.targets.provider_gate.{provider_gate, provider_host_triple}
 use app.io.cli_compile.{cli_native_build}
 use std.common.crypto.sha256.{sha256_text}
@@ -87,7 +88,13 @@ fn target_output_path(repo_root: text, target: BuildTarget) -> text:
     repo_root + "/build/targets/" + component + "/" + component + suffix
 
 fn target_cache_dir(repo_root: text, target: BuildTarget) -> text:
-    repo_root + "/build/target_cache/" + target_storage_component(target.name)
+    """Target-local cache namespace, split by SIMD class when a cpu_tier is set
+    so objects built for different vector ISAs (e.g. NEON vs SVE2) never share entries."""
+    val base = repo_root + "/build/target_cache/" + target_storage_component(target.name)
+    val simd_class = tier_spec_simd_class(target.cpu_tier)
+    if simd_class.len() > 0:
+        return base + "/simd-" + simd_class
+    base
 
 fn target_candidate_output_path(output: text, process_id: i64) -> text:
     """Process-qualified unpublished output used for fail-closed publication."""
@@ -130,6 +137,9 @@ fn target_action_error(target: BuildTarget) -> text:
     val vl_error = vector_length_tier_error(target.cpu_tier)
     if vl_error.len() > 0:
         return vl_error + " (" + target.name + ")"
+    val simd_class = tier_spec_simd_class(target.cpu_tier)
+    if simd_class_is_scalable(simd_class):
+        return "target-error: scalable-vector-unsupported: " + target.name + ": " + target.cpu_tier + " (" + simd_class + "): native-build has no SVE/RVV codegen; drop cpu_tier for a scalar build"
     if target.cpu_tier.len() > 0 and target_cpu_policy(target.cpu_tier).len() == 0:
         return "target-error: unsupported-cpu_tier: " + target.name + ": " + target.cpu_tier
     ""

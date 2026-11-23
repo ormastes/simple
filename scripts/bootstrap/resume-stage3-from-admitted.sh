@@ -884,6 +884,16 @@ stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
 . "$root/scripts/bootstrap/lib/host-bootstrap-settings.shs"
 bootstrap_host_apply_stage3_settings "$root"
 bootstrap_host_apply_memory_reserve "$root"
+# W27/W32/W36 shard knobs: mir_sharding, mir_shard_count, mir_shard_worker_kib
+# and frontend_cache (on|off) fill an unset env var before the W24/W27
+# pass-throughs below validate, hash and transcribe them. Invalid = hard error.
+bootstrap_host_apply_matrix_settings "$root" || exit 64
+bootstrap_caller_frontend_cache=
+bootstrap_host_apply_frontend_cache_default "$root" || exit 64
+if [ -n "$bootstrap_caller_frontend_cache" ]; then
+  SIMPLE_FRONTEND_CACHE=$bootstrap_caller_frontend_cache
+  export SIMPLE_FRONTEND_CACHE
+fi
 . "$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
 bootstrap_stage3_resolve_parallel_policy || exit 1
 stage3_threads=$bootstrap_stage3_policy_threads

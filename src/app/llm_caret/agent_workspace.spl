@@ -13,6 +13,8 @@ use app.io.mod.{process_run, process_run_timeout, dir_exists, file_exists, file_
     dir_create_all, current_time_ms, sleep_ms, env_get, env_set, get_args, cwd as _proc_cwd}
 use app.io.cli_ops.{cli_current_exe_path}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host, host_path_canonical, host_path_native}
+use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
 use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_which}
 use std.common.string_core.{text_to_bytes}
 use os.apps.smux.server.{smux_server_request, smux_server_request_within}
@@ -86,6 +88,44 @@ fn _fmt(key: text) -> text:
 fn _tmux(ws: AgentWorkspace, args: [text], reason: text) -> WorkspaceResult:
     _run(cmd: "tmux", args: ["-L", ws.socket] + args, reason: reason)
 
+fn _win_ascii_alpha(ch: text) -> bool:
+    ch.byte_len() == 1 and "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch)
+
+fn _win_join_canonical(base: text, rest: text) -> text:
+    if rest == "":
+        return base
+    if base.ends_with("/") and rest.starts_with("/"):
+        return base + rest.substring(1)
+    if not base.ends_with("/") and not rest.starts_with("/"):
+        return base + "/" + rest
+    base + rest
+
+fn _win_normalize_canonical_input(path: text) -> text:
+    var norm = host_path_canonical(path)
+    if norm.starts_with("//?/UNC/") or norm.starts_with("//?/unc/"):
+        norm = "//" + norm.substring(8)
+    elif norm.starts_with("//?/") and norm.byte_len() >= 7 and _win_ascii_alpha(norm.substring(4, 5)) and norm.substring(5, 7) == ":/":
+        norm = norm.substring(4)
+    if norm.byte_len() >= 3 and norm.starts_with("/") and _win_ascii_alpha(norm.substring(1, 2)) and norm.substring(2, 3) == "/":
+        norm = norm.substring(1, 2).lower() + ":/" + norm.substring(3)
+    elif norm.byte_len() == 2 and norm.starts_with("/") and _win_ascii_alpha(norm.substring(1, 2)):
+        norm = norm.substring(1, 2).lower() + ":/"
+    while norm.byte_len() > 1 and norm.ends_with("/"):
+        if norm.byte_len() == 3 and _win_ascii_alpha(norm.substring(0, 1)) and norm.substring(1, 3) == ":/":
+            break
+        norm = norm.substring(0, norm.byte_len() - 1)
+    norm
+
+fn _win_unc_is_share_root(head: text) -> bool:
+    if not head.starts_with("//"):
+        return false
+    val body = head.substring(2)
+    val first = body.index_of("/") ?? -1
+    if first < 0:
+        return true
+    val after_server = body.substring(first + 1)
+    not after_server.contains("/")
+
 # `git worktree list` prints symlink-resolved paths; the root is canonicalised
 # up front so `worktree_path` and `worktree_list` name the same tree the same
 # way (a repo reached through a symlinked cwd otherwise never matches itself).
@@ -95,12 +135,17 @@ fn _tmux(ws: AgentWorkspace, args: [text], reason: text) -> WorkspaceResult:
 fn _canonical(path: text) -> text:
     if path == "":
         return ""
-    var head = path
+    val is_win = host_is_windows_host()
+    var head = if is_win: _win_normalize_canonical_input(path) else: path
     var tail = ""
     while head != "":
-        val (out, _e, code) = process_run("realpath", [head])
-        if code == 0 and out.trim() != "":
-            return out.trim() + tail
+        if is_win:
+            if val resolved = file_canonicalize(host_path_native(head)):
+                return _win_join_canonical(host_path_canonical(resolved), tail)
+        else:
+            val (out, _e, code) = process_run("realpath", [head])
+            if code == 0 and out.trim() != "":
+                return out.trim() + tail
         val slash = head.last_index_of("/")
         if head == ".":
             return path
@@ -108,7 +153,13 @@ fn _canonical(path: text) -> text:
             # relative path with no existing component: anchor at the cwd
             tail = "/" + head + tail
             head = "."
-        else if slash == 0:
+        elif is_win and _win_unc_is_share_root(head):
+            return path
+        elif slash == 0:
+            return path
+        elif is_win and slash == 2 and head.byte_len() >= 3 and _win_ascii_alpha(head.substring(0, 1)) and head.substring(1, 2) == ":":
+            if val resolved = file_canonicalize(host_path_native(head.substring(0, 3))):
+                return _win_join_canonical(host_path_canonical(resolved), head.substring(3) + tail)
             return path
         else:
             tail = head.substring(slash) + tail

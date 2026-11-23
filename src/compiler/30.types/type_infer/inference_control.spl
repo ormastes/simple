@@ -588,6 +588,9 @@ impl HmInferContext:
                 # Synthesize target type, then check value against it
                 match self.synthesize_expr(target):
                     case Ok(target_ty):
+                        match self.check_arrow_update(target, target_ty, value):
+                            case Err(e): return Err(e)
+                            case Ok(_): pass
                         match self.infer_expr(value, InferMode.Check(target_ty)):
                             case Ok(_):
                                 Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
@@ -599,6 +602,62 @@ impl HmInferContext:
 
             case _:
                 Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+
+    me check_arrow_update(target: HirExpr, target_ty: HirType, value: HirExpr) -> Result<(), TypeInferError>:
+        """E-ARROW-UPDATE-MISMATCH: `x->m()` (desugared `x = x.m()`) whose
+        method returns a type other than the receiver's. Only values carrying
+        the parser's arrow provenance are checked; a written `x = x.m()` is not."""
+        var call = value
+        var tries = 0
+        var peeling = true
+        while peeling:
+            match call.kind:
+                case Try(inner):
+                    call = inner
+                    tries = tries + 1
+                case _:
+                    peeling = false
+        if not call.arrow_update:
+            return Ok(())
+        var method_name = ""
+        var method_key = ""
+        match call.kind:
+            case MethodCall(_, method, _, resolution):
+                method_name = method
+                method_key = match resolution:
+                    case InstanceMethod(_, method_id): method_id.id.to_text()
+                    case TraitMethod(_, method_id): method_id.id.to_text()
+                    case StaticMethod(_, method_id): method_id.id.to_text()
+                    case FreeFunction(func_id): func_id.id.to_text()
+                    case _: ""
+            case _: pass
+        if method_key == "" or not self.env[method_key].?:
+            return Ok(())
+        var ret = self.resolve(self.instantiate(self.env[method_key]))
+        match ret.kind:
+            case Function(_, fn_ret, _): ret = self.resolve(fn_ret)
+            case _: return Ok(())
+        # `x->m()?` stores the `?` payload: unwrap one Result/Option per `?`.
+        while tries > 0:
+            match ret.kind:
+                case Result(ok, _): ret = self.resolve(ok)
+                case Optional(inner): ret = self.resolve(inner)
+                case _: return Ok(())
+            tries = tries - 1
+        val receiver_ty = self.resolve(target_ty)
+        match self.unify(receiver_ty, ret):
+            case Ok(_): Ok(())
+            case Err(_):
+                val receiver = match target.kind:
+                    case Var(symbol):
+                        if self.symbol_names.contains_key(symbol.id): self.symbol_names[symbol.id] else: "x"
+                    case NamedVar(_, name): name
+                    case _: "x"
+                val recv_name = self.nil_compare_type_name(receiver_ty)
+                val ret_name = self.nil_compare_type_name(ret)
+                Err(TypeInferError.Other(
+                    "E-ARROW-UPDATE-MISMATCH: arrow update `{receiver}->{method_name}(...)` assigns the result of `{method_name}` back to `{receiver}`, but `{receiver}` has type {recv_name} and `{method_name}` returns {ret_name}; `->` needs a method returning the receiver's type (bind `{receiver}.{method_name}(...)` to a new name instead)",
+                    value.span))
 
     me infer_optional_pattern_payload(variant: text, payload: HirPatternPayload?, inner: HirType, span: Span) -> Result<(), TypeInferError>:
         if variant == "Some":

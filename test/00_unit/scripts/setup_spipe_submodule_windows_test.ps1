@@ -16,6 +16,11 @@ if ($setupOutput -notmatch [regex]::Escape((Join-Path $Root 'examples\05_stdlib\
 if ($setupOutput -match [regex]::Escape((Join-Path $Root 'scripts\examples\spipe'))) {
     throw "setup emitted the stale scripts/examples/spipe path:`n$setupOutput"
 }
+if (-not (Test-Path -LiteralPath (Join-Path $Root '.spipe\spipe\scripts\setup-spipe-links.ps1') -PathType Leaf)) {
+    if ($setupOutput -notmatch [regex]::Escape(('would_delegate ' + (Join-Path $Root '.spipe\spipe\scripts\setup-spipe-links.ps1')))) {
+        throw "dry run did not report would_delegate for uninitialized submodule:`n$setupOutput"
+    }
+}
 
 # The checker must run from its nested scripts/check directory while still
 # resolving the parent repository's index and tracked example tree.
