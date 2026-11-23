@@ -40,7 +40,7 @@ use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
-use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol, custom_primitive_underlying_type_tag_by_name}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
 use compiler.semantics.value_match_exhaustiveness.{value_match_code, value_match_env_name, value_match_env_raw, value_match_mode_current, value_match_mode_is_unknown, vm_span_key, vm_return_is_unit, vm_statement_match_keys}
 use compiler.hir.exhaustiveness.value_match_coverage.{vm_has_unguarded_catch_all, vm_check_arms, vm_message, vm_desugar_verdict_at}
@@ -991,7 +991,14 @@ impl MirLowering:
                                 parameter_type_name = self.struct_value_layout_key(parameter_type)
                                 is_class_param = self.class_type_names.has(parameter_type_name)
                             case _: ()
-                    val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
+                    # A unit / newtype over a primitive is registered as a
+                    # one-field struct but lower_type passes it as its word, so
+                    # it is never a record here: value-copying it dereferenced
+                    # the raw payload (`ratio(10 as Dist, ...)` read address
+                    # 0xa, SIGSEGV; unit_range_cast_native_execution_blocked).
+                    val is_custom_primitive = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(type_symbol)) >= 0 or
+                        custom_primitive_underlying_type_tag_by_name(parameter_type_name) >= 0
+                    val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name) and not is_custom_primitive
                     # bug s19_class_free_fn_mutation_dropped_native_2026-07-17:
                     # a plain (non-`mut`, non-`me`) `class`-typed param used to
                     # fall into the `elif is_named_struct` Bug #167 value-copy
