@@ -1,20 +1,16 @@
 # Link a bare-metal image with the in-house Simple linker (elf_boot_link)
-# instead of ld.lld. Used by check-baremetal-efi-boot.shs --linker simple.
+# instead of ld.lld. Used by check-baremetal-efi-boot.shs --linker simple and
+# check-simpleos-arm64-simple-link.shs.
 #
 # Usage: simple run scripts/check/baremetal-simple-link.spl -- \
-#            <x86_64|aarch64|riscv64> <script.ld> <out.elf> <obj.o>...
-# Exit 0 on success, 1 on a link error (message on stdout), 2 on bad usage.
+#            <x86_64|aarch64|riscv64> <script.ld> <out.elf> [options] <obj.o>...
+#   options: -L <dir>, --gc-sections, --defsym <a>=<b>, --archive <lib.a>
+#   (see src/compiler/70.backend/linker/elf/boot_link_cli.spl)
+# Exit 0 on success, 1 on a link error (message on stdout; one
+# "simple-link: undefined symbol: <name>" line per undefined symbol), 2 on bad usage.
 
-use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link}
-use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
-use compiler.backend.linker.reloc_engine.{RelocArch}
-use std.io_runtime.{get_args, file_read_bytes_i64, file_read, file_write_bytes, exit}
-
-fn _arch(name: text) -> Result<RelocArch, text>:
-    if name == "x86_64": return Ok(RelocArch.X86_64)
-    if name == "aarch64": return Ok(RelocArch.AArch64)
-    if name == "riscv64": return Ok(RelocArch.Riscv64)
-    Err("unsupported arch {name}")
+use compiler.backend.linker.elf.boot_link_cli.{boot_link_cli_parse, boot_link_cli_run}
+use std.io_runtime.{get_args, file_write_bytes, exit}
 
 fn _user_args() -> [text]:
     # Everything after this script's own path (a leading "--" is dropped).
@@ -30,36 +26,17 @@ fn _user_args() -> [text]:
 
 fn main() -> i64:
     val args = _user_args()
-    if args.len() < 4:
-        print("usage: baremetal-simple-link.spl <arch> <script.ld> <out.elf> <obj>...")
-        return 2
-    val arch = _arch(args[0])
-    if arch.is_err():
-        print("simple-link: {arch.unwrap_err()}")
-        return 2
-    val plan = boot_layout_from_text(file_read(args[1]))
-    if plan.is_err():
-        print("simple-link: script: {plan.unwrap_err()}")
-        return 1
-    var objects: [[i64]] = []
-    var i: i64 = 3
-    while i < args.len():
-        val raw = file_read_bytes_i64(args[i])
-        if raw.len() == 0:
-            print("simple-link: cannot read {args[i]}")
-            return 1
-        objects = objects.push(raw)
-        i = i + 1
-    val linked = elf_boot_link(objects, plan.unwrap(), arch.unwrap())
-    if linked.is_err():
-        print("simple-link: {linked.unwrap_err()}")
-        return 1
+    val r = boot_link_cli_run(args)
+    if r.rc != 0:
+        for line in r.lines: print(line)
+        return r.rc
+    val out = boot_link_cli_parse(args).output
     var bytes: [u8] = []
-    for b in linked.unwrap(): bytes = bytes.push((b & 0xff) as u8)
-    if not file_write_bytes(args[2], bytes):
-        print("simple-link: cannot write {args[2]}")
+    for b in r.bytes: bytes = bytes.push((b & 0xff) as u8)
+    if not file_write_bytes(out, bytes):
+        print("simple-link: cannot write {out}")
         return 1
-    print("simple-link: wrote {args[2]} ({bytes.len()} bytes, {objects.len()} objects)")
+    for line in r.lines: print(line)
     0
 
 exit(main())

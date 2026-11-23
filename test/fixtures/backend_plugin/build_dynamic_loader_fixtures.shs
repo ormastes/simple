@@ -17,22 +17,20 @@ missing_src="$root/test/fixtures/backend_plugin/dynamic_loader_missing_symbol.c"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        compiler='/c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc/bin/clang-cl.exe'
-        expected_sha='D43B7FA07B5B77B716E60600AD2792CFB2EEB370AECB6144BF6C698F2C6D7467'
-        [ -x "$compiler" ] || { echo "missing exact LLVM 23.1.1 clang-cl" >&2; exit 3; }
-        actual_sha=$(sha256sum "$compiler" | awk '{print toupper($1)}')
-        [ "$actual_sha" = "$expected_sha" ] || { echo "clang-cl digest mismatch" >&2; exit 4; }
-        "$compiler" --version | grep -F 'clang version 23.1.1' >/dev/null || exit 5
+        # Windows default toolchain: llvm-mingw UCRT (never GCC, no MSVC/clang-cl).
+        mingw_root=${SIMPLE_LLVM_MINGW_ROOT:-}
+        if [ -z "$mingw_root" ]; then
+            for d in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64; do
+                [ -d "$d" ] && mingw_root=$d
+            done
+        fi
+        compiler="$mingw_root/bin/x86_64-w64-mingw32-clang.exe"
+        [ -x "$compiler" ] || { echo "missing llvm-mingw UCRT clang (set SIMPLE_LLVM_MINGW_ROOT)" >&2; exit 3; }
+        "$compiler" --version | grep -E "clang version [0-9]+[.]" >/dev/null || { echo "llvm-mingw clang version probe failed" >&2; exit 5; }
         good="$out/provider-v1.dll"
         missing="$out/provider-missing.dll"
-        good_win=$(cygpath -w "$good")
-        missing_win=$(cygpath -w "$missing")
-        good_src_win=$(cygpath -w "$good_src")
-        missing_src_win=$(cygpath -w "$missing_src")
-        MSYS2_ARG_CONV_EXCL='*'
-        export MSYS2_ARG_CONV_EXCL
-        "$compiler" /nologo /LD "$good_src_win" "/Fe:$good_win" /link /NOLOGO
-        "$compiler" /nologo /LD "$missing_src_win" "/Fe:$missing_win" /link /NOLOGO
+        "$compiler" -std=c11 -shared -fuse-ld=lld "$(cygpath -m "$good_src")" -o "$(cygpath -m "$good")"
+        "$compiler" -std=c11 -shared -fuse-ld=lld "$(cygpath -m "$missing_src")" -o "$(cygpath -m "$missing")"
         ;;
     Darwin*)
         compiler=clang

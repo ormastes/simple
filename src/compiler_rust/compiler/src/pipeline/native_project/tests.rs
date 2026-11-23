@@ -10723,3 +10723,53 @@ fn compiler_rt_builtins_env_override_selects_explicit_archive() {
     assert_ne!(fallback, Some(missing));
     assert_ne!(gcc_pick, Some(gcc));
 }
+
+/// Perf regression (bug seed_native_build_per_file_compile_minutes_windows_2026-11-23):
+/// `build_use_map_from_ast` walks the whole `all_mangled` table per imported
+/// name. On the full-CLI closure that cost 65% of all per-file CPU
+/// (`pre_hir`, up to 190 s for one file). Run a wide table x many imports and
+/// keep the module-qualified (`mod.fn`) binding intact. No wall-clock assert:
+/// a time bound flakes on a loaded host, and the quadratic form still makes
+/// this test visibly slow.
+#[test]
+fn build_use_map_wide_closure_stays_within_budget() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for i in 0..20_000 {
+        let name = format!("f{i}");
+        let owners = vec![format!("pkg__m{}__{name}", i % 97), format!("other__m{}__{name}", i % 89)];
+        all_mangled.insert(name, owners);
+    }
+    all_mangled.insert("helper".to_string(), vec!["pkg__m1__helper".to_string()]);
+    let mut source = String::new();
+    for m in 0..40 {
+        source.push_str(&format!("use pkg.m{m}\n"));
+    }
+    source.push_str("fn main():\n    0\n");
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    assert_eq!(use_map.get("m1.helper").map(String::as_str), Some("pkg__m1__helper"));
+    assert_eq!(use_map.get("m3.f3").map(String::as_str), Some("pkg__m3__f3"));
+    assert!(use_map.get("m3.f4").is_none());
+}
+
+/// The indexed module-key lookup must find the owners the exact-name scan
+/// found when a segment's edge underscore fuses with the `__` separator:
+/// a module named `impl_`, a module under `impl_`, and one under `p_dot`.
+#[test]
+fn build_use_map_module_import_keeps_underscore_edged_segments() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for (name, owner) in [
+        ("helper", "pkg__impl___helper"),
+        ("inner", "pkg__impl___m__inner"),
+        ("dotted", "pkg__p_dot__n__dotted"),
+    ] {
+        all_mangled.insert(name.to_string(), vec![owner.to_string(), format!("other__x__{name}")]);
+    }
+    let source = "use pkg.impl_\nuse pkg.impl_.m\nuse pkg.p_dot.n\nfn main():\n    0\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    assert_eq!(use_map.get("impl_.helper").map(String::as_str), Some("pkg__impl___helper"));
+    assert_eq!(use_map.get("m.inner").map(String::as_str), Some("pkg__impl___m__inner"));
+    assert_eq!(use_map.get("n.dotted").map(String::as_str), Some("pkg__p_dot__n__dotted"));
+    assert!(use_map.get("m.helper").is_none());
+}

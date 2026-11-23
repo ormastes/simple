@@ -3,7 +3,7 @@
 use compiler.common.cache_contract.virtual_source_registration_v1.*
 use .main_lazy_json.{extract_field, escape_json, make_tool_result, make_tool_error}
 
-extern fn rt_bytes_to_text(data: [u8]) -> text
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 fn _summary_status_text_v1(status: VirtualSourceRegistrationStatusV1) -> text:
     match status:
@@ -58,7 +58,10 @@ pub fn handle_virtual_summary_read_v1(id: text, body: text) -> text:
         return _summary_unready_v1(id, result.status)
     val value = result.value.unwrap()
     val next = if value.next_offset == nil: "null" else: str(value.next_offset.unwrap())
-    make_tool_result(id, "{\"status\":\"ready\",\"uri\":\"{escape_json(value.uri)}\",\"text\":\"{escape_json(rt_bytes_to_text(value.bytes))}\",\"next_offset\":{next},\"complete\":{if value.complete: "true" else: "false"}}")
+    val page_text = match bytes_to_text_checked(value.bytes):
+        case Ok(t): t
+        case Err(e): return make_tool_error(id, -32603, "summary page is not valid UTF-8 at byte {e.byte_offset}")
+    make_tool_result(id, "{\"status\":\"ready\",\"uri\":\"{escape_json(value.uri)}\",\"text\":\"{escape_json(page_text)}\",\"next_offset\":{next},\"complete\":{if value.complete: "true" else: "false"}}")
 
 pub fn handle_virtual_summary_page_v1(id: text, body: text) -> text:
     val max_bytes = _bounded_i64_v1(body, "max_bytes", 65536, 65536)

@@ -41,10 +41,12 @@ use compiler.backend.linker.elf_parser.{
     elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_386, EM_AARCH64, EM_RISCV}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_386, EM_AARCH64, EM_ARM, EM_RISCV}
 use compiler.backend.linker.riscv_reloc.{riscv_is_pcrel_hi, riscv_is_pcrel_lo, riscv_hi_key,
     riscv_pcrel_lo_value, riscv_pcrel_lo_as_absolute}
-use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags}
+use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags_xlen}
+use compiler.backend.linker.elf.boot_target_policy.{boot_target_is_elf32, boot_target_flags,
+    boot_target_validate_reloc, boot_target_validate_image32}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
 use compiler.backend.linker.elf.byte_buffers.{elf_i64_filled}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
@@ -138,10 +140,14 @@ fn _bl_machine(target: RelocArch) -> Result<i64, text>:
             Ok(EM_AARCH64)
         case Riscv64:
             Ok(EM_RISCV)
+        case Riscv32:
+            Ok(EM_RISCV)
+        case Arm32:
+            Ok(EM_ARM)
         case I386:
             Ok(EM_386)
         case _:
-            Err("elf_boot_link: supports only x86_64, i386, aarch64 and riscv64 targets")
+            Err("elf_boot_link: unsupported target")
 
 fn _bl_is_i386(target: RelocArch) -> bool:
     match target:
@@ -173,9 +179,11 @@ fn _bl_is_a64(target: RelocArch) -> bool:
         case _:
             false
 
-fn _bl_is_rv64(target: RelocArch) -> bool:
+fn _bl_is_riscv(target: RelocArch) -> bool:
     match target:
         case Riscv64:
+            true
+        case Riscv32:
             true
         case _:
             false
@@ -1129,8 +1137,9 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     val machine = _bl_machine(target)?
     val a64 = _bl_is_a64(target)
     val i386 = _bl_is_i386(target)
-    val hdr_ehdr = if i386: ELF32_EHDR_SIZE else: BOOT_EHDR
-    val hdr_phdr = if i386: ELF32_PHDR_SIZE else: BOOT_PHDR
+    val elf32 = boot_target_is_elf32(target)
+    val hdr_ehdr = if elf32: ELF32_EHDR_SIZE else: BOOT_EHDR
+    val hdr_phdr = if elf32: ELF32_PHDR_SIZE else: BOOT_PHDR
     var parsed: [ElfObject] = []
     var i: i64 = 0
     while i < objects.len():
@@ -1138,6 +1147,8 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         if p.is_err():
             return Err("object {names[i]}: {p.unwrap_err()}")
         val obj = p.unwrap()
+        if obj.raw.len() < hdr_ehdr or obj.raw[4] != (if elf32: 1 else: 2) or obj.raw[5] != 1:
+            return Err("object {names[i]}: target requires matching little-endian ELF class")
         if obj.header.e_type != ET_REL:
             return Err("object {names[i]}: not a relocatable object (e_type {obj.header.e_type})")
         if obj.header.e_machine != machine:
@@ -1145,14 +1156,19 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         parsed = parsed.push(elf_wrap_object(elf_unmerge_relocated(obj), wraps))
         i = i + 1
 
+    val target_flags = boot_target_flags(parsed, target)?
+    if target == RelocArch.Arm32 or target == RelocArch.Riscv32:
+        for obj in parsed:
+            for relocation in obj.relocations:
+                val valid = boot_target_validate_reloc(target, elf_reloc_type(relocation))?
     parsed = elf_relax_tls(parsed, target)?
-    val rv = _bl_is_rv64(target)
-    val x86 = not a64 and not rv and not i386  # x86_64 relocation numbering
+    val rv = _bl_is_riscv(target)
+    val x86 = target == RelocArch.X86_64
     var riscv_flags: i64 = 0
     if rv:
         # Relaxation off (ld.lld --no-relax): R_RISCV_RELAX is ignored and
         # R_RISCV_ALIGN padding is resolved without shrinking code.
-        riscv_flags = elf_riscv_flags(parsed)?
+        riscv_flags = elf_riscv_flags_xlen(parsed, if elf32: 32 else: 64)?
         parsed = elf_riscv_align_objects(parsed)?
     val res = sym_resolve_objects(parsed)
     if res.errors.len() > 0:
@@ -1280,8 +1296,8 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     var got_size = (got_keys.len() + got_hdr) * 8
     if need_got_base and got_size == 0:
         got_size = 8
-    if i386 and got_size > 0:
-        return Err("elf_boot_link: i386 boot images have no GOT (_GLOBAL_OFFSET_TABLE_ or a GOT relocation needs a PIC link)")
+    if elf32 and got_size > 0:
+        return Err("elf_boot_link: ELF32 boot images have no GOT (_GLOBAL_OFFSET_TABLE_ or a GOT relocation needs a PIC link)")
     val lay = _bl_layout(plan, ins0, res, defines, got_size,
         gc.common_live, gc_sections, hdr_ehdr, hdr_phdr)?
     val ins = lay.ins
@@ -1640,13 +1656,13 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             sym_shndx = sym_shndx.push(_bl_section_of(outs, lay.sym_values[i]))
         i = i + 1
     var strtab: [i64] = [0]
-    val sym_ent: i64 = if i386: 16 else: 24
+    val sym_ent: i64 = if elf32: 16 else: 24
     var symtab: [i64] = write_zeros([], sym_ent)
     i = 0
     while i < sym_names.len():
         symtab = write_u32_le(symtab, strtab.len())
         strtab = _bl_strtab_add(strtab, sym_names[i])
-        if i386:
+        if elf32:
             # Elf32_Sym: name, value, size, info, other, shndx.
             symtab = write_u32_le(symtab, sym_values[i] & 0xffffffff)
             symtab = write_u32_le(symtab, 0)
@@ -1677,7 +1693,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         i = i + 1
     var final_end = sg.file_end
     if not strip_output:
-        val sym_align: i64 = if i386: 4 else: 8
+        val sym_align: i64 = if elf32: 4 else: 8
         val symtab_off = boot_align_up(sg.file_end, sym_align)
         secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: sym_align,
             size: symtab.len(), entsize: sym_ent, link: ".strtab", info: 1, seg: ELF_SEG_R))
@@ -1695,13 +1711,14 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     val xplan = ElfExecPlan(secs: secs, offsets: offs, vaddrs: vaddrs, segments: sg.segs,
         file_end: final_end)
     var bytes: [i64] = []
-    if i386:
+    if elf32:
+        val valid_image = boot_target_validate_image32(xplan, entry, sym_values)?
         var c8: [[u8]] = []
         for c in out_contents:
             var b: [u8] = []
             for v in c: b = b.push(v as u8)
             c8 = c8.push(b)
-        for v in elf_write_image32_bytes(BOOT_ET_EXEC, machine, 0, entry, xplan, c8):
+        for v in elf_write_image32_bytes(BOOT_ET_EXEC, machine, target_flags, entry, xplan, c8):
             bytes = bytes.push(v as i64)
     else:
         bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
@@ -1709,7 +1726,8 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         # e_flags: the merged RVC / float-ABI flags of the inputs, as ld.lld writes.
         var fi: i64 = 0
         while fi < 4:
-            bytes[48 + fi] = (riscv_flags >> (fi * 8)) & 0xff
+            val flags_offset: i64 = if elf32: 36 else: 48
+            bytes[flags_offset + fi] = (riscv_flags >> (fi * 8)) & 0xff
             fi = fi + 1
 
     var sec_names: [text] = []
