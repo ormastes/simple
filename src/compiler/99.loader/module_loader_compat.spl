@@ -68,6 +68,8 @@ use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{HostOfferV1}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
+use compiler.loader.hot_swap_pin.{HotSwapSlot, HotSwapRead, hot_swap_slot_load, hot_swap_try, hot_swap_read_begin, hot_swap_reclaim}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
 
 # Roll back a failed load transaction: unmap every candidate mapping exactly
 # once (ledger is flat [addr, size, ...]) and return the error. Global symbol
@@ -410,6 +412,10 @@ struct ModuleLoader:
     # struct, so keeping these fields in a class prevents a copy from silently
     # duplicating one snapshot lease without incrementing its global refcount.
     aspect_owner: _ModuleAspectOwnerV1
+    # RB-LOAD-02: identity-pinned hot-swap slot per SMF module path. A
+    # pinned path reloads only through hot_swap_try (refusal keeps the old
+    # module loaded); per-call readers pin the slot image.
+    hot_swap_slots: Dict<text, HotSwapSlot>
 
 fn _moduleloader_aspect_result(found: bool, facet_key: text, code: text, message: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
@@ -1616,6 +1622,14 @@ impl ModuleLoader:
         self.reload_with_intent(path, ModuleLoadIntent.SmfArtifact)
 
     me reload_with_intent(path: text, intent: ModuleLoadIntent) -> LoadResult:
+        # A pinned module is replaced only after the slot admits the new
+        # image; any refusal returns before unload, so the old module stays.
+        if self.hot_swap_slots.has(path):
+            val slot = self.hot_swap_slots[path]
+            val swapped = hot_swap_try(slot, slot.current_generation(), file_read_bytes(path))
+            if swapped.is_err():
+                return LoadResult.Error(message: swapped.unwrap_err())
+            val _freed = hot_swap_reclaim(slot)
         self.unload(path)
         if self.modules.has(path):
             return LoadResult.Error(message: "module unload blocked: " + path)
@@ -1889,7 +1903,8 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             semantic_dependencies: {},
             semantic_fingerprints: {},
             dependency_semantic_fingerprints: {},
-            aspect_owner: _module_aspect_owner_new_v1()
+            aspect_owner: _module_aspect_owner_new_v1(),
+            hot_swap_slots: {}
     )
 
 fn moduleloader_aspect_loader_handle(self: ModuleLoader) -> i64:
@@ -2032,6 +2047,24 @@ me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
 
 me moduleloader_reload_with_intent(self: ModuleLoader, path: text, intent: ModuleLoadIntent) -> LoadResult:
     self.reload_with_intent(path, intent)
+
+# RB-LOAD-02 loader entry: pin a loaded SMF module to `row`; its current
+# artifact bytes become slot generation 0 (identity-admitted, no fallback).
+# Ok = the pinned generation; Err = the loader diagnostic text.
+me moduleloader_pin_hot_swap(self: ModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
+    if not self.modules.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-LOADED: {path}")
+    val slot = hot_swap_slot_load(row, file_read_bytes(path))?
+    self.hot_swap_slots[path] = slot
+    Ok(slot.current_generation())
+
+# Per-call reader pin on a pinned module's current image.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn moduleloader_hot_swap_read_begin(self: ModuleLoader, path: text) -> Result<HotSwapRead, text>:
+    if not self.hot_swap_slots.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-PINNED: {path}")
+    hot_swap_read_begin(self.hot_swap_slots[path])
 
 me moduleloader_unload(self: ModuleLoader, path: text):
     self.unload(path)

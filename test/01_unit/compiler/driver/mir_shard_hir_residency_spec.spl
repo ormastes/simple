@@ -50,7 +50,8 @@ use compiler.driver.driver_mir_shard_hir_residency_v1.{
     mir_shard_hir_residency_armed_v1, mir_shard_hir_residency_note_v1,
     mir_shard_hir_residency_kind_v1, mir_shard_hir_residency_reload_key_v1,
     mir_shard_hir_residency_mark_full_v1, mir_shard_hir_residency_held_v1,
-    mir_shard_hir_residency_interface_v1, mir_shard_hir_residency_counters_v1}
+    mir_shard_hir_residency_interface_v1, mir_shard_hir_residency_counters_v1,
+    file_worker_unit_row_interface_only_v1}
 use app.cli.native_build_hir_warmup_outcome.{mir_shard_pool_parallel_v1}
 
 val RES_RECORDS_SOURCE = "pub struct Point:\n    x: i64\n    y: i64\n\npub const LIMIT: i64 = 7\n\npub val BASE: Point = make(5)\n\npub trait Area:\n    fn area() -> i64\n    fn doubled() -> i64:\n        self.area() * 2\n\nimpl Area for Point:\n    fn area() -> i64:\n        self.x * self.y\n\npub class Box<T>:\n    item: T\n    fn get() -> T:\n        self.item\n\npub fn make(x: i64, y: i64 = 1) -> Point:\n    Point(x: x, y: y)\n\npub fn scale(p: Point, k: i64) -> Point:\n    val mul = \\v: v * k\n    Point(x: mul(p.x), y: mul(p.y))\n\npub fn pick<T>(a: T, b: T, first: bool) -> T:\n    if first: a else: b\n\npub extern fn rt_probe_extern(v: i64) -> i64\n"
@@ -184,6 +185,23 @@ describe "MIR shard HIR residency arming predicate":
         # rows adopted but never lowered (managed stages set ENTRY_CLOSURE=0): armed
         expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", false, true, false, true, false)).to_equal("")
         expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", false, false, true, true, false)).to_equal("")
+
+describe "per-file unit HIR residency selection":
+    it "loads only non-entry rows outside the target/advice set interface-only":
+        var keep: Dict<text, bool> = {}
+        keep["src/a/target.spl"] = true
+        keep["src/a/advice.spl"] = true
+        keep["/abs/src/a/target.spl"] = true
+        # unarmed or the entry: always full
+        expect(file_worker_unit_row_interface_only_v1(false, false, "src/a/dep.spl", "/abs/src/a/dep.spl", keep)).to_equal(false)
+        expect(file_worker_unit_row_interface_only_v1(true, true, "src/a/dep.spl", "/abs/src/a/dep.spl", keep)).to_equal(false)
+        # targets and advice modules keep bodies
+        expect(file_worker_unit_row_interface_only_v1(true, false, "src/a/target.spl", "", keep)).to_equal(false)
+        expect(file_worker_unit_row_interface_only_v1(true, false, "src/a/advice.spl", "", keep)).to_equal(false)
+        # an alias row of a target (other spelling, same canonical file) keeps bodies
+        expect(file_worker_unit_row_interface_only_v1(true, false, "lib/target.spl", "/abs/src/a/target.spl", keep)).to_equal(false)
+        # any other closure row is interface-only
+        expect(file_worker_unit_row_interface_only_v1(true, false, "src/a/dep.spl", "/abs/src/a/dep.spl", keep)).to_equal(true)
 
 describe "serial MIR pool admission":
     it "keeps ordinary one-thread builds in-process":

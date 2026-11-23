@@ -246,8 +246,62 @@ fn _dir_device_extra(style: [DrawIrStyleProp], key: text) -> i32:
             return _dir_parse_int(prop.value) as i32
     0
 
+# `device-advance-widths`: the text run's per-codepoint advances measured at
+# k x the font size, device px: each pen is round(k x exact CSS pen), the
+# Chrome 159 model (a 16 px run at k=4 starts `of` at device 213, Chrome
+# 4 x 53.367 = 213.5; k x the whole-CSS-px pen says 212). They replace k x the
+# CSS advances so a glyph starts where Chrome puts it, not on a multiple of k.
+# Never scaled, always stripped; [] when the command has none.
+fn _dir_device_advances(style: [DrawIrStyleProp]) -> [i32]:
+    for prop in style:
+        if prop.key == "device-advance-widths":
+            var out: [i32] = []
+            for part in prop.value.split(","):
+                out.push(_dir_parse_int(part) as i32)
+            return out
+    []
+
+# Device advances sum to round(k x exact run width), which can differ by a
+# few px from k x the whole-CSS-px command width; Engine2D rejects advances
+# that do not sum to the command width and repaints the run with the face's
+# own per-glyph advances, which drift (+11 device px over a 450 CSS px line).
+# The last advance moves no glyph, so it absorbs the difference; the width
+# never shrinks, so the clip band keeps the tail's ink. Returns the new width.
+fn _dir_anchor_device_advances(advances: [i32], width: i32) -> ([i32], i32):
+    var sum: i64 = 0
+    for advance in advances:
+        sum = sum + (advance as i64)
+    val target: i64 = if sum > (width as i64): sum else: width as i64
+    var out = advances
+    val n = out.len()
+    out[n - 1] = ((out[n - 1] as i64) + target - sum) as i32
+    (out, target as i32)
+
+# `pen-origin-milli`: a mid-line run's fractional start past its whole-CSS-px
+# command x (CSS milli-px). With device advances present the device pass moves
+# the command x by round(k x origin) and drops the prop, so the run starts on
+# Chrome's device pen (`<code>ab</code> plain` at k=4: 3 device px right of
+# k x the whole px) and no later stage applies the CSS-milli origin again.
+fn _dir_pen_origin_milli(style: [DrawIrStyleProp]) -> i64:
+    for prop in style:
+        if prop.key == "pen-origin-milli" and _dir_is_int(prop.value):
+            return _dir_parse_int(prop.value)
+    0
+
+fn _dir_round_div(value: i64, den: i64) -> i64:
+    if value >= 0:
+        return (value + den / 2) / den
+    0 - ((0 - value + den / 2) / den)
+
+fn _dir_without_key(style: [DrawIrStyleProp], key: text) -> [DrawIrStyleProp]:
+    var out: [DrawIrStyleProp] = []
+    for prop in style:
+        if prop.key != key:
+            out.push(prop)
+    out
+
 fn _dir_is_device_prop(key: text) -> bool:
-    key == "device-y-offset" or key == "device-x-offset" or key == "device-rect" or key == "device-extra-height" or key == "device-extra-width"
+    key == "device-y-offset" or key == "device-x-offset" or key == "device-rect" or key == "device-extra-height" or key == "device-extra-width" or key == "device-advance-widths"
 
 fn _dir_grow_rect(rect: DrawIrRect, extra_width: i32, extra_height: i32) -> DrawIrRect:
     if not rect.present:
@@ -280,7 +334,17 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
     scaled.hit_rect = _dir_scale_rect(command.hit_rect, k)
     scaled.clip_rect = _dir_scale_rect(command.clip_rect, k)
     val has_device_prop = _dir_has_device_prop(command.computed_style)
+    var device_pen_origin_folded = false
     if has_device_prop:
+        val device_advances = _dir_device_advances(command.computed_style)
+        if device_advances.len() > 0 and device_advances.len() == command.advance_widths.len():
+            val anchored = _dir_anchor_device_advances(device_advances, scaled.width)
+            scaled.advance_widths = anchored.0
+            scaled.width = anchored.1
+            val origin = _dir_pen_origin_milli(command.computed_style)
+            if origin != 0:
+                scaled.x = scaled.x + (_dir_round_div(origin * (k as i64), 1000) as i32)
+                device_pen_origin_folded = true
         val device_rect = _dir_device_rect(command.computed_style)
         if device_rect.len() == 4:
             scaled.x = scaled.x + device_rect[0]
@@ -296,6 +360,8 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
             scaled.content_rect = _dir_grow_rect(scaled.content_rect, extra_width, extra_height)
             scaled.hit_rect = _dir_grow_rect(scaled.hit_rect, extra_width, extra_height)
     scaled.computed_style = _dir_scale_style(if has_device_prop: _dir_without_device_props(command.computed_style) else: command.computed_style, k)
+    if device_pen_origin_folded:
+        scaled.computed_style = _dir_without_key(scaled.computed_style, "pen-origin-milli")
     scaled.points = _dir_scale_points(command.points, k)
     var run = command.glyph_run
     run.xs = _dir_scale_i32_list(command.glyph_run.xs, k)

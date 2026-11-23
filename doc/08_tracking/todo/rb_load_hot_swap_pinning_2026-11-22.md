@@ -18,8 +18,11 @@ Done (2026-11-23, hs3): fixed-capacity generation table, so there is no reader s
 spec is blocked by doc/08_tracking/bug/seed_thread_shared_class_object_crash_2026-11-23.md.
 
 Remaining:
-- Route segment mapping (`smf_segment_load` / `segment_mapper`) callers through `hot_swap_slot_load` /
-  `hot_swap_read_begin` instead of a direct image (slot API exists, no production caller yet).
+- DONE 2026-11-23 hs4: compat `ModuleLoader.reload_with_intent` admits pinned paths through the slot before unload
+  (`moduleloader_pin_hot_swap`, `moduleloader_hot_swap_read_begin`; spec `hot_swap_loader_wiring_spec` 3/3).
+- `LazyModuleLoader.moduleloader_replace_live` (99.loader/loader/module_loader.spl) has no slot yet; callers that
+  pin modules (startup load policy) do not call `moduleloader_pin_hot_swap` yet; a failed load AFTER an
+  admitted swap leaves the slot one generation ahead of the (absent) module.
 - State migration across an ABI change (currently refused).
 - Land the OS-thread pin/reclaim stress spec once the seed shared-object crash is fixed (or on a native binary).
 - Bug (FIXED-VERIFICATION-PENDING 2026-11-23, work/at1-20261123): `atomic_i64_new` resolved to an

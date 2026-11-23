@@ -1,6 +1,6 @@
 # Seed native-build: single files take minutes to compile (Windows, full CLI)
 
-Status: open (perf). Found while rebuilding the self-hosted CLI for Lane 8 of
+Status: verification-pending (pre_hir root cause fixed, branch `work/pf1-20261123`; hir phase still open). Found while rebuilding the self-hosted CLI for Lane 8 of
 `unit_range_cast_native_execution_blocked_2026-11-19.md`.
 
 Related: `native_build_windows_link_phase_hang_runtime_cache_batch_2026-11-22.md`.
@@ -73,3 +73,38 @@ The seed was built from `origin/release/1.0.0` @ `84ea108c7c9` (includes #10999 
 | `unit_div_remainder_native_spec` (sanity) | PASS 8/8 |
 
 The enum-default item (3) is verified. The per-file slowness this bug tracks remains open.
+## Root cause 1 (pf1, 2026-11-23): `pre_hir` = `build_use_map_from_ast`
+`workaround_store.spl` alone (94-file closure) compiles in 1.2 s; per-file cost scales with the
+closure. On the full CLI closure, `SIMPLE_NATIVE_FILE_TIMING=1` showed `pre_hir` was 65 % of all
+per-file CPU (20,977 of 32,246 s), up to 190 s for `src/compiler/10.frontend/core/__init__.spl`.
+`pre_hir` is dominated by `build_use_map_from_ast` (`native_project/imports.rs`): for every
+`Single` import it walked the whole `all_mangled` table twice (module-qualified `name.fn` keys,
+and the bare multi-candidate keys), calling `resolve_import_name_strict` per key, which re-did
+the `use_segments` joins, two re-export lookups and five family `format!`s every time. Cost was
+O(imports x table) with ~10 allocations per step, so re-export hubs (`__init__.spl`, `mod.spl`)
+took minutes.
+
+Fix (seed, Rust): `StrictImportScope` hoists the per-path work out of the loop; the module-qualified
+scan visits only keys indexed under the imported name (lazy part index, same normalisation as
+`mangled_matches_use_path`) plus re-export entries; the bare multi-candidate scan runs once per
+use path instead of once per group item. Regression check:
+`build_use_map_wide_closure_stays_within_budget` (`native_project/tests.rs`).
+
+Seed built from this tree, full CLI, `--threads 40`, same host, fresh cache each run:
+
+| seed | wall | pre_hir CPU sum / max | hir CPU sum / max | files > 10 s | max file |
+|---|---|---|---|---|---|
+| `C:/dev/simple/bin/simple.exe` (before) | 26m37s | 20,977 s / 190 s | 9,097 s / - | 869 | 390 s |
+| intermediate (scope hoist only) | 24m35s | 11,143 s / 223 s | 9,507 s / 130 s | - | 223 s |
+| fix | 22m02s | 3,063 s / 9.6 s | 10,558 s / 141 s | 324 | 145 s |
+
+`core/__init__.spl` 191 s -> 6.0 s, `app/io/mod.spl` 120 s -> 5.4 s, `workaround_store.spl` 2.9 s.
+All 4,101 files compiled, 0 failed. Peak process RSS (one process, 40 worker threads, 1 s sampling):
+intermediate 6.9 GB, fix 7.6 GB (+0.7 GB: one lazy part index per file worker). The before-seed
+RSS was not sampled on this run.
+
+## Still open: `hir` phase
+`lower_module_with_return_types` is now the dominant cost (10,558 CPU s, up to 141 s per file,
+e.g. `app/io/_CliCommands/handler_commands.spl`, `app/build/cli_entry.spl`). Wall to end of build
+is also bounded by the tail of these files. Next: profile HIR lowering against the global
+struct/fn-return/enum tables for the full closure.

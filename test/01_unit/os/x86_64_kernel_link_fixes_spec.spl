@@ -1,0 +1,204 @@
+"""Focused unit specs verifying SimpleOS x86_64 kernel-link compile fixes."""
+
+use std.spec.*
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.apps.terminal.terminal.{Terminal, BufferingTerminal}
+use os.apps.shell.shell_tools.{tool_chmod}
+use os.tools.shell.ls.ls_tool.{tool_ls}
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use os.kernel.log.klog_api.{log_set_targets}
+use os.userlib.window.{WindowClient}
+use common.window_protocol.window_protocol.{
+    WmStatus, WM_STATUS_OK, WM_STATUS_ERROR, WM_STATUS_NO_SPACE}
+use os.kernel.loader.installed_artifact_boot_composition_v1.{
+    InstalledArtifactBootCompositionErrorV1,
+    InstalledArtifactBootPopulationErrorV1,
+    installed_artifact_boot_composition_validate_v1}
+use os.kernel.loader.simplebox_catalog_media_boot_v1.{
+    SimpleboxCatalogMediaBootPolicyV1, SimpleboxCatalogMediaBootErrorV1,
+    simplebox_catalog_media_boot_ingest_bytes_v1,
+    simplebox_catalog_media_canonical_layout_v1}
+use os.kernel.loader.simplebox_pinned_catalog_image_v1.{
+    SimpleboxPinnedCatalogImageErrorV1,
+    simplebox_pinned_catalog_image_shape_valid_v1}
+use os.kernel.loader.simplebox_signed_catalog_boot_ingestion_v1.{
+    SimpleboxSignedCatalogBootIngestionErrorV1,
+    simplebox_signed_catalog_boot_ingest_composed_v1}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSignedCatalogProvisionResultV1,
+    SimpleboxSignedCatalogProvisionErrorV1,
+    SimpleboxSafeArtifactBindingReceiptV1}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    SimpleboxPrimaryToolBundlePlanV1, SimpleboxPrimaryToolBundlePlanErrorV1}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPolicyV1}
+
+var _last_chmod_path: text = ""
+var _last_chmod_mode: u16 = 0u16
+
+class FixCheckMockFs:
+    entries: [DirEntry]
+
+impl FixCheckMockFs:
+    static fn new(entries: [DirEntry]) -> FixCheckMockFs:
+        FixCheckMockFs(entries: entries)
+
+impl Filesystem for FixCheckMockFs:
+    fn fs_name() -> text: "fix-check-mock"
+    me mount(device: text, options: text) -> Result<bool, text>: Ok(true)
+    me unmount() -> Result<bool, text>: Ok(true)
+    me open(path: text, flags: FileFlags) -> Result<u64, text>: Ok(1)
+    me read(handle: u64, size: u64) -> Result<[u8], text>: Ok([])
+    me write(handle: u64, data: [u8]) -> Result<u64, text>: Ok(0)
+    me close(handle: u64) -> Result<bool, text>: Ok(true)
+    me seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>: Ok(0)
+    fn stat(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(
+            id: 1, kind: FsNodeKind.File, size: 12, permissions: 0o644u16,
+            owner: 0, group: 0, created_ns: 0, modified_ns: 0))
+    fn stat_no_follow(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(
+            id: 1, kind: FsNodeKind.File, size: 12, permissions: 0o644u16,
+            owner: 0, group: 0, created_ns: 0, modified_ns: 0))
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        _last_chmod_path = path
+        _last_chmod_mode = mode
+        Ok(true)
+    me mkdir(path: text) -> Result<bool, text>: Ok(true)
+    me rmdir(path: text) -> Result<bool, text>: Ok(true)
+    fn readdir(path: text) -> Result<[DirEntry], text>: Ok(self.entries)
+    me unlink(path: text) -> Result<bool, text>: Ok(true)
+    me rename(old_path: text, new_path: text) -> Result<bool, text>: Ok(true)
+    me symlink(target: text, link_path: text) -> Result<bool, text>: Ok(true)
+    fn readlink(path: text) -> Result<text, text>: Err("not a symlink")
+
+fn _mock_vfs(entries: [DirEntry]) -> VfsManager:
+    var vfs = VfsManager.new()
+    val _ok = vfs.mount("/", "mock", "mem", false, FixCheckMockFs.new(entries))
+    vfs
+
+fn _sample_entry(name: text, kind: FsNodeKind, size: u64) -> DirEntry:
+    DirEntry(
+        name: name,
+        node: FsNode(
+            id: 2, kind: kind, size: size, permissions: 0o644u16,
+            owner: 0, group: 0, created_ns: 0, modified_ns: 0))
+
+describe "SimpleOS x86_64 kernel-link compile fixes":
+    it "renders 8x16 glyphs via common.ui.glyph_bitmap_8x16 in BrowserCompositorBackend":
+        var backend = BrowserCompositorBackend.with_color(16, 16, 0xFF000000u32)
+        backend.draw_char_8x16(0, 0, 0x41u8, 0xFFFFFFFFu32, 0xFF000000u32)
+        var lit: i32 = 0
+        for px in backend.get_pixel_buffer():
+            if px == 0xFFFFFFFFu32:
+                lit = lit + 1
+        expect(lit).to_be_greater_than(0)
+
+    it "builds Terminal UI using Terminal.cols and Terminal.rows while preserving BufferingTerminal":
+        var term = Terminal.new(80, 24)
+        val session = term.build_ui()
+        val tree = session.current_tree()
+        expect(tree.title_text()).to_equal("Terminal")
+        val status = tree.find_widget("status")
+        expect(status != nil).to_equal(true)
+        expect(status.unwrap().get_prop("right")).to_equal("80x24")
+
+        var buf = BufferingTerminal.new()
+        buf.write_string("ok")
+        expect(buf.captured()).to_equal("ok")
+
+    it "parses octal modes in tool_chmod and rejects invalid modes":
+        var vfs = _mock_vfs([])
+        var term = Terminal.new(80, 24)
+        _last_chmod_path = ""
+        _last_chmod_mode = 0u16
+
+        expect(tool_chmod(vfs, "/tmp", ["0755", "script.sh"], term)).to_equal(0)
+        expect(_last_chmod_path).to_equal("/tmp/script.sh")
+        expect(_last_chmod_mode).to_equal(493u16)
+
+        expect(tool_chmod(vfs, "/", ["644", "notes.txt"], term)).to_equal(0)
+        expect(_last_chmod_path).to_equal("/notes.txt")
+        expect(_last_chmod_mode).to_equal(420u16)
+
+        expect(tool_chmod(vfs, "/", ["788", "bad.txt"], term)).to_equal(1)
+        expect(term.take_mirrored_output()).to_contain("invalid mode")
+        expect(tool_chmod(vfs, "/", ["abc", "bad.txt"], term)).to_equal(1)
+        expect(tool_chmod(vfs, "/", ["", "bad.txt"], term)).to_equal(1)
+
+    it "iterates typed DirEntry values in tool_ls":
+        val entries = [
+            _sample_entry(".hidden", FsNodeKind.File, 10u64),
+            _sample_entry("dir", FsNodeKind.Directory, 0u64),
+            _sample_entry("readme.txt", FsNodeKind.File, 42u64)
+        ]
+        var vfs = _mock_vfs(entries)
+        var term = Terminal.new(80, 24)
+
+        expect(tool_ls(vfs, "/", [], term)).to_equal(0)
+        val short_out = term.take_mirrored_output()
+        expect(short_out).to_contain("dir")
+        expect(short_out).to_contain("readme.txt")
+        expect(short_out.contains(".hidden")).to_equal(false)
+
+        expect(tool_ls(vfs, "/", ["-a", "-l"], term)).to_equal(0)
+        val long_out = term.take_mirrored_output()
+        expect(long_out).to_contain(".hidden")
+        expect(long_out).to_contain("d  0  dir")
+        expect(long_out).to_contain("-  42  readme.txt")
+
+    it "resolves concrete WmStatus constants and WindowClient.create_window_with_process_id":
+        val ok: WmStatus = WM_STATUS_OK
+        expect(ok.value).to_equal(0)
+        expect(WM_STATUS_ERROR.value).to_equal(-1)
+        expect(WM_STATUS_NO_SPACE.value).to_equal(-2)
+        log_set_targets(0)
+        var client = WindowClient.new()
+        expect(client.create_window_with_process_id("w", 0, 0, 100, 100, 1u64)).to_equal(0u64)
+
+    it "passes explicit error defaults across loader v1 fail helpers":
+        val comp = installed_artifact_boot_composition_validate_v1(nil, nil)
+        expect(comp.ok).to_equal(false)
+        expect(comp.error).to_equal(InstalledArtifactBootCompositionErrorV1.Empty)
+        expect(comp.population_error).to_equal(
+            InstalledArtifactBootPopulationErrorV1.None)
+
+        val layout = simplebox_catalog_media_canonical_layout_v1()
+        val bad_policy = SimpleboxCatalogMediaBootPolicyV1(
+            target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+            layouts: [layout],
+            pinned_key_id: "",
+            pinned_public_key_hex: "",
+            pinned_public_key_sha256: "")
+        val media_res = simplebox_catalog_media_boot_ingest_bytes_v1(
+            bad_policy, layout, [1u8], [2u8], [3u8])
+        expect(media_res.ok).to_equal(false)
+        expect(media_res.error).to_equal(SimpleboxCatalogMediaBootErrorV1.PolicyRejected)
+        expect(media_res.image_error).to_equal(SimpleboxPinnedCatalogImageErrorV1.None)
+
+        expect(simplebox_pinned_catalog_image_shape_valid_v1([], [], [])).to_equal(false)
+
+        val bad_provision = SimpleboxSignedCatalogProvisionResultV1(
+            ok: false,
+            error: SimpleboxSignedCatalogProvisionErrorV1.InvalidInput,
+            receipt: SimpleboxSafeArtifactBindingReceiptV1(
+                artifact_relative_path: "", artifact_sha256: "",
+                artifact_byte_count: 0, signed_record_relative_path: "",
+                signed_record_sha256: "", sam1_identity_sha256: ""),
+            plan: SimpleboxPrimaryToolBundlePlanV1(
+                ok: false,
+                error: SimpleboxPrimaryToolBundlePlanErrorV1.RecordCountMismatch,
+                policy: InstalledArtifactBootPolicyV1(
+                    platform_target: ManifestTarget(
+                        os: "simpleos", arch: "x86_64", abi: "simpleos"),
+                    required_canonical_paths: [], trust_roots: []),
+                records: []))
+        val ingested = simplebox_signed_catalog_boot_ingest_composed_v1(
+            bad_provision, nil)
+        expect(ingested.ok).to_equal(false)
+        expect(ingested.error).to_equal(
+            SimpleboxSignedCatalogBootIngestionErrorV1.ProvisionRejected)
+        expect(ingested.population_error).to_equal(
+            InstalledArtifactBootPopulationErrorV1.None)
