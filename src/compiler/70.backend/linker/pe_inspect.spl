@@ -3,7 +3,7 @@
 # Builds on pe_coff_header.spl gate functions; adds structured section/header types.
 
 use std.binary_io.{BinaryReader, ByteOrder}
-use std.common.text_bytes.{bytes_to_text}
+use compiler.backend.linker.name_text.{linker_name_text}
 use std.pe_coff_header.{PeHeaderSummary, parse_pe_header_summary, pe_rva_to_file_offset}
 
 # ============================================================================
@@ -95,16 +95,16 @@ struct PeInspector:
 # Parsing Functions
 # ============================================================================
 
-fn _read_section_name(data: [u8], offset: i64) -> text:
+fn _read_section_name(data: [u8], offset: i64) -> Result<text, text>:
     if offset < 0 or offset >= data.len():
-        return ""
+        return Ok("")
     val limit = if offset + 8 < data.len(): offset + 8 else: data.len()
     var end = offset
     while end < limit and data[end] != 0:
         end = end + 1
     if end <= offset:
-        return ""
-    bytes_to_text(data[offset:end])
+        return Ok("")
+    linker_name_text(data[offset:end], "PE section name at file offset {offset}")
 
 fn pe_parse_header(data: [u8]) -> Result<PeHeader, text>:
     val summary = parse_pe_header_summary(data)
@@ -175,7 +175,7 @@ fn pe_parse_header(data: [u8]) -> Result<PeHeader, text>:
         data_directory_count: data_directory_count,
     ))
 
-fn pe_parse_sections(data: [u8], header: PeHeader) -> [PeSectionHeader]:
+fn pe_parse_sections(data: [u8], header: PeHeader) -> Result<[PeSectionHeader], text>:
     val section_table_offset = header.pe_offset + 24 + header.optional_header_size
     val order = ByteOrder.LittleEndian
     var sections: [PeSectionHeader] = []
@@ -186,7 +186,9 @@ fn pe_parse_sections(data: [u8], header: PeHeader) -> [PeSectionHeader]:
         if sec_off + PE_SECTION_HEADER_SIZE > data.len():
             break
 
-        val name = _read_section_name(data, sec_off)
+        val name: text = match _read_section_name(data, sec_off):
+            case Ok(v): v
+            case Err(e): return Err("PE section {i}: {e}")
         var reader = BinaryReader.new(data)
         reader.skip(sec_off + 8)
 
@@ -212,7 +214,7 @@ fn pe_parse_sections(data: [u8], header: PeHeader) -> [PeSectionHeader]:
         ))
         i = i + 1
 
-    sections
+    Ok(sections)
 
 fn pe_parse_data_directories(data: [u8], header: PeHeader) -> [PeDataDirectory]:
     val opt_off = header.pe_offset + 24
@@ -245,7 +247,9 @@ fn pe_inspect(data: [u8]) -> Result<PeInspector, text>:
         return Err(header_result.err()!)
 
     val header = header_result.ok()!
-    val sections = pe_parse_sections(data, header)
+    val sections: [PeSectionHeader] = match pe_parse_sections(data, header):
+        case Ok(v): v
+        case Err(e): return Err(e)
     val data_dirs = pe_parse_data_directories(data, header)
 
     Ok(PeInspector(

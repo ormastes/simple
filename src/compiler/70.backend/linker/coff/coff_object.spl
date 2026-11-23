@@ -4,7 +4,7 @@
 # starts directly with either the 20-byte classic header or the 56-byte
 # anonymous bigobj header.
 
-use std.common.text_bytes.{bytes_to_text}
+use compiler.backend.linker.name_text.{linker_name_text}
 use std.common.pe.pe_image_v1.{pe_coff_header_v1, pe_section_header_v1, pe_coff_is_bigobj_v1}
 
 # IMAGE_FILE_MACHINE_UNKNOWN: machine-neutral library members such as the
@@ -157,17 +157,17 @@ fn _coff_i32(data: [u8], offset: i64) -> i64:
     val value = _coff_u32(data, offset)
     if value >= 2147483648: value - 4294967296 else: value
 
-fn _coff_fixed_name(data: [u8], offset: i64, count: i64) -> text:
+fn _coff_fixed_name(data: [u8], offset: i64, count: i64) -> Result<text, text>:
     # NUL-terminated (or `count`-bounded) name, decoded as one byte slice.
     # The old per-byte `text.from_char_code(b)` concat was O(n^2) and, in the
     # seed interpreter, decoded every `u8` (Value::UInt) as code point 0.
-    if offset < 0 or offset >= data.len(): return ""
+    if offset < 0 or offset >= data.len(): return Ok("")
     val limit = if offset + count < data.len(): offset + count else: data.len()
     var end = offset
     while end < limit and data[end] != 0:
         end = end + 1
-    if end <= offset: return ""
-    bytes_to_text(data[offset:end])
+    if end <= offset: return Ok("")
+    linker_name_text(data[offset:end], "COFF name at file offset {offset}")
 
 fn coff_is_bigobj(data: [u8]) -> bool:
     pe_coff_is_bigobj_v1(data)
@@ -176,18 +176,20 @@ fn _coff_string(data: [u8], string_table: i64, offset: i64) -> Result<text, text
     val table_size = _coff_u32(data, string_table)
     if table_size < 4 or offset < 4 or offset >= table_size or string_table + table_size > data.len():
         return Err("COFF string-table offset {offset} is out of bounds")
-    Ok(_coff_fixed_name(data, string_table + offset, table_size - offset))
+    _coff_fixed_name(data, string_table + offset, table_size - offset)
 
 fn _coff_symbol_name(data: [u8], symbol_offset: i64, string_table: i64) -> Result<text, text>:
     val zeroes = _coff_u32(data, symbol_offset)
     if zeroes < 0: return Err("truncated COFF symbol name")
-    if zeroes != 0: return Ok(_coff_fixed_name(data, symbol_offset, 8))
+    if zeroes != 0: return _coff_fixed_name(data, symbol_offset, 8)
     val string_offset = _coff_u32(data, symbol_offset + 4)
     if string_offset < 0: return Err("truncated COFF long symbol name")
     _coff_string(data, string_table, string_offset)
 
 fn _coff_section_name(data: [u8], offset: i64, string_table: i64) -> Result<text, text>:
-    val short_name = _coff_fixed_name(data, offset, 8)
+    val short_name: text = match _coff_fixed_name(data, offset, 8):
+        case Ok(v): v
+        case Err(e): return Err(e)
     if not short_name.starts_with("/"): return Ok(short_name)
     val decimal = short_name.substring(1)
     val string_offset = decimal.to_int() ?? -1
