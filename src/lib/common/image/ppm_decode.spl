@@ -164,7 +164,8 @@ pub fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
     #   - a flat row is one write_span of a pre-built RGB pattern;
     #   - in a mixed row, a flat 64-pixel block is one pattern write_span, a
     #     block equal to the block above is already in rowb, and only the
-    #     remaining blocks pay three byte stores per pixel.
+    #     remaining blocks pay three byte stores per pixel, for their
+    #     4-pixel pieces that differ from the row above (see below).
     # Every byte is the same as the per-pixel encoding.
     val w_i = width_i64 as i32
     val h_i = height_i64 as i32
@@ -196,6 +197,15 @@ pub fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
                     row_rgb = rgb
                 rowb.write_span(row_pat, 0, 0, rlen as i64)
             else:
+                # Changed-block stores are narrowed to the 16- and then
+                # 4-pixel pieces that differ from the row above (rowb still
+                # holds it). On the 4x html catalog frame ~96 % of a changed
+                # block's pixels equal the pixel above (vertical glyph stems).
+                # A piece compare costs several pixels of stores, so a block
+                # that turns out dense (a 16-pixel piece changed in all four
+                # 4-pixel pieces) stores its rest directly, and the next
+                # `skip` changed blocks of the row skip the compares too.
+                var skip = 0
                 var x = 0
                 while x < w_i:  # cpu-lane-loop-ok: one iteration per 64-pixel block
                     var n = blk
@@ -210,13 +220,40 @@ pub fn encode_ppm_p6(width: u32, height: u32, pixels: [u32]) -> [u8]:
                             blk_rgb = rgb
                         rowb.write_span(blk_pat, (x * 3) as i64, 0, (n * 3) as i64)
                     elif y == 0 or seg != prev.slice(x, x + n):
-                        var q = x * 3
-                        for px32 in seg:  # cpu-lane-loop-ok: fresh mixed block, per-pixel stores
-                            val argb = px32 as i64
-                            rowb[q] = (argb >> 16) & 0xFF
-                            rowb[q + 1] = (argb >> 8) & 0xFF
-                            rowb[q + 2] = argb & 0xFF
-                            q = q + 3
+                        var dense = y == 0 or skip > 0
+                        if skip > 0:
+                            skip = skip - 1
+                        val bend = x + n
+                        var mx = x
+                        while mx < bend:  # cpu-lane-loop-ok: one iteration per 16-pixel piece
+                            var mn = 16
+                            if dense or mx + mn > bend:
+                                mn = bend - mx
+                            if dense or row.slice(mx, mx + mn) != prev.slice(mx, mx + mn):
+                                val mend = mx + mn
+                                var lx = mx
+                                var pieces = 0
+                                var changed = 0
+                                while lx < mend:  # cpu-lane-loop-ok: one iteration per 4-pixel piece
+                                    var ln = 4
+                                    if dense or lx + ln > mend:
+                                        ln = mend - lx
+                                    pieces = pieces + 1
+                                    if dense or row.slice(lx, lx + ln) != prev.slice(lx, lx + ln):
+                                        changed = changed + 1
+                                        val piece = if ln == n: seg else: row.slice(lx, lx + ln)
+                                        var q = lx * 3
+                                        for px32 in piece:  # cpu-lane-loop-ok: changed pixels of one piece
+                                            val argb = px32 as i64
+                                            rowb[q] = (argb >> 16) & 0xFF
+                                            rowb[q + 1] = (argb >> 8) & 0xFF
+                                            rowb[q + 2] = argb & 0xFF
+                                            q = q + 3
+                                    lx = lx + ln
+                                if pieces == 4 and changed == 4:
+                                    dense = true
+                                    skip = 3
+                            mx = mx + mn
                     x = x + n
             out.write_span(rowb, o as i64, 0, rlen as i64)
         prev = row

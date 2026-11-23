@@ -68,6 +68,9 @@ var _adv_overflow_cursor: i32 = 0
 val _GID_SLOTS: i32 = 4
 var _gid_identity: [text] = [""; 4]
 var _gid_vals: [[i64]] = [[0; 95]; 4]
+# The face's parsed kern index (`sfnt_blob_kern_face_info`), warmed with the
+# glyph ids so a kern-cache miss no longer re-parses the table directory.
+var _gid_kern: [[i64]] = [[0]; 4]
 var _gid_cursor: i32 = 0
 
 fn _gid_slot(identity: text) -> i32:
@@ -96,6 +99,7 @@ fn _gid_warm(identity: text, blob: [u8]) -> i32:
     _gid_cursor = (_gid_cursor + 1) % _GID_SLOTS
     _gid_identity[slot] = identity
     _gid_vals[slot] = ids
+    _gid_kern[slot] = sfnt_blob_kern_face_info(blob)
     slot
 
 # Batched ASCII advance warm (2026-09-13, round 13), keyed by (loaded-face
@@ -384,7 +388,7 @@ use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdGlyph, SfntLcdOutline}
 use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
@@ -2265,7 +2269,7 @@ class FontRenderer:
         val right_gid = _gid_lookup(gid_slot, right_codepoint)
         if left_gid <= 0 or right_gid <= 0:
             return 0
-        sfnt_blob_kern_pair_milli_px(blob, left_gid, right_gid, font_size.to_i64()) as i32
+        sfnt_kern_face_pair_milli_px(blob, _gid_kern[gid_slot], left_gid, right_gid, font_size.to_i64()) as i32
 
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
