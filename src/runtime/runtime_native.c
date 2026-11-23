@@ -8160,6 +8160,18 @@ int64_t rt_any_to_int(int64_t value) {
     return rt_value_unbox_int(value);
 }
 
+/* `v as <int>` with `v: any`: rt_any_to_int, except TEXT takes the CAST
+ * contract of rt_value_as_int (one code point -> that code point, longer text
+ * -> lenient parse) instead of the `.to_i64()` parse. `char_at` has no static
+ * return type, so `s.char_at(i) as i64` lands here; the parse turned every
+ * ASCII digit into its value (doc/08_tracking/bug/
+ * char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md).
+ * Twin: Rust runtime value/collections.rs. */
+int64_t rt_any_cast_int(int64_t value) {
+    if (rt_core_as_string(value)) return rt_value_as_int(value);
+    return rt_any_to_int(value);
+}
+
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
  * lowering (switch_operators_calls.spl). rt_string_to_int above requires an
  * ALREADY-tagged receiver (rt_core_as_string-checked, 0 otherwise) -- the

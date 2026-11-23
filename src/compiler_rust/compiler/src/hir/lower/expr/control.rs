@@ -40,6 +40,44 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
     expr.ty == TypeId::NIL || hir_expr_definitely_returns(expr)
 }
 
+/// Value type of a lowered tail `if`/`else` statement: the first arm whose
+/// tail value is neither bottom (NIL) nor an empty `[]` literal (its default
+/// element type is not evidence, see `lower_if`); an empty literal is used
+/// only when no other arm yields a value. `None` when the statement list does
+/// not end in an `if` with an `else`, or no arm yields a value.
+fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
+    // (type, is_empty_array_literal)
+    fn arm_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
+        match stmts.last() {
+            Some(HirStmt::Expr(expr)) if !hir_arm_is_bottom(expr) => {
+                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty());
+                Some((expr.ty, empty))
+            }
+            Some(HirStmt::If { .. }) => tail_if_type(stmts),
+            _ => None,
+        }
+    }
+    fn tail_if_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
+        match stmts.last() {
+            Some(HirStmt::If {
+                then_block,
+                else_block: Some(else_block),
+                ..
+            }) => {
+                let then_ty = arm_type(then_block);
+                let else_ty = arm_type(else_block);
+                match (then_ty, else_ty) {
+                    (Some((_, true)), Some(other @ (_, false))) => Some(other),
+                    (Some(t), _) => Some(t),
+                    (None, e) => e,
+                }
+            }
+            _ => None,
+        }
+    }
+    tail_if_type(stmts).map(|(ty, _)| ty)
+}
+
 fn expr_is_empty_array_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Array(items) => items.is_empty(),
@@ -2352,9 +2390,24 @@ impl Lowerer {
 
         let mut block_stmts = Vec::new();
         let mut result_ty = TypeId::NIL;
+        let last_index = statements.len() - 1;
 
-        for stmt in statements {
+        for (index, stmt) in statements.iter().enumerate() {
             match stmt {
+                // A tail `if`/`else` STATEMENT is the block's value (MIR
+                // `lower_block_expr` yields it), so the block takes its arms'
+                // value type. Leaving it NIL made an `if` arm like
+                // `if c:\n    if b: f() else: g()\nelse:\n    []` bottom, the
+                // join took `[]`'s default `[i32]`, and every element read was
+                // narrowed to i32 under the JIT (italic font face lost).
+                // doc/08_tracking/bug/jit_if_arm_tail_if_stmt_typed_nil_italic_lost_2026-11-23.md
+                simple_parser::ast::Node::If(_) if index == last_index => {
+                    let lowered = self.lower_node(stmt, ctx)?;
+                    if let Some(ty) = hir_tail_if_value_type(&lowered) {
+                        result_ty = ty;
+                    }
+                    block_stmts.extend(lowered);
+                }
                 simple_parser::ast::Node::Expression(expr) => {
                     let expr = self.lower_expr(expr, ctx)?;
                     result_ty = expr.ty;
