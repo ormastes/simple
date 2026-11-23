@@ -26,3 +26,24 @@ it does not claim execution or compiler qualification. Acceptance additionally
 requires the normal exact-head Windows Stage2 CI job to finish successfully.
 No compiler implementation change, host-tool fallback, GCC runtime substitution,
 or manual executable rewriting is involved.
+
+## Explicit target runtime ownership
+
+The bootstrap-main runtime selector prioritizes `libsimple_native_all.a` and
+requires eight concrete runtime owners, including `rt_native_build`. Its last
+resort Cargo invocation builds a host archive without a cross target. Restoring
+a Linux Cargo cache does not establish Windows runtime authority.
+
+The Windows seed job therefore builds native-all for its gnullvm target in a
+separate canonical feature invocation, after uploading the original seed and
+its matching runtime. The cross job downloads this same-source archive, checks
+its hash, requires every member to be x86_64 COFF (including COFF import members),
+and checks the selector's actual required exports. It passes the directory as
+an explicit runtime path. Compiler backfill is a Stage4 owner and is not selected
+by this bootstrap-main route; its generated core-C mutex/provider supplement
+remains owned by NativeProjectBuilder and the selected target compiler.
+
+A tiny `bootstrap_main.spl` is cross-linked through that actual owner before the
+full closure. Both preflight and Stage2 must report the retained archive as their
+runtime source. Native object staging and object caches are retained so a later
+link failure can be diagnosed without recompiling the unchanged closure.

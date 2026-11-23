@@ -10,6 +10,7 @@ on:
       - 'src/lib/**'
       - 'scripts/check/check-seed-new-stdlib-function-dispatch.shs'
       - 'scripts/check/check-seed-startup*.py'
+      - 'scripts/check/check-windows-gnu-runtime-authority*.py'
       - '.github/workflows/build-binaries.yml'
   pull_request:
     types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
@@ -20,6 +21,7 @@ on:
       - 'src/lib/**'
       - 'scripts/check/check-seed-new-stdlib-function-dispatch.shs'
       - 'scripts/check/check-seed-startup*.py'
+      - 'scripts/check/check-windows-gnu-runtime-authority*.py'
       - '.github/workflows/build-binaries.yml'
   workflow_dispatch:
 
@@ -252,6 +254,31 @@ jobs:
           path: staging/${{ matrix.binary }}
           retention-days: 7
 
+      - name: Build Windows bootstrap native-all authority
+        if: matrix.target == 'mingw'
+        working-directory: src/compiler_rust
+        run: |
+          # Separate canonical native-all feature build, AFTER the seed and its
+          # runtime have been uploaded; native-all-provider changes runtime features.
+          cargo +${{ matrix.toolchain }} build --locked --profile bootstrap \
+            --target ${{ matrix.rust-target }} -p simple-native-all
+          mkdir -p ../../windows-native-authority
+          cp "target/${{ matrix.rust-target }}/bootstrap/libsimple_native_all.a" ../../windows-native-authority/
+          {
+            printf 'source_revision=%s\ntarget=%s\nrust_toolchain=%s\n' \
+              '${{ github.sha }}' '${{ matrix.rust-target }}' '${{ matrix.toolchain }}'
+            printf 'native_all_sha256=%s\n' "$(sha256sum ../../windows-native-authority/libsimple_native_all.a | cut -d ' ' -f 1)"
+          } > ../../windows-native-authority/authority.env
+
+      - name: Upload Windows bootstrap native-all authority
+        if: matrix.target == 'mingw'
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-authority-mingw-x86_64-${{ github.sha }}
+          path: windows-native-authority/
+          if-no-files-found: error
+          retention-days: 7
+
   # ── Job 2: Build self-hosted binary (Stage 2) ────────────────────────
   build-native:
     needs: build-seed
@@ -431,21 +458,55 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "$root/bin" >> "$GITHUB_PATH"
 
-      - name: Restore native_all library (MinGW)
+      - name: Download matching Windows native-all authority
         if: matrix.target == 'mingw'
-        uses: actions/cache@v5
+        uses: actions/download-artifact@v7
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src/compiler_rust/target
-          key: seed-linux-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
-          restore-keys: |
-            seed-linux-
+          name: native-authority-mingw-x86_64-${{ github.sha }}
+          path: windows-native-authority
+
+      - name: Verify Windows runtime and cross-link through the actual owner
+        if: matrix.target == 'mingw'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$PWD/build/windows-cross-preflight"
+          mkdir -p "$out/project"
+          chmod +x seed-download/simple
+          python scripts/check/check-windows-gnu-runtime-authority-test.py
+          python scripts/check/check-windows-gnu-runtime-authority.py \
+            --root windows-native-authority --source-revision '${{ github.sha }}' \
+            --llvm-bin "$SIMPLE_LLVM_MINGW_ROOT/bin" --producer seed-download/simple \
+            --output "$out/runtime-admission.json"
+          printf 'fn main() -> i64:\n    print "Windows cross owner preflight"\n    return 0\n' > "$out/project/bootstrap_main.spl"
+          # Same bootstrap-main owner, target, bundle and explicit archive as the
+          # full closure. This also exercises its generated core-C supplement.
+          SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_KEEP_NATIVE_OBJS=1 SIMPLE_PARSE_SHARDING=0 SIMPLE_TRACE_RUNTIME_ROOTS=1 \
+            timeout 300 seed-download/simple native-build --backend cranelift \
+            --runtime-bundle core-c-bootstrap --runtime-path "$PWD/windows-native-authority" \
+            --threads 1 --source "$out/project" --entry-closure \
+            --entry "$out/project/bootstrap_main.spl" --cache-dir "$out/cache" \
+            --output "$out/preflight.exe" --target x86_64-pc-windows-gnu \
+            2>&1 | tee "$out/compile.log"
+          file "$out/preflight.exe" | grep -q 'PE32+'
+          grep -F "Runtime retention source: $PWD/windows-native-authority/libsimple_native_all.a " "$out/compile.log"
+          sha256sum "$out/preflight.exe" > "$out/preflight.sha256"
+
+      - name: Retain Windows cross preflight evidence
+        if: always() && matrix.target == 'mingw'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-cross-preflight-${{ github.sha }}
+          path: build/windows-cross-preflight/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Build Stage 2 (MinGW cross-compile)
         if: matrix.target == 'mingw'
+        shell: bash
         run: |
+          set -euo pipefail
           SEED="seed-download/simple"
           chmod +x "$SEED"
           echo "Using Linux seed for cross-compilation:"
@@ -457,21 +518,36 @@ jobs:
           # SIMPLE_PARSE_SHARDING=0: cache-warming shards never complete on
           # GitHub runners and leak memory that starves the worker (beta.9).
           # Keep the same selected K1 composition as the native Linux lane.
-          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 \
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=0 SIMPLE_KEEP_NATIVE_OBJS=1 SIMPLE_TRACE_RUNTIME_ROOTS=1 \
             "$SEED" native-build \
             --backend cranelift --runtime-bundle core-c-bootstrap --threads 1 \
+            --runtime-path "$PWD/windows-native-authority" \
+            --cache-dir "$PWD/build/windows-stage2-cache" \
             --source src/compositions/kernel_llvm_cranelift \
             --source src/compiler --source src/app --source src/lib \
             --entry-closure \
             --entry src/app/cli/bootstrap_main.spl \
             --output bin/simple_stage2.exe \
-            --target x86_64-pc-windows-gnu
+            --target x86_64-pc-windows-gnu 2>&1 | tee build/windows-stage2.log
 
           test -s bin/simple_stage2.exe
           file bin/simple_stage2.exe | grep -q 'PE32+'
+          grep -F "Runtime retention source: $PWD/windows-native-authority/libsimple_native_all.a " build/windows-stage2.log
           echo "Stage 2 MinGW binary built:"
           file bin/simple_stage2.exe
           ls -lh bin/simple_stage2.exe
+
+      - name: Retain Windows Stage2 link inputs
+        if: always() && matrix.target == 'mingw'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-stage2-link-inputs-${{ github.sha }}
+          path: |
+            build/windows-stage2.log
+            build/windows-stage2-cache/
+            build/native-objects-*/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload Stage 2 (MinGW)
         if: matrix.target == 'mingw'
