@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (riscv64 kernel link): __floatdidf and __fixdfdi (compiler-rt libcalls the
+# LLVM backend emits for i64<->f64 on soft-float riscv64) had no definition.
+# Doubles cross the libcall boundary as raw IEEE-754 bits in an integer register.
+# The spec executes the pure-Simple, integer-only conversions on known bit patterns.
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use os.kernel.arch.common.soft_float_conv64.{sf64_i64_to_f64_bits, sf64_f64_bits_to_i64}
+
+val ONE: i64 = 0x3FF0000000000000
+val TWO53: i64 = 0x4340000000000000
+val I64_MAX: i64 = 0x7FFFFFFFFFFFFFFF
+val I64_MIN: i64 = -9223372036854775807 - 1
+
+describe "riscv64 soft float i64 <-> f64 conversion":
+    it "converts i64 to f64 bits":
+        expect(sf64_i64_to_f64_bits(0)).to_equal(0)
+        expect(sf64_i64_to_f64_bits(1)).to_equal(ONE)
+        expect(sf64_i64_to_f64_bits(-1)).to_equal(0xBFF0000000000000 as i64)
+        expect(sf64_i64_to_f64_bits(3)).to_equal(0x4008000000000000)
+
+    it "rounds to nearest even above 2^53":
+        # 2^53+1 is a tie -> even (2^53); 2^53+3 ties up to 2^53+4.
+        expect(sf64_i64_to_f64_bits(9007199254740992)).to_equal(TWO53)
+        expect(sf64_i64_to_f64_bits(9007199254740993)).to_equal(TWO53)
+        expect(sf64_i64_to_f64_bits(9007199254740995)).to_equal(0x4340000000000002)
+        # above the tie rounds up
+        expect(sf64_i64_to_f64_bits(9007199254740994)).to_equal(0x4340000000000001)
+        # negative ties round symmetric in magnitude
+        expect(sf64_i64_to_f64_bits(-9007199254740993)).to_equal(0xC340000000000000 as i64)
+        expect(sf64_i64_to_f64_bits(-9007199254740995)).to_equal(0xC340000000000002 as i64)
+        # n == 62 ties: even stays, odd rounds up
+        expect(sf64_i64_to_f64_bits(0x7FFFFFFFFFFFFA00)).to_equal(0x43DFFFFFFFFFFFFE)
+        expect(sf64_i64_to_f64_bits(0x7FFFFFFFFFFFF600)).to_equal(0x43DFFFFFFFFFFFFE)
+
+    it "carries exponent on mantissa overflow and handles extremes":
+        expect(sf64_i64_to_f64_bits(I64_MIN)).to_equal(0xC3E0000000000000 as i64)
+        expect(sf64_i64_to_f64_bits(I64_MIN + 1)).to_equal(0xC3E0000000000000 as i64)
+        expect(sf64_i64_to_f64_bits(I64_MAX)).to_equal(0x43E0000000000000)
+        # 2^54 - 1 carries from e=1076 to e=1077 (2^54)
+        expect(sf64_i64_to_f64_bits(18014398509481983)).to_equal(0x4350000000000000)
+        # 2^63 - 512 ties up and carries from e=1085 to e=1086 (2^63)
+        expect(sf64_i64_to_f64_bits(0x7FFFFFFFFFFFFE00)).to_equal(0x43E0000000000000)
+        expect(sf64_i64_to_f64_bits(-0x7FFFFFFFFFFFFE00)).to_equal(0xC3E0000000000000 as i64)
+
+    it "truncates f64 bits to i64 toward zero including -0 and subnormals":
+        expect(sf64_f64_bits_to_i64(0)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0x8000000000000000 as i64)).to_equal(0)
+        # subnormals (+/-) truncate to 0
+        expect(sf64_f64_bits_to_i64(1)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0x000FFFFFFFFFFFFF)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0x8000000000000001 as i64)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0x800FFFFFFFFFFFFF as i64)).to_equal(0)
+        # sub-unit normals (+/-) truncate to 0
+        expect(sf64_f64_bits_to_i64(0x3FE0000000000000)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0xBFE0000000000000 as i64)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0x3FEFFFFFFFFFFFFF)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(0xBFEFFFFFFFFFFFFF as i64)).to_equal(0)
+        expect(sf64_f64_bits_to_i64(ONE)).to_equal(1)
+        expect(sf64_f64_bits_to_i64(0xBFF0000000000000 as i64)).to_equal(-1)
+        expect(sf64_f64_bits_to_i64(0x3FF8000000000000)).to_equal(1)
+        expect(sf64_f64_bits_to_i64(0xBFF8000000000000 as i64)).to_equal(-1)
+        expect(sf64_f64_bits_to_i64(0x3FFFFFFFFFFFFFFF)).to_equal(1)
+        expect(sf64_f64_bits_to_i64(0xBFFFFFFFFFFFFFFF as i64)).to_equal(-1)
+        expect(sf64_f64_bits_to_i64(TWO53)).to_equal(9007199254740992)
+        expect(sf64_f64_bits_to_i64(0x43DFFFFFFFFFFFFF)).to_equal(0x7FFFFFFFFFFFFC00)
+        expect(sf64_f64_bits_to_i64(0xC3DFFFFFFFFFFFFF as i64)).to_equal(-0x7FFFFFFFFFFFFC00)
+
+    it "saturates and maps +NaN and -NaN like compiler-rt":
+        # 2^63 and +inf saturate to max; -2^63 is exactly representable.
+        expect(sf64_f64_bits_to_i64(0x43E0000000000000)).to_equal(I64_MAX)
+        expect(sf64_f64_bits_to_i64(0x7FF0000000000000)).to_equal(I64_MAX)
+        expect(sf64_f64_bits_to_i64(0xC3E0000000000000 as i64)).to_equal(I64_MIN)
+        expect(sf64_f64_bits_to_i64(0xFFF0000000000000 as i64)).to_equal(I64_MIN)
+        # NaN: exponent all ones; sign selects the saturation side (compiler-rt).
+        expect(sf64_f64_bits_to_i64(0x7FF8000000000000)).to_equal(I64_MAX)
+        expect(sf64_f64_bits_to_i64(0x7FF0000000000001)).to_equal(I64_MAX)
+        expect(sf64_f64_bits_to_i64(0xFFF8000000000000 as i64)).to_equal(I64_MIN)
+        expect(sf64_f64_bits_to_i64(0xFFF0000000000001 as i64)).to_equal(I64_MIN)
+
+    it "round-trips exactly representable integers":
+        expect(sf64_f64_bits_to_i64(sf64_i64_to_f64_bits(123456789012345))).to_equal(123456789012345)
+        expect(sf64_f64_bits_to_i64(sf64_i64_to_f64_bits(-4503599627370497))).to_equal(-4503599627370497)
+
+    it "is wired into the riscv64 kernel entry and exports the libcall names":
+        val shim = file_read("src/os/kernel/arch/riscv64/soft_float_conv.spl")
+        expect(shim.contains("@export(\"C\")\nfn __floatdidf(a: i64) -> i64:")).to_equal(true)
+        expect(shim.contains("@export(\"C\")\nfn __fixdfdi(bits: i64) -> i64:")).to_equal(true)
+        val entry = file_read("examples/09_embedded/simple_os/arch/riscv64/os_entry.spl")
+        expect(entry.contains("use os.kernel.arch.riscv64.soft_float_conv.{{}}")).to_equal(true)
