@@ -1,46 +1,84 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Pinned candidate Phase2 acceptance
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  phase2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
         with:
+          path: control
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - name: Require actual native regression and parent provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir intake
+          gh api repos/${{ github.repository }}/actions/runs/45259641764 > intake/regression.json
+          gh api repos/${{ github.repository }}/actions/jobs/137990648590 > intake/regression-job.json
+          gh api repos/${{ github.repository }}/actions/artifacts/14861260676 > intake/regression-artifact.json
+          gh api repos/${{ github.repository }}/actions/runs/45254614898 > intake/parent-run.json
+          gh api repos/${{ github.repository }}/actions/artifacts/14858799081 > intake/parent-artifact.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          regression = json.loads(Path('intake/regression.json').read_text())
+          parent = json.loads(Path('intake/parent-run.json').read_text())
+          artifact = json.loads(Path('intake/parent-artifact.json').read_text())
+          proof_artifact = json.loads(Path('intake/regression-artifact.json').read_text())
+          assert regression['head_sha'] == '0d94944231f46466278a90f98d80373edbace7d3'
+          assert regression['status'] == 'completed' and regression['conclusion'] == 'failure'
+          assert proof_artifact['workflow_run']['id'] == 45259641764 and not proof_artifact['expired']
+          assert proof_artifact['digest'] == 'sha256:346babd08dc53a585661927c12a21ac4b4a45a8594cb3d7712d8bc40bcc86324'
+          assert parent['head_sha'] == 'ce231b5b898d797c98d44a9b59a4859a7d792a7b'
+          assert parent['status'] == 'completed' and parent['conclusion'] == 'success'
+          assert artifact['workflow_run']['id'] == 45254614898 and not artifact['expired']
+          assert artifact['digest'] == 'sha256:9e2fd5aac71751d7871c3d2e7209cdc506c6dffd285447b5bb0fdb0dbd4b43ad'
+          PY
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14861260676'
+          run-id: '45259641764'
+          github-token: ${{ github.token }}
+          path: intake/regression
+      - name: Verify owned native ELF criterion while preserving collector failure
+        run: python control/scripts/check/mir-phase2-verify-native-proof.py
+      - uses: actions/checkout@v4
+        with:
+          ref: ce231b5b898d797c98d44a9b59a4859a7d792a7b
+          path: source
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14858799081'
+          run-id: '45254614898'
+          github-token: ${{ github.token }}
+          path: source/build/ladder/in
+      - name: Canonical Linux toolchain and bounded swap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev xxhash
+          avail=$(df -BG --output=avail /mnt | tail -1 | tr -dc 0-9)
+          size=$((avail - 8)); [ "$size" -le 64 ] || size=64
+          [ "$size" -ge 24 ] || { echo 'Insufficient disk reserve for canonical swap'; exit 1; }
+          sudo fallocate -l "${size}G" /mnt/candidate-phase2.swap
+          sudo chmod 600 /mnt/candidate-phase2.swap
+          sudo mkswap /mnt/candidate-phase2.swap
+          sudo swapon /mnt/candidate-phase2.swap
+      - name: One canonical Phase2 with an absolute hash-checked parent
+        run: python control/scripts/check/mir-phase2-pinned-continuation.py
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: pinned-candidate-phase2-${{ github.run_id }}
+          path: |
+            intake
+            source/build/ladder/evidence
+            source/build/ladder/cache
+            source/build/bootstrap/stage2
+          include-hidden-files: true
+          retention-days: 14
