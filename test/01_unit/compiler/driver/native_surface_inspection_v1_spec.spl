@@ -3,7 +3,12 @@
 use std.spec.*
 use app.cli.bootstrap_surface_inspection_v1.{bootstrap_surface_inspection_plan_v1,
     bootstrap_surface_inspection_reserve_v1, bootstrap_surface_inspection_publish_v1}
-use compiler.driver.driver_native_surface_inspection_v1.{inspection_surface_text_v1}
+use compiler.driver.driver_native_surface_inspection_v1.{inspection_surface_text_v1,
+    native_surface_inspection_apply_cli_options_v1}
+use compiler.driver.driver.{compiler_driver_create}
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_route}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
@@ -14,6 +19,8 @@ use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_unset}
 
 val INSPECT_FACADE = "@when(os=\"windows\"):\nfn path_errno_address() -> i64: 0\n@else:\nuse std.inspection._Posix.errno.{path_errno_address}\n@end\nexport path_errno_address\n"
 
@@ -36,6 +43,51 @@ fn inspection_registry_v1(include_leaf: bool) -> ModuleSurfacesByName:
     builder.finish().unwrap()
 
 describe "native surface diagnostic inspection":
+    it "honors the ordinary parsed low-memory context without forcing a forbidden streaming route":
+        val keys = ["SIMPLE_STAGE3_STREAMING_SURFACES", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STAGE4_STREAMING_SURFACES"]
+        var prior: [text?] = []
+        for key in keys:
+            prior = prior.push(env_get_opt(key))
+            env_unset(key)
+        val args = ["simple", "inspect-native-surfaces", "--entry", "src/app/probe.spl",
+            "--low-memory", "--module", "facade", "--item", "get", "--diagnostic-root", "build/verify"]
+        val planned = bootstrap_surface_inspection_plan_v1(args)
+        var request_flag = false
+        var prior_route = -99
+        var actual_low_memory = false
+        var actual_route = -99
+        var forbidden_route = -99
+        match planned:
+            case Ok(plan):
+                request_flag = plan.request.requested_low_memory
+                var options = driver_core_compile_options_default()
+                options.mode = CompileMode.Aot
+                options.cli_mode_text = "aot"
+                options.backend = "llvm"
+                options.low_memory = false
+                val driver = compiler_driver_create(options)
+                driver.ctx.config["compiler_source_entry"] = "src/app/probe.spl"
+                prior_route = driver_streaming_surface_route(driver.ctx)
+                native_surface_inspection_apply_cli_options_v1(driver, plan.request)
+                actual_low_memory = driver.ctx.options.low_memory
+                actual_route = driver_streaming_surface_route(driver.ctx)
+                driver.ctx.config["coverage"] = "1"
+                forbidden_route = driver_streaming_surface_route(driver.ctx)
+            case Err(_): ()
+        var index = 0
+        while index < keys.len():
+            if val value = prior[index]:
+                env_set(keys[index], value)
+            else:
+                env_unset(keys[index])
+            index = index + 1
+        expect(prior_route).to_equal(0)
+        expect(planned.is_ok()).to_equal(true)
+        expect(request_flag).to_equal(true)
+        expect(actual_low_memory).to_equal(true)
+        expect(actual_route).to_equal(1)
+        expect(forbidden_route).to_equal(0)
+
     it "passes the actual SDK argv shape as canonical options and still rejects two entries":
         val args = ["/producer/linux-x86_64-p1/simple", "inspect-native-surfaces",
             "--source", "/checkout/src/compiler", "--source", "/checkout/src/lib",
@@ -46,6 +98,7 @@ describe "native surface diagnostic inspection":
             "--module", "lib.nogc_sync_mut.io._PathIdentityPosix.errno_abi",
             "--item", "path_errno_address", "--diagnostic-root", "build/verify"]
         val planned = bootstrap_surface_inspection_plan_v1(args).unwrap()
+        expect(planned.request.requested_low_memory).to_equal(true)
         expect(cli_native_build_option_error(planned.native_args, true)).to_equal("")
         expect(planned.native_args.contains(args[0])).to_equal(false)
         expect(planned.native_args.contains("inspect-native-surfaces")).to_equal(false)
@@ -59,6 +112,7 @@ describe "native surface diagnostic inspection":
             "--item", "get", "--diagnostic-root", "build/verify"]
         val implicit = bootstrap_surface_inspection_plan_v1(args).unwrap()
         expect(implicit.request.requested_target).to_equal("")
+        expect(implicit.request.requested_low_memory).to_equal(false)
         expect(implicit.native_args.contains("--target")).to_equal(false)
         val explicit = bootstrap_surface_inspection_plan_v1(args + ["--target", "x86_64-unknown-linux-gnu"]).unwrap()
         expect(explicit.request.requested_target).to_equal("x86_64-unknown-linux-gnu")
