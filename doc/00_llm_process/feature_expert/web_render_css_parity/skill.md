@@ -4139,3 +4139,32 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - At k=4, giving the input value `font-size-milli` puts its first gray ink row at 46 against Chrome's 45 (`form_control_paint_chrome159_spec` AC-11). The prop is therefore scoped to 1x. The gray fractional-size glyph's vertical placement is a separate bug.
   - Multi-line textarea `_line{n}` commands carry no origin.
   - The 16px round-glyph LCD residual (~7 px per round glyph on a whole-px grid; straight glyphs are exact) is analysed but unfixed. A per-point IUP model of weak points only moved a 62-glyph grid from 476 to 458 px.
+
+## 2026-11-24 — vplace: fractional gray glyphs and line-start fraction at device scale
+
+- **Gray glyphs (k=4, above 48 device px) scale y by the float size too.** `_glyph_outline`
+  (`src/lib/common/encoding/sfnt_glyf.spl`) used to scale only x by `x_milli`, so a
+  13.333 px input value at k=4 was drawn from a 53 px-tall glyph and its first ink row was
+  46, one below Chrome's 45. Hinted (LCD/mono) glyphs keep the x-only path. Because the
+  root cause is fixed, the input value now carries `font-size-milli` at every k
+  (`_html_draw_ir_input_value_command`), and form_control_paint AC-11 passes at 4x.
+- **A line that starts at a fractional CSS y now snaps from that start.** The block cursor's
+  `cy_frac` was dropped for line-placed boxes, so a canvas or text line under an `<h2>` with
+  a 0.25 CSS px residual sat one device row low. `align_inline_line_baselines` /
+  `align_inline_line_device_dy` take `line_frac_milli` and `origin_frac_milli`. Add
+  `box_device_top_px(k*cy_frac) - box_device_top_px(k*origin_frac)`. Use the delta: the
+  container's own residual is already in its device_top, and adding the absolute value
+  counts it twice. All 7 call sites in `layout_engine` pass `cy_frac, origin_frac`.
+- Re-pinned `device_px_block_height_chrome159_spec` AC-3 against Chrome (k=4, 400x300).
+  The `sub` cell is 47/83, not the earlier 48/83, which was the old 53 px glyph. The 14.4px
+  cell is now exactly 23/61.
+- Specs: `gray_glyph_fractional_size_y_chrome159_spec`, `line_start_fraction_device_rows_chrome159_spec`.
+  dpr4 catalog: animation 0.40 -> 0.35, and css-layout, css-paint, forms-media and tab-bar
+  each fell by 0.01. 1x is unchanged. Perf: animation k=4 median 15125 -> 14993 ms, RSS flat.
+- **Still open:**
+  - svg top row is still 1 device row low. `_dir_scale_command` scales `clip_rect`
+    without `device-y-offset`.
+  - The audio "0:00 / 0:00" label is missing.
+  - Animation 4x text has x offsets.
+  - A 16px round-glyph LCD residual at 1x is unclaimed.
+  - Bug doc: `doc/08_tracking/bug/web_render_device_scale_vertical_row_low_2026-11-24.md`.

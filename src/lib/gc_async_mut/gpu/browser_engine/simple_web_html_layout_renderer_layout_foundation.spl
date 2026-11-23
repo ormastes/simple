@@ -456,7 +456,7 @@ fn inline_middle_half_x_height_64(st: Style) -> i32:
         return ((scaled + per_px / 2) / per_px) as i32
     (style_baseline_offset(st) * 56 * 32 + 50) / 100
 
-fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
+fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32], line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0) -> InlineLineAlignment:
     var out_bx = bx
     var out_by = by
     if nodes.len() == 0:
@@ -555,7 +555,7 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         line_descent64 = middle_descent64
     var device_excess = 0
     if g_layout_device_scale > 1:
-        device_excess = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64)
+        device_excess = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64, line_frac_milli, origin_frac_milli)
     var resolved_height = (line_ascent64 + line_descent64 + 32) / 64
     if line_height > resolved_height:
         resolved_height = line_height
@@ -2038,7 +2038,7 @@ pub fn form_control_device_extra_h(node: HNode, st: Style, rows: i32) -> i32:
 # everything else.
 # Returns the line's device height minus k x (css_ascent + css_descent), 0 for
 # a line with a valign box.
-fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32) -> i32:
+fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32, line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0) -> i32:
     val k = g_layout_device_scale
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
     var descent = style_device_line_h_milli(line_style, k) / 1000 - ascent
@@ -2087,14 +2087,18 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     if middle_ascent > ascent:
         ascent = middle_ascent
     val line_delta = if has_valign: 0 else: ascent - k * css_ascent
+    # The line starts at the cursor's residual; its container already carries
+    # the residual it started at (origin), so only the difference moves the
+    # boxes (an svg after an h2 with 19.92px margins: device row 439, not 440).
+    val line_start_dy = box_device_top_px(line_frac_milli * k) - box_device_top_px(origin_frac_milli * k)
     # A control hangs from the device baseline by its own device baseline.
     i = 0
     while i < widget_nodes.len():
-        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], if has_valign: 0 else: line_delta - widget_deltas[i])
+        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], if has_valign: 0 else: line_delta - widget_deltas[i] + line_start_dy)
         i = i + 1
     i = 0
     while i < nodes.len():
-        _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, line_style, k, line_delta, 0)
+        _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, line_style, k, line_delta, if has_valign: 0 else: line_start_dy)
         i = i + 1
     if has_valign: 0 else: ascent + descent - k * (css_ascent + css_descent)
 
