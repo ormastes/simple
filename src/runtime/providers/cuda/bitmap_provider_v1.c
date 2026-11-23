@@ -1,13 +1,22 @@
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include "simple_gpu_provider_abi_v1.h"
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-/* Linux CUDA Driver API boundary; no SDK, constructors, or driver activity in
+/* CUDA Driver API boundary; no SDK, constructors, or driver activity in
  * query(). Format 1: LE u32 count, LE u32 reserved=0, count left u32 words,
  * count right u32 words. Count 1..16384; resource size must be exactly count*4.
  * Empty bitmaps belong to the caller's empty-result path, without submission.
@@ -21,7 +30,7 @@
 #define REJECTED SIMPLE_GPU_STATUS_REJECTED
 #define UNCERTAIN SIMPLE_GPU_STATUS_UNCERTAIN
 typedef uint64_t DevPtr;
-static struct {
+struct driver_table {
     void *lib;
     int (*Init)(unsigned); int (*DeviceGetCount)(int *); int (*DeviceGet)(int *,int);
     int (*CtxCreate)(void **,unsigned,int); int (*CtxDestroy)(void *);
@@ -37,7 +46,86 @@ static struct {
     int (*EventCreate)(void **,unsigned); int (*EventRecord)(void *,void *);
     int (*EventQuery)(void *); int (*EventElapsedTime)(float *,void *,void *);
     int (*EventDestroy)(void *);
-} driver;
+};
+
+/* Driver library candidates mirror cuda_driver_library_candidates() in
+ * src/lib/gc_async_mut/cuda/driver_loader.spl. */
+#ifdef _WIN32
+#define CUDA_DRIVER_PRIMARY "nvcuda.dll"
+static const char *const cuda_driver_candidates[] = {"nvcuda.dll"};
+static void *lib_open(const char *path) { return (void *)LoadLibraryA(path); }
+static void *lib_symbol(void *lib, const char *name) {
+    return (void *)(uintptr_t)GetProcAddress((HMODULE)lib, name);
+}
+static int lib_close(void *lib) { return FreeLibrary((HMODULE)lib) ? 0 : 1; }
+#else
+#define CUDA_DRIVER_PRIMARY "libcuda.so.1"
+static const char *const cuda_driver_candidates[] = {"libcuda.so.1", "libcuda.so"};
+static void *lib_open(const char *path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
+static void *lib_symbol(void *lib, const char *name) { return dlsym(lib, name); }
+static int lib_close(void *lib) { return dlclose(lib); }
+#endif
+
+/* Resolved once and published locklessly: the first complete table wins the
+ * CAS; a losing loader closes its own library handle and frees its table.
+ * Until a table is published, `driver` names an empty table (no library). */
+static _Atomic(struct driver_table *) driver_published;
+static struct driver_table driver_unloaded;
+static struct driver_table *published_driver(void) {
+    return atomic_load_explicit(&driver_published, memory_order_acquire);
+}
+static struct driver_table *driver_view(void) {
+    struct driver_table *table = published_driver();
+    return table ? table : &driver_unloaded;
+}
+#define driver (*driver_view())
+
+/* Named fail-closed errors (CUDA-E001/CUDA-E002), same text as the Simple
+ * loader. Thread-local so concurrent loaders never share a buffer. */
+static _Thread_local char driver_last_error[512];
+
+/* Resolve every required symbol from `path`; NULL plus a named error in `err`
+ * when the library or any symbol is missing (nothing is partially published). */
+static struct driver_table *load_driver_table(const char *path, char *err, size_t err_size) {
+    void *lib = lib_open(path);
+    if (!lib) {
+        snprintf(err, err_size, "CUDA-E001: CUDA driver not available: could not load any of [%s] "
+                 "(install the NVIDIA driver, or run without GPU features)", path);
+        return NULL;
+    }
+    struct driver_table *t = calloc(1, sizeof(*t));
+    if (!t) {
+        lib_close(lib);
+        snprintf(err, err_size, "CUDA-E001: CUDA driver not available: out of memory loading %s", path);
+        return NULL;
+    }
+    t->lib = lib;
+    const char *missing = NULL;
+#define LOAD(field,symbol) do { if (!missing) { *(void **)(&t->field) = lib_symbol(lib,symbol); \
+        if (!t->field) missing = symbol; } } while (0)
+    LOAD(Init,"cuInit"); LOAD(DeviceGetCount,"cuDeviceGetCount"); LOAD(DeviceGet,"cuDeviceGet");
+    LOAD(CtxCreate,"cuCtxCreate_v2"); LOAD(CtxDestroy,"cuCtxDestroy_v2");
+    LOAD(CtxPushCurrent,"cuCtxPushCurrent_v2"); LOAD(CtxPopCurrent,"cuCtxPopCurrent_v2");
+    LOAD(CtxSynchronize,"cuCtxSynchronize"); LOAD(ModuleLoadData,"cuModuleLoadData");
+    LOAD(ModuleUnload,"cuModuleUnload"); LOAD(ModuleGetFunction,"cuModuleGetFunction");
+    LOAD(MemAlloc,"cuMemAlloc_v2"); LOAD(MemFree,"cuMemFree_v2");
+    LOAD(MemcpyHtoD,"cuMemcpyHtoD_v2"); LOAD(MemcpyDtoH,"cuMemcpyDtoH_v2");
+    LOAD(LaunchKernel,"cuLaunchKernel"); LOAD(EventCreate,"cuEventCreate");
+    LOAD(EventRecord,"cuEventRecord"); LOAD(EventQuery,"cuEventQuery");
+    LOAD(EventElapsedTime,"cuEventElapsedTime"); LOAD(EventDestroy,"cuEventDestroy_v2");
+#undef LOAD
+    if (missing) {
+        snprintf(err, err_size, "CUDA-E002: CUDA driver %s is missing required symbol %s "
+                 "(driver older than the CUDA API this build uses; update the NVIDIA driver)", path, missing);
+        lib_close(lib); free(t);
+        return NULL;
+    }
+    return t;
+}
+
+/* Named error from the last failed load on this thread; "" after success. */
+__attribute__((visibility("default")))
+const char *simple_cuda_provider_last_error_v1(void) { return driver_last_error; }
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t next_handle = 1;
 static struct {
@@ -57,24 +145,30 @@ static uint64_t new_handle(void) {
     return result;
 }
 static int load_driver(void) {
-    if (driver.lib) return 1;
-    driver.lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!driver.lib) return 0;
-#define LOAD(field,symbol) do { *(void **)(&driver.field) = dlsym(driver.lib,symbol); if (!driver.field) goto fail; } while (0)
-    LOAD(Init,"cuInit"); LOAD(DeviceGetCount,"cuDeviceGetCount"); LOAD(DeviceGet,"cuDeviceGet");
-    LOAD(CtxCreate,"cuCtxCreate_v2"); LOAD(CtxDestroy,"cuCtxDestroy_v2");
-    LOAD(CtxPushCurrent,"cuCtxPushCurrent_v2"); LOAD(CtxPopCurrent,"cuCtxPopCurrent_v2");
-    LOAD(CtxSynchronize,"cuCtxSynchronize"); LOAD(ModuleLoadData,"cuModuleLoadData");
-    LOAD(ModuleUnload,"cuModuleUnload"); LOAD(ModuleGetFunction,"cuModuleGetFunction");
-    LOAD(MemAlloc,"cuMemAlloc_v2"); LOAD(MemFree,"cuMemFree_v2");
-    LOAD(MemcpyHtoD,"cuMemcpyHtoD_v2"); LOAD(MemcpyDtoH,"cuMemcpyDtoH_v2");
-    LOAD(LaunchKernel,"cuLaunchKernel"); LOAD(EventCreate,"cuEventCreate");
-    LOAD(EventRecord,"cuEventRecord"); LOAD(EventQuery,"cuEventQuery");
-    LOAD(EventElapsedTime,"cuEventElapsedTime"); LOAD(EventDestroy,"cuEventDestroy_v2");
-#undef LOAD
-    return 1;
-fail:
-    dlclose(driver.lib); memset(&driver,0,sizeof(driver)); return 0;
+    if (published_driver()) { driver_last_error[0] = '\0'; return 1; }
+    char tried[256] = "";
+    size_t n = sizeof(cuda_driver_candidates) / sizeof(cuda_driver_candidates[0]);
+    for (size_t i = 0; i < n; i++) {
+        struct driver_table *t = load_driver_table(cuda_driver_candidates[i], driver_last_error,
+                                                   sizeof(driver_last_error));
+        if (!t) {
+            if (strncmp(driver_last_error, "CUDA-E002:", 10) == 0) return 0;
+            size_t used = strlen(tried);
+            snprintf(tried + used, sizeof(tried) - used, "%s%s", used ? ", " : "", cuda_driver_candidates[i]);
+            continue;
+        }
+        struct driver_table *expected = NULL;
+        if (!atomic_compare_exchange_strong_explicit(&driver_published, &expected, t,
+                                                     memory_order_acq_rel, memory_order_acquire)) {
+            lib_close(t->lib); free(t); /* another loader published first */
+        }
+        driver_last_error[0] = '\0';
+        return 1;
+    }
+    snprintf(driver_last_error, sizeof(driver_last_error),
+             "CUDA-E001: CUDA driver not available: could not load any of [%s] "
+             "(install the NVIDIA driver, or run without GPU features)", tried);
+    return 0;
 }
 static int owns_session(uint64_t session) { return session && session==state.handle; }
 static int owns(uint64_t session,uint64_t handle,uint64_t current) {
@@ -258,8 +352,12 @@ static int32_t shutdown_provider(void) {
     pthread_mutex_lock(&mutex); int result=BUSY;
     if (!state.handle) {
         result=OK;
-        if (driver.lib && dlclose(driver.lib)) result=SIMPLE_GPU_STATUS_FAILED;
-        if (!result) memset(&driver,0,sizeof(driver));
+        struct driver_table *table = atomic_exchange_explicit(&driver_published, NULL, memory_order_acq_rel);
+        if (table) {
+            if (table->lib && lib_close(table->lib)) result=SIMPLE_GPU_STATUS_FAILED;
+            free(table);
+        } else if (driver_unloaded.lib && lib_close(driver_unloaded.lib)) result=SIMPLE_GPU_STATUS_FAILED;
+        if (!result) memset(&driver_unloaded,0,sizeof(driver_unloaded));
     }
     pthread_mutex_unlock(&mutex); return result;
 }
