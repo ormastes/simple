@@ -1,0 +1,115 @@
+# Bounded synthetic native fixture; this is not the 7114-row export workload.
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder}
+use compiler.hir.hir_lowering.module_surface_types.*
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.*
+
+fn fixture_registry(names: [text], bodies: [text], registry: ModuleSurfacesByName) -> text:
+    assert(names.len() == bodies.len())
+    var builder = ModuleSurfaceBuilder.new()
+    var row = 0
+    while row < names.len():
+        val path = "selected_routes/" + names[row] + ".spl"
+        val parsed = parse_and_build_module(bodies[row], path)
+        val source = SourceFile(path: path, content: bodies[row], module_name: names[row])
+        val added = builder.add_parsed(parsed, source, row)
+        assert(added.is_ok())
+        row = row + 1
+    builder.finish_into(registry)
+
+fn dump_registry(label: text, registry: ModuleSurfacesByName):
+    assert(registry.frozen)
+    val idx = registry.selected_exports_v1
+    assert(idx.frozen)
+    print "CASE {label} surfaces={registry.surfaces.len()} rows={idx.names.len()} hops={idx.hop_sources.len()}"
+    print "INDEX {idx.snapshot_digest}|{idx.route_generation}"
+    if (env_get_opt("FREEZE_FIXTURE_COMPACT") ?? "") == "1": return
+    var row = 0
+    while row < idx.names.len():
+        print "ROW {row}|{idx.source_surfaces[row]}|{idx.roles[row]}|{idx.categories[row]}|{idx.names[row]}|{idx.states[row]}|{idx.terminal_surfaces[row]}|{idx.terminal_names[row]}|{idx.terminal_projections[row]}|{idx.tiers[row]}|{idx.hop_starts[row]}|{idx.hop_counts[row]}"
+        row = row + 1
+    row = 0
+    while row < idx.hop_sources.len():
+        print "HOP {row}|{idx.hop_sources[row]}|{idx.hop_kinds[row]}|{idx.hop_targets[row]}|{idx.hop_import_rows[row]}|{idx.hop_import_items[row]}|{idx.hop_export_rows[row]}|{idx.hop_export_items[row]}|{idx.hop_export_routes[row]}"
+        row = row + 1
+    row = 0
+    while row < idx.lookup_keys.len():
+        print "LOOKUP {row}|{idx.lookup_keys[row]}|{idx.lookup_rows[row]}"
+        row = row + 1
+    row = 0
+    while row < registry.surfaces.len():
+        val surface = registry.surfaces[row]
+        assert(surface.frozen)
+        print "DIGEST {row}|{idx.surface_digests[row]}|{surface.semantic_cacheable}|{surface.semantic_hash0}|{surface.semantic_hash1}|{surface.semantic_hash2}|{surface.semantic_hash3}"
+        row = row + 1
+
+fn main():
+    val leaf = "pub fn item() -> i64:\n    1\n"
+    val direct = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["provider"], [leaf + "export item\n"], direct) == "")
+    assert(module_surface_selected_export_lookup_v1(direct, 0, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Selected)
+    dump_registry("direct", direct)
+    val ambiguous = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["left", "right", "facade"], [leaf, "pub fn item() -> i64:\n    2\n", "use left.\{item\}\nuse right.\{item\}\nexport item\n"], ambiguous) == "")
+    assert(module_surface_selected_export_lookup_v1(ambiguous, 2, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Ambiguous)
+    assert(not ambiguous.surfaces[2].semantic_cacheable)
+    dump_registry("ambiguous", ambiguous)
+    val missing_registry = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    val missing = fixture_registry(["facade"], ["export use absent.*\n"], missing_registry)
+    assert(missing.starts_with("selected export glob has no configured target:"))
+    print "ERROR missing|{missing}"
+    val masked = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["provider", "facade"], [leaf, "use absent.\{item\}\nuse provider\nexport item\n"], masked) == "")
+    assert(module_surface_selected_export_lookup_v1(masked, 1, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Unavailable)
+    dump_registry("named-masks-glob", masked)
+    val duplicate = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["provider"], [leaf + "export use provider.*\nexport use provider.*\n"], duplicate) == "")
+    dump_registry("self-duplicate", duplicate)
+    val cycle = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["left", "right"], ["export use right.*\n", "export use left.*\n"], cycle) == "")
+    dump_registry("empty-cycle", cycle)
+    val forward = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["leaf", "middle", "top"], [leaf, "export use leaf.*\n", "export use middle.*\n"], forward) == "")
+    assert(module_surface_selected_export_lookup_v1(forward, 2, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Selected)
+    dump_registry("forward", forward)
+    val reverse = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["top", "middle", "leaf"], ["export use middle.*\n", "export use leaf.*\n", leaf], reverse) == "")
+    assert(module_surface_selected_export_lookup_v1(reverse, 0, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Selected)
+    dump_registry("reverse", reverse)
+    val categories = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["provider"], ["pub struct item:\n    value: i64\npub fn item() -> i64:\n    1\nexport item\n"], categories) == "")
+    assert(module_surface_selected_export_lookup_v1(categories, 0, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Selected)
+    assert(module_surface_selected_export_lookup_v1(categories, 0, ModuleSurfaceExportCategoryV1.Struct, "item").state == ModuleSurfaceExportSelectionStateV1.Selected)
+    dump_registry("categories", categories)
+    val private_registry = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["provider"], ["pri fn secret() -> i64:\n    1\nexport secret\n"], private_registry) == "")
+    assert(module_surface_selected_export_lookup_v1(private_registry, 0, ModuleSurfaceExportCategoryV1.Function, "secret").state == ModuleSurfaceExportSelectionStateV1.Unavailable)
+    dump_registry("private", private_registry)
+    val named_cycle = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(["left", "right"], ["export use right.\{item\}\n", "export use left.\{item\}\n"], named_cycle) == "")
+    assert(module_surface_selected_export_lookup_v1(named_cycle, 0, ModuleSurfaceExportCategoryV1.Function, "item").state == ModuleSurfaceExportSelectionStateV1.Unavailable)
+    dump_registry("named-cycle", named_cycle)
+    var names: [text] = []
+    var bodies: [text] = []
+    var provider = ""
+    var declaration = 0
+    while declaration < 64:
+        provider = provider + "pub fn item{declaration}() -> i64:\n    {declaration}\n"
+        declaration = declaration + 1
+    var surface = 0
+    while surface < 128:
+        names.push("node{surface}")
+        if surface == 0:
+            bodies.push(provider)
+        else:
+            val prior = surface - 1
+            bodies.push("export use node{prior}.*\n")
+        surface = surface + 1
+    val chain = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    assert(fixture_registry(names, bodies, chain) == "")
+    assert(chain.selected_exports_v1.names.len() == 8192)
+    assert(module_surface_selected_export_lookup_v1(chain, 127, ModuleSurfaceExportCategoryV1.Function, "item63").state == ModuleSurfaceExportSelectionStateV1.Selected)
+    dump_registry("synthetic-chain-128-surfaces-64-declarations-127-glob-edges", chain)
+    print "NATIVE-FREEZE-FIXTURE-PASS cases=12 chain_rows=8192"
