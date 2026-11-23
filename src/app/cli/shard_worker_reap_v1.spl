@@ -163,6 +163,19 @@ pub fn shard_pool_poll_quantum_v1(live: i64, poll_ms: i64) -> i64:
     val quantum = poll_ms / live
     if quantum < 1: 1 else: quantum
 
+# Whether the slot pool (run_ledger_shards) re-reads host commit headroom this
+# round. It used to read and parse /proc/meminfo on EVERY ~10 ms poll round;
+# that parse's garbage is never reclaimed in the coordinator, which grew
+# ~1.3 MB/s (4 GB -> 23 GB over 3.9 h, p3h 2026-11-23) while it only waited on
+# its workers. Re-probe when the live set changed (a reap or a spawn, so the
+# footprint split stays per-worker) or once `interval_ms` has passed, so the
+# recorded worker peak is still sampled while workers run.
+# @allow(primitive_api)  # raw monotonic ms / worker counts, same shape as shard_pool_poll_quantum_v1
+pub fn shard_pool_headroom_probe_due_v1(last_probe_ms: i64, now_ms: i64, probed_live: i64, live: i64, interval_ms: i64) -> bool:
+    if last_probe_ms < 0 or probed_live != live:
+        return true
+    now_ms - last_probe_ms >= interval_ms
+
 # Sign-restore an i32 exit status that crossed the wrapper boundary
 # zero-extended (native_build_main.spl native_build_normalize_exit_code): a
 # -2 "still running" presents as 4294967294, a -1 as 4294967295.
