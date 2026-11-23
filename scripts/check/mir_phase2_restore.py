@@ -6,13 +6,12 @@ import shutil
 
 SOURCE = 'ce231b5b898d797c98d44a9b59a4859a7d792a7b'
 PARENT = 'ed5e03685a3c9233395306f6fcb2c7c5fa9a6ada36fc1158c20e6d3be91fcf73'
-MANIFEST = '18eaee37f3ce61f0f758f49d69255fcc0ebf02404fb3e47fa8a5e1c79fab870a'
+MANIFEST = '072388108755a4b8534e5636f94eeaccd0506f36a297f15adb006b713ee72b66'
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def restore_cache(source, evidence):
-    old = Path('intake/prior/source/build/ladder')
+def verify_prior(old, manifest, expected_parent_line):
     terminal = json.loads((old/'evidence/terminal.json').read_text())
     assert terminal['source'] == SOURCE and terminal['parent_sha256'] == PARENT
     assert terminal['status'] == 'FAILED' and terminal['stage'] == 'canonical-phase2'
@@ -21,14 +20,14 @@ def restore_cache(source, evidence):
     assert owner['status'] == 'rss-cap-exceeded' and owner['exit_status'] == '88'
     assert owner['quiescent'] == '1' and owner['rss_cap_enforced'] == '1'
     assert owner['rss_limit_kib'] == str(terminal['cap_kib'])
-    expected = 'Building phase 2 with ' + str(source/'build/ladder/in/linux-x86_64-p1/simple') + ' (phase 1)'
-    assert expected in (old/'evidence/phase2.stdout').read_text().splitlines()
-    manifest = Path(__file__).with_name('prior-cache-manifest.json')
+    assert expected_parent_line in (old/'evidence/phase2.stdout').read_text().splitlines()
     assert digest(manifest) == MANIFEST
     rows = json.loads(manifest.read_text())
     cache = old/'cache'
     assert {p.relative_to(cache).as_posix() for p in cache.rglob('*') if p.is_file()} == {row['path'] for row in rows}
-    dest = source/'build/ladder/cache'
+    return rows, cache
+
+def install_candidates(rows, cache, dest):
     assert not dest.exists(), 'new attempt must start with no cache or queue'
     copied = []
     excluded = []
@@ -48,6 +47,14 @@ def restore_cache(source, evidence):
         shutil.copyfile(original, target)
         assert digest(target) == row['sha256']
         copied.append(row['path'])
+    return copied, excluded
+
+def restore_cache(source, evidence):
+    old = Path('intake/prior/source/build/ladder')
+    manifest = Path(__file__).with_name('prior-cache-manifest.json')
+    expected = 'Building phase 2 with ' + str(source/'build/ladder/in/linux-x86_64-p1/simple') + ' (phase 1)'
+    rows, cache = verify_prior(old, manifest, expected)
+    copied, excluded = install_candidates(rows, cache, source/'build/ladder/cache')
     result = {'prior_run':45262236182, 'prior_artifact':14864330203,
               'manifest_sha256':MANIFEST, 'copied_candidates':copied,
               'excluded_historical_queue_files':excluded,
