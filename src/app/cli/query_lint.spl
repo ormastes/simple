@@ -19,6 +19,7 @@ use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser
 use compiler.frontend.trace_policy.{frontend_trace_suppression_set}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, TextFindingKind}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
@@ -182,6 +183,17 @@ fn _emit_primitive_api_text(lines: [text], file: text, format: text) -> i64:
                         print "{file}:{line_num}: warning[{_pa_lint_code(rtype)}]: public API return type uses bare primitive type '{rtype}'"
                     count = count + 1
         i = i + 1
+    # SPL-TEXT-001 (public `text`): reuse the CLI engine's single detector so
+    # both surfaces report `bare_text` / `bare_text_domain` identically (RB-DIAG-01).
+    for f in primitive_api_findings(file, lines):
+        if f.code != "SPL-TEXT-001":
+            continue
+        val tcode = if f.text_kind == TextFindingKind.DomainNamed: "bare_text_domain" else: "bare_text"
+        if format == "json":
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{tcode}\",\"message\":\"{query_json_escape(f.message)}\",\"line\":{f.line},\"col\":{f.column},\"end_line\":{f.line},\"end_col\":{f.column},\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{f.line}: warning[{tcode}]: {f.message}"
+        count = count + 1
     count
 
 fn _emit_lint_if_readable(file: text, format: text):
