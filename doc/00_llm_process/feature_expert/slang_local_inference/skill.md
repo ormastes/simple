@@ -111,7 +111,7 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
   so its logits come from one batch shape (fixed drift,
   `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
   The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
-- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, digest-equal to no-cache greedy on the CPU build (bits unmeasured); NOT bit-exact on Vulkan, see `slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md` (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY). Review fixes 2026-11-20: reuse capped by the owner's exact span, first-micro-batch warm-up, `BackendError.Busy`, refused mode fails the load (bug record).
+- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, digest-equal to no-cache greedy on the CPU build (bits unmeasured); Vulkan: C1 (fusion) fixed 2026-11-23, C2 (stale freed cells) still open, see `slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md` (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY). Review fixes 2026-11-20: reuse capped by the owner's exact span, first-micro-batch warm-up, `BackendError.Busy`, refused mode fails the load (bug record).
 
 
 - The HTTP path is unreachable on the bootstrap seed; see
@@ -346,8 +346,12 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - **Video (L7):** `modality/video_frames.spl` `sample_frames(blob, n)`. With
   `SLANG_FFMPEG=<path to ffmpeg.exe>` set and a projector model, `serving_chat.expand_video_parts`
   replaces each `video_url` part by n JPEG `image` parts (default 4 because 8 SmolVLM2 frames overflow n_ctx 4096; `SLANG_VIDEO_FRAMES`, 1..32; 384 px edge;
-  duration from `ffmpeg -i`, then `fps=n/dur` -> mjpeg image2pipe split on SOI/EOI). ffmpeg runs only via
-  `process_run_bounded_bytes` (local wrapper, to become `sosix_process_run_bounded_bytes`); temp file removed.
+  duration and fps from `ffmpeg -i`, then `select` of the frame on screen at (k+0.5)*dur/n with
+  `-fps_mode passthrough` (ffmpeg >= 5.1), so a one-frame clip yields one frame; unknown duration = 1 fps
+  over the first 64 s, n picked evenly) -> mjpeg image2pipe split on SOI/EOI. A probe spawn failure/timeout
+  is a server fault (503) and stops before the main run. ffmpeg runs via `slang_host.host_run_bounded_bytes`
+  (TODO `slang-sosix-bytes-run`: SOSIX has no bytes run). `slang_video_live_spec` has an ffmpeg-only example (no GPU). Temp file `slang_video_<16 random hex>_<us>.bin`
+  through `slang_host` (`host_temp_dir`, `host_file_write_bytes`, `host_file_delete`, `host_random_hex`), removed on every path.
   Video >10 MiB decoded = 413 `request_too_large`; `SLANG_FFMPEG` not a file = 503; no frame = 400
   `invalid_media`. With no `SLANG_FFMPEG` the old 400 `unsupported_modality` text is kept verbatim.
   Static build: `C:/dev/tools/ffmpeg` (gyan.dev essentials, sha256-verified). Live: `slang_video_live_spec.spl`.
@@ -366,7 +370,9 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   Media decode is C-side (stb_image/miniaudio); pure-Simple decoders are not wired.
 - **Memory gate:** overhead is `estimate_runtime_overhead_bytes` (n_ctx- and model-scaled, no GGUF parse), so a small model at small context no longer needs ~10 GiB free; the per-token constant is an admission-only upper bound, not exact KV size.
 - **Runner trap:** `skip(...)` inside an example is counted as PASSED
-  (`skipped=0`); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
+  (`skipped=0`) by seeds without the 2026-11-23 `bdd.rs` fix (source now counts it
+  skipped and prints `○ name (skip in body)`; bug doc
+  `spec_skip_reported_as_pass_2026-11-19`; keep the `SKIPPED:` lines until the seed is redeployed); the live spec records `SKIPPED:` lines to `build/probe/mm_answers.txt`.
 - **Live spec timeout knob:** `SLANG_RUN_TIMEOUT_MS` (default 600000) bounds each child in `caret_slang_local_hello_system_spec.spl`; the 3-model gate (`check-slang-ggml-inference.shs`, 9 dirs) took 34m50s on a loaded Windows host, so set e.g. 3300000 with `SIMPLE_TIMEOUT_SECONDS=3600`.
 
 ## Model kinds and modalities (L1 common structure, 2026-11-17)
@@ -619,9 +625,11 @@ route env, file exists/read, directory list and process capture through SOSIX
   reply `{created, data:[{b64_json}]}` (PNG via `common/image/png_encode.spl`,
   stored deflate). `url` format = 400. `size` = WIDTHxHEIGHT, both multiples of
   64, <= 768, default 512x512; defaults steps 4 (1..50), n 1..4, negative/absent seed = random (cfg 1.0, sd-turbo).
-  Every field is validated (400) before the runner is touched. One generation at a
+  Every field is validated (400) before the runner is touched; a wrong JSON type
+  (`"size":512`, `"response_format":5`) is 400, JSON null = absent. One generation at a
   time: `sd_runner_try_acquire` (AtomicBool) gates open/run/close, a concurrent request
-  gets 503 `busy`. `created` is unix seconds.
+  gets 503 `busy`; `defer sd_runner_release()` frees it on every return path (not on a
+  panic: `doc/08_tracking/bug/slang_sd_busy_flag_not_released_on_panic_2026-11-22.md`). `created` is unix seconds.
   No `SLANG_SD_LIB` / missing DLL = 503 `runner_unavailable`; wrong kind = 400.
 - Build: `sh scripts/check/build-slang-sd-shim.shs` (CPU,
   `build/sffi/sd-cpu/slang_sd.dll`) and `SLANG_SD_VARIANT=vulkan
@@ -643,7 +651,7 @@ route env, file exists/read, directory list and process capture through SOSIX
 ## Post-merge review follow-ups (#10682, 2026-11-22)
 - **Video input:**
   - ffmpeg output is capped at 16 MiB, the hard cap of `rt_process_run_bounded_bytes`; a larger cap never spawns ffmpeg.
-  - One video part per request (400 `too_many_video_parts`). The check runs before expansion.
+  - One video part per request (400 `too_many_video_parts`). The check runs before expansion; `video_frames_spec` pins it through `/v1/chat/completions`.
   - Server faults return 503 `video_sampling_failed`.
   - ffmpeg runs with `-protocol_whitelist file`, and the request is refused when no temp directory is set.
 - **Images:**
@@ -651,7 +659,7 @@ route env, file exists/read, directory list and process capture through SOSIX
   - `n` is 1..4 and `steps` 1..50, checked before the model loads.
 - **Tree KV:** the live spec reads `n_ubatch` from `engine_tree_cache_stats`. Measured on Vulkan:
   - Roughly half the prefill and 1.6-1.8x faster. Qwen2.5-1.5B digests match, but every logits step differs at bit level, so that match is greedy luck.
-  - Mode 3 is not bit-exact against cache-off on Vulkan for any model: ggml-vulkan fusion skips the multi-stream KV write, and stale data in freed KV cells changes flash-attention output. Gemma branching is where argmax flips (live spec 2/3). See `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
+  - Mode 3 vs cache-off on Vulkan: cause C1 (ggml-vulkan fusion depends on the KV stream count) is FIXED since 2026-11-23: `slang_ggml_backend_init` sets `GGML_VK_DISABLE_FUSION=1` before any device exists (an explicit env value wins), costing about 6% wall time on every Vulkan model in the process. Cause C2 (stale data in freed KV cells changes flash-attention output) is OPEN, direction (b): zero the stream and restore the reused prefix by host state round-trip. Gemma branching now passes 4/4 in the live spec. See `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
 
 ## L4 + L5 landed together (2026-11-22)
 - **Every kind route is served now:**
@@ -662,3 +670,15 @@ route env, file exists/read, directory list and process capture through SOSIX
   - tts through `tts_runner`.
 - The 501 stub `kind_not_implemented_response` and `engine/kind_dispatch.spl` were deleted; nothing reached them any more. Earlier mentions of `kind_dispatch.kind_open` above are history.
 - `pooling_runner_serve` is stateless. Each request opens the shim library and a model handle and closes both before returning. Module state is thread-local under the interpreter, so a cached handle would leak a shim model slot on every connection thread.
+
+## Review follow-ups (2026-11-23)
+- Request JSON string readers (`json_string_field`, `json_stop_sequences`) share one decoder that now handles `\uXXXX`, surrogate pairs (lone surrogate -> U+FFFD) and passes a malformed escape through. Spec: `protocol_json_unicode_spec.spl`.
+- `pooling_runner` refuses an embedding request on a model whose effective pooling is none (it would return one vector per token as if it were one input); the vocoder path still asks for pooling none explicitly.
+- The shim refuses `embed_eval`, `rerank_tokenize` and `tokens_set` on a tree request (shared tree context / leased token path). Test: `tree_cache_test.c` with `mock_llama_memory_clears`.
+- `tts_runner` releases the shim library through `release_backend_library` instead of its own `spl_dlclose` import.
+- `skip()` inside an `it` body is counted as skipped by `spec.spl` (`_execute_it` returns "skip", `test_skipped` rises), not as a pass. This holds on the self-hosted and aggregate path only; the seed's native `it` (bdd.rs) still reports a pass, so live specs keep the explicit `SKIPPED:` line. Pinned by `test/01_unit/lib/nogc_sync_mut/spec_skip_in_body_spec.spl`.
+
+## Pure-runner model directory and float bit helpers (2026-11-23)
+
+- Pure-runner specs and `stories15m_generate.spl` resolve the stories15M directory through `test/fixtures/slang_pure/model_dir.spl`: `SLANG_PURE_MODEL`, else `llama2c-stories15M` under `SLANG_MODEL_ROOT`; no built-in default path.
+- `std.common.binary_io` exports `f32_from_bits`, `f32_to_bits`, `f64_from_bits`, `f64_to_bits`; `std.gc_async_mut.binary_io` imports them instead of keeping a private copy (the copy turned NaN into 0.0 and lost -0.0).

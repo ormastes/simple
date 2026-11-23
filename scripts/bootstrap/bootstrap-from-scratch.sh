@@ -70,6 +70,16 @@ esac
 # Stage 3 knobs are applied in resume-stage3-from-admitted.sh (after --jobs).
 . "${bootstrap_entry_dir}/lib/host-bootstrap-settings.shs"
 bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
+# Host-config frontend_cache (on|off) stands in for an unset caller
+# SIMPLE_FRONTEND_CACHE (W27/W36); resolved here, after the pinned-archive exec,
+# into the same captured caller value the Stage 3 launch and the Stage 2 matrix
+# read. Invalid host value = hard error naming the key.
+bootstrap_host_apply_frontend_cache_default "${bootstrap_early_repo_root}" || exit 64
+# Host-config sanity_build_timeout_seconds stands in for an unset caller
+# COMPILER_BUILD_TIMEOUT_SECONDS (Stage 2 sanity probes; a Windows
+# stage2-module-path-naming-build exceeded the 180s default). Must precede the
+# `:-180` default below. Invalid host value = hard error naming the key.
+bootstrap_host_apply_sanity_build_timeout "${bootstrap_early_repo_root}" || exit 64
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -1566,7 +1576,7 @@ bootstrap_lock_handle=
 rust_target_lock_handle=
 rust_shared_cache_lock_handle=
 rust_shared_cache_root=
-rust_shared_cache_common_dir=$(bootstrap_authority_git_common_dir "${repo_root}") || exit 1
+rust_shared_cache_common_dir=
 if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
   rust_shared_cache_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
     "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT}" "${repo_root}") || exit 1
@@ -1758,7 +1768,7 @@ bootstrap_reap_descendants() {
       done
       ;;
   esac
-  kill -TERM -- "-$$" 2>/dev/null || true
+  kill -s TERM -- "-$$" 2>/dev/null || true
   bootstrap_reap_i=0
   while [ "${bootstrap_reap_i}" -lt 3 ]; do
     bootstrap_reap_left=
@@ -1929,6 +1939,11 @@ esac
 PLATFORM="${PLATFORM_TRIPLE}"
 arch="${PLATFORM_ARCH}"
 os="${PLATFORM_OS}"
+
+# Default lock scope needs the platform, unavailable at early handle setup.
+if [ -z "${rust_shared_cache_root}" ]; then
+  rust_shared_cache_common_dir=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || exit 1
+fi
 echo "Platform: ${PLATFORM}"
 
 exe_suffix=""
@@ -2044,45 +2059,7 @@ hash_path_list() {
   done
 }
 
-run_timeout() {
-  timeout_seconds=$1
-  shift
-  case "$(uname -s 2>/dev/null || echo unknown)" in
-    MSYS*|MINGW*|CYGWIN*)
-      timeout_capture=$(mktemp "${TMPDIR:-/tmp}/simple-timeout.XXXXXX") || return 1
-      timeout_marker="${timeout_capture}.expired"
-      "$@" >"${timeout_capture}" 2>&1 &
-      timeout_pid=$!
-      (
-        sleep "${timeout_seconds}"
-        if kill -0 "${timeout_pid}" 2>/dev/null; then
-          : >"${timeout_marker}"
-          kill "${timeout_pid}" 2>/dev/null || true
-          sleep 1
-          kill -9 "${timeout_pid}" 2>/dev/null || true
-        fi
-      ) &
-      timeout_watchdog=$!
-      timeout_status=0
-      wait "${timeout_pid}" || timeout_status=$?
-      kill "${timeout_watchdog}" 2>/dev/null || true
-      wait "${timeout_watchdog}" 2>/dev/null || true
-      cat "${timeout_capture}"
-      if [ -f "${timeout_marker}" ]; then
-        timeout_status=124
-      fi
-      rm -f "${timeout_capture}" "${timeout_marker}"
-      return "${timeout_status}"
-      ;;
-  esac
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${timeout_seconds}" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "${timeout_seconds}" "$@"
-  else
-    "$@"
-  fi
-}
+. "${bootstrap_entry_dir}/lib/run-timeout.shs"
 
 run_timeout_kill() {
   timeout_seconds=$1
@@ -2435,7 +2412,7 @@ ${cache_admission_payload}"
           "SIMPLE_BOOTSTRAP_LOW_MEMORY=${NATIVE_LOW_MEMORY}" SIMPLE_NATIVE_ARENA_DECLS=1 \
           "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
           "SIMPLE_NATIVE_BUILD_CACHE_DIR=${native_cache_dir}" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
-          SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
+          "SIMPLE_FRONTEND_CACHE=${stage4_frontend_cache:?}" "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
           SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
           SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
         if [ "$1" = stage4-debug ]; then
@@ -3471,6 +3448,10 @@ bootstrap_native_build_main() {
     fi
   fi
   echo "  process-tree RSS policy: ${bootstrap_tree_rss_summary}" >&2
+  # W24/W27: a caller-supplied SIMPLE_FRONTEND_CACHE is transcribed into the
+  # (provenance-hashed) build log; unset writes nothing, keeping the log shape.
+  [ -z "${stage4_frontend_cache_caller:-}" ] ||
+    echo "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=${stage4_frontend_cache_caller}" >&2
   perl "${repo_root}/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode="${bootstrap_native_session_mode}" \
     --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
@@ -3489,7 +3470,7 @@ bootstrap_native_build_main() {
     SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
     SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
     SIMPLE_CACHE_SCOPE="${stage4_cache_scope}" \
-    SIMPLE_FRONTEND_CACHE=1 \
+    SIMPLE_FRONTEND_CACHE="${stage4_frontend_cache:?}" \
     SIMPLE_FRONTEND_CACHE_DIR="${native_cache_dir}/frontend" \
     SIMPLE_HIR_CACHE=1 \
     SIMPLE_HIR_CACHE_DIR="${native_cache_dir}/hir" \
@@ -3529,7 +3510,7 @@ bootstrap_acquire_shared_rust_cargo_cache() {
     rust_cache_common_now=$(bootstrap_authority_rust_cargo_cache_common_dir \
       "${repo_root}" "${rust_shared_cache_root}") || return 1
   else
-    rust_cache_common_now=$(bootstrap_authority_git_common_dir "${repo_root}") || return 1
+    rust_cache_common_now=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || return 1
   fi
   [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || {
     echo "error: shared Rust cargo cache moved during this run: ${rust_shared_cache_common_dir} -> ${rust_cache_common_now}" >&2
@@ -3542,8 +3523,9 @@ bootstrap_acquire_shared_rust_cargo_cache() {
     }
     return 0
   fi
-  # Every linked worktree serialises here, so a sibling lane's build holds
-  # this lock for as long as its cargo runs. A silent failure here aborted a
+  # Shared cache callers serialize repository-wide; default Windows callers
+  # serialize within the checkout whose build/c and publication they share.
+  # A silent failure here aborted a
   # Windows Stage 2 lane (2026-11-07) with nothing but "preflight failed".
   bsrcc_lock_dir="${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks"
   bsrcc_wait=${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}
@@ -5310,6 +5292,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # single-variable pass-throughs, hashed and transcribed; unset keeps the
   # pinned argv byte-for-byte (SIMPLE_MIR_SHARDING absent, SIMPLE_FRONTEND_CACHE
   # at its pinned 1). Same knobs in resume-stage3-from-admitted.sh.
+  # Host config mir_sharding/mir_shard_count/mir_shard_worker_kib fill an unset
+  # env var (W36); frontend_cache was resolved at entry into
+  # bootstrap_caller_frontend_cache.
+  bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 64
   stage3_mir_sharding_env= stage3_frontend_cache=1
   case "${SIMPLE_MIR_SHARDING:-}" in
     '') ;;
@@ -5894,7 +5880,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit "${stage2_status}"
     fi
     echo "  warning: stage2 native-build failed (exit ${stage2_status}); Stage 3/full CLI unavailable" >&2
-    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
+    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise host config sanity_build_timeout_seconds, or COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
 
   if [ "${stage2_status}" -eq 0 ]; then
@@ -6318,6 +6304,18 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # the elevated ceiling when the cap is above the default ceiling, which
       # the campaign and row owners admit under real host headroom). An
       # explicit cap is kept untouched. See bootstrap_tree_rss_whole_build_export.
+      # Host-config matrix knobs (W27/W32/W36) first: an env var left unset is
+      # filled from mir_sharding / mir_shard_count / mir_shard_worker_kib (the
+      # whole-build plan below keeps a set SIMPLE_MIR_SHARD_WORKER_KB), and the
+      # caller/host frontend cache value replaces the SIMPLE_FRONTEND_CACHE=1
+      # the Stage 2 cache setup exported. All four cross into each tool row via
+      # phase-c-backend-commands.shs bootstrap_phase_c_tool_row_environment_keys.
+      bootstrap_host_apply_matrix_settings "${bootstrap_early_repo_root}" || exit 125
+      case "${bootstrap_caller_frontend_cache:-}" in
+        '') ;;
+        0|1) SIMPLE_FRONTEND_CACHE=${bootstrap_caller_frontend_cache}; export SIMPLE_FRONTEND_CACHE ;;
+        *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 125 ;;
+      esac
       bootstrap_tree_rss_whole_build_export "${stage2_tests_build_threads}" "${repo_root}" || {
         echo "error: ${bootstrap_tree_rss_refusal}" >&2
         exit 125
@@ -6952,6 +6950,19 @@ fi
 # ===========================================================================
 
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
+# Windows shard-worker warm-cache workaround (W24/W27), Stage 4 half of the
+# Stage 3 pass-through: honour the caller's SIMPLE_FRONTEND_CACHE (captured at
+# entry, before Stage 2 cache setup exported =1). Validated unset | 0 | 1;
+# unset keeps the pinned 1 byte-for-byte (cache context, argv, build log and
+# provenance unchanged). Derived here, not from stage3_frontend_cache, because
+# --resume-stage4 skips the Stage 3 block, and before prepare_native_cache so
+# the Stage 4 cache context records the value actually launched.
+stage4_frontend_cache=1 stage4_frontend_cache_caller=
+case "${bootstrap_caller_frontend_cache:-}" in
+  '') ;;
+  0|1) stage4_frontend_cache=${bootstrap_caller_frontend_cache} stage4_frontend_cache_caller=${bootstrap_caller_frontend_cache} ;;
+  *) echo "error: SIMPLE_FRONTEND_CACHE must be unset, 0 or 1" >&2; exit 1 ;;
+esac
 bootstrap_build_host_vector_provider || exit 1
 bootstrap_progress_mark stage4-fingerprint ""
 full_dir="${output_dir}/full/${PLATFORM}"
@@ -7078,6 +7089,7 @@ fi
 stage4_provenance="${full_bin}.provenance.env"
 STAGE4_DUAL_MODE="${stage4_dual_mode}" \
 STAGE4_DEBUG_CANDIDATE_PATH="${full_debug_bin}" \
+STAGE4_FRONTEND_CACHE="${stage4_frontend_cache_caller}" \
 stage4_write_candidate_provenance \
   "${full_bin}" "${stage4_provenance}" "${repo_root}" \
   "${bootstrap_script_path}" "${stage4_parent}" \

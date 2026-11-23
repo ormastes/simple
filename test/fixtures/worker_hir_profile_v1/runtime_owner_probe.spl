@@ -1,0 +1,39 @@
+# Focused native policy fixture; no forged frozen closure or launch admission.
+use app.cli.worker_hir_profile_v1.{worker_hir_environment_admit_v1,
+    worker_hir_environment_value_error_v1, worker_hir_configuration_digest_v1,
+    worker_hir_argument_error_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn checked(condition: bool) -> i64:
+    assert(condition)
+    1
+
+fn main() -> i32:
+    var checks: i64 = 0
+    var digests: [text] = []
+    for owner in ["", "c", "rust", "C", "RuSt"]:
+        val environment = worker_hir_environment_admit_v1([("SIMPLE_RUNTIME_OWNER", owner)]).unwrap()
+        checks = checks + checked(environment.len() == 1)
+        checks = checks + checked(environment[0].key == "SIMPLE_RUNTIME_OWNER")
+        checks = checks + checked(environment[0].value == owner)
+        val digest = worker_hir_configuration_digest_v1("receipt", "policy", "producer", 123,
+            environment, ["--entry-closure"])
+        checks = checks + checked(digest.len() == 64)
+        checks = checks + checked(not digests.contains(digest))
+        val original_parts = ["worker-hir-profile-v1", "receipt", "policy", "producer", "123",
+            sha256_text("SIMPLE_RUNTIME_OWNER"), sha256_text(owner), sha256_text("--entry-closure")]
+        checks = checks + checked(digest == sha256_text(original_parts.join("\n")))
+        checks = checks + checked(digest == worker_hir_configuration_digest_v1("receipt", "policy",
+            "producer", 123, environment, ["--entry-closure"]))
+        digests.push(digest)
+    for bad in ["simple", "other", " c", "c ", "rust\n", "rust;evil"]:
+        checks = checks + checked(worker_hir_environment_admit_v1([("SIMPLE_RUNTIME_OWNER", bad)]).is_err())
+        checks = checks + checked(worker_hir_environment_value_error_v1("SIMPLE_RUNTIME_OWNER", bad) != "")
+    checks = checks + checked(worker_hir_environment_admit_v1([("SIMPLE_RUNTIME_OWNER_FUTURE", "c")]).is_err())
+    val omitted = worker_hir_environment_admit_v1([]).unwrap()
+    checks = checks + checked(worker_hir_configuration_digest_v1("receipt", "policy", "producer", 123,
+        omitted, ["--entry-closure"]) != digests[0])
+    checks = checks + checked(worker_hir_argument_error_v1(["--entry-closure", "--runtime-owner=c"]) == "")
+    checks = checks + checked(worker_hir_argument_error_v1(["--entry-closure", "--runtime-owner", "rust"]) == "")
+    print "PASS HIR runtime-owner profile: {checks} assertions"
+    0

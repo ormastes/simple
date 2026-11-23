@@ -1,0 +1,45 @@
+# @cover src/lib/gc_async_mut/cuda/mod.spl 10%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+#
+# `use std.gc_async_mut.cuda.{...}` is loaded by the seed interpreter through
+# cuda/__init__.spl (group imports redirect to the package that lists the
+# names) and its bare exports, which come from sibling cuda/mod.spl. A second
+# copy in src/lib/gc_async_mut/cuda.spl was picked by static resolvers instead,
+# drifted, and forced PR #10981 to wire cuda_init_checked twice.
+# cuda/mod.spl must stay the only definition, and __init__.spl must re-export
+# exactly what mod.spl exports.
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read}
+
+val CUDA_DIR = "src/lib/gc_async_mut/cuda"
+
+fn export_names(src: text) -> [text]:
+    var names: [text] = []
+    for line in src.split("\n"):
+        if line.starts_with("export ") and not line.starts_with("export use"):
+            for part in line[7..].split(","):
+                val name = part.trim()
+                if name != "":
+                    names.push(name)
+    names.sort()
+    names
+
+describe "std.gc_async_mut.cuda single definition":
+    it "has no duplicate cuda.spl or cuda/ffi.spl beside cuda/mod.spl":
+        expect(file_exists(CUDA_DIR + "/mod.spl")).to_equal(true)
+        expect(file_exists(CUDA_DIR + ".spl")).to_equal(false)
+        expect(file_exists(CUDA_DIR + "/ffi.spl")).to_equal(false)
+
+    it "defines the entry points only in cuda/mod.spl":
+        val main = file_read(CUDA_DIR + "/mod.spl")
+        for name in ["cuda_available", "cuda_init", "cuda_init_checked", "cuda_device_count", "cuda_launch_kernel"]:
+            expect(main.contains("fn " + name + "(")).to_equal(true)
+            for other in ["/__init__.spl", "/driver_loader.spl"]:
+                expect(file_read(CUDA_DIR + other).contains("fn " + name + "(")).to_equal(false)
+
+    it "re-exports from __init__.spl exactly the names mod.spl exports":
+        val init_names = export_names(file_read(CUDA_DIR + "/__init__.spl"))
+        val mod_names = export_names(file_read(CUDA_DIR + "/mod.spl"))
+        expect(init_names.len() > 0).to_equal(true)
+        expect(init_names.join(",")).to_equal(mod_names.join(","))

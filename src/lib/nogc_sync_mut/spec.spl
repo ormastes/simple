@@ -226,6 +226,8 @@ var _aggregate_in_hook: [i64] = []
 # like the aggregate markers above, so nested-call global writeback cannot
 # restore a stale scalar. Empty means no case can consume a failure.
 var _case_depth: [i64] = []
+# One entry per skip() called inside the running example (see skip()).
+var _skipped_in_case: [i64] = []
 var _aggregate_failed_cases: [i64] = []
 var _aggregate_selected_case: [text] = []
 var _aggregate_selected_results: [text] = []
@@ -530,6 +532,7 @@ fn _execute_it(name: text, block: fn()) -> text:
     current_test_errors.clear()
     _expect_provisional_len = -1
     val pending_before = test_pending
+    val skipped_before = _skipped_in_case.len()
     _case_depth.push(1)
     if _aggregate_active():
         _aggregate_in_test.push(1)
@@ -553,6 +556,21 @@ fn _execute_it(name: text, block: fn()) -> text:
     val _ = _case_depth.pop()
     if _aggregate_active():
         val _ = _aggregate_in_test.pop()
+
+    # skip() in the body wins over every other outcome: the example is
+    # skipped, never a pass, and a later failing expect does not change that.
+    if _skipped_in_case.len() > skipped_before:
+        while _skipped_in_case.len() > skipped_before:
+            val _ = _skipped_in_case.pop()
+        if test_pending > pending_before:
+            test_pending = pending_before
+        test_skipped = test_skipped + 1
+        _write_test_result_evidence(test_passed, test_failed)
+        print "{indent}  it {name} ... skipped"
+        # The trace vocabulary has no skipped outcome; pending is the
+        # neither-pass-nor-fail one.
+        emit_trace_case_event(full_name, "finished", "pending")
+        return "skip"
 
     # Check result via Option pattern
     var passed = test_passed
@@ -789,6 +807,17 @@ pub fn planned(name: text, reason: text):
 
 # @tag(name=file_name, reason=reason)
 pub fn skip(name: text, reason: text):
+    # Called inside a running example (`it "x": if not gate: skip(...)`): that
+    # example is skipped, and _execute_it reports it so (skip wins). Before this
+    # the call was dropped and the example reported a pass. A rejected reason
+    # fails the example, like pending() does.
+    if _case_depth.len() > 0:
+        val in_case = validate_free_text_skip(reason, _active_assurance_profile())
+        if not in_case.ok:
+            current_test_errors.push("skip rejected under critical: {in_case.message}")
+            return
+        _skipped_in_case.push(1)
+        return
     if _aggregate_active():
         val id = _aggregate_declare(name, "skip")
         if _aggregate_enum() or id == "":

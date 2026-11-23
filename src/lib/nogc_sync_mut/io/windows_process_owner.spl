@@ -4,6 +4,7 @@
 # can be recycled. This owner is single-threaded and bounded to 100000 starts.
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_job_peak_memory_offset, windows_abi_job_basic_accounting_size, windows_abi_file_attribute_tag_info_size}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
 
@@ -181,12 +182,12 @@ fn _windows_process_pin_v1(heap: i64, path: text, digest: text) -> i64:
 # and directories are rejected from handle metadata before any data is read.
 @unsafe(reason: "streaming SHA256 retains file and hash identities until finalization", capabilities: [ffi, raw_ptr])
 fn _windows_process_hash_handle_v1(heap: i64, file: i64) -> text:
-    val metadata = HeapAlloc(heap, 8u32, 8u64)
-    val provider_slot = HeapAlloc(heap, 8u32, 8u64)
-    val hash_slot = HeapAlloc(heap, 8u32, 8u64)
-    val count_slot = HeapAlloc(heap, 8u32, 8u64)
-    val buffer = HeapAlloc(heap, 8u32, 65536u64)
-    val digest_buffer = HeapAlloc(heap, 8u32, 32u64)
+    val metadata = windows_abi_heap_alloc(heap, windows_abi_file_attribute_tag_info_size())
+    val provider_slot = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes())
+    val hash_slot = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes())
+    val count_slot = windows_abi_heap_alloc(heap, 8)
+    val buffer = windows_abi_heap_alloc(heap, 65536)
+    val digest_buffer = windows_abi_heap_alloc(heap, 32)
     val algorithm = _windows_process_wide_v1(heap, "SHA256")
     val allocations = [metadata, provider_slot, hash_slot, count_slot, buffer, digest_buffer, algorithm]
     var valid = true
@@ -204,12 +205,12 @@ fn _windows_process_hash_handle_v1(heap: i64, file: i64) -> text:
         if BCryptOpenAlgorithmProvider(provider_slot, algorithm, 0, 0u32) != 0:
             valid = false
         else:
-            provider = volatile_read_u64(provider_slot)
+            provider = windows_abi_read_ptr(provider_slot)
     if valid:
         if BCryptCreateHash(provider, hash_slot, 0, 0u32, 0, 0u32, 0u32) != 0:
             valid = false
         else:
-            hash = volatile_read_u64(hash_slot)
+            hash = windows_abi_read_ptr(hash_slot)
     while valid:
         if ReadFile(file, buffer, 65536u32, count_slot, 0) == 0:
             valid = false
@@ -243,7 +244,7 @@ fn _windows_process_hash_handle_v1(heap: i64, file: i64) -> text:
 
 @unsafe(reason: "bounded Windows file hashing owns and closes its exact file handle", capabilities: [ffi])
 fn windows_process_file_digest_v1(path: text) -> text:
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return ""
     val file = _windows_process_file_v1(heap, path, 2147483648u32, 1u32, 0, 3u32)
     if file == 0: return ""
@@ -297,7 +298,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     val invalid = windows_process_request_valid_v1(request)
     if invalid != "": return WindowsProcessAdmissionV1.RejectedBeforeStart(invalid)
     if _windows_process_slots_v1.len() >= 100000: return WindowsProcessAdmissionV1.RejectedBeforeStart("Windows owner slot lifetime bound reached")
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return WindowsProcessAdmissionV1.RejectedBeforeStart("GetProcessHeap failed")
     var pins: [i64] = []
     var handles: [i64] = []
@@ -332,14 +333,14 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     val argv = _windows_process_wide_v1(heap, command)
     val cwd = _windows_process_wide_v1(heap, request.directory)
     val env = _windows_process_wide_v1(heap, environment)
-    val startup = HeapAlloc(heap, 8u32, 112u64)
-    val process_info = HeapAlloc(heap, 8u32, 24u64)
-    val limits = HeapAlloc(heap, 8u32, 144u64)
-    val security = HeapAlloc(heap, 8u32, 24u64)
-    val size_slot = HeapAlloc(heap, 8u32, 8u64)
-    val allowed_handles = HeapAlloc(heap, 8u32, 24u64)
-    val accounting = HeapAlloc(heap, 8u32, 48u64)
-    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    val startup = windows_abi_heap_alloc(heap, windows_abi_startupinfoex_size())
+    val process_info = windows_abi_heap_alloc(heap, windows_abi_process_info_size())
+    val limits = windows_abi_heap_alloc(heap, windows_abi_job_extended_limit_size())
+    val security = windows_abi_heap_alloc(heap, windows_abi_security_attributes_size())
+    val size_slot = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes())
+    val allowed_handles = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes() * 3)
+    val accounting = windows_abi_heap_alloc(heap, windows_abi_job_basic_accounting_size())
+    val exit_slot = windows_abi_heap_alloc(heap, 8)
     allocations = [app, argv, cwd, env, startup, process_info, limits, security, size_slot, allowed_handles]
     for allocation in allocations:
         if allocation == 0: error = "Windows process request allocation failed"
@@ -358,8 +359,8 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
                     error = "pre-spawn available memory below required bytes: available={available} required={required_available_bytes}"
             Err(reason): error = reason
     if error == "":
-        volatile_write_u32(security, 24)
-        volatile_write_u32(security + 16, 1)
+        volatile_write_u32(security, windows_abi_security_attributes_size())
+        volatile_write_u32(security + windows_abi_security_attributes_inherit_offset(), 1)
         val stdin_handle = _windows_process_file_v1(heap, "NUL", 2147483648u32, 3u32, security, 3u32)
         val stdout_handle = _windows_process_file_v1(heap, request.stdout_path, 1073741824u32, 1u32, security, 1u32)
         val stderr_handle = _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
@@ -367,45 +368,48 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         for handle in handles:
             if handle == 0: error = "cannot create exact inherited stream handles"
         if error == "":
-            volatile_write_u32(startup, 112)
-            volatile_write_u32(startup + 60, 256)
-            volatile_write_u64(startup + 80, stdin_handle)
-            volatile_write_u64(startup + 88, stdout_handle)
-            volatile_write_u64(startup + 96, stderr_handle)
-            volatile_write_u64(allowed_handles, stdin_handle)
-            volatile_write_u64(allowed_handles + 8, stdout_handle)
-            volatile_write_u64(allowed_handles + 16, stderr_handle)
+            volatile_write_u32(startup, windows_abi_startupinfoex_size())
+            volatile_write_u32(startup + windows_abi_startupinfo_flags_offset(), 256)
+            windows_abi_write_ptr(startup + windows_abi_startupinfo_std_input_offset(), stdin_handle)
+            windows_abi_write_ptr(startup + windows_abi_startupinfo_std_output_offset(), stdout_handle)
+            windows_abi_write_ptr(startup + windows_abi_startupinfo_std_error_offset(), stderr_handle)
+            windows_abi_write_ptr(allowed_handles, stdin_handle)
+            windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes(), stdout_handle)
+            windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes() * 2, stderr_handle)
             val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, size_slot)
-            val required = volatile_read_u64(size_slot)
+            val required = windows_abi_read_ptr(size_slot)
             if required <= 0 or required > 1048576:
                 error = "invalid Windows attribute-list size"
             else:
-                attributes = HeapAlloc(heap, 8u32, required as u64)
+                attributes = windows_abi_heap_alloc(heap, required)
                 if attributes == 0:
                     error = "attribute-list allocation failed"
                 elif InitializeProcThreadAttributeList(attributes, 1u32, 0u32, size_slot) == 0:
                     error = "attribute-list initialization failed"
                 else:
                     attributes_initialized = true
-                    if UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed_handles, 24u64, 0, 0) == 0:
+                    if windows_abi_update_proc_thread_attribute(attributes, 131074, allowed_handles, windows_abi_pointer_bytes() * 3) == 0:
                         error = "handle allowlist admission failed"
-                    volatile_write_u64(startup + 104, attributes)
+                    windows_abi_write_ptr(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    if error == "" and memory_limit_bytes > windows_abi_size_t_max():
+        error = "JobObject memory limit exceeds target pointer width"
     if error == "":
-        volatile_write_u32(limits + 16, 8192)
+        volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8192)
         if memory_limit_bytes > 0:
             # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY.
-            volatile_write_u32(limits + 16, 8704)
-            volatile_write_u64(limits + 120, memory_limit_bytes)
-        job = CreateJobObjectW(0, 0)
-        if job == 0 or SetInformationJobObject(job, 9, limits, 144u32) == 0:
+            volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8704)
+            windows_abi_write_ptr(limits + windows_abi_job_memory_limit_offset(), memory_limit_bytes)
+        job = CreateJobObjectW(0, 0) as i64
+        if job == 0 or SetInformationJobObject(job, 9, limits, limits_bytes as u32) == 0:
             error = "JobObject admission failed"
-        elif QueryInformationJobObject(job, 9, limits, 144u32, 0) == 0:
+        elif QueryInformationJobObject(job, 9, limits, limits_bytes as u32, 0) == 0:
             error = "JobObject limit readback failed"
         elif memory_limit_bytes > 0 and
-                (volatile_read_u32(limits + 16) != 8704u32 or
-                 volatile_read_u64(limits + 120) != memory_limit_bytes as u64):
+                (volatile_read_u32(limits + windows_abi_job_limit_flags_offset()) != 8704u32 or
+                 windows_abi_read_ptr(limits + windows_abi_job_memory_limit_offset()) != memory_limit_bytes):
             error = "JobObject memory limit readback differs"
-        elif memory_limit_bytes == 0 and volatile_read_u32(limits + 16) != 8192u32:
+        elif memory_limit_bytes == 0 and volatile_read_u32(limits + windows_abi_job_limit_flags_offset()) != 8192u32:
             error = "JobObject monitor policy readback differs"
     if error == "":
         # CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT|CREATE_NO_WINDOW.
@@ -413,9 +417,9 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         if CreateProcessW(app, argv, 0, 0, 1, 134743044u32, env, cwd, startup, process_info) == 0:
             error = "CreateProcessW failed: " + str(GetLastError())
         else:
-            process = volatile_read_u64(process_info)
-            thread = volatile_read_u64(process_info + 8)
-            process_id = volatile_read_u32(process_info + 16)
+            process = windows_abi_read_ptr(process_info + windows_abi_process_info_process_offset())
+            thread = windows_abi_read_ptr(process_info + windows_abi_process_info_thread_offset())
+            process_id = volatile_read_u32(process_info + windows_abi_process_info_pid_offset())
             if AssignProcessToJobObject(job, process) == 0:
                 error = "suspended process job assignment failed"
             elif ResumeThread(thread) == 4294967295u32:
@@ -423,10 +427,10 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     var admission_released = true
     if attributes_initialized: DeleteProcThreadAttributeList(attributes)
     if attributes != 0:
-        if HeapFree(heap, 0u32, attributes) == 0: admission_released = false
+        if windows_abi_heap_free(heap, attributes) == 0: admission_released = false
     for allocation in allocations:
         if allocation != 0:
-            if HeapFree(heap, 0u32, allocation) == 0: admission_released = false
+            if windows_abi_heap_free(heap, allocation) == 0: admission_released = false
     for handle in handles:
         if handle != 0:
             if CloseHandle(handle) == 0: admission_released = false
@@ -543,11 +547,12 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
     if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
     val state = _windows_process_slots_v1[lease.slot]
     if state.closed: return Err("Windows owner already collected")
-    val information = HeapAlloc(state.heap, 8u32, 144u64)
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    val information = windows_abi_heap_alloc(state.heap, limits_bytes)
     if information == 0: return Err("job memory query allocation failed")
-    val queried = QueryInformationJobObject(state.job, 9, information, 144u32, 0)
-    val peak = if queried != 0: volatile_read_u64(information + 136) else: -1
-    val released = HeapFree(state.heap, 0u32, information)
+    val queried = QueryInformationJobObject(state.job, 9, information, limits_bytes as u32, 0)
+    val peak = if queried != 0: windows_abi_read_ptr(information + windows_abi_job_peak_memory_offset()) else: -1
+    val released = windows_abi_heap_free(state.heap, information)
     if queried == 0 or released == 0 or peak < 0:
         return Err("job memory accounting unavailable")
     Ok(peak)

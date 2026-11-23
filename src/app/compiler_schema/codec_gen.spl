@@ -725,10 +725,12 @@ fn _emit_default_file_helpers() -> text:
     out = out + "    p!\n\n"
     out = out + "fn _hc_enc_span_file(w: HirCodecWriter, v: text):\n"
     out = out + "    val opt_v: text? = v\n"
-    out = out + "    if not opt_v.?:\n"
+    # `.?` is false for an empty text, so test emptiness first: an empty file
+    # must encode as an empty line, not as the nil wire.
+    out = out + "    if v != \"\" and not opt_v.?:\n"
     out = out + "        w.put_nil_text_wire()\n"
     out = out + "        return\n"
-    out = out + "    val s = opt_v!\n"
+    out = out + "    val s = opt_v ?? \"\"\n"
     out = out + "    if _hc_enc_default_file != \"\":\n"
     out = out + "        if s == _hc_enc_default_file:\n"
     out = out + "            w.put_text(\"@\")\n"
@@ -789,7 +791,11 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         if s.cat == "prim_i64":
             out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: flat_pool_parse_i64(raw{k0})\n"
         elif s.cat == "prim_bool":
-            out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
+            # A NON-optional bool needs no nil: the caller rejects "N" below.
+            if bare_field:
+                out = out + indent + "val " + target + " = raw{k0} == \"1\"\n"
+            else:
+                out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
         else:
             # A NON-optional text field decodes an absent value to the empty
             # string, never nil; opt-inner, list and dict targets keep nil.

@@ -1044,21 +1044,19 @@ pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> b
 
 # LCD subpixel glyph (Chrome 159 / Skia LCD16 parity, 2026-11-16).
 #
-# Measured against Chrome's headless screenshot (Liberation Sans 16 px, see
-# test/01_unit/browser_engine/lcd_subpixel_text_chrome159_spec.spl): Chrome
-# rasterises the outline at 3x horizontal resolution, subpixel order R,G,B
-# left to right, filters it with a symmetric 5-tap FIR and keeps 5 bits per
-# channel. The taps were fitted to the 16 px `l` stem at all four of Chrome's
-# quarter-pixel phases (48 subpixel samples): [0.090, 0.225, 0.370, 0.225,
-# 0.090] (x256 ~ [23, 58, 95, 58, 23]), rms 0.33/32 -- below one LCD16 step.
-# FreeType's default [8, 77, 86, 77, 8] / 256 fits at 0.91/32 and Skia's
-# gaussian-like [26, 67, 86, 67, 26] / 272 at 0.50/32, so neither is used.
+# Chrome 159 builds LCD glyphs through Skia's path route (2026-11-23, checked
+# against Skia source and glyph_raster_shape_chrome159_spec): the hinted path
+# is scaled 4x horizontally into an A8 mask filled with Skia's analytic AA
+# (exact area, line ends snapped to quarter rows), then pack4xHToMask turns
+# every 4 quarter-pixel samples into R,G,B with one 12-tap FIR per channel
+# (/256, clamp 255). The SkMaskGamma preblend and the 5-bit
+# LCD16 pack are applied by the compositor (engine2d lcd_s32_tables.spl).
 # Unlike the grayscale
 # path above, which snaps the glyph's left bbox edge onto a pixel boundary,
 # the outline keeps its true pen-relative position: column 0 of the bitmap is
 # pen-relative x `slg_bearing_x`, and `phase_q` shifts the outline right by
 # phase_q/4 px (Skia's quarter-pixel positions). One padding pixel on each side
-# holds the filter's 2-subpixel spread. Vertically the outline is baseline-anchored and
+# holds the filter's one-pixel spread. Vertically the outline is baseline-anchored and
 # warped by the slight-hinting blue-zone fit (_lcd_hint_knots), so unlike
 # sfnt_render_glyph_into (unhinted; hung from its ink top up to 48 px, see `_gray_frame`) its rows differ too.
 class SfntLcdGlyph:
@@ -1073,10 +1071,13 @@ class SfntLcdGlyph:
     # width*height*3 filtered subpixel coverage, R,G,B per pixel.
     slg_rgb: [u8]
 
-val _SFNT_LCD_SAMPLE_ROWS: i64 = 4
-val _SFNT_LCD_TAP0: f64 = 0.370
-val _SFNT_LCD_TAP1: f64 = 0.225
-val _SFNT_LCD_TAP2: f64 = 0.090
+val _SFNT_LCD_A8_PER_PX: i64 = 4
+# Skia pack4xHToMask: one 12-tap FIR per LCD channel over the quarter-pixel A8
+# samples 4x-4 .. 4x+7 of output pixel x, each summing to 272, then /256 and
+# clamped to 255 (unrolled in sfnt_lcd_outline_raster):
+#   R 3 11 28 51 64 57 36 16 5 1 0 0
+#   G 0 2 8 22 43 61 61 43 22 8 2 0
+#   B 0 0 1 5 16 36 57 64 51 28 11 3
 
 fn _floor_glyf(value: f64) -> i64:
     val whole = value as i64
@@ -1086,69 +1087,200 @@ fn _ceil_glyf(value: f64) -> i64:
     val whole = value as i64
     if (whole as f64) < value: whole + 1 else: whole
 
-# --- LCD edge list -------------------------------------------------------------
-# The LCD kernel reads an edge only on its sample scanlines: sample t (pixel
-# row t / 4, sample t % 4, t >= 0) is sy = (2t + 1) / 8, and the kernel's test
-# `y_top < sy and sy <= y_bottom` is t > 4 * y_top - 0.5 and
-# t <= 4 * y_bottom - 0.5. A curve is always 16 chords, most of them shorter
-# than a quarter row at text sizes: of the ~200 edges of a 16 px glyph about 70%
-# lie between two sample scanlines (76% at 12 px, 49% at 40 px) and were built
-# and indexed without ever being read. `_lcd_outline_edges` is `_outline_edges`
-# without them: the kept edges are the same values in the same order.
+# --- LCD exact-area accumulation ------------------------------------------------
+# Chrome 159 draws an LCD glyph as a path into a 4x-wide A8 mask (Skia
+# SkScalerContext GenerateImageFromPath, `postScale(4, 1)`) with its analytic
+# AA, i.e. each A8 sample (a quarter pixel wide, one pixel tall) holds the exact
+# area of the glyph inside it. A 4-sub-scanline point-sampled model was fitted
+# here before; it rounds a round stroke's edge to a quarter row, and its
+# supersampled variant (SkScan_AntiPath) does not fit Chrome's straight stems.
+# The accumulator is the signed-area / cover scheme (font-rs): every line adds
+# its area to the cells it crosses and a row prefix sum gives the coverage.
+# `a` holds `height` rows of `stride` cells; x is in A8 sample units.
+# Skia's analytic edges snap every line end to a quarter row
+# (SkAnalyticEdge SnapY, kDefaultAccuracy 2), so a hinted 16 px `H` bar whose
+# top is 1/16 px above a row boundary leaves that row white, as in Chrome.
+fn _lcd_snap_y(y: f64) -> f64:
+    (_floor_glyf(y * 4.0 + 0.5) as f64) / 4.0
 
-# True when no sample scanline t >= 0 lies in (lo, hi]. `v * 4.0 - 0.5` is
-# exact for v >= 0 (the difference is no larger than `v * 4.0` there, so it
-# needs no extra bits); for v < 0 it can round across an integer, which only
-# moves a bound that is below sample 0 already.
-fn _lcd_no_sample(lo: f64, hi: f64) -> bool:
-    val below = hi * 4.0 - 0.5
-    var last = below as i64
-    if (last as f64) > below: last = last - 1
-    if last < 0: return true
-    val above = lo * 4.0 - 0.5
-    var first = above as i64
-    if (first as f64) > above: first = first - 1
-    last <= first
+fn _lcd_area_line(mut a: [f64], stride: i64, height: i64, ax: f64, ay_raw: f64, bx: f64, by_raw: f64):
+    val ay = _lcd_snap_y(ay_raw)
+    val by = _lcd_snap_y(by_raw)
+    if ay == by: return
+    var dir = 1.0
+    var x0 = ax
+    var y0 = ay
+    var x1 = bx
+    var y1 = by
+    if ay > by:
+        dir = -1.0
+        x0 = bx
+        y0 = by
+        x1 = ax
+        y1 = ay
+    if y1 <= 0.0 or y0 >= height as f64: return
+    val dxdy = (x1 - x0) / (y1 - y0)
+    var x = x0
+    if y0 < 0.0:
+        x = x - y0 * dxdy
+    var row: i64 = if y0 < 0.0: 0 else: _floor_glyf(y0)
+    var row_end = _ceil_glyf(y1)
+    if row_end > height: row_end = height
+    val limit = (stride - 2) as f64
+    while row < row_end:
+        val base = row * stride
+        val top = if y0 > row as f64: y0 else: row as f64
+        val bottom = if y1 < (row + 1) as f64: y1 else: (row + 1) as f64
+        val dy = bottom - top
+        var x_next = x + dxdy * dy
+        val d = dy * dir
+        var lo = if x < x_next: x else: x_next
+        var hi = if x < x_next: x_next else: x
+        if lo < 0.0: lo = 0.0
+        if hi < 0.0: hi = 0.0
+        if lo > limit: lo = limit
+        if hi > limit: hi = limit
+        val lo_floor = _floor_glyf(lo)
+        val hi_ceil = _ceil_glyf(hi)
+        if hi_ceil <= lo_floor + 1:
+            val mid = 0.5 * (lo + hi) - lo_floor as f64
+            a[base + lo_floor] = a[base + lo_floor] + d - d * mid
+            a[base + lo_floor + 1] = a[base + lo_floor + 1] + d * mid
+        else:
+            val s = 1.0 / (hi - lo)
+            val lo_f = lo - lo_floor as f64
+            val a0 = 0.5 * s * (1.0 - lo_f) * (1.0 - lo_f)
+            val hi_f = hi - hi_ceil as f64 + 1.0
+            val am = 0.5 * s * hi_f * hi_f
+            a[base + lo_floor] = a[base + lo_floor] + d * a0
+            if hi_ceil == lo_floor + 2:
+                a[base + lo_floor + 1] = a[base + lo_floor + 1] + d * (1.0 - a0 - am)
+            else:
+                val a1 = s * (1.5 - lo_f)
+                a[base + lo_floor + 1] = a[base + lo_floor + 1] + d * (a1 - a0)
+                var xi = lo_floor + 2
+                while xi < hi_ceil - 1:
+                    a[base + xi] = a[base + xi] + d * s
+                    xi = xi + 1
+                val a2 = a1 + (hi_ceil - lo_floor - 3) as f64 * s
+                a[base + hi_ceil - 1] = a[base + hi_ceil - 1] + d * (1.0 - a2 - am)
+            a[base + hi_ceil] = a[base + hi_ceil] + d * am
+        x = x_next
+        row = row + 1
 
-fn _lcd_add_edge(edges: [_SfntEdge], ax: f64, ay: f64, bx: f64, by: f64) -> [_SfntEdge]:
-    if ay == by: return edges
-    if ay < by:
-        if _lcd_no_sample(ay, by): return edges
-        return edges.push(_SfntEdge(y_top: ay, y_bottom: by, x_top: ax, dx_dy: (bx - ax) / (by - ay), direction: 1))
-    if _lcd_no_sample(by, ay): return edges
-    edges.push(_SfntEdge(y_top: by, y_bottom: ay, x_top: bx, dx_dy: (ax - bx) / (ay - by), direction: -1))
+# Skia's analytic quadratic edge (SkAnalyticQuadraticEdge): the edge builder
+# first chops a quad at its y extremum (SkChopQuadAtYExtrema, control y flattened
+# onto the extremum), then each y-monotonic piece is cut into 2^shift chords
+# from the curve's flatness (diff_to_shift on the 1/256 px points, AA shift 2),
+# and every inner chord end is snapped to a quarter row with its x kept (or, for
+# a chord at least 2 rows tall, to a whole row with x moved along the chord).
+# Splitting every quad into 16 chords and snapping each end piled many vertices
+# onto a crest's quarter row and drew round tops a step heavier than Chrome.
+fn _lcd_area_quad(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64):
+    val denom = ay - 2.0 * cy + by
+    if denom != 0.0:
+        val t = (ay - cy) / denom
+        if t > 0.0 and t < 1.0:
+            val lx = ax + (cx - ax) * t
+            val rx = cx + (bx - cx) * t
+            val mx = lx + (rx - lx) * t
+            val u = 1.0 - t
+            val my = ay * u * u + 2.0 * cy * t * u + by * t * t
+            _lcd_area_quad_mono(a, stride, height, ax, ay, lx, my, mx, my)
+            _lcd_area_quad_mono(a, stride, height, mx, my, rx, my, bx, by)
+            return
+    _lcd_area_quad_mono(a, stride, height, ax, ay, cx, cy, bx, by)
 
-# `_quad_edges` (depth >= 1) with the unread chords left out. A split point is
-# the midpoint of two points of its curve, and a rounded midpoint stays between
-# its operands, so every chord below a node lies inside the y range of the
-# node's three control points: no sample scanline in that range, no edge.
-fn _lcd_quad_edges(edges: [_SfntEdge], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, depth: i64) -> [_SfntEdge]:
-    var lo = ay
-    var hi = ay
-    if cy < lo: lo = cy
-    if cy > hi: hi = cy
-    if by < lo: lo = by
-    if by > hi: hi = by
-    if _lcd_no_sample(lo, hi): return edges
-    val lx = (ax + cx) / 2.0
-    val ly = (ay + cy) / 2.0
-    val rx = (cx + bx) / 2.0
-    val ry = (cy + by) / 2.0
-    val mx = (lx + rx) / 2.0
-    val my = (ly + ry) / 2.0
-    if depth == 1:
-        return _lcd_add_edge(_lcd_add_edge(edges, ax, ay, mx, my), mx, my, bx, by)
-    val left = _lcd_quad_edges(edges, ax, ay, lx, ly, mx, my, depth - 1)
-    _lcd_quad_edges(left, mx, my, rx, ry, bx, by, depth - 1)
+fn _lcd_fdot8(v: f64) -> i64:
+    (v * 256.0) as i64
 
-fn _lcd_outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) -> [_SfntEdge]:
-    var edges: [_SfntEdge] = []
+fn _lcd_bit_length(v: i64) -> i64:
+    var n: i64 = 0
+    var x = v
+    while x > 0:
+        x = x / 2
+        n = n + 1
+    n
+
+fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64):
+    val x0 = _lcd_fdot8(ax)
+    val y0 = _lcd_fdot8(ay)
+    val x1 = _lcd_fdot8(cx)
+    val y1 = _lcd_fdot8(cy)
+    val x2 = _lcd_fdot8(bx)
+    val y2 = _lcd_fdot8(by)
+    var ddx = (2 * x1 - x0 - x2) >> 2
+    var ddy = (2 * y1 - y0 - y2) >> 2
+    if ddx < 0: ddx = 0 - ddx
+    if ddy < 0: ddy = 0 - ddy
+    var dist = if ddx > ddy: ddx + ddy / 2 else: ddy + ddx / 2
+    dist = (dist + 16) >> 5
+    var shift = _lcd_bit_length(dist) >> 1
+    if shift == 0: shift = 1
+    if shift > 6: shift = 6
+    val count = 1 << shift
+    # Walk in increasing y like Skia, emit in the original direction.
+    val down = ay <= by
+    val sx = if down: ax else: bx
+    val sy = if down: ay else: by
+    val ex = if down: bx else: ax
+    val ey = if down: by else: ay
+    var xs: [f64] = [0.0; count + 1]
+    var ys: [f64] = [0.0; count + 1]
+    xs[0] = sx
+    ys[0] = _lcd_snap_y(sy)
+    val last_y = _lcd_snap_y(ey)
+    var old_x = sx
+    var old_y = sy
+    var k: i64 = 1
+    while k < count:
+        val t = (k as f64) / (count as f64)
+        val u = 1.0 - t
+        val nx = sx * u * u + 2.0 * cx * t * u + ex * t * t
+        val ny = sy * u * u + 2.0 * cy * t * u + ey * t * t
+        val step_y = ny - old_y
+        val step_x = nx - old_x
+        val prev_x = xs[k - 1]
+        val prev_y = ys[k - 1]
+        var snap_y = 0.0
+        var snap_x = nx
+        if (step_y >= 2.0 or step_y <= -2.0) and (if step_y < 0.0: 0.0 - step_y else: step_y) * 64.0 > (if step_x < 0.0: 0.0 - step_x else: step_x):
+            snap_y = _floor_glyf(ny + 0.5) as f64
+            if snap_y > last_y: snap_y = last_y
+            if ny != prev_y:
+                snap_x = nx - (nx - prev_x) / (ny - prev_y) * (ny - snap_y)
+        else:
+            snap_y = _lcd_snap_y(ny)
+            if snap_y > last_y: snap_y = last_y
+        xs[k] = snap_x
+        ys[k] = snap_y
+        old_x = nx
+        old_y = ny
+        k = k + 1
+    xs[count] = ex
+    ys[count] = last_y
+    val n = count + 1
+    var i: i64 = 0
+    while i + 1 < n:
+        if down:
+            _lcd_area_line(a, stride, height, xs[i], ys[i], xs[i + 1], ys[i + 1])
+        else:
+            _lcd_area_line(a, stride, height, xs[n - 1 - i], ys[n - 1 - i], xs[n - 2 - i], ys[n - 2 - i])
+        i = i + 1
+
+
+# Signed area / cover cells of `commands` (font units) in the A8 sample grid:
+# x' = (x * scale - left) * 4, y' = -y * scale - top.
+fn _lcd_area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64) -> [f64]:
+    var a: [f64] = [0.0; stride * height]
     var pen_x = 0.0
     var pen_y = 0.0
     var move_x = 0.0
     var move_y = 0.0
+    val sx = scale * _SFNT_LCD_A8_PER_PX as f64
+    val lx = left * _SFNT_LCD_A8_PER_PX as f64
     for command in commands:
-        val x1 = command.x1 * scale - left
+        val x1 = command.x1 * sx - lx
         val y1 = -command.y1 * scale - top
         if command.verb == SFNT_GLYF_MOVE:
             pen_x = x1
@@ -1156,119 +1288,20 @@ fn _lcd_outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f
             move_x = x1
             move_y = y1
         elif command.verb == SFNT_GLYF_LINE:
-            edges = _lcd_add_edge(edges, pen_x, pen_y, x1, y1)
+            _lcd_area_line(a, stride, height, pen_x, pen_y, x1, y1)
             pen_x = x1
             pen_y = y1
         elif command.verb == SFNT_GLYF_QUAD:
-            val x2 = command.x2 * scale - left
+            val x2 = command.x2 * sx - lx
             val y2 = -command.y2 * scale - top
-            edges = _lcd_quad_edges(edges, pen_x, pen_y, x1, y1, x2, y2, 4)
+            _lcd_area_quad(a, stride, height, pen_x, pen_y, x1, y1, x2, y2)
             pen_x = x2
             pen_y = y2
         elif command.verb == SFNT_GLYF_CLOSE:
-            edges = _lcd_add_edge(edges, pen_x, pen_y, move_x, move_y)
+            _lcd_area_line(a, stride, height, pen_x, pen_y, move_x, move_y)
             pen_x = move_x
             pen_y = move_y
-    edges
-
-# Per-SAMPLE-row edge index for the LCD kernel: `bins[t] .. bins[t + 1]`
-# (t < height * 4) is the slice of `bins` holding the indices, ascending, of
-# the edges that sample scanline t can cross (the range in the section header
-# above). Indexing by pixel row (`_edge_row_index`) made the kernel test each
-# of a row's edges four times. The kernel keeps its exact test, and the
-# ascending order keeps the insertion sort's tie order, so every coverage
-# value is unchanged.
-fn _edge_sample_index(edges: [_SfntEdge], height: i64) -> [i64]:
-    val count = edges.len()
-    val bin_count = height * 4
-    var firsts: [i64] = [0; count]
-    var lasts: [i64] = [0; count]
-    var cursor: [i64] = [0; bin_count + 1]
-    var total: i64 = 0
-    var i: i64 = 0
-    while i < count:
-        val edge = edges[i]
-        val above = edge.y_top * 4.0 - 0.5
-        var first = above as i64
-        if (first as f64) > above: first = first - 1
-        first = first + 1
-        val below = edge.y_bottom * 4.0 - 0.5
-        var last = below as i64
-        if (last as f64) > below: last = last - 1
-        if first < 0: first = 0
-        if last > bin_count - 1: last = bin_count - 1
-        firsts[i] = first
-        lasts[i] = last
-        var span = first
-        while span <= last:
-            cursor[span] = cursor[span] + 1
-            total = total + 1
-            span = span + 1
-        i = i + 1
-    var bins: [i64] = [0; bin_count + 1 + total]
-    var at: i64 = bin_count + 1
-    var t: i64 = 0
-    while t < bin_count:
-        bins[t] = at
-        at = at + cursor[t]
-        cursor[t] = bins[t]
-        t = t + 1
-    bins[bin_count] = at
-    i = 0
-    while i < count:
-        var k = firsts[i]
-        while k <= lasts[i]:
-            bins[cursor[k]] = i
-            cursor[k] = cursor[k] + 1
-            k = k + 1
-        i = i + 1
-    bins
-
-# Adds the exact horizontal span coverage of one sample row to `acc`, in
-# subpixel units (one full subpixel = 1.0). Crossings are sorted and walked
-# with the same non-zero winding rule as _glyf_raster_alpha. `bins` is the
-# `_edge_sample_index` of `edges` and `bin` the sample row at `sy`. `xs` and
-# `dirs` are the caller's crossing scratch (at least edges.len() long), and
-# `span` grows to cover every subpixel written: [span[0], span[1]).
-fn _lcd_accumulate_row(edges: [_SfntEdge], bins: [i64], bin: i64, sy: f64, subpixels: i64, mut xs: [f64], mut dirs: [i64], mut acc: [f64], mut span: [i64]):
-    var n: i64 = 0
-    val bin_end = bins[bin + 1]
-    var k = bins[bin]
-    while k < bin_end:
-        val edge = edges[bins[k]]
-        k = k + 1
-        if edge.y_top < sy and sy <= edge.y_bottom:
-            val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
-            # insertion sort: a glyph row has a handful of crossings
-            var at = n
-            while at > 0 and xs[at - 1] > crossing:
-                xs[at] = xs[at - 1]
-                dirs[at] = dirs[at - 1]
-                at = at - 1
-            xs[at] = crossing
-            dirs[at] = edge.direction
-            n = n + 1
-    var winding: i64 = 0
-    var i: i64 = 0
-    val limit = subpixels as f64
-    while i < n:
-        winding = winding + dirs[i]
-        if winding != 0 and i + 1 < n:
-            var a = xs[i] * 3.0
-            var b = xs[i + 1] * 3.0
-            if a < 0.0: a = 0.0
-            if b > limit: b = limit
-            if b > a:
-                var j = _floor_glyf(a)
-                if j < span[0]: span[0] = j
-                while (j as f64) < b and j < subpixels:
-                    val lo = if a > (j as f64): a else: j as f64
-                    val hi = if b < ((j + 1) as f64): b else: (j + 1) as f64
-                    if hi > lo:
-                        acc[j] = acc[j] + (hi - lo)
-                    j = j + 1
-                if j > span[1]: span[1] = j
-        i = i + 1
+    a
 
 # --- Slight (y-only) autohinter approximation ---------------------------------
 # Chrome on Linux renders through FreeType with hinting "slight": the latin
@@ -1650,11 +1683,16 @@ fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
         e = e + 1
     # The lowest blue extremum anchors the glyph: unanchored stems are placed
     # relative to the shift it receives from its zone fit.
-    var shift = 0.0
+    # FreeType keeps every original edge position (`opos`) as its own rounded
+    # 26.6 value, so a stem's origin is anchor->pos + (opos - anchor->opos) in
+    # integers. Adding a float shift first and rounding once picked the other
+    # side of the 16 px `5` bowl stem (org_center 442 vs FreeType's 441, a
+    # u_off/d_off tie) and drew the bowl top a whole row high.
+    var shift64: i64 = 0
     val low = _hstem_blue_fit(zones, n, bounds.top, tol)
     val high = _hstem_blue_fit(zones, n, bounds.bottom, tol)
-    if low.len() > 0: shift = low[0] - bounds.top * scale
-    else if high.len() > 0: shift = high[0] - bounds.bottom * scale
+    if low.len() > 0: shift64 = _hs_h64(low[0]) - _hs_h64(bounds.top * scale)
+    else if high.len() > 0: shift64 = _hs_h64(high[0]) - _hs_h64(bounds.bottom * scale)
     var s: i64 = 0
     while s < pairs.len() / 2:
         val lo = pairs[s * 2]
@@ -1674,7 +1712,7 @@ fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
             pos_hi = _hs_h64(hib[0])
             pos_lo = pos_hi - len64
         else:
-            val org_pos = _hs_h64(lo * scale + shift)
+            val org_pos = _hs_h64(lo * scale) + shift64
             val org_center = org_pos + len64 / 2
             if len64 < 96:
                 val u_off = if len64 <= 64: 32 else: 38
@@ -1710,13 +1748,20 @@ fn _scale_commands_x(commands: [SfntGlyfCommand], ratio: f64) -> [SfntGlyfComman
             out = out.push(_command(c.verb, c.x1 * ratio, c.y1, c.x2 * ratio, c.y2))
     out
 
+# The hinter works in 26.6 fixed point (FreeType af_*, and skrifa's port that
+# Chrome 159 runs), so every hinted point lands on a 1/64 px grid in x as
+# well as y: the 16 px `i` stem (136..316 units) becomes 69/64..159/64 px,
+# the same as `l` (138..318 units), and Chrome draws both identically.
+fn _hint_grid(v_px: f64, scale: f64) -> f64:
+    (_floor_glyf(v_px * 64.0 + 0.5) as f64) / (64.0 * scale)
+
 fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [SfntGlyfCommand]:
     var out: [SfntGlyfCommand] = []
     for c in commands:
         if c.verb == SFNT_GLYF_CLOSE:
             out = out.push(c)
         else:
-            out = out.push(_command(c.verb, c.x1, _hint_map_y(knots, c.y1) / scale, c.x2, _hint_map_y(knots, c.y2) / scale))
+            out = out.push(_command(c.verb, _hint_grid(c.x1 * scale, scale), _hint_grid(_hint_map_y(knots, c.y1), scale), _hint_grid(c.x2 * scale, scale), _hint_grid(_hint_map_y(knots, c.y2), scale)))
     out
 
 # reason: SFNT selector/size/phase scalars are the font-table domain;
@@ -1724,6 +1769,19 @@ fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [Sfn
 # @allow(primitive_api)
 pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
     sfnt_render_glyph_lcd_milli(blob, selector_kind, selector_value, size_px, 0, phase_q)
+
+# Chrome 159's font-cache-key size of a computed `font-size` (milli-px), in
+# 26.6 (1/64 px). Blink keys its font cache on `trunc(f32(size) * 100)` and
+# Skia hands FreeType that size truncated to 26.6, so 18.72 px rasterises at
+# 1197/64 (font_cache_key_size_chrome159_spec). Every text lane takes its
+# fractional size from here.
+# reason: milli-px in, 1/64-px out; consumed by font_renderer and the raster lane.
+# @allow(primitive_api)
+pub fn sfnt_font_cache_key_size_26_6(size_milli: i64) -> i64:
+    val size: f32 = ((size_milli as f64) / 1000.0) as f32
+    val hundredths = (size * (100.0 as f32)) as i64
+    val keyed: f32 = ((hundredths as f64) / 100.0) as f32
+    (keyed * (64.0 as f32)) as i64
 
 # Fractional-size twin (`font-size: 18.72px`). `x_milli` is the computed size
 # in milli-px; 0 or a whole `size_px * 1000` is the plain whole-px glyph.
@@ -1855,48 +1913,64 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
     val x0 = frame[2]
     val phase = phase_q as f64 / 4.0
     val subpixels = width * 3
-    val edges = _lcd_outline_edges(outline.slo_commands, outline.slo_scale, x0 as f64 - phase, outline.slo_raster_top)
-    val bins = _edge_sample_index(edges, height)
+    val samples = width * _SFNT_LCD_A8_PER_PX
+    val stride = samples + 2
+    val cells = _lcd_area_cells(outline.slo_commands, outline.slo_scale, x0 as f64 - phase, outline.slo_raster_top, stride, height)
     var gray: [u8] = [0u8; width * height]
     var rgb: [u8] = [0u8; width * height * 3]
-    var xs: [f64] = [0.0; edges.len() + 1]
-    var dirs: [i64] = [0; edges.len() + 1]
-    var span: [i64] = [0, 0]
+    # A8 row with 4 zero samples of padding each side, so the FIR below reads
+    # samples 4x-4 .. 4x+7 of pixel x as a8[4x .. 4x+11] with no bounds test.
+    var a8: [i64] = [0; samples + 8]
     var y: i64 = 0
     while y < height:
-        var acc: [f64] = [0.0; subpixels]
-        span[0] = subpixels
-        span[1] = 0
+        var acc = 0.0
+        var first: i64 = samples
+        var last: i64 = 0
         var s: i64 = 0
-        while s < _SFNT_LCD_SAMPLE_ROWS:
-            val sy = y as f64 + (s as f64 * 2.0 + 1.0) / (2.0 * _SFNT_LCD_SAMPLE_ROWS as f64)
-            _lcd_accumulate_row(edges, bins, y * _SFNT_LCD_SAMPLE_ROWS + s, sy, subpixels, xs, dirs, acc, span)
+        while s < samples:
+            acc = acc + cells[y * stride + s]
+            var cov = if acc < 0.0: 0.0 - acc else: acc
+            if cov > 1.0: cov = 1.0
+            val v = _floor_glyf(cov * 255.0 + 0.5)
+            a8[s + 4] = v
+            if v > 0:
+                if s < first: first = s
+                last = s + 1
             s = s + 1
-        # Subpixels further than the filter's 2-subpixel reach from any
-        # coverage, and pixels holding none of them, stay the 0 they were
-        # allocated as: every tap there multiplies 0.0.
-        if span[1] > span[0]:
-            var j: i64 = if span[0] > 2: span[0] - 2 else: 0
-            val j_end: i64 = if span[1] + 2 < subpixels: span[1] + 2 else: subpixels
-            val x_end: i64 = (j_end + 2) / 3
-            var x: i64 = j / 3
-            while j < j_end:
-                # Measured FIR [0.090, 0.225, 0.370, 0.225, 0.090] over neighbouring
-                # subpixels (see the header comment).
-                var f = _SFNT_LCD_TAP0 * acc[j]
-                if j >= 1: f = f + _SFNT_LCD_TAP1 * acc[j - 1]
-                if j + 1 < subpixels: f = f + _SFNT_LCD_TAP1 * acc[j + 1]
-                if j >= 2: f = f + _SFNT_LCD_TAP2 * acc[j - 2]
-                if j + 2 < subpixels: f = f + _SFNT_LCD_TAP2 * acc[j + 2]
-                var v = _round_glyf_metric(f * 255.0 / _SFNT_LCD_SAMPLE_ROWS as f64)
-                if v > 255: v = 255
-                if v < 0: v = 0
-                rgb[y * subpixels + j] = v as u8
-                j = j + 1
+        # Skia pack4xHToMask: output pixel x reads A8 samples 4x-4 .. 4x+7
+        # (one pixel each side), so pixels more than one pixel away from any
+        # coverage stay the 0 they were allocated as.
+        if last > first:
+            var x: i64 = first / _SFNT_LCD_A8_PER_PX - 1
+            if x < 0: x = 0
+            var x_end: i64 = (last + _SFNT_LCD_A8_PER_PX - 1) / _SFNT_LCD_A8_PER_PX + 1
+            if x_end > width: x_end = width
             while x < x_end:
-                val base = y * subpixels + x * 3
-                val sum = rgb[base] as i64 + rgb[base + 1] as i64 + rgb[base + 2] as i64
-                gray[y * width + x] = ((sum + 1) / 3) as u8
+                # Skia pack4xHToMask taps (table above), unrolled, zero taps dropped.
+                val b = x * _SFNT_LCD_A8_PER_PX
+                val s0 = a8[b]
+                val s1 = a8[b + 1]
+                val s2 = a8[b + 2]
+                val s3 = a8[b + 3]
+                val s4 = a8[b + 4]
+                val s5 = a8[b + 5]
+                val s6 = a8[b + 6]
+                val s7 = a8[b + 7]
+                val s8 = a8[b + 8]
+                val s9 = a8[b + 9]
+                val s10 = a8[b + 10]
+                val s11 = a8[b + 11]
+                var r = (3 * s0 + 11 * s1 + 28 * s2 + 51 * s3 + 64 * s4 + 57 * s5 + 36 * s6 + 16 * s7 + 5 * s8 + s9) / 256
+                var g = (2 * s1 + 8 * s2 + 22 * s3 + 43 * s4 + 61 * s5 + 61 * s6 + 43 * s7 + 22 * s8 + 8 * s9 + 2 * s10) / 256
+                var bl = (s2 + 5 * s3 + 16 * s4 + 36 * s5 + 57 * s6 + 64 * s7 + 51 * s8 + 28 * s9 + 11 * s10 + 3 * s11) / 256
+                if r > 255: r = 255
+                if g > 255: g = 255
+                if bl > 255: bl = 255
+                val o = y * subpixels + x * 3
+                rgb[o] = r as u8
+                rgb[o + 1] = g as u8
+                rgb[o + 2] = bl as u8
+                gray[y * width + x] = ((r + g + bl + 1) / 3) as u8
                 x = x + 1
         y = y + 1
     Some(SfntLcdGlyph(

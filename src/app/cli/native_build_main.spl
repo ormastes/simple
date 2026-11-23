@@ -2,7 +2,10 @@ use app.io.time_ops.{sleep_ms}
 use std.common.string_core.{str_split}
 use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1, worker_hir_profile_admit_v1, worker_hir_profile_for_owner_v1,
     worker_hir_pool_skip_without_closure_v1}
-use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, worker_hir_owner_start_v1, worker_hir_owner_retain_failure_v1}
+use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, WorkerHirSharedExecPinV1,
+    worker_hir_shared_exec_pin_open_v1, worker_hir_owner_start_borrowed_v1,
+    worker_hir_shared_exec_pin_close_stopped_v1, worker_hir_shared_exec_pin_retain_unstopped_v1,
+    worker_hir_owner_retain_failure_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
     native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
     native_build_hir_warmup_admits_mir_v1, native_build_mir_outcome_after_hir_failures_v1}
@@ -60,7 +63,7 @@ use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims}
 use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1, PARSE_SHARD_DEATH_GRACE_MS_V1,
-    shard_pool_poll_quantum_v1, shard_child_wait_bounded_v1}
+    shard_pool_poll_quantum_v1, shard_pool_headroom_probe_due_v1, shard_child_wait_bounded_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1, native_build_is_dll_init_failed_v1}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_addressable_budget_kb_v1,
     file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1,
@@ -1182,6 +1185,8 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
 # worker's own spawn; the old sequential waits let the k-th worker of a wave
 # run up to k x timeout_ms. Reap (and log) order is exit order, not index.
 const SHARD_POOL_POLL_MS: i64 = 10
+# Host headroom re-probe period for the slot pool (shard_pool_headroom_probe_due_v1).
+const SHARD_POOL_HEADROOM_PROBE_MS: i64 = 1000
 
 # One pool run's verdict. total_claims sums every owner's claim count; -1 when
 # any count was unreadable. all_stopped is false when a worker could not be
@@ -1211,6 +1216,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         return LedgerShardRunV1(code: 1, failed_modules: 0, total_claims: 0,
             blocked_reason: "worker queue environment could not be installed", all_stopped: true, refused_before_spawn: true)
     var hir_profiles: [WorkerHirProfileV1] = []
+    var hir_shared_pins: [WorkerHirSharedExecPinV1] = []
     var hir_pool_cleanup_deadline: i64 = 0
     if label == "hir-shard":
         if base.len() < 3 or base[0] != "run" or base[1] != "src/app/cli/native_build_worker.spl":
@@ -1305,10 +1311,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         var owners: [text] = []
         var indices: [i64] = []
         var started_ms: [i64] = []
+        var now_headroom: i64 = -1
+        var live_private: [i64] = []
+        var probe_at_ms: i64 = -1
+        var probed_live: i64 = -1
         while next_pending < pending.len() or pids.len() > 0:
-            val now_headroom = if pool_base_headroom < 0: -1 else: host_commit_avail_kib()
-            var live_private = shard_commit_live_footprint_v1(pool_base_headroom, now_headroom, pids.len())
-            if live_private.len() > 0 and live_private[0] > observed_peak_kib: observed_peak_kib = live_private[0]
+            val round_ms = time_now_monotonic_ms()
+            if shard_pool_headroom_probe_due_v1(probe_at_ms, round_ms, probed_live, pids.len(), SHARD_POOL_HEADROOM_PROBE_MS):
+                now_headroom = if pool_base_headroom < 0: -1 else: host_commit_avail_kib()
+                live_private = shard_commit_live_footprint_v1(pool_base_headroom, now_headroom, pids.len())
+                if live_private.len() > 0 and live_private[0] > observed_peak_kib: observed_peak_kib = live_private[0]
+                probe_at_ms = round_ms
+                probed_live = pids.len()
             val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib)
             while pids.len() < window_size and next_pending < pending.len() and
                     not stop_dispatch and
@@ -1323,8 +1337,11 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 var shard_args = base
                 shard_args = shard_args.push("{flag}={index}/{count}")
                 if label == "hir-shard":
+                    if hir_shared_pins.is_empty():
+                        hir_shared_pins = [worker_hir_shared_exec_pin_open_v1(hir_profiles[0], simple_bin)]
                     val profile = worker_hir_profile_for_owner_v1(hir_profiles[0], owner, est_kib * 1024)
-                    val hir_owner = worker_hir_owner_start_v1(profile, simple_bin, "{index}/{count}")
+                    val hir_owner = worker_hir_owner_start_borrowed_v1(
+                        profile, simple_bin, "{index}/{count}", hir_shared_pins[0])
                     hir_owners.push(hir_owner)
                     # Occupancy marker only: HIR never passes it to PID APIs.
                     pids.push(1)
@@ -1515,6 +1532,16 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     native_build_env_restore_v1(queue_env, old_queue)
     native_build_env_restore_v1(owner_env, old_owner)
     native_build_env_restore_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES", old_dataset_cap)
+    if not hir_shared_pins.is_empty():
+        if all_stopped:
+            match worker_hir_shared_exec_pin_close_stopped_v1(hir_shared_pins[0]):
+                case Ok(_): pass
+                case Err(pin_close_reason):
+                    all_stopped = false
+                    failed_workers = failed_workers + 1
+                    val _blocked = hir_shard_recovery_block(queue_dir, pin_close_reason)
+        else:
+            worker_hir_shared_exec_pin_retain_unstopped_v1(hir_shared_pins[0])
     if observed_peak_kib > 0:
         val _peak_written = file_atomic_write(peak_record, "{observed_peak_kib}")
         print "[{label}] measured worker peak commit={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"

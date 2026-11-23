@@ -18,6 +18,8 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 
 #include "../runtime.h"
 
@@ -34,6 +36,21 @@ extern int64_t rt_pool_state_pending_v1(int64_t state);
 extern int64_t rt_pool_state_running_v1(int64_t state);
 /* Weak so the pre-fix runtime still links; the fix must define it. */
 extern void spl_closure_pin_stats(int64_t* retains, int64_t* releases, int64_t* live) __attribute__((weak));
+
+/* This C-only fixture owns the optional providers normally supplied by the
+ * Rust array-packing runtime and Simple thread_pool.spl. Darwin executable
+ * links require concrete providers even for these weak imports. Count the
+ * packing notification so worker startup is checked; entering the unrelated
+ * Simple pool is a routing failure, never a successful no-op. */
+static _Atomic unsigned user_thread_notifications;
+void simple_note_user_threads_started(void) {
+    atomic_fetch_add_explicit(&user_thread_notifications, 1, memory_order_relaxed);
+}
+void worker_loop_entry(int64_t pool_id) {
+    fprintf(stderr, "FAIL: native PoolState routed to Simple worker pool %lld\n",
+            (long long)pool_id);
+    abort();
+}
 
 #define DIRECT_MARKER INT64_C(0x5344495245435446)
 
@@ -116,6 +133,7 @@ int main(void) {
 
     CHECK(rt_pool_state_close_v1(state) == 1);
     CHECK(rt_pool_state_destroy_v1(state) == 1);
+    CHECK(atomic_load_explicit(&user_thread_notifications, memory_order_relaxed) > 0);
     printf("SELFCHECK PASSED (0 failures)\n");
     return 0;
 }

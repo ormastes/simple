@@ -245,3 +245,34 @@ fn glob_import_does_not_collide_public_fn_with_cross_dir_private_helper() {
     let priv_mangled = crate::interpreter::flatten_owner_mangled_name(&priv_owner, "cfg_text");
     assert!(!format!("{run_query:?}").contains(&priv_mangled));
 }
+
+/// An omitted parameter whose default is a unit enum variant (`Kind.On` or
+/// `Kind::On`) is a call-site constant: positional, named, and method calls
+/// fill it with the variant. (seed_native_build_per_file_compile_minutes_windows_2026-11-23:
+/// `test_db_compat.spl` omitting `baseline_eligible: TestBaselineEligibility = TestBaselineEligibility.Eligible`.)
+#[test]
+fn unit_enum_variant_default_fills_omitted_argument() {
+    let head = "enum Kind:\n    On\n    Off\n\n\
+                fn mk(a: i64, k: Kind = Kind.Off, p: Kind = Kind::On) -> i64:\n    a\n";
+    for call in ["mk(1)", "mk(1, Kind.On)", "mk(1, p: Kind.Off)", "mk(a: 1)"] {
+        let text = lower_text(&format!("{head}fn caller() -> i64:\n    {call}\n")).unwrap_or_else(|e| panic!("{call}: {e}"));
+        assert!(text.contains("Kind::"), "{call}: variant must be filled: {text}");
+    }
+    let method = "enum Kind:\n    On\n    Off\n\nclass Db:\n    n: i64\n    me add(a: i64, k: Kind = Kind.Off):\n        self.n = a\n\n\
+                  fn caller() -> i64:\n    var d = Db(n: 0)\n    d.add(1)\n    d.n\n";
+    let text = lower_text(method).unwrap_or_else(|e| panic!("method: {e}"));
+    assert!(text.contains("Kind::Off"), "method: variant must be filled: {text}");
+}
+
+#[test]
+fn unknown_or_payload_enum_variant_default_stays_rejected() {
+    let cases = [
+        "enum Kind:\n    On\n    Off\n\nfn mk(a: text, k: Kind = Kind.Missing) -> text:\n    a\n",
+        "enum Kind:\n    On\n    Wrap(i64)\n\nfn mk(a: text, k: Kind = Kind.Wrap) -> text:\n    a\n",
+        "fn mk(a: text, k: text = Nowhere.Thing) -> text:\n    a\n",
+    ];
+    for head in cases {
+        let err = lower_text(&format!("{head}fn caller() -> text:\n    mk(\"a\")\n")).expect_err(head);
+        assert!(err.contains(NOT_CONSTANT), "{head}: {err}");
+    }
+}

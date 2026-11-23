@@ -1,0 +1,59 @@
+# SPL-UNIT-006 must survive a parse-cache hit: the conflict is queued while the
+# parser runs, so a module restored from the cache has to replay the conflicts
+# its cold parse queued (stored next to the cache entry).
+# Bug: doc/08_tracking/bug/unit_006_warning_lost_on_parse_cache_hit_2026-11-23.md
+# Runtime: src/compiler/10.frontend/frontend.spl,
+# src/compiler/10.frontend/frontend_parse_cache.spl,
+# src/compiler/10.frontend/core/unit_constraint.spl.
+use std.spec.*
+use std.io_runtime.{file_write_exact, dir_create_all, env_set, getpid}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits}
+use compiler.core.unit_constraint.{unit_constraint_drain_conflicts, unit_constraint_drain_conflicts_for}
+
+fn enable_isolated_parse_cache(run: text):
+    val _on = env_set("SIMPLE_FRONTEND_CACHE", "1")
+    val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", run)
+    val _dir = env_set("SIMPLE_FRONTEND_CACHE_DIR", "build/test_unit_conflict_cache_replay/" + run)
+
+describe "SPL-UNIT-006 on a parse-cache hit":
+    it "reports the conflict on the cold parse and again on the cached parse":
+        val run = "unit006-replay-{getpid()}"
+        enable_isolated_parse_cache(run)
+        expect(frontend_parse_cache_enabled()).to_be(true)
+        val dir = "build/test_unit_conflict_cache_replay/" + run + "/src"
+        expect(dir_create_all(dir)).to_be(true)
+        val path = dir + "/u6c_mod.spl"
+        val src = "unit U6cPort: u16 as u6cp in 1..=100\nunit U6cPort: u16 as u6cp in 1..=200\nfn main():\n    0\n"
+        expect(file_write_exact(path, src)).to_be(true)
+        val _stale = unit_constraint_drain_conflicts()
+
+        val _cold = parse_full_frontend(src, path, "u6c_mod", Logger(level: 0))
+        val cold = unit_constraint_drain_conflicts_for(path)
+        expect(cold.len()).to_equal(1)
+        expect(cold[0]).to_contain("SPL-UNIT-006")
+        expect(cold[0]).to_contain("U6cPort")
+
+        val hits_before = frontend_parse_cache_hits()
+        val _warm = parse_full_frontend(src, path, "u6c_mod", Logger(level: 0))
+        expect(frontend_parse_cache_hits()).to_equal(hits_before + 1)
+        val warm = unit_constraint_drain_conflicts_for(path)
+        expect(warm.len()).to_equal(1)
+        expect(warm[0]).to_equal(cold[0])
+
+    it "replays nothing for a cached module without a conflict":
+        val run = "unit006-clean-{getpid()}"
+        enable_isolated_parse_cache(run)
+        val dir = "build/test_unit_conflict_cache_replay/" + run + "/src"
+        expect(dir_create_all(dir)).to_be(true)
+        val path = dir + "/u6c_clean.spl"
+        val src = "unit U6cOne: u16 as u6co in 1..=100\nfn main():\n    0\n"
+        expect(file_write_exact(path, src)).to_be(true)
+        val _stale = unit_constraint_drain_conflicts()
+        val _cold = parse_full_frontend(src, path, "u6c_clean", Logger(level: 0))
+        expect(unit_constraint_drain_conflicts_for(path).len()).to_equal(0)
+        val hits_before = frontend_parse_cache_hits()
+        val _warm = parse_full_frontend(src, path, "u6c_clean", Logger(level: 0))
+        expect(frontend_parse_cache_hits()).to_equal(hits_before + 1)
+        expect(unit_constraint_drain_conflicts_for(path).len()).to_equal(0)

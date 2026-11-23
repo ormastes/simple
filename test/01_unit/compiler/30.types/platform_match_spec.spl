@@ -1,0 +1,125 @@
+# @cover src/compiler/30.types/platform_match.spl 80%
+# @req REQ-TYPES-PLATFORM-MATCH-001
+"""
+## Platform Variant Match Selection Specification
+
+Covers compile-target factory defaults, predicate contribution scoring,
+specificity ranking, default fallback, ambiguity detection, and multiple-default
+rejection in `compiler.types.platform_match`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use compiler.types.platform_match.{
+    CompileTarget,
+    PlatformPredMatch,
+    VariantMatch,
+    MatchSelector,
+    MatchResult
+}
+
+describe "platform variant match evaluation and selection":
+    it "provides canonical CompileTarget triples and custom targets":
+        step("Verify x86_64_linux, aarch64_linux, riscv32_none, and custom targets")
+        val x64 = CompileTarget.x86_64_linux()
+        expect(x64.cpu).to_equal("x86_64")
+        expect(x64.os).to_equal("linux")
+        expect(x64.bit).to_equal("64")
+
+        val rv32 = CompileTarget.riscv32_none()
+        expect(rv32.cpu).to_equal("riscv32")
+        expect(rv32.os).to_equal("none")
+        expect(rv32.abi).to_equal("eabi")
+        expect(rv32.bit).to_equal("32")
+
+    it "distinguishes empty wildcard predicates from matching constrained predicates":
+        step("Check PlatformPredMatch wildcard vs exact contribution")
+        val wildcard = PlatformPredMatch.check("cpu", "", "aarch64")
+        expect(wildcard.matched).to_be(true)
+        expect(wildcard.contributed()).to_be(false)
+
+        val exact = PlatformPredMatch.check("cpu", "aarch64", "aarch64")
+        expect(exact.matched).to_be(true)
+        expect(exact.contributed()).to_be(true)
+
+        val miss = PlatformPredMatch.check("os", "windows", "linux")
+        expect(miss.matched).to_be(false)
+        expect(miss.contributed()).to_be(true)
+
+    it "computes VariantMatch specificity from matched constrained axes only":
+        step("Evaluate exact vs partial vs mismatched target variants")
+        val target = CompileTarget.x86_64_linux()
+        val two_axes = VariantMatch.evaluate("v_lin64", false, "x86_64", "linux", "", "", target)
+        expect(two_axes.is_candidate()).to_be(true)
+        expect(two_axes.specificity).to_equal(2)
+
+        val three_axes = VariantMatch.evaluate("v_lin64_gnu", false, "x86_64", "linux", "gnu", "", target)
+        expect(three_axes.is_candidate()).to_be(true)
+        expect(three_axes.specificity).to_equal(3)
+
+        val wrong_os = VariantMatch.evaluate("v_win", false, "x86_64", "windows", "", "", target)
+        expect(wrong_os.is_candidate()).to_be(false)
+
+    it "selects the highest-specificity matched variant cleanly":
+        step("Rank candidates with varying specificity and verify MatchResult")
+        val target = CompileTarget.aarch64_linux()
+        val v0 = VariantMatch.evaluate("def_arm", true, "", "", "", "", target)
+        val v1 = VariantMatch.evaluate("linux_only", false, "", "linux", "", "", target)
+        val v2 = VariantMatch.evaluate("aarch64_linux_gnu", false, "aarch64", "linux", "gnu", "", target)
+        val v3 = VariantMatch.evaluate("riscv_only", false, "riscv32", "", "", "", target)
+
+        val sel = MatchSelector.from_four(v0, v1, v2, v3)
+        expect(sel.best_id()).to_equal("aarch64_linux_gnu")
+        expect(sel.is_ambiguous()).to_be(false)
+
+        val res = MatchResult.from_selector(sel)
+        expect(res.is_ok()).to_be(true)
+        expect(res.selected_id).to_equal("aarch64_linux_gnu")
+        expect(res.used_default).to_be(false)
+        expect(res.specificity).to_equal(3)
+        expect(res.error_kind()).to_equal("")
+
+    it "falls back to default when no specific candidate matches":
+        step("Verify default selection sets used_default without ambiguity")
+        val target = CompileTarget.create("wasm32", "wasi", "mvp", "32")
+        val v0 = VariantMatch.evaluate("linux_v", false, "", "linux", "", "", target)
+        val v1 = VariantMatch.evaluate("fallback_v", true, "", "", "", "", target)
+        val v2 = VariantMatch.evaluate("win_v", false, "", "windows", "", "", target)
+        val v3 = VariantMatch.evaluate("x64_v", false, "x86_64", "", "", "", target)
+
+        val sel = MatchSelector.from_four(v0, v1, v2, v3)
+        val res = MatchResult.from_selector(sel)
+        expect(res.is_ok()).to_be(true)
+        expect(res.selected_id).to_equal("fallback_v")
+        expect(res.used_default).to_be(true)
+        expect(res.error_kind()).to_equal("")
+
+    it "reports ambiguity when two non-default variants tie at highest specificity":
+        step("Verify tied non-default candidates fail closed as ambiguous")
+        val target = CompileTarget.x86_64_linux()
+        val v0 = VariantMatch.evaluate("by_cpu_os", false, "x86_64", "linux", "", "", target)
+        val v1 = VariantMatch.evaluate("by_abi_bit", false, "", "", "gnu", "64", target)
+        val v2 = VariantMatch.evaluate("by_os_only", false, "", "linux", "", "", target)
+        val v3 = VariantMatch.evaluate("def_v", true, "", "", "", "", target)
+
+        val sel = MatchSelector.from_four(v0, v1, v2, v3)
+        expect(sel.is_ambiguous()).to_be(true)
+        val res = MatchResult.from_selector(sel)
+        expect(res.is_ok()).to_be(false)
+        expect(res.error_kind()).to_equal("ambiguous")
+
+    it "rejects multiple defaults and zero-match selectors":
+        step("Check error_kind for multiple_defaults and no_match")
+        val target = CompileTarget.x86_64_linux()
+        val d0 = VariantMatch.evaluate("def_a", true, "", "", "", "", target)
+        val d1 = VariantMatch.evaluate("def_b", true, "", "", "", "", target)
+        val m0 = VariantMatch.evaluate("miss_a", false, "riscv32", "", "", "", target)
+        val m1 = VariantMatch.evaluate("miss_b", false, "", "windows", "", "", target)
+
+        val multi = MatchResult.from_selector(MatchSelector.from_four(d0, d1, m0, m1))
+        expect(multi.is_ok()).to_be(false)
+        expect(multi.multiple_defaults).to_be(true)
+        expect(multi.error_kind()).to_equal("multiple_defaults")
+
+        val none_matched = MatchResult.from_selector(MatchSelector.from_four(m0, m1, m0, m1))
+        expect(none_matched.is_ok()).to_be(false)
+        expect(none_matched.error_kind()).to_equal("no_match")

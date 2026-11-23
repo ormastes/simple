@@ -9,15 +9,18 @@
 #   (iii) inline asm outside `unsafe:` still warns (original rule)
 #   (iv)  module extern-fn (FFI) call outside `unsafe:` warns
 
-use std.spec.step
-
 use std.spec
 use std.spec.step
 use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.parse_full_frontend
-use compiler.hir.hir_lowering.types.HirLowering
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.semantics.resolve.{resolve_methods_quiet, resolve_methods_module_owner}
 use compiler.semantics.safety_checker.{SafetyChecker, SafetyError, safetychecker_check_module}
+use compiler.tools.sffi_audit.hir_inventory.{SffiHirInventoryStats, sffi_hir_inventory}
 # Guard import for
 # doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md:
 # executing lint-main's module graph (module-level Dict state init) must not
@@ -30,6 +33,49 @@ fn check_source(src: text, module_name: text) -> [SafetyError]:
     val hir = hir_lowering.lower_module(parsed)
     val checker = SafetyChecker.create()
     safetychecker_check_module(checker, hir)
+
+fn empty_sffi_inventory() -> SffiHirInventoryStats:
+    SffiHirInventoryStats(
+        resolved_extern_symbols: 0, raw_call_sites: 0,
+        resolved_raw_call_sites: 0, aliased_raw_call_sites: 0,
+        indirect_raw_call_sites: 0,
+        unresolved_prefixed_candidates: 0, lexically_scoped_call_sites: 0,
+        missing_authority_call_sites: 0, distinct_called_symbols: 0,
+        unavailable_method_bodies: 0, hir_complete: false,
+        signature_evidence_included: false,
+        verification_evidence_included: false)
+
+fn check_imported_source(
+    provider_src: text,
+    consumer_src: text
+) -> ([SafetyError], SffiHirInventoryStats):
+    val logger = Logger(level: 0)
+    val provider = parse_full_frontend(
+        provider_src, "ffi_provider.spl", "ffi_provider", logger)
+    val consumer = parse_full_frontend(
+        consumer_src, "ffi_consumer.spl", "ffi_consumer", logger)
+    var modules: Dict<text, Module> = {}
+    modules["ffi_provider"] = provider
+    modules["ffi_consumer"] = consumer
+    val sources = [
+        SourceFile(path: "ffi_provider.spl", content: provider_src, module_name: "ffi_provider"),
+        SourceFile(path: "ffi_consumer.spl", content: consumer_src, module_name: "ffi_consumer")
+    ]
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(surfaces):
+            var lowering = hirlowering_for_module("ffi_consumer.spl", surfaces)
+            val hir = lowering.lower_module(consumer)
+            if lowering.errors.len() > 0:
+                fail("imported SFFI fixture must lower without diagnostics")
+                return ([], empty_sffi_inventory())
+            val (_ignored, _) = resolve_methods_quiet(hir)
+            val resolved_hir = resolve_methods_module_owner ?? hir
+            val checker = SafetyChecker.create()
+            val errors = safetychecker_check_module(checker, resolved_hir)
+            (errors, sffi_hir_inventory(resolved_hir))
+        case Err(_):
+            fail("imported SFFI fixture surfaces must resolve")
+            ([], empty_sffi_inventory())
 
 fn count_kind(errors: [SafetyError], kind: text) -> i64:
     var n = 0
@@ -44,13 +90,15 @@ fn count_kind(errors: [SafetyError], kind: text) -> i64:
             case UnsafeFfiOutsideUnsafe(_):
                 if kind == "ffi":
                     n = n + 1
+            case StaticReferenceOutsideUnsafe(_):
+                if kind == "static_ref":
+                    n = n + 1
+            case MutableReferenceToImmutableStatic(_):
+                if kind == "immutable_static_mut_ref":
+                    n = n + 1
             case Other(_, _):
                 if kind == "other":
                     n = n + 1
-            case StaticReferenceOutsideUnsafe(_):
-                pass  # static-reference errors are not counted by this helper
-            case MutableReferenceToImmutableStatic(_):
-                pass  # nor are immutable-static mutation errors
     n
 
 describe "safety checker unsafe boundary":

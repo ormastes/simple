@@ -25,7 +25,7 @@ use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolat
 use compiler.frontend.core.string_interpolation_expand.{si_stats_reset, si_stats_report}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation_known_present}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
-use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for, parser_class_attributes_for}
+use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for, parser_class_attributes_for, parser_struct_attributes_for}
 use compiler.core.parser_decls.{parser_enum_open_regions_for}
 use compiler.core.parser_decls.{parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts}
 use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor_names}
@@ -611,7 +611,7 @@ fn flat_ast_to_module_body(path: text) -> ParserModule:
                         fields: fields,
                         visibility: s_visibility,
                         is_public: decl_get_visibility_text(idx) == "public",
-                        attributes: [],
+                        attributes: bridge_struct_embed_attributes(parser_struct_attributes_for(s_name), s_span),
                         has_doc_comment: false,
                         doc_comment: "",
                         span: s_span
@@ -1353,21 +1353,18 @@ fn flat_ast_to_module_body(path: text) -> ParserModule:
     if flat_bridge_trace_enabled():
         print "[flat-bridge] building frontend module path={path}"
     # A typed parser decision, not a source scan: only modules whose retained
-    # FunctionAttr contains @rt(hal) acquire the runtime boundary dependency.
-    var has_rt_hal_boundary = false
+    # FunctionAttr contains @rt(hal, c|rust) acquire the runtime boundary dependency.
     var has_rt_hal_comparator = false
     for function in functions.values():
         val rt_hal_attr = parse_function_attrs(function.attributes)
         if rt_hal_attr.is_rt_hal:
-            has_rt_hal_boundary = true
             if rt_hal_attr.rt_hal_compare_c or rt_hal_attr.rt_hal_compare_rust:
                 has_rt_hal_comparator = true
-    if has_rt_hal_boundary:
+    if has_rt_hal_comparator:
         imports.push(ParserImport(
             module: "std.nogc_sync_mut.rt_hal.boundary",
             items: [], is_lazy: false, span: make_span()
         ))
-    if has_rt_hal_comparator:
         imports.push(ParserImport(
             module: "std.nogc_sync_mut.rt_hal.process_task_arena",
             items: [], is_lazy: false, span: make_span()
@@ -2135,14 +2132,76 @@ pub fn fab_capture_state_install(s: FabCaptureState):
 export FabCaptureState, fab_capture_state_take, fab_capture_state_install
 
 
-# Forwarded onto a class: `@node_tree("tree")` (data plan W2b) and
+fn bridge_embed_unquote(raw: text) -> text:
+    val trimmed = raw.trim()
+    val n = trimmed.byte_len()
+    if n >= 2 and trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        return trimmed.substring(1, n - 1)
+    trimmed
+
+fn bridge_embed_arg_expr(raw_value: text, span: Span) -> Expr:
+    val unquoted = bridge_embed_unquote(raw_value)
+    val n = unquoted.byte_len()
+    var parsed_int: i64 = 0
+    var all_digits = n > 0
+    var i: i64 = 0
+    while i < n:
+        val b = unquoted.byte_at(i)
+        if b < 48 or b > 57:
+            all_digits = false
+            break
+        parsed_int = parsed_int * 10 + (b - 48)
+        i = i + 1
+    if all_digits:
+        return Expr(kind: ExprKind.IntLit(parsed_int), span: span)
+    Expr(kind: ExprKind.StringLit(unquoted, None), span: span)
+
+fn bridge_embed_attribute(spelling: text, span: Span) -> Attribute?:
+    if spelling == "embed":
+        return Some(Attribute(name: "embed", args: [], span: span))
+    if not (spelling.starts_with("embed(") and spelling.ends_with(")")):
+        return None
+    val inside = spelling.substring(6, spelling.byte_len() - 1).trim()
+    if inside == "":
+        return Some(Attribute(name: "embed", args: [], span: span))
+    var args: [Expr] = []
+    for raw_piece in inside.split(","):
+        val piece = raw_piece.trim()
+        if piece == "":
+            continue
+        val eq_idx = piece.index_of("=")
+        val colon_idx = piece.index_of(":")
+        val sep_idx = if eq_idx >= 0: eq_idx else: colon_idx
+        if sep_idx > 0:
+            val key = piece.substring(0, sep_idx).trim()
+            val rhs = bridge_embed_arg_expr(piece.substring(sep_idx + 1, piece.byte_len()), span)
+            args.push(Expr(kind: ExprKind.Assign(Expr(kind: ExprKind.Ident(key), span: span), None, rhs), span: span))
+        else:
+            args.push(bridge_embed_arg_expr(piece, span))
+    Some(Attribute(name: "embed", args: args, span: span))
+
+# Forward ONLY `@embed` / `@embed(...)` onto structs so 100% of existing
+# non-`@embed` struct ABIs remain unchanged.
+fn bridge_struct_embed_attributes(spellings: [text], span: Span) -> [Attribute]:
+    if spellings.len() == 0:
+        return []
+    var out: [Attribute] = []
+    for spelling in spellings:
+        if val embed_attr = bridge_embed_attribute(spelling, span):
+            out.push(embed_attr)
+    out
+
+# Forwarded onto a class: `@node_tree("tree")` (data plan W2b),
 # `@support_async_immutable` / `@support_async_immutable("f", ...)`
-# (immutable-views sub-plan P1). Every other class decorator stays dropped on
-# this path as before, so no existing layout/export behavior changes.
+# (immutable-views sub-plan P1), and `@embed` / `@embed(...)`. Every other class
+# decorator stays dropped on this path as before, so no existing layout/export
+# behavior changes.
 fn bridge_node_tree_attributes(spellings: [text], span: Span) -> [Attribute]:
     var out: [Attribute] = []
     for spelling in spellings:
-        if spelling.starts_with("node_tree(") and spelling.ends_with(")"):
+        if val embed_attr = bridge_embed_attribute(spelling, span):
+            out.push(embed_attr)
+        elif spelling.starts_with("node_tree(") and spelling.ends_with(")"):
             var arg = spelling.substring(10, spelling.byte_len() - 1).trim()
             if arg.len() >= 2 and arg.starts_with("\"") and arg.ends_with("\""):
                 arg = arg.substring(1, arg.byte_len() - 1)

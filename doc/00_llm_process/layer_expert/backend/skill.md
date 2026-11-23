@@ -368,3 +368,19 @@ Backend provider gate, receipt identity and backend contracts-as-data live in
 `src/app/build/targets/` (#10181); `provider_entry` `.provider.sdn` + SVE/RVV VL
 query merged in #10351 (review FAIL: provider gate self-attests; fix PR in
 progress). Details: mission_critical_robustness feature note.
+
+## 2026-11-23: seed Cranelift float call results are decoded at the producer
+
+User functions return f64/f32 as raw bits in an i64 register. The caller's dest
+vreg is typed f64 by `build_vreg_types`, and `decode_float_call_result`
+(`codegen/instr/body.rs`) now bitcasts the i64 carrier back to f64 right after
+the call (as `sync_vars_to_vregs` does for cross-block floats). Before this,
+any consumer that picks float vs. int lowering from the Cranelift value type
+broke on a direct call result: `floor_f64(x).to_i32()` gave 0, `.abs()`/
+`.sqrt()` worked on the bits, and `.floor()`/`.max()` failed with
+`function not found: f64.floor`. Trap: `simple test` runs spec bodies in the
+interpreter, so a codegen regression spec must compile a child program
+(`run` with `SIMPLE_EXECUTION_MODE` unset, and `native-build`). Also: the
+in-process `JitCompiler` harness did not reproduce the free-function shape,
+only `simple run` did. See
+[bug](../../../08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md).

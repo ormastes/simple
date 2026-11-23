@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Purpose: pin the letter/space kern pair of an inline edge space for
+`white-space:nowrap` and `direction:rtl` lines against Chrome 159. Chrome
+shapes a run together with its collapsible edge space, so `A ` is 14.234 px
+(A/space kern -0.883), not 10.672 + 4.453; the same holds on a nowrap line
+and on a right-to-left line of Latin runs (the line is one left-to-right
+segment that ends at the block's right edge).
+Audience: browser-engine inline layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default
+sans-serif 16px). Nine 300 px blocks, line-height 20 px, one line each: bands
+0-2 `white-space:nowrap`, bands 3-5 `direction:rtl`, bands 6-8 `direction:rtl`
+lines whose last run ends in a collapsible space (Chrome drops it at the line
+end: the last glyph still ends at x=299). `NK_CHROME` holds each
+band's ink-run start columns read from the Chrome screenshot (ink = every
+channel < 160); every run is one capital letter.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-SPACE-KERN-002 -- a run's edge space is kerned with the run on nowrap and rtl lines as Chrome 159 does.
+"""
+# @tag: unit, browser_engine, layout, inline, kerning, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val NK_W: i32 = 400
+val NK_H: i32 = 300
+val NK_SHORT_A: text = "A <b>B</b> A <b>D</b> A <b>F</b> A"
+val NK_SHORT_L: text = "A <b>B</b> L <b>D</b> T <b>F</b> Y"
+val NK_LONG: text = "A <span>B</span> A <span>D</span> A <span>F</span> A <span>B</span> A <span>D</span> A <span>F</span> A"
+
+fn nk_band(extra: text, body: text) -> text:
+    "<div style=\"width:300px;line-height:20px;{extra}\">{body}</div>"
+
+fn nk_page() -> text:
+    val nw = "white-space:nowrap"
+    val rtl = "direction:rtl"
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\">" + nk_band(nw, NK_SHORT_A) + nk_band(nw, NK_SHORT_L) + nk_band(nw, NK_LONG) + nk_band(rtl, NK_SHORT_A) + nk_band(rtl, NK_SHORT_L) + nk_band(rtl, NK_LONG) + nk_band(rtl, "A <b>B</b> A ") + nk_band(rtl, "<b>B</b> L ") + nk_band(rtl, "Y <b>B</b> T <span>D</span> ") + "</body></html>"
+
+val NK_CHROME: [[i32]] = [
+    [0, 16, 30, 45, 59, 74, 87],
+    [0, 16, 32, 44, 59, 74, 87],
+    [0, 16, 29, 44, 58, 73, 86, 101, 114, 129, 144, 159, 171],
+    [203, 219, 233, 248, 262, 277, 290],
+    [203, 218, 234, 247, 262, 277, 290],
+    [119, 134, 147, 163, 177, 192, 204, 220, 233, 248, 262, 277, 290],
+    [260, 276, 290],
+    [276, 292],
+    [245, 260, 275, 290]
+]
+
+fn nk_dark_col(px: [u32], x: i32, y0: i32) -> bool:
+    var y = y0
+    while y < y0 + 20:
+        val p = px[y * NK_W + x]
+        if ((p >> 16) & 255u32) < 160u32 and ((p >> 8) & 255u32) < 160u32 and (p & 255u32) < 160u32:
+            return true
+        y = y + 1
+    false
+
+fn nk_mismatches(px: [u32], first_band: i32, last_band: i32) -> i32:
+    if px.len() != NK_W * NK_H:
+        return 99
+    var bad = 0
+    var band = first_band
+    while band <= last_band:
+        val want = NK_CHROME[band]
+        var starts: [i32] = []
+        var x = 0
+        while x < NK_W:
+            if nk_dark_col(px, x, band * 20) and (x == 0 or not nk_dark_col(px, x - 1, band * 20)):
+                starts.push(x)
+            x = x + 1
+        if starts.len() != want.len():
+            print "band {band}: {starts.len()} ink runs, Chrome {want.len()}"
+            bad = bad + 1
+        else:
+            var k = 0
+            while k < want.len():
+                val d = starts[k] - want[k]
+                if d > 1 or d < -1:
+                    print "band {band} run {k}: {starts[k]}, Chrome {want[k]}"
+                    bad = bad + 1
+                k = k + 1
+        band = band + 1
+    bad
+
+describe "an edge space is kerned with its run on nowrap and rtl lines like Chrome 159":
+    it "AC-1: white-space:nowrap lines (cpu_simd)":
+        step("7 and 13 one-letter runs, A/L/T/Y before a collapsible space")
+        expect(nk_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(nk_page(), NK_W, NK_H, "cpu_simd"), 0, 2)).to_equal(0)
+
+    it "AC-2: direction:rtl lines of Latin runs (cpu_simd)":
+        step("the same lines, right-to-left block: the line ends at x=300")
+        expect(nk_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(nk_page(), NK_W, NK_H, "cpu_simd"), 3, 5)).to_equal(0)
+
+    it "AC-3: direction:rtl lines ending in a collapsible space (cpu_simd)":
+        step("the line-end space is dropped: the last glyph ends at the block's right edge")
+        expect(nk_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(nk_page(), NK_W, NK_H, "cpu_simd"), 6, 8)).to_equal(0)

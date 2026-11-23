@@ -15,6 +15,11 @@
 # skeleton/full equality is pinned by worker_surface_differential_spec.
 use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_unit_active_v1}
+use compiler.frontend.frontend.{frontend_private_parse_key_v1}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_dir}
+use compiler.frontend.frontend_spab_cache_v1.{frontend_spab_enabled_v1, frontend_spab_path_v1}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+use std.io_runtime.{file_exists}
 
 pub fn driver_hir_worker_skeleton_selected_v1(hir_shard_spec: text, flag: text) -> bool:
     hir_shard_spec != "" and flag != "0"
@@ -74,6 +79,35 @@ pub fn driver_hir_worker_parse_verdict_v1(error_count: i64, poisoned_count: i64,
 pub fn driver_hir_worker_parse_failed_row_v1(hir_shard_mode: bool, poisoned: bool) -> bool:
     hir_shard_mode and poisoned
 
+# Exact advisory-scoped private frontend cache key computed by frontend.spl.
+pub fn driver_frontend_advisory_cache_key_v1(source_content: text, advisory_cache_identity: text) -> text:
+    val private_key = frontend_private_parse_key_v1(source_content)
+    if private_key == "":
+        return ""
+    if advisory_cache_identity != "":
+        return xxh3_128_text("frontend-advisory-cache-v1|" + private_key + "|" + advisory_cache_identity)
+    private_key
+
+# True when a warm full-source frontend cache entry (.spab or .fpc) already
+# exists on disk for `(source_content, source_path, advisory_cache_identity)`.
+# Streaming HIR workers reuse that warm full-source entry inside their per-file
+# transient scope instead of building/parsing/storing a duplicate skeleton .fpc.
+# reason: boolean cache-presence predicate over source/path/advisory texts, matching driver_hir_worker_skeleton_selected_v1
+@allow(primitive_api)
+pub fn driver_hir_worker_warm_full_cache_present_v1(source_content: text, source_path: text,
+        advisory_cache_identity: text) -> bool:
+    if not frontend_parse_cache_enabled() or not file_exists(source_path):
+        return false
+    val key = driver_frontend_advisory_cache_key_v1(source_content, advisory_cache_identity)
+    if key == "":
+        return false
+    if frontend_spab_enabled_v1():
+        val spab_path = frontend_spab_path_v1(key)
+        if spab_path != "" and file_exists(spab_path):
+            return true
+    file_exists(frontend_parse_cache_dir() + "/" + key + ".fpc")
+
 export driver_hir_worker_skeleton_selected_v1, driver_hir_worker_skeleton_text_v1,
     driver_parse_shard_skeleton_warm_v1, parse_shard_skeleton_env_v1, driver_surface_parse_text_v1, driver_worker_placeholder_parse_text_v1
 export driver_hir_worker_parse_verdict_v1, driver_hir_worker_parse_failed_row_v1
+export driver_frontend_advisory_cache_key_v1, driver_hir_worker_warm_full_cache_present_v1

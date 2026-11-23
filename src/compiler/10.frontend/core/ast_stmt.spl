@@ -60,6 +60,7 @@ var stmt_if_val_marker: [bool] = []
 var stmt_count_slot: [i64] = [0]
 var stmt_mode_ready: bool = false
 var stmt_env_mirror_cached: bool = false
+var stmt_trace_tags_cached: bool = false
 
 # High-water mark of the largest stmt index ever mirrored into the environment
 # since the last stmt_reset(). stmt_count_set(0) inside stmt_reset() would
@@ -127,9 +128,18 @@ fn stmt_env_mirror_enabled() -> bool:
     # compatibility mirror while compiled Stage4 uses the cached fast path.
     (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
 
+fn stmt_trace_tags_enabled() -> bool:
+    if stmt_mode_ready:
+        if not stmt_trace_tags_cached:
+            return false
+        return not frontend_trace_suppressed()
+    ((env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? "") != "" and
+     not frontend_trace_suppressed())
+
 fn stmt_mode_slots_refresh():
     val native_arena = (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
     stmt_env_mirror_cached = (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
+    stmt_trace_tags_cached = (env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? "") != ""
     stmt_mode_ready = true
 
 fn stmt_count_slot_ensure():
@@ -295,16 +305,15 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_body_counts.push(0)
     stmt_if_single_else.push(-1)
     stmt_if_val_marker.push(false)
-    stmt_i64_set(idx, "TAG", tag)
-    stmt_i64_set(idx, "SPAN", span_id)
-    stmt_i64_set(idx, "EXPR", -1)
-    stmt_text_set(idx, "NAME", "")
-    stmt_i64_set(idx, "TYPE", 0)
-    stmt_text_set(idx, "BODY", "")
-    stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
-    val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
-    if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
-        (idx < 8 or tag <= 0)):
+    if stmt_env_mirror_enabled():
+        stmt_i64_set(idx, "TAG", tag)
+        stmt_i64_set(idx, "SPAN", span_id)
+        stmt_i64_set(idx, "EXPR", -1)
+        stmt_text_set(idx, "NAME", "")
+        stmt_i64_set(idx, "TYPE", 0)
+        stmt_text_set(idx, "BODY", "")
+        stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
+    if stmt_trace_tags_enabled() and (idx < 8 or tag <= 0):
         print "[stmt_alloc] idx={idx} tag={tag} span={span_id}"
     idx
 
@@ -662,6 +671,14 @@ fn stmt_set_expr(idx: i64, value: i64):
         return
     stmt_expr[idx] = value
 
+# Mutate a statement tag through its owner arena (cross-module array writes
+# mutate copies in interpreter mode). Used by statement-level desugar passes.
+pub fn stmt_set_tag(idx: i64, tag: i64):
+    if not stmt_idx_is_live(idx, stmt_tag.len()):
+        stmt_oob_trace("stmt_set_tag", idx, stmt_tag.len())
+        return
+    stmt_tag[idx] = tag
+
 fn stmt_owner_len() -> i64:
     stmt_tag.len()
 
@@ -705,7 +722,7 @@ export STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIN
 export STMT_LAZY_VAL_DECL, STMT_GPU_LAUNCH
 export STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT
 export STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES
-export stmt_count, stmt_set_expr, stmt_owner_len
+export stmt_count, stmt_set_expr, stmt_set_tag, stmt_owner_len
 export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
 export stmt_count_env, stmt_count_set, stmt_key
 export stmt_i64_set, stmt_text_set, stmt_list_set

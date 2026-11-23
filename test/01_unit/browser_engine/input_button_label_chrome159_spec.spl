@@ -1,0 +1,122 @@
+"""
+Purpose: Pin the box and the painted label of a default `<input type=submit |
+button | reset>` at device scale 1..4 against Chrome 159. Chrome sizes such
+an input like a `<button>`: its label (the `value`, else `Submit` / `Reset`,
+else nothing) plus 6 px inline padding and a 2 px border each side, and
+paints the label centred in it.
+Audience: web renderer layout / form-control maintainers.
+
+Chrome oracle (headless shell 1255, Linux arm64, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=K --window-size=400,300`,
+Liberation Sans). `getBoundingClientRect()` width, CSS px, at K = 1:
+`value="Go"` 33.78 for all three types (the same as `<button>Go</button>`),
+`type=submit` 57.48, `type=reset` 50.83, `type=button` with no value 16.
+Painted (`--screenshot`): K=1 frames 0-33 / 0-33 / 0-33 / 0-56 / 0-50 / 0-15
+on a mid-height row, i.e. the fractional width rounded, not ceiled (57.48 ->
+57). Label ink (pixels with every channel below 0x60) rows are pinned at K =
+1 and 2; at K = 3 and 4 (and its columns at K = 1) the value still paints
+at 13 px, not the 13.333 px float size, which moves its ink a row and two
+columns; that fix is held for review (see the skill wiki, 2026-11-22).
+
+Base (2ca16569863): every one of these inputs took the 20-column text-field
+width (185 px at K=1), so its label was centred around x = 90 and the left
+30 px of the box showed a frame and no label (K=1 ink 84-97, 73-112, 76-108).
+"""
+
+"""
+Traceability: REQ-WEB-INPUT-BUTTON-LABEL-001 — an `<input type=submit|button|reset>` is sized from its label like a `<button>`, and its label paints centred on Chrome's device rows.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans'}}div{{margin:0 0 7px 0}}</style></head><body>" +
+    "<div><input type=\"submit\" value=\"Go\"></div>" +
+    "<div><input type=\"button\" value=\"Go\"></div>" +
+    "<div><input type=\"reset\" value=\"Go\"></div>" +
+    "<div><input type=\"submit\"></div>" +
+    "<div><input type=\"reset\"></div>" +
+    "<div><input type=\"button\"></div>" +
+    "</body></html>"
+
+# CSS mid-height row of each control (tops 2, 33, 64, 95, 126, 157).
+val MID_ROWS: [i32] = [12, 43, 74, 105, 136, 167]
+
+fn _is_white(px: u32) -> bool:
+    (px & 0xFFFFFFu32) == 0xFFFFFFu32
+
+fn _is_ink(px: u32) -> bool:
+    ((px >> 16) & 0xFFu32) < 0x60u32 and ((px >> 8) & 0xFFu32) < 0x60u32 and (px & 0xFFu32) < 0x60u32
+
+# Non-white runs of device row `y`, as "first-last ...".
+fn _row_runs(px: [u32], w: i32, y: i32) -> text:
+    var out = ""
+    var start = -1
+    var x = 0
+    while x <= w:
+        val ink = x < w and not _is_white(px[y * w + x])
+        if ink and start < 0:
+            start = x
+        if not ink and start >= 0:
+            out = out + (if out == "": "" else: " ") + start.to_text() + "-" + (x - 1).to_text()
+            start = -1
+        x = x + 1
+    out
+
+# Device rows holding label ink in device columns 3K..57K above device row
+# `h`, as runs.
+fn _ink_rows(px: [u32], k: i32, h: i32) -> text:
+    val w = CSS_W * k
+    var out = ""
+    var start = -1
+    var y = 0
+    while y <= h:
+        var ink = false
+        if y < h:
+            var x = 3 * k
+            while x <= 57 * k and not ink:
+                if _is_ink(px[y * w + x]):
+                    ink = true
+                x = x + 1
+        if ink and start < 0:
+            start = y
+        if not ink and start >= 0:
+            out = out + (if out == "": "" else: " ") + start.to_text() + "-" + (y - 1).to_text()
+            start = -1
+        y = y + 1
+    out
+
+fn _render(k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, k, "cpu_simd")
+
+fn _frames_1x() -> text:
+    val px = _render(1)
+    if px.len() != (CSS_W * CSS_H) as i64:
+        return "size-mismatch"
+    var out = ""
+    for y in MID_ROWS:
+        out = out + (if out == "": "" else: " | ") + _row_runs(px, CSS_W, y)
+    out
+
+fn _label_rows(k: i32) -> text:
+    val px = _render(k)
+    if px.len() != (CSS_W * k * CSS_H * k) as i64:
+        return "size-mismatch"
+    _ink_rows(px, k, CSS_H * k)
+
+describe "Default <input type=submit|button|reset> box (Chrome 159)":
+    it "AC-1: each box is its label plus 6 px padding and a 2 px border, rounded":
+        expect(_frames_1x()).to_equal("0-33 | 0-33 | 0-33 | 0-56 | 0-50 | 0-15")
+
+describe "Default <input type=submit|button|reset> label (Chrome 159)":
+    it "AC-3: label rows at scale 1":
+        expect(_label_rows(1)).to_equal("8-16 39-47 70-78 101-109 132-140")
+
+    it "AC-4: label rows at scale 2":
+        expect(_label_rows(2)).to_equal("17-34 79-96 141-158 202-220 265-282")
+

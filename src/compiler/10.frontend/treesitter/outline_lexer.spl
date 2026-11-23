@@ -6,11 +6,34 @@
 # Split from outline.spl for modularity.
 
 use compiler.frontend.core.lexer.*
-use compiler.frontend.core.lexer_types.{Token, TokenKind}
-use compiler.frontend.core.lexer_types.{lex_token_eof}
+use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col, core_lexer_token_start, core_lexer_token_end, core_lexer_char_slice}
+use compiler.frontend.core.lexer_types.{Token, TokenKind, LexSpan, lex_token_eof, lex_span_new, token_kind_from_code}
 use compiler.frontend.treesitter_types.*
 use compiler.frontend.block_types.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
 use compiler.blocks.registry.{BlockRegistry, block_registry}
+
+fn ts_is_canonical_custom_block_kind(kind: text) -> bool:
+    (kind == "m" or kind == "sh" or kind == "sql" or kind == "re" or
+        kind == "md" or kind == "html" or kind == "graph" or kind == "img" or
+        kind == "schema" or kind == "style" or kind == "ui" or kind == "music" or
+        kind == "bim" or kind == "cad" or kind == "city" or kind == "rtl" or
+        kind == "loss" or kind == "lean" or kind == "nograd")
+
+fn ts_core_char_to_byte(core: CoreLexer, char_off: i64) -> i64:
+    val char_count = core.source_chars.len()
+    var target = char_off
+    if target < 0:
+        target = 0
+    if target > char_count:
+        target = char_count
+    if core.source.byte_len() == char_count:
+        return target
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < target:
+        acc = acc + core.source_chars[i].byte_len()
+        i = i + 1
+    acc
 
 # ============================================================================
 # TreeSitter Parser
@@ -36,6 +59,8 @@ struct TreeSitter:
     # # DESUGARED: registry: BlockRegistry
     has_registry: bool
     registry: BlockRegistry
+    core_lexer: CoreLexer = make_core_lexer("")
+    use_core_lexer: bool = false
 
 
 # ============================================================================
@@ -43,7 +68,7 @@ struct TreeSitter:
 # ============================================================================
 
 fn treesitter_new(source: text) -> TreeSitter:
-        val lexer = lexer_new(source)
+        val lexer = Lexer(dummy: 0)
         var ts = TreeSitter(
             lexer: lexer,
             current: lex_token_eof(1),
@@ -59,7 +84,9 @@ fn treesitter_new(source: text) -> TreeSitter:
             fast_mode: false,
             heuristic_mode: false,
             has_registry: false,
-            registry: BlockRegistry.new()
+            registry: BlockRegistry.new(),
+            core_lexer: make_core_lexer(source),
+            use_core_lexer: true
         )
         ts.advance()  # Prime this actual mutable parser, not a by-value helper copy
         ts
@@ -71,7 +98,7 @@ fn treesitter_with_fast_mode(fast_mode: bool) -> TreeSitter:
         In fast mode, Skippable blocks are stored as opaque outlines,
         and only OutlineRequired blocks get treesitter_outline called.
         """
-        val lexer = Lexer.new("")
+        val lexer = lexer_new("")
         TreeSitter(
             lexer: lexer,
             current: lex_token_eof(1),
@@ -87,7 +114,9 @@ fn treesitter_with_fast_mode(fast_mode: bool) -> TreeSitter:
             fast_mode: fast_mode,
             heuristic_mode: false,
             has_registry: true,
-            registry: block_registry()
+            registry: block_registry(),
+            core_lexer: make_core_lexer(""),
+            use_core_lexer: true
         )
 
 
@@ -98,7 +127,7 @@ fn treesitter_with_heuristic_mode(enabled: bool) -> TreeSitter:
         Always produces results, even with syntax errors.
         Ideal for LSP/IDE use where speed and tolerance matter more than accuracy.
         """
-        val lexer = Lexer.new("")
+        val lexer = lexer_new("")
         TreeSitter(
             lexer: lexer,
             current: lex_token_eof(1),
@@ -114,7 +143,9 @@ fn treesitter_with_heuristic_mode(enabled: bool) -> TreeSitter:
             fast_mode: false,
             heuristic_mode: enabled,
             has_registry: false,
-            registry: BlockRegistry.new()
+            registry: BlockRegistry.new(),
+            core_lexer: make_core_lexer(""),
+            use_core_lexer: false
         )
 
 
@@ -181,19 +212,46 @@ impl TreeSitter:
 
     fn with_source(source: text) -> TreeSitter:
         var next = self
-        next.lexer = lexer_new(source)
+        next.core_lexer = make_core_lexer(source)
+        next.use_core_lexer = true
         next.source = source
         next.advance()
         next
 
 
+    me next_token_from_source() -> Token:
+        if self.use_core_lexer:
+            val scan_result = core_lexer_next_token(self.core_lexer)
+            self.core_lexer = scan_result[0]
+            var kind_code: i64 = scan_result[1]
+            if kind_code == 0:
+                kind_code = 190
+            val tok_text = core_lexer_token_text(self.core_lexer)
+            val line = core_lexer_token_line(self.core_lexer)
+            val col = core_lexer_token_col(self.core_lexer)
+            val end_char = core_lexer_token_end(self.core_lexer)
+            val start_char = if kind_code == 182 or kind_code == 190: end_char else: core_lexer_token_start(self.core_lexer)
+            val start_byte = ts_core_char_to_byte(self.core_lexer, start_char)
+            val end_byte = ts_core_char_to_byte(self.core_lexer, end_char)
+            if kind_code == 6 and ts_is_canonical_custom_block_kind(tok_text):
+                val chars_len = self.core_lexer.source_chars.len()
+                if end_char < chars_len and self.core_lexer.source_chars[end_char] == "{{":
+                    kind_code = 240
+            return Token(
+                kind: token_kind_from_code(kind_code),
+                span: lex_span_new(start_byte, end_byte, line, col),
+                text: tok_text
+            )
+        var lexer = self.lexer
+        val tok = lexer_next_token(lexer)
+        self.lexer = lexer
+        tok
+
+
     me advance() -> Token:
         """Advance to next token."""
         self.previous = self.current
-
-        # Copy-modify-reassign: nested field mutations don't propagate in interpreter
-        var lexer = self.lexer
-        self.current = lexer_next_token(lexer)
+        self.current = self.next_token_from_source()
 
         # Accumulate doc comments
         # Guard against EOF and nil tokens before checking text
@@ -206,10 +264,93 @@ impl TreeSitter:
             else:
                 self.has_doc_comment = true
                 self.doc_comment = comment
-            self.current = lexer_next_token(lexer)
+            self.current = self.next_token_from_source()
 
-        self.lexer = lexer
         self.previous
+
+    me scan_raw_asm_braced_outline(start: LexSpan, is_volatile: bool, open_span: LexSpan) -> AsmBlockOutline:
+        """Scan `asm { ... }` payload raw from source so `#` immediates and braces stay intact."""
+        val content_start_char = core_lexer_token_end(self.core_lexer)
+        val chars = self.core_lexer.source_chars
+        val total = chars.len()
+        var pos = content_start_char
+        var line = open_span.line
+        var col = open_span.col + 1
+        var depth = 1
+        var in_string = false
+        var string_quote = ""
+        var escaped = false
+        var found_close = false
+        var close_char = total
+        var close_line = line
+        var close_col = col
+        while pos < total:
+            val ch = chars[pos]
+            if in_string:
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == string_quote:
+                    in_string = false
+            else:
+                if ch == "\"" or ch == "'":
+                    in_string = true
+                    string_quote = ch
+                elif ch == "{{":
+                    depth = depth + 1
+                elif ch == "}}":
+                    depth = depth - 1
+                    if depth == 0:
+                        found_close = true
+                        close_char = pos
+                        close_line = line
+                        close_col = col
+                        break
+            if ch == "\n":
+                line = line + 1
+                col = 1
+            else:
+                col = col + 1
+            pos = pos + 1
+
+        val raw_payload = if found_close:
+            core_lexer_char_slice(self.core_lexer, content_start_char, close_char)
+        else:
+            core_lexer_char_slice(self.core_lexer, content_start_char, total)
+        val close_start_byte = ts_core_char_to_byte(self.core_lexer, close_char)
+        val close_end_byte = if found_close:
+            ts_core_char_to_byte(self.core_lexer, close_char + 1)
+        else:
+            close_start_byte
+        val close_span = lex_span_new(close_start_byte, close_end_byte, close_line, close_col)
+
+        var lx = self.core_lexer
+        if lx.paren_depth > 0:
+            lx.paren_depth = lx.paren_depth - 1
+        if found_close:
+            lx.pos = close_char + 1
+            lx.line = close_line
+            lx.col = close_col + 1
+            lx.at_line_start = false
+            self.previous = Token(kind: TokenKind.RBrace, span: close_span, text: "}}")
+        else:
+            lx.pos = total
+            lx.line = line
+            lx.col = col
+            lx.at_line_start = false
+            self.previous = Token(kind: TokenKind.Eof, span: close_span, text: "")
+        self.core_lexer = lx
+        self.current = self.next_token_from_source()
+
+        AsmBlockOutline(
+            payload: raw_payload.trim(),
+            payload_span: lex_span_new(open_span.end_pos, close_start_byte, open_span.line, open_span.col),
+            span: merge_spans(start, close_span),
+            is_volatile: is_volatile,
+            syntax_form: "braced",
+            is_legacy: false
+        )
 
 
     fn peek() -> TokenKind:

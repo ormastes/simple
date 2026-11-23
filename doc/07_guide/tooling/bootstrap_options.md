@@ -211,6 +211,12 @@ codegen, and exit per shard (verified 9/9 shards, 1612/1613 modules). This is a
 scoped workaround; the `.fpc` read-back root cause is OPEN
 (`doc/08_tracking/bug/stage3_surface_build_av_items_spl_warm_frontend_cache_2026-11-22.md`;
 transport fix `stage3_resume_drops_mir_sharding_frontend_cache_env_2026-11-23.md`).
+Stage 4 (full-CLI relink, release and debug-xray, including `--resume-stage4`)
+honours the same caller `SIMPLE_FRONTEND_CACHE` (unset keeps the forced `1`;
+`0`/`1` used; else refused), binds it into the Stage 4 cache context, the
+build log (`stage4-frontend-cache:` line) and the provenance
+(`stage4_frontend_cache=`, absent = `1`)
+(`stage4_forces_frontend_cache_ignores_caller_2026-11-23.md`).
 
 ### Repo-tracked bootstrap settings (`config/bootstrap.sdn`)
 
@@ -239,14 +245,26 @@ config, so the scripts resolve the key and export the env var
 | `stage3_tree_rss_cap_kib` | `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` | `resume-stage3-from-admitted.sh` (Stage 3 only) |
 | `stage3_threads` | `SIMPLE_NATIVE_BUILD_THREADS` (coordinator route); skipped if either thread variable is set; `--jobs` wins. Direct fan-out (`SIMPLE_STAGE3_DIRECT_THREADS`>1) needs linux/darwin memory evidence and is not a host setting | `resume-stage3-from-admitted.sh` |
 | `stage3_file_workers` (0/1) | `SIMPLE_FILE_WORKERS` lane item | `bootstrap_select_stage3_file_workers` (source `host-config`) |
+| `frontend_cache` (`on`/`off`) | `SIMPLE_FRONTEND_CACHE` (`1`/`0`) for the Stage 2 verification matrix, Stage 3, and Stage 4 full-CLI relink; the Stage 2 producer build keeps its pinned `1` | `bootstrap-from-scratch.sh` startup (into the captured caller value, re-applied in the matrix subshell and used at the Stage 3 and Stage 4 launches), `resume-stage3-from-admitted.sh` (Stage 3 only) |
+| `mir_sharding` (0/1) | `SIMPLE_MIR_SHARDING` | Stage 2 matrix subshell + Stage 3 launch in `bootstrap-from-scratch.sh`, `resume-stage3-from-admitted.sh` |
+| `mir_shard_count` (1..128) | `SIMPLE_MIR_SHARD_COUNT` | same as `mir_sharding` (Stage 3 consumes it only on the per-file / interface-HIR lanes) |
+| `mir_shard_worker_kib` | `SIMPLE_MIR_SHARD_WORKER_KB` | Stage 2 matrix only (kept over the whole-build two-worker floor); NOT forwarded across the Stage 3 `env -i` boundary |
+| `sanity_build_timeout_seconds` (positive seconds) | `COMPILER_BUILD_TIMEOUT_SECONDS` (sanity-probe build cap, admission default 180) | `bootstrap-from-scratch.sh` startup and `resume-stage3-from-admitted.sh`, before each script's `:-180` default; explicit env wins, invalid = hard error |
+
+The four matrix/shard keys (W27/W32/W36, 2026-11-23) apply only when their env
+var is unset; an invalid value in any host-config layer is a hard error naming
+the key, not a silent fall-through. They reach each matrix tool row through
+`bootstrap_phase_c_tool_row_environment_keys` (`phase-c-backend-commands.shs`).
+Bug: `doc/08_tracking/bug/host_config_matrix_shard_knobs_unreachable_2026-11-23.md`.
 
 Note that a user `host.sdn` value beats the tracked per-host file; `--print`
 shows which layer won. `sh scripts/setup/update-host-config.shs [--dry-run]
 [--set KEY=VALUE]...` measures the host (CPUs -> `max_threads`; on Windows,
 available RAM < 1/4 of total while process working sets hold < 1/2 is the
 ballooned-guest pattern, #8931, and gives `mem_reserve_free_mib: 2048`) and
-updates the per-host file in place. `SIMPLE_MIR_SHARDING=0` is a temporary
-crash workaround and does not belong in host config.
+updates the per-host file in place. The `mir_*`/`frontend_cache` keys are
+host-scoped workarounds for open defects (W27 warm `.fpc` read-back AV, W32
+commit exhaustion); remove them from the per-host file once those are fixed.
 
 Defaults fixed in code, not config (2026-11-13):
 

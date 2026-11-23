@@ -54,8 +54,19 @@
 #define RT_PTREE_HAVE_OWNER 0
 #endif
 
+/* A bootstrap supervisor already owns the session and all of its descendants.
+ * Starting a nested private session would escape that owner. Presence of either
+ * reserved contract variable is sufficient to refuse: malformed/partial
+ * contracts must not silently restore permission to escape. Ordinary async
+ * children inherit the managed session and remain under its cleanup authority. */
+static int ptree_parent_session_owned(void) {
+    return getenv("SIMPLE_BOOTSTRAP_SESSION_ID") != NULL ||
+           getenv("SIMPLE_BOOTSTRAP_SESSION_EXEC") != NULL;
+}
+
 int64_t rt_process_tree_support(void) {
-    return RT_PTREE_HAVE_OWNER ? 0 : RT_PTREE_UNSUPPORTED;
+    return RT_PTREE_HAVE_OWNER && !ptree_parent_session_owned()
+               ? 0 : RT_PTREE_UNSUPPORTED;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -63,6 +74,16 @@ int64_t rt_process_tree_support(void) {
 /* with every live process and its session id. Returns count or -errno.      */
 /* ------------------------------------------------------------------------- */
 #if RT_PTREE_HAVE_OWNER
+
+/* Pid/sid operands: 0, 1 (init) and anything past INT32_MAX are never targets. */
+static int ptree_valid_target(int64_t id) {
+    return id > 1 && id <= INT32_MAX;
+}
+
+/* Negative errno in the rt_* convention; a zero errno still reports EIO. */
+static int64_t ptree_errno_result(int err) {
+    return -(int64_t)(err ? err : EIO);
+}
 
 typedef struct {
     pid_t pid;
@@ -107,7 +128,7 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
             if (saved == ESRCH) continue;
             free(list);
             closedir(proc);
-            return -(int64_t)(saved ? saved : EIO);
+            return ptree_errno_result(saved);
         }
         if (n == cap) {
             size_t new_cap = cap * 2;
@@ -133,7 +154,7 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
      * created before the second call, so leave headroom and retry on growth. */
     for (int attempt = 0; attempt < 8; attempt++) {
         int count = proc_listallpids(NULL, 0);
-        if (count <= 0) return errno ? -(int64_t)errno : -EIO;
+        if (count <= 0) return ptree_errno_result(errno);
         size_t cap = (size_t)count + 256;
         pid_t* pids = (pid_t*)calloc(cap, sizeof(pid_t));
         if (!pids) return -ENOMEM;
@@ -141,7 +162,7 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
         if (filled < 0) {
             int saved = errno;
             free(pids);
-            return saved ? -(int64_t)saved : -EIO;
+            return ptree_errno_result(saved);
         }
         if ((size_t)filled >= cap) { /* table grew past our headroom: retry */
             free(pids);
@@ -161,7 +182,7 @@ static int64_t ptree_enumerate(ptree_entry** out, size_t* out_count) {
                 if (saved == ESRCH) continue;
                 free(list);
                 free(pids);
-                return -(int64_t)(saved ? saved : EIO);
+                return ptree_errno_result(saved);
             }
             list[n].pid = pids[i];
             list[n].sid = sid;
@@ -231,6 +252,25 @@ static int64_t ptree_status_code(int status) {
     return -1;
 }
 
+/* waitpid(2) restarted across EINTR. */
+static pid_t ptree_waitpid_eintr(pid_t pid, int* status, int flags) {
+    pid_t waited;
+    do {
+        waited = waitpid(pid, status, flags);
+    } while (waited < 0 && errno == EINTR);
+    return waited;
+}
+
+/* Non-reaping waitid(WNOWAIT) probe, restarted across EINTR. Returns rc. */
+static int ptree_waitid_probe(pid_t pid, siginfo_t* info) {
+    int rc;
+    memset(info, 0, sizeof(*info));
+    do {
+        rc = waitid(P_PID, (id_t)pid, info, WEXITED | WNOHANG | WNOWAIT);
+    } while (rc < 0 && errno == EINTR);
+    return rc;
+}
+
 #endif /* RT_PTREE_HAVE_OWNER */
 
 /* ------------------------------------------------------------------------- */
@@ -241,6 +281,7 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
     (void)cmd; (void)args; (void)arg_count;
     return RT_PTREE_UNSUPPORTED;
 #else
+    if (ptree_parent_session_owned()) return -EPERM;
     if (!cmd || !*cmd || arg_count < 0 || (arg_count > 0 && !args)) return -EINVAL;
     if ((uint64_t)arg_count > (uint64_t)INT32_MAX) return -E2BIG;
     for (int64_t i = 0; i < arg_count; i++) {
@@ -337,7 +378,7 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
     close(err_pipe[0]);
     if (got == sizeof(child_errno) && child_errno != 0) {
         int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        (void)ptree_waitpid_eintr(pid, &status, 0);
         return -(int64_t)child_errno;
     }
     return (int64_t)pid;
@@ -352,13 +393,10 @@ int64_t rt_process_session_wait(int64_t pid, int64_t timeout_ms) {
     (void)pid; (void)timeout_ms;
     return RT_PTREE_UNSUPPORTED;
 #else
-    if (pid <= 1 || pid > INT32_MAX) return -1;
+    if (!ptree_valid_target(pid)) return -1;
     int status = 0;
     if (timeout_ms <= 0) {
-        pid_t waited;
-        do {
-            waited = waitpid((pid_t)pid, &status, 0);
-        } while (waited < 0 && errno == EINTR);
+        pid_t waited = ptree_waitpid_eintr((pid_t)pid, &status, 0);
         if (waited < 0) return -1;
         return ptree_status_code(status);
     }
@@ -383,14 +421,10 @@ int64_t rt_process_owned_child_state(int64_t pid) {
     (void)pid;
     return RT_PTREE_UNSUPPORTED;
 #else
-    if (pid <= 1 || pid > INT32_MAX) return -EINVAL;
+    if (!ptree_valid_target(pid)) return -EINVAL;
     siginfo_t info;
-    memset(&info, 0, sizeof(info));
-    int rc;
-    do {
-        rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
-    } while (rc < 0 && errno == EINTR);
-    if (rc < 0) return -(int64_t)(errno ? errno : EIO);
+    int rc = ptree_waitid_probe((pid_t)pid, &info);
+    if (rc < 0) return ptree_errno_result(errno);
     if (info.si_pid == (pid_t)pid) return 0;
     if (info.si_pid == 0) return 1;
     return -EIO;
@@ -402,14 +436,10 @@ int64_t rt_process_session_is_running(int64_t pid) {
     (void)pid;
     return RT_PTREE_UNSUPPORTED;
 #else
-    if (pid <= 1 || pid > INT32_MAX) return 0;
+    if (!ptree_valid_target(pid)) return 0;
     /* WNOWAIT leaves the zombie for rt_process_session_wait to reap. */
     siginfo_t info;
-    memset(&info, 0, sizeof(info));
-    int rc;
-    do {
-        rc = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
-    } while (rc < 0 && errno == EINTR);
+    int rc = ptree_waitid_probe((pid_t)pid, &info);
     if (rc == 0) {
         if (info.si_pid == (pid_t)pid) return 0; /* exited, reapable */
         return 1;                                 /* our child, still running */
@@ -430,7 +460,7 @@ int64_t rt_process_kill_session(int64_t sid, int32_t signo) {
     (void)sid; (void)signo;
     return RT_PTREE_UNSUPPORTED;
 #else
-    if (sid <= 1 || sid > INT32_MAX || signo < 0) return -EINVAL;
+    if (!ptree_valid_target(sid) || signo < 0) return -EINVAL;
     /* Never our own session: that would take the runner down with the tree. */
     if ((pid_t)sid == getsid(0)) return -EINVAL;
     ptree_entry* list = NULL;
@@ -461,7 +491,7 @@ int64_t rt_process_kill_tree(int64_t pid) {
     (void)pid;
     return RT_PTREE_UNSUPPORTED;
 #else
-    if (pid <= 1 || pid > INT32_MAX) return -EINVAL;
+    if (!ptree_valid_target(pid)) return -EINVAL;
     pid_t sid = getsid((pid_t)pid);
     if (sid >= 0 && sid != (pid_t)pid) {
         /* Alive, but not a session leader: not spawned by this owner. Refuse
@@ -491,7 +521,7 @@ int64_t rt_process_kill_tree(int64_t pid) {
             int saved = errno;
             if (saved == EINTR) continue; /* deadline still advances */
             if (saved == ECHILD) { leader_gone = 1; break; }
-            return saved ? -(int64_t)saved : -EIO;
+            return ptree_errno_result(saved);
         }
         ptree_sleep_ms(1);
     }

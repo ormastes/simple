@@ -1,0 +1,185 @@
+"""Kernel-side installed-tool probe component, not a VM or boot adapter.
+
+The boot owner supplies its real mount table, scheduler and authority registry.
+Only catalog admission, authenticated launch and one-shot scheduler evidence
+can produce a successful run result. Pure comparison helpers grant no authority.
+"""
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.mount_table_support.{mount_path_canonical}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_snapshot_armed_preparation_v1
+}
+use os.kernel.loader.executable_admission_pipeline.{executable_loader_revoke}
+use os.kernel.loader.executable_launch_arguments_v1.{executable_launch_arguments_v1_validate}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    authenticated_fs_exec_prepare_installed_artifact_online_v1,
+    authenticated_fs_exec_submit_v1
+}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionEvidenceV1, SchedulerExecutionEvidenceTokenV1,
+    scheduler_execution_evidence_consume_once_v2
+}
+
+pub enum SimpleOsToolProbeStatusV1:
+    Passed
+    Failed
+    Blocked
+
+pub struct SimpleOsToolProbeRequestV1:
+    path: text
+    argv: [text]
+    image_sha256: text
+    target_arch: text
+    expected_stdout: [u8]
+    expected_stderr: [u8]
+    # @allow(primitive_api) process-observation wire oracle: retain the scheduler's native signed i32 exit status without reinterpretation
+    expected_exit: i32
+    # @allow(primitive_api) bounded-probe request wire count: signed i64 preserves rejection of negative or over-65536 stdout limits
+    max_stdout: i64
+    # @allow(primitive_api) bounded-probe request wire count: signed i64 preserves rejection of negative or over-65536 stderr limits
+    max_stderr: i64
+
+pub struct SimpleOsToolProbeResultV1:
+    status: SimpleOsToolProbeStatusV1
+    reason: text
+    # @allow(primitive_api) kernel execution-result wire status: signed i64 carries native negative errno or the observed child exit without narrowing
+    exit_code: i64
+    scheduler: Scheduler
+    evidence: SchedulerExecutionEvidenceV1?
+    # Indeterminate owner calls never authorize rerunning the child. The boot
+    # caller retains its mount lease/registry and must resolve these coordinates
+    # through the original consume/revoke owners before retiring the result.
+    pending_evidence_token: SchedulerExecutionEvidenceTokenV1? = None
+    pending_admission_token: ExecutableAuthorityTokenV1? = None
+
+# @allow(primitive_api) scheduler evidence boundary: native signed exit/errno is retained while typed owner tokens preserve unresolved lifecycle authority
+pub(package) fn simpleos_tool_probe_unresolved_evidence_v1(
+    scheduler: Scheduler, exit_code: i64,
+    issued_token: SchedulerExecutionEvidenceTokenV1?,
+    pending_admission: ExecutableAuthorityTokenV1?
+) -> SimpleOsToolProbeResultV1:
+    SimpleOsToolProbeResultV1(status: SimpleOsToolProbeStatusV1.Failed,
+        reason: if issued_token.?: "execution-evidence-consumption-indeterminate" else: "authenticated-execution-evidence-unavailable",
+        exit_code: exit_code, scheduler: scheduler, evidence: None,
+        pending_evidence_token: issued_token, pending_admission_token: pending_admission)
+
+pub fn simpleos_tool_probe_request_error_v1(request: SimpleOsToolProbeRequestV1) -> text:
+    if not mount_path_canonical(request.path): return "noncanonical-tool-path"
+    if not request.path.starts_with("/bin/"): return "tool-path-outside-bin"
+    if request.argv.len() == 0 or request.argv[0] != request.path:
+        return "argv-zero-must-identify-tool"
+    if executable_launch_arguments_v1_validate(request.path, request.argv, []).is_err():
+        return "invalid-launch-arguments"
+    if not hash256_hex_valid(request.image_sha256) or hash256_is_zero(request.image_sha256):
+        return "invalid-tool-image-digest"
+    # Initial integration route only. In particular RV64 currently merges
+    # stdout and stderr; its observations cannot satisfy this stream oracle.
+    if request.target_arch != "x86_64": return "target-capture-route-not-admitted"
+    if request.max_stdout <= 0 or request.max_stdout > 65536 or
+       request.max_stderr < 0 or request.max_stderr > 65536:
+        return "invalid-output-bound"
+    if request.expected_stdout.len() > request.max_stdout or request.expected_stderr.len() > request.max_stderr:
+        return "output-oracle-exceeds-bound"
+    ""
+
+pub fn simpleos_tool_probe_evidence_error_v1(
+    request: SimpleOsToolProbeRequestV1, evidence: SchedulerExecutionEvidenceV1
+) -> text:
+    val invalid = simpleos_tool_probe_request_error_v1(request)
+    if invalid != "": return invalid
+    if not evidence.command_observed or evidence.child_id == 0u64 or
+       evidence.generation == 0u64 or evidence.mount_id == 0u64 or
+       evidence.mount_generation == 0u64 or evidence.file_generation == 0u64:
+        return "execution-identity-incomplete"
+    if evidence.image_hash != request.image_sha256 or
+       evidence.canonical_source_path != request.path or evidence.executable_path != request.path:
+        return "executed-image-mismatch"
+    if evidence.target_os != "simpleos" or evidence.target_abi != "simpleos" or evidence.target_arch != request.target_arch:
+        return "executed-target-mismatch"
+    if evidence.argv.len() != request.argv.len(): return "executed-argv-mismatch"
+    var i: i64 = 0
+    while i < request.argv.len():
+        if evidence.argv[i] != request.argv[i]: return "executed-argv-mismatch"
+        i = i + 1
+    if evidence.exit_code != request.expected_exit: return "tool-exit-mismatch"
+    if evidence.stdout_truncated or evidence.stderr_truncated or
+       evidence.stdout_bytes.len() > request.max_stdout or evidence.stderr_bytes.len() > request.max_stderr:
+        return "tool-output-truncated-or-over-bound"
+    # Completeness is issued by the observation owner, not inferred from
+    # expected/observed output. Both empty and nonempty streams require it.
+    if not evidence.stdout_capture_complete or not evidence.stderr_capture_complete:
+        return "process-output-capture-incomplete"
+    if evidence.stdout_bytes.len() != request.expected_stdout.len(): return "tool-stdout-mismatch"
+    i = 0
+    while i < request.expected_stdout.len():
+        if evidence.stdout_bytes[i] != request.expected_stdout[i]: return "tool-stdout-mismatch"
+        i = i + 1
+    if evidence.stderr_bytes.len() != request.expected_stderr.len(): return "tool-stderr-mismatch"
+    i = 0
+    while i < request.expected_stderr.len():
+        if evidence.stderr_bytes[i] != request.expected_stderr[i]: return "tool-stderr-mismatch"
+        i = i + 1
+    ""
+
+# @allow(primitive_api) authenticated-exec owner ABI: caller and recipe are the canonical service's existing signed native identity keys, not inferred names
+pub(package) fn simpleos_tool_probe_run_installed_v1(
+    scheduler: Scheduler, mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1, caller: i64,
+    caller_caps: CapabilitySet, recipe: i64, request: SimpleOsToolProbeRequestV1
+) -> SimpleOsToolProbeResultV1:
+    val invalid = simpleos_tool_probe_request_error_v1(request)
+    if invalid != "":
+        return SimpleOsToolProbeResultV1(status: SimpleOsToolProbeStatusV1.Blocked,
+            reason: invalid, exit_code: -22, scheduler: scheduler, evidence: None)
+    # This canonical service opens the staged artifact, checks its sealed
+    # catalog/manifest and obtains a fresh signed per-open admission. Missing
+    # media, trust, signatures or online reattestation fail closed here.
+    val admitted = authenticated_fs_exec_prepare_installed_artifact_online_v1(
+        table, authorities, caller, request.path, recipe)
+    if admitted.is_err():
+        return SimpleOsToolProbeResultV1(status: SimpleOsToolProbeStatusV1.Blocked,
+            reason: "installed-tool-admission-unavailable", exit_code: admitted.unwrap_err(), scheduler: scheduler, evidence: None)
+    val submission = admitted.unwrap()
+    val armed = executable_authority_snapshot_armed_preparation_v1(authorities, submission.token)
+    if armed.is_err() or armed.unwrap().identity.image_hash != request.image_sha256 or
+       armed.unwrap().identity.canonical_source_path != request.path or
+       armed.unwrap().identity.target.os != "simpleos" or
+       armed.unwrap().identity.target.arch != request.target_arch or
+       armed.unwrap().identity.target.abi != "simpleos":
+        val revoked = executable_loader_revoke(table, authorities, submission.token)
+        return SimpleOsToolProbeResultV1(status: SimpleOsToolProbeStatusV1.Failed,
+            reason: if revoked.is_ok(): "admitted-tool-identity-mismatch" else: "admitted-tool-cleanup-failed",
+            exit_code: -13, scheduler: scheduler, evidence: None,
+            pending_admission_token: if revoked.is_err(): Some(submission.token) else: None)
+    # Architecture dispatch uses x86_64_fs_exec_spawn_authenticated_with_launch_v1
+    # on x86_64, and the corresponding existing owner on each other CPU.
+    val executed = authenticated_fs_exec_submit_v1(
+        scheduler, table, submission, caller_caps, request.path, request.argv)
+    val observed: SchedulerExecutionEvidenceV1? = if executed.evidence.?:
+        scheduler_execution_evidence_consume_once_v2(executed.evidence.unwrap())
+    else: None
+    val pending_admission: ExecutableAuthorityTokenV1? = if executed.cleanup_indeterminate:
+        Some(submission.token)
+    else: None
+    if not observed.?:
+        return simpleos_tool_probe_unresolved_evidence_v1(
+            executed.scheduler, executed.exit_code, executed.evidence, pending_admission)
+    if executed.cleanup_indeterminate:
+        return SimpleOsToolProbeResultV1(status: SimpleOsToolProbeStatusV1.Failed,
+            reason: "authenticated-execution-or-cleanup-unproven", exit_code: executed.exit_code,
+            scheduler: executed.scheduler, evidence: observed,
+            pending_admission_token: pending_admission)
+    val evidence = observed.unwrap()
+    val error = simpleos_tool_probe_evidence_error_v1(request, evidence)
+    if error != "" or executed.exit_code != (evidence.exit_code as i64):
+        return SimpleOsToolProbeResultV1(
+            status: if error == "process-output-capture-incomplete": SimpleOsToolProbeStatusV1.Blocked else: SimpleOsToolProbeStatusV1.Failed,
+            reason: if error != "": error else: "execution-exit-receipt-mismatch",
+            exit_code: executed.exit_code, scheduler: executed.scheduler, evidence: Some(evidence))
+    SimpleOsToolProbeResultV1(status: SimpleOsToolProbeStatusV1.Passed,
+        reason: "authenticated-tool-output-matched", exit_code: executed.exit_code,
+        scheduler: executed.scheduler, evidence: Some(evidence))

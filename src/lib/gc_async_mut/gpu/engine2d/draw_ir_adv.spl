@@ -1751,7 +1751,7 @@ fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp])
     true
 
 fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, allow_clipped: bool, allow_translucent_initializer: bool) -> bool:
-    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+    if command.fractional_geometry.is_some() or draw_ir_command_has_unsupported_v4_state(command):
         return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
@@ -1936,7 +1936,7 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
 # executor to turn images, effects, clipped child surfaces, or a CPU result
 # into a device receipt.
 fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i32, height: i32) -> bool:
-    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+    if command.fractional_geometry.is_some() or draw_ir_command_has_unsupported_v4_state(command):
         return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
@@ -1960,10 +1960,17 @@ fn _engine2d_draw_ir_strict_vulkan_fractional_pixels(command: DrawIrCommand, wid
             geometry.width > 0.0 and geometry.height > 0.0 and
             right <= width.to_f64() and bottom <= height.to_f64()):
             return draw_ir_no_rect()
-        val left_pixel = ceil_f64(geometry.x - 0.5).to_i32()
-        val top_pixel = ceil_f64(geometry.y - 0.5).to_i32()
-        val right_pixel = ceil_f64(right - 0.5).to_i32()
-        val bottom_pixel = ceil_f64(bottom - 0.5).to_i32()
+        # Typed f64 locals before .to_i32(): workaround for the native
+        # call-result conversion defect (real fix in the compiler, see
+        # doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md).
+        val left_edge: f64 = ceil_f64(geometry.x - 0.5)
+        val top_edge: f64 = ceil_f64(geometry.y - 0.5)
+        val right_edge: f64 = ceil_f64(right - 0.5)
+        val bottom_edge: f64 = ceil_f64(bottom - 0.5)
+        val left_pixel = left_edge.to_i32()
+        val top_pixel = top_edge.to_i32()
+        val right_pixel = right_edge.to_i32()
+        val bottom_pixel = bottom_edge.to_i32()
         if right_pixel <= left_pixel or bottom_pixel <= top_pixel:
             return draw_ir_no_rect()
         return draw_ir_rect_bounds(
@@ -2018,10 +2025,19 @@ fn _engine2d_draw_ir_strict_vulkan_affine_pixels(command: DrawIrCommand,
                 if corners_y[i] < min_y: min_y = corners_y[i]
                 if corners_y[i] > max_y: max_y = corners_y[i]
                 i += 1
-            val left = floor_f64(min_x).to_i32() - 2
-            val top = floor_f64(min_y).to_i32() - 2
-            val right = ceil_f64(max_x).to_i32() + 2
-            val bottom = ceil_f64(max_y).to_i32() + 2
+            # Typed f64 locals before .to_i32(): natively,
+            # `floor_f64(x).to_i32()` returned the low 32 bits of the f64
+            # pattern (0 here), collapsing this box to (0,0,2,2) so the tile
+            # and bar were never painted on the GB10. Workaround for
+            # doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md.
+            val min_x_floor: f64 = floor_f64(min_x)
+            val min_y_floor: f64 = floor_f64(min_y)
+            val max_x_ceil: f64 = ceil_f64(max_x)
+            val max_y_ceil: f64 = ceil_f64(max_y)
+            val left = min_x_floor.to_i32() - 2
+            val top = min_y_floor.to_i32() - 2
+            val right = max_x_ceil.to_i32() + 2
+            val bottom = max_y_ceil.to_i32() + 2
             var visible = draw_ir_rect_intersection(
                 draw_ir_rect_bounds(left, top, right - left, bottom - top),
                 draw_ir_rect_bounds(0, 0, width, height))
@@ -2048,10 +2064,15 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
         for command in batch.commands:
             if command.? == None:
                 return "strict-vulkan-command-preflight-required"
-            # Only an affine coverage rect may carry a surface clip here (the
-            # coverage kernel clips in surface space); any other clipped
-            # command still fails closed.
-            if command.clip_rect.present and command.affine_transform == None:
+            # A surface clip is admitted on an affine coverage rect (the
+            # coverage kernel clips in surface space) and on a later plain or
+            # fractional rect (the rect kernel's push-constant scissor). The
+            # first command is the clear, which ignores clip; text, edge and
+            # path executors apply no clip; a negative clip is malformed. All
+            # of those still fail closed.
+            if (command.clip_rect.present and command.affine_transform == None and
+                (first or command.kind != DRAW_IR_COMMAND_RECT or
+                 command.clip_rect.width < 0 or command.clip_rect.height < 0)):
                 return "strict-vulkan-command-preflight-required"
             # Affine commands carry fractional local geometry too, so the v4
             # state test runs before the plain fractional rectangle branch.
@@ -2496,12 +2517,13 @@ fn _engine2d_draw_ir_materialize_image_damage(
 fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
     if command.? == None:
         return false
-    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+    # Field tests first: most commands fail one, and the v4 test is a call.
+    if not (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
+            command.height > 0 and command.computed_style.len() == 0 and
+            not command.clip_rect.present and
+            ((command.color >> 24) & 0xFFu32) > 0u32):
         return false
-    (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
-     command.height > 0 and command.computed_style.len() == 0 and
-     not command.clip_rect.present and
-     ((command.color >> 24) & 0xFFu32) > 0u32)
+    not (command.fractional_geometry.is_some() or draw_ir_command_has_unsupported_v4_state(command))
 
 fn _engine2d_draw_ir_exact_plain_bounds(
     command: DrawIrCommand, offset_x: i32, offset_y: i32,
@@ -2962,7 +2984,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
             skipped = skipped + command_weight
             unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "affine-or-raster-policy-unsupported")
             continue
-        if command.fractional_geometry != nil:
+        if command.fractional_geometry.is_some():
             skipped = skipped + command_weight
             unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "fractional-geometry-unsupported")
             continue
@@ -2986,20 +3008,36 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
             skipped = skipped + 1
             continue
         val command_clip = command.clip_rect
+        var clip_set = false
         if command_clip.present:
             val clip = draw_ir_rect_intersection(
                 draw_ir_rect_translate(command_clip, offset_x, offset_y),
                 active_clip
             )
-            eng.set_clip(
-                clip.x, clip.y, clip.width, clip.height
-            )
-        # Clip logically in force for text paints below. Horizontal
-        # containment of degraded/fallback text must INTERSECT with this,
-        # never replace it (replacing discards the container/overflow clip).
-        val text_paint_clip = _engine2d_draw_ir_text_effective_clip(
-            command_clip, active_clip, offset_x, offset_y)
-        if command_kind == DRAW_IR_COMMAND_RECT:
+            # A plain (unstyled) rect wholly inside its clip paints the same
+            # pixels under the clip already in force (the active clip, which
+            # contains `clip`), so it skips the set/restore round trip.
+            val plain_inside = (
+                command_kind == DRAW_IR_COMMAND_RECT and
+                command.computed_style.len() == 0 and
+                x.to_i64() >= clip.x.to_i64() and y.to_i64() >= clip.y.to_i64() and
+                x.to_i64() + command.width.to_i64() <= clip.x.to_i64() + clip.width.to_i64() and
+                y.to_i64() + command.height.to_i64() <= clip.y.to_i64() + clip.height.to_i64())
+            if not plain_inside:
+                eng.set_clip(
+                    clip.x, clip.y, clip.width, clip.height
+                )
+                clip_set = true
+        if command_kind == DRAW_IR_COMMAND_RECT and command.computed_style.len() == 0:
+            # No style: no shadow, corner, backdrop, glass/Metal material,
+            # gradient, border or outline applies, so the box is its colour
+            # fill alone. Skipping `_engine2d_draw_ir_render_box` and its style
+            # scans saves ~0.5 ms per command in the interpreter; a
+            # Chrome-exact dashed side emits ~3 such rects per dash.
+            if _engine2d_draw_ir_has_visible_alpha(command.color):
+                eng.draw_rect_filled(x, y, command.width, command.height, command.color)
+            rendered = rendered + command_weight
+        elif command_kind == DRAW_IR_COMMAND_RECT:
             # A concrete Metal composition requests a device receipt for every
             # canonical WM glass surface, even when its metadata or bounds are
             # malformed. Counting before execution makes that loss visible to
@@ -3058,6 +3096,11 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                 )
             rendered = rendered + command_weight
         elif command_kind == DRAW_IR_COMMAND_TEXT:
+            # Clip logically in force for text paints below. Horizontal
+            # containment of degraded/fallback text must INTERSECT with this,
+            # never replace it (replacing discards the container/overflow clip).
+            val text_paint_clip = _engine2d_draw_ir_text_effective_clip(
+                command_clip, active_clip, offset_x, offset_y)
             # Text remains on the canonical Engine2D font/batch route. The
             # generic command clip also covers selection/caret rectangles.
             eng.set_lcd_text(engine2d_draw_ir_lcd_text_enabled() and _engine2d_draw_ir_style_value(command.computed_style, "text-lcd") != "0")
@@ -3272,7 +3315,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         else:
             skipped = skipped + 1
             unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
-        if command_clip.present:
+        if clip_set:
             if active_clip.present:
                 eng.set_clip(
                     active_clip.x, active_clip.y,
@@ -3978,16 +4021,25 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                                     geometry.width, geometry.height,
                                     matrix.a, matrix.b, matrix.c, matrix.d,
                                     matrix.tx, matrix.ty, command.color)
-                elif command.fractional_geometry != None:
-                    val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
-                        command, eng.width(), eng.height())
-                    eng.draw_rect_filled(
-                        pixels.x, pixels.y, pixels.width, pixels.height,
-                        command.color)
                 else:
-                    eng.draw_rect_filled(
-                        command.x, command.y, command.width, command.height,
-                        command.color)
+                    # Preflight admitted this clip only for a non-first,
+                    # non-affine rect; the rect kernel applies it per pixel
+                    # from its push constants, and it is cleared right after.
+                    val clip = command.clip_rect
+                    if clip.present:
+                        eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+                    if command.fractional_geometry != None:
+                        val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
+                            command, eng.width(), eng.height())
+                        eng.draw_rect_filled(
+                            pixels.x, pixels.y, pixels.width, pixels.height,
+                            command.color)
+                    else:
+                        eng.draw_rect_filled(
+                            command.x, command.y, command.width, command.height,
+                            command.color)
+                    if clip.present:
+                        eng.clear_clip()
                 if painted:
                     rendered = rendered + 1
                 else:

@@ -1,7 +1,7 @@
 # engine3d: `*_ext.spl` plain impl blocks are never imported — trait impls incomplete
 
 Date: 2026-07-02
-Status: open (CPU backend fixed; same latent bug in all other 3D backends)
+Status: open (trait attachment fixed and interpreter-verified for all backends 2026-11-22; unsupported emu texture/shader/buffer behavior and native runs remain)
 Severity: P2
 Found by: W6 lane agent
 
@@ -108,3 +108,37 @@ These twelve authored behavioral cases are **TEST_BLOCKED**, with zero tests
 executed: no qualified self-hosted CLI is available. Required compiler/lib/
 MCP/LSP checks and native smokes are likewise unrun; no seed fallback or runtime
 PASS is claimed. The umbrella remains open pending those gates and parent review.
+
+## ROCm part verified on the interpreter — 2026-11-22 (lane rocm3d)
+
+Triage on `release/1.0.0` (263f49ab6c5): the ROCm source repair is already
+landed (dcc7d3b052a, PR #6299). `backend_rocm.spl` carries all 26 former
+extension methods inside `impl RenderBackend3D for RocmBackend3D`, and both
+`backend_rocm_ext.spl` paths are re-exports. What was missing was any run:
+every earlier entry is TEST_BLOCKED. No source change was needed.
+
+New spec `test/01_unit/lib/gpu/engine3d/backend_rocm_ext_methods_spec.spl`
+imports `RocmBackend3D` through the extension path
+(`std.gc_sync_mut.gpu.engine3d.backend_rocm_ext`) and calls all 26 methods
+through a `RenderBackend3D`-typed argument. Run with the release seed
+(interpreter), Windows host:
+
+| run | verdict |
+|---|---|
+| new spec, release sources | 7 executed, 7 passed |
+| new spec, ROCm files at dcc7d3b052a^ (negative control) | ERROR, 0 executed: `type RocmBackend3D does not implement required method create_texture_ex from trait RenderBackend3D` |
+| `backend_primary_trait_spec` | 3 passed |
+| `backend_remaining_primary_trait_spec` | 6 passed |
+| `backend_extension_compatibility_spec` | 6 passed |
+| `backend_trait_impl_completeness_hir_spec` | 25 passed |
+
+So the TEST_BLOCKED behavioral cases of the 2026-11-03 entries now have
+interpreter PASS evidence for all twelve primary owners.
+
+Not GPU evidence: `RocmBackend3D` has no HIP dispatch at all. It is a software
+rasterizer (class docstring: "native HIP kernel dispatch is a future
+milestone"), so there is nothing to run on the AMD GPU. Still open under this
+umbrella: shader, pipeline, storage-buffer, compute and extended-texture
+methods return the `emu_*` unsupported sentinels (-1 / empty) on ROCm and every
+other emulated backend; the new spec pins that as "unsupported", it does not
+repair it. Native (compiled) execution of these specs is unrun.

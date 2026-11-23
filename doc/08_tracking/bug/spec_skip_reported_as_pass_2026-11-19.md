@@ -137,3 +137,36 @@ be in helpers that are never called from an example.
 
 Lane L5's spec writes a `SKIPPED:` line to its own record file as a stopgap
 (commit dab01a0415a on `work/slang-l5-tts-20261117`).
+
+## Rust seed fix (lane skipfix, 2026-11-23)
+
+Option 1, in the seed's BDD handler (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`):
+
+- New thread-local `BDD_SKIP_IN_IT`, reset when an `it` starts and in `clear_bdd_state`.
+- The `skip` builtin arm: when called while an `it` body runs (`BDD_INSIDE_IT`), it sets the
+  flag instead of being left alone. At describe level behaviour is unchanged
+  (`record_describe_level_skip`).
+- The `it` arm: if the flag is set, the example is recorded skipped
+  (`BDD_IGNORED_TESTS`, `record_test_result(..., true, true)`) and printed
+  `○ <name> (skip in body)`. Skip wins over a later failing expect or error.
+  The Simple `skip()` body still prints its own `skipped (<reason>)` line, which the
+  runner's `Results:` counter reads, so the new marker is worded not to count twice.
+
+Tests (fail on old code, pass on new):
+
+- Rust: `skip_in_example_tests` in bdd.rs (2 tests; `cargo test` log
+  `C:/dev/slang-logs/skipfix/cargo_test2.log`, 2 passed).
+- Spec: `test/01_unit/lib/spec/skip_in_it_body_spec.spl` (1 real pass, 2 in-body skips, one
+  followed by a failing expect). Old seed: `passed=2 failed=1 skipped=0`
+  (`new_spec_pinned_seed.log`). Fixed seed: `passed=1 failed=0 skipped=2`
+  (`final_spec.log`).
+
+Open: the deployed `C:/dev/seeds/simple-release.exe` and the pure-Simple runner
+(`spec.spl`, handled by the skipfix-spl lane) do not have this fix until redeployed;
+the 73 files above still rely on their `SKIPPED:` stopgap lines until then.
+
+## Pure-Simple fix (lane skipfix-spl, 2026-11-23)
+
+Option 1 is done in `src/lib/nogc_sync_mut/spec.spl`: `skip()` called while an example runs records it, and `_execute_it` returns "skip" and counts `test_skipped` (skip wins over a later pass or fail). Pinned by `test/01_unit/lib/nogc_sync_mut/spec_skip_in_body_spec.spl`, which drives `_execute_it` directly: on the old code 2 of 3 examples fail ("expected pass to equal skip"), on the new code 3 of 3 pass.
+
+The seed's native `it` (bdd.rs, section above) never goes through `_execute_it`, so this test drives it directly.

@@ -1,7 +1,7 @@
 # Native Win64 single-threaded ConPTY owner. No pointers escape this module.
 # Each returned index is nonreused; copied handles become invalid on close.
 use std.nogc_sync_mut.io.windows_pty_abi.{CreatePseudoConsole, ResizePseudoConsole, ClosePseudoConsole, CreateNamedPipeW, ConnectNamedPipe, CreatePipe, PeekNamedPipe, WriteFile, GetOverlappedResult, CancelIoEx, CreateEventW, ResetEvent, GetCurrentProcessId}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError, GetTickCount64, Sleep, ReadFile, QueryInformationJobObject}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError, GetTickCount64, Sleep, ReadFile, QueryInformationJobObject, windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_overlapped_event_offset}
 use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 use std.nogc_sync_mut.io.windows_pty_codec.{windows_pty_size_valid_v1, windows_pty_coord_v1, windows_pty_decode_v1}
@@ -71,7 +71,7 @@ var _windows_pty_slots_v1: [WindowsPtyStateV1] = []
 var _windows_pty_quarantine_v1: [i64] = []
 var _windows_pty_active_v1: i64 = 0
 var _windows_pty_cleanup_failed_v1: bool = false
-var _windows_managed_host_baseline_v2: WindowsManagedStreamHostV2? = nil
+var _windows_managed_host_baseline_v2: WindowsManagedStreamHostV2? = None
 var _windows_managed_host_drift_v2: bool = false
 
 # This guard executes before any public legacy/managed entry reads registry
@@ -278,16 +278,19 @@ pub fn windows_pty_open_v1(rows: i32, cols: i32) -> i32:
     # The client has connected already; ERROR_PIPE_CONNECTED is success.
     if ConnectNamedPipe(state.input_server, 0) == 0 and GetLastError() != 535u32:
         return _windows_pty_open_failed_v1(state)
+    windows_abi_write_ptr(state.arena + 8, 0)
+    windows_abi_write_ptr(state.arena + 16, 0)
     if CreatePipe(state.arena + 8, state.arena + 16, 0, 65536u32) == 0:
         return _windows_pty_open_failed_v1(state)
-    state.output = volatile_read_u64(state.arena + 8)
-    state.output_server = volatile_read_u64(state.arena + 16)
+    state.output = windows_abi_read_ptr(state.arena + 8)
+    state.output_server = windows_abi_read_ptr(state.arena + 16)
     state.event = CreateEventW(0, 1, 0, 0)
     if state.event == 0: return _windows_pty_open_failed_v1(state)
-    volatile_write_u64(state.arena + 88, state.event)
+    windows_abi_write_ptr(state.arena + 64 + windows_abi_overlapped_event_offset(), state.event)
+    windows_abi_write_ptr(state.arena, 0)
     if CreatePseudoConsole(windows_pty_coord_v1(rows, cols), state.input_server, state.output_server, 0u32, state.arena) < 0:
         return _windows_pty_open_failed_v1(state)
-    state.console = volatile_read_u64(state.arena)
+    state.console = windows_abi_read_ptr(state.arena)
     if state.console == 0: return _windows_pty_open_failed_v1(state)
     val index = _windows_pty_slots_v1.len()
     _windows_pty_slots_v1 = _windows_pty_slots_v1.push(state)
@@ -340,33 +343,34 @@ fn _windows_pty_spawn_prepared_v1(handle: i32, prepared: WindowsPtyLaunchPrepare
     val process_info = state.arena + 12816
     val limits = state.arena + 12504
     val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, state.arena + 48)
-    val required = volatile_read_u64(state.arena + 48)
+    val required = windows_abi_read_ptr(state.arena + 48)
     var attributes: i64 = 0
     var initialized = false
     var admitted = required > 0 and required <= 1048576
     if admitted:
-        attributes = HeapAlloc(state.heap, 8u32, required as u64)
+        attributes = windows_abi_heap_alloc(state.heap, required)
         admitted = attributes != 0
     if admitted:
         initialized = InitializeProcThreadAttributeList(attributes, 1u32, 0u32, state.arena + 48) != 0
         admitted = initialized
     if admitted:
         # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE=0x20016; lpValue is HPCON itself.
-        admitted = UpdateProcThreadAttribute(attributes, 0u32, 131094u64, state.console, 8u64, 0, 0) != 0
+        admitted = windows_abi_update_proc_thread_attribute(attributes, 131094, state.console, windows_abi_pointer_bytes()) != 0
+    val limits_bytes = windows_abi_job_extended_limit_size()
     if admitted:
-        volatile_write_u32(startup, 112)
+        volatile_write_u32(startup, windows_abi_startupinfoex_size())
         # STARTF_USESTDHANDLES with INVALID_HANDLE_VALUE: without it a child of a
         # parent whose stdio is redirected inherits those handles and writes past
         # the pseudoconsole, so the pane sees only ConPTY's init sequence.
-        volatile_write_u32(startup + 60, 256)
-        volatile_write_u64(startup + 80, -1)
-        volatile_write_u64(startup + 88, -1)
-        volatile_write_u64(startup + 96, -1)
-        volatile_write_u64(startup + 104, attributes)
-        volatile_write_u32(limits + 16, 8192)
-        state.job = CreateJobObjectW(0, 0)
+        volatile_write_u32(startup + windows_abi_startupinfo_flags_offset(), 256)
+        windows_abi_write_ptr(startup + windows_abi_startupinfo_std_input_offset(), -1)
+        windows_abi_write_ptr(startup + windows_abi_startupinfo_std_output_offset(), -1)
+        windows_abi_write_ptr(startup + windows_abi_startupinfo_std_error_offset(), -1)
+        windows_abi_write_ptr(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
+        volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8192)
+        state.job = CreateJobObjectW(0, 0) as i64
         admitted = state.job != 0
-    if admitted: admitted = SetInformationJobObject(state.job, 9, limits, 144u32) != 0
+    if admitted: admitted = SetInformationJobObject(state.job, 9, limits, limits_bytes as u32) != 0
     var thread: i64 = 0
     if admitted:
         # CREATE_SUSPENDED|EXTENDED_STARTUPINFO_PRESENT, inheritHandles=FALSE.
@@ -375,8 +379,8 @@ fn _windows_pty_spawn_prepared_v1(handle: i32, prepared: WindowsPtyLaunchPrepare
         admitted = CreateProcessW(prepared.application, prepared.command, 0, 0, 0, flags,
             prepared.environment, prepared.directory, startup, process_info) != 0
         if admitted:
-            state.process = volatile_read_u64(process_info)
-            thread = volatile_read_u64(process_info + 8)
+            state.process = windows_abi_read_ptr(process_info + windows_abi_process_info_process_offset())
+            thread = windows_abi_read_ptr(process_info + windows_abi_process_info_thread_offset())
             state.pid = volatile_read_u32(process_info + 16)
             admitted = AssignProcessToJobObject(state.job, state.process) != 0
             if admitted: admitted = ResumeThread(thread) != 4294967295u32
@@ -705,12 +709,12 @@ fn _windows_process_pin_retained_v2(heap: i64, path: text, digest: text,
 fn _windows_process_hash_retained_v2(heap: i64, file: i64, expected: text,
         expires_at_unix_ms: i64) -> WindowsProducerPinRetainedV2:
     var retained = WindowsProducerPinRetainedV2(file: file)
-    val metadata = HeapAlloc(heap, 8u32, 8u64)
-    val algorithm_slot = HeapAlloc(heap, 8u32, 8u64)
-    val hash_slot = HeapAlloc(heap, 8u32, 8u64)
-    val count_slot = HeapAlloc(heap, 8u32, 8u64)
-    val buffer = HeapAlloc(heap, 8u32, 65536u64)
-    val digest_buffer = HeapAlloc(heap, 8u32, 32u64)
+    val metadata = windows_abi_heap_alloc(heap, 8)
+    val algorithm_slot = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes())
+    val hash_slot = windows_abi_heap_alloc(heap, windows_abi_pointer_bytes())
+    val count_slot = windows_abi_heap_alloc(heap, 8)
+    val buffer = windows_abi_heap_alloc(heap, 65536)
+    val digest_buffer = windows_abi_heap_alloc(heap, 32)
     val algorithm_name = _windows_process_wide_v1(heap, "SHA256")
     val allocations = [metadata, algorithm_slot, hash_slot, count_slot, buffer, digest_buffer, algorithm_name]
     var valid = true
@@ -721,11 +725,11 @@ fn _windows_process_hash_retained_v2(heap: i64, file: i64, expected: text,
             valid = false
     if valid:
         val opened = BCryptOpenAlgorithmProvider(algorithm_slot, algorithm_name, 0, 0u32)
-        retained.algorithm = volatile_read_u64(algorithm_slot)
+        retained.algorithm = windows_abi_read_ptr(algorithm_slot)
         if opened != 0 or retained.algorithm == 0: valid = false
     if valid:
         val created = BCryptCreateHash(retained.algorithm, hash_slot, 0, 0u32, 0, 0u32, 0u32)
-        retained.hash = volatile_read_u64(hash_slot)
+        retained.hash = windows_abi_read_ptr(hash_slot)
         if created != 0 or retained.hash == 0: valid = false
     var total: i64 = 0
     while valid:
@@ -838,12 +842,15 @@ fn windows_managed_stream_launch_check_v2(request: WindowsManagedStreamRequestV2
 fn windows_managed_stream_job_policy_v2(state: WindowsPtyStateV1,
         request: WindowsManagedStreamRequestV2, host: WindowsManagedStreamHostV2) -> Result<bool, text>:
     val rate = windows_managed_cpu_rate_v2(request.cpu_millis, host)?
+    if request.memory_bytes > windows_abi_size_t_max():
+        return Err("Windows Job memory limit exceeds target pointer width")
     val limits = state.arena + 12504
-    volatile_write_u32(limits + 16, 8704)
-    volatile_write_u64(limits + 120, request.memory_bytes)
-    if SetInformationJobObject(state.job, 9, limits, 144u32) == 0: return Err("Windows Job memory admission failed")
-    if QueryInformationJobObject(state.job, 9, limits, 144u32, 0) == 0: return Err("Windows Job memory readback failed")
-    if volatile_read_u32(limits + 16) != 8704u32 or volatile_read_u64(limits + 120) != request.memory_bytes as u64:
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8704)
+    windows_abi_write_ptr(limits + windows_abi_job_memory_limit_offset(), request.memory_bytes)
+    if SetInformationJobObject(state.job, 9, limits, limits_bytes as u32) == 0: return Err("Windows Job memory admission failed")
+    if QueryInformationJobObject(state.job, 9, limits, limits_bytes as u32, 0) == 0: return Err("Windows Job memory readback failed")
+    if volatile_read_u32(limits + windows_abi_job_limit_flags_offset()) != 8704u32 or windows_abi_read_ptr(limits + windows_abi_job_memory_limit_offset()) != request.memory_bytes:
         return Err("Windows Job memory or kill-on-close readback differs")
     val cpu = state.arena + 12968
     volatile_write_u32(cpu, 5)
@@ -925,15 +932,17 @@ fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManaged
         if ConnectNamedPipe(next.output, 0) == 0 and GetLastError() != 535u32:
             return (next, "Windows broker output connection failed")
     else:
+        windows_abi_write_ptr(next.arena + 8, 0)
+        windows_abi_write_ptr(next.arena + 16, 0)
         val output_created = CreatePipe(next.arena + 8, next.arena + 16, 0, 65536u32)
-        next.output = volatile_read_u64(next.arena + 8)
-        next.output_server = volatile_read_u64(next.arena + 16)
+        next.output = windows_abi_read_ptr(next.arena + 8)
+        next.output_server = windows_abi_read_ptr(next.arena + 16)
         if next.output == -1: next.output = 0
         if next.output_server == -1: next.output_server = 0
         if output_created == 0: return (next, "Windows managed output pipe creation failed")
     next.event = CreateEventW(0, 1, 0, 0)
     if next.event == 0: return (next, "Windows managed input event creation failed")
-    volatile_write_u64(next.arena + 88, next.event)
+    windows_abi_write_ptr(next.arena + 64 + windows_abi_overlapped_event_offset(), next.event)
     if SetHandleInformation(next.input_server, 1u32, 1u32) == 0 or SetHandleInformation(next.output_server, 1u32, 1u32) == 0:
         return (next, "Windows managed child endpoint inheritance failed")
     (next, "")
@@ -973,7 +982,7 @@ pub fn windows_managed_stream_admit_v2(request: WindowsManagedStreamRequestV2) -
     val pipes = _windows_managed_raw_pipes_v2(state, lease, request.mode == "broker-raw")
     state = pipes.0
     if pipes.1 != "": return _windows_managed_failed_v2(lease, state, pipes.1)
-    state.job = CreateJobObjectW(0, 0)
+    state.job = CreateJobObjectW(0, 0) as i64
     if state.job == 0: return _windows_managed_failed_v2(lease, state, "Windows managed Job creation failed")
     val policy = windows_managed_stream_job_policy_v2(state, request, host)
     if policy.is_err(): return _windows_managed_failed_v2(lease, state, policy.unwrap_err())
@@ -981,34 +990,34 @@ pub fn windows_managed_stream_admit_v2(request: WindowsManagedStreamRequestV2) -
     val process_info = state.arena + 12816
     val allowed = state.arena + 12984
     val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, state.arena + 48)
-    val size = volatile_read_u64(state.arena + 48)
+    val size = windows_abi_read_ptr(state.arena + 48)
     if size <= 0 or size > 1048576: return _windows_managed_failed_v2(lease, state, "Windows managed attribute size invalid")
-    val attributes = HeapAlloc(state.heap, 8u32, size)
+    val attributes = windows_abi_heap_alloc(state.heap, size)
     state.temporaries = state.temporaries.push(attributes)
     if attributes == 0: return _windows_managed_failed_v2(lease, state, "Windows managed attribute allocation failed")
     if InitializeProcThreadAttributeList(attributes, 1u32, 0u32, state.arena + 48) == 0:
         return _windows_managed_failed_v2(lease, state, "Windows managed attribute initialization failed")
     # Retain initialized attribute identity until checked collect, including failures.
     state.managed_attributes = attributes
-    volatile_write_u64(allowed, state.input_server)
-    volatile_write_u64(allowed + 8, state.output_server)
-    if UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed, 16u64, 0, 0) == 0:
+    windows_abi_write_ptr(allowed, state.input_server)
+    windows_abi_write_ptr(allowed + windows_abi_pointer_bytes(), state.output_server)
+    if windows_abi_update_proc_thread_attribute(attributes, 131074, allowed, windows_abi_pointer_bytes() * 2) == 0:
         return _windows_managed_failed_v2(lease, state, "Windows managed HANDLE_LIST admission failed")
-    volatile_write_u32(startup, 112)
-    volatile_write_u32(startup + 60, 256)
-    volatile_write_u64(startup + 80, state.input_server)
-    volatile_write_u64(startup + 88, state.output_server)
-    volatile_write_u64(startup + 96, state.output_server)
-    volatile_write_u64(startup + 104, attributes)
+    volatile_write_u32(startup, windows_abi_startupinfoex_size())
+    volatile_write_u32(startup + windows_abi_startupinfo_flags_offset(), 256)
+    windows_abi_write_ptr(startup + windows_abi_startupinfo_std_input_offset(), state.input_server)
+    windows_abi_write_ptr(startup + windows_abi_startupinfo_std_output_offset(), state.output_server)
+    windows_abi_write_ptr(startup + windows_abi_startupinfo_std_error_offset(), state.output_server)
+    windows_abi_write_ptr(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
     val before_create = windows_managed_stream_launch_check_v2(request, host, state.arena + 13024)
     if before_create.is_err(): return _windows_managed_failed_v2(lease, state, before_create.unwrap_err())
     state.managed_create_attempted = true
     # Suspended + UNICODE_ENVIRONMENT + EXTENDED_STARTUPINFO + NO_WINDOW.
     val created = CreateProcessW(prepared.application, prepared.command, 0, 0, 1,
         134743044u32, prepared.environment, prepared.directory, startup, process_info)
-    state.process = volatile_read_u64(process_info)
-    state.thread = volatile_read_u64(process_info + 8)
-    state.pid = volatile_read_u32(process_info + 16)
+    state.process = windows_abi_read_ptr(process_info + windows_abi_process_info_process_offset())
+    state.thread = windows_abi_read_ptr(process_info + windows_abi_process_info_thread_offset())
+    state.pid = volatile_read_u32(process_info + windows_abi_process_info_pid_offset())
     if created == 0: return _windows_managed_failed_v2(lease, state, "Windows managed CreateProcess attempted; cleanup authority retained")
     if state.process == 0 or state.thread == 0: return _windows_managed_failed_v2(lease, state, "Windows managed attempted child handles incomplete")
     if AssignProcessToJobObject(state.job, state.process) == 0:

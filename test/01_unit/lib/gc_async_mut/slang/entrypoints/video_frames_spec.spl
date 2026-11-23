@@ -10,18 +10,69 @@ model that takes images; with none configured the video stays refused. The live
 end to end run is test/03_system/lib/slang/feature/slang_video_live_spec.spl.
 
 ## Compatibility and limitations
-This spec runs no ffmpeg: it covers the mjpeg stream splitter, the frame-count
-default and the not-configured refusal. Frame count is SLANG_VIDEO_FRAMES,
-default 4, clamped to 1..32.
+This spec runs no real ffmpeg: it covers the mjpeg stream splitter, the
+frame-count default, the not-configured refusal, the frame-selection filter,
+temp-file naming, the video-part cap through the chat endpoint, and a probe
+run whose "ffmpeg" is a plain text file that cannot spawn. Frame count is
+SLANG_VIDEO_FRAMES, default 4, clamped to 1..32.
 """
 
 use std.spec.step
 use std.spec.{describe, it, expect}
 
 use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_frame_count, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_run_is_server_fault, split_mjpeg, sample_frames}
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatMessage, ChatPart}
+use std.gc_async_mut.slang.modality.video_frames.{video_temp_path, video_fps_from_banner, video_seconds_text, video_frame_filter, video_pick_evenly}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatMessage, ChatPart, json_string_field}
 use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{media_refusal}
-use std.io_runtime.{env_get}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_set_lib_path}
+use std.io_runtime.{env_get, env_get_nullable, env_set_process, env_remove_process, dir_create_all, dir_remove_all, file_write, file_write_bytes, dir_list}
+
+fn _restore_env(key: text, saved: text?):
+    match saved:
+        case Some(v): env_set_process(key, v)
+        case None: env_remove_process(key)
+
+fn _push_u64(out: [u8], n: i64) -> [u8]:
+    var o = out
+    o.push(n as u8)
+    var i = 0
+    while i < 7:
+        o.push(0 as u8)
+        i = i + 1
+    o
+
+fn _push_text(out: [u8], s: text) -> [u8]:
+    var o = out
+    for b in s.bytes():
+        o.push(b)
+    o
+
+# GGUF v3 header with one string KV general.architecture = arch.
+fn _gguf_arch(arch: text) -> [u8]:
+    val key = "general.architecture"
+    var o: [u8] = []
+    o = _push_text(o, "GGUF")
+    o.push(3 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o = _push_u64(o, 0)
+    o = _push_u64(o, 1)
+    o = _push_u64(o, key.byte_len())
+    o = _push_text(o, key)
+    o.push(8 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o.push(0 as u8)
+    o = _push_u64(o, arch.byte_len())
+    _push_text(o, arch)
+
+fn _video_part() -> text:
+    "{\"type\":\"video_url\",\"video_url\":{\"url\":\"data:video/mp4;base64,AAAA\"}}}}"
+
+fn _frame(tag: i64) -> [u8]:
+    [255, 216, tag as u8, 255, 217]
 
 describe "mjpeg stream splitting":
     it "splits back-to-back JPEGs on SOI/EOI":
@@ -92,3 +143,98 @@ describe "video request bounds":
         # interpreter-lane timeout marker
         expect(video_run_is_server_fault(124, "partial\nProcess timed out")).to_equal(true)
         expect(video_run_is_server_fault(0, "")).to_equal(false)
+
+    it "caps video parts in chat_prepare before any ffmpeg run":
+        step("Verify: two video parts to a projector model are 400 too_many_video_parts, not a sampling answer")
+        # SLANG_FFMPEG names a real file that is not an executable: had the cap
+        # run only after expansion, expansion would try it and answer 503.
+        val root = "build/test/slang_video_cap"
+        dir_remove_all(root)
+        dir_create_all(root + "/vlm")
+        file_write_bytes(root + "/vlm/model.gguf", _gguf_arch("llama"))
+        file_write_bytes(root + "/vlm/mmproj-model.gguf", _gguf_arch("clip"))
+        file_write(root + "/not-ffmpeg.txt", "not an executable")
+        engine_set_lib_path(root + "/no-such-backend.dll")
+        val saved = env_get_nullable("SLANG_FFMPEG")
+        env_set_process("SLANG_FFMPEG", root + "/not-ffmpeg.txt")
+        val body = "{\"model\":\"vlm\",\"messages\":[{\"role\":\"user\",\"content\":[" + _video_part() + "," + _video_part() + "]}]}"
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", body, root)
+        _restore_env("SLANG_FFMPEG", saved)
+        expect(response.status).to_equal(400)
+        expect(json_string_field(response.body, "code")).to_equal("too_many_video_parts")
+
+describe "video ffmpeg runs":
+    it "fails fast with a server fault when the duration probe cannot run":
+        step("Verify: an ffmpeg that cannot spawn stops at the probe, and the temp file is gone")
+        val dir = "build/test/slang_video_probe"
+        dir_remove_all(dir)
+        dir_create_all(dir + "/tmp")
+        file_write(dir + "/not-ffmpeg.txt", "not an executable")
+        val saved_ffmpeg = env_get_nullable("SLANG_FFMPEG")
+        val saved_tmp = env_get_nullable("SLANG_VIDEO_TMP")
+        env_set_process("SLANG_FFMPEG", dir + "/not-ffmpeg.txt")
+        env_set_process("SLANG_VIDEO_TMP", dir + "/tmp")
+        val blob: [u8] = [0, 0, 0, 24]
+        val result = sample_frames(blob, 4)
+        val left = dir_list(dir + "/tmp")
+        _restore_env("SLANG_FFMPEG", saved_ffmpeg)
+        _restore_env("SLANG_VIDEO_TMP", saved_tmp)
+        match result:
+            Ok(_): expect("frames").to_equal("a probe fault")
+            Err(reason):
+                expect(video_reason_is_server_fault(reason)).to_equal(true)
+                expect(reason.contains("duration probe")).to_equal(true)
+        expect(left.len()).to_equal(0)
+
+    it "names temp files with an unguessable random part":
+        step("Verify: two names in one microsecond still differ; the random part is 16 hex digits")
+        val a = video_temp_path("/t")
+        val b = video_temp_path("/t")
+        expect(a == b).to_equal(false)
+        expect(a.starts_with("/t/slang_video_")).to_equal(true)
+        val token = a.slice(15, 31)
+        var hex = 0
+        for ch in token.split(""):
+            if "0123456789abcdef".contains(ch) and ch != "":
+                hex = hex + 1
+        expect(hex).to_equal(16)
+        expect(a.slice(31, 32)).to_equal("_")
+
+describe "video frame selection":
+    it "prints ffmpeg seconds in fixed point, never exponent form":
+        expect(video_seconds_text(0.0625)).to_equal("0.062500")
+        expect(video_seconds_text(0.000001)).to_equal("0.000001")
+        expect(video_seconds_text(-0.035)).to_equal("-0.035000")
+        expect(video_seconds_text(12.5)).to_equal("12.500000")
+
+    it "reads the frame rate from the ffmpeg stream line":
+        expect(video_fps_from_banner("Stream #0:0: Video: h264, yuv420p, 160x120, 25 fps, 25 tbr")).to_equal(25.0)
+        expect(video_fps_from_banner("Video: h264, 29.97 fps, 29.97 tbr")).to_equal(29.97)
+        expect(video_fps_from_banner("Duration: N/A")).to_equal(0.0)
+
+    it "targets the middle of each interval, not t = 0":
+        step("Verify: 4 frames of 2 s at 25 fps aim at 0.25 s steps of 0.5 s, one frame time early")
+        val scale = ",scale=384:384:force_original_aspect_ratio=decrease"
+        expect(video_frame_filter(4, 2.0, 25.0)).to_equal("select=gte(t\\,0.210000+selected_n*0.500000)" + scale)
+        # A one-frame clip (0.04 s at 25 fps): the tolerance is capped at half an
+        # interval, so the first target is t = 0 and the only frame is taken once.
+        expect(video_frame_filter(4, 0.04, 25.0)).to_equal("select=gte(t\\,0.000000+selected_n*0.010000)" + scale)
+        # Unknown fps: half an interval of tolerance, so frame 0 always qualifies.
+        expect(video_frame_filter(4, 2.0, 0.0)).to_equal("select=gte(t\\,0.000000+selected_n*0.500000)" + scale)
+
+    it "samples a clip of unknown duration at one frame per second and picks evenly":
+        step("Verify: the unknown-duration filter is 1 fps; 10 decoded frames give indexes 0, 3, 6, 9")
+        expect(video_frame_filter(4, 0.0, 25.0)).to_equal("select=gte(t\\,selected_n*1.000000),scale=384:384:force_original_aspect_ratio=decrease")
+        var frames: [[u8]] = []
+        var i = 0
+        while i < 10:
+            frames.push(_frame(i))
+            i = i + 1
+        val picked = video_pick_evenly(frames, 4)
+        expect(picked.len()).to_equal(4)
+        expect(picked[0][2]).to_equal(0)
+        expect(picked[1][2]).to_equal(3)
+        expect(picked[2][2]).to_equal(6)
+        expect(picked[3][2]).to_equal(9)
+        expect(video_pick_evenly(frames, 1).len()).to_equal(1)
+        expect(video_pick_evenly([_frame(7)], 4).len()).to_equal(1)

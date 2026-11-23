@@ -1,6 +1,6 @@
 # Unit range-cast / remainder checks: native execution blocked (2026-11-19)
 
-Status: verification-pending (partial native pass 2026-11-22: port_in + port_oor verified natively; big_accept, big_reject and div_zero fail to compile natively; see Lane 6).
+Status: fixed (Lane 9, 2026-11-23: native-verified. All five fixtures pass natively, including div_zero, which now prints `10/5 ok` and then panics with SPL-UNIT-002; root cause and fix in Lane 9).
 
 Fixtures: `test/fixtures/unit_native/{port_oor,port_in,big_reject,big_accept,div_zero}.spl`.
 
@@ -125,3 +125,41 @@ Neither failure was already fixed in release/1.0.0 source (checked at 9526382f4f
 - Specs: `unit_constraint_decl_spec.spl` (4 new cases, 29/29) and `unit_div_remainder_native_spec.spl` (2 new cases, 7/7; the new cases were red before the fix). `unit_range_cast_native_spec.spl` stays 14/14.
 - Limit: the interpreter evaluates predicates in f64, so it cannot tell `0xFFFF_FFFF_FFFF_FFFF` from the bound `0xFFFF_FFFF_FFFF_FFF0`. The native check compares integers and is exact.
 Native re-verification still needed: rebuild the self-hosted CLI from a tree containing this change, then re-run Lane 6 for big_accept, big_reject and div_zero.
+
+## Lane 8: native re-verification after #10894 / #10901 / #10909 (2026-11-23, worktree nv2)
+Tree: release/1.0.0 at `d83c3a98dc8`. It contains `7c1ee5d56b7` (#10894), `3b3c0cc4f59` (#10901) and `cf87604ac86` (#10909).
+Compiler: `C:/dev/wt/nv2/build/nv2/cli_main.exe`, 116,882,432 B, sha256 `ea78bedd0911fd97f163dd8f353dd3c6c65e5866fcb99a308a8c5167d42122a2` (`--version` = `Simple v1.0.0-rc.1`).
+How it was built: Rust seed `C:/dev/simple/bin/simple.exe` (sha256 prefix `d1e16e3da724b4d9`, build-commit `f3e12b05d39`), command:
+`SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 seed native-build --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --entry-closure --entry src/app/cli/main.spl -o build/nv2/cli_main.exe --cache-dir build/nv2/cache --timeout 3600 --threads 48`,
+with `CC`/`CXX` set to llvm-mingw `clang.exe`/`clang++.exe`. 4,125 files, 31m00s, BUILD_RC=0.
+Build notes:
+- Without the `kernel_llvm_cranelift` composition root, the binary links but every command fails with `PLUG-E-K1-POLICY`.
+- With no `CC` set, this seed links with `C:\Program Files\LLVM` clang 23 and fails on a missing `libclang_rt.builtins.a`.
+- `test_db_compat.spl:394` needed a build-only workaround, which was not committed. See `seed_native_build_per_file_compile_minutes_windows_2026-11-23.md`.
+Fixtures were copied to scratch `src/app/rbnat_fx/` (deleted afterwards), as in Lane 6. Fixture env: `SIMPLE_LLVM_MINGW_ROOT=C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64`, with its `bin` first on PATH.
+Command: `timeout 2400 cli_main.exe native-build src/app/rbnat_fx/<case>.spl -o build/nv2/nv/<case>.exe`, then run the exe.
+
+| case | command | build rc / wall | run rc | stdout / stderr | compiler sha256 | verdict |
+|---|---|---|---|---|---|---|
+| port_in | `cli_main.exe native-build src/app/rbnat_fx/port_in.spl -o build/nv2/nv/port_in.exe; ./port_in.exe` | 0 / 6m59s | 0 | `in-range ok` | `ea78bedd…22a2` | PASS |
+| port_oor | same, `port_oor` | 0 / 7m05s | 1 | `in-range ok`; stderr `panic: SPL-UNIT-005: value 70000 violates the constraint of unit `Port` (`1 <= self and self <= 65535`; range 1..65535)`; no `UNREACHED` | `ea78bedd…22a2` | PASS |
+| big_accept | same, `big_accept` | 0 / 6m57s | 0 | `0x8000.. accepted` | `ea78bedd…22a2` | PASS (hex/underscore u64 bound now accepted, #10909) |
+| big_reject | same, `big_reject` | 0 / 7m01s | 1 | `0x8000.. accepted`; stderr `panic: SPL-UNIT-005: value 18446744073709551615 violates the constraint of unit `Big` (`0 <= self and self <= 0xFFFF_FFFF_FFFF_FFF0`; range 0..0xFFFF_FFFF_FFFF_FFF0)`; no `UNREACHED` | `ea78bedd…22a2` | PASS |
+| div_zero | same, `div_zero` | 0 / 7m03s | 139 (SIGSEGV, reproduced twice) | stdout and stderr empty: neither `10/5 ok` nor `SPL-UNIT-002` | `ea78bedd…22a2` | FAIL (native run: segfault before the first `print`) |
+
+The five builds ran in parallel. Logs and executables are in `C:/dev/wt/nv2/build/nv2/nv/` (untracked).
+Result: the compile failures from Lane 6 are gone. The u64 hex bound is verified natively. The `/` lowering now compiles, but the div_zero executable crashes even on the non-zero `10 / 5` call, so SPL-UNIT-002 is not verified natively.
+Handoff: debug `div_zero.exe` (the `ratio(a: Dist, b: Dist) -> i64: a / b` path from `emit_unit_div_remainder_check`). The crash happens before the first `print`.
+
+## Lane 9: div_zero SIGSEGV root cause and fix (2026-11-23, worktree dz1, branch work/dz1-20261123)
+Root cause: the crash was not in the `/` lowering. Disassembling Lane 8's `div_zero.exe` shows `__simple_main` passes `10 as Dist` / `5 as Dist` as raw words (`movl $0xa,%ecx; movl $0x5,%edx`), but `app.rbnat_fx.div_zero.ratio`'s prologue nil-checks each `Dist` param, untags it, does `movq (%rdx),...`, and copies the result into `rt_alloc(8)`. That is the Bug #167 struct-param value-copy (`copy_struct_value_recursive`), so it dereferences address 0xa. `parser_lower_unit_decl` registers a unit as a one-field struct, which puts it in `struct_field_order`. The param arm in `function_lowering.spl` then treated it as a record, while `lower_type` (and therefore the caller) passes a unit or newtype over a primitive as its word. The old MIR spec "loads a record-wrapped unit operand" asserted a `Load` in `ratio`. It was green only because of this value-copy.
+Fix: in the param prologue, `is_named_struct` now excludes custom primitives, using a symbol-keyed or name-keyed `custom_primitive_underlying_type_tag_by_*` check. The same dual check is in `box_runtime_value_local_is_record`. The bad spec was replaced by one that asserts that `ratio` has no `Load` and no `Alloc` (`test/01_unit/compiler/mir/unit_div_remainder_native_spec.spl`). Spec run (2026-11-23, seed `C:/dev/wt/sd1-target/release/simple.exe` built from release @84ea108c7c9): `simple test test/01_unit/compiler/mir/unit_div_remainder_native_spec.spl` gives 8 total, 8 passed, 0 failed (rc 0). The earlier `phase_memo_ownership` visibility error does not reproduce with this seed.
+Compiler: `C:/dev/wt/dz1/build/dz1/cli_main.exe`, sha256 `9b6c75f516cc648b923dfb88f6a65ccf83e6bf018e9f31323e47d50f6c2dd231`. Same recipe as Lane 8 (seedB, 48 threads, llvm-mingw CC/CXX, 31m38s, BUILD_RC=0), plus the same uncommitted `test_db_compat.spl` build-only workaround, which was reverted afterwards. Fixtures were in scratch `src/app/dz1_fx/` (deleted), built in parallel (408-414 s each):
+
+| case | source | run rc | stdout / stderr | verdict |
+|---|---|---|---|---|
+| uu | `ratio(10 as Dist, 5 as Dist)` (unit/unit) | 0 | `ratio=2` | PASS |
+| ui | `half(10 as Dist, 2) -> Dist` (unit/i64, rewrap path) | 0 | `half ok` | PASS |
+| rem | `10/5` then `10/3` | 1 | `10/5 ok`; `panic: SPL-UNIT-002: integer unit division is inexact ...` | PASS |
+| div_zero | `10/5` then `10/0` | 1 | `10/5 ok`; `panic: SPL-UNIT-002: unit division by zero` | PASS (was rc 139) |
+| port_in | `mk(8080)` (regression) | 0 | `in-range ok` | PASS |

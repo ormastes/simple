@@ -285,6 +285,11 @@ pub struct HirModule {
     /// ordinary functions, matching the interpreter, which always hands
     /// externs tagged `Value`s.
     pub extern_param_types: HashMap<String, Vec<TypeId>>,
+    /// Extern declarations tagged `@abi("system")` (Rust `extern "system"`
+    /// semantics): name -> (declared param types, return type). The LLVM
+    /// backend declares these with their real signature and `stdcall` only on
+    /// Windows x86 (32-bit); everywhere else the entry is ignored.
+    pub extern_system_abi: HashMap<String, (Vec<TypeId>, TypeId)>,
     /// Function names imported via `use` statements.
     /// These should NOT become global variables in MIR — they are only used
     /// for type resolution during HIR lowering.
@@ -350,6 +355,7 @@ impl HirModule {
             impls: Vec::new(),
             extern_fn_names: HashSet::new(),
             extern_param_types: HashMap::new(),
+            extern_system_abi: HashMap::new(),
             imported_function_names: HashSet::new(),
             type_bindings_log: Vec::new(),
             type_value_kinds: HashMap::new(),
@@ -362,6 +368,32 @@ impl HirModule {
     /// `Some(true)` = `struct` (value semantics), `Some(false)` = `class`/actor
     /// (identity semantics). Callers MUST make `None` a no-op: see the field
     /// doc on `type_value_kinds` for why absence is not "value type".
+    /// Record an extern's signature when it carries `@abi("system")`.
+    /// Called from every site that fills `extern_param_types`.
+    pub fn record_extern_system_abi(
+        &mut self,
+        name: &str,
+        attributes: &[simple_parser::ast::Attribute],
+        params: &[TypeId],
+        ret: TypeId,
+    ) {
+        use simple_parser::ast::{Expr, FStringPart};
+        let is_system = attributes.iter().any(|a| {
+            a.name == "abi"
+                && a.args.as_ref().is_some_and(|args| match args.first() {
+                    Some(Expr::String(s)) | Some(Expr::Identifier(s)) => s == "system",
+                    Some(Expr::FString { parts, .. }) => {
+                        matches!(parts.as_slice(), [FStringPart::Literal(s)] if s == "system")
+                    }
+                    _ => false,
+                })
+        });
+        if is_system {
+            self.extern_system_abi
+                .insert(name.to_string(), (params.to_vec(), ret));
+        }
+    }
+
     pub fn type_is_value_kind(&self, name: &str) -> Option<bool> {
         self.type_value_kinds.get(name).copied()
     }

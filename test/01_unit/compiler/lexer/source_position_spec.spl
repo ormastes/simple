@@ -1,13 +1,23 @@
-describe "Source Position":
-    extern fn rt_file_read_text(path: text) -> text?
+use std.spec.{describe, it, expect, step}
+use compiler.core.lexer_types.{
+    LexSpan, Token, TokenKind,
+    lex_span_new, lex_span_empty, span_merge, span_len,
+    lex_token_new, lex_token_eof, lex_token_error,
+    token_is_keyword, token_is_operator, token_is_literal,
+    token_kind_code, token_kind_from_code
+}
 
-    fn lexer_types_source() -> text:
-        rt_file_read_text("src/compiler/10.frontend/core/lexer_types.spl") ?? ""
+extern fn rt_file_read_text(path: text) -> text?
+
+fn lexer_types_source() -> text:
+    rt_file_read_text("src/compiler/10.frontend/core/lexer_types.spl") ?? ""
+
+describe "Source Position":
+    """Verifies LexSpan and Token position helpers in compiler.core.lexer_types."""
 
     it "keeps source span and token structures available":
         val source = lexer_types_source()
-
-        expect(source).to_contain("struct Span:")
+        expect(source).to_contain("struct LexSpan:")
         expect(source).to_contain("start: i64")
         expect(source).to_contain("end_pos: i64")
         expect(source).to_contain("line: i64")
@@ -16,14 +26,61 @@ describe "Source Position":
 
     it "keeps span and token helper constructors available":
         val source = lexer_types_source()
+        expect(source).to_contain("fn lex_span_new(start: i64, end_pos: i64, line: i64, col: i64) -> LexSpan:")
+        expect(source).to_contain("fn lex_span_empty() -> LexSpan:")
+        expect(source).to_contain("fn span_merge(a: LexSpan, b: LexSpan) -> LexSpan:")
+        expect(source).to_contain("fn span_len(s: LexSpan) -> i64:")
+        expect(source).to_contain("fn lex_token_new(kind: i64, text: text, line: i64, col: i64) -> Token:")
+        expect(source).to_contain("fn lex_token_eof(line: i64) -> Token:")
+        expect(source).to_contain("fn lex_token_error(msg: text, line: i64, col: i64) -> Token:")
 
-        expect(source).to_contain("fn lex_span_new(start: i64, end_pos: i64, line: i64, col: i64) -> Span")
-        expect(source).to_contain("fn lex_span_empty() -> Span")
-        expect(source).to_contain("fn span_merge(a: Span, b: Span) -> Span")
-        expect(source).to_contain("fn span_len(s: Span) -> i64")
-        expect(source).to_contain("fn lex_token_new(kind: i64, text: text, line: i64, col: i64) -> Token")
-        expect(source).to_contain("fn lex_token_eof(line: i64) -> Token")
-        expect(source).to_contain("fn lex_token_error(msg: text, line: i64, col: i64) -> Token")
+    it "constructs, measures, and merges LexSpan positions accurately":
+        step("Create empty and non-empty LexSpan values")
+        val empty = lex_span_empty()
+        expect(empty.start).to_equal(0)
+        expect(empty.end_pos).to_equal(0)
+        expect(empty.line).to_equal(0)
+        expect(empty.col).to_equal(0)
+        expect(span_len(empty)).to_equal(0)
+
+        val first = lex_span_new(4, 9, 2, 5)
+        val second = lex_span_new(2, 15, 2, 3)
+        expect(span_len(first)).to_equal(5)
+        expect(span_len(second)).to_equal(13)
+
+        step("Merge two overlapping spans to cover min start..max end_pos")
+        val merged = span_merge(first, second)
+        expect(merged.start).to_equal(2)
+        expect(merged.end_pos).to_equal(15)
+        expect(merged.line).to_equal(2)
+        expect(merged.col).to_equal(5)
+        expect(span_len(merged)).to_equal(13)
+
+    it "constructs EOF, error, and classified Token records with spans":
+        step("Verify EOF and error token constructors")
+        val eof_tok = lex_token_eof(12)
+        expect(token_kind_code(eof_tok.kind)).to_equal(190)
+        expect(eof_tok.span.line).to_equal(12)
+        expect(eof_tok.text).to_equal("")
+
+        val err_tok = lex_token_error("unterminated string", 7, 14)
+        expect(token_kind_code(err_tok.kind)).to_equal(191)
+        expect(err_tok.span.line).to_equal(7)
+        expect(err_tok.span.col).to_equal(14)
+        expect(err_tok.text).to_equal("unterminated string")
+
+        step("Verify literal, keyword, and operator token classification helpers")
+        val int_tok = lex_token_new(1, "42", 1, 1)
+        expect(token_is_literal(int_tok)).to_equal(true)
+        expect(token_is_keyword(int_tok)).to_equal(false)
+
+        val kw_tok = lex_token_new(20, "fn", 1, 1)
+        expect(token_is_keyword(kw_tok)).to_equal(true)
+        expect(token_is_operator(kw_tok)).to_equal(false)
+
+        val op_tok = lex_token_new(60, "+", 1, 4)
+        expect(token_is_operator(op_tok)).to_equal(true)
+        expect(token_is_literal(op_tok)).to_equal(false)
 
 # # SourcePosition Tests
 # #

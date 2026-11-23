@@ -106,6 +106,9 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+# run_timeout bounds the Stage 3 sanity probes below. It used to live only in
+# bootstrap-from-scratch.sh, which this script never sources (status 127).
+. "$root/scripts/bootstrap/lib/run-timeout.shs"
 bootstrap_stage3_resume_output_path "$source_output" "$root" \
   "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
   bootstrap_stage3_error "OUTPUT_DIR is not a canonical allowlisted directory: $source_output"
@@ -884,6 +887,16 @@ stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
 . "$root/scripts/bootstrap/lib/host-bootstrap-settings.shs"
 bootstrap_host_apply_stage3_settings "$root"
 bootstrap_host_apply_memory_reserve "$root"
+# W27/W32/W36 shard knobs: mir_sharding, mir_shard_count, mir_shard_worker_kib
+# and frontend_cache (on|off) fill an unset env var before the W24/W27
+# pass-throughs below validate, hash and transcribe them. Invalid = hard error.
+bootstrap_host_apply_matrix_settings "$root" || exit 64
+bootstrap_caller_frontend_cache=
+bootstrap_host_apply_frontend_cache_default "$root" || exit 64
+if [ -n "$bootstrap_caller_frontend_cache" ]; then
+  SIMPLE_FRONTEND_CACHE=$bootstrap_caller_frontend_cache
+  export SIMPLE_FRONTEND_CACHE
+fi
 . "$root/scripts/bootstrap/lib/stage3-direct-parallel.shs"
 bootstrap_stage3_resolve_parallel_policy || exit 1
 stage3_threads=$bootstrap_stage3_policy_threads
@@ -1310,6 +1323,9 @@ cmp -s "$runtime_admitted" "$runtime_check"
 rm -f "$runtime_check"
 
 CANDIDATE_FRONTEND_ROOT=$root
+# Host-config sanity_build_timeout_seconds fills an unset caller value (same
+# key as bootstrap-from-scratch.sh); must precede the `:-180` default.
+bootstrap_host_apply_sanity_build_timeout "$root" || exit 64
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
@@ -1347,6 +1363,34 @@ bootstrap_stage_sanity() (
   case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *)
     echo 'bootstrap-sanity-error: phase=session-validation reason=invalid-rss-cap-mode raw_status=125' >&2
     return 125 ;; esac
+  # The scrub below also drops COMPUTERNAME/HOSTNAME, so without this the
+  # compiler's start guard cannot see the caller's reserve nor resolve the
+  # host config, and falls back to its 24 GiB cap
+  # (src/app/cli/shard_mem_clamp.spl BUILD_MEMORY_RESERVE_CAP_KIB_V1). The
+  # host-config mem_reserve_free_mib is already folded into this env var by
+  # bootstrap_host_apply_memory_reserve above. Same validated pass-through as
+  # bootstrap-from-scratch.sh's bootstrap_stage_sanity: preserve absence (the
+  # compiler owns its default), reject a malformed explicit value.
+  sanity_memory_reserve_present=${SIMPLE_BUILD_MEMORY_RESERVE_BYTES+x}
+  sanity_memory_reserve=${SIMPLE_BUILD_MEMORY_RESERVE_BYTES-}
+  if [ "$sanity_memory_reserve_present" = x ]; then
+    case "$sanity_memory_reserve" in ''|0*|*[!0-9]*)
+      echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-build-memory-reserve raw_status=125' >&2
+      return 125 ;;
+    esac
+    if [ "${#sanity_memory_reserve}" -lt 4 ] ||
+       { [ "${#sanity_memory_reserve}" -eq 4 ] && [ "$sanity_memory_reserve" -lt 1024 ]; }; then
+      echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-build-memory-reserve raw_status=125' >&2
+      return 125
+    fi
+    if [ "${#sanity_memory_reserve}" -gt 19 ] ||
+       { [ "${#sanity_memory_reserve}" -eq 19 ] &&
+         [ "${sanity_memory_reserve%??????????????????}" = 9 ] &&
+         [ "${sanity_memory_reserve#?}" -gt 223372036854775807 ]; }; then
+      echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-build-memory-reserve raw_status=125' >&2
+      return 125
+    fi
+  fi
   for name in $(env | sed 's/=.*//'); do
     case "$name" in
       SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
@@ -1359,6 +1403,10 @@ bootstrap_stage_sanity() (
   if [ "$sanity_bootstrap_whole_program_present" = x ]; then
     SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=$sanity_bootstrap_whole_program
     export SIMPLE_BOOTSTRAP_WHOLE_PROGRAM
+  fi
+  if [ "$sanity_memory_reserve_present" = x ]; then
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=$sanity_memory_reserve
+    export SIMPLE_BUILD_MEMORY_RESERVE_BYTES
   fi
   evidence_tmp="$evidence.tmp.$$"
   frontend_log="$evidence.frontend-driver.log"

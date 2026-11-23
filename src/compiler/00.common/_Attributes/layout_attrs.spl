@@ -36,7 +36,7 @@ use compiler.common.diagnostics.span.{Span}
 # ============================================================================
 
 # Import shared helpers from attributes.spl
-use compiler.common.attributes.{NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg}
+use compiler.common.attributes.{NamedArg, extract_named_args, get_named_string_arg, get_named_int_arg, get_named_int_array_arg, parse_embed_attr, apply_embed_layout_attr_v1, _decl_attrs_can_cache_permanent_v1}
 
 # ============================================================================
 # Volatile Attribute Types
@@ -230,14 +230,34 @@ pub fn validate_task_policy_attr(attr: TaskAttr, runtime_family: text, effects: 
 # Layout Attribute Parsing
 # ============================================================================
 
+var _layout_attr_absent_cached: LayoutAttr? = None
+
+pub fn layout_attr_absent_shared_v1() -> LayoutAttr:
+    if val cached = _layout_attr_absent_cached:
+        return cached
+    val fresh = LayoutAttr(
+        layout_kind: TypeLayoutKind.Simple,
+        has_explicit_align: false,
+        explicit_align: 0,
+        is_packed: false,
+        is_preserve_order: false,
+        is_compactq: false
+    )
+    if _decl_attrs_can_cache_permanent_v1():
+        _layout_attr_absent_cached = Some(fresh)
+    fresh
+
 pub fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
     """Extract layout attributes from a list of attributes."""
+    if attrs.len() == 0:
+        return layout_attr_absent_shared_v1()
     var layout_kind = TypeLayoutKind.Simple
     var has_explicit_align = false
     var explicit_align_value: i64 = 0
     var is_packed = false
     var is_preserve_order = false
     var is_compactq = false
+    var has_embed = false
 
     for attr in attrs:
         if attr.name == "repr":
@@ -264,8 +284,10 @@ pub fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
             is_preserve_order = true
         elif attr.name == "compactq":
             is_compactq = true
+        elif attr.name == "embed":
+            has_embed = true
 
-    LayoutAttr(
+    val result = LayoutAttr(
         layout_kind: layout_kind,
         has_explicit_align: has_explicit_align,
         explicit_align: explicit_align_value,
@@ -273,6 +295,9 @@ pub fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
         is_preserve_order: is_preserve_order,
         is_compactq: is_compactq
     )
+    if has_embed:
+        return apply_embed_layout_attr_v1(result, parse_embed_attr(attrs))
+    result
 
 pub fn parse_platform_attrs(attrs: [Attribute]) -> PlatformParseResult:
     """Extract @platform attributes from a list of attributes.

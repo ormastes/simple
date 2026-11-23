@@ -1,20 +1,49 @@
-# Win64 direct platform boundary; no new runtime/C implementation. This module
-# is intentionally outside the builder closure until native qualification.
-# Pointer-valued Win64 ABI slots use i64; DWORD/BOOL slots use u32/i32.
-use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_read_u32, volatile_read_u64}
+#![allow(primitive_api)]
+# Windows direct platform boundary (32-bit x86 and 64-bit); no new runtime/C
+# implementation. This module is intentionally outside the builder closure until
+# native qualification. Pointer/HANDLE/SIZE_T/ULONG_PTR slots use target-width
+# u32/i32 on arch="x86" and i64/u64 on 64-bit targets; DWORD/BOOL use u32/i32.
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u32, volatile_read_u64}
 
+@when(arch="x86"):
+@abi("system")
+@unsafe(reason: "Win32 kernel32 process heap owner", capabilities: [ffi])
+extern fn GetProcessHeap() -> u32
+@abi("system")
+@unsafe(reason: "Win32 current process image copied into caller-owned UTF16 storage", capabilities: [ffi, raw_ptr])
+extern fn GetModuleFileNameW(module: u32, buffer: u32, capacity: u32) -> u32
+@abi("system")
+@unsafe(reason: "Win32 current host memory snapshot", capabilities: [ffi, raw_ptr])
+extern fn GlobalMemoryStatusEx(status: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 copied system CPU counters", capabilities: [ffi, raw_ptr])
+extern fn GetSystemTimes(idle: u32, kernel: u32, user: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 kernel32 bounded allocation", capabilities: [ffi, raw_ptr])
+extern fn HeapAlloc(heap: u32, flags: u32, size: u32) -> u32
+@abi("system")
+@unsafe(reason: "Win32 kernel32 owned allocation release", capabilities: [ffi, raw_ptr])
+extern fn HeapFree(heap: u32, flags: u32, allocation: u32) -> i32
+@else:
+@abi("system")
 @unsafe(reason: "Win64 kernel32 process heap owner", capabilities: [ffi])
 extern fn GetProcessHeap() -> i64
+@abi("system")
 @unsafe(reason: "Win64 current process image copied into caller-owned UTF16 storage", capabilities: [ffi, raw_ptr])
 extern fn GetModuleFileNameW(module: i64, buffer: i64, capacity: u32) -> u32
+@abi("system")
 @unsafe(reason: "Win64 current host memory snapshot", capabilities: [ffi, raw_ptr])
 extern fn GlobalMemoryStatusEx(status: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 copied system CPU counters", capabilities: [ffi, raw_ptr])
 extern fn GetSystemTimes(idle: i64, kernel: i64, user: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 kernel32 bounded allocation", capabilities: [ffi, raw_ptr])
 extern fn HeapAlloc(heap: i64, flags: u32, size: u64) -> i64
+@abi("system")
 @unsafe(reason: "Win64 kernel32 owned allocation release", capabilities: [ffi, raw_ptr])
 extern fn HeapFree(heap: i64, flags: u32, allocation: i64) -> i32
+@end
 # Runtime-C memory headroom snapshot; resolves under the bootstrap seed's
 # pure interpreter where the raw kernel32 heap externs above do not. Returns
 # min(ullAvailPhys, ullAvailPageFile), 0 when unavailable (callers fall back).
@@ -28,74 +57,458 @@ extern fn rt_host_commit_headroom_bytes_v1() -> i64
 # interpreter-first rationale, 0 when unavailable (callers fall back).
 @unsafe(reason: "registered runtime ABI for the host disk headroom snapshot", capabilities: [ffi])
 extern fn rt_host_disk_headroom_bytes_v1(path: text) -> i64
+@when(arch="x86"):
+@abi("system")
+@unsafe(reason: "Win32 exact ten-argument process creation ABI", capabilities: [ffi, raw_ptr])
+extern fn CreateProcessW(application: u32, command_line: u32, process_security: u32,
+    thread_security: u32, inherit_handles: i32, flags: u32, environment: u32,
+    directory: u32, startup_info: u32, process_info: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 noninherited JobObject creation", capabilities: [ffi])
+extern fn CreateJobObjectW(attributes: u32, name: u32) -> u32
+@abi("system")
+@unsafe(reason: "Win32 owned JobObject limit configuration", capabilities: [ffi, raw_ptr])
+extern fn SetInformationJobObject(job: u32, kind: i32, information: u32, size: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 suspended child assignment before execution", capabilities: [ffi])
+extern fn AssignProcessToJobObject(job: u32, process: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 resume of owned primary thread", capabilities: [ffi])
+extern fn ResumeThread(thread: u32) -> u32
+@abi("system")
+@unsafe(reason: "Win32 handle-authoritative process wait", capabilities: [ffi])
+extern fn WaitForSingleObject(handle: u32, milliseconds: u32) -> u32
+@abi("system")
+@unsafe(reason: "Win32 owned JobObject tree cancellation", capabilities: [ffi])
+extern fn TerminateJobObject(job: u32, exit_code: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 suspended admission-failure process cancellation", capabilities: [ffi])
+extern fn TerminateProcess(process: u32, exit_code: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 owned handle closure", capabilities: [ffi])
+extern fn CloseHandle(handle: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 exact owned process exit status", capabilities: [ffi, raw_ptr])
+extern fn GetExitCodeProcess(process: u32, status: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 JobObject active member observation", capabilities: [ffi, raw_ptr])
+extern fn QueryInformationJobObject(job: u32, kind: i32, information: u32, size: u32, returned: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 monotonic timeout clock", capabilities: [ffi])
+extern fn GetTickCount64() -> u64
+@abi("system")
+@unsafe(reason: "Win32 bounded process observation delay", capabilities: [ffi])
+extern fn Sleep(milliseconds: u32)
+@abi("system")
+@unsafe(reason: "Win32 file identity and inherited stream handle admission", capabilities: [ffi, raw_ptr])
+extern fn CreateFileW(path: u32, access: u32, sharing: u32, security: u32,
+    disposition: u32, attributes: u32, template_file: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 explicit child handle-list sizing and initialization", capabilities: [ffi, raw_ptr])
+extern fn InitializeProcThreadAttributeList(attributes: u32, count: u32, flags: u32, size: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 exact child handle allowlist", capabilities: [ffi, raw_ptr])
+extern fn UpdateProcThreadAttribute(attributes: u32, flags: u32, kind: u32,
+    value: u32, size: u32, previous: u32, returned: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 owned attribute-list cleanup", capabilities: [ffi, raw_ptr])
+extern fn DeleteProcThreadAttributeList(attributes: u32)
+@abi("system")
+@unsafe(reason: "Win32 immediate thread-local API error observation", capabilities: [ffi])
+extern fn GetLastError() -> u32
+@abi("system")
+@unsafe(reason: "Win32 metadata query on an already owned file identity", capabilities: [ffi, raw_ptr])
+extern fn GetFileInformationByHandleEx(file: u32, kind: i32, information: u32, size: u32) -> i32
+@abi("system")
+@unsafe(reason: "Win32 bounded read from a pinned file handle", capabilities: [ffi, raw_ptr])
+extern fn ReadFile(file: u32, buffer: u32, capacity: u32, count: u32, overlapped: u32) -> i32
+@abi("system")
+@unsafe(reason: "Windows CNG SHA256 provider acquisition", capabilities: [ffi, raw_ptr])
+extern fn BCryptOpenAlgorithmProvider(provider: u32, algorithm: u32, implementation: u32, flags: u32) -> i32
+@abi("system")
+@unsafe(reason: "Windows CNG owned streaming hash creation", capabilities: [ffi, raw_ptr])
+extern fn BCryptCreateHash(provider: u32, hash_out: u32, object_buffer: u32, object_size: u32, secret: u32, secret_size: u32, flags: u32) -> i32
+@abi("system")
+@unsafe(reason: "Windows CNG hash of a bounded owned byte buffer", capabilities: [ffi, raw_ptr])
+extern fn BCryptHashData(hash: u32, buffer: u32, count: u32, flags: u32) -> i32
+@abi("system")
+@unsafe(reason: "Windows CNG SHA256 digest finalization", capabilities: [ffi, raw_ptr])
+extern fn BCryptFinishHash(hash: u32, digest: u32, digest_size: u32, flags: u32) -> i32
+@abi("system")
+@unsafe(reason: "Windows CNG owned hash release", capabilities: [ffi])
+extern fn BCryptDestroyHash(hash: u32) -> i32
+@abi("system")
+@unsafe(reason: "Windows CNG owned provider release", capabilities: [ffi])
+extern fn BCryptCloseAlgorithmProvider(provider: u32, flags: u32) -> i32
+@else:
+@abi("system")
 @unsafe(reason: "Win64 exact ten-argument process creation ABI", capabilities: [ffi, raw_ptr])
 extern fn CreateProcessW(application: i64, command_line: i64, process_security: i64,
     thread_security: i64, inherit_handles: i32, flags: u32, environment: i64,
     directory: i64, startup_info: i64, process_info: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 noninherited JobObject creation", capabilities: [ffi])
 extern fn CreateJobObjectW(attributes: i64, name: i64) -> i64
+@abi("system")
 @unsafe(reason: "Win64 owned JobObject limit configuration", capabilities: [ffi, raw_ptr])
 extern fn SetInformationJobObject(job: i64, kind: i32, information: i64, size: u32) -> i32
+@abi("system")
 @unsafe(reason: "Win64 suspended child assignment before execution", capabilities: [ffi])
 extern fn AssignProcessToJobObject(job: i64, process: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 resume of owned primary thread", capabilities: [ffi])
 extern fn ResumeThread(thread: i64) -> u32
+@abi("system")
 @unsafe(reason: "Win64 handle-authoritative process wait", capabilities: [ffi])
 extern fn WaitForSingleObject(handle: i64, milliseconds: u32) -> u32
+@abi("system")
 @unsafe(reason: "Win64 owned JobObject tree cancellation", capabilities: [ffi])
 extern fn TerminateJobObject(job: i64, exit_code: u32) -> i32
+@abi("system")
 @unsafe(reason: "Win64 suspended admission-failure process cancellation", capabilities: [ffi])
 extern fn TerminateProcess(process: i64, exit_code: u32) -> i32
+@abi("system")
 @unsafe(reason: "Win64 owned handle closure", capabilities: [ffi])
 extern fn CloseHandle(handle: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 exact owned process exit status", capabilities: [ffi, raw_ptr])
 extern fn GetExitCodeProcess(process: i64, status: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 JobObject active member observation", capabilities: [ffi, raw_ptr])
 extern fn QueryInformationJobObject(job: i64, kind: i32, information: i64, size: u32, returned: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 monotonic timeout clock", capabilities: [ffi])
 extern fn GetTickCount64() -> u64
+@abi("system")
 @unsafe(reason: "Win64 bounded process observation delay", capabilities: [ffi])
 extern fn Sleep(milliseconds: u32)
+@abi("system")
 @unsafe(reason: "Win64 file identity and inherited stream handle admission", capabilities: [ffi, raw_ptr])
 extern fn CreateFileW(path: i64, access: u32, sharing: u32, security: i64,
     disposition: u32, attributes: u32, template_file: i64) -> i64
+@abi("system")
 @unsafe(reason: "Win64 explicit child handle-list sizing and initialization", capabilities: [ffi, raw_ptr])
 extern fn InitializeProcThreadAttributeList(attributes: i64, count: u32, flags: u32, size: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 exact child handle allowlist", capabilities: [ffi, raw_ptr])
 extern fn UpdateProcThreadAttribute(attributes: i64, flags: u32, kind: u64,
     value: i64, size: u64, previous: i64, returned: i64) -> i32
+@abi("system")
 @unsafe(reason: "Win64 owned attribute-list cleanup", capabilities: [ffi, raw_ptr])
 extern fn DeleteProcThreadAttributeList(attributes: i64)
+@abi("system")
 @unsafe(reason: "Win64 immediate thread-local API error observation", capabilities: [ffi])
 extern fn GetLastError() -> u32
+@abi("system")
 @unsafe(reason: "Win64 metadata query on an already owned file identity", capabilities: [ffi, raw_ptr])
 extern fn GetFileInformationByHandleEx(file: i64, kind: i32, information: i64, size: u32) -> i32
+@abi("system")
 @unsafe(reason: "Win64 bounded read from a pinned file handle", capabilities: [ffi, raw_ptr])
 extern fn ReadFile(file: i64, buffer: i64, capacity: u32, count: i64, overlapped: i64) -> i32
+@abi("system")
 @unsafe(reason: "Windows CNG SHA256 provider acquisition", capabilities: [ffi, raw_ptr])
 extern fn BCryptOpenAlgorithmProvider(provider: i64, algorithm: i64, implementation: i64, flags: u32) -> i32
+@abi("system")
 @unsafe(reason: "Windows CNG owned streaming hash creation", capabilities: [ffi, raw_ptr])
 extern fn BCryptCreateHash(provider: i64, hash_out: i64, object_buffer: i64, object_size: u32, secret: i64, secret_size: u32, flags: u32) -> i32
+@abi("system")
 @unsafe(reason: "Windows CNG hash of a bounded owned byte buffer", capabilities: [ffi, raw_ptr])
 extern fn BCryptHashData(hash: i64, buffer: i64, count: u32, flags: u32) -> i32
+@abi("system")
 @unsafe(reason: "Windows CNG SHA256 digest finalization", capabilities: [ffi, raw_ptr])
 extern fn BCryptFinishHash(hash: i64, digest: i64, digest_size: u32, flags: u32) -> i32
+@abi("system")
 @unsafe(reason: "Windows CNG owned hash release", capabilities: [ffi])
 extern fn BCryptDestroyHash(hash: i64) -> i32
+@abi("system")
 @unsafe(reason: "Windows CNG owned provider release", capabilities: [ffi])
 extern fn BCryptCloseAlgorithmProvider(provider: i64, flags: u32) -> i32
+@end
+
+@when(arch="x86"):
+pub fn windows_abi_pointer_bits() -> i64:
+    32
+
+pub fn windows_abi_pointer_bytes() -> i64:
+    4
+
+pub fn windows_abi_size_t_max() -> i64:
+    4294967295
+
+@unsafe(reason: "target-width Win32 pointer slot read", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_read_ptr(addr: i64) -> i64:
+    volatile_read_u32(addr)
+
+@unsafe(reason: "target-width Win32 pointer slot write", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_write_ptr(addr: i64, value: i64):
+    volatile_write_u32(addr, value)
+
+@unsafe(reason: "target-width Win32 GetProcessHeap wrapper", capabilities: [ffi])
+pub fn windows_abi_get_process_heap() -> i64:
+    GetProcessHeap() as i64
+
+@unsafe(reason: "target-width Win32 HeapAlloc wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_heap_alloc(heap: i64, size: i64) -> i64:
+    if size < 0 or size > 4294967295: return 0
+    HeapAlloc(heap as u32, 8u32, size as u32) as i64
+
+@unsafe(reason: "target-width Win32 HeapFree wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_heap_free(heap: i64, allocation: i64) -> i32:
+    HeapFree(heap as u32, 0u32, allocation as u32)
+
+@unsafe(reason: "target-width Win32 GetModuleFileNameW wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_get_module_file_name_w(module: i64, buffer: i64, capacity: i64) -> i64:
+    GetModuleFileNameW(module as u32, buffer as u32, capacity as u32) as i64
+
+@unsafe(reason: "target-width Win32 UpdateProcThreadAttribute wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_update_proc_thread_attribute(attributes: i64, kind: i64, value: i64, size: i64) -> i32:
+    UpdateProcThreadAttribute(attributes as u32, 0u32, kind as u32, value as u32, size as u32, 0u32, 0u32)
+@else:
+pub fn windows_abi_pointer_bits() -> i64:
+    64
+
+pub fn windows_abi_pointer_bytes() -> i64:
+    8
+
+pub fn windows_abi_size_t_max() -> i64:
+    9223372036854775807
+
+@unsafe(reason: "target-width Win64 pointer slot read", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_read_ptr(addr: i64) -> i64:
+    volatile_read_u64(addr)
+
+@unsafe(reason: "target-width Win64 pointer slot write", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_write_ptr(addr: i64, value: i64):
+    volatile_write_u64(addr, value)
+
+@unsafe(reason: "target-width Win64 GetProcessHeap wrapper", capabilities: [ffi])
+pub fn windows_abi_get_process_heap() -> i64:
+    GetProcessHeap()
+
+@unsafe(reason: "target-width Win64 HeapAlloc wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_heap_alloc(heap: i64, size: i64) -> i64:
+    if size < 0: return 0
+    HeapAlloc(heap, 8u32, size as u64)
+
+@unsafe(reason: "target-width Win64 HeapFree wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_heap_free(heap: i64, allocation: i64) -> i32:
+    HeapFree(heap, 0u32, allocation)
+
+@unsafe(reason: "target-width Win64 GetModuleFileNameW wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_get_module_file_name_w(module: i64, buffer: i64, capacity: i64) -> i64:
+    GetModuleFileNameW(module, buffer, capacity as u32) as i64
+
+@unsafe(reason: "target-width Win64 UpdateProcThreadAttribute wrapper", capabilities: [ffi, raw_ptr])
+pub fn windows_abi_update_proc_thread_attribute(attributes: i64, kind: i64, value: i64, size: i64) -> i32:
+    UpdateProcThreadAttribute(attributes, 0u32, kind as u64, value, size as u64, 0, 0)
+@end
+
+fn _windows_abi_pick(bits: i64, x86_value: i64, x64_value: i64) -> i64:
+    if bits == 32: x86_value else: x64_value
+
+pub fn windows_abi_pointer_bytes_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 4, 8)
+
+pub fn windows_abi_security_attributes_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 12, 24)
+
+pub fn windows_abi_security_attributes_descriptor_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 4, 8)
+
+pub fn windows_abi_security_attributes_inherit_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 8, 16)
+
+pub fn windows_abi_startupinfo_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 68, 104)
+
+pub fn windows_abi_startupinfo_flags_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 44, 60)
+
+pub fn windows_abi_startupinfo_std_input_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 56, 80)
+
+pub fn windows_abi_startupinfo_std_output_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 60, 88)
+
+pub fn windows_abi_startupinfo_std_error_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 64, 96)
+
+pub fn windows_abi_startupinfoex_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 72, 112)
+
+pub fn windows_abi_startupinfoex_attr_list_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 68, 104)
+
+pub fn windows_abi_process_info_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 16, 24)
+
+pub fn windows_abi_process_info_process_offset_for(bits: i64) -> i64:
+    0
+
+pub fn windows_abi_process_info_thread_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 4, 8)
+
+pub fn windows_abi_process_info_pid_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 8, 16)
+
+pub fn windows_abi_process_info_tid_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 12, 20)
+
+pub fn windows_abi_job_extended_limit_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 112, 144)
+
+pub fn windows_abi_job_limit_flags_offset_for(bits: i64) -> i64:
+    16
+
+pub fn windows_abi_job_process_memory_limit_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 96, 112)
+
+pub fn windows_abi_job_memory_limit_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 100, 120)
+
+pub fn windows_abi_job_peak_process_memory_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 104, 128)
+
+pub fn windows_abi_job_peak_memory_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 108, 136)
+
+pub fn windows_abi_overlapped_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 20, 32)
+
+pub fn windows_abi_overlapped_event_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 16, 24)
+
+pub fn windows_abi_wsapollfd_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 8, 16)
+
+pub fn windows_abi_wsapollfd_events_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 4, 8)
+
+pub fn windows_abi_wsapollfd_revents_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 6, 10)
+
+pub fn windows_abi_performance_info_size_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 56, 104)
+
+pub fn windows_abi_performance_info_commit_total_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 4, 8)
+
+pub fn windows_abi_performance_info_commit_limit_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 8, 16)
+
+pub fn windows_abi_performance_info_page_size_offset_for(bits: i64) -> i64:
+    _windows_abi_pick(bits, 40, 80)
+
+pub fn windows_abi_security_attributes_size() -> i64:
+    windows_abi_security_attributes_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_security_attributes_descriptor_offset() -> i64:
+    windows_abi_security_attributes_descriptor_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_security_attributes_inherit_offset() -> i64:
+    windows_abi_security_attributes_inherit_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfo_size() -> i64:
+    windows_abi_startupinfo_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfo_flags_offset() -> i64:
+    windows_abi_startupinfo_flags_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfo_std_input_offset() -> i64:
+    windows_abi_startupinfo_std_input_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfo_std_output_offset() -> i64:
+    windows_abi_startupinfo_std_output_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfo_std_error_offset() -> i64:
+    windows_abi_startupinfo_std_error_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfoex_size() -> i64:
+    windows_abi_startupinfoex_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_startupinfoex_attr_list_offset() -> i64:
+    windows_abi_startupinfoex_attr_list_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_process_info_size() -> i64:
+    windows_abi_process_info_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_process_info_process_offset() -> i64:
+    windows_abi_process_info_process_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_process_info_thread_offset() -> i64:
+    windows_abi_process_info_thread_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_process_info_pid_offset() -> i64:
+    windows_abi_process_info_pid_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_process_info_tid_offset() -> i64:
+    windows_abi_process_info_tid_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_job_extended_limit_size() -> i64:
+    windows_abi_job_extended_limit_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_job_limit_flags_offset() -> i64:
+    16
+
+pub fn windows_abi_job_process_memory_limit_offset() -> i64:
+    windows_abi_job_process_memory_limit_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_job_memory_limit_offset() -> i64:
+    windows_abi_job_memory_limit_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_job_peak_process_memory_offset() -> i64:
+    windows_abi_job_peak_process_memory_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_job_peak_memory_offset() -> i64:
+    windows_abi_job_peak_memory_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_job_basic_accounting_size() -> i64:
+    48
+
+pub fn windows_abi_job_active_processes_offset() -> i64:
+    40
+
+pub fn windows_abi_file_attribute_tag_info_size() -> i64:
+    8
+
+pub fn windows_abi_overlapped_size() -> i64:
+    windows_abi_overlapped_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_overlapped_event_offset() -> i64:
+    windows_abi_overlapped_event_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_wsapollfd_size() -> i64:
+    windows_abi_wsapollfd_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_wsapollfd_events_offset() -> i64:
+    windows_abi_wsapollfd_events_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_wsapollfd_revents_offset() -> i64:
+    windows_abi_wsapollfd_revents_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_performance_info_size() -> i64:
+    windows_abi_performance_info_size_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_performance_info_commit_total_offset() -> i64:
+    windows_abi_performance_info_commit_total_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_performance_info_commit_limit_offset() -> i64:
+    windows_abi_performance_info_commit_limit_offset_for(windows_abi_pointer_bits())
+
+pub fn windows_abi_performance_info_page_size_offset() -> i64:
+    windows_abi_performance_info_page_size_offset_for(windows_abi_pointer_bits())
 
 @when(os="windows"):
 # ASCII-only proof helper. The production owner must provide full UTF16.
 @unsafe(reason: "writes only inside a zeroed owned UTF16 allocation", capabilities: [ffi, raw_ptr])
 fn windows_abi_ascii_v1(heap: i64, value: text) -> i64:
-    val allocation = HeapAlloc(heap, 8u32, ((value.len() + 1) * 2) as u64)
+    val allocation = windows_abi_heap_alloc(heap, (value.len() + 1) * 2)
     if allocation == 0: return 0
     var index = 0
     while index < value.len():
         val scalar = value.char_code_at(index)
         if scalar < 0 or scalar > 127:
-            val _freed = HeapFree(heap, 0u32, allocation)
+            val _freed = windows_abi_heap_free(heap, allocation)
             return 0
         volatile_write_u16(allocation + index * 2, scalar)
         index = index + 1
@@ -103,18 +516,20 @@ fn windows_abi_ascii_v1(heap: i64, value: text) -> i64:
 
 @unsafe(reason: "native proof owns all allocations, handles and suspended children", capabilities: [ffi, raw_ptr])
 fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return 10
     val application = windows_abi_ascii_v1(heap, "C:\\Windows\\System32\\cmd.exe")
     val command_line = windows_abi_ascii_v1(heap, command)
     val directory = windows_abi_ascii_v1(heap, "C:\\Windows")
-    # Windows x64 SDK layouts: STARTUPINFOW=104, PROCESS_INFORMATION=24,
-    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION=144, BASIC_ACCOUNTING=48.
-    val startup = HeapAlloc(heap, 8u32, 104u64)
-    val process_info = HeapAlloc(heap, 8u32, 24u64)
-    val limits = HeapAlloc(heap, 8u32, 144u64)
-    val accounting = HeapAlloc(heap, 8u32, 48u64)
-    val exit_slot = HeapAlloc(heap, 8u32, 8u64)
+    val startup_bytes = windows_abi_startupinfo_size()
+    val process_info_bytes = windows_abi_process_info_size()
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    val accounting_bytes = windows_abi_job_basic_accounting_size()
+    val startup = windows_abi_heap_alloc(heap, startup_bytes)
+    val process_info = windows_abi_heap_alloc(heap, process_info_bytes)
+    val limits = windows_abi_heap_alloc(heap, limits_bytes)
+    val accounting = windows_abi_heap_alloc(heap, accounting_bytes)
+    val exit_slot = windows_abi_heap_alloc(heap, 8)
     var allocations: [i64] = [application, command_line, directory, startup, process_info, limits, accounting, exit_slot]
     var code: i64 = 0
     for address in allocations:
@@ -123,12 +538,12 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
     var process: i64 = 0
     var thread: i64 = 0
     if code == 0:
-        volatile_write_u32(startup, 104)
+        volatile_write_u32(startup, startup_bytes)
         # LimitFlags offset16, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE=0x2000.
-        volatile_write_u32(limits + 16, 8192)
-        job = CreateJobObjectW(0, 0)
+        volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8192)
+        job = CreateJobObjectW(0, 0) as i64
         if job == 0: code = 12
-    if code == 0 and SetInformationJobObject(job, 9, limits, 144u32) == 0: code = 13
+    if code == 0 and SetInformationJobObject(job, 9, limits, limits_bytes as u32) == 0: code = 13
     if code == 0:
         # CREATE_SUSPENDED | CREATE_NO_WINDOW. No inherited handles.
         val created = CreateProcessW(application, command_line, 0, 0, 0,
@@ -136,8 +551,8 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         if created == 0:
             code = 14
         else:
-            process = volatile_read_u64(process_info)
-            thread = volatile_read_u64(process_info + 8)
+            process = windows_abi_read_ptr(process_info + windows_abi_process_info_process_offset())
+            thread = windows_abi_read_ptr(process_info + windows_abi_process_info_thread_offset())
     if code == 0 and AssignProcessToJobObject(job, process) == 0: code = 15
     if code == 0 and ResumeThread(thread) == 4294967295u32: code = 16
     if code == 0 and cancel:
@@ -145,10 +560,10 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         val deadline = GetTickCount64() + 10000u64
         var descendants = false
         while GetTickCount64() < deadline and not descendants:
-            if QueryInformationJobObject(job, 1, accounting, 48u32, 0) == 0:
+            if QueryInformationJobObject(job, 1, accounting, accounting_bytes as u32, 0) == 0:
                 code = 17
                 break
-            descendants = volatile_read_u32(accounting + 40) >= 2
+            descendants = volatile_read_u32(accounting + windows_abi_job_active_processes_offset()) >= 2
             if not descendants: Sleep(10u32)
         if not descendants: code = 18
         if TerminateJobObject(job, 125u32) == 0: code = 19
@@ -161,10 +576,10 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         val deadline = GetTickCount64() + 10000u64
         var empty = false
         while GetTickCount64() < deadline and not empty:
-            if QueryInformationJobObject(job, 1, accounting, 48u32, 0) == 0:
+            if QueryInformationJobObject(job, 1, accounting, accounting_bytes as u32, 0) == 0:
                 code = 23
                 break
-            empty = volatile_read_u32(accounting + 40) == 0
+            empty = volatile_read_u32(accounting + windows_abi_job_active_processes_offset()) == 0
             if not empty: Sleep(10u32)
         if not empty: code = 24
     if code != 0 and process != 0:
@@ -179,7 +594,7 @@ fn windows_process_abi_case_v1(command: text, cancel: bool) -> i64:
         val _closed = CloseHandle(job)
     for address in allocations:
         if address != 0:
-            val _freed = HeapFree(heap, 0u32, address)
+            val _freed = windows_abi_heap_free(heap, address)
     code
 
 fn windows_process_abi_proof_v1() -> i64:
@@ -198,3 +613,24 @@ export CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute
 export DeleteProcThreadAttributeList, GetLastError
 export GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider
 export BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider
+export windows_abi_pointer_bits, windows_abi_pointer_bytes, windows_abi_pointer_bytes_for, windows_abi_size_t_max
+export windows_abi_read_ptr, windows_abi_write_ptr
+export windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free
+export windows_abi_get_module_file_name_w, windows_abi_update_proc_thread_attribute
+export windows_abi_security_attributes_size_for, windows_abi_security_attributes_descriptor_offset_for, windows_abi_security_attributes_inherit_offset_for
+export windows_abi_startupinfo_size_for, windows_abi_startupinfo_flags_offset_for, windows_abi_startupinfo_std_input_offset_for, windows_abi_startupinfo_std_output_offset_for, windows_abi_startupinfo_std_error_offset_for
+export windows_abi_startupinfoex_size_for, windows_abi_startupinfoex_attr_list_offset_for
+export windows_abi_process_info_size_for, windows_abi_process_info_process_offset_for, windows_abi_process_info_thread_offset_for, windows_abi_process_info_pid_offset_for, windows_abi_process_info_tid_offset_for
+export windows_abi_job_extended_limit_size_for, windows_abi_job_limit_flags_offset_for, windows_abi_job_process_memory_limit_offset_for, windows_abi_job_memory_limit_offset_for, windows_abi_job_peak_process_memory_offset_for, windows_abi_job_peak_memory_offset_for
+export windows_abi_overlapped_size_for, windows_abi_overlapped_event_offset_for
+export windows_abi_wsapollfd_size_for, windows_abi_wsapollfd_events_offset_for, windows_abi_wsapollfd_revents_offset_for
+export windows_abi_performance_info_size_for, windows_abi_performance_info_commit_total_offset_for, windows_abi_performance_info_commit_limit_offset_for, windows_abi_performance_info_page_size_offset_for
+export windows_abi_security_attributes_size, windows_abi_security_attributes_descriptor_offset, windows_abi_security_attributes_inherit_offset
+export windows_abi_startupinfo_size, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset
+export windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset
+export windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_process_info_tid_offset
+export windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_process_memory_limit_offset, windows_abi_job_memory_limit_offset, windows_abi_job_peak_process_memory_offset, windows_abi_job_peak_memory_offset
+export windows_abi_job_basic_accounting_size, windows_abi_job_active_processes_offset, windows_abi_file_attribute_tag_info_size
+export windows_abi_overlapped_size, windows_abi_overlapped_event_offset
+export windows_abi_wsapollfd_size, windows_abi_wsapollfd_events_offset, windows_abi_wsapollfd_revents_offset
+export windows_abi_performance_info_size, windows_abi_performance_info_commit_total_offset, windows_abi_performance_info_commit_limit_offset, windows_abi_performance_info_page_size_offset

@@ -3208,36 +3208,150 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
 
 #[test]
 fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
+    use simple_common::platform::cc_detect::ToolDetectEnv;
     use simple_common::target::Target;
 
     let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
-    // Bootstrap publishes its admitted driver as CC (e.g. clang-cl on the
-    // Windows lane) and that authority wins; only without it is the fallback
-    // the Clang-only default.
-    let expected_driver = match std::env::var("CC") {
-        Ok(cc) if !cc.trim().is_empty() => simple_common::platform::path::to_native_owned(cc),
-        _ => "clang".to_string(),
+    // Without CC, Windows GNU prefers the arch-matching llvm-mingw driver
+    // (never bare `clang` which could hit an MSVC clang ahead on PATH).
+    assert_eq!(
+        target_c_compiler_with_env(target, &ToolDetectEnv::default()),
+        "x86_64-w64-mingw32-clang"
+    );
+    let override_env = ToolDetectEnv {
+        cc: Some("/custom/clang".to_string()),
+        ..ToolDetectEnv::default()
     };
-    assert_eq!(target_c_compiler(target), expected_driver);
+    assert_eq!(target_c_compiler_with_env(target, &override_env), "/custom/clang");
     assert_eq!(
         windows_gnu_target_flag(target, "clang"),
         Some("--target=x86_64-w64-windows-gnu")
     );
+    assert_eq!(
+        windows_gnu_target_flag(target, "x86_64-w64-mingw32-clang"),
+        Some("--target=x86_64-w64-windows-gnu")
+    );
     assert_eq!(windows_gnu_target_flag(target, "x86_64-w64-mingw32-gcc"), None);
+    assert_eq!(windows_gnu_target_flag(target, "clang-cl"), None);
 }
 
 #[test]
 fn test_windows_gnu_target_flag_follows_target_arch() {
     use simple_common::target::Target;
 
-    for (triple, flag) in [
-        ("aarch64-pc-windows-gnullvm", "--target=aarch64-w64-windows-gnu"),
-        ("aarch64-w64-mingw32", "--target=aarch64-w64-windows-gnu"),
-        ("x86_64-pc-windows-gnu", "--target=x86_64-w64-windows-gnu"),
+    for (triple, driver, flag) in [
+        ("aarch64-pc-windows-gnullvm", "aarch64-w64-mingw32-clang", "--target=aarch64-w64-windows-gnu"),
+        ("aarch64-w64-mingw32", "aarch64-w64-mingw32-clang", "--target=aarch64-w64-windows-gnu"),
+        ("i686-pc-windows-gnu", "i686-w64-mingw32-clang", "--target=i686-w64-windows-gnu"),
+        ("armv7-pc-windows-gnu", "armv7-w64-mingw32-clang", "--target=armv7-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang", "--target=x86_64-w64-windows-gnu"),
     ] {
         let target = Target::parse(triple).unwrap();
         assert_eq!(windows_gnu_target_flag(target, "clang"), Some(flag), "{triple}");
+        assert_eq!(windows_gnu_target_flag(target, driver), Some(flag), "{triple}");
     }
+}
+
+fn write_fake_clang_tool(dir: &Path, name: &str, effective_triple: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--print-effective-triple\" ] || [ \"$1\" = \"-dumpmachine\" ]; then\n  echo \"{effective_triple}\"\nfi\nexit 0\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{name}.cmd"));
+        let script = format!(
+            "@echo off\r\nif \"%1\"==\"--print-effective-triple\" echo {effective_triple}\r\nif \"%1\"==\"-dumpmachine\" echo {effective_triple}\r\nexit /b 0\r\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+}
+
+#[test]
+fn test_windows_gnu_target_compiler_prefers_arch_llvm_mingw_and_rejects_msvc_clang() {
+    use simple_common::platform::cc_detect::ToolDetectEnv;
+    use simple_common::target::Target;
+
+    let temp = tempfile::tempdir().unwrap();
+    let msvc_bin = temp.path().join("llvm-msvc").join("bin");
+    let mingw_bin = temp.path().join("llvm-mingw").join("bin");
+    std::fs::create_dir_all(&msvc_bin).unwrap();
+    std::fs::create_dir_all(&mingw_bin).unwrap();
+
+    // Put MSVC-target clang ahead of llvm-mingw on PATH, mirroring windows-llvm-23.1.1.shs.
+    let msvc_clang = write_fake_clang_tool(&msvc_bin, "clang", "x86_64-pc-windows-msvc");
+    let _mingw_clang = write_fake_clang_tool(&mingw_bin, "clang", "x86_64-w64-windows-gnu");
+    let i686_cc = write_fake_clang_tool(&mingw_bin, "i686-w64-mingw32-clang", "i686-w64-windows-gnu");
+    let x86_64_cc = write_fake_clang_tool(&mingw_bin, "x86_64-w64-mingw32-clang", "x86_64-w64-windows-gnu");
+    let aarch64_cc = write_fake_clang_tool(&mingw_bin, "aarch64-w64-mingw32-clang", "aarch64-w64-windows-gnu");
+    let i686_cxx = write_fake_clang_tool(&mingw_bin, "i686-w64-mingw32-clang++", "i686-w64-windows-gnu");
+
+    let joined_path = std::env::join_paths([&msvc_bin, &mingw_bin]).unwrap();
+    let path_env = ToolDetectEnv {
+        path: Some(joined_path),
+        ..ToolDetectEnv::default()
+    };
+
+    for (triple, expected_path, expected_flag) in [
+        ("i686-pc-windows-gnu", &i686_cc, "--target=i686-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", &x86_64_cc, "--target=x86_64-w64-windows-gnu"),
+        ("aarch64-pc-windows-gnu", &aarch64_cc, "--target=aarch64-w64-windows-gnu"),
+    ] {
+        let target = Target::parse(triple).unwrap();
+        let selected = target_c_compiler_with_env(target, &path_env);
+        assert_eq!(Path::new(&selected), expected_path.as_path(), "{triple}");
+        assert_ne!(Path::new(&selected), msvc_clang.as_path(), "{triple}");
+        assert_eq!(windows_gnu_target_flag(target, &selected), Some(expected_flag), "{triple}");
+    }
+    assert_eq!(
+        Path::new(&target_cxx_compiler_with_env(Target::parse("i686-pc-windows-gnu").unwrap(), &path_env)),
+        i686_cxx.as_path()
+    );
+
+    // When ONLY MSVC clang exists on PATH (no llvm-mingw anywhere), fail closed on the
+    // arch-matching llvm-mingw driver name and never fall back to MSVC clang.
+    let msvc_only_env = ToolDetectEnv {
+        path: Some(msvc_bin.as_os_str().to_os_string()),
+        ..ToolDetectEnv::default()
+    };
+    for (triple, expected_fallback) in [
+        ("i686-pc-windows-gnu", "i686-w64-mingw32-clang"),
+        ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang"),
+        ("aarch64-pc-windows-gnu", "aarch64-w64-mingw32-clang"),
+    ] {
+        let selected = target_c_compiler_with_env(Target::parse(triple).unwrap(), &msvc_only_env);
+        assert_eq!(selected, expected_fallback, "{triple}");
+    }
+
+    // Also discover <arch>-w64-mingw32-clang from $HOME/.simple/toolchains/llvm-mingw-*/bin
+    // even when llvm-mingw is absent from PATH and MSVC clang is first on PATH.
+    let home = temp.path().join("home");
+    let home_mingw_bin = home
+        .join(".simple")
+        .join("toolchains")
+        .join("llvm-mingw-20260922-ucrt-x86_64")
+        .join("bin");
+    std::fs::create_dir_all(&home_mingw_bin).unwrap();
+    let home_i686_cc = write_fake_clang_tool(&home_mingw_bin, "i686-w64-mingw32-clang", "i686-w64-windows-gnu");
+    let home_env = ToolDetectEnv {
+        path: Some(msvc_bin.as_os_str().to_os_string()),
+        home_dir: Some(home),
+        ..ToolDetectEnv::default()
+    };
+    assert_eq!(
+        Path::new(&target_c_compiler_with_env(Target::parse("i686-pc-windows-gnu").unwrap(), &home_env)),
+        home_i686_cc.as_path()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -5280,6 +5394,90 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
     assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
+}
+
+// Blocker 8 (doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md):
+// an ordinary GPU entry needs the Vulkan runtime and the provider registry,
+// which only a `--features vulkan` native_all archive carries. The explicit
+// `host-gpu-native-all` lane admits exactly that archive and nothing weaker.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_selects_vulkan_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\nlong rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    assert_eq!(builder.resolve_runtime_lane(), NativeRuntimeLane::HostGpuNativeAll);
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected.0, native_all);
+    assert!(selected.1);
+    assert!(builder.reject_unexpected_native_all(Some(&selected)).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_rejects_archive_without_vulkan() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("rt_vulkan_init"), "{error}");
+    assert!(error.contains("--features vulkan"), "{error}");
+}
+
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_requires_runtime_path() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NativeBuildConfig::default();
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("--runtime-path"), "{error}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_still_refuses_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[test]
@@ -7352,6 +7550,18 @@ fn test_mingw_i686_decorated_crt_symbols_are_never_stub_candidates() {
         );
     }
     assert!(!super::tools::is_system_symbol_for_target("_app__main", target));
+}
+
+#[test]
+fn test_mingw_i686_stdcall_decorated_win32_symbols_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("i686-pc-windows-gnu").unwrap();
+    for symbol in ["_Sleep@4", "_GetLastError@0", "_CreateProcessW@40", "_CloseHandle@4"] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} is a kernel32 stdcall import, never a generated stub"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("_app_fn@4", target));
 }
 
 #[test]
@@ -10512,4 +10722,54 @@ fn compiler_rt_builtins_env_override_selects_explicit_archive() {
     assert_eq!(chosen, Some(archive));
     assert_ne!(fallback, Some(missing));
     assert_ne!(gcc_pick, Some(gcc));
+}
+
+/// Perf regression (bug seed_native_build_per_file_compile_minutes_windows_2026-11-23):
+/// `build_use_map_from_ast` walks the whole `all_mangled` table per imported
+/// name. On the full-CLI closure that cost 65% of all per-file CPU
+/// (`pre_hir`, up to 190 s for one file). Run a wide table x many imports and
+/// keep the module-qualified (`mod.fn`) binding intact. No wall-clock assert:
+/// a time bound flakes on a loaded host, and the quadratic form still makes
+/// this test visibly slow.
+#[test]
+fn build_use_map_wide_closure_stays_within_budget() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for i in 0..20_000 {
+        let name = format!("f{i}");
+        let owners = vec![format!("pkg__m{}__{name}", i % 97), format!("other__m{}__{name}", i % 89)];
+        all_mangled.insert(name, owners);
+    }
+    all_mangled.insert("helper".to_string(), vec!["pkg__m1__helper".to_string()]);
+    let mut source = String::new();
+    for m in 0..40 {
+        source.push_str(&format!("use pkg.m{m}\n"));
+    }
+    source.push_str("fn main():\n    0\n");
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    assert_eq!(use_map.get("m1.helper").map(String::as_str), Some("pkg__m1__helper"));
+    assert_eq!(use_map.get("m3.f3").map(String::as_str), Some("pkg__m3__f3"));
+    assert!(use_map.get("m3.f4").is_none());
+}
+
+/// The indexed module-key lookup must find the owners the exact-name scan
+/// found when a segment's edge underscore fuses with the `__` separator:
+/// a module named `impl_`, a module under `impl_`, and one under `p_dot`.
+#[test]
+fn build_use_map_module_import_keeps_underscore_edged_segments() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for (name, owner) in [
+        ("helper", "pkg__impl___helper"),
+        ("inner", "pkg__impl___m__inner"),
+        ("dotted", "pkg__p_dot__n__dotted"),
+    ] {
+        all_mangled.insert(name.to_string(), vec![owner.to_string(), format!("other__x__{name}")]);
+    }
+    let source = "use pkg.impl_\nuse pkg.impl_.m\nuse pkg.p_dot.n\nfn main():\n    0\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    assert_eq!(use_map.get("impl_.helper").map(String::as_str), Some("pkg__impl___helper"));
+    assert_eq!(use_map.get("m.inner").map(String::as_str), Some("pkg__impl___m__inner"));
+    assert_eq!(use_map.get("n.dotted").map(String::as_str), Some("pkg__p_dot__n__dotted"));
+    assert!(use_map.get("m.helper").is_none());
 }

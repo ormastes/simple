@@ -497,14 +497,73 @@ EOF_POISON_CMD
   check_not_contains "$_out_ilg_off" "step=internal-linker-gate" "ilg:off" "p3b internal-linker-gate suppressed"
   check_not_contains "$_out_ilg_off" "step=cli-internal-linker" "ilg:off" "p4 cli-internal-linker suppressed"
 
-  # 3c. --dry-run mode checks
-  _dry_one=$(PATH="$_poison:$PATH" sh "$_u_sh" --dry-run --simulate-host=darwin-aarch64 --phase=all --link-mode=one-binary --p4-link-mode=one-binary --backend=cranelift 2>&1)
+  # 3c. --dry-run mode checks across all simulated hosts and Windows mingw/msvc configs
+  _dry_one=$(unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE; PATH="$_poison:$PATH" sh "$_u_sh" --dry-run --simulate-host=darwin-aarch64 --phase=all --link-mode=one-binary --p4-link-mode=one-binary --backend=cranelift 2>&1)
   _rc=$?
   if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "dry-run:one-binary:rc" "exited $_rc"; fi
   check_contains "$_dry_one" "LINK_MODE=one-binary" "dry-run:lmode" "LINK_MODE=one-binary"
   check_contains "$_dry_one" "P4_LINK_MODE=one-binary" "dry-run:p4lmode" "P4_LINK_MODE=one-binary"
   check_contains "$_dry_one" "--backend cranelift" "dry-run:backend" "cranelift forwarded"
   check_contains "$_dry_one" "--mode one-binary" "dry-run:mode-flag" "one-binary mode flag"
+
+  for _dry_spec in \
+    "linux-x86_64:x86_64-unknown-linux-gnu" \
+    "linux-aarch64:aarch64-unknown-linux-gnu" \
+    "linux-riscv64:riscv64gc-unknown-linux-gnu" \
+    "darwin-aarch64:aarch64-apple-darwin" \
+    "darwin-x86_64:x86_64-apple-darwin" \
+    "freebsd-x86_64:x86_64-unknown-freebsd" \
+    "freebsd-aarch64:aarch64-unknown-freebsd" \
+    "simpleos-x86_64:x86_64-unknown-simpleos" \
+    "simpleos-aarch64:aarch64-unknown-simpleos" \
+    "simpleos-riscv64:riscv64gc-unknown-simpleos"; do
+    _dh_tag=${_dry_spec%%:*}
+    _dh_triple=${_dry_spec#*:}
+    _dry_h=$(unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE; PATH="$_poison:$PATH" sh "$_u_sh" --dry-run --simulate-host="$_dh_tag" --phase=all 2>&1)
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "dry-run:$_dh_tag:rc" "exited $_rc: $_dry_h"; fi
+    check_contains "$_dry_h" "HOST_TAG=$_dh_tag" "dry-run:$_dh_tag:host" "HOST_TAG=$_dh_tag"
+    check_contains "$_dry_h" "TARGET=$_dh_triple" "dry-run:$_dh_tag:target" "TARGET=$_dh_triple"
+    check_contains "$_dry_h" "NATIVE_HOST_MATCH=true" "dry-run:$_dh_tag:match" "NATIVE_HOST_MATCH=true"
+    check_contains "$_dry_h" "WIN_CONFIG=n/a" "dry-run:$_dh_tag:wincfg" "WIN_CONFIG=n/a"
+    check_contains "$_dry_h" "libsimple-primitive-${_dh_tag}.a" "dry-run:$_dh_tag:archive" "primitive archive"
+    check_contains "$_dry_h" "/phase3-a/simple" "dry-run:$_dh_tag:p3a-bin" "P3a artifact path"
+    check_contains "$_dry_h" "/phase3-b/simple" "dry-run:$_dh_tag:p3b-bin" "P3b artifact path"
+    check_contains "$_dry_h" "/p4-from-p3b/bin/simple" "dry-run:$_dh_tag:p4-bin" "P4 release artifact path"
+    check_contains "$_dry_h" "/p4-from-p3b/bin/simple-debug" "dry-run:$_dh_tag:p4dbg-bin" "P4 debug-xray artifact path"
+    check_not_contains "$_dry_h" ".exe" "dry-run:$_dh_tag:no-exe" "non-Windows dry-run forbids .exe"
+    check_not_contains "$_dry_h" 'MSYS2_ENV_CONV_EXCL="CL="' "dry-run:$_dh_tag:no-msys-excl" "non-Windows dry-run forbids MSYS2_ENV_CONV_EXCL"
+  done
+
+  for _dw_cpu in x86_64 aarch64; do
+    _dw_tag="windows-${_dw_cpu}"
+    for _dw_pair in "mingw:gnu" "msvc:msvc"; do
+      _dw_cfg=${_dw_pair%%:*}
+      _dw_abi=${_dw_pair#*:}
+      _dw_triple="${_dw_cpu}-pc-windows-${_dw_abi}"
+      _dry_w=$(unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE; PATH="$_poison:$PATH" sh "$_u_sh" --dry-run --simulate-host="$_dw_tag" --win-config="$_dw_cfg" --phase=all 2>&1)
+      _rc=$?
+      if [ "$_rc" -eq 0 ]; then pass_check; else fail_check "dry-run:$_dw_tag:$_dw_cfg:rc" "exited $_rc: $_dry_w"; fi
+      check_contains "$_dry_w" "HOST_TAG=$_dw_tag" "dry-run:$_dw_tag:$_dw_cfg:host" "HOST_TAG=$_dw_tag"
+      check_contains "$_dry_w" "TARGET=$_dw_triple" "dry-run:$_dw_tag:$_dw_cfg:target" "TARGET=$_dw_triple"
+      check_contains "$_dry_w" "NATIVE_HOST_MATCH=true" "dry-run:$_dw_tag:$_dw_cfg:match" "NATIVE_HOST_MATCH=true"
+      check_contains "$_dry_w" "WIN_CONFIG=$_dw_cfg" "dry-run:$_dw_tag:$_dw_cfg:wincfg" "WIN_CONFIG=$_dw_cfg"
+      check_contains "$_dry_w" "export SIMPLE_WINDOWS_ABI=\"${_dw_abi}\"" "dry-run:$_dw_tag:$_dw_cfg:abi" "SIMPLE_WINDOWS_ABI=${_dw_abi}"
+      check_contains "$_dry_w" "libsimple-primitive-${_dw_tag}.a" "dry-run:$_dw_tag:$_dw_cfg:archive" "Windows primitive archive"
+      check_contains "$_dry_w" "/phase2/simple.exe " "dry-run:$_dw_tag:$_dw_cfg:p2-exe" "P2 .exe input path"
+      check_contains "$_dry_w" "/phase3-a/simple.exe" "dry-run:$_dw_tag:$_dw_cfg:p3a-exe" "P3a .exe artifact path"
+      check_contains "$_dry_w" "/phase3-b/simple.exe" "dry-run:$_dw_tag:$_dw_cfg:p3b-exe" "P3b .exe artifact path"
+      check_contains "$_dry_w" "/p4-from-p3b/bin/simple.exe" "dry-run:$_dw_tag:$_dw_cfg:p4-exe" "P4 release .exe artifact path"
+      check_contains "$_dry_w" "/p4-from-p3b/bin/simple-debug.exe" "dry-run:$_dw_tag:$_dw_cfg:p4dbg-exe" "P4 debug-xray .exe artifact path"
+      if [ "$_dw_cfg" = "msvc" ]; then
+        check_contains "$_dry_w" 'export CL="/TC"' "dry-run:$_dw_tag:msvc:cl" 'CL="/TC" exported under msvc'
+        check_contains "$_dry_w" 'export MSYS2_ENV_CONV_EXCL="CL="' "dry-run:$_dw_tag:msvc:msys-excl" 'MSYS2_ENV_CONV_EXCL="CL=" exported under msvc'
+      else
+        check_not_contains "$_dry_w" 'export CL="/TC"' "dry-run:$_dw_tag:mingw:no-cl" 'CL="/TC" omitted under mingw'
+        check_not_contains "$_dry_w" 'MSYS2_ENV_CONV_EXCL="CL="' "dry-run:$_dw_tag:mingw:no-msys-excl" 'MSYS2_ENV_CONV_EXCL="CL=" omitted under mingw'
+      fi
+    done
+  done
 
   # 3d. Interactive --menu via stdin for 0..6 and invalid 9
   _m0=$(printf '0\n' | PATH="$_poison:$PATH" sh "$_u_sh" --menu --path-check --simulate-host=darwin-aarch64 2>&1)
@@ -879,6 +938,7 @@ EOF_XXH
     scripts/bootstrap/lib/centralized-storage.shs \
     scripts/bootstrap/lib/host-bootstrap-settings.shs \
     scripts/bootstrap/lib/host-shared-cache.shs \
+    scripts/bootstrap/lib/run-timeout.shs \
     scripts/check/lib/bootstrap-planner-admission-bound.shs \
     scripts/check/lib/portable-session-exec.pl \
     scripts/lib/storage-roots.shs \

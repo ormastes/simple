@@ -99,7 +99,15 @@ pub fn unit_constraint_find(name: text) -> i64:
 
 # Same-name re-declarations whose bounds differ, queued for the driver to
 # report (it drains them as warnings). Re-registering identical bounds is silent.
+# Each message carries the source path of the module being parsed when it was
+# queued, so a module's typecheck drains only its own conflicts.
 var unit_constraint_conflicts: [text] = []
+var unit_constraint_conflict_owners: [text] = []
+var unit_constraint_conflict_owner: text = ""
+
+# The frontend names the module it is about to parse; later conflicts belong to it.
+pub fn unit_constraint_set_conflict_owner(path: text):
+    unit_constraint_conflict_owner = path
 
 fn unit_constraint_bounds_differ(row: i64, predicate: text, min_text: text, max_text: text) -> bool:
     val old_min = unit_constraint_min_texts[row]
@@ -112,11 +120,47 @@ fn unit_constraint_bounds_text(min_text: text, max_text: text, predicate: text) 
     if min_text == "" and max_text == "": return "`" + predicate + "`"
     "[" + min_text + ", " + max_text + "]"
 
-# Take (and clear) the queued SPL-UNIT-006 conflict messages.
+# Take (and clear) every queued SPL-UNIT-006 conflict message.
 pub fn unit_constraint_drain_conflicts() -> [text]:
     val out = unit_constraint_conflicts
     unit_constraint_conflicts = []
+    unit_constraint_conflict_owners = []
     out
+
+# Take only the conflicts queued while `owner` was being parsed; the rest stay
+# queued for their own module.
+pub fn unit_constraint_drain_conflicts_for(owner: text) -> [text]:
+    var out: [text] = []
+    var keep: [text] = []
+    var keep_owners: [text] = []
+    var i = 0
+    while i < unit_constraint_conflicts.len():
+        if unit_constraint_conflict_owners[i] == owner:
+            out.push(unit_constraint_conflicts[i])
+        else:
+            keep.push(unit_constraint_conflicts[i])
+            keep_owners.push(unit_constraint_conflict_owners[i])
+        i = i + 1
+    unit_constraint_conflicts = keep
+    unit_constraint_conflict_owners = keep_owners
+    out
+
+# Queued conflicts of `owner`, left in the queue. The parse cache stores these
+# with the entry so a cache hit (which skips the parser) can replay them.
+pub fn unit_constraint_conflicts_for(owner: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < unit_constraint_conflicts.len():
+        if unit_constraint_conflict_owners[i] == owner:
+            out.push(unit_constraint_conflicts[i])
+        i = i + 1
+    out
+
+# Re-queue conflicts restored from a parse-cache entry under `owner`.
+pub fn unit_constraint_requeue_conflicts(owner: text, messages: [text]):
+    for m in messages:
+        unit_constraint_conflicts.push(m)
+        unit_constraint_conflict_owners.push(owner)
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
@@ -126,6 +170,7 @@ pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_t
     if existing >= 0:
         if unit_constraint_bounds_differ(existing, predicate, min_text, max_text):
             unit_constraint_conflicts.push("SPL-UNIT-006: unit `" + name + "` is declared again with different bounds (" + unit_constraint_bounds_text(unit_constraint_min_texts[existing], unit_constraint_max_texts[existing], unit_constraint_predicates[existing]) + " vs " + unit_constraint_bounds_text(min_text, max_text, predicate) + "); the later declaration wins")
+            unit_constraint_conflict_owners.push(unit_constraint_conflict_owner)
         unit_constraint_predicates[existing] = predicate
         unit_constraint_ref_tags[existing] = ref_tag
         unit_constraint_min_texts[existing] = min_text

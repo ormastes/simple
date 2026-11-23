@@ -55,7 +55,12 @@ and [`bootstrap_options.md`](../../../07_guide/tooling/bootstrap_options.md):
 
 Host tuning (reserve, Stage 3 tree RSS cap, Stage 3 direct threads, Stage 3
 file workers) is read from host config keys `mem_reserve_free_mib`,
-`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`
+`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`, and
+(2026-11-23, W27/W32/W36) the Stage 2 matrix / Stage 3 shard keys
+`frontend_cache` (on|off), `mir_sharding`, `mir_shard_count`,
+`mir_shard_worker_kib`, and `sanity_build_timeout_seconds`
+(`COMPILER_BUILD_TIMEOUT_SECONDS` for the sanity probes) (invalid = hard error; test
+`scripts/bootstrap/tests/host-config-matrix-shard-knobs-test.shs`)
 via `scripts/bootstrap/lib/host-bootstrap-settings.shs` and
 `bootstrap-jobs.shs`; env vars still win, absent keys change nothing. Update
 with `sh scripts/setup/update-host-config.shs --dry-run`. A user

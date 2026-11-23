@@ -1,0 +1,93 @@
+# @tag: unit, draw_ir, engine2d, vulkan
+"""
+# Strict Vulkan corpus case 02 fractional and rotated edges
+
+REQ-2D-002: the pinned corpus case 02 projection (four white clears, a
+7-degree rotated tile and a 2.5px fractional bar, both DrawIR v4 coverage-AA
+affine rects) renders on the strict Vulkan lane at its full 640x480 and passes
+the independent analytic area oracle. The affine dispatch box must enclose the
+transformed rectangle; a box collapsed to the surface origin paints nothing.
+
+The physical GB10 failure (`Engine2D corpus case 02 edge oracle mismatch`)
+came from the native build collapsing that box: `floor_f64(x).to_i32()`
+returned the low 32 bits of the f64 pattern. This spec runs interpreted, so
+it pins the values; the native red/green evidence is in
+doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md
+and the codegen defect in
+doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md.
+"""
+
+use std.spec
+use std.fs.{read_file}
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    _engine2d_draw_ir_strict_vulkan_affine_pixels,
+    engine2d_draw_ir_adv_strict_vulkan_primitives_with_images}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case02_gpu_scene_from_html}
+use common.renderdoc.corpus_case02_polygon_oracle.{
+    CORPUS_CASE02_SOURCE_PATH, CORPUS_CASE02_WIDTH, CORPUS_CASE02_HEIGHT,
+    case02_compare_canonical_rgba}
+
+fn _argb_to_rgba(pixels: [u32]) -> [i64]:
+    var rgba: [i64] = []
+    for p in pixels:
+        rgba.push(((p >> 16) & 0xFFu32).to_i64())
+        rgba.push(((p >> 8) & 0xFFu32).to_i64())
+        rgba.push((p & 0xFFu32).to_i64())
+        rgba.push(((p >> 24) & 0xFFu32).to_i64())
+    rgba
+
+fn _case02_commands() -> [DrawIrCommand]:
+    match web_corpus_case02_gpu_scene_from_html(read_file(CORPUS_CASE02_SOURCE_PATH)):
+        case Ok(web): web.gpu_draw_ir.batches[0].commands
+        case Err(_): []
+
+describe "strict Vulkan corpus case 02 edges":
+    it "encloses the rotated tile and the fractional bar in their dispatch boxes":
+        # @req REQ-2D-002
+        val commands = _case02_commands()
+        expect(commands.len()).to_equal(6)
+        if commands.len() == 6:
+            # Tile corners span x 35.08..226.42, y 40.12..161.38; bar is
+            # [290.5,293) x [40.25,320.75). Both boxes add a 2px margin.
+            val tile = _engine2d_draw_ir_strict_vulkan_affine_pixels(commands[4], 640, 480)
+            expect(tile.present).to_equal(true)
+            expect([tile.x, tile.y, tile.width, tile.height]).to_equal([33, 38, 196, 126])
+            val bar = _engine2d_draw_ir_strict_vulkan_affine_pixels(commands[5], 640, 480)
+            expect(bar.present).to_equal(true)
+            expect([bar.x, bar.y, bar.width, bar.height]).to_equal([288, 38, 7, 285])
+
+    it "renders case 02 at full 640x480 within the analytic edge oracle":
+        # @req REQ-2D-002
+        val web = match web_corpus_case02_gpu_scene_from_html(
+            read_file(CORPUS_CASE02_SOURCE_PATH)):
+            case Ok(value): value
+            case Err(reason):
+                fail("case 02 Web admission failed: {reason}")
+                return
+        val created = Engine2D.create_with_backend_strict(
+            CORPUS_CASE02_WIDTH, CORPUS_CASE02_HEIGHT, "vulkan")
+        if not created.is_ok():
+            fail("blocked: strict Vulkan device required for case 02 evidence")
+        val vk = created.unwrap()
+        val device = engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(
+            vk, web.gpu_draw_ir, [])
+        expect(device.fallback_required).to_equal(false)
+        expect(device.readback_source).to_equal("device_readback")
+        expect(device.pixels.len()).to_equal(640 * 480)
+        if device.pixels.len() == 640 * 480:
+            # Tile interior, bar interior, exterior: checked first so a
+            # skipped dispatch fails on a named pixel.
+            expect(device.pixels[100 * 640 + 130]).to_equal(0xff247bdeu32)
+            expect(device.pixels[200 * 640 + 291]).to_equal(0xff111111u32)
+            expect(device.pixels[400 * 640 + 500]).to_equal(0xffffffffu32)
+            match case02_compare_canonical_rgba(_argb_to_rgba(device.pixels)):
+                case Ok(verdict):
+                    expect(verdict.exact_mismatch_pixels).to_equal(0)
+                    expect(verdict.edge_excess_pixels).to_equal(0)
+                    expect(verdict.edge_max_channel_delta).to_be_less_than(2)
+                    expect(verdict.passed).to_equal(true)
+                case Err(reason): fail("case 02 oracle unavailable: {reason}")
+        vk.shutdown()

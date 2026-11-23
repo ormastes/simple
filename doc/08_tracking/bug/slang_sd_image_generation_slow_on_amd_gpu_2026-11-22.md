@@ -17,7 +17,7 @@ sd-turbo at 1 step should finish in a few seconds on this GPU once the model is 
 
 ## Suspected causes (unproven)
 
-1. **The model loads on every request.** `sd_runner` holds the context in module globals. Under the interpreter, module state is thread-local per connection thread (see `llm_engine.engine_preload`), and the single-owner flag closes and reopens it. So each request probably pays the 5.2 GB safetensors load. Fix direction: a C-side context cache keyed by model path, with a refcount, like `slang_ggml_model_open`.
+1. **The model loads on every request.** `sd_runner` holds the context in module globals. Under the interpreter, module state is thread-local per connection thread (see `llm_engine.engine_preload`). A request on a new connection thread would then see `SD_CTX` = 0 and an empty `SD_OPEN_MODEL`, so `sd_runner_open` loads the model again. The single-owner flag `SD_BUSY` is not the cause: it is a compare-and-swap gate on who may call open, run or close, and it never closes or reopens the context. So each request probably pays the 5.2 GB safetensors load. Fix direction: a C-side context cache keyed by model path, with a refcount, like `slang_ggml_model_open`.
 2. **The Vulkan backend may not be selected, or only partly offloaded.** The shim suppresses stable-diffusion.cpp's logs, so backend selection is unverified. The only info line seen is the CPU feature string.
 3. **No ROCm/HIP variant exists.** `build-slang-sd-shim.shs` builds only `cpu` and `vulkan`. Try ggml's HIP backend (`SD_HIPBLAS`) with the ROCm clang on this host.
 

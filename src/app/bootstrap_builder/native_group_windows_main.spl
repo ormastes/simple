@@ -8,13 +8,20 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_
 use std.nogc_sync_mut.io.group_process_owner.{group_process_set_launcher_v1}
 use std.nogc_sync_mut.io.windows_group_broker_launcher.{windows_group_broker_launch_v1}
 use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1, _windows_process_wide_v1}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, rt_host_commit_headroom_bytes_v1, rt_host_disk_headroom_bytes_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, rt_host_commit_headroom_bytes_v1, rt_host_disk_headroom_bytes_v1, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u64, volatile_write_u32}
 
+@when(arch="x86"):
+@abi("system")
+@unsafe(reason: "Win32 current volume free-space snapshot", capabilities: [ffi, raw_ptr])
+extern fn GetDiskFreeSpaceExW(path: u32, available: u32, total: u32, total_free: u32) -> i32
+@else:
+@abi("system")
 @unsafe(reason: "Win64 current volume free-space snapshot", capabilities: [ffi, raw_ptr])
 extern fn GetDiskFreeSpaceExW(path: i64, available: i64, total: i64, total_free: i64) -> i32
+@end
 
-@unsafe(reason: "reads and releases a bounded Win64 system commit snapshot", capabilities: [ffi, raw_ptr])
+@unsafe(reason: "reads and releases a bounded Windows system commit snapshot", capabilities: [ffi, raw_ptr])
 fn native_group_windows_commit_headroom_v1() -> Result<i64, text>:
     # Interpreter-first: registered runtime-C snapshot resolves under the
     # bootstrap seed's pure interpreter, where the raw kernel32 heap externs
@@ -34,20 +41,20 @@ pub fn native_group_windows_capacity_v1(path: text) -> Result<NativeGroupedCapac
     val disk_quick = rt_host_disk_headroom_bytes_v1(path)
     if disk_quick > 0:
         return Ok(NativeGroupedCapacitySampleV1(memory, disk_quick, commit, true))
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return Err("Windows process heap unavailable for disk check")
     val wide = _windows_process_wide_v1(heap, path)
-    val slots = HeapAlloc(heap, 8u32, 24u64)
+    val slots = windows_abi_heap_alloc(heap, 24)
     if wide == 0 or slots == 0:
         if wide != 0:
-            val _freed_wide = HeapFree(heap, 0u32, wide)
+            val _freed_wide = windows_abi_heap_free(heap, wide)
         if slots != 0:
-            val _freed_slots = HeapFree(heap, 0u32, slots)
+            val _freed_slots = windows_abi_heap_free(heap, slots)
         return Err("Windows disk status allocation failed")
     val queried = GetDiskFreeSpaceExW(wide, slots, slots + 8, slots + 16)
     val available = if queried != 0: volatile_read_u64(slots) else: 0u64
-    val _freed_wide = HeapFree(heap, 0u32, wide)
-    val _freed_slots = HeapFree(heap, 0u32, slots)
+    val _freed_wide = windows_abi_heap_free(heap, wide)
+    val _freed_slots = windows_abi_heap_free(heap, slots)
     if queried == 0 or available == 0u64 or available > 9223372036854775807u64:
         return Err("Windows available disk query failed")
     Ok(NativeGroupedCapacitySampleV1(memory, available as i64, commit, true))

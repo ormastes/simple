@@ -1085,80 +1085,93 @@ fn parse_signed_nth_int(s: text, target: i32) -> i32:
             i = i + 1
     -1000000
 
-fn parse_signed_nth_length(s: text, target: i32, basis: i32) -> i32:
-    """Like `parse_signed_nth_int`, but resolves a `%` unit against `basis`.
+# Sentinel of the translate parsers below: no such component.
+val TRANSLATE_NONE_MILLI: i64 = -1000000000000
+
+fn parse_signed_nth_length_milli(s: text, target: i32, basis: i32) -> i64:
+    """The `target`-th signed number of `s` in milli-px, a `%` resolved
+    against `basis`; TRANSLATE_NONE_MILLI when there is none.
 
     CSS transform translate percentages resolve against the element's own
     border box (CSS Transforms 1 §3), so `basis` is the element width for the
-    x axis and its height for the y axis. A unitless/px value is returned
-    verbatim, preserving the previous behaviour.
+    x axis and its height for the y axis. A unitless/px value is taken as px.
+    A decimal is ONE number (`0.3px` is 300, not 0 and 3); digits past the
+    thousandth are dropped.
     """
     var i = 0
     var seen = 0
     val s_len = s.byte_len()
     while i < s_len:
-        var sign = 1
+        var sign: i64 = 1
         if s.substring(i, i + 1) == "-":
             sign = -1
             i = i + 1
-        if i < s_len and dec_val(s.substring(i, i + 1)) < 10:
-            var v = 0
+        val starts_frac = i + 1 < s_len and s.substring(i, i + 1) == "." and dec_val(s.substring(i + 1, i + 2)) < 10
+        if i < s_len and (dec_val(s.substring(i, i + 1)) < 10 or starts_frac):
+            var v: i64 = 0
             while i < s_len:
                 val digit = dec_val(s.substring(i, i + 1))
                 if digit >= 10:
                     break
-                v = v * 10 + digit
+                v = v * 10 + digit.to_i64()
                 i = i + 1
+            v = v * 1000
+            if i < s_len and s.substring(i, i + 1) == ".":
+                i = i + 1
+                var place: i64 = 100
+                while i < s_len:
+                    val digit = dec_val(s.substring(i, i + 1))
+                    if digit >= 10:
+                        break
+                    v = v + digit.to_i64() * place
+                    place = place / 10
+                    i = i + 1
             if seen == target:
                 if i < s_len and s.substring(i, i + 1) == "%":
-                    return (v * sign * basis) / 100
+                    return (v * sign * basis.to_i64()) / 100
                 return v * sign
             seen = seen + 1
         else:
             i = i + 1
-    -1000000
+    TRANSLATE_NONE_MILLI
 
-fn parse_transform_translate_x(raw: text, box_w: i32) -> i32:
+# The x / y translation of a `transform` (translate / translateX /
+# translateY) or of the individual `translate` property, in milli-px; 0 when
+# it has none on that axis.
+fn parse_transform_translate_x_milli(raw: text, box_w: i32) -> i64:
     val t = raw.trim().lower()
     if t == "none":
         return 0
-    if text_index_of(t, "translatex(") >= 0:
-        val v = parse_signed_nth_length(t, 0, box_w)
-        return if v == -1000000: 0 else: v
-    if text_index_of(t, "translate(") >= 0:
-        val v = parse_signed_nth_length(t, 0, box_w)
-        return if v == -1000000: 0 else: v
+    if text_index_of(t, "translatex(") >= 0 or text_index_of(t, "translate(") >= 0:
+        val v = parse_signed_nth_length_milli(t, 0, box_w)
+        return if v == TRANSLATE_NONE_MILLI: 0 else: v
     0
 
-fn parse_transform_translate_y(raw: text, box_h: i32) -> i32:
+fn parse_transform_translate_y_milli(raw: text, box_h: i32) -> i64:
     val t = raw.trim().lower()
     if t == "none":
         return 0
     if text_index_of(t, "translatey(") >= 0:
-        val v = parse_signed_nth_length(t, 0, box_h)
-        return if v == -1000000: 0 else: v
+        val v = parse_signed_nth_length_milli(t, 0, box_h)
+        return if v == TRANSLATE_NONE_MILLI: 0 else: v
     if text_index_of(t, "translate(") >= 0:
-        val v = parse_signed_nth_length(t, 1, box_h)
-        return if v == -1000000: 0 else: v
+        val v = parse_signed_nth_length_milli(t, 1, box_h)
+        return if v == TRANSLATE_NONE_MILLI: 0 else: v
     0
 
-fn parse_individual_translate_x(raw: text, box_w: i32) -> i32:
+fn parse_individual_translate_x_milli(raw: text, box_w: i32) -> i64:
     val t = raw.trim().lower()
     if t == "none":
         return 0
-    val v = parse_signed_nth_length(t, 0, box_w)
-    if v == -1000000:
-        return 0
-    v
+    val v = parse_signed_nth_length_milli(t, 0, box_w)
+    if v == TRANSLATE_NONE_MILLI: 0 else: v
 
-fn parse_individual_translate_y(raw: text, box_h: i32) -> i32:
+fn parse_individual_translate_y_milli(raw: text, box_h: i32) -> i64:
     val t = raw.trim().lower()
     if t == "none":
         return 0
-    val v = parse_signed_nth_length(t, 1, box_h)
-    if v == -1000000:
-        return 0
-    v
+    val v = parse_signed_nth_length_milli(t, 1, box_h)
+    if v == TRANSLATE_NONE_MILLI: 0 else: v
 
 fn parse_scale_pct(raw: text) -> i32:
     val t = raw.trim().lower()

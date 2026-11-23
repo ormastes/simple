@@ -1048,26 +1048,26 @@ int64_t rt_par_atomic_cmpxchg_i64(int64_t* ptr, int64_t expected, int64_t value)
     return expected;
 }
 
-int64_t rt_par_atomic_min_i64(int64_t* ptr, int64_t value) {
+/* CAS fold shared by min/max: store the smaller (take_min) or larger of the
+ * current value and `value`, returning the value observed before the exchange. */
+static int64_t rt_par_atomic_fold_i64(int64_t* ptr, int64_t value, int take_min) {
     _Atomic int64_t* atomic = (_Atomic int64_t*)ptr;
     int64_t previous = atomic_load_explicit(atomic, memory_order_seq_cst);
     for (;;) {
-        int64_t next = previous < value ? previous : value;
+        int64_t next = take_min ? (previous < value ? previous : value)
+                                : (previous > value ? previous : value);
         if (atomic_compare_exchange_weak_explicit(atomic, &previous, next,
                                                   memory_order_seq_cst, memory_order_seq_cst))
             return previous;
     }
 }
 
+int64_t rt_par_atomic_min_i64(int64_t* ptr, int64_t value) {
+    return rt_par_atomic_fold_i64(ptr, value, 1);
+}
+
 int64_t rt_par_atomic_max_i64(int64_t* ptr, int64_t value) {
-    _Atomic int64_t* atomic = (_Atomic int64_t*)ptr;
-    int64_t previous = atomic_load_explicit(atomic, memory_order_seq_cst);
-    for (;;) {
-        int64_t next = previous > value ? previous : value;
-        if (atomic_compare_exchange_weak_explicit(atomic, &previous, next,
-                                                  memory_order_seq_cst, memory_order_seq_cst))
-            return previous;
-    }
+    return rt_par_atomic_fold_i64(ptr, value, 0);
 }
 /* END CORE PAR ATOMICS */
 
@@ -5048,9 +5048,13 @@ int64_t __simple_rt_string_char_code_at(int64_t string, int64_t index) {
  * (e.g. the web renderer's browser_renderer_protocol.spl scanning for byte
  * 10 '\n' / 44 ',') index the raw UTF-8 buffer directly, so a character
  * index would desync the frame at the first multi-byte codepoint.
- * O(1): straight buffer read, no codepoint walk needed. */
+ * Expected O(1) for counted strings and their validated data borrows.
+ * Foreign C strings retain an O(n) NUL-terminated length scan. */
 int64_t rt_string_byte_at(int64_t string, int64_t index) {
-    RtCoreString* s = rt_core_as_string(string);
+    /* A live counted string retains its length when a text ABI exposes its
+     * data pointer. Validate that existing owner before falling back to strlen
+     * for genuinely foreign C strings; never cache foreign-pointer lengths. */
+    RtCoreString* s = rt_core_as_string_or_data(string);
     const uint8_t* data;
     uint64_t len;
     if (index < 0) return 0;
@@ -7172,24 +7176,26 @@ int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
     return rt_string_new((const uint8_t*)s->data, end);
 }
 
-/* removeprefix / remove_prefix: strip `prefix` ONCE if present. */
-int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
+/* Strip `pattern` ONCE from the front (from_front) or back of `value` if present. */
+static int64_t rt_string_remove_once(int64_t value, int64_t pattern, int from_front) {
     RtCoreString* s = rt_core_as_string_or_data(value);
-    RtCoreString* p = rt_core_as_string_or_data(prefix);
+    RtCoreString* p = rt_core_as_string_or_data(pattern);
     if (!s || !p) return value;
     if (p->len == 0 || p->len > s->len) return value;
-    if (memcmp(s->data, p->data, (size_t)p->len) != 0) return value;
-    return rt_string_new((const uint8_t*)s->data + p->len, s->len - p->len);
+    uint64_t at = from_front ? 0 : s->len - p->len;
+    if (memcmp(s->data + at, p->data, (size_t)p->len) != 0) return value;
+    uint64_t keep = from_front ? p->len : 0;
+    return rt_string_new((const uint8_t*)s->data + keep, s->len - p->len);
+}
+
+/* removeprefix / remove_prefix: strip `prefix` ONCE if present. */
+int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
+    return rt_string_remove_once(value, prefix, 1);
 }
 
 /* removesuffix / remove_suffix: strip `suffix` ONCE if present. */
 int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
-    RtCoreString* s = rt_core_as_string_or_data(value);
-    RtCoreString* p = rt_core_as_string_or_data(suffix);
-    if (!s || !p) return value;
-    if (p->len == 0 || p->len > s->len) return value;
-    if (memcmp(s->data + s->len - p->len, p->data, (size_t)p->len) != 0) return value;
-    return rt_string_new((const uint8_t*)s->data, s->len - p->len);
+    return rt_string_remove_once(value, suffix, 0);
 }
 
 /* squeeze: collapse runs of the same adjacent CHARACTER (codepoint, not byte,
@@ -12875,26 +12881,27 @@ int64_t rt_array_any_truthy(SplArray* array) {
     return 0;
 }
 
-int64_t rt_array_all(SplArray* array, int64_t closure_value) {
+/* Shared closure quantifier for all/any. is_all=1: stop on the first falsy
+ * predicate (answer 0), else 1. is_all=0: stop on the first truthy predicate
+ * (answer 1), else 0. A zero func_ptr falls back to element truthiness. */
+static int64_t rt_array_quantify(SplArray* array, int64_t closure_value, int is_all) {
     if (!rt_core_array_ptr(array)) return 0;
     int64_t func_ptr = rt_closure_func_ptr(closure_value);
-    if (!func_ptr) return rt_array_all_truthy(array);
+    if (!func_ptr) return is_all ? rt_array_all_truthy(array) : rt_array_any_truthy(array);
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (!rt_core_value_truthy(func(closure_value, spl_core_array_value_at(array, i)))) return 0;
+        int truthy = rt_core_value_truthy(func(closure_value, spl_core_array_value_at(array, i))) ? 1 : 0;
+        if (truthy != is_all) return !is_all;
     }
-    return 1;
+    return is_all;
+}
+
+int64_t rt_array_all(SplArray* array, int64_t closure_value) {
+    return rt_array_quantify(array, closure_value, 1);
 }
 
 int64_t rt_array_any(SplArray* array, int64_t closure_value) {
-    if (!rt_core_array_ptr(array)) return 0;
-    int64_t func_ptr = rt_closure_func_ptr(closure_value);
-    if (!func_ptr) return rt_array_any_truthy(array);
-    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
-    for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (rt_core_value_truthy(func(closure_value, spl_core_array_value_at(array, i)))) return 1;
-    }
-    return 0;
+    return rt_array_quantify(array, closure_value, 0);
 }
 
 /* ---------------------------------------------------------------------------

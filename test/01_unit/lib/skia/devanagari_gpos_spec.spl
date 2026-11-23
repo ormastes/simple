@@ -1,0 +1,47 @@
+"""
+## Purpose and audience
+Purpose: Pin `devanagari_pair_adjustment` -- the PairPos class-pair reader the
+pinned `selected_devanagari` witness uses -- on hand-built glyph pairs from the
+bundled Noto Sans Devanagari face.
+Audience: text shaping maintainers.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-DEVANAGARI-GPOS-001 — dev2 pair positioning reads the face's own PairPos data.
+"""
+# @tag: unit, skia, text
+# @cover src/lib/skia/feature/shaper/devanagari_gpos.spl 1%
+# @cover src/lib/skia/feature/shaper/ot_layout_shaper.spl 1%
+use std.spec.*
+use std.skia.feature.glyph.ot_parser.{parse_offset_table}
+use std.skia.feature.glyph.ot_parser_layout.{select_gpos_lookups, select_gpos_lookup_plan}
+use std.skia.feature.shaper.ot_layout_shaper.{_selected_defaults, layout_tag}
+use std.skia.feature.shaper.devanagari_gpos.{devanagari_pair_adjustment}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val DEVA_FONT: text = "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
+
+# `adjustment:found` for a glyph pair under the dev2/HIN abvm blwm dist kern lookups.
+fn _pair(first: u32, second: u32) -> text:
+    val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+    val active = select_gpos_lookups(font, 1684370994u32, 1212763680u32,
+        [1633842797u32, 1651275629u32, 1684632436u32, 1801810542u32])
+    val hit = devanagari_pair_adjustment(font, active, first, second)
+    "{hit.0}:{hit.1}"
+
+describe "Devanagari pair adjustment (Noto Sans Devanagari)":
+    it "AC-1: the half na before da of हिन्दी is tightened by the face's dist class pair":
+        step("glyph 245 (half na) before 73 (da): Chrome advances the half na 309 units (4.944 px at 16 px)")
+        expect(_pair(245u32, 73u32)).to_equal("-49:true")
+
+    it "AC-2: a pair no class pair moves answers 0 and not found":
+        step("glyph 56 (ka) before 80 (ma): Chrome keeps ka's 768 advance")
+        expect(_pair(56u32, 80u32)).to_equal("0:false")
+        expect(_pair(0u32, 0u32)).to_equal("0:false")
+
+    it "AC-3: the production dev2 GPOS plan carries HarfBuzz's mark and mkmk lookups, each once":
+        step("HarfBuzz applies the common GPOS features (abvm blwm dist kern mark mkmk) to dev2; this face puts mark/mkmk in lookups 23..32")
+        val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+        val defaults = _selected_defaults(layout_tag("dev2"), "hi")
+        val plan = select_gpos_lookup_plan(font, layout_tag("dev2"), defaults.2, defaults.1)
+        expect("{plan.lookup_indices}").to_equal("[2, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]")

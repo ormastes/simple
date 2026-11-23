@@ -1,7 +1,6 @@
 # Windows native-build "link phase hang": serial runtime C build, cache published only at batch end
 
-Status: verification-pending (fix is spec-verified; the native "after" needs a
-compiler rebuilt from this source).
+Status: fixed (natively verified 2026-11-23, see "Native verification"; with SIMPLE_LLVM_MINGW_ROOT and SIMPLE_LLVM_BIN unset, hello world links through llvm-mingw and prints `hello`. Six native-builds finished the link phase).
 
 Related: `unit_range_cast_native_execution_blocked_2026-11-19.md` (lanes 3/4
 reported this as "link phase hangs before spawning any linker"),
@@ -86,3 +85,14 @@ The fixed path passes 10/10. A failed compile publishes nothing.
   `runtime_windows_direct_manifest_lookup_v1` and the dep re-hashing.
 - `cli_main.exe run <file>.spl` printed nothing at all for a two-line probe
   within 90 s.
+
+## Native verification (2026-11-23, Lane 8, worktree nv2 @ `d83c3a98dc8`)
+Compiler: `C:/dev/wt/nv2/build/nv2/cli_main.exe`, sha256 `ea78bedd0911fd97f163dd8f353dd3c6c65e5866fcb99a308a8c5167d42122a2`. It was built from a tree containing #10894 (`7c1ee5d56b7`) and #10901 (`3b3c0cc4f59`). The build recipe is in `unit_range_cast_native_execution_blocked_2026-11-19.md` Lane 8.
+
+| check | command | output | rc | compiler sha256 | verdict |
+|---|---|---|---|---|---|
+| #10901 default toolchain | `unset SIMPLE_LLVM_MINGW_ROOT SIMPLE_LLVM_BIN CC CXX LD; cli_main.exe native-build src/app/rbnat_fx/hello.spl -o build/nv2/nv/hello.exe; ./hello.exe` (no llvm-mingw on PATH) | link command uses `llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe`; `[native-build] Artifact published: build/nv2/nv/hello.exe`; run prints `hello` | build 0 (13m22s), run 0 | `ea78bedd…22a2` | PASS |
+| link phase no longer hangs (#10894) | hello plus five unit fixtures (port_in, port_oor, big_accept, big_reject, div_zero) | every log shows `[runtime-c] k/45` progress lines and then `phase=link state=succeeded`; link step dt 324-398 s | build 0 for all 6 | `ea78bedd…22a2` | PASS |
+
+Not covered here: resuming after a killed run (the spec covers it). The ~330 s link step on a warm host is the open follow-up below.
+The div_zero executable segfaults at run time. That is tracked in the unit doc, not here: its build and link succeed.

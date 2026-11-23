@@ -5734,6 +5734,14 @@ typedef struct OwnedWinStream {
     int truncated;
 } OwnedWinStream;
 
+/* Writes `count` backslashes at dst[*w] (when dst is non-NULL) and advances *w. */
+static void owned_win_put_backslashes(char* dst, size_t* w, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (dst) dst[*w] = '\\';
+        (*w)++;
+    }
+}
+
 /* CommandLineToArgvW inverse. Returns the byte count written (or that WOULD be
  * written when dst is NULL). Getting this wrong is the classic Windows spawn
  * bug: a path containing a space silently splits into two arguments. */
@@ -5760,16 +5768,16 @@ static size_t owned_win_quote_arg(const char* arg, char* dst) {
         while (*p == '\\') { bs++; p++; }
         if (*p == '\0') {
             /* Backslashes immediately before the closing quote are doubled. */
-            for (size_t i = 0; i < bs * 2; i++) { if (dst) dst[w] = '\\'; w++; }
+            owned_win_put_backslashes(dst, &w, bs * 2);
             break;
         }
         if (*p == '"') {
-            for (size_t i = 0; i < bs * 2 + 1; i++) { if (dst) dst[w] = '\\'; w++; }
+            owned_win_put_backslashes(dst, &w, bs * 2 + 1);
             if (dst) dst[w] = '"';
             w++;
             p++;
         } else {
-            for (size_t i = 0; i < bs; i++) { if (dst) dst[w] = '\\'; w++; }
+            owned_win_put_backslashes(dst, &w, bs);
             if (dst) dst[w] = *p;
             w++;
             p++;

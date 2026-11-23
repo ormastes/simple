@@ -37,6 +37,7 @@ use compiler.frontend.frontend.{parse_full_frontend_target_receipted_uncached_in
     parse_full_frontend_uncached_in_borrowed_scope_with_advisory_policy_v1}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
 use compiler.frontend.core.parser_preprocessor.{pp_declare_parse_scope}
+use compiler.frontend.core.collection_feedback.{parser_collection_feedback_active}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
 use compiler.frontend.aspect_registry.{aspect_registry_promote_transient_owner, aspect_registry_seal_parser_inventory_v2}
@@ -55,7 +56,8 @@ use compiler.core.parser.{parser_promote_transient_owners, parser_initialization
 use compiler.core.parser_decls.{parser_declaration_metadata_promote_transient_owner}
 use compiler.frontend.resource_registry.{resource_registry_promote_transient_owner}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_promote_transient_owner}
-use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1, driver_worker_placeholder_parse_text_v1}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_surface_parse_text_v1, driver_worker_placeholder_parse_text_v1,
+    driver_hir_worker_warm_full_cache_present_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_selected_v1,
     worker_surface_seed_v1, worker_surface_closure_v1, worker_surface_ready_v1,
     worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
@@ -230,6 +232,10 @@ impl CompilerDriver:
         # the full source of each module it claims (driver_hir_pipeline_lowering).
         val parse_text = driver_surface_parse_text_v1(source_content,
             driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "", driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+        self.parse_exact_frontend_selected_v1(parse_text, source_path, source_module_name)
+
+    pub me parse_exact_frontend_selected_v1(parse_text: text, source_path: text,
+        source_module_name: text) -> Result<ParserModule, text>:
         # Ordinary native builds retain full ParserModules, not lexer/flat-AST/
         # cache-decode scratch. Borrow one per-file scope through preprocessing,
         # parsing and desugaring, then retain exactly the escaped owners.
@@ -418,6 +424,13 @@ impl CompilerDriver:
             return Err("manifest projection ownership failed: " + path)
         reboxed
 
+    me _warm_full_source_frontend_cache_present_v1(source_content: text, source_path: text) -> bool:
+        if self.ctx.runtime_std_full_inventory_selection.is_some() or parser_collection_feedback_active():
+            return false
+        pp_declare_parse_scope(false, self.ctx.native_target)
+        driver_hir_worker_warm_full_cache_present_v1(
+            source_content, source_path, self.ctx.environment_variant_frontend_cache_identity)
+
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
         source_path: text,
@@ -498,13 +511,21 @@ impl CompilerDriver:
         elif worker_mode == 2:
             driver_worker_placeholder_parse_text_v1()
         elif worker_mode == 1:
-            worker_surface_text_v1(source_path, source_content,
-                if (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "") != "":
-                    tldr_dir_v1(driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "")
-                else: "")
+            if not force_source_parse and self._warm_full_source_frontend_cache_present_v1(source_content, source_path):
+                source_content
+            else:
+                worker_surface_text_v1(source_path, source_content,
+                    if (driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "") != "":
+                        tldr_dir_v1(driver_parse_env_get_v1("SIMPLE_FRONTEND_CACHE_DIR") ?? "")
+                    else: "")
         else:
-            driver_surface_parse_text_v1(source_content,
-                driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? "", driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+            val hir_shard_env = driver_parse_env_get_v1("SIMPLE_HIR_SHARD") ?? ""
+            val hir_skel_env = driver_parse_env_get_v1("SIMPLE_HIR_WORKER_SKELETON") ?? ""
+            if not force_source_parse and hir_shard_env != "" and
+                    self._warm_full_source_frontend_cache_present_v1(source_content, source_path):
+                source_content
+            else:
+                driver_surface_parse_text_v1(source_content, hir_shard_env, hir_skel_env)
         log_module_surface_stage(source_path, "parse-start")
         if tldr_imports_enabled_v1():
             if frozen_parse_text != nil and surface_text != source_content:

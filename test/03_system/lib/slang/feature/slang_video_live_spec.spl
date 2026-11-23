@@ -96,3 +96,52 @@ describe "slang answers from a video":
         val response = serve_chat_completions(_model_root(), _body(_video_part(base64_encode_bytes(big))))
         expect(response.status).to_equal(413)
         expect(json_string_field(response.body, "code")).to_equal("request_too_large")
+
+# A lavfi test-pattern clip of `seconds` at 25 fps; frames differ over time.
+fn _make_testsrc(out: text, seconds: text, frames: text) -> bool:
+    val args = ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=d=" + seconds + ":r=25:s=160x120", "-frames:v", frames, "-pix_fmt", "yuv420p", out]
+    val run = process_run_bounded_bytes(video_ffmpeg_path(), args, 120000, 1048576)
+    run.2 == 0 and file_exists(out)
+
+fn _same(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "slang samples frames with a real ffmpeg":
+    it "takes a one-frame clip once and spreads a 2 s clip over distinct frames":
+        if not file_exists(video_ffmpeg_path()):
+            _record("SKIPPED: frame selection -- needs SLANG_FFMPEG")
+            skip("takes a one-frame clip once and spreads a 2 s clip over distinct frames", "needs SLANG_FFMPEG")
+            return
+        step("Make a one-frame clip and a 2 s clip with lavfi")
+        dir_create_all("build/probe")
+        val one = "build/probe/l7_one_frame.mp4"
+        val two = "build/probe/l7_two_seconds.mp4"
+        expect(_make_testsrc(one, "0.04", "1")).to_equal(true)
+        expect(_make_testsrc(two, "2", "50")).to_equal(true)
+        step("Verify: one frame from the one-frame clip, four distinct frames from the 2 s clip")
+        var one_count = -1
+        match sample_frames(file_read_bytes(one), 4):
+            Err(reason): expect(reason).to_equal("")
+            Ok(frames): one_count = frames.len()
+        var two_count = -1
+        var distinct = true
+        match sample_frames(file_read_bytes(two), 4):
+            Err(reason): expect(reason).to_equal("")
+            Ok(frames):
+                two_count = frames.len()
+                var i = 1
+                while i < frames.len():
+                    if _same(frames[i - 1], frames[i]):
+                        distinct = false
+                    i = i + 1
+        _record("FRAME-SELECT one_frame_clip=" + one_count.to_text() + " two_second_clip=" + two_count.to_text() + " distinct=" + distinct.to_text())
+        expect(one_count).to_equal(1)
+        expect(two_count).to_equal(4)
+        expect(distinct).to_equal(true)

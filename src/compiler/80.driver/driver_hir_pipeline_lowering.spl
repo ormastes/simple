@@ -123,7 +123,11 @@ use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_r
     mir_shard_hir_residency_arm_v1, mir_shard_hir_residency_armed_v1,
     mir_shard_hir_residency_note_v1, mir_shard_hir_residency_counters_v1,
     mir_shard_hir_residency_retained_route_line_v1, hir_residency_any_nogc_strict_v1,
-    MIR_SHARD_INTERFACE_HIR_ENV_V1}
+    MIR_SHARD_INTERFACE_HIR_ENV_V1, FILE_WORKER_INTERFACE_HIR_ENV_V1,
+    file_worker_unit_interface_hir_refusal_v1, file_worker_unit_interface_hir_arm_v1,
+    file_worker_unit_interface_hir_armed_v1, file_worker_unit_row_interface_only_v1,
+    file_worker_unit_keep_full_v1, file_worker_unit_keep_full_count_v1, hir_residency_any_armed_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_unit_scoped_v1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_hir_cache.{hir_cache_load_in_owned_scope, hir_cache_store_encoded_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{HirEncodedBodyV1, hir_encoded_body_v1}
@@ -1163,6 +1167,22 @@ impl CompilerDriver:
                 print "[mir-shard] hir-residency armed: non-entry HIR cache loads are interface-only; a claimed module's body reloads from the cache"
             else:
                 print "[mir-shard] hir-residency refused reason={hir_residency_refusal}"
+        # Per-file unit residency: decided once before the first HIR load, only
+        # where the closure-walk route recorded this unit's target/advice rows.
+        # Opt-in: an unset flag decides nothing and prints nothing.
+        if (env_get(FILE_WORKER_INTERFACE_HIR_ENV_V1) ?? "") != "" and file_worker_unit_keep_full_count_v1() > 0:
+            val unit_iface_refusal = file_worker_unit_interface_hir_refusal_v1(
+                env_get(FILE_WORKER_INTERFACE_HIR_ENV_V1) ?? "",
+                driver_mir_unit_scoped_v1(worker_hir_loads_restricted_v1(), native_mir_shard_queue_v1()),
+                file_worker_unit_keep_full_count_v1(),
+                env_get("SIMPLE_BOOTSTRAP") == "1" and env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1",
+                env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") == "1",
+                self.ctx.options.mode == CompileMode.Aot,
+                hir_residency_any_nogc_strict_v1(surfaces.surfaces))
+            if file_worker_unit_interface_hir_arm_v1(unit_iface_refusal):
+                print "[file-worker] hir-residency armed: non-target, non-advice closure HIR cache loads are interface-only"
+            else:
+                print "[file-worker] hir-residency refused reason={unit_iface_refusal}"
         # Per-file unit child (native_file_worker_v1.spl): HIR for its claims,
         # then this same process continues into MIR + object.
         val hir_unit_mode: bool = hir_shard_mode and native_file_worker_unit_active_v1()
@@ -1479,7 +1499,11 @@ impl CompilerDriver:
                 ""
             # MIR shard HIR residency: every non-entry module loads interface-only
             # when armed; the claim loop reloads a claimed module's body.
-            val hir_stream_interface_only = mir_shard_hir_residency_armed_v1() and not is_requested_bootstrap_entry
+            # A per-file unit loads its non-target, non-advice rows interface-only.
+            val hir_stream_interface_only = (mir_shard_hir_residency_armed_v1() and not is_requested_bootstrap_entry) or
+                file_worker_unit_row_interface_only_v1(file_worker_unit_interface_hir_armed_v1(),
+                    is_requested_bootstrap_entry, source.path,
+                    surfaces.surfaces[surface_index].canonical_path, file_worker_unit_keep_full_v1())
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
                 hir_cache_load_parsed_v1(hir_stream_key, hir_stream_binding, source.path, self.ctx.options.library_mode, hir_stream_interface_only)
             else:
@@ -1516,7 +1540,7 @@ impl CompilerDriver:
                 # without opening an otherwise unused parse scope.
                 lowering.begin_module(source.path)
                 hir_module = hir_stream_cached.unwrap()
-                if mir_shard_hir_residency_armed_v1():
+                if hir_residency_any_armed_v1():
                     mir_shard_hir_residency_note_v1(source.path, source.module_name, hir_stream_key,
                         hir_stream_binding, self.ctx.options.library_mode,
                         if hir_stream_interface_only: "interface" else: "full")
@@ -1799,6 +1823,8 @@ impl CompilerDriver:
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
             return false
+        if file_worker_unit_interface_hir_armed_v1():
+            print "[file-worker] hir-residency loaded {mir_shard_hir_residency_counters_v1()} bodies_dropped={hir_cache_interface_only_bodies_dropped_v1()}"
         if mir_shard_hir_residency_armed_v1():
             print "[mir-shard] hir-residency loaded {mir_shard_hir_residency_counters_v1()} bodies_dropped={hir_cache_interface_only_bodies_dropped_v1()}"
         log_phase("phase3:hir:validate:start keys={validation_module_keys.len()} values={validation_module_values.len()} array={self.ctx.validation_module_array.len()}")
@@ -2265,10 +2291,16 @@ impl CompilerDriver:
                 # functions Dict. Reparse the one authoritative entry source
                 # immediately before HIR lowering so real bodies are owned by
                 # this lowering pass rather than a stale arena-backed cache.
-                val bootstrap_module_for_hir: ParserModule = if src.content != "":
-                    parse_full_frontend_stage4_streaming(src.content, src.path, name, self.ctx.logger)
+                val bootstrap_parsed: Result<ParserModule, text> = if src.content != "":
+                    self.parse_exact_frontend_selected_v1(src.content, src.path, name)
                 else:
-                    self.ctx.modules[name]
+                    Ok(self.ctx.modules[name])
+                if bootstrap_parsed.is_err():
+                    self.ctx.add_error(bootstrap_parsed.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                val bootstrap_module_for_hir: ParserModule = bootstrap_parsed.unwrap()
                 val bootstrap_lower_result = self.lower_retained_surface_module(
                     lowering, bootstrap_module_for_hir, src.path, is_bootstrap_entry, src)
                 if bootstrap_lower_result.is_err():
@@ -2284,8 +2316,14 @@ impl CompilerDriver:
                 # module's full source before lowering -- the bootstrap-entry
                 # pattern above -- so its HIR equals the parent's.
                 dtrace("[DRV] branch=hir_worker_full_reparse")
-                val claimed_module_for_hir: ParserModule = parse_full_frontend_stage4_streaming(
-                    src.content, src.path, name, self.ctx.logger)
+                val claimed_parsed: Result<ParserModule, text> = self.parse_exact_frontend_selected_v1(
+                    src.content, src.path, name)
+                if claimed_parsed.is_err():
+                    self.ctx.add_error(claimed_parsed.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                val claimed_module_for_hir: ParserModule = claimed_parsed.unwrap()
                 val claimed_lower_result = self.lower_retained_surface_module(
                     lowering, claimed_module_for_hir, src.path, is_bootstrap_entry, src)
                 if claimed_lower_result.is_err():
@@ -2314,7 +2352,14 @@ impl CompilerDriver:
                 # (same-name sibling on MirLowering; iteration 17) and the real
                 # HIR lowering body never runs.
                 dtrace("[DRV] branch=unstub_reparse")
-                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                val reparsed_selected: Result<ParserModule, text> = self.parse_exact_frontend_selected_v1(
+                    src.content, src.path, name)
+                if reparsed_selected.is_err():
+                    self.ctx.add_error(reparsed_selected.unwrap_err())
+                    hir_shard_guard_block("durable memory snapshot or source identity guard failed")
+                    mem_snapshot_abort()
+                    return false
+                val entry_module_for_hir: ParserModule = reparsed_selected.unwrap()
                 val reparsed_lower_result = self.lower_retained_surface_module(
                     lowering, entry_module_for_hir, src.path, is_bootstrap_entry, src)
                 if reparsed_lower_result.is_err():

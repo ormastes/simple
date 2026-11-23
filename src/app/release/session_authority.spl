@@ -3,9 +3,11 @@
 # claims until this boundary binds them to canonical Git/worktree state.
 
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_hash_sha256, file_read}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host, host_path_canonical, host_path_native}
+use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
 use app.io.mod.{
     process_run_bounded, dir_create_all, file_atomic_write, file_lock,
-    file_unlock, time_now_unix_micros, getpid
+    file_unlock, time_now_unix_micros, getpid, cwd
 }
 use app.release.policy.{ReleaseCheck, ReleaseSession, validate_release_session}
 
@@ -51,15 +53,129 @@ fn _sha256_matches(path: text, expected: text) -> bool:
     false
 
 fn _run(command: text, arguments: [text]) -> (text, text, i64):
-    process_run_bounded(command, arguments, 5000, 262144)
+    process_run_bounded(command, arguments, 60000, 262144)
+
+fn _is_ascii_alpha(ch: text) -> bool:
+    ch.byte_len() == 1 and "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(ch)
+
+fn _is_win_drive_root(path: text) -> bool:
+    path.byte_len() == 3 and _is_ascii_alpha(path.substring(0, 1)) and path.substring(1, 3) == ":/"
+
+fn _win_cwd_drive_anchor(base: text) -> text:
+    if base.byte_len() >= 2 and _is_ascii_alpha(base.substring(0, 1)) and base.substring(1, 2) == ":":
+        return base.substring(0, 1).upper() + ":"
+    if base.starts_with("//"):
+        val rest = base.substring(2)
+        var non_empty: [text] = []
+        for seg in rest.split("/"):
+            if seg != "":
+                non_empty.push(seg)
+                if non_empty.len() == 2:
+                    break
+        if non_empty.len() == 2:
+            return "//" + non_empty[0] + "/" + non_empty[1]
+    ""
+
+fn _normalize_windows_canonical(path: text) -> text:
+    var norm = host_path_canonical(path)
+    if norm.starts_with("//?/UNC/") or norm.starts_with("//?/unc/"):
+        norm = "//" + norm.substring(8)
+    elif norm.starts_with("//?/") and norm.byte_len() >= 7 and _is_ascii_alpha(norm.substring(4, 5)) and norm.substring(5, 7) == ":/":
+        norm = norm.substring(4)
+    if norm.byte_len() >= 2 and _is_ascii_alpha(norm.substring(0, 1)) and norm.substring(1, 2) == ":":
+        norm = norm.substring(0, 1).upper() + norm.substring(1)
+    norm
 
 fn _realpath(path: text) -> text:
+    if host_is_windows_host():
+        if path == "":
+            return ""
+        if val resolved = file_canonicalize(host_path_native(path)):
+            return _normalize_windows_canonical(resolved)
+        return ""
     val (stdout, _stderr, code) = _run("realpath", [path])
     if code != 0:
         return ""
     stdout.trim()
 
+fn _lexical_windows_abs(path: text) -> text:
+    if path == "":
+        return ""
+    var norm = host_path_canonical(path)
+    if norm.starts_with("//?/UNC/") or norm.starts_with("//?/unc/"):
+        norm = "//" + norm.substring(8)
+    elif norm.starts_with("//?/") and norm.byte_len() >= 7 and _is_ascii_alpha(norm.substring(4, 5)) and norm.substring(5, 7) == ":/":
+        norm = norm.substring(4)
+    # MinGW drive syntax: /c/... or /c -> C:/...
+    if norm.byte_len() >= 3 and norm.starts_with("/") and _is_ascii_alpha(norm.substring(1, 2)) and norm.substring(2, 3) == "/":
+        norm = norm.substring(1, 2).upper() + ":/" + norm.substring(3)
+    elif norm.byte_len() == 2 and norm.starts_with("/") and _is_ascii_alpha(norm.substring(1, 2)):
+        norm = norm.substring(1, 2).upper() + ":/"
+
+    val has_drive_abs = norm.byte_len() >= 3 and _is_ascii_alpha(norm.substring(0, 1)) and norm.substring(1, 3) == ":/"
+    val has_drive_rel = norm.byte_len() >= 2 and _is_ascii_alpha(norm.substring(0, 1)) and norm.substring(1, 2) == ":" and not has_drive_abs
+    if has_drive_rel:
+        val drv = norm.substring(0, 1).upper()
+        val base = _normalize_windows_canonical(cwd())
+        if not base.starts_with(drv + ":/"):
+            return ""
+        val rel_tail = norm.substring(2)
+        norm = if rel_tail == "": _trim_trailing_slashes(base) else: _trim_trailing_slashes(base) + "/" + rel_tail
+    elif not norm.starts_with("//"):
+        if norm.starts_with("/"):
+            val anchor = _win_cwd_drive_anchor(_normalize_windows_canonical(cwd()))
+            if anchor == "":
+                return ""
+            norm = anchor + norm
+        elif not has_drive_abs:
+            val base = _normalize_windows_canonical(cwd())
+            if base == "":
+                return ""
+            norm = _trim_trailing_slashes(base) + "/" + norm
+
+    var prefix = ""
+    var rest = norm
+    if norm.byte_len() >= 2 and _is_ascii_alpha(norm.substring(0, 1)) and norm.substring(1, 2) == ":":
+        prefix = norm.substring(0, 1).upper() + ":"
+        rest = norm.substring(2)
+    elif norm.starts_with("//"):
+        val unc_body = norm.substring(2)
+        var server = ""
+        var share = ""
+        var tail_parts: [text] = []
+        for seg in unc_body.split("/"):
+            if server == "":
+                if seg != "":
+                    server = seg
+            elif share == "":
+                if seg != "":
+                    share = seg
+            else:
+                tail_parts.push(seg)
+        if server == "" or share == "":
+            return ""
+        prefix = "//" + server + "/" + share
+        rest = tail_parts.join("/")
+    var stack: [text] = []
+    for seg in rest.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if stack.len() > 0:
+                stack = stack[0:stack.len() - 1]
+            continue
+        stack.push(seg)
+    if prefix.ends_with(":"):
+        if stack.len() == 0:
+            return prefix + "/"
+        return prefix + "/" + stack.join("/")
+    if stack.len() == 0:
+        return prefix
+    prefix + "/" + stack.join("/")
+
 fn _lexical_absolute_path(path: text) -> text:
+    if host_is_windows_host():
+        return _lexical_windows_abs(path)
     # `-s` makes symlink aliases observable while still normalizing relative
     # paths and dot segments. It is passed as argv, never through a shell.
     val (stdout, _stderr, code) = _run("realpath", ["-s", path])
@@ -78,8 +194,10 @@ fn _git_value(root: text, arguments: [text]) -> text:
 
 fn _trim_trailing_slashes(path: text) -> text:
     var result = path
-    while result.len() > 1 and result.ends_with("/"):
-        result = result[0:result.len() - 1]
+    while result.byte_len() > 1 and result.ends_with("/"):
+        if host_is_windows_host() and _is_win_drive_root(result):
+            break
+        result = result.substring(0, result.byte_len() - 1)
     result
 
 fn _protected_branch(branch: text) -> bool:
@@ -460,3 +578,4 @@ export verify_release_session, register_release_session, verify_registered_relea
 export begin_release_session_mutation, end_release_session_mutation
 export advance_release_session_head
 export check_release_session_cleanup, close_release_session
+export _realpath, _lexical_absolute_path, _trim_trailing_slashes

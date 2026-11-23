@@ -361,18 +361,35 @@ class _MirIdentityStreamHasherV1:
 fn native_capsule_mir_identity_unscoped_v1(module: MirModule) -> text:
     var hasher = _MirIdentityStreamHasherV1.create()
     hasher.feed_row("module|{storage_identity_text_v1(module.name)}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
-        val function = module.functions[symbol]
-        hasher.feed_row("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
-        val constant = module.constants[symbol]
-        hasher.feed_row("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
-        val static_value = module.statics[symbol]
+    # Index each dict with the sorted keys() element itself: a `for symbol in`
+    # binding of a SymbolId is a native struct COPY under the frozen Phase 2
+    # pin, and struct dict keys hash by address in the C runtime, so the
+    # lookup missed and serialize_mir_function read a nil MirFunction
+    # (0xC0000005 reading 0x3 in the MIR shard worker).
+    val function_keys = native_capsule_sorted_symbol_ids_v1(module.functions.keys())
+    var function_i = 0
+    while function_i < function_keys.len():
+        val function = module.functions[function_keys[function_i]]
+        hasher.feed_row("fn|{function_keys[function_i].id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
+        function_i = function_i + 1
+    val constant_keys = native_capsule_sorted_symbol_ids_v1(module.constants.keys())
+    var constant_i = 0
+    while constant_i < constant_keys.len():
+        val constant = module.constants[constant_keys[constant_i]]
+        hasher.feed_row("const|{constant_keys[constant_i].id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
+        constant_i = constant_i + 1
+    val static_keys = native_capsule_sorted_symbol_ids_v1(module.statics.keys())
+    var static_i = 0
+    while static_i < static_keys.len():
+        val static_value = module.statics[static_keys[static_i]]
         var init_identity = "none"
         if val init = static_value.init:
             init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
-        hasher.feed_row("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
-    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
-        hasher.feed_row("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
+        hasher.feed_row("static|{static_keys[static_i].id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
+        static_i = static_i + 1
+    val type_keys = native_capsule_sorted_symbol_ids_v1(module.types.keys())
+    var type_i = 0
+    while type_i < type_keys.len():
+        hasher.feed_row("type|{native_capsule_type_def_identity_v1(module.types[type_keys[type_i]])}")
+        type_i = type_i + 1
     hasher.finish_digest()

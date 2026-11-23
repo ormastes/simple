@@ -1,0 +1,44 @@
+#!/bin/sh
+# Real Git regression: sparse Windows controllers must publish complete pins.
+set -eu
+owner=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+git init -q "$fixture/repo"
+git -C "$fixture/repo" config user.email test@example.invalid
+git -C "$fixture/repo" config user.name test
+git -C "$fixture/repo" config core.symlinks false
+git -C "$fixture/repo" config core.autocrlf false
+mkdir -p "$fixture/repo/scripts" "$fixture/repo/src/compiler_rust"
+printf 'controller\n' > "$fixture/repo/scripts/controller"
+printf 'committed compiler\n' > "$fixture/repo/src/compiler_rust/Cargo.toml"
+git -C "$fixture/repo" add .
+git -C "$fixture/repo" commit -qm fixture
+git -C "$fixture/repo" sparse-checkout init --cone
+git -C "$fixture/repo" sparse-checkout set scripts
+test ! -e "$fixture/repo/src/compiler_rust/Cargo.toml"
+pin=$(sh "$owner/bootstrap-pin-archive.shs" "$fixture/repo" HEAD "$fixture/pins")
+test "$(cat "$pin/src/compiler_rust/Cargo.toml")" = 'committed compiler'
+test ! -e "$fixture/repo/src/compiler_rust/Cargo.toml"
+test "$(git -C "$fixture/repo" sparse-checkout list)" = scripts
+test "$(git -C "$pin" rev-parse HEAD)" = "$(git -C "$fixture/repo" rev-parse HEAD)"
+# Resuming a complete pin must retain build artifacts.
+mkdir -p "$pin/build"
+printf retained > "$pin/build/sentinel"
+test "$(sh "$owner/bootstrap-pin-archive.shs" "$fixture/repo" HEAD "$fixture/pins")" = "$pin"
+test "$(cat "$pin/build/sentinel")" = retained
+# A previously published sparse pin must fail closed without expanding it.
+git -C "$pin" sparse-checkout init --cone
+git -C "$pin" sparse-checkout set scripts
+test ! -e "$pin/src/compiler_rust/Cargo.toml"
+if sh "$owner/bootstrap-pin-archive.shs" "$fixture/repo" HEAD "$fixture/pins" > "$fixture/reuse.out" 2> "$fixture/reuse.err"; then
+    echo 'FAIL: sparse published pin accepted' >&2
+    exit 1
+else
+    test "$?" -eq 2
+fi
+test ! -s "$fixture/reuse.out"
+test ! -e "$pin/src/compiler_rust/Cargo.toml"
+test "$(cat "$pin/build/sentinel")" = retained
+grep -q 'sparse pinned snapshot' "$fixture/reuse.err"
+printf 'PASS: full pin from sparse controller; controller unchanged; complete reuse retained; sparse reuse refused\n'

@@ -1163,7 +1163,7 @@ impl IncrChangeSet:
     fn is_empty() -> bool:
         self.changes.len() == 0
 
-    fn len() -> i64:
+    fn change_count() -> i64:
         self.changes.len()
 
     fn changed_files() -> [text]:
@@ -1405,6 +1405,235 @@ class BuildCache:
     # `@unknown-family` and macro lookups widen (fail closed).
     tldr_root: text
 
+struct _BuildCacheParsedRowsV1:
+    ok: bool
+    version: i64
+    sources: [text]
+    fp_hashes: [text]
+    fp_sizes: [i64]
+    fp_mtimes: [i64]
+    deps_rows: [[text]]
+    outs_rows: [[text]]
+    deps_ifaces: [text]
+    module_witnesses: [text]
+    interface_digests: [text]
+    macro_input_roots: [text]
+
+# Read and parse `build_cache.sdn` inside a bounded transient scope so the raw
+# SDN file text and `SdnValue` parse tree are reclaimed before `BuildCache`
+# structs/classes are materialized on the persistent heap. Only `RtCoreArray`
+# (`[text]`, `[[text]]`, `[i64]`) and `RtCoreString` (`text`) values are
+# promoted across the scope boundary — never untagged structs or class objects.
+fn _build_cache_parse_rows_raw_v1(cache_path: text) -> _BuildCacheParsedRowsV1:
+    var parse_ok = false
+    var version: i64 = 0
+    var sources: [text] = []
+    var fp_hashes: [text] = []
+    var fp_sizes: [i64] = []
+    var fp_mtimes: [i64] = []
+    var deps_rows: [[text]] = []
+    var outs_rows: [[text]] = []
+    var deps_ifaces: [text] = []
+    var module_witnesses: [text] = []
+    var interface_digests: [text] = []
+    var macro_input_roots: [text] = []
+    val scoped = transient_array_scope_state_v1() == 0 and transient_scope_begin()
+
+    match incremental_parse_file(cache_path):
+        case Ok(sdn_value):
+            parse_ok = true
+            val ver = sdn_value.get("version")
+            if val ver_value_raw = ver:
+                val ver_value: SdnValue = ver_value_raw
+                val v = ver_value.as_i64()
+                if val parsed_version = v:
+                    version = parsed_version
+
+            val entries_val = sdn_value.get("entries")
+            if val entries_value_raw = entries_val:
+                val entries_value: SdnValue = entries_value_raw
+                val arr = entries_value.as_array()
+                # @workaround bug=native_optional_array_pattern_binder_i64_2026_10_21 reason=preserve_declared_sdn_array_element_type_until_pattern_binder_lowering_is_rebuilt
+                if val entries_array_raw = arr:
+                    val entries_array: [SdnValue] = entries_array_raw
+                    for item_raw in entries_array:
+                        val item: SdnValue = item_raw
+                        val src = item.get("source")
+                        var source_value: SdnValue = item
+                        if val source_entry_raw = src:
+                            val source_entry: SdnValue = source_entry_raw
+                            source_value = source_entry
+                        else:
+                            continue
+                        val source_str = source_value.as_str()
+                        var source = ""
+                        if val source_text = source_str:
+                            source = source_text
+                        else:
+                            continue
+
+                        # Parse outputs first so missing-output rows stay transient scratch.
+                        var outs: [text] = []
+                        val outs_val = item.get("outputs")
+                        if val outs_value_raw = outs_val:
+                            val outs_value: SdnValue = outs_value_raw
+                            val outs_arr = outs_value.as_array()
+                            if val out_items_raw = outs_arr:
+                                val out_items: [SdnValue] = out_items_raw
+                                for o_raw in out_items:
+                                    val o: SdnValue = o_raw
+                                    val os = o.as_str()
+                                    if val out_text = os:
+                                        outs = outs.push(out_text)
+                        if not _incremental_outputs_all_live_v1(outs):
+                            continue
+
+                        # Parse fingerprint
+                        var fp_hash = ""
+                        var fp_size: i64 = 0
+                        var fp_mtime: i64 = 0
+                        val fp_val = item.get("fingerprint")
+                        if val fp_obj_raw = fp_val:
+                            val fp_obj: SdnValue = fp_obj_raw
+                            val h = fp_obj.get("hash")
+                            if val hash_value_raw = h:
+                                val hash_value: SdnValue = hash_value_raw
+                                val hs = hash_value.as_str()
+                                if val parsed_hash = hs:
+                                    fp_hash = incremental_digest_untag_v1(parsed_hash)
+                            val s = fp_obj.get("size")
+                            if val size_value_raw = s:
+                                val size_value: SdnValue = size_value_raw
+                                val si = size_value.as_i64()
+                                if val parsed_size = si:
+                                    fp_size = parsed_size
+                            val m = fp_obj.get("modified_time")
+                            if val mtime_value_raw = m:
+                                val mtime_value: SdnValue = mtime_value_raw
+                                val mi = mtime_value.as_i64()
+                                if val parsed_mtime = mi:
+                                    fp_mtime = parsed_mtime
+
+                        # Parse dependencies
+                        var deps: [text] = []
+                        val deps_val = item.get("dependencies")
+                        if val deps_value_raw = deps_val:
+                            val deps_value: SdnValue = deps_value_raw
+                            val deps_arr = deps_value.as_array()
+                            if val dep_items_raw = deps_arr:
+                                val dep_items: [SdnValue] = dep_items_raw
+                                for d_raw in dep_items:
+                                    val d: SdnValue = d_raw
+                                    val ds = d.as_str()
+                                    if val dep_text = ds:
+                                        deps = deps.push(dep_text)
+
+                        # deps_iface: absent in pre-2026-08-18 rows -> ""
+                        # -> the entry fails closed in has_cached_object.
+                        var deps_iface = ""
+                        val di_val = item.get("deps_iface")
+                        if val di_raw = di_val:
+                            val di: SdnValue = di_raw
+                            val di_str = di.as_str()
+                            if val di_text = di_str:
+                                deps_iface = incremental_digest_untag_v1(di_text)
+
+                        # Absent on legacy rows. Shadow comparison reports
+                        # this as `legacy-missing`; it never changes the
+                        # authoritative closure-scoped hit decision.
+                        var module_witness = ""
+                        val mw_val = item.get("module_witness")
+                        if val mw_raw = mw_val:
+                            val mw: SdnValue = mw_raw
+                            val mw_str = mw.as_str()
+                            if val mw_text = mw_str:
+                                module_witness = mw_text
+                            else:
+                                # Field exists but has the wrong schema
+                                # type; keep it distinct from an old row
+                                # where the optional field was absent.
+                                module_witness = NATIVE_MODULE_CACHE_WITNESS_CORRUPT_V1
+
+                        var interface_digest = ""
+                        val id_val = item.get("interface_digest")
+                        if val id_raw = id_val:
+                            val id_value: SdnValue = id_raw
+                            val id_str = id_value.as_str()
+                            if val id_text = id_str:
+                                interface_digest = incremental_digest_untag_v1(id_text)
+
+                        # Already an algorithm-tagged macro digest; an
+                        # absent row (older cache file) reads as unknown.
+                        var macro_input_root = ""
+                        val mir_val = item.get("macro_input_root")
+                        if val mir_raw = mir_val:
+                            val mir_value: SdnValue = mir_raw
+                            val mir_str = mir_value.as_str()
+                            if val mir_text = mir_str:
+                                macro_input_root = mir_text
+
+                        sources = sources.push(source)
+                        fp_hashes = fp_hashes.push(fp_hash)
+                        fp_sizes = fp_sizes.push(fp_size)
+                        fp_mtimes = fp_mtimes.push(fp_mtime)
+                        deps_rows = deps_rows.push(deps)
+                        outs_rows = outs_rows.push(outs)
+                        deps_ifaces = deps_ifaces.push(deps_iface)
+                        module_witnesses = module_witnesses.push(module_witness)
+                        interface_digests = interface_digests.push(interface_digest)
+                        macro_input_roots = macro_input_roots.push(macro_input_root)
+
+            ()
+        case Err(_error):
+            parse_ok = false
+
+    if scoped:
+        val paused = transient_scope_pause()
+        var promoted = false
+        if paused and parse_ok:
+            val p_sources = transient_promote(sources)
+            val p_hashes = transient_promote(fp_hashes)
+            val p_sizes = transient_promote(fp_sizes)
+            val p_mtimes = transient_promote(fp_mtimes)
+            val p_deps = transient_promote(deps_rows)
+            val p_outs = transient_promote(outs_rows)
+            val p_ifaces = transient_promote(deps_ifaces)
+            val p_witnesses = transient_promote(module_witnesses)
+            val p_idigests = transient_promote(interface_digests)
+            val p_macros = transient_promote(macro_input_roots)
+            promoted = p_sources and p_hashes and p_sizes and p_mtimes and
+                p_deps and p_outs and p_ifaces and p_witnesses and p_idigests and p_macros
+        val ended = transient_scope_end()
+        if not ended:
+            eprint("[build-cache] WARNING load scratch scope end failed: {cache_path}")
+        if not parse_ok or not paused or not promoted:
+            parse_ok = false
+            sources = []
+            fp_hashes = []
+            fp_sizes = []
+            fp_mtimes = []
+            deps_rows = []
+            outs_rows = []
+            deps_ifaces = []
+            module_witnesses = []
+            interface_digests = []
+            macro_input_roots = []
+
+    _BuildCacheParsedRowsV1(
+        ok: parse_ok,
+        version: version,
+        sources: sources,
+        fp_hashes: fp_hashes,
+        fp_sizes: fp_sizes,
+        fp_mtimes: fp_mtimes,
+        deps_rows: deps_rows,
+        outs_rows: outs_rows,
+        deps_ifaces: deps_ifaces,
+        module_witnesses: module_witnesses,
+        interface_digests: interface_digests,
+        macro_input_roots: macro_input_roots
+    )
+
 impl BuildCache:
     static fn empty(cache_path: text) -> BuildCache:
         BuildCache(entries: {}, fingerprints: {}, cache_path: cache_path, version: 0,
@@ -1415,168 +1644,42 @@ impl BuildCache:
         if not incremental_file_exists(cache_path):
             return BuildCache.empty(cache_path)
 
-        # Construct the returned BuildCache OUTSIDE the match arm: values
-        # born inside a match arm have broken method-receiver transport on
-        # the stage4 native lane (the first self field access traps) — same
-        # defect family as CodegenOutput.to_compiled_module.
-        var version: i64 = 0
+        val parsed = _build_cache_parse_rows_raw_v1(cache_path)
+        if not parsed.ok:
+            return BuildCache.empty(cache_path)
+
+        # Construct FileFingerprint, DependencyEntry, and BuildCache OUTSIDE the
+        # ended transient scope (untagged structs/classes cannot be promoted by
+        # rt_transient_heap_promote) and OUTSIDE any match arm (stage4 native
+        # receiver-transport invariant).
         var entries: {text: DependencyEntry} = {}
         var fingerprints: {text: FileFingerprint} = {}
-        var parse_ok = false
-        match incremental_parse_file(cache_path):
-            case Ok(sdn_value):
-                parse_ok = true
-                val ver = sdn_value.get("version")
-                if val ver_value_raw = ver:
-                    val ver_value: SdnValue = ver_value_raw
-                    val v = ver_value.as_i64()
-                    if val parsed_version = v:
-                        version = parsed_version
+        val row_count = parsed.sources.len()
+        var i = 0
+        while i < row_count:
+            val source = parsed.sources[i]
+            val fp = FileFingerprint(
+                path: source,
+                content_hash: parsed.fp_hashes[i],
+                modified_time: parsed.fp_mtimes[i],
+                size: parsed.fp_sizes[i]
+            )
+            val entry = DependencyEntry(
+                source: source,
+                fingerprint: fp,
+                dependencies: parsed.deps_rows[i],
+                outputs: parsed.outs_rows[i],
+                deps_iface: parsed.deps_ifaces[i],
+                interface_digest: parsed.interface_digests[i],
+                module_witness: parsed.module_witnesses[i],
+                macro_input_root: parsed.macro_input_roots[i]
+            )
+            entries[source] = entry
+            fingerprints[source] = fp
+            i = i + 1
 
-                val entries_val = sdn_value.get("entries")
-                if val entries_value_raw = entries_val:
-                    val entries_value: SdnValue = entries_value_raw
-                    val arr = entries_value.as_array()
-                    # @workaround bug=native_optional_array_pattern_binder_i64_2026_10_21 reason=preserve_declared_sdn_array_element_type_until_pattern_binder_lowering_is_rebuilt
-                    if val entries_array_raw = arr:
-                        val entries_array: [SdnValue] = entries_array_raw
-                        for item_raw in entries_array:
-                            val item: SdnValue = item_raw
-                            val src = item.get("source")
-                            var source_value: SdnValue = item
-                            if val source_entry_raw = src:
-                                val source_entry: SdnValue = source_entry_raw
-                                source_value = source_entry
-                            else:
-                                continue
-                            val source_str = source_value.as_str()
-                            var source = ""
-                            if val source_text = source_str:
-                                source = source_text
-                            else:
-                                continue
-
-                            # Parse fingerprint
-                            var fp_hash = ""
-                            var fp_size: i64 = 0
-                            var fp_mtime: i64 = 0
-                            val fp_val = item.get("fingerprint")
-                            if val fp_obj_raw = fp_val:
-                                val fp_obj: SdnValue = fp_obj_raw
-                                val h = fp_obj.get("hash")
-                                if val hash_value_raw = h:
-                                    val hash_value: SdnValue = hash_value_raw
-                                    val hs = hash_value.as_str()
-                                    if val parsed_hash = hs:
-                                        fp_hash = incremental_digest_untag_v1(parsed_hash)
-                                val s = fp_obj.get("size")
-                                if val size_value_raw = s:
-                                    val size_value: SdnValue = size_value_raw
-                                    val si = size_value.as_i64()
-                                    if val parsed_size = si:
-                                        fp_size = parsed_size
-                                val m = fp_obj.get("modified_time")
-                                if val mtime_value_raw = m:
-                                    val mtime_value: SdnValue = mtime_value_raw
-                                    val mi = mtime_value.as_i64()
-                                    if val parsed_mtime = mi:
-                                        fp_mtime = parsed_mtime
-
-                            val fp = FileFingerprint(
-                                path: source, content_hash: fp_hash,
-                                modified_time: fp_mtime, size: fp_size)
-
-                            # Parse dependencies
-                            var deps: [text] = []
-                            val deps_val = item.get("dependencies")
-                            if val deps_value_raw = deps_val:
-                                val deps_value: SdnValue = deps_value_raw
-                                val deps_arr = deps_value.as_array()
-                                if val dep_items_raw = deps_arr:
-                                    val dep_items: [SdnValue] = dep_items_raw
-                                    for d_raw in dep_items:
-                                        val d: SdnValue = d_raw
-                                        val ds = d.as_str()
-                                        if val dep_text = ds:
-                                            deps = deps.push(dep_text)
-
-                            # Parse outputs
-                            var outs: [text] = []
-                            val outs_val = item.get("outputs")
-                            if val outs_value_raw = outs_val:
-                                val outs_value: SdnValue = outs_value_raw
-                                val outs_arr = outs_value.as_array()
-                                if val out_items_raw = outs_arr:
-                                    val out_items: [SdnValue] = out_items_raw
-                                    for o_raw in out_items:
-                                        val o: SdnValue = o_raw
-                                        val os = o.as_str()
-                                        if val out_text = os:
-                                            outs = outs.push(out_text)
-                            if not _incremental_outputs_all_live_v1(outs):
-                                continue
-
-                            # deps_iface: absent in pre-2026-08-18 rows -> ""
-                            # -> the entry fails closed in has_cached_object.
-                            var deps_iface = ""
-                            val di_val = item.get("deps_iface")
-                            if val di_raw = di_val:
-                                val di: SdnValue = di_raw
-                                val di_str = di.as_str()
-                                if val di_text = di_str:
-                                    deps_iface = incremental_digest_untag_v1(di_text)
-
-                            # Absent on legacy rows. Shadow comparison reports
-                            # this as `legacy-missing`; it never changes the
-                            # authoritative closure-scoped hit decision.
-                            var module_witness = ""
-                            val mw_val = item.get("module_witness")
-                            if val mw_raw = mw_val:
-                                val mw: SdnValue = mw_raw
-                                val mw_str = mw.as_str()
-                                if val mw_text = mw_str:
-                                    module_witness = mw_text
-                                else:
-                                    # Field exists but has the wrong schema
-                                    # type; keep it distinct from an old row
-                                    # where the optional field was absent.
-                                    module_witness = NATIVE_MODULE_CACHE_WITNESS_CORRUPT_V1
-
-                            var interface_digest = ""
-                            val id_val = item.get("interface_digest")
-                            if val id_raw = id_val:
-                                val id_value: SdnValue = id_raw
-                                val id_str = id_value.as_str()
-                                if val id_text = id_str:
-                                    interface_digest = incremental_digest_untag_v1(id_text)
-
-                            # Already an algorithm-tagged macro digest; an
-                            # absent row (older cache file) reads as unknown.
-                            var macro_input_root = ""
-                            val mir_val = item.get("macro_input_root")
-                            if val mir_raw = mir_val:
-                                val mir_value: SdnValue = mir_raw
-                                val mir_str = mir_value.as_str()
-                                if val mir_text = mir_str:
-                                    macro_input_root = mir_text
-
-                            val entry = DependencyEntry(
-                                source: source, fingerprint: fp,
-                                dependencies: deps, outputs: outs,
-                                deps_iface: deps_iface,
-                                interface_digest: interface_digest,
-                                module_witness: module_witness,
-                                macro_input_root: macro_input_root)
-                            entries[source] = entry
-                            fingerprints[source] = fp
-
-                ()
-            case Err(error):
-                parse_ok = false
-        if not parse_ok:
-            return BuildCache.empty(cache_path)
         BuildCache(entries: entries, fingerprints: fingerprints,
-                   cache_path: cache_path, version: version, tldr_root: "")
+                   cache_path: cache_path, version: parsed.version, tldr_root: "")
 
     me save() -> bool:
         """Persist cache to disk."""

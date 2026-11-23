@@ -642,3 +642,17 @@ fn test_calculation():
         panic!("Expected function definition");
     }
 }
+
+#[test]
+fn test_abi_system_attribute_attaches_to_extern_fn() {
+    let module = parse("@abi(\"system\")\nextern fn Sleep(ms: u32)\n").unwrap();
+    let Node::Extern(e) = &module.items[0] else {
+        panic!("Expected extern function, got {:?}", module.items[0]);
+    };
+    let attr = e.attributes.iter().find(|a| a.name == "abi").expect("abi attribute");
+    let args = attr.args.as_ref().expect("abi args");
+    assert!(
+        matches!(args.first(), Some(Expr::FString { parts, .. }) if matches!(parts.as_slice(), [FStringPart::Literal(s)] if s == "system")),
+        "{args:?}"
+    );
+}
