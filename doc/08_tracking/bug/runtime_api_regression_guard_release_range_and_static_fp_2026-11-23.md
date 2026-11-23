@@ -1,6 +1,6 @@
 # runtime-api-regression push gate: false FAIL on release/1.0.0 PRs (2026-11-23)
 
-Status: open (defect 2 fixed, verification-pending; defect 1 open). Gate: `push-runtime-api-regression` (`scripts/check/check-runtime-api-regression-push.shs`).
+Status: open (defects 1 and 2 fixed, verification-pending). Gate: `push-runtime-api-regression` (`scripts/check/check-runtime-api-regression-push.shs`).
 
 ## Symptom
 Pushing `work/mu1-20261122` (PR #10783, merged as `c3bb41538e4` into release/1.0.0)
@@ -30,6 +30,25 @@ FAILed with 11 `rt_core_dict_*` symbols "removed".
 ## Fix direction
 Skip `static` definitions in the C symbol extraction; fail closed (ERROR, not FAIL
 with a wrong base) when the PR-base ref cannot be verified as current.
+
+## Defect 1 fix (lane gs2, 2026-11-23)
+`main_merged_predecessor` (`scripts/check/check-push-must-pass.shs`) now uses local
+tracking refs only to decide whether narrowing applies. Whenever it does, or the
+outgoing range contains a merge, the base comes from the LIVE remote lines via
+`rebased_push_published_base` (ls-remote + bounded object fetch of main,
+release_phase3, release/<x.y>); a stale or missing `refs/remotes/origin/release/*`
+can no longer make main's merge-base win. If the live lines cannot be confirmed the
+function returns 2 and the dispatcher prints `ERROR — nothing was checked` (exit 2)
+instead of running gates over a wrong range. Selftest (`--self-test`, release
+fixture): topic off release/9.9 (differs from main) with the tracking ref deleted,
+then rewound — base must equal the live release tip and the range must be exactly
+the topic's 2 own commits; an unreachable push remote must yield rc 2.
+Defect 1 status: fixed, verification-pending. Behaviour change: a fast-forward push whose
+range contains a merge now makes a bounded live `ls-remote` (+ possible object fetch);
+when that fails the push exits 2 and must be re-pushed after `git fetch` (intended
+fail-closed). Note: `--self-test`'s pre-existing slow-remote and release_phase3
+fixtures are timing-sensitive on a loaded Windows host (passed with
+`MUST_CHECK_REMOTE_QUERY_TIMEOUT_S=60`, 34/34).
 
 ## Defect 2 fix (2026-11-23, branch work/gs1-20261123)
 `defined_symbols_c` now drops literal C definitions whose declaration prefix
