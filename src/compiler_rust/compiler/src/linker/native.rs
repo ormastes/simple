@@ -493,7 +493,11 @@ impl NativeLinker {
         options: &LinkOptions,
         target: &Target,
     ) -> LinkerResult<()> {
-        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(target);
+        // This owner is reached only after GNU PE dispatch. Pin that selected
+        // ABI before asking the const triple mapper: an implicit host target
+        // has no hint, whose Windows triple otherwise defaults to MSVC.
+        let target = Target { linker_flavor_hint: Some(LinkerFlavor::Gnu), ..*target };
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(&target);
         let mut cmd = Command::new(cc);
         cmd.arg(format!("--target={}", target.triple_str()))
             .arg(if matches!(self, Self::Lld) { "-fuse-ld=lld" } else { "-fuse-ld=bfd" })
@@ -969,6 +973,29 @@ mod tests {
         let ran = Command::new(executable).arg("x").output().unwrap();
         assert!(ran.status.success(), "{:?}", ran);
         assert_eq!(String::from_utf8(ran.stdout).unwrap().replace("\r\n", "\n"), "Hello, World!\n");
+    }
+
+    #[test]
+    #[cfg(all(windows, target_env = "gnu"))]
+    #[ignore = "requires GNU clang and ld.lld; executes the implicit-host CRT path"]
+    fn test_implicit_gnu_host_uses_gnu_driver_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = Target { linker_flavor_hint: Some(LinkerFlavor::Gnu), ..Target::host() };
+        let source = temp.path().join("main.c");
+        let object = temp.path().join("main.o");
+        std::fs::write(&source, "#include <stdio.h>\nint main(void) { puts(\"implicit GNU host\"); return 37; }\n").unwrap();
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(&explicit);
+        let compiled = Command::new(cc).arg(format!("--target={}", explicit.triple_str()))
+            .args(["-c", "-o"]).arg(&object).arg(source).output().unwrap();
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+        let host = Target::host();
+        assert_eq!(host.linker_flavor_hint, None);
+        assert_eq!(host.linker_flavor(), LinkerFlavor::Gnu);
+        let executable = temp.path().join("implicit.exe");
+        NativeLinker::Lld.link_for_target(&[object], &executable, &LinkOptions::new(), &host).unwrap();
+        let ran = Command::new(executable).output().unwrap();
+        assert_eq!(ran.status.code(), Some(37));
+        assert_eq!(String::from_utf8(ran.stdout).unwrap().replace("\r\n", "\n"), "implicit GNU host\n");
     }
 
     /// Compile real COFF/ELF objects, then exercise the public builder and native linker.
