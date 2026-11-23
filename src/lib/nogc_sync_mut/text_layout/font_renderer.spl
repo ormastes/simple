@@ -3246,23 +3246,38 @@ class FontRenderer:
             row_height = 0
         if y + padded_height > FONT_ATLAS_HEIGHT:
             return -1
-        var row = 0
         var _probe_glyph_nz = 0
         val lcd = glyph.lcd_pixels.len() == glyph.width.to_i64() * glyph.height.to_i64() * 3
-        while row < glyph.height:
-            var col = 0
-            while col < glyph.width:
-                val alpha = glyph.pixels[row * glyph.width + col].to_u32()
-                if alpha > 0u32:
+        # Each glyph row is built in a local line and written as one span into
+        # the atlas taken off the field (an element store per pixel into the
+        # `self.atlas_pixels` field was ~9 us a pixel on the interpreter lane:
+        # 0.8 s of the 4x css-layout text paint).
+        # bug=interpreter_field_array_write_span_copies_whole_array_2026-11-23
+        val gw = glyph.width.to_i64()
+        val gh = glyph.height.to_i64()
+        val gray = glyph.pixels
+        val subpixels = glyph.lcd_pixels
+        var atlas = self.atlas_pixels
+        self.atlas_pixels = []
+        var line: [u32] = [0u32; gw]
+        var row: i64 = 0
+        while row < gh:
+            var col: i64 = 0
+            val base = row * gw
+            while col < gw:
+                val alpha = gray[base + col].to_u32()
+                if _VEC_ATLAS_PROBE and alpha > 0u32:
                     _probe_glyph_nz = _probe_glyph_nz + 1
-                var cell = (alpha << 24) | 0x00FFFFFFu32
                 if lcd:
-                    val sub = (row * glyph.width + col).to_i64() * 3
-                    cell = (alpha << 24) | (glyph.lcd_pixels[sub].to_u32() << 16) |
-                        (glyph.lcd_pixels[sub + 1].to_u32() << 8) | glyph.lcd_pixels[sub + 2].to_u32()
-                self.atlas_pixels[(y + row) * FONT_ATLAS_WIDTH + x + col] = cell
+                    val sub = (base + col) * 3
+                    line[col] = (alpha << 24) | (subpixels[sub].to_u32() << 16) |
+                        (subpixels[sub + 1].to_u32() << 8) | subpixels[sub + 2].to_u32()
+                else:
+                    line[col] = (alpha << 24) | 0x00FFFFFFu32
                 col = col + 1
+            atlas.write_span(line, (y.to_i64() + row) * FONT_ATLAS_WIDTH.to_i64() + x.to_i64(), 0, gw)
             row = row + 1
+        self.atlas_pixels = atlas
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] insert cp={glyph.codepoint} w={glyph.width} h={glyph.height} src_pixels_len={glyph.pixels.len()} src_nz={_probe_glyph_nz} ax={x} ay={y}")

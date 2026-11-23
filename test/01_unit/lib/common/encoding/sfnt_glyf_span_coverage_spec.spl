@@ -1,0 +1,126 @@
+# @tag: unit, text, sfnt, perf
+# @cover src/lib/common/encoding/sfnt_glyf.spl 3%
+#
+# The gray glyph coverage kernel adds each inside run of samples between two
+# sorted crossings at once instead of visiting all 16 samples of every pixel.
+# The oracle below is the per-sample sweep it replaced, kept verbatim: every
+# coverage byte must match on outlines whose crossings land exactly ON sample
+# positions (x = k + 1/8, 3/8, 5/8, 7/8), vertices on sample scanlines,
+# crossings on pixel boundaries, left of the
+# bitmap and right of it, with nested and overlapping (winding 2) contours.
+
+use std.spec.*
+use std.common.encoding.sfnt_glyf.{_SfntEdge, _glyf_raster_alpha, _glyf_raster_alpha_rows, _edge_row_index}
+
+fn edge(ax: f64, ay: f64, bx: f64, by: f64) -> _SfntEdge:
+    if ay < by:
+        return _SfntEdge(y_top: ay, y_bottom: by, x_top: ax, dx_dy: (bx - ax) / (by - ay), direction: 1)
+    _SfntEdge(y_top: by, y_bottom: ay, x_top: bx, dx_dy: (ax - bx) / (ay - by), direction: -1)
+
+fn polygon(out: [_SfntEdge], xs: [f64], ys: [f64]) -> [_SfntEdge]:
+    var edges = out
+    var i: i64 = 0
+    while i < xs.len():
+        val j = (i + 1) % xs.len()
+        if ys[i] != ys[j]:
+            edges = edges.push(edge(xs[i], ys[i], xs[j], ys[j]))
+        i = i + 1
+    edges
+
+# The per-sample sweep the span kernel replaced (sfnt_glyf.spl before
+# 2026-11-23), unchanged.
+fn reference_alpha_rows(edges: [_SfntEdge], width: i64, height: i64, row_from: i64, row_end: i64) -> [u8]:
+    var out: [u8] = [0u8; width * height]
+    var hits: [i64] = [0; width]
+    var xs: [f64] = [0.0; edges.len() + 1]
+    var dirs: [i64] = [0; edges.len() + 1]
+    val rows = _edge_row_index(edges, height)
+    var y: i64 = row_from
+    while y < row_end:
+        var x: i64 = 0
+        while x < width:
+            hits[x] = 0
+            x = x + 1
+        val row_end = rows[y + 1]
+        var sample_y: i64 = 0
+        while sample_y < 4:
+            val sy = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
+            var n: i64 = 0
+            var k = rows[y]
+            while k < row_end:
+                val e = edges[rows[k]]
+                if e.y_top <= sy and sy < e.y_bottom:
+                    val crossing = e.x_top + e.dx_dy * (sy - e.y_top)
+                    var at = n
+                    while at > 0 and xs[at - 1] > crossing:
+                        xs[at] = xs[at - 1]
+                        dirs[at] = dirs[at - 1]
+                        at = at - 1
+                    xs[at] = crossing
+                    dirs[at] = e.direction
+                    n = n + 1
+                k = k + 1
+            if n > 0:
+                var p: i64 = 0
+                var winding: i64 = 0
+                var px: i64 = 0
+                while px < width:
+                    var sample_x: i64 = 0
+                    while sample_x < 4:
+                        val sx = px as f64 + (sample_x as f64 * 2.0 + 1.0) / 8.0
+                        while p < n and xs[p] <= sx:
+                            winding = winding + dirs[p]
+                            p = p + 1
+                        if winding != 0: hits[px] = hits[px] + 1
+                        sample_x = sample_x + 1
+                    px = px + 1
+            sample_y = sample_y + 1
+        var cx: i64 = 0
+        while cx < width:
+            out[y * width + cx] = (hits[cx] * 255 / 16) as u8
+            cx = cx + 1
+        y = y + 1
+    out
+
+fn outlines() -> [_SfntEdge]:
+    var e: [_SfntEdge] = []
+    # Axis-aligned box with every vertical side ON a sample position.
+    e = polygon(e, [1.125, 6.375, 6.375, 1.125], [0.5, 0.5, 5.75, 5.75])
+    # Box sides on pixel boundaries and on the last sample of a pixel.
+    e = polygon(e, [8.0, 11.875, 11.875, 8.0], [1.0, 1.0, 9.0, 9.0])
+    # A slanted quad that starts left of the bitmap and leaves on the right.
+    e = polygon(e, [-3.3, 30.7, 22.1, -1.9], [2.2, 7.9, 12.6, 10.4])
+    # Nested contour, opposite direction (a hole), and an overlapping
+    # same-direction triangle (winding 2 inside both).
+    e = polygon(e, [12.0, 20.0, 20.0, 12.0], [11.0, 11.0, 17.0, 17.0])
+    e = polygon(e, [14.0, 14.0, 18.0, 18.0], [12.5, 15.625, 15.625, 12.5])
+    e = polygon(e, [10.0, 24.0, 17.0], [13.0, 13.0, 19.9])
+    # Thin slivers narrower than one sample, and a spike crossing many rows.
+    e = polygon(e, [3.30, 3.36, 3.36, 3.30], [12.0, 12.0, 19.0, 19.0])
+    e = polygon(e, [25.0, 25.9, 25.1], [0.3, 0.4, 19.7])
+    # Vertices exactly ON sample scanlines (y = k + 1/8, 3/8, 5/8, 7/8): an
+    # edge ending at a sample y must not cross it (`sy < y_bottom`).
+    e = polygon(e, [2.0, 6.0, 4.0], [12.375, 12.375, 18.625])
+    e = polygon(e, [21.0, 26.0, 23.5, 20.5], [14.125, 16.0, 19.875, 17.625])
+    e
+
+describe "sfnt gray coverage span kernel":
+    it "matches the per-sample sweep byte for byte":
+        val edges = outlines()
+        val width: i64 = 27
+        val height: i64 = 20
+        val got = _glyf_raster_alpha(edges, width, height)
+        val want = reference_alpha_rows(edges, width, height, 0, height)
+        var inked: i64 = 0
+        var partial: i64 = 0
+        for v in want:
+            if v > 0u8: inked = inked + 1
+            if v > 0u8 and v < 255u8: partial = partial + 1
+        expect(inked > 100).to_equal(true)
+        expect(partial > 40).to_equal(true)
+        expect(got == want).to_equal(true)
+
+    it "matches the sweep for one row band and for a one-pixel-wide bitmap":
+        val edges = outlines()
+        expect(_glyf_raster_alpha_rows(edges, 27, 20, 7, 8) == reference_alpha_rows(edges, 27, 20, 7, 8)).to_equal(true)
+        expect(_glyf_raster_alpha(edges, 1, 20) == reference_alpha_rows(edges, 1, 20, 0, 20)).to_equal(true)

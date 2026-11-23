@@ -1,0 +1,74 @@
+# @tag: unit, gpu, engine2d, text, perf
+# @cover src/lib/common/encoding/sfnt_glyf.spl 2%
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 1%
+#
+# Text paint at device scale 4 (css-layout, 26 runs, 4x, cpu_simd) spent
+# 11.8 s; 5.4 s of it was the first rasterization of 94 glyphs at 64/75/96
+# device px (the 4x4-supersampled gray coverage kernel walked 16 samples for
+# every pixel), the rest the glyph quads: atlas subrect 2.4 s and the clipped
+# blend 2.7 s. These runs draw cold glyphs through the same route the Draw IR
+# text command takes (`draw_text_with_advances` inside a clip band) at those
+# sizes, plus a gray run at 32 px (ink-top frame) and an LCD run at 24 px.
+# Pixels are pinned by a hash measured on the base implementation
+# (release/1.0.0 77fd0470d67); the cost by a wall budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val FRAME_W = 1800
+val FRAME_H = 640
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+# Measured on the base implementation (release/1.0.0 77fd0470d67).
+val FRAME_HASH: i64 = 783453775
+# Base: 6.68 s on the interpreter lane (GB10, idle); lane ~3.8 s. 5.5 s
+# keeps room for a loaded box and is still red on base.
+val BUDGET_US: i64 = 5500000
+
+fn frame_hash(pixels: [u32]) -> i64:
+    var acc: i64 = 17
+    var i: i64 = 0
+    # cpu-lane-loop-ok: spec probe over every pixel of the frame
+    while i < pixels.len():
+        acc = (acc * 31 + (pixels[i] as i64)) % 4294967291
+        i = i + 1
+    acc
+
+fn run_line(eng: Engine2D, x: i32, y: i32, content: text, size: i32, color: u32, lcd: bool) -> bool:
+    eng.set_lcd_text(lcd)
+    val advances = eng.fonts().measure_text_advances(content, size)
+    var width = 0
+    for a in advances:
+        width = width + a
+    eng.set_clip(x - 4, 0, width + 8, FRAME_H)
+    val drawn = eng.draw_text_with_advances(x, y, content, advances, color, size)
+    eng.clear_clip()
+    drawn
+
+fn paint() -> ([u32], i64, i64):
+    var eng = Engine2D.create_with_backend(FRAME_W, FRAME_H, "cpu_simd")
+    expect(eng.load_font_bytes(FONT_PATH, file_read_bytes(FONT_PATH))).to_equal(true)
+    eng.clear(0xFFFFFFFFu32)
+    val t0 = time_now_unix_micros()
+    var drawn: i64 = 0
+    if run_line(eng, 20, 10, "Flexbox grid typography", 96, 0xFF202124u32, true): drawn = drawn + 1
+    if run_line(eng, 20, 140, "Justify content: space-between", 64, 0xFF1A73E8u32, true): drawn = drawn + 1
+    if run_line(eng, 20, 240, "Wrapping rows, gaps & order", 75, 0x80202124u32, true): drawn = drawn + 1
+    if run_line(eng, 20, 360, "Small gray caption text 0123456789", 32, 0xFF5F6368u32, false): drawn = drawn + 1
+    if run_line(eng, 20, 420, "LCD body copy at twenty-four px", 24, 0xFF202124u32, true): drawn = drawn + 1
+    if run_line(eng, 20, 480, "Flexbox grid typography", 96, 0xFF202124u32, true): drawn = drawn + 1
+    val elapsed = time_now_unix_micros() - t0
+    val pixels = eng.read_pixels()
+    eng.shutdown()
+    (pixels, elapsed, drawn)
+
+describe "Engine2D text paint with large cold glyphs":
+    it "paints the measured pixels within a time budget (cpu_simd)":
+        val r = paint()
+        val h = frame_hash(r.0)
+        print "text_paint_large elapsed_us={r.1} hash={h} drawn={r.2}"
+        expect(r.2).to_equal(6)
+        expect(r.0.len()).to_equal(FRAME_W * FRAME_H)
+        expect(h).to_equal(FRAME_HASH)
+        expect(r.1 < BUDGET_US).to_equal(true)
