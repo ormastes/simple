@@ -9,24 +9,33 @@ assert sha(parent)=='ed5e03685a3c9233395306f6fcb2c7c5fa9a6ada36fc1158c20e6d3be91
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip()=='0e3119fe909a1692108d4d3d4e088b4712806c5f'
 for n,h in {'libsimple_native_all.a':'7ceed2e9b0edbf719a6fb4422578d2e322e7ea33f71a9cf700fc8f16df2208ae','libsimple_compiler_backfill.a':'637d252e535f0773347af467335918133b2d83c52759eff64c33ac7932d2a41e'}.items(): assert sha(runtime/n)==h
 parent.chmod(0o755)
-fixture=out/'fixture.spl'; shutil.copyfile(P(__file__).with_suffix('.spl'),fixture)
 owner=source/'src/compiler/80.driver/driver_worker_surface_graph_v1.spl'
-inputs={str(p):sha(p) for p in [parent,owner,fixture,*runtime.glob('*.a')]}
+project=out/'project'; projected=project/'src/compiler/80.driver/driver_worker_surface_graph_v1.spl'
+projected.parent.mkdir(parents=True)
+shutil.copyfile(owner,projected)
+fixture=project/'src/fixture.spl'; shutil.copyfile(P(__file__).with_suffix('.spl'),fixture)
+assert sha(projected)==sha(owner)
+assert not any(l.strip().startswith(('use ','pub use ','export use ','import ')) for l in projected.read_text().splitlines())
+assert 'use compiler.driver.driver_worker_surface_graph_v1.' in fixture.read_text()
+for cmd in [['git','init','--quiet'],['git','add','src'],['git','-c','user.name=Native proof','-c','user.email=proof@example.invalid','commit','--quiet','-m','Exact formatter and native fixture']]:
+    subprocess.run(cmd,cwd=project,check=True)
+(out/'projection.json').write_text(json.dumps({'donor_revision':'0e3119fe909a1692108d4d3d4e088b4712806c5f','donor_sha256':sha(owner),'projected_sha256':sha(projected),'namespace':'compiler.driver.driver_worker_surface_graph_v1','source_files':2,'implicit_std_sources':0,'changed_prestate':'fresh two-file Git project; complete owner bytes, no extracted helpers'},indent=2))
+inputs={str(p):sha(p) for p in [parent,owner,projected,fixture,*runtime.glob('*.a')]}
 (out/'inputs.json').write_text(json.dumps(inputs,indent=2))
 env={k:v for k,v in os.environ.items() if not k.startswith('SIMPLE_')}
 for n in ['cache','storage','tmp']: (out/n).mkdir()
-env.update(SIMPLE_BINARY=str(parent),SIMPLE_PROJECT_ROOT=str(source),SIMPLE_LIB=str(source/'src'),SIMPLE_RUNTIME_PATH=str(runtime),SIMPLE_NO_STUB_FALLBACK='1',SIMPLE_NATIVE_BUILD_RUST='0',SIMPLE_BOOTSTRAP_WHOLE_PROGRAM='1',SIMPLE_PARSE_SHARDING='0',SIMPLE_CACHE=str(out/'cache'),SIMPLE_NATIVE_BUILD_CACHE_DIR=str(out/'cache'),SIMPLE_USER_STORAGE_ROOT=str(out/'storage'),TMPDIR=str(out/'tmp'))
+env.update(SIMPLE_BINARY=str(parent),SIMPLE_PROJECT_ROOT=str(project),SIMPLE_LIB=str(project/'src'),SIMPLE_RUNTIME_PATH=str(runtime),SIMPLE_NO_STUB_FALLBACK='1',SIMPLE_NATIVE_BUILD_RUST='0',SIMPLE_BOOTSTRAP_WHOLE_PROGRAM='1',SIMPLE_PARSE_SHARDING='0',SIMPLE_BUILD_TRACE='1',SIMPLE_TRACE_PHASE2='1',SIMPLE_CACHE=str(out/'cache'),SIMPLE_NATIVE_BUILD_CACHE_DIR=str(out/'cache'),SIMPLE_USER_STORAGE_ROOT=str(out/'storage'),TMPDIR=str(out/'tmp'))
 def owned(label,args,cap,seconds):
     cmd=['perl',str(source/'scripts/resource/process-tree-rss-watchdog.pl'),f'--max-rss-kib={cap}','--interval-ms=100',f'--timeout-seconds={seconds}',f'--receipt={out/(label+".env")}','--',*map(str,args)]
     (out/(label+'.argv.json')).write_text(json.dumps(cmd))
     with (out/(label+'.stdout')).open('wb') as stdout,(out/(label+'.stderr')).open('wb') as stderr:
-        code=subprocess.run(cmd,cwd=source,env=env,stdout=stdout,stderr=stderr,timeout=seconds+30).returncode
+        code=subprocess.run(cmd,cwd=project,env=env,stdout=stdout,stderr=stderr,timeout=seconds+30).returncode
     fields=dict(l.split('=',1) for l in (out/(label+'.env')).read_text().splitlines() if '=' in l)
     assert code==0 and fields['status']=='complete' and int(fields['rss_limit_kib'])==cap and fields['exit_status']=='0' and fields['quiescent']=='1' and fields['rss_cap_enforced']=='1',fields
 exe=out/'formatter'
 result={'status':'FAILED','qualification':'actual production native formatter only; SSpec/core checks unrun'}
 try:
-    owned('compile',[parent,'native-build','--backend','llvm','--threads','1','--entry-closure','--source','src/compiler','--source','src/lib','--entry',fixture,'--output',exe,'--cache-dir',out/'cache'],2097152,300)
+    owned('compile',[parent,'native-build','--backend','llvm','--threads','1','--entry-closure','--source','src','--entry',fixture,'--output',exe,'--cache-dir',out/'cache'],2097152,300)
     owned('run',[exe],262144,20)
     actual=(out/'run.stdout').read_bytes().decode('utf-8',errors='strict').splitlines()
     paths=['x'*511+'...[truncated]']*3+['x'*512,'x'*508+'😀','x'*508+'😀...[truncated]']
