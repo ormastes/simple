@@ -10,6 +10,7 @@ use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index}
+use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
@@ -35,6 +36,24 @@ fn inspection_registry_v1(include_leaf: bool) -> ModuleSurfacesByName:
     builder.finish().unwrap()
 
 describe "native surface diagnostic inspection":
+    it "passes the actual SDK argv shape as canonical options and still rejects two entries":
+        val args = ["/producer/linux-x86_64-p1/simple", "inspect-native-surfaces",
+            "--source", "/checkout/src/compiler", "--source", "/checkout/src/lib",
+            "--source", "/checkout/sdk_owner/src/app", "--entry-closure",
+            "--entry", "/checkout/sdk_owner/src/app/simpleos_sdk_owner_probe.spl",
+            "--mode", "dynload", "--low-memory", "--threads", "4", "--cache-dir", "/checkout/sdk_owner/cache",
+            "--module", "lib.nogc_sync_mut.io.path_identity_abi",
+            "--module", "lib.nogc_sync_mut.io._PathIdentityPosix.errno_abi",
+            "--item", "path_errno_address", "--diagnostic-root", "build/verify"]
+        val planned = bootstrap_surface_inspection_plan_v1(args).unwrap()
+        expect(cli_native_build_option_error(planned.native_args, true)).to_equal("")
+        expect(planned.native_args.contains(args[0])).to_equal(false)
+        expect(planned.native_args.contains("inspect-native-surfaces")).to_equal(false)
+        expect(planned.native_args.contains("--module")).to_equal(false)
+        expect(planned.native_args.contains("--diagnostic-root")).to_equal(false)
+        expect(bootstrap_surface_inspection_plan_v1(args + ["--entry", "/checkout/other.spl"]).is_err()).to_equal(true)
+        expect(bootstrap_surface_inspection_plan_v1(args + ["/checkout/other.spl"]).is_err()).to_equal(true)
+
     it "retains an omitted canonical target instead of inventing a host triple":
         val args = ["simple", "inspect-native-surfaces", "--entry", "entry.spl", "--module", "facade",
             "--item", "get", "--diagnostic-root", "build/verify"]
