@@ -1,6 +1,6 @@
 # Phase 2 miscompile: `-> T` return of an if-val binder over `tuple_at<T>(..)` int-boxes the record handle
 
-- **Status:** FIX LANDED IN SOURCE (2026-11-24); end-to-end NOT verified
+- **Status:** FIX IN PR #11114 (open, release/1.0.0, 2026-11-24); end-to-end NOT verified
   (needs the Phase 2 compiler rebuilt from this source, hours)
 - **Component:** `src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl`
   (`declared_exists_check_type`), consumed by the MIR ExistsCheck arm
