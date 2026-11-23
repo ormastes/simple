@@ -40,6 +40,13 @@ val _SOSIX_VFS_WRITE_MAX: u64 = 4088
 var _sosix_rw_req_states: [u8; 128] = [0; 128]
 var _sosix_rw_req_results: [i64; 128] = [0; 128]
 
+pub(package) struct SosixSerialWriteObserverV1:
+    # Kernel owner callback, scoped to this inline write. No ambient task or
+    # scheduler dependency is introduced into the SOSIX byte backend.
+    on_emitted_batch: fn([u8], i64) -> i64
+
+val _SOSIX_SERIAL_OBSERVATION_BATCH_V1: i64 = 256
+
 fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
     """Start a SOSIX async read and return its request ID."""
     if not fd_is_valid(fd):
@@ -112,6 +119,10 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
 
 fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
     """Start a SOSIX async write and return its request ID."""
+    _sosix_async_write_observed_v1(fd, buf_addr, count, nil)
+
+fn _sosix_async_write_observed_v1(fd: i32, buf_addr: u64, count: u64,
+        observer: SosixSerialWriteObserverV1?) -> u64:
     if not fd_is_valid(fd):
         return _SOSIX_MAX_ASYNC_REQUESTS
     val fd_type = fd_get_type(fd)
@@ -128,9 +139,20 @@ fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
         val req = _sosix_rw_alloc_request()
         if req < _SOSIX_MAX_ASYNC_REQUESTS:
             var emitted: u64 = 0
+            var batch: [u8] = []
             while emitted < count:
-                hal_console_write_byte(mmio_read8(buf_addr + emitted))
+                # Read once: observation uses the exact local byte passed to
+                # the HAL, never a later re-read of mutable userspace memory.
+                val byte = mmio_read8(buf_addr + emitted)
+                hal_console_write_byte(byte)
                 emitted = emitted + 1
+                if observer.?:
+                    batch.push(byte)
+                    if batch.len() == _SOSIX_SERIAL_OBSERVATION_BATCH_V1:
+                        _ = observer.unwrap().on_emitted_batch(batch, batch.len())
+                        batch = []
+            if observer.? and batch.len() > 0:
+                _ = observer.unwrap().on_emitted_batch(batch, batch.len())
             _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, emitted as i64)
         return req
 
@@ -200,9 +222,23 @@ fn sosix_sync_read(fd: i32, buf_addr: u64, count: u64) -> i64:
 
 fn sosix_sync_write(fd: i32, buf_addr: u64, count: u64) -> i64:
     """Synchronous compatibility write: same inline request, no busy wait."""
+    _sosix_sync_write_observed_v1(fd, buf_addr, count, nil)
+
+# @allow(primitive_api) SOSIX byte I/O boundary: descriptor and validated buffer address/count preserve the native POSIX ABI
+pub(package) fn sosix_sync_write_observed_v1(fd: i32, buf_addr: u64, count: u64,
+        observer: SosixSerialWriteObserverV1) -> i64:
+    """Observe only bytes the serial HAL has emitted; request failures emit none.
+
+    Callback rejection cannot undo output and never changes the I/O result.
+    The caller's observation owner retains lifecycle and truncation authority.
+    """
+    _sosix_sync_write_observed_v1(fd, buf_addr, count, Some(observer))
+
+fn _sosix_sync_write_observed_v1(fd: i32, buf_addr: u64, count: u64,
+        observer: SosixSerialWriteObserverV1?) -> i64:
     if not fd_is_valid(fd):
         return _SOSIX_STATUS_BAD_DESCRIPTOR
-    val req = sosix_async_write(fd, buf_addr: buf_addr, count: count)
+    val req = _sosix_async_write_observed_v1(fd, buf_addr, count, observer)
     if req >= _SOSIX_MAX_ASYNC_REQUESTS:
         return _SOSIX_STATUS_QUEUE_FULL
     if not _sosix_rw_is_complete(req):
