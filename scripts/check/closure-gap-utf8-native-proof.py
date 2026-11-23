@@ -22,7 +22,7 @@ def owned(label,args,cap,seconds):
     with (out/(label+'.stdout')).open('wb') as stdout,(out/(label+'.stderr')).open('wb') as stderr:
         code=subprocess.run(cmd,cwd=source,env=env,stdout=stdout,stderr=stderr,timeout=seconds+30).returncode
     fields=dict(l.split('=',1) for l in (out/(label+'.env')).read_text().splitlines() if '=' in l)
-    assert code==0 and fields['exit_status']=='0' and fields['quiescent']=='1' and fields['rss_cap_enforced']=='1',fields
+    assert code==0 and fields['status']=='complete' and int(fields['rss_limit_kib'])==cap and fields['exit_status']=='0' and fields['quiescent']=='1' and fields['rss_cap_enforced']=='1',fields
 exe=out/'formatter'
 result={'status':'FAILED','qualification':'actual production native formatter only; SSpec/core checks unrun'}
 try:
