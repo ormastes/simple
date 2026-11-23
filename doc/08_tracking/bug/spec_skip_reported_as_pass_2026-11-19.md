@@ -164,3 +164,9 @@ Tests (fail on old code, pass on new):
 Open: the deployed `C:/dev/seeds/simple-release.exe` and the pure-Simple runner
 (`spec.spl`, handled by the skipfix-spl lane) do not have this fix until redeployed;
 the 73 files above still rely on their `SKIPPED:` stopgap lines until then.
+
+## Pure-Simple fix (lane skipfix-spl, 2026-11-23)
+
+Option 1 is done in `src/lib/nogc_sync_mut/spec.spl`: `skip()` called while an example runs records it, and `_execute_it` returns "skip" and counts `test_skipped` (skip wins over a later pass or fail). Pinned by `test/01_unit/lib/nogc_sync_mut/spec_skip_in_body_spec.spl`, which drives `_execute_it` directly: on the old code 2 of 3 examples fail ("expected pass to equal skip"), on the new code 3 of 3 pass.
+
+The seed's native `it` (bdd.rs, section above) never goes through `_execute_it`, so this test drives it directly.
