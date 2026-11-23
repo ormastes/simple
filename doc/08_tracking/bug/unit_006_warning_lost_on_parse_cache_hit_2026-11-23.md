@@ -1,6 +1,6 @@
 # SPL-UNIT-006 warning not re-raised on parse-cache hit (2026-11-23)
 
-Status: open
+Status: verification-pending
 
 ## Symptom
 When a module that redeclares a `unit` with different bounds is served from the
@@ -27,3 +27,13 @@ twice with the cache enabled and expects the warning both times.
 ## Why not fixed in the Dist / i64 change
 That change is limited to MIR operator lowering. This bug is in the
 frontend/cache layer and needs its own cache-replay design and spec.
+
+## Fix (2026-11-23)
+The cold parse stores the conflicts it queued for the module in a
+`<key>.u006` sidecar next to the private parse-cache entry
+(`frontend_parse_cache_store_unit_conflicts`, atomic write, no locks). Every
+cache-hit path in `frontend_parse_or_restore` (spab, fpc, shared) re-queues
+them under the module path (`unit_constraint_requeue_conflicts`). A clean
+reparse clears a stale sidecar. Limit: a shared-CAS hit on a host that never
+parsed the module cold has no local sidecar, so it stays silent there.
+Repro spec: `test/01_unit/compiler/frontend/unit_conflict_parse_cache_replay_spec.spl`.

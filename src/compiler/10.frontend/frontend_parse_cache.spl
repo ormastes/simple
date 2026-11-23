@@ -243,6 +243,38 @@ pub fn frontend_parse_cache_store(key: text, blob: text, identity_sha: text) -> 
         val _evicted = cache_dir_evict_to_cap(dir, ".fpc", cache_dir_max_bytes())
     true
 
+# SPL-UNIT-006 conflicts are queued only while the parser runs, so a cache hit
+# would lose them. The cold parse stores them in a `<key>.u006` sidecar (one
+# message per line, published atomically); a hit replays them. A clean parse
+# clears a stale sidecar.
+fn frontend_parse_cache_unit_conflicts_path(key: text) -> text:
+    frontend_parse_cache_dir() + "/" + key + ".u006"
+
+pub fn frontend_parse_cache_store_unit_conflicts(key: text, messages: [text]) -> bool:
+    if key == "" or not frontend_parse_cache_enabled():
+        return false
+    val path = frontend_parse_cache_unit_conflicts_path(key)
+    if messages.len() == 0:
+        if file_exists(path):
+            return file_atomic_write(path, "")
+        return true
+    val _made = dir_create_all(frontend_parse_cache_dir())
+    file_atomic_write(path, messages.join("\n"))
+
+pub fn frontend_parse_cache_load_unit_conflicts(key: text) -> [text]:
+    if key == "" or not frontend_parse_cache_enabled():
+        return []
+    val path = frontend_parse_cache_unit_conflicts_path(key)
+    if not file_exists(path):
+        return []
+    val raw = match file_read_result(path):
+        case Ok(content): content
+        case Err(_): return []
+    var out: [text] = []
+    for line in raw.split("\n"):
+        if line != "": out.push(line)
+    out
+
 # A cache that cannot store is a slow build, not a wrong one, so a failed store
 # stays non-fatal. It is still reported once per process: on Windows the store
 # failed for every module when the cache directory's parents were missing, and
