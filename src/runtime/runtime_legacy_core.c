@@ -179,6 +179,11 @@ const char* spl_as_str(SplValue v) {
     return v.tag == SPL_STRING && v.as_str ? v.as_str : "";
 }
 
+/* "." and ".." are the self/parent entries every directory walker skips. */
+static bool legacy_dot_entry(const char* name) {
+    return strcmp(name, ".") == 0 || strcmp(name, "..") == 0;
+}
+
 #if defined(_WIN32)
 static void core_dir_walk_impl(const char* path, int64_t* result) {
     char pattern[4096];
@@ -187,7 +192,7 @@ static void core_dir_walk_impl(const char* path, int64_t* result) {
     HANDLE handle = FindFirstFileA(pattern, &entry);
     if (handle == INVALID_HANDLE_VALUE) return;
     do {
-        if (strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0) continue;
+        if (legacy_dot_entry(entry.cFileName)) continue;
         char full[4096];
         snprintf(full, sizeof(full), "%s\\%s", path, entry.cFileName);
         if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
@@ -206,7 +211,7 @@ static void core_dir_walk_impl(const char* path, int64_t* result) {
     if (!dir) return;
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (legacy_dot_entry(entry->d_name)) continue;
         char full[4096];
         snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
         struct stat metadata;
@@ -222,6 +227,16 @@ static void core_dir_walk_impl(const char* path, int64_t* result) {
 }
 #endif
 
+/* Copies a (ptr, len) `text` argument into a NUL-terminated buffer. Returns
+ * false for a NULL or empty path and for one that does not fit, so no caller
+ * reads past its end. */
+static bool legacy_copy_text_path(char* dst, size_t cap, const uint8_t* ptr, uint64_t len) {
+    if (!ptr || len == 0 || len >= cap) return false;
+    memcpy(dst, ptr, (size_t)len);
+    dst[(size_t)len] = '\0';
+    return true;
+}
+
 /* (ptr, len): the compiler's `text` extern ABI (runtime_sffi.rs:1896 declares
  * &[I64, I64]). A Simple `text` is not NUL-terminated. */
 /* -> RuntimeValue (array of text), per runtime_sffi.rs:1896. Used to return
@@ -230,11 +245,9 @@ static void core_dir_walk_impl(const char* path, int64_t* result) {
 int64_t rt_dir_walk(const uint8_t* path_ptr, uint64_t path_len) {
     int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
     char path[4096];
-    if (!path_ptr && path_len != 0) return result;
-    if (path_len >= sizeof(path)) return result;
-    if (path_len != 0) memcpy(path, path_ptr, (size_t)path_len);
-    path[(size_t)path_len] = '\0';
-    if (path[0]) core_dir_walk_impl(path, &result);
+    if (legacy_copy_text_path(path, sizeof(path), path_ptr, path_len) && path[0]) {
+        core_dir_walk_impl(path, &result);
+    }
     return result;
 }
 
@@ -515,9 +528,7 @@ int rt_file_append(const char* path, const char* content) {
  * shape as the runtime.c copy. */
 int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[4096];
-    if (!path_ptr || path_len == 0 || path_len >= sizeof(path)) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[(size_t)path_len] = '\0';
+    if (!legacy_copy_text_path(path, sizeof(path), path_ptr, path_len)) return 0;
 #if defined(_WIN32)
     /* _commit uses FlushFileBuffers, which requires a writable handle.
      * r+b opens the existing file without truncating or rewriting its bytes. */
@@ -622,11 +633,11 @@ static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
 }
 #endif
 int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
-#if defined(_WIN32)
     char path[4096];
     if (!path_ptr || path_len <= 0 || path_len >= (int64_t)sizeof(path) ||
             memchr(path_ptr, '\0', (size_t)path_len)) return -1;
     memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
+#if defined(_WIN32)
     wchar_t* wide = rt_win_long_path_widen(path);
     if (!wide) return -1;
     int valid_parent = rt_win_profile_path_parents_are_real(wide);
@@ -637,12 +648,8 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
     return file == INVALID_HANDLE_VALUE ? -1 : (int64_t)(intptr_t)file;
 #elif defined(__simpleos__)
     /* SimpleOS lacks secure openat path-walk authority; fail closed. */
-    (void)path_ptr; (void)path_len; return -1;
+    return -1;
 #else
-    char path[4096];
-    if (!path_ptr || path_len <= 0 || path_len >= (int64_t)sizeof(path) ||
-        memchr(path_ptr, '\0', (size_t)path_len)) return -1;
-    memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
     const char* leaf = NULL; int parent_fd = rt_mem_snapshot_parent_fd(path, &leaf);
     if (parent_fd < 0) return -1;
     int flags = O_WRONLY | O_CREAT | O_EXCL | O_APPEND;
@@ -819,7 +826,7 @@ static bool core_dir_remove_all_impl(const char* path) {
     if (!dir) return false;
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (legacy_dot_entry(entry->d_name)) continue;
         char child[4096];
         int child_len = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
         if (child_len < 0 || (size_t)child_len >= sizeof(child) || !core_dir_remove_all_impl(child)) {
@@ -837,10 +844,7 @@ static bool core_dir_remove_all_impl(const char* path) {
  * a truncated or extended path removes the wrong directory. */
 bool rt_dir_remove_all(const uint8_t* path_ptr, uint64_t path_len) {
     char path[4096];
-    if (!path_ptr || path_len == 0) return false;
-    if (path_len >= sizeof(path)) return false;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[(size_t)path_len] = '\0';
+    if (!legacy_copy_text_path(path, sizeof(path), path_ptr, path_len)) return false;
     return core_dir_remove_all_impl(path);
 }
 
@@ -913,20 +917,15 @@ static char** rt_legacy_spawn_argv(const char* cmd, const char** args, int64_t a
 }
 #endif
 
+/* Argument gate shared by both spawn entry points. */
+static bool rt_legacy_spawn_args_ok(const char* cmd, const char** args, int64_t arg_count) {
+    return cmd && *cmd && arg_count >= 0 && (arg_count == 0 || args);
+}
+
 int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
-    if (!cmd || !*cmd || arg_count < 0 ||
-            (arg_count > 0 && !args)) return -1;
+    if (!rt_legacy_spawn_args_ok(cmd, args, arg_count)) return -1;
 #if defined(_WIN32)
     return rt_process_spawn_async_owned_windows(cmd, args, arg_count);
-#elif defined(__APPLE__)
-    if (arg_count > 32768) return -1;
-    for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
-    char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
-    if (!argv) return -1;
-    pid_t pid = -1;
-    int error = runtime_spawn_async_macos(&pid, cmd, argv);
-    free(argv);
-    return error == 0 ? (int64_t)pid : -1;
 #else
     if (arg_count > 32768) return -1;
     for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
@@ -934,6 +933,12 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
      * allocator lock, so the child must not calloc (it used to). */
     char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
     if (!argv) return -1;
+#if defined(__APPLE__)
+    pid_t pid = -1;
+    int error = runtime_spawn_async_macos(&pid, cmd, argv);
+    free(argv);
+    return error == 0 ? (int64_t)pid : -1;
+#else
     pid_t pid = fork();
     if (pid < 0) {
         free(argv);
@@ -950,6 +955,7 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     }
     free(argv);
     return (int64_t)pid;
+#endif
 #endif
 }
 
@@ -969,8 +975,7 @@ int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg
 #if defined(_WIN32)
     return rt_process_spawn_async(cmd, args, arg_count);
 #else
-    if (!cmd || !*cmd || arg_count < 0 ||
-            (arg_count > 0 && !args)) return -1;
+    if (!rt_legacy_spawn_args_ok(cmd, args, arg_count)) return -1;
     /* argv is built BEFORE fork: a multithreaded parent may hold the
      * allocator lock, so the forked children must not calloc. */
     char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
