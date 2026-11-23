@@ -1,0 +1,56 @@
+name: Windows retained provider replay
+
+on:
+  pull_request:
+    branches: ['release/**']
+    paths:
+      - 'src/runtime/runtime_timestamp.c'
+      - 'src/runtime/test/windows_timestamp_provider_selfcheck.c'
+      - 'scripts/check/check-windows-timestamp-providers.py'
+      - 'scripts/check/replay-windows-ladder-providers.py'
+      - '.github/workflows/windows-retained-provider-replay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  retained-link:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch immutable incident source
+        shell: pwsh
+        run: |
+          git fetch origin 68bb1b5d22340f9f730d37e584033793a821f0ce
+          git worktree add --detach C:/r1/source 68bb1b5d22340f9f730d37e584033793a821f0ce
+          if ($LASTEXITCODE -ne 0) { throw 'incident source checkout failed' }
+      - name: Download retained rung 1 evidence (no rebuild)
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45211128098
+          artifact-ids: 14840940015
+          merge-multiple: true
+          path: C:/r1/fixture
+      - name: Install canonical pinned LLVM-MinGW
+        shell: bash
+        run: |
+          sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw
+          . scripts/setup/windows-gitbash-bootstrap-env.shs
+          printf 'REPLAY_TOOLCHAIN=%s\n' "$(cygpath -m "$SIMPLE_MINGW_ROOT")" >> "$GITHUB_ENV"
+      - name: Replay link, provider controls, and actual candidate native Hello
+        shell: pwsh
+        run: |
+          python scripts/check/replay-windows-ladder-providers.py --fixture C:/r1/fixture --source C:/r1/source --toolchain "$env:REPLAY_TOOLCHAIN" --output C:/r1/result
+          if ($LASTEXITCODE -ne 0) { throw 'retained provider replay failed; preserve evidence' }
+      - name: Preserve diagnostic evidence, never publish a release candidate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-retained-provider-replay
+          path: C:/r1/result
+          if-no-files-found: error
+          retention-days: 7
