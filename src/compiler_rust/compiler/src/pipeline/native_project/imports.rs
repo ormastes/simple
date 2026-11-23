@@ -1508,7 +1508,13 @@ impl UseMapScan {
         all_mangled: &std::collections::HashMap<String, Vec<String>>,
     ) -> Vec<String> {
         let bare = |key: &&String| !key.contains('.');
-        if name.is_empty() || name.contains("__") || name.contains('.') || name.contains("dot") {
+        // A segment with a leading/trailing `_` (`impl_`, `mod_`, a parent ending
+        // in `_dot`) fuses with the `__` separator, so splitting an owner yields
+        // `impl` / `_m` rather than `impl_` / `m`. Parts are indexed and looked up
+        // with edge underscores trimmed; that only widens the candidate keys, and
+        // `scope.resolve` still decides each one.
+        let lookup = name.trim_matches('_');
+        if lookup.is_empty() || name.contains("__") || name.contains('.') || name.contains("dot") {
             return all_mangled.keys().filter(bare).cloned().collect();
         }
         let index = self.part_index.get_or_insert_with(|| {
@@ -1517,7 +1523,7 @@ impl UseMapScan {
                 let mut parts = std::collections::HashSet::new();
                 for owner in owners {
                     let normalized = owner.replace("_dot_", "__").replace('.', "__");
-                    parts.extend(normalized.split("__").map(str::to_string));
+                    parts.extend(normalized.split("__").map(|part| part.trim_matches('_').to_string()));
                 }
                 for part in parts {
                     index.entry(part).or_default().push(raw_name.clone());
@@ -1525,7 +1531,7 @@ impl UseMapScan {
             }
             index
         });
-        let mut keys: std::collections::BTreeSet<String> = index.get(name).into_iter().flatten().cloned().collect();
+        let mut keys: std::collections::BTreeSet<String> = index.get(lookup).into_iter().flatten().cloned().collect();
         for re_export in scope.direct.iter().chain(scope.stripped.iter()).chain(scope.families.iter()) {
             keys.extend(re_export.keys().filter(|key| all_mangled.contains_key(*key) && bare(key)).cloned());
         }
