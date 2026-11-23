@@ -1,11 +1,13 @@
-# @cover src/lib/gc_async_mut/slang/model_executor/pure/llama_forward_rocm.spl 80%
-# @cover src/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/llama_forward_gpu.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/pure/compute_backend.spl 80%
 # Purpose and audience: executable evidence that the pure-Simple Llama runner
-# executes its forward pass on the AMD Radeon GPU through ROCm (slang -> pure
-# runner -> GPU API -> ROCm): same greedy token ids as the CPU runner for
+# executes through the backend-neutral compute interface on the AMD Radeon GPU
+# (slang -> pure runner -> compute_* -> ROCm): matvec / rmsnorm / attention equal
+# to the CPU reference within 1e-4 relative, and same greedy token ids as the CPU runner for
 # stories15M, the llama.cpp reference text, and prefix reuse that changes cost
 # only. Prints a CPU-vs-GPU perf table to the log.
-# Gate: runs only when the ROCm DLLs exist and the stories15M model directory
+# Run with SLANG_GPU=rocm|vulkan|cuda (default rocm; compute_open("auto") honours it and errors instead of
+# falling back). Gate: runs only when the selected backend is present and the stories15M model directory
 # exists (SLANG_PURE_MODEL, default C:/dev/model/llama2c-stories15M). The CPU
 # leg is slow on the seed interpreter (minutes).
 
@@ -13,11 +15,14 @@ use std.spec.{describe, it, expect, skip}
 use std.io_runtime.{env_get, is_dir, file_append_text, dir_create_all}
 use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
+use std.gc_async_mut.gpu.cuda.cuda_compute.{cuda_driver_available}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_vulkan.{vk_ops_available}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_attention}
+use std.gc_async_mut.slang.model_executor.pure.compute_backend.{compute_open, compute_kind_name, compute_device_name, compute_upload, compute_download, compute_matvec, compute_rmsnorm, compute_attention, compute_gpu_library_loaded}
 use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load}
 use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new, kv_generate_greedy}
 use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_load, pure_tokenizer_encode, pure_tokenizer_decode}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_download}
-use std.gc_async_mut.slang.model_executor.pure.llama_forward_rocm.{rocm_llama_load, rocm_llama_free, rocm_kv_session_new, rocm_kv_session_free, rocm_generate_greedy, llama_logits_rocm}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward_gpu.{gpu_llama_load, gpu_llama_free, gpu_kv_session_new, gpu_kv_session_free, gpu_generate_greedy, llama_logits_gpu}
 
 # The runner does not keep stdout of passing examples and counts skip() as a
 # pass, so evidence (and every skip reason) is also appended to a file.
@@ -34,6 +39,25 @@ fn _skip(name: text, why: text):
 val REFERENCE = ", there was a little girl named Lily. She loved to play outside in the sun"
 val N_GPU = 18
 val N_CPU = 12
+
+# Backend under test: SLANG_GPU (rocm | vulkan | cuda), default rocm. The same
+# assertions apply to every backend; compute_open("auto") honours SLANG_GPU and
+# errors instead of falling back to another backend.
+fn _want() -> text:
+    val e = env_get("SLANG_GPU").lower()
+    if e == "":
+        return "rocm"
+    e
+
+fn _backend_present() -> bool:
+    val w = _want()
+    if w == "rocm":
+        return rocm_available_at(rocm_bin_default())
+    if w == "vulkan":
+        return vk_ops_available()
+    if w == "cuda":
+        return cuda_driver_available()
+    false
 
 fn _model_dir() -> text:
     # env_get returns "" (not None) when unset.
@@ -64,9 +88,9 @@ fn _first_diff(a: [i64], b: [i64]) -> i64:
 
 # Divergence diagnostic: GPU argmax and top-2 logit margin after `ids`.
 fn _gpu_margin(ops, m, ids: [i64]) -> text:
-    val s = rocm_kv_session_new(ops, m).unwrap()
-    val r = rocm_generate_greedy(ops, m, s, ids, 0).unwrap()
-    val logits = rocm_tensor_download(ops, llama_logits_rocm(ops, m, r.session.hidden).unwrap()).unwrap()
+    val s = gpu_kv_session_new(ops, m).unwrap()
+    val r = gpu_generate_greedy(ops, m, s, ids, 0).unwrap()
+    val logits = compute_download(ops, llama_logits_gpu(ops, m, r.session.hidden).unwrap()).unwrap()
     var b1: i64 = 0
     var i: i64 = 1
     while i < logits.data.len():
@@ -86,20 +110,80 @@ fn _tps(n: i64, ms: i64) -> f64:
         return 0.0
     (n * 1000) as f64 / (ms as f64)
 
-describe "slang pure runner forward pass on the AMD GPU via ROCm":
+fn _rand(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var s = seed
+    var i: i64 = 0
+    while i < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s % 20001) as f64) / 10000.0 - 1.0)
+        i = i + 1
+    out
+
+fn _rel_err(gpu: PureTensor, cpu: PureTensor) -> f64:
+    var scale = 1.0
+    var i: i64 = 0
+    while i < cpu.data.len():
+        val a = if cpu.data[i] < 0.0: -cpu.data[i] else: cpu.data[i]
+        if a > scale:
+            scale = a
+        i = i + 1
+    var worst = 0.0
+    i = 0
+    while i < cpu.data.len():
+        val d0 = gpu.data[i] - cpu.data[i]
+        val d = if d0 < 0.0: -d0 else: d0
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst / scale
+
+describe "slang pure runner op parity through the compute interface":
+    it "matvec, rmsnorm and attention on the GPU equal the CPU reference":
+        val name = "matvec, rmsnorm and attention on the GPU equal the CPU reference"
+        if not _backend_present():
+            _skip(name, "{_want()} backend not available on this host")
+        else:
+            val ops = compute_open("auto").unwrap()
+            _record("OPS BACKEND: {compute_kind_name(ops.kind)} device={compute_device_name(ops)}")
+            expect(compute_kind_name(ops.kind)).to_equal(_want())
+            expect(compute_gpu_library_loaded()).to_equal(true)
+            # matvec 288x288 (q_proj shape) and the rmsnorm over 288
+            val w = tensor_from_values(_rand(288 * 288, 1), [288, 288])
+            val x = tensor_from_values(_rand(288, 2), [288])
+            val nw = tensor_from_values(_rand(288, 3), [288])
+            val gw = compute_upload(ops, w).unwrap()
+            val gx = compute_upload(ops, x).unwrap()
+            val gnw = compute_upload(ops, nw).unwrap()
+            val e_mv = _rel_err(compute_download(ops, compute_matvec(ops, gw, gx).unwrap()).unwrap(), tensor_matvec(w, x))
+            val e_rn = _rel_err(compute_download(ops, compute_rmsnorm(ops, gx, gnw, 0.00001).unwrap()).unwrap(), tensor_rmsnorm(x, nw, 0.00001))
+            # attention: 6 heads x 48, 5 positions of a [16, 288] KV buffer
+            val q = tensor_from_values(_rand(288, 4), [288])
+            val kb = tensor_from_values(_rand(16 * 288, 5), [16, 288])
+            val vb = tensor_from_values(_rand(16 * 288, 6), [16, 288])
+            val ga = compute_attention(ops, compute_upload(ops, q).unwrap(), compute_upload(ops, kb).unwrap(), compute_upload(ops, vb).unwrap(), 5, 6, 48).unwrap()
+            val e_at = _rel_err(compute_download(ops, ga).unwrap(), tensor_attention(q, kb, vb, 5, 6, 48))
+            _record("PARITY rel_err matvec={e_mv} rmsnorm={e_rn} attention={e_at}")
+            expect(e_mv < 0.0001).to_equal(true)
+            expect(e_rn < 0.0001).to_equal(true)
+            expect(e_at < 0.0001).to_equal(true)
+
+describe "slang pure runner forward pass on the AMD GPU via the compute interface":
     it "generates the same greedy ids as the CPU runner and reuses a shared prefix":
         val dir = _model_dir()
-        _record("GATE: rocm={rocm_available_at(rocm_bin_default())} model_dir=[{dir}]")
+        _record("GATE: backend={_want()} present={_backend_present()} model_dir=[{dir}]")
         val name = "generates the same greedy ids as the CPU runner and reuses a shared prefix"
-        if not rocm_available_at(rocm_bin_default()):
+        if not _backend_present():
             _record("SKIPPED: ROCm DLLs not found in {rocm_bin_default()}")
-            _skip(name, "ROCm DLLs not found in {rocm_bin_default()}")
+            _skip(name, "{_want()} backend not available on this host")
         elif dir == "":
             _record("SKIPPED: stories15M model directory not present")
             _skip(name, "stories15M model directory not present")
         else:
-            val ops = rocm_ops_open().unwrap()
-            val dev = rocm_ops_device_name(ops)
+            val ops = compute_open("auto").unwrap()
+            _record("BACKEND: {compute_kind_name(ops.kind)} diag=[{ops.diag}]")
+            expect(compute_kind_name(ops.kind)).to_equal(_want())
+            val dev = compute_device_name(ops)
             _record("DEVICE: {dev}")
             expect(dev).to_contain("Radeon")
 
@@ -108,10 +192,10 @@ describe "slang pure runner forward pass on the AMD GPU via ROCm":
 
             # GPU: weights once, then greedy generation (first run includes kernel compile).
             var t0 = time_now_nanos()
-            val gm = rocm_llama_load(ops, dir).unwrap()
+            val gm = gpu_llama_load(ops, dir).unwrap()
             val upload_ms = _ms_since(t0)
             t0 = time_now_nanos()
-            val g1 = rocm_generate_greedy(ops, gm, rocm_kv_session_new(ops, gm).unwrap(), prompt, N_GPU).unwrap()
+            val g1 = gpu_generate_greedy(ops, gm, gpu_kv_session_new(ops, gm).unwrap(), prompt, N_GPU).unwrap()
             val gpu_ms = _ms_since(t0)
             val gpu_text = pure_tokenizer_decode(tok, g1.generated)
             _record("gpu_ids={g1.generated}")
@@ -134,11 +218,11 @@ describe "slang pure runner forward pass on the AMD GPU via ROCm":
             val req2 = prompt + _slice(g1.generated, 0, 3)
             t0 = time_now_nanos()
             val before = g1.session.positions_evaluated
-            val r2 = rocm_generate_greedy(ops, gm, g1.session, req2, 3).unwrap()
+            val r2 = gpu_generate_greedy(ops, gm, g1.session, req2, 3).unwrap()
             val reuse_ms = _ms_since(t0)
             val reuse_positions = r2.session.positions_evaluated - before
             t0 = time_now_nanos()
-            val r2f = rocm_generate_greedy(ops, gm, rocm_kv_session_new(ops, gm).unwrap(), req2, 3).unwrap()
+            val r2f = gpu_generate_greedy(ops, gm, gpu_kv_session_new(ops, gm).unwrap(), req2, 3).unwrap()
             val fresh_ms = _ms_since(t0)
             val fresh_positions = r2f.session.positions_evaluated
 
@@ -158,6 +242,6 @@ describe "slang pure runner forward pass on the AMD GPU via ROCm":
             expect(r2.generated).to_equal(_slice(g1.generated, 3, 6))
             expect(reuse_positions < fresh_positions).to_equal(true)
 
-            rocm_kv_session_free(ops, r2.session).unwrap()
-            rocm_kv_session_free(ops, r2f.session).unwrap()
-            rocm_llama_free(ops, gm).unwrap()
+            gpu_kv_session_free(ops, r2.session).unwrap()
+            gpu_kv_session_free(ops, r2f.session).unwrap()
+            gpu_llama_free(ops, gm).unwrap()

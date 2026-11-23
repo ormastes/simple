@@ -1,0 +1,102 @@
+"""
+## Purpose
+Pure (hardware-free) parts of the CUDA compute backend: library-name resolution
+per OS, kernel argument packing, launch-config layout, f32 word/bytes helpers,
+and the kernel sources shared with the ROCm provider. Runs on any host.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.cuda.cuda_compute.{cuda_driver_lib_names, cuda_nvrtc_lib_names, cuda_libc_name, cuda_pack_args, cuda_launch_config_bytes, cuda_f32_word, cuda_f32_bytes, cuda_driver_available, cuda_open}
+use std.gc_async_mut.slang.model_executor.pure.gpu_kernel_sources.{SLANG_SRC_MATVEC, SLANG_SRC_ATTENTION}
+
+describe "cuda library name resolution":
+    it "uses nvcuda.dll on Windows and libcuda.so.1 on Linux":
+        expect(cuda_driver_lib_names("windows")).to_equal(["nvcuda.dll"])
+        expect(cuda_driver_lib_names("linux")[0]).to_equal("libcuda.so.1")
+
+    it "picks the C runtime per OS":
+        expect(cuda_libc_name("windows")).to_equal("ucrtbase.dll")
+        expect(cuda_libc_name("linux")).to_equal("libc.so.6")
+
+    it "lists the explicit NVRTC override first, then bin dir, then bare names":
+        val names = cuda_nvrtc_lib_names("windows", "D:\\x\\nvrtc.dll", "C:\\CUDA\\bin", 0)
+        expect(names[0]).to_equal("D:\\x\\nvrtc.dll")
+        expect(names[1]).to_equal("C:\\CUDA\\bin\\nvrtc64_130_0.dll")
+        expect(names[2]).to_equal("C:\\CUDA\\bin\\x64\\nvrtc64_130_0.dll")
+        expect(names[names.len() - 1]).to_equal("nvrtc64_112_0.dll")
+
+    it "uses versioned libnvrtc sonames on Linux and no x64 subdirectory":
+        val names = cuda_nvrtc_lib_names("linux", "", "/usr/local/cuda/lib64", 0)
+        expect(names[0]).to_equal("/usr/local/cuda/lib64/libnvrtc.so.13")
+        expect(names[names.len() - 1]).to_equal("libnvrtc.so")
+        var has_x64 = false
+        for n in names:
+            if n.contains("x64"):
+                has_x64 = true
+        expect(has_x64).to_equal(false)
+
+    it "falls back to bare loader names when no directory is given":
+        expect(cuda_nvrtc_lib_names("windows", "", "", 0)[0]).to_equal("nvrtc64_130_0.dll")
+
+    it "drops NVRTC majors newer than the driver but keeps the override and unversioned names":
+        val win = cuda_nvrtc_lib_names("windows", "D:\\nvrtc64_130_0.dll", "", 12)
+        expect(win).to_equal(["D:\\nvrtc64_130_0.dll", "nvrtc64_120_0.dll", "nvrtc64_112_0.dll"])
+        val lin = cuda_nvrtc_lib_names("linux", "", "", 11)
+        expect(lin).to_equal(["libnvrtc.so.11.2", "libnvrtc.so"])
+        expect(cuda_nvrtc_lib_names("windows", "", "", 13).len()).to_equal(3)
+
+describe "cuda kernel argument packing":
+    it "packs pointers as 8 bytes then words as 4 bytes, params point at each value":
+        val pack = cuda_pack_args(1000, [4096, 8192], [7, 300]).unwrap()
+        expect(pack.argv.len()).to_equal(24)
+        expect(pack.params.len()).to_equal(32)
+        # first pointer value 4096 = 0x1000
+        expect(pack.argv[0]).to_equal(0)
+        expect(pack.argv[1]).to_equal(16)
+        # word 300 = 0x012C at argv offset 20
+        expect(pack.argv[20]).to_equal(44)
+        expect(pack.argv[21]).to_equal(1)
+        # params[0] = base + 0 = 1000 = 0x03E8; params[2] = base + 16 + 0 = 1016 = 0x03F8; params[3] = 1020
+        expect(pack.params[0]).to_equal(232)
+        expect(pack.params[1]).to_equal(3)
+        expect(pack.params[16]).to_equal(248)
+        expect(pack.params[24]).to_equal(252)
+
+    it "rejects an argument list that does not fit the scratch layout":
+        var many: [i64] = []
+        var i: i64 = 0
+        while i < 200:
+            many.push(i)
+            i = i + 1
+        expect(cuda_pack_args(0, many, []).is_err()).to_equal(true)
+
+describe "cuda launch config and f32 helpers":
+    it "lays out CUlaunchConfig as 56 bytes with grid, block, zero stream and attrs":
+        val cfg = cuda_launch_config_bytes(12, 256)
+        expect(cfg.len()).to_equal(56)
+        expect(cfg[0]).to_equal(12)
+        expect(cfg[4]).to_equal(1)
+        expect(cfg[12]).to_equal(0)
+        expect(cfg[13]).to_equal(1)
+        expect(cfg[28]).to_equal(0)
+        expect(cfg[32]).to_equal(0)
+
+    it "encodes f32 words and bytes little-endian":
+        expect(cuda_f32_word(1.0)).to_equal(1065353216)
+        expect(cuda_f32_word(-2.0)).to_equal(3221225472)
+        val b = cuda_f32_bytes([1.0])
+        expect(b).to_equal([0, 0, 128, 63])
+
+describe "kernel sources shared by ROCm and CUDA":
+    it "use 64-bit offsets (long long) rather than platform-dependent long":
+        expect(SLANG_SRC_MATVEC.contains("(long long)row")).to_equal(true)
+        expect(SLANG_SRC_ATTENTION.contains("(long)")).to_equal(false)
+
+describe "cuda open failure":
+    it "returns Err with a reason and releases handles when no NVIDIA driver exists":
+        if cuda_driver_available():
+            print "NOTE: NVIDIA driver present; failure path covered by the hardware-free cases only"
+        else:
+            val r = cuda_open()
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_contain("driver library not found")

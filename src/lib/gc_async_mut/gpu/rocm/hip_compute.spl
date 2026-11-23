@@ -18,7 +18,7 @@
 # forwarder is needed. Kernel parameter convention: device pointers first
 # (8 bytes each), then 32-bit words (ints, or float bit patterns).
 
-use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_wffi_call_i64}
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
 use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
 use std.common.binary_io.{f32_to_bits}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
@@ -137,7 +137,10 @@ fn _text_at(addr: i64, cap: i64) -> text:
         i = i + 1
     bytes_to_text(out)
 
-# Load HIP + hipRTC from `bin_dir`, initialise HIP, and read the device name.
+# Load HIP + hipRTC from `bin_dir` (nothing is loaded at import; this is the only
+# place the libraries are opened), initialise HIP, and read the device name.
+# Any failure releases every library this call loaded, so a failed probe leaves
+# no GPU library resident. Kernels compile lazily in rocm_kernel.
 pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
     val os = host_os_name()
     val hip_path = _find_lib(bin_dir, hip_lib_names(os))
@@ -148,7 +151,53 @@ pub fn rocm_open_at(bin_dir: text) -> Result<RocmDevice, text>:
     val hip = spl_dlopen(hip_path)
     val rtc = spl_dlopen(rtc_path)
     if ucrt == 0 or hip == 0 or rtc == 0:
+        _release_libs([ucrt, hip, rtc])
         return Err("ROCm: dlopen failed for libc, HIP or hipRTC")
+    val r = _rocm_open_loaded(ucrt, hip, rtc)
+    if r.is_err():
+        _release_libs([ucrt, hip, rtc])
+    r
+
+# True when the HIP or hipRTC DLL is mapped into this process (a pure query:
+# GetModuleHandleA never loads anything). Lets callers assert that no GPU
+# library was loaded by an import or by a non-ROCm backend.
+@allow(primitive_api)  # reason: boolean presence query; no domain type exists for a yes/no probe
+pub fn rocm_library_loaded() -> bool:
+    val os = host_os_name()
+    gpu_dll_loaded(hip_lib_names(os) + hiprtc_lib_names(os))
+
+# True when any of the named DLLs is already mapped in this process (Windows
+# GetModuleHandleA only; it never loads anything). The GPU providers share it to
+# assert that selecting one backend loaded no other backend's library.
+@allow(primitive_api)  # reason: boolean presence query over module names; no domain type exists for a yes/no probe
+pub fn gpu_dll_loaded(names: [text]) -> bool:
+    val ucrt = spl_dlopen("ucrtbase.dll")
+    val k32 = spl_dlopen("kernel32.dll")
+    if ucrt == 0 or k32 == 0:
+        return false
+    val c_malloc = spl_dlsym(ucrt, "malloc")
+    val c_free = spl_dlsym(ucrt, "free")
+    val c_memcpy = spl_dlsym(ucrt, "memcpy")
+    val get_module = spl_dlsym(k32, "GetModuleHandleA")
+    if c_malloc == 0 or c_free == 0 or c_memcpy == 0 or get_module == 0:
+        return false
+    var loaded = false
+    for name in names:
+        var b: [u8] = text_to_utf8_bytes(name)
+        b.push(0)
+        val p = spl_wffi_call_i64(c_malloc, [b.len()], 1)
+        spl_wffi_call_i64_with_bytes(c_memcpy, [p], b, 0, b.len(), [b.len()])
+        if spl_wffi_call_i64(get_module, [p], 1) != 0:
+            loaded = true
+        spl_wffi_call_i64(c_free, [p], 1)
+    loaded
+
+fn _release_libs(handles: [i64]):
+    for h in handles:
+        if h != 0:
+            spl_dlclose(h)
+
+fn _rocm_open_loaded(ucrt: i64, hip: i64, rtc: i64) -> Result<RocmDevice, text>:
     val f_init = _need(hip, "hipInit")?
     val f_name = _need(hip, "hipDeviceGetName")?
     val c_malloc = _need(ucrt, "malloc")?
