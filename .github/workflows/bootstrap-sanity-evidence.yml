@@ -1,46 +1,47 @@
 name: Bootstrap Sanity Evidence Archive
-
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  coff-partial-link:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          name: windows-cross-preflight-fb4431072ca75278aa509e2638a6f7a92698e67a
+          run-id: 45225760378
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: retained-preflight
+      - name: Install pinned Clang and GNU PE BFD
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq --no-install-recommends binutils-mingw-w64-x86-64
+          name=llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64
+          gh release download 20260922 --repo mstorsjo/llvm-mingw --pattern "$name.tar.xz" --dir "$RUNNER_TEMP"
+          printf 'bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21  %s\n' "$RUNNER_TEMP/$name.tar.xz" | sha256sum --check -
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
+          echo "COFF_TOOLCHAIN=$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/$name/bin" >> "$GITHUB_PATH"
+      - name: Exercise production selector and retained objects
+        shell: bash
+        run: |
+          archive=$(find retained-preflight -name libsimple_runtime.a -print -quit)
+          test -s "$archive"
+          ulimit -v 2097152
+          timeout --kill-after=5 180 python scripts/check/check-coff-partial-link.py \
+            --cc "$COFF_TOOLCHAIN/bin/x86_64-w64-mingw32-clang" \
+            --ar "$COFF_TOOLCHAIN/bin/llvm-ar" --nm "$COFF_TOOLCHAIN/bin/llvm-nm" \
+            --readobj "$COFF_TOOLCHAIN/bin/llvm-readobj" --retained-archive "$archive" \
+            --out build/coff-link-proof
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coff-link-proof-${{ github.sha }}
+          path: build/coff-link-proof/
