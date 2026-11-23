@@ -2,9 +2,7 @@ name: Actual attribute store bootstrap diagnostic
 
 on:
   workflow_dispatch:
-  # Re-enable the restricted PR trigger only after binding a verified producer
-  # containing the RTI repair. The pinned producer below already reproduced the
-  # failure in run 45159597917; unrelated pushes must not repeat that execution.
+  # Temporary exact-producer pre-link diagnostic. No push/PR fanout.
 
 permissions:
   contents: read
@@ -20,14 +18,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      PRODUCER_RUN: '45145173990'
-      PRODUCER_SOURCE: 0abba1510a913300a9e8c0bed67e8dde07ebea41
+      PRODUCER_RUN: '45254614898'
+      PRODUCER_SOURCE: ce231b5b898d797c98d44a9b59a4859a7d792a7b
       # Root verified the fresh handoff and retained bootstrap Hello output.
       # This consumer remains diagnostic-only; Phase 1 is not suite admission.
-      PRODUCER_ARTIFACT: '14804958792'
-      PRODUCER_SHA256: e551d794b3e1f90b920930fc34680d3839945d3b9c352ee2d1dfeab5306fb420
-      PRODUCER_BYTES: '58490592'
-      FIXTURE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+      PRODUCER_ARTIFACT: '14858799081'
+      PRODUCER_SHA256: ed5e03685a3c9233395306f6fcb2c7c5fa9a6ada36fc1158c20e6d3be91fcf73
+      PRODUCER_BYTES: '57470728'
+      FIXTURE_SOURCE: 68bb1b5d22340f9f730d37e584033793a821f0ce
       DIAGNOSTIC_OUT: build/verify/actual-attribute-store-diagnostic
     defaults:
       run:
@@ -36,7 +34,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: 68bb1b5d22340f9f730d37e584033793a821f0ce
 
       - name: Require the exact reviewed fixture checkout
         run: |
@@ -57,7 +55,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN" > "$DIAGNOSTIC_OUT/producer-run.github.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PRODUCER_ARTIFACT" > "$DIAGNOSTIC_OUT/producer-artifact.github.json"
           jq -e --argjson run "$PRODUCER_RUN" --arg source "$PRODUCER_SOURCE" \
-            '.id == $run and .head_sha == $source and .status == "completed"' \
+            '.id == $run and .head_sha == $source and .status == "completed" and .conclusion == "success"' \
             "$DIAGNOSTIC_OUT/producer-run.github.json" > /dev/null
           jq -e --argjson run "$PRODUCER_RUN" --argjson artifact "$PRODUCER_ARTIFACT" --arg source "$PRODUCER_SOURCE" \
             '.id == $artifact and .name == "ladder-linux-x86_64-r1" and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $source' \
@@ -105,13 +103,13 @@ jobs:
           87dfdf24d9922574d367ee6c8ca5ff2575922a918b465c049aa366e38b764d7c  src/compiler/00.common/data/data_schema_core_v1.spl
           e6fc88aa80f7ecfa87db254c4abc57fcbefe39203668e3bb91171b63c6394c17  src/compiler/00.common/data/data_schema_resolver.spl
           41220c5498219ba8576e07f1879a5e840a198adebc9cf004608ec702430b06c7  src/lib/common/crypto/secure_memory.spl
-          d41bf74e31de9dbba0e089111348c5dbe400fb32187a5fea36aa7df88d85fd53  src/lib/common/crypto/sha256.spl
+          b644a178c9e9134aa455bd78915f58413c4363c55d89ed3b01427851e54e6a6e  src/lib/common/crypto/sha256.spl
           9a73e13d17fba8a3b06f3b7a71f96f73180d5f53184c970715e375a8aadcdcb6  src/lib/common/crypto/sha256_core.spl
           e29fe297060bb4b59b62c10395575ac2f3796d09033833a217046fe9d27121c9  src/lib/common/crypto/word_ops.spl
           0fd242c9a4ac3358bdee83fadac70da61dd10b6ae19109a66ae814cf334b7234  src/lib/common/sdn/parser.spl
           5fddb47d91b451fdb0046354c230e920304c2bf48e196d4305ac33e7f5a6c6e5  src/lib/common/sdn/structural_scalar_value_v1.spl
           3bed7c6207cadf5fbf5a0b913bef555cc4fdad52344e4fc8d22d2d3bd86489db  src/lib/common/sdn/value.spl
-          f6d04579d8b1238fd3012ee8332ba20dae3fab0a313660714e33fb04f90e6818  src/lib/common/text_bytes.spl
+          1d11ddf80ad185bcfa4fc746b3526ca2f42c6d56f0cc5f74dc315750c51afcb5  src/lib/common/text_bytes.spl
           ca8130b1a29b92eaa72f20aaa8d6d89e62f4ed5809fd042a5cf3f7ecb13795b7  src/lib/common/types.spl
           SOURCE_HASHES
           sha256sum --check --strict "$lane/production-projection.sha256" > "$lane/source-hash-verification.txt"
@@ -148,12 +146,14 @@ jobs:
           args=(native-build
             --source "$lane/projection/src/compiler" --source "$lane/projection/src/lib" --source "$lane/projection/src/app"
             --entry-closure --entry "$lane/projection/src/app/actual_attribute_store.spl"
-            --mode dynload --low-memory --threads 4 --cache-dir "$lane/cache" --output "$lane/program")
+            --emit-object --backend llvm --target x86_64-unknown-linux-gnu --low-memory --threads 1 --cache-dir "$lane/cache" --output "$lane/program")
           printf '%q ' "$compiler" "${args[@]}" > "$lane/command.txt"
           printf '\n' >> "$lane/command.txt"
           set +e
-          /usr/bin/time -v -o "$lane/resources.txt" timeout --verbose --signal=TERM --kill-after=5s 595s \
-            env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_MONO_ROOT_DISCOVERY=1 \
+          perl scripts/resource/process-tree-rss-watchdog.pl --rss-cap-mode=enforce --max-rss-kib=6291456 --timeout-seconds=600 --receipt="$lane/owner.env" -- \
+            env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_MONO_ROOT_DISCOVERY=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 \
+              SIMPLE_HIR_CACHE=1 SIMPLE_HIR_CACHE_DIR="$lane/hir-cache" \
+              SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$lane/frontend-cache" \
               SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=1 \
               SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_RTI_DIAGNOSTICS=1 \
               "$compiler" "${args[@]}" > "$lane/native-build.log" 2>&1
@@ -163,8 +163,8 @@ jobs:
           {
             printf 'schema: actual-attribute-store-fixture-diagnostic-v1\nstatus: BOOTSTRAP_DIAGNOSTIC\nadmission: none\n'
             printf 'producer_sha256: %s\nnative_build_exit_status: %s\n' "$PRODUCER_SHA256" "$code"
-            printf 'soft_deadline_seconds: 595\nhard_deadline_seconds: 600\n'
-            printf 'runtime_provider: native-build-default-source-selection-see-native-build-log\n'
+            printf 'soft_deadline_seconds: 600\nhard_deadline_seconds: 600\n'
+            printf 'runtime_provider: unverified-pre-link-only\n'
             printf 'emitted_program_execution: NOT_RUN\nsuite_execution: NOT_RUN\n'
           } > "$lane/receipt.sdn"
           if [ -s "$lane/program" ]; then
@@ -292,7 +292,7 @@ jobs:
           output_bytes = program.stat().st_size if program.is_file() else 0
           outcome = ('NATIVE_BUILD_FAILED' if code != 0 else
                      'OUTPUT_MISSING_OR_EMPTY' if output_bytes == 0 else
-                     'PROVIDER_METADATA_INCOMPLETE' if not metadata_ok else 'COMPILE_LINK_ONLY')
+                     'PROVIDER_METADATA_INCOMPLETE' if not metadata_ok else 'EMIT_OBJECT_ONLY')
           with (lane / 'receipt.sdn').open('a') as stream:
               stream.write('output_bytes: ' + str(output_bytes) + '\n')
               stream.write('observed_provider_metadata: ' + ('OBSERVED' if metadata_ok else 'INCOMPLETE') + '\n')
@@ -316,6 +316,11 @@ jobs:
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/*.status
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/native-build.log
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/native-build.exit
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/owner.env
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/program
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/cache
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/hir-cache
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/frontend-cache
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/projection/**/*.spl
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/observed-provider-metadata/**
           retention-days: 14
