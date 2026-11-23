@@ -31,6 +31,7 @@ pub struct GpuLayer:
     w_up: DeviceTensor
     w_down: DeviceTensor
 
+@allow(primitive_api)  # reason: tied is a yes/no checkpoint-layout flag
 pub struct GpuLlama:
     config: LlamaConfig
     embed: DeviceTensor
@@ -43,12 +44,14 @@ pub struct GpuKvRows:
     keys: [DeviceTensor]
     values: [DeviceTensor]
 
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
 pub struct GpuKvSession:
     kv: GpuKvRows
     cached_ids: [i64]
     hidden: DeviceTensor
     positions_evaluated: i64
 
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
 pub struct GpuGenResult:
     session: GpuKvSession
     generated: [i64]
@@ -133,6 +136,7 @@ fn _gpu_free_all(ops: ComputeOps, ts: [DeviceTensor]) -> Result<i64, text>:
         compute_free(ops, t)?
     Ok(0)
 
+@allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
 pub fn gpu_llama_free(ops: ComputeOps, m: GpuLlama) -> Result<i64, text>:
     for ly in m.layers:
         _gpu_free_all(ops, [ly.attn_norm, ly.wq, ly.wk, ly.wv, ly.wo, ly.ffn_norm, ly.w_gate, ly.w_up, ly.w_down])?
@@ -149,7 +153,7 @@ fn _gpu_capacity(m: GpuLlama) -> i64:
 
 # Placeholder for "no hidden state yet" (n == 0; Cpu tensors have ptr 0 too).
 fn _gpu_no_hidden() -> DeviceTensor:
-    DeviceTensor(kind: ComputeKind.Cpu, ptr: 0, n: 0, shape: [0], host: [], vkbuf: None)
+    DeviceTensor(kind: ComputeKind.Cpu, ptr: 0, n: 0, shape: [0], host: [])
 
 pub fn gpu_kv_session_new(ops: ComputeOps, m: GpuLlama) -> Result<GpuKvSession, text>:
     val log = GpuUploadLog(ts: [])
@@ -169,6 +173,7 @@ fn _gpu_kv_alloc(ops: ComputeOps, m: GpuLlama, log: GpuUploadLog) -> Result<GpuK
         l = l + 1
     Ok(GpuKvSession(kv: GpuKvRows(keys: keys, values: values), cached_ids: [], hidden: _gpu_no_hidden(), positions_evaluated: 0))
 
+@allow(primitive_api)  # reason: status/index result mirrors the provider call (0 on success, or an argmax index)
 pub fn gpu_kv_session_free(ops: ComputeOps, s: GpuKvSession) -> Result<i64, text>:
     _gpu_free_all(ops, s.kv.keys)?
     _gpu_free_all(ops, s.kv.values)?
@@ -223,6 +228,7 @@ pub fn llama_logits_gpu(ops: ComputeOps, m: GpuLlama, hidden: DeviceTensor) -> R
     compute_free(ops, hn)?
     Ok(logits)
 
+@allow(primitive_api)  # reason: token ids, positions and counts are model-vocabulary integers
 pub fn llama_greedy_token_gpu(ops: ComputeOps, m: GpuLlama, hidden: DeviceTensor) -> Result<i64, text>:
     val logits = llama_logits_gpu(ops, m, hidden)?
     val id = compute_argmax(ops, logits)?
