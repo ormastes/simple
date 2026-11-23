@@ -3855,3 +3855,26 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   (2026-11-23, Blocker 8).
 - **Landing.** Owner accepted the amendment on 2026-11-23
   (`doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`).
+
+## 2026-11-23 — GB10 corpus case 02: the Engine2D leg fails natively when `f64call().to_i32()` is used
+
+- **Trap:** natively (seed native-build or `simple run`), `floor_f64(x).to_i32()`,
+  or any `<f64-returning call>.to_i32()/.to_i64()`, converts the raw IEEE
+  bits (47.0 → 0). The interpreted `simple test` gives the right value, so a
+  green interpreted spec proves nothing for this class. Bind the call result to
+  a local first (`val f: f64 = floor_f64(x)`) or use `as i32`. Bug:
+  `doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md`.
+- **Case 02 effect:** the strict Vulkan affine dispatch box collapsed to
+  `(0,0,2,2)`, so the tile and bar were never drawn, which showed up as "edge
+  oracle mismatch". It is fixed in `draw_ir_adv.spl` with typed locals. The
+  Engine2D rgba on the GB10 is `962ca9e4…c306` and passes the oracle with
+  edge_max=1.
+- **How to find this class:** build a tiny native probe entry
+  (`--runtime-bundle host-gpu-native-all`, 8-30 s) that prints intermediate
+  boxes, and compare it with the interpreted spec on the same ICD
+  (`VK_DRIVER_FILES=.../nvidia_icd.json` works for specs on this host).
+- **Still open:** case 02 `run-*` is blocked by Skia's edge policy
+  (edge_excess=4, edge_max=30, the same on macOS and the GB10). This needs an
+  owner decision; do not widen the tolerance.
+- The worker's oracle-mismatch errors now carry the verdict numbers.
+- Spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_case02_edges_spec.spl`.
