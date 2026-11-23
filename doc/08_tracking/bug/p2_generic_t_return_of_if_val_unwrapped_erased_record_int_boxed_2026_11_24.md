@@ -115,10 +115,13 @@ the `val slot: T?` form; a concrete record caller has no
 body still substitutes).
 
 Also in the same change: `src/compiler/20.hir/return_type_interface_v1.spl`
-`rti_symbol_module` made `pub` — it is imported by
-`50.mir/_MirLowering/function_lowering.spl` (since `ac1fd826bf4`,
-2026-11-23) and the seed interpreter hard-fails every in-process MIR spec on
-this tip with `semantic: private fn rti_symbol_module ... is not visible`.
+gains `pub fn rti_symbol_defining_module(symbols, symbol: SymbolId) -> text`
+(a `SymbolId`-typed wrapper over the private `rti_symbol_module`), and
+`50.mir/_MirLowering/function_lowering.spl` imports that instead of the
+private raw-id fn it had imported since `ac1fd826bf4` (2026-11-23) — the seed
+interpreter hard-failed every in-process MIR spec on this tip with
+`semantic: private fn rti_symbol_module ... is not visible`. (Making the raw
+fn `pub` trips the `push-primitive-api-added` ratchet: bare `i64` param.)
 
 ## Not fixed here (pre-existing, separate)
 
