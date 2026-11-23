@@ -1,38 +1,92 @@
-name: Exact-source ce231 Linux runtime provisioning
+name: Parent-gated ce231 canonical Phase3 and independent early Phase4
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [phase3, early-phase4]
+        default: phase3
+      product:
+        type: choice
+        options: [full-cli, mcp]
+        default: full-cli
+      pairing_run:
+        type: string
+        default: ''
 permissions:
   contents: read
+  actions: write
 jobs:
-  runtime:
+  child:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v5
         with:
           path: control
-          sparse-checkout: scripts/check
           persist-credentials: false
       - uses: actions/checkout@v5
         with:
           ref: ce231b5b898d797c98d44a9b59a4859a7d792a7b
           path: source
           persist-credentials: false
-      - name: Install bounded runtime build prerequisites
+      - name: Native link prerequisites
         run: |
           sudo -n apt-get update -qq
-          sudo -n apt-get install -y clang lld llvm libunwind-dev
-          rustup toolchain install nightly-2026-09-15 --profile minimal
-      - name: Build runtime packages only
-        run: python control/scripts/check/ce231-runtime-provision.py
+          sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Verify real parent and retain exact runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EARLY_PRODUCT: ${{ inputs.product }}
+        run: python control/scripts/check/ce231-children/hydrate-contract.py
+      - name: Start durable canonical Phase3 owner
+        if: inputs.mode == 'phase3'
+        run: |
+          nohup python control/scripts/check/ce231-children/combined-phase3.py ce231-contract.json --output ce231-phase3 > ce231-controller.log 2>&1 < /dev/null &
+          echo "$!" > ce231-controller.pid
+      - name: Await the wrapper's actual resolver pairing
+        if: inputs.mode == 'phase3'
+        run: python control/scripts/check/ce231-children/child-control.py wait-pairing
+      - uses: actions/upload-artifact@v6
+        if: success() && inputs.mode == 'phase3'
+        with:
+          name: ce231-native-pairing-${{ github.run_id }}
+          path: ce231-phase3/pairing
+          if-no-files-found: error
+          retention-days: 14
+      - name: Dispatch independent early Phase4 from this verified parent tuple
+        if: success() && inputs.mode == 'phase3'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run bootstrap-sanity-evidence.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f mode=early-phase4 -f pairing_run="$GITHUB_RUN_ID" -f product="${{ inputs.product }}"
+      - name: Collect actual canonical Phase3 terminal status
+        if: always() && inputs.mode == 'phase3' && hashFiles('ce231-controller.pid') != ''
+        run: python control/scripts/check/ce231-children/child-control.py wait-terminal
+      - name: New Phase3 compiles and executes its own native Hello
+        if: success() && inputs.mode == 'phase3'
+        run: python control/scripts/check/ce231-children/child-control.py qualify-phase3
+      - name: Early Phase4 from Phase2, without repeating parent Hello
+        if: inputs.mode == 'early-phase4'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAIRING_RUN: ${{ inputs.pairing_run }}
+        run: python control/scripts/check/ce231-children/child-control.py early-phase4
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: ce231-linux-runtime-${{ github.run_id }}
+          name: ce231-child-${{ inputs.mode }}-${{ github.run_id }}
           path: |
-            runtime-evidence/*
-            !runtime-evidence/cargo-target
-            !runtime-evidence/cargo-home
-            !runtime-evidence/tmp
-          retention-days: 7
-          if-no-files-found: error
+            ce231-contract.json
+            ce231-intake/*json
+            ce231-phase3
+            ce231-controller.log
+            ce231-controller.pid
+            ce231-children
+            early-contract.json
+            early-plan
+            pairing-intake
+            source/build/bootstrap/stage3
+            source/build/ladder/cache/phase3
+          include-hidden-files: true
+          retention-days: 14
