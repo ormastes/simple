@@ -44,11 +44,11 @@ describe "compute_open selection and errors":
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("unknown compute backend 'tpu'")
 
-    it "offers rocm, cuda and cpu: other provider names are rejected until their lane lands":
-        for name in ["vulkan", "metal"]:
+    it "offers rocm, cuda, vulkan and cpu: other provider names are rejected until their lane lands":
+        for name in ["metal", "tpu2"]:
             val r = compute_open(name)
             expect(r.is_err()).to_equal(true)
-            expect(r.unwrap_err()).to_contain("unknown compute backend '{name}' (expected auto|rocm|cuda|cpu)")
+            expect(r.unwrap_err()).to_contain("unknown compute backend '{name}' (expected auto|rocm|cuda|vulkan|cpu)")
             expect(compute_parse_kind(name).is_none()).to_equal(true)
 
     it "parses cuda case-insensitively":
@@ -80,7 +80,21 @@ describe "compute_open selection and errors":
         if not overridden and name == "cpu":
             expect(ops.diag).to_contain("rocm:")
             expect(ops.diag).to_contain("cuda:")
+            expect(ops.diag).to_contain("vulkan:")
 
+
+describe "compute_* vulkan kind":
+    it "is named and parsed":
+        expect(compute_kind_name(ComputeKind.Vulkan)).to_equal("vulkan")
+        expect(compute_kind_name(compute_parse_kind("Vulkan").unwrap())).to_equal("vulkan")
+
+    it "cpu ops reject a vulkan tensor with an Err":
+        val ops = _cpu()
+        val v = DeviceTensor(kind: ComputeKind.Vulkan, ptr: 7, n: 3, shape: [3], host: [], vkbuf: None)
+        val a = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
+        val r = compute_add(ops, a, v)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("vulkan tensor passed to a cpu op")
 
 describe "compute_* cpu arm equals the CPU reference":
     it "uploads, runs elementwise ops and downloads":
@@ -123,7 +137,7 @@ describe "compute_* rejects a tensor of another backend kind":
     # a HIP pointer is not another backend handle). Fabricated handles; no GPU is touched.
     it "cpu ops reject a rocm tensor with an Err":
         val ops = _cpu()
-        val g = DeviceTensor(kind: ComputeKind.Rocm, ptr: 4096, n: 3, shape: [3], host: [])
+        val g = DeviceTensor(kind: ComputeKind.Rocm, ptr: 4096, n: 3, shape: [3], host: [], vkbuf: None)
         val a = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
         val r = compute_add(ops, a, g)
         expect(r.is_err()).to_equal(true)
@@ -132,7 +146,7 @@ describe "compute_* rejects a tensor of another backend kind":
 
     it "cpu ops reject a cuda tensor with an Err":
         val ops = _cpu()
-        val g = DeviceTensor(kind: ComputeKind.Cuda, ptr: 4096, n: 3, shape: [3], host: [])
+        val g = DeviceTensor(kind: ComputeKind.Cuda, ptr: 4096, n: 3, shape: [3], host: [], vkbuf: None)
         val a = compute_upload(ops, tensor_from_values([1.0, 2.0, 3.0], [3])).unwrap()
         val r = compute_add(ops, a, g)
         expect(r.is_err()).to_equal(true)
@@ -150,7 +164,7 @@ describe "compute_* cpu arm returns Err instead of panicking":
 
     it "matvec rejects a tensor whose data does not match its shape":
         val ops = _cpu()
-        val bad = DeviceTensor(kind: ComputeKind.Cpu, ptr: 0, n: 1, shape: [2, 2], host: [1.0])
+        val bad = DeviceTensor(kind: ComputeKind.Cpu, ptr: 0, n: 1, shape: [2, 2], host: [1.0], vkbuf: None)
         val x = compute_upload(ops, tensor_from_values([1.0, 2.0], [2])).unwrap()
         expect(compute_matvec(ops, bad, x).is_err()).to_equal(true)
 
