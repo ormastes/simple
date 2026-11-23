@@ -79,3 +79,48 @@ pub fn worker_surface_ready_v1(built: [bool], edges: [[i64]]) -> [bool]:
             i = i + 1
     ready
 
+# Failure-only attribution over the same frozen import/export edges used by
+# readiness. Negative edge indices are absent routes, as in readiness above.
+# Bound examined edges and queue size; cycles cannot cause recursive overflow.
+pub struct WorkerSurfaceGapV1:
+    reason: text
+    source_index: i64
+    target_index: i64
+    inspected_edges: i64
+
+pub fn worker_surface_gap_v1(root: i64, built: [bool], edges: [[i64]], edge_limit: i64 = 256) -> WorkerSurfaceGapV1:
+    if root < 0 or root >= built.len():
+        return WorkerSurfaceGapV1("invalid-root", root, root, 0)
+    if not built[root]:
+        return WorkerSurfaceGapV1("unbuilt-root", root, root, 0)
+    var queue: [i64] = [root]
+    var cursor = 0
+    var inspected = 0
+    while cursor < queue.len():
+        val current = queue[cursor]
+        cursor = cursor + 1
+        if current < edges.len():
+            for target in edges[current]:
+                if inspected >= edge_limit:
+                    return WorkerSurfaceGapV1("search-limit", current, -1, inspected)
+                inspected = inspected + 1
+                if target < 0:
+                    continue
+                if target >= built.len():
+                    return WorkerSurfaceGapV1("invalid-edge", current, target, inspected)
+                if not built[target]:
+                    return WorkerSurfaceGapV1("unbuilt-dependency", current, target, inspected)
+                if not queue.contains(target):
+                    queue.push(target)
+    WorkerSurfaceGapV1("no-missing-surface", root, -1, inspected)
+
+fn worker_surface_gap_path_v1(paths: [text], index: i64) -> text:
+    if index < 0 or index >= paths.len(): return "<no-surface>"
+    val path = paths[index]
+    if path.len() > 512: path.substring(0, 512) + "...[truncated]" else: path
+
+pub fn worker_surface_gap_message_v1(gap: WorkerSurfaceGapV1, paths: [text]) -> text:
+    val from_path = worker_surface_gap_path_v1(paths, gap.source_index)
+    val to_path = worker_surface_gap_path_v1(paths, gap.target_index)
+    "reachable-gap={gap.reason} source_index={gap.source_index} target_index={gap.target_index} inspected_edges={gap.inspected_edges} source={from_path} target={to_path}"
+

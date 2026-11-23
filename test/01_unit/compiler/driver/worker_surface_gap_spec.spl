@@ -1,0 +1,57 @@
+"""Failure-only attribution follows actual frozen edges without changing readiness."""
+use std.spec.*
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_ready_v1,
+    worker_surface_gap_v1, worker_surface_gap_message_v1}
+
+describe "blocked worker surface attribution":
+    it "identifies an unbuilt target itself":
+        val gap = worker_surface_gap_v1(0, [false], [[]])
+        expect(gap.reason).to_equal("unbuilt-root")
+        expect(gap.target_index).to_equal(0)
+        expect(gap.inspected_edges).to_equal(0)
+
+    it "finds the actual transitive missing edge through a cycle":
+        val built = [true, true, false, false]
+        val edges = [[1], [0, 2], [], []]
+        val before = worker_surface_ready_v1(built, edges)
+        val gap = worker_surface_gap_v1(0, built, edges)
+        expect(gap.reason).to_equal("unbuilt-dependency")
+        expect(gap.source_index).to_equal(1)
+        expect(gap.target_index).to_equal(2)
+        expect(gap.inspected_edges).to_equal(3)
+        expect(before).to_equal([false, false, false, false])
+        expect(worker_surface_ready_v1(built, edges)).to_equal(before)
+
+    it "does not blame an unrelated unbuilt surface or an absent negative route":
+        val gap = worker_surface_gap_v1(0, [true, false], [[-1], []])
+        expect(gap.reason).to_equal("no-missing-surface")
+        expect(gap.target_index).to_equal(-1)
+
+    it "terminates a fully built cycle without inventing a gap":
+        val gap = worker_surface_gap_v1(0, [true, true], [[1], [0]])
+        expect(gap.reason).to_equal("no-missing-surface")
+        expect(gap.inspected_edges).to_equal(2)
+
+    it "reports the actual invalid edge instead of indexing outside the registry":
+        val gap = worker_surface_gap_v1(0, [true], [[9]])
+        expect(gap.reason).to_equal("invalid-edge")
+        expect(gap.source_index).to_equal(0)
+        expect(gap.target_index).to_equal(9)
+        expect(worker_surface_gap_message_v1(gap, ["root"]).contains("target=<no-surface>")).to_equal(true)
+
+    it "reports bounded search exhaustion without guessing the unseen dependency":
+        val gap = worker_surface_gap_v1(0, [true, true, false], [[1], [2], []], 1)
+        expect(gap.reason).to_equal("search-limit")
+        expect(gap.target_index).to_equal(-1)
+        expect(gap.inspected_edges).to_equal(1)
+
+    it "rejects an invalid root and handles a missing edge row":
+        expect(worker_surface_gap_v1(2, [true], [[]]).reason).to_equal("invalid-root")
+        expect(worker_surface_gap_v1(0, [true], []).reason).to_equal("no-missing-surface")
+
+    it "bounds path text and labels truncation":
+        var long_path = ""
+        for i in 0..600: long_path = long_path + "x"
+        val message = worker_surface_gap_message_v1(worker_surface_gap_v1(0, [false], [[]]), [long_path])
+        expect(message.contains("...[truncated]")).to_equal(true)
+        expect(message.len() < 1400).to_equal(true)
