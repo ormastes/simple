@@ -12,6 +12,10 @@ manifest = {'seed': hashlib.sha256(seed.read_bytes()).hexdigest(), 'baseline': b
             'source': subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()}
 for label, source in sources.items():
     header = source[:source.index('describe ')]
+    # The extracted live example never calls the other examples' native-build
+    # entry points. Do not load that unrelated full compiler closure.
+    header = '\n'.join(line for line in header.splitlines()
+                       if not line.startswith('use app.cli.native_build_main.')) + '\n'
     start = re.search(r'^    it "composes the live[^\n]*\n', source, re.M).start()
     next_case = re.search(r'^    it ', source[start+1:], re.M)
     end = start + 1 + next_case.start() if next_case else len(source)
@@ -51,6 +55,9 @@ for label, source in sources.items():
         match = re.search(rf'{key}:\s*(\d+)',clean)
         counts[key.lower()] = int(match[1]) if match else None
     results[label] = counts
+    child_errors = list(fixture.glob('build/test-artifacts/**/stderr.log'))
+    child_error_text = '\n'.join(p.read_text(encoding='utf-8',errors='replace') for p in child_errors)
+    assert 'memory allocation of ' not in child_error_text, 'dependency loading exhausted bound: ' + label
     assert all(hashlib.sha256((fixture/p).read_bytes()).hexdigest()==digest for p,digest in inputs.items())
     (out/'results.json').write_text(json.dumps(results,indent=2),encoding='utf-8')
     (out/'inputs.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
