@@ -591,68 +591,120 @@ fn _edge_row_index(edges: [_SfntEdge], height: i64) -> [i64]:
         i = i + 1
     rows
 
-# Whole-bitmap coverage (4x4 supersample, 17 levels). The old per-pixel kernel
-# tested EVERY edge for each of 16 samples (pixels x 16 x edges, and a
-# `push` per pixel). Here each pixel row's 4 sample scanlines gather their edge
-# crossings once, insertion-sort them, and sweep the 4 sample x positions of
-# every pixel left to right with one pointer. A sample is inside when the
-# signed sum of the crossings <= sx is non-zero -- the identical crossing
-# expression, `<=` test, sample positions and integer winding sum as the old
-# kernel, so every coverage byte is unchanged. Returns width*height bytes.
+# Whole-bitmap coverage (4x4 supersample, 17 levels). Each pixel row gathers
+# the edge crossings of its 4 sample scanlines in one pass over the row's
+# edges and insertion-sorts each scanline's list. Sample j of a scanline
+# (j = 4 * px + sample_x) sits at x = px + (2 * sample_x + 1) / 8 = (2j + 1) / 8
+# and is inside when the signed sum of the crossings <= x is non-zero -- the
+# same crossing expression, `<=` test, sample positions and integer winding
+# sum as the per-sample sweep this replaced, so every coverage byte is
+# unchanged. The sweep no longer visits samples: between two consecutive
+# crossings the winding is constant, so each inside run of samples [a, b) is
+# added at once -- its partial end pixels into `hits`, its whole pixels as
+# +4 / -4 marks in `full` that one prefix pass per row resolves. Cost per
+# scanline is O(crossings), not O(4 * width): the 16 interpreted sample steps
+# per pixel were 4.7 s of the 4x css-layout render.
+#
+# The first sample a crossing c counts at is the least j with c <= (2j+1)/8,
+# i.e. j = ceil((8c - 1) / 2). For |c| < 2^49 every step of that expression
+# is exact in f64 (a power-of-two scale, a subtraction whose result is
+# representable, a halving), and so is the sweep's own sample x, so the
+# closed form names exactly the sample where the sweep's `xs[p] <= sx`
+# first held. Values outside [0, samples) clamp, as the sweep's ends did.
+# Returns width*height bytes.
 fn _glyf_raster_alpha(edges: [_SfntEdge], width: i64, height: i64) -> [u8]:
     _glyf_raster_alpha_rows(edges, width, height, 0, height)
 
 # Rows row_from .. row_end - 1 of `_glyf_raster_alpha`; the other rows stay 0.
 fn _glyf_raster_alpha_rows(edges: [_SfntEdge], width: i64, height: i64, row_from: i64, row_end: i64) -> [u8]:
     var out: [u8] = [0u8; width * height]
-    var hits: [i64] = [0; width]
-    var xs: [f64] = [0.0; edges.len() + 1]
-    var dirs: [i64] = [0; edges.len() + 1]
+    var hits: [i64] = [0; width + 1]
+    var full: [i64] = [0; width + 1]
+    # Four crossing lists (one per sample scanline), `stride` apart.
+    val stride = edges.len() + 1
+    var xs: [f64] = [0.0; stride * 4]
+    var dirs: [i64] = [0; stride * 4]
+    var counts: [i64] = [0; 4]
+    var sys: [f64] = [0.0; 4]
+    val samples = width * 4
+    val last_sample = (samples - 1) as f64
     val rows = _edge_row_index(edges, height)
     var y: i64 = row_from
     while y < row_end:
-        var x: i64 = 0
-        while x < width:
-            hits[x] = 0
-            x = x + 1
         val row_end = rows[y + 1]
         var sample_y: i64 = 0
         while sample_y < 4:
-            val sy = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
-            var n: i64 = 0
-            var k = rows[y]
-            while k < row_end:
-                val edge = edges[rows[k]]
-                if edge.y_top <= sy and sy < edge.y_bottom:
-                    val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
-                    var at = n
-                    while at > 0 and xs[at - 1] > crossing:
-                        xs[at] = xs[at - 1]
-                        dirs[at] = dirs[at - 1]
-                        at = at - 1
-                    xs[at] = crossing
-                    dirs[at] = edge.direction
-                    n = n + 1
-                k = k + 1
-            if n > 0:
-                var p: i64 = 0
-                var winding: i64 = 0
-                var px: i64 = 0
-                while px < width:
-                    var sample_x: i64 = 0
-                    while sample_x < 4:
-                        val sx = px as f64 + (sample_x as f64 * 2.0 + 1.0) / 8.0
-                        while p < n and xs[p] <= sx:
-                            winding = winding + dirs[p]
-                            p = p + 1
-                        if winding != 0: hits[px] = hits[px] + 1
-                        sample_x = sample_x + 1
-                    px = px + 1
+            sys[sample_y] = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
+            counts[sample_y] = 0
             sample_y = sample_y + 1
+        var k = rows[y]
+        while k < row_end:
+            val edge = edges[rows[k]]
+            val y_top = edge.y_top
+            val y_bottom = edge.y_bottom
+            var s: i64 = 0
+            while s < 4:
+                val sy = sys[s]
+                if sy >= y_bottom:
+                    # sys ascends: no later scanline of this row meets the edge
+                    s = 4
+                else:
+                    if y_top <= sy:
+                        val crossing = edge.x_top + edge.dx_dy * (sy - y_top)
+                        val base = s * stride
+                        var at = counts[s]
+                        while at > 0 and xs[base + at - 1] > crossing:
+                            xs[base + at] = xs[base + at - 1]
+                            dirs[base + at] = dirs[base + at - 1]
+                            at = at - 1
+                        xs[base + at] = crossing
+                        dirs[base + at] = edge.direction
+                        counts[s] = counts[s] + 1
+                    s = s + 1
+            k = k + 1
+        sample_y = 0
+        while sample_y < 4:
+            val base = sample_y * stride
+            val n = counts[sample_y]
+            # Samples [run_from, first sample of crossing p) carry `winding`.
+            var winding: i64 = 0
+            var run_from: i64 = 0
+            var p: i64 = 0
+            while p <= n:
+                var run_to = samples
+                if p < n:
+                    val first = (xs[base + p] * 8.0 - 1.0) / 2.0
+                    if first <= 0.0:
+                        run_to = 0
+                    elif first <= last_sample:
+                        run_to = first as i64
+                        if (run_to as f64) < first:
+                            run_to = run_to + 1
+                if winding != 0 and run_to > run_from:
+                    val pa = run_from / 4
+                    val pb = run_to / 4
+                    if pa == pb:
+                        hits[pa] = hits[pa] + (run_to - run_from)
+                    else:
+                        hits[pa] = hits[pa] + (4 * (pa + 1) - run_from)
+                        full[pa + 1] = full[pa + 1] + 4
+                        full[pb] = full[pb] - 4
+                        hits[pb] = hits[pb] + (run_to - 4 * pb)
+                if p < n:
+                    winding = winding + dirs[base + p]
+                    run_from = run_to
+                p = p + 1
+            sample_y = sample_y + 1
+        var whole: i64 = 0
         var cx: i64 = 0
         while cx < width:
-            out[y * width + cx] = (hits[cx] * 255 / 16) as u8
+            whole = whole + full[cx]
+            out[y * width + cx] = ((hits[cx] + whole) * 255 / 16) as u8
+            hits[cx] = 0
+            full[cx] = 0
             cx = cx + 1
+        hits[width] = 0
+        full[width] = 0
         y = y + 1
     out
 
@@ -1927,11 +1979,17 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
         var first: i64 = samples
         var last: i64 = 0
         var s: i64 = 0
+        # A zero cell leaves `acc`, so the sample keeps the previous value;
+        # `cov * 255 + 0.5` is >= 0.5, where truncation is `_floor_glyf`.
+        var v: i64 = 0
+        val row_at = y * stride
         while s < samples:
-            acc = acc + cells[y * stride + s]
-            var cov = if acc < 0.0: 0.0 - acc else: acc
-            if cov > 1.0: cov = 1.0
-            val v = _floor_glyf(cov * 255.0 + 0.5)
+            val cell = cells[row_at + s]
+            if cell != 0.0:
+                acc = acc + cell
+                var cov = if acc < 0.0: 0.0 - acc else: acc
+                if cov > 1.0: cov = 1.0
+                v = (cov * 255.0 + 0.5) as i64
             a8[s + 4] = v
             if v > 0:
                 if s < first: first = s
