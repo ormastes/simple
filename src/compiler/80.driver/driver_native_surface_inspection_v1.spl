@@ -1,0 +1,193 @@
+# Diagnostic observation only. This owner never enters HIR body lowering or codegen.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.driver.driver_source_parse_streaming.*
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_peek_list_v1}
+use compiler.driver.driver_build.go_to_end.{go_to_end_sdn_quote_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, ModuleSurfaceExportOriginLookup}
+use compiler.common.cache.native_resolution_trace.{NativeResolutionTraceV1}
+use compiler.frontend.frontend_target_cfg_receipt_v1.{FrontendCfgDecisionReceiptV1}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index, module_surfaces_frozen_alignment}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_lowering.{hir_export_origin_lookup_v1, HirReexportSource}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+struct NativeSurfaceInspectionRequestV1:
+    modules: [text]
+    item: text
+    output: text = ""
+    output_root: text = "build/verify"
+    private_directory: text = ""
+    admitted_root: text = ""
+
+fn native_surface_inspection_request_error_v1(request: NativeSurfaceInspectionRequestV1) -> text:
+    if request.modules.len() < 1 or request.modules.len() > 2:
+        return "inspection requires one or two explicit module selectors"
+    if request.item == "" or request.item.len() > 128 or request.item.contains("\n") or request.item.contains("\r"):
+        return "inspection item is missing or exceeds its bound"
+    if request.output_root != "build/verify":
+        return "inspection requires the physical build/verify diagnostic root"
+    for name in request.modules:
+        if name == "" or name.len() > 256 or name.contains("\n") or name.contains("\r"):
+            return "inspection module selector is malformed"
+    if request.modules.len() == 2 and request.modules[0] == request.modules[1]:
+        return "inspection module selectors must be distinct"
+    ""
+
+fn inspection_quote_v1(value: text) -> text:
+    go_to_end_sdn_quote_v1(value)
+
+fn inspection_surface_text_v1(surfaces: ModuleSurfacesByName, index: i64,
+        selector: text, item: text) -> Result<text, text>:
+    var out = "  - selector: " + inspection_quote_v1(selector) + "\n    physical_index: {index}\n"
+    if index < 0:
+        return Ok(out + "    observation: MISSING_MODULE\n")
+    if index >= surfaces.surfaces.len(): return Err("inspection selected index is outside frozen registry")
+    val surface: ModuleSurface = surfaces.surfaces[index]
+    if surface.imports.len() > 512 or surface.import_item_names.len() > 4096 or
+            surface.callable_names.len() > 1024 or surface.export_route_sources.len() > 4096:
+        return Err("inspection selected module exceeds diagnostic row limits")
+    if surface.import_item_offsets.len() != surface.imports.len() + 1 or
+            surface.import_target_indices.len() != surface.imports.len() or
+            surface.import_resolution_traces.len() != surface.imports.len():
+        return Err("inspection import projections are incomplete")
+    out = out + "    observation: PRESENT\n    module: " + inspection_quote_v1(surface.module_name) +
+        "\n    canonical_path: " + inspection_quote_v1(surface.canonical_path) +
+        "\n    surface_generation: {surface.generation}\n    source_index: {surface.source_index}\n" +
+        "    content_length: {surface.content_length}\n    content_hash: {surface.content_hash}\n    callables:" +
+        (if surface.callable_names.len() == 0: " []\n" else: "\n")
+    var callable_match = false
+    for name in surface.callable_names:
+        out = out + "      - " + inspection_quote_v1(name) + "\n"
+        if name == item: callable_match = true
+    out = out + "    raw_callable_match: {callable_match}\n    imports:" +
+        (if surface.imports.len() == 0: " []\n" else: "\n")
+    var row = 0
+    while row < surface.imports.len():
+        val start = surface.import_item_offsets[row]
+        val end = surface.import_item_offsets[row + 1]
+        if start < 0 or end < start or end > surface.import_item_names.len() or
+                end > surface.import_item_aliases.len() or end > surface.import_item_has_alias.len():
+            return Err("inspection import item range is malformed")
+        val target = surface.import_target_indices[row]
+        if target >= surfaces.surfaces.len(): return Err("inspection target index exceeds frozen registry")
+        val trace: NativeResolutionTraceV1 = surface.import_resolution_traces[row]
+        if trace.probes.len() > 128: return Err("inspection resolution trace exceeds diagnostic bound")
+        out = out + "      - row: {row}\n        module: " + inspection_quote_v1(surface.imports[row].module) +
+            "\n        item_start: {start}\n        item_end: {end}\n        target_index: {target}\n" +
+            "        target_present: " + (if target >= 0: "true" else: "false") +
+            "\n        selected_name: " + inspection_quote_v1(trace.selected) +
+            "\n        resolver_generation: " + inspection_quote_v1(trace.dir_generation) + "\n        items:" +
+            (if start == end: " []\n" else: "\n")
+        var pos = start
+        while pos < end:
+            out = out + "          - name: " + inspection_quote_v1(surface.import_item_names[pos]) +
+                "\n            has_alias: {surface.import_item_has_alias[pos]}\n            alias: " +
+                inspection_quote_v1(surface.import_item_aliases[pos]) + "\n"
+            pos = pos + 1
+        out = out + "        probes:" + (if trace.probes.len() == 0: " []\n" else: "\n")
+        for probe in trace.probes:
+            out = out + "          - path: " + inspection_quote_v1(probe.path) + "\n            found: {probe.found}\n"
+        row = row + 1
+    out = out + "    export_routes:" + (if surface.export_route_sources.len() == 0: " []\n" else: "\n")
+    row = 0
+    var raw_export_match = false
+    while row < surface.export_route_sources.len():
+        if row >= surface.export_route_locals.len() or row >= surface.export_route_target_indices.len():
+            return Err("inspection export projections are incomplete")
+        if surface.export_route_locals[row] == item: raw_export_match = true
+        out = out + "      - source: " + inspection_quote_v1(surface.export_route_sources[row]) +
+            "\n        local: " + inspection_quote_v1(surface.export_route_locals[row]) +
+            "\n        target_index: {surface.export_route_target_indices[row]}\n"
+        row = row + 1
+    val origin: ModuleSurfaceExportOriginLookup = hir_export_origin_lookup_v1(surfaces, surface, item)
+    # The normal walk memoizes only this private query owner, never the global registry.
+    var query = hirlowering_for_module(surface.canonical_path, surfaces)
+    val hop: HirReexportSource = query.find_reexport_source(index, item)
+    out = out + "    raw_export_match: {raw_export_match}\n    selected_origin_found: {origin.found}\n" +
+        "    selected_origin_owner: " + inspection_quote_v1(origin.owner_module) +
+        "\n    selected_origin_source: " + inspection_quote_v1(origin.source_name) +
+        "\n    selected_origin_kind: " + inspection_quote_v1(origin.resolution_kind) +
+        "\n    walker_found: {hop.found}\n    walker_target_index: {hop.module_index}\n" +
+        "    walker_target_module: " + inspection_quote_v1(hop.module_name) +
+        "\n    walker_source_item: " + inspection_quote_v1(hop.item_name) + "\n"
+    if out.byte_len() > 524288: return Err("inspection selected module exceeds byte bound")
+    Ok(out)
+
+fn driver_inspect_native_surfaces_v1(driver: CompilerDriver,
+        request: NativeSurfaceInspectionRequestV1) -> Result<text, text>:
+    val invalid = native_surface_inspection_request_error_v1(request)
+    if invalid != "": return Err(invalid)
+    for key in ["SIMPLE_NATIVE_BUILD_WORKER", "SIMPLE_PARSE_SHARD", "SIMPLE_HIR_SHARD", "SIMPLE_MIR_SHARD"]:
+        if (env_get(key) ?? "") != "": return Err("inspection cannot run in a marked worker or shard context")
+    if request.private_directory == "" or request.output != request.private_directory + "/inspection.sdn":
+        return Err("inspection requires a reserved private diagnostic output owner")
+    val handoff = native_entry_closure_handoff_peek_list_v1()
+    if handoff.len() != 1: return Err("inspection requires exactly one admitted canonical closure handoff")
+    val closure = handoff[0]
+    if not driver_streaming_surface_enabled(driver.ctx):
+        return Err("inspection requires the canonical retained streaming surface route")
+    # No native output path or artifact receipt is authorized by this API.
+    driver.ctx.options.output_file = None
+    val (_, loaded) = driver.load_sources_impl()
+    if not loaded: return Err("inspection canonical source loading failed")
+    if not driver.parse_all_committing_impl(): return Err("inspection configured parsing or surface freeze failed")
+    if not driver.streaming_surface_owner_ready: return Err("inspection retained surface owner is absent")
+    val surfaces = driver.streaming_module_surfaces_owner
+    if not module_surfaces_frozen_alignment(surfaces): return Err("inspection frozen surface alignment failed")
+    var out = "schema: simple-native-surface-inspection-v1\nstatus: DIAGNOSTIC_ONLY\nadmission: none\n" +
+        "capture_point: prebody-frozen-query\nfailing_body_equivalence: false\nquery_effect_scope: private-query-and-existing-read-index-cache\n" +
+        "registry_generation: {surfaces.generation}\nregistry_modules: {surfaces.surfaces.len()}\n" +
+        "target: " + inspection_quote_v1(driver.ctx.native_target) +
+        "\npolicy_digest: " + inspection_quote_v1(driver.ctx.environment_variant_policy_digest) +
+        "\nfrontend_session_id: {driver.ctx.environment_variant_frontend_session_id}\n" +
+        "source_root: " + inspection_quote_v1(closure.source_root) +
+        "\nsource_digest: " + inspection_quote_v1(closure.source_digest) +
+        "\nclosure_generation: {closure.generation}\nclosure_receipt_digest: " + inspection_quote_v1(closure.receipt_digest) +
+        "\nsource_revision: " + inspection_quote_v1(closure.binding.revision) +
+        "\nsource_inventory_digest: " + inspection_quote_v1(closure.binding.inventory_digest) +
+        "\nproducer_digest: " + inspection_quote_v1(closure.binding.producer_digest) +
+        "\nitem: " + inspection_quote_v1(request.item) + "\nmodules:\n"
+    for selector in request.modules:
+        val index = module_surface_registry_index(surfaces, selector)
+        out = out + inspection_surface_text_v1(surfaces, index, selector, request.item)?
+        if index >= 0:
+            val surface: ModuleSurface = surfaces.surfaces[index]
+            var source_sha = ""
+            if val facts = driver.ctx.native_source_interface_index_v1:
+                if facts.facts.has(surface.canonical_path):
+                    source_sha = facts.facts[surface.canonical_path].source_digest
+            out = out + "    retained_source_sha256: " + inspection_quote_v1(source_sha) + "\n"
+            var cfg_identity = ""
+            val cfg_paths = driver.ctx.runtime_std_cfg_source_identity_by_path.keys()
+            if cfg_paths.len() > 32768: return Err("inspection target receipt index exceeds diagnostic bound")
+            for path in cfg_paths:
+                if module_surface_canonical_path(path) == surface.canonical_path:
+                    val identity = driver.ctx.runtime_std_cfg_source_identity_by_path[path]
+                    if cfg_identity != "" and cfg_identity != identity:
+                        return Err("inspection selected source has ambiguous target receipt identities")
+                    cfg_identity = identity
+            out = out + "    cfg_source_identity: " + inspection_quote_v1(cfg_identity) + "\n"
+            if cfg_identity != "" and driver.ctx.runtime_std_cfg_decisions.has(cfg_identity):
+                val receipt: FrontendCfgDecisionReceiptV1 = driver.ctx.runtime_std_cfg_decisions[cfg_identity]
+                if receipt.decisions.len() > 512: return Err("inspection target decision rows exceed diagnostic bound")
+                out = out + "    cfg_receipt_present: true\n    cfg_target: " + inspection_quote_v1(receipt.target_triple) +
+                    "\n    cfg_source_sha256: " + inspection_quote_v1(receipt.source_digest) +
+                    "\n    cfg_preprocessed_sha256: " + inspection_quote_v1(receipt.preprocessed_digest) +
+                    "\n    cfg_decision_digest: " + inspection_quote_v1(receipt.decision_digest) + "\n    cfg_decisions:" +
+                    (if receipt.decisions.len() == 0: " []\n" else: "\n")
+                for decision in receipt.decisions:
+                    if decision.condition.len() > 4096: return Err("inspection target condition exceeds diagnostic bound")
+                    out = out + "      - line: {decision.line}\n        condition: " + inspection_quote_v1(decision.condition) +
+                        "\n        directive: " + inspection_quote_v1(decision.directive_kind) +
+                        "\n        effective_active: {decision.effective_active}\n        condition_result: {decision.condition_result}\n"
+            else:
+                out = out + "    cfg_receipt_present: false\n"
+    if out.byte_len() > 1048576: return Err("inspection output exceeds byte bound")
+    Ok(out)
+
+export NativeSurfaceInspectionRequestV1, native_surface_inspection_request_error_v1,
+    driver_inspect_native_surfaces_v1
