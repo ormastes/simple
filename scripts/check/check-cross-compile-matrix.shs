@@ -19,7 +19,7 @@
 #      an ELF with NEEDED libgcc_s is a FAIL.
 #   4. --run: execute `<artifact> --help` under qemu-user (never wine).
 #
-# Row status: PASS | FAIL | ERROR (could not check) | BLOCKED (known gap).
+# Row status: PASS | FAIL | ERROR | UNVERIFIED (engine proof absent) | BLOCKED.
 # Verdict (last stdout line, .claude/rules/vcs.md convention):
 #   PASS — <n> row(s) built and checked ...        exit 0
 #   FAIL — <k> row(s) failed: <names> ...          exit 1
@@ -39,6 +39,8 @@
 set -u
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+. "$repo_root/scripts/check/lib/simpleos-sysroot-receipt.shs"
+. "$repo_root/scripts/check/lib/native-link-observation.shs"
 
 ALL_TARGETS="linux-x86_64 linux-aarch64 linux-riscv64 linux-i686 linux-armv7
 windows-x86_64 windows-aarch64 freebsd-x86_64 freebsd-aarch64
@@ -136,7 +138,7 @@ run_block_reason() {
 aggregate() {
     _p=$(awk -F'\t' '$3=="PASS"' "$1" | wc -l | tr -d ' ')
     _f=$(awk -F'\t' '$3=="FAIL" {printf "%s/%s ", $1, $2}' "$1")
-    _e=$(awk -F'\t' '$3=="ERROR" {printf "%s/%s ", $1, $2}' "$1")
+    _e=$(awk -F'\t' '$3=="ERROR" || $3=="UNVERIFIED" {printf "%s/%s ", $1, $2}' "$1")
     _b=$(awk -F'\t' '$3=="BLOCKED"' "$1" | wc -l | tr -d ' ')
     _n=$(awk -F'\t' 'NF>=3' "$1" | wc -l | tr -d ' ')
     if [ "$_n" -eq 0 ]; then echo "ERROR — nothing was checked (0 rows)"; return 2; fi
@@ -191,6 +193,8 @@ Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' PE32+ 'Aarch64|ARM64' >/dev/null || 
     aggregate "$_t/r5" >/dev/null; [ $? -eq 2 ] || _bad "empty not ERROR"
     printf 'a\tlint\tPASS\tok\na\ttest\tPASS\tok\n' > "$_t/r6"
     aggregate "$_t/r6" >/dev/null; [ $? -eq 0 ] || _bad "all-pass not PASS"
+    printf 'b\tlint\tPASS\tx\nb\ttest\tUNVERIFIED\tx\n' > "$_t/r-unverified"
+    aggregate "$_t/r-unverified" >/dev/null; [ $? -eq 2 ] || _bad "unverified engine row incorrectly counted"
     [ -n "$(run_block_reason 1 '' simpleos)" ] || _bad "missing SimpleOS runner accepted"
     [ -z "$(run_block_reason 0 '' simpleos)" ] || _bad "link-only request blocked"
     [ -z "$(run_block_reason 1 native rust)" ] || _bad "native runner blocked"
@@ -213,6 +217,12 @@ Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' PE32+ 'Aarch64|ARM64' >/dev/null || 
     target_info simpleos-aarch64
     [ -z "$(blocked_reason)" ] || _bad "supported arm64 internal facade blocked"
     run=$_saved_run; engine=$_saved_engine
+    # Run the real physical observation reader checks as part of this owner.
+    # Their own verdict/count stays separate from the 37 matrix fixtures.
+    if ! sh "$repo_root/scripts/check/tests/native-link-observation-test.shs" > "$_t/engine-observation.log" 2>&1; then
+        cat "$_t/engine-observation.log" >&2
+        _bad "completed-link observation reader checks failed"
+    fi
     rm -rf "$_t"
     return $_rc
 }
@@ -312,6 +322,27 @@ preflight() {
     esac
     if [ "$T_KIND" = simpleos ] && [ ! -f "$repo_root/scripts/check/check-simple-core-runtime-smoke.shs" ]; then
         echo "MISSING scripts/check/check-simple-core-runtime-smoke.shs — fix: sync the repo"; return
+    fi
+    if [ "$T_KIND" = simpleos ]; then
+        _sdk_helper=$repo_root/scripts/check/lib/simpleos-sysroot-receipt.shs
+        [ -f "$_sdk_helper" ] || { echo "MISSING SimpleOS SDK receipt validator — fix: sync the repo"; return; }
+        . "$_sdk_helper"
+        case "$1" in
+            simpleos-x86_64) _sdk_arch=x86_64; _sdk_root=${SIMPLE_SYSROOT:-${SIMPLEOS_SYSROOT:-$repo_root/build/os/sysroot}} ;;
+            simpleos-i686) _sdk_arch=i686; _sdk_root=${SIMPLEOS_SYSROOT_I686:-${SIMPLEOS_SYSROOT:-$repo_root/build/os/sysroot-i686}} ;;
+            simpleos-aarch64) _sdk_arch=aarch64; _sdk_root=${SIMPLEOS_SYSROOT_AARCH64:-${SIMPLEOS_SYSROOT:-$repo_root/build/os/sysroot-aarch64}} ;;
+            simpleos-armv7) _sdk_arch=arm32; _sdk_root=${SIMPLEOS_SYSROOT_ARM32:-${SIMPLEOS_SYSROOT:-$repo_root/build/os/sysroot-arm32}} ;;
+            simpleos-riscv64gc) _sdk_arch=riscv64; _sdk_root=${SIMPLEOS_SYSROOT_RISCV64:-${SIMPLEOS_SYSROOT:-$repo_root/build/os/sysroot-riscv64}} ;;
+            simpleos-riscv32) _sdk_arch=riscv32; _sdk_root=${SIMPLEOS_SYSROOT_RISCV32:-${SIMPLEOS_SYSROOT:-$repo_root/build/os/sysroot-riscv32}} ;;
+        esac
+        if [ "$_sdk_arch" = x86_64 ]; then
+            _sdk_script=${SIMPLE_LINKER_SCRIPT:-$_sdk_root/share/simpleos/simpleos.ld}
+        else
+            _sdk_script=${SIMPLE_NATIVE_BUILD_LINKER_SCRIPT:-${SIMPLE_LINKER_SCRIPT:-$_sdk_root/share/simpleos/simpleos.ld}}
+        fi
+        simpleos_sdk_verify "$repo_root" "$_sdk_root" "$_sdk_arch" "$_sdk_root/share/simpleos" "$_sdk_script" || {
+            echo "MISSING or stale SimpleOS SDK receipt for $_sdk_arch — fix: explicitly build a fresh target sysroot generation; archive existence is insufficient"; return
+        }
     fi
     if [ $run = 1 ] && [ -n "$T_QEMU" ] && [ "$T_QEMU" != native ]; then
         command -v "$T_QEMU" >/dev/null 2>&1 || { echo "MISSING $T_QEMU — fix: apt install qemu-user (wine is not allowed)"; return; }
@@ -418,7 +449,10 @@ for t in $targets; do
         fi
         if ! fg=$(wait_mem); then emit "$t" "$a" ERROR "free memory ${fg}G < ${min_free}G after ${XC_MEM_WAIT_S:-1800}s"; continue; fi
         if ! runtime_prep "$t" "$log"; then emit "$t" "$a" FAIL "runtime build failed (see $log)"; continue; fi
-        mkdir -p "$out/$engine/$t"; rm -f "$o"
+        mkdir -p "$out/$engine/$t"; rm -f "$o" "$o.link-receipt"
+        if [ -e "$o" ] || [ -L "$o" ] || [ -e "$o.link-receipt" ] || [ -L "$o.link-receipt" ]; then
+            emit "$t" "$a" UNVERIFIED "stale output or completed-link observation could not be removed"; continue
+        fi
         cmd=$(build_cmd "$t" "$a" "$o")
         echo "[xc] $t/$a: $cmd" >> "$log"
         ( cd "$repo_root" && eval "$cmd" ) >> "$log" 2>&1
@@ -426,6 +460,9 @@ for t in $targets; do
         if [ $nb -ne 0 ] || [ ! -f "$o" ]; then
             fe=$(grep -m1 -E 'first-compile-error|^error|error:' "$log" | cut -c1-200)
             emit "$t" "$a" FAIL "native-build rc=$nb: ${fe:-see $log}"; continue
+        fi
+        if [ "$T_KIND" = simpleos ] && ! native_link_observation_verify_v3 "$o" "$t" "$engine"; then
+            emit "$t" "$a" UNVERIFIED "completed linker engine/target/output receipt missing or invalid (see $log)"; continue
         fi
         fo=$(file -b "$o")
         case $T_CLASS in

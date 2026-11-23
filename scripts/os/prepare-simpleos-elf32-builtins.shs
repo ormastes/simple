@@ -1,0 +1,235 @@
+#!/bin/sh
+# Diagnostic compiler-rt preparation; never installs into a SimpleOS SDK.
+set -eu
+
+LLVM_SOURCE_COMMIT=6dfe1677ab8dffbc6ec13d53a1e0215d75147689
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SELF=$ROOT/scripts/os/prepare-simpleos-elf32-builtins.shs
+llvm_source= llvm_prefix= output= jobs=1
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --llvm-source) llvm_source=${2:?}; shift 2 ;;
+        --llvm-prefix) llvm_prefix=${2:?}; shift 2 ;;
+        --output) output=${2:?}; shift 2 ;;
+        --jobs) jobs=${2:?}; shift 2 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+fail() { echo "ELF32 builtins preparation: $*" >&2; exit 1; }
+case $(uname -s):$(uname -m) in Linux:x86_64) ;; *) fail 'Linux x86_64 host required' ;; esac
+case $jobs in 1|2) ;; *) fail 'jobs must be 1 or 2 per target; three targets run concurrently' ;; esac
+for path in "$llvm_source" "$llvm_prefix" "$output"; do
+    case "$path" in /*) ;; *) fail 'source, prefix and output must be absolute paths' ;; esac
+    case "$path" in *' '*|*'"'*|*'\'*|*"
+"*) fail 'diagnostic paths must not contain whitespace, quotes or backslashes' ;; esac
+done
+[ ! -e "$output" ] || fail 'output already exists; preserve prior evidence'
+[ "$(git -C "$llvm_source" rev-parse HEAD)" = "$LLVM_SOURCE_COMMIT" ] || fail 'LLVM source revision differs'
+git -C "$llvm_source" diff --quiet HEAD -- || fail 'LLVM tracked sources are modified'
+[ -f "$llvm_source/compiler-rt/lib/builtins/CMakeLists.txt" ] || fail 'standalone builtins source missing'
+[ "$("$llvm_prefix/bin/llvm-config" --version)" = 23.1.1 ] || fail 'canonical LLVM 23.1.1 provider required'
+[ "$(cat "$llvm_prefix/.simple-llvm-release-sha256")" = 832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c ] || fail 'canonical LLVM archive binding differs'
+for tool in clang clang++ llvm-ar llvm-ranlib llvm-nm llvm-readobj; do
+    [ -x "$llvm_prefix/bin/$tool" ] || fail "missing LLVM tool: $tool"
+done
+for tool in cmake ninja sha256sum timeout setsid od awk sort uniq comm stat; do
+    command -v "$tool" >/dev/null || fail "missing host tool: $tool"
+done
+[ -x /usr/bin/time ] || fail 'GNU time required for retained resource evidence'
+available=$(df -Pk "$(dirname "$output")" | awk 'END {print $4}')
+[ "$available" -ge 2097152 ] || fail 'at least 2 GiB free disk required after LLVM installation'
+mkdir -p "$output"
+sdn_quote() { printf '"'; printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'; printf '"'; }
+hash() { sha256sum "$1" | awk '{print $1}'; }
+printf 'schema: simpleos-elf32-builtins-campaign-v1\nadmission: none\nscope: compiler-abi-archive-preparation-only\nsource_revision: %s\nllvm_source_revision: %s\nllvm_version: 23.1.1\nper_target_jobs: %s\nconcurrent_targets: 3\n' \
+    "$(git -C "$ROOT" rev-parse HEAD)" "$LLVM_SOURCE_COMMIT" "$jobs" > "$output/campaign.sdn"
+printf 'schema: simpleos-elf32-builtins-inputs-v1\nfiles:\n' > "$output/inputs.sdn"
+for input in "$SELF" "$ROOT/src/os/port/llvm/compiler_rt_cmake.cmake" "$ROOT/scripts/setup/install-linux-phase23-llvm23.shs"; do
+    printf '  - path: ' >> "$output/inputs.sdn"; sdn_quote "$input" >> "$output/inputs.sdn"
+    printf '\n    sha256: %s\n' "$(hash "$input")" >> "$output/inputs.sdn"
+done
+find "$ROOT/src/os/libc/include" -type f -name '*.h' -print | LC_ALL=C sort > "$output/libc-headers.list"
+while IFS= read -r input; do
+    printf '  - path: ' >> "$output/inputs.sdn"; sdn_quote "$input" >> "$output/inputs.sdn"
+    printf '\n    sha256: %s\n' "$(hash "$input")" >> "$output/inputs.sdn"
+done < "$output/libc-headers.list"
+printf 'schema: simpleos-elf32-builtins-llvm-inputs-v1\nsource_revision: %s\nfiles:\n' "$LLVM_SOURCE_COMMIT" > "$output/llvm-inputs.sdn"
+find "$llvm_source/compiler-rt/lib/builtins" "$llvm_source/compiler-rt/cmake" "$llvm_source/compiler-rt/include" "$llvm_source/cmake" "$llvm_source/llvm/cmake" -type f -print | LC_ALL=C sort > "$output/llvm-inputs.list"
+while IFS= read -r input; do
+    printf '  - path: ' >> "$output/llvm-inputs.sdn"; sdn_quote "$input" >> "$output/llvm-inputs.sdn"
+    printf '\n    sha256: %s\n' "$(hash "$input")" >> "$output/llvm-inputs.sdn"
+done < "$output/llvm-inputs.list"
+printf 'schema: simpleos-elf32-builtins-tools-v1\ntools:\n' > "$output/tools.sdn"
+for tool in "$llvm_prefix/bin/clang" "$llvm_prefix/bin/clang++" "$llvm_prefix/bin/llvm-ar" "$llvm_prefix/bin/llvm-ranlib" "$llvm_prefix/bin/llvm-nm" "$llvm_prefix/bin/llvm-readobj" "$(command -v cmake)" "$(command -v ninja)"; do
+    printf '  - path: ' >> "$output/tools.sdn"; sdn_quote "$tool" >> "$output/tools.sdn"
+    printf '\n    sha256: %s\n' "$(hash "$tool")" >> "$output/tools.sdn"
+done
+"$llvm_prefix/bin/clang" --version > "$output/clang-version.txt"
+cmake --version > "$output/cmake-version.txt"
+ninja --version > "$output/ninja-version.txt"
+cat > "$output/verify-compile-commands.cmake" <<'CMAKE'
+file(READ "${COMMANDS_FILE}" commands)
+string(JSON count LENGTH "${commands}")
+if(count LESS 1)
+    message(FATAL_ERROR "No generated compiler commands")
+endif()
+math(EXPR last "${count} - 1")
+separate_arguments(expected_flags UNIX_COMMAND "${EXPECTED_FLAGS}")
+foreach(index RANGE 0 ${last})
+    string(JSON command GET "${commands}" ${index} command)
+    string(REGEX MATCHALL "(^|[ \t])--target=[^ \t]+|(^|[ \t])-target[ \t]+[^ \t]+" targets "${command}")
+    list(LENGTH targets target_count)
+    string(REGEX MATCH "(^|[ \t])--target=${EXPECTED_TRIPLE}([ \t]|$)" correct_target "${command}")
+    if(NOT target_count EQUAL 1 OR NOT correct_target)
+        message(FATAL_ERROR "Command ${index} lacks one exact ${EXPECTED_TRIPLE} compiler target")
+    endif()
+    foreach(flag IN LISTS expected_flags)
+        string(FIND " ${command} " " ${flag} " flag_at)
+        if(flag_at EQUAL -1)
+            message(FATAL_ERROR "Command ${index} lacks ABI/ISA flag ${flag}")
+        endif()
+    endforeach()
+    foreach(option IN ITEMS march mabi mfloat-abi)
+        set(expected_option "")
+        foreach(flag IN LISTS expected_flags)
+            if(flag MATCHES "^-${option}=")
+                set(expected_option "${flag}")
+            endif()
+        endforeach()
+        string(REGEX MATCHALL "(^|[ \t])-${option}=[^ \t]+" option_flags "${command}")
+        list(LENGTH option_flags option_count)
+        if(expected_option STREQUAL "")
+            if(NOT option_count EQUAL 0)
+                message(FATAL_ERROR "Command ${index} adds an unrequested -${option} option")
+            endif()
+        else()
+            if(NOT option_count EQUAL 1)
+                message(FATAL_ERROR "Command ${index} has missing or duplicate -${option} options")
+            endif()
+            list(GET option_flags 0 actual_option)
+            string(STRIP "${actual_option}" actual_option)
+            if(NOT actual_option STREQUAL expected_option)
+                message(FATAL_ERROR "Command ${index} has conflicting -${option} value")
+            endif()
+        endif()
+    endforeach()
+endforeach()
+file(WRITE "${COMMANDS_RECEIPT}" "schema: simpleos-builtins-generated-commands-v1\nstatus: verified\ntarget: ${EXPECTED_TRIPLE}\ncommand_count: ${count}\nadmission: none\n")
+CMAKE
+
+build_one() (
+    arch=$1
+    dir=$output/$arch
+    mkdir -p "$dir/raw" "$dir/raw-members" "$dir/derived"
+    status=failed
+    active=
+    trap 'row_rc=$?; printf "schema: simpleos-elf32-builtins-row-v1\narch: %s\nstatus: %s\nexit_status: %s\nadmission: none\n" "$arch" "$status" "$row_rc" > "$dir/result.sdn"' 0
+    trap '[ -z "$active" ] || /bin/kill -TERM -- "-$active" 2>/dev/null || :; [ -z "$active" ] || wait "$active" 2>/dev/null || :; exit 143' HUP INT TERM
+    # Limits are inherited by configure/build descendants, not by the VM's
+    # unrelated processes. Actual per-command resource observations are retained.
+    ulimit -v 3145728
+    ulimit -f 2097152
+    ulimit -t 1200
+    run_bounded() {
+        stage=$1; seconds=$2; shift 2
+        printf 'argv:\n' > "$dir/$stage.command.sdn"
+        for arg do printf '  - ' >> "$dir/$stage.command.sdn"; sdn_quote "$arg" >> "$dir/$stage.command.sdn"; printf '\n' >> "$dir/$stage.command.sdn"; done
+        setsid timeout -k 10s "${seconds}s" /usr/bin/time -v -o "$dir/$stage.resources.txt" "$@" > "$dir/$stage.stdout" 2> "$dir/$stage.stderr" &
+        active=$!
+        command_rc=0
+        wait "$active" || command_rc=$?
+        active=
+        printf 'exit_status: %s\n' "$command_rc" >> "$dir/$stage.command.sdn"
+        return "$command_rc"
+    }
+    case "$arch" in
+        i686) triple=i686-unknown-none-elf; processor=i386; isa='-march=i686'; machine=3; required='__divdi3 __moddi3 __udivdi3 __umoddi3' ;;
+        arm32) triple=armv7a-none-eabi; processor=arm; isa='-marm -mfloat-abi=soft'; machine=40; required='__aeabi_dadd __aeabi_dmul __aeabi_ddiv __aeabi_ldivmod __aeabi_uldivmod __aeabi_memclr8' ;;
+        riscv32) triple=riscv32-unknown-elf; processor=riscv32; isa='-march=rv32imac -mabi=ilp32 -mno-relax'; machine=243; required='__adddf3 __divdf3 __divdi3 __udivdi3 __atomic_load_8 __atomic_store_8 __atomic_exchange_8 __atomic_compare_exchange_8 __atomic_fetch_add_8 __atomic_fetch_sub_8 __atomic_fetch_and_8 __atomic_fetch_or_8 __atomic_fetch_xor_8 __atomic_is_lock_free' ;;
+    esac
+    flags="$isa -fno-pic -ffreestanding -nostdlib -nostdlibinc -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 -isystem $ROOT/src/os/libc/include"
+    run_bounded configure 300 cmake -G Ninja -S "$llvm_source/compiler-rt/lib/builtins" -B "$dir/build" \
+        "-DTRIPLE=$triple" "-DCROSS_CLANG=$llvm_prefix/bin/clang" "-DCROSS_CLANGXX=$llvm_prefix/bin/clang++" \
+        "-DSIMPLEOS_SYSROOT=$ROOT/src/os/libc" \
+        -C "$ROOT/src/os/port/llvm/compiler_rt_cmake.cmake" \
+        "-DCMAKE_C_COMPILER_TARGET=$triple" "-DCMAKE_CXX_COMPILER_TARGET=$triple" "-DCMAKE_ASM_COMPILER_TARGET=$triple" \
+        -DCMAKE_SYSTEM_NAME=Generic "-DCMAKE_SYSTEM_PROCESSOR=$processor" \
+        "-DCMAKE_C_COMPILER=$llvm_prefix/bin/clang" "-DCMAKE_CXX_COMPILER=$llvm_prefix/bin/clang++" "-DCMAKE_ASM_COMPILER=$llvm_prefix/bin/clang" \
+        "-DCMAKE_AR=$llvm_prefix/bin/llvm-ar" "-DCMAKE_RANLIB=$llvm_prefix/bin/llvm-ranlib" "-DCMAKE_NM=$llvm_prefix/bin/llvm-nm" \
+        "-DLLVM_CMAKE_DIR=$llvm_prefix/lib/cmake/llvm" "-DCMAKE_C_FLAGS=$flags" "-DCMAKE_CXX_FLAGS=$flags" "-DCMAKE_ASM_FLAGS=$flags" \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        "-DCOMPILER_RT_DEFAULT_TARGET_TRIPLE=$triple" "-DCOMPILER_RT_DEFAULT_TARGET_ARCH=$processor" \
+        -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON -DCOMPILER_RT_BAREMETAL_BUILD=ON -DCOMPILER_RT_EXCLUDE_ATOMIC_BUILTIN=OFF \
+        -DCOMPILER_RT_LIBATOMIC_USE_PTHREAD=OFF -DCOMPILER_RT_BUILTINS_ENABLE_PIC=OFF -DCOMPILER_RT_INCLUDE_TESTS=OFF
+    run_bounded verify-commands 60 cmake "-DCOMMANDS_FILE=$dir/build/compile_commands.json" \
+        "-DEXPECTED_TRIPLE=$triple" "-DEXPECTED_FLAGS=$isa" "-DCOMMANDS_RECEIPT=$dir/compile-commands.sdn" \
+        -P "$output/verify-compile-commands.cmake"
+    run_bounded build 1200 ninja -v -C "$dir/build" -j "$jobs" builtins
+    find "$dir/build" -type f -name 'libclang_rt.builtins*.a' -print > "$dir/archive-candidates.txt"
+    [ "$(wc -l < "$dir/archive-candidates.txt" | tr -d ' ')" = 1 ] || fail "$arch must produce exactly one target builtins archive"
+    source_archive=$(cat "$dir/archive-candidates.txt")
+    raw=$dir/raw/libclang_rt.builtins-$arch.a
+    cp "$source_archive" "$raw"
+    "$llvm_prefix/bin/llvm-ar" t "$raw" > "$dir/raw-members.list"
+    awk 'length($0)>0 && $0 !~ /^[A-Za-z0-9_.+-]+$/ {bad=1} $0=="." || $0==".." {bad=1} END {exit bad}' "$dir/raw-members.list"
+    LC_ALL=C sort "$dir/raw-members.list" | uniq -d > "$dir/duplicate-members.txt"
+    [ ! -s "$dir/duplicate-members.txt" ] || fail "$arch archive member names collide"
+    member_count=$(wc -l < "$dir/raw-members.list" | tr -d ' ')
+    [ "$member_count" -gt 0 ] && [ "$member_count" -le 1024 ] || fail "$arch member count exceeds finite inventory"
+    (cd "$dir/raw-members" && "$llvm_prefix/bin/llvm-ar" x "$raw")
+    "$llvm_prefix/bin/llvm-readobj" --file-headers --arch-specific "$dir/raw-members"/* > "$dir/raw-elf-headers.txt"
+    printf 'schema: simpleos-elf32-builtins-members-v1\narch: %s\nmachine: %s\narchive_sha256: %s\nmembers:\n' "$arch" "$machine" "$(hash "$raw")" > "$dir/raw-members.sdn"
+    while IFS= read -r member; do
+        object=$dir/raw-members/$member
+        class_data=$(od -An -t u1 -j 4 -N 2 "$object" | awk '{$1=$1;print}')
+        actual_machine=$(od -An -t u2 -j 18 -N 2 "$object" | tr -d ' ')
+        abi_flags=$(od -An -t u4 -j 36 -N 4 "$object" | tr -d ' ')
+        [ "$(od -An -t x1 -N 4 "$object" | awk '{$1=$1;print}')" = '7f 45 4c 46' ] || fail "$arch member is not ELF: $member"
+        [ "$class_data" = '1 1' ] && [ "$actual_machine" = "$machine" ] || fail "$arch member target differs: $member"
+        printf '  - name: %s\n    sha256: %s\n    bytes: %s\n    elf_class: 32\n    machine: %s\n    abi_flags: %s\n' "$member" "$(hash "$object")" "$(stat -c %s "$object")" "$machine" "$abi_flags" >> "$dir/raw-members.sdn"
+    done < "$dir/raw-members.list"
+    (cd "$dir/raw" && "$llvm_prefix/bin/llvm-nm" --format=posix --print-file-name --defined-only --extern-only "$(basename "$raw")") > "$dir/raw-defined-symbols.txt"
+    awk '$3 !~ /^[WwVvUu]$/ {print $2}' "$dir/raw-defined-symbols.txt" | LC_ALL=C sort | uniq -d > "$dir/duplicate-strong.txt"
+    [ ! -s "$dir/duplicate-strong.txt" ] || fail "$arch has duplicate strong owners"
+    awk '{print $2}' "$dir/raw-defined-symbols.txt" | LC_ALL=C sort -u > "$dir/raw-defined-names.txt"
+    awk '$2=="__clear_cache" {member=$1;sub(/^.*\[/,"",member);sub(/\]:$/,"",member);print member}' "$dir/raw-defined-symbols.txt" | LC_ALL=C sort -u > "$dir/quarantined-members.txt"
+    if [ "$arch" = i686 ]; then : > "$dir/quarantined-members.txt"; else
+        [ "$(wc -l < "$dir/quarantined-members.txt" | tr -d ' ')" = 1 ] || fail "$arch cache-sync owner must be uniquely identified for quarantine"
+    fi
+    set --
+    while IFS= read -r member; do
+        if ! grep -Fx "$member" "$dir/quarantined-members.txt" >/dev/null; then set -- "$@" "$dir/raw-members/$member"; fi
+    done < "$dir/raw-members.list"
+    derived=$dir/derived/libclang_rt.builtins-simpleos-$arch-unqualified.a
+    "$llvm_prefix/bin/llvm-ar" rcsD "$derived" "$@"
+    "$llvm_prefix/bin/llvm-nm" --format=posix --print-file-name --extern-only "$derived" > "$dir/derived-symbols.txt"
+    awk '$3 !~ /^[Uuwv]$/ {print $2}' "$dir/derived-symbols.txt" | LC_ALL=C sort -u > "$dir/derived-defined-names.txt"
+    for symbol in $required; do grep -Fx "$symbol" "$dir/derived-defined-names.txt" >/dev/null || fail "$arch derived archive lacks required compiler ABI symbol: $symbol"; done
+    awk '$3=="U" && $2 ~ /^__atomic_/ {print $2}' "$dir/derived-symbols.txt" | LC_ALL=C sort -u > "$dir/atomic-undefined.txt"
+    awk '$3 !~ /^[Uuwv]$/ && $2 ~ /^__atomic_/ {print $2}' "$dir/derived-symbols.txt" | LC_ALL=C sort -u > "$dir/atomic-defined.txt"
+    comm -23 "$dir/atomic-undefined.txt" "$dir/atomic-defined.txt" > "$dir/unresolved-atomic-helpers.txt"
+    [ ! -s "$dir/unresolved-atomic-helpers.txt" ] || fail "$arch unresolved atomic helper ownership remains"
+    printf 'schema: simpleos-elf32-builtins-derived-v1\nadmission: none\nstatus: prepared-unadmitted\narch: %s\nsource_archive_sha256: %s\nderived_archive_sha256: %s\ncache_sync_contract: %s\nraw_member_count: %s\nrequired_abi_symbols: verified-in-derived-archive\natomic_undefined_owner_check: pass\natomic_recursion_check: not-performed\n' \
+        "$arch" "$(hash "$raw")" "$(hash "$derived")" "$(if [ "$arch" = i686 ]; then echo x86-unified-cache; else echo missing-real-simpleos-owner; fi)" "$member_count" > "$dir/derived.sdn"
+    status=prepared-unadmitted
+)
+
+pids=
+stop_workers() {
+    trap - HUP INT TERM
+    for worker in $pids; do kill -TERM "$worker" 2>/dev/null || :; done
+    for worker in $pids; do wait "$worker" 2>/dev/null || :; done
+    exit 143
+}
+trap stop_workers HUP INT TERM
+for arch in i686 arm32 riscv32; do
+    build_one "$arch" > "$output/$arch.log" 2>&1 &
+    pids="$pids $!"
+done
+failed=0
+for worker in $pids; do wait "$worker" || failed=1; done
+trap - HUP INT TERM
+git -C "$llvm_source" diff --quiet HEAD -- || failed=1
+printf 'exit_status: %s\n' "$failed" >> "$output/campaign.sdn"
+printf 'ELF32 builtins preparation complete; exit=%s; admission=none; output=%s\n' "$failed" "$output"
+exit "$failed"
