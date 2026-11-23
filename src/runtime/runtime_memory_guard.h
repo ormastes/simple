@@ -58,7 +58,7 @@ static size_t rt_mem_guard_host_page_size;
 #define RT_MEM_GUARD_PAGE_SIZE \
     __atomic_load_n(&rt_mem_guard_host_page_size, __ATOMIC_ACQUIRE)
 #else
-#define RT_MEM_GUARD_PAGE_SIZE ((size_t)0)
+#define RT_MEM_GUARD_PAGE_SIZE ((size_t)4096)
 #endif
 
 static size_t rt_mem_guard_resolve_page_size(void) {
