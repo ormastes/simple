@@ -1,0 +1,50 @@
+"""Owned generic methods retain semantic returns independently of physical ABI."""
+# @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+
+describe "generic method semantic return publication":
+    it "publishes the owned zero-method-binder result and preserves an ordinary signature":
+        val path = "src/rti_generic_method/provider.spl"
+        val source = "class Store<T>:\n    values: [T]\nimpl Store<T>:\n    fn get(node: i64) -> Result<T, text>:\n        Err(\"empty\")\nfn ordinary() -> text:\n    \"unchanged\"\n"
+        val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+        var lowering = HirLowering.with_filename(path)
+        val bootstrap = lowering.ambient_bootstrap_enabled()
+        val hir = lowering.lower_module(ast)
+        var checked_methods = 0
+        var checked_ordinary = 0
+        for function in hir.functions.values():
+            val symbol = hir.symbols.get_symbol_raw(function.symbol.id).unwrap()
+            if symbol.name.ends_with("Store::get"):
+                checked_methods = checked_methods + 1
+                expect(function.type_params.len()).to_equal(0)
+                expect(symbol.defining_module.unwrap()).to_equal(path)
+                # No test-created type metadata: inspect the actual lowered declaration.
+                val signature = symbol.type_.unwrap()
+                match signature.kind:
+                    case HirTypeKind.Function(_, result, _):
+                        expect(rti_term_canonical_text(rti_term_of_hir_type(result, hir.symbols, ["T"]).unwrap())).to_equal("result(p0,b:text)")
+                    case _: fail("method declaration lost its callable signature")
+                val row = rti_row_of_function(hir, rti_module_id(path), function).unwrap()
+                expect(row.owner_type_param_count).to_equal(1)
+                match row.entry:
+                    case ReturnTypeEntry.Decided(term):
+                        expect(rti_term_canonical_text(term)).to_equal("result(p0,b:text)")
+                        expect(rti_term_canonical_text(rti_subst(term, [RtType.Builtin("text")]))).to_equal("result(b:text,b:text)")
+                    case _: fail("owned method has no decided semantic return")
+                if bootstrap:
+                    expect(rti_term_canonical_text(rti_term_of_hir_type(function.return_type, hir.symbols, ["T"]).unwrap())).to_equal("b:i64")
+            if function.name == "ordinary":
+                checked_ordinary = checked_ordinary + 1
+                match symbol.type_.unwrap().kind:
+                    case HirTypeKind.Function(_, result, _):
+                        expect(rti_term_canonical_text(rti_term_of_hir_type(result, hir.symbols, []).unwrap())).to_equal("b:text")
+                    case _: fail("ordinary callable signature changed")
+                expect(rti_term_canonical_text(rti_term_of_hir_type(function.return_type, hir.symbols, []).unwrap())).to_equal("b:text")
+        expect(checked_methods).to_equal(1)
+        expect(checked_ordinary).to_equal(1)
