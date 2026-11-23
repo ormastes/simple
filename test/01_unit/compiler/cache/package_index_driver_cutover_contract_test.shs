@@ -3,6 +3,9 @@ set -eu
 
 driver=src/compiler/80.driver/driver_source_pipeline_loading.spl
 router=src/compiler/80.driver/cache/package_index_route.spl
+index=src/compiler/80.driver/cache/package_module_index.spl
+dirty_record=src/compiler/80.driver/cache/dirty_module_record.spl
+cold_index=src/compiler/80.driver/driver_build/native_full_inventory_sources.spl
 
 grep -q 'package_index_route_current_v1' "$driver"
 grep -q 'SIMPLE_PACKAGE_INDEX_COLD_INIT' "$driver"
@@ -12,7 +15,8 @@ if grep -q 'if not package_index_cold_init and' "$driver"; then
     exit 1
 fi
 grep -q 'not package_index_routed' "$driver"
-grep -q 'invalidation.dirty_packages.contains(entry.package_identity)' "$router"
+grep -q 'dirty_packages = invalidation.dirty_packages' "$router"
+grep -q 'if dirty_packages.contains(entry!.package_identity):' "$router"
 grep -q 'persistent package index admission failed' "$driver"
 grep -q 'not package_index_routed' "$driver"
 grep -q 'package_module_index_read_current_v1' "$router"
@@ -23,14 +27,21 @@ if grep -q 'selected_modules = invalidation.dirty_modules' "$router"; then
 fi
 grep -q 'scv-inventory-mismatch' "$router"
 grep -q 'SIMPLE_SCV_SNAPSHOT_ROOT' "$driver"
-grep -q 'phase_compatibility_existing_artifact_io_v1' "$router"
-grep -q 'indexed-source-{source_admission.reason}' "$router"
+# Dirty source admission lives in dirty_module_record_admit_v1; the router
+# calls it and fails the route closed when it rejects a source.
+grep -q 'val dirty = dirty_module_record_admit_v1(' "$router"
+grep -q 'val source = phase_compatibility_existing_artifact_io_v1(' "$dirty_record"
+grep -q 'false, "dirty-module-admission-failed"' "$router"
 grep -q 'index-producer-mismatch' "$router"
 grep -q 'index-root-generation-mismatch' "$router"
 grep -q 'SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST' "$driver"
 grep -q 'SIMPLE_PACKAGE_INDEX_ROOT_GENERATION' "$driver"
 grep -q 'invalidation.package_schedule' "$router"
-grep -q 'SIMPLE_PACKAGE_INDEX_PACKAGE_SCHEDULE' "$driver"
+# The package schedule is carried by the index invalidation itself (no env
+# transport through the driver) and the router consumes it fail-closed.
+grep -q 'val schedule = package_module_index_schedule_packages_v1(generation, packages)' "$index"
+grep -q 'val consumed = package_scc_consume_index_schedule_v1(' "$router"
+grep -q 'false, "schedule-{consumed.reason}"' "$router"
 
 # Regression: a caller that never computes/sets
 # SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST / _ROOT_GENERATION / _VARIANT_DIGEST
@@ -38,8 +49,14 @@ grep -q 'SIMPLE_PACKAGE_INDEX_PACKAGE_SCHEDULE' "$driver"
 # cold init rather than hard-fail with index-compatibility-missing — see
 # doc/08_tracking/bug/windows_native_build_index_compatibility_missing_2026-09-20.md.
 grep -q 'package_index_compat_markers_present' "$driver"
-grep -q 'not package_index_compat_markers_present' "$driver"
-if ! grep -q 'SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or' "$driver"; then
+# The decision moved into native_full_inventory_requires_cold_index_v1
+# (6f1269a70d5): the driver passes the explicit flag and the marker presence,
+# and the helper selects cold init when either asks for it. Grouped builds
+# (native_group_count > 0) are deliberately excluded there and stay routed.
+grep -q 'val package_index_cold_init = admitted_task or native_full_inventory_requires_cold_index_v1(' "$driver"
+grep -q '(sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1",' "$driver"
+grep -q '^            package_index_compat_markers_present)$' "$driver"
+if ! grep -q '^    explicit_cold_init or not compatibility_markers_present$' "$cold_index"; then
     echo 'package index cold-init must self-heal when compat markers are absent' >&2
     exit 1
 fi
