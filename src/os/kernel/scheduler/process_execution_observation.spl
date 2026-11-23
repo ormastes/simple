@@ -73,12 +73,16 @@ pub struct SchedulerExecutionEvidenceV1:
     stderr_bytes: [u8]
     stdout_truncated: bool
     stderr_truncated: bool
+    # @allow(primitive_api) consumed evidence wire bit: only the scheduler's protected lifecycle and stdout lease accounting issue completeness
     stdout_capture_complete: bool = false
+    # @allow(primitive_api) consumed evidence wire bit: stderr completeness is independently issued and never inferred from empty output
     stderr_capture_complete: bool = false
 
 pub(package) struct SchedulerOutputCaptureLeaseV1:
     observation: SchedulerExecutionObservationHandleV1
+    # @allow(primitive_api) nonce-bound lease wire counter: exact u64 ticket identity is checked for overflow, replay and generation ownership
     ticket: u64
+    # @allow(primitive_api) private kernel lease wire discriminator: selects one of the two separately serialized output streams
     stderr: bool
 
 struct SchedulerOutputCapturePendingV1:
@@ -237,6 +241,7 @@ fn _reserve_observation_locked(
     Some(SchedulerExecutionObservationHandleV1(
         slot: slot_index, generation: generation, nonce: nonce))
 
+# @allow(primitive_api) scheduler adoption ABI: native task/parent ids and the fail-closed capture-route bit bind the typed launch to its generation handle
 pub(package) fn scheduler_execution_observe_adoption_handle_with_launch_v1(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
     launch: ExecutableLaunchArgumentsV1, output_capture_protected: bool = false
@@ -260,6 +265,7 @@ pub(package) fn scheduler_execution_observe_adoption_handle_with_launch_v1(
     if not _unlock(): return nil
     handle
 
+# @allow(primitive_api) authenticated scheduler-adoption ABI: existing native lifecycle ids and explicit route-protection bit precede task publication
 pub(package) fn scheduler_execution_observe_adoption_with_launch_v1(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
     launch: ExecutableLaunchArgumentsV1, output_capture_protected: bool = false
@@ -343,7 +349,7 @@ pub(package) fn scheduler_execution_observation_handle_for_child_v1(child_id: u6
 pub(package) fn scheduler_execution_output_capture_begin_v1(
     child_id: u64, stderr: bool
 ) -> Result<SchedulerOutputCaptureLeaseV1?, text>:
-    """Reserve uncertainty before output; Err forbids emission, Ok(nil) is unobserved.
+    """Reserve uncertainty before output; Err forbids emission, Ok(None) is unobserved.
 
     A lease survives append/finalization lock failures. Its per-write byte count
     must reconcile with the real backend result before evidence can be complete.
@@ -353,7 +359,7 @@ pub(package) fn scheduler_execution_output_capture_begin_v1(
     val index = _live_child_index(child_id)
     if index < 0:
         if not _unlock(): return Err("output observation unlock failed")
-        return Ok(nil)
+        return Ok(None)
     val observed = _observation_state.observations[index]
     if observed.exited or observed.reaped or observed.delivered or
        observed.output_capture_pending.len() >= OUTPUT_CAPTURE_LEASE_LIMIT_V1 or
@@ -525,6 +531,7 @@ pub(package) fn scheduler_execution_observe_stderr_byte_for_handle_v1(
 ) -> bool:
     scheduler_execution_observe_stderr_batch_for_handle_v1(handle, [byte], 1) == 1
 
+# @allow(primitive_api) emitted-byte owner boundary: checked signed prefix length and retained-byte count mirror stdout's canonical batch contract
 pub(package) fn scheduler_execution_observe_stderr_batch_for_handle_v1(
     handle: SchedulerExecutionObservationHandleV1, bytes: [u8], count: i64
 ) -> i64:
