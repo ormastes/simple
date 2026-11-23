@@ -61,7 +61,7 @@ impl PlatformLinkConfig {
     /// Get the link configuration for a specific target.
     pub fn for_target(target: &Target) -> Self {
         match target.os {
-            TargetOS::Linux => Self::linux(),
+            TargetOS::Linux => Self::linux_for_arch(target.arch),
             TargetOS::MacOS => Self::macos(),
             TargetOS::FreeBSD => Self::freebsd(),
             TargetOS::Windows => {
@@ -73,6 +73,35 @@ impl PlatformLinkConfig {
             }
             _ => Self::linux(), // fallback
         }
+    }
+
+    /// `linux()` with the libc scan list of the target's Debian multiarch
+    /// directory. The stub generator weak-stubs every referenced name it does
+    /// not find in these libraries; with the x86_64 paths on an aarch64 host
+    /// it stubbed 177 libc names (`__memcpy_chk`, `glob`, `accept4`, ...) for
+    /// a Vulkan native_all link, and the exported stubs interposed libc inside
+    /// the NVIDIA ICD (SIGSEGV in `eglGetProcAddress`). Measured 2026-11-23, GB10.
+    fn linux_for_arch(arch: TargetArch) -> Self {
+        let mut config = Self::linux();
+        config.system_scan_libs = match arch {
+            TargetArch::Aarch64 => vec![
+                "/lib/aarch64-linux-gnu/libc.so.6",
+                "/lib/aarch64-linux-gnu/libm.so.6",
+                "/lib/aarch64-linux-gnu/libpthread.so.0",
+                "/lib/aarch64-linux-gnu/libdl.so.2",
+                // `_Unwind_*` (libstdc++ inside a GPU ICD throws through them).
+                "/lib/aarch64-linux-gnu/libgcc_s.so.1",
+            ],
+            TargetArch::Riscv64 => vec![
+                "/lib/riscv64-linux-gnu/libc.so.6",
+                "/lib/riscv64-linux-gnu/libm.so.6",
+                "/lib/riscv64-linux-gnu/libpthread.so.0",
+                "/lib/riscv64-linux-gnu/libdl.so.2",
+                "/lib/riscv64-linux-gnu/libgcc_s.so.1",
+            ],
+            _ => config.system_scan_libs,
+        };
+        config
     }
 
     fn linux() -> Self {
@@ -357,8 +386,13 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "simple_runtime".into(),
         ],
         TargetOS::MacOS => vec!["System".into(), "simple_runtime".into()],
+        TargetOS::Windows if target.linker_flavor() == crate::target::LinkerFlavor::Gnu => {
+            let mut libraries: Vec<String> = PlatformLinkConfig::windows_mingw().libraries
+                .into_iter().map(String::from).collect();
+            libraries.push("simple_runtime".into());
+            libraries
+        }
         TargetOS::Windows => vec![
-            "c".into(),
             "msvcrt".into(),
             "kernel32".into(),
             "ws2_32".into(),
@@ -385,6 +419,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standalone_windows_uses_crt_without_unix_libc() {
+        for triple in ["x86_64-pc-windows-gnu", "x86_64-pc-windows-msvc"] {
+            let libraries = default_libraries_for_target(&Target::parse(triple).unwrap());
+            assert!(!libraries.iter().any(|library| library == "c"), "{triple}");
+            assert!(libraries.iter().any(|library| library == "msvcrt"), "{triple}");
+        }
+        let linux = default_libraries_for_target(&Target::parse("x86_64-unknown-linux-gnu").unwrap());
+        assert!(linux.iter().any(|library| library == "c"));
+    }
+
+    #[test]
+    fn standalone_windows_gnu_covers_runtime_imports_for_each_architecture() {
+        for triple in ["x86_64-pc-windows-gnu", "aarch64-pc-windows-gnu", "i686-pc-windows-gnu"] {
+            let libraries = default_libraries_for_target(&Target::parse(triple).unwrap());
+            for library in PlatformLinkConfig::windows_mingw().libraries {
+                assert!(libraries.iter().any(|item| item == library), "{triple}: {library}");
+            }
+            assert_eq!(libraries.iter().filter(|item| *item == "simple_runtime").count(), 1);
+        }
+    }
+
+    #[test]
     fn coff_links_do_not_tolerate_unresolved_symbols() {
         // ELF/Mach-O leave an undefined symbol as a NULL slot; both COFF lanes
         // fail the link instead, so the NULL-GOT preflight must defer to them.
@@ -393,6 +449,15 @@ mod tests {
         assert!(PlatformLinkConfig::macos().tolerates_unresolved_symbols());
         assert!(!PlatformLinkConfig::windows().tolerates_unresolved_symbols());
         assert!(!PlatformLinkConfig::windows_mingw().tolerates_unresolved_symbols());
+    }
+
+    #[test]
+    fn linux_system_scan_libs_follow_target_arch() {
+        let aarch64 = PlatformLinkConfig::linux_for_arch(TargetArch::Aarch64);
+        assert!(aarch64.system_scan_libs.iter().all(|lib| lib.starts_with("/lib/aarch64-linux-gnu/")));
+        assert!(aarch64.system_scan_libs.contains(&"/lib/aarch64-linux-gnu/libc.so.6"));
+        let x86_64 = PlatformLinkConfig::linux_for_arch(TargetArch::X86_64);
+        assert!(x86_64.system_scan_libs.contains(&"/lib/x86_64-linux-gnu/libc.so.6"));
     }
 
     #[test]

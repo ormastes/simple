@@ -252,7 +252,10 @@ impl LinkerBuilder {
         }
 
         // Execute linking
-        linker.link(&self.objects, output, &self.options)
+        match self.target.as_ref() {
+            Some(target) => linker.link_for_target(&self.objects, output, &self.options, target),
+            None => linker.link(&self.objects, output, &self.options),
+        }
     }
 
     /// Get the linker that would be used.

@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-27
 - **Class:** measured rasterizer deviation vs predeclared analytic tolerance
-- **Status:** open — needs an owner decision (see "Decision needed")
+- **Status:** owner decision 2026-11-23 — keep the strict oracle; the Skia leg of case02 stays a documented FAIL (Skia edge policy), Engine2D is judged against the oracle only
 
 ## Measured evidence (macOS M4, MoltenVK 1.4.1, admitted device)
 
@@ -52,3 +52,22 @@ and this row must not be reported as PASS.
 Related: the default (non-v3) provider rejects the v3 payload with REJECTED
 before GPU work — device-verified on both builds; v1/v2 scenes (case01,
 case06) match their pinned oracles exactly on both builds.
+
+## 2026-11-23 — same numbers on the physical GB10 (NVIDIA ICD)
+
+`run-corpus-case02` with the sanctioned native qualification binary was run 3
+times, and all 3 gave the same Skia verdict:
+`exact_mismatch=0 edge_excess=4 edge_max=30 edge_sum=1004/2742`. That is the
+same 4 pixels over the bound and max delta 30 as on macOS, so this is
+deterministic Skia edge policy and not a device artefact. On the same device,
+the Engine2D strict Vulkan output passes the oracle (edge_max=1). The owner
+decision above is still needed. See
+`linux_gb10_n2_qualification_executable_blockers_2026-11-18.md` (2026-11-23,
+corpus case 02).
+
+## 2026-11-23 — owner decision
+
+Keep the predeclared case02 tolerance strict. The Skia leg stays a documented,
+deterministic FAIL (Skia's own edge policy: 4 px over the bound, max delta
+30); it is not widened and not reported as PASS. Engine2D's case02 result is
+judged against the oracle alone.

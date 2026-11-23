@@ -1,0 +1,134 @@
+"""
+## Purpose and audience
+Purpose: The right/bottom 1x ink edges Chrome paints for the nine shaped
+Devanagari words of the Chrome 159 render table, asserted with no skip and no
+early return. Their glyph runs (ids, pen x, mark y) are pinned live in
+`devanagari_render_chrome159_spec.spl` AC-2..AC-10.
+Audience: web renderer text maintainers; the GSUB lane (lane "Devanagari
+shaping, part A": syllables, reordering, substitution) makes the runs exist,
+the GPOS lane (`ot_layout_gpos*.spl`, `devanagari_gpos.spl`) places the marks.
+
+EXPECTED RED. Since the general dev2 shaper landed (PR #10934) every glyph run
+equals Chrome's; 7 of 9 still fail on a 1x ink edge (2026-11-23: right
+edge 1 px short on नहीं and कर्म, bottom 1 px low on कुछ टुँ ट्टु ड़ुँ, हिंदी falls
+back to the raster lane on its empty glyph 785). Tagged
+`@tag:in-development` so a whole-suite run skips and COUNTS the file; an
+explicit-path run executes every example. Delete the tag in the commit that
+makes all nine green.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, `<html lang="hi">`, body
+`margin:0;background:#fff;font:16px Liberation Sans, <bundled Noto Sans
+Devanagari via @font-face>;color:#000`, `<div style="position:absolute;
+left:20px;top:30px;white-space:nowrap">WORD</div>`). Same face on both sides:
+Simple resolves `lang="hi"` to the bundled Noto Sans Devanagari.
+- Ink: a pixel with any channel under 200, from the screenshot.
+- Glyph ids / pen positions: `--print-to-pdf`; Skia's PDF Type3 fonts name each
+  glyph by id, one positioned `Tj` per glyph (px at 16 px, y up).
+
+| word   | Range w  | ink x      | ink y  | glyph id @ pen x px (, y px up)                          |
+|--------|----------|------------|--------|----------------------------------------------------------|
+| हिन्दी   | 30.234   | 19..50     | 30..45 | 544@0 88@4.144 245@12.640 73@17.584 33@26.080            |
+| हिंदी    | 25.281   | 19..45     | 30..45 | 559@0 88@4.144 785@12.640 73@12.640 33@21.136            |
+| नहीं    | 21.531   | 19..42     | 30..45 | 75@0 88@8.880 635@17.376                                 |
+| कुछ    | 23.516   | 19..43     | 34..47 | 56@0 34@8.752 62@12.288                                  |
+| कर्म    | 21.859   | 19..42     | 29..43 | 56@0 80@12.288 506@21.856                                |
+| र्कं     | 12.297   | 19..32     | 29..43 | 56@0 510@8.752                                           |
+| टुँ     | 8.078    | 19..28     | 30..47 | 66@0 34@7.360 101@8.032                                  |
+| ट्टु    | 7.828    | 19..28     | 34..50 | 431@0 702@6.944,-3.088                                   |
+| द्धू    | 12.797   | 19..35     | 34..50 | 448@0 35@13.552,-1.952                                   |
+| ड़ुँ    | 8.563    | 19..29     | 30..50 | 68@0 672@8.928 702@6.976,-2.880 101@8.768                |
+
+Rules read off the table:
+- A glyph's run x is its pen px truncated (हिन्दी 12.640 -> 12, 17.584 -> 17:
+  the columns equal Chrome's).
+- A glyph's run y is its y offset ROUNDED to the nearest px, down positive:
+  ड़ुँ's low u (-2.880) paints 3 px lower (ink bottom 50 where ऴु's -2.032
+  gives 49), द्धू's uu (-1.952) 2 px lower (bottom 50 against पूरा's 48).
+  Skia snaps the cross axis to whole pixels; truncating would lose a row.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-DEVANAGARI-GPOS-001 — dev2 marks are positioned as Chrome 159 positions them.
+"""
+# @tag:in-development
+# Tracks: doc/00_llm_process/feature_expert/web_render_css_parity/skill.md ("2026-11-22 — Devanagari GPOS and shaped-glyph placement (lane B)" section: these words wait for the general dev2 shaper, lane "Devanagari shaping, part A", GSUB in src/lib/skia/feature/shaper/).
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val W: i32 = 400
+val H: i32 = 120
+
+fn _page(txt: text) -> text:
+    "<!doctype html><html lang=\"hi\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap;\">" + txt + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+# `x0..x1 y0..y1` of the ink (any channel under 200).
+fn _ink(txt: text, backend: text) -> text:
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(txt), W, H, backend)
+    var x0 = W
+    var y0 = H
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    "{x0}..{x1} {y0}..{y1}"
+
+fn _edges(box: text) -> text:
+    # right and bottom ink edge: `x1 y1`
+    val parts = box.split(" ")
+    val xs = parts[0].split("..")
+    val ys = parts[1].split("..")
+    xs[1] + " " + ys[1]
+
+describe "Devanagari mark-word ink edges against Chrome 159":
+    it "AC-2: हिंदी (anusvara over ha behind the i-matra)":
+        step("Chrome 559 88 785 73 33 at 0 4.144 12.640 12.640 21.136; ink x 19..45 y 30..45")
+        expect(_edges(_ink("हिंदी", "cpu_simd"))).to_equal("45 45")
+
+    it "AC-3: नहीं (ii-matra + anusvara ligature)":
+        step("Chrome 75 88 635 at 0 8.880 17.376; ink x 19..42 y 30..45")
+        expect(_edges(_ink("नहीं", "cpu_simd"))).to_equal("42 45")
+
+    it "AC-4: कुछ (u-matra on the ka stem: blwm mark-to-base, pen 12.288 - 3.536)":
+        step("Chrome 56 34 62 at 0 8.752 12.288; ink x 19..43 y 34..47")
+        expect(_edges(_ink("कुछ", "cpu_simd"))).to_equal("43 47")
+
+    it "AC-5: कर्म (reph after the syllable, no offset)":
+        step("Chrome 56 80 506 at 0 12.288 21.856; ink x 19..42 y 29..43")
+        expect(_edges(_ink("कर्म", "cpu_simd"))).to_equal("42 43")
+
+    it "AC-6: र्कं (reph+anusvara ligature on the ka stem: abvm mark-to-base)":
+        step("Chrome 56 510 at 0 8.752; ink x 19..32 y 29..43")
+        expect(_edges(_ink("र्कं", "cpu_simd"))).to_equal("32 43")
+
+    it "AC-7: टुँ (candrabindu behind a below-base matra still reaches the base)":
+        step("Chrome 66 34 101 at 0 7.360 8.032; ink x 19..28 y 30..47")
+        expect(_edges(_ink("टुँ", "cpu_simd"))).to_equal("28 47")
+
+    it "AC-8: ट्टु (low u-matra 3.088 px down: y rounds to 3)":
+        step("Chrome 431 702 at 0 6.944,-3.088; ink x 19..28 y 34..50")
+        expect(_edges(_ink("ट्टु", "cpu_simd"))).to_equal("28 50")
+
+    it "AC-9: द्धू (uu-matra 1.952 px down: y rounds to 2, not 1)":
+        step("Chrome 448 35 at 0 13.552,-1.952; ink x 19..35 y 34..50")
+        expect(_edges(_ink("द्धू", "cpu_simd"))).to_equal("35 50")
+
+    it "AC-10: ड़ुँ (u under a nukta: mark-to-mark, 2.880 px down rounds to 3)":
+        step("Chrome 68 672 702 101 at 0 8.928 6.976,-2.880 8.768; ink x 19..29 y 30..50")
+        expect(_edges(_ink("ड़ुँ", "cpu_simd"))).to_equal("29 50")

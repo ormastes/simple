@@ -75,6 +75,11 @@ bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
 # into the same captured caller value the Stage 3 launch and the Stage 2 matrix
 # read. Invalid host value = hard error naming the key.
 bootstrap_host_apply_frontend_cache_default "${bootstrap_early_repo_root}" || exit 64
+# Host-config sanity_build_timeout_seconds stands in for an unset caller
+# COMPILER_BUILD_TIMEOUT_SECONDS (Stage 2 sanity probes; a Windows
+# stage2-module-path-naming-build exceeded the 180s default). Must precede the
+# `:-180` default below. Invalid host value = hard error naming the key.
+bootstrap_host_apply_sanity_build_timeout "${bootstrap_early_repo_root}" || exit 64
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -1571,7 +1576,7 @@ bootstrap_lock_handle=
 rust_target_lock_handle=
 rust_shared_cache_lock_handle=
 rust_shared_cache_root=
-rust_shared_cache_common_dir=$(bootstrap_authority_git_common_dir "${repo_root}") || exit 1
+rust_shared_cache_common_dir=
 if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
   rust_shared_cache_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
     "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT}" "${repo_root}") || exit 1
@@ -1763,7 +1768,7 @@ bootstrap_reap_descendants() {
       done
       ;;
   esac
-  kill -TERM -- "-$$" 2>/dev/null || true
+  kill -s TERM -- "-$$" 2>/dev/null || true
   bootstrap_reap_i=0
   while [ "${bootstrap_reap_i}" -lt 3 ]; do
     bootstrap_reap_left=
@@ -1934,6 +1939,11 @@ esac
 PLATFORM="${PLATFORM_TRIPLE}"
 arch="${PLATFORM_ARCH}"
 os="${PLATFORM_OS}"
+
+# Default lock scope needs the platform, unavailable at early handle setup.
+if [ -z "${rust_shared_cache_root}" ]; then
+  rust_shared_cache_common_dir=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || exit 1
+fi
 echo "Platform: ${PLATFORM}"
 
 exe_suffix=""
@@ -2049,45 +2059,7 @@ hash_path_list() {
   done
 }
 
-run_timeout() {
-  timeout_seconds=$1
-  shift
-  case "$(uname -s 2>/dev/null || echo unknown)" in
-    MSYS*|MINGW*|CYGWIN*)
-      timeout_capture=$(mktemp "${TMPDIR:-/tmp}/simple-timeout.XXXXXX") || return 1
-      timeout_marker="${timeout_capture}.expired"
-      "$@" >"${timeout_capture}" 2>&1 &
-      timeout_pid=$!
-      (
-        sleep "${timeout_seconds}"
-        if kill -0 "${timeout_pid}" 2>/dev/null; then
-          : >"${timeout_marker}"
-          kill "${timeout_pid}" 2>/dev/null || true
-          sleep 1
-          kill -9 "${timeout_pid}" 2>/dev/null || true
-        fi
-      ) &
-      timeout_watchdog=$!
-      timeout_status=0
-      wait "${timeout_pid}" || timeout_status=$?
-      kill "${timeout_watchdog}" 2>/dev/null || true
-      wait "${timeout_watchdog}" 2>/dev/null || true
-      cat "${timeout_capture}"
-      if [ -f "${timeout_marker}" ]; then
-        timeout_status=124
-      fi
-      rm -f "${timeout_capture}" "${timeout_marker}"
-      return "${timeout_status}"
-      ;;
-  esac
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${timeout_seconds}" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "${timeout_seconds}" "$@"
-  else
-    "$@"
-  fi
-}
+. "${bootstrap_entry_dir}/lib/run-timeout.shs"
 
 run_timeout_kill() {
   timeout_seconds=$1
@@ -3538,7 +3510,7 @@ bootstrap_acquire_shared_rust_cargo_cache() {
     rust_cache_common_now=$(bootstrap_authority_rust_cargo_cache_common_dir \
       "${repo_root}" "${rust_shared_cache_root}") || return 1
   else
-    rust_cache_common_now=$(bootstrap_authority_git_common_dir "${repo_root}") || return 1
+    rust_cache_common_now=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || return 1
   fi
   [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || {
     echo "error: shared Rust cargo cache moved during this run: ${rust_shared_cache_common_dir} -> ${rust_cache_common_now}" >&2
@@ -3551,8 +3523,9 @@ bootstrap_acquire_shared_rust_cargo_cache() {
     }
     return 0
   fi
-  # Every linked worktree serialises here, so a sibling lane's build holds
-  # this lock for as long as its cargo runs. A silent failure here aborted a
+  # Shared cache callers serialize repository-wide; default Windows callers
+  # serialize within the checkout whose build/c and publication they share.
+  # A silent failure here aborted a
   # Windows Stage 2 lane (2026-11-07) with nothing but "preflight failed".
   bsrcc_lock_dir="${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks"
   bsrcc_wait=${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}
@@ -5907,7 +5880,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit "${stage2_status}"
     fi
     echo "  warning: stage2 native-build failed (exit ${stage2_status}); Stage 3/full CLI unavailable" >&2
-    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
+    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise host config sanity_build_timeout_seconds, or COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
 
   if [ "${stage2_status}" -eq 0 ]; then

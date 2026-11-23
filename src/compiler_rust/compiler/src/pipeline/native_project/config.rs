@@ -18,6 +18,17 @@ pub(crate) enum NativeRuntimeLane {
     SimpleCore,
     CoreCBootstrap,
     HostGpu,
+    /// Ordinary GPU entries that call the synchronous Vulkan runtime
+    /// (`rt_vulkan_*`, `rt_engine2d_*`) and the GPU provider registry
+    /// (`rt_gpu_provider_*`): a `--features vulkan` `libsimple_native_all.a`
+    /// from `--runtime-path`, then the core-C supplement for the C-only names.
+    ///
+    /// EXPLICIT OPT-IN ONLY (`--runtime-bundle host-gpu-native-all`); never
+    /// inferred. `host-gpu` keeps its core-C loader composition: the Vulkan
+    /// provider DSO path (`runtime_dynload.c`, `SIMPLE_VULKAN_PROVIDER_PATH`)
+    /// covers only part of the surface these entries call. Blocker 8 of
+    /// doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md.
+    HostGpuNativeAll,
     /// Canonical bootstrap verification tools, bound to an admitted compiler capsule.
     BootstrapTools,
     /// Link the Stage4 compiler entry against the SHARED runtime
@@ -43,6 +54,7 @@ impl NativeRuntimeLane {
             Self::SimpleCore => "simple-core",
             Self::CoreCBootstrap => "core-c-bootstrap",
             Self::HostGpu => "host-gpu",
+            Self::HostGpuNativeAll => "host-gpu-native-all",
             Self::BootstrapTools => "bootstrap-tools",
             Self::DynamicRuntime => "dynamic-runtime",
         }
@@ -63,6 +75,14 @@ pub(super) fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
 fn runtime_bundle_requests_host_gpu(value: &str) -> bool {
     matches!(value, "host-gpu" | "host_gpu" | "gpu")
 }
+
+fn runtime_bundle_requests_host_gpu_native_all(value: &str) -> bool {
+    matches!(value, "host-gpu-native-all" | "host_gpu_native_all")
+}
+
+/// Symbols a `host-gpu-native-all` archive must define: the Vulkan runtime
+/// and the C provider registry (compiled in only under `native-all-provider`).
+const HOST_GPU_NATIVE_ALL_REQUIRED: &[&str] = &["rt_vulkan_init", "rt_gpu_provider_loaded"];
 
 fn runtime_bundle_requests_bootstrap_tools(value: &str) -> bool {
     value == "bootstrap-tools"
@@ -453,6 +473,9 @@ impl NativeProjectBuilder {
             value if runtime_bundle_requests_simple_core(value) => return NativeRuntimeLane::SimpleCore,
             value if runtime_bundle_requests_core_c_bootstrap(value) => return NativeRuntimeLane::CoreCBootstrap,
             value if runtime_bundle_requests_host_gpu(value) => return NativeRuntimeLane::HostGpu,
+            value if runtime_bundle_requests_host_gpu_native_all(value) => {
+                return NativeRuntimeLane::HostGpuNativeAll
+            }
             value if runtime_bundle_requests_bootstrap_tools(value) => return NativeRuntimeLane::BootstrapTools,
             value if runtime_bundle_requests_dynamic_runtime(value) => return NativeRuntimeLane::DynamicRuntime,
             _ => {}
@@ -463,6 +486,13 @@ impl NativeProjectBuilder {
             .is_some_and(runtime_bundle_requests_dynamic_runtime)
         {
             return NativeRuntimeLane::DynamicRuntime;
+        }
+        if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+            .ok()
+            .as_deref()
+            .is_some_and(runtime_bundle_requests_host_gpu_native_all)
+        {
+            return NativeRuntimeLane::HostGpuNativeAll;
         }
         if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
             .ok()
@@ -518,7 +548,10 @@ impl NativeProjectBuilder {
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
             if is_bootstrap_main_entry(&self.entry_file)
-                || matches!(self.resolve_runtime_lane(), NativeRuntimeLane::HostGpu | NativeRuntimeLane::BootstrapTools)
+                || matches!(
+                    self.resolve_runtime_lane(),
+                    NativeRuntimeLane::HostGpu | NativeRuntimeLane::HostGpuNativeAll | NativeRuntimeLane::BootstrapTools
+                )
             {
                 return Ok(());
             }
@@ -546,6 +579,35 @@ impl NativeProjectBuilder {
         let compiler = std::env::current_exe().map_err(|error| error.to_string())?;
         let (native_all_name, _) = runtime_archive_names(super::effective_target().linker_flavor());
         admitted_bootstrap_tools_authority(runtime_path, &compiler, native_all_name)
+    }
+
+    /// The `host-gpu-native-all` archive: `<runtime-path>/libsimple_native_all.a`
+    /// (or `deps/`), admitted only when it defines the Vulkan runtime and the
+    /// provider registry. A default-feature archive fails closed here instead
+    /// of failing the link with hundreds of undefined `rt_vulkan_*`.
+    fn host_gpu_native_all_runtime(&self) -> Result<PathBuf, String> {
+        let runtime_path = self.config.runtime_path.as_deref().ok_or(
+            "the host-gpu-native-all lane requires --runtime-path <cargo target dir> holding a \
+             `cargo build --release -p simple-native-all --features vulkan` archive",
+        )?;
+        let (native_all_name, _) = runtime_archive_names(super::effective_target().linker_flavor());
+        let archive = [runtime_path.join(native_all_name), runtime_path.join("deps").join(native_all_name)]
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| format!("host-gpu-native-all: no {native_all_name} under {}", runtime_path.display()))?;
+        let defined = archive_defined_symbols(&archive)
+            .ok_or_else(|| format!("host-gpu-native-all: cannot read symbols of {}", archive.display()))?;
+        let missing: Vec<&str> =
+            HOST_GPU_NATIVE_ALL_REQUIRED.iter().copied().filter(|name| !defined.contains(*name)).collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "host-gpu-native-all: {} does not define {}; rebuild it with \
+                 `cargo build --release -p simple-native-all --features vulkan`",
+                archive.display(),
+                missing.join(", ")
+            ));
+        }
+        Ok(archive)
     }
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
@@ -647,6 +709,9 @@ impl NativeProjectBuilder {
                 "the dynamic-runtime lane is available only to the Stage4 compiler entry; `{entry}` is not one"
             ));
         }
+        if lane == NativeRuntimeLane::HostGpuNativeAll {
+            return self.host_gpu_native_all_runtime().map(|archive| Some((archive, true)));
+        }
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
         let (native_all_name, runtime_name) = runtime_archive_names(super::effective_target().linker_flavor());
 
@@ -722,7 +787,7 @@ impl NativeProjectBuilder {
                         }
                     }
                 }
-                NativeRuntimeLane::HostGpu | NativeRuntimeLane::BootstrapTools => {}
+                NativeRuntimeLane::HostGpu | NativeRuntimeLane::HostGpuNativeAll | NativeRuntimeLane::BootstrapTools => {}
                 // Unreachable: the dynamic lane returns above.
                 NativeRuntimeLane::DynamicRuntime => {}
             }
@@ -773,7 +838,7 @@ impl NativeProjectBuilder {
                         }
                     }
                 }
-                NativeRuntimeLane::HostGpu | NativeRuntimeLane::BootstrapTools => {}
+                NativeRuntimeLane::HostGpu | NativeRuntimeLane::HostGpuNativeAll | NativeRuntimeLane::BootstrapTools => {}
                 // Unreachable: the dynamic lane returns above.
                 NativeRuntimeLane::DynamicRuntime => {}
             }

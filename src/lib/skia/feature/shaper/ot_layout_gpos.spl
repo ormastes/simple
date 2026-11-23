@@ -1,7 +1,7 @@
 use std.skia.feature.glyph.ot_parser.{OtFont, read_u16_be, read_u32_be}
 use std.skia.feature.glyph.ot_parser_layout.{GposLookup, LayoutLookupActivation}
 use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord, LayoutApplyResult}
-use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataValue, GposDataAnchor, GposDataBudget,
+use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataValue, GposDataAnchor, GposDataBudget, GposDataHit,
     gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class,
     gpos_data_class_valid, gpos_data_coverage_end, gpos_data_class_end,
     gpos_data_overlap, gpos_data_glyph_class,
@@ -136,6 +136,23 @@ fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [Layou
         if not value1.valid or not value2.valid: return false
         _add(records, index, value1); _add(records, second.next, value2); true
     else: false
+# Which earlier glyph a mark may attach to, as HarfBuzz iterates (Chrome):
+# - MarkBasePos / MarkLigPos (4, 5) walk back with IgnoreMarks ALONE, whatever
+#   the lookup flag says, so the target is the nearest non-mark glyph. Noto
+#   Sans Devanagari's abvm/blwm lookups have flag 0: stopping at the previous
+#   glyph left a reph or candrabindu behind a below-base matra unattached.
+# - MarkMarkPos (6) drops the Ignore* bits and keeps the mark filtering set;
+#   the glyph it stops on must itself be a mark.
+# A face without a GDEF class table has no marks to tell apart, so every glyph
+# stays a candidate (the pre-GDEF behaviour).
+fn _attach_candidate(font: OtFont, lookup: GposLookup, kind: u32, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+    val glyph_class = gpos_data_glyph_class(font, glyph, budget)
+    val is_mark = glyph_class.valid and glyph_class.index == 3
+    if kind != 6u32:
+        return GposDataHit(index: 0, count: 0, found: not is_mark, valid: true)
+    if is_mark and (lookup.flag & 16u32) != 0u32:
+        return gpos_data_in_mark_set(font, lookup.mark_filtering_set, glyph, budget)
+    GposDataHit(index: if glyph_class.valid and not is_mark: 1 else: 0, count: 0, found: true, valid: true)
 fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> bool:
     if sub + 12 > limit or read_u16_be(font.blob, sub) != 1u32: return false
     val mark_cov = read_u16_be(font.blob, sub + 2) as i64
@@ -154,9 +171,10 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, reco
     var candidate = index - 1
     while candidate >= 0:
         if not gpos_data_take(budget): return false
-        val eligible = gpos_data_eligible(font, lookup, records[candidate].glyph_id, budget)
+        val eligible = _attach_candidate(font, lookup, kind, records[candidate].glyph_id, budget)
         if not eligible.valid: return false
         if eligible.found:
+            if eligible.index == 1: return true
             val target = gpos_data_coverage(font.blob, sub + target_cov, limit, records[candidate].glyph_id, budget)
             if not target.valid: return false
             if target.found:
@@ -304,7 +322,7 @@ fn _lookup_at(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: 
         else if kind == 2u32:
             _pair_match(font, lookup, actual, limit, records, index, budget)
         else if kind == 4u32 or kind == 5u32 or kind == 6u32:
-            _mark_match(font, lookup, actual, limit, records, index, budget)
+            _mark_match(font, lookup, kind, actual, limit, records, index, budget)
         else if kind == 7u32:
             _context(font, lookups, lookup, actual, limit, records, index, depth + 1,
                 budget, advance, activation_mask)
@@ -421,7 +439,7 @@ fn _single(font: OtFont, sub: i64, limit: i64, records: [LayoutGlyphRecord], ind
     _add(records, index, result.0)
     true
 
-fn _mark_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> _ApplyState:
+fn _mark_match(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> _ApplyState:
     if sub + 12 > limit: return _ApplyState(valid: false, matched: false, applied: false)
     val mark_offset = read_u16_be(font.blob, sub + 2) as i64
     val target_offset = read_u16_be(font.blob, sub + 4) as i64
@@ -432,9 +450,10 @@ fn _mark_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: 
     var candidate = index - 1
     while candidate >= 0:
         if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
-        val eligible = gpos_data_eligible(font, lookup, records[candidate].glyph_id, budget)
+        val eligible = _attach_candidate(font, lookup, kind, records[candidate].glyph_id, budget)
         if not eligible.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if eligible.found:
+            if eligible.index == 1: return _ApplyState(valid: true, matched: false, applied: false)
             val target = gpos_data_coverage(font.blob, sub + target_offset, limit, records[candidate].glyph_id, budget)
             if not target.valid: return _ApplyState(valid: false, matched: false, applied: false)
             return _ApplyState(valid: true, matched: target.found, applied: false)
