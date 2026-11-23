@@ -164,6 +164,7 @@ entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
 
 ## Implementation log
 
+- 2026-11-23 cud1 (optional backend hardening, dynamic CUDA): pure-Simple `src/lib/gc_async_mut/cuda/driver_loader.spl` opens `nvcuda.dll` / `libcuda.so.1|libcuda.so` at first GPU use (never linked), resolves 14 driver symbols all-or-nothing, publishes once via `AtomicI64` CAS (no lock, losers never wait); named errors `CUDA-E001` (no driver, lists candidates) and `CUDA-E002` (missing symbol). Design `doc/05_design/lib/runtime/cuda_driver_dynamic_load.md`; spec `test/01_unit/lib/gc_async_mut/cuda/cuda_driver_loader_spec.spl` 3/4 on the 2026-11-19 deployed seed (present-driver case ran green against a real nvcuda.dll); the missing-symbol case fails only because that seed predates the `spl_dlsym` return-0 fix `7f610c22789` — passes after seed redeploy. Existing C provider and Rust seed loaders already dynamic, unchanged.
 - 2026-11-22 rbid2: robust-boundaries §9 IDs all mapped to specs (see the 2026-11-15 plan §9 table); new specs for RB-ORIGIN-03, RB-BUILD-03, RB-BUILD-04, RB-RATCHET-01; RB-LOAD-01..02 in-development RED + todo.
 - 2026-11-18 P0-3 slice: `inference_effects.spl` — non-function callee type and
   trait-method calls now infer Unknown (incomplete row); `Await` has an explicit
