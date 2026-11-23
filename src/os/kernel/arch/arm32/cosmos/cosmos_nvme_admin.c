@@ -19,6 +19,14 @@ static struct cosmos_nvme_status status_generic(unsigned int sc) {
     return status_from_policy(cosmos_nvme_admin_policy_status_generic(sc));
 }
 
+/* Early-return the admin status for a failed policy check. */
+#define NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status) \
+    do { \
+        if ((policy_status) != cosmos_nvme_admin_policy_status_success()) { \
+            return status_from_policy(policy_status); \
+        } \
+    } while (0)
+
 static void zero_bytes(unsigned char *bytes, unsigned int count) {
     unsigned int index;
 
@@ -129,9 +137,7 @@ static struct cosmos_nvme_status identify(
         command->namespace_id, command->cdw10, command->cdw11,
         command->cdw12, command->cdw13);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     zero_bytes(service->payload, COSMOS_NVME_ADMIN_IDENTIFY_BYTES);
     if (cns == COSMOS_NVME_ADMIN_IDENTIFY_CONTROLLER) {
         service->payload[512U] = 0x66U; /* SQES: min/max 64-byte entries. */
@@ -160,9 +166,7 @@ static struct cosmos_nvme_status get_log_page(
         command->namespace_id, command->cdw10, command->cdw11,
         command->cdw12, command->cdw13);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     zero_bytes(service->payload, COSMOS_NVME_ADMIN_SMART_BYTES);
     return write_payload(service, command, COSMOS_NVME_ADMIN_SMART_BYTES);
 }
@@ -174,9 +178,7 @@ static struct cosmos_nvme_status set_features(
         command->namespace_id, command->cdw10, command->cdw11,
         command->cdw12, command->cdw13);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     service->negotiated_queue_count =
         cosmos_nvme_admin_policy_queue_count(command->cdw11);
     *result = cosmos_nvme_admin_policy_queue_result(
@@ -191,9 +193,7 @@ static struct cosmos_nvme_status get_features(
         command->namespace_id, command->cdw10, command->cdw11,
         command->cdw12, command->cdw13);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     *result = cosmos_nvme_admin_policy_queue_result(
         service->negotiated_queue_count);
     return status_success();
@@ -213,9 +213,7 @@ static struct cosmos_nvme_status create_cq(
         command->payload_address2_low, command->payload_address2_high,
         command->payload_bytes);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     if (service->adapter.configure_io_cq != 0 &&
         service->adapter.configure_io_cq(
             service->adapter.context, queue_id, 1U,
@@ -247,9 +245,7 @@ static struct cosmos_nvme_status create_sq(
         command->payload_address2_low, command->payload_address2_high,
         command->payload_bytes);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     if (service->adapter.configure_io_sq != 0 &&
         service->adapter.configure_io_sq(
             service->adapter.context, queue_id, 1U,
@@ -276,9 +272,7 @@ static struct cosmos_nvme_status delete_sq(
         command->payload_address2_low, command->payload_address2_high,
         command->payload_bytes);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     if (service->adapter.configure_io_sq != 0 &&
         service->adapter.configure_io_sq(
             service->adapter.context, index + 1U, 0U, 0U, 0U, 0U, 0U) !=
@@ -312,9 +306,7 @@ static struct cosmos_nvme_status delete_cq(
         command->cdw12, command->cdw13, command->payload_address_low,
         command->payload_address_high, command->payload_address2_low,
         command->payload_address2_high, command->payload_bytes);
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     if (service->adapter.configure_io_cq != 0 &&
         service->adapter.configure_io_cq(
             service->adapter.context, index + 1U, 0U, 0U, 0U, 0U, 0U, 0U) !=
@@ -336,9 +328,7 @@ static struct cosmos_nvme_status abort_command(
         service->submission_queues[index].valid, command->namespace_id,
         command->cdw10, command->cdw11, command->cdw12, command->cdw13);
 
-    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
-        return status_from_policy(policy_status);
-    }
+    NVME_ADMIN_RETURN_IF_POLICY_FAILED(policy_status);
     *result = cosmos_nvme_admin_policy_abort_result(
         target_queue_id, target_cid, service->async_event_pending,
         service->pending_async_event.cid);
