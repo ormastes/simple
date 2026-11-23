@@ -13,47 +13,31 @@ extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_dir_walk(path: text) -> [text]
 @unsafe(reason: "raw directory-exists ABI; false is the explicit provider failure status", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "raw nullable directory listing; nil conflates invalid path, absence, permission, allocation, and runtime failure", capabilities: [ffi])
+extern fn rt_dir_list(path: text) -> [text]?
 @unsafe(reason: "directory-entry no-follow ABI; false rejects non-directory or reparse entries", capabilities: [ffi])
 extern fn rt_dir_is_real_no_follow(path: text) -> bool
-use std.io_runtime.{process_run}
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_canonical}
 
 @always_inline
 fn _dir_create_raw(path: text, recursive: bool) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_dir_create(path, recursive)
+        rt_dir_create(host_path_native(path), recursive)
 
 @always_inline
 fn _dir_remove_raw(path: text, recursive: bool) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_dir_remove(path, recursive)
+        rt_dir_remove(host_path_native(path), recursive)
 
 @always_inline
 fn _dir_remove_all_raw(path: text) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_dir_remove_all(path)
+        rt_dir_remove_all(host_path_native(path))
 
 @always_inline
 fn _dir_walk_raw(path: text) -> [text]:
     unsafe(capabilities: [ffi]):
         rt_dir_walk(path)
-
-# --- Shell helpers (local copies to avoid circular imports) ---
-
-fn _dir_shell(command: text) -> (text, text, i64):
-    process_run("/bin/sh", ["-c", command])
-
-fn _dir_shell_bool(command: text) -> bool:
-    val (out, err, code) = _dir_shell(command)
-    code == 0
-
-fn _dir_shell_lines(command: text) -> [text]:
-    val (out, err, code) = _dir_shell(command)
-    var trimmed = out.trim()
-    if code == 0 and trimmed.len() > 0:
-        trimmed.split("\n")
-    else:
-        []
 
 # ============================================================================
 # Directory Operations
@@ -90,14 +74,15 @@ pub fn is_dir(path: text) -> bool:
     # doc/08_tracking/bug/is_dir_always_false_shell_dependency_2026-09-02.md);
     # rt_dir_exists is the real, already-used-elsewhere extern.
     unsafe(capabilities: [ffi]):
-        rt_dir_exists(path)
+        rt_dir_exists(host_path_native(path))
 
 pub fn dir_is_real_no_follow(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_dir_is_real_no_follow(host_path_native(path))
 
 pub fn dir_list(path: text) -> [text]:
-    _dir_shell_lines("ls -1 '{path}' 2>/dev/null")
+    unsafe(capabilities: [ffi]):
+        rt_dir_list(host_path_native(path)) ?? []
 
 pub fn dir_remove(path: text, recursive: bool) -> bool:
     if recursive:
