@@ -73,6 +73,18 @@ pub struct SchedulerExecutionEvidenceV1:
     stderr_bytes: [u8]
     stdout_truncated: bool
     stderr_truncated: bool
+    stdout_capture_complete: bool = false
+    stderr_capture_complete: bool = false
+
+pub(package) struct SchedulerOutputCaptureLeaseV1:
+    observation: SchedulerExecutionObservationHandleV1
+    ticket: u64
+    stderr: bool
+
+struct SchedulerOutputCapturePendingV1:
+    ticket: u64
+    stderr: bool
+    reported_bytes: u64
 
 struct SchedulerExecutionObservationV1:
     generation: u64
@@ -101,6 +113,11 @@ struct SchedulerExecutionObservationV1:
     stderr_bytes: [u8]
     stdout_truncated: bool
     stderr_truncated: bool
+    output_capture_protected: bool
+    output_capture_ticket: u64
+    output_capture_pending: [SchedulerOutputCapturePendingV1]
+    stdout_capture_failed: bool
+    stderr_capture_failed: bool
 
 struct SchedulerExecutionObservationStateV1:
     nonce_counter: u64
@@ -111,6 +128,7 @@ val OBSERVATION_LIMIT: i64 = 256
 val STDOUT_LIMIT: i64 = 65536
 val STDERR_LIMIT: i64 = 65536
 val ARGV_FILE_BINDING_LIMIT: i64 = 8
+val OUTPUT_CAPTURE_LEASE_LIMIT_V1: i64 = 2
 val _observation_mutex: i64 = mutex_raw_create()
 var _observation_state = SchedulerExecutionObservationStateV1(
     nonce_counter: 0x5343484544455649u64, exhausted: false, observations: [])
@@ -160,11 +178,14 @@ fn _consume_index(index: i64):
         argv_file_bindings: [], exit_code: 0,
         exited: false, reaped: false, delivered: false, consumed: true,
         stdout_bytes: [], stderr_bytes: [], stdout_truncated: false,
-        stderr_truncated: false)
+        stderr_truncated: false, output_capture_protected: false,
+        output_capture_ticket: 0u64, output_capture_pending: [],
+        stdout_capture_failed: false, stderr_capture_failed: false)
 
 fn _reserve_observation_locked(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
-    command_observed: bool, executable_path: text, argv: [text]
+    command_observed: bool, executable_path: text, argv: [text],
+    output_capture_protected: bool
 ) -> SchedulerExecutionObservationHandleV1?:
     if _observation_state.exhausted or _live_child_index(child_id) >= 0:
         return nil
@@ -207,7 +228,10 @@ fn _reserve_observation_locked(
         executable_path: executable_path, argv: argv,
         argv_file_bindings: [], exit_code: 0, exited: false,
         reaped: false, delivered: false, consumed: false, stdout_bytes: [], stderr_bytes: [],
-        stdout_truncated: false, stderr_truncated: false)
+        stdout_truncated: false, stderr_truncated: false,
+        output_capture_protected: output_capture_protected,
+        output_capture_ticket: 0u64, output_capture_pending: [],
+        stdout_capture_failed: false, stderr_capture_failed: false)
     if reusable >= 0: _observation_state.observations[reusable] = fresh
     else: _observation_state.observations.push(fresh)
     Some(SchedulerExecutionObservationHandleV1(
@@ -215,7 +239,7 @@ fn _reserve_observation_locked(
 
 pub(package) fn scheduler_execution_observe_adoption_handle_with_launch_v1(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
-    launch: ExecutableLaunchArgumentsV1
+    launch: ExecutableLaunchArgumentsV1, output_capture_protected: bool = false
 ) -> SchedulerExecutionObservationHandleV1?:
     # `executable_path` and `argv` are the scheduler-validated, independently
     # owned launch values.  This owner never accepts a post-execution command
@@ -231,16 +255,17 @@ pub(package) fn scheduler_execution_observe_adoption_handle_with_launch_v1(
        image.mount_generation == 0u64 or not _lock():
         return nil
     val handle = _reserve_observation_locked(
-        child_id, parent_id, image, true, owned_launch.path, owned_launch.argv)
+        child_id, parent_id, image, true, owned_launch.path, owned_launch.argv,
+        output_capture_protected and image.target.os == "simpleos" and image.target.arch == "x86_64")
     if not _unlock(): return nil
     handle
 
 pub(package) fn scheduler_execution_observe_adoption_with_launch_v1(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
-    launch: ExecutableLaunchArgumentsV1
+    launch: ExecutableLaunchArgumentsV1, output_capture_protected: bool = false
 ) -> bool:
     scheduler_execution_observe_adoption_handle_with_launch_v1(
-        child_id, parent_id, image, launch).is_some()
+        child_id, parent_id, image, launch, output_capture_protected).is_some()
 
 pub(package) fn scheduler_execution_attach_argv_file_bindings_v1(
     token: SchedulerExecutionEvidenceTokenV1,
@@ -297,7 +322,7 @@ pub(package) fn scheduler_execution_observe_adoption_handle_v1(
     if child_id == 0u64 or image.image_hash == "" or image.mount_generation == 0u64 or not _lock():
         return nil
     val handle = _reserve_observation_locked(
-        child_id, parent_id, image, false, "", [])
+        child_id, parent_id, image, false, "", [], false)
     if not _unlock(): return nil
     handle
 
@@ -313,6 +338,132 @@ pub(package) fn scheduler_execution_observation_handle_for_child_v1(child_id: u6
     val result = if index >= 0: Some(_handle_at(index)) else: nil
     if not _unlock(): return nil
     result
+
+# @allow(primitive_api) scheduler output boundary: native task identity and stream selector issue a typed generation-bound capture lease
+pub(package) fn scheduler_execution_output_capture_begin_v1(
+    child_id: u64, stderr: bool
+) -> Result<SchedulerOutputCaptureLeaseV1?, text>:
+    """Reserve uncertainty before output; Err forbids emission, Ok(nil) is unobserved.
+
+    A lease survives append/finalization lock failures. Its per-write byte count
+    must reconcile with the real backend result before evidence can be complete.
+    """
+    if child_id == 0u64: return Err("invalid output caller")
+    if not _lock(): return Err("output observation serialization unavailable")
+    val index = _live_child_index(child_id)
+    if index < 0:
+        if not _unlock(): return Err("output observation unlock failed")
+        return Ok(nil)
+    val observed = _observation_state.observations[index]
+    if observed.exited or observed.reaped or observed.delivered or
+       observed.output_capture_pending.len() >= OUTPUT_CAPTURE_LEASE_LIMIT_V1 or
+       observed.output_capture_ticket == 0xFFFFFFFFFFFFFFFFu64:
+        _ = _unlock()
+        return Err("output observation cannot reserve a write")
+    if (stderr and observed.stderr_capture_failed) or
+       (not stderr and observed.stdout_capture_failed):
+        _ = _unlock()
+        return Err("output stream capture previously failed")
+    # One in-flight write per stream preserves HAL byte order even if a task
+    # switches between emission and batch commit. The other stream is independent.
+    for pending in observed.output_capture_pending:
+        if pending.stderr == stderr:
+            _ = _unlock()
+            return Err("output stream capture already pending")
+    val ticket = observed.output_capture_ticket + 1u64
+    _observation_state.observations[index].output_capture_ticket = ticket
+    _observation_state.observations[index].output_capture_pending.push(
+        SchedulerOutputCapturePendingV1(ticket: ticket, stderr: stderr, reported_bytes: 0u64))
+    val lease = SchedulerOutputCaptureLeaseV1(
+        observation: _handle_at(index), ticket: ticket, stderr: stderr)
+    if not _unlock(): return Err("output observation reservation unlock failed")
+    Ok(Some(lease))
+
+fn _capture_pending_index_locked(index: i64, lease: SchedulerOutputCaptureLeaseV1) -> i64:
+    var i = 0
+    while i < _observation_state.observations[index].output_capture_pending.len():
+        val pending = _observation_state.observations[index].output_capture_pending[i]
+        if pending.ticket == lease.ticket and pending.stderr == lease.stderr: return i
+        i = i + 1
+    -1
+
+# @allow(primitive_api) HAL byte boundary: accepted-prefix count is checked against the bounded emitted-byte batch
+pub(package) fn scheduler_execution_output_capture_append_v1(
+    lease: SchedulerOutputCaptureLeaseV1, bytes: [u8], count: i64
+) -> i64:
+    if count < 0 or count > bytes.len() or not _lock(): return -1
+    val index = _handle_index(lease.observation)
+    if index < 0:
+        _ = _unlock()
+        return -1
+    val pending_index = _capture_pending_index_locked(index, lease)
+    if pending_index < 0 or _observation_state.observations[index].exited:
+        _ = _unlock()
+        return -1
+    val prior = _observation_state.observations[index].output_capture_pending[pending_index].reported_bytes
+    if (count as u64) > 0xFFFFFFFFFFFFFFFFu64 - prior:
+        _ = _unlock()
+        return -1
+    _observation_state.observations[index].output_capture_pending[pending_index].reported_bytes = prior + (count as u64)
+    var retained = 0
+    while retained < count:
+        if lease.stderr:
+            if _observation_state.observations[index].stderr_bytes.len() >= STDERR_LIMIT: break
+            _observation_state.observations[index].stderr_bytes.push(bytes[retained])
+        else:
+            if _observation_state.observations[index].stdout_bytes.len() >= STDOUT_LIMIT: break
+            _observation_state.observations[index].stdout_bytes.push(bytes[retained])
+        retained = retained + 1
+    if retained < count:
+        if lease.stderr: _observation_state.observations[index].stderr_truncated = true
+        else: _observation_state.observations[index].stdout_truncated = true
+    if not _unlock(): return -1
+    retained
+
+# @allow(primitive_api) POSIX write-result boundary: exact native emitted-byte count reconciles the typed owner lease
+pub(package) fn scheduler_execution_output_capture_finish_v1(
+    lease: SchedulerOutputCaptureLeaseV1, emitted_bytes: u64
+) -> bool:
+    """Close only this write's lease; mismatch permanently poisons its stream.
+
+    Failure to acquire leaves pending uncertainty. Once committed, counted byte
+    equality is authoritative even if the caller loses the unlock acknowledgement.
+    Callers always return the backend's actual write count unchanged.
+    """
+    if not _lock(): return false
+    val index = _handle_index(lease.observation)
+    if index < 0:
+        _ = _unlock()
+        return false
+    val pending_index = _capture_pending_index_locked(index, lease)
+    if pending_index < 0:
+        _ = _unlock()
+        return false
+    val complete = _observation_state.observations[index].output_capture_pending[pending_index].reported_bytes == emitted_bytes
+    if not complete:
+        if lease.stderr: _observation_state.observations[index].stderr_capture_failed = true
+        else: _observation_state.observations[index].stdout_capture_failed = true
+    var remaining: [SchedulerOutputCapturePendingV1] = []
+    var i = 0
+    while i < _observation_state.observations[index].output_capture_pending.len():
+        if i != pending_index:
+            remaining.push(_observation_state.observations[index].output_capture_pending[i])
+        i = i + 1
+    _observation_state.observations[index].output_capture_pending = remaining
+    if not _unlock(): return false
+    complete
+
+fn _output_capture_complete_locked(index: i64, stderr: bool) -> bool:
+    if not _observation_state.observations[index].output_capture_protected: return false
+    if stderr:
+        if _observation_state.observations[index].stderr_capture_failed or
+           _observation_state.observations[index].stderr_truncated: return false
+    else:
+        if _observation_state.observations[index].stdout_capture_failed or
+           _observation_state.observations[index].stdout_truncated: return false
+    for pending in _observation_state.observations[index].output_capture_pending:
+        if pending.stderr == stderr: return false
+    true
 
 pub(package) fn scheduler_execution_cancel_adoption_handle_v1(
     handle: SchedulerExecutionObservationHandleV1
@@ -372,15 +523,25 @@ pub(package) fn scheduler_execution_observe_stdout_batch_for_handle_v1(
 pub(package) fn scheduler_execution_observe_stderr_byte_for_handle_v1(
     handle: SchedulerExecutionObservationHandleV1, byte: u8
 ) -> bool:
-    if not _lock(): return false
+    scheduler_execution_observe_stderr_batch_for_handle_v1(handle, [byte], 1) == 1
+
+pub(package) fn scheduler_execution_observe_stderr_batch_for_handle_v1(
+    handle: SchedulerExecutionObservationHandleV1, bytes: [u8], count: i64
+) -> i64:
+    """Commit an emitted stderr prefix under the same bounds as stdout."""
+    if count < 0 or count > bytes.len() or not _lock(): return -1
     val index = _handle_index(handle)
-    var accepted = false
+    var accepted = -1
     if index >= 0 and not _observation_state.observations[index].exited:
-        if _observation_state.observations[index].stderr_bytes.len() < STDERR_LIMIT:
-            _observation_state.observations[index].stderr_bytes.push(byte)
-            accepted = true
-        else: _observation_state.observations[index].stderr_truncated = true
-    if not _unlock(): return false
+        accepted = 0
+        var i = 0
+        while i < count and _observation_state.observations[index].stderr_bytes.len() < STDERR_LIMIT:
+            _observation_state.observations[index].stderr_bytes.push(bytes[i])
+            accepted = accepted + 1
+            i = i + 1
+        if accepted < count:
+            _observation_state.observations[index].stderr_truncated = true
+    if not _unlock(): return -1
     accepted
 
 pub(package) fn scheduler_execution_active_generation_v1(child_id: u64) -> u64:
@@ -559,7 +720,9 @@ pub fn scheduler_execution_evidence_consume_once_v1(token: SchedulerExecutionEvi
         argv_file_bindings: observed.argv_file_bindings,
         exit_code: observed.exit_code,
         stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
-        stdout_truncated: observed.stdout_truncated, stderr_truncated: observed.stderr_truncated)
+        stdout_truncated: observed.stdout_truncated, stderr_truncated: observed.stderr_truncated,
+        stdout_capture_complete: _output_capture_complete_locked(index, false),
+        stderr_capture_complete: _output_capture_complete_locked(index, true))
     _consume_index(index)
     if not _unlock(): return nil
     Some(evidence)
@@ -591,7 +754,9 @@ pub fn scheduler_execution_evidence_consume_once_v2(
         exit_code: observed.exit_code, stdout_bytes: observed.stdout_bytes,
         stderr_bytes: observed.stderr_bytes,
         stdout_truncated: observed.stdout_truncated,
-        stderr_truncated: observed.stderr_truncated)
+        stderr_truncated: observed.stderr_truncated,
+        stdout_capture_complete: _output_capture_complete_locked(index, false),
+        stderr_capture_complete: _output_capture_complete_locked(index, true))
     _consume_index(index)
     if not _unlock(): return nil
     Some(evidence)
