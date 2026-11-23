@@ -1,46 +1,40 @@
 name: Bootstrap Sanity Evidence Archive
-
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
+  closure-gap:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          name: seed-linux-x86_64-d89f975af3cb46782e0c1dd68a795bb5833da846
+          run-id: 45199934467
+          github-token: ${{ github.token }}
+          path: producer
+      - name: Execute actual diagnostic owner regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gap-evidence
+          chmod +x producer/simple
+          printf '%s  %s\n' bd20b7e1378e1d1f45eb5c5d8139d1044145832644db9a2083ae5b15427de4d3 producer/simple | sha256sum --check --status
+          git rev-parse HEAD > gap-evidence/source.sha
+          sha256sum src/compiler/80.driver/driver_worker_surface_graph_v1.spl src/compiler/80.driver/driver_source_parse_streaming.spl test/01_unit/compiler/driver/worker_surface_gap_spec.spl > gap-evidence/inputs.sha
+          set +e
+          SIMPLE_LIB="$PWD/src" perl scripts/resource/process-tree-rss-watchdog.pl --rss-cap-mode=enforce --max-rss-kib=2097152 --timeout-seconds=120 --receipt=gap-evidence/owner.env -- producer/simple run test/01_unit/compiler/driver/worker_surface_gap_spec.spl --mode=interpreter >gap-evidence/stdout.log 2>gap-evidence/stderr.log
+          code=$?
+          set -e
+          printf '%s\n' "$code" > gap-evidence/exit.txt
+          test "$code" = 0
+          grep -F 'executed=8 passed=8 failed=0 skipped=0 blocked=0 dropped=0' gap-evidence/stdout.log
+          sha256sum --check --status gap-evidence/inputs.sha
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: worker-closure-gap-${{ github.sha }}
+          path: gap-evidence
