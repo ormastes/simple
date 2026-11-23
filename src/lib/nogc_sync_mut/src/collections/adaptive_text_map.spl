@@ -18,7 +18,8 @@ class AdaptiveTextMap:
     profile: AdaptiveSetProfile
     attribute: AdaptiveSetAttribute
     algorithm: AdaptiveSetAlgorithm
-    linear_entries: [OrderedTextEntry]
+    linear_keys: [text]
+    linear_values: [text]
     hash_entries: HashMap
     ordered_entries: OrderedTextSet
     site_id: text
@@ -52,7 +53,8 @@ class AdaptiveTextMap:
             profile: adaptive_set_normalize_profile(profile),
             attribute: AdaptiveSetAttribute.Auto,
             algorithm: AdaptiveSetAlgorithm.Linear,
-            linear_entries: [], hash_entries: HashMap.with_capacity(1),
+            linear_keys: [], linear_values: [],
+            hash_entries: HashMap.new(),
             ordered_entries: OrderedTextSet.new(),
             site_id: site_id, target_profile_id: target_profile_id,
             size: 0, observed_peak_size: 0, observed_lookups: 0,
@@ -168,18 +170,28 @@ class AdaptiveTextMap:
     fn storage_get(key: text) -> text?:
         match self.algorithm:
             case AdaptiveSetAlgorithm.Linear:
-                for entry in self.linear_entries:
-                    if entry.key == key:
-                        return Some(entry.value)
+                val n = self.linear_keys.len()
+                var i = 0
+                while i < n:
+                    if self.linear_keys[i] == key:
+                        return Some(self.linear_values[i])
+                    i = i + 1
             case AdaptiveSetAlgorithm.Hash:
                 return self.hash_entries.get(key)
             case AdaptiveSetAlgorithm.Ordered:
                 return self.ordered_entries.get_value(key)
-        nil
+        None
 
     fn storage_entries() -> [OrderedTextEntry]:
         match self.algorithm:
-            case AdaptiveSetAlgorithm.Linear: return self.linear_entries
+            case AdaptiveSetAlgorithm.Linear:
+                var entries: [OrderedTextEntry] = []
+                val n = self.linear_keys.len()
+                var i = 0
+                while i < n:
+                    entries.push(OrderedTextEntry(key: self.linear_keys[i], value: self.linear_values[i]))
+                    i = i + 1
+                return entries
             case AdaptiveSetAlgorithm.Ordered: return self.ordered_entries.entries()
             case AdaptiveSetAlgorithm.Hash:
                 var entries: [OrderedTextEntry] = []
@@ -189,11 +201,20 @@ class AdaptiveTextMap:
         []
 
     fn snapshot_keys_unmeasured() -> [text]:
-        var result: [text] = []
-        for entry in self.storage_entries():
-            result.push(entry.key)
-        result.sort()
-        result
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Ordered:
+                return self.ordered_entries.keys()
+            case AdaptiveSetAlgorithm.Linear:
+                var result: [text] = []
+                for key in self.linear_keys:
+                    result.push(key)
+                result.sort()
+                return result
+            case AdaptiveSetAlgorithm.Hash:
+                var result = self.hash_entries.keys()
+                result.sort()
+                return result
+        []
 
     fn keys() -> [text]:
         if self.site_id != "":
@@ -207,8 +228,15 @@ class AdaptiveTextMap:
         if self.algorithm == AdaptiveSetAlgorithm.Ordered:
             return self.ordered_entries.entries()
         var sorted = OrderedTextSet.new()
-        for entry in self.storage_entries():
-            sorted.put_value(entry.key, entry.value)
+        if self.algorithm == AdaptiveSetAlgorithm.Linear:
+            val n = self.linear_keys.len()
+            var i = 0
+            while i < n:
+                sorted.put_value(self.linear_keys[i], self.linear_values[i])
+                i = i + 1
+        else:
+            for pair in self.hash_entries.entries():
+                sorted.put_value(pair[0], pair[1])
         sorted.entries()
 
     me get(key: text) -> text?:
@@ -216,13 +244,16 @@ class AdaptiveTextMap:
         self.lookups_since_switch = self.lookups_since_switch + 1
         self.promote_if_useful()
         self.last_linear_lookup_comparisons = 0
-        var found: text? = nil
+        var found: text? = None
         if self.algorithm == AdaptiveSetAlgorithm.Linear:
-            for entry in self.linear_entries:
+            val n = self.linear_keys.len()
+            var i = 0
+            while i < n:
                 self.last_linear_lookup_comparisons = self.last_linear_lookup_comparisons + 1
-                if entry.key == key:
-                    found = Some(entry.value)
+                if self.linear_keys[i] == key:
+                    found = Some(self.linear_values[i])
                     break
+                i = i + 1
         elif self.algorithm == AdaptiveSetAlgorithm.Hash and
                 (self.site_id != "" or self.attribute == AdaptiveSetAttribute.Auto):
             val observed = self.hash_entries.get_observed(key)
@@ -235,16 +266,16 @@ class AdaptiveTextMap:
             self.observe_live_hash_lookup(observed.probes, observed.collisions)
         else:
             found = self.storage_get(key)
-        if found == nil:
+        if not found.?:
             self.observed_misses = self.observed_misses + 1
         else:
             self.observed_hits = self.observed_hits + 1
         if self.site_id != "":
-            collection_capture_note_lookup(self.site_id, self.target_profile_id, found != nil)
+            collection_capture_note_lookup(self.site_id, self.target_profile_id, found.?)
         found
 
     me contains_key(key: text) -> bool:
-        self.get(key) != nil
+        self.get(key).?
 
     me observe_live_hash_lookup(probes: i64, collisions: i64):
         if self.attribute != AdaptiveSetAttribute.Auto or
@@ -265,14 +296,20 @@ class AdaptiveTextMap:
         var inserted = false
         match self.algorithm:
             case AdaptiveSetAlgorithm.Linear:
-                var entries = self.linear_entries
-                for i in 0..entries.len():
-                    if entries[i].key == key:
-                        entries[i] = OrderedTextEntry(key: key, value: value)
-                        self.linear_entries = entries
+                var keys = self.linear_keys
+                var values = self.linear_values
+                val n = keys.len()
+                var i = 0
+                while i < n:
+                    if keys[i] == key:
+                        values[i] = value
+                        self.linear_values = values
                         return false
-                entries.push(OrderedTextEntry(key: key, value: value))
-                self.linear_entries = entries
+                    i = i + 1
+                keys.push(key)
+                values.push(value)
+                self.linear_keys = keys
+                self.linear_values = values
                 inserted = true
             case AdaptiveSetAlgorithm.Hash:
                 var hashed = self.hash_entries
@@ -294,15 +331,21 @@ class AdaptiveTextMap:
 
     me remove(key: text) -> text?:
         val previous = self.storage_get(key)
-        if previous == nil:
-            return nil
+        if not previous.?:
+            return None
         match self.algorithm:
             case AdaptiveSetAlgorithm.Linear:
-                var retained: [OrderedTextEntry] = []
-                for entry in self.linear_entries:
-                    if entry.key != key:
-                        retained.push(entry)
-                self.linear_entries = retained
+                var retained_keys: [text] = []
+                var retained_values: [text] = []
+                val n = self.linear_keys.len()
+                var i = 0
+                while i < n:
+                    if self.linear_keys[i] != key:
+                        retained_keys.push(self.linear_keys[i])
+                        retained_values.push(self.linear_values[i])
+                    i = i + 1
+                self.linear_keys = retained_keys
+                self.linear_values = retained_values
             case AdaptiveSetAlgorithm.Hash:
                 var hashed = self.hash_entries
                 hashed.remove(key)
@@ -318,8 +361,9 @@ class AdaptiveTextMap:
         previous
 
     me clear():
-        self.linear_entries = []
-        self.hash_entries = HashMap.with_capacity(1)
+        self.linear_keys = []
+        self.linear_values = []
+        self.hash_entries = HashMap.new()
         self.ordered_entries = OrderedTextSet.new()
         self.size = 0
         self.lookups_since_switch = 0
@@ -419,10 +463,18 @@ class AdaptiveTextMap:
                 not self.prefer_hash_from_profile:
             return
         var rebuilt = HashMap.with_capacity(self.size * 2 + 1)
-        for entry in self.storage_entries():
-            rebuilt.insert(entry.key, entry.value)
+        if self.algorithm == AdaptiveSetAlgorithm.Linear:
+            val n = self.linear_keys.len()
+            var i = 0
+            while i < n:
+                rebuilt.insert(self.linear_keys[i], self.linear_values[i])
+                i = i + 1
+        else:
+            for entry in self.ordered_entries.entries():
+                rebuilt.insert(entry.key, entry.value)
         self.hash_entries = rebuilt
-        self.linear_entries = []
+        self.linear_keys = []
+        self.linear_values = []
         self.ordered_entries = OrderedTextSet.new()
         self.algorithm = AdaptiveSetAlgorithm.Hash
         self.lookups_since_switch = 0
@@ -435,11 +487,19 @@ class AdaptiveTextMap:
             case AdaptiveSetAlgorithm.Linear: ()
             case AdaptiveSetAlgorithm.Hash: ()
         var rebuilt = OrderedTextSet.new()
-        for entry in self.storage_entries():
-            rebuilt.put_value(entry.key, entry.value)
+        if self.algorithm == AdaptiveSetAlgorithm.Linear:
+            val n = self.linear_keys.len()
+            var i = 0
+            while i < n:
+                rebuilt.put_value(self.linear_keys[i], self.linear_values[i])
+                i = i + 1
+        else:
+            for pair in self.hash_entries.entries():
+                rebuilt.put_value(pair[0], pair[1])
         self.ordered_entries = rebuilt
-        self.linear_entries = []
-        self.hash_entries = HashMap.with_capacity(1)
+        self.linear_keys = []
+        self.linear_values = []
+        self.hash_entries = HashMap.new()
         self.algorithm = AdaptiveSetAlgorithm.Ordered
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
@@ -457,8 +517,19 @@ class AdaptiveTextMap:
             case AdaptiveSetAlgorithm.Linear: return
             case AdaptiveSetAlgorithm.Hash: ()
             case AdaptiveSetAlgorithm.Ordered: ()
-        self.linear_entries = self.storage_entries()
-        self.hash_entries = HashMap.with_capacity(1)
+        var keys: [text] = []
+        var values: [text] = []
+        if self.algorithm == AdaptiveSetAlgorithm.Hash:
+            for pair in self.hash_entries.entries():
+                keys.push(pair[0])
+                values.push(pair[1])
+        else:
+            for entry in self.ordered_entries.entries():
+                keys.push(entry.key)
+                values.push(entry.value)
+        self.linear_keys = keys
+        self.linear_values = values
+        self.hash_entries = HashMap.new()
         self.ordered_entries = OrderedTextSet.new()
         self.algorithm = AdaptiveSetAlgorithm.Linear
         self.lookups_since_switch = 0

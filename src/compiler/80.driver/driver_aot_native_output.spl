@@ -2408,6 +2408,16 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
         case Err(e):
             return CompileResult.CodegenError(e)
 
+# Staged native codegen BuildCache reuse slot: kept in a 1-element module-private
+# array inside this module so `BuildCache` never crosses a module boundary as a
+# class value and never triggers Stage-2 `None`-global assignment lowering bugs.
+var _staged_active_build_cache_slot_v1: [BuildCache] = []
+var _staged_active_build_cache_path_v1: text = ""
+
+fn _clear_staged_active_build_cache_v1():
+    _staged_active_build_cache_slot_v1 = []
+    _staged_active_build_cache_path_v1 = ""
+
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
         log_phase("aot:native_entry")
@@ -2583,10 +2593,16 @@ impl CompilerDriver:
         # merely hid safe reusable objects before their witness could be read.
         # The closure digest remains comparison/diagnostic metadata.
         val cache_scope_root = base_cache_scope_root
+        val clean_requested = (env_get_nullable("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1"
+        if not self.native_staged_codegen.active or
+                self.native_staged_codegen.batches_flushed == 0 or
+                self.native_staged_codegen.modules_flushed == 0 or
+                clean_requested:
+            _clear_staged_active_build_cache_v1()
         # --clean requested a clean build: drop this entry's cache scope so no
         # previously compiled object in this scope can be reused. Consume the
         # flag (clear the env) so it applies to this build only.
-        if (env_get_nullable("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1":
+        if clean_requested:
             if not _sffi_dir_remove_all(base_cache_scope_root):
                 return CompileResult.CodegenError(
                     "native-build failed to remove clean cache scope {base_cache_scope_root}")
@@ -2616,7 +2632,13 @@ impl CompilerDriver:
                 "native-build failed to write cache ownership marker")
         val cache_path = driver_native_build_cache_path(cache_dir)
         val object_base = _sffi_path_join(cache_scope_root, "object")
-        var build_cache: BuildCache = BuildCache.load(cache_path)
+        var build_cache: BuildCache = if (self.native_staged_codegen.active and
+                _staged_active_build_cache_slot_v1.len() == 1 and
+                _staged_active_build_cache_path_v1 == cache_path):
+            _staged_active_build_cache_slot_v1[0]
+        else:
+            BuildCache.load(cache_path)
+        _clear_staged_active_build_cache_v1()
         # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
         val phase2_compatibility_manifest: PhaseCompatibilityManifestV1? =
             driver_load_phase2_compatibility_manifest_v1()
@@ -3416,8 +3438,11 @@ impl CompilerDriver:
             build_cache.save_entries()
         else:
             build_cache.save()
+            _clear_staged_active_build_cache_v1()
         log_phase("aot:native_compile:cache_save:done")
         if staged_flushing:
+            _staged_active_build_cache_slot_v1 = [build_cache]
+            _staged_active_build_cache_path_v1 = cache_path
             # Non-final staged batch: hand back everything the final verdict
             # and link need. No verdict, ledger, manifest or link here -- a
             # failed module stays recorded in module_outcomes and blocks the
