@@ -3917,3 +3917,47 @@ fn test_string_split_limit_matches_interpreter_bounded_split() {
     assert_eq!(split_limit_parts("é✓日", "", 3), ["é", "✓", "日"]);
     assert_eq!(split_limit_parts("é✓日", "", 1), ["é✓日"]);
 }
+
+
+/// Duplicate tracking must retain O(1) indexed ownership during graph adoption,
+/// including a second adoption and an address removed before scope completion.
+#[test]
+fn bsm_p1_adopt_ambiguous_index_preserves_ownership() {
+    let session = super::rt_session_heap_begin();
+    assert_ne!(session, 0);
+    assert!(super::rt_transient_array_scope_begin());
+    let root = super::rt_array_new(0);
+    let discarded = super::rt_array_new(0);
+    let freed = super::rt_array_new(0);
+    super::rt_array_free(freed);
+    assert!(!bsm_p1_live(freed));
+    let n: usize = std::env::var("BSM_ADOPT_AMBIGUOUS_N")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(256);
+    for i in 0..n {
+        let child = super::rt_array_new(0);
+        assert!(super::rt_array_push(child, RuntimeValue::from_int(i as i64)));
+        // Real duplicate entries trigger the exact production ambiguous case.
+        super::track_transient_heap(child);
+        assert!(super::rt_array_push(root, child));
+    }
+    super::track_transient_heap(root);
+    assert!(super::rt_transient_array_scope_pause());
+    let started = std::time::Instant::now();
+    assert!(super::rt_transient_heap_adopt(root));
+    eprintln!("bsm-bench: pattern=ambiguous_adopt n={} wall_us={}", n, started.elapsed().as_micros());
+    assert!(super::session_heap_owns(root));
+    assert!(super::rt_transient_heap_adopt(root));
+    assert_eq!(super::session_adopt_visits_debug(), 1, "already adopted root must prune");
+    assert!(!super::session_heap_owns(discarded));
+    assert!(super::rt_transient_array_scope_end());
+    assert!(!bsm_p1_live(discarded));
+    assert_eq!(super::rt_array_len(root), n as i64);
+    for i in 0..n {
+        let child = super::rt_array_get(root, i as i64);
+        assert!(super::session_heap_owns(child));
+        assert_eq!(super::rt_array_get(child, 0).as_int(), i as i64);
+    }
+    let first = super::rt_array_get(root, 0);
+    assert!(super::rt_session_heap_end(session));
+    assert!(!bsm_p1_live(root) && !bsm_p1_live(first));
+}
