@@ -1576,7 +1576,13 @@ bootstrap_lock_handle=
 rust_target_lock_handle=
 rust_shared_cache_lock_handle=
 rust_shared_cache_root=
-rust_shared_cache_common_dir=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || exit 1
+# platform-detect.shs is sourced later; this mirrors its windows test so the
+# lock domain is known before ${os} exists (set -u aborted here otherwise).
+rust_lock_domain_os=${SIMPLE_TARGET_OS:-}
+if [ -z "${rust_lock_domain_os}" ]; then
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*|Windows*) rust_lock_domain_os=windows ;; *) rust_lock_domain_os=posix ;; esac
+fi
+rust_shared_cache_common_dir=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${rust_lock_domain_os}") || exit 1
 if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
   rust_shared_cache_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
     "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT}" "${repo_root}") || exit 1
