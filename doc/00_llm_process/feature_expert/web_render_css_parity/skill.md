@@ -4004,3 +4004,31 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Open, deferred (needs refcount/ownership):**
   - `val blob = self.selected_outline_blob` copies a 410 K-element font blob in `horizontal_kern_milli` / `get_glyph_advance_milli`.
   - `var out = fb` re-binds parameters in `fb_fill_rows_const`.
+
+## 2026-11-24 — PPM encode and readback checksum reuse repeated rows (perf, byte-identical)
+
+- **Where the time went (4x css-layout, interpreter):** `encode_ppm_p6` took 6.7 s and the final readback checksum took 3.6 s. Measured on real 4x frames: about half the rows equal the row above, and 62 % of mixed 64-px blocks equal the block above. Only about 8 % of pixels are fresh mixed pixels.
+- **Encode:** each row is built in a row buffer that still holds the previous row.
+  - A repeated row is re-copied with one `write_span`.
+  - A block equal to the block above is already in the buffer.
+  - Flat rows and flat blocks are pattern spans.
+  - Fresh mixed blocks use `for p in seg` with three stores per pixel (cheaper than indexed reads).
+- **Checksum:** `engine2d_pixel_checksum(pixels, row_len)` sums per row and per 256-px block, all exact.
+  - A repeated row or a block equal to the one above reuses its earlier sum.
+  - A flat block is value × count.
+  - `CpuBackend` and `SoftwareBackend.read_pixels_with_source` pass the width. Other callers fall back to 256-px rows.
+- **Trap — packed `[u32]` frames:** the seed stores big `[u32]` arrays packed (`ArrayStore::Packed`).
+  - `.slice`, `.min`, `.max` and `==` on one go through `Deref`, which materializes and caches a boxed `Vec<Value>` view of the whole frame: +0.7 GB peak RSS at 4x.
+  - Only indexing, `for` iteration and `write_span` are packed-aware.
+  - Copy the row out with `row.write_span(pixels, 0, off, n)`, then slice the local row.
+  - The old encode already sliced the frame; that was its 1.2 GB transient.
+- **Trap — `[u32].sum()` returns 0 under the interpreter**, but the right value under the JIT. Bug: `doc/08_tracking/bug/interp_unsigned_array_sum_returns_zero_2026-11-23.md`. Once fixed, the checksum drops to about 45 ms.
+- **Pins on the 3600x3040 fixture (base 1d407c5f2dd):**
+  - `ppm_encode_frame_rows_spec`: 7.9 -> 3.4 s (budget 5.5 s); bytes are hash-pinned and equal a per-pixel reference on a small frame.
+  - `readback_checksum_frame_rows_spec`: cpu 3.5 -> 0.9 s (budget 1.8 s), generic 3.4 -> 1.5 s (budget 2.6 s); equal to the per-pixel sum including 0xFFFFFFFF pixels and partial rows.
+- **Page wall (3 alternated rounds, medians, on 77244eef35a):**
+  - 4x css-layout: 27.9 -> 21.3 s
+  - 4x html: 31.5 -> 25.5 s
+  - 4x tab-bar: 10.8 -> 7.3 s
+  - 1x css-layout: 13.6 -> 13.3 s
+  - Peak RSS for 4x css-layout: 2.965 GB on both sides.
