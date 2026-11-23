@@ -1722,15 +1722,7 @@ fn find_stage4_objcopy_tool(target: simple_common::target::Target) -> Option<Str
     if target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
     {
-        for tool in ["x86_64-w64-mingw32-objcopy", "objcopy"] {
-            if let Ok(version) = std::process::Command::new(tool).arg("--version").output() {
-                let stdout = String::from_utf8_lossy(&version.stdout);
-                if version.status.success() && (stdout.contains("GNU objcopy") || stdout.contains("GNU Binutils")) {
-                    return Some(tool.to_string());
-                }
-            }
-        }
-        return None;
+        return super::coff_partial_link::gnu_tool(&["x86_64-w64-mingw32-objcopy", "objcopy"], "objcopy");
     }
     find_objcopy_tool()
 }
@@ -1739,14 +1731,7 @@ fn find_stage4_nm_tool(target: simple_common::target::Target) -> Option<String> 
     if target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
     {
-        for tool in ["x86_64-w64-mingw32-nm", "nm"] {
-            if let Ok(version) = std::process::Command::new(tool).arg("--version").output() {
-                let stdout = String::from_utf8_lossy(&version.stdout);
-                if version.status.success() && (stdout.contains("GNU nm") || stdout.contains("GNU Binutils")) {
-                    return Some(tool.to_string());
-                }
-            }
-        }
+        return super::coff_partial_link::gnu_tool(&["x86_64-w64-mingw32-nm", "nm"], "nm");
     }
     None
 }
