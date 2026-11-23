@@ -1,0 +1,109 @@
+"""
+## Purpose and audience
+Purpose: hand over two Chrome 159 facts about what follows an auto-width
+`<button>` that the button-width lane could not fix in its own scope.
+Audience: maintainers of the web text pen (device scale) and button layout.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--window-size=400,300`, `--force-device-scale-factor=1` and `=4`, body
+`16px/1.5 'Liberation Sans'`, default UA button); the same five 30 px rows as
+`button_follower_device_width_chrome159_spec.spl` (`Go` + `ace`, `Go`
+`Submit`, `Go` + space + `ace`, `Go` + space + `OK`, `Submit` `Go` + `ace`).
+An ink run is a span of columns darker than 160 in every channel.
+
+1. Text after a button at k = 4 starts at the exact pen: the `ace` run starts
+   at device column 138 (row 0), 156 (row 2) and 368 (row 4); here 139 / 155 /
+   367. Cause: layout records the run's pen origin (`pen-origin-milli` -220
+   after `Go`), but the device-scale pass leaves it in CSS milli-px and the
+   LCD pen-phase path that applies it is skipped above
+   `FONT_LCD_MAX_SIZE_PX` (48 device px; 16 px text is 64 at k = 4), so the
+   run starts at k x its whole-CSS-px pen. Belongs with the 4x word-pen lane
+   (draw_ir_device_scale / font_renderer).
+2. At k = 1 Chrome snaps each button edge from its fractional pen: `Submit`
+   (57.48 px) paints columns 0-56 and a `Go` after it starts at 57 (row 4:
+   runs 0-0 2-54 56-57 59-88 ...); after `Go`, `Submit` ends at column 90
+   (row 1). Here the button is ceil(label) + padding = 58 px wide (0-57, and
+   the next button's left border overlaps column 57; row 1 ends at 91). A
+   CSS-width change at k = 1, outside the k > 1 device-prop path.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CHROME-PAINT-001 -- text after a button at device scale 4 and a button's device scale 1 width, handed over.
+"""
+# @tag: unit, browser_engine, layout, form_control, device_scale, chrome159
+# @tag:in-development
+# Tracks: AC-1 red (text pen origin dropped at k>1 above 48 device px; 4x word-pen lane, draw_ir_device_scale + font_renderer); AC-2 red (k=1 button width is ceil(label)+padding, Chrome snaps both edges); delete this tag in the commit that turns both green.
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val BW_W: i32 = 400
+val BW_H: i32 = 160
+val BW_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans'}}div{{height:30px}}</style></head><body><div><button>Go</button>ace</div><div><button>Go</button><button>Submit</button></div><div><button>Go</button> ace</div><div><button>Go</button> <button>OK</button></div><div><button>Submit</button><button>Go</button>ace</div></body></html>"
+# Chrome k=4 ink runs of rows 0, 2, 4 up to the first text run.
+val BW_TEXT_ROWS: [i32] = [0, 2, 4]
+val BW_TEXT_K4: [[i32]] = [[0, 134, 138, 170], [0, 134, 156, 188], [0, 364, 368, 400]]
+# Chrome k=1 ink runs of rows 1 and 4.
+val BW_K1_ROWS: [i32] = [1, 4]
+val BW_K1: [[i32]] = [[0, 0, 2, 31, 33, 34, 36, 88, 90, 90], [0, 0, 2, 54, 56, 57, 59, 88, 90, 90, 92, 99, 101, 106, 109, 115]]
+
+fn bw_dark_col(px: [u32], dw: i32, x: i32, y0: i32, y1: i32) -> bool:
+    var y = y0
+    while y < y1:
+        val p = px[y * dw + x]
+        if ((p >> 16) & 255u32) < 160u32 and ((p >> 8) & 255u32) < 160u32 and (p & 255u32) < 160u32:
+            return true
+        y = y + 1
+    false
+
+# Ink runs of one 30 px row as start/end pairs (device px).
+fn bw_runs(px: [u32], k: i32, row: i32) -> [i32]:
+    val dw = BW_W * k
+    var out: [i32] = []
+    var prev = false
+    var x = 0
+    while x < dw:
+        val d = bw_dark_col(px, dw, x, row * 30 * k, (row + 1) * 30 * k)
+        if d and not prev:
+            out.push(x)
+        if not d and prev:
+            out.push(x - 1)
+        prev = d
+        x = x + 1
+    if prev:
+        out.push(dw - 1)
+    out
+
+fn bw_text(v: [i32]) -> text:
+    var s = ""
+    for n in v:
+        s = s + " {n}"
+    s
+
+# Rows whose first `want[r].len()` run bounds differ from `want[r]`.
+fn bw_prefix_mismatches(page: text, k: i32, rows: [i32], want: [[i32]]) -> i32:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, BW_W, BW_H, k, "cpu_simd")
+    if px.len() != BW_W * k * BW_H * k:
+        return 99
+    var bad = 0
+    var i = 0
+    while i < rows.len():
+        val got = bw_runs(px, k, rows[i])
+        val exp = want[i]
+        var ok = got.len() >= exp.len()
+        var j = 0
+        while ok and j < exp.len():
+            if got[j] != exp[j]:
+                ok = false
+            j = j + 1
+        if not ok:
+            print "k={k} row {rows[i]}: runs{bw_text(got)}, Chrome starts with{bw_text(exp)}"
+            bad = bad + 1
+        i = i + 1
+    bad
+
+describe "what follows an auto-width button (Chrome 159, handover)":
+    it "AC-1: text after a button starts at its exact pen at device scale 4":
+        expect(bw_prefix_mismatches(BW_PAGE, 4, BW_TEXT_ROWS, BW_TEXT_K4)).to_equal(0)
+
+    it "AC-2: a button's edges snap from its fractional pen at device scale 1":
+        expect(bw_prefix_mismatches(BW_PAGE, 1, BW_K1_ROWS, BW_K1)).to_equal(0)
