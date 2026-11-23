@@ -33,6 +33,7 @@ typedef uint64_t DevPtr;
 struct driver_table {
     void *lib;
     int (*Init)(unsigned); int (*DeviceGetCount)(int *); int (*DeviceGet)(int *,int);
+    int (*DeviceGetAttribute)(int *,int,int);
     int (*CtxCreate)(void **,unsigned,int); int (*CtxDestroy)(void *);
     int (*CtxPushCurrent)(void *); int (*CtxPopCurrent)(void **);
     int (*CtxSynchronize)(void);
@@ -104,6 +105,7 @@ static struct driver_table *load_driver_table(const char *path, char *err, size_
 #define LOAD(field,symbol) do { if (!missing) { *(void **)(&t->field) = lib_symbol(lib,symbol); \
         if (!t->field) missing = symbol; } } while (0)
     LOAD(Init,"cuInit"); LOAD(DeviceGetCount,"cuDeviceGetCount"); LOAD(DeviceGet,"cuDeviceGet");
+    LOAD(DeviceGetAttribute,"cuDeviceGetAttribute");
     LOAD(CtxCreate,"cuCtxCreate_v2"); LOAD(CtxDestroy,"cuCtxDestroy_v2");
     LOAD(CtxPushCurrent,"cuCtxPushCurrent_v2"); LOAD(CtxPopCurrent,"cuCtxPopCurrent_v2");
     LOAD(CtxSynchronize,"cuCtxSynchronize"); LOAD(ModuleLoadData,"cuModuleLoadData");
@@ -136,8 +138,22 @@ static struct {
     size_t bytes;
     int ready, submitted, context_fault;
 } state;
-static const char ptx[] =
-".version 6.0\n.target sm_61\n.address_size 64\n.visible .entry bitmap_and(.param .u64 a,.param .u64 b,.param .u64 o,.param .u32 n) {\n.reg .pred %p; .reg .b32 %r<7>; .reg .b64 %d<8>;\nld.param.u64 %d0,[a]; ld.param.u64 %d1,[b]; ld.param.u64 %d2,[o]; ld.param.u32 %r0,[n];\nmov.u32 %r1,%ctaid.x; mov.u32 %r2,%ntid.x; mov.u32 %r3,%tid.x; mad.lo.u32 %r4,%r1,%r2,%r3; setp.ge.u32 %p,%r4,%r0; @%p bra done;\nmul.wide.u32 %d3,%r4,4; add.u64 %d4,%d0,%d3; add.u64 %d5,%d1,%d3; add.u64 %d6,%d2,%d3; ld.global.u32 %r5,[%d4]; ld.global.u32 %r6,[%d5]; and.b32 %r5,%r5,%r6; st.global.u32 [%d6],%r5;\ndone: ret; }\n";
+/* The kernel uses only sm_20-level instructions. The JIT rejects a .target
+ * above the device's compute capability (CUDA_ERROR_INVALID_PTX, "SM version
+ * specified by .target is higher than default SM version"), and newer drivers
+ * drop the oldest targets, so pick the highest tier the device supports. */
+static const struct { int cc; const char *header; } ptx_tiers[] = {
+    {61, ".version 6.0\n.target sm_61\n"}, {50, ".version 4.0\n.target sm_50\n"},
+    {30, ".version 3.0\n.target sm_30\n"}, {20, ".version 3.0\n.target sm_20\n"},
+};
+static const char *ptx_header(int major, int minor) {
+    int cc = major * 10 + minor;
+    for (size_t i = 0; i < sizeof(ptx_tiers) / sizeof(ptx_tiers[0]); i++)
+        if (cc >= ptx_tiers[i].cc) return ptx_tiers[i].header;
+    return NULL;
+}
+static const char ptx_body[] =
+".address_size 64\n.visible .entry bitmap_and(.param .u64 a,.param .u64 b,.param .u64 o,.param .u32 n) {\n.reg .pred %p; .reg .b32 %r<7>; .reg .b64 %d<8>;\nld.param.u64 %d0,[a]; ld.param.u64 %d1,[b]; ld.param.u64 %d2,[o]; ld.param.u32 %r0,[n];\nmov.u32 %r1,%ctaid.x; mov.u32 %r2,%ntid.x; mov.u32 %r3,%tid.x; mad.lo.u32 %r4,%r1,%r2,%r3; setp.ge.u32 %p,%r4,%r0; @%p bra done;\nmul.wide.u32 %d3,%r4,4; add.u64 %d4,%d0,%d3; add.u64 %d5,%d1,%d3; add.u64 %d6,%d2,%d3; ld.global.u32 %r5,[%d4]; ld.global.u32 %r6,[%d5]; and.b32 %r5,%r5,%r6; st.global.u32 [%d6],%r5;\ndone: ret; }\n";
 
 static uint64_t new_handle(void) {
     uint64_t result = next_handle;
@@ -214,6 +230,17 @@ static int close_locked(void) {
     if (driver.CtxDestroy(state.context)) return UNCERTAIN;
     memset(&state,0,sizeof(state)); return OK;
 }
+/* Called with the new context current: JIT the kernel for device `dev`. */
+static int load_module(int dev) {
+    int major = 0, minor = 0;
+    if (driver.DeviceGetAttribute(&major, 75, dev) || driver.DeviceGetAttribute(&minor, 76, dev))
+        return 1; /* CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR/_MINOR */
+    const char *header = ptx_header(major, minor);
+    if (!header) return 1;
+    char text[sizeof(ptx_body) + 64];
+    snprintf(text, sizeof(text), "%s%s", header, ptx_body);
+    return driver.ModuleLoadData(&state.module, text);
+}
 static int32_t session_open(uint64_t backend,uint64_t device,uint64_t *out) {
     if (!out) return REJECTED;
     *out=0; pthread_mutex_lock(&mutex);
@@ -229,7 +256,7 @@ static int32_t session_open(uint64_t backend,uint64_t device,uint64_t *out) {
         *out=state.handle; result=UNCERTAIN; goto done;
     }
     *out=state.handle;
-    result = driver.ModuleLoadData(&state.module,ptx) ||
+    result = load_module(dev) ||
              driver.ModuleGetFunction(&state.function,state.module,"bitmap_and") ? UNCERTAIN : OK;
     result=leave(result); /* cuCtxCreate made our context current. */
     if (result && !state.context_fault && close_locked()==OK) { *out=0; result=REJECTED; }
