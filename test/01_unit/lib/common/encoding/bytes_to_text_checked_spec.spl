@@ -1,0 +1,34 @@
+"""bytes_to_text_checked: strict UTF-8 bytes -> text (owner decision 2026-11-23).
+
+Invalid UTF-8 is REJECTED with a precise CodecError: no U+FFFD, no raw-byte
+carrier. See doc/08_tracking/bug/bytes_to_text_rejects_invalid_utf8_2026-11-23.md.
+"""
+use std.spec
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked, CodecErrorKind}
+
+fn b2t_expect_invalid(bytes: [u8], offset: i64):
+    match bytes_to_text_checked(bytes):
+        case Err(error):
+            expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
+            expect(error.byte_offset).to_equal(offset)
+        case Ok(_): assert(false)
+
+describe "bytes_to_text_checked":
+    it "round-trips valid UTF-8 including NUL and 4-byte scalars":
+        # Non-empty first: a marshaling gap that yields "" must not pass as success.
+        val decoded = bytes_to_text_checked([65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8]).unwrap()
+        expect(decoded).to_equal("A\0🙂")
+        expect(text_to_utf8_bytes(decoded).len()).to_equal(6)
+        expect(bytes_to_text_checked(text_to_utf8_bytes("한é🙂")).unwrap()).to_equal("한é🙂")
+        expect(bytes_to_text_checked([]).unwrap()).to_equal("")
+
+    it "rejects invalid, overlong and surrogate UTF-8":
+        b2t_expect_invalid([65u8, 255u8], 1)
+        expect(bytes_to_text_checked([0xC0u8, 0x80u8]).unwrap_err().kind).to_equal(CodecErrorKind.InvalidUtf8)
+        expect(bytes_to_text_checked([0xEDu8, 0xA0u8, 0x80u8]).unwrap_err().kind).to_equal(CodecErrorKind.InvalidUtf8)
+
+    it "rejects a truncated final scalar":
+        match bytes_to_text_checked([0xF0u8, 0x9Fu8]):
+            case Err(error): expect(error.kind == CodecErrorKind.InvalidUtf8 or error.kind == CodecErrorKind.TruncatedInput).to_equal(true)
+            case Ok(_): assert(false)

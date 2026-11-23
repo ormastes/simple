@@ -1,0 +1,174 @@
+#!/bin/sh
+# resume-stage3-from-admitted.sh runs as its own process, so every helper its
+# Stage 3 sanity calls must come from the script itself or a file it sources —
+# never from bootstrap-from-scratch.sh. Two regressions this pins (2026-11-23,
+# doc/08_tracking/bug/resume_stage3_run_timeout_and_sanity_memory_reserve_2026-11-23.md):
+#   1. run_timeout lived only in bootstrap-from-scratch.sh; the resume's
+#      version / unsupported-command probes died with status 127.
+#   2. the sanity env scrub dropped SIMPLE_BUILD_MEMORY_RESERVE_BYTES, so the
+#      frontend smoke fell back to the compiler's 24 GiB reserve cap.
+# Runs the real bootstrap_stage_sanity extracted from the script, with the
+# frontend/hash helpers stubbed and a fake candidate; no build is started.
+#
+# Usage: resume-stage3-sanity-helpers-test.shs [--selftest-only] [SCRIPT]
+# Verdict (last stdout line): PASS — ... exit 0 / FAIL — ... exit 1 /
+# ERROR — nothing was checked exit 2. --selftest always runs first and is fatal.
+set -u
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+owner=$repo/scripts/bootstrap/bootstrap-from-scratch.sh
+selftest_only=0
+case "${1:-}" in --selftest-only) selftest_only=1; shift ;; esac
+target=${1:-$repo/scripts/bootstrap/resume-stage3-from-admitted.sh}
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/resume-sanity-helpers.XXXXXX") || exit 2
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+# Functions the bootstrap-from-scratch.sh closure owns (its own definitions
+# plus the shared run-timeout lib it sources).
+owner_functions() {
+    cat "$owner" "$repo/scripts/bootstrap/lib/run-timeout.shs" |
+        sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)() *[({].*/\1/p' | sort -u
+}
+
+# Files the script sources through "$root/...", at any indentation.
+sourced_files() {
+    sed -n 's/^[[:space:]]*\. "\$root\/\([^"]*\)".*/\1/p' "$1" | sort -u
+}
+
+# Census: an owner function used in command position by SCRIPT but defined
+# neither in SCRIPT nor in a file it sources.
+census() {
+    script=$1
+    { cat "$script"
+      for rel in $(sourced_files "$script"); do
+          [ -f "$repo/$rel" ] && cat "$repo/$rel"
+      done
+    } | sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)() *[({].*/\1/p' |
+        sort -u >"$scratch/defined"
+    grep -v '^[[:space:]]*#' "$script" >"$scratch/body"
+    for fn in $(owner_functions); do
+        grep -qx "$fn" "$scratch/defined" && continue
+        if grep -Eq "(^|[;&|({]|\\\$\\(|then|do|else)[[:space:]]*$fn([[:space:]]|\\)|\$)" "$scratch/body"; then
+            echo "$fn"
+        fi
+    done
+}
+
+# Dynamic: source the script's own top-level bootstrap libs, extract its
+# bootstrap_stage_sanity, and run it against a fake candidate.
+# $1 script, $2 case dir, $3 reserve mode: set:<value> | unset
+run_sanity() {
+    script=$1 dir=$2 mode=$3
+    mkdir -p "$dir/home" "$dir/tmp" "$dir/capture"
+    cat >"$dir/candidate" <<'CAND'
+#!/bin/sh
+case "$1" in
+  --version) echo 'simple-bootstrap 0.0.0-fixture'; exit 0 ;;
+  run) echo "error: unknown command 'run'" >&2; exit 1 ;;
+esac
+exit 2
+CAND
+    chmod +x "$dir/candidate"
+    awk '$0 == "bootstrap_stage_sanity() (" {f=1} f {print} f && /^\)$/ {exit}' \
+        "$script" >"$dir/sanity.shs"
+    grep -q '^bootstrap_stage_sanity() ($' "$dir/sanity.shs" || return 3
+    {
+        echo "root='$repo'"
+        for rel in $(sed -n 's/^\. "\$root\/\(scripts\/bootstrap\/lib\/[^"]*\)"$/\1/p' "$script"); do
+            echo ". \"\$root/$rel\""
+        done
+        cat <<STUBS
+stage2_backend=fixture
+reserve_record='$dir/reserve.txt'
+bootstrap_stage3_canonical_version() { echo 0.0.0-fixture; }
+bootstrap_stage3_hash_file() { cksum <"\$1" | awk '{print \$1}'; }
+bootstrap_stage3_hash_stream() { cksum | awk '{print \$1}'; }
+candidate_frontend_capture_setup() { CANDIDATE_FRONTEND_CAPTURE_PARENT='$dir/capture'; }
+candidate_frontend_pinned_smoke() {
+  printf '%s\n' "\${SIMPLE_BUILD_MEMORY_RESERVE_BYTES-<absent>}" >>"\$reserve_record"
+  : >"\$CANDIDATE_FRONTEND_STATUS_PATH"
+  return 0
+}
+STUBS
+        cat "$dir/sanity.shs"
+        case "$mode" in
+            set:*) echo "SIMPLE_BUILD_MEMORY_RESERVE_BYTES='${mode#set:}'; export SIMPLE_BUILD_MEMORY_RESERVE_BYTES" ;;
+            unset) echo "unset SIMPLE_BUILD_MEMORY_RESERVE_BYTES" ;;
+        esac
+        echo "bootstrap_stage_sanity '$dir/candidate' '$dir/evidence.env' '$dir/home' '$dir/tmp' \"\$PATH\""
+    } >"$dir/harness.sh"
+    (cd "$repo" && env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC \
+        sh "$dir/harness.sh") >"$dir/out.log" 2>&1
+}
+
+field() { sed -n "s/^$1=//p" "$2" | head -n 1; }
+
+# Prints one failure reason per line; empty output means the script passes.
+check_script() {
+    script=$1 base=$2
+    mkdir -p "$base"
+    for fn in $(census "$script"); do
+        echo "census: $fn is defined only in bootstrap-from-scratch.sh"
+    done
+    run_sanity "$script" "$base/set" set:2147483648; rc=$?
+    if [ "$rc" -eq 3 ]; then echo "bootstrap_stage_sanity not found"; return 0; fi
+    ev=$base/set/evidence.env
+    if [ ! -f "$ev" ]; then
+        echo "sanity wrote no evidence (rc=$rc): $(tail -n 2 "$base/set/out.log" | tr '\n' ' ')"
+    else
+        [ "$(field version_status "$ev")" = 0 ] ||
+            echo "version probe status $(field version_status "$ev") (127 = run_timeout missing)"
+        [ "$(field unsupported_status "$ev")" = 1 ] ||
+            echo "unsupported-command probe status $(field unsupported_status "$ev") (127 = run_timeout missing)"
+    fi
+    got=$(head -n 1 "$base/set/reserve.txt" 2>/dev/null)
+    [ "$got" = 2147483648 ] ||
+        echo "frontend smoke saw SIMPLE_BUILD_MEMORY_RESERVE_BYTES=${got:-<not run>}, want 2147483648"
+    run_sanity "$script" "$base/unset" unset
+    got=$(head -n 1 "$base/unset/reserve.txt" 2>/dev/null)
+    [ "$got" = '<absent>' ] ||
+        echo "unset reserve: frontend smoke saw ${got:-<not run>}, want absent"
+    run_sanity "$script" "$base/bad" set:12abc; rc=$?
+    [ "$rc" -eq 125 ] || echo "malformed reserve: sanity returned $rc, want 125"
+    return 0
+}
+
+selftest() {
+    ok=$repo/scripts/bootstrap/resume-stage3-from-admitted.sh
+    # Fixture A: the 2026-11-23 shape — no run-timeout lib sourced.
+    grep -v 'lib/run-timeout.shs"$' "$ok" >"$scratch/no-run-timeout.sh"
+    out=$(check_script "$scratch/no-run-timeout.sh" "$scratch/st-a")
+    case "$out" in *"census: run_timeout"*"127 = run_timeout missing"*) ;; *)
+        echo "selftest A: missing run_timeout not detected: $out"; return 1 ;; esac
+    # Fixture B: the scrub without the reserve re-export.
+    grep -v '^    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=\$sanity_memory_reserve$' "$ok" >"$scratch/no-reserve.sh"
+    out=$(check_script "$scratch/no-reserve.sh" "$scratch/st-b")
+    case "$out" in *"want 2147483648"*) ;; *)
+        echo "selftest B: dropped reserve not detected: $out"; return 1 ;; esac
+    # Fixture C: the released 842a5adeefe script, when the object is present.
+    if git -C "$repo" cat-file -e 842a5adeefe:scripts/bootstrap/resume-stage3-from-admitted.sh 2>/dev/null; then
+        git -C "$repo" show 842a5adeefe:scripts/bootstrap/resume-stage3-from-admitted.sh >"$scratch/old.sh"
+        out=$(check_script "$scratch/old.sh" "$scratch/st-c")
+        case "$out" in *"127 = run_timeout missing"*"want 2147483648"*) ;; *)
+            echo "selftest C: 842a5adeefe not detected as broken: $out"; return 1 ;; esac
+    fi
+    return 0
+}
+
+if ! selftest_msg=$(selftest); then
+    echo "$selftest_msg" >&2
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "$selftest_only" -eq 1 ]; then
+    echo "PASS — selftest fixtures detected both regressions"
+    exit 0
+fi
+[ -f "$target" ] || { echo "ERROR — nothing was checked (no $target)"; exit 2; }
+failures=$(check_script "$target" "$scratch/target")
+if [ -n "$failures" ]; then
+    printf '%s\n' "$failures" >&2
+    echo "FAIL — $(printf '%s\n' "$failures" | wc -l | tr -d ' ') problem(s) in ${target#$repo/}"
+    exit 1
+fi
+echo "PASS — 3 sanity runs + helper census checked in ${target#$repo/}"
+exit 0

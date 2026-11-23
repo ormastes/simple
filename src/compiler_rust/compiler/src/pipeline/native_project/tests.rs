@@ -5396,6 +5396,90 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
 }
 
+// Blocker 8 (doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md):
+// an ordinary GPU entry needs the Vulkan runtime and the provider registry,
+// which only a `--features vulkan` native_all archive carries. The explicit
+// `host-gpu-native-all` lane admits exactly that archive and nothing weaker.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_selects_vulkan_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\nlong rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    assert_eq!(builder.resolve_runtime_lane(), NativeRuntimeLane::HostGpuNativeAll);
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected.0, native_all);
+    assert!(selected.1);
+    assert!(builder.reject_unexpected_native_all(Some(&selected)).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_rejects_archive_without_vulkan() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("rt_vulkan_init"), "{error}");
+    assert!(error.contains("--features vulkan"), "{error}");
+}
+
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_requires_runtime_path() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NativeBuildConfig::default();
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("--runtime-path"), "{error}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_still_refuses_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
+}
+
 #[test]
 fn test_runtime_bundle_hosted_is_rejected_without_full_stage4_authorization() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -10638,4 +10722,33 @@ fn compiler_rt_builtins_env_override_selects_explicit_archive() {
     assert_eq!(chosen, Some(archive));
     assert_ne!(fallback, Some(missing));
     assert_ne!(gcc_pick, Some(gcc));
+}
+
+/// Perf regression (bug seed_native_build_per_file_compile_minutes_windows_2026-11-23):
+/// `build_use_map_from_ast` walks the whole `all_mangled` table per imported
+/// name. On the full-CLI closure that cost 65% of all per-file CPU
+/// (`pre_hir`, up to 190 s for one file). Pin a wide table x many imports
+/// under a budget, and keep the module-qualified (`mod.fn`) binding intact.
+#[test]
+fn build_use_map_wide_closure_stays_within_budget() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for i in 0..20_000 {
+        let name = format!("f{i}");
+        let owners = vec![format!("pkg__m{}__{name}", i % 97), format!("other__m{}__{name}", i % 89)];
+        all_mangled.insert(name, owners);
+    }
+    all_mangled.insert("helper".to_string(), vec!["pkg__m1__helper".to_string()]);
+    let mut source = String::new();
+    for m in 0..40 {
+        source.push_str(&format!("use pkg.m{m}\n"));
+    }
+    source.push_str("fn main():\n    0\n");
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let started = std::time::Instant::now();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    let elapsed = started.elapsed();
+    assert_eq!(use_map.get("m1.helper").map(String::as_str), Some("pkg__m1__helper"));
+    assert_eq!(use_map.get("m3.f3").map(String::as_str), Some("pkg__m3__f3"));
+    assert!(use_map.get("m3.f4").is_none());
+    assert!(elapsed.as_secs_f64() < 10.0, "build_use_map_from_ast took {elapsed:?}");
 }

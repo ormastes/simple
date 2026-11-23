@@ -75,6 +75,11 @@ bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
 # into the same captured caller value the Stage 3 launch and the Stage 2 matrix
 # read. Invalid host value = hard error naming the key.
 bootstrap_host_apply_frontend_cache_default "${bootstrap_early_repo_root}" || exit 64
+# Host-config sanity_build_timeout_seconds stands in for an unset caller
+# COMPILER_BUILD_TIMEOUT_SECONDS (Stage 2 sanity probes; a Windows
+# stage2-module-path-naming-build exceeded the 180s default). Must precede the
+# `:-180` default below. Invalid host value = hard error naming the key.
+bootstrap_host_apply_sanity_build_timeout "${bootstrap_early_repo_root}" || exit 64
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -1763,7 +1768,7 @@ bootstrap_reap_descendants() {
       done
       ;;
   esac
-  kill -TERM -- "-$$" 2>/dev/null || true
+  kill -s TERM -- "-$$" 2>/dev/null || true
   bootstrap_reap_i=0
   while [ "${bootstrap_reap_i}" -lt 3 ]; do
     bootstrap_reap_left=
@@ -2049,45 +2054,7 @@ hash_path_list() {
   done
 }
 
-run_timeout() {
-  timeout_seconds=$1
-  shift
-  case "$(uname -s 2>/dev/null || echo unknown)" in
-    MSYS*|MINGW*|CYGWIN*)
-      timeout_capture=$(mktemp "${TMPDIR:-/tmp}/simple-timeout.XXXXXX") || return 1
-      timeout_marker="${timeout_capture}.expired"
-      "$@" >"${timeout_capture}" 2>&1 &
-      timeout_pid=$!
-      (
-        sleep "${timeout_seconds}"
-        if kill -0 "${timeout_pid}" 2>/dev/null; then
-          : >"${timeout_marker}"
-          kill "${timeout_pid}" 2>/dev/null || true
-          sleep 1
-          kill -9 "${timeout_pid}" 2>/dev/null || true
-        fi
-      ) &
-      timeout_watchdog=$!
-      timeout_status=0
-      wait "${timeout_pid}" || timeout_status=$?
-      kill "${timeout_watchdog}" 2>/dev/null || true
-      wait "${timeout_watchdog}" 2>/dev/null || true
-      cat "${timeout_capture}"
-      if [ -f "${timeout_marker}" ]; then
-        timeout_status=124
-      fi
-      rm -f "${timeout_capture}" "${timeout_marker}"
-      return "${timeout_status}"
-      ;;
-  esac
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${timeout_seconds}" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "${timeout_seconds}" "$@"
-  else
-    "$@"
-  fi
-}
+. "${bootstrap_entry_dir}/lib/run-timeout.shs"
 
 run_timeout_kill() {
   timeout_seconds=$1
@@ -5907,7 +5874,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit "${stage2_status}"
     fi
     echo "  warning: stage2 native-build failed (exit ${stage2_status}); Stage 3/full CLI unavailable" >&2
-    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
+    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise host config sanity_build_timeout_seconds, or COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
 
   if [ "${stage2_status}" -eq 0 ]; then

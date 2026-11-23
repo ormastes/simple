@@ -3831,3 +3831,127 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Status (explicit runs, 2026-11-23):** the nine words' glyph runs equal Chrome's and are pinned LIVE in `devanagari_render_chrome159_spec` (10/10); their 1x ink edges stay in the in-development `devanagari_mark_position_chrome159_spec` (2/9, see its header). `devanagari_glyph_hint_chrome159_spec` 0/1, top row now 29 (was 28) vs Chrome 30 — it was red on the pre-rebase head d0218772158 too (re-run there), so it was never a rebase regression.
 - **Device scale 4 (user rule: render specs stay >= 300 dpi).** `devanagari_render_k4_chrome159_spec` (`@tag:in-development`, 0/10, ~3 min) holds Chrome's k=4 ink boxes. Capture recipe: the 1x page with `--force-device-scale-factor=4 --window-size=400,300`; the same capture at factor 1 reproduced the 1x table exactly. Three defects, recorded in `doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md`: (1) `glyph_run.xs` are whole CSS px scaled by k (4*floor(p) vs Chrome floor(4p); the Latin control is 2 px short too) — design: carry the 26.6 pen in the payload, snap in device px; (2) the shaped-run ink sits 1 device px high while Latin rows match; (3) a skipped command makes `..._engine2d_at_device_scale` return an EMPTY buffer (हिंदी).
 - **Trap — `simple run` probe rendering several words in one process** returned an empty buffer after the first word with `font handle ... is not live` errors; render one word per process. An empty `[u32]` read out of bounds yields 0 in the interpreter, so an ink scan of it reports the whole frame as ink — check `px.len()` first.
+## 2026-11-23 — GB10 GPU entries link through a sanctioned lane (Blocker 8)
+
+- **Building a GPU-capable non-bootstrap binary.** There is no hand-link any
+  more. Pass:
+  - `--runtime-bundle host-gpu-native-all --runtime-path <target>/release`
+  - `SIMPLE_NO_STUB_FALLBACK=1` and `SIMPLE_NATIVE_BUILD_RUST=1`
+  - a `cargo build --release -p simple-native-all --features vulkan` archive
+    in that runtime path.
+
+  The lane fails closed when the archive has no Vulkan runtime or provider
+  registry.
+- **Trap: an aarch64 seed weak-stubbed libc.** Seeds built before this change
+  do it, because the scan list is x86_64-only. The exported stubs crash the
+  NVIDIA ICD with SIGSEGV in `eglGetProcAddress`. Check the build log for
+  `Generating N stub functions`; a sound GPU link prints none.
+- **Trap: the default lane links Vulkan probes silently.** It uses
+  `runtime_native.c` weak stubs, so `rt_vulkan_device_count` returns 0 on a
+  machine that has a GPU. Assert a real value, not just exit 0.
+- **Evidence.** The sanctioned binary reproduces the hand-link hashes exactly
+  for web-box, corpus-case01 and corpus-case06. Table and recipe:
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`
+  (2026-11-23, Blocker 8).
+- **Landing.** Owner accepted the amendment on 2026-11-23
+  (`doc/04_architecture/runtime/default_native_runtime_shift_to_c_core_abi.md`).
+
+## 2026-11-23 — GB10 corpus case 02: the Engine2D leg fails natively when `f64call().to_i32()` is used
+
+- **Trap:** natively (seed native-build or `simple run`), `floor_f64(x).to_i32()`,
+  or any `<f64-returning call>.to_i32()/.to_i64()`, converts the raw IEEE
+  bits (47.0 → 0). The interpreted `simple test` gives the right value, so a
+  green interpreted spec proves nothing for this class. Bind the call result to
+  a local first (`val f: f64 = floor_f64(x)`) or use `as i32`. Bug:
+  `doc/08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md`.
+- **Case 02 effect:** the strict Vulkan affine dispatch box collapsed to
+  `(0,0,2,2)`, so the tile and bar were never drawn, which showed up as "edge
+  oracle mismatch". It is fixed in `draw_ir_adv.spl` with typed locals. The
+  Engine2D rgba on the GB10 is `962ca9e4…c306` and passes the oracle with
+  edge_max=1.
+- **How to find this class:** build a tiny native probe entry
+  (`--runtime-bundle host-gpu-native-all`, 8-30 s) that prints intermediate
+  boxes, and compare it with the interpreted spec on the same ICD
+  (`VK_DRIVER_FILES=.../nvidia_icd.json` works for specs on this host).
+- **Still open:** case 02 `run-*` is blocked by Skia's edge policy
+  (edge_excess=4, edge_max=30, the same on macOS and the GB10). This needs an
+  owner decision; do not widen the tolerance.
+- The worker's oracle-mismatch errors now carry the verdict numbers.
+- Spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/strict_vulkan_case02_edges_spec.spl`.
+## Abspos fractional insets (2026-11-23, abspos lane)
+
+- **Cause:** `left`/`top` went through `_decl_signed_int_or_zero` and
+  `right`/`bottom` through `parse_int`, so `10.5px` painted at 10, `6.33em`
+  at 6 px, and abspos text always started on a whole pixel.
+- **Fix, parse:** insets now parse to LayoutUnit milli-px (px/em/rem) in
+  decl_apply. `*_px` rounds half up and the remainder goes in the new
+  `Style.left_milli`/`top_milli`/`right_milli`/`bottom_milli` fields. They
+  default to 0 and are copied wherever `left_auto` is copied: style.spl copy,
+  `style_with_height`/`_width`, `tag_defaults`. A field missing from one of
+  those rebuilds silently resets to 0.
+- **Fix, layout:** `absolute_box_snap` (layout_engine) wraps all four abspos
+  call sites. It takes `absolute_child_x_frac_milli`/`_y_` (layout_foundation),
+  which mirror `absolute_child_x`/`_y` branch for branch, plus the containing
+  block's fraction. It then snaps the box and records the remainder:
+  - x goes to `box_line_start_err` (same mechanism as the tablepen lane), so
+    the first run starts at the exact pen;
+  - in-flow block children inherit it (`<p>` inside an abspos at 200.5);
+  - y goes to `g_origin_frac_milli` plus `box_device_top_record`;
+  - at k>1, `box_device_dx_record` gets `round(k*exact) - k*x` and the text
+    keeps only the leftover.
+- **Fix, auto width:** a right-anchored auto-width box subtracts its own
+  max-content fraction via `flex_item_text_frac_delta_milli_px`.
+  `right:300.25px` puts an `l` at Chrome's 89.19.
+- **ICB `bottom`:** an abspos box with no positioned ancestor resolved
+  `bottom` against the body's content height, putting the box off-screen. It
+  now resolves against the viewport (`abspos_icb_bottom_chrome159_spec`).
+- **Translate:** an abspos box with `transform: translate`/`translate:` was
+  moved twice, because decl_apply also set `position_relative` and the
+  relative pass re-applied `left + translate`. Now the translation folds into
+  the abspos insets in milli-px. An `auto` left/top still carries it for
+  right/bottom anchoring and the static y.
+  `parse_signed_nth_length` split `0.3px` into the numbers 0 and 3; it is now
+  `parse_signed_nth_length_milli`.
+- **Open, Chrome antialiases translated boxes:** a fractional translation of
+  a box edge (`40(179)..60(77)` at k=1) is antialiased, not snapped. Here it
+  is snapped. That is paint-transform work.
+- **Open, wrapped lines (measured):** only the first line of a run carries
+  `pen-origin-milli`. Line 2 of an abspos `width:22px` box at `left:10.25px`
+  holding `ll ll ll` has its `l` centroid at 13.011 here and 13.250 in Chrome,
+  so it stays on the whole px.
+- **Open, wrap decision (observed, cause not investigated):** an abspos
+  `width:30px` box holding `ll ll ll` (about 30.2 px) wraps in Chrome and
+  stays on one line here.
+- **Specs:** `abspos_fractional_inset_chrome159_spec` (k=1 + k=4, centroids
+  minus a whole-px reference `l`), `abspos_icb_bottom_chrome159_spec`,
+  `abspos_transform_translate_chrome159_spec`.
+## 2026-11-23 — rtl Latin runs: edge-space kern, in-box start, line-end space; every auto-width button narrowed at k > 1
+
+- **rtl edge-space kern (core.spl):** `Style.resolved_lead_space_milli` / `resolved_trail_space_milli` are now also measured on a `direction:rtl` run whose bidi visual text equals its logical text (Latin on an rtl line); a run that reorders keeps the flat space.
+- **rtl run in its box (`text_rtl_run_starts_box`, layout_text; used by `paint_draw_ir` single-line `single_x` and the CPU raster line loop):** a one-line rtl run of left-to-right text ending in a collapsible space, in a box no wider than its own advance, paints from the box's LEFT edge. Chrome keeps that space right of the glyphs (`A <b>B</b> ...` under rtl: `A` 203, `B` 219, the ltr columns + 203). End-aligning inside the box put every such run 3-4 px late. A box widened past the run (sole `#text` child, stretched flex item) still end-aligns.
+- **rtl line-end space (`inline_line_end_space_px`, layout_engine; `align_inline_line_horizontal` now takes `nodes, styles`):** a right-aligned rtl line drops the collapsible space it ends with, so the last glyph ends at the right edge (`A <b>B</b> A ` -> last `A` ends 299). The space is either a Latin run's trailing edge or the lead space the pen took for a whitespace-only run.
+- `inline_space_kern_nowrap_rtl_chrome159_spec` 1/2 -> 3/3 (new AC-3: line-end space), in-development tag removed.
+- **Not done:** LTR `text-align:right|center` multi-run lines go through the same in-box end alignment (Chrome `A <b>B</b> A ` right-aligned: 260 276 290, here 259 271 289). Not changed, not pinned.
+- **Every auto-width button narrowed at k > 1 (supersedes the "skipped for any button followed by a box" clause of "Button width without label_slack" above):** `button_device_extra_w` no longer skips a followed button. The atomic follower's `box_device_dx` is now gated by the LINE's alignment only (`text_run_aligns_line_left(st)`). Before, the box's own `text-align` also gated it, so a button after a button (UA `text-align:center`) never moved: `Go` `Submit` ended at 365, Chrome 364. Where the follower has no exact pen (unknown pen error, centred or rtl line), the inline loop resets the button's extra width (`button_has_inline_follower`), or a 1 px gap opens. `button_follower_device_width_chrome159_spec` 2/3 -> 3/3.
+- **Handed over (in-development, `button_follower_text_and_k1_width_chrome159_spec`):** (1) text after a button at k = 4 (Chrome 138 / 156 / 368, here 139 / 155 / 367). `pen-origin-milli` stays in CSS milli-px through `draw_ir_device_scale`, and `_lcd_apply_pen_phases` is skipped above `FONT_LCD_MAX_SIZE_PX` (48 device px), so k > 1 text drops its pen origin. This belongs to the 4x word-pen lane. (2) At k = 1 a button is ceil(label) + padding (`Submit` 58), while Chrome snaps both edges from the fractional pen (`Submit` 0-56, next `Go` from 57).
+
+## 2026-11-23 — filling a box taller than the frame cost 14-24 s per page at 4x (perf, byte-identical)
+
+- **Was:** on 4x css-layout the two section boxes (3408 x 50020 and 3240 x 48428 device px on a 3600 x 3040 frame) cost 27 s and 17 s: background 20 s / 12 s, shadow 5.4 s / 3.2 s, border 2.1 s / 1.7 s (temporary per-phase timing in `_engine2d_draw_ir_render_box`). Every box paid too: a 20 x 20 rounded box 200 ms, a 1596 x 192 border 390 ms.
+- **Trap 1 — any `self.buf.write_span(...)` copies the whole field array.** #10928's fix (`var buf = self.buf` then write) still pays one copy per call, because the local shares the field's array (1.77 ms vs 1.86 ms). Only taking the field works: `var b = self.buf; self.buf = []; b.write_span(...); self.buf = b` (3.9 us). Do not call any `self.*` that reads `buf` in between. `SoftwareBackend.sw_buf_write_span` does this for every span primitive. Bug: `doc/08_tracking/bug/interpreter_field_array_write_span_copies_whole_array_2026-11-23.md`.
+- **Trap 2 — `mark_span_dirty` per pixel row** was one `mark_dirty` method call per 64 px tile, 308 us for a 3312 px row: more than the fill. It is inlined now, and `draw_rect_filled` marks once per tile row (`sw_fill_rect_rows`, which also reuses one kernel-filled span; the SIMD hit counters still advance once per row).
+- **Trap 3 — `read_pixels_region` computes the readback checksum in an interpreted per-pixel loop** (`engine2d_readback_with_identity`): 3.4 s for one 3582 x 3007 shadow band that only wanted the pixels. Use `read_pixels_region_raw` (trait default = `.pixels` of the full read; SoftwareBackend and the cpu_simd wrapper `CpuBackend` override it). cpu_simd's backend is `CpuBackend`, NOT `SoftwareBackend`: an override missing there silently falls back to the trait default.
+- **Also clipped to the frame:** translucent `draw_rect_filled` rows, border-ring straight sides (were a 4 x 50000 image), border-ring corner strips wholly off the surface.
+- **Pin:** `backend_software_tall_fill_spec` (3600 x 3040 cpu_simd + scalar, base pixel hash 3447947131): cpu_simd 26.4 s -> 0.58 s, scalar 20.2 s -> 0.78 s, against a 3 s budget. The scalar const blend reuses `blend_solid` (~60 us a call) while the destination repeats.
+- **4x css-layout box timings after:** section 1 shadow 1.3-1.8 s, background 0.26 s, border 1.8 s; section 2 1.1-2.0 / 0.22 / 1.3 s. Remaining: the shadow band's falloff rows and the ring's per-row `draw_image_blend` (simd scratch + extern per row).
+## 2026-11-23 — word pens at device scale 4 (dpr4_word_pen_fraction_chrome159_spec, 5/5)
+
+- **Was:** at k=4 every glyph pen sat on k x a whole CSS px (`b` of `a b c` at device 96, Chrome 98). Chrome keeps the fractional CSS pen and scales it.
+- **Model that matches:** resolve the run at k x the font size; its rounded boundaries are round(k x exact CSS pen). Probe over a 13-word 450 px line: equal to round(4 x Chrome Range left) at every word, `und` and `en` alike. Advances are linear (unhinted) at 64 px — hinting was NOT the cause.
+- **Trap — Engine2D silently drops advances whose sum != command width** (`_engine2d_draw_ir_text_advances`, no print) and repaints with the face's own per-glyph advances, which drift (+2..+11 device px per line). The first try (0ac1581f05a) hit exactly this: 1807 vs 1808 on the long line. Fix: `_dir_anchor_device_advances` lets the last advance (moves no glyph) absorb the difference; width never shrinks, so the tail ink is not clipped. The consumer invariant is kept.
+- **Mid-line runs:** `pen-origin-milli` is CSS milli and was never scaled; with device advances the pass moves x by round(k x origin) and drops the prop (`<code>ab</code> plain`: +3 device px, now on Chrome's column).
+- **Measure Chrome ink columns** with `--force-device-scale-factor=4 --screenshot` and a first-column-with-red<128 scan per word band; get word lefts with a Range dump via `--dump-dom`.
+- **Cost (css-layout 4x, cpu_simd, 3 alternating rounds, per-phase trace):** the k x size resolve costs ~17 ms per text command (26 commands, 0.44 s) -> document phase median 6.64 s vs 6.21 s base; paint median 95.6 s vs 95.4 s (equal). Net ~0.4 % of a ~110 s render. Whole-catalog simple_ms swings +-12 % round to round under load: compare phase medians, not one catalog run.
+- **12 px at k=4 = 48 device px = FONT_LCD_MAX_SIZE_PX:** `_lcd_apply_pen_phases` returns early unless the advances equal its own whole-px pens; k x CSS advances never did, device advances do, so small text at 4x now gets quarter-phase cells (AC-7: all 14 glyph starts on Chrome's, base 3 off).
+- **Trap — A/B order bias at 4x:** the SECOND render of a back-to-back pair is ~10 s faster in paint (css-layout: lane-first pairs said lane +1..+16 s, base-first pairs said lane -10..-14 s; per-command text draw 38.0 vs 38.2 s). Alternate WHICH side runs first between rounds, or every A/B is biased toward the second side.
+- **Button follower (button_follower_text_and_k1_width_chrome159_spec AC-1):** text after an auto-width button at 4x was 1 device px off (139/155/367 vs Chrome 138/156/368); the pen-origin fold turns it green.

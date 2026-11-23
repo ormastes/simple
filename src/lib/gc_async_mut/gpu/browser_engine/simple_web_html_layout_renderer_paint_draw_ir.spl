@@ -3,7 +3,7 @@
 # controls. Split out of simple_web_html_layout_renderer_paint_layout.spl,
 # which re-exports every name defined here.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_value_vector_x, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_value_vector_x, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, text_line_aligned_x, text_line_needs_paint_width, text_rtl_run_starts_box, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, spaced_glyph_xs_milli, backdrop_blur_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present, web_font_style_trace_enabled}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
@@ -566,6 +566,28 @@ fn _html_draw_ir_resolved_text_command(
             merged.push(prop)
     # Declare the wire arity of `advance_widths` for the Engine2D gate.
     merged.push(draw_ir_style_prop("font-advance-arity", "codepoint"))
+    # Device scale k > 1: `advance_widths` are whole CSS px and the device pass
+    # multiplies them by k, which would start every glyph on a multiple of k
+    # device px. Chrome keeps the fractional CSS pen and scales it (`a b c` at
+    # k=4: `b` at 23.344 CSS px = device 93.4, not 92). The advances of the same
+    # run measured at k x the font size are those pens: each boundary is
+    # round(k x exact CSS pen) (unhinted linear advances; measured equal to
+    # Chrome at all 13 word starts of a 450 px line). The device pass swaps them
+    # in and re-anchors the run width (`_dir_anchor_device_advances`).
+    val device_k = layout_device_scale()
+    if device_k > 1 and not metrics.shaping_required:
+        val device_metrics = resolve_font_metrics_with_language_milli(
+            browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic), txt, font_milli_of(st.font_size, st.font_size_milli) * device_k,
+            _html_text_language(nodes, i, st)
+        )
+        var device_advances = _html_draw_ir_codepoint_advances(txt, device_metrics.advances)
+        if device_metrics.valid and device_advances.len() == cp_advances.len():
+            if st.letter_spacing_milli != 0 or st.word_spacing_milli != 0:
+                device_advances = spaced_advances_milli(device_advances, text_codepoints(txt), st.letter_spacing_milli * device_k, st.word_spacing_milli * device_k)
+            var device_csv = ""
+            for da in device_advances:  # cpu-lane-loop-ok: one pass over THIS text command's per-codepoint advances; bound is its codepoint count
+                device_csv = if device_csv == "": da.to_text() else: device_csv + "," + da.to_text()
+            merged.push(draw_ir_style_prop("device-advance-widths", device_csv))
     resolved.computed_style = merged
     resolved.clip_rect = clip_rect
     resolved
@@ -864,6 +886,8 @@ fn _html_draw_ir_command(
         # (`line_base_x = text_x + st.text_indent_px` for line 0); a large
         # negative indent moves the run off the box (image-replacement idiom).
         val single_x = if st.text_overflow_ellipsis:
+            content_x + st.text_indent_px
+        elif text_rtl_run_starts_box(node, st, content_w, visual_text == transformed_text):
             content_x + st.text_indent_px
         else:
             _html_draw_ir_aligned_line_x(

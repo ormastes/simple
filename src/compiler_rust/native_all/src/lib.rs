@@ -1245,7 +1245,14 @@ noop_stubs!(
     __mock_policy_try_check,
     __mock_policy_disable,
     __mock_policy_get_mode,
-    // Vulkan stubs
+);
+
+// Vulkan stubs: only without the `vulkan` feature. With it, simple_runtime's
+// gpu_vulkan module defines the real twelve, and these duplicates forced
+// `-z muldefs` on every GPU link (Blocker 8,
+// linux_gb10_n2_qualification_executable_blockers_2026-11-18.md).
+#[cfg(not(feature = "vulkan"))]
+noop_stubs!(
     rt_vk_available,
     rt_vk_device_create,
     rt_vk_device_free,

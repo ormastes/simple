@@ -86,6 +86,9 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "host-gpu"
             | "host_gpu"
             | "gpu"
+            // Explicit vulkan native_all lane for ordinary GPU entries (Blocker 8).
+            | "host-gpu-native-all"
+            | "host_gpu_native_all"
             // Link the SHARED runtime (libsimple_runtime.so) rather than a
             // static archive. Accepted only for the Stage4 compiler entry --
             // `selected_runtime_library` refuses it for anything else -- so
@@ -370,7 +373,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     i += 2;
                 } else {
                     eprintln!(
-                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, dynamic-runtime)"
+                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, host-gpu-native-all, dynamic-runtime)"
                     );
                     return 1;
                 }
@@ -516,7 +519,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, dynamic-runtime, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, host-gpu-native-all, dynamic-runtime, runtime",
             runtime_bundle
         );
         return 1;

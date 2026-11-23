@@ -1,0 +1,152 @@
+"""
+## Purpose and audience
+Purpose: Pin `transform: translate(...)` / `translate:` on absolutely
+positioned boxes against Chrome 159. Layout folds a translation into the
+box's `left`/`top`; for an abspos box it also set `position_relative`, so
+the relative offset pass applied `left + translate` a SECOND time (a box at
+`left:40px` translated by 5 px painted at 90, not 45). The translate parser
+also split `0.3px` into the numbers 0 and 3, so `translate(0.5px,10px)` moved
+a box 5 px down instead of 10. Chrome paints the translated text at the
+exact pen (quarter phase).
+Audience: web renderer layout (transforms, absolute positioning).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=k --window-size=400,300
+--screenshot`, sans-serif = Liberation Sans 16 px, 2026-11-23). Boxes are
+20x10 black. Text probes are the ink centroid (255 - green) of an `l` minus
+that of the untranslated reference `l` at `left:10px;top:70px`.
+
+| probe                                                   | Chrome k=1           | Chrome k=4 (device)     | base k=1          |
+|---------------------------------------------------------|----------------------|-------------------------|-------------------|
+| abspos `left:40;top:10;transform:translate(5px,2px)`    | cols 45..64 rows 12..21 | 180..259, rows 48..87 | none (x 90, y 24) |
+| abspos `left:80;top:10;translate:4px 3px`               | cols 84..103 rows 13..22 | 336..415, rows 52..91 | 90..109, 24..30 (clipped) |
+| relative `top:100;left:150;translate(0.5px,10px)`       | rows 110..119        | rows 440..479           | rows 105..114     |
+| abspos `l` `left:10;translate(0.25px)`                  | delta 0.261          | 1.000                   | none              |
+| abspos `l` `left:40;translate(0.5px,0)`                 | 30.469               | 122.000                 | none              |
+| abspos `l` `left:70;translate:10.75px`                  | 70.730               | 283.000                 | none              |
+
+The relative box's x is antialiased in Chrome (150(128)..170(128)); the
+fractional translation of a box edge is a paint transform, not pinned here.
+Translated abspos boxes are pixel-snapped here (Chrome antialiases a
+fractional translation): only whole-px translations are pinned for boxes.
+"""
+
+"""
+Traceability: REQ-WEB-LAYOUT-ABSPOS-TRANSLATE-001 - a translated abspos box moves once by the exact translation.
+"""
+# @tag: unit, browser_engine, layout, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 150
+val T: text = "position:absolute;font-size:16px;line-height:20px"
+val BOX: text = "width:20px;height:10px;background:#000"
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font-family:sans-serif\">" +
+    "<div style=\"position:absolute;left:40px;top:10px;" + BOX + ";transform:translate(5px,2px)\"></div>" +
+    "<div style=\"position:absolute;left:80px;top:10px;" + BOX + ";translate:4px 3px\"></div>" +
+    "<span style=\"" + T + ";left:10px;top:40px;transform:translate(0.25px)\">l</span>" +
+    "<span style=\"" + T + ";left:40px;top:40px;transform:translate(0.5px,0)\">l</span>" +
+    "<span style=\"" + T + ";left:70px;top:40px;translate:10.75px\">l</span>" +
+    "<span style=\"" + T + ";left:10px;top:70px\">l</span>" +
+    "<div style=\"position:relative;top:100px;left:150px;" + BOX + ";transform:translate(0.5px,10px)\"></div>" +
+    "</body></html>"
+
+fn _green(v: u32) -> i64:
+    ((v >> 8u32) & 0xFFu32).to_i64()
+
+fn _g(px: [u32], k: i32, x: i32, y: i32) -> i64:
+    _green(px[y * W * k + x])
+
+# Ink centroid x (milli frame px) of 255 - green over CSS rect y0..y1 x x0..x1.
+fn _cx(px: [u32], k: i32, y0: i32, y1: i32, x0: i32, x1: i32) -> i64:
+    val fw = W * k
+    var s: i64 = 0
+    var sx: i64 = 0
+    var y = y0 * k
+    while y < (y1 + 1) * k:
+        var x = x0 * k
+        while x < (x1 + 1) * k:
+            val ink = 255 - _green(px[y * fw + x])
+            s = s + ink
+            sx = sx + ink * x.to_i64()
+            x = x + 1
+        y = y + 1
+    if s == 0: -1000000 else: sx * 1000 / s
+
+fn _delta_ok(px: [u32], k: i32, x0: i32, x1: i32, want: i64) -> bool:
+    val got = _cx(px, k, 36, 64, x0, x1) - _cx(px, k, 66, 94, 5, 30)
+    val tol: i64 = if k == 1: 80 else: 300
+    got >= want - tol and got <= want + tol
+
+describe "translated abspos boxes (Chrome 159)":
+    it "AC-1: k=1 a whole-px translation moves an abspos box once":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("translate(5px,2px) at left 40 top 10: cols 45..64 rows 12..21")
+        expect(_g(px, 1, 44, 15)).to_equal(255)
+        expect(_g(px, 1, 45, 15)).to_equal(0)
+        expect(_g(px, 1, 64, 15)).to_equal(0)
+        expect(_g(px, 1, 65, 15)).to_equal(255)
+        expect(_g(px, 1, 50, 11)).to_equal(255)
+        expect(_g(px, 1, 50, 12)).to_equal(0)
+        expect(_g(px, 1, 50, 21)).to_equal(0)
+        expect(_g(px, 1, 50, 22)).to_equal(255)
+        step("translate:4px 3px at left 80 top 10: cols 84..103 rows 13..22")
+        expect(_g(px, 1, 83, 16)).to_equal(255)
+        expect(_g(px, 1, 84, 16)).to_equal(0)
+        expect(_g(px, 1, 103, 16)).to_equal(0)
+        expect(_g(px, 1, 104, 16)).to_equal(255)
+        expect(_g(px, 1, 90, 12)).to_equal(255)
+        expect(_g(px, 1, 90, 13)).to_equal(0)
+        expect(_g(px, 1, 90, 22)).to_equal(0)
+        expect(_g(px, 1, 90, 23)).to_equal(255)
+        step("relative translate(0.5px,10px) at top 100: rows 110..119")
+        expect(_g(px, 1, 160, 109)).to_equal(255)
+        expect(_g(px, 1, 160, 110)).to_equal(0)
+        expect(_g(px, 1, 160, 119)).to_equal(0)
+        expect(_g(px, 1, 160, 120)).to_equal(255)
+
+    it "AC-2: k=1 translated abspos text keeps the exact pen":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("translate 0.25 / 0.5 / 10.75: deltas 0.261 / 30.469 / 70.730")
+        expect(_delta_ok(px, 1, 5, 30, 261)).to_equal(true)
+        expect(_delta_ok(px, 1, 35, 60, 30469)).to_equal(true)
+        expect(_delta_ok(px, 1, 65, 100, 70730)).to_equal(true)
+
+    it "AC-3: k=4 boxes and text":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        expect(px.len()).to_equal((W * H * 16).to_i64())
+        step("translate(5px,2px): device 180..259 rows 48..87; translate:4px 3px: 336..415 rows 52..91")
+        expect(_g(px, 4, 179, 60)).to_equal(255)
+        expect(_g(px, 4, 180, 60)).to_equal(0)
+        expect(_g(px, 4, 259, 60)).to_equal(0)
+        expect(_g(px, 4, 260, 60)).to_equal(255)
+        expect(_g(px, 4, 200, 47)).to_equal(255)
+        expect(_g(px, 4, 200, 48)).to_equal(0)
+        expect(_g(px, 4, 335, 60)).to_equal(255)
+        expect(_g(px, 4, 336, 60)).to_equal(0)
+        expect(_g(px, 4, 360, 51)).to_equal(255)
+        expect(_g(px, 4, 360, 52)).to_equal(0)
+        step("relative translate(0.5px,10px): rows 440..479")
+        expect(_g(px, 4, 640, 439)).to_equal(255)
+        expect(_g(px, 4, 640, 440)).to_equal(0)
+        expect(_g(px, 4, 640, 479)).to_equal(0)
+        expect(_g(px, 4, 640, 480)).to_equal(255)
+        if file_exists(SANS):
+            step("text deltas 1.0 / 122.0 / 283.0 device px")
+            expect(_delta_ok(px, 4, 5, 30, 1000)).to_equal(true)
+            expect(_delta_ok(px, 4, 35, 60, 122000)).to_equal(true)
+            expect(_delta_ok(px, 4, 65, 100, 283000)).to_equal(true)

@@ -6,7 +6,7 @@ length metadata; it does not decode or scan malformed text.
 """
 use std.common.string_core.{str_len}
 use std.nogc_async_mut.io_runtime.{platform_name, host_os}
-use std.common.encoding.external_text.{ExternalText, ExternalChar, utf8_format}
+use std.common.encoding.external_text.{ExternalText, ExternalChar, utf8_format, bytes_to_text_checked}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_from_internal, io_internal_text}
 
 pub val SOSIX_TEXT_BYTE_LIMIT: i64 = 16777216
@@ -34,6 +34,16 @@ fn sosix_admit_utf8(value: text) -> Result<text, TextIoError>:
     val admitted = sosix_encode_utf8(value)?
     Ok(value)
 
+fn sosix_admit_utf8_bytes(bytes: [u8]) -> Result<text, TextIoError>:
+    # Raw provider bytes are the only carrier for unvalidated input: text is
+    # always valid UTF-8 (owner decision 2026-11-23), so malformed input is
+    # rejected here with its precise codec error, before any text exists.
+    if bytes.len() > SOSIX_TEXT_BYTE_LIMIT:
+        return Err(TextIoError.Io("SOSIX text exceeds the 16 MiB boundary limit"))
+    match bytes_to_text_checked(bytes):
+        case Ok(value): Ok(value)
+        case Err(error): Err(TextIoError.Codec(error))
+
 fn sosix_admit_c_string(value: text, environment_key: bool) -> Result<text, TextIoError>:
     # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
     val admitted: text = match sosix_admit_utf8(value):
@@ -51,7 +61,7 @@ fn sosix_decode_char(value: ExternalChar) -> Result<char, TextIoError>:
         case Err(error): Err(TextIoError.Codec(error))
 
 export sosix_text_check_size, sosix_encode_utf8, sosix_decode_text, sosix_decode_char
-export sosix_admit_utf8, sosix_admit_c_string
+export sosix_admit_utf8, sosix_admit_utf8_bytes, sosix_admit_c_string
 
 fn sosix_require_posix_text_provider() -> Result<(), TextIoError>:
     # "unknown" (formerly "unix") is OpenBSD/NetBSD or an unlisted target:
