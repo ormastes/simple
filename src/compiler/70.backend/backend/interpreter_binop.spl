@@ -287,7 +287,7 @@ impl InterpreterBackendImpl:
                 Ok(backend_value_bool_v1(left.is_truthy() or right.is_truthy()))
 
             case HirBinOp.BitAnd | HirBinOp.BitOr | HirBinOp.BitXor | HirBinOp.Shl | HirBinOp.Shr:
-                self.eval_int_bitwise(interp_binop_disc(op_t), left, right, span)
+                self.eval_int_bitwise(interp_binop_disc(op_t), left, right, left_unsigned, span)
 
             case HirBinOp.In:
                 match self.eval_membership(left, right, span):
@@ -302,16 +302,23 @@ impl InterpreterBackendImpl:
                 Err(BackendError.not_implemented("binary operator not implemented: op={interp_binop_disc(op_t)} left={left.type_name()} right={right.type_name()} at {span.file}:{span.line}:{span.col}"))
 
     # disc is interp_binop_disc: 15 &, 16 |, 17 ^, 18 <<, 19 >>.
-    fn eval_int_bitwise(disc: i64, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+    # Shift counts are taken mod 64, as the compiled lanes and the seed do. `>>` is
+    # arithmetic for a signed left operand and logical for an unsigned one.
+    fn eval_int_bitwise(disc: i64, left: Value, right: Value, left_unsigned: bool, span: Span) -> Result<Value, BackendError>:
         match left:
             case Value.Int(l):
                 match right:
                     case Value.Int(r):
-                        var out: i64 = l >> r
+                        val count = r & 63
+                        var out: i64 = 0
                         if disc == 15: out = l & r
                         elif disc == 16: out = l | r
                         elif disc == 17: out = l ^ r
-                        elif disc == 18: out = l << r
+                        elif disc == 18: out = l << count
+                        elif disc == 19:
+                            out = l >> count
+                            if left_unsigned and count > 0:
+                                out = out & (0x7FFFFFFFFFFFFFFF >> (count - 1))
                         Ok(backend_value_int_v1(out))
                     case _:
                         Err(BackendError.type_error("invalid operands for bitwise op={disc}: left={left.type_name()} right={right.type_name()}", Some(span)))
