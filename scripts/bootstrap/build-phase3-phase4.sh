@@ -479,7 +479,9 @@ run_stage3_hello() (
   cd "$SOURCE_ROOT" || return $?
   stage3_apply_native_host_link_policy "$STAGE3_RESOLVED_TARGET" "$COMPILE_MODE" "$WIN_CONFIG" one-binary || return $?
   apply_windows_toolchain_env || return $?
+  unset SIMPLE_BOOTSTRAP SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_STAGE4 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_FILE_WORKERS
   export SIMPLE_BINARY="$s3h_candidate"
+  export SIMPLE_PROJECT_ROOT="$SOURCE_ROOT"
   export SIMPLE_LIB="$SOURCE_ROOT/src"
   export SIMPLE_RUNTIME_PATH="$RUNTIME_PATH"
   export SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
@@ -491,10 +493,7 @@ run_stage3_hello() (
   export TMPDIR="$s3h_dir/tmp"
   set -- --target "$STAGE3_RESOLVED_TARGET" --backend "$BACKEND" \
     --runtime-bundle core-c-bootstrap --runtime-path "$RUNTIME_PATH" \
-    --source "$STAGE3_POLICY_K1_ROOT" --source "$STAGE3_POLICY_HOST_COMP_ROOT" \
-    --source src/compiler --source src/app --source src/lib \
-    --source test/04_smoke --entry "$s3h_source" --entry-closure \
-    --mode one-binary --threads "$THREADS" --cache-dir "$s3h_dir/cache" -o "$s3h_out"
+    --mode one-binary --threads 1 --cache-dir "$s3h_dir/cache" "$s3h_source" -o "$s3h_out"
   if [ -n "$BACKEND_PLUGIN" ]; then
     set -- "$@" --backend-plugin "$BACKEND_PLUGIN"
   fi

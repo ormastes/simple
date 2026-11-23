@@ -10,7 +10,9 @@ The phase now compiles the tracked `test/04_smoke/bootstrap_hello_world.spl`
 with the new candidate and executes the resulting artifact before PASS.
 The invocation binds `SIMPLE_BINARY` to that candidate, uses the selected
 source checkout, host target/toolchain, backend and runtime, preserves the
-static primitive policy and chooses one-binary Hello linkage. Independent
+static primitive policy and chooses one-binary Hello linkage. It uses the
+qualified positional single-file form without source/entry/closure/optimization
+flags; bootstrap and file-worker switches are unset only in the Hello subshell. Independent
 Hello caches prevent contamination by the producing compiler's cache.
 The fixture remains in the frozen source inventory: a generated external
 source would be refused by shard source authority.
