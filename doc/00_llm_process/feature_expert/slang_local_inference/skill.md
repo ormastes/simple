@@ -677,3 +677,8 @@ route env, file exists/read, directory list and process capture through SOSIX
 - The shim refuses `embed_eval`, `rerank_tokenize` and `tokens_set` on a tree request (shared tree context / leased token path). Test: `tree_cache_test.c` with `mock_llama_memory_clears`.
 - `tts_runner` releases the shim library through `release_backend_library` instead of its own `spl_dlclose` import.
 - `skip()` inside an `it` body is counted as skipped by `spec.spl` (`_execute_it` returns "skip", `test_skipped` rises), not as a pass. This holds on the self-hosted and aggregate path only; the seed's native `it` (bdd.rs) still reports a pass, so live specs keep the explicit `SKIPPED:` line. Pinned by `test/01_unit/lib/nogc_sync_mut/spec_skip_in_body_spec.spl`.
+
+## Pure-runner model directory and float bit helpers (2026-11-23)
+
+- Pure-runner specs and `stories15m_generate.spl` resolve the stories15M directory through `test/fixtures/slang_pure/model_dir.spl`: `SLANG_PURE_MODEL`, else `llama2c-stories15M` under `SLANG_MODEL_ROOT`; no built-in default path.
+- `std.common.binary_io` exports `f32_from_bits`, `f32_to_bits`, `f64_from_bits`, `f64_to_bits`; `std.gc_async_mut.binary_io` imports them instead of keeping a private copy (the copy turned NaN into 0.0 and lost -0.0).
