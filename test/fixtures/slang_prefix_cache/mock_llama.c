@@ -52,7 +52,9 @@ int32_t llama_tokenize(const struct llama_vocab *v, const char *s, int32_t n, ll
 bool llama_vocab_is_eog(const struct llama_vocab *v, llama_token t) { return t == v->eog; }
 int32_t llama_token_to_piece(const struct llama_vocab *v, llama_token t, char *out, int32_t cap, int32_t l, bool s) { (void)v; (void)l; (void)s; if (cap < 1) return -1; out[0] = (char)t; return 1; }
 llama_memory_t llama_get_memory(const struct llama_context *c) { return (void *)c; }
-void llama_memory_clear(llama_memory_t m, bool data) { (void)data; ((struct llama_context *)m)->n_tokens = 0; }
+static int64_t memory_clears;
+int64_t mock_llama_memory_clears(void) { return memory_clears; }
+void llama_memory_clear(llama_memory_t m, bool data) { (void)data; memory_clears++; ((struct llama_context *)m)->n_tokens = 0; }
 bool llama_memory_seq_rm(llama_memory_t m, llama_seq_id id, llama_pos p0, llama_pos p1) { struct llama_context *uc = (struct llama_context *)m; if (uc->unified) { if (p0 < 0) p0 = 0; if (p1 < 0 && uc->seq_len[id] > p0) uc->seq_len[id] = p0; return true; } (void)id; (void)p1; if (fail_remove_once) { fail_remove_once = 0; return false; } if (((struct llama_context *)m)->n_tokens > p0) ((struct llama_context *)m)->n_tokens = p0; return true; }
 size_t llama_state_seq_get_size(struct llama_context *c, llama_seq_id id) { (void)c; (void)id; return sizeof(int64_t); }
 size_t llama_state_seq_get_data(struct llama_context *c, uint8_t *d, size_t n, llama_seq_id id) { (void)id; if (fail_serialize_once) { fail_serialize_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(d, &c->n_tokens, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
