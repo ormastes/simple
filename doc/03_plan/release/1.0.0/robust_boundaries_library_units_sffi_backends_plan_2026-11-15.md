@@ -207,10 +207,10 @@ Evidence is a SPEC FILE VERDICT line. "missing" = no spec or gate found by name/
 | RB-SIMD-01 | `lib/common/simd_dispatch_facade_spec.spl` | OK 3/3 |
 | RB-FIX-01 | `test/02_integration/app/lsp/diagnostic_fix_transaction_spec.spl` | OK 11/11 |
 | RB-FIX-02 | `app/lsp/code_action_revision_spec.spl` | OK 12/12 |
-| RB-DIAG-01 | `compiler/diagnostics/diagnostic_rule_policy_parity_spec.spl` | OK 6/6 (policy parity; CLI/LSP/interpreter same-ID not proven end to end) |
+| RB-DIAG-01 | `compiler/diagnostics/diagnostic_rule_policy_parity_spec.spl` + `compiler/diagnostics/diagnostic_surface_parity_spec.spl` | OK 6/6 + 3/3 (2026-11-23 dg1: CLI lint and LSP emit identical (policy rule_id, severity, line) for one fixture across error/warning/suppressed; fixed LSP reporting public `bool` as SPL-TYPE-001 instead of `bare_bool`. Interpreter emits no rule-ID-coded diagnostic for any policy-bound rule, so it has no comparable surface: gap, not proof) |
 | RB-RATCHET-01 | `compiler/lint/bound_census_reproducible_spec.spl` (rbid2); gates `check-rt-dual-implementation-ratchet.shs`, `check-primitive-api-semantic-ratchet.shs` not run | OK 3/3 (census findings reproducible, order-stable, no cross-file state; detector level) |
 
-Missing: none (2026-11-22 rbid2). In-development RED: none (RB-LOAD-02 green 2026-11-23 hs1, slice). Partial: RB-BUILD-03 (plan level), RB-DIAG-01. Red: RB-UNIT-01 (known), RB-PLUGIN-03 (env), `sosix/text_boundary_spec` (RB-TEXT-01 sibling).
+Missing: none (2026-11-22 rbid2). In-development RED: none (RB-LOAD-02 green 2026-11-23 hs1, slice). Partial: RB-BUILD-03 (plan level), RB-DIAG-01 (interpreter surface only). Red: RB-UNIT-01 (known), RB-PLUGIN-03 (env), `sosix/text_boundary_spec` (RB-TEXT-01 sibling).
 
 Evidence classes per host/target: compile-only, link, load provider, execute. Perf targets: cold compile <= +3% CPU / +2% RSS, warm <= +1%; zero added runtime work for unconstrained ABI-compatible SFFI returns.
 
