@@ -1,7 +1,8 @@
 # Bounded ELF32 compiler-rt preparation job
 
-Status: first GitHub campaign retained a shared configure failure; the minimal
-configuration repair is awaiting Astra review before another labeled attempt.
+Status: two failed GitHub campaigns are retained. The first configuration repair
+passed all three real target configurations; the second exposed an oracle
+spelling defect. Its minimal repair awaits Astra review before another attempt.
 
 ## Inputs and owner boundaries
 
@@ -149,3 +150,29 @@ not equivalence of target spellings alone or proof for the VM's 23.1.1 compiler.
 The next VM attempt must retain the actual target, ISA/ABI command flags, ELF
 attributes, and derived archive evidence. The isolated source/selection receipts
 are in `build/verify/elf32-builtins-attempt-45172244479/`.
+
+## Second real campaign: assembler command spelling
+
+Run `45183442000`, job `137722849031`, exact source
+`0795989c076ccf89c1e78c240c2666f5c005ca66`, retained artifact `14823451200`
+(`simpleos-elf32-builtins-prep-45183442000`, 89814 bytes). Inputs, logs, caches
+and generated compiler commands are preserved under
+`build/verify/elf32-builtins-attempt-45183442000/`; prior evidence is untouched.
+
+The real 23.1.1 configurations now succeed for all targets and select exactly
+`i386`, `arm`, and `riscv32`. Generated command inventories contain 140, 176 and
+158 entries respectively. They stop at one shared oracle defect before Ninja
+builds: CMake emits assembler commands as `-target <exact-triple>`, while the
+oracle's equality check only accepted the C-driver spelling
+`--target=<exact-triple>`. The count check already recognized both forms.
+First rejected entries are i686 index 112 (`ashldi3.S`), ARM index 1
+(`bswapdi2.S`), and RV32 index 0 (`mulsi3.S`); their actual target and ISA/ABI
+arguments are correct. No archive or export gate was reached.
+
+The repair accepts these two observed canonical spellings with exactly the same
+target value and still requires one target occurrence. Duplicate/conflicting
+target and ISA/ABI checks remain enforced. The complete 474 retained real
+commands are checked offline with the repaired oracle before another build;
+that source-oracle result is not a compiler build or guest qualification.
+Two real jobs and the earlier source corrections remain in the same six-cycle
+budget; no unchanged job or previously green C-provider campaign is rerun.
