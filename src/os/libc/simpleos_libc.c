@@ -124,11 +124,15 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     return (void *)(uintptr_t)r;
 }
 
-int munmap(void *addr, size_t length) {
-    int64_t r = simpleos_syscall(11, (int64_t)(uintptr_t)addr, (int64_t)length,
-                                  0, 0, 0);
+/* 0 on success, -1 with errno set when a syscall result is negative. */
+static int syscall_status(int64_t r) {
     if (r < 0) return set_errno(r);
     return 0;
+}
+
+int munmap(void *addr, size_t length) {
+    return syscall_status(simpleos_syscall(11, (int64_t)(uintptr_t)addr,
+                                           (int64_t)length, 0, 0, 0));
 }
 
 /* SimpleOS syscall 12 == mprotect, implemented in the kernel by
@@ -138,10 +142,8 @@ int munmap(void *addr, size_t length) {
  * pulled runtime_memory.o (rt_alloc / rt_free guard pages) failed with an
  * undefined reference. This is the wrapper, not a stub. */
 int mprotect(void *addr, size_t length, int prot) {
-    int64_t r = simpleos_syscall(12, (int64_t)(uintptr_t)addr, (int64_t)length,
-                                  (int64_t)prot, 0, 0);
-    if (r < 0) return set_errno(r);
-    return 0;
+    return syscall_status(simpleos_syscall(12, (int64_t)(uintptr_t)addr,
+                                           (int64_t)length, (int64_t)prot, 0, 0));
 }
 
 /* ====================================================================
