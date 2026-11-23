@@ -257,10 +257,17 @@ pub fn file_write(path: text, content: text) -> bool:
     # Writing into a nonexistent directory otherwise no-ops silently
     # (bug interp_examples_dir_f64_zero_and_write_noop_2026-07-03):
     # create the missing parent directory and retry once.
-    val sep_idx = path.rfind("/")
+    val is_win = host_is_windows_host()
+    val fwd_idx = native_path.rfind("/")
+    val back_idx = if is_win: native_path.rfind("\\") else: -1
+    val sep_idx = if back_idx > fwd_idx: back_idx else: fwd_idx
     if sep_idx <= 0:
         return false
-    val parent = path.substring(0, sep_idx)
+    var parent = native_path.substring(0, sep_idx)
+    if is_win and sep_idx == 2 and native_path.byte_len() >= 3 and native_path.substring(1, 2) == ":":
+        parent = native_path.substring(0, 3)
+    elif is_win and sep_idx == 6 and native_path.starts_with("\\\\?\\") and native_path.substring(5, 6) == ":":
+        parent = native_path.substring(0, 7)
     var parent_exists = false
     unsafe(capabilities: [ffi]):
         parent_exists = rt_file_exists(host_path_native(parent))
@@ -594,7 +601,13 @@ pub fn is_dir(path: text) -> bool:
         rt_dir_exists(host_path_native(path))
 
 pub fn is_file(path: text) -> bool:
-    shell_bool("test -f '{path}'")
+    val native_path = host_path_native(path)
+    var exists = false
+    var is_d = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(native_path)
+        is_d = rt_dir_exists(native_path)
+    exists and not is_d
 
 ## No-shell stat(2) probe for whether `path` is a character device (e.g. a
 ## DRM render node). Unlike `is_dir`/`is_file` above, this does NOT shell
@@ -606,21 +619,10 @@ pub fn is_char_device(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_is_char_device(host_path_native(path))
 
-## Prefer the native directory listing (works on hosts without /bin/sh,
-## e.g. Windows); fall back to the shell form only when the native probe
-## cannot read the directory.
+## Native directory listing (works on all hosts without /bin/sh, e.g. Windows).
 pub fn list_dir(path: text) -> [text]:
-    val native = unsafe(capabilities: [ffi]):
-        rt_dir_list(host_path_native(path))
-    if val listed = native:
-        return listed
-    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
-    if code != 0:
-        return []
-    val trimmed = stdout.trim()
-    if trimmed == "":
-        return []
-    trimmed.split("\n")
+    unsafe(capabilities: [ffi]):
+        rt_dir_list(host_path_native(path)) ?? []
 
 pub fn dir_list_or_empty(path: text) -> [text]:
     # Contract: failure == empty; dir_list_optional below distinguishes them.
