@@ -7,14 +7,14 @@
 # winrun_*/bsdrun_*/sosrun_*). Guide + per-target status:
 #   doc/07_guide/infra/toolchain/cross_compile_status_2026-11-15.md
 #
-# Per (target, artifact) row:
+# Per (linker, target, artifact) row (both lld and internal by default):
 #   1. preflight: builder, clang, ld.lld, llvm-readelf, file, the target's
 #      sysroot / llvm-mingw / compiler-rt / rustup target, qemu-user for --run.
 #      A missing tool is an ERROR row with a fix hint. Never GCC: Linux
 #      riscv64/i686/armv7 also run check-linux-cross-no-libgcc.shs.
 #   2. free-memory gate (MemAvailable >= --min-free-gb, waits up to
 #      XC_MEM_WAIT_S, default 1800s), then ONE native-build at a time with
-#      SIMPLE_CACHE_SCOPE=xc-<target>.
+#      SIMPLE_CACHE_SCOPE=xc-<linker>-<target>.
 #   3. artifact check: `file` + llvm-readelf/llvm-readobj class and machine;
 #      an ELF with NEEDED libgcc_s is a FAIL.
 #   4. --run: execute `<artifact> --help` under qemu-user (never wine).
@@ -24,7 +24,7 @@
 #   PASS — <n> row(s) built and checked ...        exit 0
 #   FAIL — <k> row(s) failed: <names> ...          exit 1
 #   ERROR — nothing was checked (...) / <k> row(s) could not be checked  exit 2
-# A run with zero PASS rows is never a PASS.
+# Every requested row must PASS; BLOCKED rows make the verdict ERROR.
 #
 # Extra targets hook (e.g. NVMe FW bare-metal lane): XC_MATRIX_EXTRA_TARGETS=<file>
 # with TAB-separated rows
@@ -34,6 +34,7 @@
 #
 # usage: sh scripts/check/check-cross-compile-matrix.shs [--targets a,b|all]
 #        [--artifacts lint,test] [--builder PATH] [--min-free-gb N] [--run]
+#        [--linkers lld,internal]
 #        [--out DIR] [--dry-run] [--selftest] [--list]
 set -u
 
@@ -41,7 +42,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || { echo "ERROR �
 
 ALL_TARGETS="linux-x86_64 linux-aarch64 linux-riscv64 linux-i686 linux-armv7
 windows-x86_64 windows-aarch64 freebsd-x86_64 freebsd-aarch64
-simpleos-x86_64 simpleos-aarch64 simpleos-riscv64gc
+simpleos-x86_64 simpleos-i686 simpleos-aarch64 simpleos-armv7 simpleos-riscv64gc simpleos-riscv32
 baremetal-x86 baremetal-x86_64 baremetal-arm baremetal-aarch64 baremetal-riscv32 baremetal-riscv64"
 
 TC=${XC_TOOLCHAINS:-$HOME/toolchains}
@@ -61,8 +62,11 @@ target_info() {
         freebsd-x86_64)  T_TRIPLE=x86_64-unknown-freebsd; T_ARCH='x86-64|X86_64'; T_CC="clang --target=x86_64-unknown-freebsd14 --sysroot=$TC/freebsd/amd64 -fuse-ld=lld" ;;
         freebsd-aarch64) T_TRIPLE=aarch64-unknown-freebsd; T_ARCH='aarch64|AArch64|AARCH64'; T_CC="clang --target=aarch64-unknown-freebsd14 --sysroot=$TC/freebsd/aarch64 -fuse-ld=lld" ;;
         simpleos-x86_64)    T_TRIPLE=x86_64-unknown-simpleos; T_KIND=simpleos; T_ARCH='x86-64|X86_64' ;;
+        simpleos-i686)      T_TRIPLE=i686-unknown-simpleos; T_KIND=simpleos; T_CLASS=ELF32; T_ARCH='80386' ;;
         simpleos-aarch64)   T_TRIPLE=aarch64-unknown-simpleos; T_KIND=simpleos; T_ARCH='aarch64|AArch64|AARCH64' ;;
+        simpleos-armv7)     T_TRIPLE=armv7-unknown-simpleos; T_KIND=simpleos; T_CLASS=ELF32; T_ARCH='ARM' ;;
         simpleos-riscv64gc) T_TRIPLE=riscv64gc-unknown-simpleos; T_KIND=simpleos; T_ARCH='RISC-V' ;;
+        simpleos-riscv32)   T_TRIPLE=riscv32imac-unknown-simpleos; T_KIND=simpleos; T_CLASS=ELF32; T_ARCH='RISC-V' ;;
         baremetal-x86)     T_TRIPLE=i686-unknown-none-elf; T_KIND=baremetal; T_CLASS=ELF32; T_ARCH='80386' ;;
         baremetal-x86_64)  T_TRIPLE=x86_64-unknown-none; T_KIND=baremetal; T_ARCH='x86-64|X86_64' ;;
         baremetal-arm)     T_TRIPLE=armv7-unknown-none-eabi; T_KIND=baremetal; T_CLASS=ELF32; T_ARCH='ARM' ;;
@@ -119,6 +123,14 @@ needs_libgcc() { printf '%s\n' "$1" | grep -E 'NEEDED' | grep -q -E 'libgcc'; }
 # mem_avail_gb <meminfo-file>
 mem_avail_gb() { awk '/^MemAvailable:/ {printf "%d\n", $2/1048576; f=1} END {if (!f) print -1}' "$1"; }
 
+# run_block_reason <run-requested> <runner> <kind>
+# Structural link evidence cannot satisfy an execution request.
+run_block_reason() {
+    if [ "$1" = 1 ] && [ -z "$2" ]; then
+        echo "execution requested but no target runner is configured for $3; link-only evidence is insufficient"
+    fi
+}
+
 # aggregate <results.tsv> -> prints verdict line, returns exit code
 # columns: target artifact status detail
 aggregate() {
@@ -130,6 +142,7 @@ aggregate() {
     if [ "$_n" -eq 0 ]; then echo "ERROR — nothing was checked (0 rows)"; return 2; fi
     if [ -n "$_f" ]; then echo "FAIL — $(echo $_f | wc -w | tr -d ' ') row(s) failed: ${_f% } (pass=$_p blocked=$_b of $_n)"; return 1; fi
     if [ -n "$_e" ]; then echo "ERROR — $(echo $_e | wc -w | tr -d ' ') row(s) could not be checked: ${_e% } (pass=$_p blocked=$_b of $_n)"; return 2; fi
+    if [ "$_b" -gt 0 ]; then echo "ERROR — $_b requested row(s) blocked (pass=$_p of $_n)"; return 2; fi
     if [ "$_p" -eq 0 ]; then echo "ERROR — nothing was checked (0 PASS rows; blocked=$_b of $_n)"; return 2; fi
     echo "PASS — $_p row(s) built and checked (blocked=$_b of $_n)"; return 0
 }
@@ -167,7 +180,7 @@ Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' PE32+ 'Aarch64|ARM64' >/dev/null || 
     XC_MATRIX_EXTRA_TARGETS=$_saved_extra
     # aggregate fixtures
     printf 'a\tlint\tPASS\tok\nb\tlint\tBLOCKED\tx\n' > "$_t/r1"
-    aggregate "$_t/r1" >/dev/null; [ $? -eq 0 ] || _bad "pass+blocked not PASS"
+    aggregate "$_t/r1" >/dev/null; [ $? -eq 2 ] || _bad "pass+blocked accepted as complete"
     printf 'a\tlint\tPASS\tok\nb\tlint\tFAIL\tx\nc\ttest\tERROR\ty\n' > "$_t/r2"
     aggregate "$_t/r2" >/dev/null; [ $? -eq 1 ] || _bad "fail not FAIL"
     printf 'a\tlint\tPASS\tok\nc\ttest\tERROR\ty\n' > "$_t/r3"
@@ -176,13 +189,38 @@ Machine: IMAGE_FILE_MACHINE_ARM64 (0xAA64)' PE32+ 'Aarch64|ARM64' >/dev/null || 
     aggregate "$_t/r4" >/dev/null; [ $? -eq 2 ] || _bad "blocked-only not ERROR (vacuous)"
     : > "$_t/r5"
     aggregate "$_t/r5" >/dev/null; [ $? -eq 2 ] || _bad "empty not ERROR"
+    printf 'a\tlint\tPASS\tok\na\ttest\tPASS\tok\n' > "$_t/r6"
+    aggregate "$_t/r6" >/dev/null; [ $? -eq 0 ] || _bad "all-pass not PASS"
+    [ -n "$(run_block_reason 1 '' simpleos)" ] || _bad "missing SimpleOS runner accepted"
+    [ -z "$(run_block_reason 0 '' simpleos)" ] || _bad "link-only request blocked"
+    [ -z "$(run_block_reason 1 native rust)" ] || _bad "native runner blocked"
+    [ -z "$(run_block_reason 1 qemu-aarch64 rust)" ] || _bad "qemu runner blocked"
+    _saved_engine=$engine
+    for _target in simpleos-i686 simpleos-armv7 simpleos-riscv32; do
+        target_info "$_target" && [ "$T_CLASS" = ELF32 ] || _bad "$_target missing ELF32 target"
+        engine=lld
+        _cmd=$(build_cmd "$_target" lint fixture-output)
+        case $_cmd in *'--backend llvm'*) ;; *) _bad "$_target does not select LLVM" ;; esac
+    done
+    target_info simpleos-aarch64
+    engine=lld; _lld_cmd=$(build_cmd simpleos-aarch64 lint fixture-output)
+    engine=internal; _internal_cmd=$(build_cmd simpleos-aarch64 lint fixture-output)
+    case $_lld_cmd in *SIMPLE_LINKER=lld*SIMPLE_CACHE_SCOPE=xc-lld-simpleos-aarch64*simple-core-lld-aarch64*) ;; *) _bad "lld selection/cache isolation" ;; esac
+    case $_internal_cmd in *SIMPLE_LINKER=internal*SIMPLE_CACHE_SCOPE=xc-internal-simpleos-aarch64*simple-core-internal-aarch64*) ;; *) _bad "internal selection/cache isolation" ;; esac
+    _saved_run=$run; run=0
+    target_info simpleos-i686
+    [ -z "$(blocked_reason)" ] || _bad "supported i686 internal facade blocked"
+    target_info simpleos-aarch64
+    [ -z "$(blocked_reason)" ] || _bad "supported arm64 internal facade blocked"
+    run=$_saved_run; engine=$_saved_engine
     rm -rf "$_t"
     return $_rc
 }
-SELFTEST_FIXTURES=22
+SELFTEST_FIXTURES=37
 
 # ---------------------------------------------------------------- args
 targets=all; artifacts="lint test"; builder=""; min_free=8; run=0; dry=0; only_selftest=0; list=0
+linkers="lld internal"; engine=lld
 out=""
 while [ $# -gt 0 ]; do
     case $1 in
@@ -197,6 +235,8 @@ while [ $# -gt 0 ]; do
         --out) out=${2:-}; shift ;;
         --out=*) out=${1#*=} ;;
         --run) run=1 ;;
+        --linkers) linkers=$(echo "${2:-}" | tr ',' ' '); shift ;;
+        --linkers=*) linkers=$(echo "${1#*=}" | tr ',' ' ') ;;
         --dry-run) dry=1 ;;
         --selftest) only_selftest=1 ;;
         --list) list=1 ;;
@@ -206,9 +246,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
-if [ $only_selftest = 1 ]; then echo "PASS — selftest $SELFTEST_FIXTURES fixture(s) checked"; exit 0; fi
-
+for engine in $linkers; do
+    case $engine in lld|internal) ;; *) echo "ERROR — unknown linker '$engine' (use lld,internal)"; exit 2 ;; esac
+done
+[ -n "$linkers" ] || { echo "ERROR — no linkers requested"; exit 2; }
 case $min_free in ''|*[!0-9]*) echo "ERROR — nothing was checked (--min-free-gb must be an integer)"; exit 2 ;; esac
 [ "$targets" = all ] && targets="$ALL_TARGETS $(extra_target_names)"
 targets=$(echo "$targets" | tr ',\n' '  ')
@@ -280,6 +321,8 @@ preflight() {
 }
 
 blocked_reason() {
+    _run_block=$(run_block_reason "$run" "$T_QEMU" "$T_KIND")
+    [ -n "$_run_block" ] && { echo "$_run_block"; return; }
     case $T_KIND in
         baremetal) [ "${XC_BAREMETAL_ENABLE:-0}" = 1 ] && { echo ""; return; }
             echo "bare metal has no hosted runtime for lint/test-runner (set XC_BAREMETAL_ENABLE=1 or add an NVMe FW row via XC_MATRIX_EXTRA_TARGETS)" ;;
@@ -301,12 +344,13 @@ wait_mem() {
 # build_cmd <target> <artifact> <outfile> -> prints the shell command (plan + exec)
 build_cmd() {
     _e=$(entry_of "$2")
-    _common="env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE=xc-$1 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648"
+    _common="env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_LINKER=$engine SIMPLE_CACHE_SCOPE=xc-$engine-$1 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648"
     case $T_KIND in
         rust)
             echo "$_common SIMPLE_SCV_INVENTORY_COLD_INIT=1 '$builder' native-build --target $T_TRIPLE --runtime-path '$out'/cargo-target/$T_TRIPLE/bootstrap --source src/compositions/kernel_llvm_cranelift --source src --entry-closure --entry $_e --mode dynload --threads ${XC_THREADS:-12} --timeout ${XC_TIMEOUT:-600} --output '$3' $T_EXTRA" ;;
         simpleos|baremetal)
-            echo "$_common SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_SIMPLE_CORE_PATH='$out'/simple-core-$T_TRIPLE/libsimple_runtime.a '$builder' native-build --source src/compositions/kernel_llvm_cranelift --source src --backend cranelift --runtime-bundle simple-core --entry-closure --entry $_e --target $T_TRIPLE --threads ${XC_THREADS:-12} --timeout ${XC_TIMEOUT:-1800} -o '$3' $T_EXTRA" ;;
+            _backend=cranelift; [ "$T_CLASS" = ELF32 ] && _backend=llvm
+            echo "$_common SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_SIMPLE_CORE_PATH='$out'/simple-core-$engine-$T_TRIPLE/libsimple_runtime.a '$builder' native-build --source src/compositions/kernel_llvm_cranelift --source src --backend $_backend --runtime-bundle simple-core --entry-closure --entry $_e --target $T_TRIPLE --threads ${XC_THREADS:-12} --timeout ${XC_TIMEOUT:-1800} -o '$3' $T_EXTRA" ;;
     esac
 }
 
@@ -325,40 +369,46 @@ runtime_prep() {
                   cargo build --profile bootstrap -p simple-native-all --features driver-compat --target "$T_TRIPLE" ) >> "$2" 2>&1
             [ -f "$_rd/libsimple_native_all.a" ] ;;
         simpleos|baremetal)
-            _sd=$out/simple-core-$T_TRIPLE
+            _sd=$out/simple-core-$engine-$T_TRIPLE
+            _backend=cranelift; [ "$T_CLASS" = ELF32 ] && _backend=llvm
             [ -s "$_sd/libsimple_runtime.a" ] && return 0
-            ( cd "$repo_root" && SIMPLE_BINARY="$builder" SIMPLE_CORE_BUILD_DIR="$_sd" SIMPLE_CORE_BACKEND=cranelift \
+            ( cd "$repo_root" && SIMPLE_BINARY="$builder" SIMPLE_CORE_BUILD_DIR="$_sd" SIMPLE_CORE_BACKEND="$_backend" SIMPLE_LINKER="$engine" SIMPLE_CACHE_SCOPE="xc-core-$engine-$1" \
                 BUILD_DIR="$_sd/work" ARCHIVE_ONLY=1 TARGET="$T_TRIPLE" sh scripts/check/check-simple-core-runtime-smoke.shs ) >> "$2" 2>&1
             [ -s "$_sd/libsimple_runtime.a" ] ;;
     esac
 }
 
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+if [ $only_selftest = 1 ]; then echo "PASS — selftest $SELFTEST_FIXTURES fixture(s) checked"; exit 0; fi
+
 mkdir -p "$out/logs" || { echo "ERROR — nothing was checked (cannot create $out)"; exit 2; }
 res=$out/results.tsv; : > "$res"
-emit() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$res"; }
+emit() { printf '%s/%s\t%s\t%s\t%s\n' "$engine" "$1" "$2" "$3" "$4" >> "$res"; }
 
 if [ $dry = 1 ]; then
     echo "# plan: builder=$builder min_free_gb=$min_free run=$run out=$out"
 fi
-libgcc_checked=""; dry_missing=""
+libgcc_checked=""; dry_missing=""; dry_blocked=""
+for engine in $linkers; do
 for t in $targets; do
     target_info "$t"
     for a in $artifacts; do
         XC_NOTE=""
         br=$(blocked_reason)
         if [ -n "$br" ]; then
-            [ $dry = 1 ] && echo "$t/$a: BLOCKED — $br"
+            [ $dry = 1 ] && echo "$engine/$t/$a: BLOCKED — $br"
+            dry_blocked="$dry_blocked $engine/$t/$a"
             emit "$t" "$a" BLOCKED "$br"; continue
         fi
-        o=$out/$t/simple_$a; [ "$T_CLASS" = PE32+ ] && o=$o.exe
+        o=$out/$engine/$t/simple_$a; [ "$T_CLASS" = PE32+ ] && o=$o.exe
         if [ $dry = 1 ]; then
             preflight > "$out/.pf"; pf=$(cat "$out/.pf")
-            [ -n "$pf" ] && dry_missing="$dry_missing $t/$a"
-            echo "$t/$a: triple=$T_TRIPLE kind=$T_KIND class=$T_CLASS preflight=${pf:-ok}"
+            [ -n "$pf" ] && dry_missing="$dry_missing $engine/$t/$a"
+            echo "$engine/$t/$a: triple=$T_TRIPLE kind=$T_KIND class=$T_CLASS preflight=${pf:-ok}"
             echo "  $(build_cmd "$t" "$a" "$o")"
             continue
         fi
-        log=$out/logs/$t-$a.log; : > "$log"
+        log=$out/logs/$engine-$t-$a.log; : > "$log"
         preflight > "$out/.pf"; pf=$(cat "$out/.pf")
         if [ -n "$pf" ]; then emit "$t" "$a" ERROR "$pf"; continue; fi
         if [ -n "$T_LINUX" ] && ! echo " $libgcc_checked " | grep -q " $T_LINUX "; then
@@ -368,7 +418,7 @@ for t in $targets; do
         fi
         if ! fg=$(wait_mem); then emit "$t" "$a" ERROR "free memory ${fg}G < ${min_free}G after ${XC_MEM_WAIT_S:-1800}s"; continue; fi
         if ! runtime_prep "$t" "$log"; then emit "$t" "$a" FAIL "runtime build failed (see $log)"; continue; fi
-        mkdir -p "$out/$t"; rm -f "$o"
+        mkdir -p "$out/$engine/$t"; rm -f "$o"
         cmd=$(build_cmd "$t" "$a" "$o")
         echo "[xc] $t/$a: $cmd" >> "$log"
         ( cd "$repo_root" && eval "$cmd" ) >> "$log" 2>&1
@@ -390,11 +440,10 @@ for t in $targets; do
         if [ $run = 1 ]; then
             case $T_QEMU in
                 native) "$o" --help >>"$log" 2>&1; rr=$? ;;
-                '') rr=skip ;;
+                '') emit "$t" "$a" BLOCKED "execution requested but no target runner is configured"; continue ;;
                 *) "$T_QEMU" "$o" --help >>"$log" 2>&1; rr=$? ;;
             esac
             case $rr in
-                skip) detail="$detail; run: no qemu-user for $T_KIND (not run)" ;;
                 0) detail="$detail; run ok" ;;
                 *) emit "$t" "$a" FAIL "run rc=$rr (see $log)"; continue ;;
             esac
@@ -403,10 +452,12 @@ for t in $targets; do
         emit "$t" "$a" PASS "$detail"
     done
 done
+done
 
 if [ $dry = 1 ]; then
     [ -n "$dry_missing" ] && { echo "ERROR — dry-run: preflight MISSING for$dry_missing; nothing built"; exit 2; }
-    echo "PASS — dry-run: preflight ok, plan printed for $(echo $targets | wc -w | tr -d ' ') target(s) x $(echo $artifacts | wc -w | tr -d ' ') artifact(s); nothing built"
+    [ -n "$dry_blocked" ] && { echo "ERROR — dry-run: requested rows BLOCKED:$dry_blocked; nothing built"; exit 2; }
+    echo "PASS — dry-run: preflight ok, plan printed for $(echo $linkers | wc -w | tr -d ' ') linker(s) x $(echo $targets | wc -w | tr -d ' ') target(s) x $(echo $artifacts | wc -w | tr -d ' ') artifact(s); nothing built"
     exit 0
 fi
 
