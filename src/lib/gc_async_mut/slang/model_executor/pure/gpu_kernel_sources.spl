@@ -1,0 +1,133 @@
+# @gc — module uses GC runtime
+#
+# gpu_kernel_sources — device kernel sources shared by the ROCm (hipRTC) and
+# CUDA (NVRTC) providers of the pure runner. One source text, two runtime
+# compilers: the kernels use only the C++ subset common to HIP and CUDA
+# (`extern "C" __global__`, `__shared__`, `__syncthreads`, sqrtf/expf/pow/sin/cos).
+# Offsets use `long long`, not `long`: `long` is 32-bit in device code when the
+# host is Windows, which would overflow row * cols on large weight matrices.
+
+pub val SLANG_SRC_MATVEC = r"""extern "C" __global__ void sgemv_rows(const float* A, const float* x, float* y, int M, int K) {
+  int row = blockIdx.x;
+  float acc = 0.0f;
+  for (int k = threadIdx.x; k < K; k += blockDim.x) acc += A[(long long)row * K + k] * x[k];
+  __shared__ float red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s]; __syncthreads(); }
+  if (threadIdx.x == 0) y[row] = red[0];
+}
+"""
+
+pub val SLANG_SRC_RMSNORM = r"""extern "C" __global__ void rmsnorm_f32(const float* x, const float* w, float* out, int n, float eps) {
+  float acc = 0.0f;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) acc += x[i] * x[i];
+  __shared__ float red[256];
+  red[threadIdx.x] = acc;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) { if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s]; __syncthreads(); }
+  float scale = 1.0f / sqrtf(red[0] / (float)n + eps);
+  for (int i = threadIdx.x; i < n; i += blockDim.x) out[i] = x[i] * scale * w[i];
+}
+"""
+
+pub val SLANG_SRC_ADD = r"""extern "C" __global__ void add_f32(const float* a, const float* b, float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = a[i] + b[i];
+}
+"""
+
+pub val SLANG_SRC_MUL = r"""extern "C" __global__ void mul_f32(const float* a, const float* b, float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = a[i] * b[i];
+}
+"""
+
+pub val SLANG_SRC_SILU = r"""extern "C" __global__ void silu_f32(const float* x, float* out, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) out[i] = x[i] / (1.0f + expf(-x[i]));
+}
+"""
+
+# One block per head. Scores live in shared memory, so n_pos <= 1024.
+pub val SLANG_SRC_ATTENTION = r"""extern "C" __global__ void attention_f32(const float* q, const float* kb, const float* vb, float* out, int n_pos, int head_dim, int dim) {
+  int h = blockIdx.x;
+  int hb = h * head_dim;
+  float scale = 1.0f / sqrtf((float)head_dim);
+  __shared__ float sc[1024];
+  for (int t = threadIdx.x; t < n_pos; t += blockDim.x) {
+    float dot = 0.0f;
+    for (int i = 0; i < head_dim; i++) dot += q[hb + i] * kb[(long long)t * dim + hb + i];
+    sc[t] = dot * scale;
+  }
+  __syncthreads();
+  __shared__ float total[1];
+  if (threadIdx.x == 0) {
+    float mx = sc[0];
+    for (int t = 1; t < n_pos; t++) if (sc[t] > mx) mx = sc[t];
+    float s = 0.0f;
+    for (int t = 0; t < n_pos; t++) { sc[t] = expf(sc[t] - mx); s += sc[t]; }
+    total[0] = s;
+  }
+  __syncthreads();
+  float inv = 1.0f / total[0];
+  for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+    float acc = 0.0f;
+    for (int t = 0; t < n_pos; t++) acc += sc[t] * vb[(long long)t * dim + hb + i];
+    out[hb + i] = acc * inv;
+  }
+}
+"""
+
+# One thread per (head, rotated pair); angles in double like the CPU op.
+pub val SLANG_SRC_ROPE = r"""extern "C" __global__ void rope_f32(const float* x, float* out, int pos, int n_heads, int head_dim, float theta) {
+  int half = head_dim / 2;
+  int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= n_heads * half) return;
+  int base = (t / half) * head_dim;
+  int i = t % half;
+  double inv = 1.0 / pow((double)theta, (double)(2 * i) / (double)head_dim);
+  double ang = (double)pos * inv;
+  float c = (float)cos(ang);
+  float s = (float)sin(ang);
+  float x0 = x[base + i];
+  float x1 = x[base + i + half];
+  out[base + i] = x0 * c - x1 * s;
+  out[base + i + half] = x1 * c + x0 * s;
+}
+"""
+
+pub val SLANG_SRC_KV_WRITE = r"""extern "C" __global__ void kv_write_f32(float* buf, const float* row, int pos, int dim) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < dim) buf[(long long)pos * dim + i] = row[i];
+}
+"""
+
+pub val SLANG_SRC_ROW = r"""extern "C" __global__ void row_f32(const float* table, float* out, int row, int cols) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < cols) out[i] = table[(long long)row * cols + i];
+}
+"""
+
+# Single block; ties resolve to the lowest index, like tensor_argmax.
+pub val SLANG_SRC_ARGMAX = r"""extern "C" __global__ void argmax_f32(const float* x, int* out, int n) {
+  int t = threadIdx.x;
+  int bi = (t < n) ? t : 0;
+  float bv = x[bi];
+  for (int i = t + blockDim.x; i < n; i += blockDim.x) {
+    if (x[i] > bv) { bv = x[i]; bi = i; }
+  }
+  __shared__ float sv[256];
+  __shared__ int si[256];
+  sv[t] = bv;
+  si[t] = bi;
+  __syncthreads();
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (t < s) {
+      if (sv[t + s] > sv[t] || (sv[t + s] == sv[t] && si[t + s] < si[t])) { sv[t] = sv[t + s]; si[t] = si[t + s]; }
+    }
+    __syncthreads();
+  }
+  if (t == 0) out[0] = si[0];
+}
+"""
