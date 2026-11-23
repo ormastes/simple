@@ -1,46 +1,82 @@
-name: Bootstrap Sanity Evidence Archive
-
+﻿name: Windows Phase2 native Hello evidence
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  phase2-native-hello:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          ref: d3422d488768713c1e6153bd2a7766ff22cbbd23
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45254122525
+          name: binary-windows-mingw-x86_64-d3422d488768713c1e6153bd2a7766ff22cbbd23
+          path: C:/w2tuple/compiler
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45254122525
+          name: native-authority-mingw-x86_64-d3422d488768713c1e6153bd2a7766ff22cbbd23
+          path: C:/w2tuple/native
+      - uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45254122525
+          name: runtime-mingw-x86_64-d3422d488768713c1e6153bd2a7766ff22cbbd23
+          path: C:/w2tuple/runtime
+      - name: Install matching target toolchain
+        run: |
+          sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw
+          . scripts/setup/windows-gitbash-bootstrap-env.shs
+          echo "CC=$(cygpath -m "$SIMPLE_MINGW_ROOT/bin/clang.exe")" >> "$GITHUB_ENV"
+          cygpath -w "$SIMPLE_MINGW_ROOT/bin" >> "$GITHUB_PATH"
+      - name: Exact Phase2 compiler start and native Hello
+        run: |
+          set -euo pipefail
+          out=/c/w2proof
+          mkdir -p "$out/tmp"
+          candidate=/c/w2tuple/compiler/simple_stage2.exe
+          native=/c/w2tuple/native/libsimple_native_all.a
+          runtime=/c/w2tuple/runtime/deps/libsimple_runtime.a
+          test "$(git rev-parse HEAD)" = d3422d488768713c1e6153bd2a7766ff22cbbd23
+          test "$(sha256sum "$candidate" | cut -d ' ' -f 1)" = a60b9ff3aa41e5ada5a1884a3f729791f4576518f996ba8b4d3f55bc463db446
+          test "$(sha256sum "$native" | cut -d ' ' -f 1)" = 7fc91928c1ff216caa45375f62aff87c174b31a6893f8ea21ff9b544ad1e40f9
+          test "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = 5856dc8727a1a72464e75762807081eaa2a6035cbb563690b50741dcde5ad26f
+          sha256sum "$candidate" "$native" "$runtime" test/04_smoke/bootstrap_hello_world.spl > "$out/inputs.sha"
+          cp /c/w2tuple/native/authority.env /c/w2tuple/runtime/runtime-identity.env "$out/"
+          unset SIMPLE_BOOTSTRAP SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR SIMPLE_LINKER SIMPLE_CORE_RUNTIME_PATH SIMPLE_SIMPLE_CORE_PATH SIMPLE_NATIVE_RUNTIME_BUNDLE
+          export SIMPLE_BINARY=C:/w2tuple/compiler/simple_stage2.exe
+          export SIMPLE_RUNTIME_PATH=C:/w2tuple/native SIMPLE_NATIVE_BUILD_RUST=0 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_KEEP_TEMP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1
+          export TEMP=C:/w2proof/tmp TMP=C:/w2proof/tmp TMPDIR=/c/w2proof/tmp
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=262144 --interval-ms=100 --timeout-seconds=60 --receipt="$out/start.env" -- "$candidate" --version > "$out/start.stdout" 2> "$out/start.stderr"
+          grep -qx 'quiescent=1' "$out/start.env"
+          status=0
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=4194304 --interval-ms=100 --timeout-seconds=600 --receipt="$out/compile.env" -- "$candidate" native-build --backend llvm --runtime-bundle core-c-bootstrap --runtime-path C:/w2tuple/native --target x86_64-pc-windows-gnu --entry-closure --mode one-binary --threads 1 --cache-dir C:/w2proof/cache test/04_smoke/bootstrap_hello_world.spl --output C:/w2proof/hello.exe > "$out/compile.stdout" 2> "$out/compile.stderr" || status=$?
+          printf 'compile_exit=%s\n' "$status" > "$out/result.env"
+          test "$status" -eq 0
+          grep -qx 'quiescent=1' "$out/compile.env"
+          test -s "$out/hello.exe"
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=131072 --interval-ms=100 --timeout-seconds=30 --receipt="$out/run.env" -- "$out/hello.exe" > "$out/hello.stdout" 2> "$out/hello.stderr"
+          grep -qx 'quiescent=1' "$out/run.env"
+          tr -d '\r' < "$out/hello.stdout" > "$out/hello.normalized"
+          printf 'hello\n' > "$out/hello.expected"
+          cmp "$out/hello.expected" "$out/hello.normalized"
+          sha256sum --check "$out/inputs.sha"
+          sha256sum "$out/hello.exe" > "$out/hello.sha"
+          printf 'run_exit=0\nexact_stdout=1\n' >> "$out/result.env"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-phase2-native-hello-${{ github.run_id }}
+          path: C:/w2proof/
+          if-no-files-found: error
+          retention-days: 14
