@@ -66,6 +66,8 @@ def main():
         subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', 'src', 'config'], cwd=source, check=True)
         if sha(parent) != PARENT:
             raise RuntimeError('parent compiler changed')
+        if result.get('product_sha256') and sha(product/'simple') != result['product_sha256']:
+            raise RuntimeError('full CLI changed during qualification')
         for name, expected in RUNTIME.items():
             if sha(runtime/name) != expected:
                 raise RuntimeError('runtime archive mismatch: '+name)
