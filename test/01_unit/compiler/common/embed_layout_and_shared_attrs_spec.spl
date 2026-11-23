@@ -1,0 +1,133 @@
+"""End-to-end @embed -> LayoutAttr wiring and session-guarded shared absent attribute defaults spec."""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{
+    EmbedLayoutMode, EmbedAttr, parse_embed_attr, embed_attr_placement_v1, apply_embed_layout_attr_v1,
+    FunctionAttr, parse_function_attrs, function_attr_absent_shared_v1, function_attr_with_gpu_kernel_v1,
+    parse_layout_attrs, layout_attr_absent_shared_v1,
+    driver_manifest_attr_absent_shared_v1, vhdl_hardware_metadata_absent_shared_v1
+}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{Attribute}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirStruct, HirClass}
+use compiler.types.type_layout.{TypeLayoutKind}
+
+fn _span() -> Span:
+    Span.empty()
+
+fn _ident_expr(name: text) -> Expr:
+    Expr(kind: ExprKind.Ident(name), span: _span())
+
+fn _str_expr(value: text) -> Expr:
+    Expr(kind: ExprKind.StringLit(value, None), span: _span())
+
+fn _int_expr(value: i64) -> Expr:
+    Expr(kind: ExprKind.IntLit(value), span: _span())
+
+fn _assign_int_expr(name: text, value: i64) -> Expr:
+    Expr(kind: ExprKind.Assign(_ident_expr(name), None, _int_expr(value)), span: _span())
+
+fn _attr(name: text, args: [Expr]) -> Attribute:
+    Attribute(name: name, args: args, span: _span())
+
+fn _lower_source(src: text) -> HirModule:
+    val pm = parse_full_frontend(src, "embed_layout_spec.spl", "embed_layout_spec", Logger(level: 0))
+    var hl = HirLowering.with_filename("embed_layout_spec.spl")
+    hl.lower_module(pm)
+
+fn _find_struct(m: HirModule, name: text) -> HirStruct?:
+    for s in m.structs.values():
+        if s.name == name:
+            return Some(s)
+    None
+
+fn _find_class(m: HirModule, name: text) -> HirClass?:
+    for c in m.classes.values():
+        if c.name == name:
+            return Some(c)
+    None
+
+describe "@embed LayoutAttr wiring and shared absent attribute defaults":
+    it "wires @embed, @embed(packed), @embed(preserve_order), and @embed(align=N) through parse_layout_attrs":
+        val absent = parse_layout_attrs([])
+        expect(absent.layout_kind == TypeLayoutKind.Simple).to_equal(true)
+        expect(absent.is_packed).to_equal(false)
+        expect(absent.is_preserve_order).to_equal(false)
+        expect(absent.has_explicit_align).to_equal(false)
+
+        val bare_embed = parse_layout_attrs([_attr("embed", [])])
+        expect(bare_embed.layout_kind == TypeLayoutKind.Simple).to_equal(true)
+        expect(bare_embed.is_packed).to_equal(false)
+        expect(bare_embed.is_preserve_order).to_equal(true)
+
+        val packed_embed = parse_layout_attrs([_attr("embed", [_ident_expr("packed")])])
+        expect(packed_embed.layout_kind == TypeLayoutKind.Packed).to_equal(true)
+        expect(packed_embed.is_packed).to_equal(true)
+
+        val preserve_embed = parse_layout_attrs([_attr("embed", [_str_expr("preserve_order"), _assign_int_expr("align", 16)])])
+        expect(preserve_embed.is_preserve_order).to_equal(true)
+        expect(preserve_embed.has_explicit_align).to_equal(true)
+        expect(preserve_embed.explicit_align).to_equal(16)
+
+        expect(layout_attr_absent_shared_v1().is_preserve_order).to_equal(false)
+        expect(layout_attr_absent_shared_v1().is_packed).to_equal(false)
+
+    it "forwards @embed across frontend parsing and HIR has_layout_attr on struct and class declarations":
+        val src = "@embed\nstruct DirectRec:\n    a: i64\n    b: i32\n\n@embed(packed)\nstruct PackedRec:\n    a: i64\n    b: u8\n\n@embed(preserve_order, align=16)\nstruct AlignedRec:\n    a: i64\n\nstruct PlainRec:\n    a: i64\n\n@embed\nclass DirectNode:\n    a: i64\n\n@embed(packed)\nclass PackedNode:\n    a: i64\n\nclass PlainNode:\n    a: i64\n"
+        val hir = _lower_source(src)
+
+        val direct_rec = _find_struct(hir, "DirectRec").unwrap()
+        expect(direct_rec.has_layout_attr).to_equal(true)
+        expect(direct_rec.layout_attr.is_preserve_order).to_equal(true)
+        expect(direct_rec.layout_attr.is_packed).to_equal(false)
+
+        val packed_rec = _find_struct(hir, "PackedRec").unwrap()
+        expect(packed_rec.has_layout_attr).to_equal(true)
+        expect(packed_rec.layout_attr.layout_kind == TypeLayoutKind.Packed).to_equal(true)
+        expect(packed_rec.layout_attr.is_packed).to_equal(true)
+
+        val aligned_rec = _find_struct(hir, "AlignedRec").unwrap()
+        expect(aligned_rec.has_layout_attr).to_equal(true)
+        expect(aligned_rec.layout_attr.is_preserve_order).to_equal(true)
+        expect(aligned_rec.layout_attr.has_explicit_align).to_equal(true)
+        expect(aligned_rec.layout_attr.explicit_align).to_equal(16)
+
+        val plain_rec = _find_struct(hir, "PlainRec").unwrap()
+        expect(plain_rec.has_layout_attr).to_equal(false)
+        expect(plain_rec.layout_attr.is_preserve_order).to_equal(false)
+
+        val direct_node = _find_class(hir, "DirectNode").unwrap()
+        expect(direct_node.has_layout_attr).to_equal(true)
+        expect(direct_node.layout_attr.is_preserve_order).to_equal(true)
+
+        val packed_node = _find_class(hir, "PackedNode").unwrap()
+        expect(packed_node.has_layout_attr).to_equal(true)
+        expect(packed_node.layout_attr.is_packed).to_equal(true)
+
+        val plain_node = _find_class(hir, "PlainNode").unwrap()
+        expect(plain_node.has_layout_attr).to_equal(false)
+
+    it "keeps function_attr_absent_shared_v1 immutable when deriving GPU kernel attributes":
+        val shared_before = parse_function_attrs([])
+        expect(shared_before.is_gpu_kernel).to_equal(false)
+        expect(shared_before.gpu_target).to_equal("")
+        expect(shared_before.gpu_backends).to_equal("")
+
+        val kernel_copy = function_attr_with_gpu_kernel_v1(shared_before, "cuda", "cuda,opencl")
+        expect(kernel_copy.is_gpu_kernel).to_equal(true)
+        expect(kernel_copy.gpu_target).to_equal("cuda")
+        expect(kernel_copy.gpu_backends).to_equal("cuda,opencl")
+
+        val shared_after = function_attr_absent_shared_v1()
+        expect(shared_after.is_gpu_kernel).to_equal(false)
+        expect(shared_after.gpu_target).to_equal("")
+        expect(shared_after.gpu_backends).to_equal("")
+        expect(driver_manifest_attr_absent_shared_v1().version).to_equal("")
+        expect(vhdl_hardware_metadata_absent_shared_v1().is_hardware).to_equal(false)
