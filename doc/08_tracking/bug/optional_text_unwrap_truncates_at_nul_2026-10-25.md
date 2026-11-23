@@ -76,3 +76,39 @@ C string, so its length is lost at the literal itself.
 Next step: rebuild a native probe against this runtime (needs >12 GB free on C:,
 it had 6.3 GB) and run the spec natively; then drop the
 `inventory_scratch.spl` `?? ""` workaround and close.
+
+
+## Addendum 2026-11-23: byte-at must recover the counted owner too
+
+The C `rt_string_len` owner recovery was not applied to `rt_string_byte_at`.
+An owned raw data borrow therefore lost bytes after embedded NUL and repeated
+`strlen` for every scanned byte. The byte-at owner now uses the existing
+registry-validated counted data owner; foreign C buffers retain their uncached
+NUL-terminated fallback. The pure-Simple twin performs registry admission before
+reading a candidate header. No representation or ABI signature changed.
+
+Reproducer/prevention: `src/runtime/test/rt_string_byte_at_owner_selfcheck.c`
+calls the actual ABI wrapper and checks counted/raw UTF-8 around NUL, bounds,
+mutable foreign buffers, an unreadable candidate-header guard page and registry
+retirement. Its `--bench` mode measures scaling; the canonical core-C capsule
+builder gates correctness. The pure-Simple native smoke is
+`test/04_smoke/native_simple_core_string_byte_at_owner.spl`; its execution is
+still unverified because the existing producer crashed in MIR cast lowering
+before emitting an executable. That compiler-owner repair is a separate lane.
+Reproducible commands and measured benchmark results are retained in PR #11035.
+
+Open follow-up: parse workers repeat entry-closure discovery after the parent
+has resolved it. This byte-at repair reduces each scan but does not remove
+those duplicate walks. Reuse needs a read-only resolved-closure receipt bound
+to SCV/content identity, ordered roots/entry, target/backend, configured variant,
+producer/runtime and compiler options. Tests must reject modified/deleted
+sources, stale epochs and changed options/ABI rather than trusting an old path
+list. No elimination-of-duplicate-work claim is made by the byte-at fix.
+
+The smoke owns its raw input and counted string separately and releases both
+before every post-allocation return. The public C `rt_string_free` accepts
+only a registered, uniquely caller-owned counted handle; it refuses borrowed,
+shared-cache and retired values. The pure lane has no shared short/literal
+cache, and now implements that existing free primitive using its own string
+registry rather than incorrectly passing a pure-lane header to the C owner.
+The smoke also checks borrowed/nil refusal and a second free returning zero.
