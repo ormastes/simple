@@ -47,3 +47,24 @@ A tiny `bootstrap_main.spl` is cross-linked through that actual owner before the
 full closure. Both preflight and Stage2 must report the retained archive as their
 runtime source. Native object staging and object caches are retained so a later
 link failure can be diagnosed without recompiling the unchanged closure.
+
+## Target COFF intermediate closure
+
+Run 45225760378 admitted the matching Windows archive and compiled the tiny
+preflight module (1 compiled, 0 failed), then PE LLD rejected `-r` while building
+the Stage4 runtime capsule. The C driver was correctly target-qualified; this
+was an intermediate linker capability mismatch, not a missing CRT or archive.
+
+Windows GNU intermediate closures use GNU PE BFD with an explicitly validated
+machine emulation (`i386pep` for x86_64, `i386pe` for x86). Selection requires a
+GNU ld identity and advertised emulation; missing tools fail closed. ELF and
+Mach-O paths retain their prior commands. Final PE links remain pinned UCRT
+Clang/LLD. Root cardinality, unresolved-runtime, tombstone, localization and
+archive-symbol checks remain mandatory. BFD-produced COFF weak fallbacks use
+the existing repair before those checks.
+
+The focused `scripts/check/check-coff-partial-link.py` exercises the actual
+production selector, the failing LLD negative control, rooted COFF extraction,
+and Clang/LLD final PE linking. It can additionally reuse the retained real
+core-C archive. Its result describes link capability, not foreign execution
+or a complete Stage2 qualification. Full cross Stage2 remains required.

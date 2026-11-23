@@ -33,6 +33,7 @@ mod mangle;
 mod module_global_init;
 mod stubs;
 mod tools;
+mod coff_partial_link;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

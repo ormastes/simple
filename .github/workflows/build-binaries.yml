@@ -429,6 +429,10 @@ jobs:
           # Same LLVM-MinGW UCRT release as the native Windows seed, using its
           # Linux-hosted distribution. GCC sysroot packages do not provide the
           # target-qualified clang driver or LLVM runtime required by this lane.
+          # PE LLD cannot perform -r. GNU PE BFD owns only intermediate COFF
+          # closures/localization; final PE links stay on this pinned Clang/LLD.
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y -qq --no-install-recommends binutils-mingw-w64-x86-64
           toolchain=llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64
           archive="$RUNNER_TEMP/$toolchain.tar.xz"
           gh release download 20260922 --repo mstorsjo/llvm-mingw \
@@ -439,15 +443,17 @@ jobs:
           cc="$root/bin/x86_64-w64-mingw32-clang"
           cxx="$root/bin/x86_64-w64-mingw32-clang++"
           ar="$root/bin/llvm-ar"
-          for tool in "$cc" "$cxx" "$ar" "$root/bin/ld.lld" "$root/bin/llvm-nm"; do
+          for tool in "$cc" "$cxx" "$ar" "$root/bin/ld.lld" "$root/bin/llvm-nm" /usr/bin/x86_64-w64-mingw32-ld /usr/bin/x86_64-w64-mingw32-objcopy /usr/bin/x86_64-w64-mingw32-nm; do
             test -x "$tool" || { echo "Missing Windows GNU tool: $tool" >&2; exit 1; }
           done
           # Exercise target CRT, compiler-rt, libunwind and LLD now, not after
           # compiling the compiler closure. This is a cross-link check, not an
           # execution or produced-compiler qualification claim.
           printf '#include <stdio.h>\nint main(void) { puts("Windows GNU toolchain"); return 0; }\n' > "$RUNNER_TEMP/windows-gnu-toolchain.c"
+          "$cc" --target=x86_64-w64-windows-gnu -c "$RUNNER_TEMP/windows-gnu-toolchain.c" -o "$RUNNER_TEMP/windows-gnu-toolchain.o"
+          x86_64-w64-mingw32-ld -m i386pep -r --undefined=main "$RUNNER_TEMP/windows-gnu-toolchain.o" -o "$RUNNER_TEMP/windows-gnu-toolchain-closure.o"
           "$cc" --target=x86_64-w64-windows-gnu -fuse-ld=lld --rtlib=compiler-rt --unwindlib=libunwind \
-            "$RUNNER_TEMP/windows-gnu-toolchain.c" -o "$RUNNER_TEMP/windows-gnu-toolchain.exe"
+            "$RUNNER_TEMP/windows-gnu-toolchain-closure.o" -o "$RUNNER_TEMP/windows-gnu-toolchain.exe"
           file "$RUNNER_TEMP/windows-gnu-toolchain.exe" | grep -q 'PE32+'
           "$cc" --version
           {
@@ -455,6 +461,7 @@ jobs:
             echo "CXX=$cxx"
             echo "AR=$ar"
             echo "SIMPLE_LLVM_MINGW_ROOT=$root"
+            echo "SIMPLE_LINKER=lld"
           } >> "$GITHUB_ENV"
           echo "$root/bin" >> "$GITHUB_PATH"
 
