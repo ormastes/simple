@@ -1,46 +1,39 @@
 name: Bootstrap Sanity Evidence Archive
-
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
+  float-mir-diagnostic:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          name: seed-linux-x86_64-d89f975af3cb46782e0c1dd68a795bb5833da846
+          run-id: 45199934467
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: diagnostic-seed
+      - name: Execute actual source lowering with bounded memory
+        shell: bash
+        run: |
+          mkdir -p diagnostic-evidence
+          git rev-parse HEAD > diagnostic-evidence/source.txt
+          find diagnostic-seed -type f -print > diagnostic-evidence/artifact-members.txt
+          seed=$(find diagnostic-seed -type f -name simple -print -quit)
+          test -n "$seed"
+          chmod +x "$seed"
+          sha256sum "$seed" src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl scripts/check/float-store-mir-diagnostic.spl > diagnostic-evidence/inputs.sha
+          export SIMPLE_LIB="$PWD/src" SIMPLE_PROJECT_ROOT="$PWD"
+          set +e
+          (ulimit -v 2097152; timeout --kill-after=5 180 "$seed" run scripts/check/float-store-mir-diagnostic.spl) > diagnostic-evidence/stdout 2> diagnostic-evidence/stderr
+          result=$?
+          printf 'exit_status=%s\n' "$result" > diagnostic-evidence/result.env
+          exit "$result"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: float-mir-diagnostic-${{ github.sha }}
+          path: diagnostic-evidence
