@@ -53,9 +53,13 @@
  * Resolve before recording any slot or installing the signal handler. After
  * publication every read (including the fault reporter) is just an atomic
  * load; the signal path never calls sysconf. */
+#if RT_MEM_GUARD_AVAILABLE
 static size_t rt_mem_guard_host_page_size;
 #define RT_MEM_GUARD_PAGE_SIZE \
     __atomic_load_n(&rt_mem_guard_host_page_size, __ATOMIC_ACQUIRE)
+#else
+#define RT_MEM_GUARD_PAGE_SIZE ((size_t)0)
+#endif
 
 static size_t rt_mem_guard_resolve_page_size(void) {
     size_t cached = RT_MEM_GUARD_PAGE_SIZE;
@@ -224,6 +228,7 @@ static int rt_mem_guard_should_sample(size_t size) {
 #if RT_MEM_GUARD_AVAILABLE
 
 static struct sigaction rt_mem_guard_prev_segv;
+static struct sigaction rt_mem_guard_prev_bus;
 static int rt_mem_guard_handler_installed = 0;
 
 /* SIGSEGV handler: if the fault is inside a tracked guard slot, write the
@@ -236,7 +241,7 @@ static void rt_mem_guard_fault_handler(int sig, siginfo_t* info, void* ctx) {
     char buf[RT_MEM_GUARD_REPORT_MAX];
     size_t n = rt_mem_guard_fault_report((uintptr_t)info->si_addr, buf, sizeof(buf));
     if (n > 0) { ssize_t w = write(2, buf, n); (void)w; }
-    sigaction(sig, &rt_mem_guard_prev_segv, NULL);
+    sigaction(sig, sig == SIGBUS ? &rt_mem_guard_prev_bus : &rt_mem_guard_prev_segv, NULL);
 }
 
 static void rt_mem_guard_install_handler(void) {
@@ -245,7 +250,16 @@ static void rt_mem_guard_install_handler(void) {
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&sa.sa_mask);
     sa.sa_sigaction = rt_mem_guard_fault_handler;
-    if (sigaction(SIGSEGV, &sa, &rt_mem_guard_prev_segv) != 0) __atomic_store_n(&rt_mem_guard_handler_installed, 0, __ATOMIC_RELEASE);
+    if (sigaction(SIGSEGV, &sa, &rt_mem_guard_prev_segv) != 0) {
+        __atomic_store_n(&rt_mem_guard_handler_installed, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    /* Darwin reports mprotect guard-page accesses as SIGBUS. Keep each
+     * signal's prior disposition so reporting preserves real fault deaths. */
+    if (sigaction(SIGBUS, &sa, &rt_mem_guard_prev_bus) != 0) {
+        sigaction(SIGSEGV, &rt_mem_guard_prev_segv, NULL);
+        __atomic_store_n(&rt_mem_guard_handler_installed, 0, __ATOMIC_RELEASE);
+    }
 }
 
 /* Allocate `size` bytes on their own guard-paged mmap slot. Right-aligns so

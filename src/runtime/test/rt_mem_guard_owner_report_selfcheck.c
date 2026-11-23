@@ -74,7 +74,7 @@ int main(void) {
         out[got > 0 ? got : 0] = '\0';
         int status = 0;
         waitpid(pid, &status, 0);
-        check(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV, "child still dies by SIGSEGV");
+        check(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS), "child still dies by SIGSEGV");
         check(strstr(out, "overflow") && strstr(out, "owner=e2e.owner") && strstr(out, "size=37"),
               "printed trap report has class, owner and size");
     }
