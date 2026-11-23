@@ -42,7 +42,7 @@ fn stdin_command_windows_profile_finish_v1(owner: Option<HostIdentityStoreV1>,
         retained = closed.owner
         if (not closed.completed or closed.error != "") and reason == "":
             reason = "command-profile-close-unconfirmed"
-    if retained != nil and reason == "": reason = "command-profile-cleanup-pending"
+    if retained.is_some() and reason == "": reason = "command-profile-cleanup-pending"
     StdinCommandProfileReadTurnV1(retained, if reason == "": bytes else: nil, reason)
 
 pub fn stdin_command_platform_profile_read_v1(path: text) -> StdinCommandProfileReadTurnV1:
@@ -67,10 +67,10 @@ pub fn stdin_command_platform_profile_read_v1(path: text) -> StdinCommandProfile
             not stdin_command_digest_valid_v1(leaf.substring(0, 64))):
         return StdinCommandProfileReadTurnV1(nil, nil, "command-protected-profile-role")
     val opened = host_identity_store_open_v1(root)
-    if not opened.ready or opened.cleanup_pending or opened.error != "" or opened.owner == nil:
+    if not opened.ready or opened.cleanup_pending or opened.error != "" or opened.owner.is_none():
         return stdin_command_windows_profile_finish_v1(opened.owner, nil, "command-protected-profile-open")
     val read = host_identity_store_read_v1(opened.owner.unwrap(), leaf, 65536)
-    if read.error != "" or read.cleanup_pending or read.absent or read.bytes == nil:
+    if read.error != "" or read.cleanup_pending or read.absent or read.bytes.is_none():
         return stdin_command_windows_profile_finish_v1(Some(read.owner), nil, "command-protected-profile-read")
     stdin_command_windows_profile_finish_v1(Some(read.owner), read.bytes, "")
 
@@ -111,10 +111,10 @@ pub fn stdin_command_platform_begin_v1(request: StdinCommandRequestV1) -> StdinC
         directory: directory, input: request.input, timeout_ms: request.timeout_ms,
         max_stdout_bytes: request.max_stdout_bytes, max_stderr_bytes: request.max_stderr_bytes,
         expires_at_unix_ms: request.expires_at_unix_ms))
-    var owner: Option<StdinCommandPlatformOwnerV1> = nil
+    var owner: Option<StdinCommandPlatformOwnerV1> = None
     if val native = opened.owner: owner = Some(StdinCommandPlatformOwnerV1(native: native, consumed: false))
     # A begin receipt never synthesizes completion or drops a retained owner.
-    if opened.result != nil:
+    if opened.result.is_some():
         return StdinCommandPlatformTurnV1(owner, nil,
             if opened.error == "": "command-unexpected-begin-result" else: opened.error)
     StdinCommandPlatformTurnV1(owner, nil, opened.error)
@@ -128,15 +128,15 @@ pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel
     # POSIX poll does, so finite caller budgets preserve SSH handshake time.
     # This is neither reconnect nor operation retry. Cancellation/completion
     # and failure cleanup do not incur an extra scheduling wait.
-    if turn.owner != nil and turn.error == "" and not cancel:
+    if turn.owner.is_some() and turn.error == "" and not cancel:
         sleep_ms(STDIN_COMMAND_POLL_WAIT_MS_V1)
-    var retained: Option<StdinCommandPlatformOwnerV1> = nil
+    var retained: Option<StdinCommandPlatformOwnerV1> = None
     if val native = turn.owner:
         current.native = native
         retained = Some(current)
     else:
         current.consumed = true
-    var normalized: Option<StdinCommandResultV1> = nil
+    var normalized: Option<StdinCommandResultV1> = None
     var error = turn.error
     if val result = turn.result:
         normalized = Some(StdinCommandResultV1(stdout: result.stdout, stderr: result.stderr,
@@ -145,5 +145,5 @@ pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel
             stdout_truncated: result.stdout_truncated, stderr_truncated: result.stderr_truncated,
             executable_digest: result.executable_digest, reaped: result.reaped,
             cleanup_confirmed: result.cleanup_confirmed, effect_attempted: result.effect_attempted))
-        if retained == nil and not result.cleanup_confirmed and error == "": error = "command-cleanup-unconfirmed"
+        if retained.is_none() and not result.cleanup_confirmed and error == "": error = "command-cleanup-unconfirmed"
     StdinCommandPlatformTurnV1(retained, normalized, error)

@@ -1,11 +1,11 @@
 """UTF8-SOSIX-01..05: actual SOSIX admission/conversion APIs. Authored UNRUN."""
 use std.spec
-use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.common.encoding.external_text.{ExternalFormat, Encoding, TextByteOrder, BomPolicy,
     external_text, external_char, external_text_decoder, utf8_format, CodecErrorKind}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError}
 use std.nogc_async_mut.sosix.text_boundary.{sosix_admit_utf8, sosix_admit_c_string,
-    sosix_encode_utf8, sosix_decode_text, sosix_decode_char, sosix_resolved_path_checked}
+    sosix_admit_utf8_bytes, sosix_encode_utf8, sosix_decode_text, sosix_decode_char, sosix_resolved_path_checked}
 
 fn sosix_spec_utf16le() -> ExternalFormat:
     ExternalFormat(encoding: Encoding.Utf16, byte_order: TextByteOrder.LittleEndian, bom: BomPolicy.Preserve)
@@ -16,19 +16,19 @@ fn sosix_expect_bytes(actual: [u8], expected: [u8]):
 
 describe "SOSIX strict internal text boundary":
     it "admits multilingual text and embedded NUL without changing bytes":
-        val raw = bytes_to_text([65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8])
+        val raw = sosix_admit_utf8_bytes([65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8]).unwrap()
         sosix_expect_bytes(text_to_utf8_bytes(sosix_admit_utf8(raw).unwrap()), [65u8, 0u8, 0xF0u8, 0x9Fu8, 0x99u8, 0x82u8])
         expect(sosix_admit_utf8("한é🙂").unwrap()).to_equal("한é🙂")
         expect(sosix_admit_utf8("").unwrap()).to_equal("")
 
     it "returns precise codec errors for malformed byte carriers":
-        match sosix_admit_utf8(bytes_to_text([65u8, 255u8])):
+        match sosix_admit_utf8_bytes([65u8, 255u8]):
             case Err(TextIoError.Codec(error)):
                 expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
                 expect(error.byte_offset).to_equal(1)
             case _: assert(false)
-        expect(sosix_admit_utf8(bytes_to_text([0xC0u8, 0x80u8])).is_err()).to_equal(true)
-        expect(sosix_admit_utf8(bytes_to_text([0xF0u8, 0x9Fu8])).is_err()).to_equal(true)
+        expect(sosix_admit_utf8_bytes([0xC0u8, 0x80u8]).is_err()).to_equal(true)
+        expect(sosix_admit_utf8_bytes([0xF0u8, 0x9Fu8]).is_err()).to_equal(true)
 
     it "rejects host C-string NUL and invalid environment names":
         expect(sosix_admit_c_string("A\0B", false).is_err()).to_equal(true)
@@ -95,7 +95,7 @@ describe "SOSIX strict internal text boundary":
         expect(sosix_resolved_path_checked("relative").is_err()).to_equal(true)
         expect(sosix_resolved_path_checked("/one\n/two").is_err()).to_equal(true)
         expect(sosix_resolved_path_checked("/one\0suffix").is_err()).to_equal(true)
-        match sosix_resolved_path_checked(bytes_to_text([32u8, 255u8, 10u8])):
+        match sosix_admit_utf8_bytes([32u8, 255u8, 10u8]):
             case Err(TextIoError.Codec(error)):
                 expect(error.kind).to_equal(CodecErrorKind.InvalidUtf8)
                 expect(error.byte_offset).to_equal(1)
