@@ -1,5 +1,6 @@
 # Shared admission for existing lint --fix and simple fix routes.
-# Coordinates use the same text indices as Replacement producers and slicing.
+# Coordinates are byte indices, the unit FixApplicator slices in (byte_len/slice);
+# a character count here rejects every fix after a non-ASCII line.
 use std.tooling.easy_fix.types.{EasyFix, Replacement, FixApplicator, easyfix_replacements, easyfix_sort_replacements_descending}
 use std.tooling.easy_fix.snapshot.{SourceSnapshot, ValidationReport, validation_ok, validation_failed}
 use compiler.tools.fix.node_view_walk.{source_parses}
@@ -22,17 +23,17 @@ pub fn validated_fix_sources(fixes: [EasyFix], sources: Dict<text, text>) -> Res
         var offset = 0
         for line in lines:
             starts.push(offset)
-            offset = offset + line.len() + 1
+            offset = offset + line.byte_len() + 1
         val ordered = easyfix_sort_replacements_descending(buckets[path])
         var previous: Replacement? = nil
         for replacement in ordered:
             val location = "{path}:{replacement.line}:{replacement.column}"
-            if replacement.start < 0 or replacement.end < replacement.start or replacement.end > source.len():
+            if replacement.start < 0 or replacement.end < replacement.start or replacement.end > source.byte_len():
                 return Err("{location}: fix range [{replacement.start}..{replacement.end}] is outside the analyzed source; rerun lint")
             if replacement.line < 1 or replacement.line > lines.len() or replacement.column < 1:
                 return Err("{location}: fix has invalid source coordinates; regenerate the diagnostic")
             val line_index = replacement.line - 1
-            if replacement.column > lines[line_index].len() + 1 or starts[line_index] + replacement.column - 1 != replacement.start:
+            if replacement.column > lines[line_index].byte_len() + 1 or starts[line_index] + replacement.column - 1 != replacement.start:
                 return Err("{location}: fix offset does not match its line and column; regenerate the diagnostic")
             if val next = previous:
                 if replacement.end > next.start or replacement.start == next.start:
