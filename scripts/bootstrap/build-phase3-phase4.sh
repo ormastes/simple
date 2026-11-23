@@ -14,6 +14,7 @@ DEFAULT_SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
 STAGE3_POLICY_SDN="$SCRIPT_DIR/stage3-native-host-link-policy.sdn"
 export STAGE3_POLICY_SDN
 . "$SCRIPT_DIR/stage3-native-host-link-policy.shs"
+. "$SCRIPT_DIR/lib/run-timeout.shs"
 
 PHASE=""
 FORCE_MENU=0
@@ -58,7 +59,7 @@ Options:
   --build-root=<DIR>             Build output directory (default: <source-root>/build/phased-selfhost)
   --seed-dir=<DIR>               Runtime directory containing libsimple_runtime.a (alias: --runtime-path)
   --runtime-path=<DIR>           Runtime directory containing libsimple_runtime.a
-  --p2-bin=<FILE>                Admitted/built Phase 2 compiler binary
+  --p2-bin=<FILE>                Compatible minimal producer (Phase 2 or later; bind actual provenance)
   --p3b-bin=<FILE>               Existing Phase 3b compiler binary (when running --phase=p4)
   --mem-guard=<FILE>             Optional mem-guard-watchdog.sh script to wrap builds
   --with-internal-linker-gate    Enable SIMPLE_LINKER=internal verification gate
@@ -455,6 +456,63 @@ verify_stage3_dynlibs() {
   return 0
 }
 
+# Exact candidate execution gate: a banner alone cannot authorize a dependent phase.
+run_stage3_hello() (
+  s3h_label=$1
+  s3h_candidate=$2
+  s3h_dir=$3/hello
+  case "$(uname -s)" in
+    MSYS*|MINGW*|CYGWIN*) ;; # shared helper owns the native-child watchdog
+    *) command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || {
+      echo "ERROR: [$s3h_label] bounded Hello execution requires timeout or gtimeout" >&2
+      return 1
+    } ;;
+  esac
+  mkdir -p "$s3h_dir/cache" "$s3h_dir/tmp" || return $?
+  s3h_source="test/04_smoke/bootstrap_hello_world.spl"
+  s3h_out="$s3h_dir/hello${EXE_EXT}"
+  rm -f "$s3h_out" "$s3h_dir/stdout" "$s3h_dir/expected"
+  # Frozen tracked fixture is admitted by the source inventory; external generated
+  # entries are refused by the shard source-authority gate.
+  [ -f "$SOURCE_ROOT/$s3h_source" ] || return 1
+  printf 'hello\n' >"$s3h_dir/expected"
+  cd "$SOURCE_ROOT" || return $?
+  stage3_apply_native_host_link_policy "$STAGE3_RESOLVED_TARGET" "$COMPILE_MODE" "$WIN_CONFIG" one-binary || return $?
+  apply_windows_toolchain_env || return $?
+  export SIMPLE_BINARY="$s3h_candidate"
+  export SIMPLE_LIB="$SOURCE_ROOT/src"
+  export SIMPLE_RUNTIME_PATH="$RUNTIME_PATH"
+  export SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
+  export SIMPLE_NATIVE_BUILD_TARGET="$STAGE3_RESOLVED_TARGET"
+  export SIMPLE_NATIVE_BUILD_CACHE_DIR="$s3h_dir/cache"
+  export SIMPLE_FRONTEND_CACHE_DIR="$s3h_dir/cache/frontend"
+  export SIMPLE_HIR_CACHE_DIR="$s3h_dir/cache/hir"
+  export SIMPLE_CACHE_SCOPE="${s3h_label}-hello"
+  export TMPDIR="$s3h_dir/tmp"
+  set -- --target "$STAGE3_RESOLVED_TARGET" --backend "$BACKEND" \
+    --runtime-bundle core-c-bootstrap --runtime-path "$RUNTIME_PATH" \
+    --source "$STAGE3_POLICY_K1_ROOT" --source "$STAGE3_POLICY_HOST_COMP_ROOT" \
+    --source src/compiler --source src/app --source src/lib \
+    --source test/04_smoke --entry "$s3h_source" --entry-closure \
+    --mode one-binary --threads "$THREADS" --cache-dir "$s3h_dir/cache" -o "$s3h_out"
+  if [ -n "$BACKEND_PLUGIN" ]; then
+    set -- "$@" --backend-plugin "$BACKEND_PLUGIN"
+  fi
+  # run_timeout is inherited by the guarded shell; no exported-function dependency.
+  run_guarded_cmd "$s3h_label-hello-compile" "$s3h_dir/compile.log" \
+    bash -c '. "$1"; shift; run_timeout 900 "$@"' _ \
+    "$SCRIPT_DIR/lib/run-timeout.shs" "$s3h_candidate" native-build "$@" || return $?
+  if [ ! -x "$s3h_out" ] || [ "$(wc -c <"$s3h_out" | tr -d ' ')" -le 1024 ]; then
+    echo "ERROR: [$s3h_label] Hello artifact missing, non-executable or vacuous" >&2
+    return 1
+  fi
+  sign_stage_outputs "$s3h_dir" "$s3h_out" || return $?
+  run_guarded_cmd "$s3h_label-hello-run" "$s3h_dir/stdout" \
+    bash -c '. "$1"; shift; run_timeout 30 "$@"' _ \
+    "$SCRIPT_DIR/lib/run-timeout.shs" "$s3h_out" || return $?
+  cmp "$s3h_dir/expected" "$s3h_dir/stdout" || return $?
+)
+
 run_stage3_step() {
   s3_label=$1
   s3_producer=$2
@@ -528,6 +586,7 @@ run_stage3_step() {
   verify_stage3_dynlibs "$s3_label" "$s3_dir"
   sign_stage_outputs "$s3_dir" "$s3_out"
   "$s3_out" --version | grep -Fq "simple-bootstrap"
+  run_stage3_hello "$s3_label" "$s3_out" "$s3_dir" || return $?
   echo "=== [$s3_label] PASS ($s3_out) ==="
 }
 
