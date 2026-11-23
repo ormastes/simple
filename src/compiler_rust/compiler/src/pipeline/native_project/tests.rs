@@ -3208,36 +3208,150 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
 
 #[test]
 fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
+    use simple_common::platform::cc_detect::ToolDetectEnv;
     use simple_common::target::Target;
 
     let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
-    // Bootstrap publishes its admitted driver as CC (e.g. clang-cl on the
-    // Windows lane) and that authority wins; only without it is the fallback
-    // the Clang-only default.
-    let expected_driver = match std::env::var("CC") {
-        Ok(cc) if !cc.trim().is_empty() => simple_common::platform::path::to_native_owned(cc),
-        _ => "clang".to_string(),
+    // Without CC, Windows GNU prefers the arch-matching llvm-mingw driver
+    // (never bare `clang` which could hit an MSVC clang ahead on PATH).
+    assert_eq!(
+        target_c_compiler_with_env(target, &ToolDetectEnv::default()),
+        "x86_64-w64-mingw32-clang"
+    );
+    let override_env = ToolDetectEnv {
+        cc: Some("/custom/clang".to_string()),
+        ..ToolDetectEnv::default()
     };
-    assert_eq!(target_c_compiler(target), expected_driver);
+    assert_eq!(target_c_compiler_with_env(target, &override_env), "/custom/clang");
     assert_eq!(
         windows_gnu_target_flag(target, "clang"),
         Some("--target=x86_64-w64-windows-gnu")
     );
+    assert_eq!(
+        windows_gnu_target_flag(target, "x86_64-w64-mingw32-clang"),
+        Some("--target=x86_64-w64-windows-gnu")
+    );
     assert_eq!(windows_gnu_target_flag(target, "x86_64-w64-mingw32-gcc"), None);
+    assert_eq!(windows_gnu_target_flag(target, "clang-cl"), None);
 }
 
 #[test]
 fn test_windows_gnu_target_flag_follows_target_arch() {
     use simple_common::target::Target;
 
-    for (triple, flag) in [
-        ("aarch64-pc-windows-gnullvm", "--target=aarch64-w64-windows-gnu"),
-        ("aarch64-w64-mingw32", "--target=aarch64-w64-windows-gnu"),
-        ("x86_64-pc-windows-gnu", "--target=x86_64-w64-windows-gnu"),
+    for (triple, driver, flag) in [
+        ("aarch64-pc-windows-gnullvm", "aarch64-w64-mingw32-clang", "--target=aarch64-w64-windows-gnu"),
+        ("aarch64-w64-mingw32", "aarch64-w64-mingw32-clang", "--target=aarch64-w64-windows-gnu"),
+        ("i686-pc-windows-gnu", "i686-w64-mingw32-clang", "--target=i686-w64-windows-gnu"),
+        ("armv7-pc-windows-gnu", "armv7-w64-mingw32-clang", "--target=armv7-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang", "--target=x86_64-w64-windows-gnu"),
     ] {
         let target = Target::parse(triple).unwrap();
         assert_eq!(windows_gnu_target_flag(target, "clang"), Some(flag), "{triple}");
+        assert_eq!(windows_gnu_target_flag(target, driver), Some(flag), "{triple}");
     }
+}
+
+fn write_fake_clang_tool(dir: &Path, name: &str, effective_triple: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--print-effective-triple\" ] || [ \"$1\" = \"-dumpmachine\" ]; then\n  echo \"{effective_triple}\"\nfi\nexit 0\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{name}.cmd"));
+        let script = format!(
+            "@echo off\r\nif \"%1\"==\"--print-effective-triple\" echo {effective_triple}\r\nif \"%1\"==\"-dumpmachine\" echo {effective_triple}\r\nexit /b 0\r\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+}
+
+#[test]
+fn test_windows_gnu_target_compiler_prefers_arch_llvm_mingw_and_rejects_msvc_clang() {
+    use simple_common::platform::cc_detect::ToolDetectEnv;
+    use simple_common::target::Target;
+
+    let temp = tempfile::tempdir().unwrap();
+    let msvc_bin = temp.path().join("llvm-msvc").join("bin");
+    let mingw_bin = temp.path().join("llvm-mingw").join("bin");
+    std::fs::create_dir_all(&msvc_bin).unwrap();
+    std::fs::create_dir_all(&mingw_bin).unwrap();
+
+    // Put MSVC-target clang ahead of llvm-mingw on PATH, mirroring windows-llvm-23.1.1.shs.
+    let msvc_clang = write_fake_clang_tool(&msvc_bin, "clang", "x86_64-pc-windows-msvc");
+    let _mingw_clang = write_fake_clang_tool(&mingw_bin, "clang", "x86_64-w64-windows-gnu");
+    let i686_cc = write_fake_clang_tool(&mingw_bin, "i686-w64-mingw32-clang", "i686-w64-windows-gnu");
+    let x86_64_cc = write_fake_clang_tool(&mingw_bin, "x86_64-w64-mingw32-clang", "x86_64-w64-windows-gnu");
+    let aarch64_cc = write_fake_clang_tool(&mingw_bin, "aarch64-w64-mingw32-clang", "aarch64-w64-windows-gnu");
+    let i686_cxx = write_fake_clang_tool(&mingw_bin, "i686-w64-mingw32-clang++", "i686-w64-windows-gnu");
+
+    let joined_path = std::env::join_paths([&msvc_bin, &mingw_bin]).unwrap();
+    let path_env = ToolDetectEnv {
+        path: Some(joined_path),
+        ..ToolDetectEnv::default()
+    };
+
+    for (triple, expected_path, expected_flag) in [
+        ("i686-pc-windows-gnu", &i686_cc, "--target=i686-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", &x86_64_cc, "--target=x86_64-w64-windows-gnu"),
+        ("aarch64-pc-windows-gnu", &aarch64_cc, "--target=aarch64-w64-windows-gnu"),
+    ] {
+        let target = Target::parse(triple).unwrap();
+        let selected = target_c_compiler_with_env(target, &path_env);
+        assert_eq!(Path::new(&selected), expected_path.as_path(), "{triple}");
+        assert_ne!(Path::new(&selected), msvc_clang.as_path(), "{triple}");
+        assert_eq!(windows_gnu_target_flag(target, &selected), Some(expected_flag), "{triple}");
+    }
+    assert_eq!(
+        Path::new(&target_cxx_compiler_with_env(Target::parse("i686-pc-windows-gnu").unwrap(), &path_env)),
+        i686_cxx.as_path()
+    );
+
+    // When ONLY MSVC clang exists on PATH (no llvm-mingw anywhere), fail closed on the
+    // arch-matching llvm-mingw driver name and never fall back to MSVC clang.
+    let msvc_only_env = ToolDetectEnv {
+        path: Some(msvc_bin.as_os_str().to_os_string()),
+        ..ToolDetectEnv::default()
+    };
+    for (triple, expected_fallback) in [
+        ("i686-pc-windows-gnu", "i686-w64-mingw32-clang"),
+        ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang"),
+        ("aarch64-pc-windows-gnu", "aarch64-w64-mingw32-clang"),
+    ] {
+        let selected = target_c_compiler_with_env(Target::parse(triple).unwrap(), &msvc_only_env);
+        assert_eq!(selected, expected_fallback, "{triple}");
+    }
+
+    // Also discover <arch>-w64-mingw32-clang from $HOME/.simple/toolchains/llvm-mingw-*/bin
+    // even when llvm-mingw is absent from PATH and MSVC clang is first on PATH.
+    let home = temp.path().join("home");
+    let home_mingw_bin = home
+        .join(".simple")
+        .join("toolchains")
+        .join("llvm-mingw-20260922-ucrt-x86_64")
+        .join("bin");
+    std::fs::create_dir_all(&home_mingw_bin).unwrap();
+    let home_i686_cc = write_fake_clang_tool(&home_mingw_bin, "i686-w64-mingw32-clang", "i686-w64-windows-gnu");
+    let home_env = ToolDetectEnv {
+        path: Some(msvc_bin.as_os_str().to_os_string()),
+        home_dir: Some(home),
+        ..ToolDetectEnv::default()
+    };
+    assert_eq!(
+        Path::new(&target_c_compiler_with_env(Target::parse("i686-pc-windows-gnu").unwrap(), &home_env)),
+        home_i686_cc.as_path()
+    );
 }
 
 #[cfg(target_os = "linux")]

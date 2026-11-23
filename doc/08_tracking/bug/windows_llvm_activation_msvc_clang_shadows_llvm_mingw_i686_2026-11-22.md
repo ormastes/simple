@@ -21,5 +21,13 @@ Workaround used: pass `CC=<llvm-mingw>/i686-w64-mingw32-clang.exe` explicitly.
 ## Fix direction
 The activation exists to provide `LLVM_SYS_231_PREFIX` / `LLVM-C.dll` for the
 seed's `llvm` cargo feature. It should export those without putting the MSVC
-clang driver first on `PATH` (or put llvm-mingw's bin ahead of it). The
-generator of this script (bootstrap-prereqs / setup) is the place to change.
+clang driver first on `PATH` (or put llvm-mingw's bin ahead of it).
+Note: no generator for `~/.simple/toolchains/activation/windows-llvm-23.1.1.shs`
+(or `.ps1`) exists in this repository (those activation scripts are host-local).
+On the compiler side, `simple-common` (`cc_detect.rs`) and `simple-compiler`
+(`tools.rs`) now resolve `<arch>-w64-mingw32-clang` across `PATH`,
+`LLVM_MINGW_ROOT`/`SIMPLE_LLVM_MINGW_ROOT`, and
+`$HOME/.simple/toolchains/llvm-mingw-*/bin` and reject any MSVC-target `clang`
+(`is_msvc_target`) for `*-windows-gnu` targets so an MSVC `clang` earlier on
+`PATH` no longer hijacks GNU builds; the host-local activation script itself
+still needs updating on machines that generate it outside the repo.
