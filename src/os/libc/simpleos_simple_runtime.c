@@ -172,19 +172,19 @@ static RtString *rt_value_string_or_render(spl_i64 value) {
     return string;
 }
 
-static void rt_write_value(spl_i64 value) {
+static void rt_write_value_fd(int fd, spl_i64 value) {
     RtString *string = rt_value_string_or_render(value);
     if (string && string->len > 0) {
-        (void)write(1, string->data, (size_t)string->len);
+        (void)write(fd, string->data, (size_t)string->len);
     }
 }
 
 void rt_print_value(spl_i64 value) {
-    rt_write_value(value);
+    rt_write_value_fd(1, value);
 }
 
 void rt_println_value(spl_i64 value) {
-    rt_write_value(value);
+    rt_write_value_fd(1, value);
     (void)write(1, "\n", 1);
 }
 
@@ -209,10 +209,7 @@ void rt_println(const char *value) {
 }
 
 void rt_eprint_value(spl_i64 value) {
-    RtString *string = rt_value_string_or_render(value);
-    if (string && string->len > 0) {
-        (void)write(2, string->data, (size_t)string->len);
-    }
+    rt_write_value_fd(2, value);
 }
 
 void rt_eprintln_value(spl_i64 value) {
