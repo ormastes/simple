@@ -4,9 +4,9 @@
 use compiler.core.ast.{decl_get, decl_get_field_types, decl_get_param_muts, decl_get_is_async, expr_get, stmts_contain_yield}
 use compiler.core.ast_expr.{EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_LAMBDA, EXPR_METHOD_CALL, expr_owner_int}
 use compiler.core.ast_expr.{EXPR_SPREAD, expr_get_arg_names, expr_get_left, expr_get_tag}
-use compiler.core.interpreter.eval.{eval_block, eval_current_decl_id, eval_defer_depth, eval_defer_depths, eval_defer_eids}
-use compiler.core.interpreter.eval.{eval_errdefer_depths, eval_errdefer_eids, eval_expr, eval_had_error, eval_implicit_new_stack}
-use compiler.core.interpreter.eval.{eval_return_value, eval_returning, eval_set_error, eval_yield_stack}
+use compiler.core.interpreter.eval.{eval_block, eval_current_decl_id, eval_defer_depth}
+use compiler.core.interpreter.eval.{eval_expr, eval_had_error, eval_implicit_new_stack}
+use compiler.core.interpreter.eval.{eval_return_value, eval_returning, eval_run_scope_defers, eval_set_error, eval_yield_stack}
 use compiler.core.interpreter.eval.{eval_caller_file, type_check_value, val_is_boxed_enum}
 use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
 use compiler.core.interpreter.eval_units.{eval_unit_method, val_is_unit}
@@ -406,50 +406,7 @@ pub fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i
     # one never executes. It is gated anyway so the two copies cannot drift.
     last_val = val_copy_if_value_struct(last_val)
 
-    # Run defer/errdefer at this depth (mirrors eval_block pattern)
-    val saved_returning = eval_returning
-    val saved_had_error = eval_had_error
-    eval_returning = false
-    eval_had_error = false
-
-    # Run defer (always)
-    var di = eval_defer_eids.len() - 1
-    while di >= 0:
-        if eval_defer_depths[di] == my_depth:
-            eval_expr(eval_defer_eids[di])
-            eval_defer_eids[di] = -1
-            eval_defer_depths[di] = -1
-        di = di - 1
-
-    # Run errdefer (only on error)
-    if saved_had_error:
-        var edi = eval_errdefer_eids.len() - 1
-        while edi >= 0:
-            if eval_errdefer_depths[edi] == my_depth:
-                eval_expr(eval_errdefer_eids[edi])
-                eval_errdefer_eids[edi] = -1
-                eval_errdefer_depths[edi] = -1
-            edi = edi - 1
-    else:
-        var edi2 = eval_errdefer_eids.len() - 1
-        while edi2 >= 0:
-            if eval_errdefer_depths[edi2] == my_depth:
-                eval_errdefer_eids[edi2] = -1
-                eval_errdefer_depths[edi2] = -1
-            edi2 = edi2 - 1
-
-    eval_returning = saved_returning
-    eval_had_error = saved_had_error
-
-    # Trim tombstones
-    while eval_defer_eids.len() > 0 and eval_defer_eids[eval_defer_eids.len() - 1] == -1:
-        eval_defer_eids.pop()
-        eval_defer_depths.pop()
-    while eval_errdefer_eids.len() > 0 and eval_errdefer_eids[eval_errdefer_eids.len() - 1] == -1:
-        eval_errdefer_eids.pop()
-        eval_errdefer_depths.pop()
-
-    eval_defer_depth = eval_defer_depth - 1
+    eval_run_scope_defers(my_depth)
     argument_context.capture_mutations(param_names)
     env_pop_scope()
     if local_count > 0:

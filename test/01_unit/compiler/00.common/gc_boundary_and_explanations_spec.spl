@@ -1,0 +1,123 @@
+# @cover src/compiler/00.common/gc_boundary.spl 80%
+# @cover src/compiler/00.common/gc_config.spl 80%
+# @cover src/compiler/00.common/error_explanations.spl 80%
+# @cover src/compiler/00.common/target_scalar_alignment.spl 80%
+# @req REQ-COMMON-GC-DIAG-001
+"""
+## GC Boundary, Error Explanations, and Scalar Alignment Specification
+
+Exercises cross-GC-mode boundary checks, GC family classification/inheritance,
+target-specific scalar ABI alignment overrides, and the structured error
+explanation registry across `compiler.common`.
+"""
+
+use std.spec.{describe, it, expect, step, fail}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.gc_config.{
+    GcMode,
+    GcConfig,
+    gc_mode_from_family_prefix,
+    is_nogc_family,
+    is_gc_family,
+    is_noalloc_family,
+    is_allocating_family
+}
+use compiler.common.gc_boundary.{GC_BOUNDARY_LINT_NAME, GcBoundaryChecker}
+use compiler.common.error_explanations.{ErrorExplanation, ErrorRegistry}
+use compiler.common.target_scalar_alignment.{target_scalar_alignment}
+
+describe "GC config inheritance and boundary checker":
+    it "inherits parent GC mode only when child config is non-explicit":
+        step("Resolve effective_gc_config for explicit and inherited children")
+        val parent_nogc = GcConfig.from_project(GcMode.NoGc)
+        val inherited = GcConfig.default_gc().effective_gc_config(parent_nogc)
+        expect(inherited.is_nogc()).to_be(true)
+        expect(inherited.explicit).to_be(false)
+
+        val file_gc = GcConfig.from_file(GcMode.Gc).effective_gc_config(parent_nogc)
+        expect(file_gc.is_gc()).to_be(true)
+        expect(file_gc.explicit).to_be(true)
+        expect(file_gc.source).to_equal("file")
+
+    it "classifies nogc, gc, and noalloc runtime module families accurately":
+        step("Verify family predicates distinguish noalloc from allocating nogc/gc modules")
+        expect(is_nogc_family("std.nogc_sync_mut.fs")).to_be(true)
+        expect(is_nogc_family("lib.gc_async_mut.task")).to_be(false)
+        expect(is_gc_family("gc_async_mut.actor")).to_be(true)
+        expect(is_noalloc_family("std.nogc_async_mut_noalloc.arena")).to_be(true)
+        expect(is_allocating_family("nogc_async_mut_noalloc.arena")).to_be(false)
+        expect(is_allocating_family("nogc_sync_mut.fs")).to_be(true)
+        expect(gc_mode_from_family_prefix("custom.module").explicit).to_be(false)
+
+    it "records cross-mode warnings only when caller and callee modes differ":
+        step("Check CrossModeCall, CrossModeReturn, ImplicitConversion, and same-mode calls")
+        val gc_cfg = GcConfig.from_module(GcMode.Gc)
+        val nogc_cfg = GcConfig.from_file(GcMode.NoGc)
+        var checker = GcBoundaryChecker.new(gc_cfg)
+
+        checker.check_call(gc_cfg, "same_mode_fn", Span.empty())
+        expect(checker.has_warnings()).to_be(false)
+
+        checker.check_call(nogc_cfg, "alloc_bridge", Span.empty())
+        checker.check_return(nogc_cfg, "compute", Span.empty())
+        checker.check_implicit_conversion(nogc_cfg, Span.empty())
+        expect(checker.has_warnings()).to_be(true)
+        expect(checker.warning_count()).to_equal(3)
+
+        val formatted = checker.format_warnings()
+        expect(formatted.len()).to_equal(3)
+        expect(formatted[0]).to_contain(GC_BOUNDARY_LINT_NAME)
+        expect(formatted[0]).to_contain("alloc_bridge")
+        expect(formatted[1]).to_contain("cross-mode return")
+        expect(formatted[2]).to_contain("implicit GC mode conversion")
+
+describe "target scalar alignment override":
+    it "promotes 64-bit scalars to 8-byte alignment on Windows x86 without altering other targets":
+        step("Verify Windows x86 ABI override vs Linux x86 and pointer baseline preservation")
+        expect(target_scalar_alignment("i64", "x86", "windows", 4)).to_equal(8)
+        expect(target_scalar_alignment("u64", "x86", "windows", 4)).to_equal(8)
+        expect(target_scalar_alignment("f64", "x86", "windows", 4)).to_equal(8)
+        expect(target_scalar_alignment("i32", "x86", "windows", 4)).to_equal(4)
+        expect(target_scalar_alignment("ptr", "x86", "windows", 4)).to_equal(4)
+        expect(target_scalar_alignment("i64", "x86", "linux", 4)).to_equal(4)
+        expect(target_scalar_alignment("i64", "x86_64", "windows", 8)).to_equal(8)
+
+describe "error explanation registry":
+    it "looks up built-in error explanations and rejects unknown codes":
+        step("Query known E0001/E1001/E0413 codes and a missing code")
+        val reg = ErrorRegistry.create()
+        match reg.get("E0001"):
+            case Some(exp):
+                expect(exp.title).to_equal("File Read Error")
+                expect(exp.related.contains("E0002")).to_be(true)
+            case None:
+                fail("expected E0001 explanation")
+
+        match reg.get("E0413"):
+            case Some(exp):
+                expect(exp.title).to_equal("Noalloc Import Boundary Violation")
+            case None:
+                fail("expected E0413 explanation")
+
+        var e9999_missing = false
+        match reg.get("E9999"):
+            case Some(_):
+                fail("unexpected explanation for E9999")
+            case None:
+                e9999_missing = true
+        expect(e9999_missing).to_be(true)
+
+    it "registers custom explanations and serializes to SDN":
+        step("Register a custom diagnostic explanation and export SDN table")
+        var reg = ErrorRegistry.create()
+        val custom = ErrorExplanation.create("E9001", "Custom Gate")
+        reg.register(custom)
+        match reg.get("E9001"):
+            case Some(found):
+                expect(found.code).to_equal("E9001")
+                expect(found.title).to_equal("Custom Gate")
+            case None:
+                fail("expected registered custom explanation")
+        val sdn = reg.to_sdn()
+        expect(sdn).to_contain("error_explanations |code, title, description, causes, fixes|")
+        expect(sdn).to_contain("E9001, \"Custom Gate\"")

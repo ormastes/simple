@@ -148,23 +148,15 @@ fn parse_raw_braced_payload(kind: text) -> text:
 fn parse_raw_asm_braced_payload() -> text:
     parse_raw_asm_normalize(parse_raw_braced_payload("asm"))
 
-fn parse_legacy_parenthesized_asm() -> i64:
-    parser_warn("legacy inline asm syntax; use asm { ... }")
-    parser_expect(140)
-    var asm_lines: [text] = []
-    while par_kind_get() == 3:
-        asm_lines.push(par_text_get())
-        parser_advance()
-        if par_kind_get() == 160:
-            parser_advance()
+class AsmOperandCollector:
+    values: [i64]
+    names: [text]
+    kinds: [text]
+    locations: [text]
+    outputs: [i64]
+    clobbers: [text]
 
-    var values: [i64] = []
-    var names: [text] = []
-    var kinds: [text] = []
-    var locations: [text] = []
-    var clobbers: [text] = []
-    var outputs: [i64] = []
-    while par_kind_get() != 141 and par_kind_get() != 190:
+    me parse_next_directive(stop_on_newline: bool) -> bool:
         var name = ""
         var directive = par_text_get()
         if directive != "in" and directive != "out" and directive != "inout" and directive != "lateout" and directive != "clobber" and directive != "clobber_abi" and directive != "options":
@@ -185,14 +177,20 @@ fn parse_legacy_parenthesized_asm() -> i64:
                 elif par_kind_get() == 141: directive_depth = directive_depth - 1
                 if directive_depth > 0: directive_parts.push(par_text_get())
                 parser_advance()
-            clobbers.push(directive + ":" + directive_parts.join(""))
-            if par_kind_get() == 160: parser_advance()
-            continue
+            self.clobbers.push(directive + ":" + directive_parts.join(""))
+            if not stop_on_newline and par_kind_get() == 160:
+                parser_advance()
+            return true
         if directive != "in" and directive != "out" and directive != "inout" and directive != "lateout":
             parser_error("expected in/out/inout/lateout inline-asm operand")
-            while par_kind_get() != 141 and par_kind_get() != 190:
+            while par_kind_get() != 190:
+                val k = par_kind_get()
+                if stop_on_newline and (k == 180 or k == 182):
+                    break
+                if not stop_on_newline and k == 141:
+                    break
                 parser_advance()
-            break
+            return false
         parser_advance()
         parser_expect(140)
         val location = par_text_get()
@@ -203,12 +201,38 @@ fn parse_legacy_parenthesized_asm() -> i64:
         if directive == "inout" and par_kind_get() == 168:
             parser_advance()
             output = parse_expr()
-        values.push(value)
-        names.push(name)
-        kinds.push(directive)
-        locations.push(location)
-        outputs.push(output)
+        self.values.push(value)
+        self.names.push(name)
+        self.kinds.push(directive)
+        self.locations.push(location)
+        self.outputs.push(output)
+        if not stop_on_newline and par_kind_get() == 160:
+            parser_advance()
+        true
+
+fn asm_operand_collector_new() -> AsmOperandCollector:
+    AsmOperandCollector(
+        values: [],
+        names: [],
+        kinds: [],
+        locations: [],
+        outputs: [],
+        clobbers: []
+    )
+
+fn parse_legacy_parenthesized_asm() -> i64:
+    parser_warn("legacy inline asm syntax; use asm { ... }")
+    parser_expect(140)
+    var asm_lines: [text] = []
+    while par_kind_get() == 3:
+        asm_lines.push(par_text_get())
+        parser_advance()
         if par_kind_get() == 160:
             parser_advance()
+
+    var collector = asm_operand_collector_new()
+    while par_kind_get() != 141 and par_kind_get() != 190:
+        if not collector.parse_next_directive(false):
+            break
     parser_expect(141)
-    expr_asm_operands(asm_lines.join("\n"), values, names, kinds, locations, outputs, clobbers, 0)
+    expr_asm_operands(asm_lines.join("\n"), collector.values, collector.names, collector.kinds, collector.locations, collector.outputs, collector.clobbers, 0)
