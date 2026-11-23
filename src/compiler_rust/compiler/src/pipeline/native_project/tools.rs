@@ -3523,7 +3523,7 @@ fn project_stage4_archive_closure(
         // Always newline-terminated: GNU objcopy 2.42 exits 1 with no message
         // on a zero-byte --localize-symbols/--weaken-symbols file, while a
         // lone "\n" is an empty list to both GNU and LLVM objcopy.
-        std::fs::write(&localize_path, localize_text + "\n")
+        std::fs::write(&localize_path, localize_text.clone() + "\n")
             .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
         // Allowed-external symbols that are kept global (above) must yield to
@@ -3587,6 +3587,8 @@ fn project_stage4_archive_closure(
         }
 
         if coff_partial {
+            let private_names = localize_text.lines().map(str::to_owned).collect();
+            super::coff_weak_projection::localize_weak(&localized_object, &private_names)?;
             let weak_names = weaken_text.lines().map(str::to_owned).collect();
             super::coff_weak_projection::project(&localized_object, &weak_names)?;
         }

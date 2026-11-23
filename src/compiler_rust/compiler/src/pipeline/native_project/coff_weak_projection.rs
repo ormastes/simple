@@ -18,6 +18,91 @@ pub(crate) fn project(path: &Path, requested: &BTreeSet<String>) -> Result<(), S
     std::fs::write(path, output).map_err(|e| e.to_string())
 }
 
+/// GNU objcopy leaves defined weak aliases global even when asked to localize
+/// them. Bind those private aliases directly to their existing fallback body.
+pub(crate) fn localize_weak(path: &Path, requested: &BTreeSet<String>) -> Result<(), String> {
+    if requested.is_empty() { return Ok(()); }
+    let input = std::fs::read(path).map_err(|e| e.to_string())?;
+    if !matches!(u16_at(&input, 0)?, 0x8664 | 0x14c) || u16_at(&input, 16)? != 0 {
+        return Err("weak localization requires ordinary x86/x64 COFF".into());
+    }
+    let sections = u16_at(&input, 2)? as usize;
+    let table = u32_at(&input, 8)? as usize;
+    let count = u32_at(&input, 12)? as usize;
+    let end = table.checked_add(count.checked_mul(18).ok_or("COFF symbol overflow")?).ok_or("COFF table overflow")?;
+    let string_size = u32_at(&input, end)? as usize;
+    if string_size < 4 || end.checked_add(string_size) != Some(input.len()) || table < 20 + sections * 40 {
+        return Err("unsupported COFF localization table bounds".into());
+    }
+    let strings = &input[end..];
+    let mut primary = BTreeSet::new();
+    let mut index = 0;
+    while index < count {
+        primary.insert(index);
+        index += 1 + input[table + index * 18 + 17] as usize;
+        if index > count { return Err("truncated COFF auxiliary records".into()); }
+    }
+    let mut output = input.clone();
+    let mut vacated = BTreeSet::new();
+    for index in &primary {
+        let pos = table + index * 18;
+        let record = &input[pos..pos + 18];
+        if record[16] != 105 { continue; }
+        let name_bytes = if u32_at(record, 0)? == 0 {
+            let offset = u32_at(record, 4)? as usize;
+            if offset < 4 { return Err("invalid COFF name offset".into()); }
+            strings.get(offset..).ok_or("invalid COFF name offset")?
+        } else { &record[..8] };
+        let length = name_bytes.iter().position(|b| *b == 0).unwrap_or(name_bytes.len());
+        let name = std::str::from_utf8(&name_bytes[..length]).map_err(|_| "non-UTF8 COFF symbol")?;
+        if !requested.contains(name) { continue; }
+        if u16_at(record, 12)? != 0 || record[17] != 1 {
+            return Err(format!("invalid private COFF weak alias {name}"));
+        }
+        let fallback_index = u32_at(&input, pos + 18)? as usize;
+        if !primary.contains(&fallback_index) { return Err("COFF private fallback is not a primary symbol".into()); }
+        let fallback = &input[table + fallback_index * 18..table + (fallback_index + 1) * 18];
+        let section = u16_at(fallback, 12)? as i16;
+        if section <= 0 || section as usize > sections || !matches!(fallback[16], 2 | 3) {
+            return Err(format!("private COFF weak alias {name} has no defined fallback"));
+        }
+        output[pos + 8..pos + 16].copy_from_slice(&fallback[8..16]);
+        output[pos + 16] = 3; // STATIC at the existing body's address
+        output[pos + 17] = 0;
+        output[pos + 18..pos + 36].fill(0);
+        // NULL storage class denotes an unused ordinary symbol; never leave
+        // the old fallback index bytes to be parsed as a symbol record.
+        output[pos + 18..pos + 22].copy_from_slice(b".pad");
+        vacated.insert(index + 1);
+    }
+    for index in &primary {
+        let pos = table + index * 18;
+        if input[pos + 16] == 105 && input[pos + 17] > 0
+            && vacated.contains(&(u32_at(&input, pos + 18)? as usize)) {
+            return Err("COFF weak alias references a vacated auxiliary index".into());
+        }
+    }
+    for section in 0..sections {
+        let header = 20 + section * 40;
+        let offset = u32_at(&input, header + 24)? as usize;
+        let mut relocations = u16_at(&input, header + 32)? as usize;
+        let first = if u32_at(&input, header + 36)? & 0x01000000 != 0 {
+            if relocations != 0xffff { return Err("invalid COFF relocation overflow".into()); }
+            relocations = u32_at(&input, offset)? as usize;
+            1
+        } else { 0 };
+        if relocations > 0 && (offset < 20 + sections * 40 || offset.checked_add(relocations.checked_mul(10).ok_or("COFF relocation overflow")?).is_none_or(|end| end > table)) {
+            return Err("unsupported COFF relocation bounds".into());
+        }
+        for relocation in first..relocations {
+            if vacated.contains(&(u32_at(&input, offset + relocation * 10 + 4)? as usize)) {
+                return Err("COFF relocation references a vacated auxiliary index".into());
+            }
+        }
+    }
+    std::fs::write(path, output).map_err(|e| e.to_string())
+}
+
 fn project_bytes(input: &[u8], requested: &BTreeSet<String>) -> Result<Vec<u8>, String> {
     if !matches!(u16_at(input, 0)?, 0x8664 | 0x14c) || u16_at(input, 16)? != 0 {
         return Err("weak projection requires ordinary x86/x64 COFF object".into());
