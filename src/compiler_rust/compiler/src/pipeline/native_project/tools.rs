@@ -1703,15 +1703,16 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
 /// Select BFD only for a Windows GNU target's intermediate COFF closure.
 fn target_coff_partial_link_command(target: simple_common::target::Target) -> Result<Option<std::process::Command>, String> {
     use simple_common::target::{LinkerFlavor, TargetArch, TargetOS};
-    if target.os != TargetOS::Windows || target.linker_flavor() != LinkerFlavor::Gnu {
-        return Ok(None);
-    }
     let arch = match target.arch {
         TargetArch::X86_64 => "x86_64",
         TargetArch::X86 => "i686",
-        other => return Err(format!("COFF partial link has no GNU PE emulation for {other:?}")),
+        TargetArch::Aarch64 => "aarch64",
+        _ => "other",
     };
-    super::coff_partial_link::command(arch).map(Some)
+    super::coff_partial_link::command(
+        target.os == TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu,
+        arch,
+    )
 }
 
 /// Select an objcopy that supports symbol localization for the target object

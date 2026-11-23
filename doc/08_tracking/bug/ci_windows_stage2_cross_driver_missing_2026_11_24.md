@@ -55,10 +55,11 @@ preflight module (1 compiled, 0 failed), then PE LLD rejected `-r` while buildin
 the Stage4 runtime capsule. The C driver was correctly target-qualified; this
 was an intermediate linker capability mismatch, not a missing CRT or archive.
 
-Windows GNU intermediate closures use GNU PE BFD with an explicitly validated
+Windows GNU x86/x64 intermediate closures use GNU PE BFD with an explicitly validated
 machine emulation (`i386pep` for x86_64, `i386pe` for x86). Selection requires a
-GNU ld identity and advertised emulation; missing tools fail closed. ELF and
-Mach-O paths retain their prior commands. Final PE links remain pinned UCRT
+GNU ld identity and advertised emulation; missing tools fail closed. Other
+architectures (including Windows GNU AArch64), ELF and Mach-O retain their
+prior commands. Final PE links remain pinned UCRT
 Clang/LLD. Root cardinality, unresolved-runtime, tombstone, localization and
 archive-symbol checks remain mandatory. BFD-produced COFF weak fallbacks use
 the existing repair before those checks.

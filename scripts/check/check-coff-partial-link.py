@@ -43,13 +43,16 @@ def main():
     harness.write_text(
         '#[path=' + json.dumps(str(owner).replace('\\', '/')) + '] mod owner;\n'
         'fn main() { let a: Vec<String> = std::env::args().collect();\n'
-        ' let mut c = owner::command(&a[1]).expect("COFF owner selection");\n'
+        ' if a[1] == "scope-controls" {\n'
+        '  assert!(owner::command(true, "aarch64").unwrap().is_none());\n'
+        '  assert!(owner::command(false, "x86_64").unwrap().is_none()); return; }\n'
+        ' let mut c = owner::command(true, &a[1]).expect("COFF owner selection").expect("x86 COFF override");\n'
         ' c.args(&a[2..]); eprintln!("{c:?}");\n'
         ' let s = c.status().expect("COFF owner execution");\n'
         ' std::process::exit(s.code().unwrap_or(125)); }\n', encoding='utf-8')
     executable = out / ('owner.exe' if os.name == 'nt' else 'owner')
     run(['rustc', '--edition=2021', harness, '-o', executable], 'build-owner')
-    run([executable, 'aarch64'], 'unsupported-machine', expected='failure')
+    run([executable, 'scope-controls'], 'unchanged-target-paths')
     for name, source in {
         'root': 'extern int dependency(void); int fixture_root(void) { return dependency() + 1; }\n',
         'dependency': 'int dependency(void) { return 41; }\n',
@@ -89,7 +92,7 @@ def main():
     if args.retained_archive: files.append(args.retained_archive.resolve())
     manifest = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
     (out / 'hashes.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    checks = ['unsupported-machine-refused', 'old-pe-lld-rejected-relocatable', 'coff-amd64-format',
+    checks = ['non-x86-and-non-windows-gnu-paths-unchanged', 'old-pe-lld-rejected-relocatable', 'coff-amd64-format',
               'root-and-dependency-defined-once', 'dependency-resolved', 'final-clang-lld-pe-link']
     if args.retained_archive: checks.append('retained-runtime-root-extracted-once')
     (out / 'result.json').write_text(json.dumps(dict(status='PASS', checks=checks,

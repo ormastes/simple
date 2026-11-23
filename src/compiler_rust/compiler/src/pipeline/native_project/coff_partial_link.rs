@@ -3,11 +3,15 @@
 
 use std::process::Command;
 
-pub(crate) fn command(arch: &str) -> Result<Command, String> {
+pub(crate) fn command(windows_gnu: bool, arch: &str) -> Result<Option<Command>, String> {
+    if !windows_gnu {
+        return Ok(None);
+    }
     let (qualified, emulation) = match arch {
         "x86_64" => ("x86_64-w64-mingw32-ld", "i386pep"),
         "i686" => ("i686-w64-mingw32-ld", "i386pe"),
-        _ => return Err(format!("COFF partial link has no GNU PE emulation for {arch}")),
+        // Other Windows GNU architectures retain their existing linker path.
+        _ => return Ok(None),
     };
     for program in [qualified, "ld"] {
         let Ok(version) = Command::new(program).arg("--version").output() else { continue };
@@ -21,7 +25,7 @@ pub(crate) fn command(arch: &str) -> Result<Command, String> {
         }
         let mut command = Command::new(program);
         command.args(["-m", emulation, "-r"]);
-        return Ok(command);
+        return Ok(Some(command));
     }
     Err(format!("COFF partial link requires GNU PE BFD `{qualified}` supporting {emulation}; final Clang/LLD selection is unchanged"))
 }
@@ -29,7 +33,8 @@ pub(crate) fn command(arch: &str) -> Result<Command, String> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn unsupported_machine_fails_closed() {
-        assert!(super::command("aarch64").unwrap_err().contains("no GNU PE emulation"));
+    fn out_of_scope_targets_keep_existing_path() {
+        assert!(super::command(true, "aarch64").unwrap().is_none());
+        assert!(super::command(false, "x86_64").unwrap().is_none());
     }
 }
