@@ -1388,13 +1388,18 @@ fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64,
 # Signed area / cover cells of `commands` (font units) in the A8 sample grid:
 # x' = (x * scale - left) * 4, y' = -y * scale - top.
 fn _lcd_area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64) -> [f64]:
+    _area_cells(commands, scale, left, top, stride, height, _SFNT_LCD_A8_PER_PX)
+
+# Signed area cells at `per_px` samples per pixel horizontally (4 = the LCD
+# A8 row, 1 = whole-pixel exact area for gray glyphs).
+fn _area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64, per_px: i64) -> [f64]:
     var a: [f64] = [0.0; stride * height]
     var pen_x = 0.0
     var pen_y = 0.0
     var move_x = 0.0
     var move_y = 0.0
-    val sx = scale * _SFNT_LCD_A8_PER_PX as f64
-    val lx = left * _SFNT_LCD_A8_PER_PX as f64
+    val sx = scale * per_px as f64
+    val lx = left * per_px as f64
     for command in commands:
         val x1 = command.x1 * sx - lx
         val y1 = -command.y1 * scale - top
@@ -1946,6 +1951,19 @@ class SfntLcdOutline:
 # text_layout/font_renderer.spl, so it must be public.
 # @allow(primitive_api)
 pub fn sfnt_lcd_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64) -> Option<SfntLcdOutline>:
+    _glyph_outline(blob, selector_kind, selector_value, size_px, x_milli, false)
+
+# The same outline for a GRAYSCALE glyph above the LCD cutoff: unhinted, framed
+# like `sfnt_render_glyph_into` (`_gray_frame`, baseline anchored), so the
+# quarter-phase cells `sfnt_gray_outline_raster` builds sit on the rows the
+# 4x4 path used. A glyph drawn at several phases parses and frames once.
+# reason: SFNT selector/size scalars are the font-table domain; consumed by
+# text_layout/font_renderer.spl.
+# @allow(primitive_api)
+pub fn sfnt_gray_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64) -> Option<SfntLcdOutline>:
+    _glyph_outline(blob, selector_kind, selector_value, size_px, x_milli, true)
+
+fn _glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64, gray: bool) -> Option<SfntLcdOutline>:
     if size_px <= 0 or size_px > 512:
         return None
     if x_milli < 0 or x_milli > 512000:
@@ -1991,7 +2009,14 @@ pub fn sfnt_lcd_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i6
     var raster_top = -bounds.bottom * scale
     var bearing_y = _round_glyf_metric(bounds.top * scale)
     var draw_commands = commands
-    val knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
+    if gray:
+        val frame = _gray_frame(bounds, scale, size_px)
+        height = frame.height
+        raster_top = 0.0 - frame.top
+        bearing_y = frame.bearing_y
+    var knots: [f64] = []
+    if not gray:
+        knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
     if knots.len() > 0:
         draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
         val hinted = match _outline_bounds(draw_commands):
@@ -2129,6 +2154,69 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
         slg_bearing_x: x0,
         slg_bearing_y: outline.slo_bearing_y,
         slg_gray: gray, slg_rgb: rgb))
+
+# Grayscale glyph above the LCD size cutoff at a Skia quarter phase (Chrome
+# 159, measured 2026-11-24: gray_glyph_subpixel_area_chrome159_spec), from
+# `sfnt_gray_glyph_outline` (same vertical frame and unhinted outline as
+# `sfnt_render_glyph_into`). Horizontally the outline keeps its true
+# pen-relative x (`slg_bearing_x` names column 0, shifted right by phase_q/4
+# px) and coverage is the exact pixel area (one area sample per pixel), not
+# the 4x4 supersample's 17 levels. `slg_rgb` is empty.
+# Metrics of the cell `sfnt_gray_outline_raster` builds at `phase_q`, without
+# the raster: [width, height, bearing_x, bearing_y], or [] where the raster
+# answers None.
+# reason: Skia's quarter-pixel index and whole device px are the font-table
+# domain; consumed by text_layout/font_renderer.spl.
+# @allow(primitive_api)
+pub fn sfnt_gray_outline_frame(outline: SfntLcdOutline, phase_q: i64) -> [i64]:
+    if phase_q < 0 or phase_q > 3:
+        return []
+    val phase = phase_q as f64 / 4.0
+    val x0 = _floor_glyf(outline.slo_left * outline.slo_scale + phase)
+    val width = _ceil_glyf(outline.slo_right * outline.slo_scale + phase) - x0
+    val height = outline.slo_height
+    if width <= 0 or height <= 0 or width > 4096 or height > 4096:
+        return []
+    [width, height, x0, outline.slo_bearing_y]
+
+# reason: SFNT selector/size scalars and Skia's quarter-pixel index are the
+# font-table domain; consumed by text_layout/font_renderer.spl.
+# @allow(primitive_api)
+pub fn sfnt_gray_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<SfntLcdGlyph>:
+    val frame = sfnt_gray_outline_frame(outline, phase_q)
+    if frame.len() != 4:
+        return None
+    val scale = outline.slo_scale
+    val phase = phase_q as f64 / 4.0
+    val width = frame[0]
+    val height = frame[1]
+    val x0 = frame[2]
+    val stride = width + 2
+    val cells = _area_cells(outline.slo_commands, scale, x0 as f64 - phase, outline.slo_raster_top, stride, height, 1)
+    var gray: [u8] = [0u8; width * height]
+    var y: i64 = 0
+    while y < height:
+        var acc = 0.0
+        var x: i64 = 0
+        val row_at = y * stride
+        val gi = y * width
+        # A zero cell leaves `acc`, so the pixel keeps the previous value.
+        var v: u8 = 0u8
+        while x < width:
+            val cell = cells[row_at + x]
+            if cell != 0.0:
+                acc = acc + cell
+                var cov = if acc < 0.0: 0.0 - acc else: acc
+                if cov > 1.0: cov = 1.0
+                v = (cov * 255.0 + 0.5) as u8
+            if v != 0u8:
+                gray[gi + x] = v
+            x = x + 1
+        y = y + 1
+    Some(SfntLcdGlyph(
+        slg_width: width, slg_height: height, slg_advance: 0,
+        slg_bearing_x: x0, slg_bearing_y: outline.slo_bearing_y,
+        slg_gray: gray, slg_rgb: []))
 
 # Blob-level batch glyph-id resolution: one table-directory parse and one cmap
 # parse for the whole `codepoints` array. See `sfnt_cmap_glyph_ids_into`.

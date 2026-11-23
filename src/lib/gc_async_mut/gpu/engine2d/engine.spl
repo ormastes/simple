@@ -506,11 +506,20 @@ fn _engine2d_glyph_quad_patch(composed: [u32], cells: [u32], dst: [u32], w: i64,
 # `font_atlas_subrect_pixels` + `draw_image_blend` paint there: the source is
 # the cell coverage times the color alpha (0 -> the destination stays), then
 # `blend`. The result depends on the coverage byte alone, so it is computed
-# once per distinct coverage.
+# once per distinct coverage. The
+# per-coverage table is kept per (color, bg) across quads: exact-area gray
+# cells carry up to 255 coverage levels, and one `blend` per level per quad
+# was most of a cold quad's cost on the interpreter lane.
+var _glyph_over_tables: Dict<text, [u32]> = {}
+var _glyph_over_table_count: i64 = 0
+
 fn _engine2d_glyph_quad_over(cells: [u32], color: u32, bg: u32) -> [u32]:
     val rgb = color & 0x00FFFFFFu32
     val color_alpha = (color >> 24) & 0xFFu32
+    val table_key = "{color}:{bg}"
     var table: [u32] = [0u32; 256]
+    if val Some(hit) = _glyph_over_tables.get(table_key):
+        table = hit
     var out: [u32] = [bg; cells.len()]
     var i: i64 = 0
     # cpu-lane-loop-ok: one pass per quad on a memo miss; hits copy spans
@@ -525,6 +534,12 @@ fn _engine2d_glyph_quad_over(cells: [u32], color: u32, bg: u32) -> [u32]:
                 table[slot] = composed
             out[i] = composed
         i = i + 1
+    if _glyph_over_table_count >= 64:
+        _glyph_over_tables = {}
+        _glyph_over_table_count = 0
+    if not _glyph_over_tables.contains_key(table_key):
+        _glyph_over_table_count = _glyph_over_table_count + 1
+    _glyph_over_tables[table_key] = table
     out
 # CSS gradient layers whose pixels the HOST evaluated (radial_gradient_pixels /
 # linear_gradient_pixels) inside draw_radial_gradient_ellipse /
