@@ -26,8 +26,11 @@ use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
 use compiler.driver.driver_hir_cache.{
     HIR_CACHE_ENTRY_VERSION, HIR_CACHE_CHECKSUM_PREFIX, HIR_CACHE_REJECT_REASONS,
     hir_cache_entry_parse, hir_cache_entry_encode, hir_cache_body_checksum,
-    hir_cache_selfcheck_blob, hir_cache_first_difference, hir_cache_summary
+    hir_cache_selfcheck_blob, hir_cache_first_difference, hir_cache_summary,
+    hir_cache_entry_read_v1
 }
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, getpid, file_delete}
 use test.helpers.lowering_harness.{expect_lowered_hir_functions}
 
 val HEADER: text = HIR_CACHE_ENTRY_VERSION + " spl-hircodec-test scope-test"
@@ -58,6 +61,25 @@ describe "HIR cache entry integrity (8a / IR-05)":
         expect(parsed.warnings).to_equal(["w\tone", "w two\nline"])
         expect(parsed.blob).to_equal(blob)
         expect(hir_module_decode(parsed.blob) != nil).to_equal(true)
+
+    it "reads back an entry larger than the 16 MiB text-session limit (hir_codec.spl is ~20.7 MB)":
+        step("Build a 32 MiB body: over FILE_TEXT_DEFAULT_LIMIT, which the store side never bounds")
+        var body = "x"
+        var doublings = 0
+        while doublings < 25:
+            body = body + body
+            doublings = doublings + 1
+        expect(body.len() > 16777216).to_equal(true)
+        val entry = hir_cache_entry_encode(HEADER, [], body)
+        val path = (env_get_opt("TMPDIR") ?? "/tmp") + "/hir_cache_big_entry_{getpid()}.hir"
+        expect(file_atomic_write(path, entry)).to_equal(true)
+        step("The entry reader returns the whole file, so the load is not a `header` rejection")
+        val raw = hir_cache_entry_read_v1(path)
+        val _removed = file_delete(path)
+        expect(raw.len()).to_equal(entry.len())
+        val parsed = hir_cache_entry_parse(raw, HEADER)
+        expect(parsed.reason).to_equal("")
+        expect(parsed.blob.len()).to_equal(body.len())
 
     it "rejects a foreign header as `header`, never decoding the body":
         val blob = hir_module_encode(lower(SRC))
