@@ -1,0 +1,102 @@
+"""
+## Purpose and audience
+Purpose: Pin the device rows of a line that starts at a fractional CSS y,
+against Chrome 159 at k=4. After an `<h2>` (0.83em margins = 19.92px) the next
+line starts at 95.84375 CSS px, i.e. device 383.375. Chrome snaps the line's
+canvas, svg and text from that exact start. This engine placed the line's
+atomic boxes and its text relative to the container's whole-px top, without
+the line's own residual, so all of them sat one device row low. Catalog
+animation 4x: canvas/svg/audio/video probes at rows 440-599 against Chrome's
+439-598.
+Audience: web renderer layout (inline line baselines at device scale).
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4`, window
+400x300. Liberation Sans 16px/1.5, color #172033. Values are device (r,g,b).
+
+| case | device row | columns = Chrome rgb |
+|------|-----|----------------------|
+| canvas top (#c00) | 383 | 200=(204,0,0) 300=(204,0,0) |
+| canvas foot | 543 | 300=(255,255,255) |
+| svg foot | 543 | 800=(255,255,255) |
+| text `ab` | 514 | 92=(230,231,233) 93=(255,255,255) |
+
+Base (400eae8a4dd): row 383 200=(255,255,255); row 543 300=(204,0,0) and
+800=(124,58,237); row 514 92=(28,36,55). Tolerance: 8 per channel.
+
+The svg's top row (383) is not pinned here: its own viewport clip does not
+follow the device offset yet (`_dir_scale_command` scales `clip_rect` without
+`device-y-offset`), so the moved rect is cut at row 384.
+"""
+
+"""
+Traceability: REQ-WEB-LINE-START-FRACTION-DEVICE-001 — boxes and text on a line that starts at a fractional cursor y are snapped from that exact start in device px.
+"""
+# @tag: unit, browser_engine, layout, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val K: i32 = 4
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;font:16px/1.5 'Liberation Sans';color:#172033;background:#fff}} section{{padding:20px}}</style></head><body><section><h2>Probes</h2>ab <canvas width=\"120\" height=\"40\" style=\"background:#c00\"></canvas> <svg width=\"120\" height=\"40\"><rect width=\"120\" height=\"40\" fill=\"#7c3aed\"></rect></svg></section></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+# "col=(r,g,b)" for each listed column: Chrome's value when every channel is
+# within 8, else ours.
+fn _row_text(px: [u32], y: i32, cols: [i32], chrome: [[i32]]) -> text:
+    val w = CSS_W * K
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * w + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[i][ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome[i] else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[i][0]},{chrome[i][1]},{chrome[i][2]}) "
+        i = i + 1
+    s
+
+var g_px: [u32] = []
+
+fn _px() -> [u32]:
+    if g_px.len() == 0:
+        g_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, K, "cpu_simd")
+    g_px
+
+describe "A line starting at a fractional CSS y snaps its boxes and text from that start (Chrome 159, k=4)":
+    it "AC-1: the canvas after an h2 starts on device row 383":
+        val px = _px()
+        expect(px.len()).to_equal((CSS_W * K * CSS_H * K) as i64)
+        val cols: [i32] = [200, 300]
+        val chrome: [[i32]] = [[204, 0, 0], [204, 0, 0]]
+        expect(_row_text(px, 383, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-2: the canvas and svg end on device row 542, leaving 543 blank":
+        val cols: [i32] = [300, 800]
+        val chrome: [[i32]] = [[255, 255, 255], [255, 255, 255]]
+        expect(_row_text(_px(), 543, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-3: the line's text sits on the same device rows as in Chrome":
+        val cols: [i32] = [92, 93]
+        val chrome: [[i32]] = [[230, 231, 233], [255, 255, 255]]
+        expect(_row_text(_px(), 514, cols, chrome)).to_equal(_want_text(cols, chrome))
