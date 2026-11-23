@@ -69,3 +69,11 @@ production selector, the failing LLD negative control, rooted COFF extraction,
 and Clang/LLD final PE linking. It can additionally reuse the retained real
 core-C archive. Its result describes link capability, not foreign execution
 or a complete Stage2 qualification. Full cross Stage2 remains required.
+
+### COFF projection follow-up (2026-11-24)
+
+Actual-owner run 45240198504 compiled the tiny producer (1 compiled, 0 failed) and passed the repaired BFD partial link, then failed at runtime capsule objcopy before full Windows Stage2 started. This is distinct from the successful retained-object partial/final link helper proof.
+
+The pinned LLVM-MinGW objcopy reports `llvm-objcopy, compatible with GNU objcopy`. The previous substring identity test admitted this LLVM alias as GNU. A retained-object diagnostic (45244502214) proved genuine `/usr/bin/x86_64-w64-mingw32-objcopy` accepts localization, weakening, section removal and copying on both fixture and real runtime closures (8 operations). It does not establish a qualified full producer.
+
+The correction requires an anchored GNU tool banner and walks PATH to find the genuine executable beyond an earlier compatibility alias, for both objcopy and nm. Windows-GNU selection scope and final Clang/LLD remain unchanged. The focused regression uses the production selector, retains the real LLVM alias rejection, checks private-symbol localization and weak root ownership, and links a PE with pinned Clang/LLD. It makes no foreign execution claim.
