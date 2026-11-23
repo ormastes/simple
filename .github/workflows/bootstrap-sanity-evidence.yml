@@ -1,4 +1,4 @@
-﻿name: Windows Phase2 native Hello evidence
+﻿name: Windows Phase2 standard ladder Hello evidence
 on:
   workflow_dispatch:
 permissions:
@@ -42,7 +42,7 @@ jobs:
       - name: Exact Phase2 compiler start and native Hello
         run: |
           set -euo pipefail
-          out=/c/w2proof
+          out=/c/w2ladder
           mkdir -p "$out/tmp"
           candidate=/c/w2tuple/compiler/simple_stage2.exe
           native=/c/w2tuple/native/libsimple_native_all.a
@@ -55,13 +55,16 @@ jobs:
           cp /c/w2tuple/native/authority.env /c/w2tuple/runtime/runtime-identity.env "$out/"
           unset SIMPLE_BOOTSTRAP SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR SIMPLE_LINKER SIMPLE_CORE_RUNTIME_PATH SIMPLE_SIMPLE_CORE_PATH SIMPLE_NATIVE_RUNTIME_BUNDLE
           export SIMPLE_BINARY=C:/w2tuple/compiler/simple_stage2.exe
-          export SIMPLE_RUNTIME_PATH=C:/w2tuple/native SIMPLE_NATIVE_BUILD_RUST=0 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_KEEP_TEMP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1
-          export TEMP=C:/w2proof/tmp TMP=C:/w2proof/tmp TMPDIR=/c/w2proof/tmp
-          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=262144 --interval-ms=100 --timeout-seconds=60 --receipt="$out/start.env" -- "$candidate" --version > "$out/start.stdout" 2> "$out/start.stderr"
-          grep -qx 'quiescent=1' "$out/start.env"
+          export SIMPLE_RUNTIME_PATH=C:/w2tuple/native SIMPLE_NATIVE_BUILD_RUST=0 SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_WINDOWS_ABI=gnu SIMPLE_LINKER_FLAVOR=gnu SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_KEEP_TEMP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1
+          export TEMP=C:/w2ladder/tmp TMP=C:/w2ladder/tmp TMPDIR=/c/w2ladder/tmp
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:scripts/check/windows-phase2-owner-sample.ps1" > "$out/sampler.ps1"
+          powershell.exe -NoProfile -File C:/w2ladder/sampler.ps1 -Launch
+          trap 'touch "$out/sample.stop"' EXIT
           status=0
-          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=4194304 --interval-ms=100 --timeout-seconds=600 --receipt="$out/compile.env" -- "$candidate" native-build --backend llvm --runtime-bundle core-c-bootstrap --runtime-path C:/w2tuple/native --target x86_64-pc-windows-gnu --entry-closure --mode one-binary --threads 1 --cache-dir C:/w2proof/cache test/04_smoke/bootstrap_hello_world.spl --output C:/w2proof/hello.exe > "$out/compile.stdout" 2> "$out/compile.stderr" || status=$?
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=4194304 --interval-ms=100 --timeout-seconds=900 --receipt="$out/compile.env" -- "$candidate" native-build test/04_smoke/bootstrap_hello_world.spl -o C:/w2ladder/hello.exe > "$out/compile.stdout" 2> "$out/compile.stderr" || status=$?
           printf 'compile_exit=%s\n' "$status" > "$out/result.env"
+          touch "$out/sample.stop"
           test "$status" -eq 0
           grep -qx 'quiescent=1' "$out/compile.env"
           test -s "$out/hello.exe"
@@ -76,7 +79,8 @@ jobs:
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: windows-phase2-native-hello-${{ github.run_id }}
-          path: C:/w2proof/
+          name: windows-phase2-ladder-hello-${{ github.run_id }}
+          path: C:/w2ladder/
           if-no-files-found: error
           retention-days: 14
+
