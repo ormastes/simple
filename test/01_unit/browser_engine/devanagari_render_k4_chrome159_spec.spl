@@ -1,0 +1,120 @@
+"""
+## Purpose and audience
+Purpose: Hold the Chrome 159 ink boxes of the ten Devanagari render-table words
+at device scale 4 (384 dpi), the resolution render parity is judged at. The 1x
+glyph runs already equal Chrome's (`devanagari_render_chrome159_spec.spl`,
+`devanagari_mark_position_chrome159_spec.spl`); at k=4 three defects show.
+Audience: web renderer text / device-scale maintainers.
+
+EXPECTED RED, tagged `@tag:in-development` (a whole-suite run skips and COUNTS
+the file; an explicit-path run executes every example). Delete the tag in the
+commit that makes every example green.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=4 --window-size=400,300`, page
+exactly as in `devanagari_render_chrome159_spec.spl`: `<html lang="hi">`, body
+`margin:0;background:#fff;color:#000;font:16px Liberation Sans, <bundled Noto
+Sans Devanagari via @font-face>`, div at left:20px top:30px). Ink = any channel
+under 200, device px. The same capture at factor 1 reproduces that spec's 1x
+table exactly, which validates the capture.
+
+| word  | Chrome k=4 ink    | Simple k=4 ink (2026-11-23, GSUB lane head) |
+|-------|-------------------|---------------------------------------------|
+| हिन्दी  | 80..201 121..187  | 80..201 120..186                            |
+| हिंदी   | 80..181 121..187  | empty buffer                                |
+| नहीं   | 80..166 122..187  | 80..165 120..186                            |
+| कुछ   | 80..174 139..195  | 80..173 138..195                            |
+| कर्म   | 80..168 121..178  | 80..167 120..177                            |
+| र्कं    | 80..129 122..178  | 80..129 120..177                            |
+| टुँ    | 80..114 121..195  | 79..114 120..195                            |
+| ट्टु   | 79..111 139..204  | 77..111 138..203                            |
+| द्धू   | 80..142 139..204  | 80..140 138..203                            |
+| ड़ुँ   | 79..117 121..204  | 77..114 120..203                            |
+| Hxgl  | 85..203 132..192  | 85..201 132..192 (Latin control: y equal)   |
+
+Defects (doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md):
+1. Pen x is snapped in CSS px, then multiplied by k: `glyph_run.xs` holds
+   whole CSS px (`shaped_run_to_font_glyph_run`), and `draw_ir_device_scale`
+   scales them by 4, so ड़ुँ's candrabindu at 8.768 lands at 32 where Chrome
+   puts it at 35 (x1 114 vs 117). The Latin control's x1 is also 2 short.
+2. The shaped-run ink sits 1 device px high (top row 1-2 above Chrome on
+   every word, bottom row 1 above on eight) while the Latin control's rows are equal: the selected-run
+   stager takes its ascent from the run face at k x font-size.
+3. A word whose text command is skipped (हिंदी: empty glyph 785 makes the
+   selected-run stager decline) returns an EMPTY buffer at k=4
+   (`simple_web_layout_render_html_pixels_engine2d_at_device_scale`), where 1x
+   paints the fallback.
+"""
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_at_device_scale
+}
+
+val K: i32 = 4
+val CSS_W: i32 = 400
+val CSS_H: i32 = 120
+
+fn _page(txt: text) -> text:
+    "<!doctype html><html lang=\"hi\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap;\">" + txt + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+# `x0..x1 y0..y1` of the ink in device px, or `empty buffer`. Scans the whole
+# k=4 frame: the ink is never cropped to a region.
+fn _ink_k4(txt: text) -> text:
+    val w = CSS_W * K
+    val h = CSS_H * K
+    val px = simple_web_render_html_to_pixels_at_device_scale(_page(txt), CSS_W, CSS_H, K)
+    if px.len() != w * h:
+        return "empty buffer"
+    var x0 = w
+    var y0 = h
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            val p = px[y * w + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    "{x0}..{x1} {y0}..{y1}"
+
+describe "Devanagari words at device scale 4 against Chrome 159":
+    it "AC-1: हिन्दी":
+        expect(_ink_k4("हिन्दी")).to_equal("80..201 121..187")
+
+    it "AC-2: हिंदी":
+        expect(_ink_k4("हिंदी")).to_equal("80..181 121..187")
+
+    it "AC-3: नहीं":
+        expect(_ink_k4("नहीं")).to_equal("80..166 122..187")
+
+    it "AC-4: कुछ":
+        expect(_ink_k4("कुछ")).to_equal("80..174 139..195")
+
+    it "AC-5: कर्म":
+        expect(_ink_k4("कर्म")).to_equal("80..168 121..178")
+
+    it "AC-6: र्कं":
+        expect(_ink_k4("र्कं")).to_equal("80..129 122..178")
+
+    it "AC-7: टुँ":
+        expect(_ink_k4("टुँ")).to_equal("80..114 121..195")
+
+    it "AC-8: ट्टु":
+        expect(_ink_k4("ट्टु")).to_equal("79..111 139..204")
+
+    it "AC-9: द्धू":
+        expect(_ink_k4("द्धू")).to_equal("80..142 139..204")
+
+    it "AC-10: ड़ुँ":
+        expect(_ink_k4("ड़ुँ")).to_equal("79..117 121..204")

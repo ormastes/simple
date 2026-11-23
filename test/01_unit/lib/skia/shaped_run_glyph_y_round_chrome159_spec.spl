@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Purpose: Pin how a shaped run's glyph positions become the whole-pixel glyph
+run the engine paints: x truncates, y ROUNDS to the nearest pixel.
+Audience: text shaping / Engine2D text maintainers.
+
+Chrome oracle (Chrome for Testing 159, 1x, 16 px Noto Sans Devanagari, pen
+positions from `--print-to-pdf`, ink rows from the screenshot):
+
+| word | glyph, y offset px (up) | ink bottom row | same glyph at y 0 |
+|------|-------------------------|----------------|-------------------|
+| ड़ुँ  | low u 702, -2.880       | 50             | -                 |
+| ऴु   | low u 702, -2.032       | 49             | -                 |
+| द्धू  | uu 35, -1.952           | 50             | पूरा: 48          |
+
+The low u is one row lower at -2.880 than at -2.032 (3 against 2), and the uu
+drops two rows at -1.952: Skia snaps the cross axis of horizontal text to the
+nearest whole pixel. Truncating toward zero gave 2 and 1.
+x keeps truncating: हिन्दी pens 12.640 / 17.584 paint on Chrome's columns as 12 / 17
+(`devanagari_render_chrome159_spec.spl` AC-1).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-DEVANAGARI-GPOS-001 — dev2 marks are positioned as Chrome 159 positions them.
+"""
+# @tag: unit, skia, text, chrome159
+# @cover src/lib/skia/feature/shaper/shaper.spl 1%
+use std.spec.*
+use std.skia.entity.geometry.{SkPoint}
+use std.skia.feature.shaper.script_detect.{Script}
+use std.skia.feature.shaper.shaper.{ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, shaped_run_to_font_glyph_run}
+
+fn _glyph(id: u32, cluster: i64) -> ShapedGlyph:
+    ShapedGlyph(glyph_id: id, source_index: cluster, cluster: cluster, x_advance: 0.0, y_advance: 0.0,
+        x_offset: 0.0, y_offset: 0.0, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+
+# `xs | ys` of a run whose glyphs sit at the given positions (y down).
+fn _run(xs: [f64], ys: [f64]) -> text:
+    var ids: [u32] = []
+    var positions: [SkPoint] = []
+    var glyphs: [ShapedGlyph] = []
+    var index: i64 = 0
+    while index < xs.len():
+        ids.push(100u32 + index as u32)
+        positions.push(SkPoint(x: xs[index], y: ys[index]))
+        glyphs.push(_glyph(100u32 + index as u32, index))
+        index = index + 1
+    val run = shaped_run_to_font_glyph_run(ShapedRun(script: Script.Devanagari, language: "hi",
+        glyph_ids: ids, positions: positions, font_handle: 1, font_generation: 1,
+        glyph_indices_valid: true, substitution_complete: true, positioning_complete: true,
+        is_rtl: false, glyphs: glyphs))
+    "{run.valid} {run.xs} | {run.ys}"
+
+describe "shaped run to whole-pixel glyph run (Chrome 159)":
+    it "AC-1: a mark's y offset rounds to the nearest pixel":
+        step("Chrome: 2.880 px down paints 3 rows lower, 2.032 -> 2, 1.952 -> 2")
+        expect(_run([0.0, 6.976, 8.496, 13.552], [0.0, 2.88, 2.032, 1.952])).to_equal("true [0, 6, 8, 13] | [0, 3, 2, 2]")
+
+    it "AC-2: an upward offset rounds to the nearest pixel too":
+        step("the same snap upward (rule, not separately isolated in Chrome pixels): क्ष़ nukta 1.040 px up -> -1, ऴु nukta 0.848 px up -> -1, 0.4 px either way -> 0")
+        expect(_run([0.0, 7.12, 7.12, 7.12], [-1.04, -0.848, -0.4, 0.4])).to_equal("true [0, 7, 7, 7] | [-1, -1, 0, 0]")
+
+    it "AC-3: pen x keeps truncating":
+        step("Chrome हिन्दी pens 0 4.144 12.640 17.584 26.080 paint as 0 4 12 17 26")
+        expect(_run([0.0, 4.144, 12.64, 17.584, 26.08], [0.0, 0.0, 0.0, 0.0, 0.0])).to_equal("true [0, 4, 12, 17, 26] | [0, 0, 0, 0, 0]")

@@ -4,6 +4,7 @@ use std.skia.feature.glyph.ot_parser.{OtFont, read_u16_be, read_i16_be}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, parse_gsub_skeleton, select_gsub_lookups, select_gpos_lookups}
 use std.skia.feature.shaper.selected_complex.{selected_glyph_advance, selected_units_per_em}
+use std.skia.feature.shaper.devanagari_gpos.{devanagari_pair_adjustment}
 
 class SelectedDevanagariGlyph:
     glyph_id: u32
@@ -104,64 +105,6 @@ fn _ligature_pair(font: OtFont, active: [GsubLookup], first: u32, second: u32) -
                 index = index + 1
     (first, false)
 
-fn _record_size(format: u32) -> i64:
-    var size: i64 = 0
-    var bit = 1u32
-    while bit <= 32768u32:
-        if (format & bit) != 0u32: size = size + 2
-        bit = bit << 1
-    size
-
-fn _x_advance(blob: [u8], offset: i64, format: u32) -> i64:
-    var cursor = offset
-    if (format & 1u32) != 0u32: cursor = cursor + 2
-    if (format & 2u32) != 0u32: cursor = cursor + 2
-    if (format & 4u32) != 0u32: return read_i16_be(blob, cursor) as i64
-    0
-
-fn _class(blob: [u8], offset: i64, limit: i64, glyph: u32) -> i64:
-    if offset < 0 or offset + 4 > limit: return -1
-    val format = read_u16_be(blob, offset)
-    if format == 1u32:
-        if offset + 6 > limit: return -1
-        val first = read_u16_be(blob, offset + 2)
-        val count = read_u16_be(blob, offset + 4) as i64
-        if glyph < first or glyph as i64 >= first as i64 + count: return 0
-        if offset + 6 + count * 2 > limit: return -1
-        return read_u16_be(blob, offset + 6 + (glyph - first) as i64 * 2) as i64
-    if format == 2u32:
-        val count = read_u16_be(blob, offset + 2) as i64
-        if offset + 4 + count * 6 > limit: return -1
-        var index: i64 = 0
-        while index < count:
-            val range = offset + 4 + index * 6
-            if glyph >= read_u16_be(blob, range) and glyph <= read_u16_be(blob, range + 2):
-                return read_u16_be(blob, range + 4) as i64
-            index = index + 1
-        return 0
-    -1
-
-fn _pair_adjustment(font: OtFont, active: [GposLookup], first: u32, second: u32) -> (i64, bool):
-    for lookup in active:
-        if lookup.lookup_type != 2u32: continue
-        val limit = lookup.table_end as i64
-        for offset in lookup.subtable_offsets:
-            val subtable = offset as i64
-            if subtable + 16 > limit or read_u16_be(font.blob, subtable) != 2u32: continue
-            val coverage = subtable + read_u16_be(font.blob, subtable + 2) as i64
-            if _devanagari_coverage_index(font.blob, coverage, limit, first) < 0: continue
-            val format_1 = read_u16_be(font.blob, subtable + 4)
-            val format_2 = read_u16_be(font.blob, subtable + 6)
-            val class_1 = _class(font.blob, subtable + read_u16_be(font.blob, subtable + 8) as i64, limit, first)
-            val class_2 = _class(font.blob, subtable + read_u16_be(font.blob, subtable + 10) as i64, limit, second)
-            val count_1 = read_u16_be(font.blob, subtable + 12) as i64
-            val count_2 = read_u16_be(font.blob, subtable + 14) as i64
-            val size = _record_size(format_1) + _record_size(format_2)
-            if class_1 < 0 or class_1 >= count_1 or class_2 < 0 or class_2 >= count_2 or subtable + 16 + count_1 * count_2 * size > limit: continue
-            val adjustment = _x_advance(font.blob, subtable + 16 + (class_1 * count_2 + class_2) * size, format_1)
-            if adjustment != 0: return (adjustment, true)
-    (0, false)
-
 fn selected_devanagari_glyphs(codepoints: [u32], start: i64, end_idx: i64,
                               font: Option<OtFont>, size: f64) -> [SelectedDevanagariGlyph]:
     # This is deliberately one pinned dev2 witness, not general Indic shaping.
@@ -197,7 +140,7 @@ fn selected_devanagari_glyphs(codepoints: [u32], start: i64, end_idx: i64,
         index = index + 1
     val prebase = _context_single(parsed, active_gsub, catalog, nominal[1], nominal[0])
     val half = _ligature_pair(parsed, active_gsub, nominal[2], nominal[3])
-    val adjustment = _pair_adjustment(parsed, active_gpos, half.0, nominal[4])
+    val adjustment = devanagari_pair_adjustment(parsed, active_gpos, half.0, nominal[4])
     val units = match selected_units_per_em(parsed):
         Some(value): value
         None: return []
