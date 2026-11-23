@@ -604,6 +604,40 @@ pub fn shard_worker_exit_hint_v1(code: i64, label: text) -> text:
 pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
     host_memory_admit_v1(headroom_kib, reserve_kib, est_kib, live_private_kib)
 
+# Minimum interval (ms) between host commit-headroom probes inside one shard
+# pool (native_build_main.spl run_ledger_shards). The slot pool polls its
+# workers every ~10 ms; it used to probe headroom on EVERY round, i.e. spawn
+# `vm_stat` (macOS) / `sysctl` (FreeBSD) or re-read /proc/meminfo ~100 times a
+# second, and rebuild the per-worker footprint array each round. The native
+# runtime never frees the captured text, its split-line arrays, the process
+# result blocks (process_result_tuple_facade_leaks_owner_array_2026-10-25.md)
+# or replaced arrays (native_array_copy_leaks_2026-10-20.md), so the
+# coordinator's RSS grew for the whole multi-hour MIR phase. Worker commit
+# moves over seconds, so one sample per second keeps admission and the peak
+# record accurate while cutting the per-round garbage to zero.
+pub const SHARD_COMMIT_PROBE_INTERVAL_MS_V1: i64 = 1000
+
+# True when the pool should take a fresh headroom sample at `now_ms`: never
+# sampled (last < 0), throttling disabled (interval <= 0), the monotonic clock
+# went backwards, or at least `interval_ms` elapsed since the last sample.
+# reason: monotonic-ms scalars match the pool's i64 time_now_monotonic_ms API
+@allow(primitive_api)
+pub fn shard_commit_probe_due_v1(last_probe_ms: i64, now_ms: i64, interval_ms: i64) -> bool:
+    if last_probe_ms < 0 or interval_ms <= 0:
+        return true
+    if now_ms < last_probe_ms:
+        return true
+    now_ms - last_probe_ms >= interval_ms
+
+# True when the cached per-worker footprint (shard_commit_live_footprint_v1)
+# must be rebuilt: the live worker count changed or a new headroom sample was
+# taken. Otherwise the pool reuses the cached array instead of allocating a
+# fresh (never-freed) one every poll round.
+# reason: live-count and sample-timestamp scalars match the pool's i64 API
+@allow(primitive_api)
+pub fn shard_commit_footprint_stale_v1(cached_live: i64, live: i64, cached_sample_ms: i64, sample_ms: i64) -> bool:
+    cached_live != live or cached_sample_ms != sample_ms
+
 # ===== per-worker estimate and tree-budget clamp (phase 4) ===================
 #
 # 2026-10-27 phase 3 (stage2 e4746b05): 21 per-file workers peaked at 72.2 GB

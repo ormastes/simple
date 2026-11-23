@@ -1,0 +1,67 @@
+# @cover src/app/cli/shard_mem_clamp.spl
+# Purpose: the shard slot pool (native_build_main.spl run_ledger_shards) polls
+# its workers every ~10 ms. Probing host commit headroom (vm_stat / sysctl /
+# /proc/meminfo) and rebuilding the per-worker footprint array on every round
+# leaked coordinator RSS for hours, because the native runtime never frees the
+# captured text, split arrays or replaced arrays. The pool now samples at most
+# once per SHARD_COMMIT_PROBE_INTERVAL_MS_V1 and reuses a footprint array keyed
+# on (live count, sample time).
+use std.spec
+use app.cli.shard_mem_clamp.{SHARD_COMMIT_PROBE_INTERVAL_MS_V1, shard_commit_probe_due_v1}
+use app.cli.shard_mem_clamp.{shard_commit_footprint_stale_v1, shard_commit_live_footprint_v1}
+
+# Simulates the pool's poll loop: `rounds` rounds `step_ms` apart starting at
+# `start_ms`; returns how many headroom probes the throttle admits.
+fn probes_over(rounds: i64, step_ms: i64, start_ms: i64, interval_ms: i64) -> i64:
+    var last: i64 = -1
+    var probes: i64 = 0
+    var round: i64 = 0
+    while round < rounds:
+        val now = start_ms + round * step_ms
+        if shard_commit_probe_due_v1(last, now, interval_ms):
+            last = now
+            probes = probes + 1
+        round = round + 1
+    probes
+
+describe "shard pool headroom probe throttle":
+    it "samples once per second, not once per 10 ms poll round":
+        expect(SHARD_COMMIT_PROBE_INTERVAL_MS_V1).to_equal(1000)
+        # One minute of 10 ms rounds: 6000 rounds used to be 6000 probes.
+        val probes = probes_over(6000, 10, 5000, SHARD_COMMIT_PROBE_INTERVAL_MS_V1)
+        expect(probes).to_equal(60)
+
+    it "probes on the first round of a pool":
+        expect(shard_commit_probe_due_v1(-1, 0, 1000)).to_equal(true)
+        expect(shard_commit_probe_due_v1(-1, 123456, 1000)).to_equal(true)
+
+    it "waits the full interval before the next sample":
+        expect(shard_commit_probe_due_v1(10000, 10999, 1000)).to_equal(false)
+        expect(shard_commit_probe_due_v1(10000, 11000, 1000)).to_equal(true)
+        expect(shard_commit_probe_due_v1(10000, 10000, 1000)).to_equal(false)
+
+    it "re-samples when the clock goes backwards or throttling is disabled":
+        expect(shard_commit_probe_due_v1(10000, 9000, 1000)).to_equal(true)
+        expect(shard_commit_probe_due_v1(10000, 10001, 0)).to_equal(true)
+        expect(probes_over(50, 10, 0, 0)).to_equal(50)
+
+describe "shard pool footprint cache":
+    it "reuses the cached footprint while live count and sample are unchanged":
+        expect(shard_commit_footprint_stale_v1(4, 4, 7000, 7000)).to_equal(false)
+
+    it "rebuilds after a spawn or reap changes the live count":
+        expect(shard_commit_footprint_stale_v1(4, 5, 7000, 7000)).to_equal(true)
+        expect(shard_commit_footprint_stale_v1(4, 3, 7000, 7000)).to_equal(true)
+        # The pool invalidates explicitly with live = -1 on every spawn/reap.
+        expect(shard_commit_footprint_stale_v1(-1, 4, 7000, 7000)).to_equal(true)
+
+    it "rebuilds after a fresh headroom sample":
+        expect(shard_commit_footprint_stale_v1(4, 4, 7000, 8000)).to_equal(true)
+        expect(shard_commit_footprint_stale_v1(-1, 0, -1, -1)).to_equal(true)
+
+    it "a rebuilt footprint matches what a per-round rebuild produced":
+        val cached = shard_commit_live_footprint_v1(40000000, 28000000, 4)
+        expect(cached.len()).to_equal(4)
+        expect(cached[0]).to_equal(3000000)
+        expect(cached[3]).to_equal(3000000)
+        expect(shard_commit_live_footprint_v1(-1, 28000000, 4).len()).to_equal(0)

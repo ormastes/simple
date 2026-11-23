@@ -73,6 +73,7 @@ use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb
     shard_live_threads_selected_v1}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1, shard_tree_headroom_kib_v1}
+use app.cli.shard_mem_clamp.{SHARD_COMMIT_PROBE_INTERVAL_MS_V1, shard_commit_probe_due_v1, shard_commit_footprint_stale_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
@@ -1297,6 +1298,16 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     # Live-admitted concurrency actually reached (the start-time cap is only an
     # upper bound: shard_commit_spawn_admit_v1 still gates every spawn).
     var peak_live: i64 = 0
+    # Throttled headroom sample + cached per-worker footprint: the slot pool
+    # polls every ~10 ms, and probing/allocating each round leaked the
+    # coordinator's RSS for hours (shard_commit_probe_due_v1). The footprint
+    # cache is keyed on (live count, sample time) and dropped on every
+    # spawn/reap so admission never reuses an array from another pool shape.
+    var headroom_sample_kib: i64 = pool_base_headroom
+    var headroom_sample_ms: i64 = -1
+    var footprint_cache: [i64] = []
+    var footprint_cache_live: i64 = -1
+    var footprint_cache_ms: i64 = -1
     while pending.len() > 0 and not hir_shard_recovery_blocked(queue_dir):
         var replacements: [i64] = []
         # Slot pool, not waves: a worker starts as soon as any of the
@@ -1310,9 +1321,18 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         var indices: [i64] = []
         var started_ms: [i64] = []
         while next_pending < pending.len() or pids.len() > 0:
-            val now_headroom = if pool_base_headroom < 0: -1 else: host_commit_avail_kib()
-            var live_private = shard_commit_live_footprint_v1(pool_base_headroom, now_headroom, pids.len())
-            if live_private.len() > 0 and live_private[0] > observed_peak_kib: observed_peak_kib = live_private[0]
+            if pool_base_headroom >= 0:
+                val round_ms = time_now_monotonic_ms()
+                if shard_commit_probe_due_v1(headroom_sample_ms, round_ms, SHARD_COMMIT_PROBE_INTERVAL_MS_V1):
+                    headroom_sample_kib = host_commit_avail_kib()
+                    headroom_sample_ms = round_ms
+            val now_headroom = if pool_base_headroom < 0: -1 else: headroom_sample_kib
+            if shard_commit_footprint_stale_v1(footprint_cache_live, pids.len(), footprint_cache_ms, headroom_sample_ms):
+                footprint_cache = shard_commit_live_footprint_v1(pool_base_headroom, now_headroom, pids.len())
+                footprint_cache_live = pids.len()
+                footprint_cache_ms = headroom_sample_ms
+                if footprint_cache.len() > 0 and footprint_cache[0] > observed_peak_kib: observed_peak_kib = footprint_cache[0]
+            var live_private = footprint_cache
             val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib)
             while pids.len() < window_size and next_pending < pending.len() and
                     not stop_dispatch and
@@ -1341,6 +1361,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 indices = indices.push(index)
                 started_ms = started_ms.push(time_now_monotonic_ms())
                 live_private = live_private.push(0)
+                footprint_cache_live = -1
                 if pids.len() > peak_live: peak_live = pids.len()
             if pids.len() == 0:
                 break
@@ -1423,6 +1444,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             owners = kept_owners
             indices = kept_indices
             started_ms = kept_started
+            footprint_cache_live = -1
             # -1 is a wait error, not proof of exit. Even a false liveness
             # probe also means invalid handle; require a real reap result.
             var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
