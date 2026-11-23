@@ -34,6 +34,10 @@ substitute. The regression retains command lines, hashes, maps and exits.
 Replacing only the timestamp archive member removes the thirteen collisions
 but exposes missing process/thread services in the ladder's auto runtime
 selection. The canonical successful Windows seed route uses core-c-bootstrap.
+The ladder now selects that bundle only for GNU Windows seed fallback. An
+actual production argv-fragment regression passes for default/GNU Windows,
+MSVC Windows, Linux and Darwin; the latter three retain their previous bundle
+selection. This fixture verifies dispatch only, not compiler qualification.
 A separate retained-closure replay using that route's actual C supplement,
 owner-member selection and existing overlap policy links and starts
 simple-bootstrap 1.0.0-rc.1. Its candidate SHA-256 is

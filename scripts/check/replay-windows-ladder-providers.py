@@ -133,7 +133,11 @@ def main():
     # must not stand in for running this newly linked Simple compiler.
     env.pop('SIMPLE_NATIVE_BUILD_RUST', None)
     env['SIMPLE_BOOTSTRAP_WHOLE_PROGRAM'] = '1'
-    hello = out/'hello.spl'
+    # The candidate's source-closure validator requires the entry in its caller
+    # checkout. Generated build inputs do not modify any tracked incident bytes.
+    hello_dir = source/'build/retained-provider-hello'
+    hello_dir.mkdir(parents=True, exist_ok=False)
+    hello = hello_dir/'hello.spl'
     hello.write_text('fn main():\n    print "retained-ladder-hello-ok"\n')
     command([candidate, 'native-build', hello, '-o', out/'hello.exe'], 'candidate-native-hello', timeout=900)
     stdout = command([out/'hello.exe'], 'hello-run', timeout=30)
