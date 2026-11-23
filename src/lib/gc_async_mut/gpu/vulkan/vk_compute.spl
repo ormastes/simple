@@ -21,13 +21,14 @@ use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi
 use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
 use std.common.binary_io.{f32_to_bits}
 use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
-use std.gc_async_mut.slang.host.slang_host.{host_env, host_os_name}
+use std.gc_async_mut.slang.host.slang_host.{host_env, host_os_name, host_libc_name}
 
 @unsafe(reason: "passes a bounded caller-owned byte payload as one pointer argument", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
 
 val VK_LOADER_WINDOWS = "vulkan-1.dll"
 val VK_LOADER_LINUX = "libvulkan.so.1"
+val VK_LOADER_MACOS = "libvulkan.1.dylib"
 val VK_SUCCESS = 0
 val VK_WHOLE_SIZE = -1
 val VK_TIMEOUT_FOREVER = -1
@@ -82,15 +83,18 @@ pub class VkDevice:
 # True when the Vulkan loader library can be opened on this host.
 @allow(primitive_api)  # reason: raw Vulkan handles, counts and push words are untyped integers at the C ABI
 pub fn vk_available() -> bool:
-    val h = spl_dlopen(vk_loader_name())
+    val h = spl_dlopen(vk_loader_name(host_os_name()))
     if h == 0:
         return false
     spl_dlclose(h)
     true
 
-fn vk_loader_name() -> text:
-    if host_os_name() == "windows":
+# Loader library per host OS (macOS reaches Vulkan through the MoltenVK loader).
+pub fn vk_loader_name(os: text) -> text:
+    if os == "windows":
         return VK_LOADER_WINDOWS
+    if os == "macos":
+        return VK_LOADER_MACOS
     VK_LOADER_LINUX
 
 fn _vk_u32(v: i64) -> [u8]:
@@ -174,17 +178,15 @@ fn _vk_family_has_compute(props: [u8], i: i64) -> bool:
 # Load the Vulkan loader and libc only now (never at import), open the first
 # usable GPU. On any failure everything loaded or created so far is released.
 pub fn vk_open() -> Result<VkDevice, text>:
-    var libc_name = "libc.so.6"
-    if host_os_name() == "windows":
-        libc_name = "ucrtbase.dll"
-    val ucrt = spl_dlopen(libc_name)
-    val loader = spl_dlopen(vk_loader_name())
+    val os = host_os_name()
+    val ucrt = spl_dlopen(host_libc_name(os))
+    val loader = spl_dlopen(vk_loader_name(os))
     if loader == 0 or ucrt == 0:
         if loader != 0:
             spl_dlclose(loader)
         if ucrt != 0:
             spl_dlclose(ucrt)
-        return Err("Vulkan: cannot load {vk_loader_name()} / {libc_name}")
+        return Err("Vulkan: cannot load {vk_loader_name(os)} / {host_libc_name(os)}")
     val c_malloc = spl_dlsym(ucrt, "malloc")
     val c_memset = spl_dlsym(ucrt, "memset")
     if c_malloc == 0 or c_memset == 0:
