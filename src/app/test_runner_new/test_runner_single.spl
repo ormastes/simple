@@ -36,7 +36,7 @@ use std.io_runtime.{host_os}
 # Files skipped by a host-OS @platform tag in this process (directory summary).
 var _single_platform_skips: i64 = 0
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
-use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
+use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged, client_dropped_execution_flags}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
 use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute, child_cwd_anchor_path}
 use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
@@ -1577,6 +1577,17 @@ fn run_single_target(args: [text]) -> i64:
         print "Simple Test Runner child"
         print "error: {run.error}: {run.path}"
         return 1
+    # --mode=<compiled lane> / --compile / --native-backend=<b>: this lane
+    # always interprets (SIMPLE_EXECUTION_MODE=interpret is pinned below), so
+    # `simple test <spec> --mode native --no-session-daemon` used to run the
+    # interpreter and report PASS for a lane that never ran. Refuse loudly,
+    # naming every dropped flag — same rule and helper as the client lane
+    # (test_runner_client.spl). Bug:
+    # test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
+    val dropped_exec_flags = client_dropped_execution_flags(args)
+    if dropped_exec_flags.len() > 0:
+        print "ERROR: test-runner: {dropped_exec_flags.join(", ")}: the --no-session-daemon single-spec lane always executes the interpreter; compiled lanes run via the directory runner (without --no-session-daemon): simple test <dir> {dropped_exec_flags.join(" ")} — refusing to run rather than silently downgrade"
+        return 2
     # --tag applies to the explicit path here too: an untagged file used to run
     # and PASS under `--tag slow --no-session-daemon`.
     val tag = client_tag_value(args)
