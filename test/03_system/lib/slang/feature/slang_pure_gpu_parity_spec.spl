@@ -8,7 +8,7 @@
 # only. Prints a CPU-vs-GPU perf table to the log.
 # Run with SLANG_GPU=rocm (default rocm; compute_open("auto") honours it and errors instead of
 # falling back). Gate: runs only when the selected backend is present and the stories15M model directory
-# exists (SLANG_PURE_MODEL, default C:/dev/model/llama2c-stories15M). The CPU
+# exists (SLANG_PURE_MODEL, default C:/dev/keep/model/llama2c-stories15M). The CPU
 # leg is slow on the seed interpreter (minutes).
 
 use std.spec.{describe, it, expect, skip}
@@ -17,7 +17,7 @@ use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_attention}
 use std.gc_async_mut.slang.model_executor.pure.compute_backend.{compute_open, compute_kind_name, compute_device_name, compute_upload, compute_download, compute_matvec, compute_rmsnorm, compute_attention, compute_gpu_library_loaded}
-use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward.{llama_load, llama_forward_logits}
 use std.gc_async_mut.slang.model_executor.pure.kv_cache.{kv_session_new, kv_generate_greedy}
 use std.gc_async_mut.slang.model_executor.pure.tokenizer.{pure_tokenizer_load, pure_tokenizer_encode, pure_tokenizer_decode}
 use std.gc_async_mut.slang.model_executor.pure.llama_forward_gpu.{gpu_llama_load, gpu_llama_free, gpu_kv_session_new, gpu_kv_session_free, gpu_generate_greedy, llama_logits_gpu}
@@ -56,7 +56,7 @@ fn _backend_present() -> bool:
 fn _model_dir() -> text:
     # env_get returns "" (not None) when unset.
     val env_dir = env_get("SLANG_PURE_MODEL")
-    val d = if env_dir != "": env_dir else: "C:/dev/model/llama2c-stories15M"
+    val d = if env_dir != "": env_dir else: "C:/dev/keep/model/llama2c-stories15M"
     if is_dir(d):
         return d
     ""
@@ -238,4 +238,56 @@ describe "slang pure runner forward pass on the AMD GPU via the compute interfac
 
             gpu_kv_session_free(ops, r2.session).unwrap()
             gpu_kv_session_free(ops, r2f.session).unwrap()
+            gpu_llama_free(ops, gm).unwrap()
+
+# Indices of the k largest values, best first (ties to the lowest index).
+fn _topk(xs: [f64], k: i64) -> [i64]:
+    var taken: [i64] = []
+    var n: i64 = 0
+    while n < k:
+        var best: i64 = -1
+        var i: i64 = 0
+        while i < xs.len():
+            var used = false
+            for t in taken:
+                if t == i:
+                    used = true
+            if not used and (best < 0 or xs[i] > xs[best]):
+                best = i
+            i = i + 1
+        taken.push(best)
+        n = n + 1
+    taken
+
+describe "slang pure runner logits on the AMD GPU via the compute interface":
+    it "final logits and the top-5 ids equal the CPU forward for the same prompt":
+        val dir = _model_dir()
+        val name = "final logits and the top-5 ids equal the CPU forward for the same prompt"
+        if not _backend_present():
+            _skip(name, "{_want()} backend not available on this host")
+        elif dir == "":
+            _skip(name, "stories15M model directory not present")
+        else:
+            val ops = compute_open("auto").unwrap()
+            expect(compute_kind_name(ops.kind)).to_equal(_want())
+            val tok = pure_tokenizer_load(dir).unwrap()
+            val prompt = _slice(pure_tokenizer_encode(tok, "Once upon a time", true), 0, 2)
+            val cm = llama_load(dir).unwrap()
+            var t0 = time_now_nanos()
+            val cpu_logits = llama_forward_logits(cm, prompt)
+            val cpu_ms = _ms_since(t0)
+            val gm = gpu_llama_load(ops, dir).unwrap()
+            t0 = time_now_nanos()
+            val s = gpu_generate_greedy(ops, gm, gpu_kv_session_new(ops, gm).unwrap(), prompt, 0).unwrap()
+            val gpu_logits = compute_download(ops, llama_logits_gpu(ops, gm, s.session.hidden).unwrap()).unwrap()
+            val gpu_ms = _ms_since(t0)
+            val err = _rel_err(gpu_logits, cpu_logits)
+            val cpu_top = _topk(cpu_logits.data, 5)
+            val gpu_top = _topk(gpu_logits.data, 5)
+            _record("LOGITS PARITY prompt_len={prompt.len()} vocab={cpu_logits.data.len()} rel_err={err} cpu_ms={cpu_ms} gpu_ms={gpu_ms}")
+            _record("LOGITS top5 cpu={cpu_top} gpu={gpu_top}")
+            expect(gpu_logits.data.len()).to_equal(cpu_logits.data.len())
+            expect(err < 0.001).to_equal(true)
+            expect(gpu_top).to_equal(cpu_top)
+            gpu_kv_session_free(ops, s.session).unwrap()
             gpu_llama_free(ops, gm).unwrap()
