@@ -124,9 +124,16 @@ jobs:
           sudo swapoff -a || :
           sudo rm -f /mnt/swapfile
           df -h / /mnt
-          avail=$(df -BG --output=avail /mnt | tail -1 | tr -dc 0-9)
-          size=$((avail - 8)); [ "$size" -gt 64 ] && size=64
-          [ "$size" -ge 24 ] || size=24
+          avail_bytes=$(df -B1 --output=avail /mnt | tail -1 | tr -dc 0-9)
+          avail=$((avail_bytes / 1073741824))
+          # Keep 32 GiB for Cargo, the 20 GiB preflight floor, and native outputs.
+          # Never force the minimum swap size by consuming that build reserve.
+          size=$((avail - 32)); [ "$size" -gt 64 ] && size=64
+          if [ "$size" -lt 24 ]; then
+            echo "BLOCKED: ${avail} GiB free cannot provide 24 GiB swap and the 32 GiB build reserve" >&2
+            exit 1
+          fi
+          printf 'phase-ladder swap: available_bytes=%s available_floor_gib=%s swap_gib=%s reserve_gib=32\n' "$avail_bytes" "$avail" "$size"
           sudo fallocate -l "${size}G" /mnt/ladder.swap
           sudo chmod 600 /mnt/ladder.swap
           sudo mkswap /mnt/ladder.swap
