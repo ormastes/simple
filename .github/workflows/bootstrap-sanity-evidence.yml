@@ -1,46 +1,119 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Linux Phase3 per-file recovery
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    env:
+      SOURCE: fd366d2a3068e9fc0d2ba7af0b915432d56b88c9
+      PARENT: phase2
+      PRODUCT: compiler
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          ref: fd366d2a3068e9fc0d2ba7af0b915432d56b88c9
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14839362739'
+          merge-multiple: true
+          run-id: '45205044707'
+          github-token: ${{ github.token }}
+          path: build/continuation/parent
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: '14833542613'
+          merge-multiple: true
+          run-id: '45205044707'
+          github-token: ${{ github.token }}
+          path: build/continuation/runtime
+      - name: Prepare native tools
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Verify parent and build child
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$PWD/build/continuation"
+          mkdir -p "$dir/evidence" "$dir/product" "$dir/cache"
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          cd "$dir/runtime"
+          sha256sum -c runtime-authority.sha256
+          cd "$dir/parent"
+          if [[ $PARENT == phase2 ]]; then
+            exe="$PWD/simple_stage2"
+            echo 'f130dde9f91955186ae5e9121917e121d99542871f80e5dc7dd6b8a718c447a3  simple_stage2' | sha256sum -c -
+          else
+            sha256sum -c SHA256SUMS
+            exe="$PWD/simple"
+            test -s hello-passed
+          fi
+          chmod +x "$exe"
+          cd "$GITHUB_WORKSPACE"
+          export SIMPLE_BINARY="$exe" SIMPLE_RUNTIME_PATH="$dir/runtime" SIMPLE_NO_STUB_FALLBACK=1
+          export SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_NATIVE_BUILD_THREADS=2
+          common=(--backend llvm --target x86_64-unknown-linux-gnu --runtime-path "$dir/runtime" --runtime-bundle core-c-bootstrap --threads 2 --source src/compositions/kernel_llvm_cranelift --source src/compositions/cuda_disabled --source src/compiler --source src/app --source src/lib)
+          if [[ $PRODUCT == compiler ]]; then
+            export SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE3=1 SIMPLE_FILE_WORKERS=1 SIMPLE_PARSE_SHARDING=1
+            unset SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_HIR_SHARDING SIMPLE_MIR_SHARDING
+            export SIMPLE_FRONTEND_CACHE=1 SIMPLE_HIR_CACHE=1 SIMPLE_NATIVE_ARENA_DECLS=1
+            export SIMPLE_FRONTEND_CACHE_DIR="$dir/cache/frontend" SIMPLE_HIR_CACHE_DIR="$dir/cache/hir"
+            export SIMPLE_PROJECT_ROOT="$PWD" SIMPLE_LIB="$PWD/src" TMPDIR="$dir/tmp"
+            export SIMPLE_KEEP_NATIVE_OBJS=1 SIMPLE_COMPILER_PHASE_PROFILE=1
+            mkdir -p "$dir/tmp"
+            entry=src/app/cli/bootstrap_main.spl
+            output="$dir/product/simple"
+          else
+            export SIMPLE_BOOTSTRAP_STAGE3=0 SIMPLE_BOOTSTRAP_STAGE4=0
+            common+=(--source src/os --source src/plugins --source src/package_ownership --source src/compositions --profile=prod --release --strip --managed-build-phase=phase4 --opt-level=standard)
+            entry=src/app/mcp/main.spl
+            output="$dir/product/simple_mcp_server"
+          fi
+          args=(native-build "${common[@]}" --entry-closure --entry "$entry" --mode dynload --low-memory --cache-dir "$dir/cache" --output "$output")
+          printf '%q ' "$exe" "${args[@]}" > "$dir/evidence/argv"
+          sha256sum "$exe" "$dir/runtime/libsimple_native_all.a" > "$dir/evidence/inputs.sha"
+          printf '%s\n' "$SOURCE" "$PARENT" "$PRODUCT" > "$dir/evidence/lineage"
+          grep -E 'MemTotal|MemAvailable' /proc/meminfo > "$dir/evidence/memory"
+          available=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+          cap=$((available * 3 / 4))
+          test "$cap" -ge 10485760
+          export SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB="$cap" SIMPLE_PROCESS_TREE_RSS_CAP_KIB="$cap"
+          export SIMPLE_BUILD_MEMORY_RESERVE_BYTES=1073741824
+          printf 'available_kib=%s\ncap_kib=%s\nreserve_bytes=1073741824\nthreads=2\nworker_price=canonical-auto\n' "$available" "$cap" > "$dir/evidence/reservation.env"
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib="$cap" --timeout-seconds=18500 --receipt="$dir/evidence/build.env" -- "$exe" "${args[@]}" > "$dir/evidence/build.log" 2>&1 || { tail -35 "$dir/evidence/build.log"; exit 1; }
+          test -s "$output"
+          sha256sum -c "$dir/evidence/inputs.sha"
+          if [[ $PRODUCT == compiler ]]; then
+            unset SIMPLE_BOOTSTRAP SIMPLE_BOOTSTRAP_STAGE3 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM SIMPLE_STAGE3_STREAMING_SURFACES SIMPLE_FILE_WORKERS SIMPLE_PARSE_SHARDING
+            unset SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE_DIR SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB
+            export SIMPLE_BINARY="$output"
+            HW_BACKEND=llvm HW_THREADS=1 HW_BUILD_TIMEOUT_SECONDS=300 perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=4194304 --timeout-seconds=360 --receipt="$dir/evidence/hello-owner.env" -- sh scripts/check/check-stage2-hello-world-native-build.shs --candidate "$output" > "$dir/evidence/hello.log" 2>&1 || { tail -20 "$dir/evidence/hello.log"; exit 1; }
+            sha256sum "$dir/evidence/hello.log" > "$dir/product/hello-passed"
+          else
+            printf '%s\n' '{"jsonrpc":"2.0","id":17,"method":"ping"}' | timeout 45 "$output" > "$dir/evidence/ping.out"
+            jq -es 'any(.[]; .id == 17 and .result == {})' "$dir/evidence/ping.out"
+          fi
+          cd "$dir/product"
+          sha256sum "$(basename "$output")" > SHA256SUMS
+          if [[ $PRODUCT == compiler ]]; then sha256sum hello-passed >> SHA256SUMS; fi
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: evidence-linux-phase3-file-recovery
+          path: |
+            build/continuation/evidence
+            build/continuation/cache
+            build/continuation/tmp
+            build/scv
+            .simple/scv
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-phase3-file-recovery
+          path: build/continuation/product
+          if-no-files-found: error
