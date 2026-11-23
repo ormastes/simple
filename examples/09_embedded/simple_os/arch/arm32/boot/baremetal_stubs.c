@@ -2516,6 +2516,7 @@ static uint32_t g_arm32_exec_generation;
 static uint32_t g_arm32_exec_ttbr;
 static uint32_t g_arm32_expected_fault_origin;
 static uint32_t g_arm32_exec_state; /* 0 idle, 1 active, 2 completed */
+static uint32_t g_arm32_auth_phase;
 
 extern void rt_arm32_svc_vector_install(void);
 extern void rt_arm32_svc_resume_kernel(void);
@@ -2629,7 +2630,7 @@ RuntimeValue rt_arm32_svc_vector_init(void)
     return 1;
 }
 
-RuntimeValue rt_arm32_exec_token_install(RuntimeValue token_val, RuntimeValue generation_val)
+int32_t rt_arm32_exec_token_install(uint32_t token_val, uint32_t generation_val)
 {
     uint32_t token = (uint32_t)token_val;
     uint32_t generation = (uint32_t)generation_val;
@@ -2643,21 +2644,22 @@ RuntimeValue rt_arm32_exec_token_install(RuntimeValue token_val, RuntimeValue ge
     return 1;
 }
 
-RuntimeValue rt_arm32_exec_reap(RuntimeValue token_val, RuntimeValue generation_val,
-                               RuntimeValue expected_status_val)
+int32_t rt_arm32_exec_reap(uint32_t token_val, uint32_t generation_val,
+                         int32_t expected_status_val)
 {
     uint32_t token = (uint32_t)token_val;
     uint32_t generation = (uint32_t)generation_val;
     if (!token || token != g_arm32_exec_token ||
-        generation != g_arm32_exec_generation || g_arm32_exec_state != 2U)
-        return (RuntimeValue)-13;
+        generation != g_arm32_exec_generation || g_arm32_exec_state != 2U ||
+        g_arm32_auth_phase != 0U)
+        return -13;
     uint32_t result = rt_arm32_completed_exit_status;
-    if (result != (uint32_t)expected_status_val) return (RuntimeValue)-10;
+    if (result != (uint32_t)expected_status_val) return -10;
     g_arm32_exec_token = 0;
     g_arm32_exec_generation = 0;
     g_arm32_exec_ttbr = 0;
     g_arm32_exec_state = 0;
-    return (RuntimeValue)(int32_t)result;
+    return (int32_t)result;
 }
 
 /* Called only by exception_vectors.s with the complete user register frame
@@ -2667,6 +2669,236 @@ static int arm32_origin_is_executable(uint32_t origin)
     for (uint32_t i = 0; i < g_arm32_exec_range_count; i++)
         if (origin >= g_arm32_exec_first[i] && origin < g_arm32_exec_last[i]) return 1;
     return 0;
+}
+
+#include "arm32_authenticated_syscall_v1.h"
+
+/* ARM32_AUTHENTICATED_SCOPE_V1_BEGIN
+ * This native lease proves physical entry only. The strong Simple owner must
+ * independently bind the Scheduler/IPC owners and inherited descriptors. */
+extern int64_t simple_arm32_authenticated_syscall_dispatch_v1(
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)
+    __attribute__((weak));
+static uint32_t g_arm32_auth_task, g_arm32_auth_generation, g_arm32_auth_root;
+static uint32_t g_arm32_auth_epoch, g_arm32_auth_next_epoch;
+static uint32_t g_arm32_auth_completed;
+static uint32_t g_arm32_auth_prepared_root;
+static uint32_t g_arm32_auth_dacr;
+/* g_arm32_auth_phase: 0 absent, 1 installing, 2 armed. */
+
+static int arm32_auth_u32(uint64_t n) { return n <= UINT32_MAX; }
+static int arm32_auth_identity(uint64_t task, uint64_t gen, uint64_t root)
+{
+    return arm32_auth_u32(task) && arm32_auth_u32(gen) && arm32_auth_u32(root) &&
+        task && task == g_arm32_auth_task && gen == g_arm32_auth_generation &&
+        root == g_arm32_auth_root && !g_arm32_auth_completed &&
+        root == arm32_current_ttbr0();
+}
+int64_t rt_arm32_authenticated_install_v1(uint64_t task, uint64_t gen, uint64_t root)
+{
+    if (g_arm32_auth_phase || !task || !gen || !root ||
+        !arm32_auth_u32(task) || !arm32_auth_u32(gen) || !arm32_auth_u32(root) ||
+        !simple_arm32_authenticated_syscall_dispatch_v1 || g_arm32_auth_prepared_root != root ||
+        g_arm32_exec_state != 0U || (root & 0x3fffU) ||
+        root != arm32_current_ttbr0()) return 0;
+    g_arm32_auth_task = (uint32_t)task;
+    g_arm32_auth_generation = (uint32_t)gen;
+    g_arm32_auth_root = (uint32_t)root;
+    g_arm32_auth_prepared_root = 0U;
+    g_arm32_auth_phase = 1U;
+    int64_t acknowledged = simple_arm32_authenticated_syscall_dispatch_v1(
+        0x7fff0000U, task, gen, root, 0U, 0U);
+    if (acknowledged != 0x41524d31 || !arm32_auth_identity(task, gen, root)) {
+        g_arm32_auth_phase = 0U;
+        g_arm32_auth_task = g_arm32_auth_generation = g_arm32_auth_root = 0U;
+        return 0;
+    }
+    g_arm32_auth_phase = 2U;
+    return 1;
+}
+int64_t rt_arm32_authenticated_reap_v1(uint64_t task, uint64_t gen, uint64_t root)
+{
+    if (g_arm32_auth_phase != 2U || g_arm32_auth_epoch ||
+        !arm32_auth_u32(task) || !arm32_auth_u32(gen) || !arm32_auth_u32(root) ||
+        task != g_arm32_auth_task || gen != g_arm32_auth_generation ||
+        root != g_arm32_auth_root || !g_arm32_auth_completed) return 0;
+    g_arm32_auth_phase = 0U;
+    g_arm32_auth_task = g_arm32_auth_generation = g_arm32_auth_root = 0U;
+    g_arm32_auth_completed = 0U;
+    return 1;
+}
+uint64_t rt_arm32_authenticated_scope_epoch_v1(uint64_t task, uint64_t gen, uint64_t root)
+{
+    return g_arm32_auth_phase == 2U && arm32_auth_identity(task, gen, root) ?
+        g_arm32_auth_epoch : 0U;
+}
+int64_t rt_arm32_authenticated_scope_matches_v1(uint64_t task, uint64_t gen,
+                                               uint64_t root, uint64_t epoch)
+{
+    return epoch && epoch == rt_arm32_authenticated_scope_epoch_v1(task, gen, root);
+}
+/* ARM32_AUTHENTICATED_SCOPE_V1_END */
+
+/* ARM32_SECTION_PREFLIGHT_V1_BEGIN */
+static int arm32_auth_par_identity_page_v1(uint32_t par, uint32_t address)
+{
+    /* Short-descriptor PAR: reject faults and supersection translations. */
+    return !(par & 3U) && (par & 0xfffff000U) == (address & 0xfffff000U);
+}
+static int arm32_auth_supervisor_section_v1(uint32_t descriptor, uint32_t dacr)
+{
+    uint32_t domain = (descriptor >> 5) & 15U;
+    return (descriptor & 3U) == 2U && !(descriptor & (1U << 18)) &&
+        ((descriptor >> 10) & 3U) == 1U && ((dacr >> (2U * domain)) & 3U) == 1U;
+}
+static int arm32_auth_user_coarse_v1(uint32_t descriptor, uint32_t dacr)
+{
+    /* Canonical child tables use domain zero and no borrowed authority bits. */
+    return (descriptor & 0x3ffU) == 1U && (dacr & 3U) == 1U;
+}
+static int arm32_auth_identity_ram_v1(uint32_t descriptor, uint32_t dacr, uint32_t address)
+{
+    return arm32_auth_supervisor_section_v1(descriptor,dacr) &&
+        !(descriptor & (1U << 15)) &&
+        (descriptor & 0xfff00000U) == (address & 0xfff00000U) &&
+        (descriptor & 0x700cU) == 0x100cU;
+}
+static int arm32_auth_section_span_v1(const uint32_t *parent, const uint32_t *child,
+                                     uint32_t dacr, uint64_t first, uint64_t end)
+{
+    if (!first || end <= first || end > UINT64_C(0x100000000)) return 0;
+    uint64_t at = first & ~UINT64_C(0xfffff);
+    while (at < end) {
+        uint32_t p = parent[at >> 20], c = child[at >> 20];
+        if (!arm32_auth_supervisor_section_v1(p,dacr) || c != p) return 0;
+        if (at > UINT32_MAX - 0x100000U) return end == UINT64_C(0x100000000);
+        at += 0x100000U;
+    }
+    return 1;
+}
+/* ARM32_SECTION_PREFLIGHT_V1_END */
+static int arm32_auth_root_readable_identity_v1(uint32_t root)
+{
+    if (!root || (root & 16383U) || root > UINT32_MAX - 16383U) return 0;
+    uint32_t saved_par;
+    __asm__ volatile("mrc p15, 0, %0, c7, c4, 0" : "=r"(saved_par));
+    int valid = 1;
+    for (uint32_t offset = 0; offset < 16384U; offset += 4096U) {
+        uint32_t address = root + offset, par;
+        __asm__ volatile("mcr p15, 0, %1, c7, c8, 0\nisb\nmrc p15, 0, %0, c7, c4, 0"
+                         : "=r"(par) : "r"(address) : "memory");
+        if (!arm32_auth_par_identity_page_v1(par,address)) { valid = 0; break; }
+    }
+    __asm__ volatile("mcr p15, 0, %0, c7, c4, 0\nisb" : : "r"(saved_par) : "memory");
+    return valid;
+}
+extern const uint8_t _kernel_start[] __attribute__((weak));
+extern const uint8_t _kernel_end[] __attribute__((weak));
+extern const uint8_t _stack_bottom[] __attribute__((weak));
+extern const uint8_t _stack_top[] __attribute__((weak));
+
+int64_t rt_arm32_authenticated_preflight_v1(uint64_t child_root)
+{
+    uint32_t sctlr, ttbcr, dacr, mpidr, cpsr, vbar, current_sp, cpacr;
+    g_arm32_auth_prepared_root = 0U;
+    if (g_arm32_auth_phase || !child_root || child_root > UINT32_MAX - 16383U ||
+        (child_root & 16383U)) return 0;
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+    __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
+    __asm__ volatile("mrc p15, 0, %0, c12, c0, 0" : "=r"(vbar));
+    __asm__ volatile("mrs %0, cpsr" : "=r"(cpsr));
+    __asm__ volatile("mov %0, sp" : "=r"(current_sp));
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 2" : "=r"(cpacr));
+    uint32_t parent_root = arm32_current_ttbr0();
+    if (!(sctlr & 1U) || !(sctlr & (1U << 23)) ||
+        (sctlr & ((1U << 29) | (1U << 28) | (1U << 25) | (1U << 30) | (1U << 13))) || ttbcr ||
+        (mpidr & 0xffffffU) || (cpsr & 0x2ffU) != 0xd3U || (cpacr & 0x00f00000U) ||
+        !parent_root || parent_root == child_root || !vbar || (vbar & 31U) ||
+        !(uintptr_t)_stack_bottom || !(uintptr_t)_stack_top ||
+        current_sp < (uintptr_t)_stack_bottom + 512U || current_sp > (uintptr_t)_stack_top) return 0;
+    if (!arm32_auth_root_readable_identity_v1(parent_root) ||
+        !arm32_auth_root_readable_identity_v1((uint32_t)child_root)) return 0;
+    const uint32_t *parent = (const uint32_t *)(uintptr_t)parent_root;
+    uint32_t table_section = parent[(uint32_t)child_root >> 20];
+    if (!arm32_auth_supervisor_section_v1(table_section,dacr) ||
+        (table_section & 0xfff00000U) != ((uint32_t)child_root & 0xfff00000U)) return 0;
+    const uint32_t *child = (const uint32_t *)(uintptr_t)child_root;
+    for (uint32_t n = 0; n < 4096U; ++n) {
+        if ((parent[n] & 3U) == 1U) return 0; /* coarse parent regions are unsupported */
+        if (arm32_auth_supervisor_section_v1(parent[n],dacr) && child[n] != parent[n]) return 0;
+        if ((child[n] & 2U) && (!arm32_auth_supervisor_section_v1(child[n],dacr) || child[n] != parent[n])) return 0;
+        if ((child[n] & 3U) == 1U && !arm32_auth_user_coarse_v1(child[n],dacr)) return 0;
+    }
+    if (!arm32_auth_section_span_v1(parent,child,dacr,(uintptr_t)_kernel_start,(uintptr_t)_kernel_end) ||
+        !arm32_auth_section_span_v1(parent,child,dacr,current_sp - 512U,(uintptr_t)current_sp + 1U) ||
+        !arm32_auth_section_span_v1(parent,child,dacr,vbar,(uintptr_t)vbar + 32U)) return 0;
+    g_arm32_auth_dacr = dacr;
+    g_arm32_auth_prepared_root = (uint32_t)child_root;
+    return 1;
+}
+
+int64_t rt_arm32_authenticated_clean_range_v1(uint64_t first, uint64_t length)
+{
+    uint32_t ctr;
+    if (!first || !length || length > 16384U || first > UINT32_MAX ||
+        length > UINT64_C(0x100000000) - first) return 0;
+    if (rt_arm32_supervisor_identity_range_v1(first,length) != 1) return 0;
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 1" : "=r"(ctr));
+    uint32_t line = 4U << ((ctr >> 16) & 15U);
+    if (line < 4U || line > 2048U) return 0;
+    uint64_t end = first + length;
+    for (uint64_t at = first & ~(uint64_t)(line - 1U); at < end; at += line) {
+        uint32_t address = (uint32_t)at;
+        __asm__ volatile("mcr p15, 0, %0, c7, c10, 1" : : "r"(address) : "memory");
+    }
+    __asm__ volatile("dsb" ::: "memory");
+    return 1;
+}
+int64_t rt_arm32_supervisor_identity_range_v1(uint64_t first, uint64_t length)
+{
+    uint32_t sctlr, ttbcr, dacr, mpidr, cpsr;
+    if (!first || !length || length > 65536U || first > UINT32_MAX ||
+        length > UINT64_C(0x100000000) - first) return 0;
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+    __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
+    __asm__ volatile("mrs %0, cpsr" : "=r"(cpsr));
+    uint32_t root = arm32_current_ttbr0();
+    if (!root || ttbcr || !(sctlr & 1U) || !(sctlr & (1U << 23)) ||
+        (sctlr & ((1U << 29) | (1U << 28) | (1U << 25))) ||
+        (mpidr & 0xffffffU) || (cpsr & 0x2ffU) != 0xd3U) return 0;
+    if (!arm32_auth_root_readable_identity_v1(root)) return 0;
+    const uint32_t *table = (const uint32_t *)(uintptr_t)root;
+    uint64_t at = first & ~UINT64_C(0xfffff), end = first + length;
+    while (at < end) {
+        if (!arm32_auth_identity_ram_v1(table[at >> 20],dacr,(uint32_t)at)) return 0;
+        at += 0x100000U;
+    }
+    return 1;
+}
+int64_t rt_arm32_authenticated_publish_instructions_v1(void)
+{
+    uint32_t zero = 0;
+    __asm__ volatile("dsb\n"
+                     "mcr p15, 0, %0, c7, c5, 0\n"
+                     "mcr p15, 0, %0, c7, c5, 6\n"
+                     "dsb\nisb" : : "r"(zero) : "memory");
+    return 1;
+}
+uint64_t rt_arm32_authenticated_supervisor_section_end_v1(uint64_t task, uint64_t gen,
+    uint64_t root, uint64_t epoch, uint64_t address)
+{
+    uint32_t dacr;
+    if (address >= 0x80000000U || !rt_arm32_authenticated_scope_matches_v1(task,gen,root,epoch) ||
+        rt_arm32_supervisor_identity_range_v1(root,16384U) != 1) return 0;
+    __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+    if (dacr != g_arm32_auth_dacr) return 0;
+    uint32_t descriptor = ((const uint32_t *)(uintptr_t)root)[address >> 20];
+    if (!arm32_auth_supervisor_section_v1(descriptor,dacr)) return 0;
+    return ((address >> 20) + 1U) << 20;
 }
 
 uint32_t rt_arm32_svc_dispatch(uint32_t id, uint32_t a0, uint32_t return_pc,
@@ -2692,6 +2924,46 @@ uint32_t rt_arm32_svc_dispatch(uint32_t id, uint32_t a0, uint32_t return_pc,
     rt_arm32_completed_exit_status = 0xffffffdaU; /* -ENOSYS */
     g_arm32_exec_state = 2U;
     return 1U;
+}
+
+uint32_t rt_arm32_svc_dispatch_frame_v1(Arm32SavedSvcRegistersV1 *frame,
+                                        uint32_t saved_cpsr)
+{
+    if (!frame) return 2U;
+    if (!g_arm32_auth_phase)
+        return rt_arm32_svc_dispatch(frame->r[7], frame->r[0],
+                                     frame->return_pc, saved_cpsr);
+    uint32_t origin = frame->return_pc >= 4U ? frame->return_pc - 4U : 0U;
+    uint32_t mpidr, cpsr, dacr, ttbcr, sctlr, cpacr;
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 5" : "=r"(mpidr));
+    __asm__ volatile("mrs %0, cpsr" : "=r"(cpsr));
+    __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+    __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 2" : "=r"(cpacr));
+    if (g_arm32_auth_phase != 2U || (mpidr & 0xffffffU) != 0U ||
+        (cpsr & 0x2ffU) != 0xd3U || (saved_cpsr & 0x2ffU) != 0xd0U ||
+        dacr != g_arm32_auth_dacr || ttbcr || !(sctlr & 1U) || !(sctlr & (1U << 23)) ||
+        (sctlr & ((1U << 29) | (1U << 28) | (1U << 25) | (1U << 30) | (1U << 13))) ||
+        (cpacr & 0x00f00000U) ||
+        rt_arm32_saved_kernel_sp < sizeof *frame ||
+        (uintptr_t)frame != rt_arm32_saved_kernel_sp - sizeof *frame ||
+        !arm32_auth_identity(g_arm32_auth_task, g_arm32_auth_generation, g_arm32_auth_root) ||
+        !origin || origin >= 0x80000000U || (origin & 3U) || g_arm32_auth_epoch ||
+        g_arm32_auth_next_epoch == UINT32_MAX) return 2U;
+    g_arm32_auth_epoch = ++g_arm32_auth_next_epoch;
+    int64_t result = simple_arm32_authenticated_syscall_dispatch_v1(
+        frame->r[7], frame->r[0], frame->r[1], frame->r[2], frame->r[3], frame->r[4]);
+    int intact = arm32_auth_identity(g_arm32_auth_task, g_arm32_auth_generation, g_arm32_auth_root);
+    g_arm32_auth_epoch = 0U;
+    if (!intact || result < INT32_MIN || result > INT32_MAX) return 2U;
+    if (frame->r[7] == 0U && result == 0) {
+        rt_arm32_completed_exit_status = frame->r[0];
+        g_arm32_auth_completed = 1U;
+        return 1U;
+    }
+    frame->r[0] = (uint32_t)(int32_t)result;
+    return 0U;
 }
 
 RuntimeValue rt_arm32_unowned_svc_selftest(void)
