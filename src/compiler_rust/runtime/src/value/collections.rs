@@ -107,8 +107,8 @@ struct TransientHeapScope {
     /// two full rescans were ~50% of parse-phase samples.
     by_ptr: std::collections::HashMap<usize, usize, std::hash::BuildHasherDefault<ahash::AHasher>>,
     indexed: usize,
-    /// Two tracked objects share a header address; fall back to the exact
-    /// original linear scans for this scope.
+    /// Two tracked objects share a header address. Ownership remains indexed;
+    /// removal defers duplicate compaction using the exact-bit promoted set.
     index_ambiguous: bool,
     /// Exact value bits promoted while the index is ambiguous. Compaction of
     /// `objects` is deferred to ONE filter at scope end instead of a
@@ -133,12 +133,16 @@ impl TransientHeapScope {
 
     fn owns_heap_ptr(&mut self, root_ptr: *mut super::heap::HeapHeader) -> bool {
         self.sync_index();
-        if self.index_ambiguous {
-            return self.objects.iter().any(|object| {
-                object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
-            });
-        }
-        self.by_ptr.contains_key(&(root_ptr as usize))
+        // A heap address has one canonical RuntimeValue representation (the
+        // address plus TAG_HEAP). Duplicate tracking therefore does not make
+        // ownership ambiguous: every entry for this address has the same
+        // promoted status. Keep the index even when removal must defer duplicate
+        // compaction. Scanning `objects` here makes adopt quadratic in the graph.
+        let Some(&position) = self.by_ptr.get(&(root_ptr as usize)) else {
+            return false;
+        };
+        let object = self.objects[position];
+        object.is_heap() && object.as_heap_ptr() == root_ptr && !self.promoted.contains(&object.0)
     }
 
     /// Drop every tracked object whose exact value bits are in `reachable`.
