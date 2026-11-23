@@ -6,12 +6,12 @@
  * and the alloc-time owner tag, and that a non-guard address yields no report.
  * Part 2 (POSIX only): forks a child that really overflows a sampled slot with
  * stderr piped to the parent, and asserts the PRINTED report names the owner
- * and size and that the child still dies by SIGSEGV (signal not swallowed).
+ * and size and that the child still dies by SIGSEGV or SIGBUS (signal not swallowed).
  */
 #include <stdio.h>
 #include <string.h>
 #include "../runtime_memory_guard.h"
-#if !defined(_WIN32)
+#if RT_MEM_GUARD_AVAILABLE
 #include <sys/wait.h>
 #endif
 
@@ -24,15 +24,22 @@ static void check(int c, const char* m) {
 int main(void) {
     char buf[RT_MEM_GUARD_REPORT_MAX];
     /* Fake slot layout: 4 pages, [guard][data][data][guard]. */
-    static uint8_t fake[4 * 4096];
+#if RT_MEM_GUARD_AVAILABLE
+    size_t page_size = rt_mem_guard_resolve_page_size();
+#else
+    size_t page_size = RT_MEM_GUARD_PAGE_SIZE;
+#endif
+    if (page_size == 0) return 1;
+    uint8_t* fake = calloc(4, page_size);
+    if (fake == NULL) return 1;
     uint8_t* page_base = fake;
-    uint8_t* user = fake + 3 * 4096 - 100; /* right-aligned, size 100 */
+    uint8_t* user = fake + 3 * page_size - 100; /* right-aligned, size 100 */
 
     rt_mem_guard_set_owner("parser.lexer", 12);
     size_t idx = rt_mem_guard_record_slot(user, page_base, 4, 100);
     check(idx != RT_MEM_GUARD_MAX_SLOTS, "slot recorded");
 
-    size_t n = rt_mem_guard_fault_report((uintptr_t)(fake + 3 * 4096 + 5), buf, sizeof(buf));
+    size_t n = rt_mem_guard_fault_report((uintptr_t)(fake + 3 * page_size + 5), buf, sizeof(buf));
     check(n > 0 && strstr(buf, "overflow") != NULL, "trailing guard page -> overflow");
     check(strstr(buf, "owner=parser.lexer") != NULL, "report names the owner");
     check(strstr(buf, "size=100") != NULL, "report names the size");
@@ -41,7 +48,7 @@ int main(void) {
     check(n > 0 && strstr(buf, "underflow") != NULL, "leading guard page -> underflow");
 
     rt_mem_guard_slots[idx].freed = 1;
-    n = rt_mem_guard_fault_report((uintptr_t)(fake + 4096 + 3), buf, sizeof(buf));
+    n = rt_mem_guard_fault_report((uintptr_t)(fake + page_size + 3), buf, sizeof(buf));
     check(n > 0 && strstr(buf, "use-after-free") != NULL, "freed slot -> use-after-free");
 
     n = rt_mem_guard_fault_report((uintptr_t)0x10, buf, sizeof(buf));
@@ -50,11 +57,11 @@ int main(void) {
     rt_mem_guard_slots[idx].user_ptr = NULL;
     rt_mem_guard_set_owner(NULL, 0);
     idx = rt_mem_guard_record_slot(user, page_base, 4, 7);
-    n = rt_mem_guard_fault_report((uintptr_t)(fake + 3 * 4096), buf, sizeof(buf));
+    n = rt_mem_guard_fault_report((uintptr_t)(fake + 3 * page_size), buf, sizeof(buf));
     check(n > 0 && strstr(buf, "owner=<none>") != NULL, "unset owner reports <none>");
     rt_mem_guard_slots[idx].user_ptr = NULL;
 
-#if !defined(_WIN32)
+#if RT_MEM_GUARD_AVAILABLE
     setenv("SIMPLE_MEM_GUARD_RATE", "1", 1);
     int fds[2];
     if (pipe(fds) == 0) {
@@ -74,7 +81,7 @@ int main(void) {
         out[got > 0 ? got : 0] = '\0';
         int status = 0;
         waitpid(pid, &status, 0);
-        check(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV, "child still dies by SIGSEGV");
+        check(WIFSIGNALED(status) && (WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS), "child still dies by a memory fault");
         check(strstr(out, "overflow") && strstr(out, "owner=e2e.owner") && strstr(out, "size=37"),
               "printed trap report has class, owner and size");
     }
