@@ -1,0 +1,62 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/2026-11-18_enum_interpolation_prints_address_dupcheck_cosine.md (pinned bin/simple.exe 41dbae93225 predates fix 2fa518de959; passes after seed redeploy)
+# Regression: cosine duplicate-check on a small C fixture must report exact counts.
+# The pinned seed (pre-2fa518de959) rendered enum interpolation as `<enum@0x..>`,
+# so every token key in `token_to_string` was unique, cosine buckets never shared
+# members and the checker silently reported 0 groups here (33 vs 309 on src/runtime).
+
+use compiler.tools.duplicate_check.detector.{find_duplicates, collect_files}
+use compiler.tools.duplicate_check.cache.{new_token_cache_manager}
+use compiler.tools.duplicate_check.config.{default_config, apply_analysis_mode}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, token_to_string}
+use std.io_runtime.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+fn c_body(name: text, acc: text) -> text:
+    "int {name}(const int *xs, int n) \{\n    int {acc} = 0;\n    for (int i = 0; i < n; i++) \{\n        if (xs[i] > 0) \{\n            {acc} += xs[i] * 2;\n        } else \{\n            {acc} -= xs[i];\n        }\n    }\n    if ({acc} > 1000) \{\n        {acc} = 1000;\n    }\n    return {acc};\n}\n"
+
+fn c_config():
+    var config = default_config()
+    config = apply_analysis_mode(config, "cosine")
+    config.include_c_sources = true
+    config.quiet = true
+    config.exclude_patterns = []
+    config
+
+describe "duplicate_check cosine on C fixture":
+    it "renders token keys with a stable enum variant name":
+        val tok = SimpleToken(kind: SimpleTokenKind.Identifier, value: "x", line: 1, column: 1, start_offset: 0, end_offset: 1)
+        expect(token_to_string(tok)).to_equal("SimpleTokenKind::Identifier:x")
+
+    it "reports exact group and line counts for renamed C clones":
+        val root = "/tmp/simple_dupcheck_c_fixture_counts"
+        shell("rm -rf '{root}'")
+        expect(rt_dir_create(root, true)).to_equal(true)
+        expect(rt_file_write_text("{root}/a.c", c_body("sum_a", "total"))).to_equal(true)
+        expect(rt_file_write_text("{root}/b.c", c_body("sum_b", "acc"))).to_equal(true)
+        val config = c_config()
+        val files = collect_files(root, config)
+        expect(files.len()).to_equal(2)
+        val groups = find_duplicates(files, config, new_token_cache_manager())
+        var lines = 0
+        for g in groups:
+            lines = lines + g.total_lines
+        expect(groups.len()).to_equal(1)
+        expect(lines).to_equal(14)
+
+    it "CLI run path reports exact cosine totals for the C fixture":
+        # `simple test` interprets specs, where enum display was already correct;
+        # the under-count only showed on the `run` (JIT) path, so drive the CLI.
+        val root = "build/dupcheck_c_fixture_cli"
+        shell("rm -rf '{root}'")
+        expect(rt_dir_create(root, true)).to_equal(true)
+        expect(rt_file_write_text("{root}/a.c", c_body("sum_a", "total"))).to_equal(true)
+        expect(rt_file_write_text("{root}/b.c", c_body("sum_b", "acc"))).to_equal(true)
+        val bin = if rt_file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+        val r = shell("{bin} run src/compiler/90.tools/duplicate_check/main.spl {root} --include-c --mode cosine -q 2>&1")
+        val out = r.stdout + r.stderr
+        expect(out).to_contain("Total duplicate groups: 1")
+        expect(out).to_contain("Total lines duplicated: 14")
