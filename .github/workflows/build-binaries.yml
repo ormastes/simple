@@ -9,6 +9,7 @@ on:
       - 'src/app/**'
       - 'src/lib/**'
       - 'scripts/check/check-seed-new-stdlib-function-dispatch.shs'
+      - 'scripts/check/check-seed-startup*.py'
       - '.github/workflows/build-binaries.yml'
   pull_request:
     types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
@@ -18,6 +19,7 @@ on:
       - 'src/app/**'
       - 'src/lib/**'
       - 'scripts/check/check-seed-new-stdlib-function-dispatch.shs'
+      - 'scripts/check/check-seed-startup*.py'
       - '.github/workflows/build-binaries.yml'
   workflow_dispatch:
 
@@ -41,20 +43,24 @@ jobs:
         include:
           - target: linux
             rust-target: ""
-            pkg: ""
+            os: ubuntu-24.04
+            toolchain: nightly
+            cache-scope: seed-linux
             binary: simple
             name: Linux x86_64
           - target: mingw
-            rust-target: x86_64-pc-windows-gnu
-            pkg: clang lld mingw-w64
+            rust-target: x86_64-pc-windows-gnullvm
+            os: windows-latest
+            toolchain: nightly-2026-09-15-x86_64-pc-windows-gnullvm
+            cache-scope: seed-mingw-native-llvm-mingw-v1
             binary: simple.exe
             name: Windows MinGW x86_64
-    # Do not use the repository's mixed `ubuntu-latest` runner pool here.
-    # Some self-hosted members intentionally have no passwordless sudo and do
-    # not carry the MinGW sysroot, which made identical matrix entries depend
-    # on which runner happened to claim them. The GitHub-hosted 24.04 image has
-    # the noninteractive package-install contract this bootstrap requires.
-    runs-on: ubuntu-24.04
+    # Windows GNU seeds use the same pinned UCRT/LLVM runtime as bootstrap and
+    # execute on Windows before publication. Linux retains its hosted runner.
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     name: Seed — ${{ matrix.name }}
 
     steps:
@@ -63,35 +69,48 @@ jobs:
       - name: Verify protected bootstrap build scripts
         shell: sh
         run: |
-          command -v xxhsum >/dev/null 2>&1 || (sudo -n apt-get update -qq && sudo -n apt-get install -y -qq --no-install-recommends xxhash)
+          if ! command -v xxhsum >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = Windows ]; then
+              choco install xxhash -y --no-progress
+            else
+              sudo -n apt-get update -qq && sudo -n apt-get install -y -qq --no-install-recommends xxhash
+            fi
+          fi
           sh scripts/check/fast-verify-bootstrap-scripts.shs
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: ${{ matrix.toolchain }}
           targets: ${{ matrix.rust-target || 'x86_64-unknown-linux-gnu' }}
 
       - name: Install Rust target
         if: matrix.rust-target != ''
-        run: rustup target add ${{ matrix.rust-target }}
+        run: rustup target add --toolchain ${{ matrix.toolchain }} ${{ matrix.rust-target }}
 
-      - name: Install cross-compilation toolchain
-        if: matrix.pkg != ''
-        run: |
-          if command -v clang >/dev/null && command -v ld.lld >/dev/null && command -v x86_64-w64-mingw32-ld >/dev/null; then
-            echo "Clang/LLD and the MinGW sysroot tools are already available"
-          else
-            sudo -n apt-get update
-            sudo -n apt-get install -y ${{ matrix.pkg }}
-          fi
-
-      - name: Select Clang for Windows GNU native support
+      - name: Install canonical LLVM-MinGW UCRT (Windows)
         if: matrix.target == 'mingw'
         run: |
-          # The MinGW sysroot supplies headers and libraries. Bootstrap-owned
-          # native support must still be compiled by Clang; build.rs rejects
-          # an implicit fallback to x86_64-w64-mingw32-gcc.
-          echo "CC_x86_64_pc_windows_gnu=clang" >> "$GITHUB_ENV"
-          clang --target=x86_64-w64-windows-gnu --version
+          sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw
+          . scripts/setup/windows-gitbash-bootstrap-env.shs
+          cc=$(cygpath -m "$SIMPLE_MINGW_ROOT/bin/clang.exe")
+          ar=$(cygpath -m "$SIMPLE_MINGW_ROOT/bin/llvm-ar.exe")
+          crt=$("$cc" --target=x86_64-w64-windows-gnu --print-file-name=libmingw32.a)
+          crt=$(cygpath -m "$(printf '%s' "$crt" | tr -d '\r')")
+          test -s "$crt"
+          {
+            echo "CC=$cc"
+            echo "AR=$ar"
+            echo "CC_x86_64_pc_windows_gnullvm=$cc"
+            echo "AR_x86_64_pc_windows_gnullvm=$ar"
+            echo "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=$cc"
+            printf 'CARGO_ENCODED_RUSTFLAGS=-Lnative=%s\037-C\037link-arg=--target=x86_64-w64-windows-gnu\037-C\037link-arg=-fuse-ld=lld\n' "$(dirname "$crt")"
+          } >> "$GITHUB_ENV"
+          cygpath -w "$SIMPLE_MINGW_ROOT/bin" >> "$GITHUB_PATH"
+          "$cc" --version
+          "$SIMPLE_MINGW_ROOT/bin/ld.lld.exe" --version
+
+      - name: Test native startup publication gate
+        run: python scripts/check/check-seed-startup-test.py
 
       - name: Cache Cargo
         uses: actions/cache@v5
@@ -100,9 +119,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src/compiler_rust/target
-          key: seed-${{ matrix.target }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          key: ${{ matrix.cache-scope }}-${{ hashFiles('src/compiler_rust/Cargo.lock', 'scripts/setup/bootstrap-prereqs.shs') }}
           restore-keys: |
-            seed-${{ matrix.target }}-
+            ${{ matrix.cache-scope }}-
 
       - name: Invalidate stale workspace-crate fingerprints
         # Same stale-seed hazard as release.yml: the prefix restore-key can
@@ -117,9 +136,9 @@ jobs:
         working-directory: src/compiler_rust
         run: |
           if [ -n "${{ matrix.rust-target }}" ]; then
-            cargo +nightly build --profile bootstrap -p simple-driver --target ${{ matrix.rust-target }}
+            cargo +${{ matrix.toolchain }} build --profile bootstrap -p simple-driver --target ${{ matrix.rust-target }}
           else
-            cargo +nightly build --profile bootstrap -p simple-driver
+            cargo +${{ matrix.toolchain }} build --profile bootstrap -p simple-driver
           fi
 
       - name: Build native runtime authority (Linux only)
@@ -128,9 +147,9 @@ jobs:
         run: |
           # Match bootstrap's Linux authority package set. Allow dependency
           # downloads on a cache miss; this job must not require --offline.
-          cargo +nightly build --locked --profile bootstrap --target x86_64-unknown-linux-gnu \
+          cargo +${{ matrix.toolchain }} build --locked --profile bootstrap --target x86_64-unknown-linux-gnu \
             -p simple-native-all -p spl_hosted_runtime
-          cargo +nightly build --locked --profile bootstrap --target x86_64-unknown-linux-gnu \
+          cargo +${{ matrix.toolchain }} build --locked --profile bootstrap --target x86_64-unknown-linux-gnu \
             -p simple-compiler-backfill
           cd target/x86_64-unknown-linux-gnu/bootstrap
           sha256sum libsimple_native_all.a libsimple_compiler_backfill.a > runtime-authority.sha256
@@ -162,15 +181,22 @@ jobs:
           echo "Seed binary size: $(wc -c < "$SEED") bytes"
           file "$SEED"
 
-          # Only run --version for native (Linux) seed
-          if [ "${{ matrix.target }}" = "linux" ]; then
-            "$SEED" --version
-          fi
+          # Both seeds now run on their actual host before any artifact upload.
+          python scripts/check/check-seed-startup.py --seed "$SEED" --output build/seed-startup.json
 
       - name: Check newly added stdlib function dispatch (Linux only)
         if: matrix.target == 'linux'
         shell: bash
         run: sh scripts/check/check-seed-new-stdlib-function-dispatch.shs --simple "$GITHUB_WORKSPACE/src/compiler_rust/target/bootstrap/simple"
+
+      - name: Retain native seed startup evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: seed-startup-${{ matrix.target }}-${{ github.sha }}
+          path: build/seed-startup.json
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Stage seed binary for upload
         run: |
