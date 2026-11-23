@@ -18,6 +18,20 @@ extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
 extern fn rt_array_free<T>(array: [T])
 
+@unsafe(reason: "open promotion share window over paused registry retention scope", capabilities: [ffi])
+extern fn rt_transient_heap_promote_share_begin() -> bool
+
+@unsafe(reason: "close promotion share window over paused registry retention scope", capabilities: [ffi])
+extern fn rt_transient_heap_promote_share_end() -> bool
+
+fn module_surface_promote_share_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote_share_begin()
+
+fn module_surface_promote_share_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote_share_end()
+
 # One managed root array per batch keeps promotion a single traversal. Each
 # element boxes one retained owner (a runtime enum object), and the walk
 # follows its payload into the owner exactly as it would follow an array slot.
@@ -686,11 +700,13 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     owning scope is paused, then retain the registry carriers.
     """
     val sentinel = module_surface_promote_scope_sentinel()
+    val _share_opened = module_surface_promote_share_begin()
     var roots: [ModuleSurfaceRoot] = []
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
         if not module_surface_promote_fields(surface):
+            val _share_closed_err = module_surface_promote_share_end()
             return "surface field root carrier failed: index={surface_index}"
         module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
@@ -721,7 +737,9 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     roots.push(ModuleSurfaceRoot.Texts(selected.surface_digests))
     roots.push(ModuleSurfaceRoot.Texts([selected.route_generation, selected.snapshot_digest, registry.configured_route_generation_v1]))
     roots.push(ModuleSurfaceRoot.Registry(registry))
-    if not module_surface_promote_roots(roots):
+    val roots_ok = module_surface_promote_roots(roots)
+    val _share_closed = module_surface_promote_share_end()
+    if not roots_ok:
         return "registry root carrier (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()} names={registry.ordered_names.len()} indices={registry.ordered_indices.len()} dict={registry.index_by_name.len()})"
     ""
 
