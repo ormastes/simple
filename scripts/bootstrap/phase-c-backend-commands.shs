@@ -111,6 +111,10 @@ bootstrap_phase_c_frontend_policy_error() {
 }
 
 bootstrap_phase_c_apply_frontend_policy() {
+  if [ "${SIMPLE_FILE_WORKERS:-0}" = 1 ] && [ "$pure_tool_threads" -lt 2 ]; then
+    bootstrap_phase_c_frontend_policy_error "per-file tool builds require at least 2 workers; requested $pure_tool_threads (no compiler launched)"
+    return 1
+  fi
   . "$source_root/scripts/bootstrap/lib/tree-rss-policy.shs" ||
     bootstrap_phase_c_frontend_policy_error "cannot load $source_root/scripts/bootstrap/lib/tree-rss-policy.shs" || return 1
   . "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs" ||
@@ -129,6 +133,12 @@ bootstrap_phase_c_apply_frontend_policy() {
     "$bootstrap_tree_rss_ceiling_kib") ||
     bootstrap_phase_c_frontend_policy_error "product frontend policy refused cap $bootstrap_tree_rss_cap_kib KiB (ceiling $bootstrap_tree_rss_ceiling_kib KiB, rss mode ${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}); an inherited SIMPLE_SHARD_MEM_CLAMP/SIMPLE_PARSE_SHARD_*/SIMPLE_HIR_SHARD_WORKER_KB/SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB contradicts scripts/bootstrap/lib/product-frontend-policy.shs, or cap > ceiling" ||
     return 1
+  pcb_effective_budget=${pcb_frontend_rows##*=}
+  if ! bootstrap_product_frontend_fanout_host &&
+     [ "${SIMPLE_FILE_WORKERS:-0}" = 1 ] && [ "$pcb_effective_budget" -lt 10485760 ]; then
+    bootstrap_phase_c_frontend_policy_error "per-file tool build budget $pcb_effective_budget KiB cannot fit the 10485760 KiB coordinator/two-worker floor (no compiler launched)"
+    return 1
+  fi
   while IFS= read -r pcb_frontend_setting; do
     export "$pcb_frontend_setting" ||
       bootstrap_phase_c_frontend_policy_error "cannot export '$pcb_frontend_setting'" || return 1
