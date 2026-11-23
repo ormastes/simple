@@ -1389,10 +1389,25 @@ main_merged_predecessor() {
             _mm_best_count=$_mm_count
         fi
     done
-    [ -n "$_mm_best" ] || return 1
+    # Local tracking refs only decide WHETHER to narrow. A stale or missing
+    # refs/remotes/<remote>/release/<x.y> made published main the closest local
+    # candidate, so a release-line PR was charged with the release line's whole
+    # history (2026-11-23, runtime_api_regression_guard_release_range...).
+    # Whenever narrowing is possible, or the range carries a merge that may have
+    # pulled in a published line, the base comes from the LIVE remote lines
+    # instead; if those cannot be confirmed, return 2 (ERROR), never a wrong range.
+    _mm_merges=$(git -C "$ROOT" rev-list --count --merges "$_mm_old..$_mm_tip") || return 2
+    if [ -z "$_mm_best" ] || [ "$_mm_best_count" -ge "$_mm_old_count" ]; then
+        [ "$_mm_merges" -gt 0 ] || return 1
+    fi
+    _mm_live=$(rebased_push_published_base "$_mm_tip") || {
+        echo "push-must-check: ERROR — cannot confirm the push's published base line (main, release_phase3, release/*) at $_mm_remote; fetch it and retry" >&2
+        return 2
+    }
+    _mm_live_count=$(git -C "$ROOT" rev-list --count "$_mm_live..$_mm_tip") || return 2
     # Only replace old when it is strictly narrower.
-    [ "$_mm_best_count" -lt "$_mm_old_count" ] || return 1
-    printf '%s\n' "$_mm_best"
+    [ "$_mm_live_count" -lt "$_mm_old_count" ] || return 1
+    printf '%s\n' "$_mm_live"
 }
 
 # A non-fast-forward PR update replaces a branch built on an old base with a
@@ -2241,6 +2256,28 @@ SLOW_GIT
         die "release fixture: per-ref base is not the published release tip"
     [ "$(git -C "$ROOT" rev-list --count "$_relpr_pred..$_relpr_tip")" -eq 2 ] ||
         die "release fixture: range is not just the branch's own commits"
+    # Stale/missing release tracking ref (2026-11-23): the topic branches off
+    # release/9.9 (which differs from main) and the local tracking ref is
+    # first deleted, then rewound. The base must still be the live release
+    # tip -- never merge-base(tip, main) -- and only the topic's own commits
+    # are in range. An unreachable push remote is an ERROR (rc 2).
+    _relpr_live=$(git -C "$ROOT" rev-parse refs/remotes/origin/release/9.9)
+    [ "$(git -C "$ROOT" rev-list --count "main..$_relpr_live")" -gt 0 ] || die "stale-release fixture: release/9.9 does not differ from main"
+    git -C "$ROOT" update-ref -d refs/remotes/origin/release/9.9 || die "stale-release fixture: ref delete failed"
+    _relpr_pred=$(MUST_CHECK_PUSH_REMOTE=origin main_merged_predecessor "$_relpr_tip" "$_relpr_old" 2>/dev/null) ||
+        die "stale-release fixture: missing release tracking ref was not resolved live"
+    [ "$_relpr_pred" = "$_relpr_live" ] || die "stale-release fixture: missing tracking ref fell back to main's merge-base"
+    git -C "$ROOT" update-ref refs/remotes/origin/release/9.9 "$_relpr_old^" || die "stale-release fixture: ref rewind failed"
+    _relpr_pred=$(MUST_CHECK_PUSH_REMOTE=origin main_merged_predecessor "$_relpr_tip" "$_relpr_old" 2>/dev/null) ||
+        die "stale-release fixture: stale release tracking ref was not resolved live"
+    [ "$_relpr_pred" = "$_relpr_live" ] || die "stale-release fixture: stale tracking ref chose a wrong base"
+    [ "$(git -C "$ROOT" rev-list --count "$_relpr_pred..$_relpr_tip")" -eq 2 ] ||
+        die "stale-release fixture: range is not just the topic's own commits"
+    git -C "$ROOT" remote add dead "$_tmp/no-such-remote" || die "stale-release fixture: dead remote add failed"
+    git -C "$ROOT" update-ref refs/remotes/dead/main refs/remotes/origin/main || die "stale-release fixture: dead main ref failed"
+    _relpr_rc=0
+    MUST_CHECK_PUSH_REMOTE=dead main_merged_predecessor "$_relpr_tip" "$_relpr_old" >/dev/null 2>&1 || _relpr_rc=$?
+    [ "$_relpr_rc" -eq 2 ] || die "stale-release fixture: unconfirmable base line did not ERROR (rc $_relpr_rc)"
     ROOT=$_saved_root
     MUST_CHECK_PUSH_REMOTE=$_saved_remote
 
@@ -2403,9 +2440,16 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
         _predecessor=$(rebased_push_published_base "$_local_sha") ||
             die "cannot verify a published PR base (main, release_phase3, release/*) for rebased ref $_local_ref"
-    elif _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor"); then
-        echo "push-must-check: $_local_ref merged published main; range base $_predecessor -> $_mm_pred (already-published main commits excluded)"
-        _predecessor=$_mm_pred
+    else
+        _mm_rc=0
+        _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor") || _mm_rc=$?
+        case "$_mm_rc" in
+            0)
+                echo "push-must-check: $_local_ref merged a published line; range base $_predecessor -> $_mm_pred (already-published commits excluded)"
+                _predecessor=$_mm_pred ;;
+            1) ;;
+            *) echo "push-must-check: ERROR — nothing was checked (cannot confirm the published base line for $_local_ref)"; exit 2 ;;
+        esac
     fi
     ALLOW_UNPROMOTED_LEDGER=0
     if ledger_is_unpromoted_at_rev "$_predecessor"; then
