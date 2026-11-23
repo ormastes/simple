@@ -67,6 +67,9 @@ pub fn is_valid_runtime_bundle(value: &str) -> bool {
             | "host-gpu"
             | "host_gpu"
             | "gpu"
+            // Explicit vulkan native_all lane for ordinary GPU entries (Blocker 8).
+            | "host-gpu-native-all"
+            | "host_gpu_native_all"
             | "bootstrap-tools"
             | "dynamic-runtime"
             | "dynamic_runtime"

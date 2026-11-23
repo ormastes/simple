@@ -5396,6 +5396,90 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
 }
 
+// Blocker 8 (doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md):
+// an ordinary GPU entry needs the Vulkan runtime and the provider registry,
+// which only a `--features vulkan` native_all archive carries. The explicit
+// `host-gpu-native-all` lane admits exactly that archive and nothing weaker.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_selects_vulkan_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\nlong rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    assert_eq!(builder.resolve_runtime_lane(), NativeRuntimeLane::HostGpuNativeAll);
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected.0, native_all);
+    assert!(selected.1);
+    assert!(builder.reject_unexpected_native_all(Some(&selected)).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_rejects_archive_without_vulkan() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("rt_vulkan_init"), "{error}");
+    assert!(error.contains("--features vulkan"), "{error}");
+}
+
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_requires_runtime_path() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NativeBuildConfig::default();
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("--runtime-path"), "{error}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_still_refuses_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
+}
+
 #[test]
 fn test_runtime_bundle_hosted_is_rejected_without_full_stage4_authorization() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
