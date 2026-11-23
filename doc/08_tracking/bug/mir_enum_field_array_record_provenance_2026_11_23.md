@@ -14,7 +14,7 @@ Underlying repair owner: agent bugtoken_layout. Suspected boundary: canonical qu
 
 Evidence directory: `/tmp/simple-wt-bug-token-layout-20261123/build/bugtoken-layout-probe/`. `enum-fields.log` is the real failing tiny original, `enum-fields-index.log` is the failed index workaround, `enum-fields-scalar.log` is scalar workaround collection. No successful final compiler/link claim follows from an emitted object alone.
 
-Recovery source: original block is available in release source commit8f3405ee95f84ceb259d2bcd1abbe8c24e3e5dfa. Workaround commit SHA will be recorded after verification. Final target compile receipt/object path and execution output remain pending.
+Recovery source: the original block is available in release source commit8f3405ee95f84ceb259d2bcd1abbe8c24e3e5dfa. Workaround source commit053c53f8a4e was verified by the complete configured target-module compile and the actual API cases below. `/tmp/simple-rc-build-20261122/bugtoken-layout-repair-20261123/object.sdn` binds the source/producer hashes, emitted object, canonical compile receipt,23 positive API assertions and nonzero assertion control. Its unchanged invalid resolution witness permits diagnostic manual linking only; normal cache admission and final P3/P4 gates remain unproven.
 
 ## Verification and diagnostic object
 
