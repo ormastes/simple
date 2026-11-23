@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../runtime_memory_guard.h"
-#if !defined(_WIN32)
+#if RT_MEM_GUARD_AVAILABLE
 #include <sys/wait.h>
 #endif
 
@@ -61,7 +61,7 @@ int main(void) {
     check(n > 0 && strstr(buf, "owner=<none>") != NULL, "unset owner reports <none>");
     rt_mem_guard_slots[idx].user_ptr = NULL;
 
-#if !defined(_WIN32)
+#if RT_MEM_GUARD_AVAILABLE
     setenv("SIMPLE_MEM_GUARD_RATE", "1", 1);
     int fds[2];
     if (pipe(fds) == 0) {
