@@ -29,3 +29,9 @@ Actual public API regression compiled and ran with output `token-receipt-native-
 The underlying MIR owner is NOT fixed. Its removal gate must use a newly built compiler that proves qualified enum provenance without borrowing an unrelated bare-name record layout, rerun the original field-array loop, and include separate modules declaring an enum and a record with the same basename. The original database module must then compile and pass the receipt behavior checks before this narrow workaround is removed. The index-read attempted workaround also failed and is preserved in `enum-fields-index.log`.
 
 Workaround change commit: `053c53f8a4e82b1e9d289e2d198b9efa193c52a9`. Keep this owner bug OPEN until the native retirement gates above pass. The diagnostic object was emitted before this commit from identical source bytes; object source hash remains unchanged.
+
+## Known-zero and assertion controls
+
+A separate actual API regression `token_receipt_known_zero_native.spl` passed7 assertions. It specifically proves that `Count(0)` mixed with three unavailable fields is rejected without knowledge, accepted with knowledge, and stored distinctly as input `0`, output/total `unavailable`. This strengthens the zero-count boundary without rerunning the unchanged16-assertion success program.
+
+One separate negative source variant changed only the first expected sum text from `15` to `16`. It compiled successfully, then exited1 with `panic: assertion failed` under canonical complete/observer0/quiescent1; the success marker was absent. Thus the observed positive program's assertions are active, not an exit-zero-only or optimized-away success.
