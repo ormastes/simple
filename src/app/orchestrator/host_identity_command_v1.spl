@@ -154,7 +154,7 @@ pub fn host_identity_store_error_v1(code: text, owner: HostIdentityStoreV1) -> O
     host_identity_finish_v1({"status": SdnValue.String("rejected"), "code": SdnValue.String(code)}, 1, owner)
 
 pub fn host_identity_open_failure_v1(opened: HostIdentityStoreOpenTurnV1) -> OrchestratorValidationReplyV1:
-    if opened.owner != nil:
+    if opened.owner.is_some():
         return host_identity_store_error_v1("host-identity-store-open", opened.owner.unwrap())
     host_identity_failure_v1("host-identity-store-open", 1)
 
@@ -173,7 +173,7 @@ fn host_identity_decode_private_v1(mut bytes: [u8]) -> Result<HostPublicKeyV1, t
 
 fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorValidationReplyV1:
     val opened = host_identity_store_open_v1(options["--store-root"])
-    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+    if not opened.ready or opened.owner.is_none() or opened.cleanup_pending or opened.error != "":
         return host_identity_open_failure_v1(opened)
     var owner = opened.owner.unwrap()
     val leaf = sha256_text(options["--auth-ref"]) + ".key"
@@ -182,7 +182,7 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
     if initial.error != "" or initial.cleanup_pending:
         return host_identity_store_error_v1("host-identity-store-read", owner)
     if not initial.absent:
-        if initial.bytes == nil: return host_identity_store_error_v1("host-identity-store-read", owner)
+        if initial.bytes.is_none(): return host_identity_store_error_v1("host-identity-store-read", owner)
         var bytes = initial.bytes.unwrap()
         initial.bytes = None
         val public_key = match host_identity_decode_private_v1(bytes):
@@ -195,7 +195,7 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
         fields["publicationObserved"] = SdnValue.Bool(false)
         val projection = host_identity_projection_receipt_v1(fields, host_identity_store_path_v1(owner, leaf), "identityPath")
         return host_identity_finish_v1(projection.fields, projection.exit_code, owner)
-    if initial.bytes != nil: return host_identity_store_error_v1("host-identity-store-absence", owner)
+    if initial.bytes.is_some(): return host_identity_store_error_v1("host-identity-store-absence", owner)
     # Private root admission and established absence precede time/OS entropy.
     val name: Option<text> = if options.contains_key("--name"): Some(options["--name"]) else: nil
     var generated = match host_identity_key_generate_v1(name, time_sample_unix_micros_or_failure()):
@@ -227,7 +227,7 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
         # Another creator won. Return its actual public identity, never ours.
         var actual = host_identity_store_read_v1(owner, leaf, 4096)
         owner = actual.owner
-        if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes == nil:
+        if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes.is_none():
             return host_identity_store_error_v1("host-identity-store-existing-read", owner)
         var bytes = actual.bytes.unwrap()
         actual.bytes = None
@@ -252,11 +252,11 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
 
 fn host_identity_stored_public_command_v1(options: Dict<text, text>, registration: bool) -> OrchestratorValidationReplyV1:
     val opened = host_identity_store_open_v1(options["--store-root"])
-    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+    if not opened.ready or opened.owner.is_none() or opened.cleanup_pending or opened.error != "":
         return host_identity_open_failure_v1(opened)
     var read = host_identity_store_read_v1(opened.owner.unwrap(), sha256_text(options["--auth-ref"]) + ".key", 4096)
     val owner = read.owner
-    if read.error != "" or read.cleanup_pending or read.absent or read.bytes == nil:
+    if read.error != "" or read.cleanup_pending or read.absent or read.bytes.is_none():
         return host_identity_store_error_v1("host-identity-store-key-unavailable", owner)
     var bytes = read.bytes.unwrap()
     read.bytes = None
@@ -274,7 +274,7 @@ fn host_identity_stored_public_command_v1(options: Dict<text, text>, registratio
 
 fn host_identity_pin_command_v1(options: Dict<text, text>, candidate: HostPublicKeyV1) -> OrchestratorValidationReplyV1:
     val opened = host_identity_store_open_v1(options["--store-root"])
-    if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
+    if not opened.ready or opened.owner.is_none() or opened.cleanup_pending or opened.error != "":
         return host_identity_open_failure_v1(opened)
     var owner = opened.owner.unwrap()
     val leaf = sha256_text(options["--trust-ref"]) + ".hosts"
@@ -289,7 +289,7 @@ fn host_identity_pin_command_v1(options: Dict<text, text>, candidate: HostPublic
     var publication_observed = false
     var actual: [u8] = []
     if read.absent:
-        if read.bytes != nil: return host_identity_store_error_v1("host-identity-store-absence", owner)
+        if read.bytes.is_some(): return host_identity_store_error_v1("host-identity-store-absence", owner)
         val published = host_identity_store_publish_v1(owner, leaf, proposed.bytes())
         owner = published.owner
         if published.cleanup_pending or published.error != "":
@@ -308,13 +308,13 @@ fn host_identity_pin_command_v1(options: Dict<text, text>, candidate: HostPublic
         elif published.publication == HostIdentityStorePublicationV1.Existing:
             val existing = host_identity_store_read_v1(owner, leaf, 4096)
             owner = existing.owner
-            if existing.error != "" or existing.cleanup_pending or existing.absent or existing.bytes == nil:
+            if existing.error != "" or existing.cleanup_pending or existing.absent or existing.bytes.is_none():
                 return host_identity_store_error_v1("host-identity-store-existing-read", owner)
             actual = existing.bytes.unwrap()
         else:
             return host_identity_store_error_v1("host-identity-store-publication-uncertain", owner)
     else:
-        if read.bytes == nil: return host_identity_store_error_v1("host-identity-store-pin-read", owner)
+        if read.bytes.is_none(): return host_identity_store_error_v1("host-identity-store-pin-read", owner)
         actual = read.bytes.unwrap()
     val existing = bytes_to_text(actual)
     val existing_key = match host_identity_known_hosts_validate_v1(existing, alias):
