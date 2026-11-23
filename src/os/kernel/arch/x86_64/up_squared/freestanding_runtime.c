@@ -120,9 +120,7 @@ void *calloc(size_t count, size_t size) {
     if (result == (void *)0) {
         return (void *)0;
     }
-    for (size_t index = 0u; index < total; ++index) {
-        result[index] = 0u;
-    }
+    memset(result, 0, total);
     return result;
 }
 
@@ -141,10 +139,7 @@ void *realloc(void *pointer, size_t size) {
         return (void *)0;
     }
     size_t copy_size = old_size < size ? old_size : size;
-    const unsigned char *old = (const unsigned char *)pointer;
-    for (size_t index = 0u; index < copy_size; ++index) {
-        result[index] = old[index];
-    }
+    memcpy(result, pointer, copy_size);
     return result;
 }
 
@@ -157,24 +152,25 @@ int64_t syscall(uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
 
 uint64_t unsafe_addr_of(int64_t value) { return (uint64_t)value; }
 
-int64_t rt_volatile_read_u8(int64_t address) {
-    return *(volatile uint8_t *)(uintptr_t)address;
+static inline int64_t up2_vread(int64_t address, int width) {
+    uintptr_t p = (uintptr_t)address;
+    if (width == 1) return *(volatile uint8_t *)p;
+    if (width == 4) return *(volatile uint32_t *)p;
+    return (int64_t)*(volatile uint64_t *)p;
 }
-int64_t rt_volatile_read_u32(int64_t address) {
-    return *(volatile uint32_t *)(uintptr_t)address;
+static inline void up2_vwrite(int64_t address, int64_t value, int width) {
+    uintptr_t p = (uintptr_t)address;
+    if (width == 1) *(volatile uint8_t *)p = (uint8_t)value;
+    else if (width == 4) *(volatile uint32_t *)p = (uint32_t)value;
+    else *(volatile uint64_t *)p = (uint64_t)value;
 }
-int64_t rt_volatile_read_u64(int64_t address) {
-    return (int64_t)*(volatile uint64_t *)(uintptr_t)address;
-}
-void rt_volatile_write_u8(int64_t address, int64_t value) {
-    *(volatile uint8_t *)(uintptr_t)address = (uint8_t)value;
-}
-void rt_volatile_write_u32(int64_t address, int64_t value) {
-    *(volatile uint32_t *)(uintptr_t)address = (uint32_t)value;
-}
-void rt_volatile_write_u64(int64_t address, int64_t value) {
-    *(volatile uint64_t *)(uintptr_t)address = (uint64_t)value;
-}
+
+int64_t rt_volatile_read_u8(int64_t address) { return up2_vread(address, 1); }
+int64_t rt_volatile_read_u32(int64_t address) { return up2_vread(address, 4); }
+int64_t rt_volatile_read_u64(int64_t address) { return up2_vread(address, 8); }
+void rt_volatile_write_u8(int64_t address, int64_t value) { up2_vwrite(address, value, 1); }
+void rt_volatile_write_u32(int64_t address, int64_t value) { up2_vwrite(address, value, 4); }
+void rt_volatile_write_u64(int64_t address, int64_t value) { up2_vwrite(address, value, 8); }
 
 int64_t rt_text_slice_audit_note_range(int64_t source, int64_t source_length,
                                        int64_t begin, int64_t finish) {
