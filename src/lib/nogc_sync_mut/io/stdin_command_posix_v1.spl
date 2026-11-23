@@ -77,31 +77,31 @@ pub fn stdin_command_platform_begin_v1(request: StdinCommandRequestV1) -> StdinC
             request.max_stderr_bytes <= 0 or request.max_stderr_bytes > 16777216 or
             request.input.len() > 2105360 or
             request.environment.len() != 0 or request.directory != ""):
-        return StdinCommandPlatformTurnV1(nil, nil, "command-request-invalid")
+        return StdinCommandPlatformTurnV1(None, None, "command-request-invalid")
     val admitted = stdin_command_platform_files_admit_v1(request.program, "", "", request.expected_digest, true)
-    if admitted.is_err(): return StdinCommandPlatformTurnV1(nil, nil, "command-program-admission")
+    if admitted.is_err(): return StdinCommandPlatformTurnV1(None, None, "command-program-admission")
     val now = time_sample_unix_micros_or_failure()
     if now < 0 or request.expires_at_unix_ms <= now / 1000:
-        return StdinCommandPlatformTurnV1(nil, nil, "command-admission-expired")
+        return StdinCommandPlatformTurnV1(None, None, "command-admission-expired")
     val stdout = match text_byte_buffer(Capacity(value: request.max_stdout_bytes)):
         case Ok(value): value
-        case Err(_): return StdinCommandPlatformTurnV1(nil, nil, "command-output-allocation")
+        case Err(_): return StdinCommandPlatformTurnV1(None, None, "command-output-allocation")
     val stderr = match text_byte_buffer(Capacity(value: request.max_stderr_bytes)):
         case Ok(value): value
-        case Err(_): return StdinCommandPlatformTurnV1(nil, nil, "command-output-allocation")
+        case Err(_): return StdinCommandPlatformTurnV1(None, None, "command-output-allocation")
     val started = match process_owned_start_v3(request.program, request.args, request.input,
             request.timeout_ms, 500, request.max_stdout_bytes + request.max_stderr_bytes):
         case Ok(value): value
-        case Err(_): return StdinCommandPlatformTurnV1(nil, nil, "command-start-failed")
+        case Err(_): return StdinCommandPlatformTurnV1(None, None, "command-start-failed")
     val owner = StdinCommandPlatformOwnerV1(lease: started.lease(), request: request,
         stdout: stdout, stderr: stderr, stdout_received: 0, stderr_received: 0,
         cancelled: false, consumed: false,
         error: if started.runtime_error == 0: "" else: "command-start-runtime-error")
-    StdinCommandPlatformTurnV1(Some(owner), nil, owner.error)
+    StdinCommandPlatformTurnV1(Some(owner), None, owner.error)
 
 pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel: bool) -> StdinCommandPlatformTurnV1:
     var current = owner
-    if current.consumed: return StdinCommandPlatformTurnV1(nil, nil, "command-owner-consumed")
+    if current.consumed: return StdinCommandPlatformTurnV1(None, None, "command-owner-consumed")
     if cancel and not current.cancelled:
         match current.lease.cancel():
             case Ok(receipt):
@@ -113,7 +113,7 @@ pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel
                 if current.error == "": current.error = "command-cancel-unresolved"
     val observed = match current.lease.poll(STDIN_COMMAND_POLL_WAIT_MS_V1, 65536, 16384):
         case Ok(value): value
-        case Err(_): return StdinCommandPlatformTurnV1(Some(current), nil, "command-poll-unresolved")
+        case Err(_): return StdinCommandPlatformTurnV1(Some(current), None, "command-poll-unresolved")
     current.stdout_received = current.stdout_received + observed.stdout.len()
     current.stderr_received = current.stderr_received + observed.stderr.len()
     if current.stdout.len() + observed.stdout.len() <= current.request.max_stdout_bytes:
@@ -132,7 +132,7 @@ pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel
     if observed.timed_out and current.error == "": current.error = "command-timeout"
     if (not observed.terminal or not observed.reaped or current.stdout_received < observed.stdout_kept or
             current.stderr_received < observed.stderr_kept):
-        return StdinCommandPlatformTurnV1(Some(current), nil, current.error)
+        return StdinCommandPlatformTurnV1(Some(current), None, current.error)
     var input_written: i64 = -1
     var stdin_closed = false
     match current.lease.input_receipt():
@@ -146,9 +146,9 @@ pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel
             if current.error == "": current.error = "command-input-receipt"
     val result = match current.lease.collect():
         case Ok(value): value
-        case Err(_): return StdinCommandPlatformTurnV1(Some(current), nil, "command-collection-unresolved")
+        case Err(_): return StdinCommandPlatformTurnV1(Some(current), None, "command-collection-unresolved")
     if not result.reaped or result.runtime_error == 11 or result.runtime_error == 16:
-        return StdinCommandPlatformTurnV1(Some(current), nil, "command-collection-pending")
+        return StdinCommandPlatformTurnV1(Some(current), None, "command-collection-pending")
     current.consumed = true
     if (result.runtime_error != 0 or result.exit_code != 0 or result.timed_out or result.cancel_requested or
             not result.identity_revalidated) and current.error == "": current.error = "command-process-failed"
@@ -160,4 +160,4 @@ pub fn stdin_command_platform_step_v1(owner: StdinCommandPlatformOwnerV1, cancel
         # POSIX preserves its legacy trusted-namespace hash observation; this
         # field is not a claim that a pinned executable was launched.
         executable_digest: current.request.expected_digest, reaped: result.reaped, cleanup_confirmed: true, effect_attempted: true)
-    StdinCommandPlatformTurnV1(nil, Some(normalized), current.error)
+    StdinCommandPlatformTurnV1(None, Some(normalized), current.error)

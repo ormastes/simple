@@ -1,0 +1,40 @@
+"""
+## Purpose and audience
+Purpose: pin the `encode_ppm_p6` header bytes under the JIT. The header used
+to be copied with `header.char_at(i) as i64`; compiled code (jit/cranelift)
+parses a one-digit text in that cast, so `"6"` stored byte 6 and every
+`web_render_page_ppm.spl` frame written in compiled mode began `P\x06`
+(interpreter fine). The in-process ppm_decode_spec runs on the interpreter
+lane and could not see it, so this spec runs a probe in a child process.
+Audience: maintainers of image encoders and the seed's JIT casts.
+## Operator workflow
+Runs $SIMPLE_BIN (or bin/simple) on
+test/fixtures/ppm_header_jit/ppm_header_probe.spl under
+SIMPLE_EXECUTION_MODE=interpret and =jit, each inside `timeout 300`.
+Bug record: doc/08_tracking/bug/char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md
+"""
+# @req: REQ-COMMON-PpmDecode-001
+
+use std.spec.*
+use std.spec.step
+use std.io.{process_run, env_get}
+
+# ASCII "P6\n12 34\n255\n" and 13 + 12*34*3 bytes.
+val EXPECTED = "header=80 54 10 49 50 32 51 52 10 50 53 53 10 len=1237"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_probe(mode: text) -> text:
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " SIMPLE_TIMEOUT_SECONDS=0 timeout 300 " + simple_binary() + " run test/fixtures/ppm_header_jit/ppm_header_probe.spl 2>&1"
+    val (stdout, _stderr, _code) = process_run("sh", ["-c", cmd])
+    stdout
+
+describe "encode_ppm_p6 header under the JIT":
+    it "AC-1: writes the ASCII header on the interpreter and on the JIT":
+        step("run the probe under the interpreter and under the JIT")
+        expect(run_probe("interpret")).to_contain(EXPECTED)
+        expect(run_probe("jit")).to_contain(EXPECTED)

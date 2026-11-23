@@ -17,7 +17,14 @@ use os.kernel.scheduler.process_execution_observation.{
     SchedulerArgvFileBindingV1, SchedulerArgvFileRoleV1,
     scheduler_execution_observe_adoption_handle_v1,
     scheduler_execution_cancel_adoption_handle_status_v1,
-    SchedulerExecutionCancellationStatusV1
+    SchedulerExecutionCancellationStatusV1,
+    scheduler_execution_observation_handle_for_child_v1,
+    scheduler_execution_observe_stdout_batch_for_handle_v1,
+    scheduler_execution_observe_stderr_batch_for_handle_v1,
+    SchedulerExecutionObservationHandleV1, SchedulerExecutionEvidenceV1,
+    scheduler_execution_output_capture_begin_v1,
+    scheduler_execution_output_capture_append_v1,
+    scheduler_execution_output_capture_finish_v1
 }
 
 fn _handle() -> ExecutableImageHandleV1:
@@ -40,7 +47,159 @@ fn _binding(path: text, index: i64) -> SchedulerArgvFileBindingV1:
         mount_id: 2u64, mount_generation: 3u64,
         namespace_generation: 5u64, file_generation: 4u64, size: 12u64)
 
+fn _capture_row(child: u64, armed: bool) -> SchedulerExecutionObservationHandleV1:
+    var image = _handle()
+    image.target = ManifestTarget(os: "simpleos", arch: "x86_64", abi: "sysv64")
+    val launch = executable_launch_arguments_v1_validate("/bin/simple", ["--help"], []).unwrap()
+    scheduler_execution_observe_adoption_handle_with_launch_v1(
+        child, 0u64, image, launch, armed).unwrap()
+
+fn _capture_terminal(handle: SchedulerExecutionObservationHandleV1) -> SchedulerExecutionEvidenceV1:
+    expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+    expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+    val token = scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()
+    scheduler_execution_evidence_consume_once_v2(token).unwrap()
+
+describe "scheduler output capture completeness leases":
+    it "does not certify a never-armed silent observation":
+        val evidence = _capture_terminal(_capture_row(8301u64, false))
+        expect(evidence.stdout_bytes).to_equal([])
+        expect(evidence.stderr_bytes).to_equal([])
+        expect(evidence.stdout_capture_complete).to_equal(false)
+        expect(evidence.stderr_capture_complete).to_equal(false)
+
+    it "certifies both empty streams only on a protected lifecycle":
+        val evidence = _capture_terminal(_capture_row(8302u64, true))
+        expect(evidence.stdout_capture_complete).to_equal(true)
+        expect(evidence.stderr_capture_complete).to_equal(true)
+
+    it "preserves uncertainty when finalization never obtains the owner lock":
+        val handle = _capture_row(8303u64, true)
+        val pending = scheduler_execution_output_capture_begin_v1(8303u64, true).unwrap().unwrap()
+        # Leaving the issued lease pending models the state left by a failed
+        # finalization lock acquisition; no synthetic passing I/O is claimed.
+        expect(pending.ticket).to_be_greater_than(0u64)
+        val evidence = _capture_terminal(handle)
+        expect(evidence.stdout_capture_complete).to_equal(true)
+        expect(evidence.stderr_capture_complete).to_equal(false)
+
+    it "detects a lost stderr append even when stdout and an empty stderr oracle match":
+        val handle = _capture_row(8304u64, true)
+        val output = scheduler_execution_output_capture_begin_v1(8304u64, false).unwrap().unwrap()
+        expect(scheduler_execution_output_capture_append_v1(output, [65u8], 1)).to_equal(1)
+        expect(scheduler_execution_output_capture_finish_v1(output, 1u64)).to_equal(true)
+        val lost = scheduler_execution_output_capture_begin_v1(8304u64, true).unwrap().unwrap()
+        # A failed append lock leaves zero reported bytes. Backend still emitted
+        # one byte, so terminal count reconciliation must poison this stream.
+        expect(scheduler_execution_output_capture_finish_v1(lost, 1u64)).to_equal(false)
+        val evidence = _capture_terminal(handle)
+        expect(evidence.stdout_bytes).to_equal([65u8])
+        expect(evidence.stderr_bytes).to_equal([])
+        expect(evidence.stdout_capture_complete).to_equal(true)
+        expect(evidence.stderr_capture_complete).to_equal(false)
+
+    it "rejects same-stream overlap before emission while leaving the other stream independent":
+        val handle = _capture_row(8305u64, true)
+        val first = scheduler_execution_output_capture_begin_v1(8305u64, false).unwrap().unwrap()
+        expect(scheduler_execution_output_capture_begin_v1(8305u64, false).is_err()).to_equal(true)
+        val second = scheduler_execution_output_capture_begin_v1(8305u64, true).unwrap().unwrap()
+        expect(scheduler_execution_output_capture_append_v1(second, [66u8], 1)).to_equal(1)
+        expect(scheduler_execution_output_capture_finish_v1(second, 1u64)).to_equal(true)
+        expect(scheduler_execution_output_capture_finish_v1(second, 1u64)).to_equal(false)
+        expect(scheduler_execution_output_capture_begin_v1(8305u64, false).is_err()).to_equal(true)
+        expect(scheduler_execution_output_capture_finish_v1(first, 1u64)).to_equal(false)
+        expect(scheduler_execution_output_capture_begin_v1(8305u64, false).is_err()).to_equal(true)
+        val evidence = _capture_terminal(handle)
+        expect(evidence.stdout_bytes).to_equal([])
+        expect(evidence.stderr_bytes).to_equal([66u8])
+        expect(evidence.stdout_capture_complete).to_equal(false)
+        expect(evidence.stderr_capture_complete).to_equal(true)
+
+    it "rejects stale-generation callbacks without completing a replacement lease":
+        val old_handle = _capture_row(8306u64, true)
+        val old = scheduler_execution_output_capture_begin_v1(8306u64, false).unwrap().unwrap()
+        expect(scheduler_execution_output_capture_finish_v1(old, 0u64)).to_equal(true)
+        expect(_capture_terminal(old_handle).stdout_capture_complete).to_equal(true)
+        val handle = _capture_row(8306u64, true)
+        val fresh = scheduler_execution_output_capture_begin_v1(8306u64, false).unwrap().unwrap()
+        expect(fresh.observation.nonce == old.observation.nonce).to_equal(false)
+        expect(scheduler_execution_output_capture_append_v1(old, [88u8], 1)).to_equal(-1)
+        expect(scheduler_execution_output_capture_finish_v1(old, 0u64)).to_equal(false)
+        val evidence = _capture_terminal(handle)
+        expect(evidence.stdout_capture_complete).to_equal(false)
+        expect(evidence.stdout_bytes).to_equal([])
+
+    it "bounds concurrent tickets and distinguishes an unobserved task from an owner error":
+        expect(scheduler_execution_output_capture_begin_v1(0u64, false).is_err()).to_equal(true)
+        expect(scheduler_execution_output_capture_begin_v1(8399u64, false).unwrap().is_some()).to_equal(false)
+        val handle = _capture_row(8307u64, true)
+        expect(scheduler_execution_output_capture_begin_v1(8307u64, false).unwrap().is_some()).to_equal(true)
+        expect(scheduler_execution_output_capture_begin_v1(8307u64, true).unwrap().is_some()).to_equal(true)
+        expect(scheduler_execution_output_capture_begin_v1(8307u64, false).is_err()).to_equal(true)
+        val evidence = _capture_terminal(handle)
+        expect(evidence.stdout_capture_complete).to_equal(false)
+        expect(evidence.stderr_capture_complete).to_equal(false)
+
 describe "scheduler execution provenance":
+    it "retains only the accepted batch prefix and keeps stdout distinct from stderr":
+        val handle = scheduler_execution_observe_adoption_handle_v1(
+            8201u64, 0u64, _handle()).unwrap()
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, [65u8, 66u8, 67u8], 2)).to_equal(2)
+        expect(scheduler_execution_observe_stderr_batch_for_handle_v1(
+            handle, [69u8, 70u8], 1)).to_equal(1)
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(
+            handle, [90u8], -1)).to_equal(-1)
+        expect(scheduler_execution_observe_stderr_batch_for_handle_v1(
+            handle, [90u8], 2)).to_equal(-1)
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val token = scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()
+        val evidence = scheduler_execution_evidence_consume_once_v1(token).unwrap()
+        expect(evidence.stdout_bytes).to_equal([65u8, 66u8])
+        expect(evidence.stderr_bytes).to_equal([69u8])
+        expect(evidence.stdout_truncated).to_equal(false)
+        expect(evidence.stderr_truncated).to_equal(false)
+
+    it "rejects a reused child's old generation without appending to its replacement":
+        val old = scheduler_execution_observe_adoption_handle_v1(
+            8202u64, 0u64, _handle()).unwrap()
+        expect(scheduler_execution_observe_exit_handle_v1(old, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(old)).to_equal(true)
+        val old_token = scheduler_execution_deliver_reaped_handle_v1(old).unwrap()
+        expect(scheduler_execution_evidence_consume_once_v1(old_token).is_some()).to_equal(true)
+        val fresh = scheduler_execution_observe_adoption_handle_v1(
+            8202u64, 0u64, _handle()).unwrap()
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(old, [88u8], 1)).to_equal(-1)
+        expect(scheduler_execution_observe_stderr_batch_for_handle_v1(old, [88u8], 1)).to_equal(-1)
+        expect(scheduler_execution_observe_stdout_batch_for_handle_v1(fresh, [89u8], 1)).to_equal(1)
+        expect(scheduler_execution_observe_exit_handle_v1(fresh, 0)).to_equal(true)
+        expect(scheduler_execution_observe_stderr_batch_for_handle_v1(fresh, [90u8], 1)).to_equal(-1)
+        expect(scheduler_execution_observe_reap_handle_v1(fresh)).to_equal(true)
+        val token = scheduler_execution_deliver_reaped_handle_v1(fresh).unwrap()
+        val evidence = scheduler_execution_evidence_consume_once_v1(token).unwrap()
+        expect(evidence.stdout_bytes).to_equal([89u8])
+        expect(evidence.stderr_bytes).to_equal([])
+        expect(scheduler_execution_observation_handle_for_child_v1(8202u64).is_some()).to_equal(false)
+
+    it "marks a bounded stderr stream truncated after retaining its exact prefix":
+        val handle = scheduler_execution_observe_adoption_handle_v1(
+            8203u64, 0u64, _handle()).unwrap()
+        var bytes: [u8] = []
+        var i = 0
+        while i < 65536:
+            bytes.push(65u8)
+            i = i + 1
+        expect(scheduler_execution_observe_stderr_batch_for_handle_v1(handle, bytes, bytes.len())).to_equal(65536)
+        expect(scheduler_execution_observe_stderr_batch_for_handle_v1(handle, [66u8], 1)).to_equal(0)
+        expect(scheduler_execution_observe_exit_handle_v1(handle, 0)).to_equal(true)
+        expect(scheduler_execution_observe_reap_handle_v1(handle)).to_equal(true)
+        val token = scheduler_execution_deliver_reaped_handle_v1(handle).unwrap()
+        val evidence = scheduler_execution_evidence_consume_once_v1(token).unwrap()
+        expect(evidence.stderr_bytes.len()).to_equal(65536)
+        expect(evidence.stderr_bytes[65535]).to_equal(65u8)
+        expect(evidence.stderr_truncated).to_equal(true)
+
     it "preserves admitted image identity and accepts only the exact one-shot argv binding":
         val launch = executable_launch_arguments_v1_validate(
             "/bin/simple", ["/src/main.spl"], []).unwrap()

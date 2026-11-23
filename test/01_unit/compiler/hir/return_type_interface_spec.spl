@@ -113,6 +113,19 @@ fn async_row(module_id: text, name: text, target: DeclRef) -> ReturnTypeRow:
     ReturnTypeRow(decl: rti_fn_ref(module_id, name), key: CalleeKey(module_id: module_id, owner: nil, name: name, is_static: false),
         type_param_count: 0, entry: ReturnTypeEntry.AsyncRef(target))
 
+fn explicit_imported_free_call_v1(name: text, type_args: [HirType]) -> HirExpr:
+    # A qualified imported identity is authoritative independently of the
+    # provider's raw symbol id. No expression or consumer result annotation.
+    val placeholder = HirType(kind: HirTypeKind.Error, span: Span.empty())
+    val callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: -1), name),
+        has_type_: false, type_: placeholder, span: Span.empty())
+    HirExpr(kind: HirExprKind.Call(callee, [], type_args),
+        has_type_: false, type_: placeholder, span: Span.empty())
+
+fn explicit_call_term_v1(table: ReturnTypeInterfaceTable, name: text, type_args: [HirType]) -> text:
+    val entry = table.callee_return(explicit_imported_free_call_v1(name, type_args), SymbolTable.new(), None).unwrap()
+    rti_term_canonical_text(table.require_concrete(table.resolve(entry).unwrap()).unwrap())
+
 fn err_code<T>(r: Result<T, RtiError>) -> text:
     match r:
         case Ok(_): "ok"
@@ -142,6 +155,82 @@ fn mir_subject_kind(hirs: Dict<text, HirModule>, fn_name: text) -> text:
     "none"
 
 describe "return-type interface v1":
+    it "instantiates an imported return-only factory parameter without value arguments":
+        val provider = path_spelled_hir("fn factory<T>() -> T?:\n    None\n", "src/rti_explicit/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(provider).unwrap()
+        val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        expect(explicit_call_term_v1(table, "rti_explicit.provider.factory", [text_type])).to_equal("opt(b:text)")
+
+    it "uses declared binder order including an unused parameter in a nested factory result":
+        val provider = path_spelled_hir("class Store<V>:\n    value: V\nfn factory<Unused, E, V>() -> Result<Store<V>, E>:\n    panic(\"not executed\")\n", "src/rti_explicit/provider.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(provider).unwrap()
+        val flag_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        val int_type = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val owner = rti_type_ref("rti_explicit.provider", "class", "Store")
+        val expected = RtType.ResultT(RtType.Nominal(owner, [RtType.Builtin("text")]), RtType.Builtin("i64"))
+        expect(explicit_call_term_v1(table, "rti_explicit.provider.factory", [flag_type, int_type, text_type])).to_equal(rti_term_canonical_text(expected))
+
+    it "rejects explicit arity mismatch without taking the erased-generic fallback":
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("rti_explicit.provider", "factory", RtType.OptionalT(RtType.Param(0)), 1)]).unwrap()
+        val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        val call = explicit_imported_free_call_v1("rti_explicit.provider.factory", [text_type, text_type])
+        expect(err_code(table.callee_return(call, SymbolTable.new(), None))).to_equal("E-RTI-002")
+
+    it "rejects unowned explicit nominal arguments and conflicting provider rows":
+        var table = ReturnTypeInterfaceTable.new()
+        val row = decided_row("rti_explicit.provider", "factory", RtType.OptionalT(RtType.Param(0)), 1)
+        table.register_rows([row]).unwrap()
+        val foreign = HirType(kind: HirTypeKind.Named(SymbolId(id: -1), []), span: Span.empty())
+        val call = explicit_imported_free_call_v1("rti_explicit.provider.factory", [foreign])
+        expect(err_code(table.callee_return(call, SymbolTable.new(), None))).to_equal("E-RTI-004")
+        expect(err_code(table.register_rows([decided_row("rti_explicit.provider", "factory", RtType.Builtin("bool"), 1)]))).to_equal("E-RTI-006")
+
+    it "keeps explicit arguments from an erased generic consumer non-concrete":
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("rti_explicit.provider", "factory", RtType.OptionalT(RtType.Param(0)), 1)]).unwrap()
+        val parameter = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        val call = explicit_imported_free_call_v1("rti_explicit.provider.factory", [parameter])
+        val entry = table.callee_return(call, SymbolTable.new(), None, ["T"]).unwrap()
+        expect(err_code(table.require_concrete(entry))).to_equal("E-RTI-003")
+        expect(err_code(table.callee_return(call, SymbolTable.new(), None))).to_equal("E-RTI-007")
+
+    it "does not let a caller parameter hide a later missing nominal owner":
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("rti_explicit.provider", "factory", RtType.OptionalT(RtType.Param(0)), 2)]).unwrap()
+        val parameter = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        val foreign = HirType(kind: HirTypeKind.Named(SymbolId(id: -1), []), span: Span.empty())
+        val call = explicit_imported_free_call_v1("rti_explicit.provider.factory", [parameter, foreign])
+        expect(err_code(table.callee_return(call, SymbolTable.new(), None, ["T"]))).to_equal("E-RTI-004")
+
+    it "rejects explicit Error and Infer metadata even beside a caller parameter":
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_rows([decided_row("rti_explicit.provider", "factory", RtType.OptionalT(RtType.Param(0)), 2)]).unwrap()
+        val parameter = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        val invalid = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        val inferred = HirType(kind: HirTypeKind.Infer(0, 0), span: Span.empty())
+        val error_call = explicit_imported_free_call_v1("rti_explicit.provider.factory", [parameter, invalid])
+        val infer_call = explicit_imported_free_call_v1("rti_explicit.provider.factory", [parameter, inferred])
+        expect(err_code(table.callee_return(error_call, SymbolTable.new(), None, ["T"]))).to_equal("E-RTI-007")
+        expect(err_code(table.callee_return(infer_call, SymbolTable.new(), None, ["T"]))).to_equal("E-RTI-007")
+
+    it "preserves the MIR non-concrete path for a genuinely declared generic caller":
+        val hir = path_spelled_hir("fn factory<T>() -> T?:\n    None\nfn caller<T>() -> bool:\n    match factory<T>():\n        case Some(_): true\n        case None: false\n", "src/rti_explicit/generic_caller.spl")
+        var lowering = MirLowering.new(hir.symbols)
+        val _ = lowering.lower_module(hir)
+        expect(lowering.errors).to_equal([])
+        expect(lowering.current_rti_consumer_params).to_equal([])
+
+    it "retains exact declared generic method-owner context through MIR lowering":
+        val hir = path_spelled_hir("class Owner<T>:\n    value: T\nfn factory<T>() -> T?:\n    None\nimpl Owner<T>:\n    fn check() -> bool:\n        match factory<T>():\n            case Some(_): true\n            case None: false\n", "src/rti_explicit/generic_owner.spl")
+        var lowering = MirLowering.new(hir.symbols)
+        val _ = lowering.lower_module(hir)
+        expect(lowering.errors).to_equal([])
+        expect(lowering.current_rti_consumer_params).to_equal([])
+
     it "reports the exact unbound return-only parameter diagnostic on the direct error path":
         val unbound = rti_param_term("T", [])
         expect(err_code(unbound)).to_equal("E-RTI-007")

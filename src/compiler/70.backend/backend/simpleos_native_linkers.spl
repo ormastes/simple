@@ -55,11 +55,14 @@ fn _simpleos_internal_link(objects: [text], archives: [text], output: text,
 # Filesystem-launched user ELF for aarch64/riscv64 SimpleOS, linked from the
 # sysroot built by scripts/os/simpleos-sysroot-{aarch64,riscv64}.shs
 # (crt0.o, libsimpleos_all.a, share/simpleos/simpleos.ld) with ld.lld.
-fn link_simpleos_user_64(arch: text, user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+# @allow(primitive_api) Internal native-link orchestrator boundary uses the same raw verbosity/optimization inputs as the existing per-architecture linkers; retyping requires the shared native-link API migration.
+pub fn link_simpleos_user(arch: text, user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    if arch != "aarch64" and arch != "riscv64" and arch != "i686" and arch != "arm32" and arch != "riscv32":
+        return Err("SimpleOS user link: unsupported architecture '{arch}'")
     val sysroot = simpleos_user_sysroot(arch)
     for path in simpleos_user_link_inputs_for_arch(arch, sysroot):
         if not file_exists(path):
-            return Err("SimpleOS {arch} user sysroot is incomplete: missing {path}; run sh scripts/os/simpleos-sysroot-{arch}.shs or set SIMPLEOS_SYSROOT")
+            return Err("SimpleOS {arch} user sysroot is incomplete: missing {path}; build its SimpleOS user sysroot or set SIMPLEOS_SYSROOT")
     var linker_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
     if linker_script == "":
         linker_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
@@ -101,13 +104,13 @@ fn link_simpleos_user_64(arch: text, user_objects: [text], output: text, verbose
             file_delete(entry_object)
             if init_o != "": file_delete(init_o)
             return Err(e)
-    if (arch == "aarch64" or arch == "riscv64") and _simpleos_internal_requested():
+    if _simpleos_internal_requested():
         # Same inputs and order as simpleos_user_link_args_for_arch, routed
         # through the in-house ELF engine instead of ld.lld. riscv64 gets crt0
         # from the script's INPUT(); the engine never relaxes, matching
         # lld's --no-relax.
         var internal_objects: [text] = []
-        if arch == "aarch64": internal_objects.push("{sysroot}/lib/crt0.o")
+        if arch != "riscv64": internal_objects.push("{sysroot}/lib/crt0.o")
         internal_objects.push(entry_object)
         if init_o != "": internal_objects.push(init_o)
         for obj in user_objects: internal_objects.push(obj)
@@ -138,7 +141,7 @@ fn link_simpleos_user_64(arch: text, user_objects: [text], output: text, verbose
 
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     if simpleos_user_link_arch(env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "") == "aarch64":
-        return link_simpleos_user_64("aarch64", user_objects, output, verbose, opt_level)
+        return link_simpleos_user("aarch64", user_objects, output, verbose, opt_level)
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
     val stubs_o = "build/os/simpleos_arm64_baremetal_stubs_{pid}.o"
@@ -496,7 +499,7 @@ pub fn link_simpleos_x86_64_external(user_objects: [text], output: text) -> Resu
 
 fn link_simpleos_riscv64(user_objects: [text], output: text, verbose: bool, opt_level: i64 = 2) -> Result<text, text>:
     if simpleos_user_link_arch(env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "") == "riscv64":
-        return link_simpleos_user_64("riscv64", user_objects, output, verbose, opt_level)
+        return link_simpleos_user("riscv64", user_objects, output, verbose, opt_level)
     var is_smoke_entry = false
     val is_display_smoke = output.contains("simpleos_riscv64_display_smoke")
     val uses_freestanding_runtime = is_display_smoke or output.contains("simpleos_riscv64_host_gpu_probe")

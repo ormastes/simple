@@ -1,0 +1,103 @@
+# Real ELF32 objects exercise ARM SHT_REL and RV32 SHT_RELA boot images.
+# These are link-only contracts; they do not claim guest execution.
+# @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
+# @cover src/compiler/70.backend/linker/elf/boot_target_policy.spl
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_image}
+use compiler.backend.linker.elf.boot_target_policy.{boot_target_validate_reloc}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val B32_FIX: text = "test/fixtures/linker/elf/simpleos32"
+val B32_SCRIPT: text = """ENTRY(_start)
+SECTIONS {
+    . = 0x400000;
+    .text : { *(.text*) }
+    .ARM.exidx : { *(.ARM.exidx*) }
+    .rodata : { *(.rodata*) }
+    .data : { *(.data*) *(.sdata*) }
+    .bss (NOLOAD) : { *(.bss*) *(.sbss*) *(COMMON) }
+}
+"""
+
+fn b32_load(name: text) -> [i64]:
+    var bytes: [i64] = []
+    for byte in file_read_bytes("{B32_FIX}/{name}"):
+        bytes = bytes.push(byte as i64)
+    bytes
+
+fn b32_u32(bytes: [i64], offset: i64) -> i64:
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+
+fn b32_value(names: [text], values: [i64], name: text) -> i64:
+    var i: i64 = 0
+    while i < names.len():
+        if names[i] == name: return values[i]
+        i = i + 1
+    -1
+
+describe "ELF32 ARM and RISC-V boot links":
+    it "relocates ARM branches and MOVW/MOVT and preserves EABI5":
+        val plan = boot_layout_from_text(B32_SCRIPT).unwrap()
+        val image = elf_boot_link_image([b32_load("arm32_start.o"), b32_load("arm32_main32.o")], plan, RelocArch.Arm32).unwrap()
+        expect(image.bytes[4]).to_equal(1)
+        expect(image.bytes[18]).to_equal(40)
+        expect(image.entry).to_equal(0x400000)
+        expect(b32_u32(image.bytes, 36)).to_equal(0x05000200)
+        expect(image.sym_names.contains("counter")).to_equal(true)
+        expect(image.sym_names.contains("main")).to_equal(true)
+        val text_offset = b32_u32(image.bytes, b32_u32(image.bytes, 32) + 40 + 16)
+        # BL targets main at +12: ARM's implicit addend subtracts PC bias 8.
+        expect(b32_u32(image.bytes, text_offset)).to_equal(0xeb000001)
+        expect(b32_u32(image.bytes, text_offset + 12)).to_equal(0xe3000030)
+        expect(b32_u32(image.bytes, text_offset + 16)).to_equal(0xe3400040)
+
+    it "relocates RV32 CALL_PLT and paired PCREL_HI20/LO12 into ELF32":
+        val plan = boot_layout_from_text(B32_SCRIPT).unwrap()
+        val image = elf_boot_link_image([b32_load("riscv32_start.o"), b32_load("riscv32_main32.o")], plan, RelocArch.Riscv32).unwrap()
+        expect(image.bytes[4]).to_equal(1)
+        expect(image.bytes[18]).to_equal(243)
+        expect(image.entry).to_equal(0x400000)
+        expect(image.sym_names.contains("counter")).to_equal(true)
+        val text_offset = b32_u32(image.bytes, b32_u32(image.bytes, 32) + 40 + 16)
+        expect(b32_u32(image.bytes, text_offset)).to_equal(0x00000097)
+        # The unrelaxed AUIPC/JALR call targets main immediately after _start.
+        expect(b32_u32(image.bytes, text_offset + 4)).to_equal(0x00e080e7)
+        expect(b32_u32(image.bytes, text_offset + 14)).to_equal(0x00000517)
+        expect(b32_u32(image.bytes, text_offset + 18)).to_equal(0x00e52503)
+
+    it "rejects target class confusion before relocation":
+        val plan = boot_layout_from_text(B32_SCRIPT).unwrap()
+        var object = b32_load("riscv32_start.o")
+        object[4] = 2
+        val result = elf_boot_link_image([object], plan, RelocArch.Riscv32)
+        expect(result.is_err()).to_equal(true)
+
+    it "normalizes RV32 ALIGN and rewrites ELF32 symbols and RELA entries":
+        val plan = boot_layout_from_text(B32_SCRIPT).unwrap()
+        val image = elf_boot_link_image([b32_load("riscv32_align.o")], plan, RelocArch.Riscv32).unwrap()
+        expect(b32_value(image.sym_names, image.sym_values, "aligned_target")).to_equal(0x400010)
+        expect(b32_value(image.sym_names, image.sym_values, "second_target")).to_equal(0x400020)
+        expect(b32_value(image.sec_names, image.sec_sizes, ".text")).to_equal(34)
+        expect(b32_u32(image.bytes, 36)).to_equal(1)
+        val text_offset = b32_u32(image.bytes, b32_u32(image.bytes, 32) + 40 + 16)
+        expect(b32_u32(image.bytes, text_offset + 4)).to_equal(0x010080e7)
+
+    it "rejects ELF32 state without a target-correct layout":
+        expect(boot_target_validate_reloc(RelocArch.Riscv32, 21).unwrap_err()).to_contain("TLS")
+        expect(boot_target_validate_reloc(RelocArch.Arm32, 108).unwrap_err()).to_contain("TLS")
+
+    it "rejects incompatible ARM ABI flags before writing an image":
+        val plan = boot_layout_from_text(B32_SCRIPT).unwrap()
+        var start = b32_load("arm32_start.o")
+        start[37] = 2  # Explicit soft ABI; architecture-only assembly is otherwise neutral.
+        var library = b32_load("arm32_main32.o")
+        library[37] = 4
+        val result = elf_boot_link_image([start, library], plan, RelocArch.Arm32)
+        expect(result.unwrap_err()).to_contain("float")
+
+    it "rejects ELF32 addresses instead of truncating them into a valid-looking image":
+        val script = B32_SCRIPT.replace("0x400000", "0x100400000")
+        val plan = boot_layout_from_text(script).unwrap()
+        val result = elf_boot_link_image([b32_load("riscv32_start.o"), b32_load("riscv32_main32.o")], plan, RelocArch.Riscv32)
+        expect(result.unwrap_err()).to_contain("32 bits")

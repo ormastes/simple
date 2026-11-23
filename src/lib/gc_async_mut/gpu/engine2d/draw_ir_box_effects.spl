@@ -1034,10 +1034,15 @@ fn engine2d_draw_ir_render_typed_border_ring(
 
 fn _e2d_box_ring_side(engine: Engine2D, x: i32, y: i32, w: i32, h: i32, color: u32) -> Engine2D:
     var eng = engine
-    if w <= 0 or h <= 0:
+    # One colour, so only the rows inside the surface are built and blended:
+    # a side of a box taller than the frame was a 4 x 50000 image walked row
+    # by row (1.4 s at device scale 4); rows off the surface write nothing.
+    val y0 = if y > 0: y else: 0
+    val y1 = if y + h < eng.h: y + h else: eng.h
+    if w <= 0 or y1 <= y0:
         return eng
-    val pixels: [u32] = [color; ((w as i64) * (h as i64)) as i32]
-    eng.draw_image_blend(x, y, w, h, pixels)
+    val pixels: [u32] = [color; ((w as i64) * ((y1 - y0) as i64)) as i32]
+    eng.draw_image_blend(x, y0, w, y1 - y0, pixels)
     eng
 
 # Classify and blend the ring pixels of the sub-rect (sx, sy, sw, sh) of the
@@ -1050,24 +1055,66 @@ fn _e2d_box_ring_strip(
     var eng = engine
     if sw <= 0 or sh <= 0:
         return eng
+    # A strip wholly above or below the surface blends nothing: skip its
+    # per-pixel classification (the bottom corners of a box taller than the
+    # frame, ~0.4 s at device scale 4).
+    if y + sy >= eng.h or y + sy + sh <= 0:
+        return eng
     val tw = widths[0]
     val rw = widths[1]
     val bw = widths[2]
     val lw = widths[3]
+    val r_tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val r_tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val r_br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val r_bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
     var pixels: [u32] = [0u32; ((sw as i64) * (sh as i64)) as i32]
+    # The per-pixel tests below are _e2d_box_inside_corners and
+    # _e2d_box_inside_inner with the radii resolved once, their row terms
+    # hoisted, and each corner helper called only inside its own corner square
+    # (~67 us a pixel at device scale 4 before); same predicates, same f64
+    # operations.
+    val wf = width.to_f64()
+    val hf = height.to_f64()
+    val tl_f = r_tl.to_f64()
+    val tr_f = r_tr.to_f64()
+    val br_f = r_br.to_f64()
+    val bl_f = r_bl.to_f64()
     var row = sy
     while row < sy + sh:
+        val cy = row.to_f64() + 0.5
+        val top_half = row * 2 < height
+        val uy = if top_half: cy else: hf - cy
+        val hw = if top_half: tw else: bw
+        val row_inner = row >= tw and row < height - bw
         var column = sx
         while column < sx + sw:
-            if _e2d_box_inside_corners(column, row, width, height, corners) and
-                not _e2d_box_inside_inner(column, row, width, height, lw, tw, rw, bw, corners):
-                val cx = column.to_f64() + 0.5
-                val cy = row.to_f64() + 0.5
+            var outer = true
+            if column < r_tl and row < r_tl:
+                outer = _e2d_box_inside_corner(r_tl - 1 - column, r_tl - 1 - row, r_tl)
+            elif column >= width - r_tr and row < r_tr:
+                outer = _e2d_box_inside_corner(column - (width - r_tr), r_tr - 1 - row, r_tr)
+            elif column >= width - r_br and row >= height - r_br:
+                outer = _e2d_box_inside_corner(column - (width - r_br), row - (height - r_br), r_br)
+            elif column < r_bl and row >= height - r_bl:
+                outer = _e2d_box_inside_corner(r_bl - 1 - column, row - (height - r_bl), r_bl)
+            var inner = false
+            val cx = column.to_f64() + 0.5
+            if outer and row_inner and column >= lw and column < width - rw:
+                val rcx = wf - cx
+                val bcy = hf - cy
+                inner = true
+                if cx < tl_f and cy < tl_f:
+                    inner = _e2d_box_inner_corner_ok(cx, cy, tl_f, r_tl - lw, r_tl - tw)
+                if inner and rcx < tr_f and cy < tr_f:
+                    inner = _e2d_box_inner_corner_ok(rcx, cy, tr_f, r_tr - rw, r_tr - tw)
+                if inner and rcx < br_f and bcy < br_f:
+                    inner = _e2d_box_inner_corner_ok(rcx, bcy, br_f, r_br - rw, r_br - bw)
+                if inner and cx < bl_f and bcy < bl_f:
+                    inner = _e2d_box_inner_corner_ok(cx, bcy, bl_f, r_bl - lw, r_bl - bw)
+            if outer and not inner:
                 val left_half = column * 2 < width
-                val top_half = row * 2 < height
-                val ux = if left_half: cx else: width.to_f64() - cx
-                val uy = if top_half: cy else: height.to_f64() - cy
-                val hw = if top_half: tw else: bw
+                val ux = if left_half: cx else: wf - cx
                 val vw = if left_half: lw else: rw
                 val horizontal = vw <= 0 or (hw > 0 and _e2d_box_horizontal_side(ux, uy, hw, vw))
                 pixels[(row - sy) * sw + (column - sx)] = if horizontal:

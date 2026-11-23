@@ -1323,6 +1323,9 @@ cmp -s "$runtime_admitted" "$runtime_check"
 rm -f "$runtime_check"
 
 CANDIDATE_FRONTEND_ROOT=$root
+# Host-config sanity_build_timeout_seconds fills an unset caller value (same
+# key as bootstrap-from-scratch.sh); must precede the `:-180` default.
+bootstrap_host_apply_sanity_build_timeout "$root" || exit 64
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}

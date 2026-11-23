@@ -168,10 +168,10 @@ pub fn distributed_operation_journal_open_v2(root: text, authority_digest: text,
 fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
         maximum_events: i64, held: i64, lease_digest: text,
         retention_profile: Option<DistributedOperationRetentionProfileV2> = None) -> Result<DistributedOperationJournalV2, text>:
-    val snapshot = operation_replay_snapshot_v2(root, authority_digest, maximum_events, nil, retention_profile)?
+    val snapshot = operation_replay_snapshot_v2(root, authority_digest, maximum_events, None, retention_profile)?
     Ok(DistributedOperationJournalV2(root, authority_digest, snapshot.history.head_commit_digest,
         snapshot.history.head_sequence, maximum_events, held, lease_digest, snapshot.rows,
-        nil, nil, snapshot.checkpoint_sequence, retention_profile))
+        None, None, snapshot.checkpoint_sequence, retention_profile))
 
 # One canonical parser/fold for both ordinary replay and history qualification.
 # No second writer/lock or Host-specific operation semantics are introduced.
@@ -499,17 +499,17 @@ pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest:
             val cancelled = operation_health_cancel_v2(turn)
             if cancelled.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(
                 DistributedOperationJournalOpenCleanupV2(root, authority_digest, sha256_text(lease), false, nil,
-                    nil, turn.owner_id, binding, maximum_events, retention_profile), error + ":" + cancelled.unwrap_err())
+                    None, turn.owner_id, binding, maximum_events, retention_profile), error + ":" + cancelled.unwrap_err())
             return DistributedOperationJournalOpenV2.Rejected(error)
         case FileLockOpenV2.CleanupRequired(lock, error):
             val bound = operation_health_bind_v2(turn, Some(lock), nil)
             val ended = if bound.is_ok(): operation_health_end_v2(turn) else: bound
             return DistributedOperationJournalOpenV2.CleanupRequired(
                 DistributedOperationJournalOpenCleanupV2(root, authority_digest, sha256_text(lease), false, Some(lock),
-                    nil, turn.owner_id, binding, maximum_events, retention_profile), if ended.is_err(): error + ":" + ended.unwrap_err() else: error)
+                    None, turn.owner_id, binding, maximum_events, retention_profile), if ended.is_err(): error + ":" + ended.unwrap_err() else: error)
     val lock = held.unwrap()
     var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest,
-        sha256_text(lease), false, Some(lock), nil, turn.owner_id, binding, maximum_events, retention_profile)
+        sha256_text(lease), false, Some(lock), None, turn.owner_id, binding, maximum_events, retention_profile)
     val bound = operation_health_bind_v2(turn, Some(lock), nil)
     if bound.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, bound.unwrap_err())
     if not file_atomic_write(root + "/parent.lease", lease):
@@ -523,7 +523,7 @@ pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest:
     if ended.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, ended.unwrap_err())
     DistributedOperationJournalOpenV2.Ready(DistributedOperationJournalV2(row.root,
         row.authority_digest, row.revision, row.sequence, row.maximum_events, -1,
-        row.lease_digest, row.operations, Some(lock), nil, row.checkpoint_sequence, retention_profile, turn.owner_id))
+        row.lease_digest, row.operations, Some(lock), None, row.checkpoint_sequence, retention_profile, turn.owner_id))
 
 pub fn distributed_operation_journal_close_owned_v2(owner: DistributedOperationJournalV2) -> DistributedOperationJournalCleanupTurnV2:
     if owner.linux_storage.is_some():
@@ -538,7 +538,7 @@ pub fn distributed_operation_journal_close_owned_v2(owner: DistributedOperationJ
     if val lock = owner.owned_lock:
         return distributed_operation_journal_open_cleanup_v2(
             DistributedOperationJournalOpenCleanupV2(owner.root, owner.authority_digest,
-                owner.lease_digest, true, Some(lock), nil, owner.health_id,
+                owner.lease_digest, true, Some(lock), None, owner.health_id,
                 operation_health_binding_v2(owner.authority_digest, owner.lease_digest,
                     owner.maximum_events, owner.retention_profile, owner.root), owner.maximum_events, owner.retention_profile))
     DistributedOperationJournalCleanupTurnV2(nil, false,
@@ -590,7 +590,7 @@ pub fn distributed_operation_journal_open_windows_v3(root: text, store: WindowsJ
     if ended.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, ended.unwrap_err())
     DistributedOperationJournalOpenV2.Ready(DistributedOperationJournalV2(root, authority_digest,
         snapshot.history.head_commit_digest, snapshot.history.head_sequence, maximum_events,
-        -1, cleanup.lease_digest, snapshot.rows, nil, Some(store), snapshot.checkpoint_sequence, retention_profile, turn.owner_id))
+        -1, cleanup.lease_digest, snapshot.rows, None, Some(store), snapshot.checkpoint_sequence, retention_profile, turn.owner_id))
 
 pub fn distributed_operation_journal_read_v3(owner: DistributedOperationJournalV2,
         relative: text, maximum: i64) -> Result<Option<text>, text>:
@@ -720,7 +720,7 @@ fn operation_journal_open_linux_pinned_v3(root: text, parent_identity: [u8], aut
     val opened = operation_health_linux_open_v1(root, binding, true, true, parent_identity)
     if opened.owner.is_none(): return DistributedOperationJournalOpenV2.Rejected(opened.error)
     var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest, sha256_text(lease), false,
-        nil, nil, opened.turn.unwrap().owner_id, binding, maximum_events, retention_profile, opened.owner, opened.turn)
+        nil, None, opened.turn.unwrap().owner_id, binding, maximum_events, retention_profile, opened.owner, opened.turn)
     if opened.error != "": return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, opened.error)
     val prepared = operation_open_linux_held_v3(cleanup, lease)
     match prepared:
@@ -739,7 +739,7 @@ fn operation_open_linux_held_v3(cleanup: DistributedOperationJournalOpenCleanupV
     val ended = operation_health_end_v2(turn)?
     Ok(DistributedOperationJournalV2(cleanup.root, cleanup.authority_digest,
         snapshot.history.head_commit_digest, snapshot.history.head_sequence, cleanup.maximum_events,
-        -1, cleanup.lease_digest, snapshot.rows, nil, nil, snapshot.checkpoint_sequence,
+        -1, cleanup.lease_digest, snapshot.rows, None, None, snapshot.checkpoint_sequence,
         cleanup.retention_profile, turn.owner_id, Some(linux)))
 
 fn operation_cleanup_linux_v3(cleanup: DistributedOperationJournalOpenCleanupV2) -> DistributedOperationJournalCleanupTurnV2:
