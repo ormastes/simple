@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::{effective_target, tools::{find_c_compiler, windows_gnu_target_flag}};
+use super::{effective_target, tools::{find_c_compiler, target_c_compiler, windows_gnu_target_flag}};
 
 fn escape_c_asm_string(s: &str) -> String {
     let mut out = String::new();
@@ -233,7 +233,11 @@ pub(crate) fn compile_inline_asm_c(
         return Ok(None);
     };
     let out = temp_dir.join("simple_asm_blocks.o");
-    let cc = find_c_compiler();
+    let cc = if target.is_some() {
+        find_c_compiler()
+    } else {
+        target_c_compiler(effective_target())
+    };
     let mut cmd = std::process::Command::new(&cc);
     cmd.arg("-c").arg("-o").arg(&out).arg(&c_path);
     if let Some((triple, march, mabi)) = target {

@@ -487,8 +487,9 @@ mod tests {
         // Clang-only toolchain: the default is always a clang driver, never
         // gcc / cc / cl.exe (cc_detect.rs).
         let is_clang = |cc: &str| {
-            let stem = std::path::Path::new(cc).file_stem().and_then(|s| s.to_str()).unwrap_or(cc).to_ascii_lowercase();
-            stem == "clang" || stem == "clang-cl"
+            let base = cc.rsplit(['/', '\\']).next().unwrap_or(cc).to_ascii_lowercase();
+            let stem = base.strip_suffix(".exe").unwrap_or(&base);
+            stem == "clang" || stem == "clang-cl" || stem.ends_with("-clang")
         };
         let linux_cc = detect_c_compiler(&linux);
         assert!(is_clang(&linux_cc), "unexpected Linux C compiler: {linux_cc}");

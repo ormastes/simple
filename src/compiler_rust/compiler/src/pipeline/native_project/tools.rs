@@ -231,32 +231,29 @@ pub(crate) fn hosted_linux_cross_compiler(
 }
 
 pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
-    // Windows GNU bootstrap is Clang-only.  The MinGW GCC driver rejects the
-    // target-qualified flags used by the generated-C and hosted-link paths,
-    // and using two driver families makes their ABI/toolchain policy diverge.
-    if target.os == simple_common::target::TargetOS::Windows
-        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
-    {
-        // Bootstrap publishes its admitted target-specific C driver as CC.
-        // Preserve that authority instead of resolving another clang on PATH.
-        // Keep the plain-clang fallback: the general detector selects the
-        // triple-prefixed llvm-mingw cross driver when host and target ABI differ.
-        if let Ok(cc) = std::env::var("CC") {
-            if !cc.trim().is_empty() {
-                return simple_common::platform::path::to_native_owned(cc);
-            }
-        }
-        return "clang".to_string();
-    }
+    target_c_compiler_with_env(target, &simple_common::platform::cc_detect::ToolDetectEnv::from_process())
+}
+
+pub(crate) fn target_c_compiler_with_env(
+    target: simple_common::target::Target,
+    env: &simple_common::platform::cc_detect::ToolDetectEnv,
+) -> String {
     hosted_linux_cross_compiler(target, false)
         .map(str::to_string)
-        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target(&target))
+        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target_with_env(&target, env))
 }
 
 pub(crate) fn target_cxx_compiler(target: simple_common::target::Target) -> String {
+    target_cxx_compiler_with_env(target, &simple_common::platform::cc_detect::ToolDetectEnv::from_process())
+}
+
+pub(crate) fn target_cxx_compiler_with_env(
+    target: simple_common::target::Target,
+    env: &simple_common::platform::cc_detect::ToolDetectEnv,
+) -> String {
     hosted_linux_cross_compiler(target, true)
         .map(str::to_string)
-        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_cxx_compiler_for_target(&target))
+        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_cxx_compiler_for_target_with_env(&target, env))
 }
 
 /// Return the linker arguments for terminfo symbols used by hosted LLVM.
@@ -405,12 +402,14 @@ pub(crate) fn windows_gnu_target_flag(
     target: simple_common::target::Target,
     compiler: &str,
 ) -> Option<&'static str> {
+    let base = compiler.rsplit(['/', '\\']).next().unwrap_or(compiler);
     (target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
         .then_some(())
-        .filter(|_| compiler.to_ascii_lowercase().contains("clang"))
+        .filter(|_| base.to_ascii_lowercase().contains("clang") && !msvc_style_c_driver(compiler))
         .map(|_| match target.arch {
             simple_common::target::TargetArch::Aarch64 => "--target=aarch64-w64-windows-gnu",
+            simple_common::target::TargetArch::Arm => "--target=armv7-w64-windows-gnu",
             simple_common::target::TargetArch::X86 => "--target=i686-w64-windows-gnu",
             _ => "--target=x86_64-w64-windows-gnu",
         })
