@@ -10,12 +10,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v7
-        with:
-          github-token: ${{ github.token }}
-          run-id: 45254122525
-          name: windows-stage2-link-inputs-d3422d488768713c1e6153bd2a7766ff22cbbd23
-          path: retained-link
+      - name: Verify immutable retained-input ZIP before extraction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build
+          gh api repos/ormastes/simple/actions/artifacts/14863320409/zip > "$RUNNER_TEMP/windows-stage2-link-inputs.zip"
+          printf 'b1b4a164fcf5313ed76a5c39c47d85f6223c91152e1e3448b8b8cc2022b6ab1e  %s\n' "$RUNNER_TEMP/windows-stage2-link-inputs.zip" | sha256sum --check - | tee build/windows-baseline-artifact.txt
+          python -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall("retained-link")' "$RUNNER_TEMP/windows-stage2-link-inputs.zip"
       - uses: actions/download-artifact@v7
         with:
           github-token: ${{ github.token }}
@@ -38,6 +40,10 @@ jobs:
           printf 'bb7bb7654b33d5aa8712acb837c963b2e0c56352560c76105270a3268c665c21  %s\n' "$RUNNER_TEMP/$name.tar.xz" | sha256sum --check -
           tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
           echo "PROOF_TOOLCHAIN=$RUNNER_TEMP/$name" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/$name/bin/x86_64-w64-mingw32-clang" --version > build/windows-baseline-tools.txt
+          "$RUNNER_TEMP/$name/bin/llvm-nm" --version >> build/windows-baseline-tools.txt
+          "$RUNNER_TEMP/$name/bin/ld.lld" --version >> build/windows-baseline-tools.txt
+          sha256sum "$RUNNER_TEMP/$name/bin/x86_64-w64-mingw32-clang" "$RUNNER_TEMP/$name/bin/llvm-nm" "$RUNNER_TEMP/$name/bin/ld.lld" >> build/windows-baseline-tools.txt
       - name: Original-object baseline only, no module compilation
         run: |
           mkdir -p build
@@ -51,4 +57,6 @@ jobs:
             build/windows-baseline-owner.env
             build/windows-baseline.stdout
             build/windows-baseline.stderr
+            build/windows-baseline-artifact.txt
+            build/windows-baseline-tools.txt
           retention-days: 14
