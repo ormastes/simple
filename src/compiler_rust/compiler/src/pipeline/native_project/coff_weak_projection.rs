@@ -70,9 +70,11 @@ pub(crate) fn localize_weak(path: &Path, requested: &BTreeSet<String>) -> Result
         output[pos + 16] = 3; // STATIC at the existing body's address
         output[pos + 17] = 0;
         output[pos + 18..pos + 36].fill(0);
-        // NULL storage class denotes an unused ordinary symbol; never leave
-        // the old fallback index bytes to be parsed as a symbol record.
+        // A private absolute-zero symbol is a valid inert record (the same
+        // shape as Clang's @feat.00). NULL/UNDEFINED is rejected by PE LLD.
         output[pos + 18..pos + 22].copy_from_slice(b".pad");
+        output[pos + 30..pos + 32].copy_from_slice(&(-1i16).to_le_bytes());
+        output[pos + 34] = 3; // STATIC, ABSOLUTE, no auxiliary records
         vacated.insert(index + 1);
     }
     for index in &primary {
