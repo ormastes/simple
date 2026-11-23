@@ -3,8 +3,8 @@
 #
 # Runs a real `native-build` of a program that imports the CUDA std modules in
 # an environment with every GPU SDK hidden (CUDA_PATH*, CUDA_HOME, HIP_PATH*,
-# ROCM_PATH, VULKAN_SDK, VK_SDK_PATH unset; PATH entries naming
-# cuda/vulkan/rocm/hip/nvidia removed), then:
+# ROCM_PATH, VULKAN_SDK, VK_SDK_PATH unset; PATH entries naming cuda/vulkan/
+# rocm/nvidia, or with a `hip` path component or hipcc dir, removed), then:
 #   1. the build must link (exit 0, binary present);
 #   2. the binary must not import any GPU SDK/driver library at load time
 #      (cudart/nvrtc/cublas/nvcuda/libcuda/vulkan-1/libvulkan/amdhip64/hiprtc);
@@ -25,8 +25,19 @@ GPU_ENV_RE='^(CUDA_PATH[A-Z0-9_]*|CUDA_HOME|CUDA_ROOT|HIP_PATH[A-Z0-9_]*|ROCM_PA
 # Prints offending GPU library names found in an import listing on stdin.
 gpu_imports() { grep -E 'DLL Name:|NEEDED' | grep -oiE "[A-Za-z0-9_.+-]*($GPU_LIB_RE)[A-Za-z0-9_.+-]*" | sort -u; }
 
-# Prints PATH with GPU SDK directories removed.
-scrub_path() { printf '%s' "$1" | tr ':' '\n' | grep -viE 'cuda|vulkan|rocm|hip|nvidia' | paste -sd: -; }
+# Prints PATH with GPU SDK directories removed. cuda/vulkan/rocm/nvidia are
+# distinctive enough for a substring match; `hip` is not (shipping, chip-tools,
+# whiplash), so it must be a whole path component (`hip`, `hip-<ver>`, an SDK
+# spelling) or a `hipcc` tool directory.
+scrub_path() {
+    printf '%s\n' "$1" | tr ':' '\n' | while IFS= read -r sp_dir; do
+        case "$(printf '%s' "$sp_dir" | tr '[:upper:]' '[:lower:]')" in
+            *cuda*|*vulkan*|*rocm*|*nvidia*) ;;
+            */hip|*/hip/*|*/hip[-_][0-9]*|*/hip[-_]sdk*|*/hipsdk*|*/hipcc*) ;;
+            *) printf '%s\n' "$sp_dir" ;;
+        esac
+    done | paste -sd: -
+}
 
 # Exit 0 when run output shows a fail-closed CUDA-E001 and no successful load.
 fail_closed_ok() { grep -q 'CUDA-E001' "$1" && ! grep -q 'cuda driver loaded' "$1" && grep -q 'nogpu-probe: end' "$1"; }
@@ -43,6 +54,12 @@ selftest() {
     [ -z "$r" ] || { echo "selftest: clean imports flagged ($r)"; st_fail=1; }
     r=$(scrub_path '/usr/bin:/c/VulkanSDK/1.4/Bin:/opt/cuda/bin:/opt/rocm/bin:/bin')
     [ "$r" = "/usr/bin:/bin" ] || { echo "selftest: PATH scrub wrong ($r)"; st_fail=1; }
+    # Unrelated dirs that merely contain the letters "hip" must survive.
+    r=$(scrub_path '/opt/shipping/bin:/x/chip-tools/bin:/home/u/whiplash/bin:/usr/bin')
+    [ "$r" = "/opt/shipping/bin:/x/chip-tools/bin:/home/u/whiplash/bin:/usr/bin" ] || { echo "selftest: unrelated ship/chip PATH entries scrubbed ($r)"; st_fail=1; }
+    # Real HIP SDK dirs (component match, any case, hipcc tool dir) must go.
+    r=$(scrub_path '/usr/bin:/c/Program Files/AMD/HIP/6.2/bin:/opt/hip/bin:/opt/hip-6.2/bin:/opt/amd/hipcc/bin:/opt/hip:/bin')
+    [ "$r" = "/usr/bin:/bin" ] || { echo "selftest: HIP SDK PATH entries not scrubbed ($r)"; st_fail=1; }
     t=$(mktemp)
     printf 'nogpu-probe: start\nnogpu-probe: CUDA-E001: x\nnogpu-probe: end\n' > "$t"
     fail_closed_ok "$t" || { echo "selftest: fail-closed output rejected"; st_fail=1; }
@@ -55,7 +72,7 @@ selftest() {
 }
 
 selftest
-if [ "${1:-}" = "--selftest" ]; then echo "PASS — selftest: 9 fixture(s) checked"; exit 0; fi
+if [ "${1:-}" = "--selftest" ]; then echo "PASS — selftest: 11 fixture(s) checked"; exit 0; fi
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR — nothing was checked (not in a git checkout)"; exit 2; }
 cd "$root" || exit 2
