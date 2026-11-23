@@ -4492,9 +4492,21 @@ impl MirLowering:
                             # Statement-shaped: no `if val x = <LocalId?>` transport into the outer var;
                             # on the native stage-2/3 lane that binding carried the Option box instead of
                             # the LocalId payload, so grid[1].push(7) faulted (0xC0000005) in mir_lower.
-                            wb_receiver = wb_b.emit_call_value(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], receiver_type)
+                            # Runtime array slots contain tagged words. A float
+                            # receiver must be decoded before a desugared merge
+                            # mutates it, then boxed again by writeback. Giving
+                            # the getter an F64 destination and marking it tagged
+                            # skipped boxing and passed F64 to rt_array_set's I64.
+                            val wb_float_receiver = match receiver_type.kind:
+                                case MirTypeKind.F32 | MirTypeKind.F64: true
+                                case _: false
+                            val wb_getter_type = if wb_float_receiver: MirType.i64() else: receiver_type
+                            wb_receiver = wb_b.emit_call_value(getter, [mir_operand_copy(wb_base), mir_operand_copy(wb_index)], wb_getter_type)
                             self.builder = wb_b
-                            self.mark_runtime_value_local(wb_receiver.id)
+                            if wb_float_receiver:
+                                wb_receiver = self.decode_runtime_value(wb_receiver, receiver_type)
+                            else:
+                                self.mark_runtime_value_local(wb_receiver.id)
                             self.remember_array_index_projection_provenance(wb_base, wb_receiver)
                         else:
                             var wb_b = self.builder
