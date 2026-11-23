@@ -670,3 +670,9 @@ route env, file exists/read, directory list and process capture through SOSIX
   - tts through `tts_runner`.
 - The 501 stub `kind_not_implemented_response` and `engine/kind_dispatch.spl` were deleted; nothing reached them any more. Earlier mentions of `kind_dispatch.kind_open` above are history.
 - `pooling_runner_serve` is stateless. Each request opens the shim library and a model handle and closes both before returning. Module state is thread-local under the interpreter, so a cached handle would leak a shim model slot on every connection thread.
+
+## Review follow-ups (2026-11-23)
+- Request JSON string readers (`json_string_field`, `json_stop_sequences`) share one decoder that now handles `\uXXXX`, surrogate pairs (lone surrogate -> U+FFFD) and passes a malformed escape through. Spec: `protocol_json_unicode_spec.spl`.
+- `pooling_runner` refuses an embedding request on a model whose effective pooling is none (it would return one vector per token as if it were one input); the vocoder path still asks for pooling none explicitly.
+- The shim refuses `embed_eval`, `rerank_tokenize` and `tokens_set` on a tree request (shared tree context / leased token path). Test: `tree_cache_test.c` with `mock_llama_memory_clears`.
+- `tts_runner` releases the shim library through `release_backend_library` instead of its own `spl_dlclose` import.

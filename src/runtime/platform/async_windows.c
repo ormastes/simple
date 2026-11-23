@@ -200,6 +200,14 @@ static int64_t fail_op(iocp_driver* id, iocp_op* op, int64_t rc) {
     return rc;
 }
 
+/* Completion check shared by the overlapped submitters: a failed submit that
+ * is not "I/O pending" discards the op and reports -err; otherwise the op id
+ * is returned. WSA_IO_PENDING and ERROR_IO_PENDING are both 997. */
+static int64_t iocp_submit_result(iocp_driver* id, iocp_op* op, BOOL failed, DWORD err) {
+    if (failed && err != ERROR_IO_PENDING) return fail_op(id, op, -(int64_t)err);
+    return op->op_id;
+}
+
 static void load_extension_functions(iocp_driver* id) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return;
@@ -327,12 +335,7 @@ static int64_t iocp_submit_connect(spl_driver* d, int64_t fd,
         op->fd, (struct sockaddr*)&sa, sizeof(sa),
         NULL, 0, &bytes, &op->overlapped);
 
-    if (!ok && WSAGetLastError() != ERROR_IO_PENDING) {
-        int err = WSAGetLastError();
-        return fail_op(id, op, -err);
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, WSAGetLastError());
 }
 
 static int64_t iocp_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size) {
@@ -355,12 +358,7 @@ static int64_t iocp_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size) {
     int rc = WSARecv(op->fd, &op->wsa_buf, 1, NULL, &flags,
                      &op->overlapped, NULL);
 
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        int err = WSAGetLastError();
-        return fail_op(id, op, -err);
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, rc == SOCKET_ERROR, WSAGetLastError());
 }
 
 static int64_t iocp_submit_send(spl_driver* d, int64_t fd,
@@ -384,12 +382,7 @@ static int64_t iocp_submit_send(spl_driver* d, int64_t fd,
     int rc = WSASend(op->fd, &op->wsa_buf, 1, NULL, 0,
                      &op->overlapped, NULL);
 
-    if (rc == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        int err = WSAGetLastError();
-        return fail_op(id, op, -err);
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, rc == SOCKET_ERROR, WSAGetLastError());
 }
 
 static int64_t iocp_submit_sendfile(spl_driver* d, int64_t sock_fd,
@@ -415,12 +408,7 @@ static int64_t iocp_submit_sendfile(spl_driver* d, int64_t sock_fd,
         (DWORD)len, 0,
         &op->overlapped, NULL, TF_USE_KERNEL_APC);
 
-    if (!ok && WSAGetLastError() != WSA_IO_PENDING) {
-        int err = WSAGetLastError();
-        return fail_op(id, op, -err);
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, WSAGetLastError());
 }
 
 static int64_t iocp_submit_read(spl_driver* d, int64_t fd,
@@ -445,12 +433,7 @@ static int64_t iocp_submit_read(spl_driver* d, int64_t fd,
     BOOL ok = ReadFile(op->file_handle, op->buf, (DWORD)buf_size,
                        NULL, &op->overlapped);
 
-    if (!ok && GetLastError() != ERROR_IO_PENDING) {
-        DWORD err = GetLastError();
-        return fail_op(id, op, -(int64_t)err);
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, GetLastError());
 }
 
 static int64_t iocp_submit_write(spl_driver* d, int64_t fd,
@@ -477,12 +460,7 @@ static int64_t iocp_submit_write(spl_driver* d, int64_t fd,
     BOOL ok = WriteFile(op->file_handle, op->buf, (DWORD)len,
                         NULL, &op->overlapped);
 
-    if (!ok && GetLastError() != ERROR_IO_PENDING) {
-        DWORD err = GetLastError();
-        return fail_op(id, op, -(int64_t)err);
-    }
-
-    return op->op_id;
+    return iocp_submit_result(id, op, !ok, GetLastError());
 }
 
 static int64_t iocp_submit_open(spl_driver* d, const char* path,

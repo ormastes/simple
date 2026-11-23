@@ -5726,6 +5726,24 @@ impl MirLowering:
             word = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
         self.builder = b
         word
+    me rewrap_unit_word_like(unit_local: LocalId, word: LocalId) -> LocalId:
+        """Box an i64 payload `word` in the same one-field record layout as
+        the record-shaped unit `unit_local` (the inverse of unit_div_payload_word)."""
+        match self.find_local_hir_type(unit_local.id):
+            case Some(found_type):
+                match found_type.kind:
+                    case HirTypeKind.Named(unit_sym, _):
+                        val canonical_symbol = self.canonical_mir_type_symbol(unit_sym)
+                        var b = self.builder
+                        val dest = b.emit_aggregate(AggregateKind.Struct(canonical_symbol), [mir_operand_copy(word)], MirType(kind: MirTypeKind.Struct(canonical_symbol)))
+                        self.builder = b
+                        if self.struct_value_syms.contains(unit_local.id):
+                            self.struct_value_syms[dest.id] = self.struct_value_syms[unit_local.id]
+                        dest
+                    case _: word
+            case None:
+                word
+
     me emit_unit_panic_if(cond: LocalId, block_label: text, msg: text):
         """Branch to a panicking block when `cond` holds, else continue."""
         var b = self.builder
@@ -6021,12 +6039,18 @@ impl MirLowering:
                             # Same-unit ratio is a dimensionless i64: return
                             # it directly (a plain `unit Dist: i64` has no
                             # __div__, so the record-operator path below
-                            # would reject it). Unit-by-scalar only needs the
-                            # guard; the division itself happens below.
-                            if self.local_is_declared_unit(left_local) and self.local_is_declared_unit(right_local):
+                            # would reject it). Unit-by-integer (`Dist / i64`)
+                            # is the same base integer division; its quotient
+                            # is re-wrapped as the left unit when that unit is
+                            # record-shaped.
+                            val left_unit = self.local_is_declared_unit(left_local)
+                            val unit_by_int = left_unit and self.local_is_integer_scalar_v1(right_local)
+                            if unit_by_int or (left_unit and self.local_is_declared_unit(right_local)):
                                 var b_div = self.builder
                                 val unit_quotient = b_div.emit_binop(MirBinOp.Div, mir_operand_copy(unit_words.0), mir_operand_copy(unit_words.1), MirType.i64())
                                 self.builder = b_div
+                                if unit_by_int and self.box_runtime_value_local_is_record(left_local):
+                                    return self.rewrap_unit_word_like(left_local, unit_quotient)
                                 return unit_quotient
                 else:
                     val eq_negate = match op:

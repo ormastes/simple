@@ -1,0 +1,207 @@
+# @cover src/compiler/30.types/units/unit_registry.spl 80%
+# @req REQ-TYPES-UNIT-REGISTRY-001
+"""
+## Unit Registry and Conversion Specification
+
+Covers registration, short/full/path lookup, collision reporting (`SPL-UNIT-004`),
+dimension compatibility checks, exact conversion math, composite units, and
+typo suggestion (`suggest_unit`) in `compiler.types.units.unit_registry`.
+"""
+
+use std.spec.{describe, it, expect, fail, step}
+use std.common.units.model.world_units.{
+    UnitClass,
+    exact_ratio,
+    exact_ratio_mul,
+    exact_ratio_equal,
+    unit_factor,
+    unit_expression,
+    unit_expression_from_base,
+    unit_expression_scaled,
+    unit_expression_mul,
+    unit_expression_div,
+    unit_expression_equivalent
+}
+use compiler.types.units.unit_registry.{
+    UnitRegistry,
+    unit_entry,
+    suggest_unit,
+    unit_registry_collisions,
+    unit_registry_lookup
+}
+
+describe "UnitRegistry registration lookup conversion and collision checks":
+    it "registers base and scaled units and resolves short and module path lookups":
+        step("Create an empty UnitRegistry and register m and km")
+        val reg = UnitRegistry.new()
+        val m_entry = reg.register_unit("m", unit_expression_from_base("m"))
+        expect(m_entry.short_symbol).to_equal("m")
+        expect(reg.has("m")).to_be(true)
+        expect(reg.entry_count()).to_equal(1)
+
+        val km_expr = unit_expression_scaled(exact_ratio(1000, 1), "m")
+        val km_entry = unit_entry(
+            short_symbol: "km",
+            full_symbol: "Kilometer",
+            module_path: "unit.length.km",
+            kind: "f64",
+            klass: UnitClass.Count,
+            base_factor: exact_ratio(1000, 1),
+            expression: km_expr,
+            role: "scale",
+            alias_of: ""
+        )
+        reg.register_entry(km_entry)
+        expect(reg.entry_count()).to_equal(2)
+
+        match reg.lookup("km"):
+            case Some(expr):
+                expect(exact_ratio_equal(expr.scale, exact_ratio(1000, 1))).to_be(true)
+            case None:
+                fail("expected km expression")
+
+        match reg.lookup_by_path("unit.length.km"):
+            case Some(found):
+                expect(found.full_symbol).to_equal("Kilometer")
+            case None:
+                fail("expected unit.length.km entry")
+
+        var missing_absent = false
+        match reg.lookup("missing"):
+            case Some(_):
+                fail("missing unit should return None")
+            case None:
+                missing_absent = true
+        expect(missing_absent).to_be(true)
+
+    it "checks dimension matching and converts compatible units":
+        step("Register meters, kilometers, and seconds and test dimensions_match + convert")
+        val reg = UnitRegistry.new()
+        val m_expr = unit_expression_from_base("m")
+        val km_expr = unit_expression_scaled(exact_ratio(1000, 1), "m")
+        val s_expr = unit_expression_from_base("s")
+        reg.register_unit("m", m_expr)
+        reg.register_unit("km", km_expr)
+        reg.register_unit("s", s_expr)
+
+        expect(reg.dimensions_match(km_expr, m_expr)).to_be(true)
+        expect(reg.dimensions_match(km_expr, s_expr)).to_be(false)
+        expect(reg.has("unknown")).to_be(false)
+
+        match reg.convert(2.5, "km", "m"):
+            case Ok(meters):
+                expect(meters).to_equal(2500.0)
+            case Err(err):
+                fail("unexpected km->m error: " + err)
+
+        match reg.convert(500.0, "m", "km"):
+            case Ok(km):
+                expect(km).to_equal(0.5)
+            case Err(err):
+                fail("unexpected m->km error: " + err)
+
+        match reg.convert(1.0, "km", "s"):
+            case Ok(_):
+                fail("incompatible dimensions should fail")
+            case Err(err):
+                expect(err.len()).to_be_greater_than(0)
+
+    it "registers and compares composite unit expressions":
+        step("Construct m/s and km/h composite expressions")
+        val reg = UnitRegistry.new()
+        val m_expr = unit_expression_from_base("m")
+        val s_expr = unit_expression_from_base("s")
+        val mps = unit_expression_div(m_expr, s_expr)
+        reg.register_composite("mps", mps)
+
+        val names = reg.all_composite_names()
+        expect(names.len()).to_equal(1)
+        expect(names[0]).to_equal("mps")
+        expect(reg.has("mps")).to_be(true)
+
+        val sq_m = unit_expression_mul(m_expr, m_expr)
+        val factor_m2 = unit_expression(exact_ratio(1, 1), [unit_factor("m", 2)])
+        expect(unit_expression_equivalent(sq_m, factor_m2)).to_be(true)
+
+    it "records deterministic SPL-UNIT-004 suffix collisions for distinct full symbols":
+        step("Register two distinct full symbols claiming the same short suffix")
+        val reg = UnitRegistry.new()
+        val first = unit_entry(
+            short_symbol: "ms",
+            full_symbol: "Millisecond",
+            module_path: "unit.time.ms",
+            kind: "i64",
+            klass: UnitClass.Count,
+            base_factor: exact_ratio(1, 1000),
+            expression: unit_expression_scaled(exact_ratio(1, 1000), "s"),
+            role: "",
+            alias_of: ""
+        )
+        val second = unit_entry(
+            short_symbol: "ms",
+            full_symbol: "MeterPerSecAlias",
+            module_path: "unit.speed.ms",
+            kind: "i64",
+            klass: UnitClass.Count,
+            base_factor: exact_ratio(1, 1),
+            expression: unit_expression_from_base("ms"),
+            role: "",
+            alias_of: ""
+        )
+        reg.register_entry(first)
+        reg.register_entry(second)
+
+        val cols = unit_registry_collisions(reg)
+        expect(cols.len()).to_equal(1)
+        expect(cols[0]).to_contain("SPL-UNIT-004")
+
+    it "keeps suffixless entries accessible only by full symbol and module path":
+        step("Register an entry whose short_symbol is empty")
+        val reg = UnitRegistry.new()
+        val marker = unit_entry(
+            short_symbol: "",
+            full_symbol: "MetersCount",
+            module_path: "unit.MetersCount",
+            kind: "",
+            klass: UnitClass.Count,
+            base_factor: exact_ratio(1, 1),
+            expression: unit_expression_from_base("MetersCount"),
+            role: "",
+            alias_of: ""
+        )
+        reg.register_entry(marker)
+
+        expect(reg.all_short_symbols().len()).to_equal(0)
+        expect(reg.has("MetersCount")).to_be(true)
+        match reg.lookup_entry("MetersCount"):
+            case Some(found):
+                expect(found.full_symbol).to_equal("MetersCount")
+            case None:
+                fail("expected MetersCount by full symbol")
+
+    it "suggests nearby registered unit names and supports imported lookup fallback":
+        step("Register millimeter and composite mps and check suggest_unit + unit_registry_lookup")
+        val reg = UnitRegistry.new()
+        reg.register_unit("mm", unit_expression_scaled(exact_ratio(1, 1000), "m"))
+        reg.register_unit("meter", unit_expression_from_base("m"))
+        reg.register_composite("mps", unit_expression_div(unit_expression_from_base("m"), unit_expression_from_base("s")))
+
+        match suggest_unit(reg, "metr"):
+            case Some(s):
+                expect(s).to_equal("meter")
+            case None:
+                fail("expected suggestion 'meter'")
+
+        var unrelated_absent = false
+        match suggest_unit(reg, "completely_unrelated_unit"):
+            case Some(s):
+                fail("unexpected distant suggestion: " + s)
+            case None:
+                unrelated_absent = true
+        expect(unrelated_absent).to_be(true)
+
+        match unit_registry_lookup(reg, "mm", ["s"]):
+            case Some(entry):
+                expect(entry.short_symbol).to_equal("mm")
+            case None:
+                fail("expected fallback lookup to still return mm")

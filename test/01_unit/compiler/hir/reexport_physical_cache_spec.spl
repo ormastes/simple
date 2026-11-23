@@ -7,7 +7,6 @@
 Purpose: Prove that physical re-export cache.
 Audience: compiler and tooling engineers who maintain this spec.
 """
-use std.spec.step
 # @req: REQ-COMPILER-HIR-001 — stable requirement identity for this spec.
 
 # @tag: unit, compiler, hir, native-safe
@@ -38,6 +37,8 @@ extern fn rt_heap_array_capacity_bytes() -> i64
 extern fn rt_heap_aux_live_bytes() -> i64
 extern fn rt_heap_registry_count() -> i64
 extern fn rt_heap_live_bytes() -> i64
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
 
 fn reexport_import(module_name: text) -> ParserImport:
     ParserImport(module: module_name, items: [], is_lazy: false, span: Span.empty())
@@ -208,6 +209,9 @@ fn depth_registry() -> ModuleSurfacesByName:
 describe "physical re-export cache":
     it "registers the terminal item without replacing it with the module name":
         step("Verify: recursive facade registration preserves item and alias")
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")).to_equal(true)
         val registry = declared_registry(true)
         var lowering = hirlowering_for_module("consumer", registry)
         lowering.register_imported_symbol(
@@ -216,25 +220,31 @@ describe "physical re-export cache":
         val symbol_id = lowering.symbols.lookup_or_invalid("Local")
         expect(symbol_id.is_valid()).to_equal(true)
         val symbol = lowering.symbols.symbols[symbol_id.id]
-        expect(symbol.name).to_equal("declared.leaf.Real")
+        expect(symbol.name).to_equal("Real")
         expect(lowering.symbols.lookup_or_invalid("declared.leaf").is_valid()).to_equal(false)
         # Repeat through the root memo into a distinct importer alias.
         lowering.register_imported_symbol(
             0, "declared.facade", "Real", "Second", Span.empty(), false)
         val second_id = lowering.symbols.lookup_or_invalid("Second")
         expect(second_id.is_valid()).to_equal(true)
-        expect(lowering.symbols.symbols[second_id.id].name).to_equal("declared.leaf.Real")
+        expect(lowering.symbols.symbols[second_id.id].name).to_equal("Real")
         val cached: HirReexportSource = lowering.find_reexport_source(0, "Real")
         expect(cached.found).to_equal(true)
         expect(cached.module_name).to_equal("declared.leaf")
         expect(cached.item_name).to_equal("Real")
         val absent: HirReexportSource = lowering.find_reexport_source(0, "Missing")
         expect(absent.found).to_equal(false)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
 
     # @manual scenario evidence
-    it "registers the terminal item without replacing it with the module name":
+    it "qualifies the terminal item under entry-closure bootstrap mode":
         # @req REQ-SSPEC-COMPILER
-        step("Verify: recursive facade registration preserves item and alias")
+        step("Verify: recursive facade registration qualifies terminal item under entry-closure bootstrap mode")
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")).to_equal(true)
         val registry = declared_registry(true)
         var lowering = hirlowering_for_module("consumer", registry)
         lowering.register_imported_symbol(
@@ -257,6 +267,8 @@ describe "physical re-export cache":
         expect(cached.item_name).to_equal("Real")
         val absent: HirReexportSource = lowering.find_reexport_source(0, "Missing")
         expect(absent.found).to_equal(false)
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
 
     it "freezes named imports into aligned scalar routes":
         # @req REQ-SSPEC-COMPILER
@@ -264,18 +276,20 @@ describe "physical re-export cache":
         var facade = ModuleSurface.empty("named.facade")
         var leaf = ModuleSurface.empty("named.leaf")
         facade.imports = [named_reexport_import("named.leaf")]
+        facade.import_item_offsets = [0, 2]
+        facade.import_item_names = ["Source", "Direct"]
+        facade.import_item_aliases = ["Local", ""]
+        facade.import_item_has_alias = [true, false]
         val registry = freeze_registry(
             [facade, leaf],
             {"named.facade": 0, "named.leaf": 1},
             ["named.facade", "named.leaf"], [0, 1])
-        expect(registry.surfaces[0].import_route_item_offsets).to_equal([0])
-        expect(registry.surfaces[0].import_route_item_counts).to_equal([2])
-        expect(registry.surfaces[0].import_route_module_names).to_equal(
-            ["named.leaf"])
-        expect(registry.surfaces[0].import_route_item_names).to_equal(
-            ["Source", "Direct"])
-        expect(registry.surfaces[0].import_route_item_local_names).to_equal(
-            ["Local", "Direct"])
+        expect(registry.surfaces[0].import_target_indices).to_equal([1])
+        expect(registry.surfaces[0].import_target_names).to_equal(["named.leaf"])
+        expect(registry.surfaces[0].import_item_offsets).to_equal([0, 2])
+        expect(registry.surfaces[0].import_item_names).to_equal(["Source", "Direct"])
+        expect(registry.surfaces[0].import_item_aliases).to_equal(["Local", ""])
+        expect(registry.surfaces[0].import_item_has_alias).to_equal([true, false])
 
     it "allocates a unique nonzero generation for every successful freeze":
         # @req REQ-SSPEC-COMPILER
@@ -371,6 +385,8 @@ describe "physical re-export cache":
         var lowering = hirlowering_for_module("first", registry)
         val hit_before = lowering.find_reexport_source(0, "Hit")
         val miss_before = lowering.find_reexport_source(0, "Missing")
+        val miss_promoted = lowering.find_reexport_source(0, "Missing")
+        expect(miss_promoted.found).to_equal(false)
         val calls_after_warm = lowering.reexport_chase_calls
         lowering.begin_module("second")
         val hit_after = lowering.find_reexport_source(0, "Hit")

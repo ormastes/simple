@@ -969,19 +969,28 @@ int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg
 #if defined(_WIN32)
     return rt_process_spawn_async(cmd, args, arg_count);
 #else
-    if (!cmd || !*cmd) return -1;
+    if (!cmd || !*cmd || arg_count < 0 ||
+            (arg_count > 0 && !args)) return -1;
+    /* argv is built BEFORE fork: a multithreaded parent may hold the
+     * allocator lock, so the forked children must not calloc. */
+    char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
+    if (!argv) return -1;
     pid_t expected_parent = getpid();
     pid_t guardian = fork();
-    if (guardian < 0) return -1;
-    if (guardian != 0) return (int64_t)guardian;
+    if (guardian < 0) {
+        free(argv);
+        return -1;
+    }
+    if (guardian != 0) {
+        free(argv);
+        return (int64_t)guardian;
+    }
     if (getppid() != expected_parent) _exit(143);
 
     pid_t worker = fork();
     if (worker < 0) _exit(127);
     if (worker == 0) {
         (void)setpgid(0, 0);
-        char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
-        if (!argv) _exit(1);
         execvp(cmd, argv);
         _exit(127);
     }

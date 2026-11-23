@@ -1,0 +1,168 @@
+# @cover src/compiler/90.tools/verify/mcdc_scenario_exclusion.spl 80%
+# @req REQ-TOOLS-MCDC-EXCLUSION-001
+"""
+## MC/DC Scenario Exclusion Directive Specification
+
+Covers parsing, identity/mask/reason/evidence/review/freshness validation,
+canonical encoding, directive line detection, audit aggregation, and normal-gate
+blocking in `compiler.tools.verify.mcdc_scenario_exclusion`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use compiler.tools.verify.mcdc_scenario_exclusion.{
+    MCDC_EXCLUSION_PREFIX,
+    MCDC_EXCLUSION_MAX_LINE_BYTES,
+    MCDC_EXCLUSION_MAX_ID_BYTES,
+    MCDC_EXCLUSION_MAX_REASON_BYTES,
+    MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS,
+    MCDC_EXCLUSION_MAX_DIRECTIVES,
+    McdcScenarioExclusionStatusV1,
+    parse_mcdc_scenario_exclusion_v1,
+    mcdc_scenario_exclusion_accepted_v1,
+    encode_mcdc_scenario_exclusion_v1,
+    bind_mcdc_scenario_exclusions_v1,
+    mcdc_scenario_exclusion_report_v1,
+    mcdc_exclusion_line_is_directive_v1,
+    mcdc_scenario_exclusion_audit_v1,
+    mcdc_scenario_exclusion_audit_add_v1,
+    scan_mcdc_scenario_exclusions_v1,
+    mcdc_scenario_exclusion_normal_gate_v1
+}
+
+fn valid_exclusion_line(scenario: text, kind: text, predicate: text, reason: text, evidence: text, observed: text, reviewed: text, expires: text) -> text:
+    MCDC_EXCLUSION_PREFIX + " scenario=" + scenario + " | decision=u64:0000000000000001 | source=u64:0000000000000002 | conditions=u64:0000000000000003 | condition-count=2 | kind=" + kind + " | code=cap-001 | capability=gpu-hw | predicate=" + predicate + " | producible=false | reason=" + reason + " | evidence=" + evidence + " | observed=" + observed + " | owner=qa-team | reviewed=" + reviewed + " | expires=" + expires
+
+fn sample_digest() -> text:
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "MC/DC scenario exclusion directive parser and gate":
+    it "exposes bounded protocol constants and detects directive lines":
+        step("Verify protocol bounds and line prefix matching")
+        expect(MCDC_EXCLUSION_PREFIX).to_equal("# @mcdc-exclude:")
+        expect(MCDC_EXCLUSION_MAX_LINE_BYTES).to_equal(1024)
+        expect(MCDC_EXCLUSION_MAX_ID_BYTES).to_equal(96)
+        expect(MCDC_EXCLUSION_MAX_REASON_BYTES).to_equal(256)
+        expect(MCDC_EXCLUSION_MAX_FRESHNESS_EPOCHS).to_equal(7776000)
+        expect(MCDC_EXCLUSION_MAX_DIRECTIVES).to_equal(256)
+
+        val src = "# normal comment\n" + MCDC_EXCLUSION_PREFIX + " scenario=s1\n"
+        expect(mcdc_exclusion_line_is_directive_v1(src, 0, 16)).to_be(false)
+        expect(mcdc_exclusion_line_is_directive_v1(src, 17, src.len() - 1)).to_be(true)
+
+    it "accepts a valid exclusion directive and round-trips canonical encoding":
+        step("Parse a complete valid directive within freshness bounds")
+        val line = valid_exclusion_line(
+            "gpu.shader-branch-1",
+            "capability-unavailable",
+            "capability.unavailable",
+            "hardware gpu shader execution unavailable on headless ci",
+            sample_digest(),
+            "1000",
+            "2000",
+            "5000"
+        )
+        val parsed = parse_mcdc_scenario_exclusion_v1(line, 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(parsed)).to_be(true)
+
+        val encoded = encode_mcdc_scenario_exclusion_v1(parsed)
+        expect(encoded.len()).to_equal(376)
+        val bound = bind_mcdc_scenario_exclusions_v1(line, encoded, 3000)
+        expect(bound.exact).to_be(true)
+        expect(bound.binary_row_count).to_equal(1)
+        expect(bound.bound_count).to_equal(1)
+
+        val rep = mcdc_scenario_exclusion_report_v1(parsed)
+        expect(rep).to_contain("EXCLUDED scenario=gpu.shader-branch-1")
+        expect(rep).to_contain("kind=capability-unavailable")
+        expect(rep).to_contain("evidence=" + sample_digest())
+
+    it "rejects non-directive lines and malformed key-value syntax":
+        step("Parse an ordinary comment and a malformed directive missing fields")
+        val comment = parse_mcdc_scenario_exclusion_v1("# just a regular comment", 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(comment)).to_be(false)
+        expect(comment.status == McdcScenarioExclusionStatusV1.NotDirective).to_be(true)
+        expect(mcdc_scenario_exclusion_report_v1(comment)).to_equal("ERROR mcdc-exclusion invalid")
+        expect(encode_mcdc_scenario_exclusion_v1(comment).len()).to_equal(0)
+
+        val broken = parse_mcdc_scenario_exclusion_v1(MCDC_EXCLUSION_PREFIX + " scenario=only-one-field", 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(broken)).to_be(false)
+        expect(broken.status == McdcScenarioExclusionStatusV1.Malformed).to_be(true)
+        expect(mcdc_scenario_exclusion_report_v1(broken)).to_equal("ERROR mcdc-exclusion invalid")
+
+    it "rejects weak placeholder reasons and all-zero evidence digests":
+        step("Reject placeholder reason 'todo' and all-zero sha256 digest")
+        val bad_reason = valid_exclusion_line(
+            "case-reason",
+            "fixture-unavailable",
+            "fixture.unavailable",
+            "todo",
+            sample_digest(),
+            "1000",
+            "2000",
+            "5000"
+        )
+        val r1 = parse_mcdc_scenario_exclusion_v1(bad_reason, 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(r1)).to_be(false)
+        expect(r1.status == McdcScenarioExclusionStatusV1.InvalidReason).to_be(true)
+        expect(mcdc_scenario_exclusion_report_v1(r1)).to_equal("ERROR mcdc-exclusion invalid")
+
+        val zero_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        val bad_ev = valid_exclusion_line(
+            "case-evidence",
+            "platform-inapplicable",
+            "platform.inapplicable",
+            "platform lacks required virtual memory ioctl",
+            zero_digest,
+            "1000",
+            "2000",
+            "5000"
+        )
+        val r2 = parse_mcdc_scenario_exclusion_v1(bad_ev, 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(r2)).to_be(false)
+        expect(r2.status == McdcScenarioExclusionStatusV1.InvalidEvidence).to_be(true)
+        expect(mcdc_scenario_exclusion_report_v1(r2)).to_equal("ERROR mcdc-exclusion invalid")
+
+    it "rejects out-of-range condition masks and stale expired reviews":
+        step("Reject condition mask bit exceeding condition-count and expired epoch")
+        val bad_mask = MCDC_EXCLUSION_PREFIX + " scenario=mask-ovf | decision=u64:0000000000000001 | source=u64:0000000000000002 | conditions=u64:000000000000000f | condition-count=2 | kind=safety-prohibited | code=safe-1 | capability=hw | predicate=safety.prohibited | producible=false | reason=safety interlock prohibits destructive fault injection | evidence=" + sample_digest() + " | observed=1000 | owner=qa | reviewed=2000 | expires=5000"
+        val r_mask = parse_mcdc_scenario_exclusion_v1(bad_mask, 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(r_mask)).to_be(false)
+        expect(r_mask.status == McdcScenarioExclusionStatusV1.InvalidIdentity).to_be(true)
+        expect(mcdc_scenario_exclusion_report_v1(r_mask)).to_equal("ERROR mcdc-exclusion invalid")
+
+        val stale_line = valid_exclusion_line(
+            "case-stale",
+            "uncontrollable-nondeterminism",
+            "nondeterminism.uncontrollable",
+            "kernel timer jitter exceeds deterministic window",
+            sample_digest(),
+            "1000",
+            "2000",
+            "2500"
+        )
+        val r_stale = parse_mcdc_scenario_exclusion_v1(stale_line, 3000)
+        expect(mcdc_scenario_exclusion_accepted_v1(r_stale)).to_be(false)
+        expect(r_stale.status == McdcScenarioExclusionStatusV1.Stale).to_be(true)
+        expect(mcdc_scenario_exclusion_report_v1(r_stale)).to_equal("ERROR mcdc-exclusion stale")
+
+    it "scans source directives and gates normal build when invalid directives exist":
+        step("Scan clean source and dirty source and inspect mcdc_scenario_exclusion_normal_gate_v1")
+        val ok_line = valid_exclusion_line(
+            "ok-scenario",
+            "capability-unavailable",
+            "capability.unavailable",
+            "hardware debugger probe disconnected in ci environment",
+            sample_digest(),
+            "1000",
+            "2000",
+            "5000"
+        )
+        val ok_scan = scan_mcdc_scenario_exclusions_v1(ok_line + "\n", 3000)
+        expect(mcdc_scenario_exclusion_normal_gate_v1(ok_scan)).to_be(true)
+
+        var bad_audit = mcdc_scenario_exclusion_audit_v1()
+        val parsed_ok = parse_mcdc_scenario_exclusion_v1(ok_line, 3000)
+        val parsed_bad = parse_mcdc_scenario_exclusion_v1(MCDC_EXCLUSION_PREFIX + " scenario=broken", 3000)
+        bad_audit = mcdc_scenario_exclusion_audit_add_v1(bad_audit, parsed_ok)
+        bad_audit = mcdc_scenario_exclusion_audit_add_v1(bad_audit, parsed_bad)
+        expect(mcdc_scenario_exclusion_normal_gate_v1(bad_audit)).to_be(false)

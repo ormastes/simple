@@ -171,6 +171,12 @@ stage4_write_candidate_provenance() (
       echo "stage4_continuation_sha256=$(bootstrap_stage3_hash_file "$continuation")"
       echo "planner_stage4_binding_sha256=$expected_binding"
     fi
+    # W24/W27 caller SIMPLE_FRONTEND_CACHE: written only when set, so an unset
+    # run keeps the previous provenance bytes (absent = pinned 1).
+    case "${STAGE4_FRONTEND_CACHE:-}" in
+      '') ;; 0|1) echo "stage4_frontend_cache=${STAGE4_FRONTEND_CACHE}" ;;
+      *) exit 1 ;;
+    esac
     if [ -n "${STAGE4_DUAL_MODE:-}" ]; then
       echo "stage4_dual_mode=${STAGE4_DUAL_MODE}"
       if [ "${STAGE4_DUAL_MODE}" = 1 ]; then
@@ -243,6 +249,31 @@ stage4_verify_continuation_completion() (
   [ "$(bootstrap_stage3_manifest_value stage4_output_sha256 "$completion")" = "$(bootstrap_stage3_hash_file "$binary")" ] || exit 1
 )
 
+# W24/W27 Stage 4 SIMPLE_FRONTEND_CACHE binding. Prints the effective value
+# (0|1). Absent key = pinned 1 and the build log must carry no
+# stage4-frontend-cache line; present key must be 0|1 and the build log must
+# carry exactly one matching line and no other. A duplicated key is a hard
+# failure, never "absent".
+stage4_verify_frontend_cache_binding() (
+  provenance="$1" build_log="$2"
+  count=$(grep -c '^stage4_frontend_cache=' "$provenance") || count=0
+  log_lines=$(grep -c '^stage4-frontend-cache: ' "$build_log") || log_lines=0
+  case "$count" in
+    0)
+      [ "$log_lines" = 0 ] || exit 1
+      echo 1
+      ;;
+    1)
+      value="$(bootstrap_stage3_manifest_value stage4_frontend_cache "$provenance")" || exit 1
+      case "$value" in 0|1) ;; *) exit 1 ;; esac
+      [ "$log_lines" = 1 ] || exit 1
+      [ "$(grep -Fxc "stage4-frontend-cache: SIMPLE_FRONTEND_CACHE=$value" "$build_log")" = 1 ] || exit 1
+      echo "$value"
+      ;;
+    *) exit 1 ;;
+  esac
+)
+
 stage4_verify_candidate_provenance_generic() (
   provenance="$(bootstrap_stage3_canonical_file "$1")" || exit 1
   binary="$(bootstrap_stage3_canonical_file "$2")" || exit 1
@@ -283,6 +314,7 @@ stage4_verify_candidate_provenance_generic() (
   smoke_log="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value essential_tools_log_path "$provenance")")" || exit 1
   [ "$(bootstrap_stage3_manifest_value essential_tools_log_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$smoke_log")" ] || exit 1
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
+  stage4_verify_frontend_cache_binding "$provenance" "$build_log" >/dev/null || exit 1
   [ "$(bootstrap_stage3_manifest_value completed_gate "$provenance")" = stage4-essential-tools-smoke ] || exit 1
   if bootstrap_stage3_manifest_value stage4_continuation_path "$provenance" >/dev/null 2>&1; then
     stage4_verify_continuation_binding "$provenance" || exit 1

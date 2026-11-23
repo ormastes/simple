@@ -1,0 +1,47 @@
+# Loader hot-swap pinning (RB-LOAD-01..02).
+# Design: doc/05_design/compiler/hot_swap/hot_swap_identity_pin_2026-11-23.md
+#
+# A HotSwapSlot pins the SMF manifest row its dependents were built against.
+# A replacement image is admitted only through the same authority as a cold
+# cached-SMF load (smf_cached_unit_identity_admit); any iface/ABI/triple/
+# policy/capability mismatch refuses the swap. A legacy image with no identity
+# record is also refused: a swap has no full-interpret fallback.
+# The commit point is one lockless CAS on the slot generation.
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_try_new}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
+use compiler.driver.driver_api_interpret.{smf_cached_unit_identity_admit}
+
+class HotSwapSlot:
+    pinned: SmfManifestEntry
+    generation: AtomicI64
+
+    fn current_generation() -> i64:
+        val gen = self.generation
+        gen.load(MemoryOrdering.SeqCst)
+
+# Fails closed when the runtime cannot allocate the generation atomic.
+# atomic_i64_try_new, not atomic_i64_new: the latter collides with the
+# i64-returning debug_stubs twin under co-compilation (see design doc).
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn hot_swap_slot_new(pinned: SmfManifestEntry) -> Result<HotSwapSlot, text>:
+    match atomic_i64_try_new(0):
+        Some(gen): Ok(HotSwapSlot(pinned: pinned, generation: gen))
+        None: Err("SMF-E-HOTSWAP-ATOMIC: generation atomic allocation failed")
+
+# Admit `image` against the pinned row, then publish it by advancing the
+# generation from `observed` with a single CAS. Ok = new generation.
+# Err = SMF-E-UNIT-* (identity refusal) or SMF-E-HOTSWAP-STALE (another swap
+# committed first; caller re-reads the generation and retries).
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn hot_swap_try(slot: HotSwapSlot, observed: i64, image: [u8]) -> Result<i64, text>:
+    val admitted = smf_cached_unit_identity_admit(slot.pinned, image)?
+    if not admitted:
+        return Err("SMF-E-UNIT-IDENTITY-MISSING: hot swap refused, replacement carries no unit identity record")
+    val gen = slot.generation
+    if not gen.compare_exchange(observed, observed + 1, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        return Err("SMF-E-HOTSWAP-STALE: generation {observed} is no longer current")
+    Ok(observed + 1)
+
+export HotSwapSlot, hot_swap_slot_new, hot_swap_try

@@ -68,7 +68,7 @@ try {
         # Match the capsule failure: parent directories are traversable, while
         # the content-addressed hosted-runtime filename crosses MAX_PATH.
         $leafName = 'probe.txt'
-        if ($kind -eq 'long') { $leafName = ('x' * 150) + '.rlib' }
+        if ($kind -eq 'long') { $leafName = ('x' * 200) + '.rlib' }
         $leaf = Join-Path $leafParent $leafName
         [IO.File]::WriteAllText((ConvertTo-NativeAclPath $leaf), 'before')
         if ($kind -eq 'long') { Assert-True ($leaf.Length -gt 260) 'long fixture too short' }
