@@ -10,8 +10,63 @@ use compiler.common.module_path_naming.{module_relative_name_from_path, module_s
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.io_runtime.{hash_text}
 
 extern fn rt_array_free<T>(array: [T])
+
+@unsafe(reason: "side-effect-free observation of current thread transient scope state", capabilities: [ffi])
+extern fn rt_transient_array_scope_state_v1() -> i64
+
+@unsafe(reason: "side-effect-free observation of current thread transient scope identity", capabilities: [ffi])
+extern fn rt_transient_array_scope_identity_v1() -> i64
+
+@unsafe(reason: "side-effect-free observation of live build session heap id", capabilities: [ffi])
+extern fn rt_session_heap_id() -> u32
+
+@unsafe(reason: "begin session-owned bucket allocation inside an active module scope", capabilities: [ffi])
+extern fn rt_session_alloc_begin() -> bool
+
+@unsafe(reason: "end session-owned bucket allocation inside an active module scope", capabilities: [ffi])
+extern fn rt_session_alloc_end() -> bool
+
+fn _msri_scope_state() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_state_v1()
+
+fn _msri_scope_identity() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_identity_v1()
+
+fn _msri_session_id_now() -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_session_heap_id()
+
+fn _msri_session_alloc_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_alloc_begin()
+
+fn _msri_session_alloc_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_session_alloc_end()
+
+var _msri_gen: i64 = -1
+var _msri_len: i64 = -1
+var _msri_surf_len: i64 = -1
+var _msri_first_hash: i64 = 0
+var _msri_mid_hash: i64 = 0
+var _msri_last_hash: i64 = 0
+var _msri_first_idx: i64 = -1
+var _msri_last_idx: i64 = -1
+var _msri_scope_id: i64 = 0
+var _msri_session_id: u32 = 0u32
+var _msri_buckets: [i64] = []
+var _msri_next: [i64] = []
+var _msri_mask: i64 = 0
+var _msri_build_count: i64 = 0
+
+# @allow(primitive_api) raw i64 bucket-rebuild counter for unit spec parity verification
+pub(package) fn module_surface_registry_index_build_count() -> i64:
+    _msri_build_count
 
 fn module_surface_retire_array_v1<T>(retired: [T], reclaim: bool):
     if reclaim:
@@ -196,16 +251,116 @@ pub(package) fn module_surface_registry_index(registry: ModuleSurfacesByName, na
     # carrier for len() can dereference released storage on a self-hosted
     # native compiler.  The aligned scalar arrays are the promoted authority;
     # this package helper must therefore never inspect index_by_name.
-    if registry.ordered_names.len() != registry.ordered_indices.len():
+    val names = registry.ordered_names
+    val indices = registry.ordered_indices
+    if names.len() != indices.len():
         return -1
-    var position = 0
-    while position < registry.ordered_names.len():
-        if registry.ordered_names[position] == name:
-            val scalar_index = registry.ordered_indices[position]
-            if scalar_index < 0 or scalar_index >= registry.surfaces.len():
+    val count = names.len()
+    if count == 0:
+        return -1
+    val surf_len = registry.surfaces.len()
+    if registry.generation <= 0 or count < 8:
+        var position = 0
+        while position < count:
+            if names[position] == name:
+                val scalar_index = indices[position]
+                if scalar_index < 0 or scalar_index >= surf_len:
+                    return -1
+                return scalar_index
+            position = position + 1
+        return -1
+
+    val cur_scope = _msri_scope_identity()
+    val cur_sess: u32 = _msri_session_id_now()
+    var scope_valid = true
+    if _msri_session_id != 0u32 and cur_sess != _msri_session_id:
+        scope_valid = false
+    if _msri_scope_id != 0 and _msri_scope_id != cur_scope:
+        scope_valid = false
+    if not scope_valid:
+        _msri_gen = -1
+        _msri_len = -1
+        _msri_surf_len = -1
+        _msri_scope_id = 0
+        _msri_session_id = 0u32
+        _msri_mask = 0
+
+    val first_hash = hash_text(names[0])
+    val mid_hash = hash_text(names[count / 2])
+    val last_hash = hash_text(names[count - 1])
+    val first_idx = indices[0]
+    val last_idx = indices[count - 1]
+    val cache_hit = (
+        scope_valid and
+        _msri_gen == registry.generation and
+        _msri_len == count and
+        _msri_surf_len == surf_len and
+        _msri_first_hash == first_hash and
+        _msri_mid_hash == mid_hash and
+        _msri_last_hash == last_hash and
+        _msri_first_idx == first_idx and
+        _msri_last_idx == last_idx and
+        _msri_buckets.len() > 0
+    )
+    if not cache_hit:
+        var bucket_count: i64 = 64
+        while bucket_count < count * 2:
+            bucket_count = bucket_count * 2
+        val mask = bucket_count - 1
+        val scope_state = _msri_scope_state()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            val _began = _msri_session_alloc_begin()
+        var buckets: [i64] = []
+        var fill = 0
+        while fill < bucket_count:
+            buckets = buckets.push(-1)
+            fill = fill + 1
+        var next: [i64] = []
+        var fill_next = 0
+        while fill_next < count:
+            next = next.push(-1)
+            fill_next = fill_next + 1
+        # Insert in reverse order so bucket heads preserve first-occurrence-wins
+        # on duplicate entries in ordered_names.
+        var pos = count - 1
+        while pos >= 0:
+            val bucket = hash_text(names[pos]) & mask
+            next[pos] = buckets[bucket]
+            buckets[bucket] = pos
+            pos = pos - 1
+        var new_scope_id: i64 = 0
+        var new_sess_id: u32 = 0u32
+        if sess_active:
+            val _ended = _msri_session_alloc_end()
+            new_sess_id = cur_sess
+        elif cur_sess != 0u32:
+            new_sess_id = cur_sess
+        elif scope_state == 1:
+            new_scope_id = cur_scope
+        _msri_gen = registry.generation
+        _msri_len = count
+        _msri_surf_len = surf_len
+        _msri_first_hash = first_hash
+        _msri_mid_hash = mid_hash
+        _msri_last_hash = last_hash
+        _msri_first_idx = first_idx
+        _msri_last_idx = last_idx
+        _msri_scope_id = new_scope_id
+        _msri_session_id = new_sess_id
+        _msri_buckets = buckets
+        _msri_next = next
+        _msri_mask = mask
+        _msri_build_count = _msri_build_count + 1
+
+    var slot = _msri_buckets[hash_text(name) & _msri_mask]
+    while slot >= 0:
+        if names[slot] == name:
+            val scalar_index = indices[slot]
+            if scalar_index < 0 or scalar_index >= surf_len:
                 return -1
             return scalar_index
-        position = position + 1
+        slot = _msri_next[slot]
     -1
 
 pub(package) fn module_surface_resolve_absolute_key(
@@ -363,15 +518,14 @@ fn module_surface_physical_sibling_key(
         return mod_name
     ""
 
-pub(package) fn module_surface_resolve_import_key(
+fn module_surface_resolve_import_key_from_initial_v1(
     registry: ModuleSurfacesByName,
     facade: ModuleSurface,
-    name: text
+    resolved: text,
+    resolved_index: i64
 ) -> text:
-    var resolved = module_surface_resolve_relative_key(registry, facade, name)
     if resolved == "":
         return ""
-    val resolved_index = module_surface_registry_index(registry, resolved)
     if resolved_index < 0 or
        registry.surfaces[resolved_index].canonical_path != facade.canonical_path:
         return resolved
@@ -386,6 +540,18 @@ pub(package) fn module_surface_resolve_import_key(
        registry.surfaces[package_index].canonical_path == facade.canonical_path:
         return resolved
     package_key
+
+pub(package) fn module_surface_resolve_import_key(
+    registry: ModuleSurfacesByName,
+    facade: ModuleSurface,
+    name: text
+) -> text:
+    val resolved = module_surface_resolve_relative_key(registry, facade, name)
+    if resolved == "":
+        return ""
+    val resolved_index = module_surface_registry_index(registry, resolved)
+    module_surface_resolve_import_key_from_initial_v1(
+        registry, facade, resolved, resolved_index)
 
 pub(package) fn module_surface_import_resolution_trace_v1(
     registry: ModuleSurfacesByName, facade: ModuleSurface,
@@ -414,7 +580,12 @@ pub(package) fn module_surface_import_resolution_trace_with_generation_v1(
     """
     val initial_selected = module_surface_resolve_relative_key(
         registry, facade, import_id)
-    val selected = module_surface_resolve_import_key(registry, facade, import_id)
+    val initial_index = if initial_selected == "":
+        -1
+    else:
+        module_surface_registry_index(registry, initial_selected)
+    val selected = module_surface_resolve_import_key_from_initial_v1(
+        registry, facade, initial_selected, initial_index)
     var base = import_id
     if import_id.starts_with("."):
         var dots = 0
@@ -442,7 +613,6 @@ pub(package) fn module_surface_import_resolution_trace_with_generation_v1(
             candidates.push("std." + tier + "." + tail)
             candidates.push("std." + tier + "." + tail + ".__init__")
     if initial_selected != "":
-        val initial_index = module_surface_registry_index(registry, initial_selected)
         if initial_index >= 0 and
            registry.surfaces[initial_index].canonical_path == facade.canonical_path and
            not facade.canonical_name.ends_with(".__init__"):
@@ -633,17 +803,42 @@ pub(package) fn module_surfaces_freeze(
         registry.ordered_names, registry.ordered_indices)
     if validation.is_err():
         return Err(validation.unwrap_err())
+    # Precompute lexicographically smallest registry alias per physical surface
+    # in one O(ordered_names.len()) pass instead of 3 x O(surfaces x aliases).
+    val total_surfaces = registry.surfaces.len()
+    var preferred_names: [text] = []
+    var preferred_found: [bool] = []
+    var pref_fill = 0
+    while pref_fill < total_surfaces:
+        preferred_names = preferred_names.push("")
+        preferred_found = preferred_found.push(false)
+        pref_fill = pref_fill + 1
+    var pref_alias = 0
+    while pref_alias < registry.ordered_names.len() and
+          pref_alias < registry.ordered_indices.len():
+        val pref_phys = registry.ordered_indices[pref_alias]
+        if pref_phys >= 0 and pref_phys < total_surfaces:
+            val pref_name = registry.ordered_names[pref_alias]
+            preferred_found[pref_phys] = true
+            val cur_pref = preferred_names[pref_phys]
+            if cur_pref == "" or pref_name < cur_pref:
+                preferred_names[pref_phys] = pref_name
+        pref_alias = pref_alias + 1
     # Validate every surface's registry alias and pre-freeze import projections
     # BEFORE mutating any surface or retiring any backing array carrier.
     var check_index = 0
-    while check_index < registry.surfaces.len():
-        val check_preferred = module_surface_preferred_registry_name_at_v1(registry, check_index)
-        if check_preferred.is_err():
-            return Err(check_preferred.unwrap_err())
+    while check_index < total_surfaces:
+        val check_chosen = preferred_names[check_index]
+        if not preferred_found[check_index] or check_chosen == "":
+            module_surface_retire_array_v1(preferred_names, reclaim_superseded)
+            module_surface_retire_array_v1(preferred_found, reclaim_superseded)
+            return Err("physical module surface has no ordered registry alias: {check_index}")
         val check_surface: ModuleSurface = registry.surfaces[check_index]
         if (check_surface.import_item_offsets.len() != check_surface.imports.len() + 1 or
             check_surface.import_item_names.len() != check_surface.import_item_aliases.len() or
             check_surface.import_item_names.len() != check_surface.import_item_has_alias.len()):
+            module_surface_retire_array_v1(preferred_names, reclaim_superseded)
+            module_surface_retire_array_v1(preferred_found, reclaim_superseded)
             return Err("pre-freeze import item projections are misaligned: {check_index}")
         var check_import_index = 0
         while check_import_index < check_surface.imports.len():
@@ -651,11 +846,15 @@ pub(package) fn module_surfaces_freeze(
             val check_item_end = check_surface.import_item_offsets[check_import_index + 1]
             if (check_item_start < 0 or check_item_start > check_item_end or
                 check_item_end > check_surface.import_item_names.len()):
+                module_surface_retire_array_v1(preferred_names, reclaim_superseded)
+                module_surface_retire_array_v1(preferred_found, reclaim_superseded)
                 return Err("pre-freeze import item range is invalid: surface={check_index} import={check_import_index}")
             check_import_index = check_import_index + 1
         check_index = check_index + 1
     val generation_result = module_surface_allocate_generation()
     if generation_result.is_err():
+        module_surface_retire_array_v1(preferred_names, reclaim_superseded)
+        module_surface_retire_array_v1(preferred_found, reclaim_superseded)
         return Err(generation_result.unwrap_err())
     val generation = generation_result.unwrap()
     registry.generation = generation
@@ -668,10 +867,12 @@ pub(package) fn module_surfaces_freeze(
         surface.logical_name = module_surface_logical_name_from_path(surface.canonical_path)
         surface.canonical_name = module_surface_fold_std_alias(surface.logical_name)
         surface.package_name = module_surface_package_name_from_name(surface.canonical_name)
-        val preferred_result = module_surface_preferred_registry_name(registry, surface)
-        if preferred_result.is_err():
-            return Err(preferred_result.unwrap_err())
-        surface.preferred_registry_name = preferred_result.unwrap()
+        val chosen_preferred = preferred_names[surface_index]
+        if module_surface_registry_index(registry, chosen_preferred) != surface_index:
+            module_surface_retire_array_v1(preferred_names, reclaim_superseded)
+            module_surface_retire_array_v1(preferred_found, reclaim_superseded)
+            return Err("preferred registry alias is not mapped to its physical surface: {chosen_preferred}")
+        surface.preferred_registry_name = chosen_preferred
         if (env_get_opt("SIMPLE_HIR_SURFACE_IDENT_DUMP") ?? "") == "1":
             # Cross-wire detector (cycle-35/36 compiler_cli 'unresolved type'):
             # dump every surface whose registry alias disagrees with its
@@ -1067,15 +1268,15 @@ pub(package) fn module_surfaces_freeze(
     while surface_index < registry.surfaces.len():
         var stored = registry.surfaces[surface_index]
         if stored.physical_index == surface_index:
-            val repair_preferred = module_surface_preferred_registry_name(registry, stored)
-            if repair_preferred.is_err():
-                return Err(repair_preferred.unwrap_err())
-            if stored.preferred_registry_name != repair_preferred.unwrap():
+            val repair_preferred = preferred_names[surface_index]
+            if stored.preferred_registry_name != repair_preferred:
                 if (env_get_opt("SIMPLE_HIR_SURFACE_IDENT_DUMP") ?? "") == "1":
-                    eprint("[surface-ident-repair] idx={surface_index} module_name={stored.module_name} smeared_preferred={stored.preferred_registry_name} repaired={repair_preferred.unwrap()}")
-                stored.preferred_registry_name = repair_preferred.unwrap()
+                    eprint("[surface-ident-repair] idx={surface_index} module_name={stored.module_name} smeared_preferred={stored.preferred_registry_name} repaired={repair_preferred}")
+                stored.preferred_registry_name = repair_preferred
                 registry.surfaces[surface_index] = stored
         surface_index = surface_index + 1
+    module_surface_retire_array_v1(preferred_names, reclaim_superseded)
+    module_surface_retire_array_v1(preferred_found, reclaim_superseded)
     registry.generation = generation
     registry.frozen = true
     Ok(registry)

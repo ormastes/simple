@@ -1596,12 +1596,22 @@ impl CompilerDriver:
         # Capture compact public facets from the actual admitted source list,
         # before either boxed or streaming source buffers are reclaimed. The
         # adapter validates raw alias ambiguity and reuses phase-1 SHA owners.
-        match native_source_interface_index_from_sources_with_digests_v1(
-                all_sources, owned_paths, owned_identities):
-            case Ok(index): self.ctx.native_source_interface_index_v1 = Some(index)
-            case Err(reason):
-                self.ctx.add_error("native source interface index refused: " + reason)
-                return (self.ctx, false)
+        # Pure --parse-shard and --hir-shard workers exit before MIR/codegen
+        # witness assembly, while the parent and unit workers build the index.
+        val pure_frontend_shard = (
+            ((sosix_env_get_nullable("SIMPLE_PARSE_SHARD") ?? "") != "" or
+             (sosix_env_get_nullable("SIMPLE_HIR_SHARD") ?? "") != "") and
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "") != "1"
+        )
+        if pure_frontend_shard:
+            self.ctx.native_source_interface_index_v1 = None
+        else:
+            match native_source_interface_index_from_sources_with_digests_v1(
+                    all_sources, owned_paths, owned_identities):
+                case Ok(index): self.ctx.native_source_interface_index_v1 = Some(index)
+                case Err(reason):
+                    self.ctx.add_error("native source interface index refused: " + reason)
+                    return (self.ctx, false)
         self.ctx.native_module_input_fact_snapshots_v1 = {}
         # Canonical phase-1 owners now retain the source bodies. Drop the
         # duplicate scan payloads before parsing/lowering grows compiler RSS.
