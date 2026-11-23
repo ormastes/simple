@@ -1,0 +1,53 @@
+# @cover src/lib/gc_async_mut/gpu/rocm/hip_compute.spl
+# @cover src/lib/gc_async_mut/gpu/rocm/hip_reduce.spl
+"""
+## Purpose
+HIP/ROCm fail-closed contract: when the ROCm runtime is unusable every entry
+point returns an Err carrying a named `ROCm[hip-...]` code — never a crash,
+never a silent CPU result. Runs on every host; no GPU is required or claimed.
+Design: doc/05_design/runtime/gpu/hip_fail_closed_2026-11-23.md
+"""
+
+use std.spec.*
+use std.io_runtime.{file_append_text, dir_create_all}
+use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_open_at}
+use std.gc_async_mut.gpu.rocm.hip_reduce.{HipReduceOp, HipReduceRequest, hip_reduce_device_at, hip_reduce_i64_at}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_join, hip_lib_names, hiprtc_lib_names}
+
+val MISSING_DIR = "build/probe/hip_fail_closed/missing"
+val GARBAGE_DIR = "build/probe/hip_fail_closed/garbage"
+
+fn _err_of_open(dir: text) -> text:
+    match rocm_open_at(dir):
+        case Ok(_): "unexpected-ok"
+        case Err(msg): msg
+
+fn _plant_garbage_libs() -> bool:
+    val os = host_os_name()
+    dir_create_all(GARBAGE_DIR)
+    val hip = hip_lib_names(os)
+    val rtc = hiprtc_lib_names(os)
+    if hip.len() == 0 or rtc.len() == 0:
+        return false
+    file_append_text(host_join(os, GARBAGE_DIR, hip[0]), "not a shared library\n")
+    file_append_text(host_join(os, GARBAGE_DIR, rtc[0]), "not a shared library\n")
+    true
+
+describe "HIP fail-closed":
+    it "names hip-library-missing when the ROCm dir has no HIP libraries":
+        expect(rocm_available_at(MISSING_DIR)).to_equal(false)
+        expect(_err_of_open(MISSING_DIR).starts_with("ROCm[hip-library-missing]")).to_equal(true)
+
+    it "propagates the named code through the reduce entry points":
+        val dev = hip_reduce_device_at(MISSING_DIR)
+        expect(dev.is_err()).to_equal(true)
+        expect(dev.unwrap_err().starts_with("ROCm[hip-library-missing]")).to_equal(true)
+        val run = hip_reduce_i64_at(MISSING_DIR, HipReduceRequest(data: [1, 2, 3], init: 0, op: HipReduceOp.Add))
+        expect(run.is_err()).to_equal(true)
+        expect(run.unwrap_err().starts_with("ROCm[hip-library-missing]")).to_equal(true)
+
+    it "names hip-dlopen-failed for library files that cannot load, without crashing":
+        if not _plant_garbage_libs():
+            skip("host OS has no HIP library names")
+        expect(rocm_available_at(GARBAGE_DIR)).to_equal(true)
+        expect(_err_of_open(GARBAGE_DIR).starts_with("ROCm[hip-dlopen-failed]")).to_equal(true)
