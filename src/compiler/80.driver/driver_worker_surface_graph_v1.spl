@@ -82,12 +82,18 @@ pub fn worker_surface_ready_v1(built: [bool], edges: [[i64]]) -> [bool]:
 # Failure-only attribution over the same frozen import/export edges used by
 # readiness. Negative edge indices are absent routes, as in readiness above.
 # Bound examined edges and queue size; cycles cannot cause recursive overflow.
+# reason: indices preserve the frozen graph's signed absent-route sentinel;
+# inspected_edges is the bounded traversal counter recorded in failure receipts.
+@allow(primitive_api)
 pub struct WorkerSurfaceGapV1:
     reason: text
     source_index: i64
     target_index: i64
     inspected_edges: i64
 
+# reason: root/edges use the existing frozen graph's i64 indices and -1 sentinel;
+# edge_limit bounds inspected graph entries without changing that owner contract.
+@allow(primitive_api)
 pub fn worker_surface_gap_v1(root: i64, built: [bool], edges: [[i64]], edge_limit: i64 = 256) -> WorkerSurfaceGapV1:
     if root < 0 or root >= built.len():
         return WorkerSurfaceGapV1("invalid-root", root, root, 0)
@@ -115,7 +121,15 @@ pub fn worker_surface_gap_v1(root: i64, built: [bool], edges: [[i64]], edge_limi
     WorkerSurfaceGapV1("no-missing-surface", root, -1, inspected)
 
 fn worker_surface_gap_path_v1(path: text) -> text:
-    if path.len() > 512: path.substring(0, 512) + "...[truncated]" else: path
+    if path.byte_len() <= 512: return path
+    var end = 512
+    # substring uses byte offsets. Exclude the entire scalar when the limit
+    # lands inside its UTF-8 continuation bytes, preserving valid path text.
+    while end > 0:
+        val byte = path.byte_at(end) as i64
+        if byte < 128 or byte >= 192: break
+        end = end - 1
+    path.substring(0, end) + "...[truncated]"
 
 pub fn worker_surface_gap_message_v1(gap: WorkerSurfaceGapV1, blocking_path: text, source_path: text, target_path: text) -> text:
     val root_path = worker_surface_gap_path_v1(blocking_path)
