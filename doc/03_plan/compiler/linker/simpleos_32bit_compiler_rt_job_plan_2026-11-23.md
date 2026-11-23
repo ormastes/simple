@@ -1,6 +1,7 @@
 # Bounded ELF32 compiler-rt preparation job
 
-Status: authored, awaiting Astra review; no GitHub build has started.
+Status: first GitHub campaign retained a shared configure failure; the minimal
+configuration repair is awaiting Astra review before another labeled attempt.
 
 ## Inputs and owner boundaries
 
@@ -53,7 +54,7 @@ finish; no automatic retry is scheduled.
 | Row | Clang target | ISA/ABI |
 |---|---|---|
 | i686 | i686-unknown-none-elf | `-march=i686` |
-| arm32 | armv7a-none-eabi | `-marm -mfloat-abi=soft` |
+| arm32 | arm-none-eabi | `-march=armv7-a -marm -mfloat-abi=soft` |
 | riscv32 | riscv32-unknown-elf | `-march=rv32imac -mabi=ilp32 -mno-relax` |
 
 All use freestanding static non-PIC compilation with the retained full flag
@@ -106,3 +107,45 @@ default branch, the one-time route is PR `labeled` with exact label
 or dispatching. Contents/actions permissions are read-only, publication is absent,
 and unadmitted diagnostics are retained even after failure. Root owns commit,
 push, trigger, and subsequent exact source/run binding verification.
+
+## First real campaign and configuration repair
+
+Run `45172244479`, job `137684442283`, exact source
+`562313db4fc0ca393e7e4c6472c32527d3925371`, failed after successful checkouts,
+VM utility installation and authenticated LLVM 23.1.1 provisioning. Artifact
+`14818570814` (`simpleos-elf32-builtins-prep-45172244479`, 67589 bytes) and the
+full job log are retained under
+`build/verify/elf32-builtins-attempt-45172244479/`.
+
+All three targets reached the same first failure in the exact pinned
+`CompilerRTUtils.cmake:385`: `COMPILER_RT_DEFAULT_TARGET_TRIPLE` is forbidden
+when `COMPILER_RT_DEFAULT_TARGET_ONLY=ON`. These are three failed rows with
+one shared demonstrated cause, not three independent architecture failures.
+All failed CMake caches, commands, stdout, stderr and resource observations are
+preserved. No builtins build command, raw archive, or export validation occurred.
+The ZLIB/zstd discovery notices are not the fatal boundary.
+
+The repair removes only the explicit `COMPILER_RT_DEFAULT_TARGET_TRIPLE`
+argument. Target-only selection remains enabled. The pinned macro derives its
+triple from the already explicit `CMAKE_C_COMPILER_TARGET`; C/CXX/ASM target
+bindings and generated-command target/ISA/ABI validation remain mandatory.
+The next real attempt needs fresh configure outputs and command verification
+for all three targets before building. No unchanged job rerun is authorized.
+The repair history includes two prior source-review corrections and this first
+real failed job; the six-cycle guard still applies to the same campaign.
+
+The exact pinned target-selection chain also exposes an ARM32 spelling gap:
+`armv7a-none-eabi` normalizes to architecture `armv7a`, while the pinned builtins
+supported table omits that name. An isolated execution of the real pinned
+`add_default_target_arch` and `filter_available_targets` functions reproduces the
+empty selection. i686 and RV32 select their exact expected architectures.
+
+The ARM builtins row therefore uses compiler target `arm-none-eabi` with explicit
+`-march=armv7-a -marm -mfloat-abi=soft`; the selected architecture is `arm`. This
+does not patch LLVM tables or disable target-only selection. The old and repaired
+profiles produce an identical complete predefined macro set under the retained
+local Clang 23.1.5 probe, with no objects built. That is scoped local evidence,
+not equivalence of target spellings alone or proof for the VM's 23.1.1 compiler.
+The next VM attempt must retain the actual target, ISA/ABI command flags, ELF
+attributes, and derived archive evidence. The isolated source/selection receipts
+are in `build/verify/elf32-builtins-attempt-45172244479/`.
