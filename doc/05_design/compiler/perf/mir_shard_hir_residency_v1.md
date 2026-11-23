@@ -328,8 +328,8 @@ targets (~5 GB RSS, ~10 GB on late `compiler.mir._MirLoweringExpr.*` units).
 - The HIR stage arms once (`file_worker_unit_interface_hir_refusal_v1`):
   requires `driver_mir_unit_scoped_v1` (ONLY_PATHS skip active) and a non-empty
   keep-full set; refuses `not-aot-compile`, `nogc-strict-module` and
-  `bootstrap-flat-rows` like the shard arm. Default ON; `SIMPLE_FILE_WORKER_INTERFACE_HIR=0`
-  opts out (`SIMPLE_UNIT_TLDR_IMPORTS` precedent). Prints
+  `bootstrap-flat-rows` like the shard arm. Opt-in (default OFF): only `SIMPLE_FILE_WORKER_INTERFACE_HIR=1`
+  arms it, like the shard flag; unset prints nothing. Prints
   `[file-worker] hir-residency armed|refused reason=…` and, after the loop,
   `[file-worker] hir-residency loaded … bodies_dropped=<n>`.
 - Selection (`file_worker_unit_row_interface_only_v1`): interface-only iff armed,
@@ -340,5 +340,5 @@ targets (~5 GB RSS, ~10 GB on late `compiler.mir._MirLoweringExpr.*` units).
 - Only HIR cache hits shrink; a closure module lowered in-process on a miss
   keeps its bodies. Cache-hit modules are never re-stored, so no projection is
   published. Measure: peak RSS of a unit child in a per-file native-build,
-  A (`SIMPLE_FILE_WORKER_INTERFACE_HIR=0`) vs B (unset), same batch, plus object
+  A (unset) vs B (`SIMPLE_FILE_WORKER_INTERFACE_HIR=1`), same batch, plus object
   identity A-vs-A and A-vs-B.

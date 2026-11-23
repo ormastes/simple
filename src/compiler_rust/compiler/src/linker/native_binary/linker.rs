@@ -105,7 +105,7 @@ impl NativeBinaryBuilder {
         match self.options.target.os {
             TargetOS::Linux | TargetOS::FreeBSD => vec!["c".to_string()],
             TargetOS::MacOS => vec!["System".to_string()],
-            TargetOS::Windows => vec!["c".to_string(), "msvcrt".to_string(), "kernel32".to_string()],
+            TargetOS::Windows => vec!["msvcrt".to_string(), "kernel32".to_string()],
             _ => vec!["c".to_string()],
         }
     }

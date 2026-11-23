@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+Purpose: pin the software `raster` text lane (`fb_text_ttf_aa_clip_range_adv`
+-> `_ttf_rasterize_glyph` in paint_gradients_text) to Chrome 159's font-cache
+-key size. Chrome rasterises a fractional `font-size` at
+`trunc(trunc_f32(S * 100) / 100 * 64) / 64` px (font_cache_key_size_chrome159
+_spec), so every size that keys to the same 26.6 value paints the same pixels.
+The raster lane handed the hinted outline the raw milli size instead (18720 vs
+18715), so 18.715 / 18.718 / 18.72 px drew different glyphs.
+Audience: web renderer text raster maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=1 --window-size=400,300
+--screenshot`, sans-serif = Liberation Sans): page `_page(S)` below, gray text
+(`opacity:0.99`) and LCD text (no opacity) captured separately. PNG md5:
+
+| S       | gray (opacity .99)  | LCD               | key (1/64 px) |
+|---------|---------------------|-------------------|---------------|
+| 18.715  | 905f4828...         | d06c141e...       | 1197          |
+| 18.718  | 905f4828...         | d06c141e...       | 1197          |
+| 18.72   | 905f4828...         | d06c141e...       | 1197          |
+| 18.7205 | 5abe13e0...         | ac3debd7...       | 1198          |
+| 18.71   | f176d005...         | 9d7dff93...       | 1196          |
+
+Chrome paints 18.715, 18.718 and 18.72 byte-identically. Before this fix the
+raster lane differed from its own 18.72 frame by 32 px at 18.715 and 7 px at
+18.718 (400x30 frame).
+Resolution: the software raster lane has no device-scale entry
+(`simple_web_layout_render_html_software_pixels` is 1x only), so this spec runs
+at the lane's only resolution; the same 1x TTF (Liberation Sans) is on both
+sides. The k=4 lanes take their size from the same
+`sfnt_font_cache_key_size_26_6` via font_renderer.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FRACTIONAL-FONT-SIZE-001 -- the raster text lane rasterises at Chrome's font-cache-key size.
+"""
+# @tag: unit, browser_engine, text, raster, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_gradients_text.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+
+val RW: i32 = 400
+val RH: i32 = 30
+
+fn _page(size: text) -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff\"><div style=\"position:absolute;left:4px;top:0;opacity:0.99;font:" + size + "px sans-serif;color:#000;line-height:30px\">Examplesshowapqmoceasd</div></body></html>"
+
+# Pixels of `a` that differ from `b` in any channel.
+fn _diff_px(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return 0 - 1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if (a[i] & 0xFFFFFFu32) != (b[i] & 0xFFFFFFu32):
+            n = n + 1
+        i = i + 1
+    n
+
+describe "raster text lane at Chrome's font-cache-key size (Chrome 159)":
+    it "AC-1: 18.715px and 18.718px paint the same pixels as 18.72px":
+        step("Chrome keys all three to 1197/64 px and paints them byte-identically")
+        val at_1872 = simple_web_layout_render_html_software_pixels(_page("18.72"), RW, RH)
+        val at_18715 = simple_web_layout_render_html_software_pixels(_page("18.715"), RW, RH)
+        val at_18718 = simple_web_layout_render_html_software_pixels(_page("18.718"), RW, RH)
+        expect(at_1872.len()).to_equal(RW * RH)
+        expect(_diff_px(at_18715, at_1872)).to_equal(0)
+        expect(_diff_px(at_18718, at_1872)).to_equal(0)

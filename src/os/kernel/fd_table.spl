@@ -81,6 +81,14 @@ var fd_context_enabled: bool = false
 # Open file descriptions. dup/dup2 share one object, including status flags
 # and file offset. fd_* arrays above stay as compatibility mirrors.
 var of_types: [u8; 256] = [0; 256]
+# Output provenance belongs to the open file description, not its fd number.
+# 0 = unobserved, 1 = original stdout sink, 2 = original stderr sink.
+var of_execution_output_roles_v1: [u8; 256] = [0; 256]
+
+pub(package) enum FdExecutionOutputRoleV1:
+    Unobserved
+    Stdout
+    Stderr
 var of_flags: [u32; 256] = [0; 256]
 var of_ports: [u64; 256] = [0; 256]
 var of_offsets: [u64; 256] = [0; 256]
@@ -113,6 +121,7 @@ pub fn fd_table_init():
         fd_fd_flags[i] = 0
         fd_objects[i] = 0
         of_types[i] = FD_TYPE_FREE
+        of_execution_output_roles_v1[i] = 0u8
         of_flags[i] = 0
         of_ports[i] = 0
         of_offsets[i] = 0
@@ -217,8 +226,10 @@ fn _fd_load_context(owner: u64):
 
 fn _fd_seed_stdio():
     fd_set(0, FD_TYPE_SERIAL, O_RDONLY, 0)
-    fd_set(1, FD_TYPE_SERIAL, O_WRONLY, 0)
-    fd_set(2, FD_TYPE_SERIAL, O_WRONLY, 0)
+    if fd_set(1, FD_TYPE_SERIAL, O_WRONLY, 0) == 0:
+        of_execution_output_roles_v1[fd_objects[1]] = 1u8
+    if fd_set(2, FD_TYPE_SERIAL, O_WRONLY, 0) == 0:
+        of_execution_output_roles_v1[fd_objects[2]] = 2u8
 
 fn fd_activate_task(owner: u64):
     """Make `owner` the active descriptor context for legacy fd_* helpers."""
@@ -292,6 +303,7 @@ fn _fd_release_object_ref(obj: u64):
         of_refcounts[obj] = of_refcounts[obj] - 1
     if of_refcounts[obj] == 0:
         of_types[obj] = FD_TYPE_FREE
+        of_execution_output_roles_v1[obj] = 0u8
         of_flags[obj] = 0
         of_ports[obj] = 0
         of_offsets[obj] = 0
@@ -337,6 +349,7 @@ fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64) -> i32:
         return -24
     val status_flags = flags & ~O_CLOEXEC
     of_types[obj] = fd_type
+    of_execution_output_roles_v1[obj] = 0u8
     of_flags[obj] = status_flags
     of_ports[obj] = ipc_port
     of_offsets[obj] = 0
@@ -620,6 +633,23 @@ fn fd_get_backend_handle(fd: i32) -> u64:
         return 0
     val idx: u64 = fd as u64
     of_ports[fd_objects[idx]]
+
+# @allow(primitive_api) POSIX descriptor boundary: fd is the kernel's existing native i32 descriptor key; the result is the owned stream-role enum
+pub(package) fn fd_execution_output_role_v1(fd: i32) -> FdExecutionOutputRoleV1:
+    """Resolve the original serial sink through dup/fork and redirection.
+
+    A freshly opened descriptor has no output role, including fd 1 or 2.
+    Only standard sink initialization assigns provenance; object reuse clears it.
+    """
+    if not fd_context_enabled or not fd_is_valid(fd):
+        return FdExecutionOutputRoleV1.Unobserved
+    val obj = fd_objects[fd as u64]
+    if obj == 0u64 or of_types[obj] != FD_TYPE_SERIAL:
+        return FdExecutionOutputRoleV1.Unobserved
+    match of_execution_output_roles_v1[obj]:
+        case 1u8: FdExecutionOutputRoleV1.Stdout
+        case 2u8: FdExecutionOutputRoleV1.Stderr
+        case _: FdExecutionOutputRoleV1.Unobserved
 
 fn fd_set_net_bound_port(fd: i32, port: u16) -> i32:
     """Record the local port this descriptor's socket is bound to."""
