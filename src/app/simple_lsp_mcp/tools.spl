@@ -18,7 +18,7 @@ use .lsp_diagnostics_structured_v1.{lsp_collect_structured_diagnostics_v1, lsp_m
 use .lsp_perf_agent_ops_v1.{lsp_handle_perf_agent_tool_call_v1}
 use compiler.common.cache_contract.virtual_source_read_registry_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
 
-extern fn rt_bytes_to_text(data: [u8]) -> text
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 # Base-repair (mirrors origin/main): run_command_text calls process_run_bounded
 # with these bounds, but the merge left them undefined here.
@@ -236,7 +236,10 @@ fn handle_resource_read(id: text, body: text) -> text:
     val value = result.value.unwrap()
     if not value.complete:
         return jsonrpc_error(id, -32005, "Virtual summary exceeds the 65536-byte resource bound")
-    val content = jo3(jp("uri", js(uri)), jp("mimeType", js("text/x-simple")), jp("text", js(rt_bytes_to_text(value.bytes))))
+    val summary_text = match bytes_to_text_checked(value.bytes):
+        case Ok(t): t
+        case Err(e): return jsonrpc_error(id, -32603, "Virtual summary is not valid UTF-8 at byte {e.byte_offset}")
+    val content = jo3(jp("uri", js(uri)), jp("mimeType", js("text/x-simple")), jp("text", js(summary_text)))
     jsonrpc_result(id, jo1(jp("contents", "[" + content + "]")))
 
 fn handle_prompts_list(id: text) -> text:
