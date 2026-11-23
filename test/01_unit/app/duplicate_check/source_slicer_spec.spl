@@ -1,0 +1,45 @@
+"""
+## Purpose and audience
+Purpose: Prove the tokenizer's chunked SourceSlicer returns exactly what `source[a:b]` returns, including non-ASCII text and slices that cross chunk boundaries.
+Audience: compiler and tooling engineers who maintain the duplicate checker.
+"""
+# @req: REQ-APP-CLI-001 — stable requirement identity for this spec.
+
+use compiler.tools.duplicate_check.tokenizer.{source_slicer_new, source_slice}
+use std.spec.step
+
+fn non_ascii_source() -> text:
+    var parts: [text] = ["é"]
+    var k = 0
+    while k < 1000:
+        parts.push("abc{k}é\n")
+        k = k + 1
+    parts.join("")
+
+fn mismatches(source: text) -> i64:
+    val slicer = source_slicer_new(source)
+    val n = source.len()
+    var bad = 0
+    var a = 0
+    while a < n + 3:
+        for width in [0, 1, 7, 4095, 4096, 4097, 9000]:
+            if source_slice(slicer, a, a + width) != source[a:a + width]:
+                bad = bad + 1
+        a = a + 397
+    bad
+
+describe "duplicate-check SourceSlicer":
+    it "matches text slicing on non-ASCII text across chunk boundaries":
+        step "slice a multi-chunk non-ASCII source at many offsets and widths"
+        expect(mismatches(non_ascii_source())).to_equal(0)
+
+    it "matches text slicing on ASCII text":
+        step "slice an ASCII source"
+        expect(mismatches("fn add(a, b):\n    a + b\n")).to_equal(0)
+
+    it "clamps past-the-end slices like text slicing":
+        step "slice past the end of a non-ASCII source"
+        val src = "é" + "abcdef"
+        val slicer = source_slicer_new(src)
+        expect(source_slice(slicer, 5, 100)).to_equal("ef")
+        expect(source_slice(slicer, 7, 9)).to_equal("")
