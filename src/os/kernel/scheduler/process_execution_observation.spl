@@ -77,6 +77,9 @@ pub struct SchedulerExecutionEvidenceV1:
     stdout_capture_complete: bool = false
     # @allow(primitive_api) consumed evidence wire bit: stderr completeness is independently issued and never inferred from empty output
     stderr_capture_complete: bool = false
+    # The ordered environment is copied from the validated launch, never
+    # reconstructed by a terminal adapter or treated as executable authority.
+    envp: [text] = []
 
 pub(package) struct SchedulerOutputCaptureLeaseV1:
     observation: SchedulerExecutionObservationHandleV1
@@ -107,6 +110,7 @@ struct SchedulerExecutionObservationV1:
     command_observed: bool
     executable_path: text
     argv: [text]
+    envp: [text]
     argv_file_bindings: [SchedulerArgvFileBindingV1]
     exit_code: i32
     exited: bool
@@ -178,7 +182,7 @@ fn _consume_index(index: i64):
         image_hash: "", mount_id: 0u64, filesystem_name: "",
         canonical_source_path: "", target_os: "", target_arch: "", target_abi: "",
         mount_generation: 0u64, file_generation: 0u64,
-        command_observed: false, executable_path: "", argv: [],
+        command_observed: false, executable_path: "", argv: [], envp: [],
         argv_file_bindings: [], exit_code: 0,
         exited: false, reaped: false, delivered: false, consumed: true,
         stdout_bytes: [], stderr_bytes: [], stdout_truncated: false,
@@ -189,7 +193,7 @@ fn _consume_index(index: i64):
 fn _reserve_observation_locked(
     child_id: u64, parent_id: u64, image: ExecutableImageHandleV1,
     command_observed: bool, executable_path: text, argv: [text],
-    output_capture_protected: bool
+    output_capture_protected: bool, envp: [text] = []
 ) -> SchedulerExecutionObservationHandleV1?:
     if _observation_state.exhausted or _live_child_index(child_id) >= 0:
         return nil
@@ -229,7 +233,7 @@ fn _reserve_observation_locked(
         target_abi: image.target.abi,
         mount_generation: image.mount_generation,
         file_generation: image.file_generation, command_observed: command_observed,
-        executable_path: executable_path, argv: argv,
+        executable_path: executable_path, argv: argv, envp: envp,
         argv_file_bindings: [], exit_code: 0, exited: false,
         reaped: false, delivered: false, consumed: false, stdout_bytes: [], stderr_bytes: [],
         stdout_truncated: false, stderr_truncated: false,
@@ -261,7 +265,8 @@ pub(package) fn scheduler_execution_observe_adoption_handle_with_launch_v1(
         return nil
     val handle = _reserve_observation_locked(
         child_id, parent_id, image, true, owned_launch.path, owned_launch.argv,
-        output_capture_protected and image.target.os == "simpleos" and image.target.arch == "x86_64")
+        output_capture_protected and image.target.os == "simpleos" and image.target.arch == "x86_64",
+        owned_launch.envp)
     if not _unlock(): return nil
     handle
 
@@ -723,7 +728,7 @@ pub fn scheduler_execution_evidence_consume_once_v1(token: SchedulerExecutionEvi
         target_abi: observed.target_abi,
         mount_generation: observed.mount_generation,
         file_generation: observed.file_generation, command_observed: observed.command_observed,
-        executable_path: observed.executable_path, argv: observed.argv,
+        executable_path: observed.executable_path, argv: observed.argv, envp: observed.envp,
         argv_file_bindings: observed.argv_file_bindings,
         exit_code: observed.exit_code,
         stdout_bytes: observed.stdout_bytes, stderr_bytes: observed.stderr_bytes,
@@ -756,7 +761,7 @@ pub fn scheduler_execution_evidence_consume_once_v2(
         target_abi: observed.target_abi,
         mount_generation: observed.mount_generation,
         file_generation: observed.file_generation, command_observed: true,
-        executable_path: observed.executable_path, argv: observed.argv,
+        executable_path: observed.executable_path, argv: observed.argv, envp: observed.envp,
         argv_file_bindings: observed.argv_file_bindings,
         exit_code: observed.exit_code, stdout_bytes: observed.stdout_bytes,
         stderr_bytes: observed.stderr_bytes,
