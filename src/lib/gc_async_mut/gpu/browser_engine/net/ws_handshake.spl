@@ -24,7 +24,7 @@ extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 extern fn rt_io_tcp_flush(fd: i64) -> bool
 @unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 # WebSocket protocol version
 val WS_VERSION = 13
@@ -53,16 +53,19 @@ fn ws_write_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, data: text) -> i
             rt_io_tcp_flush(tcp_fd)
     written
 
-fn ws_read_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, max_bytes: i64) -> text:
+fn ws_read_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, max_bytes: i64) -> BrowserResult<text>:
+    """Read up to max_bytes as UTF-8 text; "" means no data. Invalid UTF-8 is an error."""
     if val tls_conn = tls_conn:
-        return tls_conn.read_text(max_bytes).unwrap_or("")
+        return Ok(tls_conn.read_text(max_bytes).unwrap_or(""))
     if tcp_fd < 0:
-        return ""
+        return Ok("")
     val bytes = unsafe(capabilities: [ffi]):
         rt_io_tcp_read(tcp_fd, max_bytes)
     if bytes == nil:
-        return ""
-    bytes_to_text(bytes!)
+        return Ok("")
+    match bytes_to_text_checked(bytes!):
+        case Ok(decoded): Ok(decoded)
+        case Err(e): Err(network_error("ws: received invalid UTF-8 at byte {e.byte_offset}: {e.reason}"))
 
 fn build_upgrade_request(host: text, port: i64, path: text, key: text, protocols: [text]) -> text:
     # Build the HTTP/1.1 upgrade request for the WebSocket handshake.
@@ -90,18 +93,18 @@ fn build_upgrade_request(host: text, port: i64, path: text, key: text, protocols
 fn ws_request_path(url: Url) -> text:
     url.request_target()
 
-fn read_ws_response_text(tls_conn: TlsConnection?, tcp_fd: i64) -> text:
+fn read_ws_response_text(tls_conn: TlsConnection?, tcp_fd: i64) -> BrowserResult<text>:
     var response = ""
     var done = false
     while not done:
-        val chunk = ws_read_transport_fd(tls_conn, tcp_fd, 8192)
+        val chunk = ws_read_transport_fd(tls_conn, tcp_fd, 8192)?
         if chunk.len() == 0:
             done = true
         else:
             response = response + chunk
             if response.contains("\r\n\r\n"):
                 done = true
-    response
+    Ok(response)
 
 fn validate_handshake_response(raw: text, key: text, requested_protocols: [text]) -> Result<HandshakeResult>:
     # Validate the server's handshake response per RFC 6455 Section 4.2.2.
