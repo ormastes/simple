@@ -38,6 +38,24 @@ physical parent rechecks and bounded no-follow digest readback; existing evidenc
 is never deleted. Only successful publication prints the actual fresh path.
 The output never creates native-build receipts, stage admission or guest proof.
 
+The failed read-only run `45266469463` exposed a construction mismatch: the
+ordinary SDK native wrapper parses `--low-memory` into its driver options,
+whereas the shared Stage4 fixed factory intentionally enables low memory only
+under its separate bootstrap/Stage4/opt-in environment policy. The observer now
+uses `cli_native_build_parse_options_v1` to carry the actual CLI low-memory
+request into its inspection driver before the unchanged streaming gate. It
+does not change the Stage4 factory, force environment flags, or alter target
+and library policy. The record includes actual low-memory and route values,
+source-entry identities before/after load, library mode and frontend cache scope.
+
+Load context commits follow `driver_orchestration.spl`'s existing conditional
+policy. That source records a Stage3 native aggregate-return reassignment bug:
+streaming route 1 commits directly into the driver's context, so copying the
+returned context over it is unsafe. The observer binds the returned context
+and reinstalls it only under the canonical nonstreaming condition, which its
+admission guard rejects. Streaming parsing itself publishes the frontend cache
+scope. No child session or fabricated worker authority is introduced.
+
 The focused regression parses a Windows-local/POSIX-import conditional facade,
 freezes its Linux surfaces, observes the real bare-export walker, and checks a
 missing target separately. Specs are authored but unexecuted until an admitted
