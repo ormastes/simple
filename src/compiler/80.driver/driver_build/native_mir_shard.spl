@@ -27,6 +27,51 @@ use std.io_runtime.{file_exists, file_read, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used}
+
+# Native cache scope retention (driver_aot_native_output.spl) removes scope
+# directories idle past its window. A build's children must never run it: a
+# worker or the link child would delete objects that an earlier child of the
+# SAME build published and its ledger still names. Only an unmarked top-level
+# process may evict. Arguments are the raw role environment values.
+# See doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md.
+# reason: raw role environment values in, one admission decision out
+@allow(primitive_api)
+pub fn native_cache_scope_eviction_role_allowed_v1(mir_shard: text, hir_shard: text,
+        parse_shard: text, mir_shard_link: text, file_worker_unit: text,
+        build_worker: text) -> bool:
+    mir_shard == "" and hir_shard == "" and parse_shard == "" and
+        mir_shard_link == "" and file_worker_unit == "" and build_worker == ""
+
+# The cache scope directory ("<cache>/s<32 hex>") that holds `object_path`, or
+# "" when the path is not under one. The object may sit directly in the scope
+# or in a subdirectory of it; the innermost scope-shaped component wins.
+# reason: a filesystem object path in, its cache scope directory path out
+@allow(primitive_api)
+pub fn native_cache_scope_dir_of_object_v1(object_path: text) -> text:
+    val parts = object_path.replace("\\", "/").split("/")
+    var found = -1
+    var index = 0
+    while index < parts.len() - 1:
+        val part = parts[index]
+        if part.len() == 33 and part.starts_with("s"):
+            found = index
+        index = index + 1
+    if found < 0:
+        return ""
+    var scope = parts[0]
+    index = 1
+    while index <= found:
+        scope = scope + "/" + parts[index]
+        index = index + 1
+    scope
+
+# A ledger row naming `object_path` keeps that object's scope live: refresh
+# the scope's liveness marker so no concurrent build's retention sees it idle.
+fn _native_mir_shard_keep_scope_live_v1(object_path: text):
+    val scope = native_cache_scope_dir_of_object_v1(object_path)
+    if scope != "":
+        val _marked = disk_bound_mark_dir_used(scope)
 
 pub const NATIVE_MIR_SHARD_ENV_V1: text = "SIMPLE_MIR_SHARD"
 pub const NATIVE_MIR_SHARD_QUEUE_ENV_V1: text = "SIMPLE_MIR_SHARD_QUEUE"
@@ -270,6 +315,7 @@ pub fn native_mir_shard_publish_pass_v1(queue: text, module_name: text,
     val sidecar = native_mir_shard_record_base_v1(queue, module_name) + ".object"
     if not file_atomic_write(sidecar, "{object_path}\n{functions}\n{statics}\n{capsule_identity}\n"):
         return false
+    _native_mir_shard_keep_scope_live_v1(object_path)
     hir_shard_recovery_terminal(queue, native_mir_shard_owner_v1(), module_name,
         "PASS", object_path != "")
 
@@ -325,8 +371,14 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
             inputs.objectless = inputs.objectless + 1
             inputs.objectless_modules = inputs.objectless_modules.push(name)
         else:
-            if terminal[4] != "CACHE_STORED" or not file_exists(object_path):
-                return Err("MIR shard module object missing: {name} ({object_path})")
+            if terminal[4] != "CACHE_STORED":
+                return Err("MIR shard module object missing: {name} ({object_path}): ledger row is not CACHE_STORED")
+            if not file_exists(object_path):
+                return Err("MIR shard module object missing: {name} ({object_path}): " +
+                    "the ledger recorded this object but it is no longer in the native cache " +
+                    "(evicted or deleted after it was published); re-run the build to " +
+                    "recompile the missing modules")
+            _native_mir_shard_keep_scope_live_v1(object_path)
             inputs.object_files = inputs.object_files.push(object_path)
             inputs.object_modules = inputs.object_modules.push(name)
             inputs.capsule_identities = inputs.capsule_identities.push(sidecar[3])
@@ -471,5 +523,6 @@ pub fn native_mir_shard_resume_adopt_v1(prior: text, queue: text) -> NativeMirSh
         if not file_atomic_write("{base}.object", sidecar) or
                 not hir_shard_recovery_terminal(queue, "resume", name, "PASS", not sidecar.starts_with("\n")):
             return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "record not published: {name}")
+        _native_mir_shard_keep_scope_live_v1(sidecar.split("\n")[0])
         adopted = adopted + 1
     NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "")

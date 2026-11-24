@@ -1,7 +1,7 @@
 """Flat cache directories are swept oldest-first past their byte cap."""
 
 use std.spec.*
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs, disk_bound_keep_newest_prefix_dirs}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs, disk_bound_keep_newest_prefix_dirs, disk_bound_dir_is_idle, disk_bound_mark_dir_used}
 use app.cli.native_build_parse_closure_owner.{
     native_build_parse_closure_retire_request_v1,
     native_build_parse_closure_teardown_env_v1,
@@ -82,6 +82,23 @@ describe "disk bound":
         expect(file_exists(root + "/hir/obj/x.o")).to_equal(true)
         expect(file_exists(root + "/s01/obj/x.o")).to_equal(true)
         expect(disk_bound_keep_newest_dirs(root, "s0001", "s", 5, 1, 3600)).to_equal(0)
+        dir_remove_all(root)
+
+    it "a scope with a fresh liveness marker is not evictable":
+        # Used 1 hour ago, 6 hour window: live. Used 7 hours ago: idle.
+        expect(disk_bound_dir_is_idle(1000000 - 3600, 1000000, 21600)).to_equal(false)
+        expect(disk_bound_dir_is_idle(1000000 - 25200, 1000000, 21600)).to_equal(true)
+        # No window: retention is by count alone.
+        expect(disk_bound_dir_is_idle(1000000, 1000000, 0)).to_equal(true)
+        val root = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_live"
+        for name in ["s0001", "s0002", "s0003"]:
+            dir_create(root + "/" + name, true)
+        expect(disk_bound_mark_dir_used(root + "/s0002")).to_equal(true)
+        expect(file_exists(root + "/s0002/.last-use")).to_equal(true)
+        expect(disk_bound_mark_dir_used(root + "/absent")).to_equal(false)
+        expect(dir_exists(root + "/absent")).to_equal(false)
+        expect(disk_bound_keep_newest_dirs(root, "s0001", "s", 5, 1, 21600)).to_equal(0)
+        expect(dir_exists(root + "/s0002")).to_equal(true)
         dir_remove_all(root)
 
     it "evicts oldest variable-length closure-request-* prefix dirs while preserving min_age_s and siblings":
