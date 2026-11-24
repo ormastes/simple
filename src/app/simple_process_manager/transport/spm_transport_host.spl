@@ -35,7 +35,7 @@ fn _spm_sffi_read_until(fd: i64, stop_byte: i64, max: i64) -> text:
 fn _spm_sffi_close(fd: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_fd_close(fd)
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 # ---------------------------------------------------------------------------
 # Production impl
@@ -70,11 +70,12 @@ impl SpmTransport for SpmTransportHost:
             if req.kind == "ping":
                 return SpmResponse.ok_with("pong".bytes())
             return SpmResponse(ok: false, body: [], error: "transport has no handler bound")
+        val wire_text = match bytes_to_text_checked(spm_encode_request(req)):
+            case Ok(t): t
+            case Err(_): return SpmResponse(ok: false, body: [], error: "host request is not valid UTF-8")
         val fd = rt_unix_socket_connect(self.sock_path)
         if fd < 0:
             return SpmResponse(ok: false, body: [], error: "host socket connect failed: {self.sock_path}")
-        val wire = spm_encode_request(req)
-        val wire_text = bytes_to_text(wire)
         val wrote = rt_fd_write(fd, wire_text, wire_text.len())
         if wrote < 0:
             rt_fd_close(fd)

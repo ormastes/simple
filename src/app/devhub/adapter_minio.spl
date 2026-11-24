@@ -12,7 +12,7 @@ use std.io.http_client_core.{rt_http_request, rt_http_download, http_request_v2_
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.http_curl.{curl_request_bytes}
 use std.io_runtime.{host_os}
-use std.common.text_bytes.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
@@ -887,7 +887,9 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
     var status = 0
     var response_body = ""
     var transport_error = ""
+    var body_error = ""
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        body_error = ""
         # @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=Use the bounded private-file curl transport while the selected Windows core HTTP provider is unavailable
         if host_os() == "windows":
             # The core Windows runtime explicitly has no native HTTP v2
@@ -903,8 +905,12 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
                 "PUT", "{cfg.url}{canonical_uri}", headers, body, 30000)
             status = response.0
             val response_bytes: [u8] = response.3
-            response_body = bytes_to_text(response_bytes)
             transport_error = response.4
+            match bytes_to_text_checked(response_bytes):
+                case Ok(t): response_body = t
+                case Err(_):
+                    response_body = ""
+                    body_error = "S3 response body is not valid UTF-8"
         attempt = attempt + 1
         if not itf_should_retry(status, transport_error) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
             break
@@ -912,6 +918,8 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
     val mapped = map_s3_error(status, response_body, transport_error)
     if mapped.kind != "ok":
         return (false, "", mapped.message)
+    if body_error != "":
+        return (false, "", body_error)
     (true, "", response_body)
 
 fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):

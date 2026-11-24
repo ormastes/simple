@@ -4,7 +4,7 @@
 use std.common.source.service_contracts.{SourceOpenResultV1}
 use app.io.mod.{cwd, dir_is_real_no_follow, file_read_regular_no_follow_bounded_bytes}
 use app.io.file_ops.{path_absolute}
-use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.string_core.{str_len}
@@ -317,7 +317,7 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
         outline: SourceOutlineV1, view: SourceStructuredViewV1,
         query_key: text, result_identity: text, numbers: bool,
         intent: SourceIntentResolutionV1, help: text,
-        hidden: [SourceHiddenNodeV1], summary: SourceHiddenSummaryV1, has_boundary: bool) -> text:
+        hidden: [SourceHiddenNodeV1], summary: SourceHiddenSummaryV1, has_boundary: bool) -> Result<text, text>:
     val bytes = text_to_utf8_bytes(view.projection.source_text)
     val original = text_to_utf8_bytes(snapshot.source)
     var segments: [JsonValue] = []
@@ -339,7 +339,9 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
             selected.push(bytes[position])
             position = position + 1
             copied = copied + 1
-        val source = bytes_to_text(selected)
+        val source = match bytes_to_text_checked(selected):
+            case Ok(t): t
+            case Err(_): return Err("source_span_is_not_utf8")
         val node_index = view.visible_nodes[index]
         val node = outline.nodes[node_index]
         segments.push(json_value_object_from([
@@ -415,7 +417,7 @@ fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
     if intent_requested: fields.push(("intent_resolution", source_intent_json_v1(intent)))
     if help == "ess": fields.push(("essential_help", JsonValue.Str(SOURCE_ESSENTIAL_HELP_V1)))
     if help == "adv": fields.push(("advanced_help", source_advanced_help_v1()))
-    source_safe_json_v1(json_value_serialize(json_value_object_from(fields)))
+    Ok(source_safe_json_v1(json_value_serialize(json_value_object_from(fields))))
 
 fn source_open_context_v1(body: text, numbers: bool, workspace_root: text, session_level: text) -> SourceOpenResultV1:
     if str_len(body) > 4096: return source_result_error_v1("error", "request_too_large")
@@ -509,7 +511,9 @@ fn source_open_context_v1(body: text, numbers: bool, workspace_root: text, sessi
         val view = match source_project_structure_v1(snapshot, outline, mode, target, depth, start_index, max_nodes, max_bytes):
             Ok(value): value
             Err(reason): return source_result_error_v1("error", reason)
-        return source_bounded_payload_v1(source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers, intent, help, hidden_nodes, summary, has_boundary))
+        return match source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers, intent, help, hidden_nodes, summary, has_boundary):
+            Ok(payload): source_bounded_payload_v1(payload)
+            Err(reason): source_result_error_v1("unsupported", reason)
     val projection = match source_project_raw_v1(snapshot, start_byte, max_bytes):
         Ok(value): value
         Err(reason): return source_result_error_v1("error", reason)
