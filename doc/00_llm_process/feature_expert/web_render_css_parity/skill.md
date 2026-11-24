@@ -4511,3 +4511,23 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Perf:** 6 alternated rounds at k=4. Medians: overview doc 830/830 and
   paint 5473/5474 ms; html doc 5350/5368 and paint 8522/8528 ms. RSS is flat
   (2.91/2.89 and 2.96/2.95 GB).
+## 2026-11-24 — textarea value lines (hard newlines, long-value line fit)
+
+- **Only `white-space:pre` split at newlines.** The text branch of
+  `layout_with_style_flow` called `compute_preserved_newline_ranges` for
+  `pre` only. A textarea value is `pre-wrap` (`white_space_newline`), so it
+  fell through to plain word wrap, and each `\n` was drawn as a .notdef box.
+  `compute_newline_wrap_ranges` now ends a line at every kept newline and
+  wraps each segment on its own. The `\n` bytes belong to no range. This
+  also covers `pre-wrap` / `pre-line` blocks, which had the same .notdef bug.
+- **A textarea's max-content width is its control width.** The inline line
+  loop's wrap check takes `intrinsic_text_width` of the item, and for a
+  textarea that walked its value text. A 71-column value therefore predicted
+  a ~500 px box and dropped the control to the next line.
+  `_lay_intrinsic_text_width_inner` returns `text_control_auto_outer_w` for a
+  textarea.
+- Still open: Chrome clips a textarea's overflowing value at the padding box
+  (UA `overflow:auto`). Simple draws extra lines below the control. Fixture:
+  `Notes <textarea>lllll` x 12, rows 3-4 of the value.
+- Trap: a landing lane's worktree can be reset under you (squash + delete)
+  while you prototype in it. Prototype only in your own new worktree.
