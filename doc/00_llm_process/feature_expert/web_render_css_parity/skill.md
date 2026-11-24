@@ -4385,3 +4385,15 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   0.21 -> 0.16 %; every other page equal at both scales. Perf, 6 alternated
   rounds at k=4: median document/paint phases equal within noise (overview
   paint 5609 vs 5615 ms, html paint 8732 vs 8755 ms); RSS flat (2.83/2.89 GB).
+## 2026-11-24 — HIR import loading re-parsed every module the loader had parsed (seed JIT startup)
+
+- **Profile first.** The time was not where the counts pointed. HIR Pass 0.5b took about 370 ms on tab-bar, with 2,817 `load_imported_types` calls for 369 units. An exclusive profile showed `preregister_imported_type_names` at about 245 ms; the re-export, trait-capture and alias tail was only about 1 ms.
+  - Memoizing the 2,612 placeholder scans down to 326 did not change wall time, so it was dropped.
+  - The real cost was the first parse of each unit: `IMPORT_AST_PARSES=375`. The module loader had already parsed all of them and never filled the cross-lane cache.
+  - Trap: an exclusive label measures where a cost first lands, not why it is there. Read the counters (`SIMPLE_PERF_COUNTERS=1`) before building a cache.
+- **Fix:** `module_cache::shared_source_seed` takes the loader's parse. It is used only when the loader's parsed text is byte-identical to `strip_os_when_blocks(raw, cfg_target())`, so the same text gives the same AST. HIR re-parses fell from 375 to 5, saving about 250 ms of tab-bar JIT wall time; RSS is flat.
+- **Evidence:**
+  - Spec: `compiler/tests/hir_reuses_loader_parse.rs`.
+  - 8 pages JIT==interp at 1x and 4x, with the interpreter byte-identical to base.
+  - Strict-vreg is clean.
+- **Bug record:** `doc/08_tracking/bug/hir_import_reparses_loader_modules_2026-11-24.md`.
