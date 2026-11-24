@@ -69,6 +69,31 @@ An undocumented signing or packaging transform is not accepted as proof of
 identity. The expected digest must not be replaced with an observed digest
 merely to pass admission.
 
+## Loader and host constraint
+
+Offline Mach-O load-command inspection of the authenticated SPK compiler,
+matching test/build helpers, and matching runtime dylib found
+`LC_BUILD_VERSION.platform = 1` (macOS) and minimum OS **26.2.0**:
+
+| Selected image | Mach-O role | Minimum macOS |
+|---|---|---|
+| SPK `bin/simple-runtime` (`085796e2…bd23e2d`) | arm64 executable | 26.2.0 |
+| `bin/simple_test_runner` | arm64 executable | 26.2.0 |
+| `bin/simple_build_runner` | arm64 executable | 26.2.0 |
+| `lib/libsimple_runtime.dylib` | arm64 dylib | 26.2.0 |
+
+An arm64 CPU check alone therefore cannot admit these images on a macOS-15
+host. Before publishing an execution claim or invoking any selected image,
+record the actual host architecture and `sw_vers -productVersion`, and require
+arm64 with macOS 26.2 or later. A runner label does not establish the actual
+OS version. Compatible runner capacity remains unproved; no replacement label
+is prescribed here.
+
+These are offline loader observations; none of the selected images was
+executed to obtain them. Identity, loader compatibility, and command role
+each require their own evidence. The header receipt is retained as
+`C:/dev/simple-xc-guest-command-20261124/build/verify/guest-command-cycle2/rc63-selected-macho-loader-minimum.sdn`.
+
 ## Separate command-role problem
 
 At the declared source revision, the
@@ -90,9 +115,12 @@ any runtime invocation; it was not a failed execution of the unit cases.
    from shell wrappers. Document and authenticate any packaging transform.
 2. Distinguish bootstrap-compiler and full-CLI roles. Do not alias a P3 digest
    into full-CLI admission without demonstrating the general command route.
-3. Obtain an authenticated full CLI, or explicitly admit building the canonical
+3. Gate execution on the actual compatible host before publishing a claim:
+   arm64 and macOS 26.2 or later for the selected images above. Retain the
+   observed OS/architecture and the byte-bound loader requirements.
+4. Obtain an authenticated full CLI, or explicitly admit building the canonical
    full CLI from the verified P3 compiler. This need not rebuild P3 itself.
-4. Verify supported `check` and fixture-child `run` behavior on that full CLI,
+5. Verify supported `check` and fixture-child `run` behavior on that full CLI,
    then execute the actual unit and required source checks. Retain separate
    command results, expected case counts, input identities, and raw outputs.
 
