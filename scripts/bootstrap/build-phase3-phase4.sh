@@ -30,6 +30,9 @@ SOURCE_ROOT="$DEFAULT_SOURCE_ROOT"
 BUILD_ROOT=""
 RUNTIME_PATH=""
 P2_BIN=""
+P3A_BIN=""
+P3A_EXPLICIT=0
+P3A_SHA256=""
 P3B_BIN=""
 MEM_GUARD_SCRIPT="${SIMPLE_MEM_GUARD_SCRIPT:-}"
 INTERNAL_LINKER_GATE="auto"
@@ -45,7 +48,7 @@ Shared cross-platform Phase 3 & Phase 4 build script (Linux, macOS, FreeBSD, Win
 
 Options:
   --menu                         Show interactive Phased Build Menu
-  --phase=p3a|p3|p4|all          Select phase non-interactively
+  --phase=p3a|p3b|p3|p4|all      Select phase non-interactively
   --compile-mode=shard|file      Phase 3 compile mode (DEFAULT: shard; optional: file)
   --p3-compile-mode=shard|file   Alias for --compile-mode
   --link-mode=dynlib|one-binary  Phase 3 unit link mode (DEFAULT: dynlib + static primitive archive)
@@ -60,6 +63,8 @@ Options:
   --seed-dir=<DIR>               Runtime directory containing libsimple_runtime.a (alias: --runtime-path)
   --runtime-path=<DIR>           Runtime directory containing libsimple_runtime.a
   --p2-bin=<FILE>                Compatible minimal producer (Phase 2 or later; bind actual provenance)
+  --p3a-bin=<FILE>               Existing qualified P3a (required for --phase=p3b)
+  --p3a-sha256=<HEX>             Exact P3a bytes; caller verifies source/runtime/Hello provenance
   --p3b-bin=<FILE>               Existing Phase 3b compiler binary (when running --phase=p4)
   --mem-guard=<FILE>             Optional mem-guard-watchdog.sh script to wrap builds
   --with-internal-linker-gate    Enable SIMPLE_LINKER=internal verification gate
@@ -103,6 +108,10 @@ while [ "$#" -gt 0 ]; do
     --seed-dir=*|--runtime-path=*) RUNTIME_PATH=${1#*=}; shift ;;
     --p2-bin) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; P2_BIN=$2; shift 2 ;;
     --p2-bin=*) P2_BIN=${1#*=}; shift ;;
+    --p3a-bin) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; P3A_BIN=$2; P3A_EXPLICIT=1; shift 2 ;;
+    --p3a-bin=*) P3A_BIN=${1#*=}; P3A_EXPLICIT=1; shift ;;
+    --p3a-sha256) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; P3A_SHA256=$2; shift 2 ;;
+    --p3a-sha256=*) P3A_SHA256=${1#*=}; shift ;;
     --p3b-bin) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; P3B_BIN=$2; shift 2 ;;
     --p3b-bin=*) P3B_BIN=${1#*=}; shift ;;
     --mem-guard) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; MEM_GUARD_SCRIPT=$2; shift 2 ;;
@@ -205,7 +214,7 @@ BUILD_ROOT="${BUILD_ROOT:-$SOURCE_ROOT/build/phased-selfhost}"
 RUNTIME_PATH="${RUNTIME_PATH:-$BUILD_ROOT/seed/runtime}"
 P2_BIN="${P2_BIN:-$BUILD_ROOT/phase2/simple${EXE_EXT}}"
 P3A_DIR="$BUILD_ROOT/phase3-a"
-P3A_BIN="$P3A_DIR/simple${EXE_EXT}"
+P3A_BIN="${P3A_BIN:-$P3A_DIR/simple${EXE_EXT}}"
 P3B_DIR="$BUILD_ROOT/phase3-b"
 P3B_BIN="${P3B_BIN:-$P3B_DIR/simple${EXE_EXT}}"
 P4_DIR="$BUILD_ROOT/p4-from-p3b"
@@ -250,15 +259,26 @@ elif [ -z "$PHASE" ]; then
   elif [ "$NON_INTERACTIVE" -eq 0 ] && [ -t 0 ]; then
     show_phased_menu
   else
-    echo "ERROR: --phase=p3a|p3|p4|all is required in non-interactive mode (or pass --menu / --path-check / --dry-run)." >&2
+    echo "ERROR: --phase=p3a|p3b|p3|p4|all is required in non-interactive mode (or pass --menu / --path-check / --dry-run)." >&2
     exit 2
   fi
 fi
 
 case "$PHASE" in
-  p3a|p3|p4|all) ;;
-  *) echo "ERROR: invalid --phase='$PHASE' (expected p3a, p3, p4, or all)" >&2; exit 2 ;;
+  p3a|p3b|p3|p4|all) ;;
+  *) echo "ERROR: invalid --phase='$PHASE' (expected p3a, p3b, p3, p4, or all)" >&2; exit 2 ;;
 esac
+
+# Only the standalone continuation may override the P3a producer. In p3/all
+# that path is an output and must retain its established build-root ownership.
+if [ "$PHASE" != p3b ] && { [ "$P3A_EXPLICIT" -eq 1 ] || [ -n "$P3A_SHA256" ]; }; then
+  echo "ERROR: --p3a-bin/--p3a-sha256 require --phase=p3b" >&2; exit 2
+fi
+if [ "$PHASE" = p3b ]; then
+  [ "$P3A_EXPLICIT" -eq 1 ] && [ -n "$P3A_BIN" ] || { echo 'ERROR: standalone P3b requires explicit --p3a-bin' >&2; exit 2; }
+  case "$P3A_SHA256" in ''|*[!0-9a-f]*) echo 'ERROR: P3b requires an exact lowercase P3a SHA-256' >&2; exit 2 ;; esac
+  [ "${#P3A_SHA256}" -eq 64 ] || { echo 'ERROR: P3a SHA-256 must have 64 digits' >&2; exit 2; }
+fi
 
 PATH_ACTION_COUNT=0
 
@@ -294,7 +314,7 @@ run_path_check() {
   esac
 
   case "$PHASE" in
-    p3|all)
+    p3b|p3|all)
       emit_path_action "p3b" "compile-bootstrap-stage3-selfhost" "$COMPILE_MODE" "$LINK_MODE" "0" "0"
       emit_path_action "p3b" "verify-dynlib-units-no-extra-backends" "$COMPILE_MODE" "$LINK_MODE" "0" "0"
       emit_path_action "p3b" "hello-smoke" "$COMPILE_MODE" "one-binary" "0" "0"
@@ -364,7 +384,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
       ;;
   esac
   case "$PHASE" in
-    p3|all)
+    p3b|p3|all)
       p3_mode_flag="dynload"
       [ "$LINK_MODE" = "one-binary" ] && p3_mode_flag="one-binary"
       echo "CMD_P3B: $P3A_BIN native-build --target $STAGE3_RESOLVED_TARGET --backend $BACKEND --runtime-bundle core-c-bootstrap $dry_p3_sources --entry-closure${dry_plugin_arg} --threads $THREADS --cache-dir $P3B_DIR/cache --mode $p3_mode_flag --runtime-path $RUNTIME_PATH --entry src/app/cli/bootstrap_main.spl -o $P3B_BIN"
@@ -784,6 +804,18 @@ run_stage4_all() {
 case "$PHASE" in
   p3a)
     run_stage3_step "P3a" "$P2_BIN" "$P3A_DIR" "$P3A_BIN" "stage3-a"
+    ;;
+  p3b)
+    # This is the same P3b operation used by p3/all, without rebuilding P3a.
+    # A fresh root prevents cleanup/cache writes from touching the prior product.
+    [ ! -e "$BUILD_ROOT" ] && [ ! -L "$BUILD_ROOT" ] || { echo 'ERROR: standalone P3b requires a fresh build root' >&2; exit 2; }
+    [ -x "$P3A_BIN" ] || { echo 'ERROR: standalone P3b requires an executable P3a' >&2; exit 2; }
+    . "$SCRIPT_DIR/../check/lib/bootstrap-stage3/authority.shs"
+    [ "$(bootstrap_stage3_hash_file "$P3A_BIN")" = "$P3A_SHA256" ] || { echo 'ERROR: P3a digest mismatch before build' >&2; exit 2; }
+    # An explicit output outside the fresh root could overwrite the producer.
+    [ "$P3B_BIN" = "$P3B_DIR/simple${EXE_EXT}" ] || { echo 'ERROR: standalone P3b output must remain in its fresh build root' >&2; exit 2; }
+    run_stage3_step "P3b" "$P3A_BIN" "$P3B_DIR" "$P3B_BIN" "stage3-b"
+    [ "$(bootstrap_stage3_hash_file "$P3A_BIN")" = "$P3A_SHA256" ] || { echo 'ERROR: P3a changed during build' >&2; exit 2; }
     ;;
   p3)
     run_stage3_step "P3a" "$P2_BIN" "$P3A_DIR" "$P3A_BIN" "stage3-a"

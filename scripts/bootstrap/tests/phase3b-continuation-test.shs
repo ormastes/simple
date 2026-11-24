@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Actual public shell entrypoint with explicit mock compiler processes. No native qualification.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/phase3b-continuation.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+mkdir -p "$scratch/source/test/04_smoke"
+printf 'fn main():\n    print("hello")\n' >"$scratch/source/test/04_smoke/bootstrap_hello_world.spl"
+cat >"$scratch/candidate" <<'CANDIDATE'
+#!/usr/bin/env bash
+set -eu
+if [ "$1" = --version ]; then echo simple-bootstrap-contract-fixture; exit 0; fi
+[ "$1" = native-build ] || exit 90
+printf 'candidate-hello\n' >>"$SIMPLE_P3B_TRACE"
+[ "${SIMPLE_P3B_CASE:-}" != hello-fail ] || exit 91
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then output=$2; break; fi
+  shift
+done
+printf '#!/usr/bin/env bash\nprintf "hello\\n"\n# %02048d\n' 0 >"$output"
+chmod +x "$output"
+CANDIDATE
+cat >"$scratch/producer-template" <<'PRODUCER'
+#!/usr/bin/env bash
+set -eu
+[ "$1" = native-build ] || exit 92
+[ "$SIMPLE_CACHE_SCOPE" = stage3-b ] || exit 93
+[ "$SIMPLE_BINARY" = "$0" ] || exit 94
+printf 'producer-p3b\n' >>"$SIMPLE_P3B_TRACE"
+printf '%s\n' "$@" >"$SIMPLE_P3B_TRACE.argv"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then output=$2; break; fi
+  shift
+done
+cp "$SIMPLE_P3B_CANDIDATE" "$output"
+chmod +x "$output"
+if [ "${SIMPLE_P3B_CASE:-}" = mutate ]; then printf '\n# changed\n' >>"$0"; fi
+PRODUCER
+chmod +x "$scratch/candidate" "$scratch/producer-template"
+export SIMPLE_P3B_CANDIDATE="$scratch/candidate"
+run_case() {
+  case_name=$1; shift
+  cp "$scratch/producer-template" "$scratch/producer-$case_name"
+  producer="$scratch/producer-$case_name"
+  digest=$(sha256sum "$producer" | cut -d' ' -f1)
+  output="$scratch/output-$case_name"
+  export SIMPLE_P3B_TRACE="$scratch/trace-$case_name" SIMPLE_P3B_CASE="$case_name"
+  if [ "$case_name" = wrong-hash ]; then digest=$(printf '%064d' 0); fi
+  if [ "$case_name" = existing ]; then mkdir "$output"; echo preserved >"$output/sentinel"; fi
+  set -- --phase=p3b --simulate-host=linux-x86_64 --compile-mode=file --link-mode=one-binary \
+    --backend=llvm --threads=2 --non-interactive --source-root="$scratch/source" \
+    --build-root="$output" --runtime-path="$scratch/runtime" --p3a-sha256="$digest" "$@"
+  if [ "$case_name" != missing-parent ]; then set -- "$@" --p3a-bin="$producer"; fi
+  if [ "$case_name" = collision ]; then set -- "$@" --p3b-bin="$producer"; fi
+  bash "$repo/scripts/bootstrap/build-phase3-phase4.sh" "$@" >"$scratch/$case_name.log" 2>&1 && status=0 || status=$?
+  if [ "$case_name" = good ]; then
+    [ "$status" -eq 0 ] || { cat "$scratch/$case_name.log"; exit 1; }
+    printf 'producer-p3b\ncandidate-hello\n' >"$scratch/expected-trace"
+    cmp "$scratch/expected-trace" "$SIMPLE_P3B_TRACE"
+    [ -f "$output/phase3-b/simple" ] && [ ! -e "$output/phase3-a" ]
+    grep -Fx -- '--entry-closure' "$SIMPLE_P3B_TRACE.argv"
+    grep -Fx 'src/app/cli/bootstrap_main.spl' "$SIMPLE_P3B_TRACE.argv"
+    grep -Fx "$output/phase3-b/cache" "$SIMPLE_P3B_TRACE.argv"
+    printf 'hello\n' >"$scratch/hello.expected"
+    cmp "$scratch/hello.expected" "$output/phase3-b/hello/stdout"
+  else
+    [ "$status" -ne 0 ] || { echo "FAIL: $case_name accepted"; exit 1; }
+    case "$case_name" in
+      wrong-hash|existing|collision|missing-parent)
+        [ ! -e "$SIMPLE_P3B_TRACE" ]
+        [ "$(sha256sum "$producer" | cut -d' ' -f1)" = "$(sha256sum "$scratch/producer-template" | cut -d' ' -f1)" ] ;;
+    esac
+    if [ "$case_name" = existing ]; then grep -Fx preserved "$output/sentinel"; fi
+  fi
+  printf 'PASS: %s (shell contract fixture)\n' "$case_name"
+}
+for scenario in good wrong-hash missing-parent existing collision mutate hello-fail; do run_case "$scenario"; done
+digest=$(sha256sum "$scratch/producer-template" | cut -d' ' -f1)
+bash "$repo/scripts/bootstrap/build-phase3-phase4.sh" --phase=p3b --dry-run --simulate-host=windows-x86_64 \
+  --compile-mode=file --win-config=mingw --p3a-bin="$scratch/producer-template" --p3a-sha256="$digest" \
+  --build-root="$scratch/windows" >"$scratch/windows.log"
+grep -F 'CMD_P3B:' "$scratch/windows.log" | grep -F '/phase3-b/simple.exe'
+! grep -q 'CMD_P3A:' "$scratch/windows.log"
+echo 'PASS: 8 standalone P3b contract cases; mock execution and Windows argv only, no native compiler claim'
