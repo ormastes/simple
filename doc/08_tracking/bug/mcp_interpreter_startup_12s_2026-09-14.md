@@ -5,6 +5,11 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
+FIXED in source (`3e932aabea0`, 2026-11-20; verified 2026-11-24 at release/1.0.0 tip `b99b512ada8`:
+`src/app/mcp/main.spl` has no module-scope `use .main_dispatch`; `tools/call`
+reaches it through the `mcp_lazy_dispatch_tool` bridge, `main.spl:476-480`).
+The startup time was not re-measured. Original text follows.
+
 OPEN — breakdown below, fix identified but not yet applied (see "Why not
 applied here").
 
