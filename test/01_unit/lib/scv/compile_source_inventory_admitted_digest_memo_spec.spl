@@ -2,6 +2,8 @@ use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.*
 use std.nogc_sync_mut.io_runtime.{dir_remove, file_write, file_read}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 
 extern fn rt_getpid() -> i64
 
@@ -122,3 +124,51 @@ describe "SCV admitted-digest reads verify once per process per digest":
         expect(tampered.reason).to_equal("inventory-generation-invalid")
         expect(restored.valid).to_equal(true)
         expect(restored.inventory!.generation).to_equal(8)
+
+    it "REQ-SCV-ADMITTED-MEMO-006 seeding before a caller scope turns scoped reads into memo hits":
+        # Under a caller-owned transient scope the reader may not retain its
+        # result, so every scoped admitted read is a full read. A native build
+        # reads ONLY under such scopes; the seed verifies once ahead of them.
+        val root = memo_spec_root("seed")
+        dir_remove(root, true)
+        val unseeded = compile_source_inventory_publish_v1(root, memo_spec_inventory(10, "fn a(): 1"))
+        val seeded = compile_source_inventory_publish_v1(root, memo_spec_inventory(11, "fn a(): 2"))
+        val absent = sha256_text("never seeded")
+        val scope_free = transient_array_scope_state_v1() == 0
+        val c0 = compile_source_inventory_full_read_count_v1()
+        val rejected = compile_source_inventory_seed_admitted_digest_v1(root, absent)
+        val c1 = compile_source_inventory_full_read_count_v1()
+        val accepted = compile_source_inventory_seed_admitted_digest_v1(root, seeded)
+        val again = compile_source_inventory_seed_admitted_digest_v1(root, seeded)
+        val c2 = compile_source_inventory_full_read_count_v1()
+        val scoped = transient_scope_begin()
+        val in_scope = transient_array_scope_state_v1() == 1
+        val hit_a = compile_source_inventory_read_admitted_digest_v1(root, seeded)
+        val hit_b = compile_source_inventory_read_admitted_digest_v1(root, seeded)
+        val hit_generation = hit_b.inventory!.generation
+        val c3 = compile_source_inventory_full_read_count_v1()
+        val refused = compile_source_inventory_seed_admitted_digest_v1(root, unseeded)
+        val c4 = compile_source_inventory_full_read_count_v1()
+        val miss_a = compile_source_inventory_read_admitted_digest_v1(root, unseeded)
+        val miss_b = compile_source_inventory_read_admitted_digest_v1(root, unseeded)
+        val miss_valid = miss_a.valid and miss_b.valid
+        val c5 = compile_source_inventory_full_read_count_v1()
+        val ended = if scoped: transient_scope_end() else: true
+        dir_remove(root, true)
+        expect(scope_free).to_equal(true)
+        expect(rejected).to_equal(false)
+        expect(c1 - c0).to_equal(1)
+        expect(accepted).to_equal(true)
+        expect(again).to_equal(true)
+        expect(c2 - c1).to_equal(1)
+        expect(scoped).to_equal(true)
+        expect(in_scope).to_equal(true)
+        expect(hit_a.valid).to_equal(true)
+        expect(hit_generation).to_equal(11)
+        expect(c3 - c2).to_equal(0)
+        step("Inside a scope the seed is a no-op and scoped reads stay unmemoized")
+        expect(refused).to_equal(false)
+        expect(c4 - c3).to_equal(0)
+        expect(miss_valid).to_equal(true)
+        expect(c5 - c4).to_equal(2)
+        expect(ended).to_equal(true)
