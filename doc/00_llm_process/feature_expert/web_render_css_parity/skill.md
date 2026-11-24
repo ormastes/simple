@@ -4397,3 +4397,19 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - 8 pages JIT==interp at 1x and 4x, with the interpreter byte-identical to base.
   - Strict-vreg is clean.
 - **Bug record:** `doc/08_tracking/bug/hir_import_reparses_loader_modules_2026-11-24.md`.
+## 2026-11-24 — forms-media 4x JIT 24 s was a whole-frame read per translucent rect blend
+
+- **Two lanes disagreed.** This lane measured 24 s; #11183 reported 3.4-3.9 s / 2.2 GB on the same seed (d9dcc6f7).
+  - Same seed, same tree, same command: peak RSS is **12.7 GB**, not 2.2 GB, and the 2.2 GB does not reproduce. Backend, wrapper order, size and the catalog route all ruled out (the catalog runs the interpreter).
+  - The wall-time gap is the `MemoryMax=8G` cap that `page.sh` sets. Uncapped, the run takes 4.6 s. Capped, the cgroup reclaims and exit stalls (the `wrote` line at ~11 s, exit at 25-76 s).
+  - **Trap:** read peak RSS (`/usr/bin/time -f %M` inside the scope) before trusting a wall time from a capped run.
+- **Cause:** `emu_draw_rect_blend` called `core.read_pixels()` (the whole 10.9M-px frame) to blend one rect.
+  - The `<summary>` disclosure triangle (`_engine2d_draw_ir_path_fill`) blends each anti-aliased edge pixel as a 1x1 rect, so one 44x44 `path` command cost +9071 MB under the JIT.
+  - Found with a per-command `/proc/self/statm` probe in `_engine2d_draw_ir_render_command_plan`; `src/lib` needs no build, so the probe is free.
+  - gdb conditional breakpoints on `__rust_alloc` were far too slow to be usable.
+- **Fix:** read back only the rect, with `core.read_pixels_region_raw(x, y, w, h)` (native on SoftwareBackend/CpuBackend).
+  - forms-media 4x JIT (8 G cap, 3-round median): 24.30 -> 3.87 s, 8096 -> 3338 MB, paint 7550 -> 477 ms.
+  - Interpreter paint: 10.7 -> 8.8 s.
+  - All 32 PPMs (8 pages, 1x/4x, JIT/interpreter) are byte-identical to base.
+- **Spec:** `test/01_unit/lib/gc_async_mut/gpu/engine2d/rect_blend_reads_region_spec.spl`: 200 small blends, JIT 6.07 s -> 0.2 ms, JIT == interpreter.
+- **Bug record:** `doc/08_tracking/bug/engine2d_rect_blend_reads_whole_frame_2026-11-24.md`.

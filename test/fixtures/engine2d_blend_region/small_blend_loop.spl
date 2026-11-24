@@ -1,0 +1,37 @@
+# Fixture for test/01_unit/lib/gc_async_mut/gpu/engine2d/rect_blend_reads_region_spec.spl.
+# Blends 100 small translucent rects onto a 3000x3000 cpu_simd frame and
+# times them. `emu_draw_rect_blend` read the WHOLE frame back
+# (`core.read_pixels()`, 9M px) to blend each one; under the JIT that copy is
+# a real allocation per call.
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+extern fn rt_time_now_unix_micros() -> i64
+
+fn main():
+    var engine = Engine2D.create_with_backend(3000, 3000, "cpu_simd")
+    engine.clear(0xFF204060u32)
+    engine.draw_rect_blend(10, 10, 1, 1, 0x80FF8000u32)
+    val n = 100
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    while i < n:
+        # 1x1 edge pixels like a path fill's anti-aliased rim, plus a 3x2 rect
+        # that straddles the right frame edge (out-of-bounds pixels skipped).
+        engine.draw_rect_blend(20 + i, 30 + (i % 7), 1, 1, 0x80FF8000u32)
+        engine.draw_rect_blend(2998, 40 + i, 3, 2, 0x4000FF00u32)
+        i = i + 1
+    val t1 = rt_time_now_unix_micros()
+    val px = engine.read_pixels()
+    var acc: i64 = 0
+    var y = 0
+    while y < 160:
+        var x = 0
+        while x < 130:
+            acc = (acc * 31 + px[y * 3000 + x].to_i64()) % 2147483647
+            x = x + 1
+        y = y + 1
+    var edge: i64 = 0
+    y = 0
+    while y < 160:
+        edge = (edge * 31 + px[y * 3000 + 2999].to_i64()) % 2147483647
+        y = y + 1
+    print "backend={engine.backend_name()} blends={n * 2} loop_us={t1 - t0} acc={acc} edge={edge}"
