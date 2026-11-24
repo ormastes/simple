@@ -1,19 +1,61 @@
-name: True 656fa39e Phase4 from verified Phase3
-run-name: True Phase4 from Phase3 run ${{ inputs.parent_run }}
+name: Conditional canonical Linux 656 P3b and P4
 on:
   workflow_dispatch:
-    inputs:
-      parent_run:
-        type: string
-        required: true
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: true-phase4-656fa39e-${{ github.ref }}-${{ inputs.parent_run }}
+  group: linux-656-canonical-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  full-cli:
+  phase3b:
+    name: Linux 656 canonical P3b
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    outputs:
+      artifact: ${{ steps.handoff.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v5
+        with: {path: control, persist-credentials: false}
+      - uses: actions/checkout@v5
+        with:
+          ref: 656fa39e28a7775da0172a4e8eeeea1ac0ea59f0
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ed9c404d54065443ed5da8403a07dbaa1d2395fb
+          path: wrapper
+          persist-credentials: false
+      - name: Native prerequisites
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Verify actual P3a then canonical P3b and its native Hello
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 control/scripts/check/linux-656fa39e/canonical.py --role p3b --source source --wrapper wrapper --output evidence
+      - uses: actions/upload-artifact@v6
+        id: handoff
+        with:
+          name: linux-656-canonical-p3b-${{ github.run_id }}
+          path: evidence/handoff.tar
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: linux-656-canonical-p3b-evidence-${{ github.run_id }}
+          path: |
+            evidence/
+            source/build/scv/
+            source/.simple/scv/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  phase4:
+    name: Linux 656 canonical P4
+    needs: phase3b
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     steps:
@@ -24,29 +66,28 @@ jobs:
           ref: 656fa39e28a7775da0172a4e8eeeea1ac0ea59f0
           path: source
           persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ed9c404d54065443ed5da8403a07dbaa1d2395fb
+          path: wrapper
+          persist-credentials: false
       - name: Native prerequisites
         run: |
           sudo -n apt-get update -qq
           sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
-      - name: Verify immutable real Phase3 and build true full CLI
+      - name: Verify actual P3b then canonical P4 and actual release CLI behavior
         env:
           GH_TOKEN: ${{ github.token }}
-          PARENT_RUN: ${{ inputs.parent_run }}
-        run: python3 control/scripts/check/linux-656fa39e/phase3-parent.py --parent-run "$PARENT_RUN" --source source --intake parent-intake --output child-evidence
-      - name: Retain bounded canonical source snapshot metadata
-        if: always()
-        run: |
-          if [ -f source/scripts/bootstrap/capture-ladder-scv-evidence.py ]; then
-            mkdir -p child-evidence
-            python3 source/scripts/bootstrap/capture-ladder-scv-evidence.py source child-evidence/scv-source-metadata || printf '%s\n' 'SCV capture failed; no authority inferred' > child-evidence/scv-capture-failure.txt
-          fi
+          P3B_ARTIFACT: ${{ needs.phase3b.outputs.artifact }}
+        run: python3 control/scripts/check/linux-656fa39e/canonical.py --role p4 --source source --wrapper wrapper --output evidence
       - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: linux-656fa39e-true-phase4-${{ github.run_id }}
+          name: linux-656-canonical-p4-${{ github.run_id }}
           path: |
-            parent-intake/*.json
-            child-evidence/
+            evidence/
+            source/build/scv/
+            source/.simple/scv/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
