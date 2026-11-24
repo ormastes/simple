@@ -183,8 +183,14 @@ pub(crate) fn compile_builtin_method<M: Module>(
         _ => None,
     };
     if let Some(to_ty) = numeric_cast_target {
-        let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
         let src_ty = builder.func.dfg.value_type(receiver_val);
+        // Cranelift float type wins over a missing/int vreg type; see the twin
+        // in closures_structs.rs (float_method_chain_to_i64_returns_bits_2026-11-24.md).
+        let from_ty = match src_ty {
+            types::F64 => TypeId::F64,
+            types::F32 => TypeId::F32,
+            _ => ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64),
+        };
         let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
         let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
         let to_is_int = matches!(

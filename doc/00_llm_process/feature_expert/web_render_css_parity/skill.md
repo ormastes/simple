@@ -4531,3 +4531,14 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   `Notes <textarea>lllll` x 12, rows 3-4 of the value.
 - Trap: a landing lane's worktree can be reset under you (squash + delete)
   while you prototype in it. Prototype only in your own new worktree.
+## 2026-11-24 — seed: chained `x.ceil().to_i64()` returned f64 bits; `[v; n]` fill already fixed
+
+- **Chain cast:** a float math method's MIR dest has no vreg type, so `to_i64`/`to_int` defaulted the receiver to I64. That sent the raw f64 register to `rt_to_int_dynamic`, which returned the IEEE bits (`4607182418800017408` for 1.0).
+  - `to_i32`/`to_u8` and a bound local were always right.
+  - Fix: both cast sites (`closures_structs.rs`, `methods.rs`) take `from_ty` from the Cranelift value type when it is F32/F64.
+  - The interpreter's chained arm also lacked `sqrt`/`trunc`/...; `x.ceil().sqrt()` errored. It now delegates to `handle_float_methods`.
+- **`[full; len + 1]` wrong in default mode** was a stale binary. Fixed on `release/1.0.0` by `74454b58b2fd`. Check a repro binary's mtime against `git log` of the suspect lowering before filing.
+- **Spec:** `compiler/tests/float_chain_repeat_engines.rs`, run on the interpreter, the JIT and native cranelift; `main` returns a failure mask.
+- **Bug records:**
+  - `doc/08_tracking/bug/float_method_chain_to_i64_returns_bits_2026-11-24.md`
+  - `doc/08_tracking/bug/array_repeat_nonliteral_fill_computed_count_2026-11-24.md`
