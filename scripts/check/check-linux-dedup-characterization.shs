@@ -5,9 +5,10 @@
 #
 # Runs on Linux (incl. WSL). clang only (CC defaults to clang-18, then clang).
 # Configs: asan (address+undefined), tsan (thread), werror (-O2 -Wall -Wextra -Werror).
-# liburing headers: /usr/include or LIBURING_INCLUDE=<dir>; a missing header is
-# an ERROR (exit 2), never a silent skip. Verdict is the last stdout line:
-#   PASS — <n> run(s), <a> assertion(s) passed     exit 0
+# liburing headers: /usr/include or LIBURING_INCLUDE=<dir>. Without them the
+# 3 uring runs are SKIPPED and named in the verdict (never counted as passed);
+# REQUIRE_URING=1 turns a missing header into an ERROR. Verdict is the last line:
+#   PASS — <n> run(s), <a> assertion(s) passed[; SKIPPED uring x3 (...)]  exit 0
 #   FAIL — <k> of <n> run(s) failed: <names>       exit 1
 #   ERROR — nothing was checked (<reason>)         exit 2
 set -u
@@ -28,7 +29,12 @@ case "$($CC --version 2>/dev/null | head -1)" in
 esac
 
 uring_inc=${LIBURING_INCLUDE:-/usr/include}
-[ -f "$uring_inc/liburing.h" ] || { echo "ERROR — nothing was checked (liburing.h not in $uring_inc; set LIBURING_INCLUDE)"; exit 2; }
+skip=""
+if [ ! -f "$uring_inc/liburing.h" ]; then
+    [ "${REQUIRE_URING:-0}" = 1 ] && { echo "ERROR — nothing was checked (liburing.h not in $uring_inc; set LIBURING_INCLUDE)"; exit 2; }
+    skip="uring x3 (liburing.h not in $uring_inc)"
+    echo "SKIP — $skip"
+fi
 
 R=$root/src/runtime
 T=$R/test
@@ -38,6 +44,10 @@ base="-std=gnu11 -g -I$R -I$R/platform -I$T"
 targets="epoll||$T/async_linux_driver_characterization_selfcheck.c $R/platform/async_linux_epoll.c|-lpthread
 uring|-DCHAR_URING -DSPL_HAS_IO_URING -I$uring_inc|$T/async_linux_driver_characterization_selfcheck.c $R/platform/async_linux_uring.c|-l:liburing.so.2 -lpthread
 argv||$T/exec_argv_characterization_selfcheck.c $R/runtime_legacy_core.c $R/runtime_process_tree.c|-lpthread"
+total=9
+if [ -n "$skip" ]; then
+    targets=$(printf '%s\n' "$targets" | grep -v '^uring|'); total=6
+fi
 
 runs=0; failed=0; names=""; asserts=0
 for cfg in asan tsan werror; do
@@ -63,8 +73,8 @@ cat "$out/summary.txt"
 runs=$(grep -c ': .*passed' "$out/summary.txt")
 bad=$(grep -E '^(BUILDFAIL|RUNFAIL)' "$out/summary.txt" | awk '{print $2}' | tr '\n' ' ')
 asserts=$(grep -o ': [0-9]* passed' "$out/summary.txt" | awk '{s+=$2} END{print s+0}')
-total=9
 if [ "$runs" -eq 0 ] && [ -z "$bad" ]; then echo "ERROR — nothing was checked"; exit 2; fi
 if [ -n "$bad" ]; then echo "FAIL — $(echo $bad | wc -w) of $total run(s) failed: $bad"; exit 1; fi
 if [ "$runs" -ne "$total" ]; then echo "ERROR — nothing was checked (only $runs of $total runs reported)"; exit 2; fi
-echo "PASS — $runs run(s), $asserts assertion(s) passed"
+[ "$asserts" -gt 0 ] || { echo "ERROR — nothing was checked (0 assertions reported)"; exit 2; }
+echo "PASS — $runs run(s), $asserts assertion(s) passed${skip:+; SKIPPED $skip}"
