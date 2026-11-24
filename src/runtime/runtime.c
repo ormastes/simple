@@ -3916,7 +3916,7 @@ const char* rt_hex_to_wire(const char* hex_str) {
     return (const char*)SIMPLE_RT_NONNULL("rt_hex_to_wire", result);
 }
 
-#include "runtime_utf8_lossy_private.h"
+#include "runtime_utf8_strict_private.h"
 #if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
 /* Standalone Windows core-C selects runtime_native.c's text/array providers.
  * Preserve that composition while keeping the hosted twins ABI-compatible. */

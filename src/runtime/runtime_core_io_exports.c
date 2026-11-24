@@ -85,7 +85,7 @@
 #endif
 
 #include "runtime.h"
-#include "runtime_utf8_lossy_private.h"
+#include "runtime_utf8_strict_private.h"
 #include "runtime_core_text_arg.h"
 
 #include <errno.h>

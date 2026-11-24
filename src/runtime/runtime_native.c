@@ -43,7 +43,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime_memory_guard.h"
 #include "runtime_env_owned.h"
 #include "runtime_startup_args.h"
-#include "runtime_utf8_lossy_private.h"
+#include "runtime_utf8_strict_private.h"
 #include "platform/runtime_windows_private_atomic.h"
 #include "platform/runtime_windows_pty_owner_thread_private.h"
 #include "platform/runtime_windows_pipe_file_mode_private.h"
