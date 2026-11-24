@@ -66,3 +66,28 @@ restoration, method/ordinary declaration counts, semantic Result/RTI
 substitution, and the physical bootstrap i64 assertion. Its assertions are
 unchanged from ce231. Execution against the new merged source remains pending;
 no earlier passing result is relabeled as a new-head pass.
+
+## 2026-11-24: PR #11099 diagnose failure is a stale producer, not an open release defect
+
+Status: **verification-pending**.
+
+- #11099's `diagnose` run uses frozen producer source `5e436b9e623` (2026-11-23 21:53).
+  The release repair `1dadda21490` (2026-11-24 00:53) is **not** an ancestor of it
+  (`git merge-base --is-ancestor` fails), so that producer still leaves
+  `AttributeStoreV1::get` untyped and RTI falls back to the physical `b:i64`.
+- `AttributeStoreV1` declares `get`/`set` in the class body, not an `impl`
+  block. The new class-body cases in
+  `test/01_unit/compiler/hir/generic_method_semantic_return_spec.spl`
+  (owner-generic `Result`, `Option`, nested `Result<Option<T>>`, and a
+  method-chained `store.me_ref().get(3)` after a factory match), run with
+  `SIMPLE_BOOTSTRAP=1`:
+  - release head: 4/4 pass;
+  - release with `1dadda21490`'s `src/` reverted: 4/4 fail with
+    `untyped-declaration`, which matches the native symptom exactly.
+- Remaining step: build a new P1 producer from release at or after this change,
+  rebind #11099's workflow producer env to it, and rerun `diagnose`. Do not
+  relax the MIR declaration-ownership check.
+- Separately, and already present before this change:
+  `test/01_unit/compiler/hir/bootstrap_generic_owner_method_return_spec.spl`
+  fails 0/3 on release under the seed. It does not set up the entry closure that
+  bootstrap lowering requires; the 1dadda2 report says it never executed.

@@ -74,3 +74,52 @@ describe "generic method semantic return publication":
                 expect(rti_term_canonical_text(rti_term_of_hir_type(function.return_type, hir.symbols, []).unwrap())).to_equal("b:text")
         expect(checked_methods).to_equal(1)
         expect(checked_ordinary).to_equal(1)
+
+# Class-body methods (no separate `impl` block) are the AttributeStoreV1 shape
+# from test/fixtures/compiler/generic_store_factory_result_owner/actual_attribute_store.spl.
+fn lower_entry_closure(path: text, source: text) -> (HirModule, i64, bool):
+    val had_entry = env_has("SIMPLE_NATIVE_BUILD_ENTRY")
+    val prior_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+    val had_closure = env_has("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    val prior_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    val _e = env_set("SIMPLE_NATIVE_BUILD_ENTRY", path)
+    val _c = env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(ast)
+    val _r = if had_entry: env_set("SIMPLE_NATIVE_BUILD_ENTRY", prior_entry)
+        else: env_unset("SIMPLE_NATIVE_BUILD_ENTRY")
+    val _rc = if had_closure: env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", prior_closure)
+        else: env_unset("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    print "class-body-proof bootstrap={lowering.ambient_bootstrap_enabled()}"
+    (hir, lowering.errors.len(), lowering.ambient_bootstrap_enabled())
+
+fn decided_method_return(hir: HirModule, path: text, suffix: text) -> text:
+    for function in hir.functions.values():
+        val symbol = hir.symbols.get_symbol_raw(function.symbol.id).unwrap()
+        if symbol.name.ends_with(suffix):
+            if not symbol.type_.?: return "untyped-declaration"
+            val row = rti_row_of_function(hir, rti_module_id(path), function).unwrap()
+            match row.entry:
+                case ReturnTypeEntry.Decided(term):
+                    return "{row.owner_type_param_count}:" + rti_term_canonical_text(rti_subst(term, [RtType.Builtin("text")]))
+                case _: return "undecided"
+    "missing"
+
+describe "class-body generic method semantic return publication":
+    val path = "src/rti_generic_method/class_body_provider.spl"
+    val source = "class Store<T>:\n    values: [T]\n    fn get(node: i64) -> Result<T, text>:\n        Err(\"empty\")\n    fn find(node: i64) -> Option<T>:\n        nil\n    fn nested(node: i64) -> Result<Option<T>, text>:\n        Err(\"empty\")\n    fn me_ref() -> Store<T>:\n        self\nfn make_store<T>(label: text) -> Result<Store<T>, text>:\n    Ok(Store<T>(values: []))\nfn use_it() -> bool:\n    match make_store<text>(\"s\"):\n        case Ok(store):\n            match store.me_ref().get(3):\n                case Ok(v):\n                    match store.find(1):\n                        case Some(w): return v == w\n                        case None: return false\n                case Err(_): return false\n        case Err(_): return false\n"
+
+    it "publishes owner-generic Result return for a class-body method":
+        val (hir, errors, _b) = lower_entry_closure(path, source)
+        expect(errors).to_equal(0)
+        expect(decided_method_return(hir, path, "Store::get")).to_equal("1:result(b:text,b:text)")
+
+    it "publishes owner-generic Option return for a class-body method":
+        val (hir, _e, _b) = lower_entry_closure(path, source)
+        expect(decided_method_return(hir, path, "Store::find")).to_equal("1:opt(b:text)")
+
+    it "publishes nested Result<Option<T>> and chained owner returns":
+        val (hir, _e, _b) = lower_entry_closure(path, source)
+        expect(decided_method_return(hir, path, "Store::nested")).to_equal("1:result(opt(b:text),b:text)")
+        expect(decided_method_return(hir, path, "Store::me_ref")).to_start_with("1:")
