@@ -1,46 +1,100 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Pending PR11133 qualified full CLI gates
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
+    inputs:
+      cli_kind:
+        type: choice
+        options: [early, phase3]
+        required: true
+      cli_run:
+        type: string
+        required: true
+      cli_artifact:
+        type: string
+        required: true
+      mcp_run:
+        type: string
+        default: ''
+      mcp_artifact:
+        type: string
+        default: ''
+      mcp_member:
+        type: string
+        default: ''
+      mcp_sha256:
+        type: string
+        default: ''
+      mcp_source_revision:
+        description: Independently reviewed source binding for the exact native artifact
+        type: string
+        default: ''
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  pr11133:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          path: control
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - uses: actions/checkout@v5
+        with:
+          ref: ce231b5b898d797c98d44a9b59a4859a7d792a7b
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Retain exact PR identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr view 11133 --repo ormastes/simple --json number,headRefOid,baseRefName,state > pr-identity.json
+          python -c "import json; p=json.load(open('pr-identity.json')); assert p['headRefOid']=='ce231b5b898d797c98d44a9b59a4859a7d792a7b' and p['baseRefName']=='release/1.0.0'"
+      - name: Verified CLI intake, never a seed or rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_KIND: ${{ inputs.cli_kind }}
+          CLI_RUN: ${{ inputs.cli_run }}
+          CLI_ARTIFACT: ${{ inputs.cli_artifact }}
+        run: |
+          python control/scripts/check/compiler-pr-qualification/download-cli.py --kind "$CLI_KIND" --run "$CLI_RUN" --artifact "$CLI_ARTIFACT" --output intake
+      - name: Optional real native MCP server, no protocol pretest
+        if: inputs.mcp_artifact != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MCP_RUN: ${{ inputs.mcp_run }}
+          MCP_ARTIFACT: ${{ inputs.mcp_artifact }}
+          MCP_MEMBER: ${{ inputs.mcp_member }}
+          MCP_SHA: ${{ inputs.mcp_sha256 }}
+          MCP_SOURCE: ${{ inputs.mcp_source_revision }}
+        run: |
+          python control/scripts/check/compiler-pr-qualification/download-mcp.py --run "$MCP_RUN" --artifact "$MCP_ARTIFACT" --member "$MCP_MEMBER" --sha256 "$MCP_SHA" --source-revision "$MCP_SOURCE" --output mcp-intake
+      - name: Previously unverified checks, stop at first blocker
+        env:
+          CLI_KIND: ${{ inputs.cli_kind }}
+          MCP_ARTIFACT: ${{ inputs.mcp_artifact }}
+          MCP_SHA: ${{ inputs.mcp_sha256 }}
+          MCP_SOURCE: ${{ inputs.mcp_source_revision }}
+        run: |
+          args=()
+          if [ -n "$MCP_ARTIFACT" ]; then
+            args=(--mcp-binary "$PWD/mcp-intake/simple_mcp_server" --mcp-sha256 "$MCP_SHA" --mcp-source-revision "$MCP_SOURCE")
+          fi
+          python control/scripts/check/compiler-pr-qualification/qualify-pr.py --source source --intake intake --kind "$CLI_KIND" --output qualification "${args[@]}"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: pr11133-core-gates-${{ github.run_id }}
+          path: |
+            pr-identity.json
+            intake/*.json
+            mcp-intake/*.json
+            qualification/*.json
+            qualification/*.env
+            qualification/*.stdout
+            qualification/*.stderr
+          retention-days: 14
