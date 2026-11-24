@@ -45,6 +45,11 @@ fn _windows_redirected_cleanup(output: text) -> bool:
     if not removed: _windows_redirected_cleanup_blocked = true
     removed
 
+fn _windows_redirected_scope_held(output: text) -> bool:
+    for state in _windows_redirected_states:
+        if not state.closed and state.stdout_path == output: return true
+    false
+
 fn _windows_redirected_image_digest(program: text) -> text:
     # Expected bytes are frozen for this parent lifetime. Each admission still
     # pins and verifies the actual image against this digest in the owner.
@@ -82,7 +87,11 @@ fn windows_redirected_spawn_checked_with_memory(cmd: text, args: [text], stdout_
     val output = host_path_native(path_absolute(stdout_path))
     val error = host_path_native(path_absolute(stderr_path))
     val private_root = output + ".scope"
-    if is_dir(private_root): return Err("Windows private capture scope already exists")
+    if is_dir(private_root):
+        # A scope left by a dead earlier owner (killed runner, unreaped child)
+        # is orphaned; one a live admission of this process holds is not.
+        if _windows_redirected_scope_held(output): return Err("Windows private capture scope already exists")
+        if not _windows_redirected_cleanup(output): return Err("Windows stale private capture scope could not be reclaimed")
     for directory in [private_root, private_root + "/home", private_root + "/tmp", private_root + "/cache"]:
         if not dir_create_all(directory):
             val cleaned = _windows_redirected_cleanup(output)
