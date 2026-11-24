@@ -370,7 +370,7 @@ next batch and is a `src/lib/nogc_sync_mut/**` lane, not a crypto lane.
 
 ## Fresh occurrence (2026-11-24): `protocol_media_parts_spec`
 
-`test/01_unit/lib/gc_async_mut/slang/protocol_media_parts_spec.spl` went 7/11 on
+`test/01_unit/lib/gc_async_mut/slang/entrypoints/protocol_media_parts_spec.spl` went 7/11 on
 release/1.0.0: its private `_text_part(text) -> text` was resolved to
 `serving_pooling._text_part(text) -> ChatPart`, producing garbage request bodies.
 Worked around by renaming the spec helper to `_media_text_part`.
