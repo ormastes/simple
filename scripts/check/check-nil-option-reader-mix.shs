@@ -1,0 +1,1120 @@
+#!/bin/sh
+# Ratchet: an Option-typed slot must not be read with `== nil` / `!= nil`.
+#
+# Bug class (fixed by hand ~900 times on 2026-11-22..24, PRs #11164, #11172,
+# #11279): in COMPILED Simple `None == nil` is FALSE, while `.is_none()` /
+# `.is_some()` are right for both `None` and flat nil (runtime rt_is_none).
+# A reader `x == nil` therefore silently takes the wrong branch as soon as the
+# slot's producer yields `None` / `Some(..)` -- a missing dashboard session read
+# as present, `static_.init == nil` skipping zero-fill in three instruction
+# selectors, `AdaptiveSet.remove` reporting every miss as removed. Mechanical
+# `nil` -> `None` producer rewrites (NIL-UNSAFE-001) keep leaving such readers
+# behind, so NEW ones FAIL here. This gate only FLAGS; it never rewrites.
+#
+# Fix a flagged reader with `.is_none()` / `.is_some()`. One caution: inside a
+# generic class, when the reader is a CALL returning an optional of a type
+# parameter (`self.get(k) == nil`, `-> V?`), bind the result to a local first
+# (`val found = self.get(k)` / `found.is_some()`): compilers before PR #11283
+# reject the chained form in MIR lowering (E-RTI-003).
+#
+# DETECTION (static, conservative: precision over recall).
+#   Pass 1, producers that can hold an Option:
+#     - struct/class fields declared `name: T?` or `name: Option<T>`;
+#     - `.name = None` / `.name = Some(` assignments, used only
+#       for a slot no struct declares;
+#     - functions and methods declared `-> T?` / `-> Option<T>`, or, when they
+#       declare no return type, whose body has `return None`, `return Some(`,
+#       or a bare trailing `None` / `Some(..)`.
+#   Pass 2, readers `<recv>.name ==/!= nil` and `name(..) ==/!= nil`,
+#   `<recv>.name(..) ==/!= nil`, flagged only when the slot resolves:
+#     - field: the receiver type is known and that type declares the field
+#       Option. Known means a chain rooted at `self`, a parameter, an
+#       annotated local, a constructor call, a local bound to a call whose
+#       declared return type is unique (`val claim = claim_slot(k)`), a
+#       `for x in <list>` variable or an `if val` binding, then walked over
+#       declared field types, method return types and `[i]` on `[T]`
+#       fields. Otherwise the
+#       name is declared Option in EVERY struct/class that declares it;
+#     - bare call: a same-file definition, else the definition in the module
+#       the file's `use` list imports the name from, else every free function
+#       of that name in the scanned tree -- all must be Option-returning;
+#     - method call: the receiver type's method, else every method AND free
+#       function of that name -- all must be Option-returning.
+#
+# KNOWN BLIND SPOTS (not flagged, by design):
+#   - local-variable readers (`val x = opt(); if x == nil`): no slot name;
+#   - a receiver the walk cannot type (untyped local from an expression, a
+#     tuple or dict element, a generic `T`) falls back to the
+#     every-declaration rule, so an ambiguous field name is skipped;
+#   - a field or method name that is Option in one type and not in another
+#     with the receiver unresolved; same-named types with different shapes;
+#   - builtin methods (`dict.get`, `.next()`), `any?`, `Result<T?, E>`;
+#   - readers inside string interpolation, `nil == x`, spec matchers
+#     (`to_equal(nil)`, `to_be_nil`), multi-line comparisons;
+#   - only `src/**/*.spl` is scanned (vendor trees excluded), not `test/`.
+#   Measured recall, replaying the hand-fix commits against their parents:
+#   ef2a17bc62d 206 of 302 field readers and 108 of 123 call readers;
+#   68461dc161a 13 of 13 calls; 2cb2288d2a5 7 of 7 fields, 5 of 5 calls. All
+#   47 local-variable readers those commits also rewrote are out of scope.
+#   The classification is GLOBAL: declaring a new Option field or function can
+#   make an old reader elsewhere an offender. That is the bug class, not noise.
+#
+# Usage:
+#   sh scripts/check/check-nil-option-reader-mix.shs [--root DIR]
+#   sh scripts/check/check-nil-option-reader-mix.shs --rev <sha> [--base <sha>]
+#   sh scripts/check/check-nil-option-reader-mix.shs --selftest
+#   sh scripts/check/check-nil-option-reader-mix.shs --generate-baseline
+#   ... --list     also print every flagged reader (baselined ones included)
+#
+#   --root DIR   scan the working tree under DIR (default: the repo root).
+#   --rev SHA    scan COMMITTED content of SHA (private index + checkout-index; never the working
+#                copy), baseline read from SHA too. This is the mode CI and
+#                land use: the fast-gates checkout is sparse and blob-filtered,
+#                so missing `.spl` blobs are fetched in ONE batch first; a
+#                failed fetch is ERROR, never a pass.
+#   --base SHA   with --rev: a reader that is not baselined is still accepted
+#                when it already exists at `git merge-base SHA REV` -- a branch
+#                cut before a reader was fixed or baselined is not blamed for
+#                it. Only what the range itself adds FAILs.
+#
+# Baseline: scripts/check/nil_option_reader_mix_baseline.txt, one key per line
+# `path|slot|reader text|n` (n = occurrence of that exact reader in the file;
+# no line numbers, so it survives line moves). A baselined reader that is gone
+# is STALE and also FAILs, so the list only shrinks. `--generate-baseline` is
+# for reviewed updates only; it keeps the file's `#` comment lines.
+#
+# Verdict (last stdout line):
+#   PASS — <n> file(s) checked, <k> grandfathered reader(s), 0 new, 0 stale exit 0
+#   FAIL — <n> file(s) checked, ...; new: <file:line ..>; stale: <keys>    exit 1
+#   ERROR — nothing was checked (<reason>)                                 exit 2
+set -u
+# sort/comm/awk must agree on byte order; two gates broke on locale collation.
+export LC_ALL=C
+# Address repositories by path only: an inherited GIT_DIR (git sets it in
+# hooks) would make `git -C` and the selftest scratch repo act on the caller.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$script_dir/../.." && pwd)
+baseline_name="scripts/check/nil_option_reader_mix_baseline.txt"
+mode=scan
+rev=""
+base=""
+list=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--root needs a value)"; exit 2; }; root=$2; shift 2 ;;
+        --rev) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--rev needs a value)"; exit 2; }; rev=$2; shift 2 ;;
+        --base) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--base needs a value)"; exit 2; }; base=$2; shift 2 ;;
+        --selftest) mode=selftest; shift ;;
+        --generate-baseline) mode=generate; shift ;;
+        --list) list=1; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; exit 2' INT TERM
+
+# detect <tree> <out> : scans <tree>/src/**/*.spl (vendor excluded).
+# <out> gets one line per flagged reader, TAB-separated:
+#   key  path:line  reader-text  reason
+# <out>.files gets the number of files in scope. Returns 0, or non-zero when
+# a tool failed (the caller turns that into ERROR).
+#
+# Two passes keep this at ~2s over 20k files: pass L reads only the files that
+# contain a nil comparison at all and resolves each reader's LOCAL context
+# (enclosing type, parameter and local types, imports); pass G greps every
+# file for declarations of just the slot names those readers use.
+detect() {
+    d_tree=$1; d_out=$2
+    (cd "$d_tree" && find src -type f -name '*.spl' 2>/dev/null) |
+        grep -v -E '^src/(compiler_rust|runtime)/vendor/' | sort > "$d_out.list"
+    wc -l < "$d_out.list" | tr -d ' ' > "$d_out.files"
+    : > "$d_out"; : > "$d_out.raw"
+    [ -s "$d_out.list" ] || return 0
+    # xargs exits 123 when a grep batch matched nothing; grep errors are read
+    # from stderr instead, so a failed read can never look like "no readers".
+    (cd "$d_tree" && tr '\n' '\0' < "$d_out.list" | xargs -0 grep -a -l -E '(\.[A-Za-z_0-9]+[!?]*|\)) *[!=]= nil') \
+        > "$d_out.rfiles" 2> "$d_out.err"
+    [ -s "$d_out.err" ] && { cat "$d_out.err" >&2; return 9; }
+    [ -s "$d_out.rfiles" ] || return 0
+
+    # ---- pass L: readers + their local context -> R/I records ----
+    awk -v ROOT="$d_tree" '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    # Type text -> base type name, `[T]` for a list of T, "" when unknown.
+    function typestr(t,   inner) {
+        t = trim(t)
+        sub(/^mut +/, "", t); sub(/^&/, "", t); sub(/\?$/, "", t)
+        if (t ~ /^Option<.*>$/) return typestr(substr(t, 8, length(t) - 8))
+        if (t ~ /^\[.*\]$/) { inner = typestr(substr(t, 2, length(t) - 2)); return (inner == "" ? "" : "[" inner "]") }
+        if (t ~ /^(List|Array|Vec)<.*>$/) {
+            sub(/^[A-Za-z]+</, "", t); sub(/>$/, "", t)
+            inner = typestr(t); return (inner == "" ? "" : "[" inner "]")
+        }
+        sub(/<.*$/, "", t)
+        if (t !~ /^[A-Z][A-Za-z0-9_]*$/) return ""
+        return t
+    }
+    # Blank out string contents and cut a trailing comment.
+    function clean(s,   out, i, c, n, q) {
+        if (!index(s, "\"") && !index(s, SQ) && !index(s, "#")) return s
+        n = length(s); out = ""; q = ""
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (q != "") {
+                if (c == "\\") { i++; continue }
+                if (c == q) { q = ""; out = out c }
+                continue
+            }
+            if (c == "\"" || c == SQ) { q = c; out = out c; continue }
+            if (c == "#") break
+            out = out c
+        }
+        return out
+    }
+    function paren_open(s,   a, b, t) {
+        t = s; a = gsub(/\(/, "", t); t = s; b = gsub(/\)/, "", t)
+        return a - b
+    }
+    # Parameter types of the function being opened.
+    function process_header(h,   p, i, n, c, depth, params, k, np, parts, cur, pn, pt, q) {
+        split("", ptype)
+        p = index(h, "("); if (p == 0) return
+        n = length(h); depth = 0
+        for (i = p; i <= n; i++) {
+            c = substr(h, i, 1)
+            if (c == "(") depth++
+            else if (c == ")") { depth--; if (depth == 0) break }
+        }
+        params = substr(h, p + 1, i - p - 1)
+        np = 0; cur = ""; depth = 0; n = length(params)
+        for (k = 1; k <= n; k++) {
+            c = substr(params, k, 1)
+            if (c == "(" || c == "<" || c == "[") depth++
+            else if (c == ")" || c == ">" || c == "]") depth--
+            if (c == "," && depth == 0) { parts[++np] = cur; cur = "" } else cur = cur c
+        }
+        parts[++np] = cur
+        for (k = 1; k <= np; k++) {
+            q = index(parts[k], ":"); if (q == 0) continue
+            pn = trim(substr(parts[k], 1, q - 1)); pt = substr(parts[k], q + 1)
+            sub(/ *=.*$/, "", pt)
+            sub(/^(mut|var|val) +/, "", pn)
+            if (pn ~ /^[a-z_][A-Za-z0-9_]*$/) { pt = typestr(pt); ptype[pn] = (pt == "" ? "" : "T:" pt) }
+        }
+    }
+    # Index just past the group opening at s[i] (`(` or `[`); 0 if unbalanced.
+    function skip_group(s, i,   n, c, depth) {
+        n = length(s); depth = 0
+        for (; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "(" || c == "[") depth++
+            else if (c == ")" || c == "]") { depth--; if (depth == 0) return i + 1 }
+        }
+        return 0
+    }
+    # Postfix chain -> root-resolved descriptor `T:Type|.field|.method()|[]`
+    # (or `F:fn|...` for a free-function root); "" when it cannot be typed
+    # from this function alone. Pass G walks it over the declared types.
+    function norm(e,   i, n, c, tok, out, root, j) {
+        e = trim(e); sub(/ *\?\?.*$/, "", e); gsub(/[!?]/, "", e)
+        n = length(e)
+        if (!match(e, /^[A-Za-z_][A-Za-z0-9_]*/)) return ""
+        root = substr(e, 1, RLENGTH); i = RLENGTH + 1
+        if (substr(e, i, 1) == "(") {
+            j = skip_group(e, i); if (!j) return ""
+            i = j
+            if (root ~ /^[A-Z]/) out = "T:" root
+            else { out = "F:" root; called[root] = 1 }
+        } else if (root == "self") {
+            if (cur_type == "") return ""
+            out = "T:" cur_type
+        } else if (root ~ /^[A-Z]/) {
+            out = "T:" root
+        } else if (root in ptype) {
+            if (ptype[root] == "") return ""
+            out = ptype[root]
+        } else return ""
+        while (i <= n) {
+            c = substr(e, i, 1)
+            if (c == "[") { j = skip_group(e, i); if (!j) return ""; i = j; out = out "|[]"; continue }
+            if (c != ".") return ""
+            if (!match(substr(e, i + 1), /^[A-Za-z_][A-Za-z0-9_]*/)) return ""
+            tok = substr(e, i + 1, RLENGTH); i += RLENGTH + 1
+            if (substr(e, i, 1) == "(") {
+                j = skip_group(e, i); if (!j) return ""
+                i = j
+                if (tok == "unwrap" || tok == "expect" || tok == "clone") continue
+                out = out "|." tok "()"
+            } else out = out "|." tok
+        }
+        return out
+    }
+    # Left operand of a comparison: the trailing postfix expression of <left>.
+    function operand_of(left,   i, c, depth) {
+        sub(/[ \t]+$/, "", left)
+        depth = 0
+        for (i = length(left); i >= 1; i--) {
+            c = substr(left, i, 1)
+            if (c == ")" || c == "]") depth++
+            else if (c == "(" || c == "[") { if (depth == 0) break; depth-- }
+            else if (depth == 0 && c !~ /[A-Za-z0-9_.!?]/) break
+        }
+        return substr(left, i + 1)
+    }
+    function record(operand, op,   o, i, c, depth, head, name, recv, kind, desc, txt) {
+        o = operand
+        if (o == "") return
+        if (o ~ /\)$/) {
+            depth = 0
+            for (i = length(o); i >= 1; i--) {
+                c = substr(o, i, 1)
+                if (c == ")") depth++
+                else if (c == "(") { depth--; if (depth == 0) break }
+            }
+            head = substr(o, 1, i - 1)
+            kind = "C"
+        } else if (o ~ /\]$/) {
+            return
+        } else {
+            head = o; sub(/[!?]+$/, "", head)
+            kind = "F"
+        }
+        if (head ~ /\./) {
+            i = length(head); while (substr(head, i, 1) != ".") i--
+            recv = substr(head, 1, i - 1); name = substr(head, i + 1)
+            if (kind == "C") kind = "M"
+        } else {
+            if (kind == "F") return
+            recv = ""; name = head
+        }
+        if (name !~ /^[a-z_][A-Za-z0-9_]*$/) return
+        desc = (recv != "" ? norm(recv) : "")
+        txt = operand " " op " nil"
+        gsub(/[ \t]+/, " ", txt); gsub(/\|/, "/", txt)
+        printf "R\t%s\t%d\t%s\t%s\t%s\t%d\t%s\n", file, lno, kind, name, desc, (cur_type != "" && type_gen), txt
+        if (kind == "C") called[name] = 1
+    }
+    function scan_use(u,   p, mod, na, ma, nm) {
+        sub(/^ *(pub +|export +)?(use|import|from) +/, "", u)
+        p = match(u, /[{(]/)
+        if (p == 0) {
+            # `use a.b.c.name` : name imported from module c
+            na = split(trim(u), ma, "."); if (na < 2) return
+            nm = ma[na]; if (nm ~ /^[a-z_][A-Za-z0-9_]*$/) imp[nm] = ma[na - 1]
+            return
+        }
+        mod = trim(substr(u, 1, p - 1)); sub(/\.$/, "", mod)
+        na = split(mod, ma, "."); use_mod = ma[na]
+        use_names(substr(u, p + 1))
+    }
+    function use_names(names,   n, a, k, nm) {
+        if (names ~ /[})]/) { sub(/[})].*$/, "", names); in_use = 0 } else in_use = 1
+        n = split(names, a, ",")
+        for (k = 1; k <= n; k++) {
+            nm = trim(a[k]); sub(/ +as +.*$/, "", nm)
+            if (nm ~ /^[a-z_][A-Za-z0-9_]*$/) imp[nm] = use_mod
+        }
+    }
+    BEGIN {
+        SQ = sprintf("%c", 39)
+        while ((getline file) > 0) {
+            path = ROOT "/" file
+            cur_type = ""; type_ind = -1; type_gen = 0
+            in_fn = 0; fn_ind = -1; pending = 0; in_doc = 0; in_use = 0; lno = 0
+            split("", ptype); split("", imp); split("", called)
+            while ((getline line < path) > 0) {
+                lno++
+                if (index(line, "\"\"\"")) {
+                    t = line; if (gsub(/"""/, "", t) % 2 == 1) in_doc = !in_doc
+                    continue
+                }
+                if (in_doc) continue
+                if (line ~ /^[ \t]*(#|$)/) continue
+                match(line, /^ */); ind = RLENGTH
+                if (in_use) { use_names(clean(line)); continue }
+                if (pending) {
+                    hdr = hdr " " trim(clean(line))
+                    if (paren_open(hdr) <= 0 || ++pending > 40) { pending = 0; process_header(hdr) }
+                    continue
+                }
+                if (in_fn && ind <= fn_ind) { in_fn = 0; fn_ind = -1; split("", ptype) }
+                if (cur_type != "" && ind <= type_ind) { cur_type = ""; type_ind = -1; type_gen = 0 }
+                if (ind == 0 && line ~ /^(pub +|export +)?(use|import|from) /) { scan_use(clean(line)); continue }
+                if (line ~ /^ *([a-z]+ +)*(struct|class|impl|actor|trait|mixin) +[A-Z]/) {
+                    h = clean(line)
+                    match(h, /(struct|class|impl|actor|trait|mixin) +[A-Z]/)
+                    h = substr(h, RSTART); sub(/^[a-z]+ +/, "", h)
+                    if (h ~ / for /) sub(/^.* for +/, "", h)
+                    type_gen = (h ~ /^[A-Za-z0-9_]+</)
+                    sub(/[^A-Za-z0-9_].*$/, "", h)
+                    cur_type = h; type_ind = ind
+                    in_fn = 0; fn_ind = -1
+                    continue
+                }
+                if (line ~ /^ *([a-z]+ +)*(fn|me) +[A-Za-z_][A-Za-z0-9_]* *[(<]/) {
+                    h = clean(line)
+                    sub(/^ *([a-z]+ +)*(fn|me) +/, "", h)
+                    in_fn = 1; fn_ind = ind
+                    if (paren_open(h) > 0) { hdr = h; pending = 1; continue }
+                    process_header(h)
+                    continue
+                }
+                if (in_fn && line ~ /^ *((val|var) +[a-z_][A-Za-z0-9_]* *[:=]|for +[a-z_][A-Za-z0-9_]* +in |(if|elif|while) +val +[a-z_][A-Za-z0-9_]* *=)/) {
+                    h = trim(clean(line))
+                    if (h ~ /^for /) {
+                        sub(/^for +/, "", h); lname = h; sub(/[^A-Za-z0-9_].*$/, "", lname)
+                        sub(/^[A-Za-z0-9_]+ +in +/, "", h); sub(/:[^:]*$/, "", h)
+                        t = norm(h); ptype[lname] = (t == "" ? "" : t "|[]")
+                    } else {
+                        cond = (h !~ /^va[lr] /)
+                        sub(/^((if|elif|while) +)?va[lr] +/, "", h)
+                        lname = h; sub(/[^A-Za-z0-9_].*$/, "", lname)
+                        h = substr(h, length(lname) + 1)
+                        if (h ~ /^ *:/) {
+                            sub(/^ *: */, "", h); sub(/ *=.*$/, "", h)
+                            t = typestr(h); ptype[lname] = (t == "" ? "" : "T:" t)
+                        } else if (h ~ /^ *= *[^=]/) {
+                            sub(/^ *= */, "", h); if (cond) sub(/:[^:]*$/, "", h)
+                            ptype[lname] = norm(h)
+                        }
+                    }
+                }
+                if (index(line, "= nil")) {
+                    h = clean(line)
+                    while (match(h, /[!=]= nil([^A-Za-z0-9_]|$)/)) {
+                        rs = RSTART    # record() runs match() itself
+                        record(operand_of(substr(h, 1, rs - 1)), substr(h, rs, 2))
+                        h = substr(h, rs + 6)
+                    }
+                }
+            }
+            close(path)
+            for (nm in called) if (nm in imp) printf "I\t%s\t%s\t%s\n", file, nm, imp[nm]
+        }
+    }' < "$d_out.rfiles" > "$d_out.rec"
+    d_rc=$?
+    [ "$d_rc" -eq 0 ] || return "$d_rc"
+    # Slot names, and every field / method / function name on a receiver chain.
+    awk -F '\t' '$1 == "R" { print $5; n = split($6, a, "|")
+            for (i = 1; i <= n; i++) { s = a[i]; if (s == "[]" || s ~ /^T:/) continue
+                sub(/^F:/, "", s); sub(/^\./, "", s); sub(/\(\)$/, "", s); print s } }' "$d_out.rec" |
+        sort -u > "$d_out.names"
+    [ -s "$d_out.names" ] || return 0
+    d_alt=$(awk '{ printf "%s%s", sep, $0; sep = "|" }' "$d_out.names")
+    {
+        echo '^[A-Za-z@_]'
+        echo '"""'
+        echo '^ +([a-z]+ +)*(struct|class|impl|actor|trait|mixin|enum|fn|me) '
+        echo '^ *\).*->'
+        echo "^ +((pub|var|val|static|mut) +)*($d_alt) *:"
+        echo '(return +(None|Some\()|^ *None *$|^ *Some\()'
+        echo "\\.($d_alt) = (None|Some\\()"
+    } > "$d_out.pat"
+
+    # ---- pass G: declarations of those names in every file, then classify ----
+    # Four grep workers over disjoint file chunks: the 250-name alternation is
+    # the single most expensive step. Each file stays contiguous in its chunk.
+    awk -v P="$d_out.chunk" '{ print > (P (NR % 4)) }' "$d_out.list"
+    for d_c in 0 1 2 3; do
+        : > "$d_out.g$d_c"; : > "$d_out.e$d_c"
+        [ -s "$d_out.chunk$d_c" ] || continue
+        (cd "$d_tree" && tr '\n' '\0' < "$d_out.chunk$d_c" |
+            xargs -0 grep -a -H -n -E -f "$d_out.pat" > "$d_out.g$d_c" 2> "$d_out.e$d_c") &
+    done
+    wait
+    cat "$d_out.e0" "$d_out.e1" "$d_out.e2" "$d_out.e3" > "$d_out.err"
+    [ -s "$d_out.err" ] && { cat "$d_out.err" >&2; return 9; }
+    cat "$d_out.g0" "$d_out.g1" "$d_out.g2" "$d_out.g3" |
+    awk -v REC="$d_out.rec" -v NAMES="$d_out.names" '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function is_opt(t) { t = trim(t); return (t ~ /\?$/ || t ~ /^Option</) }
+    # Type text -> base type name, `[T]` for a list of T, "" when unknown.
+    function typestr(t,   inner) {
+        t = trim(t)
+        sub(/^mut +/, "", t); sub(/^&/, "", t); sub(/\?$/, "", t)
+        if (t ~ /^Option<.*>$/) return typestr(substr(t, 8, length(t) - 8))
+        if (t ~ /^\[.*\]$/) { inner = typestr(substr(t, 2, length(t) - 2)); return (inner == "" ? "" : "[" inner "]") }
+        if (t ~ /^(List|Array|Vec)<.*>$/) {
+            sub(/^[A-Za-z]+</, "", t); sub(/>$/, "", t)
+            inner = typestr(t); return (inner == "" ? "" : "[" inner "]")
+        }
+        sub(/<.*$/, "", t)
+        if (t !~ /^[A-Z][A-Za-z0-9_]*$/) return ""
+        return t
+    }
+    # One value per key; two different values make the key unusable ("").
+    function setu(arr, key, v) { if (key in arr) { if (arr[key] != v) arr[key] = "" } else arr[key] = v }
+    # Walk a receiver descriptor (pass L) over the declared types.
+    function resolve(desc, f,   n, s, i, t, nm) {
+        if (desc == "") return ""
+        n = split(desc, s, "|")
+        if (substr(s[1], 1, 2) == "T:") t = substr(s[1], 3)
+        else {
+            nm = substr(s[1], 3)
+            if ((f, nm) in fretl) t = fretl[f, nm]
+            else if (((f, nm) in imp) && ((imp[f, nm], nm) in fretm)) t = fretm[imp[f, nm], nm]
+            else if (nm in fretg) t = fretg[nm]
+            else t = ""
+        }
+        for (i = 2; i <= n && t != ""; i++) {
+            if (s[i] == "[]") { if (t ~ /^\[.*\]$/) t = substr(t, 2, length(t) - 2); else t = "" }
+            else if (t ~ /^\[/) t = ""
+            else if (s[i] ~ /\(\)$/) { nm = substr(s[i], 2, length(s[i]) - 3); t = (((t, nm) in mret) ? mret[t, nm] : "") }
+            else { nm = substr(s[i], 2); t = (((t, nm) in ftype) ? ftype[t, nm] : "") }
+        }
+        if (t ~ /^\[/) t = ""
+        return t
+    }
+    function uncomment(s,   p) {
+        # Declarations carry no string literals worth parsing; cut ` # ...`.
+        p = index(s, " #"); if (p > 0 && !index(substr(s, 1, p), "\"")) s = substr(s, 1, p - 1)
+        return s
+    }
+    # Declared return type of a header tail (text after the parameter list).
+    function ret_decl(rest,   ret, depth, n, k, c) {
+        RET = ""
+        if (!match(rest, /^ *-> */)) return 0
+        rest = substr(rest, RLENGTH + 1); ret = ""; depth = 0; n = length(rest)
+        for (k = 1; k <= n; k++) {
+            c = substr(rest, k, 1)
+            if (c == "(" || c == "<" || c == "[") depth++
+            else if (c == ")" || c == ">" || c == "]") depth--
+            if (c == ":" && depth == 0) break
+            ret = ret c
+        }
+        RET = typestr(ret)
+        return (is_opt(ret) ? 1 : 2)
+    }
+    function modlast_of(f,   n, a, b) {
+        n = split(f, a, "/"); b = a[n]
+        if ((b == "__init__.spl" || b == "mod.spl") && n > 1) return a[n - 1]
+        sub(/\.spl$/, "", b); return b
+    }
+    BEGIN {
+        while ((getline nm < NAMES) > 0) want[nm] = 1
+        close(NAMES)
+        file = ""; ndef = 0
+    }
+    {
+        p = index($0, ":"); f = substr($0, 1, p - 1); line = substr($0, p + 1)
+        p = index(line, ":"); line = substr(line, p + 1)
+        if (f != file) {
+            file = f; in_doc = 0; cur_type = ""; type_ind = -1; type_kind = ""; meth_ind = -1
+            cur_def = 0; fn_ind = -1; pend = 0
+        }
+        if (index(line, "\"\"\"")) {
+            t = line; if (gsub(/"""/, "", t) % 2 == 1) in_doc = !in_doc
+            next
+        }
+        if (in_doc) next
+        match(line, /^ */); ind = RLENGTH
+        if (substr(line, ind + 1, 1) == "#") next
+        if (pend) {
+            if (line ~ /^ *\)/) {
+                h = uncomment(line); sub(/^ *\)/, "", h)
+                def_decl[pend] = ret_decl(h); def_ret[pend] = RET; pend = 0
+                next
+            }
+            if (line ~ /^ *([a-z]+ +)*(struct|class|impl|actor|trait|mixin|enum|fn|me) /) pend = 0
+        }
+        if (fn_ind >= 0 && ind <= fn_ind) { cur_def = 0; fn_ind = -1 }
+        if (cur_type != "" && ind <= type_ind) { cur_type = ""; type_ind = -1; meth_ind = -1 }
+        if (ind == 0 && line ~ /^(pub +|export +)?(use|import|from) /) next
+        if (line ~ /^ *([a-z]+ +)*(struct|class|impl|actor|trait|mixin|enum) +[A-Z]/) {
+            h = uncomment(line)
+            match(h, /(struct|class|impl|actor|trait|mixin|enum) +[A-Z]/)
+            h = substr(h, RSTART)
+            type_kind = h; sub(/ .*$/, "", type_kind)
+            sub(/^[a-z]+ +/, "", h)
+            if (h ~ / for /) sub(/^.* for +/, "", h)
+            sub(/[^A-Za-z0-9_].*$/, "", h)
+            cur_type = h; type_ind = ind; meth_ind = -1
+            cur_def = 0; fn_ind = -1
+            next
+        }
+        if (line ~ /^ *([a-z]+ +)*(fn|me) +[A-Za-z_][A-Za-z0-9_]* *[(<]/) {
+            h = uncomment(line)
+            sub(/^ *([a-z]+ +)*(fn|me) +/, "", h)
+            nm = h; sub(/[^A-Za-z0-9_].*$/, "", nm)
+            fn_ind = ind; cur_def = 0
+            meth = (cur_type != "" && ind > type_ind)
+            if (meth && (meth_ind < 0 || ind < meth_ind)) meth_ind = ind
+            if (!(nm in want)) next
+            cur_def = ++ndef
+            def_name[cur_def] = nm; def_file[cur_def] = file
+            def_meth[cur_def] = meth; def_type[cur_def] = (meth ? cur_type : "")
+            def_decl[cur_def] = 0; def_body[cur_def] = 0; def_ret[cur_def] = ""
+            # Skip the parameter list; an unbalanced one continues on later lines.
+            p = index(h, "("); depth = 0; n = length(h); closed = 0
+            if (p > 0) for (i = p; i <= n; i++) {
+                c = substr(h, i, 1)
+                if (c == "(") depth++
+                else if (c == ")") { depth--; if (depth == 0) { closed = 1; break } }
+            }
+            if (closed) { def_decl[cur_def] = ret_decl(substr(h, i + 1)); def_ret[cur_def] = RET }
+            else pend = cur_def
+            next
+        }
+        if (cur_type != "" && (type_kind == "struct" || type_kind == "class") && ind > type_ind && ind <= type_ind + 4 && (meth_ind < 0 || ind <= meth_ind) && line ~ /^ +((pub|var|val|static|mut) +)*[a-z_][A-Za-z0-9_]* *: *[^ ]/) {
+            h = uncomment(line)
+            sub(/^ +((pub|var|val|static|mut) +)*/, "", h)
+            q = index(h, ":")
+            fname = trim(substr(h, 1, q - 1)); ftxt = substr(h, q + 1)
+            sub(/ *=.*$/, "", ftxt); sub(/,[ \t]*$/, "", ftxt)
+            if (fname in want) {
+                fdecl[fname]++
+                if (is_opt(ftxt)) { fopt[fname]++; topt[cur_type, fname] = 1 } else tnon[cur_type, fname] = 1
+                bt = typestr(ftxt)
+                if ((cur_type, fname) in ftype) { if (ftype[cur_type, fname] != bt) ftype[cur_type, fname] = "" }
+                else ftype[cur_type, fname] = bt
+            }
+            next
+        }
+        if (cur_def && ind > fn_ind && (index(line, "None") || index(line, "Some("))) {
+            h = trim(uncomment(line))
+            if (h ~ /(^|[^A-Za-z0-9_])return +(None([^A-Za-z0-9_]|$)|Some\()/ || h == "None" || h ~ /^Some\(.*\)$/) def_body[cur_def] = 1
+        }
+        if (index(line, " = None") || index(line, " = Some(")) {
+            h = uncomment(line)
+            while (match(h, /\.[a-z_][A-Za-z0-9_]* = (None([^A-Za-z0-9_]|$)|Some\()/)) {
+                t = substr(h, RSTART + 1, RLENGTH - 1); sub(/ .*$/, "", t); noneprod[t] = 1
+                h = substr(h, RSTART + RLENGTH)
+            }
+        }
+    }
+    END {
+        for (d = 1; d <= ndef; d++) {
+            o = (def_decl[d] == 1 || (def_decl[d] == 0 && def_body[d]))
+            n = def_name[d]
+            if (def_meth[d]) setu(mret, def_type[d] SUBSEP n, def_ret[d])
+            else { setu(fretl, def_file[d] SUBSEP n, def_ret[d]); setu(fretm, modlast_of(def_file[d]) SUBSEP n, def_ret[d]); setu(fretg, n, def_ret[d]) }
+            if (def_meth[d]) {
+                if (o) { mopt[def_type[d], n] = 1; amopt[n]++ } else { mnon[def_type[d], n] = 1; amnon[n]++ }
+            } else {
+                ml = modlast_of(def_file[d])
+                if (o) { lopt[def_file[d], n] = 1; modopt[ml, n] = 1; gopt[n]++ }
+                else { lnon[def_file[d], n] = 1; modnon[ml, n] = 1; gnon[n]++ }
+            }
+        }
+        FS = "\t"
+        nr = 0
+        while ((getline rec < REC) > 0) {
+            split(rec, r, "\t")
+            if (r[1] == "I") { imp[r[2], r[3]] = r[4]; continue }
+            nr++
+            r_file[nr] = r[2]; r_line[nr] = r[3]; r_kind[nr] = r[4]; r_name[nr] = r[5]
+            r_desc[nr] = r[6]; r_gen[nr] = r[7]; r_text[nr] = r[8]
+        }
+        close(REC)
+        for (i = 1; i <= nr; i++) {
+            f = r_file[i]; n = r_name[i]; k = r_kind[i]; why = ""
+            t = resolve(r_desc[i], f)
+            if (k == "F") {
+                if (t != "" && (((t, n) in topt) || ((t, n) in tnon))) {
+                    if (((t, n) in topt) && !((t, n) in tnon)) why = "field " t "." n " is declared Option"
+                } else if (fdecl[n] > 0) {
+                    if (fopt[n] == fdecl[n]) why = "every declaration of field ." n " is Option (" fdecl[n] ")"
+                } else if (n in noneprod) why = "undeclared slot ." n " has a None/Some producer"
+                slot = "." n
+            } else if (k == "C") {
+                if (((f, n) in lopt) || ((f, n) in lnon)) {
+                    if (((f, n) in lopt) && !((f, n) in lnon)) why = "same-file fn " n "() returns Option"
+                } else if (((f, n) in imp) && (((imp[f, n], n) in modopt) || ((imp[f, n], n) in modnon))) {
+                    ml = imp[f, n]
+                    if (((ml, n) in modopt) && !((ml, n) in modnon)) why = "imported fn " ml "." n "() returns Option"
+                } else if (gopt[n] > 0 && gnon[n] == 0 && amnon[n] == 0) why = "every fn " n "() returns Option (" gopt[n] ")"
+                slot = n "()"
+            } else {
+                if (t != "" && (((t, n) in mopt) || ((t, n) in mnon))) {
+                    if (((t, n) in mopt) && !((t, n) in mnon)) why = "method " t "." n "() returns Option"
+                } else if (amopt[n] > 0 && amnon[n] == 0 && gnon[n] == 0) why = "every method ." n "() returns Option (" amopt[n] ")"
+                slot = "." n "()"
+                if (why != "" && r_gen[i] == 1) why = why "; generic class: bind the call to a local before .is_some()/.is_none()"
+            }
+            if (why != "") printf "%s\t%d\t%s\t%s\t%s\n", f, r_line[i], slot, r_text[i], why
+        }
+    }' > "$d_out.raw"
+    d_rc=$?
+    [ "$d_rc" -eq 0 ] || return "$d_rc"
+    [ -s "$d_out.err" ] && { cat "$d_out.err" >&2; return 9; }
+    # Key = path|slot|text|n, n = occurrence of that exact reader in the file.
+    sort -t "$(printf '\t')" -k1,1 -k3,3 -k4,4 -k2,2n "$d_out.raw" | awk -F '\t' '
+        { k = $1 "|" $3 "|" $4; c[k]++; printf "%s|%d\t%s:%d\t%s\t%s\n", k, c[k], $1, $2, $4, $5 }' |
+        sort > "$d_out"
+    return 0
+}
+
+# promisor_remote <repo> : prints the promisor remote of a blob-filtered
+# (partial) clone, nothing for a full clone. Current git records it as
+# remote.<name>.promisor=true; older git as extensions.partialclone=<name>.
+promisor_remote() {
+    p_r=$(git -C "$1" config --get-regexp '^remote\..*\.promisor$' 2>/dev/null |
+        awk '$2 == "true" { n = $1; sub(/^remote\./, "", n); sub(/\.promisor$/, "", n); print n; exit }')
+    [ -n "$p_r" ] || p_r=$(git -C "$1" config --get extensions.partialclone 2>/dev/null)
+    printf '%s' "$p_r"
+}
+
+# materialize <repo> <rev> <dest> : committed src/**/*.spl of <rev> -> <dest>.
+# Returns 0 ok, 3 when <rev> has no src/*.spl at all, 2 on any other failure.
+materialize() {
+    m_repo=$1; m_rev=$2; m_dest=$3
+    mkdir -p "$m_dest" || return 2
+    git -C "$m_repo" ls-tree -r "$m_rev" -- src > "$m_dest.tree" 2>/dev/null
+    m_rc=$?
+    [ "$m_rc" -eq 0 ] || return 2
+    awk '$2 == "blob" { p = $0; sub(/^[^\t]*\t/, "", p)
+             if (p ~ /\.spl$/ && p !~ /^src\/(compiler_rust|runtime)\/vendor\//) print $3 }' \
+        "$m_dest.tree" | sort -u > "$m_dest.oids"
+    [ -s "$m_dest.oids" ] || return 3
+    m_remote=$(promisor_remote "$m_repo")
+    if [ -n "$m_remote" ]; then
+        # One batched fetch instead of ~16k lazy single-blob fetches. The
+        # local object list is read with --batch-all-objects, which never
+        # triggers a lazy fetch on any git version.
+        git -C "$m_repo" cat-file --batch-all-objects --unordered \
+            --batch-check='%(objectname)' 2>/dev/null | sort -u > "$m_dest.have"
+        comm -23 "$m_dest.oids" "$m_dest.have" > "$m_dest.missing"
+        rm -f "$m_dest.have"
+        if [ -s "$m_dest.missing" ]; then
+            git -C "$m_repo" -c fetch.negotiationAlgorithm=noop fetch "$m_remote" \
+                --no-tags --no-write-fetch-head --recurse-submodules=no \
+                --filter=blob:none --quiet --stdin < "$m_dest.missing" >&2
+            m_rc=$?
+            [ "$m_rc" -eq 0 ] || return 2
+        fi
+    fi
+    # A private index + checkout-index, NOT `git archive`: in a blob-filtered
+    # clone archive lazily fetched every blob under src/ (115k objects, 69s
+    # measured) even with a `*.spl` pathspec. This reads exactly the blobs
+    # listed above. core.sparseCheckout=false keeps skip-worktree bits off the
+    # private index, so nothing is silently left out of the export.
+    awk '$2 == "blob" { p = $0; sub(/^[^\t]*\t/, "", p)
+             if (p ~ /\.spl$/ && p !~ /^src\/(compiler_rust|runtime)\/vendor\//) print p }' \
+        "$m_dest.tree" > "$m_dest.paths"
+    m_abs=$(cd "$m_dest" && pwd) || return 2
+    GIT_INDEX_FILE="$m_abs.index" git -C "$m_repo" -c core.sparseCheckout=false read-tree "$m_rev" 2>/dev/null
+    m_rc=$?
+    [ "$m_rc" -eq 0 ] || return 2
+    GIT_INDEX_FILE="$m_abs.index" git -C "$m_repo" -c core.sparseCheckout=false -c core.autocrlf=false \
+        checkout-index --prefix="$m_abs/" --stdin < "$m_dest.paths" 2>/dev/null
+    m_rc=$?
+    rm -f "$m_abs.index"
+    [ "$m_rc" -eq 0 ] || return 2
+    # Every listed path must have landed; a short export is not a scan.
+    m_want=$(wc -l < "$m_dest.paths" | tr -d ' ')
+    m_got=$( (cd "$m_dest" && find src -type f -name '*.spl' 2>/dev/null) | wc -l | tr -d ' ')
+    [ "$m_want" -eq "$m_got" ] || return 2
+    return 0
+}
+
+# load_baseline <file-or-empty> <out> : sorted keys, comments/blank dropped.
+load_baseline() {
+    : > "$2"
+    [ -n "$1" ] && [ -f "$1" ] && grep -v -E '^(#|$)' "$1" | sort -u > "$2"
+    return 0
+}
+
+# scan <repo-or-tree> <rev-or-empty> <base-or-empty> <baseline-override-or-empty>
+# Prints diagnostics + the verdict line. Returns 0/1/2.
+scan() {
+    s_root=$1; s_rev=$2; s_base=$3; s_blfile=$4
+    # scan runs inside $(...) in the selftest, so a counter would not survive.
+    s_w=$(mktemp -d "$work/scan.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    s_has_bl=0
+    if [ -n "$s_rev" ]; then
+        s_sha=$(git -C "$s_root" rev-parse --verify --quiet "$s_rev^{commit}" 2>/dev/null)
+        if [ -z "$s_sha" ]; then
+            echo "ERROR — nothing was checked (revision $s_rev does not resolve to a commit in $s_root)"
+            return 2
+        fi
+        materialize "$s_root" "$s_sha" "$s_w/tree"
+        s_rc=$?
+        if [ "$s_rc" -eq 3 ]; then
+            echo "ERROR — nothing was checked (0 .spl files under src/ at $s_sha)"
+            return 2
+        elif [ "$s_rc" -ne 0 ]; then
+            echo "ERROR — nothing was checked (could not read committed src/ of $s_sha; in a blob-filtered clone the batched blob fetch failed)"
+            return 2
+        fi
+        s_tree="$s_w/tree"
+        if [ -z "$s_blfile" ]; then
+            if git -C "$s_root" cat-file -e "$s_sha:$baseline_name" 2>/dev/null; then
+                git -C "$s_root" show "$s_sha:$baseline_name" > "$s_w/baseline.src" 2>/dev/null
+                s_rc=$?
+                [ "$s_rc" -eq 0 ] || { echo "ERROR — nothing was checked (could not read $baseline_name at $s_sha)"; return 2; }
+                s_blfile="$s_w/baseline.src"; s_has_bl=1
+            fi
+        else
+            s_has_bl=1
+        fi
+        s_where="at $(printf '%s' "$s_sha" | cut -c1-11)"
+    else
+        if [ ! -d "$s_root/src" ]; then
+            echo "ERROR — nothing was checked (no src/ under $s_root)"
+            return 2
+        fi
+        s_tree=$s_root
+        if [ -z "$s_blfile" ]; then s_blfile="$s_root/$baseline_name"; fi
+        [ -f "$s_blfile" ] && s_has_bl=1
+        s_where="in the working tree"
+    fi
+    detect "$s_tree" "$s_w/cur"
+    s_rc=$?
+    if [ "$s_rc" -ne 0 ]; then
+        echo "ERROR — nothing was checked (detector failed, awk exit $s_rc)"
+        return 2
+    fi
+    s_files=$(cat "$s_w/cur.files" 2>/dev/null)
+    case "$s_files" in ''|*[!0-9]*) s_files=0 ;; esac
+    if [ "$s_files" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 .spl files under src/ $s_where)"
+        return 2
+    fi
+    cut -f1 "$s_w/cur" | sort -u > "$s_w/cur.keys"
+    load_baseline "$s_blfile" "$s_w/known"
+    comm -13 "$s_w/known" "$s_w/cur.keys" > "$s_w/new"
+    comm -23 "$s_w/known" "$s_w/cur.keys" > "$s_w/stale"
+    s_note=""
+    if [ -s "$s_w/new" ] && [ -n "$s_rev" ] && [ -n "$s_base" ]; then
+        # Delta: a reader already present at the merge base is not this
+        # range's doing (a branch cut before it was fixed or baselined).
+        if ! git -C "$s_root" rev-parse --verify --quiet "$s_base^{commit}" >/dev/null 2>&1; then
+            echo "ERROR — nothing was checked (base $s_base does not resolve to a commit in $s_root)"
+            return 2
+        fi
+        s_mb=$(git -C "$s_root" merge-base "$s_base" "$s_sha" 2>/dev/null)
+        if [ -n "$s_mb" ] && [ "$s_mb" = "$s_sha" ]; then
+            # The revision is itself an ancestor of the base: the range adds
+            # no commit, so every unbaselined reader is inherited.
+            s_pre=$(wc -l < "$s_w/new" | tr -d " ")
+            : > "$s_w/new"
+            s_note=" ($s_pre unbaselined reader(s) inherited: $(printf "%s" "$s_sha" | cut -c1-11) is an ancestor of the base, the range adds no commit)"
+        fi
+        if [ -n "$s_mb" ] && [ "$s_mb" != "$s_sha" ]; then
+            materialize "$s_root" "$s_mb" "$s_w/mbtree"
+            s_rc=$?
+            if [ "$s_rc" -eq 0 ]; then
+                detect "$s_w/mbtree" "$s_w/mb"
+                s_rc=$?
+                [ "$s_rc" -eq 0 ] || { echo "ERROR — nothing was checked (detector failed on merge base $s_mb, awk exit $s_rc)"; return 2; }
+                cut -f1 "$s_w/mb" | sort -u > "$s_w/mb.keys"
+                comm -23 "$s_w/new" "$s_w/mb.keys" > "$s_w/new.delta"
+                s_pre=$(( $(wc -l < "$s_w/new") - $(wc -l < "$s_w/new.delta") ))
+                mv -f "$s_w/new.delta" "$s_w/new"
+                s_note=" ($s_pre unbaselined reader(s) already present at merge base $(printf '%s' "$s_mb" | cut -c1-11), not charged to this range)"
+            elif [ "$s_rc" -ne 3 ]; then
+                echo "ERROR — nothing was checked (could not read committed src/ of merge base $s_mb)"
+                return 2
+            fi
+        elif [ -z "$s_mb" ] && [ "$s_has_bl" -eq 0 ]; then
+            # No baseline at this revision AND no reachable merge base (shallow
+            # fetch): the branch predates the gate and nothing can tell its own
+            # readers from inherited ones. Blocking it would charge an
+            # unrelated PR with pre-existing debt, so report and accept; the
+            # frozen (no --base) run on the target branch still sees them.
+            s_cnt=$(wc -l < "$s_w/new" | tr -d ' ')
+            echo "note: $baseline_name is absent $s_where and no merge base with $s_base is reachable; $s_cnt reader(s) flagged but none can be attributed to this range" >&2
+            echo "PASS — $s_files file(s) checked $s_where, $s_cnt grandfathered reader(s) (no baseline and no merge base: the branch predates the gate), 0 new, 0 stale"
+            return 0
+        fi
+    fi
+    s_total=$(wc -l < "$s_w/cur.keys" | tr -d ' ')
+    if [ "$list" -eq 1 ]; then
+        awk -F '\t' '{ printf "flagged: %s: %s  [%s]\n", $2, $3, $4 }' "$s_w/cur"
+    fi
+    if [ -s "$s_w/new" ] || [ -s "$s_w/stale" ]; then
+        awk -F '\t' 'NR == FNR { want[$0] = 1; next } ($1 in want) { printf "new mixed nil/Option reader: %s: %s  [%s] -- use .is_none()/.is_some()\n", $2, $3, $4 }' \
+            "$s_w/new" "$s_w/cur"
+        sed 's/^/stale baseline entry (reader gone or no longer Option, remove it): /' "$s_w/stale"
+        s_newlist=$(awk -F '\t' 'NR == FNR { want[$0] = 1; next } ($1 in want) { printf "%s%s", sep, $2; sep = " " }' "$s_w/new" "$s_w/cur")
+        s_stalelist=$(awk '{ printf "%s%s", sep, $0; sep = " ; " }' "$s_w/stale")
+        echo "FAIL — $s_files file(s) checked $s_where, $s_total reader(s) flagged; new: ${s_newlist:-none}; stale: ${s_stalelist:-none}$s_note"
+        return 1
+    fi
+    echo "PASS — $s_files file(s) checked $s_where, $s_total grandfathered reader(s), 0 new, 0 stale$s_note"
+    return 0
+}
+
+selftest() {
+    t="$work/selftest"
+    mkdir -p "$t/clean/src/a" "$t/mixed/src/a" "$t/flat/src/a" "$t/quoted/src/a" "$t/empty/src" \
+        "$t/call/src/a" "$t/ambig/src/a" "$t/vendor/src/runtime/vendor/x" "$t/vendor/src/a"
+    # (a) Option slot read with is_none/is_some: clean.
+    cat > "$t/clean/src/a/m.spl" <<'EOF'
+struct Slot:
+    lease: Lease?
+    busy: bool
+
+fn free(slot: Slot) -> bool:
+    if slot.lease.is_none():
+        return true
+    false
+EOF
+    # (b) the same slot read with `== nil`: a mixed reader.
+    cat > "$t/mixed/src/a/m.spl" <<'EOF'
+struct Slot:
+    lease: Lease?
+    busy: bool
+
+fn free(slot: Slot) -> bool:
+    if slot.lease == nil:
+        return true
+    false
+EOF
+    # (e) flat-nil-only slot: declared non-Option, only ever nil.
+    cat > "$t/flat/src/a/m.spl" <<'EOF'
+struct Node:
+    next: any
+    name: text
+
+fn make() -> Node:
+    Node(next: nil, name: "n")
+
+fn tail(node: Node) -> bool:
+    node.next == nil
+
+fn raw_lookup(k: text) -> any:
+    return nil
+
+fn missing(k: text) -> bool:
+    raw_lookup(k) == nil
+EOF
+    # (f) `== nil` only inside a comment, a string and a docstring.
+    cat > "$t/quoted/src/a/m.spl" <<'EOF'
+struct Slot:
+    lease: Lease?
+
+fn describe(slot: Slot) -> text:
+    """Never write slot.lease == nil here."""
+    # slot.lease == nil would be wrong
+    val msg = "slot.lease == nil is the bug"
+    msg
+EOF
+    # call readers: same-file Option fn, body-only producer, method on self.
+    cat > "$t/call/src/a/m.spl" <<'EOF'
+fn lookup(k: text) -> Entry?:
+    return None
+
+fn probe(k: text):
+    if k == "":
+        return None
+    Some(k)
+
+class Box<T>:
+    item: T?
+
+    fn get() -> T?:
+        self.item
+
+    fn has() -> bool:
+        self.get() != nil
+
+fn use_them(k: text) -> bool:
+    if lookup(k) == nil:
+        return false
+    probe(k) != nil
+EOF
+    # ambiguous name: Option in one struct, plain in another, receiver unknown.
+    cat > "$t/ambig/src/a/m.spl" <<'EOF'
+struct A:
+    owner: Owner?
+
+struct B:
+    owner: Owner
+
+fn unknown(x) -> bool:
+    x.owner == nil
+
+fn known(a: A) -> bool:
+    a.owner != nil
+EOF
+    # receiver typed through a call result, a loop variable and an index.
+    mkdir -p "$t/infer/src/a"
+    cat > "$t/infer/src/a/m.spl" <<'EOF'
+struct Claim:
+    lease: Lease?
+    note: text
+
+struct Pool:
+    claims: [Claim]
+    note: text?
+
+struct Other:
+    lease: Lease
+    note: text
+
+fn claim_slot(k: text) -> Claim:
+    Claim(lease: nil, note: k)
+
+fn held(pool: Pool, k: text) -> bool:
+    val claim = claim_slot(k)
+    if claim.lease == nil:
+        return false
+    for c in pool.claims:
+        if c.lease != nil:
+            return true
+    pool.claims[0].lease != nil
+
+fn plain(k: text) -> bool:
+    val claim = claim_slot(k)
+    claim.note == nil
+EOF
+    # vendored tree is not scanned; one clean owned file keeps it non-empty.
+    cp "$t/mixed/src/a/m.spl" "$t/vendor/src/runtime/vendor/x/m.spl"
+    cp "$t/clean/src/a/m.spl" "$t/vendor/src/a/m.spl"
+    : > "$t/nobase"
+    echo 'src/a/m.spl|.lease|slot.lease == nil|1' > "$t/base_lease"
+    ok=1
+    st_fail() { echo "selftest: $1" >&2; ok=0; }
+
+    out=$(scan "$t/clean" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 0 ] || st_fail "(a) clean tree must PASS: $out"
+    out=$(scan "$t/mixed" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 1 ] || st_fail "(b) new mixed reader must FAIL: $out"
+    case "$out" in *"src/a/m.spl:6"*) ;; *) st_fail "(b) FAIL must name src/a/m.spl:6: $out" ;; esac
+    out=$(scan "$t/mixed" "" "" "$t/base_lease"); rc=$?
+    [ "$rc" -eq 0 ] || st_fail "(b2) baselined reader must PASS: $out"
+    out=$(scan "$t/clean" "" "" "$t/base_lease"); rc=$?
+    [ "$rc" -eq 1 ] || st_fail "(c) stale baseline entry must FAIL: $out"
+    case "$out" in *"stale: src/a/m.spl|.lease|"*) ;; *) st_fail "(c) FAIL must name the stale key: $out" ;; esac
+    out=$(scan "$t/empty" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 2 ] || st_fail "(d) empty tree must ERROR: $out"
+    out=$(scan "$t/flat" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 0 ] || st_fail "(e) flat-nil-only slot must not be flagged: $out"
+    out=$(scan "$t/quoted" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 0 ] || st_fail "(f) comment/string/docstring must not be flagged: $out"
+    out=$(scan "$t/call" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 1 ] || st_fail "(g) Option-returning call readers must FAIL: $out"
+    for want in "src/a/m.spl:16" "src/a/m.spl:19" "src/a/m.spl:21" "generic class"; do
+        case "$out" in *"$want"*) ;; *) st_fail "(g) FAIL must mention $want: $out" ;; esac
+    done
+    out=$(scan "$t/ambig" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 1 ] || st_fail "(h) resolved receiver must FAIL: $out"
+    case "$out" in *"src/a/m.spl:8"*) st_fail "(h) ambiguous unresolved receiver must not be flagged: $out" ;; esac
+    case "$out" in *"src/a/m.spl:11"*) ;; *) st_fail "(h) FAIL must name src/a/m.spl:11: $out" ;; esac
+    out=$(scan "$t/vendor" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 0 ] || st_fail "(i) vendored tree must not be scanned: $out"
+
+    out=$(scan "$t/infer" "" "" "$t/nobase"); rc=$?
+    [ "$rc" -eq 1 ] || st_fail "(j) receivers typed by inference must FAIL: $out"
+    for want in "src/a/m.spl:18" "src/a/m.spl:21" "src/a/m.spl:23"; do
+        case "$out" in *"$want"*) ;; *) st_fail "(j) FAIL must name $want: $out" ;; esac
+    done
+    case "$out" in *"src/a/m.spl:27"*) st_fail "(j) a non-Option field of the inferred type must not be flagged: $out" ;; esac
+
+    # Committed-content mode, the one CI enforces: a scratch git repo whose
+    # WORKING TREE is deliberately clean while the commits are not.
+    g="$t/repo"
+    mkdir -p "$g/src/a" "$g/scripts/check"
+    st_git() { git -C "$g" -c user.name=selftest -c user.email=selftest@invalid -c commit.gpgsign=false "$@" >/dev/null 2>&1; }
+    if git init -q "$g" >/dev/null 2>&1; then
+        cp "$t/mixed/src/a/m.spl" "$g/src/a/old.spl"
+        st_git add -A; st_git commit -q -m pre-gate
+        c_pre=$(git -C "$g" rev-parse HEAD)
+        cp "$t/base_lease" "$g/$baseline_name"
+        sed -i.bak 's|src/a/m.spl|src/a/old.spl|' "$g/$baseline_name"; rm -f "$g/$baseline_name.bak"
+        st_git add -A; st_git commit -q -m adopt-gate
+        c_gate=$(git -C "$g" rev-parse HEAD)
+        cp "$t/mixed/src/a/m.spl" "$g/src/a/new.spl"
+        st_git add -A; st_git commit -q -m add-reader
+        c_new=$(git -C "$g" rev-parse HEAD)
+        st_git checkout -q -b stale "$c_gate"
+        cp "$t/clean/src/a/m.spl" "$g/src/a/kept.spl"
+        st_git rm -q src/a/old.spl; st_git add -A; st_git commit -q -m fix-without-baseline
+        c_stale=$(git -C "$g" rev-parse HEAD)
+        st_git checkout -q -b side "$c_pre"
+        cp "$t/clean/src/a/m.spl" "$g/src/a/side.spl"
+        st_git add -A; st_git commit -q -m pre-gate-branch-clean
+        c_side=$(git -C "$g" rev-parse HEAD)
+        cp "$t/mixed/src/a/m.spl" "$g/src/a/side2.spl"
+        st_git add -A; st_git commit -q -m pre-gate-branch-adds-reader
+        c_side_bad=$(git -C "$g" rev-parse HEAD)
+        # Working tree now differs from every commit under test.
+        rm -rf "$g/src"; mkdir -p "$g/src"
+        out=$(scan "$g" "$c_gate" "" ""); rc=$?
+        [ "$rc" -eq 0 ] || st_fail "(r1) --rev with its committed baseline must PASS: $out"
+        out=$(scan "$g" "$c_new" "$c_gate" ""); rc=$?
+        [ "$rc" -eq 1 ] || st_fail "(r2) --rev with a new committed reader must FAIL: $out"
+        case "$out" in *"src/a/new.spl:6"*) ;; *) st_fail "(r2) FAIL must name src/a/new.spl:6: $out" ;; esac
+        out=$(scan "$g" "$c_stale" "$c_gate" ""); rc=$?
+        [ "$rc" -eq 1 ] || st_fail "(r3) --rev with a stale committed baseline must FAIL: $out"
+        case "$out" in *"stale: src/a/old.spl|"*) ;; *) st_fail "(r3) FAIL must name the stale key: $out" ;; esac
+        out=$(scan "$g" "$c_side" "$c_gate" ""); rc=$?
+        [ "$rc" -eq 0 ] || st_fail "(r4) a branch cut before the gate must PASS on inherited readers: $out"
+        out=$(scan "$g" "$c_side_bad" "$c_gate" ""); rc=$?
+        [ "$rc" -eq 1 ] || st_fail "(r5) a pre-gate branch that ADDS a reader must FAIL: $out"
+        case "$out" in *"src/a/side2.spl:6"*) ;; *) st_fail "(r5) FAIL must name src/a/side2.spl:6: $out" ;; esac
+        case "$out" in *"new: src/a/old.spl"*) st_fail "(r5) the inherited reader must not be charged: $out" ;; esac
+        out=$(scan "$g" "$c_pre" "" ""); rc=$?
+        [ "$rc" -eq 1 ] || st_fail "(r6) frozen --rev run without a baseline must FAIL: $out"
+        out=$(scan "$g" "0000000000000000000000000000000000000001" "" ""); rc=$?
+        [ "$rc" -eq 2 ] || st_fail "(r7) an unresolvable --rev must ERROR: $out"
+        out=$(scan "$g" "$c_pre" "$c_gate" ""); rc=$?
+        [ "$rc" -eq 0 ] || st_fail "(r8) a pre-gate revision that is an ancestor of the base adds nothing and must PASS: $out"
+        out=$(scan "$g" "$c_new" "0000000000000000000000000000000000000002" ""); rc=$?
+        [ "$rc" -eq 2 ] || st_fail "(r9) an unresolvable --base must ERROR, not fall back: $out"
+        # Unrelated histories stand in for a shallow fetch with no merge base.
+        st_git checkout -q --orphan lone; st_git rm -q -r --cached .; rm -rf "$g/src" "$g/scripts"
+        mkdir -p "$g/src/a"; cp "$t/mixed/src/a/m.spl" "$g/src/a/lone.spl"
+        st_git add -A; st_git commit -q -m no-baseline-no-merge-base
+        c_lone=$(git -C "$g" rev-parse HEAD)
+        mkdir -p "$g/scripts/check"; : > "$g/$baseline_name"
+        st_git add -A; st_git commit -q -m baseline-no-merge-base
+        c_lone_bl=$(git -C "$g" rev-parse HEAD)
+        rm -rf "$g/src"; mkdir -p "$g/src"
+        out=$(scan "$g" "$c_lone" "$c_gate" "" 2>/dev/null); rc=$?
+        [ "$rc" -eq 0 ] || st_fail "(r10) no baseline and no merge base: nothing is attributable, must PASS: $out"
+        out=$(scan "$g" "$c_lone_bl" "$c_gate" "" 2>/dev/null); rc=$?
+        [ "$rc" -eq 1 ] || st_fail "(r11) a baseline but no merge base must judge frozen and FAIL: $out"
+    else
+        st_fail "(r0) git init failed; committed-content mode is unproven"
+    fi
+    [ "$ok" -eq 1 ]
+}
+
+selftest_fixtures=21
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "$mode" = selftest ]; then
+    echo "PASS — selftest $selftest_fixtures fixture(s)"
+    exit 0
+fi
+if [ "$mode" = generate ]; then
+    if [ -n "$rev" ]; then
+        echo "ERROR — nothing was checked (--generate-baseline writes the working tree; do not combine it with --rev)"
+        exit 2
+    fi
+    if [ ! -d "$root/src" ]; then
+        echo "ERROR — nothing was checked (no src/ under $root)"
+        exit 2
+    fi
+    detect "$root" "$work/gen"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR — nothing was checked (detector failed, awk exit $rc)"
+        exit 2
+    fi
+    gen_files=$(cat "$work/gen.files" 2>/dev/null)
+    case "$gen_files" in ''|0|*[!0-9]*) echo "ERROR — nothing was checked (0 .spl files under $root/src)"; exit 2 ;; esac
+    {
+        if [ -f "$root/$baseline_name" ] && grep -q '^#' "$root/$baseline_name"; then
+            grep '^#' "$root/$baseline_name"
+        else
+            echo "# Grandfathered Option slots still read with \`== nil\` / \`!= nil\`. Only shrink this list."
+            echo "# Key: path|slot|reader text|occurrence. See scripts/check/check-nil-option-reader-mix.shs."
+        fi
+        cut -f1 "$work/gen" | sort -u
+    } > "$work/gen.out"
+    cp "$work/gen.out" "$root/$baseline_name" || { echo "ERROR — nothing was checked (could not write $baseline_name)"; exit 2; }
+    echo "PASS — baseline written: $baseline_name ($(cut -f1 "$work/gen" | sort -u | wc -l | tr -d ' ') reader(s), $gen_files file(s) checked)"
+    exit 0
+fi
+scan "$root" "$rev" "$base" ""
+exit $?
