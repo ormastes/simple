@@ -84,6 +84,87 @@ bootstrap_scheduler_admission_after_lease() {
         [ -f "$2" ] && [ ! -L "$2" ] && [ "$1" -nt "$2" ]
 }
 
+# Existing-Phase2 resume is a separate authority path. Never make an old
+# receipt look newly published: verify its complete authority and bind its
+# immutable identity to the current scheduler lease instead.
+bootstrap_scheduler_verify_admitted_parent() (
+    [ "$#" -eq 3 ] || exit 1
+    admission=$1 output=$2 root=$3
+    if [ -z "${SIMPLE_ABI_POLICY:-}" ]; then
+        SIMPLE_ABI_POLICY=$(awk '$1 == "simple_abi_policy:" { count++; value=$2 }
+            END { if (count == 1 && value != "") print value }' \
+            "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn") || exit 1
+        [ -n "$SIMPLE_ABI_POLICY" ] || exit 1
+        export SIMPLE_ABI_POLICY
+    fi
+    [ "$(bootstrap_stage3_canonical_file "$admission")" = "$admission" ] || exit 1
+    admission_root=$(dirname -- "$(dirname -- "$admission")")
+    case "$admission_root" in "$output"/stage3/*) ;; *) exit 1 ;; esac
+    [ "$admission" = "$admission_root/stage2-admitted/admission.env" ] || exit 1
+    candidate=$(bootstrap_scheduler_manifest_value candidate_path "$admission") || exit 1
+    case "$candidate" in "$admission_root/stage2-admitted/simple"|"$admission_root/stage2-admitted/simple.exe") ;; *) exit 1 ;; esac
+    args=$(bootstrap_scheduler_manifest_value build_args_sha256 "$admission") || exit 1
+    bootstrap_stage3_verify_stage2_admission_receipt \
+        "$admission" "$admission" "$candidate" "$candidate" \
+        "$admission_root/source-inputs-before.txt" "$admission_root/source-inputs-before.txt" \
+        "$admission_root/runtime-admitted.txt" "$admission_root/runtime-admitted.txt" \
+        "$admission_root/stage2-runtime-authority" "$admission_root/stage2-runtime-authority" \
+        "$admission_root/tool-authority-before.txt" "$admission_root/tool-authority-before.txt" \
+        "$args" "$admission_root/stage2-sanity.env" "$admission_root/stage2-sanity.env" "$admission_root" \
+        "$admission_root/stage2-receiver.env" "$admission_root/stage2-receiver.env" \
+        "$admission_root/stage2-receiver.log" "$admission_root/stage2-receiver.log" "$root"
+)
+
+bootstrap_scheduler_verify_resume_input() (
+    [ "$#" -eq 5 ] || exit 1
+    record=$1 output=$2 root=$3 lease=$4 lease_sha=$5
+    [ -f "$record" ] && [ ! -L "$record" ] || exit 1
+    generation=$(bootstrap_scheduler_manifest_value generation "$lease") || exit 1
+    bootstrap_scheduler_lease_current "$lease" "$generation" "$lease_sha" || exit 1
+    [ "$(bootstrap_scheduler_manifest_value schema "$record")" = simple-bootstrap-scheduler-resume-input-v1 ] || exit 1
+    [ "$(bootstrap_scheduler_manifest_value generation "$record")" = "$generation" ] || exit 1
+    [ "$(bootstrap_scheduler_manifest_value lease_sha256 "$record")" = "$lease_sha" ] || exit 1
+    [ "$(bootstrap_scheduler_manifest_value bootstrap_output "$record")" = "$output" ] || exit 1
+    admission=$(bootstrap_scheduler_manifest_value admission_path "$record") || exit 1
+    [ "$(bootstrap_scheduler_hash_file "$admission")" = "$(bootstrap_scheduler_manifest_value admission_sha256 "$record")" ] || exit 1
+    bootstrap_scheduler_verify_admitted_parent "$admission" "$output" "$root" || exit 1
+    candidate=$(bootstrap_scheduler_manifest_value candidate_path "$admission") || exit 1
+    [ "$(bootstrap_scheduler_manifest_value candidate_path "$record")" = "$candidate" ] || exit 1
+    [ "$(bootstrap_scheduler_hash_file "$candidate")" = "$(bootstrap_scheduler_manifest_value candidate_sha256 "$record")" ] || exit 1
+)
+
+bootstrap_scheduler_write_resume_input() (
+    [ "$#" -eq 5 ] || exit 1
+    record=$1 output=$2 root=$3 lease=$4 lease_sha=$5
+    [ ! -e "$record" ] && [ ! -L "$record" ] || exit 1
+    set -- "$output"/stage3/*/stage2-admitted/admission.env
+    [ "$#" -eq 1 ] || exit 1
+    admission=$1
+    bootstrap_scheduler_verify_admitted_parent "$admission" "$output" "$root" || exit 1
+    generation=$(bootstrap_scheduler_manifest_value generation "$lease") || exit 1
+    bootstrap_scheduler_lease_current "$lease" "$generation" "$lease_sha" || exit 1
+    candidate=$(bootstrap_scheduler_manifest_value candidate_path "$admission") || exit 1
+    admission_sha=$(bootstrap_scheduler_hash_file "$admission") || exit 1
+    candidate_sha=$(bootstrap_scheduler_hash_file "$candidate") || exit 1
+    work="$record.tmp.$$"
+    [ ! -e "$work" ] && [ ! -L "$work" ] || exit 1
+    trap 'rm -f "$work"' EXIT
+    umask 077
+    {
+        echo schema=simple-bootstrap-scheduler-resume-input-v1
+        echo generation="$generation"
+        echo lease_sha256="$lease_sha"
+        echo bootstrap_output="$output"
+        echo admission_path="$admission"
+        echo admission_sha256="$admission_sha"
+        echo candidate_path="$candidate"
+        echo candidate_sha256="$candidate_sha"
+    } >"$work" || exit 1
+    bootstrap_scheduler_verify_resume_input "$work" "$output" "$root" "$lease" "$lease_sha" || exit 1
+    chmod 0400 "$work" || exit 1
+    mv "$work" "$record"
+)
+
 bootstrap_scheduler_lease_current() {
     bootstrap_scheduler_lease_file=$1
     bootstrap_scheduler_lease_generation=$2
@@ -251,6 +332,18 @@ bootstrap_scheduler_verify_lineage_admission() {
     bootstrap_scheduler_lease_current "$bootstrap_scheduler_lineage_lease" \
         "$bootstrap_scheduler_lineage_generation" \
         "$bootstrap_scheduler_lineage_lease_sha" || return 1
+    # Optional only for legacy fresh-build lineages. A resume record, when
+    # present, remains an immutable dependency of every continuation.
+    bootstrap_scheduler_resume_path=$(bootstrap_scheduler_manifest_value \
+        resume_input_path "$bootstrap_scheduler_lineage" 2>/dev/null || true)
+    bootstrap_scheduler_resume_sha=$(bootstrap_scheduler_manifest_value \
+        resume_input_sha256 "$bootstrap_scheduler_lineage" 2>/dev/null || true)
+    if [ -n "$bootstrap_scheduler_resume_path$bootstrap_scheduler_resume_sha" ]; then
+        [ "$bootstrap_scheduler_resume_path" = "$(dirname -- "$bootstrap_scheduler_lineage_lease")/resume-input.env" ] || return 1
+        [ "$(bootstrap_scheduler_hash_file "$bootstrap_scheduler_resume_path")" = "$bootstrap_scheduler_resume_sha" ] || return 1
+        [ "$(bootstrap_scheduler_manifest_value lease_sha256 "$bootstrap_scheduler_resume_path")" = "$bootstrap_scheduler_lineage_lease_sha" ] || return 1
+        [ "$(bootstrap_scheduler_manifest_value generation "$bootstrap_scheduler_resume_path")" = "$bootstrap_scheduler_lineage_generation" ] || return 1
+    fi
     for bootstrap_scheduler_lineage_stem in \
         qualification_result stage3_result stage3_provenance stage3_candidate \
         parent_admission; do

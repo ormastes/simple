@@ -1,0 +1,75 @@
+#!/bin/sh
+# Identity-only fixtures, not fabricated planner admission or compiler receipts.
+set -eu
+case "${1:-}" in ''|--strategy-hook-only) ;; *) exit 2 ;; esac
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$repo
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+work=$(mktemp -d "$temp_parent/stage4-binding.XXXXXXXX")
+case "$work" in "$temp_parent"/stage4-binding.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+printf 'identity fixture planner\n' > "$work/planner"
+printf 'identity fixture candidate\n' > "$work/candidate"
+printf 'source_fingerprint=fixture-source-one\n' > "$work/manifest"
+binding() {
+    bootstrap_stage3_stage4_binding_sha256 "$work/planner" "$work/candidate" "$work/manifest" "$1"
+}
+# Byte-for-byte compatibility with the original Linux/mac deployment formula.
+if [ "${1:-}" != --strategy-hook-only ]; then
+expected=$(printf '%s\n' \
+    "planner_sha256=$(bootstrap_stage3_hash_file "$work/planner")" \
+    "candidate_sha256=$(bootstrap_stage3_hash_file "$work/candidate")" \
+    "source_fingerprint=fixture-source-one" \
+    "backend=llvm" | bootstrap_stage3_hash_stdin)
+actual=$(binding llvm)
+[ "$actual" = "$expected" ]
+[ "$(binding cranelift)" != "$actual" ]
+printf 'changed planner\n' >> "$work/planner"
+[ "$(binding llvm)" != "$actual" ]
+printf 'identity fixture planner\n' > "$work/planner"
+printf 'changed candidate\n' >> "$work/candidate"
+[ "$(binding llvm)" != "$actual" ]
+printf 'identity fixture candidate\n' > "$work/candidate"
+printf 'source_fingerprint=fixture-source-two\n' > "$work/manifest"
+[ "$(binding llvm)" != "$actual" ]
+if bootstrap_stage3_stage4_binding_sha256 "$work/missing" "$work/candidate" "$work/manifest" llvm; then
+    echo 'FAIL: nonexistent planner hashed as authority' >&2; exit 1
+fi
+if bootstrap_stage3_stage4_binding_sha256 "$work/planner" "$work/missing" "$work/manifest" llvm; then
+    echo 'FAIL: nonexistent candidate hashed as authority' >&2; exit 1
+fi
+echo 'PASS: canonical Stage4 binding formula and all four identity inputs'
+fi
+
+# Execute the exact scheduler binding block. Planner admission is a separate
+# contract test: this harness supplies only its already-verified input boundary,
+# never a synthetic receipt claimed as admitted. Calculation and rejection are
+# the actual production code, including the caller-supplied mismatch check.
+awk '/^    bootstrap_planner_v2_verify "\$stage4_receipt" "\$root"/ { copy=1 }
+     copy && /^    continuation_started=/ { exit }
+     copy { print }' "$repo/scripts/bootstrap/bootstrap-strategy.shs" > "$work/strategy-binding.sh"
+[ -s "$work/strategy-binding.sh" ]
+printf 'platform=fixture-platform\n' >> "$work/manifest"
+bootstrap_planner_v2_verify() {
+    [ "$1" = "$work/planner" ] && [ "$2" = "$repo" ]
+}
+bootstrap_planner_v2_field() {
+    [ "$2" = "$work/planner" ] || return 1
+    case "$1" in target) echo '//bootstrap:stage4' ;; platform) echo fixture-platform ;; *) return 1 ;; esac
+}
+run_strategy_binding() (
+    root=$repo stage4_receipt="$work/planner" stage3_candidate="$work/candidate"
+    stage3_manifest="$work/manifest" backend=llvm
+    SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256=$1
+    . "$work/strategy-binding.sh"
+    [ "$stage4_binding" = "$(binding llvm)" ]
+)
+run_strategy_binding ''
+run_strategy_binding "$(binding llvm)"
+if run_strategy_binding wrong-supplied-binding; then
+    echo 'FAIL: actual scheduler binding block accepted a mismatch' >&2; exit 1
+fi
+echo 'PASS: actual scheduler computes absent binding and rejects supplied mismatch'
