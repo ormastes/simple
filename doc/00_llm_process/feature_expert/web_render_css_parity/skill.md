@@ -4348,3 +4348,40 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   negative margin. The css-layout renders are byte-identical at both scales. Matrix: 81.
 - Perf, css-layout, 3 alternated rounds, wall medians base/head: k=1 11729/11680 ms,
   k=4 31339/31259 ms. RSS is flat at about 2.66 GB / 8.33 GB.
+
+## 2026-11-24 monoflex lane: underline thickness, flex-wrap fractional x
+
+- **"Overview monospace `code` advances" was a misread.** DejaVu Sans Mono
+  advances already match Chrome at 1x and 4x (identical column-run starts).
+  The overview's biggest 4x cluster is the `working anchor` link UNDERLINE.
+- **Auto underline thickness is floor(em / 10), min 1** (Chrome 159, measured
+  at 16/19/20/24/30/40/50/64 px). The old round(0.0733em) gave 1 row at 20
+  and 24 px (Chrome 2), 2 at 30 (Chrome 3) and so on.
+- **At device scale k, Chrome computes the underline on the DEVICE font.** A
+  16 px link at k=4 is 6 rows at baseline + 4, not 4 x (1 row at + 1). The
+  rule now carries `device-rect` (dx 0, device top, run.width * k, device
+  thickness) plus the run's `device-y-offset`. Its x extent is unchanged from
+  base (it is still off by 1-2 device px on a fractional-x flex link, as before).
+- **A flex-WRAP row had no fractional main-axis start.** Only the single-line
+  path carried `item_frac_delta_milli`. The wrap placing pass now accumulates
+  each auto item's exact-width fraction per line (reset on line break) and
+  snaps the next item as `absolute_box_snap` does, except that an exact half
+  device px rounds DOWN for the box. That was measured: the `ul` after
+  `<ol><li>Ordered item</li>` sits at 145.375 css, and Chrome paints its disc
+  at 696 with its text from pen 741.5. `flex_item_text_frac_delta_milli_px`
+  also takes the widest block child's single text run, so an `ol` of `li`s
+  counts.
+- **Open, not fixed:**
+  - 19 px underline is one row low (offset formula, not thickness).
+  - Chrome's skip-ink gaps are not drawn.
+  - A no-wrap `display:flex` row with the same `ol` wraps the `ol` text.
+  - html article header 1 row short at 1x: the h3 line box is 28.08 px
+    (18.72 x 1.5) but block layout keeps it at whole 28, so the flex header
+    is 97.436 -> 97 px where Chrome has 97.52 -> 98 rows.
+- Specs:
+  - `text_underline_auto_thickness_chrome159_spec.spl`
+  - `flex_wrap_list_fractional_x_chrome159_spec.spl`
+- Catalog (bfe4baf76e9 -> lane): overview 1x 0.59 -> 0.41 %, overview 4x
+  0.21 -> 0.16 %; every other page equal at both scales. Perf, 6 alternated
+  rounds at k=4: median document/paint phases equal within noise (overview
+  paint 5609 vs 5615 ms, html paint 8732 vs 8755 ms); RSS flat (2.83/2.89 GB).

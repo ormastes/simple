@@ -2598,6 +2598,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     start_offset: 0, gap_extra: 0, auto_margin: 0
                 )
             var cx_wrap = ix + line_distribution.start_offset
+            var frac_wrap_milli = 0
             var cy_wrap = if reverse_wrap:
                 y + st.border_t + st.pad_t + align_content_offset + total_line_h_with_align - (if line_count > 0: line_heights[0] + align_content_line_extra else: 0)
             else:
@@ -2689,6 +2690,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                                 auto_margin: 0
                             )
                         cx_wrap = ix + line_distribution.start_offset
+                        frac_wrap_milli = 0
                         effective_cml = if cst.margin_l_auto:
                             line_distribution.auto_margin
                         else:
@@ -2740,7 +2742,24 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
-                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, wrap_item_style)
+                    # Chrome keeps the line's earlier auto items at their exact
+                    # (LayoutUnit) widths, so this item starts at a fractional
+                    # x: the `ul` after `<ol><li>Ordered item</li>` paints from
+                    # device column 741.5 at k=4. Snapped like `absolute_box_snap`,
+                    # except an exact half device px rounds DOWN for the box (measured:
+                    # Chrome paints that ul's disc at 696, its text from pen 741.5).
+                    var draw_x_wrap = cx_wrap
+                    if frac_wrap_milli != 0 and not row_flex_main_reversed(st):
+                        val sx_wrap = snap_milli_px(frac_wrap_milli)
+                        draw_x_wrap = cx_wrap + sx_wrap
+                        var err_x_wrap = frac_wrap_milli - sx_wrap * 1000
+                        val k_wrap = layout_device_scale()
+                        if k_wrap > 1:
+                            val dx_wrap = snap_milli_px(err_x_wrap * k_wrap - 1)
+                            box_device_dx_record(nodes.len() as i32, fc_wrap, dx_wrap)
+                            err_x_wrap = (err_x_wrap * k_wrap - dx_wrap * 1000) / k_wrap
+                        box_line_start_err_record(nodes.len() as i32, fc_wrap, err_x_wrap)
+                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, draw_x_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, wrap_item_style)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -2757,6 +2776,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         out_bx = shifted.bx
                         out_by = shifted.by
                     cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
+                    if cst.width_px == 0 and not cst.width_zero and cst.flex_basis_px == 0 and cst.flex_grow == 0 and not flex_item_zero_basis(cst):
+                        frac_wrap_milli = frac_wrap_milli + flex_item_text_frac_delta_milli_px(nodes, styles, child_index, fc_wrap, cst, base_w_wrap)
                     val actual_item_h = resolved_cst.margin_t + out_bh[fc_wrap] + resolved_cst.margin_b
                     if actual_item_h > line_h_wrap:
                         line_h_wrap = actual_item_h
