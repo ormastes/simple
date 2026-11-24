@@ -1285,6 +1285,26 @@ fn handle_method_call_with_self_update_inner(
         let _pending_generics =
             crate::interpreter::push_method_call_generics_with_method(receiver, method, generic_args);
         let _clear_expected_target = crate::interpreter::push_expected_target_type(None);
+        // BDD negation link in STATEMENT position: `expect(x).not_().to_be_none()`.
+        // The nested-call recursion below would otherwise evaluate
+        // `expect(x).not_()` as an ordinary call (dispatching to a stdlib
+        // `not_` on the bare subject) and never run the negated matcher.
+        // Mirrors the expression-position check in interpreter/expr/calls.rs.
+        if method.starts_with("to") {
+            if let Some((expect_call, true)) = crate::interpreter::interpreter_method::peel_bdd_matcher_receiver(receiver) {
+                let result = crate::interpreter::interpreter_method::evaluate_negated_bdd_matcher(
+                    expect_call,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                return Ok((result, None));
+            }
+        }
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
         if let Expr::MethodCall {

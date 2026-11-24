@@ -313,7 +313,7 @@ pub(crate) fn peel_bdd_matcher_receiver(receiver: &Box<Expr>) -> Option<(&Box<Ex
 pub(crate) fn is_argless_bdd_matcher(name: &str) -> bool {
     matches!(
         name,
-        "to_be_nil" | "to_be_none" | "to_be_truthy" | "to_be_falsy" | "to_be_true" | "to_be_false" | "to_not_be_nil"
+        "to_be_nil" | "to_be_none" | "to_be_some" | "to_be_truthy" | "to_be_falsy" | "to_be_true" | "to_be_false" | "to_not_be_nil"
     )
 }
 
@@ -343,6 +343,7 @@ pub(crate) fn evaluate_negated_bdd_matcher(
         "to_contain" => Some("to_not_contain"),
         "to_include" => Some("to_not_include"),
         "to_be_nil" | "to_be_none" => Some("to_not_be_nil"),
+        "to_be_some" => Some("to_be_none"),
         "to" => Some("not_to"),
         _ => None,
     };
@@ -693,6 +694,7 @@ pub(crate) fn evaluate_method_call(
             | "to_be_false"
             | "to_be_nil"
             | "to_be_none"
+            | "to_be_some"
             | "to_be_greater_than"
             | "to_be_less_than"
             | "to_be_greater_than_or_equal"
@@ -838,6 +840,17 @@ pub(crate) fn evaluate_method_call(
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
                 let failure_msg = format!("expected {} to be nil", recv_val.to_display_string());
                 push_bdd_failure(failure_msg);
+            }
+            break 'bdd_matcher Some(Value::Bool(matched));
+        }
+        "to_be_some" => {
+            // Reverse of to_be_none: any non-nil-like value (Option::Some(x) or
+            // a bare present value) matches.
+            let matched = !recv_val.is_nil_like();
+            use crate::interpreter::interpreter_call::{push_bdd_failure, BDD_EXPECT_FAILED};
+            if !matched {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                push_bdd_failure(format!("expected Some(_), got {}", recv_val.to_display_string()));
             }
             break 'bdd_matcher Some(Value::Bool(matched));
         }
