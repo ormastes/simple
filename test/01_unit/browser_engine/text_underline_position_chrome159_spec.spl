@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Pin where Chrome 159 puts an `auto` underline below the baseline, for
+every font size 12..36 px at device scale 1 and 48..144 device px at scale 4
+(50 sizes). Chrome's gap is max(1, ceil(thickness / 2)) with the UNFLOORED
+`auto` thickness font-size / 10 (19px: 1 row, 21px: 2 rows). It does not read
+the font's `post` underlinePosition: with Liberation Serif (-123/2048) and
+Liberation Mono (-393/2048) the underline sits the same gap below the H
+bottom (the baseline) as with Liberation Sans (-67/2048) -- their rows differ
+only by the faces' ascents -- and an authored `text-decoration-thickness: 3px`
+puts it at baseline + 2 at every size. This engine used
+round(0.106em - floor(em/10)/2): one row low at
+19 px and at device 76, 96, 100, 116, 120, 128, 136, 140, one row high at
+21..23 px.
+Audience: web renderer text-decoration paint maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x1000, Liberation Sans via `sans-serif`. Each 40 px row holds one black
+`ooo` link; the value is the LAST run of rows with green < 128 in column 1
+(K=1) / 4 (K=4) of each row band, i.e. the underline.
+
+| K | sizes | Chrome | base ea5ca01cfce |
+|---|-------|--------|------------------|
+| 1 | 19 | 307 | 308 |
+| 1 | 21 22 23 | 389-390 429-430 470-471 | 388-389 428-429 469-470 |
+| 4 | 76 96 100 116 120 128 136 140 | 1229 2037 2199 2846 3007 3330 3654 3815 (tops) | each one row lower |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-UNDERLINE-POSITION-001 — an auto underline's top is baseline + max(1, ceil(font-size / 20)) on the device font, independent of the font's post table.
+"""
+# @tag: unit, browser_engine, paint, text_decoration, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+fn _sizes_page() -> text:
+    var body = ""
+    var fs = 12
+    while fs <= 36:
+        body = body + "<p style=\"font-size:{fs}px\"><a href=\"#x\" style=\"color:#000\">ooo</a></p>"
+        fs = fs + 1
+    "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;color:#000;background:#fff;font-family:sans-serif}} p{{margin:0;height:40px;line-height:40px;overflow:hidden}}</style></head><body>" + body + "</body></html>"
+
+# The last run of rows y0..y1-1 whose pixel in column x has green < 128.
+fn _last_run(px: [u32], w: i32, x: i32, y0: i32, y1: i32) -> text:
+    var s = ""
+    var start = -1
+    var y = y0
+    while y <= y1:
+        val ink = y < y1 and ((px[y * w + x] >> 8u32) & 255u32) < 128u32
+        if ink and start < 0:
+            start = y
+        if not ink and start >= 0:
+            s = if start == y - 1: "{start}" else: "{start}-{y - 1}"
+            start = -1
+        y = y + 1
+    s
+
+fn _underlines(k: i32, x: i32) -> text:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_sizes_page(), 400, 1000, k, "cpu_simd")
+    var out = ""
+    var band = 0
+    while band < 25:
+        out = out + " " + _last_run(px, 400 * k, x, band * 40 * k, (band + 1) * 40 * k)
+        band = band + 1
+    out.trim()
+
+describe "Auto underline position (Chrome 159)":
+    it "AC-1: 12..36 px at device scale 1 sit at baseline + max(1, ceil(em / 20))":
+        expect(_underlines(1, 1)).to_equal("25 65 106 146 186 226 267 307 348-349 389-390 429-430 470-471 510-511 551-552 591-592 631-632 671-672 712-713 752-754 792-794 833-835 873-875 914-916 954-956 994-996")
+
+    it "AC-2: 48..144 device px at device scale 4 use the device font size":
+        expect(_underlines(4, 4)).to_equal("98-101 260-264 422-426 583-588 746-751 907-912 1068-1074 1229-1235 1391-1398 1554-1561 1715-1722 1876-1884 2037-2045 2199-2208 2361-2370 2523-2532 2684-2694 2846-2856 3007-3018 3169-3180 3330-3341 3492-3504 3654-3666 3815-3828 3977-3990")

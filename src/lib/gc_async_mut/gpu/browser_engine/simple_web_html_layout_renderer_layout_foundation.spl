@@ -237,6 +237,8 @@ class LayoutResult:
     # Filled by `layout()` from `g_text_device_dy` / `g_text_device_dy_rest`.
     device_dy: [i32] = []
     device_dy_rest: [i32] = []
+    # Per node: exact tops of lines 2..n of a wrapped run (`text_line_frac_dy`).
+    line_y_steps: [i32] = []
     # Per node at device scale k > 1: milli device px from k x by[i] to the true
     # device top of a block-level box (`box_device_top_record`); paint snaps it
     # with `box_device_top_px` and moves every command the box owns by it.
@@ -288,10 +290,12 @@ class InlineLineAlignment:
     bx: [i32]
     by: [i32]
     height: i32
-    # Device scale k > 1: the line's device-px height minus k x `height`, in
-    # milli CSS px (Chrome lays the line out in device px). The block cursor
-    # carries it in its residual. 0 at k == 1.
+    # The line's exact height minus `height`, in milli CSS px: the fraction a
+    # number line-height keeps (19.5 px), and at device scale k > 1 the device-px
+    # height beyond k x `height`. The block cursor carries it in its residual.
     height_frac_milli: i32 = 0
+    # Line top to baseline, whole CSS px.
+    baseline: i32 = 0
 
 # Distance from the top of a line box (of this style's strut) to its baseline.
 # Chrome (Blink FontHeight::AddLeading): ascent and descent are the face's own,
@@ -469,8 +473,10 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     var out_bx = bx
     var out_by = by
     if nodes.len() == 0:
+        # A wrapped run's last line on its own: the strut keeps its fraction.
+        val empty_frac = if line_height == style_line_h(line_style): line_h_frac_milli(line_style) else: 0
         return InlineLineAlignment(
-            bx: out_bx, by: out_by, height: line_height
+            bx: out_bx, by: out_by, height: line_height, height_frac_milli: empty_frac
         )
     var ascent = inline_line_strut_baseline_offset(line_style)
     var descent = inline_line_baseline_descent(line_style)
@@ -488,6 +494,10 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     var middle_half_x64 = -1
     var middle_ascent64 = 0
     var middle_descent64 = 0
+    # The furthest a text box's exact (1/64 px) line-height reaches below the
+    # baseline: a number line-height keeps its fraction there, since the half
+    # leading above is floored (a 22px/1.3 span: 21 above, 7.594 below).
+    var below64 = inline_line_below64(line_style)
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
@@ -545,6 +555,9 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
             val node_line_shift = vertical_align_baseline_shift(node_style, line_style.font_size)
             node_ascent = inline_box_shifted_ascent(child_index, html_nodes, styles, node_index) - node_line_shift
             node_descent = inline_box_shifted_descent(child_index, html_nodes, styles, node_index) + node_line_shift
+        val node_below64 = if widget_baseline < 0 and node_descent == inline_line_baseline_descent(node_style) and not bottom_edge_baseline(child_index, node_index, node_style, node_replaced): inline_line_below64(node_style) else: node_descent * 64
+        if node_below64 > below64:
+            below64 = node_below64
         if node_ascent > ascent:
             ascent = node_ascent
         if node_descent > descent:
@@ -706,6 +719,10 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     # struts there).
     val strut_only = line_style.display != "inline" and resolved_height == ascent + descent and middle_ascent64 == 0 and middle_descent64 == 0
     var height_frac_milli = if strut_only: device_excess * 1000 / g_layout_device_scale + line_h_sub_px_milli(line_style, resolved_height, device_excess) else: 0
+    # A line a bigger number line-height box made taller keeps that box's
+    # fraction below the baseline (Chrome: 19.5 + 28.594 px, not 19.5 + 28).
+    if strut_only and height_frac_milli == 0 and below64 > descent * 64:
+        height_frac_milli = (below64 - descent * 64) * 1000 / 64
     # A block whose only content is one wrapped (or `pre`) text run of n whole
     # lines: Chrome stacks n exact line boxes, so the box is n x the exact
     # line height (3 lines of 13px/1.5 are 58.5 px, not 57).
@@ -715,7 +732,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val run_lh = style_line_h(run_style)
         if run_lh > 0 and resolved_height > run_lh and resolved_height % run_lh == 0:
             height_frac_milli = (resolved_height / run_lh) * line_h_frac_milli(run_style)
-    InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height, height_frac_milli: height_frac_milli)
+            text_line_frac_record(html_nodes.len() as i32, nodes[0], line_h_frac_milli(run_style), line_frac_milli)
+    InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height, height_frac_milli: height_frac_milli, baseline: ascent + baseline_drop)
 
 fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
     val node = nodes[i]
@@ -1676,6 +1694,7 @@ var g_text_device_dy: [i32] = []
 var g_text_device_dy_rest: [i32] = []
 
 pub fn text_device_dy_reset():
+    g_text_line_steps = []
     g_text_device_dy = []
     g_text_device_dy_rest = []
 
@@ -1706,15 +1725,62 @@ fn text_device_dy_record(node_count: i32, i: i32, first: i32, rest: i32):
     g_text_device_dy[i] = first
     g_text_device_dy_rest[i] = rest
 
-# Move lines 2..n of the wrapped run `i` down by `extra` device px: the device
-# height its first line has beyond k x the CSS line height.
-pub fn text_device_dy_rest_add(node_count: i32, i: i32, extra: i32):
-    if extra == 0:
+# Lines 2..n of a wrapped (or `pre`) text run `i` at their exact tops. Chrome
+# stacks lines of a number line-height in LayoutUnits, so line j of a 19.5 px
+# run starts j x 19.5 below the first (row 20 at k=1, device 78 at k=4), not
+# j x 19; and a first line made taller by a bigger inline (a 22px span in a
+# 15px run) pushes lines 2..n down by its extra height, not by how far that
+# line's baseline moved the run. Three entries per node: the per-line sub-px
+# part (milli CSS px, see `line_h_frac_milli`), the cursor residual the run
+# starts at, and the milli CSS px lines 2..n move beyond those. Reset with the
+# device tables, carried in `LayoutResult.line_y_steps`; empty until needed.
+var g_text_line_steps: [i32] = []
+
+fn text_line_steps_set(node_count: i32, i: i32, slot: i32, value: i32):
+    if i < 0 or i >= node_count:
         return
-    if g_text_device_dy.len() == 0:
-        g_text_device_dy = zero_i32_list(node_count)
-        g_text_device_dy_rest = zero_i32_list(node_count)
-    g_text_device_dy_rest[i] = g_text_device_dy_rest[i] + extra
+    if g_text_line_steps.len() != node_count * 3:
+        if value == 0:
+            return
+        g_text_line_steps = zero_i32_list(node_count * 3)
+    g_text_line_steps[i * 3 + slot] = value
+
+# reason: node index and milli-px residuals index the per-node layout tables.
+# @allow(primitive_api)
+pub fn text_line_frac_record(node_count: i32, i: i32, frac_milli: i32, start_milli: i32):
+    if frac_milli == 0 and g_text_line_steps.len() == 0:
+        return
+    text_line_steps_set(node_count, i, 0, frac_milli)
+    text_line_steps_set(node_count, i, 1, start_milli)
+
+# reason: node index and milli CSS px index the per-node layout tables.
+# @allow(primitive_api)
+pub fn text_line_rest_record(node_count: i32, i: i32, rest_milli: i32):
+    text_line_steps_set(node_count, i, 2, rest_milli)
+
+# reason: per-node layout table carried through LayoutResult.
+# @allow(primitive_api)
+pub fn text_line_steps_table() -> [i32]:
+    g_text_line_steps
+
+# reason: per-node layout table carried through LayoutResult.
+# @allow(primitive_api)
+pub fn text_line_steps_restore(steps: [i32]):
+    g_text_line_steps = steps
+
+# How far line `line_i` (> 0) of run `i` moves for its exact top: CSS px at
+# k == 1, device px at k > 1 (the paint adds it to `device-y-offset`).
+# reason: node/line index in, whole px out; layout-table scalars.
+# @allow(primitive_api)
+pub fn text_line_frac_dy(steps: [i32], i: i32, line_i: i32) -> i32:
+    if line_i <= 0 or i < 0 or i * 3 + 2 >= steps.len():
+        return 0
+    val k = g_layout_device_scale
+    val start = steps[i * 3 + 1]
+    val exact = start + steps[i * 3 + 2] + line_i * steps[i * 3]
+    if k <= 1:
+        return (exact + 500) / 1000 - (start + 500) / 1000
+    box_device_top_px(exact * k) - box_device_top_px(start * k)
 
 # Sub-pixel top of each laid-out block-level box at device scale k > 1 (see
 # LayoutResult.device_top), in milli DEVICE px: k times the block cursor's
@@ -1856,6 +1922,15 @@ fn style_device_font_milli(st: Style) -> i32:
 # the h3 at k=4), whose whole px `device_excess` already carries. Only a
 # number line-height has a fraction (px and `normal` are whole); 0 when the
 # line is taller than its strut.
+# 1/64 px a box's line-height reaches below its baseline: the half leading
+# above is floored to whole px (`inline_line_strut_baseline_offset`), so a
+# number line-height keeps its LayoutUnit fraction below.
+fn inline_line_below64(st: Style) -> i32:
+    val above = inline_line_strut_baseline_offset(st)
+    if st.line_height_px >= 0 or style_is_ua_control_font(st):
+        return (style_line_h(st) - above) * 64
+    style_device_line_h_milli(st, 1) * 64 / 1000 - above * 64
+
 fn line_h_sub_px_milli(st: Style, css_height: i32, device_excess: i32) -> i32:
     if st.line_height_px >= 0 or style_is_ua_control_font(st):
         return 0
@@ -1868,7 +1943,9 @@ fn line_h_sub_px_milli(st: Style, css_height: i32, device_excess: i32) -> i32:
 # Exact-minus-whole height (milli CSS px) of one line of a number line-height
 # at the layout's device scale k: the device line (k x 28.08 = 112.32 for the
 # h3 at k=4) less k x the whole CSS line, over k. 0 for px and `normal`.
-fn line_h_frac_milli(st: Style) -> i32:
+# reason: milli CSS px scalar read by the block cursor, like cursor_advance_px.
+# @allow(primitive_api)
+pub fn line_h_frac_milli(st: Style) -> i32:
     # A union line (`style_used_face_line`) is `normal` but not whole at k > 1:
     # Chrome 159 puts four 16px Liberation Sans + Noto Sans Arabic lines at
     # 4 x 135 device px, not 4 x 4 x 34. (Other `normal` lines: open.)

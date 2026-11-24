@@ -458,12 +458,16 @@ fn _html_draw_ir_text_shadow_commands(
 # `text-decoration-line: underline` for a #text node's emitted text runs (UA
 # `a:link` and authored underlines). The Draw IR text command carries the
 # decoration only as a style prop, which no Engine2D executor reads, so the
-# rule is emitted as its own rect under each run. Placement follows Chrome:
-# top = baseline + round(0.106em - thickness/2), thickness = floor(em/10)
-# (min 1) unless `text-decoration-thickness` is set; the baseline is the run's
-# y plus the ascent, i.e. relative to where the glyphs are drawn. At device
-# scale k Chrome applies both rules to the DEVICE font (16px at k=4: 6 rows
-# at baseline + 4, not k x the 1 px rule at + 1), carried as `device-rect`.
+# rule is emitted as its own rect under each run. Placement as measured on
+# Chrome 159: top = baseline + max(1, ceil(thickness / 2)) with the UNFLOORED
+# thickness (`auto` = font-size / 10, so 19px -> 1, 21px -> 2), drawn
+# floor(em/10) rows (min 1) thick unless `text-decoration-thickness` is set.
+# The font's `post` underlinePosition plays no part (Liberation Sans, Serif
+# and Mono leave the same gap below the baseline; an authored 3px is baseline + 2 at
+# every size); see text_underline_position_chrome159_spec. The baseline is the run's
+# y plus the ascent, i.e. where the glyphs are drawn. At device scale k Chrome
+# applies both rules to the DEVICE font (16px at k=4: 6 rows at baseline + 4,
+# not k x the 1 px rule at + 1), carried as `device-rect`.
 fn _html_draw_ir_underline_commands(
     node: HNode, st: Style, runs: [DrawIrCommand]
 ) -> [DrawIrCommand]:
@@ -472,7 +476,8 @@ fn _html_draw_ir_underline_commands(
         return out
     val fs = st.font_size
     val thickness = style_decoration_thickness_px(st)
-    val below = (fs * 1060 - thickness * 5000 + 5000) / 10000
+    val font_milli = if st.font_size_milli > 0: st.font_size_milli else: fs * 1000
+    val below = _html_draw_ir_underline_gap(font_milli, st.text_decoration_thickness_px)
     val color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
     val k = layout_device_scale()
     # A run a fallback face shaped (`st.used_face_units`) was hung from the line
@@ -492,7 +497,7 @@ fn _html_draw_ir_underline_commands(
     val dev_fs = fs * k
     val dev_auto = if dev_fs / 10 < 1: 1 else: dev_fs / 10
     val dev_thickness = if st.text_decoration_thickness_px > 0: st.text_decoration_thickness_px * k else: dev_auto
-    val dev_top = dev_ascent + (dev_fs * 1060 - dev_thickness * 5000 + 5000) / 10000 + st.text_underline_offset_px * k
+    val dev_top = dev_ascent + _html_draw_ir_underline_gap(font_milli * k, st.text_decoration_thickness_px * k) + st.text_underline_offset_px * k
     # cpu-lane-loop-ok: one rule per emitted text line of this node; bound is the node's wrapped line count
     for run in runs:
         if run.kind == "text" and run.width > 0:
@@ -510,6 +515,13 @@ fn _html_draw_ir_underline_commands(
                 rule.computed_style = props
             out.push(rule)
     out
+
+# Chrome's auto underline gap below the baseline: max(1, ceil(thickness / 2))
+# px, thickness in milli px = the authored px (x 1000) or font-size / 10.
+fn _html_draw_ir_underline_gap(font_milli: i32, authored_px: i32) -> i32:
+    val t_milli = if authored_px > 0: authored_px * 1000 else: font_milli / 10
+    val gap = (t_milli + 1999) / 2000
+    if gap < 1: 1 else: gap
 
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
     if value < 0: 0 - value.to_i64() else: value.to_i64()
