@@ -9,7 +9,8 @@ use std.common.sdn.encode.sdn_encode_canonical
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
 use std.common.contracts.orchestration.host_service_auth_v6.{HostServiceAuthContextV6, host_service_auth_tag_v6, host_service_auth_verify_v6}
-use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
+use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid}
 
 pub struct HostServiceReadyPathV1:
     parent: text
@@ -56,7 +57,10 @@ fn setup_fields_v1(bytes: [u8], count: i64) -> Result<Dict<text, SdnValue>, text
     if bytes.len() < 1 or bytes.len() > 512 or not utf8_bytes_valid(bytes): return Err("host-auth-record-bound-or-text")
     val limits = SdnStrictLimitsV1(max_source_bytes: 512, max_depth: 2, max_nodes: 32,
         max_rows: 0, max_cells: 0, max_columns: 9)
-    val document = sdn_parse_strict_v1(bytes_to_text(bytes), limits)
+    val source: text = match bytes_to_text_checked(bytes):
+        case Ok(v): v
+        case Err(_): return Err("host-auth-record-bound-or-text")
+    val document = sdn_parse_strict_v1(source, limits)
     if document.is_err(): return Err("host-auth-record-sdn")
     val fields = match document.unwrap().value:
         case SdnValue.Dict(value): value
@@ -101,7 +105,10 @@ pub fn host_service_auth_setup_validate_v1(bytes: [u8], expected_digest: text,
     val secret = setup_text_v1(fields, "secret")?
     val canonical = host_service_auth_setup_record_v1(uid, secret)?
     if not retained_credential_bytes_equal_v2(bytes, canonical): return Err("host-auth-setup-not-canonical")
-    val digest = sha256_text(bytes_to_text(canonical))
+    val canonical_text: text = match bytes_to_text_checked(canonical):
+        case Ok(v): v
+        case Err(_): return Err("host-auth-setup-not-canonical")
+    val digest = sha256_text(canonical_text)
     if digest != expected_digest or (expected_uid != "" and uid != expected_uid): return Err("host-auth-setup-pin-mismatch")
     Ok(HostServiceAuthSetupMetadataV1(publication_uid: uid, setup_digest: digest))
 
@@ -178,7 +185,9 @@ pub struct HostServiceAuthLeaseV1:
 pub fn host_service_auth_lease_validate_v1(bytes: [u8], expected_authority: text) -> Result<HostServiceAuthLeaseV1, text>:
     if bytes.len() < 1 or bytes.len() > 512 or not utf8_bytes_valid(bytes): return Err("host-auth-lease-bound-or-text")
     if not host_service_hex_shape_v6(expected_authority, 64): return Err("host-auth-lease-authority-shape")
-    val source = bytes_to_text(bytes)
+    val source: text = match bytes_to_text_checked(bytes):
+        case Ok(v): v
+        case Err(_): return Err("host-auth-lease-bound-or-text")
     val fields = source.split("\n")
     if fields.len() != 4 or fields[0] != "DISTRIBUTED-OPERATION-LEASE-V2" or fields[3] != "":
         return Err("host-auth-lease-format")
