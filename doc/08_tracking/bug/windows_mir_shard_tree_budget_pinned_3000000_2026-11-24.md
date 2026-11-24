@@ -108,21 +108,33 @@ lowered=1628`, and all 17 owner processes log `[hir-cache] adopted=1567
 lowered=61` and `[hir-cache] hits=1567 misses=61 stores=0 refused=61
 reason=decode rejected=absent:61`. What every owner redoes:
 
-- parse of all 1,628 files (`phase3:hir:file:start` is logged by both
-  `driver_hir_pipeline_lowering.spl:1523` and `:2211` for every file in every
-  process: 58,608 lines = 36 passes x 1,628), and
+- parse of all 1,628 files: `phase2:parse:file:start` appears 58,608 times =
+  36 parse passes x 1,628 files, with `phase2:parse:start` 36 times for 18
+  processes (coordinator + 17 owners), i.e. every owner parses the whole
+  closure, twice. HIR adoption replaces lowering, not parsing: the HIR-phase
+  markers (`driver_hir_pipeline_lowering.spl:1523`, `:2211`) also fire for
+  every file in every process.
 - HIR lowering of the 61 modules the coordinator could not store:
   `[hir-cache-store] refused reason=decode detail=reader kind=malformed
-  detail=truncated line=335078/335078 module=.../src/app/cli/native_build_main.spl;
-  entry not stored` (`driver_hir_cache.spl:1226`, 18 processes x 61). The
-  store-side self-decode of the largest modules fails on a truncated last line,
-  so the biggest HIR entries are exactly the ones every owner re-lowers.
+  detail=truncated line=335078/335078 token= module=.../src/app/cli/native_build_main.spl;
+  entry not stored` (18 processes x 61). Path: the store-side self-decode
+  (`driver_hir_cache.spl:649`, `:943`, `:1009` ->
+  `hir_module_decode_reason`, `src/compiler/20.hir/hir_codec.spl:647`) runs
+  `hc_dec_hir_module` over the blob just encoded; `FlatPoolReader.next()`
+  (`src/compiler/10.frontend/core/flat_pool_codec.spl:333`) reaches
+  `pos >= lines.len()` and rejects `malformed/truncated` at line
+  335,078 of 335,078 -- the decoder asks for one more token than the encoder
+  wrote. It is an encoder/decoder field-count disagreement that surfaces only
+  on the largest frames (the 61 refused modules, `native_build_main.spl` among
+  them), not a size cap: no line or byte limit sits on that path. Finding
+  the disagreeing `hc_enc_*`/`hc_dec_*` pair is the blocker; it is not a
+  release-branch change.
 
 Making an owner hold only its shard's HIR (or a cheaper adopted form) is not a
 cheap change and is not attempted here. Two concrete follow-ups fall out of the
-evidence: the `truncated line=335078/335078` encoder/decoder round-trip
-refusal on 61 modules, and whether the adopted-HIR path can skip the parse
-pass for cache-hit modules.
+evidence: the round-trip refusal above (61 of the largest modules re-lowered
+by every owner), and whether the adopted-HIR path can skip the two parse
+passes for cache-hit modules.
 
 ## Defect 3: the recorded MIR owner peak is contaminated by the sibling lane
 
