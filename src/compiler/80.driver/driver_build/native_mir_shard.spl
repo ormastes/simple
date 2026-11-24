@@ -27,7 +27,8 @@ use std.io_runtime.{file_exists, file_read, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keep_newest_dirs}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1,
+    disk_bound_keep_newest_dirs}
 
 # Native cache scope retention (driver_aot_native_output.spl) removes scope
 # directories idle past its window. A build's children must never run it: a
@@ -74,19 +75,6 @@ pub fn native_cache_scope_start_retention_due_v1(mir_shard: text, hir_shard: tex
             return false
     true
 
-fn _native_cache_scope_name_valid_v1(name: text) -> bool:
-    if name.byte_len() != 33 or not name.starts_with("s"):
-        return false
-    var offset = 1
-    while offset < 33:
-        val ch = name.byte_at(offset)
-        val digit = ch >= 0x30 and ch <= 0x39
-        val lower_hex = ch >= 0x61 and ch <= 0x66
-        if not digit and not lower_hex:
-            return false
-        offset = offset + 1
-    true
-
 # The cache scope directory ("<cache>/s<32 hex>") that holds `object_path`, or
 # "" when the path is not under one. The object may sit directly in the scope
 # or in a subdirectory of it; the innermost scope-shaped component wins.
@@ -98,7 +86,7 @@ pub fn native_cache_scope_dir_of_object_v1(object_path: text) -> text:
     var index = 0
     while index < parts.len() - 1:
         val part = parts[index]
-        if _native_cache_scope_name_valid_v1(part):
+        if disk_bound_keyed_hex_name_v1(part, "s", 33):
             found = index
         index = index + 1
     if found < 0:
@@ -606,7 +594,7 @@ pub fn native_cache_scope_start_retention_v1(cache_dir: text, prior_ledgers: [te
         for scope in native_mir_shard_ledger_scope_dirs_v1(ledger):
             val _marked = disk_bound_mark_dir_used(scope)
     val scopes = disk_bound_keep_newest_dirs(cache_dir, "", "s", 33, keep,
-        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1)
+        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1, true)
     val legacy = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1,
-        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1)
+        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1, true)
     scopes + legacy
