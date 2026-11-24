@@ -6318,10 +6318,18 @@ int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t s
 }
 
 int64_t rt_string_starts_with(int64_t value, int64_t prefix) {
+    const char* p;
+    size_t prefix_len;
+    if (value < 0x10000 || prefix < 0x10000 || !rt_text_view_abi(prefix, &p, &prefix_len)) return 0;
     RtCoreString* s = rt_core_as_string_or_data(value);
-    RtCoreString* p = rt_core_as_string_or_data(prefix);
-    if (!s || !p || p->len > s->len) return 0;
-    return p->len == 0 || memcmp(s->data, p->data, (size_t)p->len) == 0;
+    if (s) return prefix_len <= s->len && memcmp(s->data, p, prefix_len) == 0;
+    /* Bootstrap substring receivers can be bare C strings. A prefix check only
+     * needs the first prefix_len bytes, even for a source-sized receiver. */
+    const char* raw = (const char*)(uintptr_t)value;
+    for (size_t i = 0; i < prefix_len; ++i) {
+        if (raw[i] == '\0' || raw[i] != p[i]) return 0;
+    }
+    return 1;
 }
 
 int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
