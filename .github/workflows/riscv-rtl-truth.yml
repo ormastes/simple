@@ -1,19 +1,60 @@
 name: RISC-V RTL Source Truth
 on:
   pull_request:
+    paths:
+      - 'src/lib/hardware/rv32i_rtl/**'
+      - 'src/lib/hardware/rv64gc_rtl/**'
+      - 'examples/09_embedded/fpga_riscv/**'
+      - '**/*.vhd'
+      - 'scripts/check/check-riscv-rtl-truth.shs'
+      - 'test/01_unit/scripts/riscv_rtl_truth_contract_test.shs'
+      - 'test/fixtures/riscv_truth/**'
+      - '.github/workflows/riscv-rtl-truth.yml'
   push:
     branches: [main, release/1.0.0]
+    paths:
+      - 'src/lib/hardware/rv32i_rtl/**'
+      - 'src/lib/hardware/rv64gc_rtl/**'
+      - 'examples/09_embedded/fpga_riscv/**'
+      - '**/*.vhd'
+      - 'scripts/check/check-riscv-rtl-truth.shs'
+      - 'test/01_unit/scripts/riscv_rtl_truth_contract_test.shs'
+      - 'test/fixtures/riscv_truth/**'
+      - '.github/workflows/riscv-rtl-truth.yml'
   workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   rtl-source-truth:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            src/lib/hardware/rv32i_rtl
+            src/lib/hardware/rv64gc_rtl
+            src/lib/hardware/debug
+            examples/09_embedded/fpga_riscv
+            examples/09_embedded/vhdl
+            scripts/check
+            test/01_unit/scripts
+            test/01_unit/lib/hardware/fpga_linux
+            test/fixtures/riscv_truth
+            test/fixtures/vhdl
+            test/riscv_isa_gate
+          sparse-checkout-cone-mode: true
       - name: Install source audit tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep gawk
+        run: |
+          if ! command -v rg >/dev/null 2>&1 || ! command -v gawk >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ripgrep gawk
+          fi
       - name: Check fail-closed admission and sabotage controls
         run: sh test/01_unit/scripts/riscv_rtl_truth_contract_test.shs
       - name: Audit actual RTL source

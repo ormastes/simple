@@ -9,8 +9,6 @@ name: Required Gates
 # to main / dispatch only; the PR pays for this one job.
 
 on:
-  push:
-    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
   pull_request:
     branches: [main, master, develop, release_windows, release_phase3, 'release/**']
   workflow_dispatch:
@@ -123,47 +121,66 @@ jobs:
             tools/counterpart/sdk/c
           sparse-checkout-cone-mode: true
 
-      # .csm seals (xxh3) are verified with the native `xxhsum -H3` on a runner
-      # (no deployed bin/simple here). sdn-seal-lib.shs checks the tool against
-      # the published empty-input digest before it trusts it; with no hasher the
-      # gate ERRORS (fail closed), so install it best-effort here.
-      - name: Install xxhsum for .csm seal verification
+      - name: Provision xxhsum and verify LLVM toolchain
         shell: sh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
-          command -v xxhsum >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xxhash)
+          _fetch_pid=""
+          _fetch_rc=0
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
+            (
+              git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA"
+            ) >"$RUNNER_TEMP/pr-fetch.log" 2>&1 </dev/null &
+            _fetch_pid=$!
+          fi
+          _llvm_dir=""
+          _best_ver=0
+          for _d in /usr/lib/llvm-*/bin; do
+            [ -d "$_d" ] || continue
+            _v=${_d#/usr/lib/llvm-}; _v=${_v%/bin}
+            case "$_v" in ''|*[!0-9]*) continue ;; esac
+            if [ "$_v" -gt "$_best_ver" ] && [ -x "$_d/llvm-nm" ]; then
+              _best_ver=$_v
+              _llvm_dir=$_d
+            fi
+          done
+          if [ -n "$_llvm_dir" ]; then
+            case ":$PATH:" in *":$_llvm_dir:"*) ;; *) PATH="$_llvm_dir:$PATH" ;; esac
+            printf '%s\n' "$_llvm_dir" >> "$GITHUB_PATH"
+            export PATH
+          fi
+          pkgs=""
+          command -v xxhsum >/dev/null 2>&1 || pkgs="$pkgs xxhash"
+          command -v clang >/dev/null 2>&1 || pkgs="$pkgs clang"
+          command -v ld.lld >/dev/null 2>&1 || pkgs="$pkgs lld"
+          sh scripts/check/check-runtime-link-completeness.shs --resolve-only >/dev/null 2>&1 || pkgs="$pkgs llvm"
+          if [ -n "$pkgs" ]; then
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              ( sudo apt-get update -qq -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- &&
+                sudo apt-get install -y -qq --no-install-recommends $pkgs ) ||
+              ( sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $pkgs )
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq --no-install-recommends $pkgs
+            fi
+          fi
           xxhsum -V
-
-      # local-runtime-link-completeness compiles the core-C runtime with clang
-      # and reads symbols with llvm-nm (src/compiler, src/runtime and the
-      # sffi/cli decl roots are in the sparse set above for that reason). The
-      # hosted image has no llvm-nm on PATH (lld: ld.lld for local-simpleos-module-init-stub-weak). The gate itself FAILS (exit 2) if
-      # no llvm-nm resolves, so a missing tool can never read as green.
-      - name: Install LLVM toolchain (llvm-nm, clang, lld)
-        shell: sh
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends llvm clang lld
           sh scripts/check/check-runtime-link-completeness.shs --resolve-only
+          if [ -n "$_fetch_pid" ]; then
+            wait "$_fetch_pid" || _fetch_rc=$?
+            if [ "$_fetch_rc" -ne 0 ]; then
+              cat "$RUNNER_TEMP/pr-fetch.log" 2>/dev/null || true
+              echo "fast-gates: could not fetch the PR endpoints"
+              exit 1
+            fi
+            : > "$RUNNER_TEMP/pr-endpoints-fetched"
+          fi
 
-      - name: LLVM nm resolver self-test
-        shell: sh
-        run: sh scripts/check/check-llvm-nm-resolve-selftest.shs
-
-      - name: Pure provider runtime capsule admission contract controls
-        shell: sh
-        run: sh scripts/check/check-pure-provider-runtime-capsule.shs --selftest
-
-      - name: Bootstrap sandbox copy-list closure gate
-        shell: sh
-        run: |
-          sh scripts/check/check-bootstrap-sandbox-copy-closure.shs
-
-      - name: Unified bootstrap build-scripts contract gate
-        shell: sh
-        run: |
-          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest && sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
-
-      - name: Fast push-tier gates on the PR range
+      - name: Fast push-tier and contract gates on the PR range
         shell: sh
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -171,49 +188,60 @@ jobs:
           PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           # `shell: sh` is `sh -e`; without this a red runner exit aborts the
-          # step before the exit-code check below runs.
+          # step before background subshells are waited and checked below.
           set +e
-          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
-              echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
-              exit 0
-          fi
-          case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
-          # PR_COMMITS + 1 is enough for every diff-scoped gate, but
-          # check-no-stale-snapshot-rewind consults up to --window (default 40)
-          # first-parent ancestors of each commit's parent as contributors. With
-          # only one ancestor beyond the range it would still exit 0 while
-          # examining a near-empty contributor window — a silent weakening, not a
-          # FAIL, which is exactly the fail-open shape this workflow avoids
-          # elsewhere. 41 extra commits keeps the window real.
-          # --no-recurse-submodules: the range routinely spans a .spipe/spipe (or
-          # other) gitlink bump, and on-demand recursion then tries to fetch a
-          # submodule this sparse job never initialised -> "Could not access
-          # submodule" and a spurious RED on every PR (2026-09-26, PR #1619/#1621).
-          git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
-              { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
-          # The private-import baseline names source files outside the fixed
-          # sparse roots above (for example examples/12_business). Materialize
-          # exactly the directories needed by the current baseline so the
-          # checker can distinguish real stale entries from sparse omissions.
-          # Paths travel through stdin; baseline data is never interpolated
-          # into shell commands.
-          if [ ! -s scripts/check/private_import_baseline.txt ]; then
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
+            if [ ! -f "$RUNNER_TEMP/pr-endpoints-fetched" ]; then
+              git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
+                  { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
+            fi
+            if [ ! -s scripts/check/private_import_baseline.txt ]; then
               echo "fast-gates: private-import baseline is missing or empty"
               exit 1
+            fi
           fi
-          source_dirs=$(mktemp)
-          sorted_source_dirs=$(mktemp)
-          trap 'rm -f "$source_dirs" "$sorted_source_dirs"' EXIT
-          awk -F'|' 'NF >= 2 && $1 != "" { path = $1; sub(/\/[^/]+$/, "", path); if (path != $1) print path }' \
-              scripts/check/private_import_baseline.txt > "$source_dirs"
-          # The module file/dir ambiguity baseline names X.spl beside X/; cone mode
-          # only brings X/ in when something else names it, so a pair whose
-          # directory left the private-import baseline read as stale here.
-          awk '!/^#/ && NF { path = $0; sub(/\.spl$/, "", path); print path }' \
-              scripts/check/module_file_dir_ambiguity_baseline.txt >> "$source_dirs"
-          LC_ALL=C sort -u "$source_dirs" > "$sorted_source_dirs"
-          git sparse-checkout add --stdin < "$sorted_source_dirs" ||
-              { echo "fast-gates: could not materialize private-import source directories"; exit 1; }
+
+          _bg_fail=0
+          _unified_pid=""
+
+          (
+            sh scripts/check/check-llvm-nm-resolve-selftest.shs
+          ) >"$RUNNER_TEMP/fg-llvm-nm.log" 2>&1 </dev/null &
+          _pid_llvm_nm=$!
+
+          (
+            sh scripts/check/check-pure-provider-runtime-capsule.shs --selftest
+          ) >"$RUNNER_TEMP/fg-capsule.log" 2>&1 </dev/null &
+          _pid_capsule=$!
+
+          (
+            sh scripts/check/check-bootstrap-sandbox-copy-closure.shs
+          ) >"$RUNNER_TEMP/fg-copy-closure.log" 2>&1 </dev/null &
+          _pid_copy_closure=$!
+
+          (
+            sh scripts/check/check-land-target-range.shs
+          ) >"$RUNNER_TEMP/fg-land-range.log" 2>&1 </dev/null &
+          _pid_land_range=$!
+
+          _run_unified=0
+          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+            _run_unified=1
+          elif git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -Eq '^(bin|config|release|scripts|\.github|doc/04_architecture/compiler/plugin_arch|test/01_unit/scripts)/'; then
+            _run_unified=1
+          fi
+          if [ "$_run_unified" -eq 1 ]; then
+            (
+              set -e
+              sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+              sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
+            ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
+            _unified_pid=$!
+          else
+            echo "fast-gates: no bootstrap/script/config/workflow paths changed in range; skipping standalone duplicate unified-contract sweep"
+          fi
+
           # One runner, one manifest, for both local and remote (goal item 5,
           # WP3): this used to be 9 hardcoded `run_gate` lines that had
           # drifted from the pre-push `local` tier (rust-dup --rev vs --range,
@@ -263,12 +291,39 @@ jobs:
           # endpoints from THIS event, never from the manifest file, so a row
           # runs against the real PR content even though its COMMAND TEXT
           # came from BASE.
-          PRIVATE_IMPORT_BASE="$BASE_SHA" sh scripts/check/run-gate-tier.shs --tier local \
-              --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
-              --manifest-rev "$BASE_SHA" --jobs 16 --budget 240
-          rc=$?
-          [ "$rc" -eq 0 ] || { echo "fast-gates: one or more fast gates failed or errored (exit $rc)"; exit 1; }
+          _tier_rc=0
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            PRIVATE_IMPORT_BASE="$BASE_SHA" sh scripts/check/run-gate-tier.shs --tier local \
+                --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
+                --manifest-rev "$BASE_SHA" --jobs 16 --budget 240
+            _tier_rc=$?
+          else
+            echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"
+          fi
 
-      - name: Landing target range regression
-        shell: sh
-        run: sh scripts/check/check-land-target-range.shs
+          wait_bg() {
+            _wb_pid=$1; _wb_name=$2; _wb_log=$3
+            [ -n "$_wb_pid" ] || return 0
+            wait "$_wb_pid"
+            _wb_rc=$?
+            echo "=== $_wb_name (exit $_wb_rc) ==="
+            cat "$_wb_log" 2>/dev/null || true
+            if [ "$_wb_rc" -ne 0 ]; then
+              _bg_fail=1
+            fi
+          }
+
+          wait_bg "$_pid_llvm_nm" "LLVM nm resolver self-test" "$RUNNER_TEMP/fg-llvm-nm.log"
+          wait_bg "$_pid_capsule" "Pure provider runtime capsule admission contract controls" "$RUNNER_TEMP/fg-capsule.log"
+          wait_bg "$_pid_copy_closure" "Bootstrap sandbox copy-list closure gate" "$RUNNER_TEMP/fg-copy-closure.log"
+          wait_bg "$_pid_land_range" "Landing target range regression" "$RUNNER_TEMP/fg-land-range.log"
+          wait_bg "$_unified_pid" "Unified bootstrap build-scripts contract gate" "$RUNNER_TEMP/fg-unified.log"
+
+          if [ "$_tier_rc" -ne 0 ]; then
+            echo "fast-gates: one or more fast gates failed or errored (exit $_tier_rc)"
+            exit 1
+          fi
+          if [ "$_bg_fail" -ne 0 ]; then
+            echo "fast-gates: one or more background contract gates failed"
+            exit 1
+          fi
