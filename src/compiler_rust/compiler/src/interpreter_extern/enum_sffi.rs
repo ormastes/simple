@@ -93,16 +93,15 @@ pub fn rt_enum_id_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// or out-of-range discriminants are a semantic error, never a silent nil.
 pub fn rt_enum_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     let int_arg = |i: usize| match args.get(i) {
-        Some(Value::Int(n)) => Some(*n),
+        Some(Value::Int(n)) => i32::try_from(*n).ok().and_then(|word| u32::try_from(word).ok()),
         _ => None,
     };
     let (Some(enum_id), Some(disc)) = (int_arg(0), int_arg(1)) else {
         return Err(CompileError::semantic(
-            "rt_enum_new expects (enum_id: i32, discriminant: i32, payload)".to_string(),
+            "rt_enum_new expects nonnegative i32 enum_id and discriminant".to_string(),
         ));
     };
     let payload = args.get(2).cloned().unwrap_or(Value::Nil);
-    let (enum_id, disc) = (enum_id as u32, disc as u32);
     let builtin = match enum_id {
         0 => Some(("Result", ["Ok", "Err"])),
         1 => Some(("Option", ["Some", "None"])),
@@ -148,6 +147,14 @@ mod rt_enum_new_tests {
         );
         assert_eq!(rt_enum_id_fn(&[v.clone()]).unwrap(), Value::Int(1));
         assert_eq!(rt_enum_discriminant_fn(&[v]).unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn invalid_wire_words_do_not_wrap_to_builtin_variants() {
+        for (enum_id, disc) in [(1, 1_i64 << 32), ((1_i64 << 32) + 1, 0), (i64::MIN, 0)] {
+            let args = [Value::Int(enum_id), Value::Int(disc), Value::Nil];
+            assert!(rt_enum_new_fn(&args).is_err(), "accepted enum {enum_id}, variant {disc}");
+        }
     }
 
     #[test]
