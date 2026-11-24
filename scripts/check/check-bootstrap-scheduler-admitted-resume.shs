@@ -16,20 +16,23 @@ scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
 trap 'chmod -R u+w "$scratch" 2>/dev/null || true; rm -rf "$scratch"' EXIT HUP INT TERM
 checks=0
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-check() { checks=$((checks + 1)); "$@" || fail "$*"; }
-reject() { checks=$((checks + 1)); if "$@"; then fail "unexpected acceptance: $*"; fi; }
+check() { checks=$((checks + 1)); printf "CHECK %s: %s\n" "$checks" "$*"; "$@" || fail "$*"; }
+reject() { checks=$((checks + 1)); printf "REJECT %s: %s\n" "$checks" "$*"; if "$@"; then fail "unexpected acceptance: $*"; fi; }
 replace_in_file() { sed "$1" "$2" >"$2.next"; mv "$2.next" "$2"; }
-# Reuse only the existing fixture constructor, not its executed test matrix.
-# Its canonical admission writer and verifiers stay real. Place the fixture in
-# the production host discovery layout (retaining a .exe filename fixture) before the writer seals paths.
-awk '/^make_fixture\(\)/ {copy=1} /^run_producer\(\)/ {copy=0} copy {print}' \
- "$root/scripts/check/check-bootstrap-planner-admission-producer.shs" | \
- sed 's@mf_evidence_dir="$mf_dst/build/bootstrap/provenance/fixture"@mf_evidence_dir="$mf_dst/build/bootstrap/stage3/$fixture_platform"@' >"$scratch/fixture.sh"
-. "$scratch/fixture.sh"
+for required in release/version.sdn VERSION src/app/cli/bootstrap_identity.spl src/app/cli/bootstrap_reason_planner.spl; do
+ test -f "$root/$required" || fail "missing canonical fixture input: $required"
+done
+bootstrap_stage3_canonical_version "$root" >/dev/null || fail "canonical fixture version rejected"
+printf "SETUP: canonical fixture inputs verified\n"
+# Shared fixture API invokes the canonical writer/checker; no compiler runs.
+. "$root/scripts/check/lib/bootstrap-planner-admission-fixture.shs"
 host_platform=$(bootstrap_stage3_host_platform) || fail "canonical host selector unavailable"
 fixture_platform=$host_platform
 fixture="$scratch/source"
-make_fixture "$fixture" 'stage2-provenance: pure-simple' strict .exe
+printf "SETUP: construct admitted fixture %s\n" "$fixture_platform"
+set -x
+make_fixture "$fixture" 'stage2-provenance: pure-simple' strict .exe "stage3/$fixture_platform"
+set +x
 output="$fixture/build/bootstrap"
 admission="$output/stage3/$fixture_platform/stage2-admitted/admission.env"
 candidate="$output/stage3/$fixture_platform/stage2-admitted/simple.exe"
@@ -45,7 +48,10 @@ record="$scratch/resume.env"
 # A second correctly sealed foreign-target fixture must not make host discovery
 # ambiguous, nor substitute for the host when its admission is absent.
 fixture_platform=foreign-target-fixture
-make_fixture "$fixture" 'stage2-provenance: pure-simple' strict .exe
+printf "SETUP: construct admitted fixture %s\n" "$fixture_platform"
+set -x
+make_fixture "$fixture" 'stage2-provenance: pure-simple' strict .exe "stage3/$fixture_platform"
+set +x
 foreign_admission="$output/stage3/$fixture_platform/stage2-admitted/admission.env"
 check test -f "$foreign_admission"
 reject bootstrap_scheduler_verify_admitted_parent "$foreign_admission" "$output" "$root"

@@ -27,6 +27,15 @@ Windows filename preservation, record overwrite refusal, fresh-lease rules,
 and the actual Stage4 hook's missing/matching/conflicting binding behavior.
 The bootstrap contract CI owns bounded execution and retained owner receipts.
 
+The first two focused CI attempts stopped in fixture setup, not production
+assertions: the initial fixture omitted the Stage4 helper-path declaration;
+the next checkout omitted the canonical release/version.sdn dependency and
+returned exit1 without an assertion transcript. The final fixture uses a
+shared constructor API with the old default layout preserved, explicitly
+checks version-source prerequisites and emits numbered assertion progress.
+CI includes the actual release version authority. Neither setup failure is
+claimed as a compiler or admission verdict.
+
 Deployment boundary: the scheduler derives its root, engine, qualifier and
 source authority from its own checkout. It has no supported external frozen
 engine override. This repair applies to matching-source generations; it must
