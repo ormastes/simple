@@ -22,31 +22,160 @@ nil-check outcome should have controlled short-circuiting. Same defect class
 as `bare_optional_in_condition_position_wrong_branch_2026-08-01`, which fixed
 `if`/`while` but left `and`/`or` behind.
 
-This is a source-content guard, not a runtime execution spec: the fix lives
-in the pure-Simple self-hosted compiler
-(`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`), which the
+## Chain lowering is iterative (2026-11-24)
+
+Bug `windows_compiler_stack_overflow_1mib_default_deep_or_chain_2026-11-24`:
+the parser left-associates `a or b or c` into `Or(Or(a, b), c)`, and the arm
+recursed on the left operand once per term, so a ~40-term `or` chain
+overflowed the 1 MiB default Windows stack of the Phase-2-built compiler.
+The arm now walks the same-operator left spine into a leaf list and
+`lower_logical_chain_v1` lowers the leaves in a loop, emitting per leaf
+exactly the MIR the recursion emitted per node. Both operand reads still go
+through `lower_cond_expr`.
+
+The source-shape cases are guards on the pure-Simple compiler, which the
 currently deployed `bin/simple` (a Rust bootstrap seed, see `bin/simple
 --version`) does not execute -- the seed has its own independent Rust MIR
-lowering and never reads this file's compiled behavior. A true end-to-end
-runtime check requires a self-hosted binary built via full bootstrap (T3),
-out of scope for an ordinary spec run. This spec instead asserts the exact
-fix shape is present in source, which is real, sabotage-provable evidence
-today (revert the fix -> this spec goes RED; restore it -> GREEN).
+lowering. The runtime chain cases below therefore pin the LANGUAGE contract
+(left-to-right evaluation, short-circuit, Bool result) that the new lowering
+must keep; they exercise this file's lowering only under a self-hosted
+binary. The `MirLowering` case does run the pure-Simple lowering (in the
+seed's interpreter) over a 60-term chain and inspects the MIR it produced.
 """
 
-extern fn rt_file_read_text(path: text) -> text
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+var chain_trace: [text] = []
+
+fn probe(name: text, value: bool) -> bool:
+    chain_trace.push(name)
+    value
+
+fn chain_trace_joined() -> text:
+    chain_trace.join(",")
+
+fn reset_chain_trace():
+    chain_trace = []
+
+fn or_chain_source(terms: i64) -> text:
+    var body = "a == 0"
+    var i = 1
+    while i < terms:
+        body = body + " or a == {i}"
+        i = i + 1
+    "fn chain(a: i64) -> bool:\n    {body}\n"
+
+fn lower_source_to_mir(src: text) -> MirModule:
+    val file = "testdata/logic_chain_lowering.spl"
+    val parsed = parse_full_frontend(src, file, "logic_chain_lowering", Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+
+fn lowered_function_names(mir: MirModule) -> text:
+    var names: [text] = []
+    for f in mir.functions.values():
+        names.push(f.name)
+    names.join(",")
+
+fn count_blocks_labelled(mir: MirModule, fn_name: text, label: text) -> i64:
+    var count = 0
+    for f in mir.functions.values():
+        # Lowered names may carry the module qualifier.
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            for block in f.blocks:
+                if (block.label ?? "") == label:
+                    count = count + 1
+    count
 
 describe "And/Or logical operands in MIR lowering (lower_binary_expr)":
     it "routes both the left and right operand through lower_cond_expr, not lower_expr":
         val source = rt_file_read_text(
             "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
         expect(source).to_contain("case And | Or:")
-        expect(source).to_contain("val left_local = self.lower_cond_expr(left)")
-        expect(source).to_contain("val right_local = self.lower_cond_expr(right)")
+        expect(source).to_contain("var acc_local = self.lower_cond_expr(leaves[0])")
+        expect(source).to_contain("val right_local = self.lower_cond_expr(leaves[leaf_index])")
         # Sabotage guard: the old (buggy) call shape must NOT be the one that
-        # actually feeds left_local/right_local for the And|Or arm. We can't
-        # assert global absence of "lower_expr(left)" (it's legitimately used
-        # elsewhere, e.g. the `case _:` binary-op fallthrough), so we instead
-        # pin the exact fixed lines above as the ones present -- if this file
-        # is reverted to `val left_local = self.lower_expr(left)` right after
-        # `case And | Or:`, the two to_contain checks above fail.
+        # feeds the branch operands. We can't assert global absence of
+        # "lower_expr(left)" (it's legitimately used elsewhere, e.g. the
+        # `case _:` binary-op fallthrough), so we instead pin the exact fixed
+        # lines above as the ones present -- if the chain helper is reverted
+        # to `self.lower_expr(leaves[0])`, the to_contain checks above fail.
+
+    it "lowers a same-operator left spine as a leaf list in a loop, not by recursing on left":
+        val source = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        # Anchor on the indented arm line, not the bare token: the helper's
+        # docstring mentions `case And | Or:` too and precedes the arm.
+        val arm = source.split("            case And | Or:\n")[1].split("case _:\n                var left_local = self.lower_expr(left)")[0]
+        expect(arm).to_contain("case HirExprKind.Binary(chain_op, chain_left, chain_right):")
+        expect(arm).to_contain("if chain_op == op and chain_left != None and chain_right != None:")
+        expect(arm).to_contain("self.lower_logical_chain_v1(op, chain_leaves)")
+        # The arm itself no longer lowers either operand directly.
+        expect(arm.contains("self.lower_cond_expr(left)")).to_equal(false)
+        expect(arm.contains("self.lower_cond_expr(right)")).to_equal(false)
+        val helper = source.split("me lower_logical_chain_v1(op: HirBinOp, leaves: [HirExpr]) -> LocalId:")[1].split("me lower_binary_expr(")[0]
+        expect(helper).to_contain("while leaf_index < leaves.len():")
+        expect(helper).to_contain("chain_start_ordinal, left_end_ordinal, right_local,")
+        expect(helper).to_contain("left_end_ordinal = self.mcdc_next_condition_ordinal")
+
+describe "logical chain semantics the iterative lowering must keep":
+    it "a long `or` chain evaluates left to right and stops at the first true operand":
+        reset_chain_trace()
+        val result = probe("a", false) or probe("b", false) or probe("c", false) or probe("d", false) or probe("e", false) or probe("f", false) or probe("g", false) or probe("h", false) or probe("i", false) or probe("j", false) or probe("k", false) or probe("l", false) or probe("m", false) or probe("n", false) or probe("o", false) or probe("p", false) or probe("q", false) or probe("r", false) or probe("s", false) or probe("t", false) or probe("u", true) or probe("v", false) or probe("w", true) or probe("x", false)
+        expect(result).to_equal(true)
+        expect(chain_trace_joined()).to_equal("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u")
+
+    it "an all-false `or` chain evaluates every operand once, in order, and yields false":
+        reset_chain_trace()
+        val result = probe("a", false) or probe("b", false) or probe("c", false) or probe("d", false) or probe("e", false) or probe("f", false) or probe("g", false) or probe("h", false)
+        expect(result).to_equal(false)
+        expect(chain_trace_joined()).to_equal("a,b,c,d,e,f,g,h")
+
+    it "a long `and` chain evaluates left to right and stops at the first false operand":
+        reset_chain_trace()
+        val result = probe("a", true) and probe("b", true) and probe("c", true) and probe("d", true) and probe("e", true) and probe("f", true) and probe("g", true) and probe("h", true) and probe("i", true) and probe("j", true) and probe("k", true) and probe("l", true) and probe("m", true) and probe("n", true) and probe("o", true) and probe("p", true) and probe("q", true) and probe("r", true) and probe("s", true) and probe("t", true) and probe("u", false) and probe("v", true) and probe("w", false) and probe("x", true)
+        expect(result).to_equal(false)
+        expect(chain_trace_joined()).to_equal("a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u")
+
+    it "an all-true `and` chain evaluates every operand once, in order, and yields true":
+        reset_chain_trace()
+        val result = probe("a", true) and probe("b", true) and probe("c", true) and probe("d", true) and probe("e", true) and probe("f", true) and probe("g", true) and probe("h", true)
+        expect(result).to_equal(true)
+        expect(chain_trace_joined()).to_equal("a,b,c,d,e,f,g,h")
+
+    it "a mixed chain keeps `and` tighter than `or`: an `and` group is one `or` leaf, short-circuited inside":
+        # Parses as (a or (b and c) or (d and e and f)) or g: the `and`
+        # groups are opaque leaves of the `or` spine and still short-circuit
+        # internally. `b` is true so `c` runs; `d` is false so `e`,`f` do not;
+        # `g` is true so the chain stops there.
+        reset_chain_trace()
+        val result = probe("a", false) or (probe("b", true) and probe("c", false)) or (probe("d", false) and probe("e", true) and probe("f", true)) or probe("g", true) or probe("h", true)
+        expect(result).to_equal(true)
+        expect(chain_trace_joined()).to_equal("a,b,c,d,g")
+
+    it "a mixed chain with a parenthesised right-nested `or` keeps the same evaluation order":
+        reset_chain_trace()
+        val result = probe("a", false) or (probe("b", false) or (probe("c", false) or probe("d", true))) or probe("e", true)
+        expect(result).to_equal(true)
+        expect(chain_trace_joined()).to_equal("a,b,c,d")
+
+describe "pure-Simple MirLowering over a deep `or` chain":
+    it "lowers a 60-term `or` chain to one logic_merge block per operator and a Bool result":
+        val mir = lower_source_to_mir(or_chain_source(60))
+        expect(lowered_function_names(mir).contains("chain")).to_equal(true)
+        # 60 leaves -> 59 nodes, each with its own merge/short/rhs block,
+        # exactly as the recursive lowering produced.
+        expect(count_blocks_labelled(mir, "chain", "logic_merge")).to_equal(59)
+        expect(count_blocks_labelled(mir, "chain", "logic_short")).to_equal(59)
+        expect(count_blocks_labelled(mir, "chain", "logic_rhs")).to_equal(59)

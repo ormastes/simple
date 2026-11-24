@@ -453,7 +453,18 @@ impl MirLowering:
                                     # ABI defect class as 4710b22a991).
                                     if val present_global_elem = self.symbols.get_symbol_raw(global_elem_symbol.id):
                                         val global_elem: HirSymbol = present_global_elem
-                                        self.array_element_struct_syms[dest.id] = global_elem.name
+                                        # Record owners only: an ENUM element
+                                        # (`var g: [RelocArch] = []`, elf_static_link.spl)
+                                        # has no struct layout, so registering it made
+                                        # `g[0]` die in checked_array_record_layout with
+                                        # "array return record element has no unique
+                                        # provider layout" (remember_array_index_projection_
+                                        # provenance calls it before its own kind filter).
+                                        # Bug p2_mir_enum_array_global_index_no_unique_provider_layout_2026_11_24.
+                                        match global_elem.kind:
+                                            case SymbolKind.Struct | SymbolKind.Class:
+                                                self.array_element_struct_syms[dest.id] = global_elem.name
+                                            case _: ()
                                 case _: ()
                         case _: ()
             # Register struct provenance for the loaded local, mirroring every
@@ -3994,6 +4005,102 @@ impl MirLowering:
             eprint("[mir-lower-expr] span-builder-written method={span_method_name} id={span_result.id}\n")
         span_result
 
+    me lower_logical_chain_v1(op: HirBinOp, leaves: [HirExpr]) -> LocalId:
+        """Lower a left-associated `and`/`or` chain `l0 op l1 op ... op lN`
+        iteratively.
+
+        Iteration i (1 <= i <= N) emits exactly what the former recursive
+        `case And | Or:` arm emitted for the node `(l0 op ... op l(i-1)) op
+        li`, with the accumulated Bool result standing in for the recursively
+        lowered left operand: its own `logic_rhs` / `logic_short` /
+        `logic_merge` blocks, its own entry-alloca merge slot, the Bool->i64
+        zext of the rhs, the merge load and the `!= 0` Bool normalization.
+        Evaluation order (left to right), short-circuit shape (a decided
+        prefix jumps straight to the node's short block, never evaluating
+        the remaining leaves) and the resulting Bool local are therefore
+        unchanged; only the native recursion depth is -- it is now constant
+        in N.
+
+        MC/DC: the recursion read `left_start_ordinal` before lowering the
+        left operand of each node. Because every node's left operand is the
+        prefix rooted at `l0`, that start is the ordinal read once before
+        `l0` for EVERY level, and `left_end_ordinal` for level i is the
+        ordinal right after leaf l(i-1) was lowered (`emit_mcdc_mask_range`
+        and compound nodes do not advance the ordinal). Both are reproduced
+        here per level."""
+        val chain_start_ordinal = self.mcdc_next_condition_ordinal
+        var acc_local = self.lower_cond_expr(leaves[0])
+        var left_end_ordinal = self.mcdc_next_condition_ordinal
+        var leaf_index = 1
+        while leaf_index < leaves.len():
+            var b_logic = self.builder
+            val rhs_block = b_logic.new_block(Some("logic_rhs"))
+            val short_block = b_logic.new_block(Some("logic_short"))
+            val merge_block = b_logic.new_block(Some("logic_merge"))
+            # The merge slot has function lifetime. Keep its alloca in
+            # entry so a logical expression inside a loop does not grow
+            # the native stack on every iteration.
+            val result_slot = b_logic.emit_entry_alloc(MirType.i64())
+            match op:
+                case And: b_logic.terminate_if(mir_operand_copy(acc_local), rhs_block, short_block)
+                case _: b_logic.terminate_if(mir_operand_copy(acc_local), short_block, rhs_block)
+            self.builder = b_logic
+
+            var b_short = self.builder
+            b_short.switch_to_block(short_block)
+            val short_int = match op:
+                case And: 0
+                case _: 1
+            val short_value = b_short.emit_const_int(short_int)
+            b_short.emit_store(mir_operand_copy(result_slot), mir_operand_copy(short_value))
+            b_short.terminate_goto(merge_block)
+            self.builder = b_short
+
+            var b_rhs = self.builder
+            b_rhs.switch_to_block(rhs_block)
+            self.builder = b_rhs
+            # RHS is in condition position too -- same reasoning as the
+            # LHS. The Bool->i64 normalization below still applies on top
+            # of whatever lower_cond_expr returns.
+            val right_local = self.lower_cond_expr(leaves[leaf_index])
+            # Boolean-derivative masking: when the RHS controls this node
+            # (false for AND, true for OR), every evaluated occurrence in
+            # the LHS subtree is provably irrelevant to this outcome.
+            self.emit_mcdc_mask_range(
+                chain_start_ordinal, left_end_ordinal, right_local,
+                op == HirBinOp.Or)
+            left_end_ordinal = self.mcdc_next_condition_ordinal
+            var right_value = right_local
+            var b_rhs_done = self.builder
+            if val right_type = self.local_mir_type_of(right_local):
+                match right_type.kind:
+                    case MirTypeKind.Bool:
+                        right_value = b_rhs_done.emit_cast(mir_operand_copy(right_local), MirType.i64())
+                    case _: ()
+            b_rhs_done.emit_store(mir_operand_copy(result_slot), mir_operand_copy(right_value))
+            b_rhs_done.terminate_goto(merge_block)
+            b_rhs_done.switch_to_block(merge_block)
+            # The merge slot itself stays i64 (both arms store 0/1
+            # ints; a Bool rhs is zext'd above), but the RESULT
+            # local must be typed Bool: downstream type dispatch --
+            # lower_bootstrap_print_call, coerce_concat_operand --
+            # keys off local_mir_type_of, and an I64-typed result
+            # routes print(a and b) to rt_raw_i64_to_string ("0"/
+            # "1") instead of rt_raw_bool_to_string ("true"/
+            # "false") (strict-llvm parity case
+            # logical_short_circuit). Normalize via `!= 0` -- a
+            # compare with i64 operands and a Bool dest is the
+            # established legal pattern (see the tagged-bool decode
+            # in lower_binary_expr: emit_binop(Eq, raw, true_value, bool));
+            # it avoids the illegal i64->i1 narrowing bitcast that
+            # loading the slot directly as Bool would risk.
+            val merged_int = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
+            val logic_zero = b_rhs_done.emit_const_int(0)
+            acc_local = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
+            self.builder = b_rhs_done
+            leaf_index = leaf_index + 1
+        acc_local
+
     me lower_binary_expr(expr_value: HirExpr, op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId:
 
         # A qualified enum variant on the RHS of `is` names a PATTERN, not a
@@ -4074,74 +4181,46 @@ impl MirLowering:
                 # branch. Same class of bug as
                 # bare_optional_in_condition_position_wrong_branch, which fixed
                 # `if`/`while` but left `and`/`or` behind.
-                val left_start_ordinal = self.mcdc_next_condition_ordinal
-                val left_local = self.lower_cond_expr(left)
-                val left_end_ordinal = self.mcdc_next_condition_ordinal
-                var b_logic = self.builder
-                val rhs_block = b_logic.new_block(Some("logic_rhs"))
-                val short_block = b_logic.new_block(Some("logic_short"))
-                val merge_block = b_logic.new_block(Some("logic_merge"))
-                # The merge slot has function lifetime. Keep its alloca in
-                # entry so a logical expression inside a loop does not grow
-                # the native stack on every iteration.
-                val result_slot = b_logic.emit_entry_alloc(MirType.i64())
-                match op:
-                    case And: b_logic.terminate_if(mir_operand_copy(left_local), rhs_block, short_block)
-                    case _: b_logic.terminate_if(mir_operand_copy(left_local), short_block, rhs_block)
-                self.builder = b_logic
-
-                var b_short = self.builder
-                b_short.switch_to_block(short_block)
-                val short_int = match op:
-                    case And: 0
-                    case _: 1
-                val short_value = b_short.emit_const_int(short_int)
-                b_short.emit_store(mir_operand_copy(result_slot), mir_operand_copy(short_value))
-                b_short.terminate_goto(merge_block)
-                self.builder = b_short
-
-                var b_rhs = self.builder
-                b_rhs.switch_to_block(rhs_block)
-                self.builder = b_rhs
-                # RHS is in condition position too -- same reasoning as the
-                # LHS above. The Bool->i64 normalization below still applies
-                # on top of whatever lower_cond_expr returns.
-                val right_local = self.lower_cond_expr(right)
-                # Boolean-derivative masking: when the RHS controls this node
-                # (false for AND, true for OR), every evaluated occurrence in
-                # the LHS subtree is provably irrelevant to this outcome.
-                self.emit_mcdc_mask_range(
-                    left_start_ordinal, left_end_ordinal, right_local,
-                    op == HirBinOp.Or)
-                var right_value = right_local
-                var b_rhs_done = self.builder
-                if val right_type = self.local_mir_type_of(right_local):
-                    match right_type.kind:
-                        case MirTypeKind.Bool:
-                            right_value = b_rhs_done.emit_cast(mir_operand_copy(right_local), MirType.i64())
-                        case _: ()
-                b_rhs_done.emit_store(mir_operand_copy(result_slot), mir_operand_copy(right_value))
-                b_rhs_done.terminate_goto(merge_block)
-                b_rhs_done.switch_to_block(merge_block)
-                # The merge slot itself stays i64 (both arms store 0/1
-                # ints; a Bool rhs is zext'd above), but the RESULT
-                # local must be typed Bool: downstream type dispatch --
-                # lower_bootstrap_print_call, coerce_concat_operand --
-                # keys off local_mir_type_of, and an I64-typed result
-                # routes print(a and b) to rt_raw_i64_to_string ("0"/
-                # "1") instead of rt_raw_bool_to_string ("true"/
-                # "false") (strict-llvm parity case
-                # logical_short_circuit). Normalize via `!= 0` -- a
-                # compare with i64 operands and a Bool dest is the
-                # established legal pattern (see the tagged-bool decode
-                # above: emit_binop(Eq, raw, true_value, bool)); it
-                # avoids the illegal i64->i1 narrowing bitcast that
-                # loading the slot directly as Bool would risk.
-                val merged_int = b_rhs_done.emit_load(mir_operand_copy(result_slot), MirType.i64())
-                val logic_zero = b_rhs_done.emit_const_int(0)
-                val logic_result = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
-                self.builder = b_rhs_done
-                logic_result
+                #
+                # Bug windows_compiler_stack_overflow_1mib_default_deep_or_chain
+                # (2026-11-24): the parser builds `a or b or c or d` LEFT-
+                # associated -- `Or(Or(Or(a, b), c), d)` (parser_expr.spl
+                # parse_or/parse_and: `left = expr_binary(op, left, right)`),
+                # and so does `combine_pattern_conditions` for match guards.
+                # Lowering that shape by recursing on `left` nested one
+                # lower_expr -> lower_expr_impl -> lower_binary_expr ->
+                # lower_cond_expr -> lower_cond_operand frame group PER
+                # OPERAND, and a ~40-term `or` chain overflowed the 1 MiB
+                # default Windows stack. Walk the same-operator left spine
+                # into a leaf list here and lower the chain in a loop
+                # instead; `lower_logical_chain_v1` emits, per leaf, exactly
+                # the MIR the recursion emitted per node, so the output is
+                # unchanged and the stack depth no longer depends on chain
+                # length. Only the LEFT spine is flattened: a right-nested
+                # operand only arises from explicit parentheses and keeps its
+                # own node (and its own MC/DC mask range).
+                var chain_reversed: [HirExpr] = [right]
+                var chain_cursor: HirExpr = left
+                var chain_walking = true
+                while chain_walking:
+                    match chain_cursor.kind:
+                        case HirExprKind.Binary(chain_op, chain_left, chain_right):
+                            if chain_op == op and chain_left != None and chain_right != None:
+                                chain_reversed.push(chain_right)
+                                chain_cursor = chain_left
+                            else:
+                                chain_walking = false
+                        case _:
+                            chain_walking = false
+                # `chain_cursor` is now the leftmost leaf; the others were
+                # collected right-to-left, so emit them in reverse to get
+                # source (left-to-right evaluation) order.
+                var chain_leaves: [HirExpr] = [chain_cursor]
+                var chain_index = chain_reversed.len() - 1
+                while chain_index >= 0:
+                    chain_leaves.push(chain_reversed[chain_index])
+                    chain_index = chain_index - 1
+                self.lower_logical_chain_v1(op, chain_leaves)
             case _:
                 var left_local = self.lower_expr(left)
                 var right_local = self.lower_expr(right)
