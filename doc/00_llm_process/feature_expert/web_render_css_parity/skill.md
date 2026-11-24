@@ -4247,3 +4247,25 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 
   The 1x catalog is identical. Perf: overview k=4 median 9695 -> 9669 ms over 6
   alternated rounds, RSS flat.
+## 2026-11-24 — font-blob copies under the JIT (forms-media 4x)
+
+- **The premise was stale.** The "forms-media 4x is ~22 s and hits the 8 GB cap" numbers came from the Nov-19 blend seed (`cargo-target-webrender-blend`, 60799992 B). That seed predates the 2026-11-23 JIT fixes, and on it html 4x also peaks at 8.36 GB. So the 8 GB was a general JIT leak, not a forms-media one.
+- **On a seed built from the current base** (`cargo-target-wr-jitweb-base`, sha256 d9dcc6f7…, built from c8a6a542373; no seed/runtime diff vs 0ddeaad747c), forms-media 4x is one of the pack:
+  - JIT: 3.4-3.9 s and 2.2 GB, of which document is ~0.1 s and paint ~0.1 s. The rest is the JIT start.
+  - Interpreter: 11.7 s and 0.97 GB.
+  - Other pages at 4x under the JIT take 3.3-4.6 s at 2.1-2.2 GB.
+- **Where the copies were.** Count them with `gdb -batch` on `break *rt_array_copy`. Decode `len` as `*(u64*)(($x0 & ~7) + 8)` and filter len >= 100000. Map `$lr` to the nearest `[jit-addr]` line (from `SIMPLE_JIT_TRACE_ADDR=1`).
+  - forms-media 4x had 799 whole-font copies (LiberationSans 410820 / 414568 B, DejaVuSansMono 343140 B):
+    - `horizontal_kern_milli`: 524
+    - `get_glyph_advance_milli`: 225
+    - `try_load_runtime_ttf`: 24
+    - `parse_cmap_format4` / `parse_cmap_format12`: 25
+  - All of them come from `val blob = self.selected_outline_blob` or `val blob = font.blob`. An array-typed `val` binding lowers to `rt_array_copy`, while passing the field straight as an argument does not copy.
+  - The JIT frees these copies: no RSS growth over 2000 calls. Each one costs ~20 us for 410 KB, so the whole page lost only ~16 ms. The interpreter shares the array and never copies.
+- **Fix (font_renderer.spl, blob plumbing only):** both query methods read `self.selected_outline_blob` in place. The fixture's 1000 queries on a 1.7 MB face dropped from 50-60 ms to 0.12-0.2 ms under the JIT. Interpreter time is unchanged (52 ms). forms-media 4x copies went from 799 to 50, all at load or cmap parse. Those 50 are left as they are: ~20 MB transient, about 1 ms.
+- **Spec:** `test/01_unit/lib/nogc_sync_mut/text_layout/font_blob_no_copy_jit_spec.spl`, with fixture `test/fixtures/font_blob_copy/kern_advance_loop.spl`. A JIT child must finish 1000 queries in under 5 ms, and its results must equal the interpreter's. It needs a current seed in `SIMPLE_BIN`.
+- **Page-level A/B** (3 rounds, alternating which side runs first, 4x, medians, base vs head): page-level deltas are within noise, which matches the ~16 ms the copies cost. All PPMs are byte-identical.
+  - JIT forms-media wall: 3.87 vs 3.80 s; RSS 2218 vs 2161 MB.
+  - Interpreter forms-media wall: 11.72 vs 11.66 s; RSS 973 vs 971 MB.
+  - html and tab-bar: unchanged.
+- **Trap:** for any JIT perf or RSS claim, use a seed built from the base you measure. The brief's blend seed predates the take-idiom and liveness fixes, so it inflates JIT RSS 4x and can OOM pages. The class "array field read copies" is tracked for native AOT in `doc/08_tracking/bug/2026-11-24_native_struct_array_field_read_leaks_copy.md`. That bug leaks; under the JIT the copy is freed.
