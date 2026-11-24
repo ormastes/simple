@@ -75,6 +75,7 @@ use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb
     shard_live_threads_selected_v1}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_gate_v1, shard_tree_headroom_kib_v1}
+use std.common.crypto.sha256.{sha256_text}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
@@ -82,7 +83,9 @@ use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_commit_estimate_kib_v1, shard_commit_spawn_admit_v1, shard_commit_live_footprint_v1,
     shard_commit_unmeasured_estimate_kib_v1, shard_worker_exit_hint_v1,
     shard_worker_estimate_kib_v1, shard_pool_clamp_workers,
-    shard_worker_estimate_clamped_kib_v1, native_mir_shard_fallback_action_v1}
+    shard_worker_estimate_clamped_kib_v1, native_mir_shard_fallback_action_v1,
+    shard_pool_live_tree_worker_budget_kib_v1, shard_pool_spawn_admit_v1,
+    shard_pool_estimate_budget_cap_kib_v1}
 use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib}
 use app.io.sysinfo_ops.{process_peak_rss_kb, cpu_count}
 use std.nogc_sync_mut.io.host_capacity.{host_capacity_probe_v1, host_capacity_idle_cpu_v1, host_capacity_text_v1,
@@ -1134,20 +1137,68 @@ fn shard_ledger_root_v1(args: [text]) -> (text, text):
             root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/hir"
     (root, cache_selection)
 
+# Filename-safe digest of SIMPLE_FRONTEND_CACHE_SCOPE for persisted worker peak
+# records ("unknown" when empty). Raw cache scopes contain ':', ';', '=', and
+# '/', which fail on Windows filenames or introduce nonexistent subdirectories.
+pub fn native_build_peak_producer_key_v1(producer: text) -> text:
+    if producer == "":
+        return "unknown"
+    sha256_text(producer).substring(0, 16)
+
+# Canonical path for a phase worker's persisted `.peak_kib` record under
+# `parent_dir`. Avoids introducing `//` when `parent_dir` is a root separator.
+pub fn native_build_peak_record_path_v1(parent_dir: text, label: text, producer: text) -> text:
+    val key = native_build_peak_producer_key_v1(producer)
+    val base = if parent_dir == "": "." else: parent_dir
+    val sep = if base.ends_with("/") or base.ends_with("\\"): "" else: "/"
+    "{base}{sep}{label}.{key}.peak_kib"
+
+# Read a persisted worker peak record in KiB (0 when missing or malformed).
+# reason: reads persisted KiB peak record from disk
+@allow(primitive_api)
+pub fn native_build_peak_record_read_v1(path: text) -> i64:
+    if path == "" or not file_exists(path):
+        return 0
+    val parsed = shard_mem_available_kb_from_field(file_read(path))
+    if parsed > 0: parsed else: 0
+
+# Persist a measured worker peak record in KiB atomically as a monotonic
+# high-water mark, creating missing parent directories first. Never shrinks an
+# already-recorded higher peak for the same producer key.
+# reason: persists KiB peak record atomically to disk
+@allow(primitive_api)
+pub fn native_build_peak_record_write_v1(path: text, peak_kib: i64) -> bool:
+    if path == "" or peak_kib <= 0:
+        return false
+    val existing = native_build_peak_record_read_v1(path)
+    if existing >= peak_kib:
+        return true
+    val parent = native_build_path_parent_v1(path)
+    if parent != "" and parent != "." and not dir_exists(parent):
+        if not dir_create_all(parent):
+            return false
+    file_atomic_write(path, "{peak_kib}")
+
+# Read all persisted worker peak_kib records under `root` for `producer`.
+# reason: reads recorded worker KiB peaks under a ledger root
+@allow(primitive_api)
+pub fn native_build_recorded_worker_peaks_for_root_v1(root: text, producer: text) -> [i64]:
+    var peaks: [i64] = []
+    if root == "":
+        return peaks
+    for label in ["hir-shard", "mir-shard", "file-worker"]:
+        val rec = native_build_peak_record_path_v1(root, label, producer)
+        val v = native_build_peak_record_read_v1(rec)
+        if v > 0: peaks = peaks.push(v)
+    peaks
+
 # Per-WORKER peaks recorded by run_ledger_shards beside the ledgers (one record
 # per worker role label, written only from live worker private-commit samples,
 # never from the coordinator). Missing/invalid records are skipped.
 fn native_build_recorded_worker_peaks_v1(args: [text]) -> [i64]:
     val (root, _sel) = shard_ledger_root_v1(args)
     val producer = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
-    val producer_key = if producer == "": "unknown" else: producer
-    var peaks: [i64] = []
-    for label in ["hir-shard", "mir-shard", "file-worker"]:
-        val rec = "{root}/{label}.{producer_key}.peak_kib"
-        if file_exists(rec):
-            val v = file_read(rec).trim().to_i64() ?? 0
-            if v > 0: peaks = peaks.push(v)
-    peaks
+    native_build_recorded_worker_peaks_for_root_v1(root, producer)
 
 fn shard_ledger_queue_dir(args: [text], prefix: text, label: text) -> text:
     val (root, cache_selection) = shard_ledger_root_v1(args)
@@ -1268,10 +1319,19 @@ pub struct LedgerShardRunV1:
     refused_before_spawn: bool
 
 # Directory holding a ledger queue ("" -> "."), where per-phase measured
-# worker peaks persist across runs.
+# worker peaks persist across runs. Supports both POSIX '/' and Windows '\'
+# separators and preserves '/' and Windows drive roots ('X:/', 'X:\').
 pub fn native_build_path_parent_v1(path: text) -> text:
-    val slash = path.last_index_of("/")
-    if slash <= 0: "." else: path.substring(0, slash)
+    val fwd = path.last_index_of("/")
+    val back = path.last_index_of("\\")
+    val sep = if fwd > back: fwd else: back
+    if sep < 0:
+        return "."
+    if sep == 0:
+        return path.substring(0, 1)
+    if sep == 2 and path.byte_len() >= 3 and path.byte_at(1) == 58:
+        return path.substring(0, 3)
+    path.substring(0, sep)
 
 fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         base: [text], queue_dir: text, args: [text], count: i64, parallel: i64,
@@ -1325,14 +1385,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     # the compiler binary): a redeployed compiler, whose footprint may differ
     # (BuildSession memory model), starts from static + live observation.
     val producer = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
-    val producer_key = if producer == "": "unknown" else: producer
-    val peak_record = "{native_build_path_parent_v1(queue_dir)}/{label}.{producer_key}.peak_kib"
+    val peak_record = native_build_peak_record_path_v1(native_build_path_parent_v1(queue_dir), label, producer)
     val old_dataset_cap = native_build_env_saved_v1("SIMPLE_GLOBAL_DATASET_MAX_BYTES")
     val budget_knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" else: "SIMPLE_HIR_SHARD_WORKER_KB"
     val static_kib = if label == "mir-shard": native_build_mir_worker_budget_kb_v1() else: native_build_hir_worker_budget_kb_v1()
     val override_kib = shard_mem_available_kb_from_field(env_get(budget_knob) ?? "")
-    val recorded_peak = if file_exists(peak_record): (file_read(peak_record).trim().to_i64() ?? 0) else: 0
+    val recorded_peak = native_build_peak_record_read_v1(peak_record)
     var observed_peak_kib: i64 = 0
+    var persisted_peak_kib: i64 = recorded_peak
     # Commit is measured from the registered host headroom probe only (works
     # in the seed interpreter and native code alike): the pool's commit use
     # since it started, split over live workers. -1 = unavailable -> the
@@ -1341,6 +1401,9 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     if pool_base_headroom < 0:
         print "[{label}] commit headroom unavailable on this host/engine; static worker cap only"
     val commit_reserve_kib: i64 = shard_tree_headroom_kib_v1()
+    val pool_parent_peak = process_peak_rss_kb()
+    val tree_worker_budget_kib = shard_pool_live_tree_worker_budget_kib_v1(
+        if pool_parent_peak > 0: pool_parent_peak else: -1)
     var pending: [i64] = []
     var i: i64 = 0
     # A resumed MIR ledger (run_mir_shards) needs only enough owners for its
@@ -1387,17 +1450,23 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             if shard_pool_headroom_probe_due_v1(probe_at_ms, round_ms, probed_live, pids.len(), SHARD_POOL_HEADROOM_PROBE_MS):
                 now_headroom = if pool_base_headroom < 0: -1 else: host_commit_avail_kib()
                 live_private = shard_commit_live_footprint_v1(pool_base_headroom, now_headroom, pids.len())
-                if live_private.len() > 0 and live_private[0] > observed_peak_kib: observed_peak_kib = live_private[0]
+                if live_private.len() > 0 and live_private[0] > observed_peak_kib:
+                    observed_peak_kib = live_private[0]
+                    if observed_peak_kib > persisted_peak_kib:
+                        if native_build_peak_record_write_v1(peak_record, observed_peak_kib):
+                            persisted_peak_kib = observed_peak_kib
                 probe_at_ms = round_ms
                 probed_live = pids.len()
-            val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib)
+            val host_worker_budget = if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib
+            val est_cap_kib = shard_pool_estimate_budget_cap_kib_v1(host_worker_budget, tree_worker_budget_kib)
+            val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), est_cap_kib)
             # Admission (pure arithmetic) before the BLOCKED probe: the probe
             # formats a path, and with a free slot that admission keeps
             # refusing it would run, and leave that string behind, every
             # SHARD_POOL_POLL_MS round for as long as the refusal lasts.
             while pids.len() < window_size and next_pending < pending.len() and
                     not stop_dispatch and
-                    shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private) and
+                    shard_pool_spawn_admit_v1(now_headroom, commit_reserve_kib, tree_worker_budget_kib, est_kib, live_private, pids.len()) and
                     not hir_shard_recovery_blocked(queue_dir):
                 val index = pending[next_pending]
                 next_pending = next_pending + 1
@@ -1625,7 +1694,11 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         else:
             worker_hir_shared_exec_pin_retain_unstopped_v1(hir_shared_pins[0])
     if observed_peak_kib > 0:
-        val _peak_written = file_atomic_write(peak_record, "{observed_peak_kib}")
+        var peak_written = observed_peak_kib <= persisted_peak_kib
+        if not peak_written:
+            peak_written = native_build_peak_record_write_v1(peak_record, observed_peak_kib)
+        if not peak_written:
+            eprint "[{label}] WARNING: failed to persist worker peak record {peak_record} ({observed_peak_kib} kB)"
         print "[{label}] measured worker peak commit={observed_peak_kib} kB (static estimate {static_kib} kB, previous run {recorded_peak} kB)"
     val unfinished = if all_stopped: hir_shard_recovery_close_inventory(queue_dir, fail_fast) else: -1
     if unfinished != 0:
@@ -1691,6 +1764,22 @@ fn native_build_hir_worker_budget_kb_v1() -> i64:
         return file_worker_pool_live_unit_hir_budget_kb_v1(native_build_closure_selected_count_v1())
     file_worker_pool_hir_budget_kb_v1()
 
+fn native_build_mir_admission_budget_kb_v1(args: [text]) -> i64:
+    val mir_default = native_build_mir_worker_budget_kb_v1()
+    val mir_override = shard_mem_available_kb_from_field(env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? "")
+    file_worker_pool_addressable_budget_kb_v1(
+        shard_worker_estimate_kib_v1(mir_default, native_build_recorded_worker_peaks_v1(args), mir_override),
+        file_worker_pool_host_pointer_bits_v1())
+
+fn native_build_mir_parent_tighten_v1(parallel: i64, budget_kb: i64) -> i64:
+    if parallel <= 1:
+        return parallel
+    val measured_peak = process_peak_rss_kb()
+    if measured_peak <= 0:
+        return parallel
+    val capped = shard_threads_mem_cap(parallel, budget_kb, measured_peak)
+    if capped < 1: 1 else: capped
+
 # reason: MIR shard parallelism preflight queried by build coordinator and specs
 @allow(primitive_api)
 pub fn native_build_mir_shard_parallel(args: [text]) -> i64:
@@ -1733,8 +1822,10 @@ pub fn native_build_mir_shard_parallel(args: [text]) -> i64:
             (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
         eprint "[mir-shard] disabled: output format re-reads MIR set"
         return 0
-    val requested = native_build_shard_threads(args, native_build_mir_worker_budget_kb_v1())
-    if requested > 0: requested else: 1
+    val mir_budget = native_build_mir_admission_budget_kb_v1(args)
+    val requested = native_build_shard_threads(args, mir_budget)
+    val bounded = native_build_mir_parent_tighten_v1(requested, mir_budget)
+    if bounded > 0: bounded else: 1
 
 fn native_build_mir_shard_count(parallel: i64) -> i64:
     val configured = (env_get("SIMPLE_MIR_SHARD_COUNT") ?? "").to_i64() ?? 0
@@ -1988,8 +2079,10 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     var result = ""
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0":
-        val parallel = native_build_shard_threads(args, native_build_mir_worker_budget_kb_v1())
-        val pool_parallel = mir_shard_pool_parallel_v1(parallel,
+        val mir_budget = native_build_mir_admission_budget_kb_v1(args)
+        val parallel = native_build_shard_threads(args, mir_budget)
+        val bounded_parallel = native_build_mir_parent_tighten_v1(parallel, mir_budget)
+        val pool_parallel = mir_shard_pool_parallel_v1(bounded_parallel,
             env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "", mir_flag == "1")
         if pool_parallel > 0:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")

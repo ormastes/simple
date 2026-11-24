@@ -631,6 +631,113 @@ pub fn shard_worker_exit_hint_v1(code: i64, label: text) -> text:
 pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
     host_memory_admit_v1(headroom_kib, reserve_kib, est_kib, live_private_kib)
 
+# Remaining worker budget (KiB) inside the tightest active enclosing tree cap
+# (declared tree budget, SIMPLE_PROCESS_TREE_RSS_CAP_KIB, or cgroup memory.max)
+# after subtracting the coordinator's footprint (`parent_peak_kb`; unknown < 0
+# reserves SHARD_FLOOR_UNKNOWN_PARENT_KB_V1). Returns -1 when no enclosing tree
+# cap is active.
+# reason: pure worker-pool budget calculation over KiB capacity inputs
+@allow(primitive_api)
+pub fn shard_pool_tree_worker_budget_kib_v1(declared_kb: i64, rss_cap_kb: i64,
+        cgroup_kb: i64, parent_peak_kb: i64) -> i64:
+    val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
+    val cap_kb = shard_pool_cap_kb_for_v1(rss_cap_kb, cgroup_kb)
+    var tight_tree = tree_kb
+    if cap_kb > 0 and (tight_tree <= 0 or cap_kb < tight_tree):
+        tight_tree = cap_kb
+    if tight_tree <= 0:
+        return -1
+    val parent_kb = if parent_peak_kb >= 0: parent_peak_kb else: SHARD_FLOOR_UNKNOWN_PARENT_KB_V1
+    val remaining = tight_tree - parent_kb
+    if remaining > 0: remaining else: 0
+
+# Live enclosing-tree worker budget (KiB) from env + cgroup memory.max minus
+# coordinator peak (`parent_peak_kb`), or -1 when no tree cap applies.
+# reason: live tree-cap budget helper queried by worker-pool admission
+@allow(primitive_api)
+pub fn shard_pool_live_tree_worker_budget_kib_v1(parent_peak_kb: i64) -> i64:
+    val declared_kb = shard_mem_available_kb_from_field(
+        env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val rss_cap_kb = shard_mem_available_kb_from_field(
+        env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+    val cgroup_kb = shard_cgroup_memory_max_kb()
+    shard_pool_tree_worker_budget_kib_v1(declared_kb, rss_cap_kb, cgroup_kb, parent_peak_kb)
+
+# Tightest positive worker-estimate clamp cap (KiB) across host headroom
+# (`host_budget_kib`) and enclosing tree worker budget (`tree_worker_budget_kib`).
+# Returns -1 when neither limit applies.
+# reason: pure KiB budget min selector for shard_worker_estimate_clamped_kib_v1
+@allow(primitive_api)
+pub fn shard_pool_estimate_budget_cap_kib_v1(host_budget_kib: i64, tree_worker_budget_kib: i64) -> i64:
+    if host_budget_kib > 0 and tree_worker_budget_kib > 0:
+        if host_budget_kib < tree_worker_budget_kib: host_budget_kib else: tree_worker_budget_kib
+    elif host_budget_kib > 0:
+        host_budget_kib
+    elif tree_worker_budget_kib > 0:
+        tree_worker_budget_kib
+    else:
+        -1
+
+# Enclosing-tree admission for one additional worker at `est_kib`: sums
+# max(current_live, est_kib) across all `effective_live` live workers plus
+# `est_kib` for the candidate worker, and rejects once total projected worker
+# footprint exceeds `tree_worker_budget_kib`. When `live_count >= 0`, unmeasured
+# live slots beyond `live_private_kib.len()` still reserve `est_kib` each so an
+# unavailable headroom probe never over-admits wave 0 or refills. At least one
+# worker is always admitted when `effective_live == 0` so the pool never stalls.
+# reason: enclosing tree-cap admission predicate over KiB worker footprints
+@allow(primitive_api)
+pub fn shard_pool_tree_admit_v1(tree_worker_budget_kib: i64, est_kib: i64,
+        live_private_kib: [i64], live_count: i64 = -1) -> bool:
+    val effective_live = if live_count >= 0: live_count else: live_private_kib.len()
+    if tree_worker_budget_kib < 0 or effective_live <= 0:
+        return true
+    if est_kib <= 0:
+        return tree_worker_budget_kib > 0
+    if est_kib > tree_worker_budget_kib:
+        return false
+    var projected = est_kib
+    var i: i64 = 0
+    while i < effective_live:
+        val cur = if i < live_private_kib.len(): live_private_kib[i] else: 0
+        val slot = if cur > est_kib: cur else: est_kib
+        if slot > tree_worker_budget_kib - projected:
+            return false
+        projected = projected + slot
+        i = i + 1
+    true
+
+# Combined worker-pool spawn admission enforcing BOTH host commit headroom
+# (`shard_commit_spawn_admit_v1`) and the active enclosing tree worker budget
+# (`shard_pool_tree_admit_v1`).
+# reason: combined worker spawn admission predicate over KiB memory limits
+@allow(primitive_api)
+pub fn shard_pool_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64,
+        tree_worker_budget_kib: i64, est_kib: i64, live_private_kib: [i64],
+        live_count: i64 = -1) -> bool:
+    if not shard_commit_spawn_admit_v1(headroom_kib, reserve_kib, est_kib, live_private_kib):
+        return false
+    shard_pool_tree_admit_v1(tree_worker_budget_kib, est_kib, live_private_kib, live_count)
+
+# Pure model of wave-0 initial pool admission (`run_ledger_shards`): counts how
+# many workers wave 0 admits at startup given window, headroom, tree worker
+# budget, static estimate, recorded peak, and override.
+# reason: testable pure simulation of wave-0 pool admission concurrency
+@allow(primitive_api)
+pub fn shard_pool_wave0_admitted_count_v1(window_size: i64, pending_count: i64,
+        pool_base_headroom_kib: i64, reserve_kib: i64, tree_worker_budget_kib: i64,
+        static_kib: i64, recorded_peak_kib: i64, override_kib: i64 = 0) -> i64:
+    val raw_est = shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak_kib, override_kib)
+    val host_budget = if pool_base_headroom_kib < 0: -1 else: pool_base_headroom_kib - reserve_kib
+    val cap_kib = shard_pool_estimate_budget_cap_kib_v1(host_budget, tree_worker_budget_kib)
+    val est_kib = shard_worker_estimate_clamped_kib_v1(raw_est, cap_kib)
+    var live: [i64] = []
+    while live.len() < window_size and live.len() < pending_count and
+            shard_pool_spawn_admit_v1(pool_base_headroom_kib, reserve_kib,
+                tree_worker_budget_kib, est_kib, live, live.len()):
+        live = live.push(0)
+    live.len()
+
 # ===== per-worker estimate and tree-budget clamp (phase 4) ===================
 #
 # 2026-10-27 phase 3 (stage2 e4746b05): 21 per-file workers peaked at 72.2 GB
