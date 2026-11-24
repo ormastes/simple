@@ -367,3 +367,10 @@ single tier:
 (`interp_env_get_name_collision_nil_root_2026-07-26`); this diagnostic now shows it
 is one member of a ~15-name family with the same shape. That family is the natural
 next batch and is a `src/lib/nogc_sync_mut/**` lane, not a crypto lane.
+
+## Fresh occurrence (2026-11-24): `protocol_media_parts_spec`
+
+`test/01_unit/lib/gc_async_mut/slang/protocol_media_parts_spec.spl` went 7/11 on
+release/1.0.0: its private `_text_part(text) -> text` was resolved to
+`serving_pooling._text_part(text) -> ChatPart`, producing garbage request bodies.
+Worked around by renaming the spec helper to `_media_text_part`.

@@ -713,5 +713,9 @@ route env, file exists/read, directory list and process capture through SOSIX
 - Gaps: CUDA is unrun on hardware; `compute_gpu_library_loaded()` is Windows-only (vacuous on Linux).
 
 ## Spec helper names (2026-11-24)
-- Private helpers in a spec are co-compiled with the library under test; a same-named private fn with the same arity (e.g. a spec `_text_part(text) -> text` vs `serving_pooling._text_part(text) -> ChatPart`) can be resolved to the library one, silently producing garbage bodies. `protocol_media_parts_spec` went 7/11 on release/1.0.0 for this reason; its helper is now `_media_text_part`. Give spec helpers a spec-specific prefix.
+- Private helpers in a spec are co-compiled with the library under test; this is the known cross-module private-symbol collision (`doc/08_tracking/bug/compiler_cross_module_private_symbol_collision_2026-06-16.md`), not a naming convention. A same-named private fn with the same arity (e.g. a spec `_text_part(text) -> text` vs `serving_pooling._text_part(text) -> ChatPart`) can resolve to the library one and silently produce garbage bodies; `protocol_media_parts_spec` went 7/11 on release/1.0.0 this way and now uses `_media_text_part`. The rename is a workaround until the fix is in the running seed.
 - Root cause is a seed-interpreter bug, fixed in source 2026-11-24 (`doc/08_tracking/bug/seed_private_fn_cross_module_collision_2026-11-24.md`); the prefix advice holds until a seed carrying that fix is the one running the specs.
+
+## Media live sweep notes (2026-11-24)
+- Prebuilt shims from before the model-handles/TTS work lack `SLANG_CAP_MODEL_HANDLES` (pooling `SymbolMissing`) and the TTS entry points (503); rebuild `slang_ggml.dll` from the tip (`LLAMA_BUILD_DIR` must be an absolute path) before judging pooling/tts/system_all_kinds (all three pass on a fresh shim).
+- `slang_video_live_spec` times out in its "413 over 10 MiB" example (seed-interpreter cost of a 10 MiB payload, not a hang): `doc/08_tracking/bug/slang_video_live_413_example_seed_interpreter_perf_2026-11-24.md`.
