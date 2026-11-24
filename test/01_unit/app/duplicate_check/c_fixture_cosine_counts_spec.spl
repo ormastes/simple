@@ -7,7 +7,7 @@ use compiler.tools.duplicate_check.detector.{find_duplicates, collect_files}
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager}
 use compiler.tools.duplicate_check.config.{default_config, apply_analysis_mode}
 use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, token_to_string}
-use std.io_runtime.{shell}
+use std.io_runtime.{shell, env_get}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
@@ -53,8 +53,11 @@ describe "duplicate_check cosine on C fixture":
         expect(rt_dir_create(root, true)).to_equal(true)
         expect(rt_file_write_text("{root}/a.c", c_body("sum_a", "total"))).to_equal(true)
         expect(rt_file_write_text("{root}/b.c", c_body("sum_b", "acc"))).to_equal(true)
-        val bin = if rt_file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
-        val r = shell("{bin} run src/compiler/90.tools/duplicate_check/main.spl {root} --include-c --mode cosine -q 2>&1")
-        val out = r.stdout + r.stderr
+        # SIMPLE_BINARY (fresh seed) wins over the tracked bin/simple.exe, which may be a pinned pre-fix seed.
+        val configured = (env_get("SIMPLE_BINARY") ?? "").replace("\\", "/")
+        val bin = if configured != "" and rt_file_exists(configured): configured elif rt_file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+        val r = shell("{bin} run src/compiler/90.tools/duplicate_check/main.spl {root} --include-c --mode cosine -q")
+        # stdout only: the seed prints its bootstrap banner and warnings on stderr.
+        val out = r.stdout
         expect(out).to_contain("Total duplicate groups: 1")
         expect(out).to_contain("Total lines duplicated: 14")
