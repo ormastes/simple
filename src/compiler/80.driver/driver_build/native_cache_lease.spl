@@ -1,5 +1,6 @@
 # Cache build leases. The directory lock serializes lease registration with
 # deletion; the individual lock stays held for the build's lifetime.
+use std.nogc_sync_mut.sffi.fs.{file_canonicalize}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, secure_temp_dir}
 use std.nogc_sync_mut.io_runtime.{dir_create, dir_exists, dir_list_optional, dir_remove}
 use std.nogc_sync_mut.path.{basename, dirname, join}
@@ -10,6 +11,7 @@ use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs, disk_bound_key
 @allow(primitive_api)
 pub struct NativeCacheLease:
     cache_root: text
+    registry: text
     directory: text
     handle: i64
 
@@ -37,7 +39,14 @@ fn lease_gate(base: text) -> text:
 pub fn native_cache_lease_begin(cache_root: text) -> Result<NativeCacheLease, text>:
     if cache_root == "":
         return Err("native cache lease requires a cache root")
-    val base = lease_base(cache_root)
+    if not dir_exists(cache_root) and not dir_create(cache_root, true) and not dir_exists(cache_root):
+        return Err("cannot create native cache root: " + cache_root)
+    # Resolve aliases before deciding which ancestor owns retention. A
+    # trailing "/." or symlink to a derived root must share its registry.
+    val resolved = match file_canonicalize(cache_root):
+        case Some(path): path
+        case None: return Err("cannot canonicalize native cache root: " + cache_root)
+    val base = lease_base(resolved)
     if not dir_exists(base) and not dir_create(base, true) and not dir_exists(base):
         return Err("cannot create native cache lease directory: " + base)
     val gate = file_lock(lease_gate(base), 30)
@@ -55,7 +64,7 @@ fn native_cache_lease_register(cache_root: text, base: text) -> Result<NativeCac
             if handle < 0:
                 val _removed = dir_remove(directory, true)
                 return Err("cannot lock native cache build lease: " + directory)
-            Ok(NativeCacheLease(cache_root: cache_root, directory: directory, handle: handle))
+            Ok(NativeCacheLease(cache_root: cache_root, registry: base, directory: directory, handle: handle))
 
 pub fn native_cache_lease_end(lease: NativeCacheLease):
     if not file_unlock(lease.handle):
@@ -83,7 +92,7 @@ fn native_cache_other_build_active(base: text, own_directory: text) -> bool:
 # reason: native cache retention count and age use the disk-bound API's scalar contract
 @allow(primitive_api)
 pub fn native_cache_sweep_with_lease(lease: NativeCacheLease, current: text, keep: i64, min_age_s: i64 = 21600) -> i64:
-    val base = lease_base(lease.cache_root)
+    val base = lease.registry
     val gate = file_lock(lease_gate(base), 0)
     if gate < 0:
         return 0
