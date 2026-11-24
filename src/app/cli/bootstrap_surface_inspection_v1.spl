@@ -1,0 +1,94 @@
+# Public bootstrap diagnostic request parsing; never routes through a worker.
+use compiler.driver.driver_native_surface_inspection_v1.{NativeSurfaceInspectionRequestV1,
+    native_surface_inspection_request_error_v1}
+use app.cli.bootstrap_focused_native_build_args.{focused_native_build_arg_value, focused_native_build_target}
+use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
+use compiler.common.cache.phase_compatibility_path_io.{phase_compatibility_canonical_directory_io_v1}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_create_exclusive,
+    file_publish_noreplace, file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BootstrapSurfaceInspectionPlanV1:
+    native_args: [text]
+    request: NativeSurfaceInspectionRequestV1
+
+fn bootstrap_surface_inspection_plan_v1(args: [text]) -> Result<BootstrapSurfaceInspectionPlanV1, text>:
+    if args.len() < 2: return Err("inspection command arguments are missing")
+    var native_args: [text] = [args[0], "native-build"]
+    var modules: [text] = []
+    var item = ""
+    var output_root = ""
+    var index = 2
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--module" or arg == "--item" or arg == "--diagnostic-root":
+            if index + 1 >= args.len(): return Err("inspection selector flag requires a value")
+            val value = args[index + 1]
+            if value.starts_with("--"): return Err("inspection selector flag requires a value")
+            if arg == "--module":
+                modules = modules.push(value)
+            elif arg == "--item":
+                if item != "": return Err("inspection item may be specified only once")
+                item = value
+            else:
+                if output_root != "": return Err("inspection diagnostic output may be specified only once")
+                output_root = value
+            index = index + 2
+        else:
+            if arg == "--output" or arg == "-o" or arg.starts_with("--output="):
+                return Err("inspection accepts --diagnostic-root, never a native output")
+            native_args = native_args.push(arg)
+            index = index + 1
+    val request = NativeSurfaceInspectionRequestV1(modules: modules, item: item, output_root: output_root,
+        requested_target: focused_native_build_target(native_args))
+    val invalid = native_surface_inspection_request_error_v1(request)
+    if invalid != "": return Err(invalid)
+    if focused_native_build_arg_value(native_args, "--entry") == "":
+        return Err("inspection requires an explicit --entry")
+    val native_error = cli_native_build_option_error(native_args, true)
+    if native_error != "": return Err(native_error)
+    Ok(BootstrapSurfaceInspectionPlanV1(native_args: native_args, request: request))
+
+fn bootstrap_surface_inspection_reserve_v1(plan: BootstrapSurfaceInspectionPlanV1) -> Result<BootstrapSurfaceInspectionPlanV1, text>:
+    val admitted = phase_compatibility_canonical_directory_io_v1(path_absolute(plan.request.output_root))
+    if not admitted.valid: return Err("inspection physical diagnostic root was refused")
+    val private_dir = secure_temp_dir_raw(admitted.canonical_root, "native-surface-inspection")
+    if private_dir == "": return Err("inspection private diagnostic directory creation failed")
+    val checked = phase_compatibility_canonical_directory_io_v1(private_dir)
+    if not checked.valid or not checked.canonical_root.starts_with(admitted.canonical_root + "/"):
+        return Err("inspection private diagnostic directory admission failed")
+    val request = NativeSurfaceInspectionRequestV1(modules: plan.request.modules,
+        item: plan.request.item, output_root: plan.request.output_root,
+        requested_target: plan.request.requested_target,
+        admitted_root: admitted.canonical_root, private_directory: checked.canonical_root, output: checked.canonical_root + "/inspection.sdn")
+    Ok(BootstrapSurfaceInspectionPlanV1(native_args: plan.native_args, request: request))
+
+fn bootstrap_surface_inspection_publish_v1(request: NativeSurfaceInspectionRequestV1,
+        sdn: text) -> Result<text, text>:
+    val root = phase_compatibility_canonical_directory_io_v1(path_absolute(request.output_root))
+    val private_dir = phase_compatibility_canonical_directory_io_v1(request.private_directory)
+    if not root.valid or not private_dir.valid or root.canonical_root != request.admitted_root or
+            not private_dir.canonical_root.starts_with(root.canonical_root + "/") or
+            request.output != private_dir.canonical_root + "/inspection.sdn":
+        return Err("inspection diagnostic parent identity changed")
+    val staged = private_dir.canonical_root + "/inspection.staged"
+    if not file_create_exclusive(staged, sdn): return Err("inspection exclusive staging failed")
+    val staged_read = file_read_regular_no_follow_bounded(staged, 1048576)?
+    if sha256_text(staged_read) != sha256_text(sdn): return Err("inspection staged digest mismatch")
+    # Recheck physical parents immediately before publication; never replace a
+    # previous record, including identical bytes. No ambient receipt is success.
+    val final_root = phase_compatibility_canonical_directory_io_v1(path_absolute(request.output_root))
+    val final_private = phase_compatibility_canonical_directory_io_v1(request.private_directory)
+    if not final_root.valid or not final_private.valid or
+            final_root.canonical_root != root.canonical_root or final_private.canonical_root != private_dir.canonical_root:
+        return Err("inspection diagnostic parent identity changed before publication")
+    val published = file_publish_noreplace(staged, request.output)?
+    if not published:
+        return Err("inspection exclusive diagnostic publication failed")
+    val actual = file_read_regular_no_follow_bounded(request.output, 1048576)?
+    if sha256_text(actual) != sha256_text(sdn): return Err("inspection published digest mismatch")
+    Ok(request.output)
+
+export BootstrapSurfaceInspectionPlanV1, bootstrap_surface_inspection_plan_v1,
+    bootstrap_surface_inspection_reserve_v1, bootstrap_surface_inspection_publish_v1

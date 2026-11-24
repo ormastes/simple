@@ -1,0 +1,88 @@
+# @cover src/compiler/80.driver/driver_native_surface_inspection_v1.spl
+# @cover src/app/cli/bootstrap_surface_inspection_v1.spl
+use std.spec.*
+use app.cli.bootstrap_surface_inspection_v1.{bootstrap_surface_inspection_plan_v1,
+    bootstrap_surface_inspection_reserve_v1, bootstrap_surface_inspection_publish_v1}
+use compiler.driver.driver_native_surface_inspection_v1.{inspection_surface_text_v1}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend_target_receipted_v1}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+val INSPECT_FACADE = "@when(os=\"windows\"):\nfn path_errno_address() -> i64: 0\n@else:\nuse std.inspection._Posix.errno.{path_errno_address}\n@end\nexport path_errno_address\n"
+
+fn inspection_registry_v1(include_leaf: bool) -> ModuleSurfacesByName:
+    var builder = ModuleSurfaceBuilder.new()
+    var names = ["lib.inspection.facade"]
+    var paths = ["src/lib/inspection/facade.spl"]
+    var bodies = [INSPECT_FACADE]
+    if include_leaf:
+        names = names.push("lib.inspection._Posix.errno")
+        paths = paths.push("src/lib/inspection/_Posix/errno.spl")
+        bodies = bodies.push("fn path_errno_address() -> i64: 42\nexport path_errno_address\n")
+    var index = 0
+    while index < names.len():
+        val parsed = parse_full_frontend_target_receipted_v1(bodies[index], paths[index], names[index],
+            Logger(level: 0), paths[index], sha256_text(bodies[index]), "x86_64-unknown-linux-gnu").unwrap()
+        expect(builder.add_parsed(parsed.0, SourceFile(path: paths[index], content: bodies[index],
+            module_name: names[index]), index).is_ok()).to_equal(true)
+        index = index + 1
+    builder.finish().unwrap()
+
+describe "native surface diagnostic inspection":
+    it "retains an omitted canonical target instead of inventing a host triple":
+        val args = ["simple", "inspect-native-surfaces", "--entry", "entry.spl", "--module", "facade",
+            "--item", "get", "--diagnostic-root", "build/verify"]
+        val implicit = bootstrap_surface_inspection_plan_v1(args).unwrap()
+        expect(implicit.request.requested_target).to_equal("")
+        expect(implicit.native_args.contains("--target")).to_equal(false)
+        val explicit = bootstrap_surface_inspection_plan_v1(args + ["--target", "x86_64-unknown-linux-gnu"]).unwrap()
+        expect(explicit.request.requested_target).to_equal("x86_64-unknown-linux-gnu")
+
+    it "publishes a fresh private diagnostic once and preserves it on a collision":
+        expect(dir_create_all("build/verify")).to_equal(true)
+        val parsed = bootstrap_surface_inspection_plan_v1(["simple", "inspect-native-surfaces",
+            "--entry", "entry.spl", "--target", "x86_64-unknown-linux-gnu", "--module", "facade",
+            "--item", "get", "--diagnostic-root", "build/verify"]).unwrap()
+        val reserved = bootstrap_surface_inspection_reserve_v1(parsed).unwrap()
+        val fixture = "schema: surface-inspection-owner-test-fixture\n"
+        val first = bootstrap_surface_inspection_publish_v1(reserved.request, fixture).unwrap()
+        expect(first).to_equal(reserved.request.output)
+        expect(bootstrap_surface_inspection_publish_v1(reserved.request, "replacement\n").is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(first, 4096).unwrap()).to_equal(fixture)
+
+    it "observes configured POSIX imports and the same walk through a bare export":
+        val registry = inspection_registry_v1(true)
+        val index = module_surface_registry_index(registry, "lib.inspection.facade")
+        val observed = inspection_surface_text_v1(registry, index, "lib.inspection.facade", "path_errno_address").unwrap()
+        expect(observed.contains("raw_callable_match: false")).to_equal(true)
+        expect(observed.contains("module: \"std.inspection._Posix.errno\"")).to_equal(true)
+        expect(observed.contains("target_present: true")).to_equal(true)
+        expect(observed.contains("walker_found: true")).to_equal(true)
+        expect(observed.contains("walker_source_item: \"path_errno_address\"")).to_equal(true)
+
+    it "retains missing configured targets as observations rather than successful bindings":
+        val registry = inspection_registry_v1(false)
+        val index = module_surface_registry_index(registry, "lib.inspection.facade")
+        val observed = inspection_surface_text_v1(registry, index, "lib.inspection.facade", "path_errno_address").unwrap()
+        expect(observed.contains("target_index: -1")).to_equal(true)
+        expect(observed.contains("target_present: false")).to_equal(true)
+        expect(observed.contains("walker_found: false")).to_equal(true)
+        val absent = inspection_surface_text_v1(registry, -1, "missing.module", "path_errno_address").unwrap()
+        expect(absent.contains("observation: MISSING_MODULE")).to_equal(true)
+
+    it "rejects malformed selector sets and native-output requests before source ownership changes":
+        val base = ["simple", "inspect-native-surfaces", "--entry", "entry.spl", "--target", "x86_64-unknown-linux-gnu"]
+        expect(bootstrap_surface_inspection_plan_v1(base + ["--module", "facade", "--item", "get",
+            "--diagnostic-root", "build/verify"]).is_ok()).to_equal(true)
+        expect(bootstrap_surface_inspection_plan_v1(base + ["--module", "facade", "--module", "leaf", "--module", "third",
+            "--item", "get", "--diagnostic-root", "build/verify"]).is_err()).to_equal(true)
+        expect(bootstrap_surface_inspection_plan_v1(base + ["--module", "facade", "--item", "get",
+            "--output", "native.elf", "--diagnostic-root", "build/verify"]).is_err()).to_equal(true)
+        expect(bootstrap_surface_inspection_plan_v1(base + ["--module", "facade", "--item", "get",
+            "--diagnostic-root", "src/overwrite.sdn"]).is_err()).to_equal(true)

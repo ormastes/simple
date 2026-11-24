@@ -1,0 +1,44 @@
+#!/bin/sh
+# Exercise the real strict observation reader with physical output bytes.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+. "$root/scripts/check/lib/simpleos-sysroot-receipt.shs"
+. "$root/scripts/check/lib/native-link-observation.shs"
+scratch=$(mktemp -d)
+trap 'rm -f "$scratch/output" "$scratch/output.link-receipt" "$scratch/body"; rmdir "$scratch"' EXIT HUP INT TERM
+printf 'physical fixture bytes\n' > "$scratch/output"
+fixture_receipt() {
+    {
+        printf 'simple-link-receipt: 3\nobservation: completed-native-link\ncompleted: true\nfresh-only: true\ncache-authority: none\n'
+        printf 'target: simpleos-%s\narch: %s\nengine-id: %s\noutput-sha256: %s\n' "$1" "$1" "$2" "$(simpleos_sdk_hash "$scratch/output")"
+    } > "$scratch/body"
+    cp "$scratch/body" "$scratch/output.link-receipt"
+    printf 'receipt-sha256: %s\n' "$(simpleos_sdk_hash "$scratch/body")" >> "$scratch/output.link-receipt"
+}
+refuse() {
+    if native_link_observation_verify_v3 "$scratch/output" "$1" "$2"; then
+        echo "FAIL: accepted $3" >&2; exit 1
+    fi
+}
+for pair in 'simpleos-x86_64 x86_64' 'simpleos-i686 i686' 'simpleos-aarch64 aarch64' 'simpleos-armv7 arm32' 'simpleos-riscv64gc riscv64' 'simpleos-riscv32 riscv32'; do
+    set -- $pair
+    fixture_receipt "$2" internal:simpleos
+    native_link_observation_verify_v3 "$scratch/output" "$1" internal
+    refuse "$1" lld internal-as-lld
+    fixture_receipt "$2" ld.lld
+    native_link_observation_verify_v3 "$scratch/output" "$1" lld
+    refuse "$1" internal external-fallback-as-internal
+done
+fixture_receipt aarch64 internal:invented
+refuse simpleos-aarch64 internal unknown-internal-label
+fixture_receipt x86_64 internal:simpleos
+refuse simpleos-aarch64 internal wrong-target
+fixture_receipt aarch64 internal:simpleos
+printf 'changed\n' >> "$scratch/output"
+refuse simpleos-aarch64 internal changed-output-bytes
+fixture_receipt aarch64 internal:simpleos
+printf 'extra: row\n' >> "$scratch/output.link-receipt"
+refuse simpleos-aarch64 internal extra-receipt-row
+rm -f "$scratch/output.link-receipt"
+refuse simpleos-aarch64 internal missing-receipt
+echo 'PASS: six target bindings, exact engines, fallback mismatch, output mutation, malformed and missing observations'

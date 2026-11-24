@@ -1,0 +1,221 @@
+name: Read-only native surface owner inspection
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: readonly-native-surface-owner-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.event_name == 'workflow_dispatch' || (github.event.action == 'labeled' && github.event.label.name == 'simpleos-surface-inspection' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'work/xc-surface-inspection-20261124')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      # Deliberately blocked until a NEW compiled inspection-capable P1 is verified.
+      # Never substitute the older P1 that lacks this command.
+      PRODUCER_RUN: '45212783426'
+      PRODUCER_SOURCE: '1d0351ba1a89517d6d9e8c0015b0344dda125659'
+      PRODUCER_ARTIFACT: '14838944482'
+      PRODUCER_SHA256: '6d772fb41bd05fc0fbb336ddc18e2643ce5b57e0ad44e624cd20965a433a2652'
+      PRODUCER_BYTES: '58590344'
+      DATA_SOURCE: 0d9debaf39e604c531b5214f014c290c7c3e044f
+      DATA_COMPILER_TREE: 2ad653b6a28c4b7ba1a23027c6f3f74a0e5bdffd
+      DATA_LIB_TREE: e3206c4c74b3b8bcdc4d967b28e359f314bc22f4
+      DATA_ENTRY_SHA256: 98602bc41839ce44421338ff9dd4d7d7de329aa93df89d568f40a31bcb119808
+      OUT: build/verify/native-surface-owner-inspection
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Refuse pending or malformed new producer pins
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]] || { echo 'BLOCKED: new inspection-capable P1 run is pending'; exit 2; }
+          [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ ]] || exit 2
+          [[ "$PRODUCER_ARTIFACT" =~ ^[1-9][0-9]*$ ]] || exit 2
+          [[ "$PRODUCER_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
+          [[ "$PRODUCER_BYTES" =~ ^[1-9][0-9]*$ ]] || exit 2
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.DATA_SOURCE }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Bind immutable failed input data and new producer API metadata
+        id: binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$DATA_SOURCE"
+          test "$(git rev-parse HEAD:src/compiler)" = "$DATA_COMPILER_TREE"
+          test "$(git rev-parse HEAD:src/lib)" = "$DATA_LIB_TREE"
+          mkdir -p "$OUT/producer-source-proof"
+          cat > "$OUT/data-source-pins.sha256" <<'PINS'
+          411ac0f26973680ad07a29cc191dcc65a5c95448282df93642df91d4848539a8  src/lib/nogc_sync_mut/io/path_identity.spl
+          2d8f120f9c670a941d363caed14c82b468bf75b78a432c6adaf229727e500ec3  src/lib/nogc_sync_mut/io/path_identity_abi.spl
+          598f86c3476ddf75cb691290d57614302d982ba029cbb61a3fd10b4acd6584d9  src/lib/nogc_sync_mut/io/_PathIdentityPosix/errno_abi.spl
+          a4a1904d68e355d6cc95ceff7867edd26454c66afdb0db812fe7dd0e36886d3b  src/compiler/70.backend/backend/simpleos_sysroot_receipt.spl
+          8d254fc19cc407f99d8c74fe576b53eb9a020d1647033586acdc6de5c0202849  src/compiler/00.common/library_mode_policy_v1.spl
+          98602bc41839ce44421338ff9dd4d7d7de329aa93df89d568f40a31bcb119808  test/fixtures/compiler/simpleos_sysroot_receipt_owner/main.spl
+          PINS
+          sha256sum --check --strict "$OUT/data-source-pins.sha256" > "$OUT/data-source-verification.txt"
+          # JSON here is explicit GitHub API interoperability, not diagnostic schema.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN" > "$OUT/producer-run.github.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PRODUCER_ARTIFACT" > "$OUT/producer-artifact.github.json"
+          jq -e --argjson id "$PRODUCER_RUN" --arg source "$PRODUCER_SOURCE" \
+            '.id==$id and .head_sha==$source and .status=="completed" and .conclusion=="success"' "$OUT/producer-run.github.json" >/dev/null
+          jq -e --argjson id "$PRODUCER_ARTIFACT" --argjson run "$PRODUCER_RUN" --arg source "$PRODUCER_SOURCE" \
+            '.id==$id and .name=="ladder-linux-x86_64-r1" and .expired==false and .workflow_run.id==$run and .workflow_run.head_sha==$source' "$OUT/producer-artifact.github.json" >/dev/null
+          for source in src/app/cli/bootstrap_main.spl src/app/cli/bootstrap_surface_inspection_v1.spl \
+              src/app/cli/bootstrap_focused_native_build.spl src/compiler/80.driver/bootstrap_api_fixed.spl \
+              src/compiler/80.driver/driver_native_surface_inspection_v1.spl; do
+            target="$OUT/producer-source-proof/$source"
+            mkdir -p "$(dirname "$target")"
+            gh api "repos/$GITHUB_REPOSITORY/contents/$source?ref=$PRODUCER_SOURCE" --jq .content | tr -d '\n' | base64 --decode > "$target"
+            test -s "$target"
+          done
+          grep -Fq 'inspect-native-surfaces' "$OUT/producer-source-proof/src/app/cli/bootstrap_main.spl"
+          grep -Fq 'failing_body_equivalence: false' "$OUT/producer-source-proof/src/compiler/80.driver/driver_native_surface_inspection_v1.spl"
+          find "$OUT/producer-source-proof" -type f -print0 | sort -z | xargs -0 sha256sum > "$OUT/producer-source-proof.sha256"
+
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: ${{ env.PRODUCER_ARTIFACT }}
+          run-id: ${{ env.PRODUCER_RUN }}
+          github-token: ${{ github.token }}
+          path: build/verify/native-surface-owner-inspection/producer
+
+      - name: Verify new P1 bytes and recreate exact failed SDK entry path
+        id: ready
+        run: |
+          set -euo pipefail
+          compiler="$PWD/$OUT/producer/linux-x86_64-p1/simple"
+          printf '1\n' | cmp -s - "$OUT/producer/linux-x86_64-p1/PHASE"
+          test -f "$compiler" && test ! -L "$compiler"
+          test "$(stat -c '%s' "$compiler")" = "$PRODUCER_BYTES"
+          printf '%s  %s\n' "$PRODUCER_SHA256" "$compiler" | sha256sum --check --status
+          chmod +x "$compiler"
+          lane="$PWD/build/verify/actual-attribute-store-diagnostic/sdk_owner"
+          test ! -e "$lane"
+          mkdir -p "$lane/src/app"
+          cp test/fixtures/compiler/simpleos_sysroot_receipt_owner/main.spl "$lane/src/app/simpleos_sdk_owner_probe.spl"
+          printf '%s  %s\n' "$DATA_ENTRY_SHA256" "$lane/src/app/simpleos_sdk_owner_probe.spl" | sha256sum --check --status
+          {
+            printf 'schema: native-surface-inspection-consumer-binding-v1\nstatus: DIAGNOSTIC_ONLY\nadmission: none\n'
+            printf 'producer_run: %s\nproducer_source: "%s"\nproducer_artifact: %s\nproducer_sha256: "%s"\n' "$PRODUCER_RUN" "$PRODUCER_SOURCE" "$PRODUCER_ARTIFACT" "$PRODUCER_SHA256"
+            printf 'data_source: "%s"\ndata_compiler_tree: "%s"\ndata_lib_tree: "%s"\nentry_sha256: "%s"\n' "$DATA_SOURCE" "$DATA_COMPILER_TREE" "$DATA_LIB_TREE" "$DATA_ENTRY_SHA256"
+            printf 'library_mode: omitted-default-empty\nfailed_context: cycle5-default-empty-target\nnative_compile: NOT_REQUESTED\nsdk_qualification: none\n'
+          } > "$OUT/binding.sdn"
+
+      - name: Collect default-empty and explicit-Linux prebody queries independently
+        if: ${{ !cancelled() && steps.binding.outcome == 'success' && steps.ready.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          compiler="$PWD/$OUT/producer/linux-x86_64-p1/simple"
+          lane="$PWD/build/verify/actual-attribute-store-diagnostic/sdk_owner"
+          for query in default-empty explicit-linux; do
+            query_out="$PWD/$OUT/$query"
+            mkdir "$query_out"
+            cache="$lane/cache"
+            if [ "$query" = explicit-linux ]; then cache="$lane/cache-explicit-linux"; fi
+            test ! -e "$cache"
+            args=(inspect-native-surfaces --source "$PWD/src/compiler" --source "$PWD/src/lib" --source "$lane/src/app"
+              --entry-closure --entry "$lane/src/app/simpleos_sdk_owner_probe.spl" --mode dynload --low-memory --threads 4
+              --cache-dir "$cache" --module lib.nogc_sync_mut.io.path_identity_abi
+              --module lib.nogc_sync_mut.io._PathIdentityPosix.errno_abi --item path_errno_address --diagnostic-root build/verify)
+            # The first query intentionally omits target as cycle5 did. The
+            # differential is explicitly new target context, not equivalence.
+            if [ "$query" = explicit-linux ]; then args+=(--target x86_64-unknown-linux-gnu); fi
+            printf '%q ' "$compiler" "${args[@]}" > "$query_out/command.txt"
+            printf '\n' >> "$query_out/command.txt"
+            find "$PWD/build/verify" -maxdepth 1 -type d -name 'native-surface-inspection*' | sort > "$query_out/private-before.txt"
+            set +e
+            # Additional finite address-space cap; existing compiler guards stay
+            # enabled. RSS and exit evidence are retained independently.
+            (ulimit -v 12582912
+              /usr/bin/time -v -o "$query_out/resources.txt" timeout --verbose --signal=TERM --kill-after=5s 900s \
+                env -u SIMPLE_NATIVE_BUILD_WORKER -u SIMPLE_PARSE_SHARD -u SIMPLE_HIR_SHARD -u SIMPLE_MIR_SHARD \
+                  -u SIMPLE_MIR_SHARD_LINK -u SIMPLE_NATIVE_BUILD_TARGET \
+                  SIMPLE_BOOTSTRAP=1 SIMPLE_MONO_ROOT_DISCOVERY=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=1 \
+                  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_RTI_DIAGNOSTICS=1 SIMPLE_BOOTSTRAP_DIAG=1 \
+                  "$compiler" "${args[@]}") > "$query_out/stdout.log" 2> "$query_out/stderr.log"
+            code=$?
+            set -e
+            printf '%s\n' "$code" > "$query_out/inspection.exit"
+            find "$PWD/build/verify" -maxdepth 1 -type d -name 'native-surface-inspection*' | sort > "$query_out/private-after.txt"
+            comm -13 "$query_out/private-before.txt" "$query_out/private-after.txt" > "$query_out/private-created.txt"
+            count=$(wc -l < "$query_out/private-created.txt")
+            if [ "$count" -eq 1 ]; then
+              private=$(cat "$query_out/private-created.txt")
+              physical=$(realpath -e -- "$private")
+              test "$(dirname "$physical")" = "$PWD/build/verify"
+              test ! -L "$private"
+              cp -a "$physical" "$query_out/private-output"
+            fi
+            printf 'schema: readonly-query-collection-v1\nstatus: DIAGNOSTIC_ONLY\nadmission: none\nquery: %s\nexit_code: %s\ncreated_private_directories: %s\naddress_space_limit_kib: 12582912\ntimeout_seconds: 900\nfailing_body_equivalence: false\nsdk_qualification: none\n' "$query" "$code" "$count" > "$query_out/collection.sdn"
+            # Structural capture only: missing modules/items/negative edges are
+            # valid observations, never turned into a fabricated success.
+            python3 - "$query_out" "$code" <<'CAPTURE'
+          import pathlib, sys
+          out = pathlib.Path(sys.argv[1])
+          record = out / 'private-output/inspection.sdn'
+          state = 'REFUSED_OR_FAILED'
+          if sys.argv[2] == '0' and record.is_file() and not record.is_symlink() and record.stat().st_size <= 1048576:
+              text = record.read_text()
+              required = ['schema: simple-native-surface-inspection-v1', 'status: DIAGNOSTIC_ONLY',
+                          'admission: none', 'capture_point: prebody-frozen-query', 'failing_body_equivalence: false']
+              if all(text.splitlines().count(row) == 1 for row in required): state = 'CAPTURED_DIAGNOSTIC_DATA'
+          (out / 'capture.status').write_text(state + '\n')
+          CAPTURE
+            # Keep all parser/read-index cache bytes, including negative edges.
+            # No old cache is reused; no .object/IR sidecar exclusions.
+            if [ -d "$cache" ]; then
+              test ! -L "$cache"
+              test "$(realpath -e -- "$cache")" = "$cache"
+              case "$cache" in "$PWD"/build/verify/*) ;; *) exit 2 ;; esac
+              # tar's default does not dereference internal symlinks.
+              tar -czf "$query_out/parser-cache.tar.gz" -C "$lane" "$(basename "$cache")"
+            fi
+            if [ -d build/scv ]; then
+              test ! -L build/scv
+              test "$(realpath -e -- build/scv)" = "$PWD/build/scv"
+              # Preserve this query's authority/closure state before the next
+              # query can update shared read-index metadata. Never dereference.
+              tar -czf "$query_out/scv-authority-and-closure-cache.tar.gz" -C build scv
+            fi
+          done
+          printf '%s  %s\n' "$PRODUCER_SHA256" "$compiler" | sha256sum --check --status
+          git diff --exit-code -- src/compiler src/lib
+
+      - name: Retain complete source authority and closure metadata
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -d "$OUT" ] && [ -d build/scv ] && { [ ! -f "$OUT/default-empty/scv-authority-and-closure-cache.tar.gz" ] || [ ! -f "$OUT/explicit-linux/scv-authority-and-closure-cache.tar.gz" ]; }; then
+            # This is the isolated consumer checkout's authority/snapshot cache,
+            # not a producer worktree or earlier failed run's retained history.
+            test ! -L build/scv
+            test "$(realpath -e -- build/scv)" = "$PWD/build/scv"
+            # Do not use tar -h: outside-workspace symlinks are never followed.
+            tar -czf "$OUT/scv-authority-and-closure-cache.tar.gz" -C build scv
+          fi
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: readonly-native-surface-owner-${{ github.run_id }}
+          path: |
+            build/verify/native-surface-owner-inspection/**
+            !build/verify/native-surface-owner-inspection/producer/**
+          if-no-files-found: warn
+          retention-days: 14
