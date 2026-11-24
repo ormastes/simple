@@ -1,6 +1,6 @@
 # Tree KV cache (mode 3): not bit-exact against cache-off on Vulkan (Gemma branching digest differs)
 
-- **Status:** C1 fixed by option (a) (2026-11-23, `slang_ggml_backend_init` sets `GGML_VK_DISABLE_FUSION`); C2 fixed by option (b) (2026-11-24), at a wall-time cost, see "Resolution of C2". Bit-level exactness was not re-measured; evidence is digest-level plus the mock contract test.
+- **Status:** C1 fixed by option (a) (2026-11-23, `slang_ggml_backend_init` sets `GGML_VK_DISABLE_FUSION`); C2 fixed for recycled streams in mode 3 (zero-on-recycle) and for warm hits in opt-in mode 4 (host prefix restore, ~3x slower); warm-hit stale-tail in default mode 3 remains open pending llama.cpp partial `seq_cp`/tail-zero (option c) — default mode 3 is digest-equal and ~2x faster than cache-off on gemma-3-270m Vulkan. Bit-level exactness was not re-measured; evidence is digest-level plus the mock contract test.
 - **Found:** 2026-11-22, Windows EVO-X5Pro host, Radeon 8065S through the Vulkan llama.cpp build (`build-mingw-vulkan`, llama.cpp `99b9548`)
 - **Seed:** `C:/dev/seeds/simple-release.exe`
 - **Spec:** `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl` (unchanged; it still fails 2/3 on Gemma on Vulkan)

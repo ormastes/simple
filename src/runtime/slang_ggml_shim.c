@@ -994,7 +994,10 @@ static int slang_tree_flush_stream_copies(void) {
 /* Mode 4 reuse (the owner copy and tail drop were queued by prepare): serialise the surviving
  * prefix through host memory, zero the stream, and restore only the prefix, so
  * no cell of the owner's tail survives past the reused frontier. Returns 1 when
- * the stream then holds exactly `reuse` cells. */
+ * the stream then holds exactly `reuse` cells.
+ * Runs outside g_state_lock; mutating g_tree_seq_dirty[seq] is safe because
+ * g_tree_active serialises tree requests and mode-change/unload refuse while
+ * g_request_count != 0. */
 static int slang_tree_restore_prefix_host(int seq) {
     g_tree_seq_dirty[seq] = 1;
     int ok = 0;
@@ -1113,9 +1116,11 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
         }
         if (owner >= 0) {
             llama_memory_t memory = llama_get_memory(g_tree_ctx);
-            /* Per-sequence streams (mode 3) only copy whole sequences, and a copy
-             * would carry the owner's tail as stale cells: restore the prefix
-             * through the host instead. Unified KV just adds the seq id to cells. */
+            /* Per-sequence streams (mode 3) only support whole-sequence seq_cp.
+             * Default mode 3 reuses the prefix in place (seq_cp + seq_rm of the
+             * tail); opt-in mode 4 (g_tree_host_restore) additionally restores
+             * the surviving prefix through host memory to clear stale tail data.
+             * Unified KV (modes 1/2) just adds the seq id to the prefix cells. */
             overwritten = 1;
             g_tree_seq_dirty[seq] = 1;
             if (g_tree_mode == 3 && g_tree_host_restore) {
@@ -1262,8 +1267,10 @@ static int64_t slang_tree_eval_prompt(struct slang_request *request) {
     if (request->seq < 0) {
         SLANG_LOCK();
         int64_t prepared = slang_tree_prepare_locked(request);
+        int pending = prepared > 0 && request->restore_pending;
         SLANG_UNLOCK();
         if (prepared < 0) return prepared;
+        if (pending) (void)slang_tree_restore_finish(request);
     }
     if (request->eval_start < 0 || request->eval_start > request->tok_len)
         return SLANG_ERR_DECODE;

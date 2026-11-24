@@ -16,6 +16,7 @@ int64_t slang_ggml_capabilities(void);
 int64_t slang_ggml_prefix_cache_configure(int64_t, int64_t);
 int64_t slang_ggml_prefix_cache_mode_configure(int64_t, int64_t);
 int64_t slang_ggml_prefix_hits(void);
+int64_t slang_ggml_prefix_misses(void);
 int64_t slang_ggml_prefix_tokens_reused(void);
 int64_t slang_ggml_prefix_tokens_prefilled(void);
 int64_t slang_ggml_prefix_evictions(void);
@@ -262,18 +263,22 @@ int main(void) {
      * the request is a warm hit on a longer owner or a cold request on a stream
      * freed by an earlier long one. The warm prefix goes through host memory
      * (state_seq get/set), not a whole-stream copy. */
-    /* Default mode 3 reuses the prefix in place: no host restore. */
+    /* Default mode 3 reuses the prefix in place (no host restore), while still
+     * zeroing recycled streams on cold allocs. Use a 16-cell owner so there is
+     * a real tail past the 8-token reused frontier. */
     assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
     h = slang_ggml_request_create(64);
     begin(h, "0123456789", 0);
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
     finish(h);
     int64_t restores = mock_llama_restore_calls();
     begin(h, "01234567xy", 8);
     finish(h);
     assert(mock_llama_restore_calls() == restores);
     assert(slang_ggml_request_close(h) == 0);
-    /* Mode 4 = mode 3 plus the host restore. */
+    /* Mode 4 = mode 3 plus the host restore (zero stale tail on warm hits). */
     assert(slang_ggml_prefix_cache_mode_configure(4, 0) == 4);
     assert(slang_ggml_tree_mode() == 3);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
@@ -290,15 +295,54 @@ int main(void) {
     assert(mock_llama_stale_leaks() == leaks);             /* the owner's tail did not follow */
     assert(slang_ggml_request_close(h) == 0);
 
-    /* A restore that fails is a MISS: nothing reused, the failure counted, the
-     * stream re-zeroed (no stale cells), and the request still completes. */
+    /* Mode 4 direct eval (without calling prefix_prepare first) must also run
+     * the deferred host restore instead of silently reusing in place. */
+    h = slang_ggml_request_create(64);
+    leaks = mock_llama_stale_leaks();
+    restores = mock_llama_restore_calls();
+    text(h, "01234567ab");
+    assert(slang_ggml_request_tokenize(h, 0) == 10);
+    assert(slang_ggml_request_eval_prompt(h) == 10);
+    finish(h);
+    assert(mock_llama_restore_calls() == restores + 1);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(slang_ggml_request_close(h) == 0);
+
+    /* A restore that fails is a MISS: nothing reused, the failure counted,
+     * hits/reused rolled back and misses incremented, stream re-zeroed, and
+     * the request still completes. */
     h = slang_ggml_request_create(64);
     int64_t rfail = slang_ggml_prefix_restore_failures();
+    int64_t hits_before = slang_ggml_prefix_hits();
+    int64_t misses_before = slang_ggml_prefix_misses();
+    int64_t reused_before = slang_ggml_prefix_tokens_reused();
     leaks = mock_llama_stale_leaks();
     mock_llama_fail_restore_once();
     begin(h, "01234567zz", 0);
     finish(h);
     assert(slang_ggml_prefix_restore_failures() == rfail + 1);
+    assert(slang_ggml_prefix_hits() == hits_before);
+    assert(slang_ggml_prefix_misses() == misses_before + 1);
+    assert(slang_ggml_prefix_tokens_reused() == reused_before);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(slang_ggml_request_close(h) == 0);
+
+    /* Mode 4 direct eval with a failing restore must also roll back to cold eval. */
+    h = slang_ggml_request_create(64);
+    rfail = slang_ggml_prefix_restore_failures();
+    hits_before = slang_ggml_prefix_hits();
+    misses_before = slang_ggml_prefix_misses();
+    reused_before = slang_ggml_prefix_tokens_reused();
+    leaks = mock_llama_stale_leaks();
+    mock_llama_fail_restore_once();
+    text(h, "01234567ww");
+    assert(slang_ggml_request_tokenize(h, 0) == 10);
+    assert(slang_ggml_request_eval_prompt(h) == 10);
+    finish(h);
+    assert(slang_ggml_prefix_restore_failures() == rfail + 1);
+    assert(slang_ggml_prefix_hits() == hits_before);
+    assert(slang_ggml_prefix_misses() == misses_before + 1);
+    assert(slang_ggml_prefix_tokens_reused() == reused_before);
     assert(mock_llama_stale_leaks() == leaks);
     assert(slang_ggml_request_close(h) == 0);
     assert(slang_ggml_prefix_cache_configure(1, 1024) == 1);
