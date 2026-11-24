@@ -1,46 +1,48 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Focused native output contract evidence
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  focused-output:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          path: control
+      - uses: actions/checkout@v5
+        with:
+          ref: cefb9bdb94aa94c53aac1c02673d8eaab30e0843
+          fetch-depth: 0
+          path: s
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build actual patched dispatcher and verify focused output contracts
+        working-directory: s
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python ../control/scripts/check/focused-output-proof/controller.py
+      - name: Preserve actual compiler outputs, receipts and failures
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: focused-output-${{ github.run_id }}
+          path: |
+            s/build/focused-output-proof/*.json
+            s/build/focused-output-proof/*.env
+            s/build/focused-output-proof/*.stdout
+            s/build/focused-output-proof/*.stderr
+            s/build/focused-output-proof/*.imports
+            s/build/focused-output-proof/*.exe
+            s/build/focused-output-proof/cases/
+            s/build/focused-output-proof/cache/
+            s/build/native-objects-*/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
