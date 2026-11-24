@@ -20,10 +20,14 @@ def source_guard(source,allowed=None):
  for line in changes:
   status,name=line.split('\t');assert status=='A' and name in allowed and sha(source/name)==allowed[name]
 def tools_snapshot(out):
- values={}
+ values={};invocations={}
  for name in ('clang','ld.lld','llvm-ar'):
-  path=Path(shutil.which(name)).resolve();values[str(path)]=sha(path)
-  subprocess.run([str(path),'--version'],stdout=(out/(name+'.version')).open('wb'),check=True,timeout=30)
+  invoked=Path(shutil.which(name)).absolute();path=invoked.resolve();values[str(path)]=sha(path)
+  invocations[name]={'invoked':str(invoked),'resolved':str(path),'sha256':values[str(path)]}
+  # LLVM selects driver flavor from argv[0]; resolving ld.lld to lld before
+  # invocation loses the ELF driver even though the executable bytes match.
+  subprocess.run([str(invoked),'--version'],stdout=(out/(name+'.version')).open('wb'),check=True,timeout=30)
+ save(out/'tool-invocations.json',invocations)
  save(out/'tool-files.json',values);return values
 def download(kind,number,digest,out):
  meta=api('actions/artifacts/'+str(number));assert not meta['expired']
@@ -129,6 +133,7 @@ def child(a):
   except Exception as error:result.update(status='FAILED',immutable_inputs_after='FAIL',identity_error=str(error))
   save(out/'terminal.json',result)
  assert result['status']=='BEHAVIOR_PASS',result
-p=argparse.ArgumentParser();p.add_argument('mode',choices=['intake','child']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--parent',type=Path);p.add_argument('--role',choices=['phase3','full-cli']);p.add_argument('--artifact-pins');a=p.parse_args()
-assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=a.source,text=True).strip()==SOURCE
-(intake if a.mode=='intake' else child)(a)
+if __name__=='__main__':
+ p=argparse.ArgumentParser();p.add_argument('mode',choices=['intake','child']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--parent',type=Path);p.add_argument('--role',choices=['phase3','full-cli']);p.add_argument('--artifact-pins');a=p.parse_args()
+ assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=a.source,text=True).strip()==SOURCE
+ (intake if a.mode=='intake' else child)(a)
