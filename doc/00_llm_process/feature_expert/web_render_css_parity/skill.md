@@ -4208,3 +4208,42 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - Method note: measure UA-chrome text by rendering candidate spans in Chrome itself and
   running a box pixel diff (`boxdiff.spl`) against the real control, sweeping font, colour
   and x. That settles the face and the subpixel offsets before any code is written.
+
+## 2026-11-24 — listdisc: disc markers use the device-size font; cluster sweep of css-paint, html, overview
+
+- **Sweep (4x, svgaudio head 3886f381d01, `region.spl`, 32 px tiles).** The text rows are
+  glyph anti-aliasing, with centroids within 0.4 device px of Chrome. The non-AA clusters are:
+  - **Disc bullets.** In overview's lists, rank 0 is 9,123 px. A 160x64 cluster with a
+    centroid of -7..-9 px recurs on every page's feature inventory.
+  - **html `<article><header>` gradient bottom edge.** It is 2 device rows short (870 vs
+    872), 6,822 px. A standalone header + h3 fixture does NOT reproduce it (4x ends at
+    451 on both sides), so the cause depends on context. Open, unclaimed.
+  - **overview `code` monospace advances.** The rest of the line shifts by up to 8 px.
+    Open, unclaimed.
+  - The clip-rect horizontal offset / `device-rect` did not show up anywhere.
+- **Disc marker fix** (`_html_draw_ir_list_marker_commands`, paint_layout). Chrome runs
+  ListMarker's disc metrics (a = ascent, o = 2a/3, side = (o+1)/2, x = content - o - 7,
+  y = text top + 3(a-o)/2) on the DEVICE font.
+  - At k=4 a 16px face gives a 58, o 38, a 19 px disc at content - 45, text top + 30.
+    The 7 stays unscaled.
+  - We had k x the CSS disc: 20 px wide, 19 device px left and 2 rows high.
+  - At k>1 the disc is now an overlay rect with `device-rect` and a large radius, which
+    the painter clamps to a circle. 1x is unchanged.
+  - Pinned by `list_disc_marker_device_scale_chrome159_spec`.
+  - The `ol` decimal markers were already within 1 px at both scales.
+- **Open from this case:** a `ul` that is a flex item after an `ol` starts at a fractional
+  x (Chrome device 741, ours 740). `flex_item_text_frac_delta_milli_px` only covers
+  single-text-run items. The spec pins that disc's rows and width but not its x.
+- Catalog dpr4 (base 30c19e17c23 -> head):
+
+  | page | before | after |
+  |---|---|---|
+  | overview | 0.22 | 0.21 |
+  | html | 0.29 | 0.28 |
+  | css-layout | 0.49 | 0.48 |
+  | css-paint | 0.31 | 0.29 |
+  | forms-media | 0.45 | 0.43 |
+  | animation | 0.33 | 0.31 |
+
+  The 1x catalog is identical. Perf: overview k=4 median 9695 -> 9669 ms over 6
+  alternated rounds, RSS flat.
