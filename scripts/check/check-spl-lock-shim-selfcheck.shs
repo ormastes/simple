@@ -1,0 +1,55 @@
+#!/bin/sh
+# Builds and runs src/runtime/test/spl_lock_shim_selfcheck.c (the private
+# Win32/POSIX lock shim src/runtime/spl_lock_shim.h) plain, under ASan/UBSan,
+# and (POSIX only) under TSan; then runs the pool characterization, whose
+# lane A (runtime_pool.c) is the shim's main consumer. clang only (never gcc).
+# Fail-closed verdict, last line of stdout:
+#   PASS — <n> run(s) ...              exit 0
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked (...)  exit 2
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+cd "$root" || { echo "ERROR — nothing was checked (cd failed)"; exit 2; }
+CC=${CC:-clang}
+case "$(basename "$CC")" in *gcc*|*g++*) echo "ERROR — nothing was checked (gcc is forbidden: $CC)"; exit 2;; esac
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no clang: $CC)"; exit 2; }
+"$CC" --version 2>/dev/null | grep -qi clang || { echo "ERROR — nothing was checked ($CC is not clang)"; exit 2; }
+out="$root/build/spl_lock_shim_selfcheck"
+mkdir -p "$out" || { echo "ERROR — nothing was checked (mkdir $out)"; exit 2; }
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    os=windows; exe=.exe; libs=""; sans="none asan"
+    resdir=$("$CC" -print-resource-dir 2>/dev/null)
+    [ -n "$resdir" ] && PATH="$PATH:$resdir/lib/windows" && export PATH ;;
+  *) os=posix; exe=; libs="-lpthread"; sans="none asan tsan" ;;
+esac
+ran=0; fails=""
+
+for san in $sans; do
+  case "$san" in
+    none) sf="" ;;
+    asan) sf="-fsanitize=address,undefined -fno-sanitize-recover=undefined" ;;
+    tsan) sf="-fsanitize=thread" ;;
+  esac
+  bin="$out/spl_lock_shim_$san$exe"
+  # shellcheck disable=SC2086
+  "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -I src/runtime $sf \
+    src/runtime/test/spl_lock_shim_selfcheck.c -o "$bin" $libs
+  rc=$?
+  if [ "$rc" -ne 0 ]; then fails="$fails shim-$san(compile rc=$rc)"; continue; fi
+  "$bin" > "$out/shim_$san.txt" 2>&1
+  rc=$?
+  ran=$((ran + 1))
+  if [ "$rc" -ne 0 ]; then fails="$fails shim-$san(run rc=$rc)"; continue; fi
+  grep -q "^PASS: " "$out/shim_$san.txt" || fails="$fails shim-$san(no PASS line)"
+
+  sh scripts/check/check-rt-pool-characterization.shs --sanitize "$san" --out "$out/pool_$san" > "$out/pool_$san.txt" 2>&1
+  rc=$?
+  ran=$((ran + 1))
+  [ "$rc" -eq 0 ] || fails="$fails pool-$san(rc=$rc, see $out/pool_$san.txt)"
+done
+
+if [ -n "$fails" ]; then echo "FAIL — $ran run(s) ($os), failed:$fails"; exit 1; fi
+if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked (0 runs)"; exit 2; fi
+echo "PASS — $ran run(s) ($os: $sans), shim selfcheck + pool characterization green"
+exit 0
