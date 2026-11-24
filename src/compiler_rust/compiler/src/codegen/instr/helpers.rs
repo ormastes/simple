@@ -728,7 +728,8 @@ fn adapt_value_to_type(
                     .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted);
             }
         }
-        return builder.ins().fcvt_to_sint(expected_ty, val);
+        // Narrow int slot: saturate like an explicit cast (NaN -> 0), never trap.
+        return float_to_int_saturating(builder, val, expected_ty, true);
     }
     // int → float
     if actual_ty.is_int() && expected_ty.is_float() {
@@ -797,5 +798,108 @@ pub(crate) fn indirect_call_with_result<M: Module>(
             let nil = builder.ins().iconst(types::I64, 3);
             ctx.vreg_values.insert(*d, nil);
         }
+    }
+}
+
+/// Float -> integer conversion with the interpreter's semantics
+/// (`semantics::cast_float_to_numeric`, i.e. Rust `as`): truncate toward
+/// zero, SATURATE to the target width's range, NaN -> 0. Used by every
+/// `x as uN/iN` and `x.to_uN()/to_iN()` lowering so the compiled engines agree
+/// with the interpreter. The old `fcvt_to_{sint,uint}.i64` + `ireduce` wrapped
+/// in-i64-range values (`70000.5.to_u16()` = 4464) and TRAPPED (SIGILL) on a
+/// negative float to an unsigned type and on NaN/out-of-i64-range input.
+/// `to_int` selects the result width (I8/I16/I32/I64); `signed` the range.
+/// doc/08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md
+pub(crate) fn float_to_int_saturating(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    to_int: types::Type,
+    signed: bool,
+) -> cranelift_codegen::ir::Value {
+    let wide = if signed {
+        builder.ins().fcvt_to_sint_sat(types::I64, val)
+    } else {
+        builder.ins().fcvt_to_uint_sat(types::I64, val)
+    };
+    if to_int == types::I64 {
+        return wide;
+    }
+    let bits = to_int.bits();
+    let clamped = if signed {
+        let max = builder.ins().iconst(types::I64, (1i64 << (bits - 1)) - 1);
+        let min = builder.ins().iconst(types::I64, -(1i64 << (bits - 1)));
+        let upper = builder.ins().smin(wide, max);
+        builder.ins().smax(upper, min)
+    } else {
+        let max = builder.ins().iconst(types::I64, ((1u64 << bits) - 1) as i64);
+        builder.ins().umin(wide, max)
+    };
+    builder.ins().ireduce(to_int, clamped)
+}
+
+/// Implicit float -> narrow-int slot adapters (`adapt_value_to_type`, used by
+/// every `adapted_call`) used trapping `fcvt_to_sint`, so NaN, +/-inf or an
+/// out-of-range float passed into an i8/i16/i32 runtime/SFFI slot killed the
+/// process with SIGILL. They now saturate exactly like an explicit cast.
+#[cfg(test)]
+mod float_adapt_tests {
+    use super::*;
+    use cranelift_codegen::ir::AbiParam;
+    use cranelift_codegen::settings;
+    use cranelift_frontend::FunctionBuilderContext;
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Linkage;
+
+    /// JIT `f(x: f64) -> i64 = sextend(adapt_value_to_type(x, slot))`.
+    fn adapt_fn(slot: types::Type) -> (JITModule, extern "C" fn(f64) -> i64) {
+        let isa = cranelift_native::builder()
+            .expect("host ISA")
+            .finish(settings::Flags::new(settings::builder()))
+            .expect("ISA");
+        let mut module = JITModule::new(JITBuilder::with_isa(isa, cranelift_module::default_libcall_names()));
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = module.declare_function("adapt", Linkage::Export, &sig).expect("declare");
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut fctx = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            b.seal_block(entry);
+            let x = b.block_params(entry)[0];
+            let narrow = adapt_value_to_type(&mut b, x, slot);
+            let wide = b.ins().sextend(types::I64, narrow);
+            b.ins().return_(&[wide]);
+            b.finalize();
+        }
+        module.define_function(id, &mut ctx).expect("define");
+        module.finalize_definitions().expect("finalize");
+        let code = module.get_finalized_function(id);
+        (module, unsafe { std::mem::transmute::<*const u8, extern "C" fn(f64) -> i64>(code) })
+    }
+
+    #[test]
+    fn float_into_narrow_int_slot_saturates_instead_of_trapping() {
+        let inputs = [-5.5, 3.7, 70000.5, -40000.25, 1e20, -1e20, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let mut failures = Vec::new();
+        for slot in [types::I8, types::I16, types::I32] {
+            let (_module, f) = adapt_fn(slot);
+            for x in inputs {
+                let want = match slot {
+                    types::I8 => x as i8 as i64,
+                    types::I16 => x as i16 as i64,
+                    _ => x as i32 as i64,
+                };
+                let got = f(x);
+                if got != want {
+                    failures.push(format!("{slot} <- {x}: got {got}, want {want}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "narrow slot adapters:\n{}", failures.join("\n"));
     }
 }

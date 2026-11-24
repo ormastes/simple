@@ -213,10 +213,13 @@ impl MirFunction {
             live_out.insert(b.id, HashSet::new());
         }
 
+        // Backward problem: visit blocks last-to-first so a value live across
+        // a long straight-line chain converges in one pass, not one pass per
+        // block (the fixed point is the same in any order).
         let mut changed = true;
         while changed {
             changed = false;
-            for b in &self.blocks {
+            for b in self.blocks.iter().rev() {
                 let succs = b.terminator.successors();
                 let out_set = live_out.get_mut(&b.id).unwrap();
                 out_set.clear();

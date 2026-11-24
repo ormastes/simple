@@ -410,6 +410,25 @@ fn candidate_declared_by(
         .find(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *owner))
 }
 
+/// Owner key of the module that WROTE the code now running, in the form
+/// `FUNCTION_MODULE_OWNER` records: `CURRENT_EXEC_MODULE` alone is `None` at
+/// the entry's top level (an `it` body included) and is the INVOKER's module
+/// inside a closure body. Entry-file fns are owned by `<entry>`, not by the
+/// entry file's key.
+fn lexical_caller_owner() -> Arc<str> {
+    let caller = crate::interpreter::interpreter_module::private_call_caller();
+    let caller_is_entry = crate::interpreter::CURRENT_FILE.with(|c| {
+        c.borrow()
+            .as_deref()
+            .is_some_and(|entry| *crate::interpreter::normalize_path_key(entry).to_string_lossy() == *caller)
+    });
+    if caller_is_entry {
+        Arc::from("<entry>")
+    } else {
+        caller
+    }
+}
+
 /// The calling module's OWN declaration of `name`, when `found` (what a
 /// bare-name table handed back) belongs to another module. The flat function
 /// table and the flattened top-level env are last-registration-wins, so two
@@ -1107,18 +1126,29 @@ pub(crate) fn evaluate_call(
                         impl_methods,
                     );
                 }
+                // Own-module definitions first: `FUNCTION_OVERLOADS` is keyed by
+                // the bare name process-wide, so it also holds every OTHER
+                // module's same-named fn. Scoring the whole set let another
+                // module's private helper win a tie (first registered) or
+                // outscore the caller's own (typed vs untyped parameter).
+                // Bug: seed_private_fn_cross_module_collision_2026-11-24.
+                let caller = lexical_caller_owner();
+                let own: Vec<Arc<FunctionDef>> = overloads
+                    .iter()
+                    .filter(|candidate| function_module_owner(candidate).is_some_and(|o| *o == *caller))
+                    .cloned()
+                    .collect();
                 // When no candidate scores (untyped/erased argument values), the
                 // flat map below is last-registration-wins across modules; the
                 // calling module's own definition is what native lowering binds.
-                let selected = select_overload(&overloads, &evaluated_args).or_else(|| {
-                    let current = CURRENT_EXEC_MODULE
-                        .with(|cell| cell.borrow().clone())
-                        .unwrap_or_else(|| Arc::from("<entry>"));
-                    candidate_declared_by(&current, name, functions).filter(|own| {
-                        let required = own.params.iter().filter(|p| p.default.is_none()).count();
-                        (required..=own.params.len()).contains(&evaluated_args.len())
-                    })
-                });
+                let selected = select_overload(&own, &evaluated_args)
+                    .or_else(|| select_overload(&overloads, &evaluated_args))
+                    .or_else(|| {
+                        candidate_declared_by(&caller, name, functions).filter(|own| {
+                            let required = own.params.iter().filter(|p| p.default.is_none()).count();
+                            (required..=own.params.len()).contains(&evaluated_args.len())
+                        })
+                    });
                 if let Some(func) = selected {
                     gate_private_call(name, &func)?;
                     if debug_dupdispatch() {

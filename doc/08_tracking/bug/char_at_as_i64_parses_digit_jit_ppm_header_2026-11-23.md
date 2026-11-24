@@ -1,7 +1,8 @@
 # `text.char_at(i) as i64` parses a digit under jit/cranelift (PPM header `P\x06`)
 
 - **Date:** 2026-11-23
-- **Status:** open (compiler); workaround landed in `encode_ppm_p6`
+- **Status:** FIXED 2026-11-23 in the seed (`rt_any_cast_int`); the
+  `encode_ppm_p6` `.bytes()` workaround stays (correct by construction)
 - **Family:** `text_byte_len_vs_codepoint_index_family_2026-08-06.md` (that
   record has the same cast returning a POINTER for non-ASCII text; this is the
   ASCII-digit variant, still live on the 2026-11 seed).
@@ -47,8 +48,33 @@ headers `50 36 0a 34 30 20 33 30 0a 32 35 35` after the change.
 `src/lib/nogc_sync_mut/js/engine/parser.spl:1232-1236` compute hex digit values
 as `ch.char_at(0) as i64 - 48`; under jit a `"5"` gives `5 - 48 = -43`.
 
-## Fix needed
+## Root cause (2026-11-23)
 
-Make the compiled `text as i64` cast on a one-character `char_at` result
-return the code point, as the interpreter does (or reject the cast at compile
-time and require `.bytes()` / an explicit code-point accessor).
+`char_at` has no static return type, so HIR types `s.char_at(i)` as `any` and
+`x as i64` reaches the `any -> <int>` arm of MIR `lower_cast_expr`
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`). Since
+`6289aff155b` (2026-11-13, the any-float cast fix) that arm called
+`rt_any_to_int`, whose text leg is the `.to_i64()` PARSE (`rt_string_to_int`:
+parse first, code point only when the parse fails). So `"6"` parsed to 6 while
+`"P"` fell back to 80. The STRING-typed cast arm already used `rt_value_as_int`
+(one code point -> that code point), which is why a typed
+`val s = "7"; s as i64` was always 55.
+
+## Fix
+
+New runtime entry `rt_any_cast_int` (Rust `runtime/src/value/collections.rs`,
+C twin `src/runtime/runtime_native.c`): text -> `rt_value_as_int` (the cast
+contract), everything else -> `rt_any_to_int` (float truncates; tagged int,
+bool and wide int unchanged). `lower_cast_expr` emits it for `any as <int>`;
+`.to_i64()` / `.to_int()` keep `rt_any_to_int` and still parse. Registered in
+`runtime_symbols.rs`, `runtime_sffi.rs` and `common_backend.rs`.
+
+Red/green: `src/compiler_rust/compiler/tests/any_text_cast_jit.rs`. On base,
+3 of 5 FAIL (`char_at(1) as i64` = 6, header checksum 234 vs 54, any `"6"` =
+6). With the fix, 5/5 pass and `any_float_cast_jit.rs` still passes 6/6. Runtime
+unit test: `test_any_cast_int_text_is_code_point`.
+
+The self-hosted compiler uses `rt_any_to_int` only for the `.to_i64()` method
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`). That method
+has the parse contract, so it is correct. Its `as` cast lowering was not
+changed here.

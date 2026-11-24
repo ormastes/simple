@@ -1,6 +1,6 @@
 # Interpreter does not link private module globals of a transitively imported module
 
-**Status:** open
+**Status:** verification-pending
 **Date:** 2026-11-23
 **Area:** compiler_rust interpreter module dependency linking
 **Related:** `interpreter_fd_ownership_private_module_globals_not_linked_2026-08-12.md` (direct-import variant, superseded)
@@ -26,3 +26,11 @@ to the spec makes it pass, so function bodies are linked but module-level
 
 `test/01_unit/compiler/backend_plugin/dynamic_loader_spec.spl` carries
 `@workaround bug=interp_transitive_import_private_globals_not_linked_2026-11-23`.
+
+## Fix status
+
+Fix: module-level initializers evaluate with the importing module's classes merged in
+(`init_classes_view` in `src/compiler_rust/compiler/src/interpreter_module/module_evaluator/evaluation_helpers.rs`).
+Gate: `test/01_unit/compiler/backend_plugin/dynamic_loader_spec.spl` with the `@workaround` removed.
+Fail-without: pre-fix seed (`git hash-object` 7502091c / a4b9d2bd), `passed=3 failed=4`, `variable _dynlib_lifetime_gate_v1 not found`.
+Pass-with: post-fix seed build, see PR body. Status stays verification-pending until native verification.

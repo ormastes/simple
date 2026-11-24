@@ -383,6 +383,23 @@ fn test_any_to_int_decodes_tagged_values() {
     assert_eq!(super::rt_any_to_int(rt_array_get(bytes, 0)), 203);
 }
 
+/// `v as <int>` on an erased value: one-code-point text is its CODE POINT
+/// (the cast contract), not the `.to_i64()` parse; other legs match
+/// `rt_any_to_int`.
+#[test]
+fn test_any_cast_int_text_is_code_point() {
+    let digit = unsafe { super::rt_string_new(b"6".as_ptr(), 1) };
+    assert_eq!(super::rt_any_cast_int(digit), 54);
+    assert_eq!(super::rt_any_to_int(digit), 6);
+    let accent = unsafe { super::rt_string_new("é".as_ptr(), 2) };
+    assert_eq!(super::rt_any_cast_int(accent), 233);
+    let text = unsafe { super::rt_string_new(b"42".as_ptr(), 2) };
+    assert_eq!(super::rt_any_cast_int(text), 42);
+    assert_eq!(super::rt_any_cast_int(RuntimeValue::from_int(-7)), -7);
+    assert_eq!(super::rt_any_cast_int(RuntimeValue::from_bool(true)), 1);
+    assert_eq!(super::rt_any_cast_int(RuntimeValue::from_float(2.9)), 2);
+}
+
 #[test]
 fn test_array_concat_u64_packed_and_mixed_layouts() {
     let a = rt_array_new_with_cap_u64(1);

@@ -218,6 +218,23 @@ build log (`stage4-frontend-cache:` line) and the provenance
 (`stage4_frontend_cache=`, absent = `1`)
 (`stage4_forces_frontend_cache_ignores_caller_2026-11-23.md`).
 
+**Measured per-file worker prices (2026-11-24, self-compile, `SIMPLE_FILE_WORKER_BATCH=8`,
+`SIMPLE_UNIT_TLDR_IMPORTS=0`).** A unit worker's RSS is not a constant: it has a
+~4.3 GB floor and rises with the unit's HIR import closure (in-unit growth was
+seen too and has not been separated from it). End-of-unit `[codegen] ... rss_mib=` over
+195 units was min 4.2 / p25 4.8 / median 6.7 / p75 7.6 / p90 9.8 / max 13.0 GB
+(closure 8 / 135 / 461 / 578 / 879 / 1574 modules). A
+`SIMPLE_MIR_SHARD_WORKER_KB` / `SIMPLE_HIR_SHARD_WORKER_KB` of `6000000` is
+below the median unit; the late `compiler.driver.*` / `compiler.mir.*` units
+need ~10-13 GB each. Three figures in the log are easy to misread:
+`parent peak=` is the coordinator's high-water mark (4.4-5.0 GB, reached in the
+closure walk before any worker starts; it polls at ~2.1 GB), HIR admission
+reserves `max(parent peak, 40 % of the tree budget)` so the peak only binds
+below an 11.6 GB budget (MIR admission does not use it), and `measured worker peak commit=` is a host-wide headroom
+delta divided by live workers, so it includes any other build on the host.
+Detail and open items:
+`doc/08_tracking/bug/native_build_per_file_lane_coordinator_and_worker_rss_2026-11-24.md`.
+
 ### Repo-tracked bootstrap settings (`config/bootstrap.sdn`)
 
 Precedence for every key: CLI flag (where one exists) > env > config > built-in default.

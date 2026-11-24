@@ -1,0 +1,67 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+# @cover src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+fn owner_method_hir(source: text) -> (HirModule, i64):
+    val prior = rt_env_get("SIMPLE_BOOTSTRAP")
+    rt_env_set("SIMPLE_BOOTSTRAP", "1")
+    val parsed = parse_full_frontend(source, "owner_method.spl", "owner_method", Logger(level: 0))
+    var lowering = HirLowering.with_filename("owner_method.spl")
+    val hir = lowering.lower_module(parsed)
+    if val value = prior:
+        rt_env_set("SIMPLE_BOOTSTRAP", value)
+    else:
+        rt_env_remove("SIMPLE_BOOTSTRAP")
+    (hir, lowering.errors.len())
+
+describe "bootstrap generic-owner semantic method returns":
+    it "publishes Result of the owner parameter without method-owned parameters":
+        val (hir, errors) = owner_method_hir("class Store<T>:\n    value: T\nimpl Store<T>:\n    fn get() -> Result<T, text>:\n        Ok(self.value)\n")
+        expect(errors).to_equal(0)
+        val rows = rti_rows_from_hir_v1(hir).unwrap().rows
+        var found = false
+        for row in rows:
+            if row.decl.display == "Store.get":
+                found = true
+                expect(row.owner_type_param_count).to_equal(1)
+                expect(rti_row_canonical_text_v1(row).contains("result(p0,b:text)")).to_equal(true)
+                var table = ReturnTypeInterfaceTable.new()
+                table.register_rows([row]).unwrap()
+                val actual = table.instantiate(row, [RtType.Builtin("text")]).unwrap()
+                expect(rti_term_canonical_text(actual)).to_equal("result(b:text,b:text)")
+                val wrong_owner = rti_type_ref(row.key.module_id, "class", "Other")
+                expect(table.lookup(CalleeKey(module_id: row.key.module_id,
+                    owner: Some(wrong_owner), name: "get", is_static: false)).is_err()).to_equal(true)
+        expect(found).to_equal(true)
+
+    it "keeps nongeneric and method-owned generic declarations distinct":
+        val (hir, errors) = owner_method_hir("class Plain:\n    value: i64\nimpl Plain:\n    fn get() -> i64:\n        self.value\n    fn lift<U>(value: U) -> Result<U, text>:\n        Ok(value)\n")
+        expect(errors).to_equal(0)
+        val rows = rti_rows_from_hir_v1(hir).unwrap().rows
+        var seen = 0
+        for row in rows:
+            if row.decl.display == "Plain.get":
+                expect(row.owner_type_param_count).to_equal(0)
+                expect(rti_row_canonical_text_v1(row).contains("decided|b:i64")).to_equal(true)
+                seen = seen + 1
+            if row.decl.display == "Plain.lift":
+                expect(row.owner_type_param_count).to_equal(0)
+                expect(row.type_param_count).to_equal(1)
+                expect(rti_row_canonical_text_v1(row).contains("result(p0,b:text)")).to_equal(true)
+                seen = seen + 1
+        expect(seen).to_equal(2)
+
+    it "rejects a return parameter absent from the actual impl scope":
+        val (_, errors) = owner_method_hir("class Store<T>:\n    value: T\nimpl Store<T>:\n    fn get() -> Result<U, text>:\n        Err(\"unbound\")\n")
+        expect(errors).to_be_greater_than(0)

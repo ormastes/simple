@@ -263,12 +263,277 @@ pub(crate) fn compute_array_move_sites(
                         && a.release_struct_fields(a.local_ty(*idx)).is_some()
                 })
                 .collect();
+            collect_take_sites(&a, &func.body, &mut sites);
             sites.block_release_locals = a.block_release_locals(func, &sites.let_locals);
             sites.string_overwrite_locals = a.string_overwrite_locals(func);
             return sites;
         }
         for o in not_moved {
             handed_over.remove(&o);
+        }
+    }
+}
+
+/// The "take" idiom on an array field (`r` a local or the `me` receiver):
+///
+/// ```text
+/// var x = r.f      # (or `x = r.f`) read the field place
+/// r.f = []         # IMMEDIATELY overwritten with a fresh empty literal
+/// ...x mutated in place...
+/// r.f = x          # stored back; x dead afterwards
+/// ```
+///
+/// After the overwrite `r.f` no longer holds the old buffer, so a `Let` take
+/// moves it into `x` instead of an `rt_array_copy`. Nothing frees that copy
+/// on the JIT lane, and nothing frees the buffer the overwrite drops either.
+/// The result equals mutating `r.f` in place, which compiled code already
+/// does. (An `Assign` take already moves: assignment never copies.)
+///
+/// The store back hands `x` over (no `rt_array_copy`) when every value `x`
+/// ever holds is a fresh literal or a take, and every other use of `x` is in
+/// place (`stmt_uses_local_in_place`). It also needs the store back to be the
+/// only one and the last use of `x`, outside any loop. `x`'s buffer then has
+/// no other holder, so the field becomes its only owner.
+///
+/// Excluded: a root whose field stores may `rt_array_free` the replaced
+/// buffer (`field_release_structs`), since `r.f = []` would then free the
+/// buffer `x` now holds.
+/// Bug: doc/08_tracking/bug/jit_take_field_array_idiom_copies_and_leaks_surface_2026-11-23.md
+fn collect_take_sites(a: &Analysis<'_>, body: &[HirStmt], sites: &mut ArrayMoveSites) {
+    let mut takes: Vec<(usize, *const HirStmt)> = Vec::new();
+    find_takes(a, body, sites, &mut takes);
+    let take_stmts: HashSet<*const HirStmt> = takes.iter().map(|(_, p)| *p).collect();
+    let locals: HashSet<usize> = takes.iter().map(|(x, _)| *x).collect();
+    for x in locals {
+        if x < a.nparams || a.closure_locals.contains(&x) {
+            continue;
+        }
+        let mut ev = TakeUses::default();
+        if scan_take_uses(body, x, &take_stmts, 0, &mut ev) && ev.stores == [ev.count - 1] && !ev.store_in_loop {
+            sites.field_store_locals.insert(x);
+        }
+    }
+}
+
+/// `x = r.f` / `Let x = r.f` immediately followed by `r.f = []`.
+fn find_takes(a: &Analysis<'_>, stmts: &[HirStmt], sites: &mut ArrayMoveSites, out: &mut Vec<(usize, *const HirStmt)>) {
+    for (i, stmt) in stmts.iter().enumerate() {
+        for child in child_stmt_lists(stmt) {
+            find_takes(a, child, sites, out);
+        }
+        let (x, value, is_let) = match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } => (*local_index, value, true),
+            HirStmt::Assign { target, value } => match target.kind {
+                HirExprKind::Local(x) => (x, value, false),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let HirExprKind::FieldAccess { receiver, field_index } = &value.kind else {
+            continue;
+        };
+        let HirExprKind::Local(r) = receiver.kind else {
+            continue;
+        };
+        if r == x || !a.let_is_array(x, value) || sites.field_release_structs.contains(&r) {
+            continue;
+        }
+        let overwritten_empty = matches!(stmts.get(i + 1), Some(HirStmt::Assign { target, value })
+            if matches!(&target.kind, HirExprKind::FieldAccess { receiver, field_index: g }
+                    if *g == *field_index && matches!(receiver.kind, HirExprKind::Local(q) if q == r))
+                && matches!(&value.kind, HirExprKind::Array(items) if items.is_empty()));
+        if !overwritten_empty {
+            continue;
+        }
+        if is_let && a.let_counts.get(&x) == Some(&1) && !a.closure_locals.contains(&x) {
+            sites.let_locals.insert(x);
+        }
+        out.push((x, stmt as *const HirStmt));
+    }
+}
+
+#[derive(Default)]
+struct TakeUses {
+    /// Statements mentioning `x`, in pre-order.
+    count: usize,
+    /// Event positions of `<field> = x` stores.
+    stores: Vec<usize>,
+    store_in_loop: bool,
+}
+
+/// Classify every mention of `x`; false when one is not allowed (see
+/// `collect_take_sites`).
+fn scan_take_uses(
+    stmts: &[HirStmt],
+    x: usize,
+    takes: &HashSet<*const HirStmt>,
+    loop_depth: usize,
+    ev: &mut TakeUses,
+) -> bool {
+    let fresh = |v: &HirExpr| {
+        matches!(&v.kind, HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. }) && count_mentions_expr(v, x) == 0
+    };
+    for stmt in stmts {
+        if count_mentions_stmt(stmt, x) == 0 {
+            continue;
+        }
+        let ok = match stmt {
+            HirStmt::Let {
+                local_index,
+                value: Some(value),
+                ..
+            } if *local_index == x => fresh(value) || takes.contains(&(stmt as *const HirStmt)),
+            HirStmt::Assign { target, value } if matches!(target.kind, HirExprKind::Local(t) if t == x) => {
+                fresh(value) || takes.contains(&(stmt as *const HirStmt))
+            }
+            HirStmt::Assign { target, value }
+                if matches!(target.kind, HirExprKind::FieldAccess { .. })
+                    && matches!(value.kind, HirExprKind::Local(o) if o == x)
+                    && count_mentions_expr(target, x) == 0 =>
+            {
+                ev.stores.push(ev.count);
+                ev.store_in_loop |= loop_depth > 0;
+                true
+            }
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                if !expr_uses_local_in_place(condition, x) {
+                    return false;
+                }
+                if !scan_take_uses(then_block, x, takes, loop_depth, ev) {
+                    return false;
+                }
+                if let Some(b) = else_block {
+                    if !scan_take_uses(b, x, takes, loop_depth, ev) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            HirStmt::While { condition, body, .. } => {
+                if !expr_uses_local_in_place(condition, x) || !scan_take_uses(body, x, takes, loop_depth + 1, ev) {
+                    return false;
+                }
+                continue;
+            }
+            HirStmt::Loop { body, .. } => {
+                if !scan_take_uses(body, x, takes, loop_depth + 1, ev) {
+                    return false;
+                }
+                continue;
+            }
+            _ => stmt_uses_local_in_place(stmt, x),
+        };
+        if !ok {
+            return false;
+        }
+        ev.count += 1;
+    }
+    true
+}
+
+/// Statement lists nested directly in `stmt` (not expression-embedded blocks).
+fn child_stmt_lists(stmt: &HirStmt) -> Vec<&[HirStmt]> {
+    match stmt {
+        HirStmt::If {
+            then_block, else_block, ..
+        } => {
+            let mut out: Vec<&[HirStmt]> = vec![then_block];
+            if let Some(b) = else_block {
+                out.push(b);
+            }
+            out
+        }
+        HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::For { body, .. } | HirStmt::Defer { body } => {
+            vec![body]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Builtin array methods that read or mutate their receiver in place and
+/// never retain it.
+const IN_PLACE_ARRAY_METHODS: &[&str] = &[
+    "write_span", "push", "pop", "len", "fill", "clear", "insert", "remove", "swap", "reverse", "truncate",
+];
+
+/// True when every mention of local `x` in `stmt` is in place: the receiver
+/// of an `IN_PLACE_ARRAY_METHODS` call or the base of an index. A bare read,
+/// a capture, a call/struct argument or any unrecognised statement is not.
+fn stmt_uses_local_in_place(stmt: &HirStmt, x: usize) -> bool {
+    if count_mentions_stmt(stmt, x) == 0 {
+        return true;
+    }
+    match stmt {
+        HirStmt::Expr(e) => expr_uses_local_in_place(e, x),
+        HirStmt::Assign { target, value } => {
+            let target_ok = match &target.kind {
+                HirExprKind::Local(t) => *t != x,
+                _ => expr_uses_local_in_place(target, x),
+            };
+            target_ok && expr_uses_local_in_place(value, x)
+        }
+        HirStmt::Let { local_index, value, .. } => {
+            *local_index != x && value.as_ref().is_none_or(|v| expr_uses_local_in_place(v, x))
+        }
+        HirStmt::If {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_uses_local_in_place(condition, x)
+                && then_block.iter().all(|s| stmt_uses_local_in_place(s, x))
+                && else_block
+                    .as_ref()
+                    .is_none_or(|b| b.iter().all(|s| stmt_uses_local_in_place(s, x)))
+        }
+        HirStmt::While { condition, body, .. } => {
+            expr_uses_local_in_place(condition, x) && body.iter().all(|s| stmt_uses_local_in_place(s, x))
+        }
+        _ => false,
+    }
+}
+
+fn expr_uses_local_in_place(e: &HirExpr, x: usize) -> bool {
+    if count_mentions_expr(e, x) == 0 {
+        return true;
+    }
+    match &e.kind {
+        HirExprKind::MethodCall {
+            receiver, method, args, ..
+        } if matches!(receiver.kind, HirExprKind::Local(r) if r == x)
+            && IN_PLACE_ARRAY_METHODS.contains(&method.as_str()) =>
+        {
+            args.iter().all(|a| expr_uses_local_in_place(a, x))
+        }
+        // `other.write_span(x, ...)` copies elements out of `x`; it keeps no
+        // reference to `x`'s buffer.
+        HirExprKind::MethodCall {
+            receiver, method, args, ..
+        } if method == "write_span" && matches!(args.first().map(|a| &a.kind), Some(HirExprKind::Local(s)) if *s == x) => {
+            expr_uses_local_in_place(receiver, x) && args[1..].iter().all(|a| expr_uses_local_in_place(a, x))
+        }
+        HirExprKind::Index { receiver, index } if matches!(receiver.kind, HirExprKind::Local(r) if r == x) => {
+            expr_uses_local_in_place(index, x)
+        }
+        HirExprKind::Local(_)
+        | HirExprKind::Lambda { .. }
+        | HirExprKind::LetIn { .. }
+        | HirExprKind::Block(_)
+        | HirExprKind::UnsafeBlock { .. } => false,
+        _ => {
+            let mut children = Vec::new();
+            expr_children(e, &mut children);
+            children.into_iter().all(|c| expr_uses_local_in_place(c, x))
         }
     }
 }

@@ -7,7 +7,7 @@
 use std.spec.step
 
 use std.spec
-use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id, make_tool_result, make_tool_error, content_length_header}
+use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id, make_tool_result, make_tool_error, content_length_header, _slice_text, _json_chars, _json_chars_join, _find_json_value_start_chars}
 
 describe "Simple LSP MCP native JSON extraction":
     # @manual scenario evidence
@@ -70,3 +70,51 @@ describe "Simple LSP MCP stdio framing":
         step("frames an ASCII body identically under byte and char counts")
         val body = "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}"
         expect(content_length_header(body)).to_equal("Content-Length: " + str(body.len()) + "\r\n\r\n")
+
+describe "Simple LSP MCP single-pass JSON scanners":
+    """
+    lsp_mcp_hover_definition_hang_windows_2026-10-27 ("Left over"): the scanners
+    indexed the request with `_char_at`, which walks the text from the start on
+    every call, so each extraction was quadratic in the request size. They now
+    index one char array per call. These cases pin that the results are the
+    ones the char-walking scanners produced.
+    """
+    it "joins a char range exactly like the char-indexed slice":
+        # @req REQ-SSPEC-UNIT
+        step("joins a char range exactly like the char-indexed slice")
+        val src = "a\u00e9\u2014b\"c"
+        val chars = _json_chars(src)
+        expect(chars.len()).to_equal(6)
+        expect(_json_chars_join(chars, 0, 6)).to_equal(src)
+        expect(_json_chars_join(chars, 1, 3)).to_equal(_slice_text(src, 1, 3))
+        expect(_json_chars_join(chars, 4, 99)).to_equal(_slice_text(src, 4, 99))
+        expect(_json_chars_join(chars, 3, 3)).to_equal("")
+
+    it "finds the value start after optional whitespace and skips a key-shaped value":
+        # @req REQ-SSPEC-UNIT
+        step("finds the value start after optional whitespace and skips a key-shaped value")
+        expect(_find_json_value_start_chars(_json_chars("{\"k\":1}"), "k")).to_equal(5)
+        expect(_find_json_value_start_chars(_json_chars("{\"k\" : \n 1}"), "k")).to_equal(9)
+        expect(_find_json_value_start_chars(_json_chars("{\"a\":\"k\",\"k\":2}"), "k")).to_equal(13)
+        expect(_find_json_value_start_chars(_json_chars("{\"a\":1}"), "k")).to_equal(-1)
+        expect(_find_json_value_start_chars(_json_chars("\"k"), "k")).to_equal(-1)
+
+    it "extracts string, object, array and bare values after multibyte text":
+        # @req REQ-SSPEC-UNIT
+        step("extracts string, object, array and bare values after multibyte text")
+        val json = "{\"t\":\"\u00e9 \\\"q\\\" }\",\"o\":{\"s\":\"}\",\"n\":{\"x\":1}},\"a\":[1,[2,\"]\"],3],\"b\":true,\"z\":7}"
+        expect(extract_field(json, "t")).to_equal("\u00e9 \\\"q\\\" }")
+        expect(extract_field(json, "o")).to_equal("{\"s\":\"}\",\"n\":{\"x\":1}}")
+        expect(extract_field(json, "a")).to_equal("[1,[2,\"]\"],3]")
+        expect(extract_field(json, "b")).to_equal("true")
+        expect(extract_field(json, "z")).to_equal("7")
+        expect(extract_field(json, "missing")).to_equal("")
+        expect(extract_field("{\"u\":\"open", "u")).to_equal("")
+
+    it "extracts ids and falls back to null":
+        # @req REQ-SSPEC-UNIT
+        step("extracts ids and falls back to null")
+        expect(extract_id("{\"m\":\"\u00e9\",\"id\" : 42 }")).to_equal("42")
+        expect(extract_id("{\"id\":\"a\\\"b\"}")).to_equal("\"a\\\"b\"")
+        expect(extract_id("{\"method\":\"x\"}")).to_equal("null")
+        expect(extract_id("{\"id\":\"open")).to_equal("null")

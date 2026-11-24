@@ -1,0 +1,72 @@
+"""
+# Font kern / advance queries do not copy the font blob under the JIT
+
+`FontRenderer.horizontal_kern_milli` and `get_glyph_advance_milli` bound the
+selected face with `val blob = self.selected_outline_blob`. Under the seed JIT
+an array-typed `val` binding lowers to `rt_array_copy`, so every query copied
+the whole font file: measured 799 copies of 343-415 KB on the forms-media
+catalog page at device scale 4 (gdb count on `rt_array_copy`, 2026-11-24).
+The interpreter shares the array and never paid this.
+
+The fixture loads the bundled 1.7 MB NotoSansMono face and times 500 kern +
+500 advance queries in a JIT child. Measured on the seed d9dcc6f7: 50-60 ms
+with the copy, 0.12-0.2 ms without. The budget (5 ms) sits 10x above the
+fixed time and 10x below the copying one. A run demoted to the interpreter
+takes ~52 ms, so it is red too. The query results must equal the
+interpreter's.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get, env_set}
+
+fn simple_binary() -> text:
+    var configured = env_get("SIMPLE_BIN") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+val FIXTURE = "test/fixtures/font_blob_copy/kern_advance_loop.spl"
+
+fn run_fixture(mode: text) -> (text, text, i64):
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val prev_warn = env_get("SIMPLE_RUST_SEED_WARNING") ?? ""
+    env_set("SIMPLE_EXECUTION_MODE", mode)
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    val result = process_run(simple_binary(), ["run", FIXTURE])
+    env_set("SIMPLE_RUST_SEED_WARNING", prev_warn)
+    env_set("SIMPLE_EXECUTION_MODE", previous)
+    result
+
+# Value of `key=` on the fixture's report line, or "" when absent.
+fn report_field(stdout: text, key: text) -> text:
+    for line in stdout.split("\n"):
+        if line.starts_with("loaded="):
+            for part in line.split(" "):
+                if part.starts_with(key + "="):
+                    return part.substring(key.len() + 1, part.len())
+    ""
+
+describe "font blob is read in place by kern and advance queries":
+    # @manual scenario evidence
+
+    it "1000 queries on a 1.7 MB face take under 5 ms on the JIT":
+        # @req: REQ-SSPEC-UNIT
+        val (stdout, stderr, code) = run_fixture("jit")
+        expect code == 0
+        expect report_field(stdout, "loaded") == "true"
+        expect (report_field(stdout, "blob_len").to_int() ?? 0) > 1000000
+        val loop_us = report_field(stdout, "loop_us").to_int() ?? -1
+        expect loop_us >= 0
+        expect loop_us < 5000
+
+    it "JIT query results equal the interpreter's":
+        # @req: REQ-SSPEC-UNIT
+        val (jit_out, jit_err, jit_code) = run_fixture("jit")
+        val (int_out, int_err, int_code) = run_fixture("interpreter")
+        expect jit_code == 0
+        expect int_code == 0
+        expect report_field(jit_out, "acc") != ""
+        expect report_field(jit_out, "acc") == report_field(int_out, "acc")

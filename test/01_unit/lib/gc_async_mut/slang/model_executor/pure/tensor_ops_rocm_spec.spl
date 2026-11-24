@@ -5,8 +5,8 @@
 # device math vs f64 CPU math).
 
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_attention, tensor_rope, tensor_kv_write, tensor_row, tensor_argmax}
-use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_rmsnorm, rocm_tensor_add, rocm_tensor_mul, rocm_tensor_silu, rocm_tensor_attention, rocm_tensor_rope, rocm_tensor_kv_write, rocm_tensor_row, rocm_tensor_argmax}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_softmax, tensor_attention, tensor_rope, tensor_kv_write, tensor_row, tensor_argmax}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_rocm.{rocm_ops_open, rocm_ops_device_name, rocm_tensor_upload, rocm_tensor_download, rocm_tensor_matvec, rocm_tensor_rmsnorm, rocm_tensor_add, rocm_tensor_mul, rocm_tensor_silu, rocm_tensor_softmax, rocm_tensor_attention, rocm_tensor_rope, rocm_tensor_kv_write, rocm_tensor_row, rocm_tensor_argmax}
 
 fn rocm_present() -> bool:
     if rocm_available_at(rocm_bin_default()):
@@ -88,6 +88,33 @@ describe "pure ROCm ops provider":
             expect(rel_err(s, tensor_add(a, b)) < 0.0001).to_equal(true)
             expect(rel_err(m, tensor_mul(a, b)) < 0.0001).to_equal(true)
             expect(rel_err(u, tensor_silu(a)) < 0.0001).to_equal(true)
+
+    it "softmax matches the CPU op and sums to one":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val x = rand_tensor([1000], 15)
+            val y = rocm_tensor_download(ops, rocm_tensor_softmax(ops, rocm_tensor_upload(ops, x).unwrap()).unwrap()).unwrap()
+            expect(y.data.len()).to_equal(1000)
+            expect(rel_err(y, tensor_softmax(x)) < 0.0001).to_equal(true)
+            var total = 0.0
+            for v in y.data:
+                total = total + v
+            expect(total > 0.9999 and total < 1.0001).to_equal(true)
+
+    it "rejects mismatched shapes on the host instead of reading out of bounds":
+        if rocm_present():
+            val ops = rocm_ops_open().unwrap()
+            val w = rocm_tensor_upload(ops, rand_tensor([4, 8], 16)).unwrap()
+            val x5 = rocm_tensor_upload(ops, rand_tensor([5], 17)).unwrap()
+            val x8 = rocm_tensor_upload(ops, rand_tensor([8], 18)).unwrap()
+            expect(rocm_tensor_matvec(ops, w, x5).is_err()).to_equal(true)
+            expect(rocm_tensor_add(ops, x5, x8).is_err()).to_equal(true)
+            expect(rocm_tensor_mul(ops, x8, x5).is_err()).to_equal(true)
+            expect(rocm_tensor_rmsnorm(ops, x8, x5, 0.00001).is_err()).to_equal(true)
+            expect(rocm_tensor_rope(ops, x5, 1, 1, 5, 10000.0).is_err()).to_equal(true)
+            expect(rocm_tensor_attention(ops, x8, x8, x8, 4, 1, 8).is_err()).to_equal(true)
+            expect(rocm_tensor_upload(ops, PureTensor(data: [1.0, 2.0], shape: [3])).is_err()).to_equal(true)
+            expect(rocm_tensor_matvec(ops, w, x8).is_ok()).to_equal(true)
 
     it "attention matches the CPU op":
         if rocm_present():

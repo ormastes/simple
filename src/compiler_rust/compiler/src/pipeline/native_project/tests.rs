@@ -4968,6 +4968,7 @@ fn test_core_c_runtime_owns_tool_host_service_family() {
         "rt_ptr_read_i32",
         "rt_string_index_of",
         "rt_array_max",
+        "rt_array_min",
         "rt_array_sort",
         "max",
     ] {

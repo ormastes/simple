@@ -140,7 +140,7 @@ impl NativeBinaryBuilder {
 
         let runtime_dir =
             NativeBinaryOptions::find_runtime_library_path_for_target(&self.options.target).or_else(|| {
-                if self.options.target == simple_common::target::Target::host() {
+                if self.options.target.uses_host_runtime_abi() {
                     std::env::current_dir()
                         .ok()
                         .map(|p| p.join("target/debug"))

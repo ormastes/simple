@@ -1,0 +1,93 @@
+"""
+## Purpose and audience
+Purpose: Pin where a clip lands at device scale k=4 when a box snaps to a
+device column / row of its own, against Chrome 159. A clip moves with the box
+that OWNS the clip edge, not with the command it clips:
+- an `overflow:hidden` box at a fractional `left` clips its child at the
+  box's own device column (A, C);
+- a child shifted inside an unshifted `overflow:hidden` box keeps that box's
+  clip (B: x, E: y);
+- an svg after text at a fractional pen clips its shapes at its own shifted
+  viewport (D, the x twin of `line_start_fraction_device_rows` AC-4).
+Base `_dir_scale_command` moved the clip by the command's own
+`device-y-offset` and ignored `device-x-offset`, so A, C, D cut the shifted
+box's ink and E cut a child's last rows at its own offset.
+Audience: web renderer device-scale pass (Draw IR clip rects).
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4`, window
+400x300. Runs are device columns whose pixel is blue (b > 128, r < 128).
+
+| case | device row | Chrome runs | base runs |
+|------|-----|-------------|-----------|
+| A left:40.5 box, 40px child | 60 | 162..241 | 164..243 |
+| B abs child left:10.5 in box at 100 | 60 | 442..519 | 442..519 |
+| C left:200.25 box, 40px child | 180 | 801..880 | 801..879 |
+| D `ab <svg width=40>` rect 60 wide | 430 | 169..328 | 169..327 |
+| E abs child top:10.5 in box top:10 | 119 | 1200..1279 | (none) |
+"""
+
+"""
+Traceability: REQ-WEB-CLIP-DEVICE-OFFSET-OWNER-001 — at device scale a clip edge follows the device offset of the box that owns it.
+"""
+# @tag: unit, browser_engine, device_scale, clip, chrome159
+# @cover src/lib/common/ui/draw_ir_device_scale.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val K: i32 = 4
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}</style></head><body><div style=\"position:absolute;left:40.5px;top:10px;width:20px;height:20px;overflow:hidden\"><div style=\"width:40px;height:20px;background:#00f\"></div></div><div style=\"position:absolute;left:100px;top:10px;width:30px;height:20px;overflow:hidden\"><div style=\"position:absolute;left:10.5px;top:0;width:40px;height:20px;background:#00f\"></div></div><div style=\"position:absolute;left:200.25px;top:40px;width:20px;height:20px;overflow:hidden\"><div style=\"width:40px;height:20px;background:#00f\"></div></div><div style=\"position:absolute;left:300px;top:10px;width:20px;height:20px;overflow:hidden\"><div style=\"position:absolute;left:0;top:10.5px;width:20px;height:20px;background:#00f\"></div></div><div style=\"position:absolute;left:20px;top:100px\">ab <svg width=\"40\" height=\"20\"><rect width=\"60\" height=\"20\" fill=\"#00f\"></rect></svg></div></body></html>"
+
+var g_px: [u32] = []
+
+fn _px() -> [u32]:
+    if g_px.len() == 0:
+        g_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, K, "cpu_simd")
+    g_px
+
+# Blue runs " a..b" on device row y between device columns x0 and x1.
+fn _runs(y: i32, x0: i32, x1: i32) -> text:
+    val px = _px()
+    val w = CSS_W * K
+    var out = ""
+    var x = x0
+    var inr = false
+    var start = 0
+    while x <= x1:
+        var blue = false
+        if x < x1:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 128 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+describe "A clip edge follows the device offset of the box that owns it (Chrome 159, k=4)":
+    it "AC-1: an overflow:hidden box at left:40.5px clips its child at its own device columns":
+        expect(_px().len()).to_equal((CSS_W * K * CSS_H * K) as i64)
+        expect(_runs(60, 100, 300)).to_equal(" 162..241")
+
+    it "AC-2: a child at left:10.5px keeps its unshifted parent's clip":
+        expect(_runs(60, 400, 600)).to_equal(" 442..519")
+
+    it "AC-3: an overflow:hidden box at left:200.25px clips at device column 881":
+        expect(_runs(180, 700, 1000)).to_equal(" 801..880")
+
+    it "AC-4: an svg at a fractional pen clips its shapes at its own shifted viewport":
+        expect(_runs(430, 150, 400)).to_equal(" 169..328")
+
+    it "AC-5: a child at top:10.5px keeps its unshifted parent's bottom clip":
+        expect(_runs(119, 1150, 1350)).to_equal(" 1200..1279")
+        expect(_runs(120, 1150, 1350)).to_equal("")
