@@ -180,12 +180,12 @@ fn _compiler_inventory_git_lines_traced_v1(root: text, args: [text],
         compiler_inventory_git_bound_ms_v1(), 16 * 1024 * 1024)
     if trace.is_some(): trace!.captured_query(query_kind, status, stdout)
     if status != 0:
-        return nil
+        return None
     Some(stdout)
 
 fn compiler_inventory_git_head_v1(root: text) -> text:
     val output = compiler_inventory_git_lines_v1(root, ["rev-parse", "HEAD"])
-    if output == nil: "" else: output!.trim()
+    if output.is_none(): "" else: output!.trim()
 
 fn compiler_inventory_event_push_v1(
     events: [CompileSourceEventV1], root: text, operation: text, path: text
@@ -200,7 +200,7 @@ fn compiler_inventory_event_push_cost_v1(
     # control-character names even with core.quotePath=false; that encoding
     # cannot be treated as the canonical source identity, so refuse the batch.
     if path.starts_with("\""):
-        return nil
+        return None
     val normalized = if path.contains("\\"): path.replace("\\", "/") else: path
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
@@ -212,7 +212,7 @@ fn compiler_inventory_event_push_cost_v1(
     # cold-init wall time. Filter before touching the file.
     if not compile_source_inventory_path_valid_v1(normalized):
         return Some(events)
-    if compiler_inventory_family_v1(normalized) == "": return nil
+    if compiler_inventory_family_v1(normalized) == "": return None
     if operation == "delete":
         val started = scv_cost_now_v1(cost)
         val deleted = compile_source_inventory_git_event_cost_v1("delete", normalized, "", cost)
@@ -236,8 +236,8 @@ fn compiler_inventory_event_push_cost_v1(
     # change — see
     # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
     val event = compiler_inventory_file_event_cost_v1(operation, normalized, absolute, cost)
-    if event == nil:
-        return nil
+    if event.is_none():
+        return None
     Some(events.push(event!))
 
 fn compiler_inventory_parse_name_status_v1(
@@ -258,18 +258,18 @@ fn compiler_inventory_parse_name_status_cost_v1(
         # can be advanced. Skipping malformed rows would publish an inventory
         # that silently omits a changed source.
         if separator <= 0 or separator == line.len() - 1:
-            return nil
+            return None
         val status = line[:separator]
         if status != "A" and status != "M" and status != "D" and
                 status != "T" and status != "U":
-            return nil
+            return None
         val path = line[separator + 1:]
         if path.contains("\t") or path.contains("\r"):
-            return nil
+            return None
         val operation = if status.starts_with("D"): "delete" else: "modify"
         val next = compiler_inventory_event_push_cost_v1(result, root, operation, path, cost)
-        if next == nil:
-            return nil
+        if next.is_none():
+            return None
         result = next!
     Some(result)
 
@@ -324,7 +324,7 @@ fn compiler_inventory_porcelain_path_v1(raw: text) -> text?:
     val unquoted = raw[1:raw.len() - 1]
     if unquoted == "" or unquoted.contains("\\") or
             unquoted.contains("\""):
-        return nil
+        return None
     Some(unquoted)
 
 fn compiler_inventory_parse_porcelain_v1(
@@ -349,11 +349,11 @@ fn compiler_inventory_parse_porcelain_cost_v1(
         if line == "":
             continue
         if line.byte_len() <= 3 or line.substring(2, 3) != " ":
-            return nil
+            return None
         val status = line.substring(0, 2)
         val decoded = compiler_inventory_porcelain_path_v1(line.substring(3))
         if decoded.is_none():
-            return nil
+            return None
         val path = decoded!
         if status == "??":
             untracked_paths.push(path)
@@ -366,24 +366,24 @@ fn compiler_inventory_parse_porcelain_cost_v1(
                 (tree_status != " " and tree_status != "A" and
                     tree_status != "M" and tree_status != "D" and
                     tree_status != "T" and tree_status != "U"):
-            return nil
+            return None
         val operation = if status.contains("D"): "delete" else: "modify"
         val next = compiler_inventory_event_push_cost_v1(
             changed, root, operation, path, cost)
-        if next == nil:
-            return nil
+        if next.is_none():
+            return None
         changed = next!
         dirty_paths.push(path)
     val untracked = untracked_paths.join("\n")
     val digests = compiler_inventory_untracked_digests_v1(
         untracked, source_roots)
     if not digests.valid:
-        return nil
+        return None
     for path in untracked_paths:
         val next = compiler_inventory_event_push_cost_v1(
             changed, root, "create", path, cost)
-        if next == nil:
-            return nil
+        if next.is_none():
+            return None
         changed = next!
     Some(CompilerInventoryGitEventsV1(
         changed, digests.src_digest, digests.test_digest, digests.paths, digests.examples_tooling_digest,
@@ -408,7 +408,7 @@ fn _compiler_inventory_git_events_traced_cost_v1(
     cost: ScvCompileCostV1?
 ) -> CompilerInventoryGitEventsV1?:
     for scope in source_roots:
-        if not compiler_inventory_scope_valid_v1(scope): return nil
+        if not compiler_inventory_scope_valid_v1(scope): return None
     # Reuse the refresh owner's captured HEAD for both diffs. A second
     # rev-parse costs a process on every warm request and can bind events from
     # one revision to a cursor naming another if a commit lands mid-refresh.
@@ -424,13 +424,13 @@ fn _compiler_inventory_git_events_traced_cost_v1(
         val listed = _compiler_inventory_git_lines_traced_v1(
             root, ["-c", "core.quotePath=false", "ls-files", "-t",
                 "--cached", "--others", "--modified", "--exclude-standard", "--"] + source_roots, trace, 1)
-        if listed == nil:
-            return nil
+        if listed.is_none():
+            return None
         val staged = compiler_inventory_git_lines_v1(
             root, ["-c", "core.quotePath=false", "diff", "--cached", "--name-only",
                 "--no-renames", head, "--"] + source_roots)
-        if staged == nil:
-            return nil
+        if staged.is_none():
+            return None
         var untracked_paths: [text] = []
         var dirty_paths: [text] = []
         var dirty_seen: Dict<text, bool> = {}
@@ -444,11 +444,11 @@ fn _compiler_inventory_git_events_traced_cost_v1(
             if line == "":
                 continue
             if line.byte_len() <= 2 or line.substring(1, 2) != " ":
-                return nil
+                return None
             val tag = line.substring(0, 1)
             if tag != "?" and tag != "H" and tag != "S" and tag != "M" and
                     tag != "R" and tag != "C":
-                return nil
+                return None
             val path = line.substring(2)
             if tag == "C":
                 # The `H` row of this path already pushed its event.
@@ -460,18 +460,18 @@ fn _compiler_inventory_git_events_traced_cost_v1(
                 untracked_paths = untracked_paths.push(path)
             val next = compiler_inventory_event_push_cost_v1(
                 events, root, "create", path, cost)
-            if next == nil:
-                return nil
+            if next.is_none():
+                return None
             events = next!
         val digests = compiler_inventory_untracked_digests_v1(
             untracked_paths.join("\n"), source_roots)
         if not digests.valid:
-            return nil
+            return None
         return Some(CompilerInventoryGitEventsV1(
             events, digests.src_digest, digests.test_digest,
             digests.paths, digests.examples_tooling_digest, dirty_paths))
     if head == "" or previous_head == "":
-        return nil
+        return None
     if head != previous_head:
         # One cursor HEAD covers the complete closed inventory. Restricting
         # this diff to today's selectors would permanently skip a committed
@@ -480,11 +480,11 @@ fn _compiler_inventory_git_events_traced_cost_v1(
             root, ["-c", "core.quotePath=false", "diff", "--name-status",
                 "--no-renames", previous_head, head, "--", "src", "test",
                 "examples/10_tooling"], trace, 2)
-        if committed == nil:
-            return nil
+        if committed.is_none():
+            return None
         val next = compiler_inventory_parse_name_status_cost_v1(root, committed!, events, cost)
-        if next == nil:
-            return nil
+        if next.is_none():
+            return None
         events = next!
     # One porcelain listing replaces the separate tracked diff and untracked
     # ls-files processes on every warm request. The captured HEAD above still
@@ -492,8 +492,8 @@ fn _compiler_inventory_git_events_traced_cost_v1(
     val working = _compiler_inventory_git_lines_traced_v1(
         root, ["-c", "core.quotePath=false", "status", "--porcelain=v1",
             "--untracked-files=all", "--no-renames", "--"] + source_roots, trace, 3)
-    if working == nil:
-        return nil
+    if working.is_none():
+        return None
     compiler_inventory_parse_porcelain_cost_v1(
         root, working!, events, source_roots, cost)
 
@@ -509,7 +509,7 @@ fn compiler_inventory_filesystem_events_v1(
     val lines = journal.split("\n")
     val rows = compiler_inventory_journal_rows_v1(journal)
     if rows < 0 or consumed_rows < 0 or consumed_rows > rows:
-        return nil
+        return None
     var index = consumed_rows
     while index < rows:
         val line = lines[index]
@@ -521,28 +521,28 @@ fn compiler_inventory_filesystem_events_v1(
         if not line.starts_with("op=") or kind_start <= 3 or
                 refs_start <= kind_start or sha_start <= refs_start or
                 utc_start <= sha_start or utc_start + " utc=".len() >= line.len():
-            return nil
+            return None
         val record_kind = line[kind_start + " kind=".len():refs_start]
         if record_kind == "":
-            return nil
+            return None
         if record_kind != "fsevent":
             if record_kind != "snapshot" and record_kind != "checkpoint":
-                return nil
+                return None
             continue
         val fields = line[refs_start + " refs=".len():sha_start].split(",")
         if fields.len() != 3:
-            return nil
+            return None
         if not fields[0].starts_with("kind=") or
                 not fields[1].starts_with("path=") or
                 not fields[2].starts_with("related="):
-            return nil
+            return None
         val kind = fields[0].substring(5)
         val path = compiler_inventory_decode_v1(fields[1].substring(5))
         val related = compiler_inventory_decode_v1(fields[2].substring(8))
         if kind == "" or path == "" or path.contains("\n") or
                 path.contains("\r") or related.contains("\n") or
                 related.contains("\r"):
-            return nil
+            return None
         events = events.push(FsWatchEvent(index, kind, path, related))
     Some(events)
 
@@ -579,7 +579,7 @@ fn compiler_inventory_journal_prefix_digest_v1(
 ) -> text?:
     val rows = compiler_inventory_journal_rows_v1(journal)
     if rows < 0 or consumed_rows < 0 or consumed_rows > rows:
-        return nil
+        return None
     if consumed_rows == 0:
         return Some(sha256_text(""))
     var seen = 0
@@ -633,12 +633,12 @@ fn compiler_inventory_dirty_read_v1(cache_root: text, inventory_digest: text) ->
     if size <= 0 or size > 16 * 1024 * 1024:
         return None
     val content = match file_read_regular_no_follow_bounded(path, size):
-        case Err(_): return nil
+        case Err(_): return None
         case Ok(value): value
     val rows = content.split("\n")
     if rows.len() < 3 or rows[0] != COMPILER_INVENTORY_DIRTY_HEADER_V1 or
             rows[1] != "inventory={inventory_digest}" or not rows[2].starts_with("count="):
-        return nil
+        return None
     val count = rows[2].substring(6).to_i64() ?? -1
     if count < 0 or rows.len() != count + 3:
         return None
@@ -677,7 +677,7 @@ fn compiler_inventory_membership_decode_v1(content: text) -> [text]?:
     val rows = content.split("\n")
     if rows.len() < 2 or rows[0] != "simple-compile-untracked-membership-v1" or
             not rows[1].starts_with("count="):
-        return nil
+        return None
     val count = rows[1].substring(6).to_i64() ?? -1
     if count < 0 or rows.len() != count + 2:
         return None
@@ -689,7 +689,7 @@ fn compiler_inventory_membership_decode_v1(content: text) -> [text]?:
         if not compile_source_inventory_path_valid_v1(path) or
                 compiler_inventory_family_v1(path) == "" or
                 seen.has(path):
-            return nil
+            return None
         seen[path] = true
         paths.push(path)
         index = index + 1
@@ -699,18 +699,18 @@ fn compiler_inventory_membership_read_v1(
     cache_root: text, digest: text
 ) -> [text]?:
     if not compile_source_inventory_digest_valid_v1(digest):
-        return nil
+        return None
     val path = compiler_inventory_membership_path_v1(cache_root, digest)
     if not file_is_regular_no_follow(path):
-        return nil
+        return None
     val size = file_size(path)
     if size <= 0 or size > 16 * 1024 * 1024:
-        return nil
+        return None
     val content = match file_read_regular_no_follow_bounded(path, size):
-        case Err(_): return nil
+        case Err(_): return None
         case Ok(value): value
     if sha256_text(content) != digest:
-        return nil
+        return None
     compiler_inventory_membership_decode_v1(content)
 
 fn compiler_inventory_membership_publish_v1(
@@ -772,16 +772,16 @@ fn compiler_inventory_untracked_deletions_v1(
     val listed = compiler_inventory_git_lines_v1(
         root, ["-c", "core.quotePath=false", "ls-files", "--cached", "--"] +
             pathspecs)
-    if listed == nil:
-        return nil
+    if listed.is_none():
+        return None
     var tracked: Dict<text, bool> = {}
     for path in listed!.split("\n"):
         if path == "":
             continue
         if path.starts_with("\"") or path.contains("\r"):
-            return nil
+            return None
         if not removed_names.has(path):
-            return nil
+            return None
         tracked[path] = true
     var deletions: [CompileSourceEventV1] = []
     for path in removed:
@@ -918,7 +918,7 @@ fn _compiler_inventory_refresh_observed_cost_v1(
                 "untracked-membership-record-invalid (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
         val deleted = compiler_inventory_untracked_deletions_v1(
             root, previous!, observed.untracked_paths, source_roots)
-        if deleted == nil:
+        if deleted.is_none():
             return compiler_inventory_invalid_v1("untracked-membership-reconcile-failed")
         if trace.is_some(): diagnostic_deleted = deleted!.len()
         for event in deleted!:
@@ -936,7 +936,7 @@ fn _compiler_inventory_refresh_observed_cost_v1(
                     not still_listed.has(path):
                 # Dirty at the last refresh and clean now: Git reports nothing.
                 val next = compiler_inventory_event_push_v1(git_events, root, "modify", path)
-                if next == nil:
+                if next.is_none():
                     return compiler_inventory_invalid_v1("dirty-tracked-reconcile-failed")
                 git_events = next!
         next_dirty = compiler_inventory_membership_merge_v1(
@@ -982,7 +982,7 @@ fn _compiler_inventory_refresh_observed_cost_v1(
     if cursor.valid and not cold_init:
         val prefix_digest = compiler_inventory_journal_prefix_digest_v1(
             journal, consumed_rows)
-        if prefix_digest == nil:
+        if prefix_digest.is_none():
             return compiler_inventory_invalid_v1(
                 "filesystem-event-journal-truncated" +
                 " (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1 to rebuild from Git)")
@@ -992,7 +992,7 @@ fn _compiler_inventory_refresh_observed_cost_v1(
                 " (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1 to rebuild from Git)")
     val filesystem_events = compiler_inventory_filesystem_events_v1(
         root, journal, consumed_rows)
-    if filesystem_events == nil:
+    if filesystem_events.is_none():
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
     if not compiler_inventory_filesystem_families_valid_v1(root, filesystem_events!):
         return compiler_inventory_invalid_v1("filesystem-event-source-family-unsupported")
