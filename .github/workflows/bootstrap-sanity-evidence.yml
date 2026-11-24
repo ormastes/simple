@@ -1,46 +1,45 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Exact cross-provider Rust seed gate
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  seed-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+          ref: d8912ba9919628659e4abafff7848223bd6d9c50
+      - uses: actions/checkout@v5
+        with:
+          path: control
+      - name: Fetch explicit base and pinned toolchain
+        run: |
+          git fetch --no-tags --depth=1 origin e3f09c3b258897fc91f921ac62fee828860fb71b
+          rustup toolchain install nightly-2026-09-15 --profile minimal --component rustfmt --component clippy
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: seed-guard-linux-20260915-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            seed-guard-linux-20260915-
+            seed-linux-
+      - name: Run actual exact-source seed gate under tree owner
+        run: python3 control/scripts/check/cross-provider-seed-gate.py
+      - name: Retain exact verdict and Cargo diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: cross-provider-seed-gate-${{ github.run_id }}
+          path: |
+            build/exact-seed-gate/*.json
+            build/exact-seed-gate/*.env
+            build/exact-seed-gate/*.log
+            build/exact-seed-gate/*.out
+            build/exact-seed-gate/green/
+          if-no-files-found: warn
+          retention-days: 7
