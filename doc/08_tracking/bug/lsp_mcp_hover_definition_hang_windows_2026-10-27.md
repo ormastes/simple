@@ -36,6 +36,28 @@ byte-indexed `substring`. Red (4/7 failed: path truncated to `module.s`)
 Left over: `_char_at` is O(i), so scans remain O(n^2) in char count (no longer
 inflated by multibyte bytes); a single-pass char-array scanner would fix it.
 
+## Resolution: quadratic `_char_at` scans (2026-11-24)
+
+Root cause: `_char_at(s, i)` is `_slice_text(s, i, i + 1)`, which iterates `s`
+from its first char, and `_find_json_value_start` built a `search_n`-char
+slice the same way at every offset. `extract_field`, `extract_id`, `arg_field`
+and `arg_int_field` called them once per scanned position, so each extraction
+cost O(n^2) char steps in the request size, and one `tools/call` runs several.
+
+Fix: each scanner builds one char array per call (`_json_chars`) and indexes
+it; `_find_json_value_start_chars` compares the key element-wise and
+`_json_chars_join` replaces the char-indexed slice
+(`src/app/simple_lsp_mcp/json_helpers.spl`, `tools.spl`). Control flow, char
+indices and every return value are unchanged. `_char_at`, `_char_len` and
+`_slice_text` stay for their remaining single-index callers. Specs:
+`json_helpers_spec.spl` ("single-pass JSON scanners", 4 cases) and
+`lsp_non_ascii_paths_spec.spl` (1 case).
+
+Not measured and not executed: no rebuilt compiler or runnable full `simple`
+binary was available, so the new cases were authored but not run, and no
+request-latency number is claimed. The hover/definition symbol-resolution
+items above stay open.
+
 ## Residual timeout-response repair candidate (2026-11-03)
 
 The nonposition timeout-success follow-up is now tracked independently as
