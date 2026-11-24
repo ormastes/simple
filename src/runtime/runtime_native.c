@@ -14332,50 +14332,12 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
 #include "platform/runtime_win_long_path.h"
 #include "platform/runtime_win_excl_file.h"
 #endif
-static int rt_bucket2_fsync_path(const char* path) {
-    if (!path) return 0;
-#if defined(_WIN32)
-    /* Same fix as runtime.c's rt_fsync_path twin: fopen()+fflush() is both
-     * MAX_PATH-capped (ANSI/narrow-CRT) and not actually durable (fflush()
-     * only empties the CRT's userspace buffer). Use CreateFileW (widened,
-     * extended-length-prefixed) + FlushFileBuffers, falling back to
-     * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
-     * required for FlushFileBuffers to succeed. FILE_FLAG_BACKUP_SEMANTICS is
-     * required too: callers durability-sync DIRECTORIES through this same
-     * worker (native_noop_admission.spl syncs "{root}/generations" after a
-     * rename, the POSIX fsync-the-parent-dir idiom), and CreateFile refuses
-     * to open a directory handle at all without it (ERROR_ACCESS_DENIED);
-     * harmless on a regular file. */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    HANDLE file = INVALID_HANDLE_VALUE;
-    if (wide_path) {
-        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        free(wide_path);
-    } else {
-        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    }
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    int ok = FlushFileBuffers(file) != 0;
-    if (!CloseHandle(file)) ok = 0;
-    return ok ? 1 : 0;
-#else
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    int ok = fsync(fileno(file)) == 0;
-    fclose(file);
-    return ok ? 1 : 0;
-#endif
-}
+/* fsync worker rt_fsync_path: one body shared with runtime.c. */
+#include "runtime_file_fsync_impl.h"
 SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_bucket2_fsync_path(path);
+    return rt_fsync_path(path);
 }
 
 /* ---- mirrors runtime_timestamp.c (rt_progress_* thread-local clock ABI) --- */
@@ -15253,31 +15215,11 @@ bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
-/* Reads the rest of `f` into a RuntimeValue text and closes it. Returns nil
- * (RT_NIL == 3, TAG_SPECIAL payload 0) on allocation failure. */
-static int64_t rt_file_slurp_text_close(FILE* f) {
-    const int64_t rt_nil = 3;
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)rt_observed_malloc_v1(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
-}
+/* Byte-count read to EOF, shared with runtime.c; this lane routes the
+ * growable buffer through the allocation observer. */
+#define RT_FILE_SLURP_MALLOC(n) rt_observed_malloc_v1(n)
+#define RT_FILE_SLURP_REALLOC(p, n) rt_observed_realloc_v1((p), (n))
+#include "runtime_file_slurp_impl.h"
 
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
@@ -15561,173 +15503,23 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
  * interpreter provider documents single-thread, fail-closed parity instead
  * of claiming this native atomic drain contract.
  */
-#define RT_FILE_EXISTS_PROBE_ACCEPTING    (UINT64_C(1) << 63)
-#define RT_FILE_EXISTS_PROBE_TRANSITION   (UINT64_C(1) << 62)
-#define RT_FILE_EXISTS_PROBE_LEASE_MASK   (RT_FILE_EXISTS_PROBE_TRANSITION - 1)
-#define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
-#define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
-
-static atomic_uint_fast64_t rt_file_exists_probe_state = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_generation = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_total = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_failed = ATOMIC_VAR_INIT(0);
-
-/* Reserve one total slot. A failed slot is incremented only after this succeeds,
- * so concurrent records preserve failed <= total <= TOTAL_MAX. */
-static int rt_file_exists_probe_try_add_total(void) {
-    uint_fast64_t current = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_relaxed);
-    while (current < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_total, &current, current + 1,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static uint_fast64_t rt_file_exists_probe_lease_admit(void) {
-    /* Disabled source path: one relaxed gate load, without assembly claims. */
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_relaxed);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-        if ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) ==
-            RT_FILE_EXISTS_PROBE_LEASE_MASK) return 0;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, state + UINT64_C(1),
-                memory_order_acquire, memory_order_relaxed)) {
-            uint_fast64_t generation = atomic_load_explicit(
-                &rt_file_exists_probe_generation, memory_order_acquire);
-            if (generation != 0) return generation;
-            atomic_fetch_sub_explicit(
-                &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-            return 0;
-        }
-    }
-}
-
-static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
-    if (lease != 0 && atomic_load_explicit(
-            &rt_file_exists_probe_generation, memory_order_acquire) == lease) {
-        if (rt_file_exists_probe_try_add_total() && !exists) {
-            uint_fast64_t failed = atomic_load_explicit(
-                &rt_file_exists_probe_failed, memory_order_relaxed);
-            while (failed < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-                if (atomic_compare_exchange_weak_explicit(
-                        &rt_file_exists_probe_failed, &failed, failed + 1,
-                        memory_order_relaxed, memory_order_relaxed)) {
-                    break;
-                }
-            }
-        }
-    }
-    if (lease != 0) {
-        atomic_fetch_sub_explicit(
-            &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-    }
-}
+#include "runtime_file_exists_probe_impl.h"
 
 int64_t rt_file_exists_probe_begin(void) {
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return -1;
-    }
-    uint_fast64_t generation = atomic_load_explicit(
-        &rt_file_exists_probe_generation, memory_order_acquire);
-    if (generation >= RT_FILE_EXISTS_PROBE_GENERATION_MAX) {
-        atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-        return -3;
-    }
-    generation += 1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, generation, memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_state, RT_FILE_EXISTS_PROBE_ACCEPTING,
-        memory_order_release);
-    return (int64_t)generation;
+    return rt_file_exists_probe_begin_impl();
 }
 
 int64_t rt_file_exists_probe_end(int64_t token) {
-    if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
-        atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-            (uint_fast64_t)token) return -2;
-
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-            atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-                (uint_fast64_t)token) {
-            return -2;
-        }
-        uint_fast64_t closing =
-            (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) |
-            RT_FILE_EXISTS_PROBE_TRANSITION;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, closing,
-                memory_order_acq_rel, memory_order_acquire)) {
-            break;
-        }
-    }
-
-    do {
-        state = atomic_load_explicit(
-            &rt_file_exists_probe_state, memory_order_acquire);
-    } while ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0);
-
-    uint_fast64_t total = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_acquire);
-    uint_fast64_t failed = atomic_load_explicit(
-        &rt_file_exists_probe_failed, memory_order_acquire);
-    if (total > RT_FILE_EXISTS_PROBE_TOTAL_MAX) total = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    if (failed > RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        failed = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    }
-    atomic_store_explicit(
-        &rt_file_exists_probe_state,
-        0,
-        memory_order_release);
-    return (int64_t)((total << 32) | failed);
+    return rt_file_exists_probe_end_impl(token);
 }
 
 #if defined(SIMPLE_RUNTIME_TESTING)
 int64_t rt_file_exists_probe_test_seed_generation(int64_t generation) {
-    if (generation < 0 || (uint_fast64_t)generation >
-            RT_FILE_EXISTS_PROBE_GENERATION_MAX) return -3;
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, (uint_fast64_t)generation,
-        memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-    return 0;
+    return rt_file_exists_probe_test_seed_generation_impl(generation);
 }
 
 int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
-    if (total < 0 || failed < 0 || (uint_fast64_t)total >
-            RT_FILE_EXISTS_PROBE_TOTAL_MAX || (uint_fast64_t)failed >
-            (uint_fast64_t)total) return -3;
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-        (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_total, (uint_fast64_t)total, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_failed, (uint_fast64_t)failed, memory_order_relaxed);
-    return 0;
+    return rt_file_exists_probe_test_seed_counters_impl(total, failed);
 }
 #endif
 
@@ -15756,47 +15548,15 @@ bool rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     return exists;
 }
 
+/* No-shell stat probes: one body shared with runtime.c. */
+#include "runtime_file_stat_impl.h"
+
 bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path_buf[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
-    const char* path = path_buf;
-#if defined(_WIN32)
-    if (!path) return 0;
-    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
-     * plain UTF-16 conversion failed past MAX_PATH, so a long
-     * package-module index path read as "not a regular file" and admission
-     * failed package-index:generation-unavailable (2026-09-25). */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    if (!wide_path) return 0;
-    DWORD attributes = GetFileAttributesW(wide_path);
-    free(wide_path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
-#else
-    struct stat st;
-    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
+    return rt_file_is_regular_no_follow_impl(path_ptr, path_len);
 }
 
-/* rt_file_is_char_device: mirrors runtime.c's rt_file_is_char_device for the
- * core-c-bootstrap build (native binaries linked without runtime.c). See
- * that definition for rationale (no-shell char-device probe, symlinks
- * followed). */
 int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len;
-    return 0;
-#else
-    /* The compiler emits the two-argument (ptr, len) form for `text` externs
-     * (runtime_sffi.rs / src/compiler/50.mir/text_extern_abi.spl); a Simple
-     * `text` is NOT NUL-terminated, so the buffer must be copied. */
-    char buf[4096];
-    if (!path_ptr || path_len >= sizeof(buf)) return 0;
-    memcpy(buf, path_ptr, (size_t)path_len);
-    buf[(size_t)path_len] = '\0';
-    struct stat st;
-    return stat(buf, &st) == 0 && S_ISCHR(st.st_mode);
-#endif
+    return rt_file_is_char_device_impl(path_ptr, path_len);
 }
 
 bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
