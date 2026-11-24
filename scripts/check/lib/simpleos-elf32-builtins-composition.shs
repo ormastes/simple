@@ -1,0 +1,59 @@
+#!/bin/sh
+# Sourced archive-composition checks; no compiler, archive mutation or CLI.
+# LLVM 6dfe1677ab8dffbc6ec13d53a1e0215d75147689:
+# arm/aeabi_[df]rsub.c call __aeabi_[df]sub(b,a), with AEABI_RTABI pcs(aapcs).
+# arm/adddf3.S and arm/addsf3.S provide the same y-x base-PCS operations,
+# including the shared uncommon-operand paths. Keep those assembly owners.
+
+simpleos_arm_rsub_exclusions() {
+    awk '
+    function reject(message) { print "ARM reverse-subtract policy: " message > "/dev/stderr"; bad=1 }
+    NF == 0 { next }
+    {
+        if (NF < 3) { reject("malformed nm row"); next }
+        member=$1
+        sub(/^.*\[/,"",member); sub(/\]:$/,"",member)
+        if ($1 != "libclang_rt.builtins-arm32.a[" member "]:") { reject("unexpected archive/member identity"); next }
+        if ($3 !~ /^[WwVvUu]$/) { strong[$2]++; owner[$2 SUBSEP member]++; kind[$2 SUBSEP member]=$3 }
+        if (member=="aeabi_drsub.c.obj" || member=="aeabi_frsub.c.obj") {
+            exports[member]++
+            expected=(member=="aeabi_drsub.c.obj" ? "__aeabi_drsub" : "__aeabi_frsub")
+            if ($2!=expected || $3!="T") reject("redundant C wrapper has another export or non-text binding")
+        }
+    }
+    END {
+        for (symbol in strong) if (strong[symbol]>1 && symbol!="__aeabi_drsub" && symbol!="__aeabi_frsub") reject("unrecognized duplicate strong owner: " symbol)
+        if (strong["__aeabi_drsub"]!=2 || owner["__aeabi_drsub" SUBSEP "adddf3.S.obj"]!=1 || owner["__aeabi_drsub" SUBSEP "aeabi_drsub.c.obj"]!=1 || kind["__aeabi_drsub" SUBSEP "adddf3.S.obj"]!="T") reject("double reverse-subtract owner pair differs")
+        if (strong["__aeabi_frsub"]!=2 || owner["__aeabi_frsub" SUBSEP "addsf3.S.obj"]!=1 || owner["__aeabi_frsub" SUBSEP "aeabi_frsub.c.obj"]!=1 || kind["__aeabi_frsub" SUBSEP "addsf3.S.obj"]!="T") reject("float reverse-subtract owner pair differs")
+        if (exports["aeabi_drsub.c.obj"]!=1 || exports["aeabi_frsub.c.obj"]!=1) reject("C wrapper sole-export proof is absent")
+        if (owner["__aeabi_dadd" SUBSEP "adddf3.S.obj"]!=1 || owner["__aeabi_dsub" SUBSEP "adddf3.S.obj"]!=1 || owner["__aeabi_fadd" SUBSEP "addsf3.S.obj"]!=1 || owner["__aeabi_fsub" SUBSEP "addsf3.S.obj"]!=1) reject("retained assembly provider arithmetic roles differ")
+        if (bad) exit 1
+        print "aeabi_drsub.c.obj"
+        print "aeabi_frsub.c.obj"
+    }' "$1"
+}
+
+# Check real llvm-readobj --symbols output after composition, not just nm T.
+simpleos_arm_rsub_callable_check() {
+    awk '
+    function reject(message) { print "ARM reverse-subtract callable check: " message > "/dev/stderr"; bad=1 }
+    /^File: / { member=$0; sub(/^.*\(/,"",member); sub(/\)$/,"",member) }
+    /^  Symbol \{$/ { name=""; binding=""; type=""; section=""; size=0; in_symbol=1 }
+    in_symbol && /Name:/ { name=$2 }
+    in_symbol && /Binding:/ { binding=$2 }
+    in_symbol && /Type:/ { type=$2 }
+    in_symbol && /Section:/ { section=$2 }
+    in_symbol && /Size:/ { size=$2+0 }
+    /^  \}$/ && in_symbol {
+        if (name=="__aeabi_drsub" || name=="__aeabi_frsub") {
+            count[name]++
+            expected=(name=="__aeabi_drsub" ? "adddf3.S.obj" : "addsf3.S.obj")
+            if (member!=expected || binding!="Global" || type!="Function" || section !~ /^\.text/ || size<=0) reject("retained definition is not its assembly-owned global function: " name)
+        }
+        in_symbol=0
+    }
+    END {
+        if (count["__aeabi_drsub"]!=1 || count["__aeabi_frsub"]!=1) reject("reverse-subtract definitions must each occur exactly once")
+        if (bad) exit 1
+    }' "$1"
+}

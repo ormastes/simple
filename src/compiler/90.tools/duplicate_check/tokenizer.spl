@@ -20,13 +20,68 @@ struct SimpleToken:
     start_offset: i64
     end_offset: i64
 
+# Code-point slicing in O(slice length). `text[a:b]` and `text.len()` count
+# code points and walk from the start of a non-ASCII text, so slicing every
+# token of a 200 KB file with one non-ASCII byte was quadratic (8.9 s vs 12 ms
+# for a 47 KB ASCII file). `slice` returns exactly what `source[a:b]` returns
+# (same clamping): non-ASCII text is cut once into SLICE_CHUNK-code-point
+# chunks (themselves `source[..]` slices), so each slice walks one short chunk.
+# Gap + latent byte/code-point offset mix-up:
+# doc/08_tracking/bug/2026-11-24_dupcheck_codepoint_slice_quadratic_non_ascii.md
+val SLICE_CHUNK: i64 = 4096
+
+struct SourceSlicer:
+    source: text
+    ascii: bool
+    char_len: i64
+    chunks: [text]
+
+fn is_ascii_text(source: text) -> bool:
+    for b in source.bytes():
+        if b >= 128:
+            return false
+    true
+
+# @allow(primitive_api) code-point offsets are the plain i64 offsets text slicing already takes
+pub fn source_slicer_new(source: text) -> SourceSlicer:
+    val char_len = source.len()
+    if is_ascii_text(source):
+        return SourceSlicer(source: source, ascii: true, char_len: char_len, chunks: [])
+    var chunks: [text] = []
+    var at = 0
+    while at < char_len:
+        chunks.push(source[at:at + SLICE_CHUNK])
+        at = at + SLICE_CHUNK
+    SourceSlicer(source: source, ascii: false, char_len: char_len, chunks: chunks)
+
+# @allow(primitive_api) code-point offsets are the plain i64 offsets text slicing already takes
+pub fn source_slice(slicer: SourceSlicer, start: i64, end: i64) -> text:
+    if slicer.ascii:
+        return slicer.source[start:end]
+    val n = slicer.char_len
+    val a = if start > n: n else: start
+    val b = if end > n: n else: end
+    if b <= a:
+        return ""
+    val first = a / SLICE_CHUNK
+    val last = (b - 1) / SLICE_CHUNK
+    val base = first * SLICE_CHUNK
+    if first == last:
+        return slicer.chunks[first][a - base:b - base]
+    var out = slicer.chunks[first][a - base:SLICE_CHUNK]
+    var k = first + 1
+    while k < last:
+        out = out + slicer.chunks[k]
+        k = k + 1
+    out + slicer.chunks[last][0:b - last * SLICE_CHUNK]
+
 fn token_to_string(token: SimpleToken) -> text:
     "{token.kind}:{token.value}"
 
 fn is_keyword_text(value: text) -> bool:
     value == "fn" or value == "val" or value == "var" or value == "if" or value == "else" or value == "while" or value == "for" or value == "match" or value == "case" or value == "return" or value == "break" or value == "continue" or value == "class" or value == "struct" or value == "enum" or value == "use" or value == "export"
 
-fn match_operator_bytes(bytes: [u8], source: text, source_len: i64, index: i64) -> text:
+fn match_operator_bytes(bytes: [u8], slicer: SourceSlicer, source_len: i64, index: i64) -> text:
     if index >= source_len:
         return ""
     val b = bytes[index]
@@ -44,7 +99,7 @@ fn match_operator_bytes(bytes: [u8], source: text, source_len: i64, index: i64) 
     if b == 45 and nb == 62:
         return "->"
     if b == 43 or b == 45 or b == 42 or b == 47 or b == 61 or b == 60 or b == 62 or b == 58 or b == 46 or b == 44 or b == 40 or b == 41 or b == 91 or b == 93 or b == 123 or b == 125:
-        return source[index:index+1]
+        return source_slice(slicer, index, index + 1)
     ""
 
 fn is_c_source_path(path: text) -> bool:
@@ -62,7 +117,8 @@ fn tokenize_mode(source: text, config: DuplicationConfig, c_mode: bool) -> [Simp
     var i = 0
     var line = 1
     var column = 1
-    val source_len = source.len()
+    val slicer = source_slicer_new(source)
+    val source_len = slicer.char_len
     val bytes = source.bytes()
 
     while i < source_len:
@@ -80,7 +136,7 @@ fn tokenize_mode(source: text, config: DuplicationConfig, c_mode: bool) -> [Simp
         if not handled:
             if b == 32 or b == 9:
                 if not config.ignore_whitespace:
-                    result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: source[i:i+1], line: line, column: column, start_offset: i, end_offset: i + 1))
+                    result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: source_slice(slicer, i, i + 1), line: line, column: column, start_offset: i, end_offset: i + 1))
                 i = i + 1
                 column = column + 1
                 handled = true
@@ -122,7 +178,7 @@ fn tokenize_mode(source: text, config: DuplicationConfig, c_mode: bool) -> [Simp
                         break
                     i = i + 1
                     column = column + 1
-                val ident = source[start_idx:i]
+                val ident = source_slice(slicer, start_idx, i)
                 val is_keyword = is_keyword_text(ident)
                 val kind = if is_keyword: SimpleTokenKind.Keyword else: SimpleTokenKind.Identifier
                 val value = if kind == SimpleTokenKind.Identifier and config.ignore_identifiers then "IDENTIFIER" else ident
@@ -141,7 +197,7 @@ fn tokenize_mode(source: text, config: DuplicationConfig, c_mode: bool) -> [Simp
                         break
                     i = i + 1
                     column = column + 1
-                val num = source[start_idx:i]
+                val num = source_slice(slicer, start_idx, i)
                 val value = if config.ignore_literals then "LITERAL" else num
                 result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
                 handled = true
@@ -181,13 +237,13 @@ fn tokenize_mode(source: text, config: DuplicationConfig, c_mode: bool) -> [Simp
                         else:
                             column = column + 1
                         i = i + 1
-                val str_val = source[start_idx:i]
+                val str_val = source_slice(slicer, start_idx, i)
                 val value = if config.ignore_literals then "LITERAL" else str_val
                 result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: start_line, column: start_col, start_offset: start_idx, end_offset: i))
                 handled = true
 
         if not handled:
-            val op = match_operator_bytes(bytes, source, source_len, i)
+            val op = match_operator_bytes(bytes, slicer, source_len, i)
             if op.len() > 0:
                 result.push(SimpleToken(kind: SimpleTokenKind.Operator, value: op, line: line, column: column, start_offset: i, end_offset: i + op.len()))
                 i = i + op.len()

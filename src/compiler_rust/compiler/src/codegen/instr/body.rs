@@ -779,6 +779,9 @@ pub fn compile_function_body<M: Module>(
     // inline array accessor fast paths emit `u32 len@8; items@16` instead of
     // the hosted `u64 len@8; data*@24` layout.
     fam_arrays: bool,
+    // The function's live-in sets when the caller already has them (the
+    // JIT computes them on a helper thread, off the translation path).
+    live_ins: Option<HashMap<BlockId, HashSet<VReg>>>,
 ) -> InstrResult<()> {
     if func.attributes.iter().any(|attr| attr == "naked") {
         return compile_naked_function_body(module, cranelift_func, func, func_ids);
@@ -831,7 +834,7 @@ pub fn compile_function_body<M: Module>(
     // Declare Cranelift Variables for all VRegs to handle SSA across blocks.
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
     // VRegs are sorted to ensure deterministic Variable ID assignment.
-    let live_ins = func.compute_live_ins();
+    let live_ins = live_ins.unwrap_or_else(|| func.compute_live_ins());
     let sorted_cross_block_vregs = sorted_cross_block_vregs(&live_ins);
     let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
     for vreg in &sorted_cross_block_vregs {
@@ -1417,8 +1420,8 @@ pub fn compile_function_body<M: Module>(
                                     .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), as_f64)
                             } else if val_type.is_float() && ret_ty.is_int() {
                                 // Narrow int return slots (runtime-spec fns): real
-                                // value conversion.
-                                builder.ins().fcvt_to_sint(ret_ty, rv)
+                                // value conversion, saturating like an explicit cast.
+                                super::helpers::float_to_int_saturating(&mut builder, rv, ret_ty, true)
                             } else if val_type.is_float() && ret_ty.is_float() {
                                 // Float width conversion
                                 if val_type.bits() < ret_ty.bits() {

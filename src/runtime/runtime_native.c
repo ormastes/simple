@@ -7836,6 +7836,31 @@ int64_t rt_array_max(int64_t receiver) {
     return result;
 }
 
+/* collections.rs rt_array_min -- twin of rt_array_max above: nil for an empty
+ * array or a non-array; packed [u8] / [u64] compare raw UNSIGNED elements. */
+int64_t rt_array_min(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    RtCoreArray* packed = rt_core_array_ptr(arr);
+    if (packed->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        uint64_t best = UINT64_MAX;
+        for (int64_t i = 0; i < packed->len; i++) {
+            uint64_t v = is_bytes ? (uint64_t)((const uint8_t*)packed->data)[i]
+                                  : ((const uint64_t*)packed->data)[i];
+            if (v < best) best = v;
+        }
+        return rt_value_int((int64_t)best);
+    }
+    int64_t result = spl_core_array_value_at(arr, 0);
+    int64_t count = rt_array_len(arr);
+    for (int64_t index = 1; index < count; index++) {
+        int64_t candidate = spl_core_array_value_at(arr, index);
+        if (rt_sort_cmp(candidate, result) < 0) result = candidate;
+    }
+    return result;
+}
+
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
  * A negative n yields an empty result, matching the saturating eval_arg_usize. */
 int64_t rt_take(int64_t receiver, int64_t n) {
@@ -8615,16 +8640,28 @@ typedef struct RtStructAllocation {
 } RtStructAllocation;
 
 #define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
-#define RT_STRUCT_ALLOC_MAX_CAP ((size_t)1 << 22)
 
 static RtStructAllocation* rt_struct_allocs = NULL;
 static size_t rt_struct_alloc_cap = 0;
 static size_t rt_struct_alloc_len = 0;
 static size_t rt_struct_alloc_tombs = 0;
+static size_t rt_struct_alloc_failures = 0;
+static size_t rt_struct_alloc_max_cap_for_test = 0;
 #if defined(_WIN32)
 static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
 #else
 static pthread_rwlock_t rt_struct_alloc_lock = PTHREAD_RWLOCK_INITIALIZER;
+#endif
+
+#if defined(SIMPLE_RUNTIME_STRUCT_REGISTRY_TESTING)
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+int64_t rt_struct_registry_len(void) { return (int64_t)rt_struct_alloc_len; }
+int64_t rt_struct_registry_cap(void) { return (int64_t)rt_struct_alloc_cap; }
+int64_t rt_struct_registry_failures(void) { return (int64_t)rt_struct_alloc_failures; }
+void rt_struct_registry_set_max_cap_for_test(size_t max_cap) {
+    rt_struct_alloc_max_cap_for_test = max_cap;
+}
+#endif
 #endif
 
 static void rt_struct_alloc_lock_acquire(void) {
@@ -8659,37 +8696,83 @@ static void rt_struct_alloc_read_lock_release(void) {
 #endif
 }
 
+static size_t rt_struct_alloc_hash(uintptr_t ptr) {
+    return rt_core_immortal_hash_ptr(ptr);
+}
+
+static size_t rt_struct_alloc_load_limit(size_t cap) {
+    size_t limit = cap - (cap / 4);
+    if (limit >= cap && cap > 0) limit = cap - 1;
+    return limit;
+}
+
+static size_t rt_struct_alloc_next_cap(size_t current) {
+    const size_t max_entries = SIZE_MAX / sizeof(RtStructAllocation);
+    size_t ceiling = rt_struct_alloc_max_cap_for_test != 0 &&
+            rt_struct_alloc_max_cap_for_test < max_entries
+        ? rt_struct_alloc_max_cap_for_test
+        : max_entries;
+    if (current == 0) return ceiling < 256 ? 0 : 256;
+    if (current >= ceiling || current > max_entries / 2) return 0;
+    size_t next = current * 2;
+    return next > ceiling ? 0 : next;
+}
+
+static int rt_struct_alloc_needs_rehash(size_t cap) {
+    size_t limit = rt_struct_alloc_load_limit(cap);
+    if (rt_struct_alloc_len >= limit) return 1;
+    size_t remaining = limit - rt_struct_alloc_len;
+    return rt_struct_alloc_tombs >= remaining - 1;
+}
+
+static void rt_struct_alloc_record_failure(void) {
+    if (rt_struct_alloc_failures != SIZE_MAX) {
+        rt_struct_alloc_failures++;
+    }
+}
+
 static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
     size_t mask = rt_struct_alloc_cap - 1;
-    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
+    size_t index = rt_struct_alloc_hash(ptr) & mask;
     size_t first_tomb = SIZE_MAX;
-    for (;;) {
-        uintptr_t entry = rt_struct_allocs[i].ptr;
+    for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
+        uintptr_t entry = rt_struct_allocs[index].ptr;
         if (entry == 0) {
-            size_t target = first_tomb == SIZE_MAX ? i : first_tomb;
+            size_t target = first_tomb == SIZE_MAX ? index : first_tomb;
             rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
             if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
             rt_struct_alloc_len++;
             return 1;
         }
         if (entry == RT_STRUCT_ALLOC_TOMBSTONE) {
-            if (first_tomb == SIZE_MAX) first_tomb = i;
+            if (first_tomb == SIZE_MAX) first_tomb = index;
         } else if (entry == ptr) {
-            rt_struct_allocs[i].bytes = bytes;
+            rt_struct_allocs[index].bytes = bytes;
             return 1;
         }
-        i = (i + 1) & mask;
+        index = (index + 1) & mask;
     }
+    if (first_tomb != SIZE_MAX) {
+        rt_struct_allocs[first_tomb] = (RtStructAllocation){ptr, bytes};
+        rt_struct_alloc_tombs--;
+        rt_struct_alloc_len++;
+        return 1;
+    }
+    return 0;
 }
 
 static int rt_struct_alloc_resize(size_t next_cap) {
-    if (next_cap > RT_STRUCT_ALLOC_MAX_CAP ||
-            next_cap > SIZE_MAX / sizeof(RtStructAllocation)) return 0;
+    const size_t max_entries = SIZE_MAX / sizeof(RtStructAllocation);
+    if (next_cap == 0 || next_cap > max_entries) return 0;
+    if (rt_struct_alloc_max_cap_for_test != 0 &&
+            next_cap > rt_struct_alloc_max_cap_for_test) return 0;
     RtStructAllocation* fresh = (RtStructAllocation*)rt_observed_calloc_v1(
         next_cap, sizeof(RtStructAllocation));
     if (!fresh) return 0;
     RtStructAllocation* old = rt_struct_allocs;
     size_t old_cap = rt_struct_alloc_cap;
+    size_t old_len = rt_struct_alloc_len;
+    size_t old_tombs = rt_struct_alloc_tombs;
     rt_struct_allocs = fresh;
     rt_struct_alloc_cap = next_cap;
     rt_struct_alloc_len = 0;
@@ -8697,7 +8780,14 @@ static int rt_struct_alloc_resize(size_t next_cap) {
     for (size_t i = 0; i < old_cap; i++) {
         uintptr_t ptr = old[i].ptr;
         if (ptr != 0 && ptr != RT_STRUCT_ALLOC_TOMBSTONE) {
-            rt_struct_alloc_insert_raw(ptr, old[i].bytes);
+            if (!rt_struct_alloc_insert_raw(ptr, old[i].bytes)) {
+                free(fresh);
+                rt_struct_allocs = old;
+                rt_struct_alloc_cap = old_cap;
+                rt_struct_alloc_len = old_len;
+                rt_struct_alloc_tombs = old_tombs;
+                return 0;
+            }
         }
     }
     free(old);
@@ -8705,27 +8795,33 @@ static int rt_struct_alloc_resize(size_t next_cap) {
 }
 
 static int rt_struct_alloc_register(void* ptr, size_t bytes) {
-    int ok = 0;
     if (!ptr) return 0;
     rt_struct_alloc_lock_acquire();
+    int ok = 1;
     if (rt_struct_alloc_cap == 0) {
-        ok = rt_struct_alloc_resize(256);
-    } else {
-        ok = 1;
-    }
-    if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
-            >= rt_struct_alloc_cap * 7) {
+        size_t init_cap = rt_struct_alloc_next_cap(0);
+        ok = init_cap != 0 && rt_struct_alloc_resize(init_cap);
+    } else if (rt_struct_alloc_needs_rehash(rt_struct_alloc_cap)) {
         if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
             ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-        } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
-        } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-        } else if (rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
-            ok = 0;
+        } else {
+            size_t grown = rt_struct_alloc_next_cap(rt_struct_alloc_cap);
+            if (grown != 0) {
+                ok = rt_struct_alloc_resize(grown);
+            } else if (rt_struct_alloc_len + rt_struct_alloc_tombs + 1 >= rt_struct_alloc_cap) {
+                if (rt_struct_alloc_tombs > 0 && rt_struct_alloc_len + 1 < rt_struct_alloc_cap) {
+                    ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
+                } else if (rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
+                    ok = 0;
+                }
+            }
         }
     }
+    if (ok && rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
+        ok = 0;
+    }
     if (ok) ok = rt_struct_alloc_insert_raw((uintptr_t)ptr, bytes);
+    if (!ok) rt_struct_alloc_record_failure();
     rt_struct_alloc_lock_release();
     return ok;
 }
@@ -8734,8 +8830,8 @@ static int rt_struct_alloc_register(void* ptr, size_t bytes) {
 static void rt_struct_alloc_unregister_locked(void* ptr) {
     if (!ptr || rt_struct_alloc_cap == 0) return;
     size_t mask = rt_struct_alloc_cap - 1;
-    size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
-    for (;;) {
+    size_t i = rt_struct_alloc_hash((uintptr_t)ptr) & mask;
+    for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
         uintptr_t entry = rt_struct_allocs[i].ptr;
         if (entry == 0) break;
         if (entry == (uintptr_t)ptr) {
@@ -8786,8 +8882,8 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
     rt_struct_alloc_read_lock_acquire();
     if (rt_struct_alloc_cap != 0) {
         size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
-        for (;;) {
+        size_t i = rt_struct_alloc_hash((uintptr_t)ptr) & mask;
+        for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
             uintptr_t entry = rt_struct_allocs[i].ptr;
             if (entry == 0) break;
             if (entry == (uintptr_t)ptr) {
@@ -8857,8 +8953,8 @@ int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t a
     rt_struct_alloc_read_lock_acquire();
     if (rt_struct_alloc_cap != 0) {
         size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
-        for (;;) {
+        size_t i = rt_struct_alloc_hash(ptr) & mask;
+        for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
             uintptr_t entry = rt_struct_allocs[i].ptr;
             if (entry == 0) break;
             if (entry == ptr) {

@@ -1,0 +1,152 @@
+#!/bin/sh
+# Build the Rust bootstrap seed from source.
+#
+# bin/simple.exe IS git-tracked (a legacy committed seed). Do not commit seed
+# binaries: by default this script installs to the untracked, gitignored
+# bin/local/simple$EXE and prints how to point bin/simple at it.
+# --in-place overwrites the tracked bin/simple$EXE (warns: do not commit).
+#
+# Pinned recipe (clang only, never gcc):
+#   channel    = src/compiler_rust/rust-toolchain.toml
+#   Windows    = <channel>-x86_64-pc-windows-gnu + llvm-mingw UCRT clang (default)
+#                <channel>-x86_64-pc-windows-msvc + clang-cl         (--msvc)
+#   elsewhere  = <channel>, CC=clang CXX=clang++
+#   cargo build --locked --profile bootstrap -p simple-driver -j $SEED_JOBS
+#
+# Install is atomic (temp file + mv -f). The seed source revision is recorded
+# in <dest>.seed-rev (untracked).
+#
+# Usage:
+#   sh scripts/setup/build-seed.shs [--msvc] [--in-place]
+#   sh scripts/setup/build-seed.shs --check [--in-place]  # FRESH 0 / STALE|DIRTY 1 / UNKNOWN 2
+#   sh scripts/setup/build-seed.shs --selftest
+# Env: SEED_JOBS (default 4), CARGO_TARGET_DIR, SEED_DEST, LLVM_MINGW_DIR.
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+seed_paths="src/compiler_rust src/runtime"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) exe=.exe; is_win=1 ;;
+  *) exe=; is_win=0 ;;
+esac
+
+seed_src_rev() { git -C "$1" log -1 --format=%H -- $seed_paths 2>/dev/null; }
+seed_src_dirty() { git -C "$1" status --porcelain -- $seed_paths 2>/dev/null | head -n 1; }
+
+# check_verdict <dest> <want-rev> <dirty-line>: 0 FRESH / 1 STALE|DIRTY / 2 UNKNOWN
+check_verdict() {
+  if [ -n "$3" ]; then echo "DIRTY — uncommitted seed source changes (e.g. $3); seed cannot match"; return 1; fi
+  if [ ! -f "$1" ]; then echo "UNKNOWN — no seed at $1"; return 2; fi
+  if [ ! -f "$1.seed-rev" ]; then
+    echo "UNKNOWN — $1 has no .seed-rev record; rebuild with build-seed.shs"; return 2
+  fi
+  have=$(cat "$1.seed-rev")
+  if [ -z "$2" ]; then echo "UNKNOWN — cannot resolve seed source revision"; return 2; fi
+  if [ "$have" = "$2" ]; then echo "FRESH — seed built from $2"; return 0; fi
+  echo "STALE — seed built from $have, seed sources now at $2"; return 1
+}
+
+# atomic_install <src> <dest>: 0 ok, 1 locked/failed (temp removed)
+atomic_install() {
+  tmp="$2.new.$$"
+  cp "$1" "$tmp" || { rm -f "$tmp"; echo "build-seed: copy to $tmp failed" >&2; return 1; }
+  if ! ${SEED_MV:-mv -f} "$tmp" "$2" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "build-seed: target in use ($2); stop running simple$exe processes (by PID) and rerun" >&2
+    return 1
+  fi
+}
+
+expect() { want=$1; shift; set +e; "$@" >/dev/null 2>&1; got=$?; set -e; [ "$got" -eq "$want" ]; }
+
+selftest() {
+  t=$(mktemp -d); r=0; n=0
+  expect 2 check_verdict "$t/none" abc "" || r=1; n=$((n+1))
+  : > "$t/s"
+  expect 2 check_verdict "$t/s" abc "" || r=1; n=$((n+1))
+  echo abc > "$t/s.seed-rev"
+  expect 0 check_verdict "$t/s" abc "" || r=1; n=$((n+1))
+  expect 1 check_verdict "$t/s" def "" || r=1; n=$((n+1))
+  expect 1 check_verdict "$t/s" abc " M src/runtime/x.c" || r=1; n=$((n+1))
+  # real dirty detection in a fixture repo
+  g="$t/repo"; mkdir -p "$g/src/runtime"; echo a > "$g/src/runtime/x.c"
+  git -C "$g" init -q && git -C "$g" -c core.autocrlf=false add -A && git -C "$g" -c user.name=t -c user.email=t@t commit -qm i
+  [ -z "$(seed_src_dirty "$g")" ] || r=1
+  echo b > "$g/src/runtime/x.c"
+  [ -n "$(seed_src_dirty "$g")" ] || r=1
+  expect 1 check_verdict "$t/s" abc "$(seed_src_dirty "$g")" || r=1; n=$((n+1))
+  # atomic install: success, then failure leaves no temp and keeps target
+  echo new > "$t/src"; echo old > "$t/dst"
+  expect 0 atomic_install "$t/src" "$t/dst" || r=1
+  [ "$(cat "$t/dst")" = new ] || r=1; n=$((n+1))
+  mkdir -p "$t/blocked"; echo old > "$t/blocked/dst"
+  SEED_MV=false expect 1 atomic_install "$t/src" "$t/blocked/dst" || r=1
+  [ "$(cat "$t/blocked/dst")" = old ] || r=1
+  unset SEED_MV
+  ls "$t/blocked" | grep -q '\.new\.' && r=1; n=$((n+1))
+  rm -rf "$t"
+  if [ $r -eq 0 ]; then echo "PASS — $n selftest fixture(s)"; else echo "FAIL — selftest"; fi
+  return $r
+}
+
+mode=build; msvc=0; inplace=0
+for a in "$@"; do
+  case "$a" in
+    --selftest) selftest; exit $? ;;
+    --check) mode=check ;;
+    --msvc) msvc=1 ;;
+    --in-place) inplace=1 ;;
+    *) echo "usage: build-seed.shs [--check|--selftest] [--msvc] [--in-place]" >&2; exit 2 ;;
+  esac
+done
+
+if [ $inplace -eq 1 ]; then dest="$repo_root/bin/simple$exe"
+else dest=${SEED_DEST:-$repo_root/bin/local/simple$exe}; fi
+
+if [ $mode = check ]; then
+  check_verdict "$dest" "$(seed_src_rev "$repo_root")" "$(seed_src_dirty "$repo_root")"; exit $?
+fi
+
+selftest >/dev/null
+
+crate="$repo_root/src/compiler_rust"
+channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$crate/rust-toolchain.toml")
+[ -n "$channel" ] || { echo "build-seed: no channel in rust-toolchain.toml" >&2; exit 2; }
+if [ $is_win -eq 1 ] && [ $msvc -eq 1 ]; then
+  toolchain="$channel-x86_64-pc-windows-msvc"; export CC=clang-cl CXX=clang-cl
+elif [ $is_win -eq 1 ]; then
+  toolchain="$channel-x86_64-pc-windows-gnu"
+  if [ -z "${LLVM_MINGW_DIR:-}" ]; then
+    LLVM_MINGW_DIR=$(ls -d "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 2>/dev/null | tail -n 1)
+  fi
+  [ -n "$LLVM_MINGW_DIR" ] || { echo "build-seed: llvm-mingw UCRT not found; run scripts/setup/bootstrap-prereqs.shs install" >&2; exit 2; }
+  PATH="$LLVM_MINGW_DIR/bin:$PATH"; export PATH CC=clang CXX=clang++
+  # Rust's windows-gnu target links with -lgcc -lgcc_eh; llvm-mingw has no libgcc.
+  # Serve them from compiler-rt builtins + libunwind via a shim dir (never GCC).
+  rt=$(ls "$LLVM_MINGW_DIR"/lib/clang/*/lib/windows/libclang_rt.builtins-x86_64.a 2>/dev/null | tail -n 1)
+  uw="$LLVM_MINGW_DIR/x86_64-w64-mingw32/lib/libunwind.a"
+  [ -f "$rt" ] && [ -f "$uw" ] || { echo "build-seed: llvm-mingw compiler-rt/libunwind missing" >&2; exit 2; }
+  gccshim="${CARGO_TARGET_DIR:-$crate/target}/gcc-shim"; mkdir -p "$gccshim"
+  cp "$rt" "$gccshim/libgcc.a"; cp "$uw" "$gccshim/libgcc_eh.a"
+  LIBRARY_PATH="$(cd "$gccshim" && pwd -W 2>/dev/null || pwd)${LIBRARY_PATH:+;$LIBRARY_PATH}"; export LIBRARY_PATH
+else
+  toolchain=$channel; export CC=clang CXX=clang++
+fi
+command -v "$CC" >/dev/null || { echo "build-seed: $CC not on PATH (clang only, never gcc)" >&2; exit 2; }
+: "${CARGO_TARGET_DIR:=$crate/target}"; export CARGO_TARGET_DIR
+
+rev=$(seed_src_rev "$repo_root")
+( cd "$crate" && cargo "+$toolchain" build --locked --profile bootstrap -p simple-driver -j "${SEED_JOBS:-4}" )
+built="$CARGO_TARGET_DIR/bootstrap/simple$exe"
+[ -f "$built" ] || { echo "build-seed: missing $built" >&2; exit 1; }
+
+mkdir -p "$(dirname "$dest")"
+atomic_install "$built" "$dest" || exit 1
+printf '%s\n' "$rev" > "$dest.seed-rev.new.$$" && mv -f "$dest.seed-rev.new.$$" "$dest.seed-rev"
+echo "build-seed: installed $dest (seed sources $rev)"
+if [ $inplace -eq 1 ]; then
+  echo "build-seed: WARNING: overwrote git-tracked $dest — do not commit it" >&2
+else
+  echo "build-seed: use it via: export SIMPLE_BINARY=$dest  (or ln -sf local/simple$exe bin/simple)"
+fi

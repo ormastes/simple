@@ -12,7 +12,7 @@ use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_langu
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.media_control_chrome.{chrome_audio_control_spans, chrome_video_control_spans}
@@ -797,7 +797,15 @@ fn _html_draw_ir_command(
         # A mid-line run's real pen origin (LayoutResult.pen_origin_milli) for
         # its single or first line; the `_line{n}` commands start at a line
         # box edge and carry none.
-        val run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, i)
+        var run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, i)
+        if run_pen_origin == 0:
+            # Text inside a `<select>` (via its `<option>`) or `<textarea>`
+            # starts from the control box's exact pen.
+            var owner = node.parent as i32
+            if owner >= 0 and nodes[owner].tag == "option":
+                owner = nodes[owner].parent as i32
+            if owner >= 0 and (nodes[owner].tag == "select" or nodes[owner].tag == "textarea"):
+                run_pen_origin = text_pen_origin_at(boxes.pen_origin_milli, owner)
         if run_pen_origin != 0:
             computed_style.push(draw_ir_style_prop("pen-origin-milli", "{run_pen_origin}"))
         if _html_draw_ir_fixed_gray_text(nodes, styles, i):
@@ -1555,6 +1563,12 @@ fn _html_draw_ir_input_value_command(
     for advance in resolved.advance_widths:
         real_w = real_w + advance
     resolved.x = input_value_vector_x(plan, content_x, content_w, real_w)
+    # The UA control font is 13.333px; the advances above are its pens, so
+    # the glyph raster takes the float size too (it drew 13 px glyphs), at
+    # every k: the gray (k = 4) glyph scales both axes by it.
+    val size_milli = font_milli_of(st.font_size, st.font_size_milli)
+    if st.font_size_milli > 0 and size_milli % 1000 != 0:
+        resolved.computed_style.push(draw_ir_style_prop("font-size-milli", "{size_milli}"))
     resolved
 
 fn _html_draw_ir_overlay_rect(
@@ -1689,7 +1703,7 @@ fn _html_draw_ir_svg_shape_commands(
 
 fn _html_draw_ir_replaced_media_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
-    i: i32, clip: ClipRect
+    i: i32, clip: ClipRect, vector_fonts: bool
 ) -> [DrawIrCommand]:
     val node = nodes[i]
     if node.tag == "svg":
@@ -1778,6 +1792,38 @@ fn _html_draw_ir_replaced_media_commands(
             box_x, box_y, 0, 0, layout_device_scale(), clip
         ):
             commands.push(part)
+        if vector_fonts and box_w >= 250 and box_h >= 24:
+            # Chrome 159 time display: `0:00` and `/ 0:00` are two boxes, 14px
+            # Liberation Sans #1f1f1f on a `normal` line centred in the strip;
+            # the current time starts at x 47, the remaining time at 78.25
+            # (two Chrome spans at these offsets reproduce its 4x pixels exactly).
+            var label_st = st
+            label_st.font_family = "Liberation Sans"
+            label_st.font_size = 14
+            label_st.font_size_milli = 0
+            label_st.line_height_px = 0
+            label_st.bold = false
+            label_st.font_style_italic = false
+            label_st.letter_spacing_milli = 0
+            label_st.word_spacing_milli = 0
+            label_st.fg = web_argb(31, 31, 31)
+            val label_clip = draw_ir_rect_bounds(clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0)
+            val label_y = box_y + (box_h - style_line_h(label_st) + 1) / 2
+            val label_dy = centred_line_device_dy(label_st, box_h)
+            val parts: [(text, text, i32, i32)] = [("current", "0:00", 47, 0), ("remaining", "/ 0:00", 78, 250)]
+            # cpu-lane-loop-ok: the two fixed time-display runs of one <audio controls>
+            for part in parts:
+                var props: [DrawIrStyleProp] = []
+                if part.3 != 0:
+                    props.push(draw_ir_style_prop("pen-origin-milli", "{part.3}"))
+                var label = _html_draw_ir_resolved_text_command(
+                    nodes, i, node, label_st, component_id + "_audio_time_" + part.0,
+                    box_x + part.2, label_y, part.1, props, label_clip, true
+                )
+                if label_dy != 0:
+                    label.computed_style.push(draw_ir_style_prop("device-y-offset", "{label_dy}"))
+                label.parent_id = component_id
+                commands.push(label)
     commands
 
 # Chrome 159 checkbox / radio: the glyph is a square of side min(w, h), centred

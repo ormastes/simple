@@ -58,7 +58,7 @@ fn primary_inspect_entry_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
     if entry.adopted:
         # Only a cleaned session awaiting publication can be pending here;
         # it is never read or independently cleaned by the binding owner.
-        if entry.session != nil:
+        if entry.session.is_some():
             val published = smux_pane_primary_progress_v4(request.pane_id, entry.session_identity, entry.session.unwrap())
             if published.is_err():
                 entry.code = published.unwrap_err()
@@ -79,10 +79,10 @@ fn primary_inspect_entry_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
             return primary_remember_v4(current, index, entry)
         if not container_primary_attach_native_cleaned_v1(session.unwrap()):
             return primary_remember_v4(current, index, entry)
-        if entry.helper == nil:
+        if entry.helper.is_none():
             entry.code = "primary-helper-provenance-missing"
             return primary_remember_v4(current, index, entry)
-        if entry.settlement_ack == nil:
+        if entry.settlement_ack.is_none():
             val retained = HostPrimaryAttachTurnV1(local: current.local, helper: entry.helper.unwrap(), plan: entry.plan,
                 session: Some(session.unwrap()), consumption_attempted: true)
             val settled = host_primary_attach_settle_v1(retained)
@@ -91,24 +91,24 @@ fn primary_inspect_entry_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
             entry.status = "helper-cleaned-awaiting-release"
             entry.code = settled.error
             if settled.settled: entry.settlement_ack = settled.ack
-            if entry.session != nil:
+            if entry.session.is_some():
                 val published = smux_pane_primary_progress_v4(request.pane_id, entry.session_identity, entry.session.unwrap())
                 if published.is_err():
                     entry.code = published.unwrap_err()
                     return primary_remember_v4(current, index, entry)
                 entry.session = nil
-        if entry.settlement_ack == nil: return primary_remember_v4(current, index, entry)
+        if entry.settlement_ack.is_none(): return primary_remember_v4(current, index, entry)
         val acknowledged = smux_pane_primary_settlement_v4(request.pane_id, entry.session_identity,
             entry.native_identity, entry.settlement_ack.unwrap())
         if acknowledged.is_err():
             entry.code = acknowledged.unwrap_err()
             return primary_remember_v4(current, index, entry)
         entry.adopted = false
-    elif entry.recovered != nil:
+    elif entry.recovered.is_some():
         # Refresh metadata/current journal before any explicit recovered cleanup.
         val recovered = host_primary_attach_recover_v1(current.local.capacity, request.helper_operation_id)
         current.local.capacity = recovered.owner
-        if recovered.recovered == nil:
+        if recovered.recovered.is_none():
             entry.code = recovered.error
             return primary_remember_v4(current, index, entry)
         val exact = recovered.recovered.unwrap()
@@ -125,11 +125,11 @@ fn primary_inspect_entry_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
         val settled = host_primary_attach_settle_recovered_v1(current.local.capacity, exact)
         current.local.capacity = settled.owner
         entry.recovered = settled.retained
-        if not settled.settled or settled.ack == nil:
+        if not settled.settled or settled.ack.is_none():
             entry.code = settled.error
             return primary_remember_v4(current, index, entry)
         entry.settlement_ack = settled.ack
-    elif entry.helper != nil:
+    elif entry.helper.is_some():
         var retained = HostPrimaryAttachTurnV1(local: current.local, helper: entry.helper.unwrap(), plan: entry.plan,
             session: entry.session, cleanup_spawn: entry.cleanup_spawn, consumption_attempted: true)
         if cleanup:
@@ -145,7 +145,7 @@ fn primary_inspect_entry_v4(owner: SmuxRuntimeBindingOwnerV3, index: int,
         current.local = settled.retained.local
         entry.session = settled.retained.session
         entry.cleanup_spawn = settled.retained.cleanup_spawn
-        if not settled.settled or settled.ack == nil:
+        if not settled.settled or settled.ack.is_none():
             entry.code = settled.error
             return primary_remember_v4(current, index, entry)
         entry.settlement_ack = settled.ack
@@ -174,7 +174,7 @@ pub fn smux_primary_inspect_v4(owner: SmuxRuntimeBindingOwnerV3, uid: text,
     if planned.is_err(): return smux_primary_reply_v4(current, uid, "unconfirmed", planned.unwrap_err())
     val recovered = host_primary_attach_recover_v1(current.local.capacity, request.unwrap().target.helper_operation_id)
     current.local.capacity = recovered.owner
-    if recovered.recovered == nil:
+    if recovered.recovered.is_none():
         if not current.local.capacity.journal.operations.contains_key(request.unwrap().target.helper_operation_id):
             return smux_primary_reply_v4(current, uid, "planned", "primary-helper-not-prepared",
                 planned.unwrap().request_digest, planned.unwrap().identity.binding_digest)

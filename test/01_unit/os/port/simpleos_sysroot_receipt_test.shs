@@ -1,0 +1,144 @@
+#!/bin/sh
+# Receipt discrimination with a real Clang-produced ELF32 object and archive.
+# This checks provenance guards; the fixture is not a qualified SimpleOS SDK.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
+. "$repo/scripts/check/lib/simpleos-sysroot-receipt.shs"
+cc=${CC:-clang}; ar=${AR:-llvm-ar}
+command -v "$cc" >/dev/null 2>&1 && command -v "$ar" >/dev/null 2>&1 || exit 2
+case "$("$cc" --version | sed -n '1p')" in *clang*) ;; *) echo 'ERROR: fixture requires Clang'; exit 2 ;; esac
+mkdir -p "$repo/build/verify"
+fixture=$(mktemp -d "$repo/build/verify/sysroot-receipt.XXXXXX")
+root=$fixture/source; sdk=$fixture/sdk
+mkdir -p "$root/src/os/libc/include" "$root/scripts/check/lib" "$root/scripts/os" "$sdk/lib" "$sdk/share/simpleos"
+cp "$repo/scripts/check/lib/simpleos-sysroot-receipt.shs" "$root/scripts/check/lib/"
+cp "$repo/scripts/os/simpleos-sysroot-32.shs" "$root/scripts/os/"
+printf '#define SDK_VALUE 60\n' > "$root/src/os/libc/include/fixture.h"
+printf '#include "fixture.h"\nint sdk_fixture(void) { return SDK_VALUE; }\n' > "$root/src/os/libc/simpleos_libc.c"
+printf '%s\n' 'fixture build recipe' > "$root/src/os/libc/Makefile"
+printf '%s\n' "--target=i686-unknown-none-elf -ffreestanding -I $root/src/os/libc/include -c $root/src/os/libc/simpleos_libc.c -o $sdk/lib/crt0.o" > "$fixture/flags.txt"
+simpleos_sdk_capture_inputs "$root" i686 scripts/os/simpleos-sysroot-32.shs "$fixture/prebuild.sdn"
+"$cc" --target=i686-unknown-none-elf -ffreestanding -I "$root/src/os/libc/include" \
+    -c "$root/src/os/libc/simpleos_libc.c" -o "$sdk/lib/crt0.o" > "$fixture/compile.log" 2>&1
+"$ar" rcsD "$sdk/lib/libsimpleos_c.a" "$sdk/lib/crt0.o"
+cp "$sdk/lib/libsimpleos_c.a" "$sdk/lib/libsimpleos_all.a"
+printf 'ENTRY(sdk_fixture)\n' > "$sdk/share/simpleos/simpleos.ld"
+printf 'i686-unknown-simpleos\n' > "$sdk/share/simpleos/target-triple.txt"
+simpleos_sdk_write "$root" "$sdk" i686 scripts/os/simpleos-sysroot-32.shs "$cc" "$ar" "$fixture/flags.txt" "$fixture/prebuild.sdn"
+if [ "${1:-}" = --fixture-only ]; then
+    printf 'fixture=%s\n' "$fixture"
+    exit 0
+fi
+receipt=$sdk/share/simpleos/sysroot-receipt.sdn
+cp "$receipt" "$fixture/receipt.saved"
+checked=0
+reject() {
+    label=$1; shift
+    if "$@" > "$fixture/$label.log" 2>&1; then
+        echo "FAIL: accepted $label; evidence=$fixture" >&2; exit 1
+    fi
+    checked=$((checked + 1))
+}
+accept() {
+    label=$1; shift
+    if ! "$@" > "$fixture/$label.log" 2>&1; then
+        echo "FAIL: refused $label; evidence=$fixture" >&2; exit 1
+    fi
+    checked=$((checked + 1))
+}
+aggregate_binding_case() {
+    cp "$sdk/share/simpleos/sysroot-artifacts.sdn" "$fixture/aggregate-artifacts.saved"
+    cp "$sdk/share/simpleos/sysroot-members.sdn" "$fixture/aggregate-members.saved"
+    awk 'index($0,"\"lib/libsimpleos_all.a\"")==0' "$fixture/aggregate-artifacts.saved" > "$sdk/share/simpleos/sysroot-artifacts.sdn"
+    awk 'index($0,"\"lib/libsimpleos_all.a/")==0' "$fixture/aggregate-members.saved" > "$sdk/share/simpleos/sysroot-members.sdn"
+    aggregate_hash=$(simpleos_sdk_hash "$sdk/share/simpleos/sysroot-artifacts.sdn")
+    member_hash=$(simpleos_sdk_hash "$sdk/share/simpleos/sysroot-members.sdn")
+    # Rebind both ledgers, leaving the actually consumed archive installed.
+    # An ordinary tamper/hash check cannot detect this omitted-input case.
+    awk -v a="$aggregate_hash" -v m="$member_hash" '
+        /^artifacts_sha256:/ {print "artifacts_sha256: \"" a "\""; next}
+        /^members_sha256:/ {print "members_sha256: \"" m "\""; next}
+        {print}' "$fixture/receipt.saved" > "$receipt"
+    reject unlisted-consumed-aggregate simpleos_sdk_verify "$root" "$sdk" i686
+    cp "$fixture/aggregate-artifacts.saved" "$sdk/share/simpleos/sysroot-artifacts.sdn"
+    cp "$fixture/aggregate-members.saved" "$sdk/share/simpleos/sysroot-members.sdn"
+    cp "$fixture/receipt.saved" "$receipt"
+}
+script_binding_case() {
+    cp "$sdk/share/simpleos/simpleos.ld" "$fixture/script-override.ld"
+    accept identical-script-override simpleos_sdk_verify "$root" "$sdk" i686 "$sdk/share/simpleos" "$fixture/script-override.ld"
+    printf 'ENTRY(different_entry)\n' > "$fixture/script-override.ld"
+    accept distinct-caller-script-override simpleos_sdk_verify "$root" "$sdk" i686 "$sdk/share/simpleos" "$fixture/script-override.ld"
+}
+if [ "${1:-}" = --caller-script-only ]; then
+    script_binding_case
+    printf 'PASS: %s caller script compatibility cases; evidence=%s\n' "$checked" "$fixture"
+    exit 0
+fi
+if [ "${1:-}" = --consumed-inputs-only ]; then
+    aggregate_binding_case
+    script_binding_case
+    printf 'schema: simpleos-sysroot-consumed-input-test-v1\nchecks: %s\nstatus: pass\nqualification: provenance-only\n' "$checked" > "$fixture/result.sdn"
+    printf 'PASS: %s consumed aggregate/script guard cases; evidence=%s\n' "$checked" "$fixture"
+    exit 0
+fi
+if [ "${1:-}" = --prepublish-target-only ]; then
+    cp "$sdk/lib/crt0.o" "$fixture/crt.saved"
+    printf '\002' | dd of="$sdk/lib/crt0.o" bs=1 seek=4 conv=notrunc 2>/dev/null
+    reject wrong-target-before-publish simpleos_sdk_write "$root" "$sdk" i686 scripts/os/simpleos-sysroot-32.shs "$cc" "$ar" "$fixture/flags.txt" "$fixture/prebuild.sdn"
+    [ "$(simpleos_sdk_hash "$receipt")" = "$(simpleos_sdk_hash "$fixture/receipt.saved")" ] || { echo 'FAIL: invalid target replaced the admitted receipt'; exit 1; }
+    cp "$fixture/crt.saved" "$sdk/lib/crt0.o"
+    printf 'PASS: target mismatch refused before receipt publication; evidence=%s\n' "$fixture"
+    exit 0
+fi
+accept intact-sdk simpleos_sdk_verify "$root" "$sdk" i686
+accept intact-builder simpleos_sdk_verify_builder "$root" "$sdk" i686 "$cc" "$ar" "$fixture/flags.txt"
+mv "$receipt" "$fixture/receipt.missing"
+reject missing-receipt simpleos_sdk_verify "$root" "$sdk" i686
+mv "$fixture/receipt.missing" "$receipt"
+printf 'status: built\n' >> "$receipt"
+reject duplicate-field simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/receipt.saved" "$receipt"
+reject wrong-target simpleos_sdk_verify "$root" "$sdk" aarch64
+cp "$root/src/os/libc/simpleos_libc.c" "$fixture/source.saved"
+printf '\nint new_write_abi(void) { return 32; }\n' >> "$root/src/os/libc/simpleos_libc.c"
+reject stale-libc-source simpleos_sdk_verify "$root" "$sdk" i686
+reject source-changed-during-build simpleos_sdk_write "$root" "$sdk" i686 scripts/os/simpleos-sysroot-32.shs "$cc" "$ar" "$fixture/flags.txt" "$fixture/prebuild.sdn"
+[ "$(simpleos_sdk_hash "$receipt")" = "$(simpleos_sdk_hash "$fixture/receipt.saved")" ] || { echo 'FAIL: failure published a new receipt'; exit 1; }
+cp "$fixture/source.saved" "$root/src/os/libc/simpleos_libc.c"
+cp "$root/src/os/libc/include/fixture.h" "$fixture/header.saved"
+printf '#define SDK_VALUE 32\n' > "$root/src/os/libc/include/fixture.h"
+reject stale-header simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/header.saved" "$root/src/os/libc/include/fixture.h"
+cp "$root/scripts/os/simpleos-sysroot-32.shs" "$fixture/recipe.saved"
+printf '\n# changed recipe\n' >> "$root/scripts/os/simpleos-sysroot-32.shs"
+reject stale-recipe simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/recipe.saved" "$root/scripts/os/simpleos-sysroot-32.shs"
+cp "$root/scripts/check/lib/simpleos-sysroot-receipt.shs" "$fixture/owner.saved"
+printf '\n# changed validator owner\n' >> "$root/scripts/check/lib/simpleos-sysroot-receipt.shs"
+reject stale-owner simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/owner.saved" "$root/scripts/check/lib/simpleos-sysroot-receipt.shs"
+cp "$sdk/lib/libsimpleos_c.a" "$fixture/archive.saved"
+printf x >> "$sdk/lib/libsimpleos_c.a"
+reject changed-archive simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/archive.saved" "$sdk/lib/libsimpleos_c.a"
+cp "$sdk/lib/crt0.o" "$fixture/crt.saved"
+printf x >> "$sdk/lib/crt0.o"
+reject changed-crt simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/crt.saved" "$sdk/lib/crt0.o"
+cp "$sdk/share/simpleos/sysroot-members.sdn" "$fixture/members.saved"
+printf '\n' >> "$sdk/share/simpleos/sysroot-members.sdn"
+reject changed-member-ledger simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/members.saved" "$sdk/share/simpleos/sysroot-members.sdn"
+printf '%s\n' '--changed-compiler-flags' > "$fixture/other-flags.txt"
+reject changed-builder-flags simpleos_sdk_verify_builder "$root" "$sdk" i686 "$cc" "$ar" "$fixture/other-flags.txt"
+reject changed-builder-tool simpleos_sdk_verify_builder "$root" "$sdk" i686 "$ar" "$ar" "$fixture/flags.txt"
+sed 's|^compiler_path: .*|compiler_path: /foreign/build-host/clang|' "$fixture/receipt.saved" > "$receipt"
+accept foreign-producer-sdk simpleos_sdk_verify "$root" "$sdk" i686
+cp "$fixture/receipt.saved" "$receipt"
+[ "$(simpleos_sdk_field "$receipt" stdio_source_profile)" = legacy-serial-unqualified ] || exit 1
+[ "$(simpleos_sdk_field "$receipt" runtime_qualification)" = none ] || exit 1
+aggregate_binding_case
+script_binding_case
+printf 'schema: simpleos-sysroot-receipt-test-v1\nchecks: %s\nstatus: pass\nqualification: provenance-only\n' "$checked" > "$fixture/result.sdn"
+printf 'PASS: %s sysroot receipt guard cases; evidence=%s\n' "$checked" "$fixture"

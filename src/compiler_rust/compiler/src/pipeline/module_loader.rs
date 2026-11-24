@@ -2816,6 +2816,7 @@ fn load_module_with_imports_internal(
     }
 
     let mut source = read_module_source_text_cached(&path)?;
+    let raw_source = (target_arch == simple_common::target::TargetArch::host()).then(|| source.clone());
 
     // Bootstrap leniency: older sources use optional `text?` types which the
     // current parser treats as a bare identifier. During early bootstrap we
@@ -2848,6 +2849,11 @@ fn load_module_with_imports_internal(
     let mut module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
+    // Hand this parse to the cross-lane cache so HIR import loading does not
+    // parse the same file again (375 second parses on the web renderer).
+    if let Some(raw) = raw_source {
+        crate::interpreter::shared_source_seed(&path, raw, &source, &module);
+    }
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
     // Private fn names must be known before any importer's flattened top-level
     // initializer runs, and to the JIT lane, which never runs the interpreter

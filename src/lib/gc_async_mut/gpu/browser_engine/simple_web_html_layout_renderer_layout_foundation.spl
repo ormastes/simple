@@ -20,7 +20,7 @@ use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_langu
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli, font_milli_of}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, MARGIN_NEG_PX_BASE}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{IntrinsicWidthResult, LineWrapRanges, char_w, text_advance, style_char_w, style_text_advance, style_space_advance, line_h, style_line_h, _lay_style_run_byte_advances_inner, utf8_encoded_len, next_codepoint_start, byte_advances_range_width, style_text_line_advance_width_with, style_font_is_monospace, grid_item_is_replaced, replaced_default_box_w, FORM_CONTROL_UA_FONT_TRUNCATED_PX, FORM_CONTROL_UA_FONT_NUM, FORM_CONTROL_UA_FONT_DEN, FORM_CONTROL_MEASURE_MAX_PX, FORM_CONTROL_MEASURE_OVERSAMPLE, form_control_label_width_px, form_control_text_children_label_px, form_control_button_label_correction_px, form_control_first_text_child, form_control_label_text_node, replaced_default_is_content_size, replaced_specified_box_h, SVG_RATIO_MAX_BOX_PX, svg_ratio_view_box_milli, svg_ratio_scaled_px, replaced_auto_box_w, INPUT_COL_ADVANCE_PX, INPUT_CONTENT_INTERCEPT_PX, TEXTAREA_COL_ADVANCE_PX, TEXTAREA_CONTENT_INTERCEPT_PX, form_control_face_identity, form_control_intrinsic_content_w, form_control_intrinsic_content_device_w, form_control_content_w_for_face, form_control_cols, inline_replaced_predicted_width, _lay_intrinsic_text_width_inner, inline_subtree_edge_is_space, text_control_auto_outer_w, _lay_flex_item_max_content_width_inner, _table_text_min_content_width, _lay_flex_wrap_auto_base_width_inner, _lay_style_measured_run_advance_inner, codepoint_is_space, text_starts_with_collapsible_space, text_ends_with_collapsible_space, resolved_space_advance, _lay_inline_text_advance_width_inner, text_ink_y_offset, text_ink_x_offset, web_wrap_line_end, text_line_advance_width, style_text_line_advance_width, html_text_paint_fully_transparent, text_line_aligned_x, text_line_needs_paint_width, text_rtl_run_starts_box, _lay_ellipsize_text_for_width_inner, text_first_line_dx_at, text_line_box_dx, text_line_box_w, text_run_aligns_line_left, text_last_line_advance, compute_style_wrap_ranges_float_band, _lay_compute_wrap_ranges_inner, _lay_compute_style_wrap_ranges_inner, compute_style_wrap_ranges_first_line, _lay_compute_style_wrap_ranges_first_inner, first_word_advance_width, word_end_byte, css_outer_width, constrained_outer_width, cursor_advance_px, cursor_advance_frac, style_run_byte_advances, style_measured_run_advance, inline_text_advance_width, inline_text_width_after_lead, compute_style_wrap_ranges, compute_wrap_ranges, intrinsic_text_width, flex_item_max_content_width, flex_wrap_auto_base_width, ellipsize_text_for_width, layout_set_images, img_resource_auto_outer_h, img_resource_auto_outer_w}
 
 # A `<summary>`'s disclosure marker (Chrome 159 list_marker.cc): the symbol
@@ -456,7 +456,7 @@ fn inline_middle_half_x_height_64(st: Style) -> i32:
         return ((scaled + per_px / 2) / per_px) as i32
     (style_baseline_offset(st) * 56 * 32 + 50) / 100
 
-fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32]) -> InlineLineAlignment:
+fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], line_y: i32, line_height: i32, bx: [i32], by: [i32], bh: [i32], line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0) -> InlineLineAlignment:
     var out_bx = bx
     var out_by = by
     if nodes.len() == 0:
@@ -555,7 +555,7 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         line_descent64 = middle_descent64
     var device_excess = 0
     if g_layout_device_scale > 1:
-        device_excess = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64)
+        device_excess = align_inline_line_device_dy(child_index, line_style, html_nodes, nodes, margin_ts, margin_bs, styles, bh, ascent, descent, any_valign, middle_ascent64, line_frac_milli, origin_frac_milli)
     var resolved_height = (line_ascent64 + line_descent64 + 32) / 64
     if line_height > resolved_height:
         resolved_height = line_height
@@ -807,7 +807,9 @@ pub fn inline_content_area_height(st: Style) -> i32:
 fn style_decoration_thickness_px(st: Style) -> i32:
     if st.text_decoration_thickness_px > 0:
         return st.text_decoration_thickness_px
-    val auto_px = (st.font_size * 733 + 5000) / 10000
+    # Chrome 159 `auto`: floor(font-size / 10), at least 1 (Liberation Sans at
+    # 1x: 16/19 -> 1, 20/24 -> 2, 30 -> 3, 40 -> 4, 50 -> 5, 64 -> 6 rows).
+    val auto_px = st.font_size / 10
     if auto_px < 1: 1 else: auto_px
 
 # [ascent, descent] of the style's face in whole px, or [] without a measured face.
@@ -933,24 +935,55 @@ pub fn flex_item_text_frac_delta_milli_px(nodes: [HNode], styles: [Style], child
     item sits from the whole-px `intrinsic_w` the row sized it with, when the
     item's content is one text run: Chrome 159 keeps `HTML` at 43.5625 px in
     a row of text items, so the next item starts at 43.5625 and `CSS Paint`
-    (73.8125) ends at 117, not 118. 0 for any other content."""
-    var run = -1
+    (73.8125) ends at 117, not 118. An item whose content is block boxes
+    (an `ol` of `li`s) takes the fraction of the widest child's own run:
+    Chrome starts the `ul` after `<ol><li>Ordered item</li>...` at 185.25.
+    0 for any other content."""
+    val own = _item_run_width_frac(nodes, styles, child_index, item)
+    val inset = st.pad_l + st.pad_r + st.border_l + st.border_r
+    if own[0] >= 0:
+        return if intrinsic_w == own[0] + inset: own[1] else: 0
+    var best_w = -1
+    var best_frac = 0
     var c = child_index.first_child[item]
     while c >= 0:  # cpu-lane-loop-ok: one pass over one flex item's direct children; bound is that child list
-        if nodes[c].tag != "#text":
-            return 0
-        if nodes[c].text_trimmed.len() > 0:
-            if run >= 0:
+        if nodes[c].tag == "#text":
+            if nodes[c].text_trimmed.len() > 0:
                 return 0
+        else:
+            val cs = styles[c]
+            val run = _item_run_width_frac(nodes, styles, child_index, c)
+            if run[0] < 0:
+                return 0
+            val w = run[0] + cs.pad_l + cs.pad_r + cs.border_l + cs.border_r + cs.margin_l + cs.margin_r
+            if w > best_w or (w == best_w and run[1] > best_frac):
+                best_w = w
+                best_frac = run[1]
+        c = child_index.next_sibling[c]
+    if best_w < 0 or intrinsic_w != best_w + inset:
+        return 0
+    best_frac
+
+# [whole px width, milli-px fraction] of the one text run that is `item`'s
+# whole content (its outside `::marker` adds no width), [-1, 0] otherwise.
+fn _item_run_width_frac(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32) -> [i32]:
+    var run = -1
+    var c = child_index.first_child[item]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over one box's direct children; bound is that child list
+        if nodes[c].tag != "#text" and nodes[c].tag != "::marker":
+            return [-1, 0]
+        if nodes[c].tag == "#text" and nodes[c].text_trimmed.len() > 0:
+            if run >= 0:
+                return [-1, 0]
             run = c
         c = child_index.next_sibling[c]
     if run < 0:
-        return 0
+        return [-1, 0]
     val rst = styles[run]
-    if rst.resolved_font_width_milli < 0 or intrinsic_w != rst.resolved_font_width + st.pad_l + st.pad_r + st.border_l + st.border_r:
-        return 0
+    if rst.resolved_font_width_milli < 0:
+        return [-1, 0]
     val frac = layout_unit_ceil_milli(rst.resolved_font_width_milli) - (rst.resolved_font_width as i64) * 1000
-    if frac > 500 or frac < -500: 0 else: frac as i32
+    [rst.resolved_font_width, if frac > 500 or frac < -500: 0 else: frac as i32]
 
 # reason: node index, run text and whole-px / milli-px widths are layout scalars.
 # @allow(primitive_api)
@@ -1432,7 +1465,8 @@ pub fn inline_pen_err_carry_px(err_milli: i64) -> i32:
 # advanced past it, or INLINE_PEN_ERR_UNKNOWN. Exact only for what this
 # layout measures from the face: a one-line `#text` run, and a plain inline
 # element (no padding/border) holding exactly one such run -- `<code>audio
-# </code>` is 48.17 px in Chrome, 48 here. Anything else (atomic boxes,
+# </code>` is 48.17 px in Chrome, 48 here -- and a default checkbox / radio
+# (a whole 13 px box). Anything else (other atomic boxes,
 # wrapped runs, spacing-adjusted runs) is unknown, so later runs on the line
 # keep the integer pen.
 # reason: node index into the per-node layout tables.
@@ -1454,6 +1488,13 @@ pub fn inline_item_width_err_milli(nodes: [HNode], styles: [Style], child_index:
         # width=60>` then a space then an svg: the svg at 64.45, not 64).
         if inline_replaced_width_is_exact(nodes[c], st, bw[c]):
             return 0
+        # A default checkbox / radio is a whole 13 px box: the label run
+        # after it keeps the line's pen fraction (`<input type=checkbox>
+        # Enabled`: Chrome paints `Enabled` from 34.45, not 34).
+        if nodes[c].tag == "input" and st.width_px <= 0:
+            val input_type = attr_value(nodes[c].attrs_raw, "type").trim().lower()
+            if input_type == "checkbox" or input_type == "radio":
+                return 0
         if st.display != "inline" or grid_item_is_replaced(nodes[c]):
             return INLINE_PEN_ERR_UNKNOWN
         if st.pad_l != 0 or st.pad_r != 0 or st.border_l != 0 or st.border_r != 0:
@@ -2004,6 +2045,22 @@ pub fn form_control_label_device_dy(node: HNode, st: Style) -> i32:
         return 0
     form_control_device_baseline_delta(node, st, k, 0)
 
+# A `normal` line of `st` centred in a box of box_h CSS px (the media
+# controls' time text). Chrome centres it in DEVICE px with the half px
+# rounding down the page (14px Liberation Sans at k=4: (216 - 63) / 2 = 76.5
+# -> 77, baseline 128); the painter takes k x the CSS-centred top plus the
+# device face ascent (76 + 51 = 127). Device px the text moves; 0 at k == 1.
+# reason: CSS box height in, device-px delta out; both are layout scalars.
+# @allow(primitive_api)
+pub fn centred_line_device_dy(st: Style, box_h: i32) -> i32:
+    val k = g_layout_device_scale
+    val css = style_face_ascent_descent(st)
+    if k <= 1 or css.len() != 2:
+        return 0
+    val chrome = (k * box_h - style_device_line_h_milli(st, k) / 1000 + 1) / 2 + inline_line_strut_baseline_offset_device(st, k)
+    val painter = k * ((box_h - style_line_h(st) + 1) / 2) + k * css[0] - text_device_painter_dy(st, k)
+    chrome - painter
+
 # Device-px height of an auto-height form control minus k x its CSS height
 # (Chrome 159, 13.333px Liberation Sans, k = 1..4): the `normal` line is the
 # face's per-part rounded sum at the DEVICE size (15, 31, 45, 61), a textarea
@@ -2030,7 +2087,7 @@ pub fn form_control_device_extra_h(node: HNode, st: Style, rows: i32) -> i32:
 # everything else.
 # Returns the line's device height minus k x (css_ascent + css_descent), 0 for
 # a line with a valign box.
-fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32) -> i32:
+fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32, line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0) -> i32:
     val k = g_layout_device_scale
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
     var descent = style_device_line_h_milli(line_style, k) / 1000 - ascent
@@ -2079,14 +2136,18 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     if middle_ascent > ascent:
         ascent = middle_ascent
     val line_delta = if has_valign: 0 else: ascent - k * css_ascent
+    # The line starts at the cursor's residual; its container already carries
+    # the residual it started at (origin), so only the difference moves the
+    # boxes (an svg after an h2 with 19.92px margins: device row 439, not 440).
+    val line_start_dy = box_device_top_px(line_frac_milli * k) - box_device_top_px(origin_frac_milli * k)
     # A control hangs from the device baseline by its own device baseline.
     i = 0
     while i < widget_nodes.len():
-        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], if has_valign: 0 else: line_delta - widget_deltas[i])
+        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], if has_valign: 0 else: line_delta - widget_deltas[i] + line_start_dy)
         i = i + 1
     i = 0
     while i < nodes.len():
-        _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, line_style, k, line_delta, 0)
+        _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, line_style, k, line_delta, if has_valign: 0 else: line_start_dy)
         i = i + 1
     if has_valign: 0 else: ascent + descent - k * (css_ascent + css_descent)
 
@@ -2550,6 +2611,10 @@ fn absolute_outer_height(node: HNode, st: Style, containing_h: i32) -> i32:
     constrained_outer_height(node, st, style_line_h(st))
 
 fn resolve_horizontal_margin_px(margin_px: i32, containing_w: i32) -> i32:
+    # -(MARGIN_NEG_PX_BASE + P) is a literal -P px margin; any other negative
+    # value is a percentage (see horizontal_margin_signed).
+    if margin_px <= 0 - MARGIN_NEG_PX_BASE:
+        return margin_px + MARGIN_NEG_PX_BASE
     if margin_px < 0:
         return containing_w * (0 - margin_px) / 100
     margin_px
