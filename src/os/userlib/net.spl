@@ -142,3 +142,33 @@ fn _sockaddr_bytes(addr: SockAddr) -> [u8]:
     encoded[6] = o[2]
     encoded[7] = o[3]
     encoded
+
+val _NET_SEND_RANGE_CHUNK_BYTES: u64 = 4096u64
+
+fn socket_send_range(sock: Socket, data: [u8], offset: u64, max_len: u64) -> Result<(u64, u64), text>:
+    """Send a bounded staged range beginning at `offset`.
+
+    The canonical socket adapter validates and packs the staged byte array for
+    every runtime representation.  The returned pair is (written, staged), so
+    callers can adapt the next staging window after a partial write.
+    """
+    val chunk = socket_send_range_chunk(data, offset, max_len)?
+    val written = socket_send(sock, chunk)?
+    Ok((written, chunk.len().to_u64()))
+
+fn socket_send_range_chunk(data: [u8], offset: u64, max_len: u64) -> Result<[u8], text>:
+    val length = data.len().to_u64()
+    if offset > length:
+        return Err("send offset {offset} exceeds buffer length {length}")
+    val available = length - offset
+    val bounded_max = if max_len < _NET_SEND_RANGE_CHUNK_BYTES:
+        max_len
+    else:
+        _NET_SEND_RANGE_CHUNK_BYTES
+    val chunk_len = if available < bounded_max: available else: bounded_max
+    var chunk: [u8] = []
+    var index = 0u64
+    while index < chunk_len:
+        chunk.push(data[offset + index])
+        index = index + 1u64
+    Ok(chunk)
