@@ -1354,7 +1354,7 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, line_boxes: [i32
                 endv = last_space
             elif not space_hangs and not may_break_in_word and endv < n:
                 endv = word_end_byte(tb, start, n)
-            endv = wrap_back_off_exact(txt, tb, by, start, endv, max_width, st)
+            endv = wrap_back_off_exact(txt, tb, by, start, endv, max_width, 0, st)
             if endv == start:
                 endv = next_codepoint_start(txt, start)
         else:
@@ -1418,7 +1418,7 @@ fn _lay_compute_wrap_ranges_inner(txt: text, cpl: i32) -> LineWrapRanges:
 # offsets this loop already uses is exact, and a break can never land inside a
 # codepoint — a continuation byte adds 0 and therefore always fits.
 fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
-    _lay_compute_style_wrap_ranges_first_inner(txt, max_width, max_width, st, fallback_cpl)
+    _lay_compute_style_wrap_ranges_first_inner(txt, max_width, max_width, st, fallback_cpl, 0, 0)
 
 # `first_width` is the width available to line 0 -- the remainder of a line
 # box the run shares with the inline siblings before it. Every later line gets
@@ -1427,7 +1427,16 @@ fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fa
 # The caller must have checked that the run has a per-byte advance table
 # (`style_run_byte_advances`); without one this degrades to the uniform wrap.
 fn compute_style_wrap_ranges_first_line(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
-    _lay_compute_style_wrap_ranges_first_inner(txt, first_width, max_width, st, fallback_cpl)
+    _lay_compute_style_wrap_ranges_first_inner(txt, first_width, max_width, st, fallback_cpl, 0, 0)
+
+# As `compute_style_wrap_ranges_first_line` for a box whose exact width is
+# `max_width` px plus `frac_milli` thousandths (its LayoutUnit remainder,
+# `box_frac_w`): a line as wide as the whole box fits against the exact width
+# (Chrome 159: `ll ll ll`, 30.21875 px, fits a `width:30.25px` box). A
+# mid-line first line has `first_width` px plus `first_frac_milli` (signed:
+# the box remainder minus the exact pen error where the run starts).
+fn compute_style_wrap_ranges_exact(txt: text, first_width: i32, max_width: i32, frac_milli: i32, first_frac_milli: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    _lay_compute_style_wrap_ranges_first_inner(txt, first_width, max_width, st, fallback_cpl, frac_milli, first_frac_milli)
 
 # Chrome 159 fits a line when its exact run width, rounded up to a LayoutUnit
 # (1/64 px), is at most the available width. The byte advances are whole px
@@ -1435,7 +1444,9 @@ fn compute_style_wrap_ranges_first_line(txt: text, first_width: i32, max_width: 
 # sum EQUALS `width` can be wider than it: `The quick brown` at 16 px sums to
 # 117 but is 117.39 px, and Chrome breaks it in a 117 px box. Such a line is
 # measured exactly and, if it overflows, ends at its previous space instead.
-fn wrap_back_off_exact(txt: text, tb: [u8], by: [i32], start: i32, endv: i32, width: i32, st: Style) -> i32:
+# With a signed remainder `frac_milli` the available width is `width` +
+# frac, and every line whose sum lies within 1 px of it is measured.
+fn wrap_back_off_exact(txt: text, tb: [u8], by: [i32], start: i32, endv: i32, width: i32, frac_milli: i32, st: Style) -> i32:
     if st.resolved_font_width_milli < 0 or endv <= start:
         return endv
     var used = 0
@@ -1443,21 +1454,23 @@ fn wrap_back_off_exact(txt: text, tb: [u8], by: [i32], start: i32, endv: i32, wi
     while k < endv:
         used = used + by[k]
         k = k + 1
-    if used != width:
+    val avail_milli = (width as i64) * 1000 + (frac_milli as i64)
+    val used_milli = (used as i64) * 1000
+    if used_milli <= avail_milli - 1000 or used_milli >= avail_milli + 1000:
         return endv
     val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
     val m = resolve_font_metrics_with_language_milli(family, txt.slice(start, endv), font_milli_of(st.font_size, st.font_size_milli), "")
     if not m.valid or m.identity != st.resolved_font_identity or m.width_milli < 0:
         return endv
     val lu64 = (m.width_milli * 64 + 999) / 1000
-    if lu64 <= (width as i64) * 64:
+    if lu64 * 1000 <= avail_milli * 64:
         return endv
     var p = endv - 1
     while p > start and tb[p] != 32:
         p = p - 1
     if p > start: p else: endv
 
-fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32, frac_milli: i32, first_frac_milli: i32) -> LineWrapRanges:
     # Cheap gates first: building `by` decodes the whole run, so it must not run
     # for a style that cannot use it anyway.
     if st.resolved_font_identity == "" or max_width <= 0:
@@ -1480,7 +1493,11 @@ fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_w
         var used = 0
         var last_space = -1
         val line_width = if start == 0: first_width else: max_width
-        while endv < n and used + by[endv] <= line_width:
+        val line_frac = if start == 0 and first_width != max_width: first_frac_milli else: frac_milli
+        # Whole-px sums are within 1 px of the exact width: take every byte
+        # that may still fit the exact width; wrap_back_off_exact decides.
+        val fit_width = (((line_width as i64) * 1000 + (line_frac as i64) + 999) / 1000) as i32
+        while endv < n and used + by[endv] <= fit_width:
             used = used + by[endv]
             if tb[endv] == 32:
                 last_space = endv
@@ -1510,7 +1527,7 @@ fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_w
             # No break opportunity inside this line: take the whole word, even
             # though it overflows, and break at the space that ends it.
             endv = word_end_byte(tb, start, n)
-        endv = wrap_back_off_exact(txt, tb, by, start, endv, line_width, st)
+        endv = wrap_back_off_exact(txt, tb, by, start, endv, line_width, line_frac, st)
         if endv == start:
             # Progress guard: `start` is a space whose own advance already
             # exceeds `max_width` (a pen remainder of a pixel or two), so the

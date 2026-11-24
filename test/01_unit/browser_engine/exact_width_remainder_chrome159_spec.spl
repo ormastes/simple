@@ -1,0 +1,184 @@
+"""
+## Purpose and audience
+Purpose: Pin three exact-width cases against Chrome 159 that the abspos-wrap
+lane left open: the multi-line wrap loop must fit against a box's exact
+LayoutUnit width (not its whole px), floats / inline-blocks / in-flow blocks
+must paint their exact width in device px at k=4, and an `em`/`rem` width
+must keep its full decimal (not 0.1 em).
+Audience: web renderer layout (line fit, float / inline-block sizing, CSS
+length parse).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=k --window-size=400,300
+--screenshot`, sans-serif = Liberation Sans 16 px, line-height 20 px,
+2026-11-24; geometry from getBoundingClientRect). Boxes are `#00f` with
+transparent text. `ll ll ll` is 30.21875 px, so in a 30.25 px box
+`ll ll ll ll ll ll` breaks into two lines of three.
+
+| probe                                         | Chrome            | base (48d45e53a68) |
+|-----------------------------------------------|-------------------|--------------------|
+| abspos `width:30.25px`, 6 x `ll` (h k=1)      | 40                | 60                 |
+| abspos `width:30px` (guard)                   | 60                | 60                 |
+| in-flow `width:30.25px`                       | 40                | 60                 |
+| `float:left;width:30.25px`                    | 40                | 60                 |
+| abspos `width:30.2px` (30.1875, guard)        | 60                | 60                 |
+| abspos 30.25, first `ll` in a `<span>`        | 40                | 60                 |
+| k=4 in-flow `width:30.25px` at 80             | 320..440          | 320..439           |
+| k=4 float `width:30.25px` at 150              | 600..720          | 600..719           |
+| k=4 float `width:30.25px;height:10px` at 0    | 0..120            | 0..119             |
+| k=4 float shrink `ipsum` (42.6875) at 40      | 160..330          | 160..331           |
+| k=4 inline-block `ipsum` at 100               | 400..570          | 400..571           |
+| k=4 inline-block `width:30.25px` at 160       | 640..760          | 640..759           |
+| k=4 float `Hello world` (79.140625) at 200    | 800..1116         | 800..1115          |
+| k=1 `width:6.33em` (101.265625)               | 0..100            | 0..99              |
+| k=1 `3.7em` at 13 px (48.09375, guard)        | 180..227          | 180..227           |
+| k=4 `6.33em` / `2.55rem` (40.796875) / `3.7em` / `4.04em` (64.625) | 0..404 / 480..642 / 720..911 / 960..1218 | 0..399 / 480..639 / 720..911 / 960..1215 |
+
+Not pinned: at k=1 Chrome paints `2.55rem` as 41 px and `4.04em` as 65 px
+(round of the exact right edge); this renderer floors k=1 widths.
+"""
+
+"""
+Traceability: REQ-WEB-LAYOUT-EXACT-WIDTH-002 - wrapped lines fit against a box's exact LayoutUnit width, floats / inline-blocks / authored-width blocks paint their exact width at device scale, and em/rem widths keep their full decimal.
+"""
+# @tag: unit, browser_engine, layout, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 300
+val B: text = "background:#00f;color:transparent"
+val L: text = "ll ll ll ll ll ll"
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font-family:sans-serif\"><div style=\"position:relative;width:400px;height:300px;font-size:16px;line-height:20px\">" +
+    "<div style=\"position:absolute;left:0;top:0;width:30.25px;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:40px;top:0;width:30px;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:80px;top:0;width:60px\"><div style=\"width:30.25px;" + B + "\">" + L + "</div></div>" +
+    "<div style=\"position:absolute;left:150px;top:0;width:60px\"><div style=\"float:left;width:30.25px;" + B + "\">" + L + "</div></div>" +
+    "<div style=\"position:absolute;left:220px;top:0;width:30.2px;" + B + "\">" + L + "</div>" +
+    "<div style=\"position:absolute;left:270px;top:0;width:30.25px;" + B + "\"><span>ll</span> ll ll ll ll ll</div>" +
+    "<div style=\"position:absolute;left:0;top:100px;width:390px\"><div style=\"float:left;width:30.25px;height:10px;" + B + "\"></div></div>" +
+    "<div style=\"position:absolute;left:40px;top:100px;width:300px\"><div style=\"float:left;" + B + "\">ipsum</div></div>" +
+    "<div style=\"position:absolute;left:100px;top:100px;width:200px\"><span style=\"display:inline-block;" + B + "\">ipsum</span></div>" +
+    "<div style=\"position:absolute;left:160px;top:100px;width:200px\"><span style=\"display:inline-block;width:30.25px;height:10px;" + B + "\"></span></div>" +
+    "<div style=\"position:absolute;left:200px;top:100px;width:190px\"><div style=\"float:left;" + B + "\">Hello world</div></div>" +
+    "<div style=\"position:absolute;left:0;top:150px;width:390px\"><div style=\"width:6.33em;height:10px;" + B + "\"></div></div>" +
+    "<div style=\"position:absolute;left:120px;top:150px;width:200px\"><div style=\"width:2.55rem;height:10px;" + B + "\"></div></div>" +
+    "<div style=\"position:absolute;left:180px;top:150px;width:200px;font-size:13px\"><div style=\"width:3.7em;height:10px;" + B + "\"></div></div>" +
+    "<div style=\"position:absolute;left:240px;top:150px;width:150px\"><div style=\"width:4.04em;height:10px;" + B + "\"></div></div>" +
+    "</div></body></html>"
+
+fn _blue(v: u32) -> bool:
+    val r = ((v >> 16u32) & 0xFFu32).to_i64()
+    val b = (v & 0xFFu32).to_i64()
+    b > 128 and r < 128
+
+# Blue device rows in device column x between CSS rows y0..y1.
+fn _blue_h(px: [u32], k: i32, x: i32, y0: i32, y1: i32) -> i32:
+    var n = 0
+    var y = y0 * k
+    while y < y1 * k:
+        if _blue(px[y * W * k + x]): n = n + 1
+        y = y + 1
+    n
+
+# Heights of the six `ll` boxes (CSS columns 5, 45, 85, 155, 225, 275).
+fn _heights(px: [u32], k: i32) -> [i32]:
+    var out: [i32] = []
+    for xc in [5, 45, 85, 155, 225, 275]:
+        out.push(_blue_h(px, k, xc * k, 0, 98))
+    out
+
+fn _blue_first(px: [u32], k: i32, y: i32, x0: i32) -> i32:
+    var x = x0
+    while x < W * k and not _blue(px[y * W * k + x]):
+        x = x + 1
+    x
+
+# Last blue device column of the blue span that starts at or after x0 on
+# device row y.
+fn _blue_last(px: [u32], k: i32, y: i32, x0: i32) -> i32:
+    var x = _blue_first(px, k, y, x0)
+    while x < W * k and _blue(px[y * W * k + x]):
+        x = x + 1
+    x - 1
+
+describe "exact width remainder (Chrome 159)":
+    it "AC-1: k=1 the wrap loop fits lines against the box's exact width":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        val h = _heights(px, 1)
+        step("30.25 px abspos / in-flow / float / span-led: two lines of three (40)")
+        expect(h[0]).to_equal(40)
+        expect(h[2]).to_equal(40)
+        expect(h[3]).to_equal(40)
+        expect(h[5]).to_equal(40)
+        step("30 px and 30.2 px (30.1875) guards: three lines (60)")
+        expect(h[1]).to_equal(60)
+        expect(h[4]).to_equal(60)
+
+    it "AC-2: k=4 the same boxes break as at k=1":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        expect(px.len()).to_equal((W * H * 16).to_i64())
+        val h = _heights(px, 4)
+        expect(h[0]).to_equal(160)
+        expect(h[1]).to_equal(240)
+        expect(h[2]).to_equal(160)
+        expect(h[3]).to_equal(160)
+        expect(h[4]).to_equal(240)
+        expect(h[5]).to_equal(160)
+
+    it "AC-3: k=4 floats, inline-blocks and authored-width blocks paint their exact width":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        step("in-flow / float width:30.25px on row 5: 320..440 / 600..720")
+        expect(_blue_last(px, 4, 20, 300)).to_equal(440)
+        expect(_blue_first(px, 4, 20, 580)).to_equal(600)
+        expect(_blue_last(px, 4, 20, 580)).to_equal(720)
+        step("float width:30.25px / float ipsum / inline-block ipsum / float Hello world")
+        expect(_blue_last(px, 4, 410, 0)).to_equal(120)
+        expect(_blue_first(px, 4, 410, 140)).to_equal(160)
+        expect(_blue_last(px, 4, 410, 140)).to_equal(330)
+        expect(_blue_first(px, 4, 410, 380)).to_equal(400)
+        expect(_blue_last(px, 4, 410, 380)).to_equal(570)
+        expect(_blue_first(px, 4, 410, 780)).to_equal(800)
+        expect(_blue_last(px, 4, 410, 780)).to_equal(1116)
+        step("inline-block width:30.25px: 640..760")
+        expect(_blue_first(px, 4, 440, 620)).to_equal(640)
+        expect(_blue_last(px, 4, 440, 620)).to_equal(760)
+
+    it "AC-4: em / rem widths keep their full decimal":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val p1 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("k=1 6.33em = 101.265625 -> 0..100; 3.7em at 13px guard 180..227")
+        expect(_blue_last(p1, 1, 155, 0)).to_equal(100)
+        expect(_blue_first(p1, 1, 155, 170)).to_equal(180)
+        expect(_blue_last(p1, 1, 155, 170)).to_equal(227)
+        val p4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        step("k=4 6.33em / 2.55rem / 3.7em / 4.04em")
+        expect(_blue_last(p4, 4, 620, 0)).to_equal(404)
+        expect(_blue_first(p4, 4, 620, 460)).to_equal(480)
+        expect(_blue_last(p4, 4, 620, 460)).to_equal(642)
+        expect(_blue_first(p4, 4, 620, 700)).to_equal(720)
+        expect(_blue_last(p4, 4, 620, 700)).to_equal(911)
+        expect(_blue_first(p4, 4, 620, 940)).to_equal(960)
+        expect(_blue_last(p4, 4, 620, 940)).to_equal(1218)

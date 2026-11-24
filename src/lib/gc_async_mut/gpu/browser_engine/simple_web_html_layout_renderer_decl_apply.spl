@@ -831,7 +831,7 @@ fn _apply_decls_without_grid_inner(
         else:
             # `em`/`rem` are font-relative (see _decl_font_relative_length_px):
             # `width:10em` was read as 10 px.
-            width_v = _decl_font_relative_length_px(width, font_size_v)
+            width_v = _decl_width_length_px(width, font_size_v)
             width_milli_v = _decl_width_frac_milli(width, font_size_v, width_v)
         width_zero_v = width_v == 0 and "0123456789.".contains(width.substring(0, 1))
         if width.ends_with("%") or width.ends_with("vw"):
@@ -2858,11 +2858,23 @@ fn _decl_font_relative_length_px(raw: text, font_px: i32) -> i32:
         return (font_px * parse_decimal_x10(v)) / 10
     parse_int(raw)
 
+# An authored `width` in whole px. An `em`/`rem` width keeps its full
+# decimal (Chrome 159: `6.33em` at 16 px is 101.28, floored to the
+# LayoutUnit 101.265625 -> 101), where `_decl_font_relative_length_px` reads
+# 0.1 em (100). Width only: margins and heights keep their own parse.
+fn _decl_width_length_px(raw: text, font_px: i32) -> i32:
+    val v = raw.trim().lower()
+    if not v.ends_with("em") or v.starts_with("-"):
+        return _decl_font_relative_length_px(raw, font_px)
+    val unit_px: i64 = if v.ends_with("rem"): css_cascade_root_font_px().to_i64() else: font_px.to_i64()
+    val exact = svg_number_milli(v) * unit_px
+    ((exact * 64 / 1000) / 64) as i32
+
 # The `Style.width_milli` of an authored `width` whose whole px
 # `_decl_font_relative_length_px` gave as `whole`: the exact length floored
 # to a LayoutUnit (Chrome 159: `30.2px` is 30.1875, `30.25px` 30.25), minus
 # `whole * 1000`. -1 when the token is not a plain px / em / rem length or
-# `whole` is not its floor (an em width is parsed to 0.1 em).
+# `whole` is not its floor.
 fn _decl_width_frac_milli(raw: text, font_px: i32, whole: i32) -> i32:
     val v = raw.trim().lower()
     if v.byte_len() == 0 or dec_val(v.substring(0, 1)) >= 10 and not v.starts_with("."):
