@@ -4621,3 +4621,22 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - k=4: 31490 / 30402 ms (each side has one outlier, 81.5 s and 20.5 s).
   - RSS medians: k=1 2.63 / 2.67 GB, k=4 8.38 / 8.33 GB.
   - The route-stage counters read 0 on this route, so there is no document/paint split.
+
+
+## 2026-11-24 — abspos wrapped lines: exact LayoutUnit fit, line 2..n pen origin, exact device width at k > 1 (abspos-wrap lane)
+
+Three causes, none specific to absolutely positioned boxes. Measured with Liberation Sans 16px/20px against Chrome 159 at 1x and 4x.
+- **Fit (all boxes with an exact width):** the one-run fit test in the `#text` branch (`run_fits`, layout_engine) compared the WHOLE-px run width with the box. `ll ll ll` is 30 whole px but 30.21875 exact, so a `width:30px` box kept it on one line where Chrome breaks it. That covers abspos, in-flow and float boxes. The old wiki claim that "only the `used == width` line can overflow" holds for the multi-line wrap loop, not for this pre-test.
+  - **Fix:** the test now goes through `box_frac_w_at`, the same channel the flex row uses. `text_container_frac_w` walks from the run through plain inline parents and in-flow auto-width blocks that fill their parent, up to the first box with a recorded exact-width remainder.
+  - It uses that box only when the run was laid out across the box's whole content width (`node_w == content`). A mid-line run gets its own whole-px width as its box: `aa <b>bold text</b> cc <span>dd ee</span> ff` in 70 px moved `ee ff` down a line before this guard was added.
+  - **Who records a remainder:** an authored px/em width records `Style.width_milli`. That is a new field holding the exact width floored to a LayoutUnit minus the floored `width_px`, so `30.2px` gives 187 and `30.25px` gives 250. It is -1 when the width has no exact form (percent, an em rounded to 0.1 em, or a width rewritten by `style_with_width`, aspect-ratio or a transform).
+  - An abspos box records `absolute_width_frac_milli`. A single-run shrink-to-fit box uses LayoutUnit-ceil(max-content), capped at the exact available width (`left:370px` leaves 30, and the 30.21875 run wraps). A left+right stretched box uses `-(left_milli + right_milli)`. Anything else stays unset and keeps the old whole-px test.
+  - **Copy-site trap:** like `left_milli`, the new field must be copied in style.spl, `tag_defaults`, `style_with_height` and `style_with_width`.
+- **Line 2..n pen (k = 1):** only the first line carried `pen-origin-milli`. The inline loop now records `g_text_rest_pen_origin_milli` (LayoutResult `rest_pen_origin_milli`), which is the box's line-start error. It is recorded only for left-aligned lines not shortened by floats. `_html_draw_ir_wrap_extra_line_commands` pushes it on every `_line{n}` command.
+  - `left:10.25px` gives line 2 at -49.739 against Chrome -49.739 (base -50.000).
+  - At k = 4 the device column already carried the fraction, and that is unchanged.
+- **Device width (k > 1):** an abspos box with a known remainder records `box_device_extra_w = round(k(fx + frac)) - round(k fx)`. Paint now applies `device-extra-width` to absolute boxes as well as form controls.
+  - Shrink-to-fit `Hello world` at `left:10px` paints 40..356, matching Chrome (base 40..355).
+  - `width:30.2px` paints 640..760 (base 640..759).
+- **Spec:** `abspos_wrapped_lines_chrome159_spec` went from 0/4 on base to 4/4 on head. 35 neighbouring abspos / float / flex / button / pen-origin / wrap specs give results identical to base. The 1x catalog is byte-identical to base on all 8 pages.
+- **Open:** the multi-line wrap loop (`wrap_back_off_exact`) still ignores a box's remainder, so a run that wraps in a `30.25px` box fits each line against 30. Floats and inline-blocks sized shrink-to-fit still paint k x whole px at k > 1; only abspos boxes record the device width.
