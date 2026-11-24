@@ -6,7 +6,8 @@ use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
 @end
 use std.nogc_sync_mut.io.tcp.TcpStream
-use std.common.string_core.{bytes_to_text, text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
+use std.common.string_core.{text_to_bytes}
 use std.common.contracts.orchestration.host_service_auth_v6.HostServiceAuthContextV6
 use std.common.contracts.orchestration.host_service_auth_frame_v6.*
 use std.common.contracts.orchestration.host_service_operation_v6.*
@@ -129,7 +130,10 @@ pub fn host_service_auth_exchange_begin_v6(reader: HostServiceReadyReaderV1,
 
 fn exchange_accept_frame_v6(original: AuthExchangeStateV6) -> AuthExchangeStateV6:
     var state = original
-    val decoded = host_service_auth_frame_decode_v6(bytes_to_text(state.input))
+    val frame_text: text = match bytes_to_text_checked(state.input):
+        case Ok(v): v
+        case Err(_): return exchange_fail_v6(state, "host-service-auth-frame-utf8")
+    val decoded = host_service_auth_frame_decode_v6(frame_text)
     if decoded.is_err(): return exchange_fail_v6(state, decoded.unwrap_err())
     val frame = decoded.unwrap()
     if (frame.service_incarnation != state.context.service_incarnation or frame.client_nonce != state.context.client_nonce or
@@ -227,7 +231,10 @@ pub fn host_service_auth_exchange_step_v6(owner: HostServiceAuthExchangeV6,
                     else: state.expected = size
                 elif byte < 32 or byte > 126 or state.header.byte_len() >= 31:
                     state = exchange_fail_v6(state, "host-service-auth-length")
-                else: state.header = state.header + bytes_to_text(bytes)
+                else:
+                    match bytes_to_text_checked(bytes):
+                        case Ok(v): state.header = state.header + v
+                        case Err(_): state = exchange_fail_v6(state, "host-service-auth-length")
             else:
                 state.input = state.input + bytes
                 if state.input.len() == state.expected: state = exchange_accept_frame_v6(state)
