@@ -67,7 +67,7 @@ extern fn rt_io_tcp_flush(fd: i64) -> bool
 use std.nogc_async_mut.io.file_ops.{file_read_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{ExternalTextDecoder, external_text_decoder, utf8_format}
 use std.common.string_core.{text_to_bytes}
 
 fn io_write_completion_has_progress_v1(transferred: i64) -> bool:
@@ -126,6 +126,8 @@ class IoDriver:
     _bytes_pending_data: [[u8]]
     _recv_byte_ids: [i64]
     _recv_byte_data: [[u8]]
+    _utf8_fds: [i64]
+    _utf8_decoders: [ExternalTextDecoder]
     _ev_fd: i64
     _ev_registered: [i64]
     _ev_registered_modes: [i64]
@@ -142,6 +144,8 @@ class IoDriver:
             _bytes_pending_data: [],
             _recv_byte_ids: [],
             _recv_byte_data: [],
+            _utf8_fds: [],
+            _utf8_decoders: [],
             _ev_fd: -2,
             _ev_registered: [],
             _ev_registered_modes: []
@@ -346,6 +350,41 @@ class IoDriver:
             i = i + 1
         self._recv_byte_ids.push(op_id)
         self._recv_byte_data.push(data)
+
+    me _recv_text(fd: i64, data: [u8]) -> text:
+        """Strict UTF-8 text view of a TCP read. A scalar split across reads is
+        carried per fd (at most 3 bytes); truly invalid UTF-8 yields "" and the
+        raw bytes (poll_recv_bytes) stay authoritative."""
+        var i = 0
+        while i < self._utf8_fds.len():
+            if self._utf8_fds[i] == fd:
+                match self._utf8_decoders[i].push(data):
+                    case Ok(value): return value
+                    case Err(_):
+                        self._drop_recv_decoder(fd)
+                        return ""
+            i = i + 1
+        match external_text_decoder(utf8_format()):
+            case Err(_): return ""
+            case Ok(decoder):
+                match decoder.push(data):
+                    case Err(_): return ""
+                    case Ok(value):
+                        self._utf8_fds.push(fd)
+                        self._utf8_decoders.push(decoder)
+                        value
+
+    me _drop_recv_decoder(fd: i64):
+        var fds: [i64] = []
+        var decoders: [ExternalTextDecoder] = []
+        var i = 0
+        while i < self._utf8_fds.len():
+            if self._utf8_fds[i] != fd:
+                fds.push(self._utf8_fds[i])
+                decoders.push(self._utf8_decoders[i])
+            i = i + 1
+        self._utf8_fds = fds
+        self._utf8_decoders = decoders
 
     me _load_recv_bytes(op_id: i64) -> [u8]:
         var i = 0
@@ -669,7 +708,7 @@ class IoDriver:
                     i = i + 1
                     continue
                 if bytes!.len() > 0:
-                    val txt = bytes_to_text(bytes!)
+                    val txt = self._recv_text(fd, bytes!)
                     self._store_recv_bytes(oid, bytes!)
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd_bytes(oid, bytes!.len(), 0, txt, fd, bytes!)
@@ -714,6 +753,7 @@ class IoDriver:
                     self._remove_file(fd)
                 else:
                     self._ev_deregister(fd)
+                    self._drop_recv_decoder(fd)
                     unsafe(capabilities: [ffi]):
                         rt_io_tcp_close(fd)
                 self._complete(oid, 0, 0, "")
@@ -913,6 +953,8 @@ class IoDriver:
         self._bytes_pending_data = []
         self._recv_byte_ids = []
         self._recv_byte_data = []
+        self._utf8_fds = []
+        self._utf8_decoders = []
         if self._ev_fd >= 0:
             rt_event_loop_close(self._ev_fd)
         self._ev_registered = {}
