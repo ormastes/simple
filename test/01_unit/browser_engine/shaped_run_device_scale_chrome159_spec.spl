@@ -1,0 +1,121 @@
+"""
+## Purpose and audience
+Purpose: Pin shaped (Arabic, Devanagari) text at device scale 4 (384 dpi)
+against Chrome 159: the frame is painted at all, and each glyph starts on
+Chrome's device pen. Audience: web renderer text / device-scale maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=4 --window-size=400,300`). Page:
+`<html lang="ar|hi">`, body `margin:0;background:#fff;color:#000;font:16px
+<face>`, `<div style="position:absolute;left:20px;top:30px;white-space:nowrap">`.
+Same face on both sides: Chrome loads the bundled Noto Sans Arabic / Noto Sans
+Devanagari via `@font-face`; Simple selects the same files from `lang`. For
+Arabic the Chrome page names ONLY Noto Sans Arabic: with `Liberation Sans`
+first, Chrome takes the space from Liberation (4.45 px, run 77.375) where the
+Arabic face's space is 4.16 px (run 77.09375, the shaped_run_spacing oracle).
+The same captures at factor 1 reproduce the 1x tables of
+`shaped_run_spacing_chrome159_spec.spl` and `devanagari_render_chrome159_spec.spl`.
+Ink = any channel under 200, device px.
+
+| text          | Chrome k=4 ink x | base (2026-11-24)          |
+|---------------|------------------|----------------------------|
+| مرحبا بالعالم  | 80..384          | EMPTY frame                |
+| مرحبا123      | 85..317          | EMPTY frame                |
+| مرحبا.        | -                | EMPTY frame                |
+| مرحبا         | 84..210          | 85..209                    |
+| हिंदी          | 80..181          | EMPTY frame                |
+| नहीं / कुछ / कर्म | 80..166 / 80..174 / 80..168 | 80..165 / 80..173 / 80..167 |
+| टुँ / ट्टु       | 80..114 / 79..111 | 79..114 / 77..111         |
+| द्धू / ड़ुँ       | 80..142 / 79..117 | 80..140 / 77..114         |
+
+Causes (fixed with this spec): (1) a glyph with no outline (the Arabic space,
+Noto Devanagari's empty 785 after हिंदी's anusvara) made the selected-run stager
+decline the whole run, Engine2D failed the shaped command closed, and one
+skipped command blanks the whole k=4 frame; (2) a run the shaper declines
+(Arabic plus digits or punctuation) still asked for shaping with an invalid
+glyph run, with the same result; (3) glyph xs were whole CSS px times k, where Chrome paints a glyph at
+floor(4 x pen) device px.
+Not covered here: the vertical baseline (Devanagari 1 device row high, Arabic
+1 row low), held in `devanagari_render_k4_chrome159_spec.spl`.
+"""
+"""
+Traceability: REQ-WEB-TEXT-SHAPED-DPR-001 — shaped text paints at device scale k on Chrome's device pens.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val K: i32 = 4
+val CSS_W: i32 = 400
+val CSS_H: i32 = 120
+
+fn _page(lang: text, txt: text) -> text:
+    "<!doctype html><html lang=\"" + lang + "\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap;\">" + txt + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+# `x0..x1` of the k=4 ink, or `empty frame` when no frame came back.
+fn _ink_x(lang: text, txt: text) -> text:
+    val w = CSS_W * K
+    val h = CSS_H * K
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(lang, txt), CSS_W, CSS_H, K, "cpu_simd")
+    if px.len() != (w * h) as i64:
+        return "empty frame"
+    var x0 = w
+    var x1 = -1
+    var y = 0
+    while y < h:
+        var x = 0
+        while x < w:
+            val p = px[y * w + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+            x = x + 1
+        y = y + 1
+    "{x0}..{x1}"
+
+fn _painted(lang: text, txt: text) -> bool:
+    val v = _ink_x(lang, txt)
+    v != "empty frame" and v != "{CSS_W * K}..-1"
+
+fn _x1(lang: text, txt: text) -> text:
+    val v = _ink_x(lang, txt)
+    if v == "empty frame":
+        return v
+    v.split("..")[1]
+
+describe "shaped runs at device scale 4 against Chrome 159":
+    it "AC-1: an Arabic run with a space paints a frame (the space glyph has no outline)":
+        step("Chrome k=4 مرحبا بالعالم ink x 80..384; base returned no frame")
+        expect(_painted("ar", "مرحبا بالعالم")).to_equal(true)
+
+    it "AC-2: a run the Arabic shaper declines (digits, punctuation) still paints a frame":
+        step("Chrome k=4 مرحبا123 ink x 85..317; base returned no frame for both")
+        expect(_painted("ar", "مرحبا123")).to_equal(true)
+        expect(_painted("ar", "مرحبا.")).to_equal(true)
+
+    it "AC-3: a one-word Arabic run ends at Chrome's right ink column":
+        step("Chrome k=4 مرحبا ink x 84..210")
+        expect(_x1("ar", "مرحبا")).to_equal("210")
+
+    it "AC-4: हिंदी (empty glyph 785) paints Chrome's ink columns":
+        step("Chrome k=4 ink x 80..181; base returned no frame")
+        expect(_ink_x("hi", "हिंदी")).to_equal("80..181")
+
+    it "AC-5: Devanagari marks and conjuncts sit on Chrome's device pens":
+        step("Chrome k=4 ink x: नहीं 80..166, कुछ 80..174, कर्म 80..168")
+        expect(_ink_x("hi", "नहीं")).to_equal("80..166")
+        expect(_ink_x("hi", "कुछ")).to_equal("80..174")
+        expect(_ink_x("hi", "कर्म")).to_equal("80..168")
+
+    it "AC-6: below-base marks and the candrabindu sit on Chrome's device pens":
+        step("Chrome k=4 ink x: टुँ 80..114, ट्टु 79..111, द्धू 80..142, ड़ुँ 79..117")
+        expect(_ink_x("hi", "टुँ")).to_equal("80..114")
+        expect(_ink_x("hi", "ट्टु")).to_equal("79..111")
+        expect(_ink_x("hi", "द्धू")).to_equal("80..142")
+        expect(_ink_x("hi", "ड़ुँ")).to_equal("79..117")
