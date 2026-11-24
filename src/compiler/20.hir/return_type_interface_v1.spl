@@ -430,6 +430,15 @@ fn rti_rows_from_hir_v1(module: HirModule) -> Result<RtiRowsV1, RtiError>:
 # Term helpers
 # ============================================================================
 
+fn rti_term_head_may_own_methods_v1(term: RtType) -> bool:
+    """False for a builtin-headed term, which has no struct/class owner row
+    regardless of its payload. A nominal head owns methods; a bare parameter
+    is undecided until substituted and keeps the concrete-consumer check."""
+    match term:
+        case RtType.Nominal(_, _): true
+        case RtType.Param(_): true
+        case _: false
+
 fn rti_term_has_param(term: RtType) -> bool:
     match term:
         case RtType.Param(_): true
@@ -791,7 +800,20 @@ impl ReturnTypeInterfaceTable:
             case HirExprKind.Var(sym): return self.static_or_value_owner(symbols, sym.id)
             case HirExprKind.NamedVar(sym, _): return self.static_or_value_owner(symbols, sym.id)
             case _: ()
-        val term = self.require_concrete(self.resolve(self.callee_return(receiver, symbols, nil)?)?)?
+        val resolved = self.resolve(self.callee_return(receiver, symbols, nil)?)?
+        # Owner discovery reads only the HEAD of the receiver's return type.
+        # A builtin head (`opt(..)`, `result(..)`, array, dict, ...) names no
+        # struct/class owner whether or not its payload is substituted, so
+        # `inner.remove(key).is_some()` in an erased generic body (receiver
+        # row `opt(p1)`) is the same "RTI cannot answer" as its concrete
+        # twin `opt(b:bool)` -- never the fatal E-RTI-003 below, which stays
+        # for a bare parameter and for a nominal owner carrying parameters.
+        match resolved:
+            case ReturnTypeEntry.Decided(head):
+                if not rti_term_head_may_own_methods_v1(head):
+                    return Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(head)}' is not a struct/class (trait receivers are RTI PR2)"))
+            case _: ()
+        val term = self.require_concrete(resolved)?
         match term:
             case RtType.Nominal(decl, args): Ok((decl, false, args))
             case _: Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(term)}' is not a struct/class (trait receivers are RTI PR2)"))
