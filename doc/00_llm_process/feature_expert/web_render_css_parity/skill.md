@@ -4549,3 +4549,21 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Trap:** a HIR type error makes the JIT `run` silently fall back to the interpreter (`[jit-fallback]`). Use `SIMPLE_JIT_STRICT=1` to see it as a failure.
 - **Sweep:** checked 48,515 `src/` and `test/` files. 10 call sites in 2 files were fixed: `progress_bar` / `progress_bar_html` in the `coverage/stats render_adapter`, which were also passing the wrong number of arguments. The 8 web pages were unaffected.
 - **Bug record:** `doc/08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md`.
+
+## 2026-11-24 — shaped (Arabic, Devanagari) runs at device scale 4
+
+- **A blank k=4 frame means one skipped command.** `simple_web_layout_render_html_pixels_engine2d_at_device_scale` (and the 1x engine2d entry) return `[]` when `skipped_command_count != 0`. 1x only *looked* fine because `simple_web_engine2d_render_html_pixels` falls back to the raster lane, which paints unshaped per-codepoint glyphs. Probe the device-scale entry at k=1 too: if it is blank there as well, the bug is not in the scale path.
+- **Three causes, one per AC in `shaped_run_device_scale_chrome159_spec` (base 0/6, head 6/6):**
+  - `_stage_selected_glyph_run_active` declined a whole run on any 0-size glyph. That covered the Arabic space (every multi-word `lang="ar"` run) and Noto Devanagari's empty 785 (हिंदी). It now skips a glyph only when `_selected_glyph_is_blank` proves a clean measure with no coverage (meta[7]=310031, meta[0..1]=0, meta[5]=0). A glyph whose raster failed still declines the run.
+  - `_arabic_run_supported` admits only letters and spaces, so `مرحبا123` / `مرحبا.` had `glyph_run.valid=false` but still requested shaping. Paint now emits them as resolved per-codepoint commands.
+  - Shaped glyph xs were whole CSS px x k. Resolve now keeps each glyph's pen in 1/64 px (`ResolvedFontMetrics.glyph_pens_64`). Paint emits `device-glyph-xs` = floor(k x pen) and `draw_ir_device_scale` swaps it in. All ten devanagari_render_k4 words now have Chrome's exact ink x (base: 7 of 10 off).
+  - **Perf trap:** do NOT shape the run again at k x the size to get device pens. That doubled the document phase on a shaped page (intl k=4: 125 s vs 64 s) for a byte-identical frame.
+- **Fix the 1x regression the blank-frame fix exposes.** Once shaped runs really paint, they lose Chrome's quarter-px subpixel phase: `shaped_run_spacing` AC-1 went 96 -> 95. Base was green only by accident, through the unshaped raster lane. The fix:
+  - paint derives the nearest quarter px from the same 1/64 pens;
+  - it emits `glyph-pen-q4` at 1x only, with spacing applied at 4x scale through `spaced_glyph_xs_milli`; the device pass strips the key;
+  - the stager draws an LCD-size glyph at its whole-px pen plus a `_lcd_glyph` phase cell, using a distinct atlas codepoint `-2-phase`.
+  - Results: `devanagari_mark_position` 4/9 -> 8/9, `devanagari_corpus` 7/11 -> 10/11.
+- **Oracle trap: the fallback font list changes the space.** With `Liberation Sans, Noto Sans Arabic`, Chrome takes the space from Liberation (run 77.375). For Arabic, name ONLY the Arabic face (run 77.09375, which matches the shaped_run_spacing oracle).
+- **Spec trap: base runs need the spec copied into the base worktree.** A spec resolves `src/lib` from its own file's project, so running head's spec from a base cwd tests HEAD's code.
+- **Open — the vertical baseline belongs to the layout lane.** Devanagari is 1 device row high (178 vs 179) and Arabic 1 row low (209 vs 208). Simple's baseline is device_dy (+1, the strut's half-leading) plus the face ascent. Chrome applies the half-leading only when the strut's ascent dominates. Numbers: `doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md`.
+- **Open — itemisation of neutrals:** `مرحبا123` reverses the digits, and Chrome takes them from Liberation. This belongs to the layout/shaper owner.

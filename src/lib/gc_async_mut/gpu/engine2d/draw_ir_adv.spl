@@ -32,7 +32,7 @@ use std.common.ui.draw_ir.{
     simple_2d_draw_ir_adv_composition_plan,
     simple_2d_draw_ir_adv_plan
 }
-use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_default_font_config_for}
 use std.common.numeric_round.{ceil_f64, floor_f64}
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
 use std.gc_async_mut.gpu.engine2d.backend_emu.{radial_gradient_pixels, linear_gradient_pixels}
@@ -474,6 +474,20 @@ fn _engine2d_draw_ir_text_spacing_milli(command: DrawIrCommand, key: text) -> i6
     if raw == "":
         return 0
     raw.to_i64()
+
+# `glyph-pen-q4`: a shaped run's glyph pens to the nearest quarter device px
+# (4 x px), one per glyph; [] when absent or not one per glyph. The stager
+# starts each LCD glyph on its whole px with a quarter-phase cell.
+fn _engine2d_draw_ir_glyph_pen_q4(command: DrawIrCommand) -> [i32]:
+    val raw = _engine2d_draw_ir_style_value(command.computed_style, "glyph-pen-q4")
+    var out: [i32] = []
+    if raw == "":
+        return out
+    for part in raw.split(","):
+        out.push(part.to_i64() as i32)
+    if out.len() != command.glyph_run.glyph_ids.len():
+        return []
+    out
 
 # `font-size-milli`: the computed fractional font size in milli-px (device
 # scaled with `font-size`); 0 when absent, which is every whole-px run. The
@@ -3168,7 +3182,9 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                     val shadow_blur_px = _engine2d_draw_ir_text_shadow_blur_px(command)
                     if shaped:
                         if payload_valid:
-                            drawn = eng.draw_shaped_text(x, y, command.glyph_run, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                            val pen_q4 = _engine2d_draw_ir_glyph_pen_q4(command)
+                            val shaped_size = _engine2d_draw_ir_text_font_size(command.computed_style)
+                            drawn = if pen_q4.len() > 0: eng.draw_shaped_text_configured(x, y, command.glyph_run, command.color, engine2d_default_font_config_for(shaped_size, eng.baremetal_backend.is_some()), pen_q4) else: eng.draw_shaped_text(x, y, command.glyph_run, command.color, shaped_size)
                     elif shadow_blur_px > 0:
                         drawn = _engine2d_draw_ir_blurred_text_shadow(eng, x, y, command, advances, shadow_blur_px)
                     else:

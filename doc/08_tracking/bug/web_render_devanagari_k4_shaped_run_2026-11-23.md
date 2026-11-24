@@ -48,3 +48,31 @@ Not yet located which rounding differs.
 (हिंदी: glyph 785 is empty, so `glyph.width <= 0` invalidates the run; before
 the general dev2 shaper every word but हिन्दी) therefore yields no frame at
 k=4, while 1x paints the per-codepoint fallback.
+
+## Status 2026-11-24 (branch work/webrender-intl4x-20261124)
+
+- **Defect 1 fixed.** Resolve keeps each glyph's pen in 1/64 px
+  (`glyph_pens_64`). Paint (`simple_web_html_layout_renderer_paint_draw_ir.spl`)
+  emits `device-glyph-xs` = floor(k x pen), and `draw_ir_device_scale` swaps it
+  in for `k x glyph_run.xs`. There is no payload change.
+  All ten words' ink x now equal Chrome's (base: 7 of 10 off).
+- **Defect 3 fixed, and it was wider than Devanagari.** The stager now skips an
+  outline-less glyph (`_selected_glyph_is_blank`: a clean measure with no
+  coverage) instead of declining the run. That also covers the Arabic space, so
+  every multi-word `lang="ar"` run used to blank the whole k=4 frame. A run the
+  Arabic shaper declines (`مرحبا123`, `مرحبا.`) now paints per codepoint instead
+  of being sent as an invalid shaped command. Corpus pages 33-bidi and
+  48-overflow-ellipsis paint at k=4 (base: no frame).
+- **Defect 2 is open. Owner: layout (`device_dy`), not the stager.** The stager
+  places the baseline at command y + the shaped face's ascent at k x size, and
+  command y = 4 x 30 + device_dy. Layout's device_dy is +1 here: the strut's
+  half-leading.
+
+  | text | Simple baseline | Chrome baseline |
+  |------|-----------------|-----------------|
+  | Devanagari | 121 + 57 = 178 | 179 (44.75 CSS) |
+  | Arabic, Noto only | 121 + 88 = 209 | 208 = 120 + 88 |
+
+  For Devanagari the Liberation strut's ascent (58) dominates the line; for
+  Arabic the face's ascent dominates, so the +1 must not apply. That is a
+  line-box (strut vs. run ascent) rule, which belongs to the layout lane.

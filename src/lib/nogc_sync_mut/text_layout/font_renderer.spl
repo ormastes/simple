@@ -438,6 +438,10 @@ class ResolvedFontMetrics:
     # A mid-line run's LCD pen phase is derived from it (Chrome 159 lays the
     # line out fractionally; see inline_run_pen_origin_chrome159_spec).
     width_milli: i64 = -1
+    # A shaped run's exact glyph pens in 1/64 px, one per glyph; [] when the
+    # run is not shaped. Paint derives the 1x quarter-px LCD phase and the
+    # device pen floor(k x pen) from it without shaping again.
+    glyph_pens_64: [i32] = []
 
 # ponytail: process-local 128-entry ring for pinned layout metrics; replace with
 # per-document caches only when concurrent multi-face ownership lands.
@@ -3765,6 +3769,16 @@ class FontRenderer:
     # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
     # now updates `self.cache` in place — see get_glyph above for the channel
     # rationale.
+    # True when the selected face measures `glyph_index` cleanly and it has no
+    # coverage at all (an outline-less glyph), as opposed to a failed measure.
+    fn _selected_glyph_is_blank(glyph_index: i32, font_size: i32) -> bool:
+        if self.selected_outline_blob.len() == 0:
+            return false
+        var meta: [i64] = [0; 20]
+        sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+            glyph_index.to_i64(), font_size.to_i64(), meta)
+        meta[7] == 310031 and meta[5] == 0 and meta[0] == 0 and meta[1] == 0
+
     me _selected_glyph_index_cached(generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
         var cache = self.cache
         val cached = cache.lookup_index(0, generation, glyph_index, font_size)
@@ -3810,15 +3824,17 @@ class FontRenderer:
         self.stage_selected_glyph_run_configured(payload, color, config)
         self.staged_batch()
 
-    me stage_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> i64:
+    # `pen_q4`: each glyph's exact pen to the nearest quarter device px
+    # ([] = the whole-px `payload.xs` only).
+    me stage_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig, pen_q4: [i32] = []) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
-        val staged = self._stage_selected_glyph_run_active(payload, color, config.size)
+        val staged = self._stage_selected_glyph_run_active(payload, color, config.size, pen_q4)
         self._apply_staged_config(config)
         staged
 
-    me _stage_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> i64:
+    me _stage_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32, pen_q4: [i32] = []) -> i64:
         val active = self.ttf_rasterizer
         if active == nil:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
@@ -3842,6 +3858,7 @@ class FontRenderer:
                 ascent = ascent_meta[17].to_i32()
         if ascent <= 0:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        val lcd_phases = pen_q4.len() == payload.glyph_ids.len() and self._lcd_applies(font_size)
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -3854,17 +3871,50 @@ class FontRenderer:
                     return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 val glyph_id = raw_gid.to_i32()
                 val glyph = self._selected_glyph_index_cached(generation, glyph_id, font_size)
+                # A glyph with no outline (the space of `مرحبا بالعالم`, the
+                # empty placeholder 785 after हिंदी's anusvara) paints nothing
+                # in Chrome; it gets no quad, like `_stage_glyph_run_active`.
+                # A glyph whose raster FAILED still declines the run.
+                val blank = (glyph.width <= 0 or glyph.height <= 0) and self._selected_glyph_is_blank(glyph_id, font_size)
+                if blank:
+                    i = i + 1
+                    continue
                 if glyph.width <= 0 or glyph.height <= 0:
                     return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
-                var atlas_index = self._font_atlas_entry_index(0, generation, glyph_id, -1, font_size)
+                # LCD sizes: the glyph starts on its exact pen to the nearest
+                # quarter px (Skia subpixel positioning), as the plain lane's
+                # `_lcd_apply_pen_phases` does: a whole-px pen plus a phase
+                # cell. `مرحبا بالعالم`'s first letter at 68.6875 px is pen 68
+                # phase 3 (Chrome ink x1 96, the truncated pen's 95).
+                var pen_x = payload.xs[i]
+                var cell = glyph
+                var cell_cp: i32 = -1
+                if lcd_phases:
+                    val q = pen_q4[i]
+                    val whole = if q >= 0: q / 4 else: 0 - ((3 - q) / 4)
+                    if whole - pen_x <= 1 and pen_x - whole <= 1:
+                        pen_x = whole
+                        val phase = q - whole * 4
+                        if phase != 0 and glyph.lcd_pixels.len() > 0:
+                            cell_cp = -2 - phase
+                            val key = "sel|{identity}|{generation}|{glyph_id}|{font_size}|{phase}"
+                            if val Some(hit) = _lcd_phase_glyphs.get(key):
+                                cell = hit
+                            else:
+                                cell = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, glyph_id.to_i64(), cell_cp, glyph_id, generation, font_size, glyph, phase)
+                                _lcd_phase_glyphs[key] = cell
+                            if cell.codepoint != cell_cp:
+                                cell = glyph
+                                cell_cp = -1
+                var atlas_index = self._font_atlas_entry_index(0, generation, glyph_id, cell_cp, font_size)
                 var inserted = false
                 if atlas_index < 0:
-                    atlas_index = self._insert_font_atlas_glyph(glyph)
+                    atlas_index = self._insert_font_atlas_glyph(cell)
                     inserted = atlas_index >= 0
                 if atlas_index < 0:
                     overflow = true
                 else:
-                    val destination = _font_shaped_glyph_destination(payload.xs[i], payload.ys[i], glyph, ascent)
+                    val destination = _font_shaped_glyph_destination(pen_x, payload.ys[i], cell, ascent)
                     if not destination.0:
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                     val quad = FontRenderQuad(codepoint: -1, byte_offset: -1,
@@ -3999,6 +4049,7 @@ class _ResolvedShapedGlyphRun:
     payload: DrawIrGlyphRunPayload
     advances: [i32]
     width: i32
+    pens_64: [i32] = []
 
 # Both classifiers below are pure functions of one short string and are called
 # once per uncached resolve — 146 times on css-layout for at most a handful of
@@ -4252,6 +4303,8 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     var xs: [i32] = []
     var ys: [i32] = []
     var clusters: [i64] = []
+    # Each glyph pen in 1/64 px.
+    var pens_64: [i32] = []
     var advances: [i32] = [0; codepoints.len()]
     var total_advance = 0.0
     var valid = runs.len() > 0
@@ -4265,6 +4318,8 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             xs = xs.push(material.xs[i])
             ys = ys.push(material.ys[i])
             clusters = clusters.push(material.clusters[i])
+            if i < run.positions.len():
+                pens_64 = pens_64.push(((run.positions[i].x * 64.0) + 0.5).floor().to_i32())
             val cluster = material.clusters[i]
             val before = total_advance.to_i32()
             total_advance = total_advance + run.glyphs[i].x_advance
@@ -4278,7 +4333,7 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             valid = false
     val width = total_advance.to_i32()
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
-    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
+    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0, pens_64: if payload.valid: pens_64 else: [])
 
 # ---------------------------------------------------------------------------
 # Front memo for resolved font metrics.
@@ -4751,6 +4806,7 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
         line_height: if valid: line_height else: 0,
         reason: if valid and (complex_script == 0 or shaped.valid): "resolved" else if valid: "font-shaping-unavailable" else: "font-identity-unavailable",
         glyph_run: shaped.payload,
+        glyph_pens_64: if valid: shaped.pens_64 else: [],
         shaping_required: complex_script != 0,
         width_milli: if valid: width_milli else: -1
     )

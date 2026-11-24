@@ -525,6 +525,12 @@ fn _html_draw_ir_resolved_text_command(
     # each space; same fold as layout's `resolved_font_advances`.
     var run_width = metrics.width
     var glyph_run = metrics.glyph_run
+    # A run the shaper declined (`مرحبا123`, `مرحبا.`: the Arabic lane admits
+    # letters and spaces only) carries an INVALID glyph run. Engine2D fails a
+    # shaped command with no valid run closed, and one skipped command blanks
+    # the whole frame (`..._at_device_scale` returns []). Such a run is
+    # painted per codepoint instead, as the 1x raster lane paints it.
+    val shaped_run = metrics.shaping_required and glyph_run.valid
     if st.letter_spacing_milli != 0 or st.word_spacing_milli != 0:
         val run_cps = text_codepoints(txt)
         cp_advances = spaced_advances_milli(cp_advances, run_cps, st.letter_spacing_milli, st.word_spacing_milli)
@@ -533,9 +539,9 @@ fn _html_draw_ir_resolved_text_command(
             run_width = run_width + sa
         # A shaped run with no blank glyph is painted from its glyph xs, so the
         # gaps go there too (shaped_run_spacing_chrome159_spec AC-7).
-        if metrics.shaping_required and glyph_run.valid:
+        if shaped_run:
             glyph_run.xs = spaced_glyph_xs_milli(glyph_run.xs, glyph_run.clusters, run_cps, st.letter_spacing_milli, st.word_spacing_milli)
-    var resolved = if metrics.shaping_required:
+    var resolved = if shaped_run:
         draw_ir_text_shaped_font(
             cid, tx, ty, txt, st.fg,
             metrics.family, metrics.identity, cp_advances, run_width,
@@ -575,7 +581,7 @@ fn _html_draw_ir_resolved_text_command(
     # Chrome at all 13 word starts of a 450 px line). The device pass swaps them
     # in and re-anchors the run width (`_dir_anchor_device_advances`).
     val device_k = layout_device_scale()
-    if device_k > 1 and not metrics.shaping_required:
+    if device_k > 1 and not shaped_run:
         val device_metrics = resolve_font_metrics_with_language_milli(
             browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic), txt, font_milli_of(st.font_size, st.font_size_milli) * device_k,
             _html_text_language(nodes, i, st)
@@ -588,6 +594,28 @@ fn _html_draw_ir_resolved_text_command(
             for da in device_advances:  # cpu-lane-loop-ok: one pass over THIS text command's per-codepoint advances; bound is its codepoint count
                 device_csv = if device_csv == "": da.to_text() else: device_csv + "," + da.to_text()
             merged.push(draw_ir_style_prop("device-advance-widths", device_csv))
+    # A shaped run's glyph xs are whole CSS px. Chrome starts each glyph on its
+    # exact pen: floor(k x pen) device px at k > 1 (ड़ुँ's candrabindu at 8.768
+    # px: device 35, not k x 8 = 32), and on the nearest quarter px at 1x, for
+    # the LCD subpixel phase (مرحبا بالعالم's last letter at 88.6875 px inks to
+    # 96, not 95). Both come from the run's 1/64 px pens; no second shaping.
+    # Spacing is applied in the target unit, as the glyph xs take it.
+    val pens_64 = metrics.glyph_pens_64
+    if shaped_run and pens_64.len() == glyph_run.glyph_ids.len():
+        val unit: i64 = if device_k > 1: device_k as i64 else: 4
+        var pens: [i32] = []
+        for p in pens_64:  # cpu-lane-loop-ok: one pass over THIS shaped run's glyphs; bound is its glyph count
+            val scaled = p as i64 * unit
+            val v = if device_k > 1: (if scaled >= 0: scaled / 64 else: 0 - ((63 - scaled) / 64)) else: (scaled + 32) / 64
+            pens.push(v as i32)
+        if st.letter_spacing_milli != 0 or st.word_spacing_milli != 0:
+            pens = spaced_glyph_xs_milli(pens, glyph_run.clusters, text_codepoints(txt), st.letter_spacing_milli * (unit as i32), st.word_spacing_milli * (unit as i32))
+        var pens_csv = ""
+        for q in pens:  # cpu-lane-loop-ok: one pass over THIS shaped run's glyphs; bound is its glyph count
+            pens_csv = if pens_csv == "": q.to_text() else: pens_csv + "," + q.to_text()
+        # The device pass strips both keys; `device-glyph-xs` replaces the
+        # scaled xs, `glyph-pen-q4` reaches the 1x stager.
+        merged.push(draw_ir_style_prop(if device_k > 1: "device-glyph-xs" else: "glyph-pen-q4", pens_csv))
     resolved.computed_style = merged
     resolved.clip_rect = clip_rect
     resolved
