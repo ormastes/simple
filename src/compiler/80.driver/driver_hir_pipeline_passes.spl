@@ -229,8 +229,23 @@ pub fn run_safety_warn_pass(ctx: CompileContext,
 fn hir_semantic_pass_scope_enabled_v1() -> bool:
     (env_get("SIMPLE_HIR_SEMANTIC_PASS_SCOPE") ?? "") != "0"
 
+# SIMPLE_HIR_SEMANTIC_PASS_SCOPE_SKIP=<comma pass names> runs just those passes
+# unscoped (typecheck, safety_warn, any_escape, enum_contract,
+# representation_manifest, representation_bind) so a dangling-scope crash can be
+# bisected without giving up scoping for every pass. Bug
+# hir_semantic_pass_scope_dangling_hirtype_2026-11-24.
+fn hir_pass_scope_skipped_v1(skip_list: text, pass_name: text) -> bool:
+    for item in skip_list.split(","):
+        if item.trim() == pass_name: return true
+    false
+
+# SIMPLE_HIR_SEMANTIC_PASS_TRACE=1 prints the module entering each scoped pass,
+# so the last line before E-HIR-VISIT-UNHANDLED names the failing module.
 fn _hir_pass_scope_open_v1(pass_name: text, name: text) -> bool:
     if not hir_semantic_pass_scope_enabled_v1(): return false
+    if (env_get("SIMPLE_HIR_SEMANTIC_PASS_TRACE") ?? "") == "1":
+        eprint("[hir-pass-scope] trace pass={pass_name} module={name}")
+    if hir_pass_scope_skipped_v1(env_get("SIMPLE_HIR_SEMANTIC_PASS_SCOPE_SKIP") ?? "", pass_name): return false
     if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
         eprint("[hir-pass-scope] WARNING transient scope refused; running {pass_name} UNSCOPED, arena retained: module={name}")
         return false
@@ -360,6 +375,8 @@ fn _representation_bind_scoped_v1(contexts: Dict<text, RepresentationSourceConte
     if paused and owned and ended: return declarations
     eprint("[hir-pass-scope] WARNING declaration promotion failed (paused={paused} owned={owned} ended={ended}); re-running representation_bind UNSCOPED: module={name}")
     representation_bind_module_facts_v1(contexts, name, module)
+
+export hir_pass_scope_skipped_v1
 
 pub fn run_any_escape_pass(
     ctx: CompileContext,
