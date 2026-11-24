@@ -9,7 +9,7 @@ use app.llm_caret.claude_api.{build_claude_api_headers, build_claude_api_body,
     complete_claude_api_exchange}
 use app.llm_caret.openai_compat.{build_compat_request, complete_compat_exchange}
 use std.nogc_sync_mut.io.http_client_core.{http_request_v2_raw}
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
@@ -80,11 +80,16 @@ fn _timeout_exchange_v1(method: text, url: text, headers: text, body: text,
     val header_lines = if headers == "": [] else: headers.split("\n")
     val result = http_request_v2_raw(method, url, header_lines, body.bytes(), timeout_ms)
     if result.0 < 0:
-        return (bytes_to_text(result.3), if result.4 == "": "HTTP transport failed" else: result.4)
+        val partial = match bytes_to_text_checked(result.3):
+            case Ok(t): t
+            case Err(_): ""
+        return (partial, if result.4 == "": "HTTP transport failed" else: result.4)
     if result.3.len() > 8388608: return ("", "provider response exceeds 8 MiB limit")
     if result.0 < 200 or result.0 >= 300:
         return ("", "provider HTTP status " + result.0.to_text())
-    (bytes_to_text(result.3), "")
+    match bytes_to_text_checked(result.3):
+        case Ok(t): (t, "")
+        case Err(_): ("", "provider response is not valid UTF-8")
 
 fn _base_endpoint_v1(endpoint: text) -> text:
     if endpoint.ends_with("/"): endpoint.substring(0, endpoint.byte_len() - 1) else: endpoint

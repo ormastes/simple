@@ -37,7 +37,7 @@ use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.ui.wm_chrome_theme.{active_wm_theme_id}
 
 use std.common.string_core.{text_to_bytes}
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked, CodecErrorKind}
 extern fn rt_time_ms() -> u64
 
 fn web_server_time_ms() -> u64:
@@ -46,8 +46,14 @@ fn web_server_time_ms() -> u64:
 fn web_server_text_to_bytes(s: text) -> [u8]:
     text_to_bytes(s)
 
-fn web_server_bytes_to_text(data: [u8]) -> text:
-    bytes_to_text(data)
+# Strict UTF-8. "request_incomplete_utf8" means the bytes end inside a
+# multi-byte sequence (a socket chunk boundary): read more before deciding.
+fn web_server_bytes_to_text(data: [u8]) -> Result<text, text>:
+    match bytes_to_text_checked(data):
+        case Ok(t): Ok(t)
+        case Err(e):
+            if e.kind == CodecErrorKind.TruncatedInput: Err("request_incomplete_utf8")
+            else: Err("request_not_utf8")
 
 fn _active_or_default_wm_theme_id() -> text:
     val active_theme_id = active_wm_theme_id()
@@ -165,7 +171,9 @@ fn ws_read_text_frame(stream: TcpStream) -> text?:
         while i < payload_len:
             payload[i] = payload[i] ^ maskkey[i % 4]
             i = i + 1
-    return web_server_bytes_to_text(payload)
+    match web_server_bytes_to_text(payload):
+        case Ok(t): return t
+        case Err(_): return None
 
 fn parse_request_line(request_line: text) -> (text, text):
     var method = ""
@@ -336,6 +344,7 @@ class WebServer:
         read may include part or all of a small POST body; callers must consume
         that initial body before trying to read more from the socket."""
         var raw = ""
+        var raw_bytes: [u8] = []
         var attempts = 0
         var head_done = false
         while not head_done and attempts < 64:
@@ -345,13 +354,19 @@ class WebServer:
                     if chunk.len() == 0:
                         head_done = true
                     else:
-                        raw = "{raw}{web_server_bytes_to_text(chunk)}"
-                        if not ui_web_request_head_allowed(raw.byte_len()):
+                        for b in chunk: raw_bytes.push(b)
+                        if not ui_web_request_head_allowed(raw_bytes.len()):
                             return Err("request_head_too_large")
+                        match web_server_bytes_to_text(raw_bytes):
+                            case Ok(t): raw = t
+                            case Err(reason):
+                                if reason != "request_incomplete_utf8": return Err(reason)
                         if raw.contains("\r\n\r\n"):
                             head_done = true
                 Err(_):
                     head_done = true
+        if raw.byte_len() != raw_bytes.len():
+            return Err("request_not_utf8")
         if raw == "":
             return Err("empty request")
         val sep = raw.index_of("\r\n\r\n")
@@ -901,6 +916,7 @@ fn _wm_handle_connection(stream: TcpStream, session: UISession, guard: OriginGua
 
 fn _wm_read_head(stream: TcpStream) -> Result<(text, text, text, text), text>:
     var raw = ""
+    var raw_bytes: [u8] = []
     var attempts = 0
     while attempts < 16:
         attempts = attempts + 1
@@ -908,13 +924,19 @@ fn _wm_read_head(stream: TcpStream) -> Result<(text, text, text, text), text>:
             Ok(chunk):
                 if chunk.len() == 0:
                     break
-                raw = "{raw}{web_server_bytes_to_text(chunk)}"
-                if not ui_web_request_head_allowed(raw.byte_len()):
+                for b in chunk: raw_bytes.push(b)
+                if not ui_web_request_head_allowed(raw_bytes.len()):
                     return Err("request_head_too_large")
+                match web_server_bytes_to_text(raw_bytes):
+                    case Ok(t): raw = t
+                    case Err(reason):
+                        if reason != "request_incomplete_utf8": return Err(reason)
                 if raw.contains("\r\n\r\n"):
                     break
             Err(_):
                 break
+    if raw.byte_len() != raw_bytes.len():
+        return Err("request_not_utf8")
     if raw == "":
         return Err("empty_request")
     val sep = raw.index_of("\r\n\r\n")
