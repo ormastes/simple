@@ -1,0 +1,86 @@
+name: ARM32 canonical wiring evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: arm32-canonical-wiring-0148a181333c468892ad37b6741046e8808d0f1b
+  cancel-in-progress: false
+
+jobs:
+  canonical-wiring:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0148a181333c468892ad37b6741046e8808d0f1b
+          persist-credentials: false
+      - name: Verify unused one-shot authorization
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = ormastes/simple
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(date -u +%s)" -lt "$(date -u -d 2026-11-26T00:00:00Z +%s)"
+          evidence=build/verify/arm32-canonical-wiring
+          mkdir -p "$evidence"
+          target=0148a181333c468892ad37b6741046e8808d0f1b
+          test "$(git rev-parse HEAD)" = "$target"
+          gh api 'repos/ormastes/simple/actions/artifacts?name=arm32-canonical-wiring-0148a181-one-shot-claim&per_page=1' \
+            --jq .total_count > "$evidence/prior-claims.count"
+          test "$(cat "$evidence/prior-claims.count")" = 0
+          for tool in sh git awk grep find sort comm sed cut tr wc mktemp cmp tar; do
+            command -v "$tool" >> "$evidence/tools.txt"
+          done
+          sha256sum scripts/check/check-guard-wiring.shs \
+            scripts/check/guard_wiring_optout.txt \
+            scripts/check/guard_wiring_unwired_baseline.txt > "$evidence/inputs.sha256"
+          printf 'schema: arm32-canonical-wiring-claim-v1\nsource_revision: %s\ncontrol_revision: %s\nrun: %s\nrun_attempt: %s\nmaximum_executions: 1\nclaim_window_end: 2026-11-26T00:00:00Z\nqualification: structural-wiring-only\narchive_rebuilt: false\nsdk_qualified: false\nguest_qualified: false\n' \
+            "$target" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$evidence/claim.sdn"
+      - name: Publish non-resetting one-shot claim before the guard
+        id: claim
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm32-canonical-wiring-0148a181-one-shot-claim
+          path: build/verify/arm32-canonical-wiring/claim.sdn
+          if-no-files-found: error
+          retention-days: 90
+      - name: Execute the unchanged canonical wiring guard once
+        env:
+          CLAIM_ID: ${{ steps.claim.outputs.artifact-id }}
+          CLAIM_DIGEST: ${{ steps.claim.outputs.artifact-digest }}
+          CLAIM_URL: ${{ steps.claim.outputs.artifact-url }}
+          CLAIM_OUTCOME: ${{ steps.claim.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CLAIM_OUTCOME" = success
+          [[ "$CLAIM_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CLAIM_DIGEST" =~ ^[0-9a-fA-F]{64}$ ]]
+          test "$CLAIM_URL" = "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts/$CLAIM_ID"
+          evidence=build/verify/arm32-canonical-wiring
+          cp "$evidence/claim.sdn" "$evidence/receipt.sdn"
+          printf 'claim_artifact: %s\nclaim_digest: %s\nclaim_url: %s\nclaim_receipt: upload-action-issued\n' \
+            "$CLAIM_ID" "$CLAIM_DIGEST" "$CLAIM_URL" >> "$evidence/receipt.sdn"
+          set +e
+          sh scripts/check/check-guard-wiring.shs > "$evidence/stdout.log" 2> "$evidence/stderr.log"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$evidence/exit.txt"
+          printf 'exit: %s\n' "$status" >> "$evidence/receipt.sdn"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arm32-canonical-wiring-${{ github.run_id }}
+          path: build/verify/arm32-canonical-wiring
+          if-no-files-found: error
+          retention-days: 30
