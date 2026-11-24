@@ -1,6 +1,7 @@
 # Stage 2 compiler-tests RSS cap priced from ballooned free RAM, and its kill reported only as exit 88 (W21)
 
 Date: 2026-11-22
+Status: FIXED (landed on release/1.0.0; re-checked 2026-11-24: `w21-*` policy cases and `bootstrap_tree_rss_cap_kill_line` present in scripts/bootstrap/lib/tree-rss-policy.shs)
 Host: DESKTOP-VMF96U6 (Windows 11, Hyper-V dynamic-memory guest, 64 GiB, #8931)
 Ledger: `C:/dev/simple-release-boot-20261122/build/rboot/WORKAROUNDS.md` W21
 Branch: `work/bootstrap-rss-cap-windows-20261122` (base `origin/release/1.0.0` @ d472feffa55)
