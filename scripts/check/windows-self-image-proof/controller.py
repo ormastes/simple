@@ -5,7 +5,7 @@ HERE=P(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('intake',HERE/'proof.py')
 n=importlib.util.module_from_spec(spec);spec.loader.exec_module(n)
 n.OUT=n.ROOT/'build/windows-self-image-proof';n.OUT.mkdir(parents=True,exist_ok=True)
-SOURCE='67c4722e5507345776aa57ec5865903749ad67ec'
+SOURCE='bb288a06a006470af1a740a36e0bca310e31d281'
 BASE='002e381e56259b60f7da059f52dd469e5bd60b11'
 
 def main():
@@ -61,23 +61,21 @@ def main():
     assert 'COFF-x86-64' in pe and 'Symbol: GetModuleFileNameW (' in pe
     digest=n.sha(product)
     runner=n.OUT/'run-renamed.py'
-    runner.write_text("import subprocess,sys\np=subprocess.run(['C:/stale/simple.exe',sys.argv[2]],executable=sys.argv[1],timeout=30)\nraise SystemExit(p.returncode)\n",encoding='utf-8')
+    runner.write_text("import os,subprocess,sys\nenv=dict(os.environ)\nprofile=sys.argv[3]\nassert profile in ('os-unset','os-spoofed')\nif profile=='os-unset':env.pop('OS',None)\nelse:env['OS']='Linux'\np=subprocess.run(['C:/stale/simple.exe',profile,sys.argv[2]],executable=sys.argv[1],env=env,timeout=30)\nraise SystemExit(p.returncode)\n",encoding='utf-8')
     profiles={}
     for profile in ('os-unset','os-spoofed'):
         run_env=dict(env);run_env.update(SIMPLE_BINARY='C:/stale/simple.exe',SIMPLE_BIN='C:/stale/another-simple.exe')
-        if profile=='os-unset': run_env.pop('OS',None)
-        else: run_env['OS']='Linux'
-        n.owned(profile,[sys.executable,str(runner),str(product),digest],262144,45,run_env)
+        n.owned(profile,[sys.executable,str(runner),str(product),digest,profile],262144,45,run_env)
         output=(n.OUT/(profile+'.stdout')).read_bytes().replace(b'\r\n',b'\n').decode('utf-8')
         lines=output.splitlines()
-        assert len(lines)==2 and lines[0]=='windows-native-build-self-image assertions=7',output
+        assert len(lines)==2 and lines[0]=='windows-native-build-self-image assertions=8',output
         assert lines[1].startswith('kernel-image=')
         actual=P(lines[1].split('=',1)[1])
         assert os.path.samefile(actual,product) and n.sha(actual)==digest
-        profiles[profile]={'assertions':7,'actual_image':str(actual),'OS':run_env.get('OS')}
+        profiles[profile]={'assertions':8,'actual_image':str(actual),'OS':None if profile=='os-unset' else 'Linux'}
     assert all(n.sha(n.OUT/p)==h for p,h in identities.items())
     assert all(n.sha(n.ROOT/p)==h for p,h in source_files.items())
-    n.save('terminal.json',{'status':'NATIVE_RENAMED_IMAGE_OS_PASS','profiles':profiles,'assertions':14,'source':SOURCE,
+    n.save('terminal.json',{'status':'NATIVE_RENAMED_IMAGE_OS_PASS','profiles':profiles,'assertions':16,'source':SOURCE,
         'compiler_source':n.SOURCE,'compiler_sha256':n.sha(compiler),'fixture_sha256':digest,
         'image':str(actual),'scope':'actual canonical kernel lookup and source wiring; not rebuilt native_build_main or Phase3 qualification'})
 
