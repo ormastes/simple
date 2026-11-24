@@ -1,46 +1,49 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Exact PR11133 native SSpec owner proof
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  original-sspec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          path: control
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - uses: actions/checkout@v5
+        with:
+          ref: 432b62c7eec1c7bc2c9e0c43d79f0d5b07c068c0
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Immutable comparison inputs and native tools
+        run: |
+          git -C source fetch --no-tags origin 3b6c589b18ffee3bf5bca3b72a3187082df2f9c6 ce231b5b898d797c98d44a9b59a4859a7d792a7b
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Real owner on unchanged SSpec, no fallback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python control/scripts/check/pr11133-native-sspec-proof.py
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: pr11133-original-native-sspec-${{ github.run_id }}
+          path: |
+            native-sspec-proof/*.json
+            native-sspec-proof/*.env
+            native-sspec-proof/*.stdout
+            native-sspec-proof/*.stderr
+            native-sspec-proof/*.diff
+            native-sspec-proof/native-sspec-owner
+            native-sspec-proof/tmp
+            source/test/native-generated-*
+            source/build/scv
+            source/test/fixtures/pr11133_native_sspec_owner.spl
+          include-hidden-files: true
+          retention-days: 14
