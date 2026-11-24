@@ -20,16 +20,18 @@ reject() { checks=$((checks + 1)); if "$@"; then fail "unexpected acceptance: $*
 replace_in_file() { sed "$1" "$2" >"$2.next"; mv "$2.next" "$2"; }
 # Reuse only the existing fixture constructor, not its executed test matrix.
 # Its canonical admission writer and verifiers stay real. Place the fixture in
-# the production Windows discovery layout before the writer seals paths.
+# the production host discovery layout (retaining a .exe filename fixture) before the writer seals paths.
 awk '/^make_fixture\(\)/ {copy=1} /^run_producer\(\)/ {copy=0} copy {print}' \
  "$root/scripts/check/check-bootstrap-planner-admission-producer.shs" | \
- sed 's@mf_evidence_dir="$mf_dst/build/bootstrap/provenance/fixture"@mf_evidence_dir="$mf_dst/build/bootstrap/stage3/x86_64-pc-windows-gnu"@' >"$scratch/fixture.sh"
+ sed 's@mf_evidence_dir="$mf_dst/build/bootstrap/provenance/fixture"@mf_evidence_dir="$mf_dst/build/bootstrap/stage3/$fixture_platform"@' >"$scratch/fixture.sh"
 . "$scratch/fixture.sh"
+host_platform=$(bootstrap_stage3_host_platform) || fail "canonical host selector unavailable"
+fixture_platform=$host_platform
 fixture="$scratch/source"
 make_fixture "$fixture" 'stage2-provenance: pure-simple' strict .exe
 output="$fixture/build/bootstrap"
-admission="$output/stage3/x86_64-pc-windows-gnu/stage2-admitted/admission.env"
-candidate="$output/stage3/x86_64-pc-windows-gnu/stage2-admitted/simple.exe"
+admission="$output/stage3/$fixture_platform/stage2-admitted/admission.env"
+candidate="$output/stage3/$fixture_platform/stage2-admitted/simple.exe"
 check test -f "$candidate"
 check bootstrap_scheduler_verify_admitted_parent "$admission" "$output" "$root"
 lease="$scratch/lease.env"
@@ -39,15 +41,28 @@ touch -t 202001010000 "$admission"
 touch -t 202001020000 "$lease"
 lease_sha=$(bootstrap_scheduler_hash_file "$lease")
 record="$scratch/resume.env"
+# A second correctly sealed foreign-target fixture must not make host discovery
+# ambiguous, nor substitute for the host when its admission is absent.
+fixture_platform=foreign-target-fixture
+make_fixture "$fixture" 'stage2-provenance: pure-simple' strict .exe
+foreign_admission="$output/stage3/$fixture_platform/stage2-admitted/admission.env"
+check test -f "$foreign_admission"
+reject bootstrap_scheduler_verify_admitted_parent "$foreign_admission" "$output" "$root"
+fixture_platform=$host_platform
+mv "$output/stage3/$host_platform" "$scratch/held-host"
+reject bootstrap_scheduler_write_resume_input "$scratch/foreign-only.env" "$output" "$root" "$lease" "$lease_sha"
+check test ! -e "$scratch/foreign-only.env"
+mv "$scratch/held-host" "$output/stage3/$host_platform"
 reject bootstrap_scheduler_admission_after_lease "$admission" "$lease"
 check bootstrap_scheduler_write_resume_input "$record" "$output" "$root" "$lease" "$lease_sha"
 check bootstrap_scheduler_verify_resume_input "$record" "$output" "$root" "$lease" "$lease_sha"
+check test "$(bootstrap_scheduler_manifest_value candidate_path "$record")" = "$candidate"
 # The sealed record must not be overwritten or silently rebound.
 reject bootstrap_scheduler_write_resume_input "$record" "$output" "$root" "$lease" "$lease_sha"
 for mutated in "$candidate" "$admission" \
- "$output/stage3/x86_64-pc-windows-gnu/source-inputs-before.txt" \
- "$output/stage3/x86_64-pc-windows-gnu/runtime-admitted.txt" \
- "$output/stage3/x86_64-pc-windows-gnu/tool-authority-before.txt" "$lease"; do
+ "$output/stage3/$fixture_platform/source-inputs-before.txt" \
+ "$output/stage3/$fixture_platform/runtime-admitted.txt" \
+ "$output/stage3/$fixture_platform/tool-authority-before.txt" "$lease"; do
  rm -f "$scratch/original"
  cp -p "$mutated" "$scratch/original"
  chmod u+w "$mutated"
