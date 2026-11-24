@@ -396,10 +396,8 @@ impl MirLowering:
           2. ends_nl = normalized.ends_with("\\n")   (existing
              rt_string_ends_with, same call shape as the "ends_with"
              special case above).
-          3. If ends_nl: strip exactly the final "\\n" via the same
-             rt_string_len + rt_interp_cstr + spl_str_slice sequence the
-             "substring"/"slice" special case above already uses (raw-buffer
-             slice, then re-tag via ensure_tagged_str).
+          3. If ends_nl: strip the final newline with rt_string_len,
+             rt_interp_cstr and spl_str_slice, then re-tag the result.
           4. lines = body.split("\\n")   (existing rt_string_split, same
              call shape as the "split" special case above); flagged
              runtime_array_locals exactly like plain `.split()` so
@@ -2766,11 +2764,12 @@ impl MirLowering:
             return self.emit_runtime_array_slice_bounds(receiver_local, zero, bounded)
 
     me lower_text_codepoint_slice_v1(receiver_local: LocalId, args: [HirCallArg], span: Span) -> LocalId:
-        # `s[a:b]` / `s[a:]` on proven text: one rt_slice over the tagged
-        # handle with CODE-POINT bounds (negative counts from the end, bounds
-        # clamped by the runtime), exactly the seed's lower_slice. An open end
-        # is i64::MAX, which rt_slice clamps to the code-point length. ASCII
-        # text keeps byte == code point behind the runtime's memoized ASCII bit.
+        self.lower_text_slice_v1(receiver_local, args, span, true)
+
+    me lower_text_slice_v1(receiver_local: LocalId, args: [HirCallArg], span: Span, bracket_slice: bool) -> LocalId:
+        # Brackets count code points. Explicit slice/substring methods use
+        # byte offsets. Both runtime entries preserve embedded NUL bytes.
+        val runtime_symbol = if bracket_slice: "rt_slice" else: "rt_slice_text_bytes"
         val tagged = self.ensure_tagged_str(receiver_local)
         val start_local = self.lower_text_index_operand(args[0].value)
         var end_local: LocalId = 0
@@ -2788,7 +2787,7 @@ impl MirLowering:
         val start = b_slice.emit_cast(mir_operand_copy(start_local), MirType.i64())
         val finish = b_slice.emit_cast(mir_operand_copy(end_local), MirType.i64())
         val step = b_slice.emit_const_int(1)
-        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_slice"),
+        val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(runtime_symbol),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                 params: [MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64()],
                 return_type: MirType.i64(), is_variadic: false)))), call_origin: MirCallOrigin.Runtime)
@@ -4238,26 +4237,6 @@ impl MirLowering:
         # wrong/garbage filename. Handle it type-independently whenever
         # resolution is Unresolved, mirroring the starts_with fix.
         #
-        # Representation: the receiver may be a tagged argv element
-        # (rt_string_new-built) OR a genuinely-raw char* (a plain string
-        # literal, e.g. `val s = "hello world"; s.substring(6)` -- text/text3
-        # probe #4), but spl_str_slice/spl_str_len operate on RAW char*.
-        #
-        # BUG (fixed here): this previously coerced via rt_string_data
-        # (tagged -> raw ptr), which requires the receiver to ALREADY be a
-        # tagged handle -- rt_string_data returns NULL for anything else. A
-        # raw literal receiver made this NULL, so spl_str_len(NULL) -> 0 and
-        # spl_str_slice(NULL, start, 0) -> "" (empty string) SILENTLY (no
-        # error, no crash, just a blank result) whenever `start >= end`
-        # (which `start=6, end=0` always is), instead of the correct
-        # substring. Use rt_interp_cstr instead: it does the tagged-or-raw
-        # check at RUNTIME (bug #136's autodetection) -- a tagged handle
-        # unwraps to its buffer, an already-raw char* passes through
-        # unchanged -- so it is correct for both representations. The
-        # raw-char* result matches the non-bootstrap Str-path representation
-        # the downstream -o/--output filename handling expects. Supports both
-        # `.substring(start)` (1 arg; end = spl_str_len) and
-        # `.substring(start, end)` (2 args).
         # Bug (array.slice/.substring misrouted to string.slice): this erased-
         # receiver fallback (like the "contains" one further below) assumed
         # an untyped/unresolved "slice"/"substring" receiver is always a
@@ -4310,41 +4289,7 @@ impl MirLowering:
                 sub_recv_tagged = prelowered_method_receiver
             else:
                 sub_recv_tagged = self.lower_expr(receiver)
-            if bracket_slice:
-                return self.lower_text_codepoint_slice_v1(sub_recv_tagged, args, receiver.span)
-            val strdata_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_interp_cstr"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-            ), call_origin: MirCallOrigin.Runtime)
-            var b_subsd = self.builder
-            val sub_recv_res = b_subsd.emit_call(strdata_op, [mir_operand_copy(sub_recv_tagged)], MirType(kind: MirTypeKind.Opaque("str")))
-            self.builder = b_subsd
-            if val sub_recv_raw = sub_recv_res:
-                var sub_args: [MirOperand] = [mir_operand_copy(sub_recv_raw)]
-                for arg in args:
-                    val sub_arg_local = self.lower_text_index_operand(arg.value)
-                    sub_args = sub_args.push(mir_operand_copy(sub_arg_local))
-                if args.len() == 1:
-                    val sublen_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("spl_str_len"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                    ), call_origin: MirCallOrigin.Runtime)
-                    var b_sublen = self.builder
-                    val sublen_res = b_sublen.emit_call(sublen_op, [mir_operand_copy(sub_recv_raw)], MirType.i64())
-                    self.builder = b_sublen
-                    if val sublen_local = sublen_res:
-                        sub_args = sub_args.push(mir_operand_copy(sublen_local))
-                val subslice_op = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("spl_str_slice"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                ), call_origin: MirCallOrigin.Runtime)
-                var b_subslice = self.builder
-                val subslice_res = b_subslice.emit_call(subslice_op, sub_args, MirType(kind: MirTypeKind.Opaque("str")))
-                self.builder = b_subslice
-                if val subslice_local = subslice_res:
-                    return subslice_local
-                return sub_recv_raw
-            return sub_recv_tagged
+            return self.lower_text_slice_v1(sub_recv_tagged, args, receiver.span, bracket_slice)
 
         # methods-mir-20261031 shape 1: `fn f(value): value.substring(0, 1)`
         # / `value[0:1]` -- an erased (untyped-param) receiver with no text or
@@ -4415,33 +4360,7 @@ impl MirLowering:
             if slice_receiver_is_text:
                 if args.len() == 1 or args.len() == 2:
                     val receiver_local = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
-                    if bracket_slice:
-                        return self.lower_text_codepoint_slice_v1(receiver_local, args, receiver.span)
-                    var arg_operands: [MirOperand] = []
-                    arg_operands = arg_operands.push(mir_operand_copy(receiver_local))
-                    for arg in args:
-                        val arg_local = self.lower_text_index_operand(arg.value)
-                        arg_operands = arg_operands.push(mir_operand_copy(arg_local))
-                    if args.len() == 1:
-                        val len_operand = MirOperand(kind: MirOperandKind.Const(
-                            MirConstValue.Str("spl_str_len"),
-                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
-                        ), call_origin: MirCallOrigin.Runtime)
-                        var b_len = self.builder
-                        val len_result = b_len.emit_call(len_operand, [mir_operand_copy(receiver_local)], MirType.i64())
-                        self.builder = b_len
-                        if val len_local = len_result:
-                            arg_operands = arg_operands.push(mir_operand_copy(len_local))
-                    val slice_operand = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("spl_str_slice"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
-                    ), call_origin: MirCallOrigin.Runtime)
-                    var b_slice = self.builder
-                    val slice_result = b_slice.emit_call(slice_operand, arg_operands, MirType(kind: MirTypeKind.Opaque("str")))
-                    self.builder = b_slice
-                    if val slice_local = slice_result:
-                        return slice_local
-                    return receiver_local
+                    return self.lower_text_slice_v1(receiver_local, args, receiver.span, bracket_slice)
 
         if self.is_mutating_method(method):
             if mir_mc_trace_state == 1:
@@ -4943,13 +4862,8 @@ impl MirLowering:
         # (rt_string_char_at, declared in llvm_lib_translate.spl). Not routed
         # through rt_string_char_at directly here: that function requires an
         # ALREADY-tagged receiver (rt_core_as_string-checked) and returns nil
-        # for a raw literal, the same trap substring/slice above just got
-        # fixed for. Instead reuse the just-fixed, verified-safe substring
-        # machinery: normalize the receiver via rt_interp_cstr (tagged-or-raw
-        # autodetect) and take a 1-char slice [index, index+1) via
-        # spl_str_slice, returning a fresh raw 1-char string -- consistent
-        # with substring's return representation and with the oracle
-        # (`"h"`, a 1-char text, not a char code).
+        # for a raw literal. Normalize the receiver via rt_interp_cstr and
+        # take a one-byte slice [index, index+1) for the text result.
         if method == "char_at" and args.len() == 1 and resolution_is_unresolved:
             val ca_recv_tagged = if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver)
             val ca_cstr_op = MirOperand(kind: MirOperandKind.Const(
