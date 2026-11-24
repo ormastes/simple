@@ -9,7 +9,8 @@
 # length:u32, payload:length bytes. Exact length; no trailing bytes.
 # Channel 0 is the session control channel (HELLO, REGISTER, UNREGISTER,
 # PING); stream frames use channel >= 1.
-use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 pub const ENDPOINT_FRAME_VERSION_V1: i64 = 1
 pub const ENDPOINT_FRAME_HEADER_V1: i64 = 14
@@ -172,7 +173,10 @@ pub fn endpoint_frame_target_fields_v1(frame: EndpointFrameV1) -> Result<Endpoin
         target_bytes.push(frame.payload[index])
     if not _endpoint_frame_ascii_token(target_bytes, ENDPOINT_FRAME_MAX_TARGET_V1):
         return Err("endpoint-frame-target-invalid")
-    Ok(EndpointFrameTargetV1(protocol: protocol, port: port, target: bytes_to_text(target_bytes)))
+    val target = match bytes_to_text_checked(target_bytes):
+        case Ok(t): t
+        case Err(_): return Err("endpoint-frame-target-invalid")
+    Ok(EndpointFrameTargetV1(protocol: protocol, port: port, target: target))
 
 pub fn endpoint_frame_hello_payload_v1(nonce: [u8], admission_ref: text) -> Result<[u8], text>:
     if nonce.len() != ENDPOINT_FRAME_NONCE_V1: return Err("endpoint-frame-hello-nonce-invalid")
@@ -196,7 +200,10 @@ pub fn endpoint_frame_hello_fields_v1(frame: EndpointFrameV1) -> Result<Endpoint
     for index in (1 + ENDPOINT_FRAME_NONCE_V1)..frame.payload.len():
         reference.push(frame.payload[index])
     if not _endpoint_frame_ascii_token(reference, 128): return Err("endpoint-frame-hello-admission-invalid")
-    Ok(EndpointFrameHelloV1(protocol_version: 1, nonce: nonce, admission_ref: bytes_to_text(reference)))
+    val admission_ref = match bytes_to_text_checked(reference):
+        case Ok(t): t
+        case Err(_): return Err("endpoint-frame-hello-admission-invalid")
+    Ok(EndpointFrameHelloV1(protocol_version: 1, nonce: nonce, admission_ref: admission_ref))
 
 # Out-of-range values are refused, never masked: a masked 65536 would silently become reason 0.
 pub fn endpoint_frame_u16_payload_v1(value: i64) -> Result<[u8], text>:

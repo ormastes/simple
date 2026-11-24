@@ -3,7 +3,7 @@
 use std.nogc_sync_mut.io.windows_command_contract_v2.{WindowsCommandRequestV2,
     windows_command_request_validate_v2, windows_command_line_v2}
 use std.common.build_manager.contracts.builder_digest_valid_v1
-use std.common.text_bytes.bytes_to_text
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.nogc_sync_mut.io.windows_process_text.{windows_process_quote_arg_bytes_v1, windows_process_utf16_units_v1}
 
 pub struct WindowsStdinCommandRequestV1:
@@ -99,8 +99,14 @@ pub fn windows_stdin_native_line_v1(request: WindowsStdinCommandRequestV1, image
     if not image.starts_with("\\\\?\\GLOBALROOT\\Device\\HarddiskVolume"):
         return Err("windows-stdin-launch-image-not-native")
     # Called only with the actual retained pin's OS-resolved image spelling.
-    var command = bytes_to_text(windows_process_quote_arg_bytes_v1(image)?)
-    for argument in request.args: command = command + " " + bytes_to_text(windows_process_quote_arg_bytes_v1(argument)?)
+    var command = match bytes_to_text_checked(windows_process_quote_arg_bytes_v1(image)?):
+        case Ok(t): t
+        case Err(_): return Err("windows-stdin-native-image-invalid-utf8")
+    for argument in request.args:
+        val quoted = match bytes_to_text_checked(windows_process_quote_arg_bytes_v1(argument)?):
+            case Ok(t): t
+            case Err(_): return Err("windows-stdin-native-argument-invalid-utf8")
+        command = command + " " + quoted
     if windows_process_utf16_units_v1(command, false) > 32766: return Err("windows-stdin-native-command-bound")
     Ok(command)
 
