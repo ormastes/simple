@@ -391,8 +391,16 @@ class HirCodecWriter:
     #
     # Scalars too can be nil in a lowered module (see put_text). `N` is not a
     # digit, so it cannot collide with any encoded number or bool.
+    me _can_append_i64() -> bool:
+        self._can_append(22, 64, 22)
+
+    me _append_present_i64(rendered: text):
+        # Zero and one dominate scalar lines in cached HIR frames.
+        val line = if rendered == "0": "0\n" elif rendered == "1": "1\n" else: rendered + "\n"
+        self._append_line(line)
+
     me put_i64(v: i64):
-        if not self._can_append(22, 64, 22):
+        if not self._can_append_i64():
             return
         # Do NOT test `v == nil` on this i64-typed slot. Staged-native codegen
         # compares the raw integer with nil's immediate, which is 3, so every
@@ -408,18 +416,22 @@ class HirCodecWriter:
         # seed interpreter, not `nil`; that line is neither digits nor `N`, so
         # the reader desynchronised. Absence has one wire form, `N`.
         val rendered = "{v}"
-        val line = if _hc_rendered_i64_is_absent(rendered): "N\n" else: rendered + "\n"
-        self._append_line(line)
+        if _hc_rendered_i64_is_absent(rendered):
+            self._append_line("N\n")
+        else:
+            self._append_present_i64(rendered)
+
+    me _can_append_bool() -> bool:
+        self._can_append(2, 32, 2)
 
     me put_bool(v: bool):
-        if not self._can_append(2, 32, 2):
+        if not self._can_append_bool():
             return
         # Same hazard as put_i64, and silent: staged-native `v == nil` is true
         # for every `true`, so each true flag was written as `N` and decoded
         # back as nil. One line either way, so nothing desynchronised.
         val rendered = "{v}"
-        val line = if rendered == "true": "1\n" elif rendered == "false": "0\n" else: "N\n"
-        self._append_line(line)
+        self._append_line(_hc_rendered_bool_line(rendered))
 
     # A NON-optional struct-field scalar: the generated decoder refuses the nil
     # token N for these slots (nil_in_non_optional_scalar), so writing it would
@@ -432,18 +444,21 @@ class HirCodecWriter:
         if _hc_rendered_i64_is_absent(rendered):
             self.reject("nil_in_non_optional_scalar:" + owner_field)
             return
-        self.put_i64(v)
+        if self._can_append_i64():
+            self._append_present_i64(rendered)
 
     me put_bool_field(v: bool, owner_field: text):
         if not self.ok: return
         val rendered = "{v}"
-        if rendered != "true" and rendered != "false":
+        val line = _hc_rendered_bool_line(rendered)
+        if line == "N\n":
             self.reject("nil_in_non_optional_scalar:" + owner_field)
             return
-        self.put_bool(v)
+        if self._can_append_bool():
+            self._append_line(line)
 
     me put_nil_bool_wire():
-        if self._can_append(2, 32, 2):
+        if self._can_append_bool():
             self._append_line("N\n")
 
     me put_nil_text_wire():
@@ -556,6 +571,9 @@ class HirCodecWriter:
             return ""
         self.output_bytes = self.output_bytes + header_bytes
         header + "\n" + body
+
+fn _hc_rendered_bool_line(rendered: text) -> text:
+    if rendered == "true": "1\n" elif rendered == "false": "0\n" else: "N\n"
 
 # Every rendering an absent i64 slot can take: `nil`, and `None` /
 # `Option::None` for an absent `i64?` (the seed interpreter prints the latter).
