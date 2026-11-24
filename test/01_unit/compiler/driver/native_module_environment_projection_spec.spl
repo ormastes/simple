@@ -69,6 +69,29 @@ describe "native module delivery-intent projection":
         expect(duplicate.valid).to_equal(false)
         expect(duplicate.reason).to_contain("environment-field-duplicate")
 
+    it "keeps the object scope when only the final output path changes":
+        val first: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_CACHE_SCOPE", "lane-a"),
+            ("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", "/out/one/simple")]
+        val second: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_CACHE_SCOPE", "lane-a"),
+            ("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", "/out/two/simple")]
+        val absent: [(text, text)] = [("PATH", "/usr/bin"), ("SIMPLE_CACHE_SCOPE", "lane-a")]
+        val module_first = native_build_module_environment_snapshot_fingerprint_v1(first)
+        val module_second = native_build_module_environment_snapshot_fingerprint_v1(second)
+        expect(module_first.valid).to_equal(true)
+        expect(module_second.valid).to_equal(true)
+        expect(module_second.digest).to_equal(module_first.digest)
+        expect(native_build_module_environment_snapshot_fingerprint_v1(absent).digest).to_equal(
+            module_first.digest)
+        # The whole-build no-op request folds the complete capture: a
+        # different `-o` is still a different request there.
+        expect(native_build_environment_snapshot_fingerprint_v1(first).digest ==
+            native_build_environment_snapshot_fingerprint_v1(second).digest).to_equal(false)
+        # The declared lane is still isolation.
+        val other_lane = native_build_module_environment_snapshot_fingerprint_v1(
+            [("PATH", "/usr/bin"), ("SIMPLE_CACHE_SCOPE", "lane-b"),
+             ("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", "/out/one/simple")])
+        expect(other_lane.digest == module_first.digest).to_equal(false)
+
     it "ignores per-run observability sinks and the external RSS ceiling":
         # Stage 3 relaunches differ only in these (pid-stamped paths, run id,
         # watchdog ceiling); none is read by a compiler decision, so they must

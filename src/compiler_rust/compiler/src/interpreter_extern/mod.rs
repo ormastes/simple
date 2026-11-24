@@ -2004,6 +2004,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_session_is_running", bootstrap_runtime::rt_process_session_is_running);
     insert_simple!("rt_process_kill_session", bootstrap_runtime::rt_process_kill_session);
     insert_simple!("rt_process_kill_tree", bootstrap_runtime::rt_process_kill_tree);
+    insert_simple!("rt_child_set_pdeathsig", bootstrap_runtime::rt_child_set_pdeathsig);
     insert_simple!("rt_simple_abi_version", bootstrap_runtime::rt_simple_abi_version);
     insert_simple!("rt_simple_abi_version_deferred", bootstrap_runtime::rt_simple_abi_version_deferred);
     insert_simple!("rt_process_kill", system::rt_process_kill);
@@ -3961,6 +3962,13 @@ mod tests {
     #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
+    }
+
+    /// The seed interprets native_build_main.spl, whose batch children arm
+    /// this at entry; an unregistered name is "unknown extern function".
+    #[test]
+    fn dispatch_registers_child_pdeathsig() {
+        assert!(EXTERN_DISPATCH.contains_key("rt_child_set_pdeathsig"));
     }
 
     #[test]

@@ -197,7 +197,7 @@ pub use module_cache::{
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{
-    clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_for_target,
+    clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_for_target, shared_source_seed,
     shared_source_lookup, shared_source_lookup_for_target, SharedSource,
 };
 pub(crate) use module_cache::take_shared_ast;

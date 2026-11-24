@@ -1576,7 +1576,7 @@ bootstrap_lock_handle=
 rust_target_lock_handle=
 rust_shared_cache_lock_handle=
 rust_shared_cache_root=
-rust_shared_cache_common_dir=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || exit 1
+rust_shared_cache_common_dir=
 if [ "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT+x}" = x ]; then
   rust_shared_cache_root=$(bootstrap_authority_validate_rust_cargo_cache_root \
     "${SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT}" "${repo_root}") || exit 1
@@ -1939,6 +1939,11 @@ esac
 PLATFORM="${PLATFORM_TRIPLE}"
 arch="${PLATFORM_ARCH}"
 os="${PLATFORM_OS}"
+
+# Default lock scope needs the platform, unavailable at early handle setup.
+if [ -z "${rust_shared_cache_root}" ]; then
+  rust_shared_cache_common_dir=$(bootstrap_authority_default_rust_cargo_lock_domain "${repo_root}" "${os}") || exit 1
+fi
 echo "Platform: ${PLATFORM}"
 
 exe_suffix=""

@@ -1,5 +1,6 @@
 # Frontend fanout hosts: every host except Windows, whose transcribed owner
-# (command-snapshot.shs) pins one frontend by design. On a fanout host the
+# (command-snapshot.shs) pins parse warm-up to one frontend. Per-file products
+# use the admitted tree share on Windows too (see below). On a fanout host the
 # product share is the enforced process-tree cap itself: the compiler's clamp
 # (src/app/cli/shard_mem_clamp.spl) spends 60% of that budget at 9000000 KiB
 # per HIR shard worker, so the cap decides the worker count -- and
@@ -22,8 +23,8 @@ bootstrap_product_frontend_linux_host() {
     [ "$(uname -s 2>/dev/null || echo unknown)" = Linux ]
 }
 
-# Uses the canonical Windows frontend owner. Windows keeps the one-worker share;
-# fanout hosts admit up to the cap. Codegen parallelism remains independent.
+# Uses the canonical Windows frontend owner. Windows two-pass builds keep the
+# one-worker share; per-file products admit against the cap. Codegen is separate.
 bootstrap_product_frontend_policy() {
     product_policy_mode=$1 product_policy_cap=$2 product_policy_rss_mode=$3
     # Optional 4th argument: the job-scaled hard ceiling the caller resolved
@@ -52,6 +53,13 @@ bootstrap_product_frontend_policy() {
         product_policy_max=3000000
         product_policy_parse_worker=1650000
         product_policy_hir_worker=3000000
+        # Per-file products require two unit workers. The historical Windows
+        # one-frontend share applies only to the two-pass route; retaining it
+        # here made even a larger admitted owner refuse every file-worker pool.
+        if [ "${SIMPLE_FILE_WORKERS:-0}" = 1 ]; then
+            product_policy_default=$product_policy_cap
+            product_policy_max=$product_policy_ceiling
+        fi
     fi
     product_policy_share=${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-}
     if [ "$product_policy_mode" = diagnostic ]; then

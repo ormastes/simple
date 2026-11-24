@@ -1700,6 +1700,21 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
     None
 }
 
+/// Select BFD only for a Windows GNU target's intermediate COFF closure.
+fn target_coff_partial_link_command(target: simple_common::target::Target) -> Result<Option<std::process::Command>, String> {
+    use simple_common::target::{LinkerFlavor, TargetArch, TargetOS};
+    let arch = match target.arch {
+        TargetArch::X86_64 => "x86_64",
+        TargetArch::X86 => "i686",
+        TargetArch::Aarch64 => "aarch64",
+        _ => "other",
+    };
+    super::coff_partial_link::command(
+        target.os == TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu,
+        arch,
+    )
+}
+
 /// Select an objcopy that supports symbol localization for the target object
 /// format. LLVM 18 rejects non-empty `--localize-symbols` lists for COFF, so
 /// Windows GNU projections must use GNU objcopy instead.
@@ -1707,15 +1722,7 @@ fn find_stage4_objcopy_tool(target: simple_common::target::Target) -> Option<Str
     if target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
     {
-        for tool in ["x86_64-w64-mingw32-objcopy", "objcopy"] {
-            if let Ok(version) = std::process::Command::new(tool).arg("--version").output() {
-                let stdout = String::from_utf8_lossy(&version.stdout);
-                if version.status.success() && (stdout.contains("GNU objcopy") || stdout.contains("GNU Binutils")) {
-                    return Some(tool.to_string());
-                }
-            }
-        }
-        return None;
+        return super::coff_partial_link::gnu_tool(&["x86_64-w64-mingw32-objcopy", "objcopy"], "objcopy");
     }
     find_objcopy_tool()
 }
@@ -1724,14 +1731,7 @@ fn find_stage4_nm_tool(target: simple_common::target::Target) -> Option<String> 
     if target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
     {
-        for tool in ["x86_64-w64-mingw32-nm", "nm"] {
-            if let Ok(version) = std::process::Command::new(tool).arg("--version").output() {
-                let stdout = String::from_utf8_lossy(&version.stdout);
-                if version.status.success() && (stdout.contains("GNU nm") || stdout.contains("GNU Binutils")) {
-                    return Some(tool.to_string());
-                }
-            }
-        }
+        return super::coff_partial_link::gnu_tool(&["x86_64-w64-mingw32-nm", "nm"], "nm");
     }
     None
 }
@@ -1817,7 +1817,7 @@ fn coff_defined_weak_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
             continue;
         }
         let defined = if (1..=section_count).contains(&symbol.section_number()) {
-            true
+            return Err("COFF WeakExternal must be an undefined alias with a fallback auxiliary record".into());
         } else if symbol.number_of_aux_symbols() > 0 {
             let aux = table
                 .get::<object::pe::ImageAuxSymbolWeak>(index, 1)
@@ -3371,30 +3371,38 @@ fn project_stage4_archive_closure(
         // Otherwise Clang invokes the host linker on a Windows GNU archive.
         let target = effective_target();
         let cc = target_c_compiler(target);
-        let mut closure_cmd = std::process::Command::new(&cc);
-        if let Some(flag) = windows_gnu_target_flag(target, &cc) {
-            closure_cmd.arg(flag);
-        }
-        // A relocatable closure made by GNU ld can carry misaligned AArch64
-        // LDST relocations into an lld final link. Use the selected linker
-        // for both steps so the capsule has the same relocation semantics.
-        let fuse_ld = super::linker::requested_linker_driver_name()?;
-        if let Some(linker) = fuse_ld {
-            closure_cmd.arg(format!("-fuse-ld={linker}"));
-        }
-        closure_cmd.arg("-nostdlib").arg("-Wl,-r");
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            closure_cmd.arg("-no-pie");
-            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
-                closure_cmd.arg("-Wl,--gc-sections");
+        let coff_command = target_coff_partial_link_command(target)?;
+        let coff_partial = coff_command.is_some();
+        let mut closure_cmd = coff_command.unwrap_or_else(|| std::process::Command::new(&cc));
+        if !coff_partial {
+            if let Some(flag) = windows_gnu_target_flag(target, &cc) {
+                closure_cmd.arg(flag);
+            }
+            // A relocatable closure made by GNU ld can carry misaligned AArch64
+            // LDST relocations into an lld final link. Use the selected linker
+            // for both steps so the capsule has the same relocation semantics.
+            let fuse_ld = super::linker::requested_linker_driver_name()?;
+            if let Some(linker) = fuse_ld {
+                closure_cmd.arg(format!("-fuse-ld={linker}"));
+            }
+            closure_cmd.arg("-nostdlib").arg("-Wl,-r");
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                closure_cmd.arg("-no-pie");
+                if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                    closure_cmd.arg("-Wl,--gc-sections");
+                }
             }
         }
         for symbol in &requested {
-            #[cfg(target_os = "macos")]
-            closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
-            #[cfg(not(target_os = "macos"))]
-            closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
+            if coff_partial {
+                closure_cmd.arg(format!("--undefined={symbol}"));
+            } else {
+                #[cfg(target_os = "macos")]
+                closure_cmd.arg(format!("-Wl,-u,_{symbol}"));
+                #[cfg(not(target_os = "macos"))]
+                closure_cmd.arg(format!("-Wl,--undefined={symbol}"));
+            }
         }
         // The current Apple linker ignores `-u`-seeded archive extraction in
         // `-r` mode: members defining the requested roots never load and the
@@ -3402,7 +3410,7 @@ fn project_stage4_archive_closure(
         // reference object instead; its own array symbol is not in `requested`
         // so the localization pass below demotes it like any other non-root.
         #[cfg(target_os = "macos")]
-        {
+        if !coff_partial {
             let refs_c = temp_dir.join(format!("{stem}_refs.c"));
             let refs_o = temp_dir.join(format!("{stem}_refs.o"));
             let mut source = String::new();
@@ -3430,18 +3438,27 @@ fn project_stage4_archive_closure(
             }
             closure_cmd.arg(&refs_o);
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        closure_cmd.arg("-Wl,--start-group");
+        if coff_partial {
+            closure_cmd.arg("--start-group");
+        } else {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            closure_cmd.arg("-Wl,--start-group");
+        }
         for archive in inputs {
             closure_cmd.arg(archive);
         }
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        closure_cmd.arg("-Wl,--end-group");
+        if coff_partial {
+            closure_cmd.arg("--end-group");
+        } else {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            closure_cmd.arg("-Wl,--end-group");
+        }
+        let closure_program = closure_cmd.get_program().to_string_lossy().into_owned();
         let closure = closure_cmd
             .arg("-o")
             .arg(&closure_object)
             .output()
-            .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {cc}: {err}"))?;
+            .map_err(|err| format!("failed to execute Stage4 runtime capsule closure link with {closure_program}: {err}"))?;
         if !closure.status.success() {
             return Err(format!(
                 "Stage4 runtime capsule closure link failed: {}",
@@ -3506,7 +3523,7 @@ fn project_stage4_archive_closure(
         // Always newline-terminated: GNU objcopy 2.42 exits 1 with no message
         // on a zero-byte --localize-symbols/--weaken-symbols file, while a
         // lone "\n" is an empty list to both GNU and LLVM objcopy.
-        std::fs::write(&localize_path, localize_text + "\n")
+        std::fs::write(&localize_path, localize_text.clone() + "\n")
             .map_err(|err| format!("failed to write Stage4 runtime capsule localization list: {err}"))?;
 
         // Allowed-external symbols that are kept global (above) must yield to
@@ -3530,7 +3547,7 @@ fn project_stage4_archive_closure(
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(&weaken_path, weaken_text + "\n")
+        std::fs::write(&weaken_path, if coff_partial { "\n".to_string() } else { weaken_text.clone() + "\n" })
             .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
         let objcopy = find_stage4_objcopy_tool(target).ok_or_else(|| {
@@ -3569,6 +3586,12 @@ fn project_stage4_archive_closure(
             ));
         }
 
+        if coff_partial {
+            let private_names = localize_text.lines().map(str::to_owned).collect();
+            super::coff_weak_projection::localize_weak(&localized_object, &private_names)?;
+            let weak_names = weaken_text.lines().map(str::to_owned).collect();
+            super::coff_weak_projection::project(&localized_object, &weak_names)?;
+        }
         let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
         // LLVM 18 llvm-nm reports GNU objcopy's COFF WeakExternal symbols as
         // strong `T`. Inspect Windows GNU output with the matching GNU reader.
@@ -3773,35 +3796,45 @@ pub(crate) fn build_compiler_backfill_archive(
                 temp_dir.display()
             )
         })?;
+        let target = effective_target();
         let cc = find_c_compiler();
-        let mut closure_cmd = std::process::Command::new(&cc);
-        // Match the final linker's relocation handling. GNU ld's partial
-        // AArch64 closure can leave misaligned LDST128 relocations that lld
-        // rejects when the localized backfill reaches the final link.
-        let fuse_ld = super::linker::requested_linker_driver_name()?;
-        if let Some(linker) = fuse_ld {
-            closure_cmd.arg(format!("-fuse-ld={linker}"));
-        }
-        closure_cmd.arg("-nostdlib").arg("-Wl,-r");
-        #[cfg(target_os = "linux")]
-        {
-            closure_cmd.arg("-no-pie");
-            if partial_link_gc_sections_allowed(&cc, fuse_ld) {
-                closure_cmd.arg("-Wl,--gc-sections");
+        let coff_command = target_coff_partial_link_command(target)?;
+        let coff_partial = coff_command.is_some();
+        let mut closure_cmd = coff_command.unwrap_or_else(|| std::process::Command::new(&cc));
+        if !coff_partial {
+            // Match the final linker's relocation handling. GNU ld's partial
+            // AArch64 closure can leave misaligned LDST128 relocations that lld
+            // rejects when the localized backfill reaches the final link.
+            let fuse_ld = super::linker::requested_linker_driver_name()?;
+            if let Some(linker) = fuse_ld {
+                closure_cmd.arg(format!("-fuse-ld={linker}"));
+            }
+            closure_cmd.arg("-nostdlib").arg("-Wl,-r");
+            #[cfg(target_os = "linux")]
+            {
+                closure_cmd.arg("-no-pie");
+                if partial_link_gc_sections_allowed(&cc, fuse_ld) {
+                    closure_cmd.arg("-Wl,--gc-sections");
+                }
             }
         }
         for export in &manifest {
-            #[cfg(target_os = "macos")]
-            closure_cmd.arg(format!("-Wl,-u,_{export}"));
-            #[cfg(not(target_os = "macos"))]
-            closure_cmd.arg(format!("-Wl,--undefined={export}"));
+            if coff_partial {
+                closure_cmd.arg(format!("--undefined={export}"));
+            } else {
+                #[cfg(target_os = "macos")]
+                closure_cmd.arg(format!("-Wl,-u,_{export}"));
+                #[cfg(not(target_os = "macos"))]
+                closure_cmd.arg(format!("-Wl,--undefined={export}"));
+            }
         }
+        let closure_program = closure_cmd.get_program().to_string_lossy().into_owned();
         let closure_result = closure_cmd
             .arg("-o")
             .arg(&closure_object)
             .arg(compiler_archive)
             .output()
-            .map_err(|err| format!("failed to execute compiler backfill closure link with {cc}: {err}"))?;
+            .map_err(|err| format!("failed to execute compiler backfill closure link with {closure_program}: {err}"))?;
         if !closure_result.status.success() {
             return Err(format!(
                 "compiler backfill closure link failed: {}",
@@ -3809,6 +3842,9 @@ pub(crate) fn build_compiler_backfill_archive(
             ));
         }
 
+        if coff_partial {
+            repair_coff_weak_fallback_indices(&closure_object)?;
+        }
         reject_partial_link_tombstones(&closure_object, "compiler backfill")?;
         let (closure_defined, closure_undefined) = archive_global_symbols(&closure_object)?;
         for export in &manifest {

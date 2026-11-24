@@ -3793,7 +3793,8 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
                     let promoted = builder.ins().fpromote(types::F64, val);
                     adapted.push(builder.ins().bitcast(types::I64, MemFlags::new(), promoted));
                 } else {
-                    adapted.push(builder.ins().fcvt_to_sint(expected_ty, val));
+                    // Narrow int slot: saturate like an explicit cast, never trap.
+                    adapted.push(super::helpers::float_to_int_saturating(builder, val, expected_ty, true));
                 }
             } else if actual_ty.is_float() && expected_ty.is_float() {
                 // Float width conversion

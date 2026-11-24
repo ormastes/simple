@@ -7,7 +7,9 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.process_memory.{macos_vm_available_from_vm_stat_v1,
     physmem_total_from_bytes_field_v1, host_commit_avail_kib, host_physmem_total_kib}
 use app.cli.shard_mem_clamp.{shard_standalone_host_cap_v1, SHARD_HIR_WORKER_KB_V1,
-    shard_commit_spawn_admit_v1, shard_tree_headroom_kib_v1}
+    shard_commit_spawn_admit_v1, shard_tree_headroom_kib_v1,
+    shard_tree_headroom_kib_for_v1, build_host_memory_total_kib}
+use std.nogc_sync_mut.host_limits.{host_limit_mem_reserve_free_kib}
 use app.cli.file_worker_pool_refusal.{FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1,
     FILE_WORKER_UNIT_SMALL_CLOSURE_FLOOR_KB_V1,
     FileWorkerUnitPriceV1, FileWorkerUnitScaleBoundsV1, BinaryPointerWidthV1,
@@ -54,7 +56,13 @@ describe "Pillar 1: parallel worker admission on 24 GiB Apple Silicon & calibrat
         step("live run_ledger_shards commit gate (RAM/4 = 6 GiB reserve, not RAM/2 = 12 GiB) admits 2nd worker on 14 GiB avail Mac")
         expect(shard_commit_spawn_admit_v1(14 * GIB, 6 * GIB, 3584000, [0])).to_equal(true)
         expect(shard_commit_spawn_admit_v1(14 * GIB, 6 * GIB, FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1, [0])).to_equal(true)
-        expect(shard_tree_headroom_kib_v1() <= 8 * GIB).to_equal(true)
+        expect(shard_tree_headroom_kib_for_v1("", 0, 24 * GIB)).to_equal(6 * GIB)
+        # Explicit caller/host policy may exceed the automatic 24 GiB-host reserve.
+        expect(shard_tree_headroom_kib_for_v1("", 10 * GIB, 24 * GIB)).to_equal(10 * GIB)
+        val reserve_field = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+        val host_reserve = host_limit_mem_reserve_free_kib(0)
+        expect(shard_tree_headroom_kib_v1()).to_equal(shard_tree_headroom_kib_for_v1(
+            reserve_field, host_reserve, build_host_memory_total_kib()))
         step("exhausted reserve fails closed to 0 for HIR pool and 1 for sequential lane")
         expect(shard_standalone_host_cap_v1(4, 3584000, 3 * GIB, 4 * GIB, 500000)).to_equal(0)
         expect(shard_standalone_host_cap_v1(4, 3584000, 3 * GIB, 4 * GIB, 0 - 1)).to_equal(1)

@@ -48,7 +48,7 @@ pub struct HostPrimaryGeometryTurnV2:
     task: HostPrimaryGeometryTaskV2?
     receipt: HostPrimaryGeometryReceiptV1?
     error: text
-    history: HostPrimaryGeometryHistoryV2? = nil
+    history: HostPrimaryGeometryHistoryV2? = None
 
 fn refused(local: HostLocalRootV3, reason: text) -> HostPrimaryGeometryTurnV2:
     HostPrimaryGeometryTurnV2(local, nil, nil, reason)
@@ -81,7 +81,7 @@ pub fn host_primary_geometry_connection_match_v2(expected_plan: text, expected_s
 # scanned one pair per step, so persistent recovery cannot block the control poll.
 pub fn host_primary_geometry_begin_v2(local: HostLocalRootV3,
         connection: HostPrimaryConnectionTaskV3, session: ContainerOwnedTerminalSessionV2,
-        request: ContainerPrimaryGeometryRequestV1, history: HostPrimaryGeometryHistoryV2? = nil) -> HostPrimaryGeometryTurnV2:
+        request: ContainerPrimaryGeometryRequestV1, history: HostPrimaryGeometryHistoryV2? = None) -> HostPrimaryGeometryTurnV2:
     val live = host_primary_connection_control_live_v3(local, connection)
     if live.is_err(): return refused(local, live.unwrap_err())
     val proposed = initial_receipt(session, request)
@@ -98,7 +98,7 @@ pub fn host_primary_geometry_begin_v2(local: HostLocalRootV3,
             if parent.is_err(): return refused(local, parent.unwrap_err())
             val begun = container_primary_geometry_begin_v2(root.container_v3(), session, parent.unwrap().execution,
                 current.unwrap().engine_policy_bytes, request)
-            if begun.owner == nil: return HostPrimaryGeometryTurnV2(local, nil, nil, begun.error)
+            if begun.owner.is_none(): return HostPrimaryGeometryTurnV2(local, nil, nil, begun.error)
             val journal = root.capacity_v3().journal
             var task = HostPrimaryGeometryTaskV2(head, head, request, begun.owner, "scan", 1, nil,
                 connection.plan_v3().request_digest, journal.lease_digest, journal.authority_digest, journal.windows_store.unwrap(), "")
@@ -240,9 +240,9 @@ pub fn host_primary_geometry_step_v2(local: HostLocalRootV3,
 
 fn finish(local: HostLocalRootV3, task: HostPrimaryGeometryTaskV2) -> HostPrimaryGeometryTurnV2:
     var retained = task
-    if retained.exchange == nil and retained.phase == "discard":
+    if retained.exchange.is_none() and retained.phase == "discard":
         return HostPrimaryGeometryTurnV2(local, nil, nil, retained.error)
-    if retained.exchange == nil and ["cached", "blocked"].contains(retained.phase):
+    if retained.exchange.is_none() and ["cached", "blocked"].contains(retained.phase):
         return completed(local, retained, retained.phase == "cached")
     match local:
         case HostLocalRootV3.Windows(root):
@@ -250,7 +250,7 @@ fn finish(local: HostLocalRootV3, task: HostPrimaryGeometryTaskV2) -> HostPrimar
             val current = root.current_v3()
             val same_writer = (journal.lease_digest == retained.journal_lease and journal.authority_digest == retained.journal_authority and
                 journal.windows_store.is_some() and retained.journal_store.same_owner(journal.windows_store.unwrap()))
-            if retained.exchange == nil and current.is_ok() and same_writer:
+            if retained.exchange.is_none() and current.is_ok() and same_writer:
                 if retained.phase == "reservation-uncertain":
                     val observed = host_primary_geometry_record_read_v1(journal, retained.head.binding_uid, retained.slot, false)
                     if observed.is_ok() and observed.unwrap().is_none():

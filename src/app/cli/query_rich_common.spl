@@ -8,6 +8,7 @@ use std.io_runtime.{file_exists, dir_list_or_empty, get_args}
 use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.nogc_sync_mut.io.file_ops.{file_mmap_read_text}
+use compiler.tools.lint._LintMain.config_and_model.{lint_policy_code_for_rule}
 
 # ---------------------------------------------------------------------------
 # Thin wrappers — importable by other query_* modules via `use`
@@ -108,6 +109,15 @@ fn _diag_rewrite_severity(json_str: text, sev: i64) -> text:
         json_str.substring(0, vstart), severity_text, json_str.substring(vend)]
     parts.join("")
 
+# RB-DIAG-01: attach the policy rule ID (config/policy/diagnostic_policy.sdn)
+# as `"policy_id"` so the LSP surface prints the same ID the CLI prints.
+fn _diag_attach_policy_id(json_str: text) -> text:
+    val code = _diag_code_of(json_str)
+    val policy_id = lint_policy_code_for_rule(code)
+    if policy_id == "" or policy_id == code or not json_str.ends_with("}"):
+        return json_str
+    json_str.substring(0, json_str.byte_len() - 1) + ",\"policy_id\":\"" + policy_id + "\"}"
+
 fn _diag_emit_or_collect(json_str: text):
     """Either print or collect a JSON diagnostic string depending on mode.
 
@@ -122,6 +132,7 @@ fn _diag_emit_or_collect(json_str: text):
             if ov < 0:
                 return  # suppressed (Allow)
             out = _diag_rewrite_severity(json_str, ov)
+    out = _diag_attach_policy_id(out)
     if _DIAG_COLLECT_MODE:
         _DIAG_COLLECTED.push(out)
     else:
