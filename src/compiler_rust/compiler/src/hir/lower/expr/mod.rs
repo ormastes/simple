@@ -2616,8 +2616,8 @@ impl Lowerer {
                 // BoxInt and picks static dispatch, which codegen already
                 // routes to `rt_index_of`.
                 "index_of" => Some(TypeId::I64),
-                // `arr.sum()` (interpreter_method/collections.rs "sum") only
-                // accumulates Int elements and always returns an Int — same
+                // `arr.sum()` (interpreter_method/collections.rs "sum")
+                // accumulates signed and unsigned ints into an Int — same
                 // "raw i64 needs BoxInt" gap class as `index_of` above. The
                 // MIR lowering (lowering_expr_method.rs, task:
                 // jit_method_dispatch_audit_2026-07-29) unboxes

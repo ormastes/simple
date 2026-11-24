@@ -151,7 +151,13 @@ if [ "${1:-}" = --check-toolchain ]; then
   exit 0
 fi
 TRIPLE="aarch64-unknown-none-elf"
-OBJ_DIR="$SYSROOT/obj"
+mkdir -p "$SYSROOT/obj"
+OBJ_DIR=$(mktemp -d "$SYSROOT/obj/libc-generation.XXXXXX")
+. "$REPO_ROOT/scripts/check/lib/simpleos-sysroot-receipt.shs"
+simpleos_sdk_invalidate "$SYSROOT"
+mkdir -p "$OBJ_DIR"
+sdk_input_capture="$OBJ_DIR/prebuild-inputs.sdn"
+simpleos_sdk_capture_inputs "$REPO_ROOT" aarch64 scripts/os/simpleos-sysroot-aarch64.shs "$sdk_input_capture"
 
 CFLAGS="-target $TRIPLE -ffreestanding -nostdlib -fno-builtin \
   -fno-stack-protector -fno-exceptions \
@@ -218,8 +224,7 @@ $AR rcs "$SYSROOT/lib/libsimpleos_c.a" $OBJS
 # -print-libgcc-file-name slot by cc-aarch64-simpleos, because
 # simpleos_user_runtime_paths() in the seed linker is x86_64-gated.
 echo "[sysroot-aarch64] Cross-compiling real Simple runtime for aarch64..."
-RT_BUILD="$OBJ_DIR/simple_runtime_native"
-mkdir -p "$RT_BUILD"
+RT_BUILD=$(mktemp -d "$OBJ_DIR/simple_runtime_native.XXXXXX")
 RT_CFLAGS="-target $TRIPLE \
     -ffreestanding -nostdlib -nostdlibinc -fno-builtin -fno-stack-protector \
     -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
@@ -383,6 +388,9 @@ SECTIONS {
 EOF
 
 printf 'aarch64-unknown-simpleos\n' > "$SYSROOT/share/simpleos/target-triple.txt"
+sdk_flags_file="$OBJ_DIR/build-flags.txt"
+printf 'CFLAGS=%s\nASFLAGS=%s\nRT_CFLAGS=%s\n' "$CFLAGS" "$ASFLAGS" "$RT_CFLAGS" > "$sdk_flags_file"
+simpleos_sdk_write "$REPO_ROOT" "$SYSROOT" aarch64 scripts/os/simpleos-sysroot-aarch64.shs "$CC" "$AR" "$sdk_flags_file" "$sdk_input_capture"
 
 echo "[sysroot-aarch64] done: $SYSROOT"
 ls -l "$SYSROOT/lib"

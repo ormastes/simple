@@ -920,14 +920,13 @@ impl<'a> MirLowerer<'a> {
 
         // === JIT method-dispatch audit batch (jit_method_dispatch_audit_2026-07-29) ===
         // `arr.sum()` on an Array<T>: the interpreter
-        // (interpreter_method/collections.rs "sum") only accumulates Int
-        // elements (ignoring anything that isn't `Value::Int`) and always
-        // returns an Int — never a Float, even when the array holds floats.
-        // `rt_array_sum` (runtime/src/value/collections.rs) mixes floats in
-        // and can return a Float when the array holds any float element — a
-        // known, documented divergence from the interpreter for MIXED
-        // int/float arrays only; for a pure-Int array (the overwhelmingly
-        // common case) both agree exactly. `rt_array_sum` already returns a
+        // (interpreter_method/collections.rs "sum") and `rt_array_sum`
+        // (runtime/src/value/collections.rs) both sum signed and unsigned
+        // ints into an Int and promote to a Float when any element is a
+        // float. This lowering types the result I64, so a float result is
+        // still mis-read here (open:
+        // doc/08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md);
+        // int arrays agree on every engine. `rt_array_sum` already returns a
         // TAG-BOXED int (`RuntimeValue::from_int`), matching what `d[k]`/
         // `.get(k)` return for an Int value, so reuse the same tag-boxing-
         // safe unbox helper `unbox_dict_read_result` (lowering_expr_struct.rs)

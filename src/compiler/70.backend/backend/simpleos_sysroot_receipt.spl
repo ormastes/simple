@@ -1,0 +1,239 @@
+# Bounded native SDK provenance checks. No shell, compiler, archiver, glob or
+# tree scan is used by a linker consumer. Execution qualification is separate.
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty, file_size_raw, file_read_bytes_result, env_get, file_exists, dir_exists}
+use compiler.backend.runtime_object_cache.{runtime_object_cache_digest_valid_v1}
+use compiler.backend.simpleos_native_symbols.{simpleos_user_link_arch, simpleos_user_sysroot, simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs}
+
+val SIMPLEOS_SDK_RECEIPT_LIMIT_V1: i64 = 32768
+val SIMPLEOS_SDK_LEDGER_LIMIT_V1: i64 = 2097152
+val SIMPLEOS_SDK_ENTRY_LIMIT_V1: i64 = 2048
+
+pub fn simpleos_sdk_canonical_arch_v1(target: text) -> text:
+    simpleos_user_link_arch(target)
+
+fn _sdk_fields_v1() -> [text]:
+    ["schema", "status", "target", "target_triple", "recipe_path", "recipe_sha256",
+        "receipt_owner_sha256", "source_inputs_sha256", "artifacts_sha256", "members_sha256",
+        "compiler_path", "compiler_sha256", "archiver_path", "archiver_sha256", "flags_sha256",
+        "crt0_sha256", "libc_sha256", "stdio_source_profile", "runtime_qualification"]
+
+fn _sdk_triple_v1(arch: text) -> text:
+    if not ["x86_64", "aarch64", "riscv64", "i686", "arm32", "riscv32"].contains(arch): return ""
+    "{arch}-unknown-simpleos"
+
+fn _sdk_stdio_v1(arch: text) -> text:
+    if arch == "x86_64": "x64-fd32-source-only" else: "legacy-serial-unqualified"
+
+fn _sdk_path_v1(path: text) -> bool:
+    if path == "" or path.len() > 512 or path.starts_with("/") or path.contains(".."): return false
+    for ch in path:
+        if not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./+-".contains(ch): return false
+    true
+
+fn _sdk_string_v1(value: SdnValue, key: text) -> text:
+    match value.get(key):
+        case Some(item): item.as_str() ?? ""
+        case None: ""
+
+fn _sdk_parse_v1(raw: text, maximum: i64) -> Result<SdnValue, text>:
+    if raw == "" or raw.byte_len() > maximum: return Err("SDK record exceeds its read bound or is empty")
+    val (value, issues) = parse_with_issues(raw)?
+    if issues.len() > 0: return Err("SDK record has duplicate or ambiguous SDN fields")
+    match value.as_dict():
+        case Some(_): pass
+        case None: return Err("SDK record must be an SDN dictionary")
+    Ok(value)
+
+pub fn simpleos_sdk_receipt_decode_v1(raw: text, arch: text) -> Result<Dict<text, text>, text>:
+    val parsed = _sdk_parse_v1(raw, SIMPLEOS_SDK_RECEIPT_LIMIT_V1)?
+    val dictionary = parsed.as_dict().unwrap()
+    val required = _sdk_fields_v1()
+    if dictionary.len() != required.len(): return Err("SDK receipt has missing or unknown fields")
+    var fields: Dict<text, text> = {}
+    for key in dictionary.keys():
+        if not required.contains(key): return Err("SDK receipt has unknown field {key}")
+        val value = _sdk_string_v1(parsed, key)
+        if value == "" or value.len() > 4096: return Err("SDK receipt field {key} is empty or oversized")
+        fields[key] = value
+    for key in ["recipe_sha256", "receipt_owner_sha256", "source_inputs_sha256", "artifacts_sha256",
+            "members_sha256", "compiler_sha256", "archiver_sha256", "flags_sha256", "crt0_sha256", "libc_sha256"]:
+        if not runtime_object_cache_digest_valid_v1(fields[key]): return Err("SDK receipt has invalid digest {key}")
+    if fields["schema"] != "simpleos-sysroot-receipt-v1" or fields["status"] != "built":
+        return Err("SDK receipt has unsupported schema or status")
+    if _sdk_triple_v1(arch) == "" or fields["target"] != arch or fields["target_triple"] != _sdk_triple_v1(arch):
+        return Err("SDK receipt target does not match the canonical user target")
+    if fields["stdio_source_profile"] != _sdk_stdio_v1(arch) or fields["runtime_qualification"] != "none":
+        return Err("SDK receipt has unsupported source profile or qualification claim")
+    val recipe = fields["recipe_path"]
+    val recipe_pair = arch + ":" + recipe
+    if not ["x86_64:src/os/port/llvm/sysroot.shs", "aarch64:src/os/port/llvm/sysroot.shs",
+            "aarch64:scripts/os/simpleos-sysroot-aarch64.shs", "riscv64:scripts/os/simpleos-sysroot-riscv64.shs",
+            "i686:scripts/os/simpleos-sysroot-32.shs", "arm32:scripts/os/simpleos-sysroot-32.shs",
+            "riscv32:scripts/os/simpleos-sysroot-32.shs"].contains(recipe_pair):
+        return Err("SDK receipt recipe is outside its canonical owner scope")
+    Ok(fields)
+
+fn _sdk_read_v1(path: text, maximum: i64) -> Result<text, text>:
+    file_read_regular_no_follow_bounded(path, maximum)
+
+fn _sdk_hash_v1(path: text, expected: text) -> Result<bool, text>:
+    if not runtime_object_cache_digest_valid_v1(expected) or not file_is_regular_no_follow(path):
+        return Err("SDK input is missing, unsafe or has invalid identity: {path}")
+    if file_hash_sha256_or_empty(path) != expected: return Err("SDK input is stale or changed: {path}")
+    Ok(true)
+
+pub fn simpleos_sdk_ledger_decode_v1(raw: text, schema: text) -> Result<Dict<text, text>, text>:
+    val parsed = _sdk_parse_v1(raw, SIMPLEOS_SDK_LEDGER_LIMIT_V1)?
+    val root = parsed.as_dict().unwrap()
+    if root.len() != 2 or not root.contains_key("files") or _sdk_string_v1(parsed, "schema") != schema:
+        return Err("SDK ledger has unknown fields or schema")
+    val files = match parsed.get("files"):
+        case Some(value):
+            match value.as_dict():
+                case Some(entries): entries
+                case None: return Err("SDK ledger files must be a dictionary")
+        case None: return Err("SDK ledger files are missing")
+    if files.len() == 0 or files.len() > SIMPLEOS_SDK_ENTRY_LIMIT_V1: return Err("SDK ledger entry count is outside its bound")
+    var entries: Dict<text, text> = {}
+    for path in files.keys():
+        val digest = files[path].as_str() ?? ""
+        if not _sdk_path_v1(path) or not runtime_object_cache_digest_valid_v1(digest):
+            return Err("SDK ledger contains an unsafe path or invalid digest")
+        entries[path] = digest
+    Ok(entries)
+
+fn _sdk_ledger_read_v1(path: text, digest: text, schema: text) -> Result<Dict<text, text>, text>:
+    val identity = _sdk_hash_v1(path, digest)?
+    simpleos_sdk_ledger_decode_v1(_sdk_read_v1(path, SIMPLEOS_SDK_LEDGER_LIMIT_V1)?, schema)
+
+fn _sdk_crt_target_v1(sysroot: text, arch: text) -> Result<bool, text>:
+    val path = "{sysroot}/lib/crt0.o"
+    val size = file_size_raw(path)
+    if size < 52 or size > 1048576: return Err("SDK CRT object exceeds its header read bound")
+    val bytes = file_read_bytes_result(path)?
+    if bytes.len() < 52: return Err("SDK CRT object is truncated")
+    val elf_class: i64 = if arch == "x86_64" or arch == "aarch64" or arch == "riscv64": 2 else: 1
+    var machine: i64 = 243
+    if arch == "x86_64": machine = 62
+    elif arch == "i686": machine = 3
+    elif arch == "aarch64": machine = 183
+    elif arch == "arm32": machine = 40
+    val actual_machine = (bytes[18] as i64) | ((bytes[19] as i64) << 8)
+    if bytes[0] != 127u8 or bytes[1] != 69u8 or bytes[2] != 76u8 or bytes[3] != 70u8 or
+            (bytes[4] as i64) != elf_class or bytes[5] != 1u8 or actual_machine != machine:
+        return Err("SDK CRT object has a different ELF class, byte order or machine")
+    Ok(true)
+
+@allow(primitive_api) # reason: the existing linker guard protocol returns a raw success boolean inside Result; this function validates SDK provenance rather than constructing a domain value
+pub fn simpleos_sysroot_validate_sdk_v1(sysroot: text, arch: text, source_root: text,
+        crt_override: text = "", libc_override: text = "", script_override: text = "") -> Result<bool, text>:
+    """Validate declared immutable SDK inputs before either userland linker engine.
+    Producer CC/AR identities are provenance only, never local-tool requirements."""
+    val meta = "{sysroot}/share/simpleos"
+    val receipt = simpleos_sdk_receipt_decode_v1(_sdk_read_v1("{meta}/sysroot-receipt.sdn", SIMPLEOS_SDK_RECEIPT_LIMIT_V1)?, arch)?
+    val source = _sdk_ledger_read_v1("{meta}/sysroot-inputs.sdn", receipt["source_inputs_sha256"], "simpleos-sdk-inputs-v1")?
+    val artifacts = _sdk_ledger_read_v1("{meta}/sysroot-artifacts.sdn", receipt["artifacts_sha256"], "simpleos-sdk-artifacts-v1")?
+    val members = _sdk_ledger_read_v1("{meta}/sysroot-members.sdn", receipt["members_sha256"], "simpleos-sdk-members-v1")?
+    val recipe = receipt["recipe_path"]
+    val owner = "scripts/check/lib/simpleos-sysroot-receipt.shs"
+    for required in ["src/os/libc/simpleos_libc.c", recipe, owner]:
+        if not source.contains_key(required): return Err("SDK source ledger is missing its required owner {required}")
+    if source[recipe] != receipt["recipe_sha256"] or source[owner] != receipt["receipt_owner_sha256"]:
+        return Err("SDK recipe/owner identity does not match the source ledger")
+    for path in source.keys():
+        if not (path.starts_with("src/os/libc/") or path.starts_with("src/runtime/") or path == recipe or path == owner):
+            return Err("SDK source ledger escapes its owned input family")
+        val verified = _sdk_hash_v1("{source_root}/{path}", source[path])?
+    for required in ["lib/crt0.o", "lib/libsimpleos_c.a", "share/simpleos/simpleos.ld", "share/simpleos/target-triple.txt"]:
+        if not artifacts.contains_key(required): return Err("SDK artifact ledger is missing {required}")
+    val required_runtime = if arch == "x86_64": "lib/libsimple_runtime.a" else: "lib/libsimpleos_all.a"
+    if not artifacts.contains_key(required_runtime): return Err("SDK artifact ledger is missing its consumed runtime aggregate {required_runtime}")
+    if artifacts["lib/crt0.o"] != receipt["crt0_sha256"] or artifacts["lib/libsimpleos_c.a"] != receipt["libc_sha256"]:
+        return Err("SDK CRT/libc identity does not match the artifact ledger")
+    for path in artifacts.keys():
+        if not (path.starts_with("lib/") or path == "share/simpleos/simpleos.ld" or path == "share/simpleos/target-triple.txt"):
+            return Err("SDK artifact ledger escapes its installed input family")
+        val verified = _sdk_hash_v1("{sysroot}/{path}", artifacts[path])?
+    var recorded_archives: Dict<text, bool> = {}
+    for member in members.keys():
+        val separator = member.index_of(".a/")
+        if separator < 0: return Err("SDK member ledger has no owning archive")
+        val archive = member[0:separator + 2]
+        val leaf = member[separator + 3:]
+        if leaf == "" or leaf.contains("/") or not artifacts.contains_key(archive):
+            return Err("SDK member ledger names an unbound archive or invalid member")
+        recorded_archives[archive] = true
+    for path in artifacts.keys():
+        if path.ends_with(".a") and not recorded_archives.contains_key(path):
+            return Err("SDK archive has no member provenance")
+    val flags_verified = _sdk_hash_v1("{meta}/sysroot-build-flags.txt", receipt["flags_sha256"])?
+    val triple = _sdk_read_v1("{meta}/target-triple.txt", 256)?
+    if triple != receipt["target_triple"] + "\n": return Err("SDK target marker is not canonical")
+    val crt_target_verified = _sdk_crt_target_v1(sysroot, arch)?
+    if crt_override != "" and crt_override != "{sysroot}/lib/crt0.o":
+        val actual_crt_verified = _sdk_hash_v1(crt_override, receipt["crt0_sha256"])?
+    if libc_override != "" and libc_override != "{sysroot}/lib/libsimpleos_c.a":
+        val actual_libc_verified = _sdk_hash_v1(libc_override, receipt["libc_sha256"])?
+    if script_override != "" and script_override != "{sysroot}/share/simpleos/simpleos.ld":
+        val actual_script_digest = simpleos_caller_input_digest_v1(script_override, 2097152)?
+    Ok(true)
+
+# A caller input is a regular, bounded, stable file, not an SDK attestation.
+@allow(primitive_api) # reason: maximum is the raw i64 byte bound passed unchanged to the canonical bounded-file-read ABI
+pub fn simpleos_caller_input_digest_v1(path: text, maximum: i64) -> Result<text, text>:
+    if path == "" or path.byte_len() > 4096 or path.contains("|") or path.contains("\n") or path.contains("\r"):
+        return Err("invalid SimpleOS caller input path")
+    if not file_is_regular_no_follow(path): return Err("SimpleOS caller input must be a regular file: " + path)
+    val size = file_size_raw(path)
+    if size < 0 or size > maximum: return Err("SimpleOS caller input exceeds read bound: " + path)
+    # Scripts/receipt identities use the canonical no-follow read primitive,
+    # including the actual open, rather than relying only on path predicates.
+    if maximum <= SIMPLEOS_SDK_LEDGER_LIMIT_V1:
+        val bytes = file_read_regular_no_follow_bounded_bytes(path, maximum)?
+        val digest = sha256_u8_hex(bytes)
+        val observed = file_read_regular_no_follow_bounded_bytes(path, maximum)?
+        if not file_is_regular_no_follow(path) or file_size_raw(path) != size or sha256_u8_hex(observed) != digest:
+            return Err("SimpleOS caller input changed while reading: " + path)
+        return Ok(digest)
+    val digest = file_hash_sha256_or_empty(path)
+    if not runtime_object_cache_digest_valid_v1(digest) or not file_is_regular_no_follow(path) or file_size_raw(path) != size or file_hash_sha256_or_empty(path) != digest:
+        return Err("SimpleOS caller input changed while hashing: " + path)
+    Ok(digest)
+
+# The target environment is the backend's actual route selector. Kernel lanes
+# have no SDK claim and keep their existing receipt policy.
+pub fn simpleos_user_receipt_inputs_v1() -> Result<[text], text>:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val arch = simpleos_user_link_arch(target)
+    if arch == "": return Ok([])
+    val sysroot = if arch == "x86_64": simpleos_x86_64_sysroot() else: simpleos_user_sysroot(arch)
+    var script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+    if arch != "x86_64":
+        val native_script = env_get("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT") ?? ""
+        if native_script != "": script = native_script
+    if script == "": script = "{sysroot}/share/simpleos/simpleos.ld"
+    var support: [text] = []
+    if arch == "x86_64": support = simpleos_x86_64_user_link_inputs(sysroot)
+    val validated = simpleos_sysroot_validate_sdk_v1(sysroot, arch, ".",
+        if support.len() > 0: support[0] else: "",
+        if support.len() > 0: support[2] else: "", script)?
+    val receipt = "{sysroot}/share/simpleos/sysroot-receipt.sdn"
+    var rows = ["sdk|sdk-receipt|" + receipt + "|" + simpleos_caller_input_digest_v1(receipt, SIMPLEOS_SDK_RECEIPT_LIMIT_V1)?]
+    val script_owner = if script == "{sysroot}/share/simpleos/simpleos.ld": "sdk" else: "caller"
+    rows.push(script_owner + "|linker-script|" + script + "|" + simpleos_caller_input_digest_v1(script, 2097152)?)
+    if support.len() > 0:
+        var index = 0
+        for path in support:
+            val kind = if index == 0: "crt" elif index == 1: "runtime-archive" else: "libc"
+            val owner = if ["{sysroot}/lib/crt0.o", "{sysroot}/lib/libsimpleos_c.a", "{sysroot}/lib/libsimple_runtime.a"].contains(path): "sdk" else: "caller"
+            rows.push(owner + "|" + kind + "|" + path + "|" + simpleos_caller_input_digest_v1(path, 1073741824)?)
+            index = index + 1
+    else:
+        val core = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
+        if core != "" and file_exists(core) and not dir_exists(core):
+            rows.push("caller|runtime-archive|" + core + "|" + simpleos_caller_input_digest_v1(core, 1073741824)?)
+    Ok(rows)

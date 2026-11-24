@@ -3,7 +3,7 @@ Kernel path/name bytes -> text rejects invalid UTF-8 with EILSEQ.
 
 ## Purpose and audience
 Owner decision 2026-11-23: invalid UTF-8 never becomes `text`. Kernel
-syscall paths (open/stat/unlink/rename/spawn/exec) decode through
+syscall paths (open/stat/unlink/rename/chdir/spawn/exec) decode through
 `os.kernel.text_checked.kernel_text_checked`, which returns Err(EILSEQ).
 ## Operator workflow
 Run with `bin/simple test` on this file.
@@ -61,3 +61,13 @@ describe "kernel path utf-8 checked decode":
         val sp = file_read("src/os/kernel/ipc/syscall_process.spl")
         expect(sp.contains("kernel_text_checked")).to_equal(true)
         expect(sp.contains("rt_string_from_byte_array")).to_equal(false)
+
+    it "rejects invalid UTF-8 in chdir before it becomes the cwd":
+        step("Verify: _handle_chdir validates the resolved bytes ahead of cwd_set")
+        val sf = file_read("src/os/kernel/ipc/syscall_file.spl")
+        val body = sf.split("fn _handle_chdir(")[1]
+        val check = body.split("if not kernel_utf8_valid(resolved):")
+        expect(check.len()).to_equal(2)
+        expect(check[0].contains("cwd_set(")).to_equal(false)
+        expect(check[1].trim().starts_with("return SyscallResult(value: _FS_EILSEQ)")).to_equal(true)
+        expect(kernel_utf8_valid([0x2Fu8, 0x64u8, 0xFFu8])).to_equal(false)

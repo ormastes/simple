@@ -4,11 +4,13 @@
 # so exact Stage4 provider composition stays on the localized
 # compiler-backfill + core-runtime lane.
 
-use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed_v2}
+use compiler.driver.bootstrap_api_fixed.{aot_native_project_with_backend_fixed_v2, bootstrap_native_driver_with_backend_fixed_v1}
+use app.cli.bootstrap_surface_inspection_v1.{bootstrap_surface_inspection_publish_v1}
+use compiler.driver.driver_native_surface_inspection_v1.{NativeSurfaceInspectionRequestV1, driver_inspect_native_surfaces_v1}
 use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
     selected_k1_backend_policy_v1, selected_k1_backend_table_diagnostic_v1}
 use compiler.backend.backend_port.{codegen_optimization_from_scalar_v1}
-use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
+use compiler.common.driver_compile_result.{CompileResult, compile_result_is_success, compile_result_errors}
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set, host_os, host_arch}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
@@ -37,7 +39,16 @@ pub use app.cli.bootstrap_focused_native_build_args.{
 
 use app.cli.collection_planner_options.{collection_planner_options}
 
-pub fn focused_native_build_error(args: [text]) -> text:
+enum FocusedNativeExecutionV1:
+    Compiled(CompileResult)
+    Inspected(Result<text, text>)
+
+# reason: bootstrap command entry returns the operating-system process exit status
+@allow(primitive_api)
+pub fn run_focused_native_surface_inspection_v1(args: [text], request: NativeSurfaceInspectionRequestV1) -> i64:
+    run_focused_native_build_plan(args, false, Some(request))
+
+pub fn focused_native_build_error(args: [text], inspection: NativeSurfaceInspectionRequestV1? = None) -> text:
     val plugin_error = focused_native_build_backend_plugin_error(args)
     if plugin_error != "": return plugin_error
     val planner = collection_planner_options(args)
@@ -53,7 +64,7 @@ pub fn focused_native_build_error(args: [text]) -> text:
     if focused_native_build_arg_value(args, "--entry") == "":
         return "Error: focused native-build requires --entry"
     if (focused_native_build_arg_value(args, "--output") == "" and
-        focused_native_build_arg_value(args, "-o") == ""):
+        focused_native_build_arg_value(args, "-o") == "") and inspection == None:
         return "Error: focused native-build requires --output"
     if focused_native_build_has_flag(args, "--xray-startup-consumer"):
         if not focused_native_build_has_flag(args, "--xray") or (mode != "" and mode != "one-binary"):
@@ -103,8 +114,9 @@ fn _focused_default_xray_target_v1(explicit_target: text) -> text:
         return "{arch}-unknown-linux-gnu"
     ""
 
-fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i64:
-    val plan_error = focused_native_build_error(args)
+fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool,
+        inspection: NativeSurfaceInspectionRequestV1? = None) -> i64:
+    val plan_error = focused_native_build_error(args, inspection)
     if plan_error != "":
         print plan_error
         return 1
@@ -211,27 +223,53 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
 
     val effective_strip = focused_native_build_strip(args, exact_stage4_capsule)
     val debug_info_override = if debug_requested: 1 elif target_profile.release: 0 else: 1
-    val result = aot_native_project_with_backend_fixed_v2(
-        focused_native_build_source_at(sources, 0),
-        focused_native_build_source_at(sources, 1),
-        focused_native_build_source_at(sources, 2),
-        focused_native_build_source_at(sources, 3),
-        focused_native_build_source_at(sources, 4),
-        focused_native_build_source_at(sources, 5),
-        sources.len(),
-        entry,
-        output,
-        backend,
-        effective_strip,
-        target_profile.release,
-        opt_level,
-        focused_native_build_has_flag(args, "--no-borrow-check"),
-        target_profile.managed_build_phase,
-        backend_plugin_path,
-        xray_enabled,
-        xray_startup_consumer,
-        debug_info_override
-    )
+    val execution = if val request = inspection:
+        val inspected = match bootstrap_native_driver_with_backend_fixed_v1(
+            focused_native_build_source_at(sources, 0),
+            focused_native_build_source_at(sources, 1),
+            focused_native_build_source_at(sources, 2),
+            focused_native_build_source_at(sources, 3),
+            focused_native_build_source_at(sources, 4),
+            focused_native_build_source_at(sources, 5),
+            sources.len(),
+            entry,
+            output,
+            backend,
+            effective_strip,
+            target_profile.release,
+            opt_level,
+            focused_native_build_has_flag(args, "--no-borrow-check"),
+            target_profile.managed_build_phase,
+            backend_plugin_path,
+            xray_enabled,
+            xray_startup_consumer,
+            debug_info_override
+        ):
+            case Ok(driver): driver_inspect_native_surfaces_v1(driver, request)
+            case Err(reason): Err(reason)
+        FocusedNativeExecutionV1.Inspected(inspected)
+    else:
+        FocusedNativeExecutionV1.Compiled(aot_native_project_with_backend_fixed_v2(
+            focused_native_build_source_at(sources, 0),
+            focused_native_build_source_at(sources, 1),
+            focused_native_build_source_at(sources, 2),
+            focused_native_build_source_at(sources, 3),
+            focused_native_build_source_at(sources, 4),
+            focused_native_build_source_at(sources, 5),
+            sources.len(),
+            entry,
+            output,
+            backend,
+            effective_strip,
+            target_profile.release,
+            opt_level,
+            focused_native_build_has_flag(args, "--no-borrow-check"),
+            target_profile.managed_build_phase,
+            backend_plugin_path,
+            xray_enabled,
+            xray_startup_consumer,
+            debug_info_override
+        ))
     val active_receipt_dir = focused_native_build_receipt_dir_from_env_v1(
         env_get("SIMPLE_NATIVE_BUILD_RECEIPT_DIR"), target_profile, effective_cache_dir, xray_enabled)
     val focused_receipt_path = focused_native_build_receipt_path_v1(
@@ -251,6 +289,25 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     native_build_env_restore_v1("SIMPLE_STAGE3_LIB_DYNLIB", old_stage3_dynlib)
     native_build_env_restore_v1("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", old_dynlib_explicit)
 
+    # Both branches restore the exact same ambient configuration before reporting.
+    val result = match execution:
+        case FocusedNativeExecutionV1.Inspected(observation):
+            match observation:
+                case Ok(sdn):
+                    if val request = inspection:
+                        match bootstrap_surface_inspection_publish_v1(request, sdn):
+                            case Ok(path):
+                                print "diagnostic-only: {path}; no compile admission"
+                                return 0
+                            case Err(reason):
+                                print "error: surface inspection publication: {reason}"
+                                return 1
+                    print "error: surface inspection diagnostic publication failed"
+                    return 1
+                case Err(reason):
+                    print "error: surface inspection: {reason}"
+                    return 1
+        case FocusedNativeExecutionV1.Compiled(compiled): compiled
     if compile_result_is_success(result):
         if dir_create_all(active_receipt_dir):
             val receipt_sdn = "format: \"simple/focused-native-build-receipt/v1\"\n" +

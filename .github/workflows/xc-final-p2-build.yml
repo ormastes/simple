@@ -1,0 +1,175 @@
+name: Final provisional P2 build
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+permissions:
+  contents: read
+  actions: read
+# One campaign across every source/parent/ref. A new P1 does not reset attempt six.
+concurrency:
+  group: simpleos-cross-compile-final-p2-campaign
+  cancel-in-progress: false
+jobs:
+  provisional-p2:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/work/xc-p2-priority-20261124') ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'simpleos-final-p2' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'work/xc-p2-priority-20261124')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CONTROL_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+      SOURCE_SHA: 3b6c589b18ffee3bf5bca3b72a3187082df2f9c6
+      PARENT_SHA: d4005d9264b4ba89a9d126080e43d062b4edd29bb33d0ae08f7a42c95050e30c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 3b6c589b18ffee3bf5bca3b72a3187082df2f9c6
+          path: source
+          persist-credentials: false
+      - name: Verify immutable inputs and unused final campaign claim
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = ormastes/simple
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C control rev-parse HEAD)" = "$CONTROL_SOURCE"
+          mkdir -p source/build/ladder/evidence source/build/ladder/producer
+          evidence=source/build/ladder/evidence
+          ledger=control/config/bootstrap/xc-final-p2-campaign.sdn
+          for row in 'schema: xc-final-p2-campaign-v1' 'campaign: simpleos-cross-compile-full-p2' \
+            'used_before: 5' 'attempt: 6' 'maximum_attempts: 6' \
+            "source_revision: $SOURCE_SHA" 'parent_run: 45274376191' 'parent_artifact: 14870797190' \
+            'parent_phase: 1' 'parent_size: 58591040' "parent_sha256: $PARENT_SHA" \
+            'claim_artifact: xc-final-p2-campaign-claim' 'qualification: provisional-build-only' \
+            'claim_window_end: 2026-11-26T00:00:00Z' \
+            'sdk_qualification: BLOCKED' 'p3: skipped' 'publish: false'; do
+            grep -Fxq "$row" "$ledger"
+          done
+          cp "$ledger" "$evidence/campaign.sdn"
+          # Claim publication lives 90 days; admission closes long before expiry.
+          test "$(date -u +%s)" -lt "$(date -u -d 2026-11-26T00:00:00Z +%s)"
+          gh api 'repos/ormastes/simple/actions/artifacts?name=xc-final-p2-campaign-claim&per_page=1' \
+            --jq .total_count > "$evidence/prior-claims.count"
+          test "$(cat "$evidence/prior-claims.count")" = 0
+          gh api repos/ormastes/simple/actions/runs/45274376191 \
+            --jq '[.id,.head_sha,.status,.conclusion]|@tsv' > "$evidence/parent-run.tsv"
+          printf '45274376191\t%s\tcompleted\tsuccess\n' "$SOURCE_SHA" | cmp -s - "$evidence/parent-run.tsv"
+          gh api repos/ormastes/simple/actions/artifacts/14870797190 \
+            --jq '[.id,.name,.expired,.workflow_run.id,.workflow_run.head_sha]|@tsv' > "$evidence/parent-artifact.tsv"
+          printf '14870797190\tladder-linux-x86_64-r1\tfalse\t45274376191\t%s\n' "$SOURCE_SHA" | cmp -s - "$evidence/parent-artifact.tsv"
+          printf 'schema: xc-final-p2-claim-v1\ncampaign: simpleos-cross-compile-full-p2\nused_before: 5\nattempt: 6\nrun: %s\nworkflow_revision: %s\nsource_revision: %s\nsdk_qualification: BLOCKED\np3: skipped\npublish: false\n' \
+            "$GITHUB_RUN_ID" "$CONTROL_SOURCE" "$SOURCE_SHA" > "$evidence/claim.sdn"
+          printf 'event_sha: %s\ncontrol_source: %s\n' "$GITHUB_SHA" "$CONTROL_SOURCE" > "$evidence/workflow-source.sdn"
+      - name: Stage exact verified P1
+        run: |
+          set -euo pipefail
+          gh run download 45274376191 --repo ormastes/simple --name ladder-linux-x86_64-r1 --dir source/build/ladder/download
+          parent=source/build/ladder/download/linux-x86_64-p1/simple
+          test -f "$parent" && test ! -L "$parent"
+          printf '1\n' | cmp -s - source/build/ladder/download/linux-x86_64-p1/PHASE
+          test "$(stat -c %s "$parent")" = 58591040
+          printf '%s  %s\n' "$PARENT_SHA" "$parent" | sha256sum -c -
+          cp "$parent" source/build/ladder/producer/simple
+          chmod 755 source/build/ladder/producer/simple
+          (cd source && sha256sum build/ladder/producer/simple > build/ladder/evidence/parent-before.sha256)
+      - name: Canonical Linux prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev
+          sudo swapoff -a
+          sudo rm -f /mnt/swapfile
+          available=$(df -B1 --output=avail /mnt | tail -1 | tr -dc 0-9)
+          gib=$((available / 1073741824 - 32))
+          test "$gib" -ge 24
+          test "$gib" -le 64 || gib=64
+          sudo fallocate -l "${gib}G" /mnt/xc-final-p2.swap
+          sudo chmod 600 /mnt/xc-final-p2.swap
+          sudo mkswap /mnt/xc-final-p2.swap
+          sudo swapon /mnt/xc-final-p2.swap
+          free -g
+      # Durable claim follows non-compiler preflight, before any compiler invocation.
+      - name: Publish non-resetting final attempt claim
+        id: claim
+        uses: actions/upload-artifact@v6
+        with:
+          name: xc-final-p2-campaign-claim
+          path: source/build/ladder/evidence/claim.sdn
+          retention-days: 90
+          if-no-files-found: error
+      - name: Build provisional P2 with explicit canonical parent
+        working-directory: source
+        env:
+          CLAIM_ID: ${{ steps.claim.outputs.artifact-id }}
+          SIMPLE_BOOTSTRAP_COMPILER_PHASE: 1
+          SIMPLE_HOST_MAX_THREADS: 2
+          SIMPLE_HOST_MAX_BUILD_JOBS: 2
+          SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: 2
+          SIMPLE_NATIVE_FILE_TIMING: 1
+        run: |
+          set -euo pipefail
+          test -n "$CLAIM_ID"
+          gh api "repos/ormastes/simple/actions/artifacts/$CLAIM_ID" \
+            --jq '[.name,.expired,.workflow_run.id]|@tsv' > build/ladder/evidence/claim-api.tsv
+          printf 'xc-final-p2-campaign-claim\tfalse\t%s\n' "$GITHUB_RUN_ID" | cmp -s - build/ladder/evidence/claim-api.tsv
+          export SIMPLE_BOOTSTRAP_COMPILER="$PWD/build/ladder/producer/simple"
+          printf 'parent_path: %s\nparent_phase: 1\nsource_revision: %s\nworkflow_revision: %s\n' \
+            "$SIMPLE_BOOTSTRAP_COMPILER" "$SOURCE_SHA" "$CONTROL_SOURCE" > build/ladder/evidence/build-input.sdn
+          # Existing canonical owner qualifies the explicit path; no auto/RC/seed caller follows failure.
+          rc=0
+          sh scripts/bootstrap/build-next-phase-ci.shs linux-x86_64 2 2>&1 | tee build/ladder/evidence/build.log || rc=$?
+          printf '%s\n' "$rc" > build/ladder/evidence/build.exit
+          sha256sum -c build/ladder/evidence/parent-before.sha256
+          grep -Fxq "Building phase 2 with $SIMPLE_BOOTSTRAP_COMPILER (phase 1)" build/ladder/evidence/build.log
+          test "$rc" = 0
+          test -s build/bootstrap/stage2/simple
+          sha256sum build/bootstrap/stage2/simple > build/ladder/evidence/p2.sha256
+          file build/bootstrap/stage2/simple > build/ladder/evidence/p2.file
+          readelf -h build/bootstrap/stage2/simple > build/ladder/evidence/p2.elf-header
+      - name: Real P2 Hello compile and execution (build-only qualification)
+        working-directory: source
+        run: |
+          set -euo pipefail
+          probe="$PWD/build/ladder/evidence/hello"
+          mkdir "$probe"
+          printf 'fn main():\n    print "phase-ladder-2-ok"\n' > "$probe/hello.spl"
+          build/bootstrap/stage2/simple --version > "$probe/version.stdout" 2> "$probe/version.stderr"
+          rc=0
+          SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 build/bootstrap/stage2/simple native-build "$probe/hello.spl" -o "$probe/hello" > "$probe/build.stdout" 2> "$probe/build.stderr" || rc=$?
+          printf '%s\n' "$rc" > "$probe/build.exit"
+          test "$rc" = 0
+          file "$probe/hello" > "$probe/hello.file"
+          readelf -h "$probe/hello" > "$probe/hello.elf-header"
+          sha256sum "$probe/hello" > "$probe/hello.sha256"
+          rc=0
+          "$probe/hello" > "$probe/stdout" 2> "$probe/stderr" || rc=$?
+          printf '%s\n' "$rc" > "$probe/execution.exit"
+          test "$rc" = 0
+          printf 'phase-ladder-2-ok\n' > "$probe/expected-lf"
+          printf 'phase-ladder-2-ok\r\n' > "$probe/expected-crlf"
+          cmp -s "$probe/expected-lf" "$probe/stdout" || cmp -s "$probe/expected-crlf" "$probe/stdout"
+          test ! -s "$probe/stderr"
+          printf 'schema: xc-provisional-p2-result-v1\nbuild: PASS\nhello_compile: PASS\nhello_execution: PASS\nqualification: provisional-build-only\nsdk_qualification: BLOCKED\np3: skipped\npublish: false\n' > build/ladder/evidence/result.sdn
+      - name: Retain actual evidence and candidate (never a PHASE handoff)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: xc-final-p2-build-${{ github.run_id }}
+          path: |
+            source/build/ladder/evidence
+            source/build/ladder/producer
+            source/build/bootstrap/stage2/simple
+          retention-days: 90
+          if-no-files-found: error

@@ -9,7 +9,7 @@
 # lint_rule_api's StaticLintRule) so dispatch needs no trait objects.
 
 use compiler.tools.duplicate_check.features.{FeatureVec, build_feature_vector, cosine_similarity, feature_signature}
-use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
+use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense, cosine_from_dot_and_magnitudes, math_sqrt}
 use compiler.tools.duplicate_check.lsh_prefilter.{lsh_candidate_pairs_for_streams, sorted_tokens}
 
 # Raw material for one block. Each engine reads the part it needs:
@@ -394,3 +394,170 @@ fn long_text_all_pair_candidates(features: [SimilarityFeatures], excluded: [bool
                 j = j + 1
         i = i + 1
     SimilarityCandidates(pairs: pairs, skipped_buckets: [], dropped_slots: 0)
+
+# ---------------------------------------------------------------- interned cosine
+
+# WORKAROUND native_struct_array_field_read_leaks_copy_2026-11-24:
+# Cosine grouping over interned token ids. Same weights, signatures, candidate
+# order and float summation order as cosine_token_similarity (so reports stay
+# byte-identical), but every block lives in flat corpus arrays that are only
+# ever indexed from locals: natively, reading an array field off a struct
+# copies the array and never frees it, which over 900k scored pairs cost
+# >1 GB through FeatureVec (doc/08_tracking/bug/2026-11-24_native_struct_array_field_read_leaks_copy.md).
+
+# @allow(primitive_api) match counts are the CLI-reported scalars, like SimilarityCandidates
+pub struct CosineMatches:
+    matches: [ScoredPair]
+    skipped_buckets: [text]
+    dropped_slots: i64
+    comparison_count: i64
+
+# @allow(primitive_api) ids/vocab/weights are the interned cosine corpus scalars
+pub fn interned_signature(ids: [i64], weights: [f64], start: i64, end: i64, vocab: [text], top_n: i64) -> text:
+    """feature_signature over one block's interned range: top-N by weight
+    (first occurrence wins ties), names sorted alphabetically, ','-joined."""
+    var used: [bool] = []
+    var k = start
+    while k < end:
+        used.push(false)
+        k = k + 1
+    var selected: [text] = []
+    var count = 0
+    while count < top_n and count < end - start:
+        var best = -1
+        var best_weight = -1.0
+        k = start
+        while k < end:
+            if not used[k - start] and weights[k] > best_weight:
+                best_weight = weights[k]
+                best = k
+            k = k + 1
+        if best >= 0:
+            val name = vocab[ids[best]]
+            if name.len() > 0:
+                selected.push(name)
+                used[best - start] = true
+        count = count + 1
+    var si = 0
+    while si < selected.len():
+        var min_idx = si
+        var sj = si + 1
+        while sj < selected.len():
+            if selected[sj] < selected[min_idx]:
+                min_idx = sj
+            sj = sj + 1
+        if min_idx != si:
+            val tmp = selected[si]
+            selected[si] = selected[min_idx]
+            selected[min_idx] = tmp
+        si = si + 1
+    selected.join(",")
+
+# @allow(primitive_api) ids/vocab/weights/threshold are the interned cosine corpus scalars
+pub fn interned_cosine_matches(block_token_ids: [[i64]], vocab: [text], excluded: [bool], threshold: f64) -> CosineMatches:
+    """Featurize every block's interned token ids, bucket by signature token,
+    and score candidate pairs as they are generated (no pair list)."""
+    var offsets: [i64] = [0]
+    var ids: [i64] = []
+    var weights: [f64] = []
+    var sorted_slots: [i64] = []
+    var magnitudes: [f64] = []
+    var signatures: [text] = []
+    var counts: [i64] = []
+    for block_ids in block_token_ids:
+        val base = ids.len()
+        counts = []
+        for id in block_ids:
+            var k = base
+            while k < ids.len() and ids[k] != id:
+                k = k + 1
+            if k < ids.len():
+                counts[k - base] = counts[k - base] + 1
+            else:
+                ids.push(id)
+                counts.push(1)
+        val total_f64 = block_ids.len() * 1.0
+        var sum_squares = 0.0
+        var k = base
+        while k < ids.len():
+            val weight = (counts[k - base] * 1.0) / total_f64
+            weights.push(weight)
+            sum_squares = sum_squares + (weight * weight)
+            # Insertion sort of this block's slots by id (a few dozen ids).
+            var pos = sorted_slots.len()
+            sorted_slots.push(k)
+            while pos > base and ids[sorted_slots[pos - 1]] > ids[k]:
+                sorted_slots[pos] = sorted_slots[pos - 1]
+                pos = pos - 1
+            sorted_slots[pos] = k
+            k = k + 1
+        val magnitude = if ids.len() > base: math_sqrt(sum_squares) else: 0.0
+        magnitudes.push(magnitude)
+        val signature = if magnitude == 0.0: "" else: interned_signature(ids, weights, base, ids.len(), vocab, SIGNATURE_TOP_N)
+        signatures.push(signature)
+        offsets.push(ids.len())
+
+    var token_buckets = key_buckets_new()
+    var gi = 0
+    while gi < magnitudes.len():
+        if magnitudes[gi] != 0.0 and not is_skipped(excluded, gi):
+            for tok in signatures[gi].split(","):
+                if tok.len() > 0:
+                    key_buckets_add(token_buckets, tok, gi)
+        gi = gi + 1
+
+    var matches: [ScoredPair] = []
+    var skipped: [text] = []
+    var dropped = 0
+    var comparisons = 0
+    val pair_stride = magnitudes.len() + 1
+    var seen_pairs: {i64: bool} = {}
+    var slot = 0
+    while slot < token_buckets.members.len():
+        val tok = token_buckets.keys[slot]
+        val indices = token_buckets.members[slot]
+        slot = slot + 1
+        if indices.len() > MAX_BUCKET_SIZE:
+            skipped.push("'{tok}' ({indices.len()} blocks, cap {MAX_BUCKET_SIZE})")
+            dropped = dropped + indices.len()
+            continue
+        var pi = 0
+        while pi < indices.len():
+            val i = indices[pi]
+            var pj = pi + 1
+            while pj < indices.len():
+                val j = indices[pj]
+                val lo = if i < j: i else: j
+                val hi = if i < j: j else: i
+                val pair_key = lo * pair_stride + hi
+                if not seen_pairs.has(pair_key):
+                    seen_pairs[pair_key] = true
+                    comparisons = comparisons + 1
+                    # Dot product in block i's first-occurrence order (the
+                    # dict path's key order); binary search j's sorted view.
+                    var dot = 0.0
+                    val j_lo = offsets[j]
+                    val j_hi = offsets[j + 1]
+                    var a = offsets[i]
+                    val a_end = offsets[i + 1]
+                    while a < a_end:
+                        val id = ids[a]
+                        var lo2 = j_lo
+                        var hi2 = j_hi
+                        while lo2 < hi2:
+                            val mid = (lo2 + hi2) / 2
+                            val v = ids[sorted_slots[mid]]
+                            if v == id:
+                                dot = dot + (weights[a] * weights[sorted_slots[mid]])
+                                lo2 = hi2
+                            elif v < id:
+                                lo2 = mid + 1
+                            else:
+                                hi2 = mid
+                        a = a + 1
+                    val sim = cosine_from_dot_and_magnitudes(dot, magnitudes[i], magnitudes[j])
+                    if sim >= threshold:
+                        matches.push(ScoredPair(left: i, right: j, score: sim))
+                pj = pj + 1
+            pi = pi + 1
+    CosineMatches(matches: matches, skipped_buckets: skipped, dropped_slots: dropped, comparison_count: comparisons)

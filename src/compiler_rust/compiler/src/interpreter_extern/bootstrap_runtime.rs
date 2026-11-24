@@ -40,6 +40,8 @@ unsafe extern "C" {
     fn c_process_kill_session(sid: i64, signo: i32) -> i64;
     #[link_name = "rt_process_kill_tree"]
     fn c_process_kill_tree(pid: i64) -> i64;
+    #[link_name = "rt_child_set_pdeathsig"]
+    fn c_child_set_pdeathsig(signo: i32) -> i64;
 }
 
 /// Same value as RT_PTREE_UNSUPPORTED in runtime_process_tree.h.
@@ -123,6 +125,17 @@ pub fn rt_process_kill_session(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_process_kill_tree(args: &[Value]) -> Result<Value, CompileError> {
     let pid = int_arg(args, 0, "rt_process_kill_tree")?;
     Ok(Value::Int(unsafe { c_process_kill_tree(pid) }))
+}
+
+/// rt_child_set_pdeathsig(signo) -> 0 armed | -errno | RT_PTREE_UNSUPPORTED.
+/// Child side: the calling process gets `signo` when its parent exits (Linux
+/// prctl, FreeBSD procctl); signo 0 clears the arm. A parent that died before
+/// the call never triggers it, so the caller re-checks its parent afterwards.
+pub fn rt_child_set_pdeathsig(args: &[Value]) -> Result<Value, CompileError> {
+    let signo = int_arg(args, 0, "rt_child_set_pdeathsig")?;
+    let signo =
+        i32::try_from(signo).map_err(|_| CompileError::runtime("rt_child_set_pdeathsig: signal out of range"))?;
+    Ok(Value::Int(unsafe { c_child_set_pdeathsig(signo) }))
 }
 
 fn text_arg<'a>(args: &'a [Value], index: usize, name: &str) -> Result<&'a str, CompileError> {
@@ -359,6 +372,20 @@ mod tests {
         // An exec failure is -errno, never a pid.
         let bad = rt_process_spawn_session_value(&[text("/nonexistent/never-here"), Value::array(vec![])]).unwrap();
         assert_eq!(bad, Value::Int(-(libc::ENOENT as i64)));
+    }
+
+    /// Signal 0 clears the arm, so the test process never arms itself.
+    #[test]
+    fn child_pdeathsig_bridge_is_registered_and_reaches_the_c_owner() {
+        let expected = if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            0
+        } else {
+            RT_PTREE_UNSUPPORTED
+        };
+        assert_eq!(rt_child_set_pdeathsig(&[Value::Int(0)]).unwrap(), Value::Int(expected));
+        assert!(rt_child_set_pdeathsig(&[]).is_err());
+        assert!(rt_child_set_pdeathsig(&[text("9")]).is_err());
+        assert!(rt_child_set_pdeathsig(&[Value::Int(i64::MAX)]).is_err());
     }
 
     #[cfg(any(target_os = "linux", windows))]
