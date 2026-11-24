@@ -8,10 +8,18 @@
 #include "../providers/cuda/bitmap_provider_v1.c"
 #include <stdio.h>
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"FAIL line=%d %s\n",__LINE__,#x); return 1; } } while (0)
-#ifdef _WIN32
+/* An always-present, never-CUDA system library per OS (must resolve through
+ * the provider's own loader, which is System32-only on Windows). */
+#if defined(_WIN32)
 #define NOT_CUDA "kernel32.dll"
-#else
+#elif defined(__APPLE__)
+#define NOT_CUDA "/usr/lib/libSystem.B.dylib"
+#elif defined(__FreeBSD__)
+#define NOT_CUDA "libc.so.7"
+#elif defined(__linux__) && defined(__GLIBC__)
 #define NOT_CUDA "libc.so.6"
+#else
+#define NOT_CUDA NULL /* no known always-present library: E002 probe skipped */
 #endif
 
 int main(void) {
@@ -19,9 +27,14 @@ int main(void) {
     CHECK(load_driver_table("simple_no_such_cuda_driver_lib", err, sizeof(err)) == NULL);
     CHECK(strncmp(err, "CUDA-E001:", 10) == 0);
     CHECK(strstr(err, "simple_no_such_cuda_driver_lib") != NULL);
-    CHECK(load_driver_table(NOT_CUDA, err, sizeof(err)) == NULL);
-    CHECK(strncmp(err, "CUDA-E002:", 10) == 0);
-    CHECK(strstr(err, "cuInit") != NULL);
+    const char *not_cuda = NOT_CUDA;
+    if (not_cuda != NULL) {
+        CHECK(load_driver_table(not_cuda, err, sizeof(err)) == NULL);
+        CHECK(strncmp(err, "CUDA-E002:", 10) == 0);
+        CHECK(strstr(err, "cuInit") != NULL);
+    } else {
+        printf("SKIP CUDA-E002 probe: no known non-CUDA system library on this OS\n");
+    }
 
     if (!load_driver()) {
         const char *why = simple_cuda_provider_last_error_v1();

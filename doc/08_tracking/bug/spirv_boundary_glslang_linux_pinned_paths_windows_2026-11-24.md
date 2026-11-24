@@ -14,3 +14,7 @@ candidate/counterpart "not installed at pinned paths" details did not say
 
 Open: make the tool paths host-resolvable (PATH lookup / env override) or have the 4
 descriptor examples report an explicit unavailable-skip when the tools are absent.
+
+Open (Fable review of #11202): the regeneration example passes vacuously through
+`assert_contains(detail, "unavailable")` when the tools are absent. It should record
+a real skip (explicit `SKIPPED:` line) instead of counting as a pass.

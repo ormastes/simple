@@ -688,7 +688,15 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     # only for a block container: an inline box keeps its whole CSS px height,
     # which the line around it aligns by (its device reach is read from its
     # struts there).
-    val height_frac_milli = if line_style.display != "inline" and resolved_height == ascent + descent and middle_ascent64 == 0 and middle_descent64 == 0: device_excess * 1000 / g_layout_device_scale else: 0
+    val strut_only = line_style.display != "inline" and resolved_height == ascent + descent and middle_ascent64 == 0 and middle_descent64 == 0
+    var height_frac_milli = if strut_only: device_excess * 1000 / g_layout_device_scale + line_h_sub_px_milli(line_style, resolved_height, device_excess) else: 0
+    # A block whose only content is one wrapped (or `pre`) text run of n whole
+    # lines: Chrome stacks n exact line boxes, so the box is n x the exact
+    # line height (3 lines of 13px/1.5 are 58.5 px, not 57).
+    if not strut_only and line_style.display != "inline" and nodes.len() == 1 and html_nodes[nodes[0]].tag == "#text" and bh[nodes[0]] == resolved_height and resolved_height == line_height:
+        val run_lh = style_line_h(line_style)
+        if run_lh > 0 and resolved_height > run_lh and resolved_height % run_lh == 0:
+            height_frac_milli = (resolved_height / run_lh) * line_h_frac_milli(line_style)
     InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height, height_frac_milli: height_frac_milli)
 
 fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
@@ -1403,6 +1411,24 @@ pub fn inline_pen_err(inline_x: i32, inline_start_x: i32, cy: i32, err_x: i32, e
         return err_milli
     INLINE_PEN_ERR_UNKNOWN
 
+# Whole px an auto-width `<button>` at integer pen `x` (exact pen `x` +
+# `err_milli`), laid out `bw` px wide for a box exactly `bw` + `delta_milli`
+# wide, paints narrower than `bw` at device scale 1 (0 or negative). Chrome
+# places the box at a LayoutUnit (1/64 px) pen, keeps its LayoutUnit width and
+# snaps the right edge to the nearest pixel, half up: `OK` (35.2656 px) after
+# `<button>Go</button> ` (38.2344) ends at 73.5, column 73 (36 px wide), where
+# the milli-px sum 73.493 would round to 73 and paint it 35 px.
+# reason: layout pen and width scalars (whole px, milli-px) in, whole px out.
+# @allow(primitive_api)
+pub fn inline_button_k1_snap_px(x: i32, err_milli: i64, bw: i32, delta_milli: i64) -> i32:
+    val start_lu = ((((x as i64) * 1000 + err_milli) * 64) + 500) / 1000
+    val w_lu = ((((bw as i64) * 1000 + delta_milli) * 64) + 500) / 1000
+    if start_lu < 0 or w_lu <= 0:
+        return 0
+    val right = (start_lu + w_lu + 32) / 64
+    val extra = (right - (x as i64) - (bw as i64)) as i32
+    if extra < 0: extra else: 0
+
 # Exact-minus-integer width (milli-px) of an auto-width `<button>` on a line:
 # its box holds each label rounded UP to a whole pixel, Chrome keeps the
 # label's real width (`Submit` 41.484 px in a 42 px slot, so the box after it
@@ -1420,7 +1446,9 @@ fn inline_button_width_err_milli(nodes: [HNode], styles: [Style], child_index: H
                 return INLINE_PEN_ERR_UNKNOWN
             val real_w = form_control_label_width_px(tst, nodes[t].text_trimmed)
             val used_w = if real_w > tst.resolved_font_width: real_w else: tst.resolved_font_width
-            delta = delta + tst.resolved_font_width_milli - (used_w as i64) * 1000
+            # Chrome stores the max-content width as a LayoutUnit rounded UP
+            # (`OK` 21.257 px is 21.2656): a later edge can round past it.
+            delta = delta + layout_unit_ceil_milli(tst.resolved_font_width_milli) - (used_w as i64) * 1000
         t = child_index.next_sibling[t]
     delta
 
@@ -1752,6 +1780,31 @@ fn style_device_font_milli(st: Style) -> i32:
         return FORM_CONTROL_UA_FONT_NUM * 1000 / FORM_CONTROL_UA_FONT_DEN
     font_milli_of(st.font_size, st.font_size_milli)
 
+# Sub-px part (milli CSS px) of a strut-only line's height that layout's whole
+# px line box drops: Chrome keeps a number line-height in LayoutUnits, so an
+# h3 (18.72px x 1.5) line is 28.08 px and a 15px/1.3 line 19.5, and the block
+# cursor advances by that. At k > 1 the line is the DEVICE strut (112.32 for
+# the h3 at k=4), whose whole px `device_excess` already carries. Only a
+# number line-height has a fraction (px and `normal` are whole); 0 when the
+# line is taller than its strut.
+fn line_h_sub_px_milli(st: Style, css_height: i32, device_excess: i32) -> i32:
+    if st.line_height_px >= 0 or style_is_ua_control_font(st):
+        return 0
+    val k = g_layout_device_scale
+    val dev_milli = style_device_line_h_milli(st, k)
+    if k * css_height + device_excess != dev_milli / 1000:
+        return 0
+    (dev_milli % 1000) / k
+
+# Exact-minus-whole height (milli CSS px) of one line of a number line-height
+# at the layout's device scale k: the device line (k x 28.08 = 112.32 for the
+# h3 at k=4) less k x the whole CSS line, over k. 0 for px and `normal`.
+fn line_h_frac_milli(st: Style) -> i32:
+    if st.line_height_px >= 0 or style_is_ua_control_font(st):
+        return 0
+    val k = g_layout_device_scale
+    (style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000) / k
+
 # Used line-height of `st` in milli DEVICE px at device scale k: Chrome zooms
 # the computed value, so `20px` is 20k, a number multiplies the device font
 # size, and `normal` is the face's per-part rounded sum at size * k.
@@ -1882,13 +1935,14 @@ pub fn box_device_extra_h_at(i: i32) -> i32:
 # Chrome sizes a control in device px (a default text `<input>` is 719 device
 # px at k = 4, 4 x its 185 CSS px is 740), so the value is usually negative.
 # Only the control's own box takes it: boxes after it on the line keep their
-# CSS-snapped x. Empty at k == 1.
+# CSS-snapped x. At k == 1 only an inline auto-width `<button>` records:
+# its edge snap (-1 or 0), applied by paint (`_html_draw_ir_k1_button_boxes`).
 var g_box_device_extra_w: [i32] = []
 
 # reason: node index, node count and a device-px delta are layout-array scalars.
 # @allow(primitive_api)
 pub fn box_device_extra_w_record(node_count: i32, i: i32, extra_device_px: i32):
-    if g_layout_device_scale <= 1 or i < 0 or i >= node_count:
+    if g_layout_device_scale < 1 or i < 0 or i >= node_count:
         return
     if g_box_device_extra_w.len() != node_count:
         if extra_device_px == 0:

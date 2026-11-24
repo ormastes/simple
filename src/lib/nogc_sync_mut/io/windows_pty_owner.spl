@@ -1,7 +1,7 @@
 # Native Win64 single-threaded ConPTY owner. No pointers escape this module.
 # Each returned index is nonreused; copied handles become invalid on close.
 use std.nogc_sync_mut.io.windows_pty_abi.{CreatePseudoConsole, ResizePseudoConsole, ClosePseudoConsole, CreateNamedPipeW, ConnectNamedPipe, CreatePipe, PeekNamedPipe, WriteFile, GetOverlappedResult, CancelIoEx, CreateEventW, ResetEvent, GetCurrentProcessId}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError, GetTickCount64, Sleep, ReadFile, QueryInformationJobObject, windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_overlapped_event_offset}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{HeapFree, CreateFileW, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError, GetTickCount64, Sleep, ReadFile, QueryInformationJobObject, windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_handle_is_invalid, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_overlapped_event_offset}
 use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 use std.nogc_sync_mut.io.windows_pty_codec.{windows_pty_size_valid_v1, windows_pty_coord_v1, windows_pty_decode_v1}
@@ -253,10 +253,10 @@ pub fn windows_pty_open_v1(rows: i32, cols: i32) -> i32:
     _windows_pty_reap_v1()
     if not windows_pty_size_valid_v1(rows, cols) or _windows_pty_slots_v1.len() >= 100000 or _windows_pty_active_v1 >= 1024:
         return -1
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return -1
     var state = WindowsPtyStateV1(heap: heap)
-    state.arena = HeapAlloc(heap, 8u32, 16384u64)
+    state.arena = windows_abi_heap_alloc(heap, 16384)
     if state.arena == 0: return -1
     val pipe_name = "\\\\.\\pipe\\simple-conpty-" + str(GetCurrentProcessId()) + "-" + str(_windows_pty_slots_v1.len())
     val name = _windows_process_wide_v1(heap, pipe_name)
@@ -265,10 +265,10 @@ pub fn windows_pty_open_v1(rows: i32, cols: i32) -> i32:
     # FIRST_PIPE_INSTANCE prevents attaching to an unrelated existing server;
     # REJECT_REMOTE_CLIENTS prevents remote access. NULL security is noninherited.
     state.input_server = CreateNamedPipeW(name, 524289u32, 8u32, 1u32, 4096u32, 4096u32, 0u32, 0)
-    if state.input_server == -1: state.input_server = 0
+    if windows_abi_handle_is_invalid(state.input_server): state.input_server = 0
     if state.input_server != 0:
         state.input = CreateFileW(name, 1073741824u32, 0u32, 0, 3u32, 1073741824u32, 0)
-        if state.input == -1: state.input = 0
+        if windows_abi_handle_is_invalid(state.input): state.input = 0
     val retained_name = _windows_pty_free_v1(heap, name)
     if retained_name != 0:
         state.temporaries = state.temporaries.push(retained_name)
@@ -381,7 +381,7 @@ fn _windows_pty_spawn_prepared_v1(handle: i32, prepared: WindowsPtyLaunchPrepare
         if admitted:
             state.process = windows_abi_read_ptr(process_info + windows_abi_process_info_process_offset())
             thread = windows_abi_read_ptr(process_info + windows_abi_process_info_thread_offset())
-            state.pid = volatile_read_u32(process_info + 16)
+            state.pid = volatile_read_u32(process_info + windows_abi_process_info_pid_offset())
             admitted = AssignProcessToJobObject(state.job, state.process) != 0
             if admitted: admitted = ResumeThread(thread) != 4294967295u32
     if initialized: DeleteProcThreadAttributeList(attributes)
@@ -601,9 +601,9 @@ fn _windows_pty_managed_capacity_v2() -> bool:
 @unsafe(reason: "reserves bounded RAW ownership without creating a pseudoconsole or child", capabilities: [ffi, raw_ptr])
 fn _windows_pty_managed_reserve_v2() -> Result<WindowsManagedStreamLeaseV2, text>:
     if not _windows_pty_managed_capacity_v2(): return Err("Windows managed owner capacity exhausted")
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return Err("Windows managed process heap unavailable")
-    val arena = HeapAlloc(heap, 8u32, 16384u64)
+    val arena = windows_abi_heap_alloc(heap, 16384)
     if arena == 0: return Err("Windows managed arena allocation failed")
     val index = _windows_pty_slots_v1.len()
     val state = WindowsPtyStateV1(heap: heap, arena: arena, managed: true, managed_generation: index + 1)
@@ -692,7 +692,7 @@ fn _windows_process_pin_retained_v2(heap: i64, path: text, digest: text,
         return retained
     # Do not use the V1 file helper: it discards a failed HeapFree(wide).
     retained.file = CreateFileW(wide, 2147483648u32, 1u32, 0, 3u32, 2097280u32, 0)
-    if retained.file == -1: retained.file = 0
+    if windows_abi_handle_is_invalid(retained.file): retained.file = 0
     if HeapFree(heap, 0u32, wide) == 0:
         retained.allocations = retained.allocations.push(wide)
         retained.release_failed = true
@@ -803,12 +803,12 @@ pub fn windows_managed_stream_host_observe_v2() -> Result<WindowsManagedStreamHo
     val owner_thread = _windows_pty_owner_entry_result_v2()?
     if _windows_managed_host_drift_v2: return Err("Windows managed CPU profile drift requires deployment requalification")
     if not _windows_pty_managed_capacity_v2(): return Err("Windows native observation owner capacity exhausted")
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return Err("Windows native observation heap unavailable")
-    val arena = HeapAlloc(heap, 8u32, 8u64)
+    val arena = windows_abi_heap_alloc(heap, 8)
     if arena == 0: return Err("Windows native observation allocation failed")
     val result = windows_managed_stream_host_at_v2(arena)
-    if HeapFree(heap, 0u32, arena) == 0:
+    if windows_abi_heap_free(heap, arena) == 0:
         _windows_pty_managed_retain_observation_v2(heap, arena)
         return Err("Windows native observation release failed; owner retained allocation")
     if result.is_err():
@@ -908,10 +908,10 @@ fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManaged
     if name == 0: return (next, "Windows managed pipe name allocation failed")
     # FIRST_PIPE_INSTANCE + REJECT_REMOTE_CLIENTS; parent write client is overlapped.
     next.input_server = CreateNamedPipeW(name, 524289u32, 8u32, 1u32, 4096u32, 4096u32, 0u32, 0)
-    if next.input_server == -1: next.input_server = 0
+    if windows_abi_handle_is_invalid(next.input_server): next.input_server = 0
     if next.input_server == 0: return (next, "Windows managed input pipe creation failed")
     next.input = CreateFileW(name, 1073741824u32, 0u32, 0, 3u32, 1073741824u32, 0)
-    if next.input == -1: next.input = 0
+    if windows_abi_handle_is_invalid(next.input): next.input = 0
     if next.input == 0: return (next, "Windows managed input client creation failed")
     if ConnectNamedPipe(next.input_server, 0) == 0 and GetLastError() != 535u32:
         return (next, "Windows managed input pipe connection failed")
@@ -922,12 +922,12 @@ fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManaged
         next.temporaries = next.temporaries.push(output_name)
         if output_name == 0: return (next, "Windows broker output name allocation failed")
         next.output = CreateNamedPipeW(output_name, 524289u32, 8u32, 1u32, 65536u32, 65536u32, 0u32, 0)
-        if next.output == -1: next.output = 0
+        if windows_abi_handle_is_invalid(next.output): next.output = 0
         if next.output == 0: return (next, "Windows broker output server creation failed")
         # GENERIC_WRITE|FILE_READ_ATTRIBUTES permits the child's actual
         # GetNamedPipeInfo admission query on this write-only client endpoint.
         next.output_server = CreateFileW(output_name, 1073741952u32, 0u32, 0, 3u32, 1073741824u32, 0)
-        if next.output_server == -1: next.output_server = 0
+        if windows_abi_handle_is_invalid(next.output_server): next.output_server = 0
         if next.output_server == 0: return (next, "Windows broker overlapped output client creation failed")
         if ConnectNamedPipe(next.output, 0) == 0 and GetLastError() != 535u32:
             return (next, "Windows broker output connection failed")
@@ -937,8 +937,8 @@ fn _windows_managed_raw_pipes_v2(state: WindowsPtyStateV1, lease: WindowsManaged
         val output_created = CreatePipe(next.arena + 8, next.arena + 16, 0, 65536u32)
         next.output = windows_abi_read_ptr(next.arena + 8)
         next.output_server = windows_abi_read_ptr(next.arena + 16)
-        if next.output == -1: next.output = 0
-        if next.output_server == -1: next.output_server = 0
+        if windows_abi_handle_is_invalid(next.output): next.output = 0
+        if windows_abi_handle_is_invalid(next.output_server): next.output_server = 0
         if output_created == 0: return (next, "Windows managed output pipe creation failed")
     next.event = CreateEventW(0, 1, 0, 0)
     if next.event == 0: return (next, "Windows managed input event creation failed")

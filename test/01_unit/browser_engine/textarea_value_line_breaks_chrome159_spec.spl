@@ -1,0 +1,88 @@
+"""
+## Purpose and audience
+Purpose: hand over two Chrome 159 facts about a `<textarea>` whose value does
+not fit one line, found by the forms parity lane and outside its scope.
+Audience: maintainers of textarea value layout (control text box) and the
+inline line-break decision for atomic boxes.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=1`, window
+400x300), 16px/1.5 Liberation Sans body, `label{display:block;margin:8px 0
+8px 10px}`, UA textarea (13.333px monospace, 20 cols, 2 rows) with
+`padding:8px; border:1px solid #94a3b8; border-radius:5px` after `Notes `.
+
+1. Hard newlines break lines: value `lllll\nlllll\nlllll` paints its third
+   line's first `l` top at row 48, columns 66-69 = (159,71,15) (0,0,0)
+   (0,0,7) (63,151,215), the same as rows 18 and 33. Here the `\n` is drawn
+   as a hollow .notdef box (columns 106-110 and 153-157 of row 1) and all
+   three words sit on line 1; row 48 is blank. `white_space_newline` is set
+   for textarea (declarations), but the control-text path does not split on
+   it.
+2. A long value does not move the control: value `lllll` x 12 keeps the
+   textarea on the label's line (top border row 8, columns 59-246; column 100
+   = (148,163,184)) and wraps inside the box. Here the control drops to the
+   next line (box at x 10, y 32), as if the line-fit test used the value's
+   max-content width instead of the 20-column box.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CONTROL-TEXT-PEN-001 -- textarea value hard line breaks and line placement, handed over.
+"""
+# @tag: unit, browser_engine, form_controls, chrome159
+# @tag:in-development
+# Tracks: textarea value line breaks / long-value line fit, handed over by the forms parity lane 2026-11-24 (pagediff_claims "forms lane" HANDOFF row); owner: textarea control-text layout.
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val HEAD: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} label{{display:block;margin:8px 0 8px 10px}} textarea{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body>"
+val PAGE_NEWLINES: text = HEAD + "<label>Notes <textarea>lllll\nlllll\nlllll</textarea></label></body></html>"
+val PAGE_LONG: text = HEAD + "<label>Notes <textarea>lllll lllll lllll lllll lllll lllll lllll lllll lllll lllll lllll lllll</textarea></label></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+fn _row_text(px: [u32], y: i32, cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * CSS_W + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[i][ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome[i] else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[i][0]},{chrome[i][1]},{chrome[i][2]}) "
+        i = i + 1
+    s
+
+fn _render(page: text) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, 1, "cpu_simd")
+
+describe "A textarea value that does not fit one line (Chrome 159, 1x, handover)":
+    it "AC-1: breaks at each hard newline":
+        val px = _render(PAGE_NEWLINES)
+        val cols: [i32] = [66, 67, 68, 69]
+        val chrome: [[i32]] = [[159, 71, 15], [0, 0, 0], [0, 0, 7], [63, 151, 215]]
+        expect(_row_text(px, 48, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-2: stays on the label's line and wraps inside its 20 columns":
+        val px = _render(PAGE_LONG)
+        val cols: [i32] = [61, 100, 244]
+        val chrome: [[i32]] = [[148, 163, 184], [148, 163, 184], [148, 163, 184]]
+        expect(_row_text(px, 8, cols, chrome)).to_equal(_want_text(cols, chrome))

@@ -1,10 +1,9 @@
-name: Actual attribute store bootstrap diagnostic
+name: SDK and attribute store owner bootstrap diagnostics
 
 on:
   workflow_dispatch:
-  # Re-enable the restricted PR trigger only after binding a verified producer
-  # containing the RTI repair. The pinned producer below already reproduced the
-  # failure in run 45159597917; unrelated pushes must not repeat that execution.
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
@@ -16,17 +15,18 @@ concurrency:
 
 jobs:
   diagnose:
-    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'work/cross-compile-complete-20261123')
+    if: github.event_name == 'workflow_dispatch' || (github.event.action == 'labeled' && github.event.label.name == 'simpleos-owner-probes' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'work/xc-diagnostics-20261123')
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
-      PRODUCER_RUN: '45145173990'
-      PRODUCER_SOURCE: 0abba1510a913300a9e8c0bed67e8dde07ebea41
+      PRODUCER_RUN: '45179230801'
+      PRODUCER_SOURCE: 5e436b9e62384ac3c52f98f4a7032e332d7764bf
       # Root verified the fresh handoff and retained bootstrap Hello output.
       # This consumer remains diagnostic-only; Phase 1 is not suite admission.
-      PRODUCER_ARTIFACT: '14804958792'
-      PRODUCER_SHA256: e551d794b3e1f90b920930fc34680d3839945d3b9c352ee2d1dfeab5306fb420
-      PRODUCER_BYTES: '58490592'
+      PRODUCER_ARTIFACT: '14824030275'
+      PRODUCER_SHA256: 52b6fb7ba8cefa37a8d459e98068758fbfc5842ba6b12777000b4721355cb8cf
+      PRODUCER_BYTES: '58545480'
+      SDK_OWNER_SHA256: a4a1904d68e355d6cc95ceff7867edd26454c66afdb0db812fe7dd0e36886d3b
       FIXTURE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
       DIAGNOSTIC_OUT: build/verify/actual-attribute-store-diagnostic
     defaults:
@@ -36,6 +36,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Require the exact reviewed fixture checkout
@@ -57,7 +58,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN" > "$DIAGNOSTIC_OUT/producer-run.github.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PRODUCER_ARTIFACT" > "$DIAGNOSTIC_OUT/producer-artifact.github.json"
           jq -e --argjson run "$PRODUCER_RUN" --arg source "$PRODUCER_SOURCE" \
-            '.id == $run and .head_sha == $source and .status == "completed"' \
+            '.id == $run and .head_sha == $source and .status == "completed" and .conclusion == "success"' \
             "$DIAGNOSTIC_OUT/producer-run.github.json" > /dev/null
           jq -e --argjson run "$PRODUCER_RUN" --argjson artifact "$PRODUCER_ARTIFACT" --arg source "$PRODUCER_SOURCE" \
             '.id == $artifact and .name == "ladder-linux-x86_64-r1" and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $source' \
@@ -71,6 +72,7 @@ jobs:
           path: build/verify/actual-attribute-store-diagnostic/producer
 
       - name: Verify immutable Phase 1 compiler bytes
+        id: compiler_binding
         run: |
           set -euo pipefail
           compiler="$PWD/$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/simple"
@@ -95,8 +97,15 @@ jobs:
           } > "$DIAGNOSTIC_OUT/producer.sdn"
 
       - name: Verify and stage exactly the reviewed source projection
+        id: source_binding
         run: |
           set -euo pipefail
+          # Production compiler/lib/runtime and SDK fixture recipe must be exact
+          # frozen producer source. Only diagnostic fixture/workflow may differ.
+          git cat-file -e "$PRODUCER_SOURCE^{commit}"
+          git diff --exit-code "$PRODUCER_SOURCE" -- src/compiler src/lib src/runtime \
+            scripts/check/lib/simpleos-sysroot-receipt.shs scripts/os/simpleos-sysroot-32.shs \
+            test/01_unit/os/port/simpleos_sysroot_receipt_test.shs
           lane="$PWD/$DIAGNOSTIC_OUT/actual_attribute_store"
           mkdir -p "$lane/projection" "$lane/cache"
           cat > "$lane/production-projection.sha256" <<'SOURCE_HASHES'
@@ -105,13 +114,13 @@ jobs:
           87dfdf24d9922574d367ee6c8ca5ff2575922a918b465c049aa366e38b764d7c  src/compiler/00.common/data/data_schema_core_v1.spl
           e6fc88aa80f7ecfa87db254c4abc57fcbefe39203668e3bb91171b63c6394c17  src/compiler/00.common/data/data_schema_resolver.spl
           41220c5498219ba8576e07f1879a5e840a198adebc9cf004608ec702430b06c7  src/lib/common/crypto/secure_memory.spl
-          d41bf74e31de9dbba0e089111348c5dbe400fb32187a5fea36aa7df88d85fd53  src/lib/common/crypto/sha256.spl
+          b644a178c9e9134aa455bd78915f58413c4363c55d89ed3b01427851e54e6a6e  src/lib/common/crypto/sha256.spl
           9a73e13d17fba8a3b06f3b7a71f96f73180d5f53184c970715e375a8aadcdcb6  src/lib/common/crypto/sha256_core.spl
           e29fe297060bb4b59b62c10395575ac2f3796d09033833a217046fe9d27121c9  src/lib/common/crypto/word_ops.spl
           0fd242c9a4ac3358bdee83fadac70da61dd10b6ae19109a66ae814cf334b7234  src/lib/common/sdn/parser.spl
           5fddb47d91b451fdb0046354c230e920304c2bf48e196d4305ac33e7f5a6c6e5  src/lib/common/sdn/structural_scalar_value_v1.spl
           3bed7c6207cadf5fbf5a0b913bef555cc4fdad52344e4fc8d22d2d3bd86489db  src/lib/common/sdn/value.spl
-          f6d04579d8b1238fd3012ee8332ba20dae3fab0a313660714e33fb04f90e6818  src/lib/common/text_bytes.spl
+          1d11ddf80ad185bcfa4fc746b3526ca2f42c6d56f0cc5f74dc315750c51afcb5  src/lib/common/text_bytes.spl
           ca8130b1a29b92eaa72f20aaa8d6d89e62f4ed5809fd042a5cf3f7ecb13795b7  src/lib/common/types.spl
           SOURCE_HASHES
           sha256sum --check --strict "$lane/production-projection.sha256" > "$lane/source-hash-verification.txt"
@@ -126,12 +135,13 @@ jobs:
             done < "$lane/production-projection.sha256"
           } > "$lane/projection.sdn"
           fixture=test/fixtures/compiler/generic_store_factory_result_owner/actual_attribute_store.spl
-          printf '%s  %s\n' d8cc197e7d64801f54094263f07fb777b34b56fad6d4ddad6f89d4bbe1b1cdfe "$fixture" | sha256sum --check --status
+          printf '%s  %s\n' 22bba1464f54c1d0255d69c334ccc5319673663e6417796d83af300466393069 "$fixture" | sha256sum --check --status
           mkdir -p "$lane/projection/src/app"
           cp "$fixture" "$lane/projection/src/app/actual_attribute_store.spl"
-          printf '%s  %s\n' d8cc197e7d64801f54094263f07fb777b34b56fad6d4ddad6f89d4bbe1b1cdfe "$lane/projection/src/app/actual_attribute_store.spl" | sha256sum --check --status
+          printf '%s  %s\n' 22bba1464f54c1d0255d69c334ccc5319673663e6417796d83af300466393069 "$lane/projection/src/app/actual_attribute_store.spl" | sha256sum --check --status
 
       - name: Install canonical native build prerequisites
+        id: prerequisites
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -140,7 +150,8 @@ jobs:
           llc --version > "$DIAGNOSTIC_OUT/llc-version.txt"
           ld.lld --version > "$DIAGNOSTIC_OUT/lld-version.txt"
 
-      - name: Collect the single real-owner native build
+      - name: Collect the real attribute-owner native build
+        id: attribute_compile
         run: |
           set -euo pipefail
           lane="$PWD/$DIAGNOSTIC_OUT/actual_attribute_store"
@@ -165,7 +176,7 @@ jobs:
             printf 'producer_sha256: %s\nnative_build_exit_status: %s\n' "$PRODUCER_SHA256" "$code"
             printf 'soft_deadline_seconds: 595\nhard_deadline_seconds: 600\n'
             printf 'runtime_provider: native-build-default-source-selection-see-native-build-log\n'
-            printf 'emitted_program_execution: NOT_RUN\nsuite_execution: NOT_RUN\n'
+            printf 'suite_execution: NOT_RUN\n'
           } > "$lane/receipt.sdn"
           if [ -s "$lane/program" ]; then
             sha256sum "$lane/program" > "$lane/program.sha256"
@@ -173,6 +184,26 @@ jobs:
           fi
           # Collection follows even for a real compile failure. Final status is
           # decided after retaining actual module/source owner metadata below.
+
+      - name: Execute the actual attribute-owner positive and negative roundtrip
+        if: ${{ !cancelled() && steps.source_binding.outcome == 'success' && steps.compiler_binding.outcome == 'success' && steps.prerequisites.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          lane="$PWD/$DIAGNOSTIC_OUT/actual_attribute_store"
+          status=NOT_RUN
+          code=125
+          if [ "$(cat "$lane/native-build.exit")" = 0 ] && [ -s "$lane/program" ]; then
+            printf 'attribute-store-owner-ok\n' > "$lane/expected.stdout"
+            set +e
+            timeout --verbose --signal=TERM --kill-after=5s 60s "$lane/program" > "$lane/execution.stdout" 2> "$lane/execution.stderr"
+            code=$?
+            set -e
+            status=FAIL
+            if [ "$code" -eq 0 ] && cmp -s "$lane/expected.stdout" "$lane/execution.stdout" && [ ! -s "$lane/execution.stderr" ]; then status=PASS; fi
+          fi
+          printf '%s\n' "$code" > "$lane/execution.exit"
+          printf '%s\n' "$status" > "$lane/execution.status"
+          printf 'execution_status: %s\nexecution_exit: %s\nsemantic_controls: positive-roundtrip-and-wrong-expected-negative\nphysical_input_files: 14\n' "$status" "$code" >> "$lane/receipt.sdn"
 
       - name: Retain actual selected-provider module and source records
         if: always()
@@ -194,7 +225,7 @@ jobs:
           for line in (lane / 'production-projection.sha256').read_text().splitlines():
               digest, source = line.split(None, 1)
               expected[source.strip()] = digest
-          expected['src/app/actual_attribute_store.spl'] = 'd8cc197e7d64801f54094263f07fb777b34b56fad6d4ddad6f89d4bbe1b1cdfe'
+          expected['src/app/actual_attribute_store.spl'] = '22bba1464f54c1d0255d69c334ccc5319673663e6417796d83af300466393069'
           for source in (lane / 'cache').rglob('*.object'):
               if len(capsules) >= 128:
                   errors.append('object metadata count exceeds bounded collector limit 128')
@@ -268,9 +299,9 @@ jobs:
           lines = ['schema: actual-selected-provider-records-v1', 'status: BOOTSTRAP_DIAGNOSTIC', 'admission: none',
                    'selected_source_count: ' + (selected.group(1) if selected else 'unknown'),
                    'native_object_provider_records: ' + str(len(rows)),
-                   'actual_attribute_owner_records: ' + str(len(actual_owner)),
-                   'actual_entry_records: ' + str(len(actual_entry)),
-                   'coverage: observed-object-capsules-only-not-full-closure-proof', 'providers:']
+                   'matched_attribute_owner_records: ' + str(len(actual_owner)),
+                   'matched_entry_records: ' + str(len(actual_entry)),
+                   'coverage: observed-object-capsules-only-not-full-closure-proof', 'physical_path_attestation: none-derived-projection-mapping-only', 'providers:']
           for module, key, source, relative, digest, source_identity, capsule in rows:
               lines += ['  - module_name: ' + quote(module), '    raw_compiler_source_key: ' + quote(key),
                         '    derived_projection_source_path: ' + quote(source),
@@ -292,7 +323,7 @@ jobs:
           output_bytes = program.stat().st_size if program.is_file() else 0
           outcome = ('NATIVE_BUILD_FAILED' if code != 0 else
                      'OUTPUT_MISSING_OR_EMPTY' if output_bytes == 0 else
-                     'PROVIDER_METADATA_INCOMPLETE' if not metadata_ok else 'COMPILE_LINK_ONLY')
+                     'PROVIDER_METADATA_INCOMPLETE' if not metadata_ok else 'COMPILE_LINK_ONLY_EXECUTION_SEPARATELY_RECORDED')
           with (lane / 'receipt.sdn').open('a') as stream:
               stream.write('output_bytes: ' + str(output_bytes) + '\n')
               stream.write('observed_provider_metadata: ' + ('OBSERVED' if metadata_ok else 'INCOMPLETE') + '\n')
@@ -301,6 +332,157 @@ jobs:
           if code != 0 or output_bytes == 0 or not metadata_ok:
               raise SystemExit(1)
           PY
+
+      - name: Compile and execute independent SDK owner native diagnostic
+        if: ${{ !cancelled() && steps.source_binding.outcome == 'success' && steps.compiler_binding.outcome == 'success' && steps.prerequisites.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          lane="$PWD/$DIAGNOSTIC_OUT/sdk_owner"
+          compiler="$PWD/$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/simple"
+          mkdir -p "$lane/src/app" "$lane/cache"
+          printf '%s  %s\n' "$SDK_OWNER_SHA256" src/compiler/70.backend/backend/simpleos_sysroot_receipt.spl | sha256sum --check --strict > "$lane/source-hash-verification.txt"
+          sha256sum test/fixtures/compiler/simpleos_sysroot_receipt_owner/* > "$lane/probe-sources.sha256"
+          # Entry is physically within an explicitly selected source root.
+          cp test/fixtures/compiler/simpleos_sysroot_receipt_owner/main.spl "$lane/src/app/simpleos_sdk_owner_probe.spl"
+          sha256sum test/fixtures/compiler/simpleos_sysroot_receipt_owner/main.spl "$lane/src/app/simpleos_sdk_owner_probe.spl" > "$lane/entry-source.sha256"
+          args=(native-build --source "$PWD/src/compiler" --source "$PWD/src/lib" --source "$lane/src/app"
+            --entry-closure --entry "$lane/src/app/simpleos_sdk_owner_probe.spl"
+            --mode dynload --low-memory --threads 4 --cache-dir "$lane/cache" --output "$lane/program")
+          printf '%q ' "$compiler" "${args[@]}" > "$lane/command.txt"
+          printf '\n' >> "$lane/command.txt"
+          set +e
+          /usr/bin/time -v -o "$lane/resources.txt" timeout --verbose --signal=TERM --kill-after=5s 1000s \
+            env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_MONO_ROOT_DISCOVERY=1 \
+              SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=1 \
+              SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_RTI_DIAGNOSTICS=1 \
+              "$compiler" "${args[@]}" > "$lane/native-build.log" 2>&1
+          code=$?
+          set -e
+          printf '%s\n' "$code" > "$lane/native-build.exit"
+          execution=NOT_RUN
+          run_code=125
+          if [ "$code" -eq 0 ] && [ -s "$lane/program" ]; then
+            sha256sum "$lane/program" > "$lane/program.sha256"
+            digest=$(sha256sum "$lane/program" | awk '{print $1}')
+            set +e
+            timeout --verbose --signal=TERM --kill-after=5s 120s \
+              env CC="$(command -v clang)" AR="$(command -v llvm-ar)" \
+              sh test/fixtures/compiler/simpleos_sysroot_receipt_owner/run.shs "$lane/program" "$digest" \
+              > "$lane/wrapper.stdout" 2> "$lane/wrapper.stderr"
+            run_code=$?
+            set -e
+            execution=FAIL
+            if [ "$run_code" -eq 0 ]; then execution=PASS; fi
+            # Retain only the wrapper-created private fixture with physical bounds.
+            fixture=$(sed -n 's/^fixture=//p' "$lane/wrapper.stdout")
+            if [ -n "$fixture" ] && [ -d "$fixture" ] && [ ! -L "$fixture" ]; then
+              fixture=$(realpath -e -- "$fixture")
+              case "$fixture" in "$PWD"/build/verify/sysroot-receipt.*)
+                [ "$(dirname -- "$fixture")" = "$PWD/build/verify" ] || exit 2
+                cp -a "$fixture/bootstrap-owner-run" "$lane/execution-evidence"
+                cp -a "$fixture/sdk/share/simpleos" "$lane/fixture-metadata"
+                ;; *) exit 2 ;;
+              esac
+            fi
+          fi
+          printf '%s\n' "$run_code" > "$lane/execution.exit"
+          printf '%s\n' "$execution" > "$lane/execution.status"
+          {
+            printf 'schema: simpleos-sdk-owner-bootstrap-diagnostic-v1\nstatus: BOOTSTRAP_DIAGNOSTIC\nadmission: none\n'
+            printf 'producer_sha256: %s\nproducer_source: %s\n' "$PRODUCER_SHA256" "$PRODUCER_SOURCE"
+            printf 'native_build_exit: %s\nexecution_exit: %s\nexecution_status: %s\n' "$code" "$run_code" "$execution"
+            printf 'expected_runtime_assertions: 31\ncompile_timeout_seconds: 1000\nexecution_timeout_seconds: 120\n'
+            printf 'sdk_qualification: none\nsuite_execution: NOT_RUN\n'
+            printf 'production_compiler_tree: %s\nproduction_lib_tree: %s\n' "$(git rev-parse HEAD:src/compiler)" "$(git rev-parse HEAD:src/lib)"
+          } > "$lane/receipt.sdn"
+
+      - name: Retain SDK selected-owner source records
+        if: ${{ !cancelled() && steps.source_binding.outcome == 'success' && steps.compiler_binding.outcome == 'success' && steps.prerequisites.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYSDK'
+          import hashlib, os, pathlib, re, shutil
+          root = pathlib.Path.cwd()
+          lane = root / os.environ['DIAGNOSTIC_OUT'] / 'sdk_owner'
+          output = lane / 'observed-provider-metadata'
+          output.mkdir(exist_ok=True)
+          rows, errors, count = [], [], 0
+          owner = 'src/compiler/70.backend/backend/simpleos_sysroot_receipt.spl'
+          entry = (lane / 'src/app/simpleos_sdk_owner_probe.spl').resolve()
+          for capsule in sorted((lane / 'cache').rglob('*.object')):
+              count += 1
+              if count > 2048:
+                  errors.append('object metadata count exceeds bounded limit 2048')
+                  break
+              if capsule.stat().st_size > 131072:
+                  errors.append('object metadata exceeds 128KiB: ' + str(capsule))
+                  continue
+              raw = capsule.read_bytes()
+              target = output / capsule.relative_to(lane / 'cache')
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(capsule, target)
+              candidates = [line for line in raw.splitlines() if line.startswith(b'native-capsule-v1|')]
+              if len(candidates) != 1:
+                  errors.append('missing unique native capsule: ' + str(capsule))
+                  continue
+              data, position, fields = candidates[0], len(b'native-capsule-v1|'), []
+              try:
+                  for _ in range(5):
+                      colon = data.index(b':', position)
+                      length = int(data[position:colon])
+                      if length < 0 or length > 131072 or colon + 1 + length > len(data):
+                          raise ValueError('invalid field extent')
+                      position = colon + 1
+                      fields.append(data[position:position + length].decode('utf-8'))
+                      position += length
+                      if data[position:position + 1] != b'|': raise ValueError('missing separator')
+                      position += 1
+                  module, _, _, key, source_identity = fields
+                  # A snapshot key is not a physical-path attestation. Preserve
+                  # raw key and explicitly label the checked file mapping.
+                  mapped = pathlib.Path(key.removeprefix('scv-snapshot:'))
+                  mapped = (mapped if mapped.is_absolute() else root / mapped).resolve()
+                  if not module or not source_identity.strip() or not mapped.is_file():
+                      raise ValueError('missing module/identity/mapped source')
+                  relative = mapped.relative_to(root).as_posix()
+                  if not (relative.startswith('src/compiler/') or relative.startswith('src/lib/') or mapped == entry):
+                      raise ValueError('mapped source outside frozen production/isolated entry roots')
+                  rows.append((module, key, relative, hashlib.sha256(mapped.read_bytes()).hexdigest()))
+              except (ValueError, IndexError, UnicodeError) as error:
+                  errors.append(str(capsule) + ': ' + str(error))
+          owner_rows = [row for row in rows if row[0] == 'compiler.backend.simpleos_sysroot_receipt' and row[2] == owner and row[3] == os.environ['SDK_OWNER_SHA256']]
+          with (lane / 'native-build.log').open('rb') as stream:
+              raw_log = stream.read(16777217)
+          if len(raw_log) > 16777216: errors.append('native build log exceeds bounded limit 16MiB')
+          selected = re.search(r'\[parse-closure\][^\n]*\bselected=(\d+)', raw_log[:16777216].decode('utf-8', errors='replace'))
+          entry_rows = [row for row in rows if (root / row[2]).resolve() == entry]
+          quote = lambda value: '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
+          lines = ['schema: sdk-selected-provider-records-v1', 'admission: none',
+                   'physical_path_attestation: none-derived-snapshot-key-mapping-only',
+                   'selected_source_count: ' + (selected.group(1) if selected else 'unknown'),
+                   'observed_object_capsules: ' + str(count),
+                   'matched_sdk_owner_records: ' + str(len(owner_rows)),
+                   'matched_entry_records: ' + str(len(entry_rows)), 'providers:']
+          for module, key, relative, digest in rows:
+              lines += ['  - module_name: ' + quote(module), '    raw_compiler_source_key: ' + quote(key),
+                        '    derived_checked_source_mapping: ' + quote(relative), '    source_sha256: ' + digest]
+          lines += ['collector_errors:'] + ['  - ' + quote(error) for error in errors]
+          (lane / 'selected-providers.sdn').write_text('\n'.join(lines) + '\n')
+          ok = bool(owner_rows) and bool(entry_rows) and selected is not None and not errors
+          (lane / 'metadata.status').write_text('OBSERVED\n' if ok else 'INCOMPLETE\n')
+          if not ok: raise SystemExit(1)
+          PYSDK
+
+      - name: Require both independent owner outcomes
+        if: always()
+        run: |
+          set -euo pipefail
+          out="$PWD/$DIAGNOSTIC_OUT"
+          for owner in actual_attribute_store sdk_owner; do
+            test "$(cat "$out/$owner/native-build.exit")" = 0
+            test "$(cat "$out/$owner/execution.status")" = PASS
+            test "$(cat "$out/$owner/metadata.status")" = OBSERVED
+          done
 
       - uses: actions/upload-artifact@v6
         if: always()
@@ -318,5 +500,10 @@ jobs:
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/native-build.exit
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/projection/**/*.spl
             build/verify/actual-attribute-store-diagnostic/actual_attribute_store/observed-provider-metadata/**
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/execution.*
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/expected.stdout
+            build/verify/actual-attribute-store-diagnostic/sdk_owner/**
+            !build/verify/actual-attribute-store-diagnostic/sdk_owner/cache/**
+            !build/verify/actual-attribute-store-diagnostic/sdk_owner/program
           retention-days: 14
           if-no-files-found: warn
