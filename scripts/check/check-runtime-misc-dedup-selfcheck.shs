@@ -1,0 +1,143 @@
+#!/bin/sh
+# Builds and runs the characterization selfchecks for the three private
+# shared-body headers introduced by the misc runtime C dedup lane
+# (plain and under ASan/UBSan), syntax-checks every includer in each of its
+# ownership configurations, and runs a source contract pinning both includers
+# of each header to the ONE shared body:
+#   src/runtime/runtime_hosted_backend_stubs_impl.h
+#       <- runtime_native.c, runtime_native_gpu_stub.c
+#   src/runtime/runtime_dynload_snapshot_private.h
+#       <- runtime_dynload.c, runtime_native.c (!SIMPLE_RUNTIME_DYNLOAD_OWNER)
+#   src/runtime/scilib/scilib_bits_common.h
+#       <- scilib/mock_shim.c, scilib/openblas_shim.c (real + fallback branch)
+# clang only (never gcc). Fail-closed verdict, last line of stdout:
+#   PASS — <n> run(s) ...              exit 0
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked (...)  exit 2
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+cd "$root" || { echo "ERROR — nothing was checked (cd failed)"; exit 2; }
+CC=${CC:-clang}
+case "$(basename "$CC")" in *gcc*|*g++*) echo "ERROR — nothing was checked (gcc is forbidden: $CC)"; exit 2;; esac
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no clang: $CC)"; exit 2; }
+"$CC" --version 2>/dev/null | grep -qi clang || { echo "ERROR — nothing was checked ($CC is not clang)"; exit 2; }
+out="$root/build/runtime_misc_dedup_selfcheck"
+mkdir -p "$out" || { echo "ERROR — nothing was checked (mkdir $out)"; exit 2; }
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    os=windows; exe=.exe; libs=""
+    resdir=$("$CC" -print-resource-dir 2>/dev/null)
+    [ -n "$resdir" ] && PATH="$PATH:$resdir/lib/windows" && export PATH ;;
+  Linux) os=linux; exe=; libs="-lm" ;;
+  *) os=posix; exe=; libs="-lm" ;;
+esac
+sans="none asan"
+ran=0; fails=""
+
+# 1. Characterization selfchecks. Each row: <name>|<extra sources>
+rows="rt_hosted_backend_stubs_selfcheck|src/runtime/runtime_native_gpu_stub.c
+scilib_bits_common_selfcheck|
+rt_dynload_snapshot_private_selfcheck|"
+for san in $sans; do
+  case "$san" in
+    none) sf="" ;;
+    asan) sf="-fsanitize=address,undefined -fno-sanitize-recover=undefined" ;;
+  esac
+  printf '%s\n' "$rows" | while IFS='|' read -r t extra; do
+    [ -n "$t" ] || continue
+    bin="$out/${t}_$san$exe"
+    # shellcheck disable=SC2086
+    "$CC" -O1 -g -Wall -I src/runtime $sf "src/runtime/test/$t.c" $extra -o "$bin" $libs > "$out/${t}_$san.build.txt" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then echo "FAILROW $t-$san(compile rc=$rc)"; continue; fi
+    "$bin" > "$out/${t}_$san.txt" 2>&1
+    rc=$?
+    echo "RAN"
+    [ "$rc" -eq 0 ] || echo "FAILROW $t-$san(run rc=$rc)"
+    # The dynload snapshot test is evidence only where memfd exists.
+    if [ "$t" = rt_dynload_snapshot_private_selfcheck ] && grep -q SKIP "$out/${t}_$san.txt"; then
+      [ "$os" = linux ] && echo "FAILROW $t-$san(SKIP on linux)"
+      echo "SKIPPED"
+    fi
+  done > "$out/rows_$san.txt"
+  n=$(grep -c '^RAN$' "$out/rows_$san.txt"); ran=$((ran + n))
+  skipped=$(grep -c '^SKIPPED$' "$out/rows_$san.txt"); ran=$((ran - skipped))
+  f=$(grep '^FAILROW' "$out/rows_$san.txt" | sed 's/^FAILROW //' | tr '\n' ' ')
+  [ -z "$f" ] || fails="$fails $f"
+done
+
+# 2. Every includer, in every ownership configuration, still parses.
+syntax() { # <label> <file> [defines...]
+  label=$1; file=$2; shift 2
+  # shellcheck disable=SC2086
+  "$CC" -fsyntax-only -Wall -I src/runtime "$@" "$file" > "$out/syntax_$label.txt" 2>&1
+  rc=$?
+  ran=$((ran + 1))
+  [ "$rc" -eq 0 ] || fails="$fails syntax-$label(rc=$rc)"
+}
+syntax gpu_stub        src/runtime/runtime_native_gpu_stub.c
+syntax dynload         src/runtime/runtime_dynload.c
+syntax native          src/runtime/runtime_native.c
+syntax native_owner    src/runtime/runtime_native.c -DSIMPLE_RUNTIME_DYNLOAD_OWNER
+syntax mock_shim       src/runtime/scilib/mock_shim.c
+syntax openblas_fb     src/runtime/scilib/openblas_shim.c
+# The real OpenBLAS branch needs cblas.h/lapacke.h; without them on the host,
+# parse it against minimal prototype-only stand-ins so its includes of the
+# shared header are still checked.
+fake="$out/fakeblas"; mkdir -p "$fake"
+if [ -r /usr/include/x86_64-linux-gnu/cblas.h ] || [ -r /usr/include/cblas.h ]; then
+  syntax openblas_real src/runtime/scilib/openblas_shim.c -DSIMPLE_SCILIB_ENABLE_REAL_OPENBLAS
+else
+  cat > "$fake/cblas.h" <<'EOF'
+typedef enum { CblasRowMajor = 101 } CBLAS_LAYOUT;
+typedef enum { CblasNoTrans = 111, CblasTrans = 112, CblasConjTrans = 113 } CBLAS_TRANSPOSE;
+void cblas_daxpy(int, double, const double *, int, double *, int);
+double cblas_ddot(int, const double *, int, const double *, int);
+void cblas_dscal(int, double, double *, int);
+int cblas_idamax(int, const double *, int);
+double cblas_dnrm2(int, const double *, int);
+void cblas_dgemv(CBLAS_LAYOUT, CBLAS_TRANSPOSE, int, int, double, const double *, int, const double *, int, double, double *, int);
+void cblas_dgemm(CBLAS_LAYOUT, CBLAS_TRANSPOSE, CBLAS_TRANSPOSE, int, int, int, double, const double *, int, const double *, int, double, double *, int);
+EOF
+  cat > "$fake/lapacke.h" <<'EOF'
+typedef int lapack_int;
+#define LAPACK_ROW_MAJOR 101
+lapack_int LAPACKE_dgetrf(int, lapack_int, lapack_int, double *, lapack_int, lapack_int *);
+lapack_int LAPACKE_dgetrs(int, char, lapack_int, lapack_int, const double *, lapack_int, const lapack_int *, double *, lapack_int);
+lapack_int LAPACKE_dgesv(int, lapack_int, lapack_int, double *, lapack_int, lapack_int *, double *, lapack_int);
+EOF
+  syntax openblas_real_fake src/runtime/scilib/openblas_shim.c -DSIMPLE_SCILIB_ENABLE_REAL_OPENBLAS -I "$fake"
+fi
+
+# 3. Source contract: one body per header, both includers include it, no
+#    re-forked copy of a shared definition in any includer.
+contract=0
+req() { grep -Fq "$2" "$1" || { echo "contract: $1 lacks: $2" >> "$out/contract.txt"; contract=1; }; }
+forbid() { ! grep -Eq "$2" "$1" || { echo "contract: $1 re-forks: $2" >> "$out/contract.txt"; contract=1; }; }
+: > "$out/contract.txt"
+for f in src/runtime/runtime_native.c src/runtime/runtime_native_gpu_stub.c; do
+  req "$f" '#include "runtime_hosted_backend_stubs_impl.h"'
+  forbid "$f" '^(bool|int64_t) rt_(oneapi|opengl)_[a-z_]+\('
+done
+for f in src/runtime/runtime_dynload.c src/runtime/runtime_native.c; do
+  req "$f" '#include "runtime_dynload_snapshot_private.h"'
+  req "$f" 'simple_dynload_snapshot_memfd_linux_v1(path, "simple-sffi-provider")'
+  forbid "$f" 'SYS_memfd_create'
+  forbid "$f" 'F_SEAL_WRITE'
+done
+for f in src/runtime/scilib/mock_shim.c src/runtime/scilib/openblas_shim.c; do
+  req "$f" '#include "scilib_bits_common.h"'
+  forbid "$f" '^static (int64_t scilib_double_to_bits|double scilib_bits_to_double)\('
+  forbid "$f" '^int64_t rt_scilib_openblas_(ddot|dgemm|dgemv)_bits\('
+  forbid "$f" '^(int64_t rt_cuda_malloc|void rt_cuda_free|void rt_cuda_memcpy_htod|void rt_cuda_memcpy_dtoh)\('
+done
+n=$(grep -c 'rt_\(oneapi\|opengl\)_[a-z_]*(' src/runtime/runtime_hosted_backend_stubs_impl.h)
+[ "$n" -eq 32 ] || { echo "contract: expected 32 stub definitions in runtime_hosted_backend_stubs_impl.h, found $n" >> "$out/contract.txt"; contract=1; }
+grep -q 'SIMPLE_DYNLOAD_SNAPSHOT_MAX_BYTES UINT64_C(1073741824)' src/runtime/runtime_dynload_snapshot_private.h || { echo "contract: 1 GiB snapshot cap missing" >> "$out/contract.txt"; contract=1; }
+ran=$((ran + 1))
+[ "$contract" -eq 0 ] || fails="$fails source-contract"
+
+if [ -n "$fails" ]; then echo "FAIL — $ran run(s) ($os), failed:$fails (logs: $out)"; exit 1; fi
+if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked (0 runs)"; exit 2; fi
+echo "PASS — $ran run(s) ($os: $sans), misc dedup selfchecks + includer syntax + source contract green"
+exit 0
