@@ -83,6 +83,88 @@ pub fn rt_enum_id_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(id))
 }
 
+/// Build an enum value from its runtime identity.
+///
+/// Mirrors `simple_runtime::value::objects::rt_enum_new(enum_id, disc, payload)`
+/// for interpreter values: `enum_id` is the owner's `enum_runtime_type_id`
+/// (as returned by `rt_enum_id`) and `disc` its declaration index (as returned
+/// by `rt_enum_discriminant`), so `rt_enum_new(rt_enum_id(v),
+/// rt_enum_discriminant(v), rt_enum_payload(v))` rebuilds `v`. Unknown owners
+/// or out-of-range discriminants are a semantic error, never a silent nil.
+pub fn rt_enum_new_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let int_arg = |i: usize| match args.get(i) {
+        Some(Value::Int(n)) => i32::try_from(*n).ok().and_then(|word| u32::try_from(word).ok()),
+        _ => None,
+    };
+    let (Some(enum_id), Some(disc)) = (int_arg(0), int_arg(1)) else {
+        return Err(CompileError::semantic(
+            "rt_enum_new expects nonnegative i32 enum_id and discriminant".to_string(),
+        ));
+    };
+    let payload = args.get(2).cloned().unwrap_or(Value::Nil);
+    let builtin = match enum_id {
+        0 => Some(("Result", ["Ok", "Err"])),
+        1 => Some(("Option", ["Some", "None"])),
+        _ => None,
+    };
+    if let Some((name, variants)) = builtin {
+        let Some(variant) = variants.get(disc as usize) else {
+            return Err(CompileError::semantic(format!("rt_enum_new: {name} has no discriminant {disc}")));
+        };
+        let payload = if *variant == "None" { None } else { Some(Box::new(payload)) };
+        return Ok(Value::Enum { enum_name: name.to_string(), variant: variant.to_string(), payload });
+    }
+    let find = |enums: &std::collections::HashMap<String, std::sync::Arc<EnumDef>>| {
+        enums
+            .iter()
+            .filter(|(name, _)| enum_runtime_type_id(name) == enum_id)
+            .min_by(|a, b| a.0.cmp(b.0))
+            .map(|(name, def)| (name.clone(), def.clone()))
+    };
+    let found = crate::interpreter::BLOCK_SCOPED_ENUMS
+        .with(|enums| find(&enums.borrow()))
+        .or_else(|| crate::interpreter::GLOBAL_ENUMS.with(|enums| find(&enums.borrow())));
+    let Some((enum_name, def)) = found else {
+        return Err(CompileError::semantic(format!("rt_enum_new: no enum with runtime id {enum_id}")));
+    };
+    let Some(variant) = def.variants.get(disc as usize) else {
+        return Err(CompileError::semantic(format!("rt_enum_new: {enum_name} has no discriminant {disc}")));
+    };
+    let payload = variant.fields.as_ref().map(|_| Box::new(payload));
+    Ok(Value::Enum { enum_name, variant: variant.name.clone(), payload })
+}
+
+#[cfg(test)]
+mod rt_enum_new_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_option_some_round_trips() {
+        let v = rt_enum_new_fn(&[Value::Int(1), Value::Int(0), Value::Int(7)]).unwrap();
+        assert_eq!(
+            v,
+            Value::Enum { enum_name: "Option".into(), variant: "Some".into(), payload: Some(Box::new(Value::Int(7))) }
+        );
+        assert_eq!(rt_enum_id_fn(&[v.clone()]).unwrap(), Value::Int(1));
+        assert_eq!(rt_enum_discriminant_fn(&[v]).unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn invalid_wire_words_do_not_wrap_to_builtin_variants() {
+        for (enum_id, disc) in [(1, 1_i64 << 32), ((1_i64 << 32) + 1, 0), (i64::MIN, 0)] {
+            let args = [Value::Int(enum_id), Value::Int(disc), Value::Nil];
+            assert!(rt_enum_new_fn(&args).is_err(), "accepted enum {enum_id}, variant {disc}");
+        }
+    }
+
+    #[test]
+    fn unknown_identity_is_an_error_not_nil() {
+        assert!(rt_enum_new_fn(&[Value::Int(1), Value::Int(9), Value::Nil]).is_err());
+        assert!(rt_enum_new_fn(&[Value::Int(123456), Value::Int(0), Value::Nil]).is_err());
+        assert!(rt_enum_new_fn(&[]).is_err());
+    }
+}
+
 #[cfg(test)]
 mod rt_enum_id_tests {
     use super::*;

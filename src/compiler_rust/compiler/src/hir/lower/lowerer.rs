@@ -83,6 +83,14 @@ pub struct Lowerer {
     /// imported multiple times with different grouped symbols; path-only
     /// de-duplication skips later function imports.
     pub(super) loaded_import_targets: HashSet<(PathBuf, String)>,
+    /// Resolved unit keys whose type names `preregister_imported_type_names`
+    /// already placed. Placeholders are only added when absent and are never
+    /// removed, so a second pass over the same unit is a no-op (but used to
+    /// re-walk its items and re-`read_dir` its package every time).
+    pub(super) preregistered_units: HashSet<PathBuf>,
+    /// Memo for `resolve_imported_module_path`, keyed by (importing file,
+    /// module path, target). Filesystem resolution is fixed for one lowering.
+    pub(super) resolved_import_paths: std::cell::RefCell<HashMap<(PathBuf, String), crate::module_resolver::ResolvedModule>>,
     /// Nesting depth of dependency-only import loads: an imported module's own
     /// `use` statements, followed so its signatures resolve. Aliases those
     /// statements declare are private to that module and must not become
@@ -418,6 +426,8 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            preregistered_units: HashSet::new(),
+            resolved_import_paths: std::cell::RefCell::new(HashMap::new()),
             dependency_import_depth: 0,
             direct_enum_owners: HashMap::new(),
             direct_enum_wanted: HashSet::new(),
@@ -518,6 +528,8 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            preregistered_units: HashSet::new(),
+            resolved_import_paths: std::cell::RefCell::new(HashMap::new()),
             dependency_import_depth: 0,
             direct_enum_owners: HashMap::new(),
             direct_enum_wanted: HashSet::new(),
@@ -641,6 +653,8 @@ impl Lowerer {
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            preregistered_units: HashSet::new(),
+            resolved_import_paths: std::cell::RefCell::new(HashMap::new()),
             dependency_import_depth: 0,
             direct_enum_owners: HashMap::new(),
             direct_enum_wanted: HashSet::new(),

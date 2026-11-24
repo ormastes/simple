@@ -1,0 +1,203 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/native_mir_shard.spl 0%
+"""
+# A running build never evicts native cache scopes it still links from
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md
+
+## Purpose and Audience
+
+A 7h20m per-file worker build compiled all 1,611 modules and then failed at
+link: scope directories published early in the run had been idle for more
+than the 6 hour retention window, and a later child of the same build removed
+them.
+
+## Expected Outcome
+
+Shard, worker, unit and link children never run scope retention; every ledger
+row that names an object refreshes that object's scope liveness marker; and a
+missing object at link says it left the cache and that a re-run rebuilds it.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.nogc_sync_mut.io_runtime.{env_set, dir_create_all, dir_remove_all, dir_exists, getpid, file_exists, file_write, file_delete}
+use compiler.driver.driver_build.native_mir_shard.{
+    native_cache_scope_eviction_role_allowed_v1, native_cache_scope_dir_of_object_v1,
+    native_cache_scope_start_retention_due_v1,
+    native_mir_shard_ledger_scope_dirs_v1, native_cache_scope_start_retention_v1,
+    native_mir_shard_claim_v1, native_mir_shard_publish_pass_v1,
+    native_mir_shard_link_inputs_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory}
+
+val SCOPE = "s264d59a3c4d238c02222a5fc874a842c"
+
+fn fresh_root(tag: text) -> text:
+    val dir = "build/test_tmp/native_cache_scope_live_{tag}_{getpid()}"
+    val _removed = dir_remove_all(dir)
+    val _created = dir_create_all(dir)
+    dir
+
+describe "native cache scope eviction role":
+    it "lets only an unmarked top-level process evict":
+        # @req REQ-SSPEC-COMPILER
+        step("lets only an unmarked top-level process evict")
+        assert_true(native_cache_scope_eviction_role_allowed_v1("", "", "", "", "", ""))
+
+    it "worker role never evicts":
+        # @req REQ-SSPEC-COMPILER
+        step("worker role never evicts")
+        assert_false(native_cache_scope_eviction_role_allowed_v1("3/8", "", "", "", "", ""))
+        assert_false(native_cache_scope_eviction_role_allowed_v1("", "3/8", "", "", "", ""))
+        assert_false(native_cache_scope_eviction_role_allowed_v1("", "", "3/8", "", "", ""))
+        assert_false(native_cache_scope_eviction_role_allowed_v1("", "", "", "", "1", ""))
+        assert_false(native_cache_scope_eviction_role_allowed_v1("", "", "", "", "", "1"))
+
+    it "the ledger link child never evicts":
+        # @req REQ-SSPEC-COMPILER
+        step("the ledger link child never evicts")
+        assert_false(native_cache_scope_eviction_role_allowed_v1("", "", "", "build/q/mir", "", ""))
+
+describe "native cache scope build-start retention gate":
+    it "the top-level coordinator runs the pass once":
+        # @req REQ-SSPEC-COMPILER
+        step("the top-level coordinator runs the pass once")
+        val argv = ["native-build", "--entry", "src/app/cli/main.spl", "--cache-dir", "c", "--threads=8"]
+        assert_true(native_cache_scope_start_retention_due_v1("", "", "", "", "", "", "", "", "", argv))
+        # The latch it then exports refuses this process and every descendant.
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "", "", "", "", "", "", "1", argv))
+
+    it "a role environment never runs the pass":
+        # @req REQ-SSPEC-COMPILER
+        step("a role environment never runs the pass")
+        val argv = ["native-build", "--cache-dir", "c"]
+        assert_false(native_cache_scope_start_retention_due_v1("3/8", "", "", "", "", "", "", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "3/8", "", "", "", "", "", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "3/8", "", "", "", "", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "", "build/q/mir", "", "", "", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "", "", "1", "", "", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "", "", "", "1", "", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "", "", "", "", "build/group.result", "", "", argv))
+        assert_false(native_cache_scope_start_retention_due_v1("", "", "", "", "", "", "", "1", "", argv))
+
+    it "a role flag in argv never runs the pass":
+        # @req REQ-SSPEC-COMPILER
+        step("a role flag in argv never runs the pass")
+        for flag in ["--file-worker=0/4", "--parse-shard=1/4", "--parse-fibers=1/4", "--hir-shard=1/4", "--mir-shard=1/4"]:
+            assert_false(native_cache_scope_start_retention_due_v1("", "", "", "", "", "", "", "", "",
+                ["native-build", "--cache-dir", "c", flag]))
+
+describe "native cache scope of an object":
+    it "ignores a 33-character s-prefixed component that is not hex":
+        # @req REQ-SSPEC-COMPILER
+        step("ignores a 33-character s-prefixed component that is not hex")
+        assert_equal(native_cache_scope_dir_of_object_v1(
+            "build/source_inventory_snapshot_dir_v1x/m.o"), "")
+        # The real scope still wins when such a component sits below it.
+        assert_equal(native_cache_scope_dir_of_object_v1(
+            "cache/{SCOPE}/source_inventory_snapshot_dir_v1x/m.o"), "cache/{SCOPE}")
+
+    it "names the scope directory for an object stored directly in it":
+        # @req REQ-SSPEC-COMPILER
+        step("names the scope directory for an object stored directly in it")
+        assert_equal(native_cache_scope_dir_of_object_v1("/c/cache/{SCOPE}/aot-ab.o"),
+            "/c/cache/{SCOPE}")
+
+    it "names the scope directory for an object in a scope subdirectory":
+        # @req REQ-SSPEC-COMPILER
+        step("names the scope directory for an object in a scope subdirectory")
+        assert_equal(native_cache_scope_dir_of_object_v1("cache/{SCOPE}/object/m.o"),
+            "cache/{SCOPE}")
+
+    it "does not confuse an invalid nested directory name with the scope":
+        # @req REQ-SSPEC-COMPILER
+        step("does not confuse an invalid nested directory name with the scope")
+        val invalid = "s264d59a3c4d238c02222a5fc874a842g"
+        assert_equal(native_cache_scope_dir_of_object_v1("/c/cache/{SCOPE}/{invalid}/aot.o"),
+            "/c/cache/{SCOPE}")
+        assert_equal(native_cache_scope_dir_of_object_v1("/c/cache/{invalid}/aot.o"), "")
+
+    it "returns nothing for a path outside any scope":
+        # @req REQ-SSPEC-COMPILER
+        step("returns nothing for a path outside any scope")
+        assert_equal(native_cache_scope_dir_of_object_v1("build/out/m.o"), "")
+        assert_equal(native_cache_scope_dir_of_object_v1(""), "")
+        # A file whose own name is scope-shaped is not a directory.
+        assert_equal(native_cache_scope_dir_of_object_v1("build/{SCOPE}"), "")
+
+describe "MIR shard ledger keeps object scopes live":
+    it "refreshes the scope liveness marker when a PASS row is published":
+        # @req REQ-SSPEC-COMPILER
+        step("refreshes the scope liveness marker when a PASS row is published")
+        val root = fresh_root("publish")
+        val queue = root + "/queue"
+        val scope = root + "/cache/" + SCOPE
+        val _q = dir_create_all(queue)
+        val _s = dir_create_all(scope)
+        val object_path = scope + "/aot-a.o"
+        val _o = file_write(object_path, "obj")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0+fork0/2")
+        assert_true(hir_shard_recovery_inventory(queue, "ident", ["mod.a"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "ident"), 1)
+        assert_false(file_exists(scope + "/.last-use"))
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", object_path, 1, 0, "cap"))
+        assert_true(file_exists(scope + "/.last-use"))
+        val _removed = dir_remove_all(root)
+
+    it "says a recorded object left the cache and that a re-run rebuilds it":
+        # @req REQ-SSPEC-COMPILER
+        step("says a recorded object left the cache and that a re-run rebuilds it")
+        val root = fresh_root("missing")
+        val queue = root + "/queue"
+        val scope = root + "/cache/" + SCOPE
+        val _q = dir_create_all(queue)
+        val _s = dir_create_all(scope)
+        val object_path = scope + "/aot-a.o"
+        val _o = file_write(object_path, "obj")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0+fork0/2")
+        assert_true(hir_shard_recovery_inventory(queue, "ident", ["mod.a"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "ident"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", object_path, 1, 0, "cap"))
+        # The scope is evicted after the row was published.
+        val _evicted = dir_remove_all(scope)
+        val admitted = native_mir_shard_link_inputs_v1(queue, "ident")
+        assert_true(admitted.is_err())
+        val message = admitted.unwrap_err()
+        assert_true(message.starts_with("MIR shard module object missing: mod.a ("))
+        assert_true(message.contains("no longer in the native cache"))
+        assert_true(message.contains("re-run the build"))
+        val _removed = dir_remove_all(root)
+
+describe "native cache scope build-start retention":
+    it "keeps the scopes a resumable ledger names and marks them live":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the scopes a resumable ledger names and marks them live")
+        val root = fresh_root("start")
+        val queue = root + "/queue"
+        val cache = root + "/cache"
+        val scope = cache + "/" + SCOPE
+        val other = cache + "/s0123456789abcdef0123456789abcdef"
+        val _q = dir_create_all(queue)
+        val _s = dir_create_all(scope)
+        val _t = dir_create_all(other)
+        val object_path = scope + "/aot-a.o"
+        val _o = file_write(object_path, "obj")
+        val _owner = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@0+fork0/2")
+        assert_true(hir_shard_recovery_inventory(queue, "ident", ["mod.a"]))
+        assert_equal(native_mir_shard_claim_v1(queue, "mod.a", "ident"), 1)
+        assert_true(native_mir_shard_publish_pass_v1(queue, "mod.a", object_path, 1, 0, "cap"))
+        val named = native_mir_shard_ledger_scope_dirs_v1(queue)
+        assert_equal(named.len(), 1)
+        assert_equal(named[0], scope)
+        assert_equal(native_mir_shard_ledger_scope_dirs_v1(root + "/absent").len(), 0)
+        # keep = 1 asks for every other scope to go; both were used inside the
+        # idle window, so the build-start pass removes neither.
+        # Publishing wrote the marker; drop it so only the pass can restore it.
+        assert_true(file_delete(scope + "/.last-use"))
+        assert_false(file_exists(scope + "/.last-use"))
+        assert_equal(native_cache_scope_start_retention_v1(cache, [queue, root + "/absent"], 1), 0)
+        assert_true(file_exists(object_path))
+        assert_true(file_exists(scope + "/.last-use"))
+        assert_true(dir_exists(other))
+        val _removed = dir_remove_all(root)

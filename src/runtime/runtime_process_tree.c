@@ -12,6 +12,7 @@
 #endif
 
 #include "runtime_process_tree.h"
+#include "runtime_exec_argv_private.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -289,10 +290,8 @@ int64_t rt_process_spawn_session(const char* cmd, const char** args, int64_t arg
     }
     /* argv is built in the parent: nothing may allocate between fork and exec
      * in a multithreaded parent. */
-    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
+    char** argv = spawn_argv_build(cmd, args, arg_count);
     if (!argv) return -ENOMEM;
-    argv[0] = (char*)cmd;
-    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
 
     /* The child reports an exec failure through a CLOEXEC pipe, so the caller
      * gets -errno instead of a pid that exits 127 a moment later. */

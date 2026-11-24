@@ -1,6 +1,6 @@
 # In-process LSP MCP document symbols exceed Linux resource targets
 
-Status: open
+Status: partially fixed 2026-11-24. Per-symbol re-reads and re-parses were already removed by 70d34196da3 and 8a04b71ff1f (one parse, facts hoisted). This change adds a per-request read memo for the in-process lsp_symbols path (source_reader begin_disk). The p95 and RSS targets are NOT re-measured: no idle host or native build was available. Keep open until remeasured.
 
 The Phase 2 whole-program Linux LSP MCP executable built from `70d34196da3`
 (SHA-256 `f029fae5735030fb4af98f3475fd9c454536f243a9522cde2cd547f039295d16`)

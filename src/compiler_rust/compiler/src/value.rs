@@ -869,21 +869,22 @@ impl ModuleBindings {
             None => {
                 // Resolve outside the memo: a layer's source is a different
                 // (earlier-finished) module's table with its own memo.
-                let resolved = self.layers.iter().rev().find_map(|layer| layer.resolve(local_name));
-                match self
-                    .memo
-                    .with(|memo| addr(memo.entry(local_name.to_owned()).or_insert(resolved.map(Box::new))))
-                {
+                // Resolved exactly ONCE. A non-owner thread used to resolve a
+                // second time after the memo refused it; every layer's source
+                // is itself a layered table, so that doubled the walk at each
+                // import level (2^depth) and a worker thread spent seconds per
+                // global lookup or overflowed its stack.
+                // doc/08_tracking/bug/seed_thread_shared_class_object_crash_2026-11-23.md
+                let mut resolved = Some(self.layers.iter().rev().find_map(|layer| layer.resolve(local_name)));
+                match self.memo.with(|memo| {
+                    addr(
+                        memo.entry(local_name.to_owned())
+                            .or_insert(resolved.take().flatten().map(Box::new)),
+                    )
+                }) {
                     Some(ptr) => ptr,
                     // Not the owning thread: hand the answer out by value.
-                    None => {
-                        return self
-                            .layers
-                            .iter()
-                            .rev()
-                            .find_map(|layer| layer.resolve(local_name))
-                            .map(Cow::Owned)
-                    }
+                    None => return resolved.flatten().map(Cow::Owned),
                 }
             }
         };

@@ -11,7 +11,7 @@ use app.orchestrator.host_identity_command_v1.{host_identity_failure_v1, host_id
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
-use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.nogc_sync_mut.sosix.host.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.io.host_identity_store_v1.*
 use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.{HostIdentitySshProjectionV1, HostIdentitySshPathsV1,
@@ -187,9 +187,9 @@ pub fn host_identity_profile_command_v1(args: [text]) -> OrchestratorValidationR
     if pin.error != "" or pin.cleanup_pending or pin.absent or pin.bytes.is_none():
         return identity_profile_error_pair_v2(fields, "host-identity-profile-pin-unavailable", owner, projection)
     val pin_bytes = pin.bytes.unwrap()
-    if not utf8_bytes_valid(pin_bytes):
-        return identity_profile_error_pair_v2(fields, "host-identity-profile-pin-invalid", owner, projection)
-    val pin_source = bytes_to_text(pin_bytes)
+    val pin_source = match bytes_to_text_checked(pin_bytes):
+        case Ok(t): t
+        case Err(_): return identity_profile_error_pair_v2(fields, "host-identity-profile-pin-invalid", owner, projection)
     # Actual current proof immediately precedes the pure data/alias gate and
     # publication. An invalidated pair is never recreated or replaced.
     val current_paths = match host_identity_ssh_projection_paths_v1(projection.unwrap(), owner):
@@ -212,7 +212,10 @@ pub fn host_identity_profile_command_v1(args: [text]) -> OrchestratorValidationR
         if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes.is_none():
             return identity_profile_error_pair_v2(fields, "host-identity-profile-existing-unconfirmed", owner, projection)
         val actual_bytes = actual.bytes.unwrap()
-        if not utf8_bytes_valid(actual_bytes) or bytes_to_text(actual_bytes) != prepared.canonical:
+        val actual_matches = match bytes_to_text_checked(actual_bytes):
+            case Ok(t): t == prepared.canonical
+            case Err(_): false
+        if not actual_matches:
             return identity_profile_error_pair_v2(fields, "host-identity-profile-existing-conflict", owner, projection)
         fields["status"] = SdnValue.String("profile-existing")
     elif published.publication == HostIdentityStorePublicationV1.Published and published.file_synced:

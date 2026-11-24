@@ -111,6 +111,7 @@ typedef SSIZE_T ssize_t;
 #include <windows.h>
 #include <psapi.h>
 #include "platform/windows_raw_mapping.h"
+#include "platform/spl_win_utf16_private.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -11680,20 +11681,12 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * rt_interp_cstr accepts both encodings and is a strict superset. */
 #ifdef _WIN32
 static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        rt_observed_malloc_v1, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;
@@ -16962,27 +16955,16 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
 /* UTF-8 -> freshly allocated NUL-terminated UTF-16; NULL on failure. */
 static wchar_t* rt_http_win_wide(const char* text, size_t len) {
     if (len > (size_t)INT_MAX) return NULL;
-    int need = len ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)len, NULL, 0) : 0;
-    if (len && need <= 0) return NULL;
-    wchar_t* out = (wchar_t*)rt_observed_malloc_v1(((size_t)need + 1) * sizeof(wchar_t));
-    if (!out) return NULL;
-    if (need) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)len, out, need);
-    out[need] = L'\0';
-    return out;
+    return spl_win_utf8_to_wide(text, (ptrdiff_t)len, MB_ERR_INVALID_CHARS,
+                                rt_observed_malloc_v1, free, NULL);
 }
 
 /* UTF-16 (len wchar_t) -> allocated UTF-8 bytes (not NUL-counted). */
 static uint8_t* rt_http_win_narrow(const wchar_t* text, size_t len, size_t* out_len) {
     *out_len = 0;
     if (len > (size_t)INT_MAX) return NULL;
-    int need = len ? WideCharToMultiByte(CP_UTF8, 0, text, (int)len, NULL, 0, NULL, NULL) : 0;
-    if (len && need <= 0) return NULL;
-    uint8_t* out = (uint8_t*)rt_observed_malloc_v1((size_t)need + 1);
-    if (!out) return NULL;
-    if (need) WideCharToMultiByte(CP_UTF8, 0, text, (int)len, (char*)out, need, NULL, NULL);
-    out[need] = '\0';
-    *out_len = (size_t)need;
-    return out;
+    return (uint8_t*)spl_win_wide_to_utf8(text, (ptrdiff_t)len, 0,
+                                          rt_observed_malloc_v1, free, out_len);
 }
 
 static void rt_http_win_error(DWORD code, char* error, size_t error_cap, const char* fallback) {
@@ -17461,26 +17443,18 @@ int64_t rt_path_join(
 #if defined(_WIN32)
 /* Environment names and values are UTF-8 at this boundary, never ACP bytes. */
 static wchar_t* native_env_widen(const char* value) {
-    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
-    if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)count * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return spl_win_utf8_to_wide(value, -1, MB_ERR_INVALID_CHARS,
+                                rt_observed_malloc_v1, free, NULL);
 }
 
 static int64_t native_host_text_from_wide(const wchar_t* wide, DWORD length) {
     if (length == 0) return rt_string_new((const uint8_t*)"", 0);
     if (length > INT_MAX) return rt_core_nil();
-    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, NULL, 0, NULL, NULL);
-    if (bytes <= 0) return rt_core_nil();
-    uint8_t* utf8 = (uint8_t*)rt_observed_malloc_v1((size_t)bytes);
+    size_t bytes = 0;
+    char* utf8 = spl_win_wide_to_utf8(wide, (ptrdiff_t)length, WC_ERR_INVALID_CHARS,
+                                      rt_observed_malloc_v1, free, &bytes);
     if (!utf8) return rt_core_nil();
-    int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, (char*)utf8, bytes, NULL, NULL);
-    int64_t result = converted == bytes ? rt_string_new(utf8, (uint64_t)bytes) : rt_core_nil();
+    int64_t result = rt_string_new((const uint8_t*)utf8, (uint64_t)bytes);
     free(utf8);
     return result;
 }
@@ -18413,11 +18387,9 @@ int64_t rt_file_list_dir(int64_t path_value) {
     pattern[path_len + 2] = '\0';
     free(path);
 
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, NULL, 0);
-    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t)) : NULL;
-    if (!wide_pattern ||
-        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
-        if (wide_pattern) free(wide_pattern);
+    wchar_t* wide_pattern = spl_win_utf8_to_wide(pattern, -1, MB_ERR_INVALID_CHARS,
+                                                 rt_observed_malloc_v1, free, NULL);
+    if (!wide_pattern) {
         free(pattern);
         return rt_core_nil();
     }
@@ -19705,14 +19677,11 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * escape sequences. */
 static wchar_t* spl_widen_long_path(const char* path) {
     static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    size_t wide_units = 0;
+    wchar_t* wide = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+                                         rt_observed_malloc_v1, free, &wide_units);
     if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
+    int wide_len = (int)wide_units + 1; /* count includes the terminator */
     /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
      * resolution for a short drive-absolute path; UNC/extended paths retain
      * their existing spelling. */
@@ -20723,19 +20692,12 @@ int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
 
 #if defined(_WIN32)
 static HMODULE simple_load_library_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        rt_observed_malloc_v1, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-            wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;

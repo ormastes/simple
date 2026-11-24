@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+RB-DIAG-01 third surface: SPL-PAT-001 (`non_option_pattern_match`, a Some/None
+pattern on a non-Option subject) reported with the same policy rule ID by the
+CLI lint engine, the LSP lint pass, and the interpreter.
+
+Which interpreter emits it:
+- `bin/simple run` in interpreter mode is the Rust seed's tree-walker
+  (`interpreter_patterns.rs`). It checks the runtime VALUE, so it flags a
+  primitive subject (`match 5: case Some(_)`) as `warning[SPL-PAT-001]` on stderr
+  when `SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`. It reports no line. Neither run
+  path reports it from the type checker first.
+- The pure-Simple interpreter (`match_enum_variant_pattern`) stores Option flat
+  (raw-or-nil), so it cannot tell a primitive from a `T?`. It flags the
+  boxed non-Option enum shape (`match Color.Red: case Some(_)`) into
+  `eval_warnings`. A spec cannot drive a full pure-Simple run, so that path is
+  pinned in-process.
+Audience: diagnostics, lint, LSP, and interpreter maintainers.
+"""
+# @cover src/compiler/90.tools/fix/rules/impl_/lint_option_pattern.spl
+# @cover src/compiler/10.frontend/core/interpreter/eval.spl
+# @req REQ-DIAG-POLICY-002
+
+use std.spec.*
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use std.io_runtime.{process_run, env_get}
+use compiler.tools.lint.main.{Linter, lint_cli_source}
+use compiler.tools.lint._LintMain.config_and_model.{LintLevel}
+use app.cli.query_lint.{_qlint_collect_lint_diagnostics_json}
+use std.nogc_sync_mut.lsp.handlers.diagnostics.{_parse_compiler_json_diagnostic}
+use compiler.core.interpreter.value.{val_make_struct, val_make_int, val_make_text}
+use compiler.core.interpreter.eval.{match_enum_variant_pattern, eval_warnings, eval_clear_warnings}
+
+val FIXTURE = "test/01_unit/compiler/diagnostics/fixtures/pat001_interp_fixture.spl"
+
+fn policy_line_of(formatted: text) -> text:
+    for l in formatted.split("\n"):
+        val t = l.trim()
+        if t.starts_with("policy: "):
+            return t.slice(8).trim()
+    ""
+
+fn cli_pat_tuples() -> [text]:
+    var out: [text] = []
+    for r in lint_cli_source(Linter.new(), FIXTURE, file_read_text(FIXTURE)):
+        if policy_line_of(r.format()) == "SPL-PAT-001":
+            val sev = if r.lint.level == LintLevel.Deny: "error" else: "warning"
+            out.push("SPL-PAT-001|{sev}|{r.line}")
+    out.sort()
+
+fn lsp_pat_tuples() -> [text]:
+    var out: [text] = []
+    for raw in _qlint_collect_lint_diagnostics_json(FIXTURE, file_read_text(FIXTURE)).1:
+        match _parse_compiler_json_diagnostic(raw):
+            Some(d):
+                if d.contains_key("data") and (d["data"]["policy_id"] ?? "") == "SPL-PAT-001":
+                    val sev = if d["severity"].to_int() == 1: "error" else: "warning"
+                    val line0: i64 = d["range"]["start"]["line"]
+                    out.push("SPL-PAT-001|{sev}|{line0 + 1}")
+            _: pass_do_nothing
+    out.sort()
+
+fn run_seed_interpreter() -> text:
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1 SIMPLE_EXECUTION_MODE=interpreter " + bin + " run " + FIXTURE + " 2>&1"
+    process_run("sh", ["-c", cmd]).0
+
+# @manual_section: diagnostic_interpreter_parity
+describe "RB-DIAG-01: SPL-PAT-001 across CLI, LSP, and interpreter":
+    it "CLI and LSP report SPL-PAT-001 as an error on both offending case lines":
+        val cli = cli_pat_tuples()
+        expect(cli).to_equal(["SPL-PAT-001|error|11", "SPL-PAT-001|error|8"])
+        expect(lsp_pat_tuples()).to_equal(cli)
+
+    it "the bin/simple run interpreter reports SPL-PAT-001 for the primitive subject":
+        val out = run_seed_interpreter()
+        expect(out).to_contain("[SPL-PAT-001]")
+
+    it "the pure-Simple interpreter pushes SPL-PAT-001 for a boxed non-Option enum":
+        eval_clear_warnings()
+        val red = val_make_struct("Color::Red", ["__tag", "__payload"], [val_make_text("Red"), val_make_int(0)])
+        expect(match_enum_variant_pattern(red, "Some", [])).to_equal(false)
+        var hits = 0
+        for w in eval_warnings:
+            if w.contains("[SPL-PAT-001]"):
+                hits = hits + 1
+        expect(hits).to_equal(1)
+
+    it "the pure-Simple interpreter stays silent for a real Option box":
+        eval_clear_warnings()
+        val some = val_make_struct("Option::Some", ["__tag", "__payload"], [val_make_text("Some"), val_make_int(1)])
+        expect(match_enum_variant_pattern(some, "Some", [])).to_equal(true)
+        var hits = 0
+        for w in eval_warnings:
+            if w.contains("[SPL-PAT-001]"):
+                hits = hits + 1
+        expect(hits).to_equal(0)

@@ -1,6 +1,6 @@
 # Stage2 native_compile memory blowup attributed to parser_preprocessor (2026-11-01)
 
-- Status: OPEN. **No module-local construct found.** The attribution to
+- Status: resolved-duplicate (see the 2026-11-03 section at the bottom; re-verified 2026-11-24, no further change). Was: OPEN. **No module-local construct found.** The attribution to
   `parser_preprocessor.spl` is a progress-label artifact. No source workaround
   was applied: nothing exists to work around.
 - Severity: P1 (blocks the Phase 3 stage3 build)

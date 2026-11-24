@@ -212,6 +212,17 @@ fn _probe_host_physmem_kib_v1() -> i64:
     if code != 0:
         return 0
     shard_mem_available_kb_from_field(out.trim())
+
+# Free commit headroom (KiB): Win32_OperatingSystem.FreeVirtualMemory. Probed
+# only when the start gate is about to refuse (windows_balloon_memory_headroom
+# _false_refusal_2026-11-13.md); a failed or timed-out probe is 0 = no witness.
+fn _probe_free_commit_kib_v1() -> i64:
+    val (out, _err, code) = process_run_bounded("powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory"],
+        20000, 65536)
+    if code != 0:
+        return 0
+    shard_mem_available_kb_from_field(out.trim())
 @else:
 @when(os="freebsd"):
 # FreeBSD has no /proc/meminfo without linprocfs (that probe read 0, clamped
@@ -231,6 +242,10 @@ fn _probe_host_physmem_kib_v1() -> i64:
     if code != 0:
         return 0
     build_host_memory_total_kib_from_bytes_field(out)
+
+# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
+fn _probe_free_commit_kib_v1() -> i64:
+    0
 @else:
 @when(os="macos"):
 # Darwin has no /proc/meminfo and no MemAvailable analogue; `vm_stat` reports
@@ -249,6 +264,10 @@ fn _probe_host_physmem_kib_v1() -> i64:
     if code != 0:
         return 0
     build_host_memory_total_kib_from_bytes_field(out)
+
+# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
+fn _probe_free_commit_kib_v1() -> i64:
+    0
 @else:
 @when(os="simpleos"):
 # SimpleOS has no awk and its procfs meminfo is a fixed placeholder, so the
@@ -268,6 +287,10 @@ pub fn shard_mem_available_kb() -> i64:
 # cap (shard_cgroup_memory_max_kb is 0 there).
 fn _probe_host_physmem_kib_v1() -> i64:
     shard_simpleos_kb_from_probe_v1(shard_simpleos_mem_probe_v1(), true)
+
+# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
+fn _probe_free_commit_kib_v1() -> i64:
+    0
 @else:
 # MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
 # permits only the existing sequential path, never CPU-count fanout.
@@ -294,6 +317,10 @@ fn _probe_host_physmem_kib_v1() -> i64:
     if code != 0:
         return 0
     shard_mem_available_kb_from_field(out.trim())
+
+# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
+fn _probe_free_commit_kib_v1() -> i64:
+    0
 @end
 @end
 @end
@@ -1046,6 +1073,34 @@ pub fn build_memory_start_refusal_v1(available_kib: i64, reserve_kib: i64) -> te
     "error: build refused: {available_kib / 1024} MiB of RAM/commit headroom free, below the " +
         "{reserve_kib / 1024} MiB reserve (SIMPLE_BUILD_MEMORY_RESERVE_BYTES); wait for other builds " +
         "to finish or lower the reserve"
+
+# Check whether free commit covers the reserve on a host configured to
+# use dynamic memory. The installed capacity must also cover twice the reserve.
+# Unknown free commit cannot satisfy the reserve.
+@allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
+pub fn build_memory_balloon_witness_admits_v1(available_kib: i64, reserve_kib: i64, total_kib: i64, free_commit_kib: i64) -> bool:
+    if available_kib <= 0 or available_kib >= reserve_kib: return false
+    if reserve_kib <= 0 or total_kib < reserve_kib * 2: return false
+    free_commit_kib >= reserve_kib
+
+# (refusal, warning): refusal is "" when admitted; warning is non-empty when a
+# refusal was overridden by the commit witness.
+@allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
+pub fn build_memory_start_decision_v1(available_kib: i64, reserve_kib: i64, total_kib: i64, free_commit_kib: i64, allow_commit_witness: bool = false) -> (text, text):
+    val refusal = build_memory_start_refusal_v1(available_kib, reserve_kib)
+    if refusal == "": return ("", "")
+    if allow_commit_witness and build_memory_balloon_witness_admits_v1(available_kib, reserve_kib, total_kib, free_commit_kib):
+        return ("", "warning: build admitted on commit headroom: {available_kib / 1024} MiB of RAM/commit headroom reported, below the {reserve_kib / 1024} MiB reserve, but {free_commit_kib / 1024} MiB of commit is free on a {total_kib / 1024} MiB host (balloon/dynamic memory); lower SIMPLE_BUILD_MEMORY_RESERVE_BYTES to silence")
+    (refusal, "")
+
+# Probe total and commit only after a reserve refusal on a host whose
+# operator set SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1.
+@allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
+pub fn build_memory_start_gate_v1(available_kib: i64, reserve_kib: i64) -> (text, text):
+    val refusal = build_memory_start_refusal_v1(available_kib, reserve_kib)
+    if refusal == "" or (env_get("SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS") ?? "") != "1":
+        return (refusal, "")
+    build_memory_start_decision_v1(available_kib, reserve_kib, build_host_memory_total_kib(), _probe_free_commit_kib_v1(), true)
 
 # Measured peak + 25% margin, floored at 1 GiB so a near-empty record cannot
 # price a worker at nothing.

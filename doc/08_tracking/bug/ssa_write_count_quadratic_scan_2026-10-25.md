@@ -1,6 +1,8 @@
 # SSA write counting scans every previously seen local
 
-Status: OPEN. Indexed counting repair passes seven interpreter-hosted
+Status: FIXED in source (`b1a30d05283`, verified at release/1.0.0 tip `b99b512ada8`, 2026-11-24);
+native qualification pending, so the OPEN reference required below stays.
+Indexed counting repair passes seven interpreter-hosted
 compiler-pass regressions; native performance and original producer
 qualification remain pending.
 

@@ -4,7 +4,8 @@
 # token behavior require the actual owner. This codec never creates/retries execs.
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get,
     json_value_serialize, json_value_object_from, json_value_str_array}
-use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.text_bytes.{boxed_text_bytes_checked, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.net.http_core.{body_decision, header_field_name_is_token, hex_chunk_size}
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1, WindowsDockerRequestV1,
     WINDOWS_DOCKER_ENGINE_V1, windows_docker_id_v1, windows_docker_token_v1, windows_docker_mount_path_v1,
@@ -105,7 +106,9 @@ fn engine_slice_v3(bytes: [u8], start: i64, end: i64) -> [u8]:
 fn engine_ascii_v3(bytes: [u8]) -> Result<text, text>:
     for byte in bytes:
         if byte > 127u8: return Err("docker-engine-nonascii-protocol")
-    val result = bytes_to_text(bytes)
+    val result = match bytes_to_text_checked(bytes):
+        case Ok(decoded): decoded
+        case Err(_): return Err("docker-engine-byte-conversion-failed")
     if result.byte_len() != bytes.len(): return Err("docker-engine-byte-conversion-failed")
     Ok(result)
 
@@ -255,7 +258,9 @@ fn engine_json_v3(body: [u8]) -> Result<JsonValue, text>:
         if tokens > 8192: return Err("docker-engine-json-token-bound")
     if quoted or depth != 0: return Err("docker-engine-json-incomplete")
     val unicode_valid = engine_unicode_escapes_v3(body)?
-    val source = bytes_to_text(body)
+    val source = match bytes_to_text_checked(body):
+        case Ok(decoded): decoded
+        case Err(_): return Err("docker-engine-json-byte-conversion")
     if source.byte_len() != body.len(): return Err("docker-engine-json-byte-conversion")
     json_parse_value_strict(source)
 

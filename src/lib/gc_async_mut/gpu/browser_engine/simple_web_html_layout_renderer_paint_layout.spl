@@ -779,8 +779,34 @@ fn _html_draw_ir_descendant_bottom(
         i = i - 1
     descendant_bottom
 
+# Device scale 1: an auto-width `<button>` paints between its fractional
+# edges snapped to whole pixels (`Submit`, 57.48 px at 0, paints 0-56), so
+# its box is narrowed by the snap layout recorded (`box_device_extra_w_at`)
+# while the layout box keeps the label rounded up. Unchanged at k > 1, where
+# the device-scale pass applies the same table as `device-extra-width`.
+fn _html_draw_ir_k1_button_boxes(nodes: [HNode], boxes: LayoutResult) -> LayoutResult:
+    if layout_device_scale() != 1:
+        return boxes
+    var narrowed = false
+    var i = 0
+    while i < nodes.len() and not narrowed:  # cpu-lane-loop-ok: one existence scan over the node list per render
+        if nodes[i].tag == "button" and box_device_extra_w_at(i) < 0:
+            narrowed = true
+        i = i + 1
+    if not narrowed:
+        return boxes
+    var bw: [i32] = []
+    i = 0
+    while i < nodes.len():  # cpu-lane-loop-ok: one copy of the width column, only on a page with a narrowed button
+        val extra = if nodes[i].tag == "button": box_device_extra_w_at(i) else: 0
+        bw.push(if extra < 0 and boxes.bw[i] + extra > 0: boxes.bw[i] + extra else: boxes.bw[i])
+        i = i + 1
+    var out = boxes
+    out.bw = bw
+    out
+
 fn _html_draw_ir_commands(
-    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    nodes: [HNode], styles: [Style], layout_boxes: LayoutResult,
     raw_boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
     target_keys: [text], overlay: BrowserTextInputOverlay,
@@ -789,6 +815,7 @@ fn _html_draw_ir_commands(
     element_scroll_index: i32, element_scroll_top: i32,
     element_scroll_max: i32, widget_mode: bool, widget_chrome_text: bool
 ) -> ([DrawIrCommand], [i32]):
+    val boxes = _html_draw_ir_k1_button_boxes(nodes, layout_boxes)
     # One uri -> index map per render. The per-node loop below used to rescan
     # the whole image list for every img, video and background layer.
     val image_index_by_uri = _html_draw_ir_image_index_by_uri(images)
@@ -1044,6 +1071,12 @@ fn _html_draw_ir_commands(
             # (Chrome 159 at k=4: text input 133, select 139, where 4 x the
             # CSS box is 132 / 140).
             val control_extra_h = if layout_device_scale() > 1 and _html_draw_ir_is_form_control_box(nodes[i]): box_device_extra_h_at(i) else: 0
+            # ... and any other box its snapped device bottom: a block or flex box
+            # ending at a sub-px cursor (19.5 px lines at k=4) paints round(k x
+            # bottom) - round(k x top) rows, so stacked backgrounds meet.
+            val block_extra_h = if layout_device_scale() > 1 and not _html_draw_ir_is_form_control_box(nodes[i]) and nodes[i].tag != "#text": box_device_extra_h_at(i) else: 0
+            if block_extra_h != 0:
+                node_command.computed_style.push(draw_ir_style_prop("device-extra-height", block_extra_h.to_text()))
             if control_extra_h != 0:
                 node_command.computed_style.push(draw_ir_style_prop("device-extra-height", control_extra_h.to_text()))
             # ... and its DEVICE width (a default text input 719, 4 x 185 is 740).
@@ -1919,10 +1952,9 @@ fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [H
 # ancestor. Text adds it to its
 # device-px line-metrics offset. Carried as `device-y-offset`, which
 # `draw_ir_composition_at_device_scale` applies and strips. Only the top
-# moves: a box keeps k x its CSS height, as measured against Chrome on the
-# catalog (a bottom snapped from the cursor residual put the overview
-# section's border 1 device px above Chrome's). At k == 1 the table is empty
-# and the commands are returned untouched.
+# moves here; a box's snapped device bottom is its `device-extra-height`
+# (`box_device_extra_h_at`, round(k x bottom) - round(k x top) - k x height).
+# At k == 1 the table is empty and the commands are returned untouched.
 fn _html_draw_ir_device_top(commands: [DrawIrCommand], owners: [i32], nodes: [HNode], boxes: LayoutResult) -> [DrawIrCommand]:
     if boxes.device_top.len() != nodes.len():
         return commands

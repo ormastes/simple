@@ -8,7 +8,7 @@ use std.common.contracts.container.agent_executable_profile_v1.AgentExecutablePr
 use std.common.contracts.container.agent_workspace_manifest_v1.*
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
-use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.process.observation_v4.*
 use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1, retained_directory_open_trusted_v1}
 use std.nogc_sync_mut.io.process_observation_v4.*
@@ -103,7 +103,10 @@ pub fn linux_agent_bootstrap_open_v1(invocation_digest: text) -> LinuxAgentBoots
     val read = file.read_stage_input_v1(1048576)
     val consumed_file = file.close()
     var raw = ""
-    if read.is_ok() and utf8_bytes_valid(read.unwrap()): raw = bytes_to_text(read.unwrap())
+    if read.is_ok():
+        match bytes_to_text_checked(read.unwrap()):
+            case Ok(decoded_raw): raw = decoded_raw
+            case Err(_): raw = ""
     val decoded = agent_workspace_invocation_manifest_decode_v2(raw)
     if not consumed_file or read.is_err() or sha256_text(raw) != invocation_digest or decoded.is_err():
         val consumed = root.close()
@@ -161,8 +164,9 @@ fn bootstrap_digest_hex_v1(bytes: [u8]) -> text:
     output
 
 fn bootstrap_output_v1(state: AgentBootstrapStateV1, stdout: [u8]) -> Result<(), text>:
-    if not utf8_bytes_valid(stdout): return Err("bootstrap-git-output-utf8")
-    val output = bytes_to_text(stdout)
+    val output = match bytes_to_text_checked(stdout):
+        case Ok(decoded): decoded
+        case Err(_): return Err("bootstrap-git-output-utf8")
     val prefix = state.root_path + "/" + state.workspace.attempt_leaf
     if state.command_index == 0 and not agent_git_version_supported_v1(output): return Err("bootstrap-git-version-unsupported")
     if state.command_index == 3 and output != "commit\n": return Err("bootstrap-revision-not-commit")
