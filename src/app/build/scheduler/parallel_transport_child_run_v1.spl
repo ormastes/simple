@@ -72,12 +72,12 @@ fn _child_run_file_v1(root: text, relative_path: text,
         snapshot_digest: text) -> ParallelTransportFileV1?:
     val opened = read_only_file_view_open_v1(root, relative_path,
         snapshot_digest, FileReadPolicyV1.buffered)
-    if opened.is_err(): return nil
+    if opened.is_err(): return None
     var view = opened.unwrap()
     val size = view.identity.size
     if size > _child_run_limit_v1(relative_path).to_u64():
         val _ = read_only_file_view_close_v1(view)
-        return nil
+        return None
     var stream = sha256_stream_v1_new()
     val cancellation = CancellationToken.new()
     var offset: u64 = 0u64
@@ -99,7 +99,7 @@ fn _child_run_file_v1(root: text, relative_path: text,
         offset = offset + length
     val digest = if good: stream.finish_hex() else: nil
     val closed = read_only_file_view_close_v1(view)
-    if not good or closed.is_err() or digest == nil: return nil
+    if not good or closed.is_err() or digest.is_none(): return None
     Some(ParallelTransportFileV1(relative_path, size.to_i64(),
         digest.unwrap()))
 
@@ -114,13 +114,13 @@ fn _child_run_inventory_v1(handoff: ParallelTransportHandoffV1,
     else:
         required.push("outputs/failure-proof.wire")
     required = canonical_identity_sort_texts(required)
-    if required.len() > handoff.max_output_files: return nil
+    if required.len() > handoff.max_output_files: return None
     var expected_names: [text] = []
     for path in required:
         expected_names.push(path["outputs/".len():])
     val inventory = check_parallel_flat_result_inventory_v1(
         handoff.result_root + "/outputs", expected_names)
-    if not inventory.valid: return nil
+    if not inventory.valid: return None
     # This remains a child claim. The stopped-child parent verifier must hash
     # every declared path before granting trust or retaining bytes.
     var files: [ParallelTransportFileV1] = []
@@ -128,19 +128,19 @@ fn _child_run_inventory_v1(handoff: ParallelTransportHandoffV1,
     for path in required:
         val file = _child_run_file_v1(handoff.result_root, path,
             handoff.request_digest)
-        if file == nil: return nil
+        if file.is_none(): return None
         val item = file.unwrap()
-        if item.byte_count > handoff.max_output_bytes - total: return nil
-        if not file_fsync(handoff.result_root + "/" + path): return nil
+        if item.byte_count > handoff.max_output_bytes - total: return None
+        if not file_fsync(handoff.result_root + "/" + path): return None
         total = total + item.byte_count
         files.push(item)
     val observed = ParallelTransportObservationV1(true, "",
         parallel_transport_handoff_digest_v1(handoff), handoff.nonce,
         handoff.request_digest, "FETCHED", result_wire, files)
     val plan = plan_parallel_retained_result_v1(handoff, observed)
-    if not plan.valid or plan.success != success: return nil
+    if not plan.valid or plan.success != success: return None
     if not directory_fsync(handoff.result_root + "/outputs"):
-        return nil
+        return None
     Some(observed)
 
 fn _child_run_publish_observation_v1(handoff: ParallelTransportHandoffV1,
@@ -249,7 +249,7 @@ fn run_parallel_transport_child_v1(handoff_wire: [u8],
     val _ = dir_remove(stage, false)
     val observation = _child_run_inventory_v1(handoff, request,
         reply.result_wire, success)
-    if observation == nil:
+    if observation.is_none():
         return _child_run_incomplete_v1("result-inventory-invalid")
     if not _child_run_deadline_open_v1(handoff):
         return _child_run_incomplete_v1("deadline-expired")
