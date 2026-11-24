@@ -17,10 +17,12 @@ MIR lowering error: E-RTI-003: unsubstituted generic parameter in 'opt(p1)'
 reached a concrete consumer at src/lib/nogc_sync_mut/src/collections/adaptive_set.spl:102:23
 ```
 
-Two E-RTI-003 errors were counted for the module. The file holds exactly one
-chained call on a call result (line 102; column 23 is the start of
-`inner.remove(key)`), so the second error is most likely the same site
-reported twice. That was not confirmed against the build log.
+Two E-RTI-003 errors were counted for the module. Both are the same site: the
+build log carries the message once with the `102:23` location and once
+without, and across all retries (13 E-RTI-003 lines) every located one is
+`adaptive_set.spl:102:23`. Column 23 is the start of `inner.remove(key)`, the
+only chained call on a call result in the file. `adaptive_set` is the only
+module the log reports as `failed stage=mir`.
 
 The `!= nil` form lowered. It is a binary operator, not a method call, so it
 never asks RTI for the receiver's owner.
