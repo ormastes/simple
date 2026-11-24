@@ -11,7 +11,8 @@
 use common.plugin.iface_id.{ParamExt}
 use compiler.backend.backend_port.{CodegenParamsV1, codegen_params_v1}
 use compiler.backend.backend.backend_types.{BackendCompileOptions}
-use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 pub val CRANELIFT_RETAINED_OPTIMIZATION_V2: text = "retained-v2"
 pub val CRANELIFT_RETAINED_TARGET_EXT_V2: text = "simple.codegen.cranelift.retained_target_triple.v2"
@@ -45,17 +46,22 @@ pub fn cranelift_retained_params_encode_v2(options: BackendCompileOptions,
     params.ext = ext
     params
 
-pub fn cranelift_retained_params_decode_v2(params: CodegenParamsV1) -> CraneliftRetainedTargetV2:
-    var target_triple: text? = nil
-    var cpu: text? = nil
+fn _retained_payload_text_v2(ext: ParamExt) -> Result<text, text>:
+    match bytes_to_text_checked(ext.payload):
+        case Ok(value): Ok(value)
+        case Err(e): Err("{ext.ext_name}: invalid UTF-8 in retained payload at byte offset {e.byte_offset}: {e.reason}")
+
+pub fn cranelift_retained_params_decode_v2(params: CodegenParamsV1) -> Result<CraneliftRetainedTargetV2, text>:
+    var target_triple: text? = None
+    var cpu: text? = None
     var features: [text] = []
     for ext in params.ext:
         if ext.ext_name == CRANELIFT_RETAINED_TARGET_EXT_V2:
-            target_triple = Some(bytes_to_text(ext.payload))
+            target_triple = Some(_retained_payload_text_v2(ext)?)
         elif ext.ext_name == CRANELIFT_RETAINED_CPU_EXT_V2:
-            cpu = Some(bytes_to_text(ext.payload))
+            cpu = Some(_retained_payload_text_v2(ext)?)
         elif ext.ext_name == CRANELIFT_RETAINED_FEATURES_EXT_V2:
-            val joined = bytes_to_text(ext.payload)
+            val joined = _retained_payload_text_v2(ext)?
             if joined != "":
                 features = joined.split(",")
-    CraneliftRetainedTargetV2(target_triple: target_triple, cpu: cpu, features: features)
+    Ok(CraneliftRetainedTargetV2(target_triple: target_triple, cpu: cpu, features: features))
