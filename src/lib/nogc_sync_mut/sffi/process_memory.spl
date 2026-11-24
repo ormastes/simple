@@ -18,15 +18,54 @@ fn _process_memory_digits_v1(field: text) -> i64:
         i = i + 1
     digits.to_i64() ?? -1
 
-# Value of a "<key> <n> kB" row of a /proc table; -1 when absent or junk.
-pub fn proc_status_kib(table: text, key: text) -> i64:
-    for line in table.split("\n"):
-        if line.starts_with(key):
-            val rest = line.substring(key.len()).trim()
-            val space = rest.index_of(" ")
-            val digits = if space > 0: rest.substring(0, space) else: rest
-            return _process_memory_digits_v1(digits)
+# Byte offset just past `key` in the first row of `table` that starts with it;
+# -1 when no row does.
+fn _proc_status_row_after_key_v1(table: text, key: text) -> i64:
+    val n = table.byte_len()
+    val k = key.byte_len()
+    var row = 0
+    while row <= n:
+        var j = 0
+        while j < k and row + j < n and table.byte_at(row + j) == key.byte_at(j):
+            j = j + 1
+        if j == k: return row + k
+        var end = row
+        while end < n and table.byte_at(end) != 10:
+            end = end + 1
+        row = end + 1
     -1
+
+# Value of a "<key> <n> kB" row of a /proc table; -1 when absent or junk.
+# Decodes the bytes in place and allocates nothing: the slot-pool coordinator
+# calls this twice a second for the whole build, and splitting /proc/meminfo
+# into rows on each call was most of the ~13 KB per probe that PR #11002
+# measured as never reclaimed there.
+pub fn proc_status_kib(table: text, key: text) -> i64:
+    val n = table.byte_len()
+    var i = _proc_status_row_after_key_v1(table, key)
+    if i < 0: return -1
+    # Blanks before the value: space, tab, CR.
+    while i < n and (table.byte_at(i) == 32 or table.byte_at(i) == 9 or table.byte_at(i) == 13):
+        i = i + 1
+    var value: i64 = 0
+    var count = 0
+    var closed = false
+    while i < n:
+        val b = table.byte_at(i)
+        # The value is the first space-separated field of the row.
+        if b == 10 or b == 32: break
+        if b == 9 or b == 13:
+            closed = true
+        elif closed or b < 48 or b > 57:
+            return -1
+        else:
+            count = count + 1
+            # At most 18 digits (no i64 overflow), as _process_memory_digits_v1.
+            if count > 18: return -1
+            value = value * 10 + (b - 48)
+        i = i + 1
+    if count == 0: return -1
+    value
 
 # Linux (and SimpleOS's synthetic procfs): MemAvailable + SwapFree KiB.
 pub fn host_commit_avail_kib_from_meminfo(table: text) -> i64:

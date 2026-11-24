@@ -1148,115 +1148,6 @@ fn warn_unprovided_use_names(
     }
 }
 
-/// Loose text probe: does `path`'s source plausibly provide any of `names` —
-/// either as a definition (`fn name(`, `class name`, ..., matched by
-/// [`sibling_might_define_requested_names`]) or as a member of an
-/// `export`/`use ... {.., name, ..}` re-export list (e.g. a thin shim like
-/// `export use std.nogc_sync_mut.spec.{.., print_summary, ..}`, which has no
-/// `fn print_summary(` of its own)? Returns the subset of `names` found.
-/// Tokenizes on non-identifier characters so a name must appear as a whole
-/// token, not merely as a substring of a longer identifier. Reads the file
-/// once regardless of how many names are probed. Deliberately loose/
-/// best-effort. `None` means the bounded probe could not inspect the source,
-/// not that the requested names are absent. Only `Some(empty)` proves that
-/// no requested token was found in a completely read source.
-fn file_plausibly_provides_names(path: &Path, names: &[String]) -> Option<std::collections::HashSet<String>> {
-    let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
-    let source = super::module_cache::probe_source_cached(path, max_check_bytes)?;
-    let tokens: std::collections::HashSet<&str> = source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-    Some(
-        names
-            .iter()
-            .filter(|name| tokens.contains(name.as_str()))
-            .cloned()
-            .collect(),
-    )
-}
-
-fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
-    match &use_stmt.target {
-        ImportTarget::Group(_) | ImportTarget::Glob => {
-            if module_path.extension().is_some_and(|ext| ext == "spl")
-                && module_path.file_name().is_none_or(|name| name != "__init__.spl")
-            {
-                let package_init = module_path.with_extension("").join("__init__.spl");
-                if package_init.exists() && package_init.is_file() {
-                    // A `Group` import naming specific symbols must not redirect
-                    // away from a sibling FILE that provides those symbols into a
-                    // same-named PACKAGE that doesn't — that silently loses the
-                    // requested names (see
-                    // doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md:
-                    // `use std.spec.{print_summary, ...}` resolved the FILE
-                    // `spec.spl`, which defines them, then got redirected here to
-                    // the sibling `spec/__init__.spl` PACKAGE, which doesn't).
-                    // The check must be PER-NAME, not "package has any match at
-                    // all": a re-export shim can list a large mixed group where
-                    // the package legitimately covers *some* names (e.g. a BDD
-                    // facade re-exporting both the framework's own `print_summary`
-                    // AND decorator/env-detect names like `is_windows`/`skip_it`
-                    // that genuinely live in the sibling package) while still
-                    // lacking others the file uniquely provides. A coarse "package
-                    // has ANY requested name" test still redirected in that mixed
-                    // case and re-lost `print_summary`. So: withhold the
-                    // (otherwise unconditional) package-init preference as soon as
-                    // ANY single requested name is positively confirmed on the
-                    // file but NOT on the package. An unavailable bounded probe
-                    // cannot justify redirecting the already-resolved file. When
-                    // both sources were inspected, a name absent from both keeps
-                    // the existing "package wins" default (see
-                    // `prefers_package_init_for_group_imports_when_both_exist`).
-                    if let ImportTarget::Group(_) = &use_stmt.target {
-                        if let Some(requested) = requested_group_import_names(use_stmt) {
-                            if !requested.is_empty() {
-                                let Some(file_names) = file_plausibly_provides_names(module_path, &requested) else {
-                                    return module_path.to_path_buf();
-                                };
-                                let Some(package_names) = file_plausibly_provides_names(&package_init, &requested) else {
-                                    return module_path.to_path_buf();
-                                };
-                                let file_has_unique_name = file_names.iter().any(|name| !package_names.contains(name));
-                                if file_has_unique_name {
-                                    return module_path.to_path_buf();
-                                }
-                            }
-                        }
-                    }
-                    return package_init;
-                }
-            }
-            module_path.to_path_buf()
-        }
-        _ => module_path.to_path_buf(),
-    }
-}
-
-/// Wraps `prefer_package_init_for_member_import` with a guard against
-/// self-referential redirect cycles (task #153).
-///
-/// A `Group`/`Glob` import from `X.spl` normally prefers a sibling
-/// `X/__init__.spl` package aggregator when one exists — many legitimate
-/// "thin file + real package" pairs rely on this (see
-/// `prefers_package_init_for_group_imports_when_both_exist`). But if `X/__init__.spl`
-/// itself re-exports from the very module path that led here (e.g. a stale
-/// duplicate `X/__init__.spl` doing `export use pkg.X.{...}`), the redirect
-/// sends us right back into a module already on the load stack. That hits
-/// the circular-import branch below, which returns empty/partial exports —
-/// silently dropping every symbol the redirect exists to serve. This is
-/// exactly how `compiler_driver_create` went missing for standalone
-/// `simple run` scripts when a stale `80.driver/driver/__init__.spl` shadowed
-/// the real `80.driver/driver.spl` (see
-/// doc/08_tracking/bug/selfhost_bootstrap_unresolved_symbols_2026-06-24.md).
-/// In that specific case, keep the already-resolved file — it has the real
-/// definitions instead of a stale/self-referential aggregator.
-fn resolve_member_import_target(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
-    let redirected = prefer_package_init_for_member_import(module_path, use_stmt);
-    if redirected != module_path && is_module_loading(&redirected) {
-        module_path.to_path_buf()
-    } else {
-        redirected
-    }
-}
-
 /// Validate that imported function effects are compatible with importer's capabilities.
 ///
 /// If the importer has no `requires [capabilities]`, it's unrestricted and can import anything.
@@ -1490,16 +1381,9 @@ pub fn load_and_merge_module(
             return Err(e);
         }
     };
-    let original_module_path = module_path.clone();
-    let module_path = resolve_member_import_target(&module_path, use_stmt);
-    if module_path != original_module_path {
-        loader_trace!(
-            "init-redirect",
-            "{} -> {}",
-            original_module_path.display(),
-            module_path.display()
-        );
-    }
+    // No `X.spl` -> `X/__init__.spl` redirect here: every loader resolves a
+    // file/package pair FILE-FIRST (doc/04_architecture/language/modules.md
+    // § "File vs package with the same name").
     loader_trace!("resolve", "{} -> {}", parts.join("."), module_path.display());
     debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
     if let Err(error) = emit_gc_boundary_warning(current_file, &module_path, &parts.join(".")) {
@@ -2015,8 +1899,8 @@ pub fn load_and_merge_module(
 mod tests {
     use super::{
         bare_export_source_names, enforce_gc_boundary_policy, export_target_names, gc_boundary_warning_message,
-        file_plausibly_provides_names, load_and_merge_module, loader_trace_enabled,
-        mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
+        load_and_merge_module, loader_trace_enabled,
+        mark_module_loading,
         should_keep_selective_export, unmark_module_loading,
     };
     use crate::value::Value;
@@ -2205,174 +2089,44 @@ mod tests {
         assert!(msg.is_none());
     }
 
-    fn use_stmt_with_target(target: ImportTarget) -> UseStmt {
-        UseStmt {
-            span: Span::new(0, 0, 0, 0),
-            path: ModulePath {
-                segments: vec!["std".to_string(), "io".to_string()],
-            },
-            target,
-            is_type_only: false,
-            is_lazy: false,
-            attributes: vec![],
+    /// A module name that is both `fx.spl` and `fx/__init__.spl` resolves
+    /// FILE-FIRST for group and glob imports too, matching the static
+    /// resolvers (doc/04_architecture/language/modules.md § "File vs package
+    /// with the same name"). The seed used to redirect these imports to the
+    /// package, so the interpreter and the compiler loaded different code.
+    #[test]
+    fn file_and_package_pair_resolves_file_first_for_every_import_form() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let main_file = root.join("main.spl");
+        fs::write(&main_file, "fn main(): 0\n").unwrap();
+        fs::write(root.join("fx.spl"), "fn file_only() -> i64:\n    1\n").unwrap();
+        fs::create_dir_all(root.join("fx")).unwrap();
+        fs::write(root.join("fx").join("__init__.spl"), "fn pkg_only() -> i64:\n    2\n").unwrap();
+
+        for target in [
+            ImportTarget::Glob,
+            ImportTarget::Group(vec![ImportTarget::Single("file_only".to_string())]),
+        ] {
+            clear_module_cache();
+            let mut functions = HashMap::new();
+            let mut classes = HashMap::new();
+            let mut enums = HashMap::new();
+            let value = load_and_merge_module(
+                &use_stmt_with_path(&["fx"], target),
+                Some(&main_file),
+                &mut functions,
+                &mut classes,
+                &mut enums,
+            )
+            .unwrap();
+            let exports = match value {
+                Value::Dict(exports) => exports,
+                other => panic!("expected module exports dict, got {:?}", other),
+            };
+            assert!(exports.get("file_only").is_some(), "file form must be loaded");
+            assert!(exports.get("pkg_only").is_none(), "package form must not be loaded");
         }
-    }
-
-    #[test]
-    fn prefers_package_init_for_group_imports_when_both_exist() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let file_path = root.join("io.spl");
-        let package_dir = root.join("io");
-        let init_path = package_dir.join("__init__.spl");
-        fs::write(&file_path, "# file module\n").unwrap();
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(&init_path, "# package module\n").unwrap();
-
-        let resolved = prefer_package_init_for_member_import(
-            &file_path,
-            &use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())])),
-        );
-
-        assert_eq!(resolved, init_path);
-    }
-
-    // Build only slightly beyond the production probe budget. Do not relax the
-    // budget or read the oversized file through an uncapped fallback in tests.
-    fn oversized_member_probe_source(definition: &str) -> String {
-        let limit = crate::memory_guard::sibling_max_check_bytes();
-        assert!(limit <= 1024 * 1024, "member-import fixtures require a probe budget <= 1 MiB");
-        format!("#{}\n{}", " ".repeat(limit as usize), definition)
-    }
-
-    #[test]
-    fn member_probe_distinguishes_uninspected_source_from_known_absence() {
-        let temp = tempfile::tempdir().unwrap();
-        let small = temp.path().join("small.spl");
-        let large = temp.path().join("large.spl");
-        let names = vec!["file_only".to_string()];
-        fs::write(&small, "# no matching identifier\n").unwrap();
-        fs::write(&large, oversized_member_probe_source("fn file_only(): 41\n")).unwrap();
-        assert_eq!(file_plausibly_provides_names(&small, &names), Some(Default::default()));
-        assert_eq!(file_plausibly_provides_names(&large, &names), None);
-        assert_eq!(file_plausibly_provides_names(&temp.path().join("missing.spl"), &names), None);
-    }
-
-    #[test]
-    fn oversized_file_keeps_group_import_owner_and_aliased_member() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        // Unique name lies after the probe budget, not in an inspectable prefix.
-        fs::write(&file, oversized_member_probe_source("fn shared(): 1\nfn file_only(): 41\n")).unwrap();
-        fs::write(&package, "fn shared(): 2\n").unwrap();
-        let requested = use_stmt_with_target(ImportTarget::Group(vec![
-            ImportTarget::Single("shared".into()),
-            ImportTarget::Aliased { name: "file_only".into(), alias: "selected".into() },
-        ]));
-        assert_eq!(resolve_member_import_target(&file, &requested), file);
-        // The same unknown result is memoized; repeated visits must not switch
-        // owners or make the file eligible for a full-source probe.
-        for _ in 0..8 {
-            assert_eq!(resolve_member_import_target(&file, &requested), file);
-            assert!(super::super::module_cache::probe_source_cached(
-                &file, crate::memory_guard::sibling_max_check_bytes()
-            ).is_none());
-        }
-    }
-
-    #[test]
-    fn oversized_package_does_not_supply_known_absence_for_group_redirect() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        fs::write(&file, "fn shared(): 1\n").unwrap();
-        fs::write(&package, oversized_member_probe_source("fn shared(): 2\n")).unwrap();
-        let requested = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
-        assert_eq!(resolve_member_import_target(&file, &requested), file);
-        // Glob imports retain their existing package preference.
-        assert_eq!(resolve_member_import_target(&file, &use_stmt_with_target(ImportTarget::Glob)), package);
-    }
-
-    #[test]
-    fn inspected_file_unique_name_preserves_mixed_group_but_shared_names_prefer_package() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("spec.spl");
-        let package = temp.path().join("spec/__init__.spl");
-        fs::create_dir_all(package.parent().unwrap()).unwrap();
-        fs::write(&file, "fn shared(): 1\nfn file_only(): 41\n").unwrap();
-        fs::write(&package, "fn shared(): 2\n").unwrap();
-        let mixed = use_stmt_with_target(ImportTarget::Group(vec![
-            ImportTarget::Single("shared".into()), ImportTarget::Single("file_only".into()),
-        ]));
-        assert_eq!(resolve_member_import_target(&file, &mixed), file);
-        let shared = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
-        assert_eq!(resolve_member_import_target(&file, &shared), package);
-    }
-
-    #[test]
-    fn resolve_member_import_target_falls_back_to_file_on_self_referential_redirect_cycle() {
-        // task #153 shape: `driver.spl` (real definitions) sits next to a
-        // stale `driver/__init__.spl` that re-exports from the very module
-        // path that resolves back to it. `80.driver/driver/__init__.spl` did
-        // exactly this (`export use compiler.driver.driver.{compiler_driver_create, ...}`),
-        // which shadowed `compiler_driver_create` for every standalone
-        // `simple run` script that imported `compiler.driver.driver.{...}`.
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let file_path = root.join("driver.spl");
-        let package_dir = root.join("driver");
-        let init_path = package_dir.join("__init__.spl");
-        fs::write(&file_path, "fn compiler_driver_create(): 42\n").unwrap();
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(&init_path, "export use driver.{compiler_driver_create}\n").unwrap();
-
-        let use_stmt = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single(
-            "compiler_driver_create".to_string(),
-        )]));
-
-        // Baseline (no cycle in progress): the package init is preferred,
-        // same as any other legitimate "thin file + real package" pair
-        // (`prefers_package_init_for_group_imports_when_both_exist`).
-        let resolved = resolve_member_import_target(&file_path, &use_stmt);
-        assert_eq!(resolved, init_path);
-
-        // Simulate the interpreter mid-way through loading `init_path` when
-        // its own self-referential re-export re-resolves the same import.
-        // Without the guard, `resolve_member_import_target` would collapse
-        // to `prefer_package_init_for_member_import` and redirect back into
-        // `init_path` — which the circular-import branch in
-        // `load_and_merge_module` then answers with empty/partial exports,
-        // silently dropping `compiler_driver_create`.
-        mark_module_loading(&init_path);
-        let resolved_during_cycle = resolve_member_import_target(&file_path, &use_stmt);
-        unmark_module_loading(&init_path);
-
-        assert_eq!(
-            resolved_during_cycle, file_path,
-            "must keep the already-resolved file instead of re-entering a package-init already on the load stack"
-        );
-    }
-
-    #[test]
-    fn keeps_file_module_for_single_imports() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let file_path = root.join("io.spl");
-        let package_dir = root.join("io");
-        let init_path = package_dir.join("__init__.spl");
-        fs::write(&file_path, "# file module\n").unwrap();
-        fs::create_dir_all(&package_dir).unwrap();
-        fs::write(&init_path, "# package module\n").unwrap();
-
-        let resolved = prefer_package_init_for_member_import(
-            &file_path,
-            &use_stmt_with_target(ImportTarget::Single("io".to_string())),
-        );
-
-        assert_eq!(resolved, file_path);
     }
 
     pub(super) fn use_stmt_with_path(path: &[&str], target: ImportTarget) -> UseStmt {

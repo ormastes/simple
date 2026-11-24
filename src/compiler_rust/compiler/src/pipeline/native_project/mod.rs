@@ -33,6 +33,8 @@ mod mangle;
 mod module_global_init;
 mod stubs;
 mod tools;
+mod coff_partial_link;
+mod coff_weak_projection;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

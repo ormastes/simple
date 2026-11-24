@@ -1,0 +1,73 @@
+"""
+Kernel path/name bytes -> text rejects invalid UTF-8 with EILSEQ.
+
+## Purpose and audience
+Owner decision 2026-11-23: invalid UTF-8 never becomes `text`. Kernel
+syscall paths (open/stat/unlink/rename/chdir/spawn/exec) decode through
+`os.kernel.text_checked.kernel_text_checked`, which returns Err(EILSEQ).
+## Operator workflow
+Run with `bin/simple test` on this file.
+## Compatibility and limitations
+The syscall handlers need the full scheduler/VMM bootstrap, so the handler
+wiring is pinned statically; the decode itself is exercised directly.
+"""
+# @manual: primary
+# @req: REQ-OS-IPC_SYSCALL_PATH_UTF8-001
+# doc-path: doc/08_tracking/bug/bytes_to_text_rejects_invalid_utf8_2026-11-23.md
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.fs.{file_read}
+use os.kernel.text_checked.{kernel_text_checked, kernel_utf8_valid}
+use os.kernel.errno.{EILSEQ}
+
+fn _err_code(r: Result<text, i32>) -> i32:
+    match r:
+        case Ok(_): 0
+        case Err(e): e
+
+fn _ok_text(r: Result<text, i32>) -> text:
+    match r:
+        case Ok(v): v
+        case Err(_): "<err>"
+
+describe "kernel path utf-8 checked decode":
+    it "rejects a path containing byte 0xFF with EILSEQ":
+        step("Verify: /f<0xFF> -> Err(EILSEQ=84)")
+        val path: [u8] = [0x2Fu8, 0x66u8, 0xFFu8]
+        expect(EILSEQ).to_equal(84)
+        expect(_err_code(kernel_text_checked(path))).to_equal(84)
+
+    it "accepts a valid ASCII and multi-byte UTF-8 path":
+        step("Verify: /foo and /caf<C3 A9> decode")
+        val ascii: [u8] = [0x2Fu8, 0x66u8, 0x6Fu8, 0x6Fu8]
+        expect(_ok_text(kernel_text_checked(ascii))).to_equal("/foo")
+        val accented: [u8] = [0x2Fu8, 0x63u8, 0x61u8, 0x66u8, 0xC3u8, 0xA9u8]
+        expect(_err_code(kernel_text_checked(accented))).to_equal(0)
+
+    it "rejects overlong, surrogate and truncated sequences":
+        step("Verify: strict accept set")
+        expect(kernel_utf8_valid([0xC0u8, 0x80u8])).to_equal(false)
+        expect(kernel_utf8_valid([0xEDu8, 0xA0u8, 0x80u8])).to_equal(false)
+        expect(kernel_utf8_valid([0xE2u8, 0x82u8])).to_equal(false)
+        expect(kernel_utf8_valid([0xF4u8, 0x90u8, 0x80u8, 0x80u8])).to_equal(false)
+        expect(kernel_utf8_valid([0xF0u8, 0x9Fu8, 0x98u8, 0x80u8])).to_equal(true)
+
+    it "routes syscall path decodes through the checked helper":
+        step("Verify: syscall_file/syscall_process return EILSEQ on bad paths")
+        val sf = file_read("src/os/kernel/ipc/syscall_file.spl")
+        expect(sf.contains("kernel_text_checked")).to_equal(true)
+        expect(sf.contains("_FS_EILSEQ")).to_equal(true)
+        expect(sf.contains("bytes_to_text(b)")).to_equal(false)
+        val sp = file_read("src/os/kernel/ipc/syscall_process.spl")
+        expect(sp.contains("kernel_text_checked")).to_equal(true)
+        expect(sp.contains("rt_string_from_byte_array")).to_equal(false)
+
+    it "rejects invalid UTF-8 in chdir before it becomes the cwd":
+        step("Verify: _handle_chdir validates the resolved bytes ahead of cwd_set")
+        val sf = file_read("src/os/kernel/ipc/syscall_file.spl")
+        val body = sf.split("fn _handle_chdir(")[1]
+        val check = body.split("if not kernel_utf8_valid(resolved):")
+        expect(check.len()).to_equal(2)
+        expect(check[0].contains("cwd_set(")).to_equal(false)
+        expect(check[1].trim().starts_with("return SyscallResult(value: _FS_EILSEQ)")).to_equal(true)
+        expect(kernel_utf8_valid([0x2Fu8, 0x64u8, 0xFFu8])).to_equal(false)

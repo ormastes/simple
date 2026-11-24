@@ -1,7 +1,8 @@
 # Package-internal encoding of the trailer in the ORIGINAL resource allocation.
 # These unsafe mechanisms allocate no root/registry and never expose an FD.
 use std.nogc_sync_mut.io.linux_protected_broker_state_v1.*
-use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.crypto.sha256.sha256_text
 @when(os="linux"):
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8, volatile_read_u64, volatile_write_u64}
@@ -23,7 +24,10 @@ pub(package) fn broker_cell_text_v1(cell: i64, offset: i64, maximum: i64) -> Res
     var bytes: [u8] = []
     for at in 0..count: bytes.push(volatile_read_u8(base + 8 + at) as u8)
     if not utf8_bytes_valid(bytes): return Err("broker-control-cell-text")
-    Ok(bytes_to_text(bytes))
+    val value: text = match bytes_to_text_checked(bytes):
+        case Ok(v): v
+        case Err(_): return Err("broker-control-cell-text")
+    Ok(value)
 
 @unsafe(reason: "persist bounded exact transaction data before effects", capabilities: [ffi, raw_ptr])
 pub(package) fn broker_cell_set_text_v1(cell: i64, offset: i64, value: text, maximum: i64) -> Result<(), text>:

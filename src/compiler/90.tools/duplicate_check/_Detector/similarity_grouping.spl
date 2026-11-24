@@ -1,7 +1,7 @@
 # Duplicate-check — file collection + similarity grouping/refinement
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.similarity.{SimilarityEngine, SimilarityInput, similarity_for_mode, empty_features, score_candidates}
+use compiler.tools.duplicate_check.similarity.{similarity_for_mode, interned_cosine_matches}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens_with_content}
 use compiler.tools.duplicate_check.tokenizer.{SimpleToken, tokenize_for_path, token_to_string}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
@@ -28,11 +28,33 @@ fn cosine_scan_files(files: [text], config: DuplicationConfig) -> [text]:
             selected.push(file)
     selected
 
-fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager, engine: SimilarityEngine) -> SimilarityPrep:
+fn intern_token_ids(tokens: [SimpleToken], vocab_ids: {text: i64}, vocab: [text]) -> [i64]:
+    var ids: [i64] = []
+    for tok in tokens:
+        val name = token_to_string(tok)
+        val known = vocab_ids.get(name) ?? -1
+        if known >= 0:
+            ids.push(known)
+        else:
+            vocab_ids[name] = vocab.len()
+            ids.push(vocab.len())
+            vocab.push(name)
+    ids
+
+fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
-    var file_token_cache = {}
-    var file_line_index_cache: {text: {text: i64}} = {}
-    var feature_vectors = []
+    # Per-file state lives in locals for the current file only (blocks arrive
+    # grouped by file): reading a file's token array / line map out of a dict
+    # per block copied it natively on every one of ~48k blocks. Tokens are
+    # interned once per file; each block keeps only its id slice.
+    var files_seen: {text: bool} = {}
+    var vocab_ids: {text: i64} = {}
+    var vocab: [text] = []
+    var current_file = ""
+    var current_ids: [i64] = []
+    # line -> index of the first token on that line, -1 when none.
+    var current_line_first: [i64] = []
+    var block_token_ids: [[i64]] = []
     var low_signal_flags = []
     var block_idx = 0
     val start_ms = current_time_ms()
@@ -42,10 +64,8 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
         val is_low_signal = is_low_signal_block(block)
         low_signal_flags.push(is_low_signal)
 
-        var tokens: [SimpleToken] = []
-        if file_token_cache.has(block.file):
-            tokens = file_token_cache[block.file]
-        else:
+        if block_idx == 0 or block.file != current_file:
+            var tokens: [SimpleToken] = []
             val cached_tok = get_cached_tokens(cache_manager, block.file)
             if cached_tok != nil:
                 tokens = cached_tok
@@ -53,75 +73,53 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
                 val content = read_detector_source(block.file)
                 tokens = tokenize_for_path(block.file, content, config)
                 set_cached_tokens_with_content(cache_manager, block.file, tokens, content)
-            file_token_cache[block.file] = tokens
-
-            # Build line-to-token-index map once per file for O(1) lookups
-            var line_index: {text: i64} = {}
+            files_seen[block.file] = true
+            current_file = block.file
+            current_ids = intern_token_ids(tokens, vocab_ids, vocab)
+            current_line_first = []
             var li = 0
             var last_line = -1
             while li < tokens.len():
                 val tline = tokens[li].line
                 if tline != last_line:
-                    val line_key = "{tline}"
-                    line_index[line_key] = li
+                    while current_line_first.len() <= tline:
+                        current_line_first.push(-1)
+                    current_line_first[tline] = li
                     last_line = tline
                 li = li + 1
-            file_line_index_cache[block.file] = line_index
 
-        var block_features = empty_features()
+        var block_ids: [i64] = []
         if not is_low_signal:
-            # O(1) lookup via line index
-            var token_start = 0
-            var found_start = false
-            val cached_line_index = file_line_index_cache[block.file]
-            if cached_line_index != nil:
-                val line_key = "{block.line_start}"
-                if cached_line_index.has(line_key):
-                    token_start = cached_line_index[line_key]
-                    found_start = true
+            val line = block.line_start
+            if line >= 0 and line < current_line_first.len() and current_line_first[line] >= 0:
+                val token_start = current_line_first[line]
+                val token_end = (token_start + block.token_count).min(current_ids.len())
+                block_ids = current_ids[token_start:token_end]
 
-            if not found_start:
-                # Fallback to linear scan
-                var ti = 0
-                while ti < tokens.len():
-                    if tokens[ti].line == block.line_start:
-                        token_start = ti
-                        found_start = true
-                        break
-                    ti = ti + 1
-
-            if found_start:
-                val token_end = (token_start + block.token_count).min(tokens.len())
-                var token_strings: [text] = []
-                var ti2 = token_start
-                while ti2 < token_end:
-                    token_strings.push(token_to_string(tokens[ti2]))
-                    ti2 = ti2 + 1
-                block_features = engine.featurize(SimilarityInput(text_val: "", tokens: token_strings, embedding: []))
-
-        feature_vectors.push(block_features)
+        block_token_ids.push(block_ids)
         block_idx = block_idx + 1
         last_ms = progress_tick(config, "feature pass", block_idx, blocks_to_analyze.len(), start_ms, last_ms)
 
-    log_progress(config, "Extracted {feature_vectors.len()} feature vectors from {file_token_cache.keys().len()} files")
+    log_progress(config, "Extracted {block_token_ids.len()} feature vectors from {files_seen.keys().len()} files")
     SimilarityPrep(
         blocks: blocks_to_analyze,
-        features: feature_vectors,
+        block_token_ids: block_token_ids,
+        vocab: vocab,
         low_signal_flags: low_signal_flags,
-        file_count: file_token_cache.keys().len()
+        file_count: files_seen.keys().len()
     )
 
-fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig, engine: SimilarityEngine) -> {text: [i64]}:
-    # Candidates come from the engine's prefilter (cosine: signature-token
-    # inverted index, never blocks^2); scoring + thresholding are shared.
+fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -> {text: [i64]}:
+    # Candidates come from a signature-token inverted index (never blocks^2);
+    # pairs are scored as they are generated over interned token ids.
     log_progress(config, "Bucketing {prep.blocks.len()} blocks by shared token signature (inverted index)...")
 
-    val candidates = engine.candidates(prep.features, prep.low_signal_flags)
-    for skipped in candidates.skipped_buckets:
+    val result = interned_cosine_matches(prep.block_token_ids, prep.vocab, prep.low_signal_flags, config.similarity_threshold)
+    for skipped in result.skipped_buckets:
         log_progress(config, "  Skipping oversized bucket {skipped} to bound work")
-    val dropped_bucket_blocks = candidates.dropped_slots
-    val comparison_count = candidates.pairs.len()
-    val matches = score_candidates(engine, prep.features, candidates, config.similarity_threshold)
+    val dropped_bucket_blocks = result.dropped_slots
+    val comparison_count = result.comparison_count
+    val matches = result.matches
     val match_count = matches.len()
 
     var adjacency = {}
@@ -198,9 +196,8 @@ fn group_occurrence_key(group: DuplicateGroup) -> text:
 
 fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     """Refine hash-based groups through the cosine SimilarityAlgorithm to catch fuzzy duplicates."""
-    val engine = similarity_for_mode("cosine", false)
-    val prep = load_tokens_with_line_indexes(all_blocks, config, cache_manager, engine)
-    val adjacency = build_similarity_adjacency(prep, config, engine)
+    val prep = load_tokens_with_line_indexes(all_blocks, config, cache_manager)
+    val adjacency = build_similarity_adjacency(prep, config)
     val similarity_groups = build_similarity_groups(adjacency, all_blocks, config)
 
     var refined_groups = []

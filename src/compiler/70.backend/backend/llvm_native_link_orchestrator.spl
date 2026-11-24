@@ -24,7 +24,9 @@ use compiler.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target, native_effective_link_os}
+use compiler.backend.linker.linker_wrapper.{link_to_native_with_engine, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target, native_effective_link_os}
+use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1}
+use compiler.backend.simpleos_native_linkers.{link_simpleos_user_with_engine_v1, link_simpleos_x86_64_user_with_engine_v1}
 use compiler.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
@@ -56,7 +58,7 @@ use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_v1, llvm
 use compiler.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link, simpleos_user_link_arch}
 use compiler.backend.baremetal_native_link.{baremetal_link_arch_v1, link_baremetal_native_v1}
 use compiler.backend.aot_target_normalization.{backend_aot_simpleos_32bit_user_target_error}
-use compiler.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32, link_simpleos_user}
+use compiler.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
 use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_artifact_error_v1, darwin_runtime_provider_manifest_v1}
 # ============================================================================
 # Main Orchestrator
@@ -208,6 +210,13 @@ pub fn orchestrator_link_llvm_native(user_objects: [text], output: text, options
         case Ok(value): Ok(value.output_path)
         case Err(message): Err(message)
 
+fn llvm_completed_link_artifact_v3(result: Result<NativeLinkSuccessV1, text>) -> Result<NativeLinkedArtifactV2, text>:
+    match result:
+        case Ok(completed):
+            Ok(NativeLinkedArtifactV2(output_path: completed.output, startup: None,
+                actual_engine_id: Some(completed.engine_id)))
+        case Err(message): Err(message)
+
 pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<NativeLinkedArtifactV2, text>:
     compiler_work_link_schedule_v1(user_objects.len())
     """Link LLVM-compiled user objects with C runtime into a native executable.
@@ -260,13 +269,15 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
             return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks require a hosted source-built runtime")
         if stage4_requested:
             return Err("Stage4 strict profile does not support SimpleOS link routes")
-        return native_link_without_startup_v2(link_simpleos_user(user_arch, user_objects, output, verbose, options.opt_level))
+        return llvm_completed_link_artifact_v3(link_simpleos_user_with_engine_v1(user_arch, user_objects, output, verbose, options.opt_level))
 
     if is_simpleos_x86_64_link(user_objects, output):
         if options.xray_thread_context_v1:
             return Err("XRAY-E-CONTEXT-RUNTIME: thread hooks require a hosted source-built runtime")
         if stage4_requested:
             return Err("Stage4 strict profile does not support SimpleOS link routes")
+        if user_arch == "x86_64":
+            return llvm_completed_link_artifact_v3(link_simpleos_x86_64_user_with_engine_v1(user_objects, output, verbose, options.opt_level))
         return native_link_without_startup_v2(link_simpleos_x86_64(user_objects, output, verbose, options.opt_level))
 
     if is_simpleos_arm64_link(output):
@@ -830,7 +841,7 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
         if not all_objects.contains(entry_obj_path) or observed.is_none() or
                 observed.unwrap() != startup_receipt.unwrap().entry_object_digest:
             startup_receipt = None
-    val link_result = link_to_native(all_objects, output, link_config)
+    val link_result = link_to_native_with_engine(all_objects, output, link_config)
     if startup_receipt.is_some():
         val observed = file_hash_sha256(entry_obj_path)
         if observed.is_none() or observed.unwrap() != startup_receipt.unwrap().entry_object_digest:
@@ -857,7 +868,8 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
             stage4_cleanup_ok = false
 
     match link_result:
-        case Ok(path):
+        case Ok(completed):
+            val path = completed.output
             if not stage4_cleanup_ok:
                 if not remove_file_if_exists(path):
                     return Err("Stage4 selected-archive projection cleanup failed after linking; output cleanup also failed")
@@ -881,7 +893,8 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
                     return native_link_without_startup_v2(llvm_stage4_receipt_failure(path, stage4_profile_dir, stage4_profile_receipt_path, not profile_dir_existed, true, "Stage4 link-profile receipt write failed"))
             if verbose:
                 print "[llvm-link] Native executable: {path}"
-            Ok(NativeLinkedArtifactV2(output_path: path, startup: startup_receipt))
+            Ok(NativeLinkedArtifactV2(output_path: path, startup: startup_receipt,
+                actual_engine_id: Some(completed.engine_id)))
         case Err(e):
             if stage4_requested:
                 if not remove_file_if_exists(output):

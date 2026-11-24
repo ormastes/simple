@@ -1,0 +1,30 @@
+# @tag: unit, gpu, engine2d, software, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 2%
+#
+# The first clear() of a process builds the CPU kernel table: 16 timing
+# probes (4 ops x 4 span buckets), each racing the scalar oracle against the
+# SIMD-ISA kernel. With fixed rep counts the interpreted scalar oracles made
+# that ~1.6 s, paid on every web page render (one process per page) before
+# the first pixel. This spec runs first in its own process, so the clear
+# below is the one that builds the table. The gate itself must keep working:
+# every bucket probed and sealed, and the surface filled.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+describe "first clear of a process (CPU kernel table build)":
+    it "probes and seals every bucket within a time budget":
+        var backend = SoftwareBackend.create_cpu_simd()
+        expect(backend.init(10, 4)).to_equal(true)
+        expect(backend.kernel_table_ready).to_equal(false)
+        val t0 = time_now_unix_micros()
+        backend.clear(0xFF001122u32)
+        val elapsed = time_now_unix_micros() - t0
+        print "kernel_table_first_clear elapsed_us={elapsed} registrations={backend.kernel_table.registrations} rejections={backend.kernel_table.rejections}"
+        expect(backend.kernel_table_ready).to_equal(true)
+        expect(backend.kernel_table.sealed).to_equal(true)
+        expect(backend.kernel_table.registrations + backend.kernel_table.rejections).to_equal(16)
+        expect(backend.buf[0]).to_equal(0xFF001122u32)
+        expect(backend.buf[39]).to_equal(0xFF001122u32)
+        expect(elapsed < 400000).to_equal(true)

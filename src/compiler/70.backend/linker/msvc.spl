@@ -69,6 +69,9 @@ fn msvc_run_response(output: text, exe: text, args: [text]) -> MsvcShellResult:
 # Windows Library Names
 # ===========================================================================
 
+# 64 MiB main-thread stack reserve for every MSVC/lld-link image (W51; see build_args).
+val MSVC_DEFAULT_STACK_RESERVE: i64 = 67108864
+
 fn default_windows_libs_with_suffix() -> [text]:
     ["kernel32.lib", "user32.lib", "ws2_32.lib", "winhttp.lib", "mswsock.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib", "ntdll.lib", "shell32.lib", "ole32.lib", "msvcrt.lib"]
 
@@ -150,6 +153,18 @@ impl MsvcConfig:
 
         # Subsystem
         args.push("/SUBSYSTEM:{self.subsystem}")
+
+        # Stack reserve. lld-link/link.exe default to 1 MiB; a Simple compiler
+        # built by a Simple compiler overflows that lowering a ~40-term `or`
+        # chain (rb5 W51: P3 stack overflow in MirLowering.lower_expr on
+        # lib/common/process/observation_v4.spl). 64 MiB matches the internal
+        # COFF linker's PeImagePolicy default; an explicit /STACK in extra_args wins.
+        var has_stack = false
+        for arg in self.extra_args:
+            if arg.starts_with("/STACK:"):
+                has_stack = true
+        if not has_stack:
+            args.push("/STACK:{MSVC_DEFAULT_STACK_RESERVE}")
 
         # Machine type
         args.push("/MACHINE:{self.machine}")

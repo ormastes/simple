@@ -9,12 +9,12 @@
 use std.io_runtime.{ file_exists }
 use std.common.text_advanced.{split_whitespace}
 
-# File I/O externs.  File read is nullable on provider failure; byte-to-text
-# remains raw because provider lanes do not yet agree on invalid input.
+use std.common.encoding.external_text.{bytes_to_text_checked}
+
+# File I/O extern.  File read is nullable on provider failure; byte-to-text
+# goes through strict UTF-8 (invalid input is rejected, owner 2026-11-23).
 @unsafe(reason: "raw filesystem path and optional owned byte-array ABI", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-@unsafe(reason: "raw byte-array to text lift; caller rejects empty conversion of non-empty input", capabilities: [ffi])
-extern fn rt_bytes_to_text(data: [u8]) -> text?
 
 fn _file_bytes_or_error(path: text) -> Result<[u8], text>:
     if not file_exists(path):
@@ -31,14 +31,9 @@ fn _file_bytes_or_error(path: text) -> Result<[u8], text>:
 fn _bytes_to_text_or_error(data: [u8], context: text) -> Result<text, text>:
     if data.len() == 0:
         return Err("empty byte input for {context}")
-    val converted = unsafe(capabilities: [ffi]):
-        rt_bytes_to_text(data)
-    match converted:
-        Some(value):
-            if value.len() == 0:
-                return Err("failed to decode non-empty bytes for {context}")
-            Ok(value)
-        nil: Err("failed to decode bytes for {context}")
+    match bytes_to_text_checked(data):
+        case Ok(value): Ok(value)
+        case Err(e): Err("invalid UTF-8 at byte {e.byte_offset} for {context}: {e.reason}")
 
 # ============================================================================
 # Base64 decode (inline, baremetal-safe — no std import needed)
@@ -132,7 +127,11 @@ pub fn load_rsa_pkcs8_from_file(path: text) -> Result<[u8], text>:
     # when the hosted runtime refuses to decode them as UTF-8 text.
     val raw = _file_bytes_or_error(path)?
 
-    val text_content = _bytes_to_text_or_error(raw, path)?
+    # DER keys are binary payloads and stay [u8]: a body that is not valid
+    # UTF-8 cannot be PEM text, so it takes the DER path without decoding.
+    val text_content: text = match bytes_to_text_checked(raw):
+        case Ok(v): v
+        case Err(_): return Ok(raw)
     val trimmed_content = text_content.trim()
 
     if trimmed_content.starts_with("-----BEGIN"):
@@ -183,7 +182,10 @@ pub fn load_ssh_public_blob_from_file(path: text) -> Result<[u8], text>:
     Returns the decoded raw SSH wire blob after a shallow algorithm/header check.
     """
     val raw = _file_bytes_or_error(path)?
-    val content = (_bytes_to_text_or_error(raw, path)?).trim()
+    val content_raw: text = match _bytes_to_text_or_error(raw, path):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val content = content_raw.trim()
     # Free function, not a text method -- see debug.spl's comment on the same
     # `str.split_whitespace` undefined-symbol class (2026-09-07).
     val parts = split_whitespace(content)

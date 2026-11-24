@@ -207,7 +207,7 @@ fn grouped_run_admit_v1(
 ) -> GroupedRunStateV1:
     var next = state
     val slot = next.slots[slot_index]
-    if slot.lease == nil:
+    if slot.lease.is_none():
         next.error = "group result has no parent lease"
         return next
     val payload = managed_parse_action_result_encode_v1(result)
@@ -268,7 +268,7 @@ fn grouped_run_archive_reap_v1(slot: GroupedRunSlotV1, receipt: GroupedReapRecei
 
 fn grouped_run_queue_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, slot_index: i64) -> bool:
     val slot = state.slots[slot_index]
-    if slot.lease == nil: return false
+    if slot.lease.is_none(): return false
     val action = grouped_run_action_v1(state.execution, slot.lease!, run.keep_going)
     val basename = managed_parse_action_basename_v1(action)
     grouped_run_write_v1(slot.root + "/requests/" + basename, managed_parse_action_encode_v1(action)) and
@@ -364,7 +364,7 @@ fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> Gr
                 return next
             val claim = grouped_execution_claim_v1(next.execution, record.action_id, record.worker_id,
                 record.generation, run.profile.memory_budget_bytes)
-            if not claim.accepted or claim.lease == nil or claim.lease!.lease_id != record.lease_id:
+            if not claim.accepted or claim.lease.is_none() or claim.lease!.lease_id != record.lease_id:
                 next.error = "journal claim no longer matches canonical authority"
                 return next
             next.execution = claim.execution
@@ -375,7 +375,7 @@ fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> Gr
             slot.stop_reason = ""
             next.slots[index] = slot
         elif record.kind == "RETRY":
-            if slot.lease == nil:
+            if slot.lease.is_none():
                 next.error = "journal retry lacks prior lease"
                 return next
             val old = slot.lease!
@@ -393,7 +393,7 @@ fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> Gr
             val receipt = GroupedReapReceiptV1(old.group_id, old.action_id, old.worker_id, old.generation,
                 old.lease_id, old.snapshot_digest, old.cache_identity, record.digest)
             val retried = grouped_execution_recover_v1(next.execution, receipt, record.generation)
-            if not retried.accepted or retried.lease == nil or retried.lease!.lease_id != record.lease_id:
+            if not retried.accepted or retried.lease.is_none() or retried.lease!.lease_id != record.lease_id:
                 next.error = "journal retry authority differs"
                 return next
             next.execution = retried.execution
@@ -403,7 +403,7 @@ fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> Gr
             slot.stop_reason = ""
             next.slots[index] = slot
         elif record.kind == "STOP":
-            if slot.lease == nil or slot.lease!.action_id != record.action_id or slot.lease!.lease_id != record.lease_id or slot.lease!.generation != record.generation:
+            if slot.lease.is_none() or slot.lease!.action_id != record.action_id or slot.lease!.lease_id != record.lease_id or slot.lease!.generation != record.generation:
                 next.error = "final group proof has stale lease"
                 return next
             val proof_path = grouped_run_root_v1(run, record.worker_id, record.generation) + "/reaped-{record.generation}.sdn"
@@ -420,7 +420,7 @@ fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> Gr
             slot.root = grouped_run_root_v1(run, record.worker_id, slot.snapshot.generation)
             next.slots[index] = slot
         else:
-            if slot.lease == nil or slot.lease!.action_id != record.action_id or
+            if slot.lease.is_none() or slot.lease!.action_id != record.action_id or
                     slot.lease!.lease_id != record.lease_id or slot.lease!.generation != record.generation:
                 next.error = "journal completion has stale lease"
                 return next
@@ -441,7 +441,7 @@ fn grouped_run_replay_v1(run: ManagedParseRunV1, state: GroupedRunStateV1) -> Gr
     # written. Reconcile immutable receipts without inferring process death.
     for i in 0..next.slots.len():
         val slot = next.slots[i]
-        if slot.busy and slot.lease != nil:
+        if slot.busy and slot.lease.is_some():
             val action = grouped_run_action_v1(next.execution, slot.lease!, run.keep_going)
             val path = grouped_run_receipt_path_v1(run, action.action_id)
             if file_exists(path):
@@ -470,7 +470,7 @@ fn grouped_run_cleanup_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, canc
     var clean = true
     for i in 0..next.slots.len():
         var slot = next.slots[i]
-        if slot.owner == nil:
+        if slot.owner.is_none():
             if slot.busy: clean = false
             continue
         if cancel:
@@ -496,7 +496,7 @@ fn grouped_run_cleanup_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, canc
                 _ = group_process_cancel_v1(slot.owner!)
                 cancelled = true
                 deadline = current_time_ms() + run.shutdown_timeout_ms
-        if terminal and slot.lease != nil:
+        if terminal and slot.lease.is_some():
             match group_process_collect_reap_v1(slot.owner!, slot.lease!):
                 case Ok(receipt):
                     if grouped_run_archive_reap_v1(slot, receipt):
@@ -519,11 +519,11 @@ fn grouped_run_cleanup_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, canc
 fn grouped_run_observe_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, index: i64) -> GroupedRunStateV1:
     var next = state
     var slot = next.slots[index]
-    if slot.owner == nil: return next
+    if slot.owner.is_none(): return next
     val observed = match group_process_poll_v1(slot.owner!):
         case Ok(value): value
         case Err(_): return next
-    if slot.busy and slot.lease != nil:
+    if slot.busy and slot.lease.is_some():
         val action = grouped_run_action_v1(next.execution, slot.lease!, run.keep_going)
         val path = slot.root + "/receipts/" + managed_parse_action_basename_v1(action)
         if file_exists(path):
@@ -538,7 +538,7 @@ fn grouped_run_observe_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, inde
                 case Err(error):
                     next.error = "current group receipt rejected: " + error
                     return next
-    if observed.terminal and observed.leader_reaped and observed.tree_empty and slot.lease != nil:
+    if observed.terminal and observed.leader_reaped and observed.tree_empty and slot.lease.is_some():
         val receipt = match group_process_collect_reap_v1(slot.owner!, slot.lease!):
             case Ok(value): value
             case Err(error):
@@ -560,7 +560,7 @@ fn grouped_run_observe_v1(run: ManagedParseRunV1, state: GroupedRunStateV1, inde
             if not grouped_run_persist_v1(run, next.journal): next.error = "cannot checkpoint idle group termination"
             return next
         val retried = grouped_execution_recover_v1(next.execution, receipt, slot.snapshot.generation + 1)
-        if retried.accepted and retried.lease != nil:
+        if retried.accepted and retried.lease.is_some():
             next.execution = retried.execution
             slot.snapshot.generation = retried.lease!.generation
             slot.root = grouped_run_root_v1(run, slot.snapshot.worker_id, slot.snapshot.generation)
@@ -633,7 +633,7 @@ fn grouped_run_locked_v1(run: ManagedParseRunV1) -> GroupedRunResultV1:
     if state.error != "": return GroupedRunResultV1(2, state.error, state.completed, state.cached)
     if state.journal.closed:
         for slot in state.slots:
-            if slot.lease != nil and slot.stop_reason != "proven final shutdown":
+            if slot.lease.is_some() and slot.stop_reason != "proven final shutdown":
                 return GroupedRunResultV1(2, "closed journal lacks final tree proof", state.completed, state.cached)
         val succeeded = state.completed == run.graph.actions.len() and not state.failed
         return GroupedRunResultV1(if succeeded: 0 else: 1,
@@ -642,7 +642,7 @@ fn grouped_run_locked_v1(run: ManagedParseRunV1) -> GroupedRunResultV1:
     # freshly challenged; a missing response never licenses a replacement.
     for i in 0..state.slots.len():
         val slot = state.slots[i]
-        if slot.lease == nil: continue
+        if slot.lease.is_none(): continue
         if slot.stop_reason == "proven final shutdown":
             var stopped = slot
             stopped.stop_reason = ""
@@ -674,7 +674,7 @@ fn grouped_run_locked_v1(run: ManagedParseRunV1) -> GroupedRunResultV1:
                     continue
                 val claim = grouped_execution_claim_v1(state.execution, binding.action_id,
                     slot.snapshot.worker_id, slot.snapshot.generation, run.profile.memory_budget_bytes)
-                if not claim.accepted or claim.lease == nil: continue
+                if not claim.accepted or claim.lease.is_none(): continue
                 state.execution = claim.execution
                 slot.lease = claim.lease
                 slot.busy = true
@@ -685,15 +685,15 @@ fn grouped_run_locked_v1(run: ManagedParseRunV1) -> GroupedRunResultV1:
                 if not grouped_run_persist_v1(run, state.journal):
                     state.error = "cannot checkpoint group claim"
                     break
-                if slot.owner == nil: state = grouped_run_launch_v1(run, state, i)
+                if slot.owner.is_none(): state = grouped_run_launch_v1(run, state, i)
                 break
             if state.error != "": break
         if state.error != "": break
         var active = false
         var unresolved = false
         for slot in state.slots:
-            if slot.busy and slot.owner != nil: active = true
-            if slot.busy and slot.owner == nil: unresolved = true
+            if slot.busy and slot.owner.is_some(): active = true
+            if slot.busy and slot.owner.is_none(): unresolved = true
         if not active:
             if unresolved: state.error = "group authority unresolved; independent available actions exhausted"
             break

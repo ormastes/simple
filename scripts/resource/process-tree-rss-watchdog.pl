@@ -923,12 +923,16 @@ sub install_cached_windows_helper {
     my $cache = $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE} ||
         abs_path($watchdog_source_dir . '/../..') . '/.simple/storage/cache/bootstrap-session-helper';
     $cache =~ m{\A/} or die "session helper cache must be POSIX-absolute";
-    # The native Job supervisor starts an MSYS shell for the workload. Preserve
-    # this path across the preceding MSYS-to-native launch so an inherited
-    # guard does not receive D:/... and publish a non-POSIX helper path.
-    if (exists $ENV{SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE}) {
+    # The native Job supervisor starts an MSYS shell for the workload. These
+    # shell-owned paths must survive the preceding MSYS-to-native launch:
+    # nested guards require a POSIX helper cache, and bootstrap authority
+    # checks require the external output allowlist in canonical POSIX form.
+    # Keep other variables/argv subject to normal native path conversion.
+    for my $variable (qw(SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE
+                         SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT)) {
+        next unless exists $ENV{$variable};
         my $excluded = $ENV{MSYS2_ENV_CONV_EXCL} // '';
-        my $name = 'SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE=';
+        my $name = "$variable=";
         $ENV{MSYS2_ENV_CONV_EXCL} = length($excluded) ? "$excluded;$name" : $name
             unless ";$excluded;" =~ /;\Q$name\E;/;
     }

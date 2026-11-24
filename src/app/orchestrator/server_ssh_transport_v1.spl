@@ -6,7 +6,7 @@ use app.orchestrator.server_ssh_relay_v1.{server_gateway_frame_encode_v1, server
 use app.orchestrator.host_identity_public_v1.host_identity_known_hosts_validate_v1
 use std.common.config_core.server_context_types_v1.{ServerRecordV1, server_record_validate_v1}
 use std.common.crypto.sha256.sha256_text
-use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.nogc_sync_mut.io.stdin_command_v1.{StdinCommandRequestV1, stdin_command_begin_v1,
     stdin_command_step_v1, stdin_command_files_admit_v1}
 use std.nogc_sync_mut.io.host_identity_store_v1.{host_identity_store_open_v1,
@@ -42,7 +42,7 @@ pub fn server_ssh_start_v1(record: ServerRecordV1, profile: ServerSshProfileV1,
     if profile.store_root != "":
         val opened = host_identity_store_open_v1(profile.store_root)
         turn.store_cleanup = opened.owner
-        if not opened.ready or opened.cleanup_pending or opened.error != "" or opened.owner == nil:
+        if not opened.ready or opened.cleanup_pending or opened.error != "" or opened.owner.is_none():
             turn.error = "server-ssh-protected-store-open"
             return Ok(turn)
         val owner = opened.owner.unwrap()
@@ -53,14 +53,16 @@ pub fn server_ssh_start_v1(record: ServerRecordV1, profile: ServerSshProfileV1,
         val hosts_leaf = sha256_text(record.tls_ref) + ".hosts"
         val pins = host_identity_store_read_v1(owner, hosts_leaf, 65536)
         turn.store_cleanup = Some(pins.owner)
-        if pins.error != "" or pins.cleanup_pending or pins.absent or pins.bytes == nil:
+        if pins.error != "" or pins.cleanup_pending or pins.absent or pins.bytes.is_none():
             turn.error = "server-ssh-protected-pin-read"
             return Ok(turn)
         val pin_bytes = pins.bytes.unwrap()
-        if not utf8_bytes_valid(pin_bytes):
-            turn.error = "server-ssh-protected-pin-utf8"
-            return Ok(turn)
-        if host_identity_known_hosts_validate_v1(bytes_to_text(pin_bytes), profile.host_key_alias).is_err():
+        val pin_text = match bytes_to_text_checked(pin_bytes):
+            case Ok(t): t
+            case Err(_):
+                turn.error = "server-ssh-protected-pin-utf8"
+                return Ok(turn)
+        if host_identity_known_hosts_validate_v1(pin_text, profile.host_key_alias).is_err():
             turn.error = "server-ssh-protected-pin-invalid"
             return Ok(turn)
         val hosts_path = host_identity_store_path_v1(pins.owner, hosts_leaf)
