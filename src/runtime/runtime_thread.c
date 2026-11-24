@@ -30,6 +30,10 @@
  * ================================================================ */
 
 #if defined(_WIN32) || defined(_WIN64)
+    #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+        #undef _WIN32_WINNT
+        #define _WIN32_WINNT 0x0600
+    #endif
     #define SPL_THREAD_WINDOWS
     #include <windows.h>
     #include <process.h>
@@ -218,11 +222,13 @@ static void free_handle(int64_t handle) {
 }
 
 /* Scalar TLS has a raw i64 ABI, distinct from the tagged RuntimeValue TLS.
- * Each live handle owns one OS TLS key. Values are kept in the key itself,
- * without a heap allocation on the get/set path. Public handles combine a
- * monotonically increasing serial with a reusable table slot: stale handles
- * never address a recycled OS key, and table memory tracks peak live slots.
- * The table lock stays held across OS key access, so free cannot race it. */
+ * Each live handle owns one OS TLS/FLS key. 64-bit targets keep values in the
+ * slot itself without heap allocation; 32-bit targets (and SCALAR_TLS_FORCE_BOXED)
+ * keep a per-thread heap cell freed automatically on thread/fiber exit or key
+ * destruction. Public handles combine a monotonically increasing serial with a
+ * reusable table slot: stale handles never address a recycled OS key, and table
+ * memory tracks peak live slots. The table lock stays held across OS key
+ * access, so free cannot race it. */
 #define SCALAR_TLS_SLOT_BITS 20
 #define SCALAR_TLS_SLOT_COUNT (UINT64_C(1) << SCALAR_TLS_SLOT_BITS)
 #define SCALAR_TLS_SLOT_MASK (SCALAR_TLS_SLOT_COUNT - 1)
@@ -256,17 +262,88 @@ static SRWLOCK g_scalar_tls_lock = SRWLOCK_INIT;
 #define SCALAR_TLS_WRUNLOCK() ReleaseSRWLockExclusive(&g_scalar_tls_lock)
 #endif
 
-/* The hosted runtime stores i64 scalar values in TLS. 64-bit targets keep the
- * bits in the pointer-sized slot; 32-bit targets (i686 Windows, armv7) keep a
- * per-thread heap cell, allocated on first set and owned by that thread. */
+/* The hosted runtime stores i64 scalar values in TLS/FLS. 64-bit targets keep
+ * the bits in the pointer-sized slot; 32-bit targets (i686 Windows, armv7)
+ * keep a per-thread heap cell, allocated on first set and freed on thread exit
+ * or rt_thread_local_free. On Win32, FLS invokes the callback on thread/fiber
+ * exit and inside FlsFree() for every live non-NULL slot. */
+#ifdef SCALAR_TLS_FORCE_BOXED
+#define SCALAR_TLS_INLINE 0
+#else
+#define SCALAR_TLS_INLINE (sizeof(uintptr_t) >= sizeof(int64_t))
+#endif
+
+#ifndef SCALAR_TLS_CELL_ALLOC
+#define SCALAR_TLS_CELL_ALLOC() ((int64_t*)malloc(sizeof(int64_t)))
+#endif
+#ifndef SCALAR_TLS_CELL_FREE
+#define SCALAR_TLS_CELL_FREE(p) free(p)
+#endif
+
+#ifdef SIMPLE_SCALAR_TLS_SELFCHECK
+#ifdef SPL_THREAD_PTHREAD
+typedef long ScalarTlsCounter;
+static void scalar_tls_counter_inc(ScalarTlsCounter* c) { __atomic_add_fetch(c, 1, __ATOMIC_SEQ_CST); }
+static void scalar_tls_counter_dec(ScalarTlsCounter* c) { __atomic_sub_fetch(c, 1, __ATOMIC_SEQ_CST); }
+static int64_t scalar_tls_counter_load(ScalarTlsCounter* c) { return (int64_t)__atomic_load_n(c, __ATOMIC_SEQ_CST); }
+static void scalar_tls_counter_zero(ScalarTlsCounter* c) { __atomic_store_n(c, 0, __ATOMIC_SEQ_CST); }
+#else
+typedef volatile LONG ScalarTlsCounter;
+static void scalar_tls_counter_inc(ScalarTlsCounter* c) { InterlockedIncrement(c); }
+static void scalar_tls_counter_dec(ScalarTlsCounter* c) { InterlockedDecrement(c); }
+static int64_t scalar_tls_counter_load(ScalarTlsCounter* c) { return (int64_t)InterlockedExchangeAdd(c, 0); }
+static void scalar_tls_counter_zero(ScalarTlsCounter* c) { InterlockedExchange(c, 0); }
+#endif
+
+static ScalarTlsCounter g_scalar_tls_selfcheck_allocs = 0;
+static ScalarTlsCounter g_scalar_tls_selfcheck_frees = 0;
+static ScalarTlsCounter g_scalar_tls_selfcheck_live = 0;
+
+static int64_t* scalar_tls_cell_alloc(void) {
+    int64_t* cell = SCALAR_TLS_CELL_ALLOC();
+    if (cell) {
+        scalar_tls_counter_inc(&g_scalar_tls_selfcheck_allocs);
+        scalar_tls_counter_inc(&g_scalar_tls_selfcheck_live);
+    }
+    return cell;
+}
+
+static void scalar_tls_cell_free(void* cell) {
+    if (!cell) return;
+    scalar_tls_counter_inc(&g_scalar_tls_selfcheck_frees);
+    scalar_tls_counter_dec(&g_scalar_tls_selfcheck_live);
+    SCALAR_TLS_CELL_FREE(cell);
+}
+
+int64_t spl_scalar_tls_selfcheck_allocs(void) { return scalar_tls_counter_load(&g_scalar_tls_selfcheck_allocs); }
+int64_t spl_scalar_tls_selfcheck_frees(void) { return scalar_tls_counter_load(&g_scalar_tls_selfcheck_frees); }
+int64_t spl_scalar_tls_selfcheck_live(void) { return scalar_tls_counter_load(&g_scalar_tls_selfcheck_live); }
+void spl_scalar_tls_selfcheck_reset(void) {
+    scalar_tls_counter_zero(&g_scalar_tls_selfcheck_allocs);
+    scalar_tls_counter_zero(&g_scalar_tls_selfcheck_frees);
+    scalar_tls_counter_zero(&g_scalar_tls_selfcheck_live);
+}
+#else
+#define scalar_tls_cell_alloc() SCALAR_TLS_CELL_ALLOC()
+static void scalar_tls_cell_free(void* cell) {
+    if (cell) SCALAR_TLS_CELL_FREE(cell);
+}
+#endif
+
 #ifdef SPL_THREAD_PTHREAD
 #define SCALAR_TLS_RAW_GET(k) pthread_getspecific(k)
-#define SCALAR_TLS_RAW_SET(k, v) (void)pthread_setspecific((k), (v))
+#define SCALAR_TLS_RAW_SET(k, v) (pthread_setspecific((k), (v)) == 0)
+static void scalar_tls_pthread_free(void* cell) {
+    scalar_tls_cell_free(cell);
+}
 #else
-#define SCALAR_TLS_RAW_GET(k) TlsGetValue(k)
-#define SCALAR_TLS_RAW_SET(k, v) (void)TlsSetValue((k), (v))
+#define SCALAR_TLS_RAW_GET(k) FlsGetValue(k)
+#define SCALAR_TLS_RAW_SET(k, v) (FlsSetValue((k), (v)) != 0)
+/* FLS callbacks on 32-bit x86 use __stdcall (WINAPI), never raw __cdecl free. */
+static VOID WINAPI scalar_tls_fls_free(PVOID cell) {
+    scalar_tls_cell_free(cell);
+}
 #endif
-#define SCALAR_TLS_INLINE (sizeof(uintptr_t) >= sizeof(int64_t))
 
 int64_t rt_thread_local_new(void) {
     SCALAR_TLS_WRLOCK();
@@ -297,13 +374,14 @@ int64_t rt_thread_local_new(void) {
     }
 
 #ifdef SPL_THREAD_PTHREAD
-    if (pthread_key_create(&g_scalar_tls_entries[index].key, SCALAR_TLS_INLINE ? NULL : free) != 0) {
+    if (pthread_key_create(&g_scalar_tls_entries[index].key,
+                           SCALAR_TLS_INLINE ? NULL : scalar_tls_pthread_free) != 0) {
         SCALAR_TLS_WRUNLOCK();
         return 0;
     }
 #else
-    DWORD key = TlsAlloc();
-    if (key == TLS_OUT_OF_INDEXES) {
+    DWORD key = FlsAlloc(SCALAR_TLS_INLINE ? NULL : scalar_tls_fls_free);
+    if (key == FLS_OUT_OF_INDEXES) {
         SCALAR_TLS_WRUNLOCK();
         return 0;
     }
@@ -357,12 +435,15 @@ void rt_thread_local_set_i64(int64_t handle, int64_t value) {
         if (SCALAR_TLS_INLINE) {
             uintptr_t bits = 0;
             memcpy(&bits, &value, sizeof(bits));
-            SCALAR_TLS_RAW_SET(entry->key, (void*)bits);
+            (void)SCALAR_TLS_RAW_SET(entry->key, (void*)bits);
         } else {
             int64_t* cell = (int64_t*)SCALAR_TLS_RAW_GET(entry->key);
             if (!cell) {
-                cell = (int64_t*)malloc(sizeof(int64_t));
-                if (cell) SCALAR_TLS_RAW_SET(entry->key, cell);
+                cell = scalar_tls_cell_alloc();
+                if (cell && !SCALAR_TLS_RAW_SET(entry->key, cell)) {
+                    scalar_tls_cell_free(cell);
+                    cell = NULL;
+                }
             }
             if (cell) *cell = value;
         }
@@ -375,13 +456,19 @@ void rt_thread_local_free(int64_t handle) {
     SCALAR_TLS_WRLOCK();
     ScalarTlsEntry* entry = scalar_tls_live(handle, &index);
     if (entry) {
-        if (!SCALAR_TLS_INLINE) {
-            free(SCALAR_TLS_RAW_GET(entry->key)); /* calling thread's cell */
-        }
 #ifdef SPL_THREAD_PTHREAD
+        if (!SCALAR_TLS_INLINE) {
+            void* cell = SCALAR_TLS_RAW_GET(entry->key);
+            if (cell) {
+                (void)SCALAR_TLS_RAW_SET(entry->key, NULL);
+                scalar_tls_cell_free(cell); /* calling thread's cell */
+            }
+        }
         (void)pthread_key_delete(entry->key);
 #else
-        (void)TlsFree(entry->key);
+        /* FlsFree invokes scalar_tls_fls_free for every live thread/fiber
+         * with a non-NULL slot; freeing here first would double-free. */
+        (void)FlsFree(entry->key);
 #endif
         entry->active = false;
         entry->next_free = g_scalar_tls_free_head;
