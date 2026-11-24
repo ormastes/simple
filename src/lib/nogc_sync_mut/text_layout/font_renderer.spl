@@ -442,6 +442,10 @@ class ResolvedFontMetrics:
     # run is not shaped. Paint derives the 1x quarter-px LCD phase and the
     # device pen floor(k x pen) from it without shaping again.
     glyph_pens_64: [i32] = []
+    # Line-metric units ([ascent, descent, gap, upem]) of the face that shaped
+    # the run, [] for an unshaped run. Blink's `line-height: normal` line box
+    # holds every face a run uses, not only the primary font.
+    used_face_units: [i64] = []
 
 # ponytail: process-local 128-entry ring for pinned layout metrics; replace with
 # per-document caches only when concurrent multi-face ownership lands.
@@ -4050,6 +4054,8 @@ class _ResolvedShapedGlyphRun:
     advances: [i32]
     width: i32
     pens_64: [i32] = []
+    # The shaping face's line-metric units (`sfnt_blob_line_metric_units`).
+    face_units: [i64] = []
 
 # Both classifiers below are pure functions of one short string and are called
 # once per uncached resolve — 146 times on css-layout for at most a handful of
@@ -4170,6 +4176,41 @@ pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: b
             _browser_face_ascent_descent_memo = {}
         _browser_face_ascent_descent_memo[key] = out
     out
+
+# Line-metric units ([ascent, descent, gap, upem]) of the primary face that
+# `family` resolves to, or [] off the measured host. Lets a run tell a fallback
+# face from its own primary face (a `font-family: Noto Sans Devanagari` run
+# shapes with its primary face: no union, the strut already is that face).
+# reason: family name and style flags are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_line_units(family: text, bold: bool, italic: bool) -> [i64]:
+    if not browser_host_has_measured_linux_face_set():
+        return []
+    for candidate in browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic)):
+        val path = font_face_spec_path(candidate)
+        if file_exists(path):
+            return _browser_face_line_units(path)
+    []
+
+# [ascent, descent] in whole px at font_size_milli * k of a run's USED face
+# (`ResolvedFontMetrics.used_face_units`), each carrying its share of the face's
+# line gap (Blink AddLeading: the floored half above, the rest below), or [].
+# This is what a `line-height: normal` line box unions with its strut. There is
+# no subpixel-positioning borrow: Chrome 159 at k=4 puts a Noto Sans Devanagari
+# 16px line at 59 + 26 = 85 (the borrow would make it 86) and Noto Sans Arabic's
+# baseline 88 below the line top.
+# reason: font-unit scalars, a milli-px size and an integer device scale are the SFNT table domain.
+# @allow(primitive_api)
+pub fn browser_used_face_line_ascent_descent_device_px(units: [i64], font_size_milli: i32, k: i32) -> [i32]:
+    if units.len() != 4 or font_size_milli <= 0 or k < 1:
+        return []
+    val size = (font_size_milli as i64) * (k as i64)
+    val ad = sfnt_line_metric_units_ascent_descent_milli_px(units, size)
+    val line = sfnt_line_metric_units_normal_line_height_milli_px(units, size)
+    if ad.len() != 2 or line < ad[0] + ad[1]:
+        return []
+    val above = (line - ad[0] - ad[1]) / 2
+    [(ad[0] + above) as i32, (line - ad[0] - above) as i32]
 
 fn _browser_face_line_units(path: text) -> [i64]:
     if _browser_face_line_units_memo.has(path):
@@ -4333,7 +4374,7 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             valid = false
     val width = total_advance.to_i32()
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
-    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0, pens_64: if payload.valid: pens_64 else: [])
+    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0, pens_64: if payload.valid: pens_64 else: [], face_units: if payload.valid: sfnt_blob_line_metric_units(font_blob) else: [])
 
 # ---------------------------------------------------------------------------
 # Front memo for resolved font metrics.
@@ -4807,6 +4848,7 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
         reason: if valid and (complex_script == 0 or shaped.valid): "resolved" else if valid: "font-shaping-unavailable" else: "font-identity-unavailable",
         glyph_run: shaped.payload,
         glyph_pens_64: if valid: shaped.pens_64 else: [],
+        used_face_units: if valid and shaped.valid: shaped.face_units else: [],
         shaping_required: complex_script != 0,
         width_milli: if valid: width_milli else: -1
     )

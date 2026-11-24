@@ -76,3 +76,19 @@ k=4, while 1x paints the per-codepoint fallback.
   For Devanagari the Liberation strut's ascent (58) dominates the line; for
   Arabic the face's ascent dominates, so the +1 must not apply. That is a
   line-box (strut vs. run ascent) rule, which belongs to the layout lane.
+
+### 2026-11-24 — defect 2 (y) fixed in the layout lane
+
+The +1 came from the line box, not from `device_dy` alone. Chrome's
+`line-height: normal` line box is the union of the strut and the used fallback
+face (each face's own rounded ascent and descent plus half its gap, with no
+borrow for the fallback face). Simple now builds the same line box
+(`style_used_face_line`, layout_text) and hangs shaped runs from its baseline.
+
+- `line_box_used_font_metrics_chrome159_spec`: base 0/5, head 5/5.
+- `devanagari_render_k4_chrome159_spec`: base 0/10, head 6/10.
+
+The four remaining examples (नहीं, कुछ, र्कं, टुँ) are one ink row each at a single
+edge, the glyph's vertical raster phase (see
+`glyph_vertical_raster_phase_chrome159_spec`). They are not the baseline, so the
+`in-development` tag stays.

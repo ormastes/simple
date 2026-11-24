@@ -7,7 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_pr
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace}
-use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_normal_line_height_milli_px}
+use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_normal_line_height_milli_px, browser_face_ascent_descent_milli_px, browser_face_ascent_descent_device_px, browser_used_face_line_ascent_descent_device_px}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli, font_milli_of}
@@ -75,10 +75,43 @@ fn style_line_h(st: Style) -> i32:
     # elements.
     val normal = browser_normal_line_height_milli_px(st.font_family, st.bold, st.font_style_italic, font_milli_of(st.font_size, st.font_size_milli))
     if normal > 0:
+        val used = style_used_face_line(st, 1)
+        if used.len() == 2:
+            return used[0] + used[1]
         return normal
     if st.resolved_font_line_height > 0:
         return st.resolved_font_line_height
     line_h(st.font_size)
+
+# `line-height: normal` on a #text whose run a fallback face shaped: Blink's
+# line box holds the primary font's strut AND that face, each as [ascent,
+# descent] with its own half line gap (floored above, the rest below), so the
+# line is max(ascents) + max(descents). Chrome 159, 16px Liberation Sans
+# (14 / 3, gap 1 -> 14 / 4): + Noto Sans Arabic (22 / 12) is 22 + 12 = 34;
+# + Noto Sans Devanagari (14 / 7) is 14 + 7 = 21. At k=4 (Liberation 59 / 15
+# with the device strut), 88 + 47 = 135 and 59 + 26 = 85. A fixed line-height
+# keeps the strut only (a 40px Devanagari line is 40 in Chrome), and so does a
+# style with no used face. Answers [ascent, descent] in px at device scale k
+# (k = 1: CSS px), or [] when the strut alone applies.
+fn style_used_face_line(st: Style, k: i32) -> [i32]:
+    if st.used_face_units.len() == 0 or st.line_height_px != 0 or st.line_height_em_milli != 0:
+        return []
+    val size_milli = font_milli_of(st.font_size, st.font_size_milli)
+    val used = browser_used_face_line_ascent_descent_device_px(st.used_face_units, size_milli, k)
+    if used.len() != 2:
+        return []
+    val primary = if k > 1:
+        browser_face_ascent_descent_device_px(st.font_family, st.bold, st.font_style_italic, size_milli, k)
+    else:
+        browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, size_milli)
+    val line = browser_normal_line_height_milli_px(st.font_family, st.bold, st.font_style_italic, size_milli * k)
+    if primary.len() != 2 or line <= 0:
+        return []
+    val leading = line - primary[0] - primary[1]
+    val above = if leading >= 0: leading / 2 else: 0 - (1 - leading) / 2
+    val ascent = primary[0] + above
+    val descent = line - ascent
+    [if used[0] > ascent: used[0] else: ascent, if used[1] > descent: used[1] else: descent]
 
 # --- ONE advance table, shared by layout and paint -------------------------
 #

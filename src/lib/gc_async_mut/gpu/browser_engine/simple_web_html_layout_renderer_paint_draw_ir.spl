@@ -4,11 +4,12 @@
 # which re-exports every name defined here.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_value_vector_x, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, text_line_aligned_x, text_line_needs_paint_width, text_rtl_run_starts_box, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, spaced_glyph_xs_milli, backdrop_blur_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present, web_font_style_trace_enabled}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{font_milli_round_px, spaced_advances_milli, spaced_glyph_xs_milli, backdrop_blur_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present, web_font_style_trace_enabled}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, linear_gradient_line_q10_at_angle, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
-use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli, browser_face_ascent_descent_milli_px, browser_face_line_units}
+use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
@@ -479,7 +480,16 @@ fn _html_draw_ir_text_with_device_dy(command: DrawIrCommand, boxes: LayoutResult
         return command
     var out = command
     var style = command.computed_style
-    style.push(draw_ir_style_prop("device-y-offset", table[i].to_text()))
+    # A shaped run may already carry its own baseline offset: the two add.
+    var prior = 0
+    var kept: [DrawIrStyleProp] = []
+    for prop in style:  # cpu-lane-loop-ok: one pass over THIS command's style props
+        if prop.key == "device-y-offset":
+            prior = prior + (prop.value.to_i64() as i32)
+        else:
+            kept.push(prop)
+    style = kept
+    style.push(draw_ir_style_prop("device-y-offset", (prior + table[i]).to_text()))
     out.computed_style = style
     out
 
@@ -616,6 +626,27 @@ fn _html_draw_ir_resolved_text_command(
         # The device pass strips both keys; `device-glyph-xs` replaces the
         # scaled xs, `glyph-pen-q4` reaches the 1x stager.
         merged.push(draw_ir_style_prop(if device_k > 1: "device-glyph-xs" else: "glyph-pen-q4", pens_csv))
+    # The selected-run stager hangs a shaped run from the SHAPING face's ascent
+    # (hhea, rounded at the size it paints), while layout put the command top
+    # one primary-font ascent above the line's baseline (Chrome's baseline is
+    # the union of the strut and the used faces). Move the command by the
+    # difference so the glyphs land on that baseline: 16px Liberation Sans over
+    # Noto Sans Arabic is 14 - 22 = -8 px; at k=4 the device part is 58 - 88.
+    if shaped_run and metrics.used_face_units.len() == 4 and metrics.used_face_units != browser_face_line_units(st.font_family, st.bold, st.font_style_italic):
+        val size_milli = font_milli_of(st.font_size, st.font_size_milli)
+        val css_primary = browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, size_milli)
+        val css_used = sfnt_line_metric_units_ascent_descent_px(metrics.used_face_units, st.font_size.to_i64())
+        if css_primary.len() == 2 and css_used.len() == 2:
+            val css_dy = css_primary[0] - (css_used[0] as i32)
+            resolved.y = resolved.y + css_dy
+            if device_k > 1:
+                val device_px = font_milli_round_px(size_milli * device_k)
+                val dev_primary = browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, device_px * 1000)
+                val dev_used = sfnt_line_metric_units_ascent_descent_px(metrics.used_face_units, device_px.to_i64())
+                if dev_primary.len() == 2 and dev_used.len() == 2:
+                    val extra = dev_primary[0] - (dev_used[0] as i32) - device_k * css_dy
+                    if extra != 0:
+                        merged.push(draw_ir_style_prop("device-y-offset", extra.to_text()))
     resolved.computed_style = merged
     resolved.clip_rect = clip_rect
     resolved
