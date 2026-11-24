@@ -3,7 +3,8 @@ use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.*
 use std.nogc_sync_mut.io_runtime.{dir_remove, file_write, file_read}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
-use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end,
+    transient_session_heap_begin_v1, transient_session_heap_end_v1}
 
 extern fn rt_getpid() -> i64
 
@@ -145,6 +146,7 @@ describe "SCV admitted-digest reads verify once per process per digest":
         val in_scope = transient_array_scope_state_v1() == 1
         val hit_a = compile_source_inventory_read_admitted_digest_v1(root, seeded)
         val hit_b = compile_source_inventory_read_admitted_digest_v1(root, seeded)
+        val hit_valid = hit_a.valid and hit_b.valid
         val hit_generation = hit_b.inventory!.generation
         val c3 = compile_source_inventory_full_read_count_v1()
         val refused = compile_source_inventory_seed_admitted_digest_v1(root, unseeded)
@@ -154,6 +156,13 @@ describe "SCV admitted-digest reads verify once per process per digest":
         val miss_valid = miss_a.valid and miss_b.valid
         val c5 = compile_source_inventory_full_read_count_v1()
         val ended = if scoped: transient_scope_end() else: true
+        # A live build session adopts promotions; a memo stored there would
+        # dangle at session end, so the seed must refuse without reading.
+        val session = transient_session_heap_begin_v1()
+        val session_live = session != 0u32
+        val in_session = compile_source_inventory_seed_admitted_digest_v1(root, unseeded)
+        val c6 = compile_source_inventory_full_read_count_v1()
+        val session_ended = transient_session_heap_end_v1(session)
         dir_remove(root, true)
         expect(scope_free).to_equal(true)
         expect(rejected).to_equal(false)
@@ -163,7 +172,7 @@ describe "SCV admitted-digest reads verify once per process per digest":
         expect(c2 - c1).to_equal(1)
         expect(scoped).to_equal(true)
         expect(in_scope).to_equal(true)
-        expect(hit_a.valid).to_equal(true)
+        expect(hit_valid).to_equal(true)
         expect(hit_generation).to_equal(11)
         expect(c3 - c2).to_equal(0)
         step("Inside a scope the seed is a no-op and scoped reads stay unmemoized")
@@ -172,3 +181,7 @@ describe "SCV admitted-digest reads verify once per process per digest":
         expect(miss_valid).to_equal(true)
         expect(c5 - c4).to_equal(2)
         expect(ended).to_equal(true)
+        expect(session_live).to_equal(true)
+        expect(in_session).to_equal(false)
+        expect(c6 - c5).to_equal(0)
+        expect(session_ended).to_equal(true)
