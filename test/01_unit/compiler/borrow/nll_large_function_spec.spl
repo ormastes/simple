@@ -148,6 +148,18 @@ fn diamond() -> ControlFlowGraph:
     cfg.add_block(large_block(3, [6], 7, []))
     cfg
 
+# Fan 0 -> {1, 2, 3} -> 4, same point numbering. Blocks are positioned in
+# breadth-first order, so from middle sibling 2 a use in sibling 1 sits
+# before the query and a use in sibling 3 sits after it, outside block 2.
+fn fan3() -> ControlFlowGraph:
+    var cfg = ControlFlowGraph.create()
+    cfg.add_block(large_block(0, [0], 1, [1, 2, 3]))
+    cfg.add_block(large_block(1, [2], 3, [4]))
+    cfg.add_block(large_block(2, [4], 5, [4]))
+    cfg.add_block(large_block(3, [6], 7, [4]))
+    cfg.add_block(large_block(4, [8], 9, []))
+    cfg
+
 describe "NLL loan liveness across sibling blocks":
     it "ignores a later sibling-block use when the reference is dead in this block":
         var checker = NLLChecker.create(diamond())
@@ -158,10 +170,14 @@ describe "NLL loan liveness across sibling blocks":
         expect(large_errors(checker)).to_equal("")
         expect(ok).to_equal(true)
 
-    it "ignores an earlier sibling-block use when the reference is dead in this block":
-        var checker = NLLChecker.create(diamond())
+    it "ignores earlier and later sibling-block uses when the reference is dead in this block":
+        # In block 2 the first event at/after the query is the use at point 6
+        # in block 3, past block 2's end: only the block-boundary guard stops
+        # it from being read as a live use.
+        var checker = NLLChecker.create(fan3())
         checker.record_borrow(0, Place.local(0), BorrowKind.Mutable, 10)
         checker.record_use(2, Place.local(10))
+        checker.record_use(6, Place.local(10))
         checker.record_borrow(4, Place.local(0), BorrowKind.Mutable, 11)
         val ok = checker.check()
         expect(large_errors(checker)).to_equal("")
@@ -178,7 +194,8 @@ describe "NLL loan liveness across sibling blocks":
 
 # One reference used at every one of 2000 statement points: each liveness
 # query reads `local_events[local] ?? []` for a 2000-event list, which must
-# stay a binary search over a shared array, not a per-query copy.
+# stay a binary search over a shared array, not a per-query copy. These
+# cases check verdicts on that shape only; they do not measure cost.
 fn hot_local_uses(checker: NLLChecker, count: i64) -> NLLChecker:
     var c = checker
     var p = 1
@@ -188,7 +205,7 @@ fn hot_local_uses(checker: NLLChecker, count: i64) -> NLLChecker:
     c
 
 describe "NLL loan liveness for one heavily used local":
-    it "checks a reference used at 2000 points without going quadratic":
+    it "accepts shared loans for a reference used at every one of 2000 points":
         var checker = hot_local_uses(NLLChecker.create(straight_line(1000)), 2000)
         checker.record_borrow(0, Place.local(0), BorrowKind.Shared, 10)
         checker.record_borrow(1000, Place.local(0), BorrowKind.Shared, 11)
