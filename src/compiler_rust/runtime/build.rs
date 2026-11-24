@@ -51,6 +51,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
+    println!("cargo:rerun-if-changed=../../runtime/rt_pool_core.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_image.c");
     println!("cargo:rerun-if-changed=../../runtime/startup/common/runtime_log_hosted.c");
@@ -571,7 +572,16 @@ fn compile_c_runtime_sources() {
         // colliding with runtime_native.c under native-all-provider builds.
         let win_priv_stub = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
             .join("windows_private_root_provider.c");
-        let stub_body = "#include \"platform/runtime_windows_private_root.h\"\n";
+        // Match runtime_native.c before the first Windows header: FILE_ID_INFO
+        // is hidden when llvm-mingw defaults to a pre-Windows-8 SDK target.
+        // Keep a caller's newer target and the existing 128-bit identity ABI.
+        let stub_body = concat!(
+            "#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602\n",
+            "#undef _WIN32_WINNT\n",
+            "#define _WIN32_WINNT 0x0602\n",
+            "#endif\n",
+            "#include \"platform/runtime_windows_private_root.h\"\n",
+        );
         if fs::read_to_string(&win_priv_stub).ok().as_deref() != Some(stub_body) {
             fs::write(&win_priv_stub, stub_body).expect("write windows_private_root_provider.c");
         }

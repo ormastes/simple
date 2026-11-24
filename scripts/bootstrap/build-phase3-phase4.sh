@@ -304,6 +304,10 @@ run_path_check() {
       ;;
   esac
 
+  if [ "$PHASE" = p4 ]; then
+    emit_path_action "p4" "producer-hello-smoke" "$COMPILE_MODE" "one-binary" "0" "0"
+  fi
+
   case "$PHASE" in
     p4|all)
       emit_path_action "p4" "cli-release" "$COMPILE_MODE" "$p4_lmode_label" "0" "1"
@@ -786,6 +790,8 @@ case "$PHASE" in
     run_stage3_step "P3b" "$P3A_BIN" "$P3B_DIR" "$P3B_BIN" "stage3-b"
     ;;
   p4)
+    # An externally supplied P3b has not passed this invocation's Hello gate.
+    run_stage3_hello "P4-producer" "$P3B_BIN" "$P4_DIR/producer" || exit $?
     run_stage4_all
     ;;
   all)

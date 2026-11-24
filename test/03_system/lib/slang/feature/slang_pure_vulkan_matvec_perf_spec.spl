@@ -1,0 +1,93 @@
+"""
+## Purpose
+Times the Vulkan matvec on the real stories15M head shape (32000x288) with the
+weights bulk-uploaded as raw F32 bytes from model.safetensors, and checks the
+first 512 output rows against the CPU op. Separate from the op-parity spec
+because decoding the full CPU weight matrix exceeds the interpreter test budget.
+Skips with an explicit SKIPPED line when the Vulkan loader or the model file
+(SLANG_MODEL_ROOT/llama2c-stories15M/model.safetensors) is absent.
+"""
+
+use std.spec.*
+use std.io_runtime.{env_get, file_exists, file_read_bytes, file_append_text, dir_create_all}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_decode_f32_le}
+use std.gc_async_mut.slang.model_executor.pure.weights.{pure_weights_f32_ranges, PureF32Range}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_vulkan.{vk_ops_available, vk_ops_open, vk_tensor_upload, vk_tensor_upload_f32_bytes, vk_tensor_download, vk_tensor_matvec, vk_tensor_free, vk_ops_sync}
+
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+fn model_path() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? "C:/dev/keep/model"
+    root + "/llama2c-stories15M/model.safetensors"
+
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/vulkan_evidence.txt", line + "\n")
+
+fn rand_values(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var s = seed
+    var i: i64 = 0
+    while i < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s % 20001) as f64) / 10000.0 - 1.0)
+        i = i + 1
+    out
+
+fn ms3(us: i64) -> text:
+    "{us / 1000}.{us % 1000}"
+
+fn find_shape(ranges: [PureF32Range], rows: i64, cols: i64) -> PureF32Range:
+    for r in ranges:
+        if r.shape.len() == 2 and r.shape[0] == rows and r.shape[1] == cols:
+            return r
+    ranges[0]
+
+describe "slang pure runner Vulkan matvec timing (system)":
+    it "times matvec on the stories15M head shape":
+        val model = model_path()
+        if not vk_ops_available():
+            _record("SKIPPED: Vulkan loader not found")
+        elif not file_exists(model):
+            _record("SKIPPED: model not found: " + model)
+        else:
+            val ops = vk_ops_open().unwrap()
+            val bytes = file_read_bytes(model)
+            val ranges = pure_weights_f32_ranges(bytes).unwrap()
+            val r = find_shape(ranges, 32000, 288)
+            val rows = r.shape[0]
+            val cols = r.shape[1]
+            val x = tensor_from_values(rand_values(cols, 12), [cols])
+            val w = tensor_decode_f32_le(bytes, r.offset, 512 * cols, [512, cols])
+            val tu0 = time_now_nanos()
+            val dw = vk_tensor_upload_f32_bytes(ops, bytes, r.offset, r.shape).unwrap()
+            val tu1 = time_now_nanos()
+            val dx = vk_tensor_upload(ops, x).unwrap()
+            vk_tensor_download(ops, vk_tensor_matvec(ops, dw, dx).unwrap()).unwrap()
+            val cpu = tensor_matvec(w, x)
+            val tk0 = time_now_nanos()
+            var i: i64 = 0
+            while i < 20:
+                val dy = vk_tensor_matvec(ops, dw, dx).unwrap()
+                vk_ops_sync(ops).unwrap()
+                vk_tensor_free(ops, dy).unwrap()
+                i = i + 1
+            val tk1 = time_now_nanos()
+            val gpu = vk_tensor_download(ops, vk_tensor_matvec(ops, dw, dx).unwrap()).unwrap()
+            _record("PERF vulkan matvec {rows}x{cols}: gpu_excl_transfer_ms={ms3((tk1 - tk0) / 20 / 1000)} weight_bulk_upload_once_ms={(tu1 - tu0) / 1000000}")
+            var worst = 0.0
+            var scale = 1.0
+            var j: i64 = 0
+            while j < 512:
+                val a = if cpu.data[j] < 0.0: -cpu.data[j] else: cpu.data[j]
+                if a > scale:
+                    scale = a
+                val d0 = gpu.data[j] - cpu.data[j]
+                val d = if d0 < 0.0: -d0 else: d0
+                if d > worst:
+                    worst = d
+                j = j + 1
+            val e = worst / scale
+            _record("REL_ERR matvec head first 512 rows = {e}")
+            expect(e < 0.0001).to_equal(true)

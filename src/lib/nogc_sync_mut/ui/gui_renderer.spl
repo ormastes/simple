@@ -138,23 +138,23 @@ fn _gui_begin_call(renderer: GuiRenderer) -> _GuiCallLease?:
     val el = renderer.el
     val fp_loop_window_count = renderer.fp_loop_window_count
     if library_opt == nil or owner_opt == nil or ticket == 0u64 or win <= 0:
-        return nil
+        return None
     val library = library_opt.?
     if not library.begin_raw_call():
-        return nil
+        return None
     val owner = owner_opt.?
     val raw = native_session_owner_begin_v1(owner, ticket)
     if raw != win:
         if raw > 0:
             _ = native_session_owner_end_v1(owner, ticket)
         library.end_raw_call()
-        return nil
+        return None
     # The provider pump is thread-local. Check its unique loop ID before
     # dispatching any window or event call on this admitted session.
     if spl_wffi_call_i64(fp_loop_window_count, [el], 1) < 0:
         _ = native_session_owner_end_v1(owner, ticket)
         library.end_raw_call()
-        return nil
+        return None
     Some(_GuiCallLease(library: library, owner: owner, ticket: ticket))
 
 @unsafe(reason: "releases a pinned GUI provider operation and window admission", capabilities: [ffi, raw_ptr])
@@ -195,7 +195,7 @@ impl GuiRenderer:
     # Sentinel instance (win == 0) for non-optional storage slots.
     static fn empty() -> GuiRenderer:
         GuiRenderer(
-            engine: "", library: nil, session_owner: nil,
+            engine: "", library: None, session_owner: None,
             session_ticket: 0u64, el: 0, win: 0, width: 0, height: 0,
             fp_poll: 0, fp_type: 0,
             fp_key_scancode: 0, fp_key_keycode: 0, fp_key_pressed: 0,
@@ -214,18 +214,18 @@ impl GuiRenderer:
         if engine == "electron":
             print "GuiRenderer: engine 'electron' is an API stub (not implemented) — no window opened"
             dbg_stage("gui", "renderer_create_failed_electron_stub")
-            return nil
+            return None
         if engine != "winit" and engine != "auto" and engine != "":
             print "GuiRenderer: unknown engine '{engine}' (supported: winit, auto, electron-stub)"
             dbg_stage("gui", "renderer_create_failed_unknown_engine")
-            return nil
+            return None
 
         dbg_stage("gui", "winit_dylib_open_start")
         val candidates = gui_renderer_lib_candidates()
-        var loaded: DynLib? = nil
+        var loaded: DynLib? = None
         var errors: [text] = []
         var i = 0
-        while i < candidates.len() and loaded == nil:
+        while i < candidates.len() and loaded.is_none():
             val attempt = unsafe(capabilities: [ffi]):
                 DynLib.load_checked(candidates[i])
             match attempt:
@@ -234,12 +234,12 @@ impl GuiRenderer:
                 case Err(error):
                     errors.push(error)
             i = i + 1
-        if loaded == nil:
+        if loaded.is_none():
             print "GuiRenderer: cannot load the winit provider — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
             for error in errors:
                 print "GuiRenderer:   {error}"
             dbg_stage("gui", "winit_dylib_open_failed")
-            return nil
+            return None
         var l = loaded.unwrap()
         dbg_stage("gui", "winit_dylib_open_done")
         _gui_missing_symbols = []
@@ -272,7 +272,7 @@ impl GuiRenderer:
             dbg_stage("gui", "winit_symbols_missing")
             unsafe(capabilities: [ffi]):
                 l.close()
-            return nil
+            return None
         if fp_poll == 0 or fp_type == 0 or fp_key_scancode == 0 or
             fp_key_keycode == 0 or fp_key_pressed == 0 or fp_mouse_button == 0 or
             fp_mouse_pressed == 0 or fp_mouse_x == 0 or fp_mouse_y == 0 or
@@ -294,7 +294,7 @@ impl GuiRenderer:
         if not l.begin_raw_call():
             unsafe(capabilities: [ffi]):
                 l.close()
-            return nil
+            return None
         val el = spl_wffi_call_i64(fp_loop_new, [], 0)
         if el == 0:
             print "GuiRenderer: event loop creation failed (macOS needs SIMPLE_GUI=1 for main-thread execution)"
@@ -302,7 +302,7 @@ impl GuiRenderer:
             l.end_raw_call()
             unsafe(capabilities: [ffi]):
                 l.close()
-            return nil
+            return None
         dbg_stage("gui", "winit_event_loop_create_done")
         val title_ptr = spl_str_ptr(title)
         dbg_stage("gui", "winit_window_create_start")
@@ -314,7 +314,7 @@ impl GuiRenderer:
                 l.end_raw_call()
                 unsafe(capabilities: [ffi]):
                     l.close()
-            return nil
+            return None
         dbg_stage("gui", "winit_window_create_done")
         val owner = native_session_owner_new_v1()
         val ticket = native_session_owner_register_v1(owner, win)
@@ -328,7 +328,7 @@ impl GuiRenderer:
                 l.end_raw_call()
                 unsafe(capabilities: [ffi]):
                     l.close()
-            return nil
+            return None
         GuiRenderer(
             engine: "winit-dyn",
             library: Some(l),
@@ -399,7 +399,7 @@ impl GuiRenderer:
     fn is_open() -> bool:
         if self.win == 0:
             return false
-        if self.session_owner == nil:
+        if self.session_owner.is_none():
             return true
         native_session_owner_is_live_v1(self.session_owner.?, self.session_ticket)
 
@@ -586,7 +586,7 @@ impl GuiRenderer:
     # leaves the session quarantined and its mapping pin held for safety.
     @unsafe(reason: "destroys raw foreign objects and closes their provider library", capabilities: [ffi, raw_ptr])
     me close() -> bool:
-        if self.library == nil or self.session_owner == nil or
+        if self.library.is_none() or self.session_owner.is_none() or
            self.session_ticket == 0u64:
             return false
         val owner = self.session_owner.?

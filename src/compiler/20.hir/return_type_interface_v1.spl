@@ -276,6 +276,10 @@ fn rti_term_of_hir_type(t: HirType, symbols: SymbolTable, type_params: [text]) -
 fn rti_symbol_module(symbols: SymbolTable, raw: i64) -> text:
     rti_module_id(symbols.symbol_defining_module_scalar_raw(raw))
 
+# Cross-module form (50.mir function_lowering): a SymbolId, never a raw id.
+pub fn rti_symbol_defining_module(symbols: SymbolTable, symbol: SymbolId) -> text:
+    rti_symbol_module(symbols, symbol.id)
+
 fn rti_type_decl_ref(symbols: SymbolTable, raw: i64) -> Result<DeclRef, RtiError>:
     if val sym = symbols.get_symbol_raw(raw):
         val kind = rti_kind_display(sym.kind)
@@ -690,22 +694,45 @@ impl ReturnTypeInterfaceTable:
                 return rti_fn_ref(module_id, bound)
         rti_fn_ref(module_id, local)
 
-    fn callee_return(expr: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<ReturnTypeEntry, RtiError>:
+    fn callee_return(expr: HirExpr, symbols: SymbolTable, receiver_type: HirType?, consumer_params: [text] = []) -> Result<ReturnTypeEntry, RtiError>:
         match expr.kind:
-            case HirExprKind.Call(callee, _, _): self.call_return(callee, symbols)
+            case HirExprKind.Call(callee, _, type_args): self.call_return(callee, symbols, type_args, consumer_params)
             case HirExprKind.MethodCall(receiver, method, _, _): self.method_return(receiver, method, symbols, receiver_type)
             case HirExprKind.Var(sym): self.fn_return(symbols, sym.id, "")
             case HirExprKind.NamedVar(sym, name): self.fn_return(symbols, sym.id, name)
             case _: Err(rti_error("E-RTI-001", "expression is not a call to a declared callable (RTI v1 covers free functions and struct/class methods)"))
 
-    fn call_return(callee: HirExpr, symbols: SymbolTable) -> Result<ReturnTypeEntry, RtiError>:
+    fn call_return(callee: HirExpr, symbols: SymbolTable, type_args: [HirType] = [], consumer_params: [text] = []) -> Result<ReturnTypeEntry, RtiError>:
         match callee.kind:
-            case HirExprKind.Var(sym): self.fn_return(symbols, sym.id, "")
-            case HirExprKind.NamedVar(sym, name): self.fn_return(symbols, sym.id, name)
-            case HirExprKind.Field(base, field, _): self.method_return(base, field, symbols, nil)
+            case HirExprKind.Var(sym): self.fn_return(symbols, sym.id, "", type_args, consumer_params)
+            case HirExprKind.NamedVar(sym, name): self.fn_return(symbols, sym.id, name, type_args, consumer_params)
+            case HirExprKind.Field(base, field, _):
+                if type_args.len() > 0:
+                    return Err(rti_error("E-RTI-002", "explicit call type arguments require an owned free-function declaration"))
+                self.method_return(base, field, symbols, nil)
             case _: Err(rti_error("E-RTI-001", "callee expression shape is not covered by RTI v1 (closures/indirect calls)"))
 
-    fn fn_return(symbols: SymbolTable, raw: i64, name: text) -> Result<ReturnTypeEntry, RtiError>:
+    fn explicit_free_row_return_v1(row: ReturnTypeRow, type_args: [HirType], symbols: SymbolTable, consumer_params: [text]) -> Result<ReturnTypeEntry, RtiError>:
+        # Param indices were published in the declaration's binder order,
+        # including binders unused by its return. Never derive their order
+        # from occurrences in the result or infer over an explicit binding.
+        if type_args.len() == 0: return Ok(row.entry)
+        if row.key.owner != None:
+            return Err(rti_error("E-RTI-002", "explicit call type arguments require an owned free-function declaration"))
+        if type_args.len() != row.type_param_count:
+            # E-RTI-003 is the MIR consumer's erased-generic fallback. An
+            # explicit arity error must remain fatal instead of losing args.
+            return Err(rti_error("E-RTI-002", "'{row.decl.display}' of module '{row.decl.module_id}' takes {row.type_param_count} explicit type argument(s), got {type_args.len()}"))
+        # Validate every argument before the non-concrete decision. A T in
+        # an earlier argument must not hide Error/Infer or a missing owner
+        # later in this list (or inside a nested argument).
+        val terms = rti_terms_of_hir_types(type_args, symbols, consumer_params)?
+        # If a validated argument names a declared caller binder, substitution
+        # leaves a Param in this entry. The existing require_concrete boundary
+        # handles its erased-generic fallback; callee_return itself succeeds.
+        Ok(ReturnTypeEntry.Decided(self.instantiate(row, terms)?))
+
+    fn fn_return(symbols: SymbolTable, raw: i64, name: text, type_args: [HirType] = [], consumer_params: [text] = []) -> Result<ReturnTypeEntry, RtiError>:
         # NamedVar deliberately preserves this identity across HIR transport:
         # a table rename (and module-local raw id) need not survive that pass.
         # Match the call lowerer's carried-name authority, never a suffix or
@@ -714,7 +741,7 @@ impl ReturnTypeInterfaceTable:
             # HIR carries the original declaration name even for an imported
             # alias. A consumer alias must not rewrite or reject this owner.
             if val row = self.row_at(qualified):
-                return Ok(row.entry)
+                return self.explicit_free_row_return_v1(row, type_args, symbols, consumer_params)
             # Infer/unannotated functions intentionally publish no row. Keep
             # their existing no-answer path only when the raw table proves
             # this same free declaration; never rewrite that proof by alias.
@@ -743,7 +770,7 @@ impl ReturnTypeInterfaceTable:
             target = rti_wildcard_callable(symbols, name)?
         val decl = self.decl_ref_of(symbols, target)?
         if val row = self.row_at(decl):
-            return Ok(row.entry)
+            return self.explicit_free_row_return_v1(row, type_args, symbols, consumer_params)
         Err(rti_error("E-RTI-001", "callee '{rti_last_segment(decl.display)}' of module '{decl.module_id}' has no return-type row ({decl.display})"))
 
     fn receiver_owner(receiver: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<(DeclRef, bool), RtiError>:

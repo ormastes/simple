@@ -19,6 +19,8 @@ use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser
 use compiler.frontend.trace_policy.{frontend_trace_suppression_set}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, TextFindingKind}
+use compiler.tools.fix.rules.impl_.lint_option_pattern.{non_option_pattern_lines}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
@@ -32,7 +34,7 @@ use compiler.semantics.lint.param_tag.{ParamTagWarning, check_param_tag, extract
 
 # Lint codes emitted by this path that have a LintConfig config-name mapping.
 fn _governed_lint_codes() -> [text]:
-    ["primitive_api", "bare_bool", "simple_script_required",
+    ["primitive_api", "bare_bool", "bare_text", "bare_text_domain", "simple_script_required",
      "T001", "T002", "T003", "T004", "ARG001", "ARG002", "ACC001", "NAME001",
      "DTYP001",
      "COLL001", "COLL002", "COLL003", "COLL004", "COLL005", "COLL006",
@@ -182,6 +184,17 @@ fn _emit_primitive_api_text(lines: [text], file: text, format: text) -> i64:
                         print "{file}:{line_num}: warning[{_pa_lint_code(rtype)}]: public API return type uses bare primitive type '{rtype}'"
                     count = count + 1
         i = i + 1
+    # SPL-TEXT-001 (public `text`): reuse the CLI engine's single detector so
+    # both surfaces report `bare_text` / `bare_text_domain` identically (RB-DIAG-01).
+    for f in primitive_api_findings(file, lines):
+        if f.code != "SPL-TEXT-001":
+            continue
+        val tcode = if f.text_kind == TextFindingKind.DomainNamed: "bare_text_domain" else: "bare_text"
+        if format == "json":
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{tcode}\",\"message\":\"{query_json_escape(f.message)}\",\"line\":{f.line},\"col\":{f.column},\"end_line\":{f.line},\"end_col\":{f.column},\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{f.line}: warning[{tcode}]: {f.message}"
+        count = count + 1
     count
 
 fn _emit_lint_if_readable(file: text, format: text):
@@ -262,6 +275,13 @@ fn _emit_source_lint_diagnostics(file: text, source: text, format: text) -> i64:
     count = count + _emit_text_heuristic_lints(
         lines, source_locations, indent_successors, file, format)
     count = count + _emit_primitive_api_text(lines, file, format)
+    # SPL-PAT-001: shared detector with the CLI engine (RB-DIAG-01).
+    for pat_line in non_option_pattern_lines(lines):
+        if format == "json":
+            _diag_emit_or_collect("{\"severity\":1,\"code\":\"non_option_pattern_match\",\"message\":\"Some/None pattern matched against a non-Option subject\",\"line\":{pat_line},\"col\":1,\"end_line\":{pat_line},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{pat_line}: error[non_option_pattern_match]: Some/None pattern matched against a non-Option subject"
+        count = count + 1
     count = count + _run_ast_lint_passes(
         source, source_locations, file, format)
     _clear_lint_config_overrides()

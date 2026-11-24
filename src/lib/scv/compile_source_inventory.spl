@@ -6,7 +6,8 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
-use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote,
+    transient_session_heap_live_v1}
 @allow(star_import) # reason: public compatibility facade over the pure inventory core
 export use std.scv.compile_source_inventory_core.*
 use std.nogc_sync_mut.io_runtime.{dir_list_or_empty}
@@ -945,13 +946,44 @@ fn compile_source_inventory_read_admitted_digest_v1(
             _admitted_generation_memo_v1.digest == digest:
         return _admitted_generation_memo_v1
     # A result read under a caller-owned transient scope dies with that scope;
-    # only a result this reader promoted itself may outlive the call.
-    val promotable = transient_array_scope_state_v1() == 0
+    # only a result this reader promoted itself may outlive the call. Under a
+    # live build session that promotion is session adoption, not permanence
+    # (runtime_native.c rt_transient_heap_promote, BSM alias): the graph is
+    # reclaimed by rt_session_heap_end, so it must not enter the memo either.
+    val promotable = transient_array_scope_state_v1() == 0 and not transient_session_heap_live_v1()
     val read = compile_source_inventory_read_at_pointer_v1(cache_root, digest)
     if promotable and read.valid and read.digest == digest and read.inventory.?:
         _admitted_generation_memo_root_v1 = cache_root
         _admitted_generation_memo_v1 = read
     read
+
+fn compile_source_inventory_seed_admitted_digest_v1(cache_root: text, digest: text) -> bool:
+    """Verify and memoize an admitted generation BEFORE the caller opens a scope.
+
+    compile_source_inventory_read_admitted_digest_v1 may only retain a result
+    it promoted itself, so it stores nothing while a caller-owned transient
+    scope is active or paused. Every native-build caller reads under such a
+    scope (source-authority validation opens its own; the parse-closure owner
+    wraps the whole walk), so the memo stayed empty and a warm hello-world
+    coordinator fully re-read, re-hashed and re-decoded one 18.6 MB generation
+    8 times through the admitted reader (measured 2026-11-24, 7 of 8 at scope
+    state 1). A scope owner calls this first, at state 0: the one full
+    verification happens here and the scoped reads that follow are memo hits.
+
+    Adds no trust: it IS the admitted read, moved ahead of the scope. Under an
+    active or paused scope it does nothing and returns false, so it can never
+    add a read. A rejected blob is not remembered and returns false; the
+    caller's own read then fails closed exactly as before.
+
+    Also a no-op under a live build session: promotion there is session
+    adoption (runtime_native.c rt_transient_heap_promote, BSM alias), so the
+    memoized graph would be reclaimed at session end and every later hit
+    would dangle.
+    """
+    if transient_array_scope_state_v1() != 0 or transient_session_heap_live_v1():
+        return false
+    val seeded = compile_source_inventory_read_admitted_digest_v1(cache_root, digest)
+    seeded.valid and seeded.digest == digest
 
 fn compile_source_inventory_read_at_pointer_unscoped_v1(
     cache_root: text, pointer_content: text
@@ -1031,6 +1063,7 @@ export compile_source_inventory_digest_v1
 export compile_source_inventory_publish_v1, compile_source_inventory_publish_reasoned_v1, compile_source_inventory_read_current_v1
 export compile_source_inventory_read_pointer_content_v1, compile_source_inventory_read_at_pointer_v1
 export compile_source_inventory_read_admitted_digest_v1, compile_source_inventory_full_read_count_v1
+export compile_source_inventory_seed_admitted_digest_v1
 export compile_source_inventory_revalidate_pointer_v1
 export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1

@@ -19,6 +19,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 
 usage() {
     cat <<'EOF'
@@ -324,6 +325,16 @@ event() {
 }
 
 engine_done="$generation_dir/engine.done.env"
+resume_input=
+resume_input_sha=
+if [ "$resume_stage3" -eq 1 ]; then
+    resume_input="$generation_dir/resume-input.env"
+    bootstrap_scheduler_write_resume_input "$resume_input" "$output" "$root" "$lease" "$lease_sha" || {
+        echo 'bootstrap-scheduler-error: existing Phase2 resume authority did not verify' >&2
+        exit 1
+    }
+    resume_input_sha=$(bootstrap_scheduler_hash_file "$resume_input") || exit 1
+fi
 engine_started=$(date +%s)
 event task-start stage-engine building
 (
@@ -390,6 +401,8 @@ engine_pid=$!
 
 run_qualifier() {
     (
+        set -- "$output" "$generation_dir" "$lease" "$lease_sha" "$engine_done"
+        [ -z "$resume_input" ] || set -- "$@" "$resume_input" "$resume_input_sha"
         # No ulimit -v here, deliberately: the broad Stage-2 gate links a
         # native hello-world, and mold's multi-GiB output-buffer reservation
         # fails under ANY finite RLIMIT_AS -- verified at caps from 2 GiB to
@@ -399,8 +412,7 @@ run_qualifier() {
         # the mandatory gate and got the engine TERM'd on every speculative
         # run. Resident-memory protection remains the kill-monitor's job.
         SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
-            /bin/sh "$qualifier" "$output" "$generation_dir" "$lease" \
-            "$lease_sha" "$engine_done"
+            /bin/sh "$qualifier" "$@"
     ) >"$generation_dir/qualification.log" 2>&1
 }
 
@@ -499,7 +511,11 @@ if [ "$qualification_status" = passed ] &&
     admission_receiver=$(bootstrap_scheduler_manifest_value receiver_evidence_path \
         "$qualification_admission" 2>/dev/null || true)
     admission_root=$(dirname -- "$(dirname -- "$qualification_admission")")
-    qualification_candidate=$admission_root/stage2-admitted/simple
+    qualification_candidate=$(bootstrap_scheduler_manifest_value candidate_path "$qualification_admission") || exit 1
+    case "$qualification_candidate" in
+        "$admission_root/stage2-admitted/simple"|"$admission_root/stage2-admitted/simple.exe") ;;
+        *) echo 'bootstrap-scheduler-error: noncanonical admitted candidate' >&2; exit 1 ;;
+    esac
     admission_source=$admission_root/source-inputs-before.txt
     admission_runtime=$admission_root/runtime-admitted.txt
     admission_tool=$admission_root/tool-authority-before.txt
@@ -520,7 +536,12 @@ stage3_evidence_status=invalid
 stage3_manifest=
 stage3_candidate=
 stage3_result="$generation_dir/stage3.result.env"
-set -- "$output"/stage3/*/provenance.env
+if [ "$resume_stage3" -eq 1 ]; then
+    resume_platform=$(bootstrap_stage3_host_platform) || exit 1
+    set -- "$output/stage3/$resume_platform/provenance.env"
+else
+    set -- "$output"/stage3/*/provenance.env
+fi
 stage3_manifest_count=0
 for stage3_manifest_candidate in "$@"; do
     if [ -f "$stage3_manifest_candidate" ] && [ ! -L "$stage3_manifest_candidate" ]; then
@@ -655,6 +676,13 @@ bootstrap_scheduler_verify_task_receipt \
 # This immutable admission is the authority for every Stage-4/deploy/release
 # continuation. It is written and re-verified while the generation lease is
 # still current, before the continuation process is allowed to start.
+if [ -n "$resume_input" ]; then
+    [ "$(bootstrap_scheduler_hash_file "$resume_input")" = "$resume_input_sha" ] || exit 1
+    bootstrap_scheduler_verify_resume_input "$resume_input" "$output" "$root" "$lease" "$lease_sha" || {
+        echo 'bootstrap-scheduler-error: existing Phase2 resume authority changed' >&2
+        exit 1
+    }
+fi
 lineage_tmp="$generation_dir/lineage-admission.env.tmp.$$"
 {
     echo schema=simple-bootstrap-lineage-admission-v1
@@ -680,6 +708,10 @@ lineage_tmp="$generation_dir/lineage-admission.env.tmp.$$"
     echo overlap_observed="$overlap_observed"
     echo schedule_mode="$schedule_mode"
     echo ancestor_chain=qualified-untainted
+    if [ -n "$resume_input" ]; then
+        echo resume_input_path="$resume_input"
+        echo resume_input_sha256="$resume_input_sha"
+    fi
     echo completed_epoch_seconds="$(date +%s)"
 } >"$lineage_tmp"
 bootstrap_scheduler_atomic_replace "$lineage_tmp" \
@@ -780,6 +812,17 @@ if [ "$wants_full_cli" -eq 1 ]; then
         exit 64
     }
     continuation_status=failed
+    bootstrap_planner_v2_verify "$stage4_receipt" "$root" || exit 1
+    [ "$(bootstrap_planner_v2_field target "$stage4_receipt")" = //bootstrap:stage4 ] || exit 1
+    [ "$(bootstrap_planner_v2_field platform "$stage4_receipt")" = \
+      "$(bootstrap_stage3_manifest_value platform "$stage3_manifest")" ] || exit 1
+    stage4_binding=$(bootstrap_stage3_stage4_binding_sha256 \
+        "$stage4_receipt" "$stage3_candidate" "$stage3_manifest" "$backend") || exit 1
+    [ -z "${SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256:-}" ] || \
+        [ "$SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256" = "$stage4_binding" ] || {
+        echo 'bootstrap-scheduler-error: supplied Stage4 binding mismatch' >&2
+        exit 1
+    }
     continuation_started=$(date +%s)
     # The engine permits only --jobs=1 for a Stage 4 resume. Loud, not a comment.
     echo "bootstrap-strategy: serial: Stage 4 continuation runs --jobs=1 (engine permits only one job for a Stage 4 resume; host cpu_total=${cpu_total:-unknown} not used)" >&2
@@ -794,6 +837,7 @@ if [ "$wants_full_cli" -eq 1 ]; then
     continuation_quarantine=1
     set +e
     env SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
+        SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256="$stage4_binding" \
         SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE="$continuation_quarantine" \
         SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION="$lineage" \
         SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION_SHA256="$lineage_sha" \

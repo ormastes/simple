@@ -1,0 +1,182 @@
+# Tracks: doc/08_tracking/bug/2026-11-16_slang_cuda_provider_unverified_no_nvidia_host.md
+#
+# slang pure backend — CUDA ops provider vs the CPU provider (tensor_ops.spl).
+# Requires an NVIDIA GPU + driver + NVRTC. Authored on an AMD-only host, so the
+# device cases are STATIC-ONLY there. Not tagged in-development: that tag is not
+# for environmental unavailability (doc/07_guide/infra/testing.md). Without an
+# NVIDIA driver every device case returns early, and because the runner counts
+# that as a pass the skip reason is also appended to
+# build/probe/pure_evidence.txt as a `SKIPPED:` line (same convention as the ROCm
+# specs): a green run is only evidence of CUDA when the log has `CUDA DEVICE:`.
+# A driver without NVRTC, or without a device, is also a recorded skip; any
+# other open failure is a FAIL. Every opened device is closed again.
+# The hardware-free argument checks live in
+# test/01_unit/lib/gc_async_mut/gpu/cuda_compute_spec.spl.
+# Tolerance: |gpu - cpu| <= 1e-4 * max(1, max|cpu|) per element.
+
+use std.spec.*
+use std.io_runtime.{file_append_text, dir_create_all}
+use std.gc_async_mut.gpu.cuda.cuda_compute.{cuda_driver_available}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_attention, tensor_rope, tensor_kv_write, tensor_row, tensor_argmax}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_cuda.{CudaOps, cuda_ops_open, cuda_ops_close, cuda_ops_device_name, cuda_tensor_upload, cuda_tensor_download, cuda_tensor_matvec, cuda_tensor_rmsnorm, cuda_tensor_add, cuda_tensor_mul, cuda_tensor_silu, cuda_tensor_attention, cuda_tensor_rope, cuda_tensor_kv_write, cuda_tensor_row, cuda_tensor_argmax}
+
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/pure_evidence.txt", line + "\n")
+
+# Open the device, or None after recording a skip. Environmental unavailability
+# (no driver, driver without the CUDA toolkit's NVRTC, or no device: cuInit
+# rc=100) is a recorded skip; any other open failure is an Err, which the case's unwrap() turns into a failure.
+fn open_or_skip() -> Result<Option<CudaOps>, text>:
+    if not cuda_driver_available():
+        _record("SKIPPED: slang_pure_cuda_ops_spec: no NVIDIA driver library (nvcuda.dll / libcuda.so.1) on this host")
+        return Ok(None)
+    val r = cuda_ops_open()
+    if r.is_ok():
+        return Ok(Some(r.unwrap()))
+    val e = r.unwrap_err()
+    if (e.contains("NVRTC") and e.contains("not found")) or e.contains("cuInit failed rc=100"):
+        _record("SKIPPED: slang_pure_cuda_ops_spec: {e}")
+        return Ok(None)
+    Err(e)
+
+fn rand_values(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var s = seed
+    var i: i64 = 0
+    while i < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s % 20001) as f64) / 10000.0 - 1.0)
+        i = i + 1
+    out
+
+fn rand_tensor(shape: [i64], seed: i64) -> PureTensor:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    tensor_from_values(rand_values(n, seed), shape)
+
+# Max |gpu - cpu| relative to max(1, max|cpu|).
+fn rel_err(gpu: PureTensor, cpu: PureTensor) -> f64:
+    var scale = 1.0
+    var i: i64 = 0
+    while i < cpu.data.len():
+        val a = if cpu.data[i] < 0.0: -cpu.data[i] else: cpu.data[i]
+        if a > scale:
+            scale = a
+        i = i + 1
+    var worst = 0.0
+    i = 0
+    while i < cpu.data.len():
+        val d0 = gpu.data[i] - cpu.data[i]
+        val d = if d0 < 0.0: -d0 else: d0
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst / scale
+
+describe "pure CUDA ops provider":
+    it "opens an NVIDIA device and closes it again":
+        if val ops = open_or_skip().unwrap():
+            # Names such as "Tesla V100-SXM2-16GB" do not contain "NVIDIA".
+            _record("CUDA DEVICE: {cuda_ops_device_name(ops)}")
+            expect(cuda_ops_device_name(ops).len() > 0).to_equal(true)
+            cuda_ops_close(ops)
+            if val again = open_or_skip().unwrap():
+                cuda_ops_close(again)
+
+    it "matvec matches the CPU op":
+        if val ops = open_or_skip().unwrap():
+            val w = rand_tensor([300, 288], 1)
+            val x = rand_tensor([288], 2)
+            val dw = cuda_tensor_upload(ops, w).unwrap()
+            val dx = cuda_tensor_upload(ops, x).unwrap()
+            val y = cuda_tensor_download(ops, cuda_tensor_matvec(ops, dw, dx).unwrap()).unwrap()
+            expect(y.data.len()).to_equal(300)
+            expect(rel_err(y, tensor_matvec(w, x)) < 0.0001).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "rmsnorm matches the CPU op":
+        if val ops = open_or_skip().unwrap():
+            val x = rand_tensor([288], 3)
+            val w = rand_tensor([288], 4)
+            val y = cuda_tensor_download(ops, cuda_tensor_rmsnorm(ops, cuda_tensor_upload(ops, x).unwrap(), cuda_tensor_upload(ops, w).unwrap(), 0.00001).unwrap()).unwrap()
+            expect(rel_err(y, tensor_rmsnorm(x, w, 0.00001)) < 0.0001).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "add, mul and silu match the CPU ops":
+        if val ops = open_or_skip().unwrap():
+            val a = rand_tensor([768], 5)
+            val b = rand_tensor([768], 6)
+            val da = cuda_tensor_upload(ops, a).unwrap()
+            val db = cuda_tensor_upload(ops, b).unwrap()
+            val s = cuda_tensor_download(ops, cuda_tensor_add(ops, da, db).unwrap()).unwrap()
+            val m = cuda_tensor_download(ops, cuda_tensor_mul(ops, da, db).unwrap()).unwrap()
+            val u = cuda_tensor_download(ops, cuda_tensor_silu(ops, da).unwrap()).unwrap()
+            expect(rel_err(s, tensor_add(a, b)) < 0.0001).to_equal(true)
+            expect(rel_err(m, tensor_mul(a, b)) < 0.0001).to_equal(true)
+            expect(rel_err(u, tensor_silu(a)) < 0.0001).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "an elementwise op over empty tensors succeeds (a zero-size grid is not launched)":
+        if val ops = open_or_skip().unwrap():
+            val empty = tensor_from_values([], [0])
+            val de = cuda_tensor_upload(ops, empty).unwrap()
+            val r = cuda_tensor_add(ops, de, de)
+            expect(r.is_ok()).to_equal(true)
+            expect(r.unwrap().n).to_equal(0)
+            cuda_ops_close(ops)
+
+    it "attention matches the CPU op":
+        if val ops = open_or_skip().unwrap():
+            val q = rand_tensor([288], 7)
+            val kb = rand_tensor([32, 288], 8)
+            val vb = rand_tensor([32, 288], 9)
+            val y = cuda_tensor_download(ops, cuda_tensor_attention(ops, cuda_tensor_upload(ops, q).unwrap(), cuda_tensor_upload(ops, kb).unwrap(), cuda_tensor_upload(ops, vb).unwrap(), 20, 6, 48).unwrap()).unwrap()
+            expect(rel_err(y, tensor_attention(q, kb, vb, 20, 6, 48)) < 0.0001).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "rope matches the CPU op":
+        if val ops = open_or_skip().unwrap():
+            val x = rand_tensor([288], 10)
+            val y = cuda_tensor_download(ops, cuda_tensor_rope(ops, cuda_tensor_upload(ops, x).unwrap(), 7, 6, 48, 10000.0).unwrap()).unwrap()
+            expect(rel_err(y, tensor_rope(x, 7, 6, 48, 10000.0)) < 0.0001).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "kv_write writes one row in place like the CPU op":
+        if val ops = open_or_skip().unwrap():
+            val buf = rand_tensor([4, 6], 11)
+            val row = rand_tensor([6], 12)
+            val dbuf = cuda_tensor_upload(ops, buf).unwrap()
+            cuda_tensor_kv_write(ops, dbuf, 2, cuda_tensor_upload(ops, row).unwrap()).unwrap()
+            expect(rel_err(cuda_tensor_download(ops, dbuf).unwrap(), tensor_kv_write(buf, 2, row)) < 0.0001).to_equal(true)
+            expect(cuda_tensor_kv_write(ops, dbuf, 4, cuda_tensor_upload(ops, row).unwrap()).is_err()).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "row lookup matches the CPU op":
+        if val ops = open_or_skip().unwrap():
+            val table = rand_tensor([5, 6], 13)
+            val y = cuda_tensor_download(ops, cuda_tensor_row(ops, cuda_tensor_upload(ops, table).unwrap(), 3).unwrap()).unwrap()
+            expect(rel_err(y, tensor_row(table, 3)) < 0.0001).to_equal(true)
+            cuda_ops_close(ops)
+
+    it "argmax returns the CPU index, lowest index on ties":
+        if val ops = open_or_skip().unwrap():
+            var vals = rand_values(32000, 14)
+            vals[31337] = 5.0
+            val unique = tensor_from_values(vals, [32000])
+            expect(cuda_tensor_argmax(ops, cuda_tensor_upload(ops, unique).unwrap()).unwrap()).to_equal(31337)
+            vals[31337] = 0.5
+            vals[20000] = 7.0
+            vals[100] = 7.0
+            val tied = tensor_from_values(vals, [32000])
+            expect(cuda_tensor_argmax(ops, cuda_tensor_upload(ops, tied).unwrap()).unwrap()).to_equal(tensor_argmax(tied))
+            expect(tensor_argmax(tied)).to_equal(100)
+            cuda_ops_close(ops)
+
+    it "reports a CUDA error as Err, not a crash":
+        if val ops = open_or_skip().unwrap():
+            val bad = cuda_tensor_attention(ops, cuda_tensor_upload(ops, rand_tensor([288], 1)).unwrap(), cuda_tensor_upload(ops, rand_tensor([288], 1)).unwrap(), cuda_tensor_upload(ops, rand_tensor([288], 1)).unwrap(), 2000, 6, 48)
+            expect(bad.is_err()).to_equal(true)
+            cuda_ops_close(ops)

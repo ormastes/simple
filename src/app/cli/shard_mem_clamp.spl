@@ -1054,14 +1054,20 @@ pub fn shard_measured_estimate_kib_v1(recorded_peak_kib: i64) -> i64:
     val est = recorded_peak_kib + recorded_peak_kib / 4
     if est > SHARD_MEASURED_FLOOR_KB_V1: est else: SHARD_MEASURED_FLOOR_KB_V1
 
-# Parse-shard price (phase-3 2026-11-15): SIMPLE_PARSE_SHARD_WORKER_KB wins;
-# else host worker_mem_mib, else the default -- capped by an explicit
-# SIMPLE_HIR_SHARD_WORKER_KB, since a slim parse shard is never heavier than a
-# HIR shard (host 26 GiB priced parse at 27262976 kB despite HIR=6815744).
-pub fn shard_parse_worker_budget_kb_for_v1(parse_raw: text, hir_raw: text, host_kb: i64, default_kb: i64) -> i64:
+# Each parse child loads the published closure before claiming individual files.
+# Three children on the 1,652-file macOS stage-3 closure reached 17,978,880 KiB
+# in aggregate. Round the average tree cost up to 6 GiB per concurrent slot.
+# Scale this admission floor by file count up to the observed closure size.
+# Larger configured worker estimates still win.
+@allow(primitive_api)  # Raw environment fields, KiB, and the published file count (-1 when unknown).
+pub fn shard_parse_worker_budget_kb_for_v1(parse_raw: text, hir_raw: text, host_kb: i64,
+        default_kb: i64, closure_files: i64 = -1) -> i64:
     val parse_kb = shard_mem_available_kb_from_field(parse_raw)
-    if parse_kb > 0:
-        return parse_kb
     val base = if host_kb > 0: host_kb else: default_kb
     val hir_kb = shard_mem_available_kb_from_field(hir_raw)
-    if hir_kb > 0 and hir_kb < base: hir_kb else: base
+    val fallback = if hir_kb > 0 and hir_kb < base: hir_kb else: base
+    val configured = if parse_kb > 0: parse_kb else: fallback
+    if closure_files <= 0: return configured
+    val sampled_files = if closure_files < 1652: closure_files else: 1652
+    val closure_floor = (sampled_files * 6291456 + 1651) / 1652
+    if configured < closure_floor: closure_floor else: configured

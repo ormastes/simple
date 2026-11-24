@@ -4,7 +4,7 @@ Section placement honours sh_addralign, so a section-relative normalization
 is valid when it covers every requested alignment. Raw ELF tables are updated
 and reparsed together; callers never receive inconsistent raw/parsed objects.
 """
-use compiler.backend.linker.elf_parser.{ElfObject, ElfRelocation, elf_parse_object,
+use compiler.backend.linker.elf_parser.{ElfObject, ElfSymbol, ElfRelocation, elf_parse_object,
     elf_reloc_type, elf_reloc_sym, elf_section_addralign, elf_section_entsize}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_patch_width}
 
@@ -32,12 +32,14 @@ fn riscv_align_offset(cuts: [RiscvAlignCut], offset: i64) -> Result<i64, text>:
     if offset == cut.start: return Ok(offset - cut.removed_before)
     Ok(offset - cut.removed_before - (cut.end - cut.start - cut.kept))
 
-fn riscv_align_put(raw: [u8], offset: i64, value: i64) -> Result<[u8], text>:
-    if offset < 0 or offset > raw.len() or 8 > raw.len() - offset:
+fn riscv_align_put(raw: [u8], offset: i64, value: i64, width: i64) -> Result<[u8], text>:
+    if width == 4 and (value < 0 or value > 0xffffffff):
+        return Err("RISC-V ALIGN ELF32 table field overflow")
+    if offset < 0 or offset > raw.len() or width > raw.len() - offset:
         return Err("RISC-V ALIGN ELF table field is truncated")
     var result = raw
     var i: i64 = 0
-    while i < 8:
+    while i < width:
         result[offset + i] = ((value >> (i * 8)) & 255) as u8
         i = i + 1
     Ok(result)
@@ -49,7 +51,8 @@ fn riscv_align_section(object: ElfObject, si: i64, hints: [ElfRelocation]) -> Re
         return Err("RISC-V ALIGN requires an allocated executable PROGBITS section")
     if section.sh_addr < 0 or section.sh_addr > object.raw.len() or section.sh_size < 0 or section.sh_size > object.raw.len() - section.sh_addr:
         return Err("RISC-V ALIGN input section is truncated")
-    val minimum = if (object.raw[48] & 1) != 0: 2 else: 4
+    val flags_offset: i64 = if object.raw[4] == 1: 36 else: 48
+    val minimum = if (object.raw[flags_offset] & 1) != 0: 2 else: 4
     val section_alignment = elf_section_addralign(object, si)
     var by_offset: {i64: i64} = {}
     for hint in hints:
@@ -107,8 +110,19 @@ fn riscv_align_section(object: ElfObject, si: i64, hints: [ElfRelocation]) -> Re
     Ok(RiscvAlignSection(cuts: cuts, bytes: bytes))
 
 fn elf_riscv_align_object(object: ElfObject) -> Result<ElfObject, text>:
-    if object.raw.len() < 64 or object.raw[4] != 2 or object.raw[5] != 1 or object.header.e_machine != 243:
-        return Err("RISC-V ALIGN requires a little-endian RV64 ELF object")
+    if object.raw.len() < 52 or (object.raw[4] != 1 and object.raw[4] != 2) or object.raw[5] != 1 or object.header.e_machine != 243:
+        return Err("RISC-V ALIGN requires a little-endian RV32 or RV64 ELF object")
+    val elf32 = object.raw[4] == 1
+    if not elf32 and object.raw.len() < 64:
+        return Err("RISC-V ALIGN ELF64 header is truncated")
+    val word: i64 = if elf32: 4 else: 8
+    val shent: i64 = if elf32: 40 else: 64
+    val shsize: i64 = if elf32: 20 else: 32
+    val syment: i64 = if elf32: 16 else: 24
+    val symvalue: i64 = if elf32: 4 else: 8
+    val symsize: i64 = if elf32: 8 else: 16
+    val relaent: i64 = if elf32: 12 else: 24
+    val arch = if elf32: RelocArch.Riscv32 else: RelocArch.Riscv64
     var hints: [[ElfRelocation]] = []
     for section in object.sections: hints.push([])
     var found = false
@@ -132,10 +146,10 @@ fn elf_riscv_align_object(object: ElfObject) -> Result<ElfObject, text>:
             while i < section.sh_size:
                 raw[section.sh_addr + i] = if i < plan.bytes.len(): plan.bytes[i] else: 0
                 i = i + 1
-            raw = riscv_align_put(raw, object.header.e_shoff + si * 64 + 32, plan.bytes.len())?
+            raw = riscv_align_put(raw, object.header.e_shoff + si * shent + shsize, plan.bytes.len(), word)?
         if section.sh_type == 2:
-            if symtab != -1 or elf_section_entsize(object, si) != 24:
-                return Err("RISC-V ALIGN requires one canonical ELF64 symbol table")
+            if symtab != -1 or elf_section_entsize(object, si) != syment:
+                return Err("RISC-V ALIGN requires one canonical target-width symbol table")
             symtab = si
         si = si + 1
     if symtab < 0: return Err("RISC-V ALIGN requires a symbol table")
@@ -149,9 +163,9 @@ fn elf_riscv_align_object(object: ElfObject) -> Result<ElfObject, text>:
             val cuts = plans[section_index].cuts
             val start = riscv_align_offset(cuts, symbol.st_value)?
             val end = riscv_align_offset(cuts, symbol.st_value + symbol.st_size)?
-            val offset = object.sections[symtab].sh_addr + symbol_index * 24
-            raw = riscv_align_put(raw, offset + 8, start)?
-            raw = riscv_align_put(raw, offset + 16, end - start)?
+            val offset = object.sections[symtab].sh_addr + symbol_index * syment
+            raw = riscv_align_put(raw, offset + symvalue, start, word)?
+            raw = riscv_align_put(raw, offset + symsize, end - start, word)?
         symbol_index = symbol_index + 1
     var entries: {i64: i64} = {}
     for relocation in object.relocations:
@@ -159,27 +173,27 @@ fn elf_riscv_align_object(object: ElfObject) -> Result<ElfObject, text>:
         if table_index < 0 or table_index >= object.sections.len():
             return Err("RISC-V ALIGN relocation table is invalid")
         val table = object.sections[table_index]
-        if table.sh_type != 4 or elf_section_entsize(object, table_index) != 24:
-            return Err("RISC-V ALIGN requires canonical ELF64 RELA tables")
+        if table.sh_type != 4 or elf_section_entsize(object, table_index) != relaent:
+            return Err("RISC-V ALIGN requires canonical target-width RELA tables")
         val entry = if entries.has(table_index): entries[table_index] else: 0
         entries[table_index] = entry + 1
-        val offset = table.sh_addr + entry * 24
+        val offset = table.sh_addr + entry * relaent
         val target = relocation.target_section_idx
         if target < 0 or target >= plans.len(): return Err("RISC-V ALIGN relocation target section is invalid")
         val kind = elf_reloc_type(relocation)
         val cuts = plans[target].cuts
         val place = riscv_align_offset(cuts, relocation.r_offset)?
         if cuts.len() > 0 and kind != 43:
-            val width = reloc_patch_width(RelocArch.Riscv64, kind)
+            val width = reloc_patch_width(arch, kind)
             val size = object.sections[target].sh_size
             if relocation.r_offset < 0 or relocation.r_offset > size or width > size - relocation.r_offset:
                 return Err("RISC-V ALIGN relocation field exceeds its input section")
             val end = riscv_align_offset(cuts, relocation.r_offset + width)?
             if end - place != width: return Err("RISC-V ALIGN relocation overlaps deleted padding")
-        raw = riscv_align_put(raw, offset, place)?
+        raw = riscv_align_put(raw, offset, place, word)?
         if kind == 43:
-            raw = riscv_align_put(raw, offset + 8, 0)?
-            raw = riscv_align_put(raw, offset + 16, 0)?
+            raw = riscv_align_put(raw, offset + word, 0, word)?
+            raw = riscv_align_put(raw, offset + 2 * word, 0, word)?
             continue
         val symbol_id = elf_reloc_sym(relocation)
         if symbol_id < 0 or symbol_id >= object.symbols.len():
@@ -187,7 +201,25 @@ fn elf_riscv_align_object(object: ElfObject) -> Result<ElfObject, text>:
         # Keep explicit addends unchanged for both named and section symbols.
         # LLD --no-relax preserves `_start + 24` and `.text + 24` even when
         # the actual label originally at offset24 moves to offset16.
-    elf_parse_object(raw)
+    val reparsed = elf_parse_object(raw)?
+    # Archive closure and --wrap project names without rewriting the raw string
+    # table. Normalization changes offsets, never symbol identity or order;
+    # retain those projected names while taking values/sizes from the new ELF.
+    if reparsed.symbols.len() != object.symbols.len():
+        return Err("RISC-V ALIGN changed symbol-table identity")
+    var symbols: [ElfSymbol] = []
+    var index: i64 = 0
+    for symbol in reparsed.symbols:
+        if symbol.st_name != object.symbols[index].st_name:
+            return Err("RISC-V ALIGN changed symbol-table order")
+        symbols.push(ElfSymbol(st_name: symbol.st_name, st_info: symbol.st_info,
+            st_other: symbol.st_other, st_shndx: symbol.st_shndx,
+            st_value: symbol.st_value, st_size: symbol.st_size,
+            name: object.symbols[index].name))
+        index = index + 1
+    Ok(ElfObject(header: reparsed.header, sections: reparsed.sections,
+        symbols: symbols, relocations: reparsed.relocations,
+        strtab: reparsed.strtab, shstrtab: reparsed.shstrtab, raw: reparsed.raw))
 
 fn elf_riscv_align_objects(objects: [ElfObject]) -> Result<[ElfObject], text>:
     var normalized: [ElfObject] = []

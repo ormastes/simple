@@ -80,6 +80,23 @@ run_profile() {
     --runtime-path="$tmp/runtime space" --runtime-bundle=bootstrap-tools
 }
 run_profile accepted >"$tmp/accepted.log" 2>&1
+# Validate the actual writer against the strict production consumer's ordered
+# key list. Existing argv-only checks missed extra non-argv metadata rows.
+python3 - "$repo/src/app/bootstrap_builder/native_group_provisional_hello_command.spl" "$tmp/output/accepted/compile.argv" <<'PY'
+import re
+import sys
+from pathlib import Path
+consumer = Path(sys.argv[1]).read_text(encoding="utf-8")
+base = re.search(r"var keys = \[(.*?)\]", consumer, re.S).group(1)
+extension = re.search(r"if version2:\s+keys = (.*?)\n", consumer).group(1)
+keys = re.findall(r'"([^"\n]+)"', base + extension)
+rows = Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+expected = keys + [f"arg_{i}" for i in range(27)]
+actual = [row.split("=", 1)[0] for row in rows[1:]]
+assert actual == expected, ("writer/consumer transcript fields differ", actual, expected)
+assert len(rows) == 1 + len(keys) + 27
+print("PASS: emitted transcript matches production consumer field order and count")
+PY
 grep -qx 'SIMPLE-PROVISIONAL-HELLO-COMMAND-2' "$tmp/output/accepted/compile.argv"
 grep -qx 'arg_5=cranelift' "$tmp/output/accepted/compile.argv"
 grep -qx 'arg_14=80' "$tmp/output/accepted/compile.argv"
@@ -89,7 +106,7 @@ grep -Fx "arg_24=$tmp/runtime space" "$tmp/output/accepted/compile.argv" >/dev/n
 sed -n 's/^arg_[0-9]*=//p' "$tmp/output/accepted/compile.argv" | sed '1d' >"$tmp/transcribed"
 cmp "$tmp/capture" "$tmp/transcribed"
 test -s "$tmp/output/accepted/hello.receipt"
-grep -qx 'inventory_cold_init=1' "$tmp/output/accepted/compile.argv"
+grep -qx 'inventory_cold_init=1' "$tmp/output/accepted/compile.env"
 # Existing publication must use warm admission even if inherited cold-init is
 # set. The fixture deliberately uses malformed content: do not erase evidence.
 mkdir -p "$tmp/source/build/scv/source-inventory"
@@ -97,13 +114,13 @@ printf 'malformed publication retained\n' >"$tmp/source/build/scv/source-invento
 TEST_EXPECT_COLD=0
 SIMPLE_SCV_INVENTORY_COLD_INIT=1; export SIMPLE_SCV_INVENTORY_COLD_INIT
 run_profile warm >"$tmp/warm.log" 2>&1
-grep -qx 'inventory_cold_init=0' "$tmp/output/warm/compile.argv"
+grep -qx 'inventory_cold_init=0' "$tmp/output/warm/compile.env"
 grep -qx 'malformed publication retained' "$tmp/source/build/scv/source-inventory/CURRENT"
 rm "$tmp/source/build/scv/source-inventory/CURRENT"
 mkdir -p "$tmp/source/build/scv/compile-events"
 printf 'legacy publication retained\n' >"$tmp/source/build/scv/compile-events/CURRENT"
 run_profile legacy >"$tmp/legacy.log" 2>&1
-grep -qx 'inventory_cold_init=0' "$tmp/output/legacy/compile.argv"
+grep -qx 'inventory_cold_init=0' "$tmp/output/legacy/compile.env"
 unset SIMPLE_SCV_INVENTORY_COLD_INIT
 TEST_MUTATE_RUNTIME=1; export TEST_MUTATE_RUNTIME
 if run_profile changed >"$tmp/changed.log" 2>&1; then echo 'FAIL runtime drift accepted' >&2; exit 1; fi

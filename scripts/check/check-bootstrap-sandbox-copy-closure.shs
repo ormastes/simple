@@ -1,0 +1,101 @@
+#!/bin/sh
+# check-bootstrap-sandbox-copy-closure.shs — every `. "$SCRIPT_DIR/<f>"` /
+# `source "$SCRIPT_DIR/<f>"` include of a script copied into a bootstrap gate
+# sandbox must itself be copied into that sandbox.
+#
+# Incident 2026-11-23: b9c3b4de231 made build-phase3-phase4.sh source
+# lib/run-timeout.shs, but the sandbox copy lists in
+# check-bootstrap-unified-scripts-contract.shs and fast-verify-bootstrap-scripts.shs
+# were not extended, so every path-matrix case exited 2 and release/1.0.0 went red.
+#
+# Usage: sh scripts/check/check-bootstrap-sandbox-copy-closure.shs [--selftest]
+# Verdict (last stdout line): PASS — exit 0 / FAIL — exit 1 / ERROR — exit 2.
+set -u
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+
+# closure_check ROOT LISTFILE LABEL — prints "MISSING <label>: <rel> includes <dep>"
+# per gap; echoes the number of scripts scanned on fd 3.
+closure_check() {
+  _root=$1; _list=$2; _label=$3; _n=0
+  while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    case "$_rel" in *.sh|*.shs) ;; *) continue ;; esac
+    [ -f "$_root/$_rel" ] || { echo "MISSING $_label: listed file absent: $_rel"; continue; }
+    _n=$((_n + 1))
+    _dir=$(dirname -- "$_rel")
+    sed -n 's/^[[:space:]]*\(\.\|source\)[[:space:]][[:space:]]*"\$SCRIPT_DIR\/\([^"$]*\)".*$/\2/p' "$_root/$_rel" |
+    while IFS= read -r _dep; do
+      _want="$_dir/$_dep"
+      grep -qxF "$_want" "$_list" || echo "MISSING $_label: $_rel includes $_want"
+    done
+  done < "$_list"
+  echo "$_n" >&3
+}
+
+# Extract the copy lists from the two gate scripts.
+extract_contract_list() {
+  # The sandbox list is the `for _rel in \` block that names build-phase3-phase4.bat.
+  awk '
+    /^[[:space:]]*for _rel in \\$/ { inb=1; buf=""; next }
+    inb && /; do[[:space:]]*$/ { if (buf ~ /build-phase3-phase4\.bat/) printf "%s", buf; inb=0; next }
+    inb { l=$0; sub(/^[[:space:]]+/, "", l); sub(/[[:space:]]*\\$/, "", l); if (l != "") buf = buf l "\n" }
+  ' "$1"
+}
+extract_fast_verify_list() {
+  sed -n 's/^[[:space:]]*cp "\$ROOT_DIR\/\([^"]*\)" "\$_st\/[^"]*".*$/\1/p' "$1"
+}
+
+run_scan() {
+  _root=$1; _tmp=$(mktemp -d); _miss=0; _scanned=0
+  extract_contract_list "$_root/scripts/check/check-bootstrap-unified-scripts-contract.shs" > "$_tmp/contract"
+  extract_fast_verify_list "$_root/scripts/check/fast-verify-bootstrap-scripts.shs" > "$_tmp/fastverify"
+  for _l in contract fastverify; do
+    if [ ! -s "$_tmp/$_l" ]; then
+      rm -rf "$_tmp"; echo "ERROR — nothing was checked (could not extract $_l copy list)"; return 2
+    fi
+    closure_check "$_root" "$_tmp/$_l" "$_l" > "$_tmp/$_l.out" 3> "$_tmp/$_l.n"
+    _scanned=$((_scanned + $(cat "$_tmp/$_l.n")))
+    cat "$_tmp/$_l.out"
+    _miss=$((_miss + $(grep -c . "$_tmp/$_l.out")))
+  done
+  rm -rf "$_tmp"
+  if [ "$_scanned" -eq 0 ]; then echo "ERROR — nothing was checked (0 scripts scanned)"; return 2; fi
+  if [ "$_miss" -gt 0 ]; then echo "FAIL — $_scanned script(s) scanned, $_miss include(s) missing from sandbox copy lists"; return 1; fi
+  echo "PASS — $_scanned script(s) scanned, all \$SCRIPT_DIR includes are in the sandbox copy lists"
+  return 0
+}
+
+selftest() {
+  _t=$(mktemp -d)
+  mkdir -p "$_t/scripts/bootstrap/lib" "$_t/scripts/check"
+  printf '#!/bin/sh\nSCRIPT_DIR=x\n. "$SCRIPT_DIR/stage3-native-host-link-policy.shs"\n. "$SCRIPT_DIR/lib/run-timeout.shs"\n' > "$_t/scripts/bootstrap/build-phase3-phase4.sh"
+  : > "$_t/scripts/bootstrap/stage3-native-host-link-policy.shs"
+  : > "$_t/scripts/bootstrap/lib/run-timeout.shs"
+  : > "$_t/scripts/bootstrap/build-phase3-phase4.bat"
+  # Incident replay: lists without lib/run-timeout.shs must FAIL.
+  printf '  for _rel in \\\n    scripts/bootstrap/build-phase3-phase4.sh \\\n    scripts/bootstrap/build-phase3-phase4.bat \\\n    scripts/bootstrap/stage3-native-host-link-policy.shs \\\n  ; do\n' > "$_t/scripts/check/check-bootstrap-unified-scripts-contract.shs"
+  printf '  cp "$ROOT_DIR/scripts/bootstrap/build-phase3-phase4.sh" "$_st/scripts/bootstrap/build-phase3-phase4.sh"\n  cp "$ROOT_DIR/scripts/bootstrap/stage3-native-host-link-policy.shs" "$_st/scripts/bootstrap/stage3-native-host-link-policy.shs"\n' > "$_t/scripts/check/fast-verify-bootstrap-scripts.shs"
+  _out=$(run_scan "$_t"); _rc=$?
+  if [ "$_rc" -ne 1 ] || ! printf '%s\n' "$_out" | grep -q "contract: scripts/bootstrap/build-phase3-phase4.sh includes scripts/bootstrap/lib/run-timeout.shs" \
+     || ! printf '%s\n' "$_out" | grep -q "fastverify: .*lib/run-timeout.shs"; then
+    rm -rf "$_t"; echo "selftest FAIL (incident replay): rc=$_rc: $_out"; return 1
+  fi
+  # Fixed lists must PASS.
+  printf '  for _rel in \\\n    scripts/bootstrap/build-phase3-phase4.sh \\\n    scripts/bootstrap/build-phase3-phase4.bat \\\n    scripts/bootstrap/stage3-native-host-link-policy.shs \\\n    scripts/bootstrap/lib/run-timeout.shs \\\n  ; do\n' > "$_t/scripts/check/check-bootstrap-unified-scripts-contract.shs"
+  printf '  cp "$ROOT_DIR/scripts/bootstrap/lib/run-timeout.shs" "$_st/scripts/bootstrap/lib/run-timeout.shs"\n' >> "$_t/scripts/check/fast-verify-bootstrap-scripts.shs"
+  _out=$(run_scan "$_t"); _rc=$?
+  if [ "$_rc" -ne 0 ]; then rm -rf "$_t"; echo "selftest FAIL (fixed): rc=$_rc: $_out"; return 1; fi
+  # Unextractable list must ERROR, never pass.
+  : > "$_t/scripts/check/fast-verify-bootstrap-scripts.shs"
+  _out=$(run_scan "$_t"); _rc=$?
+  rm -rf "$_t"
+  if [ "$_rc" -ne 2 ]; then echo "selftest FAIL (empty list): rc=$_rc: $_out"; return 1; fi
+  echo "selftest PASS (3 fixtures)"
+  return 0
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+[ "${1:-}" = "--selftest" ] && exit 0
+run_scan "$ROOT_DIR"
+exit $?

@@ -1220,6 +1220,20 @@ fn _emu_gradient_color_at_q16(colors: [u32], positions_permille: [i32], t16: i64
 # LUT and rounding as the browser-engine fb raster
 # (`fb_linear_gradient_general_clip`), so the Draw IR lane and the CPU raster
 # agree pixel for pixel.
+fn _emu_lgs_threshold(t: i64, len_q16: i64) -> i64:
+    """Smallest N with N * 32768 / len_q16 >= t (the gradient position term of
+    emu_draw_linear_gradient_stops), by binary search on that expression."""
+    var lo: i64 = 0 - len_q16 - 1
+    var hi: i64 = len_q16 + 1
+    # cpu-lane-loop-ok: binary search, ~31 steps; invariant g(lo) < t <= g(hi)
+    while hi - lo > 1:
+        val mid = lo + (hi - lo) / 2
+        if mid * 32768 / len_q16 >= t:
+            hi = mid
+        else:
+            lo = mid
+    hi
+
 fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, colors: [u32], positions_permille: [i32], angle_deg: i32):
     if w <= 0 or h <= 0 or colors.len() == 0:
         return
@@ -1253,6 +1267,32 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
     for sc_color in colors:
         if color_a(sc_color) < 255:
             any_alpha = true
+    # Large LUT boxes are written run by run. A pixel's colour depends only on
+    # its numerator N = dx2 * s + row_t through the non-decreasing
+    # g(N) = N * 32768 / len_q16, so for every LUT index b whose colour differs
+    # from b - 1 there is one exact threshold: the smallest N with
+    # g(N) >= 64 * b - 32768 (found by binary search on g itself). Along a row
+    # N = 2 * s * px + K is monotonic, so each run's end is one integer
+    # division settled by a direct comparison with the threshold, and a run is
+    # one write_span of its colour. Same colour per pixel as the per-pixel
+    # walk below; the 4x catalog header (3240 x 388, 120deg) went 3.3 s ->
+    # see emu_linear_gradient_stops_runs_spec.spl.
+    val use_runs = use_lut and (w as i64) * (h as i64) >= 65536
+    var th_n: [i64] = []
+    var th_c: [u32] = []
+    if use_runs:
+        var b = 1
+        # cpu-lane-loop-ok: once per box over the 1025-entry LUT
+        while b <= 1024:
+            if lut[b] != lut[b - 1]:
+                th_n.push(_emu_lgs_threshold(64 * (b as i64) - 32768, len_q16))
+                th_c.push(lut[b])
+            b = b + 1
+    val nth = th_n.len() as i32
+    # One [colour; w] pattern per run colour, built on first use (slot 0 = lut[0]).
+    var pat_slot: [i32] = [-1; if use_runs: nth + 1 else: 0]
+    var pats: [[u32]] = []
+    val two_s = 2 * s
     var py: i32 = 0
     # cpu-lane-loop-ok: N-stop linear gradient scanline walk: one iteration per row of the rect
     while py < h:
@@ -1261,6 +1301,59 @@ fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i3
         # A fresh row each time: a batching backend may keep the array.
         var row: [u32] = [0u32; w]
         var px: i32 = 0
+        if use_runs:
+            val k = ((1 - w) as i64) * s + row_t
+            # j = last threshold <= N(0), -1 when none.
+            var lo_j: i32 = -1
+            var hi_j: i32 = nth
+            # cpu-lane-loop-ok: binary search over the box's thresholds
+            while hi_j - lo_j > 1:
+                val mid = lo_j + (hi_j - lo_j) / 2
+                if th_n[mid] <= k:
+                    lo_j = mid
+                else:
+                    hi_j = mid
+            var j = lo_j
+            # cpu-lane-loop-ok: one iteration per colour run of the row
+            while px < w:
+                var end: i64 = w as i64
+                if s > 0 and j + 1 < nth:
+                    # Smallest column with N >= th_n[j + 1].
+                    val th = th_n[j + 1]
+                    end = (th - k) / two_s
+                    if end < (px as i64):
+                        end = px as i64
+                    # cpu-lane-loop-ok: settles the division, at most a step or two
+                    while end > (px as i64) and two_s * (end - 1) + k >= th:
+                        end = end - 1
+                    # cpu-lane-loop-ok: settles the division, at most a step or two
+                    while end < (w as i64) and two_s * end + k < th:
+                        end = end + 1
+                elif s < 0 and j >= 0:
+                    # Smallest column with N < th_n[j].
+                    val th = th_n[j]
+                    end = (th - k) / two_s
+                    if end < (px as i64):
+                        end = px as i64
+                    # cpu-lane-loop-ok: settles the division, at most a step or two
+                    while end > (px as i64) and two_s * (end - 1) + k < th:
+                        end = end - 1
+                    # cpu-lane-loop-ok: settles the division, at most a step or two
+                    while end < (w as i64) and two_s * end + k >= th:
+                        end = end + 1
+                if end > (w as i64):
+                    end = w as i64
+                val e = end as i32
+                if e > px:
+                    val slot = j + 1
+                    if pat_slot[slot] < 0:
+                        pat_slot[slot] = pats.len() as i32
+                        pats.push([if j < 0: lut[0] else: th_c[j]; w])
+                    row.write_span(pats[pat_slot[slot]], px as i64, 0, (e - px) as i64)
+                    px = e
+                if px >= w:
+                    break
+                j = if s > 0: j + 1 else: j - 1
         # cpu-lane-loop-ok: N-stop linear gradient per-pixel column walk; the row is emitted as ONE image blit
         while px < w:
             val dx2 = (2 * px + 1 - w) as i64
@@ -1606,7 +1699,12 @@ fn emu_draw_rect_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, 
         return
     if sa == 0:
         return
-    val fb: [u32] = core.read_pixels()
+    # Read back only the rect, not the frame: a 1x1 anti-aliased edge pixel
+    # used to copy the whole surface (forms-media 4x: ~100 copies of a
+    # 3600x3040 frame, +9 GB under the JIT). Out-of-frame region pixels read
+    # as 0 and are skipped below exactly as before.
+    # doc/08_tracking/bug/engine2d_rect_blend_reads_whole_frame_2026-11-24.md
+    val fb: [u32] = core.read_pixels_region_raw(x, y, w, h)
     val fb_w = core.width()
     val sr = color_r(color)
     val sg = color_g(color)
@@ -1619,7 +1717,7 @@ fn emu_draw_rect_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, 
             val fx = x + px
             val fy = y + py
             if fx >= 0 and fx < fb_w and fy >= 0 and fy < core.height():
-                val dst = fb[fy * fb_w + fx]
+                val dst = fb[py * w + px]
                 val blended = _emu_blend_over(sr, sg, sb, sa, dst, true)
                 result[py * w + px] = blended
             px = px + 1

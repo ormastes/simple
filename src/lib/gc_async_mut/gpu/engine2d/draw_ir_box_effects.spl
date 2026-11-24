@@ -1064,20 +1064,57 @@ fn _e2d_box_ring_strip(
     val rw = widths[1]
     val bw = widths[2]
     val lw = widths[3]
+    val r_tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val r_tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val r_br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val r_bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
     var pixels: [u32] = [0u32; ((sw as i64) * (sh as i64)) as i32]
+    # The per-pixel tests below are _e2d_box_inside_corners and
+    # _e2d_box_inside_inner with the radii resolved once, their row terms
+    # hoisted, and each corner helper called only inside its own corner square
+    # (~67 us a pixel at device scale 4 before); same predicates, same f64
+    # operations.
+    val wf = width.to_f64()
+    val hf = height.to_f64()
+    val tl_f = r_tl.to_f64()
+    val tr_f = r_tr.to_f64()
+    val br_f = r_br.to_f64()
+    val bl_f = r_bl.to_f64()
     var row = sy
     while row < sy + sh:
+        val cy = row.to_f64() + 0.5
+        val top_half = row * 2 < height
+        val uy = if top_half: cy else: hf - cy
+        val hw = if top_half: tw else: bw
+        val row_inner = row >= tw and row < height - bw
         var column = sx
         while column < sx + sw:
-            if _e2d_box_inside_corners(column, row, width, height, corners) and
-                not _e2d_box_inside_inner(column, row, width, height, lw, tw, rw, bw, corners):
-                val cx = column.to_f64() + 0.5
-                val cy = row.to_f64() + 0.5
+            var outer = true
+            if column < r_tl and row < r_tl:
+                outer = _e2d_box_inside_corner(r_tl - 1 - column, r_tl - 1 - row, r_tl)
+            elif column >= width - r_tr and row < r_tr:
+                outer = _e2d_box_inside_corner(column - (width - r_tr), r_tr - 1 - row, r_tr)
+            elif column >= width - r_br and row >= height - r_br:
+                outer = _e2d_box_inside_corner(column - (width - r_br), row - (height - r_br), r_br)
+            elif column < r_bl and row >= height - r_bl:
+                outer = _e2d_box_inside_corner(r_bl - 1 - column, row - (height - r_bl), r_bl)
+            var inner = false
+            val cx = column.to_f64() + 0.5
+            if outer and row_inner and column >= lw and column < width - rw:
+                val rcx = wf - cx
+                val bcy = hf - cy
+                inner = true
+                if cx < tl_f and cy < tl_f:
+                    inner = _e2d_box_inner_corner_ok(cx, cy, tl_f, r_tl - lw, r_tl - tw)
+                if inner and rcx < tr_f and cy < tr_f:
+                    inner = _e2d_box_inner_corner_ok(rcx, cy, tr_f, r_tr - rw, r_tr - tw)
+                if inner and rcx < br_f and bcy < br_f:
+                    inner = _e2d_box_inner_corner_ok(rcx, bcy, br_f, r_br - rw, r_br - bw)
+                if inner and cx < bl_f and bcy < bl_f:
+                    inner = _e2d_box_inner_corner_ok(cx, bcy, bl_f, r_bl - lw, r_bl - bw)
+            if outer and not inner:
                 val left_half = column * 2 < width
-                val top_half = row * 2 < height
-                val ux = if left_half: cx else: width.to_f64() - cx
-                val uy = if top_half: cy else: height.to_f64() - cy
-                val hw = if top_half: tw else: bw
+                val ux = if left_half: cx else: wf - cx
                 val vw = if left_half: lw else: rw
                 val horizontal = vw <= 0 or (hw > 0 and _e2d_box_horizontal_side(ux, uy, hw, vw))
                 pixels[(row - sy) * sw + (column - sx)] = if horizontal:
@@ -1221,3 +1258,316 @@ export engine2d_draw_ir_render_legacy_shadow
 export engine2d_draw_ir_render_typed_outer_shadows
 export engine2d_draw_ir_render_typed_background
 export engine2d_draw_ir_render_typed_inset_shadows
+
+# ---------------------------------------------------------------------------
+# A rounded border 1 device px wide, as Chrome 159 paints it: Blink strokes
+# the border box's rrect inset by half the width, and Skia draws a stroke at
+# most 1 device px wide as an anti-aliased HAIRLINE (SkScan_Antihair): each
+# corner's conic is split into quads (tolerance 1/4 px), each quad into
+# 2^level lines, and every line spreads its alpha over two pixel rows (or
+# columns) from its 16.16 position, end pixels scaled by their 26.6 length.
+# Measured on a 5 px radius #94a3b8 border on white: corner alphas 41 162 231
+# / 45 222 62 26, this model 39 161 231 / 42 220 61 24.
+
+# Index of pixel (px, py) in the `gw` x `gw` corner grid whose top-left is
+# (ox, oy), or -1 outside it.
+fn _e2d_hair_index(gw: i32, ox: i64, oy: i64, px: i64, py: i64) -> i32:
+    val gx = px - ox
+    val gy = py - oy
+    if gx < 0 or gy < 0 or gx >= (gw as i64) or gy >= (gw as i64):
+        return -1
+    (gy * (gw as i64) + gx) as i32
+
+# One anti-aliased hairline segment, endpoints in 26.6 fixed point.
+fn _e2d_hair_line(grid: [i32], gw: i32, ox: i64, oy: i64, ax: i64, ay: i64, bx: i64, by: i64) -> [i32]:
+    var g = grid
+    val horizontal = (if bx > ax: bx - ax else: ax - bx) > (if by > ay: by - ay else: ay - by)
+    # Major axis u, minor axis v (x, y for a mostly horizontal line).
+    var u0 = if horizontal: ax else: ay
+    var v0 = if horizontal: ay else: ax
+    var u1 = if horizontal: bx else: by
+    var v1 = if horizontal: by else: bx
+    if u0 == u1 and v0 == v1:
+        return g
+    if u0 > u1:
+        val tu = u0
+        u0 = u1
+        u1 = tu
+        val tv = v0
+        v0 = v1
+        v1 = tv
+    val istart = u0 >> 6
+    val istop = (u1 + 63) >> 6
+    var fv = v0 << 10
+    var slope: i64 = 0
+    if v0 != v1:
+        slope = ((v1 - v0) << 16) / (u1 - u0)
+        fv = fv + ((slope * (32 - (u0 & 63)) + 32) >> 6)
+    val scale_start = if istop - istart == 1: u1 - u0 else: 64 - (u0 & 63)
+    val scale_stop = if istop - istart == 1: 0 else: u1 & 63
+    var u = istart
+    var step = 0
+    # cpu-lane-loop-ok: pixels along one hairline segment of a corner arc (< radius + 2)
+    while u < istop:
+        val last = u == istop - 1 and scale_stop > 0
+        val m: i64 = if step == 0: scale_start elif last: scale_stop else: 64
+        val f = fv + 32768
+        val lower = f >> 16
+        val a = (f >> 8) & 255
+        val a_low = if m >= 64: a else: (a * m) >> 6
+        val a_up = if m >= 64: 255 - a else: ((255 - a) * m) >> 6
+        val i_up = if horizontal: _e2d_hair_index(gw, ox, oy, u, lower - 1) else: _e2d_hair_index(gw, ox, oy, lower - 1, u)
+        val i_low = if horizontal: _e2d_hair_index(gw, ox, oy, u, lower) else: _e2d_hair_index(gw, ox, oy, lower, u)
+        if i_up >= 0 and a_up > 0:
+            g[i_up] = ((g[i_up] as i64) * (255 - a_up) / 255) as i32
+        if i_low >= 0 and a_low > 0:
+            g[i_low] = ((g[i_low] as i64) * (255 - a_low) / 255) as i32
+        fv = fv + slope
+        u = u + 1
+        step = step + 1
+    g
+
+fn _e2d_hair_d6(v: f64) -> i64:
+    (v * 64.0).to_i64()
+
+fn _e2d_hair_ceil(v: f64) -> i64:
+    val t = v.to_i64()
+    if t.to_f64() < v: t + 1 else: t
+
+# A quad (p0, p1, p2) as Skia's hair_quad: 2^level lines, level from the
+# control point's distance to the chord midpoint.
+fn _e2d_hair_quad(grid: [i32], gw: i32, ox: i64, oy: i64, p: [f64]) -> [i32]:
+    var g = grid
+    var dx = (p[0] + p[4]) * 0.5 - p[2]
+    var dy = (p[1] + p[5]) * 0.5 - p[3]
+    if dx < 0.0:
+        dx = 0.0 - dx
+    if dy < 0.0:
+        dy = 0.0 - dy
+    val idx = _e2d_hair_ceil(dx)
+    val idy = _e2d_hair_ceil(dy)
+    val d = if idx > idy: idx + (idy >> 1) else: idy + (idx >> 1)
+    var bits: i64 = 0
+    var v = d
+    # cpu-lane-loop-ok: bit length of a small distance (<= 32 iterations)
+    while v > 0:
+        bits = bits + 1
+        v = v >> 1
+    var level = (bits + 1) >> 1
+    if level > 5:
+        level = 5
+    val lines = 1 << level
+    var px = p[0]
+    var py = p[1]
+    var i: i64 = 1
+    # cpu-lane-loop-ok: at most 32 lines per quad
+    while i <= lines:
+        val t = i.to_f64() / lines.to_f64()
+        val mt = 1.0 - t
+        val qx = if i == lines: p[4] else: mt * mt * p[0] + 2.0 * mt * t * p[2] + t * t * p[4]
+        val qy = if i == lines: p[5] else: mt * mt * p[1] + 2.0 * mt * t * p[3] + t * t * p[5]
+        g = _e2d_hair_line(g, gw, ox, oy, _e2d_hair_d6(px), _e2d_hair_d6(py), _e2d_hair_d6(qx), _e2d_hair_d6(qy))
+        px = qx
+        py = qy
+        i = i + 1
+    g
+
+# A conic (p0, p1, p2, weight w) chopped `level` times at t = 1/2, each leaf
+# drawn as the quad of its own points (SkConic::chopIntoQuadsPOW2).
+fn _e2d_hair_conic(grid: [i32], gw: i32, ox: i64, oy: i64, p: [f64], w: f64, level: i32) -> [i32]:
+    if level <= 0:
+        return _e2d_hair_quad(grid, gw, ox, oy, p)
+    val scale = 1.0 / (1.0 + w)
+    val mx = (p[0] + 2.0 * w * p[2] + p[4]) * scale * 0.5
+    val my = (p[1] + 2.0 * w * p[3] + p[5]) * scale * 0.5
+    val nw = (0.5 + w * 0.5).sqrt()
+    val first: [f64] = [p[0], p[1], (p[0] + w * p[2]) * scale, (p[1] + w * p[3]) * scale, mx, my]
+    val second: [f64] = [mx, my, (w * p[2] + p[4]) * scale, (w * p[3] + p[5]) * scale, p[4], p[5]]
+    val g = _e2d_hair_conic(grid, gw, ox, oy, first, nw, level - 1)
+    _e2d_hair_conic(g, gw, ox, oy, second, nw, level - 1)
+
+# One corner's arc of radius `r` - 1/2 (device px), centre-line endpoints
+# (sx, sy) -> (ex, ey) with control (cx, cy), blended into the corner block
+# whose top-left pixel is (bx, by).
+#
+# The four corners are mirror images (Chrome's measured corners mirror
+# exactly), so one top-left grid per radius serves every corner.
+fn _e2d_hair_corner_grid(r: i32) -> [i32]:
+    val gw = r + 1
+    val rf = r.to_f64()
+    val p: [f64] = [0.5, rf, 0.5, 0.5, rf, 0.5]
+    var grid: [i32] = [255; gw * gw]
+    val w = 0.70710678118654752
+    val a = w - 1.0
+    val k = a / (4.0 * (2.0 + a))
+    val ex = k * (p[0] - 2.0 * p[2] + p[4])
+    val ey = k * (p[1] - 2.0 * p[3] + p[5])
+    var err = (ex * ex + ey * ey).sqrt()
+    var pow2 = 0
+    # cpu-lane-loop-ok: SkConic::computeQuadPOW2, at most 4 halvings
+    while pow2 < 4 and err > 0.25:
+        err = err * 0.25
+        pow2 = pow2 + 1
+    _e2d_hair_conic(grid, gw, 0, 0, p, w, pow2)
+
+# Blend a top-left corner table (`gw` x `gw`, alpha scale `full`, 0 = none)
+# at (bx, by), mirrored for a right and/or bottom corner.
+fn _e2d_corner_table_blend(engine: Engine2D, color: u32, table: [i32], gw: i32, full: u32, bx: i32, by: i32, flip_x: bool, flip_y: bool) -> Engine2D:
+    var eng = engine
+    val ca = (color >> 24) & 0xFFu32
+    val rgb = color & 0x00FFFFFFu32
+    var pixels: [u32] = [0u32; gw * gw]
+    var py = 0
+    # cpu-lane-loop-ok: one corner block, gw^2 pixels
+    while py < gw:
+        val sy = if flip_y: gw - 1 - py else: py
+        var px = 0
+        while px < gw:
+            val sx = if flip_x: gw - 1 - px else: px
+            val cov = table[sy * gw + sx] as u32
+            if cov > 0u32:
+                pixels[py * gw + px] = (((cov * ca + full / 2u32) / full) << 24) | rgb
+            px = px + 1
+        py = py + 1
+    eng.draw_image_blend(bx, by, gw, gw, pixels)
+    eng
+
+# Hairline corner coverage (0..255) of radius `r`, top-left orientation.
+fn _e2d_hair_corner_cov(r: i32) -> [i32]:
+    var grid = _e2d_hair_corner_grid(r)
+    var i = 0
+    # cpu-lane-loop-ok: one corner block, (radius + 1)^2 pixels
+    while i < grid.len():
+        grid[i] = 255 - grid[i]
+        i = i + 1
+    grid
+
+# True when the border of a box is a Chrome hairline rrect: every side 1
+# device px in one colour and every corner rounded.
+# reason: device-px border widths and corner radii of one Draw IR box
+# @allow(primitive_api)
+pub fn engine2d_draw_ir_hairline_rrect_border(widths: [i32], colors: [u32], width: i32, height: i32, corners: Engine2dDrawIrCornerRadii) -> bool:
+    if widths[0] != 1 or widths[1] != 1 or widths[2] != 1 or widths[3] != 1:
+        return false
+    if colors[1] != colors[0] or colors[2] != colors[0] or colors[3] != colors[0]:
+        return false
+    if ((colors[0] >> 24) & 0xFFu32) == 0u32:
+        return false
+    _e2d_box_corner_radius(corners.top_left, width, height) >= 2 and
+        _e2d_box_corner_radius(corners.top_right, width, height) >= 2 and
+        _e2d_box_corner_radius(corners.bottom_right, width, height) >= 2 and
+        _e2d_box_corner_radius(corners.bottom_left, width, height) >= 2
+
+# Paint a hairline rrect border (see `engine2d_draw_ir_hairline_rrect_border`).
+fn engine2d_draw_ir_render_hairline_rrect_border(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    color: u32, corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    # Straight sides: the centre line sits on a pixel centre, so each side is
+    # one full-coverage row or column between its corner blocks.
+    eng.draw_rect_filled(x + tl, y, width - tl - tr, 1, color)
+    eng.draw_rect_filled(x + bl, y + height - 1, width - bl - br, 1, color)
+    eng.draw_rect_filled(x, y + tl, 1, height - tl - bl, color)
+    eng.draw_rect_filled(x + width - 1, y + tr, 1, height - tr - br, color)
+    val t_tl = _e2d_hair_corner_cov(tl)
+    val t_tr = if tr == tl: t_tl else: _e2d_hair_corner_cov(tr)
+    val t_br = if br == tl: t_tl elif br == tr: t_tr else: _e2d_hair_corner_cov(br)
+    val t_bl = if bl == tl: t_tl elif bl == tr: t_tr elif bl == br: t_br else: _e2d_hair_corner_cov(bl)
+    eng = _e2d_corner_table_blend(eng, color, t_tl, tl + 1, 255u32, x, y, false, false)
+    eng = _e2d_corner_table_blend(eng, color, t_tr, tr + 1, 255u32, x + width - tr - 1, y, true, false)
+    eng = _e2d_corner_table_blend(eng, color, t_br, br + 1, 255u32, x + width - br - 1, y + height - br - 1, true, true)
+    _e2d_corner_table_blend(eng, color, t_bl, bl + 1, 255u32, x, y + height - bl - 1, false, true)
+
+# Coverage (0..256) of pixel (px, py) of a top-left corner block by the
+# quarter disc of radius `r` centred at (c, c) (sampled 16 x 16), only the
+# part right of x = 1/2 and below y = 1/2 (the half-pixel inset lines).
+fn _e2d_shrunk_corner_cov(px: i32, py: i32, c: f64, r: f64) -> i32:
+    # Whole-pixel answers first: only pixels the arc or an inset line
+    # crosses are sampled.
+    val x0 = px.to_f64()
+    val y0 = py.to_f64()
+    val fx = if x0 < c: c - x0 else: 0.0
+    val fy = if y0 < c: c - y0 else: 0.0
+    if x0 >= 0.5 and y0 >= 0.5 and fx * fx + fy * fy <= r * r:
+        return 256
+    val nx = if x0 + 1.0 < c: c - x0 - 1.0 else: 0.0
+    val ny = if y0 + 1.0 < c: c - y0 - 1.0 else: 0.0
+    if nx * nx + ny * ny >= r * r:
+        return 0
+    var n = 0
+    var sy = 0
+    # cpu-lane-loop-ok: 16 x 16 samples of one corner pixel
+    while sy < 16:
+        val yy = y0 + (sy.to_f64() + 0.5) / 16.0
+        val ddy = if yy < c: c - yy else: 0.0
+        var sx = 0
+        while sx < 16:
+            val xx = x0 + (sx.to_f64() + 0.5) / 16.0
+            val ddx = if xx < c: c - xx else: 0.0
+            if xx >= 0.5 and yy >= 0.5 and ddx * ddx + ddy * ddy <= r * r:
+                n = n + 1
+            sx = sx + 1
+        sy = sy + 1
+    n
+
+# The background of a box with a hairline rrect border, shrunk by half the
+# border width as Blink's bleed avoidance paints it (kBackgroundBleedShrink
+# Background): the rrect inset 1/2 px with radii r - 1/2, anti-aliased. The
+# border row/column itself is left to the opaque border painted over it.
+fn engine2d_draw_ir_render_shrunk_rrect_background(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    color: u32, corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    # Interior rows between the corner blocks, then the bands beside them.
+    val top_band = if tl > tr: tl else: tr
+    val bottom_band = if bl > br: bl else: br
+    if height - top_band - bottom_band > 0:
+        eng.draw_rect_filled(x + 1, y + top_band, width - 2, height - top_band - bottom_band, color)
+    if top_band > 1:
+        eng.draw_rect_filled(x + tl, y + 1, width - tl - tr, top_band - 1, color)
+        if tl < top_band:
+            eng.draw_rect_filled(x + 1, y + tl, tl - 1, top_band - tl, color)
+        if tr < top_band:
+            eng.draw_rect_filled(x + width - tr, y + tr, tr - 1, top_band - tr, color)
+    if bottom_band > 1:
+        eng.draw_rect_filled(x + bl, y + height - bottom_band, width - bl - br, bottom_band - 1, color)
+        if bl < bottom_band:
+            eng.draw_rect_filled(x + 1, y + height - bottom_band, bl - 1, bottom_band - bl, color)
+        if br < bottom_band:
+            eng.draw_rect_filled(x + width - br, y + height - bottom_band, br - 1, bottom_band - br, color)
+    val t_tl = _e2d_shrunk_corner_table(tl)
+    val t_tr = if tr == tl: t_tl else: _e2d_shrunk_corner_table(tr)
+    val t_br = if br == tl: t_tl elif br == tr: t_tr else: _e2d_shrunk_corner_table(br)
+    val t_bl = if bl == tl: t_tl elif bl == tr: t_tr elif bl == br: t_br else: _e2d_shrunk_corner_table(bl)
+    eng = _e2d_corner_table_blend(eng, color, t_tl, tl, 256u32, x, y, false, false)
+    eng = _e2d_corner_table_blend(eng, color, t_tr, tr, 256u32, x + width - tr, y, true, false)
+    eng = _e2d_corner_table_blend(eng, color, t_br, br, 256u32, x + width - br, y + height - br, true, true)
+    _e2d_corner_table_blend(eng, color, t_bl, bl, 256u32, x, y + height - bl, false, true)
+
+# Shrunk-background coverage (0..256) of a top-left corner block of radius `r`.
+fn _e2d_shrunk_corner_table(r: i32) -> [i32]:
+    var table: [i32] = [0; r * r]
+    val rf = r.to_f64()
+    var py = 0
+    # cpu-lane-loop-ok: one corner block, radius^2 pixels
+    while py < r:
+        var px = 0
+        while px < r:
+            table[py * r + px] = _e2d_shrunk_corner_cov(px, py, rf, rf - 0.5)
+            px = px + 1
+        py = py + 1
+    table
+
+export engine2d_draw_ir_hairline_rrect_border
+export engine2d_draw_ir_render_hairline_rrect_border
+export engine2d_draw_ir_render_shrunk_rrect_background

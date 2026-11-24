@@ -4,7 +4,8 @@
 use app.orchestrator.server_ssh_types_v1.{ServerSshProfileV1, ServerSshProfileLoadTurnV1}
 use std.common.config_core.server_context_types_v1.{ServerRecordV1, server_record_validate_v1}
 use std.common.string_core.str_len
-use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.text_bytes.{boxed_text_bytes_checked, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
 use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
@@ -90,14 +91,16 @@ pub fn server_ssh_file_no_follow_v1(path: text, max_bytes: i64) -> bool:
 
 pub fn server_ssh_profile_load_v1(path: text) -> ServerSshProfileLoadTurnV1:
     val read = stdin_command_profile_read_v1(path)
-    if read.error != "" or read.owner != nil or read.bytes == nil:
+    if read.error != "" or read.owner.is_some() or read.bytes.is_none():
         return ServerSshProfileLoadTurnV1(nil, read.owner,
             if read.error == "": "server-ssh-profile-cleanup-unconfirmed" else: "server-ssh-profile-unreadable")
     val bytes = read.bytes.unwrap()
-    if not utf8_bytes_valid(bytes): return ServerSshProfileLoadTurnV1(nil, nil, "server-ssh-profile-utf8")
-    match server_ssh_profile_decode_v1(bytes_to_text(bytes)):
-        case Ok(profile): ServerSshProfileLoadTurnV1(Some(profile), nil, "")
-        case Err(reason): ServerSshProfileLoadTurnV1(nil, nil, reason)
+    match bytes_to_text_checked(bytes):
+        case Err(_): ServerSshProfileLoadTurnV1(nil, nil, "server-ssh-profile-utf8")
+        case Ok(text_value):
+            match server_ssh_profile_decode_v1(text_value):
+                case Ok(profile): ServerSshProfileLoadTurnV1(Some(profile), nil, "")
+                case Err(reason): ServerSshProfileLoadTurnV1(nil, nil, reason)
 
 export server_ssh_path_valid_v1, server_ssh_profile_validate_v1, server_ssh_profile_decode_v1
 export server_ssh_file_no_follow_v1, server_ssh_profile_load_v1

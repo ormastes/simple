@@ -1,0 +1,101 @@
+# @tag: unit, image, ppm, perf
+# @cover src/lib/common/image/ppm_decode.spl 30%
+#
+# encode_ppm_p6 on a 3600 x 3040 frame (the 4x web catalog size). Mixed
+# 64-pixel blocks went through three interpreted byte stores per pixel:
+# ~6.7 s per 4x catalog frame. The fixture mixes every row shape a page
+# has: rows equal to the row above, flat rows, flat blocks, mixed blocks
+# equal to the block above, fresh mixed blocks (row 0 too), and the
+# 16-pixel partial last block. Bytes are pinned by a hash measured on the
+# base implementation (release/1.0.0 1d407c5f2dd) and, on a small frame,
+# compared byte for byte with a per-pixel reference encoder.
+
+use std.spec.*
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (release/1.0.0 1d407c5f2dd).
+val FRAME_HASH: i64 = 3225973431
+
+fn frame_fixture(w: i32, h: i32, bg: u32) -> [u32]:
+    var px: [u32] = [bg; w * h]
+    var mix: [u32] = [0u32; w + 64]
+    var i = 0
+    # cpu-lane-loop-ok: one mixed source row, w + 64 pixels
+    while i < w + 64:
+        val v = ((i as i64) * 40503 + 12345) % 16777216
+        mix[i] = (4278190080 + v) as u32
+        i = i + 1
+    val box: [u32] = [0xff336699u32; w]
+    val a0 = w / 36
+    val a1 = w * 11 / 36
+    val b0 = w * 5 / 36
+    val b1 = w * 15 / 36
+    val m0 = w * 20 / 36
+    val m1 = w * 26 / 36
+    var y = 0
+    # cpu-lane-loop-ok: one or two span writes per fixture row
+    while y < h:
+        val band = y % 40
+        val row = y * w
+        if band < 20:
+            # Vertical stripes: rows equal to the row above for band < 10,
+            # blocks equal to the block above for 10..19.
+            px.write_span(mix, (row + a0) as i64, 0, (a1 - a0) as i64)
+            if band >= 10:
+                px.write_span(mix, (row + m0) as i64, (y % 64) as i64, (m1 - m0) as i64)
+        elif band < 25:
+            px.write_span(box, (row + b0) as i64, 0, (b1 - b0) as i64)
+        elif band >= 37:
+            px.write_span(mix, row as i64, (y % 64) as i64, w as i64)
+        y = y + 1
+    px
+
+fn reference_encode(w: i32, h: i32, pixels: [u32]) -> [u8]:
+    var out: [u8] = []
+    for b in "P6\n{w} {h}\n255\n".bytes():
+        out.push((b as i64) & 255)
+    for p in pixels:
+        val argb = p as i64
+        out.push((argb >> 16) & 0xFF)
+        out.push((argb >> 8) & 0xFF)
+        out.push(argb & 0xFF)
+    out
+
+fn sampled_hash(bytes: [u8]) -> i64:
+    var acc: i64 = 17
+    var i: i64 = 0
+    # cpu-lane-loop-ok: spec probe over a 1-in-7 byte sample
+    while i < bytes.len():
+        acc = (acc * 31 + (bytes[i] as i64)) % 4294967291
+        i = i + 7
+    acc
+
+describe "encode_ppm_p6 on a full catalog frame":
+    it "matches a per-pixel reference encoder on every row shape":
+        val w = 200
+        val h = 80
+        val px = frame_fixture(w, h, 0xffffffffu32)
+        val got = encode_ppm_p6(w as u32, h as u32, px)
+        val want = reference_encode(w, h, px)
+        expect(got.len()).to_equal(want.len())
+        expect(got == want).to_equal(true)
+
+    it "keeps the size guards":
+        val px = frame_fixture(8, 4, 0xff000000u32)
+        expect(encode_ppm_p6(9u32, 4u32, px).len()).to_equal(0)
+        expect(encode_ppm_p6(0u32, 4u32, px).len()).to_equal(11)
+        expect(encode_ppm_p6(8u32, 0u32, px).len()).to_equal(11)
+
+    it "encodes the measured bytes within a time budget":
+        val px = frame_fixture(FRAME_W, FRAME_H, 0xffeef0ffu32)
+        val t0 = time_now_unix_micros()
+        val bytes = encode_ppm_p6(FRAME_W as u32, FRAME_H as u32, px)
+        val elapsed = time_now_unix_micros() - t0
+        val h = sampled_hash(bytes)
+        print "ppm_encode_frame elapsed_us={elapsed} len={bytes.len()} hash={h}"
+        expect(bytes.len()).to_equal(32832017)
+        expect(h).to_equal(FRAME_HASH)
+        expect(elapsed < 5500000).to_equal(true)

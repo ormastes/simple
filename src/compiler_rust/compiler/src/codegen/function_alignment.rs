@@ -17,14 +17,32 @@ pub fn define_function_aligned<M: cranelift_module::Module + ?Sized>(
     func_id: cranelift_module::FuncId,
     ctx: &mut cranelift_codegen::Context,
 ) -> cranelift_module::ModuleResult<()> {
-    let alignment = {
-        let isa = module.isa();
-        let isa_min = isa.function_alignment().minimum as u64;
-        let compiled = ctx.compile(isa, &mut cranelift_codegen::control::ControlPlane::default())?;
-        (compiled.buffer.alignment as u64)
-            .max(isa_min)
-            .max(MIN_FUNCTION_ALIGNMENT)
-    };
+    let alignment = compile_aligned(module.isa(), ctx)?;
+    define_compiled(module, func_id, ctx, alignment)
+}
+
+/// The module-free half of [`define_function_aligned`]: run Cranelift codegen on
+/// `ctx` and return the alignment to define it with. Needs only the ISA, so the
+/// JIT runs it on worker threads (`CodegenBackend::codegen_workers`).
+pub fn compile_aligned(
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    ctx: &mut cranelift_codegen::Context,
+) -> cranelift_module::ModuleResult<u64> {
+    let isa_min = isa.function_alignment().minimum as u64;
+    let compiled = ctx.compile(isa, &mut cranelift_codegen::control::ControlPlane::default())?;
+    Ok((compiled.buffer.alignment as u64)
+        .max(isa_min)
+        .max(MIN_FUNCTION_ALIGNMENT))
+}
+
+/// The module half of [`define_function_aligned`]: define the code `ctx` was
+/// compiled to by [`compile_aligned`].
+pub fn define_compiled<M: cranelift_module::Module + ?Sized>(
+    module: &mut M,
+    func_id: cranelift_module::FuncId,
+    ctx: &cranelift_codegen::Context,
+    alignment: u64,
+) -> cranelift_module::ModuleResult<()> {
     let compiled = ctx.compiled_code().expect("compiled code after successful compile");
     module.define_function_bytes(
         func_id,

@@ -11,6 +11,7 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1}
 use compiler.driver.cache.native_module_input_fact_snapshots.{native_module_input_fact_snapshots_v1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_gap_v1, worker_surface_gap_message_v1}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{CompileMode}
@@ -33,6 +34,7 @@ use compiler.core.ast_coverage_inventory.{
     compiler_coverage_inventory_release_parse_scratch}
 use compiler.frontend.desugar.placeholder_lambda.{placeholder_release_parse_scratch}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
+use compiler.driver.driver_parse_shard_rows_v1.{driver_parse_shard_row_plan_v1}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.core.parser.{parser_promote_transient_owners, parser_initialization_generation_v1}
@@ -339,15 +341,22 @@ impl CompilerDriver:
             for _p in source_paths:
                 worker_built.push(false)
         val parse_shard_start = if parse_shard: driver_parse_shard_strided_start_v1(frozen_source_count) else: 0
+        # Rotation can begin at a logical alias of a physical source whose
+        # canonical row appears earlier. Establish the authoritative first
+        # rows before rotation/claims, rather than admitting that alias as a
+        # canonical source in an otherwise empty shard-local registry.
+        val parse_shard_rows = if parse_shard:
+            driver_parse_shard_row_plan_v1(canonical_paths, parse_shard_start)
+        else: []
+        val parse_step_count = if parse_shard: parse_shard_rows.len() else: frozen_source_count
         var source_step = 0
-        while source_step < frozen_source_count:
-            source_index = if parse_shard: (parse_shard_start + source_step) % frozen_source_count else: source_step
+        while source_step < parse_step_count:
+            source_index = if parse_shard: parse_shard_rows[source_step] else: source_step
             source_step = source_step + 1
             # A parse shard exists only to warm the front-end cache for the
             # files it owns (static hash slice, or a claim from the shared
-            # queue). Starting at `parse_shard_start` and wrapping modulo
-            # `frozen_source_count` gives each shard a disjoint initial partition
-            # while still work-stealing stragglers across the full ring.
+            # queue). The rotated plan retains the full physical-file ring
+            # for work-stealing while excluding nonauthoritative alias rows.
             if parse_shard and not _driver_parse_shard_owns(source_paths[source_index]):
                 continue
             val canonical_path = canonical_paths[source_index]
@@ -360,7 +369,7 @@ impl CompilerDriver:
                         "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
                     return false
             elif unit_tldr_on and not source_paths[source_index].ends_with("/__init__.spl") and not worker_needed[source_index] and
-                    unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path) != nil:
+                    unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path).is_some():
                 # PM3: an import not parsed here gets its summary-built surface.
                 var tldr_surface: ModuleSurface = unit_tldr_surface_for_row_v1(unit_tldr_plan, source_module_names[source_index], canonical_path).unwrap()
                 # Bind the summary surface to this admitted row, exactly like a
@@ -623,12 +632,14 @@ impl CompilerDriver:
                 var root_indices: [i64] = []
                 var found_targets: [text] = []
                 var pending_reason = ""
+                var pending_surface_index = -1
                 var ti = 0
                 while ti < surface_source.len():
                     val tpath = surface_source[ti]
                     val is_target = mir_target_set.contains_key(tpath)
                     if is_target or mir_advice_paths.contains(tpath):
                         if not surface_ready[ti]:
+                            pending_surface_index = ti
                             pending_reason = if is_target: "import-closure surface missing for {tpath}"
                                 else: "aop advice outside import closure ({tpath})"
                         root_indices.push(ti)
@@ -637,6 +648,17 @@ impl CompilerDriver:
                 if pending_reason == "" and found_targets.len() != mir_targets.len():
                     pending_reason = "a MIR target has no surface in this closure"
                 if pending_reason != "":
+                    if pending_surface_index >= 0:
+                        val gap = worker_surface_gap_v1(pending_surface_index, surface_built, surface_edges)
+                        val blocking_path = retained_surfaces.surfaces[pending_surface_index].canonical_path
+                        var gap_source_path = "<no-surface>"
+                        var gap_target_path = "<no-surface>"
+                        if gap.source_index >= 0 and gap.source_index < retained_surfaces.surfaces.len():
+                            gap_source_path = retained_surfaces.surfaces[gap.source_index].canonical_path
+                        if gap.target_index >= 0 and gap.target_index < retained_surfaces.surfaces.len():
+                            gap_target_path = retained_surfaces.surfaces[gap.target_index].canonical_path
+                        pending_reason = pending_reason + "; blocking_target_index={pending_surface_index} " + worker_surface_gap_message_v1(
+                            gap, blocking_path, gap_source_path, gap_target_path)
                     for target in mir_targets:
                         val _pending = native_file_worker_closure_incomplete_publish_v1(mir_queue_dir, target, pending_reason)
                     self.ctx.add_error("FILE-WORKER-E-CLOSURE-INCOMPLETE: {pending_reason}")

@@ -1,0 +1,512 @@
+#![allow(primitive_api)]
+# reason: raw Vulkan handles, SPIR-V words, counts and tensor positions are untyped integers at the C ABI and kernel launch parameters
+# @gc — module uses GC runtime
+#
+# vk_compute — Vulkan compute backend of the GPU API (sibling of hip_compute).
+#
+# Layering: slang -> pure LLM runner -> GPU API -> Vulkan. vulkan-1.dll (or
+# libvulkan.so.1) is loaded with the dynamic helper the ROCm leg uses
+# (spl_dlopen / spl_dlsym / spl_wffi_call_i64), so no rt_* extern and no Vulkan
+# SDK are needed; every VkResult other than VK_SUCCESS surfaces as Err(text).
+# Only Vulkan 1.0 entry points are used (all take at most 8 integer arguments).
+#
+# Memory: f32 storage buffers are created in a DEVICE_LOCAL | HOST_VISIBLE |
+# HOST_COHERENT memory type when the device has one (APUs, resizable BAR), else
+# a HOST_VISIBLE | HOST_COHERENT one, and stay persistently mapped, so upload
+# and download are plain memcpy with no staging buffer.
+# Dispatch: each vk_dispatch records one command buffer (bind pipeline,
+# descriptor set, push constants, dispatch), submits it and waits on a fence, so
+# results are visible to the host and between ops when it returns.
+# Host structs are packed into a malloc'd scratch block; handles are 64-bit.
+
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
+use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
+use std.common.binary_io.{f32_to_bits}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.gc_async_mut.slang.host.slang_host.{host_env, host_os_name, host_libc_name}
+
+@unsafe(reason: "passes a bounded caller-owned byte payload as one pointer argument", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
+
+val VK_LOADER_WINDOWS = "vulkan-1.dll"
+val VK_LOADER_LINUX = "libvulkan.so.1"
+val VK_LOADER_MACOS = "libvulkan.1.dylib"
+val VK_SUCCESS = 0
+val VK_WHOLE_SIZE = -1
+val VK_TIMEOUT_FOREVER = -1
+# VK_MAKE_API_VERSION(0, 1, 1, 0)
+val VK_API_VERSION_1_1 = 4198400
+# Workgroup size every kernel of the slang provider uses.
+val VK_MAX_LOCAL_SIZE = 256
+# Scratch layout (bytes): out slots 0..255, struct area 256.., push values at 6144.
+val SCRATCH_SIZE = 8192
+val OFF_PUSH = 6144
+
+pub struct VkBuffer:
+    buf: i64
+    mem: i64
+    mapped: i64
+    n: i64
+
+pub class VkKernel:
+    pipeline: i64
+    layout: i64
+    set_layout: i64
+    dset: i64
+    desc_pool: i64
+    n_bufs: i64
+    push_size: i64
+
+pub class VkDevice:
+    name: text
+    loader: i64
+    libc: i64
+    fns: Dict<text, i64>
+    instance: i64
+    phys: i64
+    device: i64
+    queue: i64
+    family: i64
+    cmd_pool: i64
+    cmd_buf: i64
+    fence: i64
+    desc_pool: i64
+    mem_types: [i64]
+    # Device limits read at open: maxStorageBufferRange (bytes one storage
+    # descriptor may bind) and maxComputeWorkGroupCount[0].
+    max_storage_range: i64
+    max_groups_x: i64
+    c_malloc: i64
+    c_free: i64
+    c_memcpy: i64
+    scratch: i64
+    kernels: Dict<text, VkKernel>
+
+# True when the Vulkan loader library can be opened on this host.
+pub fn vk_available() -> bool:
+    val h = spl_dlopen(vk_loader_name(host_os_name()))
+    if h == 0:
+        return false
+    spl_dlclose(h)
+    true
+
+# Loader library per host OS (macOS reaches Vulkan through the MoltenVK loader).
+pub fn vk_loader_name(os: text) -> text:
+    if os == "windows":
+        return VK_LOADER_WINDOWS
+    if os == "macos":
+        return VK_LOADER_MACOS
+    VK_LOADER_LINUX
+
+fn _vk_u32(v: i64) -> [u8]:
+    [(v & 255) as u8, ((v >> 8) & 255) as u8, ((v >> 16) & 255) as u8, ((v >> 24) & 255) as u8]
+
+fn _vk_u64(v: i64) -> [u8]:
+    _vk_u32(v) + _vk_u32((v >> 32) & 4294967295)
+
+fn _vk_zeros(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+# Little-endian unsigned integer of `width` (4 or 8) bytes at host address `addr`.
+fn _vk_read_uint(addr: i64, width: i64) -> i64:
+    val b = bytes_from_raw(addr, width)
+    var v: i64 = 0
+    var i: i64 = width - 1
+    while i >= 0:
+        v = v * 256 + (b[i] as i64)
+        i = i - 1
+    v
+
+fn _vk_text_at(addr: i64, cap: i64) -> text:
+    val raw = bytes_from_raw(addr, cap)
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < raw.len() and raw[i] != 0:
+        out.push(raw[i])
+        i = i + 1
+    bytes_to_text(out)
+
+fn _vk_err(what: text, rc: i64) -> text:
+    "Vulkan: {what} failed VkResult={rc}"
+
+fn _vk_host_write(dev: VkDevice, dst: i64, bytes: [u8], offset: i64, length: i64) -> i64:
+    spl_wffi_call_i64_with_bytes(dev.c_memcpy, [dst], bytes, offset, length, [length])
+
+# Write `bytes` at scratch+off.
+fn _vk_put(dev: VkDevice, off: i64, bytes: [u8]):
+    _vk_host_write(dev, dev.scratch + off, bytes, 0, bytes.len())
+
+fn _vk_fn(dev: VkDevice, name: text) -> i64:
+    dev.fns[name]
+
+# Call a Vulkan entry point; Err on a non-zero VkResult.
+fn _vk_call(dev: VkDevice, name: text, args: [i64]) -> Result<i64, text>:
+    val rc = spl_wffi_call_i64(_vk_fn(dev, name), args, args.len()) & 4294967295
+    if rc != VK_SUCCESS:
+        return Err(_vk_err(name, rc))
+    Ok(0)
+
+# Call a void Vulkan entry point.
+fn _vk_call_void(dev: VkDevice, name: text, args: [i64]):
+    spl_wffi_call_i64(_vk_fn(dev, name), args, args.len())
+
+val VK_DEVICE_FNS = ["vkGetPhysicalDeviceQueueFamilyProperties", "vkGetPhysicalDeviceMemoryProperties", "vkGetPhysicalDeviceProperties", "vkEnumeratePhysicalDevices", "vkCreateDevice", "vkDestroyDevice", "vkDestroyInstance", "vkGetDeviceQueue", "vkCreateBuffer", "vkDestroyBuffer", "vkGetBufferMemoryRequirements", "vkAllocateMemory", "vkFreeMemory", "vkBindBufferMemory", "vkMapMemory", "vkCreateShaderModule", "vkDestroyShaderModule", "vkCreateDescriptorSetLayout", "vkCreatePipelineLayout", "vkCreateComputePipelines", "vkCreateDescriptorPool", "vkAllocateDescriptorSets", "vkUpdateDescriptorSets", "vkCreateCommandPool", "vkAllocateCommandBuffers", "vkBeginCommandBuffer", "vkEndCommandBuffer", "vkResetCommandBuffer", "vkCmdBindPipeline", "vkCmdBindDescriptorSets", "vkCmdPushConstants", "vkCmdDispatch", "vkCreateFence", "vkQueueSubmit", "vkWaitForFences", "vkResetFences", "vkDeviceWaitIdle", "vkDestroyPipeline", "vkDestroyPipelineLayout", "vkDestroyDescriptorSetLayout", "vkDestroyDescriptorPool", "vkDestroyCommandPool", "vkDestroyFence"]
+
+fn _vk_open_instance(dev: VkDevice, loader: i64) -> Result<i64, text>:
+    # VkInstanceCreateInfo (64 bytes, sType=1) at 256 with pApplicationInfo
+    # (+24) -> VkApplicationInfo (48 bytes, sType=0) at 384 whose apiVersion
+    # (+44) is 1.1: the shaders are SPIR-V 1.3 with the StorageBuffer storage
+    # class, which Vulkan 1.0 (the default without app info) does not accept.
+    _vk_put(dev, 256, _vk_zeros(176))
+    _vk_put(dev, 384 + 44, _vk_u32(VK_API_VERSION_1_1))
+    _vk_put(dev, 256, _vk_u32(1) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(0) + _vk_u64(dev.scratch + 384))
+    val rc = spl_wffi_call_i64(spl_dlsym(loader, "vkCreateInstance"), [dev.scratch + 256, 0, dev.scratch], 3) & 4294967295
+    if rc != VK_SUCCESS:
+        return Err(_vk_err("vkCreateInstance", rc))
+    Ok(_vk_read_uint(dev.scratch, 8))
+
+# True when queue family `i` of `props` (24 bytes each) supports compute.
+fn _vk_family_has_compute(props: [u8], i: i64) -> bool:
+    (props[i * 24] as i64) / 2 % 2 == 1
+
+# Open the first usable Vulkan GPU with a compute queue (SLANG_VK_DEVICE, when
+# set, selects the first device whose name contains that text).
+# Load the Vulkan loader and libc only now (never at import), open the first
+# usable GPU. On any failure everything loaded or created so far is released.
+pub fn vk_open() -> Result<VkDevice, text>:
+    val os = host_os_name()
+    val ucrt = spl_dlopen(host_libc_name(os))
+    val loader = spl_dlopen(vk_loader_name(os))
+    if loader == 0 or ucrt == 0:
+        if loader != 0:
+            spl_dlclose(loader)
+        if ucrt != 0:
+            spl_dlclose(ucrt)
+        return Err("Vulkan: cannot load {vk_loader_name(os)} / {host_libc_name(os)}")
+    val c_malloc = spl_dlsym(ucrt, "malloc")
+    val c_memset = spl_dlsym(ucrt, "memset")
+    if c_malloc == 0 or c_memset == 0:
+        spl_dlclose(loader)
+        spl_dlclose(ucrt)
+        return Err("Vulkan: cannot resolve malloc/memset in {host_libc_name(os)}")
+    val dev = VkDevice(
+        name: "", loader: loader, libc: ucrt, fns: {}, instance: 0, phys: 0, device: 0, queue: 0, family: 0,
+        cmd_pool: 0, cmd_buf: 0, fence: 0, desc_pool: 0, mem_types: [], max_storage_range: 0, max_groups_x: 0,
+        c_malloc: c_malloc, c_free: spl_dlsym(ucrt, "free"), c_memcpy: spl_dlsym(ucrt, "memcpy"),
+        scratch: spl_wffi_call_i64(c_malloc, [SCRATCH_SIZE], 1), kernels: {})
+    spl_wffi_call_i64(c_memset, [dev.scratch, 0, SCRATCH_SIZE], 3)
+    val r = _vk_init(dev)
+    match r:
+        case Ok(_):
+            Ok(dev)
+        case Err(e):
+            vk_close(dev)
+            Err(e)
+
+# Release the device, instance, scratch block and both libraries. Safe on a
+# partially opened device; the device must not be used afterwards.
+pub fn vk_close(dev: VkDevice):
+    if dev.device != 0:
+        # Every child object must be destroyed before the device.
+        _vk_call_void(dev, "vkDeviceWaitIdle", [dev.device])
+        for name in dev.kernels.keys():
+            val k = dev.kernels[name]
+            _vk_call_void(dev, "vkDestroyPipeline", [dev.device, k.pipeline, 0])
+            _vk_call_void(dev, "vkDestroyPipelineLayout", [dev.device, k.layout, 0])
+            _vk_call_void(dev, "vkDestroyDescriptorPool", [dev.device, k.desc_pool, 0])
+            _vk_call_void(dev, "vkDestroyDescriptorSetLayout", [dev.device, k.set_layout, 0])
+        dev.kernels = {}
+        if dev.fence != 0:
+            _vk_call_void(dev, "vkDestroyFence", [dev.device, dev.fence, 0])
+            dev.fence = 0
+        if dev.cmd_pool != 0:
+            _vk_call_void(dev, "vkDestroyCommandPool", [dev.device, dev.cmd_pool, 0])
+            dev.cmd_pool = 0
+        _vk_call_void(dev, "vkDestroyDevice", [dev.device, 0])
+        dev.device = 0
+    if dev.instance != 0:
+        _vk_call_void(dev, "vkDestroyInstance", [dev.instance, 0])
+        dev.instance = 0
+    if dev.scratch != 0:
+        spl_wffi_call_i64(dev.c_free, [dev.scratch], 1)
+        dev.scratch = 0
+    spl_dlclose(dev.loader)
+    spl_dlclose(dev.libc)
+
+fn _vk_init(dev: VkDevice) -> Result<i64, text>:
+    val loader = dev.loader
+    for fname in VK_DEVICE_FNS:
+        val f = spl_dlsym(loader, fname)
+        if f == 0:
+            return Err("Vulkan: missing symbol {fname}")
+        dev.fns[fname] = f
+    dev.instance = _vk_open_instance(dev, loader)?
+    # Physical devices: count at scratch+0, handles at scratch+256.
+    _vk_put(dev, 0, _vk_u32(16))
+    _vk_call(dev, "vkEnumeratePhysicalDevices", [dev.instance, dev.scratch, dev.scratch + 256])?
+    val count = _vk_read_uint(dev.scratch, 4)
+    if count == 0:
+        return Err("Vulkan: no physical devices")
+    val want = host_env("SLANG_VK_DEVICE")
+    var chosen: i64 = -1
+    var chosen_family: i64 = 0
+    var chosen_name = ""
+    var chosen_rank: i64 = -1
+    var di: i64 = 0
+    while di < count:
+        val pd = _vk_read_uint(dev.scratch + 256 + di * 8, 8)
+        # VkPhysicalDeviceProperties: deviceType at 16, deviceName[256] at 20.
+        _vk_call_void(dev, "vkGetPhysicalDeviceProperties", [pd, dev.scratch + 1024])
+        val dtype = _vk_read_uint(dev.scratch + 1024 + 16, 4)
+        # apiVersion at 0; VkPhysicalDeviceLimits at 296: maxStorageBufferRange
+        # +28, maxComputeWorkGroupCount[0] +220, maxComputeWorkGroupInvocations +232.
+        val api = _vk_read_uint(dev.scratch + 1024, 4)
+        val lim_storage = _vk_read_uint(dev.scratch + 1024 + 296 + 28, 4)
+        val lim_groups_x = _vk_read_uint(dev.scratch + 1024 + 296 + 220, 4)
+        val lim_invocations = _vk_read_uint(dev.scratch + 1024 + 296 + 232, 4)
+        val usable = api >= VK_API_VERSION_1_1 and lim_invocations >= VK_MAX_LOCAL_SIZE
+        val dname = _vk_text_at(dev.scratch + 1024 + 20, 256)
+        _vk_put(dev, 0, _vk_u32(16))
+        _vk_call_void(dev, "vkGetPhysicalDeviceQueueFamilyProperties", [pd, dev.scratch, dev.scratch + 2304])
+        val nfam = _vk_read_uint(dev.scratch, 4)
+        val fam_bytes = bytes_from_raw(dev.scratch + 2304, nfam * 24)
+        var fam: i64 = -1
+        var fi: i64 = 0
+        while fi < nfam and fam < 0:
+            if _vk_family_has_compute(fam_bytes, fi):
+                fam = fi
+            fi = fi + 1
+        # rank: discrete GPU 3, integrated 2, other 1; an explicit name match wins.
+        var rank: i64 = 1
+        if dtype == 2:
+            rank = 3
+        if dtype == 1:
+            rank = 2
+        if want != "" and dname.contains(want):
+            rank = 10
+        if usable and fam >= 0 and rank > chosen_rank:
+            chosen = pd
+            dev.max_storage_range = lim_storage
+            dev.max_groups_x = lim_groups_x
+            chosen_family = fam
+            chosen_name = dname
+            chosen_rank = rank
+        di = di + 1
+    if chosen < 0:
+        return Err("Vulkan: no physical device with Vulkan 1.1, a compute queue and {VK_MAX_LOCAL_SIZE}-lane workgroups")
+    dev.phys = chosen
+    dev.family = chosen_family
+    dev.name = chosen_name
+    # VkDeviceQueueCreateInfo at 256 (40 bytes), priority float 1.0 at 320,
+    # VkDeviceCreateInfo at 384 (72 bytes).
+    _vk_put(dev, 256, _vk_zeros(256))
+    _vk_put(dev, 256, _vk_u32(2) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(chosen_family) + _vk_u32(1) + _vk_u32(0) + _vk_u64(dev.scratch + 320))
+    _vk_put(dev, 320, _vk_u32(1065353216))
+    _vk_put(dev, 384, _vk_u32(3) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(1) + _vk_u64(dev.scratch + 256))
+    _vk_call(dev, "vkCreateDevice", [chosen, dev.scratch + 384, 0, dev.scratch])?
+    dev.device = _vk_read_uint(dev.scratch, 8)
+    _vk_call_void(dev, "vkGetDeviceQueue", [dev.device, chosen_family, 0, dev.scratch])
+    dev.queue = _vk_read_uint(dev.scratch, 8)
+    # Memory types: VkPhysicalDeviceMemoryProperties, types at 4 (8 bytes each).
+    _vk_call_void(dev, "vkGetPhysicalDeviceMemoryProperties", [chosen, dev.scratch + 1024])
+    val ntypes = _vk_read_uint(dev.scratch + 1024, 4)
+    val tb = bytes_from_raw(dev.scratch + 1028, ntypes * 8)
+    var ti: i64 = 0
+    while ti < ntypes:
+        dev.mem_types.push((tb[ti * 8] as i64) + (tb[ti * 8 + 1] as i64) * 256)
+        ti = ti + 1
+    # Command pool (RESET_COMMAND_BUFFER) + one primary command buffer + fence.
+    _vk_put(dev, 256, _vk_u32(39) + _vk_u32(0) + _vk_u64(0) + _vk_u32(2) + _vk_u32(chosen_family))
+    _vk_call(dev, "vkCreateCommandPool", [dev.device, dev.scratch + 256, 0, dev.scratch])?
+    dev.cmd_pool = _vk_read_uint(dev.scratch, 8)
+    _vk_put(dev, 256, _vk_u32(40) + _vk_u32(0) + _vk_u64(0) + _vk_u64(dev.cmd_pool) + _vk_u32(0) + _vk_u32(1))
+    _vk_call(dev, "vkAllocateCommandBuffers", [dev.device, dev.scratch + 256, dev.scratch])?
+    dev.cmd_buf = _vk_read_uint(dev.scratch, 8)
+    _vk_put(dev, 256, _vk_u32(8) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0))
+    _vk_call(dev, "vkCreateFence", [dev.device, dev.scratch + 256, 0, dev.scratch])?
+    dev.fence = _vk_read_uint(dev.scratch, 8)
+    Ok(0)
+
+# Memory type index with all of `want` flags among the bits allowed by `type_bits`, or -1.
+fn _vk_find_mem_type(dev: VkDevice, type_bits: i64, want: i64) -> i64:
+    var i: i64 = 0
+    while i < dev.mem_types.len():
+        val allowed = (type_bits >> i) & 1
+        if allowed == 1 and (dev.mem_types[i] & want) == want:
+            return i
+        i = i + 1
+    -1
+
+# Storage buffer of `n_floats` f32 values, persistently mapped.
+pub fn vk_buffer_alloc(dev: VkDevice, n_floats: i64) -> Result<VkBuffer, text>:
+    var size = n_floats * 4
+    if size < 4:
+        size = 4
+    # Each op binds the whole buffer as one storage descriptor (VK_WHOLE_SIZE).
+    if size > dev.max_storage_range:
+        return Err("Vulkan: buffer of {size} bytes exceeds maxStorageBufferRange {dev.max_storage_range}")
+    # VkBufferCreateInfo: usage STORAGE_BUFFER (0x20), exclusive sharing.
+    _vk_put(dev, 256, _vk_zeros(64))
+    _vk_put(dev, 256, _vk_u32(12) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(0) + _vk_u64(size) + _vk_u32(32) + _vk_u32(0) + _vk_u32(0))
+    _vk_call(dev, "vkCreateBuffer", [dev.device, dev.scratch + 256, 0, dev.scratch])?
+    val buf = _vk_read_uint(dev.scratch, 8)
+    # VkMemoryRequirements: size@0 alignment@8 memoryTypeBits@16.
+    _vk_call_void(dev, "vkGetBufferMemoryRequirements", [dev.device, buf, dev.scratch + 512])
+    val alloc_size = _vk_read_uint(dev.scratch + 512, 8)
+    val bits = _vk_read_uint(dev.scratch + 512 + 16, 4)
+    var mt = _vk_find_mem_type(dev, bits, 7)
+    var mem: i64 = 0
+    var rc: i64 = 1
+    if mt >= 0:
+        _vk_put(dev, 256, _vk_u32(5) + _vk_u32(0) + _vk_u64(0) + _vk_u64(alloc_size) + _vk_u32(mt) + _vk_u32(0))
+        rc = spl_wffi_call_i64(_vk_fn(dev, "vkAllocateMemory"), [dev.device, dev.scratch + 256, 0, dev.scratch], 4) & 4294967295
+    if rc != VK_SUCCESS:
+        mt = _vk_find_mem_type(dev, bits, 6)
+        if mt < 0:
+            _vk_call_void(dev, "vkDestroyBuffer", [dev.device, buf, 0])
+            return Err("Vulkan: no HOST_VISIBLE | HOST_COHERENT memory type for the buffer")
+        _vk_put(dev, 256, _vk_u32(5) + _vk_u32(0) + _vk_u64(0) + _vk_u64(alloc_size) + _vk_u32(mt) + _vk_u32(0))
+        val fallback = _vk_call(dev, "vkAllocateMemory", [dev.device, dev.scratch + 256, 0, dev.scratch])
+        if fallback.is_err():
+            _vk_call_void(dev, "vkDestroyBuffer", [dev.device, buf, 0])
+            return Err(fallback.unwrap_err())
+    mem = _vk_read_uint(dev.scratch, 8)
+    var bound = _vk_call(dev, "vkBindBufferMemory", [dev.device, buf, mem, 0])
+    if bound.is_ok():
+        bound = _vk_call(dev, "vkMapMemory", [dev.device, mem, 0, VK_WHOLE_SIZE, 0, dev.scratch])
+    if bound.is_err():
+        _vk_call_void(dev, "vkDestroyBuffer", [dev.device, buf, 0])
+        _vk_call_void(dev, "vkFreeMemory", [dev.device, mem, 0])
+        return Err(bound.unwrap_err())
+    Ok(VkBuffer(buf: buf, mem: mem, mapped: _vk_read_uint(dev.scratch, 8), n: n_floats))
+
+pub fn vk_buffer_free(dev: VkDevice, t: VkBuffer):
+    _vk_call_void(dev, "vkDestroyBuffer", [dev.device, t.buf, 0])
+    _vk_call_void(dev, "vkFreeMemory", [dev.device, t.mem, 0])
+
+# Bulk upload: `byte_len` bytes of `bytes` from `offset` go to byte `dst_off` of the buffer.
+pub fn vk_buffer_upload_bytes(dev: VkDevice, t: VkBuffer, dst_off: i64, bytes: [u8], offset: i64, byte_len: i64) -> Result<i64, text>:
+    if offset < 0 or byte_len < 0 or offset + byte_len > bytes.len():
+        return Err("Vulkan: upload range {offset}+{byte_len} outside {bytes.len()} bytes")
+    if dst_off < 0 or dst_off + byte_len > t.n * 4:
+        return Err("Vulkan: upload of {byte_len} bytes at {dst_off} overruns buffer of {t.n * 4} bytes")
+    _vk_host_write(dev, t.mapped + dst_off, bytes, offset, byte_len)
+    Ok(byte_len)
+
+pub fn vk_buffer_download_bytes(dev: VkDevice, t: VkBuffer, byte_len: i64) -> Result<[u8], text>:
+    if byte_len < 0 or byte_len > t.n * 4:
+        return Err("Vulkan: download of {byte_len} bytes exceeds buffer of {t.n * 4} bytes")
+    Ok(bytes_from_raw(t.mapped, byte_len))
+
+# Host f64 -> little-endian f32 bytes.
+pub fn vk_f32_bytes(values: [f64]) -> [u8]:
+    var out: [u8] = []
+    for v in values:
+        val bits = f32_to_bits(v as f32) as i64
+        out.push((bits & 255) as u8)
+        out.push(((bits >> 8) & 255) as u8)
+        out.push(((bits >> 16) & 255) as u8)
+        out.push(((bits >> 24) & 255) as u8)
+    out
+
+# f32 bit pattern of `v` as the 32-bit word a push-constant `float` member holds.
+pub fn vk_f32_word(v: f64) -> i64:
+    (f32_to_bits(v as f32) as i64) & 4294967295
+
+# Pipeline for SPIR-V `spirv` with `n_bufs` storage buffers (set 0, bindings
+# 0..n-1) and `push_size` bytes of push constants; cached by `name`.
+pub fn vk_kernel(dev: VkDevice, name: text, spirv: [u8], n_bufs: i64, push_size: i64) -> Result<VkKernel, text>:
+    val cached = dev.kernels.get(name)
+    if cached.is_some():
+        return Ok(cached.unwrap())
+    # Shader module: the SPIR-V code lives in its own malloc block.
+    val code = spl_wffi_call_i64(dev.c_malloc, [spirv.len() + 8], 1)
+    _vk_host_write(dev, code, spirv, 0, spirv.len())
+    _vk_put(dev, 256, _vk_u32(16) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(0) + _vk_u64(spirv.len()) + _vk_u64(code))
+    val rc_mod = spl_wffi_call_i64(_vk_fn(dev, "vkCreateShaderModule"), [dev.device, dev.scratch + 256, 0, dev.scratch], 4) & 4294967295
+    spl_wffi_call_i64(dev.c_free, [code], 1)
+    if rc_mod != VK_SUCCESS:
+        return Err(_vk_err("vkCreateShaderModule({name})", rc_mod))
+    val shader = _vk_read_uint(dev.scratch, 8)
+    # Descriptor set layout: n storage-buffer bindings (24 bytes each at 512).
+    var bind_bytes: [u8] = []
+    var b: i64 = 0
+    while b < n_bufs:
+        bind_bytes = bind_bytes + _vk_u32(b) + _vk_u32(7) + _vk_u32(1) + _vk_u32(32) + _vk_u64(0)
+        b = b + 1
+    _vk_put(dev, 512, bind_bytes)
+    _vk_put(dev, 256, _vk_u32(32) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(n_bufs) + _vk_u64(dev.scratch + 512))
+    _vk_call(dev, "vkCreateDescriptorSetLayout", [dev.device, dev.scratch + 256, 0, dev.scratch])?
+    val set_layout = _vk_read_uint(dev.scratch, 8)
+    # Pipeline layout: set layout handle at 1024, push range at 1040.
+    _vk_put(dev, 1024, _vk_u64(set_layout))
+    _vk_put(dev, 1040, _vk_u32(32) + _vk_u32(0) + _vk_u32(push_size))
+    _vk_put(dev, 256, _vk_u32(30) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(1) + _vk_u64(dev.scratch + 1024) + _vk_u32(1) + _vk_u32(0) + _vk_u64(dev.scratch + 1040))
+    _vk_call(dev, "vkCreatePipelineLayout", [dev.device, dev.scratch + 256, 0, dev.scratch])?
+    val layout = _vk_read_uint(dev.scratch, 8)
+    # "main" at 1100; VkComputePipelineCreateInfo (96 bytes) at 256.
+    _vk_put(dev, 1100, [109, 97, 105, 110, 0])
+    _vk_put(dev, 256, _vk_zeros(96))
+    _vk_put(dev, 256, _vk_u32(29) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(0) + _vk_u32(18) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(32) + _vk_u64(shader) + _vk_u64(dev.scratch + 1100) + _vk_u64(0) + _vk_u64(layout) + _vk_u64(0) + _vk_u32(-1 & 4294967295) + _vk_u32(0))
+    _vk_call(dev, "vkCreateComputePipelines", [dev.device, 0, 1, dev.scratch + 256, 0, dev.scratch + 1200])?
+    val pipeline = _vk_read_uint(dev.scratch + 1200, 8)
+    _vk_call_void(dev, "vkDestroyShaderModule", [dev.device, shader, 0])
+    # One reusable descriptor set per pipeline (dispatches are serialized).
+    _vk_put(dev, 512, _vk_u32(7) + _vk_u32(n_bufs))
+    _vk_put(dev, 256, _vk_u32(33) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(1) + _vk_u32(1) + _vk_u32(0) + _vk_u64(dev.scratch + 512))
+    _vk_call(dev, "vkCreateDescriptorPool", [dev.device, dev.scratch + 256, 0, dev.scratch])?
+    val pool = _vk_read_uint(dev.scratch, 8)
+    _vk_put(dev, 256, _vk_u32(34) + _vk_u32(0) + _vk_u64(0) + _vk_u64(pool) + _vk_u32(1) + _vk_u32(0) + _vk_u64(dev.scratch + 1024))
+    _vk_call(dev, "vkAllocateDescriptorSets", [dev.device, dev.scratch + 256, dev.scratch])?
+    val dset = _vk_read_uint(dev.scratch, 8)
+    val k = VkKernel(pipeline: pipeline, layout: layout, set_layout: set_layout, dset: dset, desc_pool: pool, n_bufs: n_bufs, push_size: push_size)
+    dev.kernels[name] = k
+    Ok(k)
+
+# Bind `bufs`, push `push_words` (32-bit words), dispatch `groups_x` workgroups,
+# submit and wait. Returns when the results are visible to the host.
+pub fn vk_dispatch(dev: VkDevice, k: VkKernel, bufs: [VkBuffer], push_words: [i64], groups_x: i64) -> Result<i64, text>:
+    if bufs.len() != k.n_bufs or push_words.len() * 4 > k.push_size:
+        return Err("Vulkan: dispatch argument mismatch ({bufs.len()} buffers / {push_words.len()} words for {k.n_bufs} / {k.push_size / 4})")
+    if groups_x < 1 or groups_x > dev.max_groups_x:
+        return Err("Vulkan: {groups_x} workgroups outside 1..maxComputeWorkGroupCount[0] {dev.max_groups_x}")
+    # Descriptor writes: infos (24 bytes) at 512, writes (64 bytes) at 1024.
+    var infos: [u8] = []
+    var writes: [u8] = []
+    var i: i64 = 0
+    while i < bufs.len():
+        infos = infos + _vk_u64(bufs[i].buf) + _vk_u64(0) + _vk_u64(VK_WHOLE_SIZE)
+        writes = writes + _vk_u32(35) + _vk_u32(0) + _vk_u64(0) + _vk_u64(k.dset) + _vk_u32(i) + _vk_u32(0) + _vk_u32(1) + _vk_u32(7) + _vk_u64(0) + _vk_u64(dev.scratch + 512 + i * 24) + _vk_u64(0)
+        i = i + 1
+    _vk_put(dev, 512, infos)
+    _vk_put(dev, 1024, writes)
+    _vk_call_void(dev, "vkUpdateDescriptorSets", [dev.device, bufs.len(), dev.scratch + 1024, 0, 0])
+    var push: [u8] = []
+    for w in push_words:
+        push = push + _vk_u32(w)
+    if push.len() > 0:
+        _vk_put(dev, OFF_PUSH, push)
+    _vk_call(dev, "vkResetCommandBuffer", [dev.cmd_buf, 0])?
+    _vk_put(dev, 256, _vk_u32(42) + _vk_u32(0) + _vk_u64(0) + _vk_u32(1) + _vk_u32(0) + _vk_u64(0))
+    _vk_call(dev, "vkBeginCommandBuffer", [dev.cmd_buf, dev.scratch + 256])?
+    _vk_call_void(dev, "vkCmdBindPipeline", [dev.cmd_buf, 1, k.pipeline])
+    _vk_put(dev, 2048, _vk_u64(k.dset))
+    _vk_call_void(dev, "vkCmdBindDescriptorSets", [dev.cmd_buf, 1, k.layout, 0, 1, dev.scratch + 2048, 0, 0])
+    if push.len() > 0:
+        _vk_call_void(dev, "vkCmdPushConstants", [dev.cmd_buf, k.layout, 32, 0, push.len(), dev.scratch + OFF_PUSH])
+    _vk_call_void(dev, "vkCmdDispatch", [dev.cmd_buf, groups_x, 1, 1])
+    _vk_call(dev, "vkEndCommandBuffer", [dev.cmd_buf])?
+    # VkSubmitInfo (72 bytes) at 256; command buffer handle at 2048.
+    _vk_put(dev, 256, _vk_zeros(72))
+    _vk_put(dev, 2048, _vk_u64(dev.cmd_buf))
+    _vk_put(dev, 256, _vk_u32(4) + _vk_u32(0) + _vk_u64(0) + _vk_u32(0) + _vk_u32(0) + _vk_u64(0) + _vk_u64(0) + _vk_u32(1) + _vk_u32(0) + _vk_u64(dev.scratch + 2048))
+    _vk_call(dev, "vkQueueSubmit", [dev.queue, 1, dev.scratch + 256, dev.fence])?
+    _vk_put(dev, 2064, _vk_u64(dev.fence))
+    _vk_call(dev, "vkWaitForFences", [dev.device, 1, dev.scratch + 2064, 1, VK_TIMEOUT_FOREVER])?
+    _vk_call(dev, "vkResetFences", [dev.device, 1, dev.scratch + 2064])?
+    Ok(0)

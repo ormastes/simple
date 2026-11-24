@@ -23,15 +23,19 @@ case "$ARCH" in
     *) echo "[sysroot-32] unsupported arch '$ARCH' (i686, riscv32, arm32)" >&2; exit 2 ;;
 esac
 
-SYSROOT="$REPO_ROOT/build/os/sysroot-$ARCH"
+SYSROOT="${SIMPLEOS_SYSROOT_32:-$REPO_ROOT/build/os/sysroot-$ARCH}"
 LIBC_DIR="$REPO_ROOT/src/os/libc"
-LIBC_BUILD="$REPO_ROOT/build/os/libc-$ARCH-unknown-simpleos"
+mkdir -p "$SYSROOT/obj"
+LIBC_BUILD=$(mktemp -d "$SYSROOT/obj/libc-generation.XXXXXX")
 CC="${CC:-clang}"
 AR="${AR:-llvm-ar}"
 CFLAGS="$ARCH_CFLAGS -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -O2 -Wall -Wextra -Wno-unused-parameter -D__simpleos__=1 -I$LIBC_DIR/include"
+. "$REPO_ROOT/scripts/check/lib/simpleos-sysroot-receipt.shs"
+simpleos_sdk_invalidate "$SYSROOT"
 
-rm -rf "$LIBC_BUILD"
 mkdir -p "$SYSROOT/lib" "$SYSROOT/share/simpleos" "$LIBC_BUILD"
+sdk_input_capture="$LIBC_BUILD/prebuild-inputs.sdn"
+simpleos_sdk_capture_inputs "$REPO_ROOT" "$ARCH" scripts/os/simpleos-sysroot-32.shs "$sdk_input_capture"
 printf '%s\n' "$ARCH-unknown-simpleos" > "$SYSROOT/share/simpleos/target-triple.txt"
 
 echo "[sysroot-32] Building SimpleOS libc for $ARCH..."
@@ -66,4 +70,7 @@ cat > "$SYSROOT/share/simpleos/simpleos.ld" << 'LDEOF'
  * and the Simple linker produce. Static linking only. */
 ENTRY(_start)
 LDEOF
+sdk_flags_file="$LIBC_BUILD/build-flags.txt"
+printf 'CFLAGS=%s\nASFLAGS=%s\n' "$CFLAGS" "$ARCH_CFLAGS" > "$sdk_flags_file"
+simpleos_sdk_write "$REPO_ROOT" "$SYSROOT" "$ARCH" scripts/os/simpleos-sysroot-32.shs "$CC" "$AR" "$sdk_flags_file" "$sdk_input_capture"
 echo "[sysroot-32] Sysroot ready: $SYSROOT"

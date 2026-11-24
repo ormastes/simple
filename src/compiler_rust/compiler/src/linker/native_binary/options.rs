@@ -131,7 +131,7 @@ impl NativeBinaryOptions {
     fn default_library_paths_for_target(target: &Target) -> Vec<PathBuf> {
         let mut library_paths = Self::detect_library_paths_for_target(target);
 
-        if *target == Target::host() {
+        if target.uses_host_runtime_abi() {
             if let Some(compiler_path) = Self::find_compiler_library_path() {
                 Self::push_front_unique(&mut library_paths, compiler_path);
             }
@@ -139,7 +139,7 @@ impl NativeBinaryOptions {
 
         if let Some(runtime_path) = Self::find_runtime_library_path_for_target(target) {
             Self::push_front_unique(&mut library_paths, runtime_path);
-        } else if *target == Target::host() {
+        } else if target.uses_host_runtime_abi() {
             let cwd_debug = std::env::current_dir().ok().map(|p| p.join("target/debug"));
             if let Some(path) = cwd_debug.filter(|path| Self::runtime_lib_exists(path)) {
                 Self::push_front_unique(&mut library_paths, path);
@@ -351,7 +351,7 @@ impl NativeBinaryOptions {
             }
         }
 
-        if *target != Target::host() {
+        if !target.uses_host_runtime_abi() {
             return None;
         }
 
@@ -563,6 +563,31 @@ impl NativeBinaryOptions {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(all(windows, target_env = "gnu"))]
+    #[ignore = "requires SIMPLE_HOST_RUNTIME_TEST_CWD with real target/bootstrap/deps runtime; run serially"]
+    fn explicit_windows_host_abi_discovers_published_runtime() {
+        use simple_common::target::{LinkerFlavor, Target, TargetArch};
+        assert!(std::env::var_os("SIMPLE_RUNTIME_PATH").is_none());
+        let fixture = std::path::PathBuf::from(std::env::var_os("SIMPLE_HOST_RUNTIME_TEST_CWD").unwrap());
+        let expected = fixture.join("target/bootstrap/deps").canonicalize().unwrap();
+        assert!(expected.join("libsimple_runtime.a").is_file());
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&fixture).unwrap();
+        let host = Target::host();
+        let explicit = Target { linker_flavor_hint: Some(LinkerFlavor::Gnu), ..host };
+        let implicit_path = NativeBinaryOptions::find_runtime_library_path_for_target(&host);
+        let explicit_path = NativeBinaryOptions::find_runtime_library_path_for_target(&explicit);
+        let incompatible = NativeBinaryOptions::find_runtime_library_path_for_target(
+            &Target { linker_flavor_hint: Some(LinkerFlavor::Msvc), ..host });
+        let cross = NativeBinaryOptions::find_runtime_library_path_for_target(&Target {
+            arch: if host.arch == TargetArch::X86_64 { TargetArch::Aarch64 } else { TargetArch::X86_64 }, ..explicit });
+        std::env::set_current_dir(original).unwrap();
+        assert_eq!(implicit_path, Some(expected.clone()));
+        assert_eq!(explicit_path, Some(expected));
+        assert!(incompatible.is_none());
+        assert!(cross.is_none());
+    }
     use super::NativeBinaryOptions;
     use std::fs;
     use std::path::PathBuf;

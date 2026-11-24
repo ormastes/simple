@@ -536,7 +536,25 @@ int64_t slang_ggml_out_byte(int64_t i) {
 
 /* ---- lifecycle ------------------------------------------------------- */
 
+/* ggml-vulkan reads GGML_VK_DISABLE_FUSION once, when it creates the device, and
+ * keeps the device for the process. Tree KV mode 3 gives the cache a 16-stream
+ * KV layout; with fusion on, the one-stream cache-off graph runs the fused
+ * rms_norm/rope/set_rows kernels while the multi-stream graph does not, so the
+ * two paths differ in the last bits. Mode 3 can be configured at any time, so
+ * fusion is turned off here, before any device exists. An explicit value from
+ * the environment wins. See doc/08_tracking/bug/
+ * slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md (C1). */
+static void slang_vulkan_fusion_off(void) {
+    if (getenv("GGML_VK_DISABLE_FUSION") != NULL) return;
+#if defined(_WIN32)
+    _putenv_s("GGML_VK_DISABLE_FUSION", "1");
+#else
+    setenv("GGML_VK_DISABLE_FUSION", "1", 0);
+#endif
+}
+
 int64_t slang_ggml_backend_init(void) {
+    slang_vulkan_fusion_off();
     llama_backend_init();
     return 0;
 }
@@ -641,6 +659,7 @@ struct slang_tree_node {
 
 static struct slang_tree_node g_tree_node[SLANG_TREE_MAX_NODES];
 static int g_tree_seq_used[SLANG_TREE_MAX_SEQS];
+static int g_tree_seq_dirty[SLANG_TREE_MAX_SEQS];   /* stream may hold stale K/V data */
 static int g_tree_mode = 0;
 static struct llama_context *g_tree_ctx = NULL;
 static int64_t g_tree_limit = 0;      /* per-request context limit of g_tree_ctx */
@@ -649,9 +668,18 @@ static int64_t g_tree_cells = 0;
 static int64_t g_tree_active = 0;     /* handle of the request on the context */
 static int g_tree_warm = 0;           /* the context has run a full micro-batch */
 
+/* Mode 3 keeps the last two seq ids out of circulation: the last is a never-decoded
+ * "pristine" stream a request stream is zeroed from (slang_tree_zero_stream), the
+ * one before it is the scratch stream slang_tree_flush_stream_copies decodes on. */
+#define SLANG_TREE_PRISTINE_SEQ (SLANG_TREE_MAX_SEQS - 1)
+#define SLANG_TREE_SCRATCH_SEQ  (SLANG_TREE_MAX_SEQS - 2)
+static int slang_tree_usable_seqs(void) {
+    return g_tree_mode == 3 ? SLANG_TREE_MAX_SEQS - 2 : SLANG_TREE_MAX_SEQS;
+}
+
 static int64_t slang_tree_capacity(void) {
-    return g_prefix_capacity < SLANG_TREE_MAX_SEQS - 1 ? g_prefix_capacity
-                                                      : SLANG_TREE_MAX_SEQS - 1;
+    int64_t room = slang_tree_usable_seqs() - 1;
+    return g_prefix_capacity < room ? g_prefix_capacity : room;
 }
 
 static void slang_tree_node_init(int i) {
@@ -888,7 +916,7 @@ static void slang_tree_compact(int node) {
 }
 
 static int slang_tree_alloc_seq(void) {
-    for (int i = 0; i < SLANG_TREE_MAX_SEQS; i++)
+    for (int i = 0; i < slang_tree_usable_seqs(); i++)
         if (!g_tree_seq_used[i]) { g_tree_seq_used[i] = 1; return i; }
     return -1;
 }
@@ -925,8 +953,62 @@ static void slang_tree_destroy(void) {
         if (g_tree_node[i].used) free(g_tree_node[i].tok);
     slang_tree_reset_root();
     memset(g_tree_seq_used, 0, sizeof(g_tree_seq_used));
+    memset(g_tree_seq_dirty, 0, sizeof(g_tree_seq_dirty));
     if (g_tree_ctx != NULL) { llama_free(g_tree_ctx); g_tree_ctx = NULL; }
     g_tree_limit = 0; g_tree_cells = 0; g_tree_active = 0; g_tree_warm = 0;
+}
+
+/* Mode 3, option (b) of slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md:
+ * a stream a request takes may hold K/V cells of an earlier, longer request past
+ * the new frontier, and flash attention is not independent of them. A seq_cp from
+ * the never-decoded pristine stream replaces the whole destination stream (data
+ * and cell table) with zeros. */
+static void slang_tree_zero_stream(int seq) {
+    if (g_tree_mode != 3 || !g_tree_seq_dirty[seq]) return;
+    llama_memory_seq_cp(llama_get_memory(g_tree_ctx), SLANG_TREE_PRISTINE_SEQ, seq, -1, -1);
+    g_tree_seq_dirty[seq] = 0;
+}
+
+/* llama.cpp queues a cross-stream seq_cp and applies the buffer copy at the next
+ * decode, so a state_seq get/set issued right after one would read or write the
+ * stream before the copy lands (and the copy would then overwrite the restore).
+ * One token decoded on the scratch stream runs the queued copies; the scratch
+ * cells are dropped again. Returns 1 on success. */
+static int slang_tree_flush_stream_copies(void) {
+    if (!g_tree_warm) return 0;   /* the first decode of a context must be a full micro-batch */
+    struct llama_batch batch = llama_batch_init(1, 0, 1);
+    batch.token[0] = 0;
+    batch.pos[0] = 0;
+    batch.n_seq_id[0] = 1;
+    batch.seq_id[0][0] = SLANG_TREE_SCRATCH_SEQ;
+    batch.logits[0] = 0;
+    batch.n_tokens = 1;
+    int rc = llama_decode(g_tree_ctx, batch);
+    llama_batch_free(batch);
+    llama_memory_seq_rm(llama_get_memory(g_tree_ctx), SLANG_TREE_SCRATCH_SEQ, -1, -1);
+    return rc == 0;
+}
+
+/* Mode 3 reuse: copy the owner's stream, drop the tail, serialise the surviving
+ * prefix through host memory, zero the stream, and restore only the prefix, so
+ * no cell of the owner's tail survives past the reused frontier. Returns 1 when
+ * the stream then holds exactly `reuse` cells. */
+static int slang_tree_restore_prefix_host(int owner_seq, int seq, int64_t reuse) {
+    llama_memory_t memory = llama_get_memory(g_tree_ctx);
+    llama_memory_seq_cp(memory, owner_seq, seq, -1, -1);
+    llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
+    int ok = 0;
+    if (!slang_tree_flush_stream_copies()) return 0;
+    size_t size = llama_state_seq_get_size(g_tree_ctx, seq);
+    uint8_t *blob = size > 0 ? (uint8_t *)malloc(size) : NULL;
+    if (blob != NULL && llama_state_seq_get_data(g_tree_ctx, blob, size, seq) == size) {
+        slang_tree_zero_stream(seq);
+        if (slang_tree_flush_stream_copies())
+            ok = llama_state_seq_set_data(g_tree_ctx, blob, size, seq) == size;
+        g_tree_seq_dirty[seq] = 1;
+    }
+    free(blob);
+    return ok;
 }
 
 static int slang_tree_kv_holds(int seq, int64_t count) {
@@ -1000,6 +1082,8 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
     int seq = slang_tree_alloc_seq();
     if (seq < 0 && slang_tree_evict_lru()) seq = slang_tree_alloc_seq();
     if (seq < 0) return SLANG_ERR_BUSY;
+    slang_tree_zero_stream(seq);
+    g_tree_seq_dirty[seq] = 1;
     int64_t reuse = 0;
     int node = 0;
     int64_t matched = request->tok_len > 1
@@ -1029,11 +1113,11 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
         }
         if (owner >= 0) {
             llama_memory_t memory = llama_get_memory(g_tree_ctx);
-            /* Per-sequence streams (mode 3) only copy whole sequences; copy the
-             * owner then drop the tail. Unified KV just adds the seq id to cells. */
+            /* Per-sequence streams (mode 3) only copy whole sequences, and a copy
+             * would carry the owner's tail as stale cells: restore the prefix
+             * through the host instead. Unified KV just adds the seq id to cells. */
             if (g_tree_mode == 3) {
-                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
-                llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
+                slang_tree_restore_prefix_host(g_tree_node[owner].seq, seq, reuse);
             } else {
                 llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, 0, (llama_pos)reuse);
             }
@@ -1043,6 +1127,7 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
                 request->tree_owner = owner;
             } else {
                 llama_memory_seq_rm(memory, seq, -1, -1);
+                slang_tree_zero_stream(seq);   /* the failed restore left cells behind */
                 g_prefix_restore_failures++;
                 reuse = 0;
             }

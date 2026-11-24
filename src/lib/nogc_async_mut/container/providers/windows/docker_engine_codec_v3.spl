@@ -4,7 +4,8 @@
 # token behavior require the actual owner. This codec never creates/retries execs.
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get,
     json_value_serialize, json_value_object_from, json_value_str_array}
-use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, utf8_bytes_valid}
+use std.common.text_bytes.{boxed_text_bytes_checked, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.net.http_core.{body_decision, header_field_name_is_token, hex_chunk_size}
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1, WindowsDockerRequestV1,
     WINDOWS_DOCKER_ENGINE_V1, windows_docker_id_v1, windows_docker_token_v1, windows_docker_mount_path_v1,
@@ -105,7 +106,9 @@ fn engine_slice_v3(bytes: [u8], start: i64, end: i64) -> [u8]:
 fn engine_ascii_v3(bytes: [u8]) -> Result<text, text>:
     for byte in bytes:
         if byte > 127u8: return Err("docker-engine-nonascii-protocol")
-    val result = bytes_to_text(bytes)
+    val result = match bytes_to_text_checked(bytes):
+        case Ok(decoded): decoded
+        case Err(_): return Err("docker-engine-byte-conversion-failed")
     if result.byte_len() != bytes.len(): return Err("docker-engine-byte-conversion-failed")
     Ok(result)
 
@@ -149,7 +152,7 @@ fn engine_request_v3(operation: text, method: text, target: text, json: JsonValu
     if val value = json: body = engine_bytes_v3(json_value_serialize(value))?
     if body.len() > WINDOWS_ENGINE_REQUEST_MAX_V3: return Err("docker-engine-json-request-bound")
     var headers: [(text, text)] = [("Host", "docker"), ("Content-Length", body.len().to_text())]
-    if json != nil: headers.push(("Content-Type", "application/json"))
+    if json.is_some(): headers.push(("Content-Type", "application/json"))
     if hijack:
         headers = headers + [("Connection", "Upgrade"), ("Upgrade", "tcp")]
     else:
@@ -255,14 +258,16 @@ fn engine_json_v3(body: [u8]) -> Result<JsonValue, text>:
         if tokens > 8192: return Err("docker-engine-json-token-bound")
     if quoted or depth != 0: return Err("docker-engine-json-incomplete")
     val unicode_valid = engine_unicode_escapes_v3(body)?
-    val source = bytes_to_text(body)
+    val source = match bytes_to_text_checked(body):
+        case Ok(decoded): decoded
+        case Err(_): return Err("docker-engine-json-byte-conversion")
     if source.byte_len() != body.len(): return Err("docker-engine-json-byte-conversion")
     json_parse_value_strict(source)
 
 fn engine_field_v3(value: JsonValue, key: text) -> Result<JsonValue, text>:
     match json_value_get(value, key):
         case Some(field): Ok(field)
-        case nil: Err("docker-engine-json-missing:" + key)
+        case None: Err("docker-engine-json-missing:" + key)
 
 fn engine_text_v3(value: JsonValue, key: text) -> Result<text, text>:
     match engine_field_v3(value, key)?:
@@ -393,14 +398,14 @@ pub fn windows_engine_exec_inspect_decode_v3(body: [u8], expected_exec_id: text,
             case JsonValue.Str(argument):
                 if argument != request.argv[index + 1]: return Err("docker-engine-exec-argv-mismatch")
             case _: return Err("docker-engine-exec-argument-type")
-    var observed_user: text? = nil
+    var observed_user: text? = None
     if val user_field = json_value_get(process, "user"):
         match user_field:
             case JsonValue.Str(user):
                 if user != "" and user != "ContainerUser": return Err("docker-engine-exec-user-mismatch")
                 if user != "": observed_user = Some(user)
             case _: return Err("docker-engine-exec-user-type")
-    var observed_privileged: bool? = nil
+    var observed_privileged: bool? = None
     if val privilege = json_value_get(process, "privileged"):
         match privilege:
             case JsonValue.Bool(privileged):
@@ -410,7 +415,7 @@ pub fn windows_engine_exec_inspect_decode_v3(body: [u8], expected_exec_id: text,
     if engine_bool_v3(value, "OpenStdin")? != request.stdin_requested or not engine_bool_v3(value, "OpenStdout")? or not engine_bool_v3(value, "OpenStderr")?:
         return Err("docker-engine-exec-stream-attachment-mismatch")
     val running = engine_bool_v3(value, "Running")?
-    var exit_code: i64? = nil
+    var exit_code: i64? = None
     match engine_field_v3(value, "ExitCode")?:
         case JsonValue.Null: ()
         case JsonValue.Int(code):

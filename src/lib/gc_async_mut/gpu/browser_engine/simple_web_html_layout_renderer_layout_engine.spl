@@ -17,11 +17,11 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_device_dy_rest_add}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{button_device_extra_w, button_has_inline_follower, box_device_extra_w_at}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_auto_content_w}
 
 
@@ -1851,6 +1851,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         )
     else:
         []
+    # Chrome's fractional left edge of each column just resolved (empty when
+    # unknown); copied now, before a nested table overwrites the global.
+    val auto_column_edge_frac: [i32] = if auto_column_offsets.len() > 0: g_table_column_edge_frac_milli else: []
     if (
         st.display == "table" and (
             st.table_layout == "fixed" or
@@ -2001,6 +2004,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             styles[cell],
                             if cell_layout_width > 0: cell_layout_width else: 1
                         )
+                    # The cell's lines start at Chrome's fractional column edge
+                    # (the border and padding after it are whole pixels).
+                    box_line_start_err_record(
+                        nodes.len() as i32, cell,
+                        if st.table_layout == "auto" and used_columns < auto_column_edge_frac.len().to_i32(): auto_column_edge_frac[used_columns] else: 0
+                    )
                     val cell_result = layout_with_style(
                         nodes, styles, child_index, cell,
                         box_x, table_y - lead_y, allocated_cell_width,
@@ -2589,6 +2598,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     start_offset: 0, gap_extra: 0, auto_margin: 0
                 )
             var cx_wrap = ix + line_distribution.start_offset
+            var frac_wrap_milli = 0
             var cy_wrap = if reverse_wrap:
                 y + st.border_t + st.pad_t + align_content_offset + total_line_h_with_align - (if line_count > 0: line_heights[0] + align_content_line_extra else: 0)
             else:
@@ -2680,6 +2690,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                                 auto_margin: 0
                             )
                         cx_wrap = ix + line_distribution.start_offset
+                        frac_wrap_milli = 0
                         effective_cml = if cst.margin_l_auto:
                             line_distribution.auto_margin
                         else:
@@ -2731,7 +2742,24 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
-                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, wrap_item_style)
+                    # Chrome keeps the line's earlier auto items at their exact
+                    # (LayoutUnit) widths, so this item starts at a fractional
+                    # x: the `ul` after `<ol><li>Ordered item</li>` paints from
+                    # device column 741.5 at k=4. Snapped like `absolute_box_snap`,
+                    # except an exact half device px rounds DOWN for the box (measured:
+                    # Chrome paints that ul's disc at 696, its text from pen 741.5).
+                    var draw_x_wrap = cx_wrap
+                    if frac_wrap_milli != 0 and not row_flex_main_reversed(st):
+                        val sx_wrap = snap_milli_px(frac_wrap_milli)
+                        draw_x_wrap = cx_wrap + sx_wrap
+                        var err_x_wrap = frac_wrap_milli - sx_wrap * 1000
+                        val k_wrap = layout_device_scale()
+                        if k_wrap > 1:
+                            val dx_wrap = snap_milli_px(err_x_wrap * k_wrap - 1)
+                            box_device_dx_record(nodes.len() as i32, fc_wrap, dx_wrap)
+                            err_x_wrap = (err_x_wrap * k_wrap - dx_wrap * 1000) / k_wrap
+                        box_line_start_err_record(nodes.len() as i32, fc_wrap, err_x_wrap)
+                    val child = layout_with_style(nodes, styles, child_index, fc_wrap, draw_x_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, wrap_item_style)
                     out_bx = child.bx
                     out_by = child.by
                     out_bw = child.bw
@@ -2748,6 +2776,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         out_bx = shifted.bx
                         out_by = shifted.by
                     cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
+                    if cst.width_px == 0 and not cst.width_zero and cst.flex_basis_px == 0 and cst.flex_grow == 0 and not flex_item_zero_basis(cst):
+                        frac_wrap_milli = frac_wrap_milli + flex_item_text_frac_delta_milli_px(nodes, styles, child_index, fc_wrap, cst, base_w_wrap)
                     val actual_item_h = resolved_cst.margin_t + out_bh[fc_wrap] + resolved_cst.margin_b
                     if actual_item_h > line_h_wrap:
                         line_h_wrap = actual_item_h
@@ -3277,6 +3307,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         out_bh[i] = flex_h
         val flex_placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h)
         val flex_end_frac = if flex_h == flex_content_h and st.height_px <= 0: cursor_advance_frac(origin_frac, flex_content_milli) else: origin_frac
+        box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px(flex_end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale()))
         return LayoutResult(bx: flex_placed.bx, by: flex_placed.by, bw: flex_placed.bw, bh: flex_placed.bh, wrap_starts: flex_placed.wrap_starts, wrap_ends: flex_placed.wrap_ends, intrinsic_widths: flex_placed.intrinsic_widths, height: flex_placed.height, end_frac_milli: flex_end_frac, end_frac_valid: true)
     val col_reverse = st.flex_direction == "column-reverse"
     if st.display == "flex" and (st.flex_direction == "column" or col_reverse):
@@ -3757,7 +3788,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
                         styles, cy,
-                        inline_line_h, out_bx, out_by, out_bh
+                        inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                     )
                     out_bx = aligned.bx
                     out_by = aligned.by
@@ -3822,7 +3853,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                                 child_index, st, nodes, inline_baseline_nodes,
                                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                                 styles, cy,
-                                inline_line_h, out_bx, out_by, out_bh
+                                inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                             )
                             out_bx = wbr_aligned.bx
                             out_by = wbr_aligned.by
@@ -4076,7 +4107,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                                 child_index, st, nodes, inline_baseline_nodes,
                                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                                 styles, cy,
-                                inline_line_h, out_bx, out_by, out_bh
+                                inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                             )
                             out_bx = broken.bx
                             out_by = broken.by
@@ -4162,7 +4193,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
                         styles, cy,
-                        inline_line_h, out_bx, out_by, out_bh
+                        inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                     )
                     out_bx = aligned.bx
                     out_by = aligned.by
@@ -4263,6 +4294,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # opens a 1 px gap (centred / rtl lines, after an inline-block).
                     if (run_pen_err == INLINE_PEN_ERR_UNKNOWN or not text_run_aligns_line_left(st)) and nodes[c].tag == "button" and box_device_extra_w_at(c) != 0 and button_has_inline_follower(nodes, child_index, c):
                         box_device_extra_w_record(nodes.len() as i32, c, 0)
+                if layout_device_scale() == 1 and (nodes[c].tag == "input" or nodes[c].tag == "select" or nodes[c].tag == "textarea") and run_pen_origin != 0:
+                    # A form control's box starts at the line's exact pen, and
+                    # so does its text (`Name <input value=Simple>`: Chrome
+                    # paints `Simple` 9 px past a box at 57.12, not 57).
+                    text_pen_origin_record(nodes.len() as i32, c, run_pen_origin)
                 if run_node >= 0 and run_node != c:
                     # The one run of a plain inline element starts at the
                     # element's pen: `<b>o</b>` after 27.56 px of line
@@ -4324,7 +4360,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             child_index, st, nodes, inline_baseline_nodes,
                             inline_baseline_margin_ts, inline_baseline_margin_bs,
                             styles, cy,
-                            inline_line_h, out_bx, out_by, out_bh
+                            inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                         )
                         out_bx = run_first.bx
                         out_by = run_first.by
@@ -4411,6 +4447,19 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     )
                 val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
                 val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
+                if layout_device_scale() == 1 and nodes[c].tag == "button":
+                    # Chrome paints an auto-width button between its two
+                    # fractional edges snapped to whole pixels: `Submit`
+                    # (57.48 px) at 0 paints 0-56 and a box after it starts at
+                    # 57. The layout box keeps the label rounded up (and the
+                    # cursor carry below places what follows); paint narrows.
+                    # Recorded every pass (0 without an exact pen), so a
+                    # re-laid-out button never keeps an old snap.
+                    val k1_snap = if item_err != INLINE_PEN_ERR_UNKNOWN and item_delta != INLINE_PEN_ERR_UNKNOWN and text_run_aligns_line_left(st):
+                        inline_button_k1_snap_px(inline_x, item_err, out_bw[c], item_delta)
+                    else:
+                        0
+                    box_device_extra_w_record(nodes.len() as i32, c, k1_snap)
                 inline_x = (
                     inline_x + inline_margin_l + out_bw[c] +
                     inline_margin_r
@@ -4438,7 +4487,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_index, st, nodes, inline_baseline_nodes,
                     inline_baseline_margin_ts, inline_baseline_margin_bs,
                     styles, cy,
-                    inline_line_h, out_bx, out_by, out_bh
+                    inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                 )
                 out_bx = aligned.bx
                 out_by = aligned.by
@@ -4748,7 +4797,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 child_index, st, nodes, inline_baseline_nodes,
                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                 styles, cy,
-                inline_line_h, out_bx, out_by, out_bh
+                inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
             )
             out_bx = aligned.bx
             out_by = aligned.by
@@ -4802,7 +4851,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # An authored or clamped height makes the bottom edge start + h exactly, so the
     # residual is the start fraction; a content height ends where the cursor did.
     val end_frac = if h == content_h and st.height_px <= 0 and not st.contain_size: cy_frac else: origin_frac
-    box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px((end_frac - origin_frac) * layout_device_scale()))
+    box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px(end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale()))
     if node.tag == "button" and layout_device_scale() > 1 and st.width_px <= 0 and st.flex_grow <= 0:
         box_device_extra_w_record(nodes.len() as i32, i, button_device_extra_w(nodes, styles, child_index, i))
     LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t, end_frac_milli: end_frac, end_frac_valid: true)

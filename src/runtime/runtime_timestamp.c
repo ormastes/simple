@@ -57,31 +57,42 @@ void rt_progress_tls_clear(void) {
  * not define this macro and therefore has no duplicate policy provider. */
 #ifdef SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT
 #include "test/runtime_timestamp_calendar_oracle.c"
-int32_t rt_timestamp_get_year(int64_t v) { return rt_timestamp_oracle_get_year(v); }
-int32_t rt_timestamp_get_month(int64_t v) { return rt_timestamp_oracle_get_month(v); }
-int32_t rt_timestamp_get_day(int64_t v) { return rt_timestamp_oracle_get_day(v); }
-int32_t rt_timestamp_get_hour(int64_t v) { return rt_timestamp_oracle_get_hour(v); }
-int32_t rt_timestamp_get_minute(int64_t v) { return rt_timestamp_oracle_get_minute(v); }
-int32_t rt_timestamp_get_second(int64_t v) { return rt_timestamp_oracle_get_second(v); }
-int32_t rt_timestamp_get_microsecond(int64_t v) { return rt_timestamp_oracle_get_microsecond(v); }
-int64_t rt_timestamp_from_components(int32_t y, int32_t m, int32_t d, int32_t h,
+/* GNU COFF archives can be pulled for the clock/TLS functions above after a
+ * compiled Simple module has already supplied the calendar/progress policy.
+ * Keep only the seed compatibility exports overridable; genuine duplicate
+ * strong providers must still fail the normal link. Other targets are unchanged. */
+#if defined(_WIN32) && !defined(_MSC_VER)
+#define RT_BOOTSTRAP_TIME_COMPAT __attribute__((weak))
+#else
+#define RT_BOOTSTRAP_TIME_COMPAT
+#endif
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_year(int64_t v) { return rt_timestamp_oracle_get_year(v); }
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_month(int64_t v) { return rt_timestamp_oracle_get_month(v); }
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_day(int64_t v) { return rt_timestamp_oracle_get_day(v); }
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_hour(int64_t v) { return rt_timestamp_oracle_get_hour(v); }
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_minute(int64_t v) { return rt_timestamp_oracle_get_minute(v); }
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_second(int64_t v) { return rt_timestamp_oracle_get_second(v); }
+RT_BOOTSTRAP_TIME_COMPAT int32_t rt_timestamp_get_microsecond(int64_t v) { return rt_timestamp_oracle_get_microsecond(v); }
+RT_BOOTSTRAP_TIME_COMPAT int64_t rt_timestamp_from_components(int32_t y, int32_t m, int32_t d, int32_t h,
                                      int32_t min, int32_t s, int32_t us) {
     return rt_timestamp_oracle_from_components(y, m, d, h, min, s, us);
 }
-int64_t rt_timestamp_add_days(int64_t v, int64_t d) { return rt_timestamp_oracle_add_days(v, d); }
-int64_t rt_timestamp_diff_days(int64_t a, int64_t b) { return rt_timestamp_oracle_diff_days(a, b); }
+RT_BOOTSTRAP_TIME_COMPAT int64_t rt_timestamp_add_days(int64_t v, int64_t d) { return rt_timestamp_oracle_add_days(v, d); }
+RT_BOOTSTRAP_TIME_COMPAT int64_t rt_timestamp_diff_days(int64_t a, int64_t b) { return rt_timestamp_oracle_diff_days(a, b); }
 /* rt_time_now_seconds: historical i64 ABI. Defined in runtime_time.c (the
  * designated C companion of time.rs, alongside its sibling clocks) since
  * 5362c2345c6; defining it here too made the seed link fail with a duplicate
  * symbol. See doc/08_tracking/bug/seed_rt_time_now_seconds_unlinkable_2026-08-28.md. */
-bool rt_progress_init(void) {
+RT_BOOTSTRAP_TIME_COMPAT bool rt_progress_init(void) {
     int64_t now = rt_progress_clock_now_nanos();
     if (now < 0) { rt_progress_tls_clear(); return false; }
     rt_progress_tls_store_start_nanos(now);
     return true;
 }
-bool rt_progress_reset(void) { return rt_progress_init(); }
-double rt_progress_get_elapsed_seconds(void) {
+RT_BOOTSTRAP_TIME_COMPAT bool rt_progress_reset(void) {
+    return rt_progress_init();
+}
+RT_BOOTSTRAP_TIME_COMPAT double rt_progress_get_elapsed_seconds(void) {
     if (!rt_progress_tls_is_initialized()) {
         if (!rt_progress_init()) return -1.0;
         return 0.0;

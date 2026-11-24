@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Pin the second (soft-wrapped) line of a `<textarea>` against Chrome
+159 at device scale 1. Chrome draws every line of the value at the UA control
+font's real 13.333px, one fractional line height below the last, from the
+same fractional pen as the first line. This engine painted only the first
+line that way: the `_line{n}` commands dropped the run's `font-size-milli`
+(13 px glyphs, a wider, darker stem), sat a whole pixel line lower, and lost
+the textarea box's pen origin.
+Audience: web renderer Draw-IR text producers (wrapped-line commands).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=1`, window
+400x300), black text, 16px/1.5 Liberation Sans body, UA textarea (13.333px
+monospace, 20 cols) with `padding:8px; border:1px solid #94a3b8`, value
+`lllll lllll lllll lllll lllll` (wraps after the third word). Values are
+device (r,g,b) at the listed columns; tolerance 8 per channel.
+
+| case | row | columns = Chrome rgb |
+|------|-----|----------------------|
+| textarea at x 10, line 2 top | 33 | 20=(87,23,0) 21=(0,0,0) 22=(0,0,47) |
+| textarea at x 10, line 2 stem | 34 | 21=(255,223,159) 22=(71,31,55) 23=(119,199,247) |
+| after `Notes `, line 2 stem | 34 | 66=(255,255,255) 67=(255,247,207) 68=(135,63,31) 69=(63,151,215) |
+
+Base (0ddeaad747c): row 33 is blank at 20-22 (line 2 one row low); row 34
+at 20-23 is (79,23,0) (0,0,0) (0,7,63) (151,215,247), a 13 px stem; after
+`Notes ` row 34 66=(79,23,0) 67=(0,0,0), the stem 1.5 px left of Chrome's.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CONTROL-TEXT-PEN-001 — every line of a wrapped textarea value is drawn at the control font's computed size, line height and fractional pen.
+"""
+# @tag: unit, browser_engine, text, form_controls, chrome159
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val HEAD: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} label{{display:block;margin:8px 0 8px 10px}} textarea{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body>"
+val PAGE_BARE: text = HEAD + "<label><textarea>lllll lllll lllll lllll lllll</textarea></label></body></html>"
+val PAGE_LABEL: text = HEAD + "<label>Notes <textarea>lllll lllll lllll lllll lllll</textarea></label></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+# "col=(r,g,b)" for each listed column: Chrome's value when every channel is
+# within 8, else ours.
+fn _row_text(px: [u32], y: i32, cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * CSS_W + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[i][ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome[i] else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[i][0]},{chrome[i][1]},{chrome[i][2]}) "
+        i = i + 1
+    s
+
+fn _render(page: text) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, 1, "cpu_simd")
+
+describe "A textarea's wrapped second line (Chrome 159, 1x)":
+    it "AC-1: starts one fractional line below the first, at 13.333px":
+        val px = _render(PAGE_BARE)
+        expect(px.len()).to_equal((CSS_W * CSS_H) as i64)
+        val top_cols: [i32] = [20, 21, 22]
+        val top: [[i32]] = [[87, 23, 0], [0, 0, 0], [0, 0, 47]]
+        expect(_row_text(px, 33, top_cols, top)).to_equal(_want_text(top_cols, top))
+        val stem_cols: [i32] = [21, 22, 23]
+        val stem: [[i32]] = [[255, 223, 159], [71, 31, 55], [119, 199, 247]]
+        expect(_row_text(px, 34, stem_cols, stem)).to_equal(_want_text(stem_cols, stem))
+
+    it "AC-2: starts from the textarea box's fractional pen after a label":
+        val px = _render(PAGE_LABEL)
+        val cols: [i32] = [66, 67, 68, 69]
+        val chrome: [[i32]] = [[255, 255, 255], [255, 247, 207], [135, 63, 31], [63, 151, 215]]
+        expect(_row_text(px, 34, cols, chrome)).to_equal(_want_text(cols, chrome))

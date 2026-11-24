@@ -25,7 +25,15 @@ timeout 10 "$out/failure-check" > "$out/failure.log" 2>&1
 "$cc" -std=c11 -O1 -Wall -Wextra -Werror -pthread -I"$repo/src/runtime" \
     "$repo/src/runtime/test/cuda_driver_load_selfcheck.c" -ldl \
     -o "$out/driver-load-check" >> "$out/compile.log" 2>&1
-timeout 30 "$out/driver-load-check" > "$out/driver-load.log" 2>&1
+# Exit 77 = no CUDA driver on this host: a visible SKIP, never a pass, and it
+# must not abort the remaining checks under `set -e`.
+driver_load_rc=0
+timeout 30 "$out/driver-load-check" > "$out/driver-load.log" 2>&1 || driver_load_rc=$?
+case "$driver_load_rc" in
+    0) ;;
+    77) echo "SKIP driver-load selfcheck: no CUDA driver (exit 77)" | tee -a "$out/driver-load.log" ;;
+    *) cat "$out/driver-load.log"; echo "FAIL driver-load selfcheck exit=$driver_load_rc" >&2; exit "$driver_load_rc" ;;
+esac
 digest=$(sha256sum "$out/provider.so" | awk '{print $1}')
 "$cc" -std=c11 -O1 -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
     -I"$repo/src/runtime" -I"$repo/src/runtime/platform" \
@@ -44,6 +52,8 @@ perl "$repo/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib=1000000
     -- "$out/check" "$out/provider.so" "$digest" $mode > "$out/run.log" 2>&1
 result=$?
 set -e
-printf 'run_exit=%s\n' "$result" > "$out/status.txt"
+printf 'run_exit=%s\ndriver_load_exit=%s\n' "$result" "$driver_load_rc" > "$out/status.txt"
 cat "$out/failure.log" "$out/driver-load.log" "$out/denied.log" "$out/run.log" "$out/status.txt"
+# A skipped driver-load selfcheck can never be reported as an overall PASS.
+if [ "$result" -eq 0 ] && [ "$driver_load_rc" -eq 77 ]; then exit 77; fi
 exit "$result"

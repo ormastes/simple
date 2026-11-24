@@ -44,6 +44,24 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
 - **Seed-lane cache identity quirk:** pre-stage4 seed binaries have an uncacheable
   identity (cache validation fails on seed-compiled artifacts; rebuild after
   stage4 redeploy)
+- **Unadmitted compiler identity is stable (2026-11-24):** with `SIMPLE_ABI_POLICY` /
+  `SIMPLE_ABI_ADMISSION_RECEIPT` unset, `native_build_compiler_identity()` used to
+  return `uncacheable-abi-admission-…-<pid>-<micros>` — one object scope (`s<hex>`)
+  and witness config per PROCESS, so no per-file batch or re-run ever hit. It is now
+  `native_build_unadmitted_producer_identity` (exe hash + sources + runtime + ABI
+  epoch, admission `unadmitted-v1`), granted only when BOTH variables are unset and
+  the hashed binary's sha256 equals that of `/proc/self/exe`
+  (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
+  `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
+  receipt is still per-process.
+- **Repeated imports and `-o` (2026-11-24, unexecuted):** a module that names one
+  import on several `use` lines got witness `…-witness-v1-invalid`
+  (`ambiguous-resolution-fact`; 112 modules in one evidence cache) and never hit.
+  `native_module_cache_witness_v1` now folds a repeat once when its resolution
+  digest equals the first one; a differing repeat is still invalid. The `-o` path
+  reached the object scope through `SIMPLE_NATIVE_NOOP_FINAL_OUTPUT` in the module
+  environment digest; the module projection now drops it (the no-op request keeps
+  it). Record: `doc/08_tracking/bug/native_cache_duplicate_import_witness_and_output_scope_2026-11-24.md`.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 
@@ -367,3 +385,7 @@ A stdlib `extern fn` call is FOREIGN origin; MIR reads a tuple result with raw `
 ## SMF half of `--mode dynload`: never fold byte arrays per module (2026-11-18)
 
 `out = bytes_concat_copy_v1(out, part)` inside a per-module loop re-copies the whole prefix into a fresh array each time, and the native runtime never reclaims the superseded array, so N modules retain about N/2 copies of the image. That killed a fully linked Phase 3 at 52 G in `phase=smf_package`; a 397-module closure reproduces it under a 12 G cap in 11 s. Assemble with one `out` and `out.push(byte)` (`smf_object_spool_assemble_v1`, `smf_parts_assemble_manifests_v1`, `serialize_smf_dependencies`). The staged binary is renamed only after the driver returns Success, so an OOM in the SMF half loses the linked output. Sum the running totals of the `.smfpart` sizes to predict the old cost. Record: `doc/08_tracking/bug/smf_package_quadratic_assembly_oom_2026-11-18.md`.
+
+## Cache scope retention never runs in a build's children (2026-11-24)
+
+`_compile_to_native_with_backend_session` removes `cache/s<32hex>` scope directories idle for 6 hours (`disk_bound_keep_newest_dirs`, idle = newest mtime of the scope dir and its direct children). It ran in every shard worker batch and in the link child, so a build longer than 6 hours deleted its own early objects and failed at link with `MIR shard module object missing`. Retention is now gated by `native_cache_scope_eviction_role_allowed_v1` (false under any shard/worker/unit/link role env), and every ledger row naming an object refreshes that scope's `.last-use` marker (`disk_bound_mark_dir_used`). When adding a new child role env, add it to that predicate. Bug: `doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md`.

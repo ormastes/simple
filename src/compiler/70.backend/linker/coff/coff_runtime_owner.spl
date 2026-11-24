@@ -33,7 +33,7 @@
 
 @unsafe(reason: "raw whole-file byte read of a runtime archive", capabilities: [ffi])
 extern fn rt_file_read_bytes(path: text) -> [u8]?
-use std.common.text_bytes.{bytes_to_text}
+use compiler.backend.linker.name_text.{linker_name_text}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
 
 val COFF_OWNER_MACHINE_AMD64: i64 = 0x8664
@@ -141,19 +141,19 @@ fn _owner_section_number(data: [u8], record: i64, bigobj: bool) -> i64:
     val raw = _owner_u16(data, record + 12)
     if raw >= 32768: raw - 65536 else: raw
 
-fn _owner_name(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) -> text:
+fn _owner_name(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) -> Result<text, text>:
     var start = record
     var limit: i64 = 8
     if _owner_u32(data, record) == 0:
         start = base + layout.string_table + _owner_u32(data, record + 4)
         limit = 4096
-    if start < 0 or start >= data.len(): return ""
+    if start < 0 or start >= data.len(): return Ok("")
     val bound = if start + limit < data.len(): start + limit else: data.len()
     var end = start
     while end < bound and data[end] != 0:
         end = end + 1
-    if end <= start: return ""
-    bytes_to_text(data[start:end])
+    if end <= start: return Ok("")
+    linker_name_text(data[start:end], "runtime owner COFF symbol at offset {start}")
 
 fn _owner_weak_default_defined(data: [u8], base: i64, layout: CoffOwnerLayoutV1, record: i64) -> bool:
     """A weak external's aux record names its default; defined => a definition."""
@@ -180,7 +180,11 @@ fn _owner_object_definitions(data: [u8], base: i64, size: i64, into: {text: bool
         val weak_definition = storage == COFF_OWNER_CLASS_WEAK_EXTERNAL and aux > 0 and
             _owner_weak_default_defined(data, base, layout, record)
         if strong or weak_definition:
-            result[_owner_name(data, base, layout, record)] = true
+            # A name that is not valid UTF-8 is never ceded: no owner claim is
+            # made for it, and the final link reports the invalid name.
+            match _owner_name(data, base, layout, record):
+                case Ok(name): result[name] = true
+                case Err(_): ()
         i = i + 1 + aux
     result
 
@@ -255,7 +259,11 @@ fn _runtime_owner_cede_archive_file_impl_v1(archive_path: text, owned: {text: bo
                 val storage = bytes[record + class_offset] as i64
                 val aux = bytes[record + class_offset + 1] as i64
                 if storage == COFF_OWNER_CLASS_EXTERNAL and _owner_section_number(bytes, record, layout.bigobj) > 0:
-                    if owned.has(_owner_name(bytes, base, layout, record)):
+                    # Owned names are all valid UTF-8, so an undecodable name never matches.
+                    val owned_hit = match _owner_name(bytes, base, layout, record):
+                        case Ok(name): owned.has(name)
+                        case Err(_): false
+                    if owned_hit:
                         # Value and SectionNumber -> 0: an undefined reference.
                         var z: i64 = 8
                         val end = if layout.bigobj: 16 else: 14

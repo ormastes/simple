@@ -10,10 +10,10 @@ use std.nogc_sync_mut.gpu.native_session_owner_v1.{NativeSessionOwnerV1,
 use std.io_runtime.{file_hash_sha256_or_shell}
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use common.text.{escape_json}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 @unsafe(reason: "projects caller-owned byte storage for the frozen Chromium C ABI", capabilities: [ffi, raw_ptr])
 extern fn rt_array_data_ptr_text(collection: [u8]) -> i64
-extern fn rt_bytes_to_text(data: [u8]) -> text
 @unsafe(reason: "allocates packed mutable byte storage for a bounded native response", capabilities: [ffi, raw_ptr])
 extern fn rt_byte_array_new_len(length: i64) -> [u8]?
 @unsafe(reason: "reads the provider-written bounded response length slot", capabilities: [ffi, raw_ptr])
@@ -57,14 +57,14 @@ struct ChromiumOracleHandle:
     released: bool
 
 fn _chromium_oracle_handle_live(handle: ChromiumOracleHandle) -> bool:
-    if handle.released or handle.library == nil or handle.session_owner == nil or
+    if handle.released or handle.library.is_none() or handle.session_owner.is_none() or
        handle.session_ticket == 0u64:
         return false
     handle.library.?.is_live()
 
 @unsafe(reason: "pins a cached Chromium oracle symbol through one provider call", capabilities: [ffi, raw_ptr])
 fn _chromium_oracle_begin_call(handle: ChromiumOracleHandle) -> bool:
-    if handle.released or handle.library == nil:
+    if handle.released or handle.library.is_none():
         return false
     handle.library.?.begin_raw_call()
 
@@ -137,7 +137,7 @@ fn _chromium_oracle_load_result(request: ChromiumOracleLoadRequest, ok: bool,
                                 status: text, abi: ChromiumOracleAbi,
                                 error: text) -> ChromiumOracleLoadResult:
     ChromiumOracleLoadResult(ok: ok, status: status,
-        library_path: request.library_path, abi: abi, handle: nil, error: error)
+        library_path: request.library_path, abi: abi, handle: None, error: error)
 
 fn chromium_oracle_validate_library_probe(
     request: ChromiumOracleLoadRequest,
@@ -244,15 +244,17 @@ fn _chromium_oracle_status(code: i64) -> text:
     if code == 5: return "released-handle"
     "unknown-status"
 
-fn _chromium_oracle_prefix_text(bytes: [u8], length: i64) -> text:
+fn _chromium_oracle_prefix_text(bytes: [u8], length: i64) -> Result<text, text>:
     if length < 0 or length > bytes.len():
-        return ""
+        return Err("empty-or-invalid-length")
     var exact: [u8] = []
     var index: i64 = 0
     while index < length:
         exact.push(bytes[index])
         index = index + 1
-    rt_bytes_to_text(exact)
+    match bytes_to_text_checked(exact):
+        case Ok(t): Ok(t)
+        case Err(e): Err("invalid-utf8-response at byte {e.byte_offset}")
 
 @unsafe(reason: "loads and admits the explicit test-only Chromium oracle provider", capabilities: [ffi, raw_ptr])
 fn chromium_oracle_load(request: ChromiumOracleLoadRequest) -> ChromiumOracleLoadResult:
@@ -382,7 +384,11 @@ fn chromium_oracle_run(handle: ChromiumOracleHandle, request_json: text,
     if code != 0:
         return ChromiumOracleCallResult(ok: false, status: status,
             response_json: "", response_bytes: response_len, error: status)
-    val output = _chromium_oracle_prefix_text(response, response_len)
+    val output: text = match _chromium_oracle_prefix_text(response, response_len):
+        case Ok(t): t
+        case Err(reason):
+            return ChromiumOracleCallResult(ok: false, status: "invalid-response",
+                response_json: "", response_bytes: response_len, error: reason)
     if output == "":
         return ChromiumOracleCallResult(ok: false, status: "invalid-response",
             response_json: "", response_bytes: response_len, error: "empty-or-invalid-length")
@@ -404,7 +410,7 @@ fn chromium_oracle_run_fixture(handle: ChromiumOracleHandle,
 
 @unsafe(reason: "destroys the native oracle session and closes its provider exactly once", capabilities: [ffi, raw_ptr])
 fn chromium_oracle_release(handle: ChromiumOracleHandle) -> ChromiumOracleReleaseResult:
-    if handle.released or handle.library == nil or handle.session_owner == nil or
+    if handle.released or handle.library.is_none() or handle.session_owner.is_none() or
        handle.session_ticket == 0u64:
         return ChromiumOracleReleaseResult(ok: false, status: "released-handle",
             handle: handle, error: "released-handle")
@@ -428,8 +434,8 @@ fn chromium_oracle_release(handle: ChromiumOracleHandle) -> ChromiumOracleReleas
     var library = handle.library.?
     library.end_raw_call()
     library.close()
-    val released = ChromiumOracleHandle(library_handle: 0, library: nil,
-        session_owner: nil, session_ticket: 0u64,
+    val released = ChromiumOracleHandle(library_handle: 0, library: None,
+        session_owner: None, session_ticket: 0u64,
         library_path: handle.library_path, abi_version: handle.abi_version,
         symbols: handle.symbols, released: true)
     ChromiumOracleReleaseResult(ok: true, status: _chromium_oracle_status(code),

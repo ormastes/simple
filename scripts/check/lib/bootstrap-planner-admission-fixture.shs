@@ -1,0 +1,245 @@
+#!/bin/sh
+# Shared shell-contract fixture; synthetic bytes are never compiler evidence.
+# Caller supplies root, fail, replace_in_file, and the canonical planner/Stage3
+# helpers. make_fixture DEST PROVENANCE POLICY [EXE_SUFFIX] [EVIDENCE_LAYOUT]
+# preserves the original provenance/fixture layout when the fifth arg is absent.
+
+make_fixture() {
+    mf_dst=$1 mf_prov=$2 mf_policy=$3 mf_suffix=${4:-}
+    mkdir -p "$mf_dst/src/app/cli" "$mf_dst/src/runtime" \
+        "$mf_dst/build/bootstrap/stage2/fixture-triple"
+    cp -- "$root/src/app/cli/bootstrap_reason_planner.spl" \
+        "$mf_dst/src/app/cli/bootstrap_reason_planner.spl"
+    printf 'int fixture_runtime(void) { return 0; }\n' >"$mf_dst/src/runtime/fixture.c"
+
+    # Fixture parent compiler: on `native-build ... -o OUT` it emits a planner
+    # shim with the same argv contract and authorization text as the real
+    # planner. This exercises the producer's measure/exec/smoke/emit path
+    # without needing a real stage2 compiler in the tree.
+    cat >"$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix" <<'FIXTURE_CC'
+#!/bin/sh
+set -eu
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || {
+    echo "fixture-cc: strict no-stub mode was not propagated" >&2
+    exit 1
+}
+out=''
+prev=''
+entry=''
+runtime=''
+cache=''
+source_roots=''
+backend=''
+backend_count=0
+for a in "$@"; do
+    case "$a" in --backend=*) backend=${a#*=}; backend_count=$((backend_count + 1)) ;; esac
+    if [ "$prev" = "-o" ]; then out=$a; fi
+    if [ "$prev" = "--entry" ]; then entry=$a; fi
+    if [ "$prev" = "--runtime-path" ]; then runtime=$a; fi
+    if [ "$prev" = "--cache-dir" ]; then cache=$a; fi
+    if [ "$prev" = "--source" ]; then source_roots="$source_roots|$a"; fi
+    prev=$a
+done
+[ -n "$out" ] || { echo "fixture-cc: no -o" >&2; exit 1; }
+case "$backend:$backend_count" in llvm:1|llvm-lib:1|cranelift:1) ;; *)
+    echo "fixture-cc: planner build backend was not explicitly selected" >&2; exit 1 ;; esac
+printf '%s\n' "$backend" >"$out.backend-observed"
+printf '%s:%s\n' "${SIMPLE_WINDOWS_ABI:-unset}" "${SIMPLE_LINKER_FLAVOR:-unset}" >"$out.abi-observed"
+[ "$source_roots" = '|src/app/cli|src/lib' ] || {
+    echo "fixture-cc: entry-closure source roots must be checkout-relative" >&2; exit 1;
+}
+# Checkout-relative like the source roots: an absolute entry is spelled C:/...
+# in argv but C:\... by the parent's cwd on Windows, so the frozen cold-entry
+# route cannot map it into the SCV snapshot (artifact-unavailable).
+[ "$entry" = src/app/cli/bootstrap_reason_planner.spl ] &&
+    [ -f "$(pwd -P)/$entry" ] || {
+    echo "fixture-cc: planner entry must be checkout-relative" >&2; exit 1;
+}
+[ -d "$runtime" ] && [ "$runtime" = "${SIMPLE_RUNTIME_PATH:-}" ] || {
+    echo "fixture-cc: admitted runtime provider missing" >&2; exit 1;
+}
+case "$cache" in "$(dirname -- "$out")"/planner-cache) ;; *)
+    echo "fixture-cc: planner cache is not private" >&2; exit 1 ;; esac
+cat >"$out" <<'PLANNER'
+#!/bin/sh
+set -eu
+reason='' target='' parent='' runtime='' closure='' planner='' receipt=''
+for a in "$@"; do
+    case "$a" in
+        --bootstrap-reason=*) reason=${a#*=} ;;
+        --bootstrap-target=*) target=${a#*=} ;;
+        --parent-compiler-sha256=*) parent=${a#*=} ;;
+        --runtime-snapshot-sha256=*) runtime=${a#*=} ;;
+        --planner-source-closure-sha256=*) closure=${a#*=} ;;
+        --planner-sha256=*) planner=${a#*=} ;;
+        --bootstrap-receipt=*) receipt=${a#*=} ;;
+    esac
+done
+# strict: refuse with exit 2 (the real planner's contract).
+# refuse-exit0: print the refusal but exit 0 and write no receipt -- the
+#   Windows W19 shape, where the printed refusal and the exit status disagree.
+# refuse-exit0-receipt: print the refusal, exit 0, AND write a receipt; the
+#   text alone must never admit a planner whose refusal left a receipt.
+case "@POLICY@" in strict|refuse-exit0|refuse-exit0-receipt)
+    case "$target:$reason" in
+        //bootstrap:stage3:seed-missing|\
+        //bootstrap:stage4:self-host-convergence-check|\
+        //bootstrap:stage4:release-trust-verification|\
+        //bootstrap:stage4:diverse-double-compilation) ;;
+        *) printf 'bootstrap-policy-error: typed-reason-required\r\n'
+           case "@POLICY@" in
+               strict) exit 2 ;;
+               refuse-exit0) exit 0 ;;
+               refuse-exit0-receipt) printf 'forged\n' >"$receipt"; exit 0 ;;
+           esac ;;
+    esac ;;
+esac
+printf '%s\n' "simple-bootstrap-authorization-v2|producer=simple-build-planner-v2|target=$target|reason=$reason|parent_sha256=$parent|runtime_sha256=$runtime|source_closure_sha256=$closure|planner_sha256=$planner" >"$receipt"
+echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
+PLANNER
+chmod +x "$out"
+FIXTURE_CC
+    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix"
+    chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix"
+    mf_parent="$mf_dst/build/bootstrap/stage2/fixture-triple/simple$mf_suffix"
+    mf_parent_sha=$(bootstrap_planner_v2_hash_file "$mf_parent")
+    mf_evidence_dir="$mf_dst/build/bootstrap/${5:-provenance/fixture}"
+    mf_admitted="$mf_evidence_dir/stage2-admitted/simple$mf_suffix"
+    mkdir -p "$mf_evidence_dir/stage2-admitted"
+    cp -- "$mf_parent" "$mf_admitted"
+    chmod 500 "$mf_admitted"
+    [ "$(bootstrap_planner_v2_hash_file "$mf_admitted")" = "$mf_parent_sha" ] ||
+        fail "fixture admitted candidate does not match its parent compiler"
+    mf_runtime_authority="$mf_evidence_dir/stage2-runtime-authority"
+    mkdir -p "$mf_runtime_authority/deps"
+    printf 'hosted runtime\n' \
+        >"$mf_runtime_authority/deps/libspl_hosted_runtime-fixture.rlib"
+    mf_hosted_sha=$(bootstrap_planner_v2_hash_file \
+        "$mf_runtime_authority/deps/libspl_hosted_runtime-fixture.rlib")
+    {
+        echo schema=simple-bootstrap-hosted-runtime-authority-v1
+        echo status=frozen
+        echo relative_path=deps/libspl_hosted_runtime-fixture.rlib
+        echo sha256="$mf_hosted_sha"
+    } >"$mf_runtime_authority/hosted-runtime.env"
+    chmod 400 "$mf_runtime_authority/deps/libspl_hosted_runtime-fixture.rlib" \
+        "$mf_runtime_authority/hosted-runtime.env"
+    chmod 500 "$mf_runtime_authority/deps" "$mf_runtime_authority"
+    printf '%s\n' source >"$mf_evidence_dir/source-inputs-before.txt"
+    printf '%s\n' runtime >"$mf_evidence_dir/runtime-admitted.txt"
+    printf '%s\n' tool >"$mf_evidence_dir/tool-authority-before.txt"
+    printf '%s\n' receiver-log >"$mf_evidence_dir/stage2-receiver.log"
+    mf_log_sha=$(bootstrap_planner_v2_hash_file "$mf_evidence_dir/stage2-receiver.log")
+    mf_runtime_sha=$(bootstrap_planner_v2_hash_file "$mf_evidence_dir/runtime-admitted.txt")
+    mf_sanity="$mf_evidence_dir/stage2-sanity.env"
+    : >"$mf_sanity.frontend-driver.log"
+    for mf_mode in 0 1; do
+        mf_mode_log="$mf_sanity.frontend-bootstrap-$mf_mode.log"
+        for mf_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+            case "$mf_probe" in p2_add) mf_probe_log=$mf_mode_log ;; *) mf_probe_log=$mf_mode_log.$(printf '%s' "$mf_probe" | tr _ -) ;; esac
+            printf 'probe=%s mode=%s\n' "$mf_probe" "$mf_mode" >"$mf_probe_log"
+            mf_probe_sha=$(bootstrap_planner_v2_hash_file "$mf_probe_log")
+            {
+                echo schema=simple-bounded-process-log-v1; echo status=complete
+                echo reason=child-exit; echo raw_status=0; echo max_bytes=4194304
+                # `$(( ))` normalises wc's output. BSD/macOS `wc -c <f` right-pads
+                # its count ("      20"), and the verifier requires
+                # `^[0-9]+$` on bytes_captured -- so on macOS every fixture probe
+                # was rejected `bounded-nonnegative-syntax`. sanity.shs already
+                # carries the same normalisation on the reading side; this is the
+                # writing side of the identical BSD trap.
+                echo bytes_captured="$(( $(wc -c <"$mf_probe_log") ))"; echo timeout_seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}"
+                echo term_grace_seconds=1; echo combined_stream=stdout-stderr
+                echo process_group=setsid; echo artifact_limit=none
+                echo log_leaf="${mf_probe_log##*/}"; echo log_sha256="$mf_probe_sha"
+            } >"$mf_probe_log.bounded.env"
+        done
+        {
+            echo schema=simple-candidate-frontend-status-v2
+            echo result=pass
+            echo probe=complete
+            echo raw_status=0
+            echo bootstrap_mode="$mf_mode"
+            echo backend=llvm
+            echo log_path="$mf_mode_log"
+            for mf_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+                case "$mf_probe" in p2_add) mf_probe_log=$mf_mode_log ;; *) mf_probe_log=$mf_mode_log.$(printf '%s' "$mf_probe" | tr _ -) ;; esac
+                echo "${mf_probe}_log_path=$mf_probe_log"
+                echo "${mf_probe}_log_sha256=$(bootstrap_planner_v2_hash_file "$mf_probe_log")"
+                echo "${mf_probe}_collector_receipt_path=$mf_probe_log.bounded.env"
+                echo "${mf_probe}_collector_receipt_sha256=$(bootstrap_planner_v2_hash_file "$mf_probe_log.bounded.env")"
+                echo "${mf_probe}_raw_status=0"
+            done
+        } >"$mf_sanity.frontend-bootstrap-$mf_mode.status.env"
+    done
+    {
+        echo schema=simple-bootstrap-sanity-evidence-v1
+        echo status=pass
+        echo candidate_sha256_before="$mf_parent_sha"
+        echo version_status=0
+        planner_fixture_version=$(bootstrap_stage3_canonical_version "$root") || return 1
+        echo "version_output=simple-bootstrap $planner_fixture_version"
+        echo "version_expected=$planner_fixture_version"
+        echo 'version_expect_status=0'
+        echo 'version_match_status=0'
+        echo unsupported_status=1
+        echo unsupported_output_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        echo frontend_smoke_status=0
+        echo frontend_smoke_backend=llvm
+        echo frontend_smoke_bootstrap_mode_status=0
+        echo frontend_smoke_bootstrap0_raw_status=0
+        echo frontend_smoke_bootstrap0_log_path="$mf_sanity.frontend-bootstrap-0.log"
+        echo frontend_smoke_bootstrap0_log_sha256="$(bootstrap_planner_v2_hash_file "$mf_sanity.frontend-bootstrap-0.log")"
+        echo frontend_smoke_bootstrap0_status_path="$mf_sanity.frontend-bootstrap-0.status.env"
+        echo frontend_smoke_bootstrap0_status_sha256="$(bootstrap_planner_v2_hash_file "$mf_sanity.frontend-bootstrap-0.status.env")"
+        echo frontend_smoke_bootstrap1_ran=true
+        echo frontend_smoke_bootstrap1_raw_status=0
+        echo frontend_smoke_bootstrap1_log_path="$mf_sanity.frontend-bootstrap-1.log"
+        echo frontend_smoke_bootstrap1_log_sha256="$(bootstrap_planner_v2_hash_file "$mf_sanity.frontend-bootstrap-1.log")"
+        echo frontend_smoke_bootstrap1_status_path="$mf_sanity.frontend-bootstrap-1.status.env"
+        echo frontend_smoke_bootstrap1_status_sha256="$(bootstrap_planner_v2_hash_file "$mf_sanity.frontend-bootstrap-1.status.env")"
+        echo frontend_smoke_output_sha256="$(bootstrap_planner_v2_hash_file "$mf_sanity.frontend-driver.log")"
+        echo frontend_smoke_driver_log_path="$mf_sanity.frontend-driver.log"
+        echo frontend_smoke_driver_log_sha256="$(bootstrap_planner_v2_hash_file "$mf_sanity.frontend-driver.log")"
+        echo candidate_sha256_after="$mf_parent_sha"
+    } >"$mf_sanity"
+    {
+        echo schema=simple-bootstrap-stage2-receiver-evidence-v1
+        echo status=pass
+        echo probe_exit=0
+        echo candidate_sha256_before="$mf_parent_sha"
+        echo candidate_sha256_after="$mf_parent_sha"
+        echo runtime_snapshot_sha256="$mf_runtime_sha"
+        echo probe_log="$mf_evidence_dir/stage2-receiver.log"
+        echo probe_log_sha256="$mf_log_sha"
+    } >"$mf_evidence_dir/stage2-receiver.env"
+    mf_admission="$mf_evidence_dir/stage2-admitted/admission.env"
+    bootstrap_stage3_write_stage2_admission_receipt \
+        "$mf_admission" "$mf_admission" "$mf_admitted" "$mf_admitted" \
+        "$mf_evidence_dir/source-inputs-before.txt" "$mf_evidence_dir/source-inputs-before.txt" \
+        "$mf_evidence_dir/runtime-admitted.txt" "$mf_evidence_dir/runtime-admitted.txt" \
+        "$mf_evidence_dir/stage2-runtime-authority" "$mf_evidence_dir/stage2-runtime-authority" \
+        "$mf_evidence_dir/tool-authority-before.txt" "$mf_evidence_dir/tool-authority-before.txt" \
+        cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+        "$mf_evidence_dir/stage2-sanity.env" \
+        "$mf_evidence_dir/stage2-sanity.env" "$mf_evidence_dir" \
+        "$mf_evidence_dir/stage2-receiver.env" "$mf_evidence_dir/stage2-receiver.env" \
+        "$mf_evidence_dir/stage2-receiver.log" "$mf_evidence_dir/stage2-receiver.log" "$root" || fail "could not create fixture Stage-2 admission"
+    mf_admission_sha=$(bootstrap_planner_v2_hash_file "$mf_admission")
+    {
+        echo schema=simple-bootstrap-stage2-parent-sanity-v1
+        echo 'stage2-sanity: pass'
+        echo candidate_sha256="$mf_parent_sha"
+        echo admission_receipt_path="$mf_admission"
+        echo admission_receipt_sha256="$mf_admission_sha"
+    } >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-sanity.receipt"
+    {
+        echo schema=simple-bootstrap-stage2-parent-provenance-v1
+        echo "$mf_prov"
+        echo authority=explicit-full-bootstrap-stage2-trust-root
+        echo candidate_sha256="$mf_parent_sha"
+        echo admission_receipt_path="$mf_admission"
+        echo admission_receipt_sha256="$mf_admission_sha"
+    } >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-provenance.receipt"
+}
+
