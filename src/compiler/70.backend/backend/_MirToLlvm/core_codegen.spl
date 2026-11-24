@@ -203,13 +203,40 @@ fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
     unsafe(capabilities: [ffi]):
         rt_tuple_get<T>(tuple, index)
 
-# @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=binding the T? result of _sffi_tuple_get to a non-optional local keeps the Option transport word on stage3, so the Const MirConstValue reached translate_const as garbage and the total enum match fell through; required slots read through this non-optional form
-# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=a `-> T` tail `.unwrap()` of an erased `T?` int-boxes the record payload (rt_value_int_wide), so Stage 3 read every Index/Const child as a garbage handle; the `if val` + explicit return form keeps the payload word
+# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=erased_generic_required_getter_int_boxes_record_handles_even_with_explicit_return_use_concrete_payload_owners
 @always_inline
-fn _sffi_tuple_get_req<T>(tuple: i64, index: i64) -> T:
-    unsafe(capabilities: [ffi]):
-        if val present = rt_tuple_get<T>(tuple, index):
-            return present
+fn _sffi_local_id_payload_req(tuple: i64, index: i64) -> LocalId:
+    val payload: LocalId? = _sffi_tuple_get<LocalId>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_mir_const_value_payload_req(tuple: i64, index: i64) -> MirConstValue:
+    val payload: MirConstValue? = _sffi_tuple_get<MirConstValue>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_mir_type_payload_req(tuple: i64, index: i64) -> MirType:
+    val payload: MirType? = _sffi_tuple_get<MirType>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_aggregate_kind_payload_req(tuple: i64, index: i64) -> AggregateKind:
+    val payload: AggregateKind? = _sffi_tuple_get<AggregateKind>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_mir_operand_list_payload_req(tuple: i64, index: i64) -> [MirOperand]:
+    val payload: [MirOperand]? = _sffi_tuple_get<[MirOperand]>(tuple, index)
+    if val present = payload:
+        return present
     panic("required tuple payload slot {index} is absent")
 
 @always_inline
@@ -1473,9 +1500,9 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] instruction:const-discriminant index={index}"
         if _sffi_enum_discriminant(inst_kind) == const_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get_req<LocalId>(payload, 0)
-            val value: MirConstValue = _sffi_tuple_get_req<MirConstValue>(payload, 1)
-            val ty: MirType = _sffi_tuple_get_req<MirType>(payload, 2)
+            val dest: LocalId = _sffi_local_id_payload_req(payload, 0)
+            val value: MirConstValue = _sffi_mir_const_value_payload_req(payload, 1)
+            val ty: MirType = _sffi_mir_type_payload_req(payload, 2)
             self.translate_const(dest, value, ty)
             # Fast paths must perform the SAME trailing bookkeeping the
             # fall-through dispatch does. Skipping this call is exactly how the
@@ -1524,9 +1551,9 @@ impl MirTextCodegen for MirToLlvm:
             MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
         if _sffi_enum_discriminant(inst_kind) == aggregate_disc:
             val agg_payload = _sffi_enum_payload(inst_kind)
-            val agg_dest: LocalId = _sffi_tuple_get_req<LocalId>(agg_payload, 0)
-            val agg_kind: AggregateKind = _sffi_tuple_get_req<AggregateKind>(agg_payload, 1)
-            val agg_operands: [MirOperand] = _sffi_tuple_get_req<[MirOperand]>(agg_payload, 2)
+            val agg_dest: LocalId = _sffi_local_id_payload_req(agg_payload, 0)
+            val agg_kind: AggregateKind = _sffi_aggregate_kind_payload_req(agg_payload, 1)
+            val agg_operands: [MirOperand] = _sffi_mir_operand_list_payload_req(agg_payload, 2)
             if mir_trace_enabled():
                 # The raw-tuple local loses its receiver metadata on the fixed
                 # producer; bind it through a concrete parameter before len.
@@ -1546,8 +1573,8 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] instruction:copy-discriminant index={index}"
         if _sffi_enum_discriminant(inst_kind) == copy_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get_req<LocalId>(payload, 0)
-            val src: LocalId = _sffi_tuple_get_req<LocalId>(payload, 1)
+            val dest: LocalId = _sffi_local_id_payload_req(payload, 0)
+            val src: LocalId = _sffi_local_id_payload_req(payload, 1)
             self.translate_copy_move(dest, src, false)
             # Same invariant as the Const fast path above: mirror the trailing
             # bookkeeping of the fall-through dispatch before returning.

@@ -132,3 +132,23 @@ after is byte-identical except `head`.
   at all. Pre-existing, not investigated here.
 - Whether the Stage 3 self-build gets past MIR with this workaround still needs a fresh
   Stage 3 build to confirm.
+
+
+## 2026-11-23 Darwin native follow-up — generic bug remains OPEN
+
+The earlier claim that `if val` plus explicit `return` fixes the untyped tuple
+forwarder is disproven by the qualified `assembly-v2` producer. Its native
+`_sffi_tuple_get_req` still calls `rt_value_int_wide` after `rt_unwrap_or_self`.
+Darwin crash `simple-2026-11-23-165412.ips` dereferences the int-boxed HirExpr
+operand in `lower_cast_expr+132`; an independent index fixture fails similarly.
+This is not an RSS limit: the first run peaked at 411536 KiB under a 4 GiB cap.
+
+Both compiler tuple-payload owners now use concrete typed required decoders:
+HirExpr in MIR; LocalId, MirConstValue, MirType, AggregateKind and [MirOperand]
+in LLVM translation. Each reads an explicitly typed optional and returns the
+concrete value, panicking on an absent required slot. Optional tuple reads and
+scalar tuple ABI are unchanged. This repairs the compiler's payload consumers;
+it does not resolve the general ambiguous erased generic-return contract.
+
+The new compiler bytes must execute cast/index native fixtures and compile/run
+the original runtime byte-at fixture before further bootstrap admission.
