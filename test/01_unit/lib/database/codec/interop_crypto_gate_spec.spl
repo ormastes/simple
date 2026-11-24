@@ -17,6 +17,7 @@ Audience: devhub SQLCipher 4 interop lane maintainers; bootstrap owners.
 use std.spec.*
 use std.io_runtime.{env_get_opt}
 use std.env.{env_set, env_unset}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
 use nogc_sync_mut.database.codec.interop_crypto_gate.{
     INTEROP_CRYPTO_GATE_ENV, INTEROP_CRYPTO_STATUS_ENV,
     interop_crypto_gate_mode, interop_crypto_status_path,
@@ -93,3 +94,20 @@ describe "REQ-INTEROP-GATE-003: status record is well-formed when present":
         val _s = env_set(INTEROP_CRYPTO_STATUS_ENV, "build/interop/selftest/flag_skip.sdn")
         expect(interop_crypto_status_path()).to_equal("build/interop/selftest/flag_skip.sdn")
         _restore_env(INTEROP_CRYPTO_STATUS_ENV, original)
+
+describe "REQ-INTEROP-GATE-004: invalid UTF-8 status record is rejected":
+    # @req REQ-INTEROP-GATE-004
+    it "treats a status record with invalid UTF-8 as unreadable":
+        val original = env_get_opt(INTEROP_CRYPTO_STATUS_ENV) ?? ""
+        val dir = match secure_temp_dir("build", "interop_gate_utf8"):
+            case Ok(d): d
+            case Err(e): e
+        val path = dir + "/status.sdn"
+        # "status: enabled" followed by a lone 0xFF byte.
+        val bytes: [u8] = [115u8, 116u8, 97u8, 116u8, 117u8, 115u8, 58u8, 32u8,
+            101u8, 110u8, 97u8, 98u8, 108u8, 101u8, 100u8, 255u8]
+        expect(file_write_bytes(path, bytes)).to_equal(true)
+        val _s = env_set(INTEROP_CRYPTO_STATUS_ENV, path)
+        expect(interop_crypto_status_record()).to_equal("")
+        _restore_env(INTEROP_CRYPTO_STATUS_ENV, original)
+        val _r = file_remove(path)
