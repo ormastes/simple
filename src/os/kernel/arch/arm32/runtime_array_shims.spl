@@ -274,14 +274,59 @@ fn rt_bytes_from_raw(ptr: i64, len: i64) -> i64:
     out
 
 @cfg(arm32)
+fn _a32_utf8_well_formed(src: i64, n: i64) -> bool:
+    # Twin of spl_utf8_well_formed (src/runtime/runtime_utf8_well_formed.h):
+    # Unicode Table 3-7; overlongs, stray continuations, surrogates,
+    # truncation and > U+10FFFF are ill-formed.
+    var i: i64 = 0
+    while i < n:
+        val b = a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(src, i))) & 255
+        if b < 0x80:
+            i = i + 1
+            continue
+        var need: i64 = 0
+        var lo: i64 = 0x80
+        var hi: i64 = 0xBF
+        if b >= 0xC2 and b <= 0xDF:
+            need = 1
+        elif b >= 0xE0 and b <= 0xEF:
+            need = 2
+            if b == 0xE0:
+                lo = 0xA0
+            elif b == 0xED:
+                hi = 0x9F
+        elif b >= 0xF0 and b <= 0xF4:
+            need = 3
+            if b == 0xF0:
+                lo = 0x90
+            elif b == 0xF4:
+                hi = 0x8F
+        else:
+            return false
+        var j: i64 = 1
+        while j <= need:
+            if i + j >= n:
+                return false
+            val c = a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(src, i + j))) & 255
+            if c < lo or c > hi:
+                return false
+            lo = 0x80
+            hi = 0xBF
+            j = j + 1
+        i = i + need + 1
+    true
+
+@cfg(arm32)
 @export("C")
 fn rt_bytes_to_text(array: i64) -> i64:
     # Builds a RuntimeString {type=1, size, len, data, NUL} directly (the C
-    # rt_string_new returns nil for the empty string).
+    # rt_string_new returns nil for the empty string). Ill-formed UTF-8 -> nil.
     val src = _a32_obj(array, A32_HEAP_ARRAY)
     var n: i64 = 0
     if src != 0:
         n = _a32_len(src)
+    if n > 0 and not _a32_utf8_well_formed(src, n):
+        return A32_NIL  # strict like the hosted runtime: ill-formed UTF-8 -> nil
     val total = 12 + n + 1
     val raw = rt_alloc(total)
     if (raw & A32_TAG_MASK) != A32_TAG_HEAP:

@@ -8,6 +8,7 @@
  */
 #include <stddef.h>
 #include <stdint.h>
+#include "../../../../../runtime/runtime_utf8_well_formed.h"
 
 extern uint8_t rt_port_inb(uint16_t port);
 extern void rt_port_outb(uint16_t port, uint8_t value);
@@ -182,12 +183,18 @@ extern int64_t rt_array_len_safe(int64_t value);
 extern int64_t rt_array_data_ptr(int64_t value);
 extern int64_t rt_string_new(int64_t bytes, int64_t length);
 
+/* Strict like the hosted runtime: ill-formed UTF-8 yields nil (3). */
 int64_t rt_bytes_to_text(int64_t value) {
     int64_t length = rt_array_len_safe(value);
+    int64_t data;
     if (value == 0 || length <= 0) {
         return rt_string_new(0, 0);
     }
-    return rt_string_new(rt_array_data_ptr(value), length);
+    data = rt_array_data_ptr(value);
+    if (!spl_utf8_well_formed((const uint8_t *)(uintptr_t)data, (size_t)length)) {
+        return 3; /* RT_NIL, == SPL_UTF8_TEXT_REJECTED */
+    }
+    return rt_string_new(data, length);
 }
 
 long long strtoll(const char *text, char **end, int base) {

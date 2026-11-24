@@ -38,6 +38,7 @@ void rt_put_le64(spl_u8 *p, spl_u64 v);
 spl_u32 rt_get_le32(const spl_u8 *p);
 
 #include "rv64_cpu_primitives.inc.h"
+#include "../../../../../runtime/runtime_utf8_well_formed.h"
 
 void rt_riscv64_cbo_clean(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.clean 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
 void rt_riscv64_cbo_inval(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.inval 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
@@ -3474,9 +3475,15 @@ spl_i64 rt_bytes_alloc(spl_i64 len_value) {
 }
 
 /* rt_bytes_to_text(bytes) -> text: convert a freestanding byte array handle
- * into a string handle. Identical contract to rt_string_from_byte_array. */
+ * into a string handle. STRICT like the hosted runtime: ill-formed UTF-8
+ * (spl_utf8_well_formed, Unicode Table 3-7) yields nil. */
 spl_i64 rt_bytes_to_text(spl_i64 array_value) {
-    return rt_string_from_byte_array(array_value);
+    spl_i64 out_value = rt_string_from_byte_array(array_value);
+    RtString *s = rt_as_string(out_value);
+    if (s && !spl_utf8_well_formed((const uint8_t *)s->data, (size_t)s->len)) {
+        return rt_nil();
+    }
+    return out_value;
 }
 
 /* rt_string_to_upper(str) -> str: ASCII-uppercase copy of the input string. */
