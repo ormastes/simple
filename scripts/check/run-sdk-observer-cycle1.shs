@@ -1,13 +1,14 @@
 #!/bin/sh
 # Exactly one enabled native control, then one original frozen SDK compile.
 set -eu
-workspace=${GITHUB_WORKSPACE:?workflow workspace is required}
+workspace=$(CDPATH= cd -- "${GITHUB_WORKSPACE:?workflow workspace is required}" && pwd -P)
 control="$workspace/control"
-data="$workspace/data"
+data=$(CDPATH= cd -- "$workspace/data" && pwd -P)
 out="$workspace/build/verify/sdk-worker-observer-cycle2"
+sdk_lane="$data/build/verify/sdk-worker-observer-cycle2/sdk"
 compiler="$out/handoff/linux-x86_64-p1/simple"
 evidence="$control/scripts/check/sdk-observer-evidence-v1.py"
-mkdir -p "$out/control" "$out/sdk/src/app" "$out/sdk/cache"
+mkdir -p "$out/control" "$sdk_lane/src/app" "$sdk_lane/cache"
 printf 'schema: sdk-observer-cycle2-outcome-v1\nsdk: NOT_RUN\nqualification: none\np3: skipped\n' > "$out/outcome.sdn"
 python3 - "$out/heartbeat.log" "$$" <<'PYHEART' &
 import datetime, os, pathlib, subprocess, sys, time
@@ -78,7 +79,7 @@ python3 "$evidence" records --kind control --log "$control_lane/runtime.stderr" 
   --output "$control_lane/capture.sdn"
 
 # Original SDK command/selected source bytes, with separate stdout/stderr capture.
-lane="$out/sdk"
+lane="$sdk_lane"
 python3 - "$lane/environment.sdn" <<'PYENV'
 import json, os, pathlib, sys
 names = ('SIMPLE_NATIVE_BUILD_TARGET', 'SIMPLE_NATIVE_LIBRARY_MODE', 'SIMPLE_LIBRARY_MODE',
@@ -144,6 +145,16 @@ if [ "$(cat "$lane/native-build.exit")" = 0 ] && [ -s "$lane/program" ]; then
   set -e
   execution=FAIL
   if [ "$run_code" = 0 ]; then execution=PASS; fi
+  # Preserve the exact frozen wrapper's fresh, physically bounded run evidence.
+  # Its executable guard requires the program under this DATA checkout's build/verify.
+  fixture=$(sed -n 's/^fixture=//p' "$lane/wrapper.stdout")
+  if [ -n "$fixture" ] && [ -d "$fixture" ] && [ ! -L "$fixture" ]; then
+    fixture=$(realpath -e -- "$fixture")
+    test "$(dirname -- "$fixture")" = "$data/build/verify"
+    case "$(basename -- "$fixture")" in sysroot-receipt.*) ;; *) exit 2 ;; esac
+    cp -a "$fixture/bootstrap-owner-run" "$lane/execution-evidence"
+    cp -a "$fixture/sdk/share/simpleos" "$lane/fixture-metadata"
+  fi
 fi
 printf '%s\n' "$run_code" > "$lane/execution.exit"
 printf '%s\n' "$execution" > "$lane/execution.status"
