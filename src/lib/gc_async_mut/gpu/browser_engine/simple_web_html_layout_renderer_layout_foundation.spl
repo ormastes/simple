@@ -225,6 +225,12 @@ class LayoutResult:
     # `layout()` from `g_text_pen_origin_milli`; read through
     # `text_pen_origin_at`.
     pen_origin_milli: [i32] = []
+    # Per node: milli-px from a wrapped `#text` run's line box edge to where
+    # its lines 2..n REALLY start (the box's sub-pixel content edge: an
+    # absolute box at `left:10.25px` starts every line at 10.25). Empty when
+    # no run needs it. Filled by `layout()` from
+    # `g_text_rest_pen_origin_milli`; read through `text_pen_origin_at`.
+    rest_pen_origin_milli: [i32] = []
     # Per node at device scale k > 1: device-px y correction of a `#text` run's
     # Draw IR command, first line in `device_dy`, lines 2..n in
     # `device_dy_rest` (see `align_inline_line_device_dy`). Empty at k == 1.
@@ -936,6 +942,21 @@ fn layout_unit_ceil_milli(milli: i64) -> i64:
     val w64 = (milli * 64 + 999) / 1000
     (w64 * 1000 + 63) / 64
 
+# The one non-empty `#text` child of `item` when its children are all text,
+# else -1.
+fn sole_text_run_child(nodes: [HNode], child_index: HtmlChildIndex, item: i32) -> i32:
+    var run = -1
+    var c = child_index.first_child[item]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over one box's direct children; bound is that child list
+        if nodes[c].tag != "#text":
+            return -1
+        if nodes[c].text_trimmed.len() > 0:
+            if run >= 0:
+                return -1
+            run = c
+        c = child_index.next_sibling[c]
+    run
+
 # reason: node indices and whole-px / milli-px widths are layout-array scalars.
 # @allow(primitive_api)
 pub fn flex_item_text_frac_delta_milli_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, st: Style, intrinsic_w: i32) -> i32:
@@ -1203,6 +1224,7 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
     out.left_milli = st.left_milli
+    out.width_milli = st.width_milli
     out.top_milli = st.top_milli
     out.right_milli = st.right_milli
     out.bottom_milli = st.bottom_milli
@@ -1238,6 +1260,7 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.left_auto = st.left_auto
     out.top_auto = st.top_auto
     out.left_milli = st.left_milli
+    out.width_milli = if width_px == st.width_px: st.width_milli else: -1
     out.top_milli = st.top_milli
     out.right_milli = st.right_milli
     out.bottom_milli = st.bottom_milli
@@ -1360,6 +1383,28 @@ pub fn text_pen_origin_record(node_count: i32, i: i32, origin_milli: i32):
             return
         g_text_pen_origin_milli = zero_i32_list(node_count)
     g_text_pen_origin_milli[i] = origin_milli
+
+# Pen origins of a wrapped run's lines 2..n (see
+# LayoutResult.rest_pen_origin_milli): the sub-pixel start of the line box
+# they open at. Same lifecycle as `g_text_pen_origin_milli`.
+pub var g_text_rest_pen_origin_milli: [i32] = []
+
+pub fn text_rest_pen_origin_reset():
+    g_text_rest_pen_origin_milli = []
+
+# reason: per-node milli-px table, the same shape LayoutResult.rest_pen_origin_milli carries.
+# @allow(primitive_api)
+pub fn text_rest_pen_origin_restore(table: [i32]):
+    g_text_rest_pen_origin_milli = table
+
+# reason: node index and milli-px origin index the per-node layout tables.
+# @allow(primitive_api)
+pub fn text_rest_pen_origin_record(node_count: i32, i: i32, origin_milli: i32):
+    if g_text_rest_pen_origin_milli.len() == 0:
+        if origin_milli == 0:
+            return
+        g_text_rest_pen_origin_milli = zero_i32_list(node_count)
+    g_text_rest_pen_origin_milli[i] = origin_milli
 
 # reason: per-node milli-px table read by node index, like text_first_line_dx_at.
 # @allow(primitive_api)
@@ -2026,6 +2071,14 @@ pub fn box_frac_w_take(node_count: i32, i: i32):
         g_box_frac_w_milli = [BOX_FRAC_W_UNSET; node_count]
     g_box_frac_w_milli[i] = frac
 
+# Records the exact-width remainder of a box that knows it from its own style
+# (an authored `30.2px` width) when no hand-over set one.
+# reason: node index, node count and a milli-px remainder are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_frac_w_set(node_count: i32, i: i32, frac_milli: i32):
+    item_frac_w_hand_over(frac_milli)
+    box_frac_w_take(node_count, i)
+
 # reason: node index in, milli-px remainder (or BOX_FRAC_W_UNSET) out.
 # @allow(primitive_api)
 pub fn box_frac_w_at(i: i32) -> i32:
@@ -2654,6 +2707,63 @@ fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
     if shrink_to_fit < 1:
         shrink_to_fit = 1
     constrained_outer_width(node, st, shrink_to_fit)
+
+# Exact (LayoutUnit) border-box width of absolute box `c` minus the whole-px
+# `absolute_w` that `absolute_outer_width` gave it, in milli-px; or
+# BOX_FRAC_W_UNSET where that width is not known exactly. Chrome 159 lays the
+# box's text out in, and paints the box at, the exact width: a shrink-to-fit
+# `Hello world` is 79.140625 px (its LayoutUnit max-content), `ll ll ll`
+# with 30 px available is 30 (and wraps, being 30.21875), `width:30.2px` is
+# 30.1875, `left:120px;right:250.5px` in 400 px is 29.5.
+# reason: node index and whole-px / milli-px widths are layout-array scalars.
+# @allow(primitive_api)
+pub fn absolute_width_frac_milli(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32, parent: Style, cst: Style, absolute_w: i32, containing_w: i32) -> i32:
+    val node = nodes[c]
+    if cst.position_fixed or absolute_replaced_tag(node.tag) or replaced_default_box_w(node.tag) > 0:
+        return BOX_FRAC_W_UNSET
+    if cst.pad_l_pct != 0 or cst.pad_r_pct != 0 or cst.width_zero or cst.width_px < 0:
+        return BOX_FRAC_W_UNSET
+    if cst.width_px > 0:
+        if cst.width_milli < 0 or absolute_w != css_outer_width(node, cst, cst.width_px):
+            return BOX_FRAC_W_UNSET
+        return cst.width_milli
+    val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+    val left_set = not cst.left_auto
+    val right_set = cst.right_px >= 0
+    if left_set and right_set:
+        val stretched = padding_box_w - cst.left_px - cst.right_px - absolute_margin_x(cst, padding_box_w)
+        if stretched < 1 or absolute_w != stretched:
+            return BOX_FRAC_W_UNSET
+        return 0 - cst.left_milli - cst.right_milli
+    if cst.left_px < 0:
+        return BOX_FRAC_W_UNSET
+    # The available width `absolute_outer_width` capped the shrink-to-fit
+    # width at, exact.
+    var available = padding_box_w
+    var available_milli: i64 = (padding_box_w as i64) * 1000
+    if right_set:
+        available = available - cst.right_px
+        available_milli = available_milli - (cst.right_px as i64) * 1000 - (cst.right_milli as i64)
+    if cst.left_px > 0:
+        available = available - cst.left_px
+        available_milli = available_milli - (cst.left_px as i64) * 1000 - (cst.left_milli as i64)
+    val run = sole_text_run_child(nodes, child_index, c)
+    var exact: i64 = 0
+    if run >= 0 and styles[run].resolved_font_width_milli >= 0 and not styles[run].white_space_pre:
+        val extra = cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+        val whole = styles[run].resolved_font_width + extra
+        val used = if whole > available: available else: whole
+        if absolute_w != used:
+            return BOX_FRAC_W_UNSET
+        exact = layout_unit_ceil_milli(styles[run].resolved_font_width_milli) + (extra as i64) * 1000
+        if exact > available_milli:
+            exact = available_milli
+    elif absolute_w == available:
+        exact = available_milli
+    else:
+        return BOX_FRAC_W_UNSET
+    val frac = exact - (absolute_w as i64) * 1000
+    if frac > -1000 and frac < 1000: frac as i32 else: BOX_FRAC_W_UNSET
 
 fn absolute_outer_height(node: HNode, st: Style, containing_h: i32) -> i32:
     val border_y = st.border_t + st.border_b
