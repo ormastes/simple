@@ -48,6 +48,7 @@ int64_t mock_llama_restore_calls(void);
 int64_t mock_llama_short_first_decodes(void);
 void mock_llama_set_n_ubatch(uint32_t);
 void mock_llama_fail_decode_once(void);
+void mock_llama_fail_restore_once(void);
 void mock_llama_fail_seq_cp_once(void);
 int mock_llama_last_kv_unified(void);
 
@@ -82,7 +83,7 @@ int main(void) {
     slang_ggml_backend_init();
     reload(0);
     assert(slang_ggml_capabilities() == (31 | 256 | 512));
-    assert(slang_ggml_prefix_cache_mode_configure(4, 0) < 0);
+    assert(slang_ggml_prefix_cache_mode_configure(5, 0) < 0);
     assert(slang_ggml_prefix_cache_mode_configure(2, -1) < 0);
     assert(slang_ggml_tree_mode() == 0);
 
@@ -261,7 +262,20 @@ int main(void) {
      * the request is a warm hit on a longer owner or a cold request on a stream
      * freed by an earlier long one. The warm prefix goes through host memory
      * (state_seq get/set), not a whole-stream copy. */
+    /* Default mode 3 reuses the prefix in place: no host restore. */
     assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
+    assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+    h = slang_ggml_request_create(64);
+    begin(h, "0123456789", 0);
+    finish(h);
+    int64_t restores = mock_llama_restore_calls();
+    begin(h, "01234567xy", 8);
+    finish(h);
+    assert(mock_llama_restore_calls() == restores);
+    assert(slang_ggml_request_close(h) == 0);
+    /* Mode 4 = mode 3 plus the host restore. */
+    assert(slang_ggml_prefix_cache_mode_configure(4, 0) == 4);
+    assert(slang_ggml_tree_mode() == 3);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
     h = slang_ggml_request_create(64);
     begin(h, "0123456789", 0);
@@ -269,11 +283,23 @@ int main(void) {
         assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
     finish(h);                                             /* owner stream holds 16 cells */
     int64_t leaks = mock_llama_stale_leaks();
-    int64_t restores = mock_llama_restore_calls();
+    restores = mock_llama_restore_calls();
     begin(h, "01234567xy", 8);                             /* shares 8 of the owner's 16 */
     finish(h);
     assert(mock_llama_restore_calls() == restores + 1);
     assert(mock_llama_stale_leaks() == leaks);             /* the owner's tail did not follow */
+    assert(slang_ggml_request_close(h) == 0);
+
+    /* A restore that fails is a MISS: nothing reused, the failure counted, the
+     * stream re-zeroed (no stale cells), and the request still completes. */
+    h = slang_ggml_request_create(64);
+    int64_t rfail = slang_ggml_prefix_restore_failures();
+    leaks = mock_llama_stale_leaks();
+    mock_llama_fail_restore_once();
+    begin(h, "01234567zz", 0);
+    finish(h);
+    assert(slang_ggml_prefix_restore_failures() == rfail + 1);
+    assert(mock_llama_stale_leaks() == leaks);
     assert(slang_ggml_request_close(h) == 0);
     assert(slang_ggml_prefix_cache_configure(1, 1024) == 1);
     h = slang_ggml_request_create(64);

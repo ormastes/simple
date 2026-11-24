@@ -67,3 +67,33 @@ Evidence, gemma-3-270m-it, Vulkan, seed `simple-release.exe`, live spec now with
 - No logits-level comparison was done for this change.
 
 Perf, tree-request wall ms, old shim -> new shim (off lane unchanged, ~same): branching 656 -> 2058, boundary 114 -> 316, multiturn 495 -> 1479, stale 848 -> 2272. The tree lane is now 1.5-1.8x SLOWER than cache-off wall time (it still prefills 40-50% fewer tokens), about 3x slower than before. Cause: per request two or three stream-sized buffer copies, a host round-trip of the prefix and up to two scratch decodes. Documented, not fixed. Possible follow-ups: zero only the cells past the frontier, or an upstream partial `seq_cp`/range state API (option c).
+
+## C2 follow-up (2026-11-24, lane treevk-c2b): restore is opt-in, failure is a miss
+
+Fable review of the first C2 fix found: the `slang_tree_restore_prefix_host` return value was
+discarded (a failed restore was accepted as a hit with the owner's stale tail and never counted),
+two GPU decodes plus a readback ran under `g_state_lock`, and the alloc-time zero was overwritten
+by the owner copy. Now:
+
+- Zero-on-recycle stays always on, but is skipped when an owner copy overwrites the stream anyway.
+- The host prefix restore is OPT-IN: `engine_set_prefix_cache_mode(4, 0)` = mode 3 plus restore
+  (`slang_ggml_prefix_cache_mode_configure(4, ..)`). Default mode 3 reuses the prefix in place
+  (seq_cp + tail drop) on a stream zeroed at recycle.
+- The restore (flush decodes + readback) runs after `g_state_lock` is released, in
+  `slang_tree_restore_finish`; `g_tree_active` keeps other tree requests out (BUSY).
+- A failed restore (flush, malloc, short get/set, cell-table mismatch) is a MISS: stream dropped and
+  re-zeroed, `prefix_restore_failures` counted, hit/reused counters rolled back, reuse 0.
+- C test `tree_cache_test.c`: default mode does no host restore; mode 4 restores; forced restore
+  failure (`mock_llama_fail_restore_once`, now honoured by the mock's tree path) is a counted miss with
+  no stale leak. The old shim fails this test (asserts at the default-mode no-restore check).
+
+Live (gemma-3-270m-it, Vulkan, log `C:/dev/slang-logs/treevk-c2b/live_default.log`, 5/5 pass, all tree digests equal cache-off), tree wall ms:
+
+| workload | cache off | tree after #11219 | tree default (this change) |
+|---|---|---|---|
+| branching | 1232 | 2058 | 604 |
+| boundary | 248 | 316 | 111 |
+| multiturn | 921 | 1479 | 464 |
+| stale | 1399 | 2272 | 803 |
+
+Opt-in mode 4 (host restore; `C:/dev/slang-logs/treevk-c2b/live_restore.log`, 5/5, digests equal), tree wall ms: branching 2034, boundary 319, multiturn 1475, stale 2222 (same as after the first C2 fix: the restore cost is inherent, only the lock hold changed).
