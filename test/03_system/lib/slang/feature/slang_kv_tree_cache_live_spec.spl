@@ -8,8 +8,9 @@
 ## Purpose and audience
 Purpose: prove on a real model that the shim's tree (radix) prefix cache in its
 exact mode (mode 3: one persistent multi-sequence context, one KV stream per
-sequence) reuses a shared prefix across different requests, prefills fewer
-tokens than cache-off, and returns byte-identical greedy output.
+sequence; SLANG_KV_TREE_MODE=4 adds opt-in host prefix restore) reuses a shared
+prefix across different requests, prefills fewer tokens than cache-off, and
+returns byte-identical greedy output.
 Audience: engineers changing the slang shim's context/prefix code.
 
 ## What is checked
@@ -159,7 +160,12 @@ fn _run_multiturn() -> Result<[text], text>:
         turn = turn + 1
     Ok(outs)
 
-# One lane in a fresh load. tree=false: cache off. tree=true: mode 3, 4 entries.
+fn _kv_tree_mode() -> i64:
+    if (env_get("SLANG_KV_TREE_MODE") ?? "") == "4":
+        return 4
+    3
+
+# One lane in a fresh load. tree=false: cache off. tree=true: mode 3 (or 4 when SLANG_KV_TREE_MODE=4), 4 entries.
 fn _lane(model: NativeModel, tree: bool, workload: text) -> Result<TreeLane, text>:
     var entries: i64 = 0
     var bytes: i64 = 0
@@ -167,9 +173,7 @@ fn _lane(model: NativeModel, tree: bool, workload: text) -> Result<TreeLane, tex
     if tree:
         entries = 4
         bytes = 2147483648
-        mode = 3
-        if (env_get("SLANG_KV_TREE_MODE") ?? "") == "4":
-            mode = 4
+        mode = _kv_tree_mode()
     if not engine_set_prefix_cache_limits(entries, bytes):
         return Err("cache limits rejected")
     if not engine_set_prefix_cache_mode(mode, 0):
@@ -225,7 +229,7 @@ fn _check(model: NativeModel, workload: text):
     val off = _lane(model, false, workload)
     if off.is_err():
         fail(workload + " cache-off lane failed: " + off.unwrap_err())
-    step(workload + ": tree lane (mode 3)")
+    step(workload + ": tree lane (mode " + _kv_tree_mode().to_text() + ")")
     val tree = _lane(model, true, workload)
     if tree.is_err():
         fail(workload + " tree lane failed: " + tree.unwrap_err())
@@ -290,9 +294,9 @@ describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
                 fail(picked.unwrap_err())
             _check(picked.unwrap(), "stale")
 
-    it "vulkan fusion is off once the backend is up, so mode 3 matches cache-off":
+    it "vulkan fusion is off once the backend is up, so tree mode 3/4 matches cache-off":
         if not _live_enabled():
-            skip("vulkan fusion is off once the backend is up, so mode 3 matches cache-off", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+            skip("vulkan fusion is off once the backend is up, so tree mode 3/4 matches cache-off", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
         else:
             expect(engine_set_n_ctx_text("4096")).to_equal(true)
             val picked = _pick_model(_model_root())
@@ -304,7 +308,7 @@ describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
                 fail("cache-off lane failed: " + off.unwrap_err())
             step("ggml-vulkan reads GGML_VK_DISABLE_FUSION at device init; the shim sets it in backend init")
             expect(env_get("GGML_VK_DISABLE_FUSION") ?? "").to_equal("1")
-            step("a cold tree request equals the cache-off request bit for bit in text")
+            step("tree branching (mode " + _kv_tree_mode().to_text() + ") equals the cache-off request in text")
             val tree = _lane(picked.unwrap(), true, "branching")
             if tree.is_err():
                 fail("tree lane failed: " + tree.unwrap_err())

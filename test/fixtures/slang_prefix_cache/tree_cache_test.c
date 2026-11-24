@@ -16,6 +16,7 @@ int64_t slang_ggml_capabilities(void);
 int64_t slang_ggml_prefix_cache_configure(int64_t, int64_t);
 int64_t slang_ggml_prefix_cache_mode_configure(int64_t, int64_t);
 int64_t slang_ggml_prefix_hits(void);
+int64_t slang_ggml_prefix_misses(void);
 int64_t slang_ggml_prefix_tokens_reused(void);
 int64_t slang_ggml_prefix_tokens_prefilled(void);
 int64_t slang_ggml_prefix_evictions(void);
@@ -25,6 +26,11 @@ int64_t slang_ggml_tree_mode(void);
 int64_t slang_ggml_tree_nodes(void);
 int64_t slang_ggml_tree_cached_tokens(void);
 int64_t slang_ggml_tree_shared_tokens(void);
+int64_t slang_ggml_ctx_create(int64_t);
+int64_t slang_ggml_tokenize(int64_t);
+int64_t slang_ggml_eval_prompt(void);
+int64_t slang_ggml_eval(int64_t);
+int64_t slang_ggml_sample(void);
 int64_t slang_ggml_request_create(int64_t);
 int64_t slang_ggml_request_close(int64_t);
 int64_t slang_ggml_request_str_reset(int64_t);
@@ -57,6 +63,11 @@ int mock_llama_last_kv_unified(void);
 static void text(int64_t h, const char *s) {
     assert(slang_ggml_request_str_reset(h) == 0);
     while (*s) assert(slang_ggml_request_str_push(h, (unsigned char)*s++) > 0);
+}
+
+static void compat_text(const char *s) {
+    assert(slang_ggml_str_reset() == 0);
+    while (*s) assert(slang_ggml_str_push((unsigned char)*s++) > 0);
 }
 
 /* Tokens are 10+byte (no bos), so a generated token 10+c re-tokenizes to itself. */
@@ -256,12 +267,11 @@ int main(void) {
     finish(h);
     assert(slang_ggml_request_close(h) == 0);
 
-    /* Mode 3 stale cells (C2 of slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md):
-     * a stream carries the K/V cells of whatever ran on it before. A reused
-     * stream must reach the decode with nothing past its own frontier, whether
-     * the request is a warm hit on a longer owner or a cold request on a stream
-     * freed by an earlier long one. The warm prefix goes through host memory
-     * (state_seq get/set), not a whole-stream copy. */
+    /* Modes 3 and 4 stale cells (C2 of slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md):
+     * a stream carries the K/V cells of whatever ran on it before. Mode 3 zeroes
+     * recycled streams from a pristine stream and reuses prefixes in place; opt-in
+     * mode 4 additionally restores a reused prefix through host memory (state_seq
+     * get/set) so the owner's tail never reaches the new stream. */
     /* Default mode 3 reuses the prefix in place: no host restore. */
     assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
@@ -362,5 +372,135 @@ int main(void) {
     assert(slang_ggml_request_close(h) == 0);
     assert(slang_ggml_free() == 0);
     assert(mock_llama_bad_positions() == 0);
+
+    /* (1) Mode 4 monotonic telemetry: a failed restore never bumps hits or
+     * tokens_reused (not even transiently before eval_prompt), and counts as one
+     * miss plus one restore failure. */
+    reload(0);
+    mock_llama_set_n_ubatch(4);
+    assert(slang_ggml_prefix_cache_mode_configure(4, 0) == 4);
+    assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+    h = slang_ggml_request_create(64);
+    assert(h > 0);
+    begin(h, "0123456789", 0);
+    finish(h);
+    assert(slang_ggml_prefix_hits() == 0);
+    assert(slang_ggml_prefix_misses() == 1);
+    assert(slang_ggml_prefix_tokens_reused() == 0);
+    rfail = slang_ggml_prefix_restore_failures();
+    leaks = mock_llama_stale_leaks();
+    mock_llama_fail_restore_once();
+    assert(prepare(h, "01234567zz") == 0);
+    assert(slang_ggml_prefix_hits() == 0);
+    assert(slang_ggml_prefix_tokens_reused() == 0);
+    assert(slang_ggml_prefix_misses() == 2);
+    assert(slang_ggml_prefix_restore_failures() == rfail + 1);
+    assert(slang_ggml_request_eval_prompt(h) == 10);
+    finish(h);
+    assert(slang_ggml_prefix_hits() == 0);
+    assert(slang_ggml_prefix_tokens_reused() == 0);
+    assert(slang_ggml_prefix_misses() == 2);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(slang_ggml_request_close(h) == 0);
+    assert(slang_ggml_free() == 0);
+
+    /* (2) Stream recycle after failed mode-4 restore + cold decode: restore_finish
+     * re-zeroes the stream and keeps it dirty so cold decode followed by later
+     * eviction + cold recycle still zeroes the stream and leaks no stale KV. */
+    reload(0);
+    mock_llama_set_n_ubatch(4);
+    assert(slang_ggml_prefix_cache_mode_configure(4, 0) == 4);
+    assert(slang_ggml_prefix_cache_configure(1, 1024) == 1);
+    h = slang_ggml_request_create(64);
+    assert(h > 0);
+    begin(h, "0123456789", 0);                             /* seq 0 */
+    finish(h);
+    leaks = mock_llama_stale_leaks();
+    mock_llama_fail_restore_once();
+    begin(h, "01234567zz", 0);                             /* seq 1: failed restore -> cold decode */
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
+    finish(h);                                             /* seq 1 has 16 cells, evicts seq 0 */
+    begin(h, "aaaa", 0);                                   /* takes seq 0, evicts seq 1 */
+    finish(h);
+    begin(h, "bbbb", 0);                                   /* recycles seq 1 (cold): must zero 16 cells */
+    finish(h);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(mock_llama_bad_positions() == 0);
+    assert(slang_ggml_request_close(h) == 0);
+    assert(slang_ggml_free() == 0);
+
+    /* (3) Direct slang_ggml_eval_prompt (request->seq < 0, skipping prefix_prepare)
+     * in mode 4 runs slang_tree_restore_finish on both success and failure paths. */
+    reload(0);
+    mock_llama_set_n_ubatch(4);
+    assert(slang_ggml_prefix_cache_mode_configure(4, 0) == 4);
+    assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+    assert(slang_ggml_ctx_create(64) == 0);
+    compat_text("0123456789");
+    assert(slang_ggml_tokenize(0) == 10);
+    assert(slang_ggml_eval_prompt() == 10);
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_eval(10 + (unsigned char)*g) == 0);
+    assert(slang_ggml_sample() == 2);
+    restores = mock_llama_restore_calls();
+    leaks = mock_llama_stale_leaks();
+    int64_t prefilled = slang_ggml_prefix_tokens_prefilled();
+    compat_text("01234567xy");
+    assert(slang_ggml_tokenize(0) == 10);
+    assert(slang_ggml_eval_prompt() == 10);
+    assert(slang_ggml_sample() == 2);
+    assert(mock_llama_restore_calls() == restores + 1);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(slang_ggml_prefix_hits() == 1);
+    assert(slang_ggml_prefix_tokens_reused() == 8);
+    assert(slang_ggml_prefix_tokens_prefilled() == prefilled + 2);
+    rfail = slang_ggml_prefix_restore_failures();
+    restores = mock_llama_restore_calls();
+    prefilled = slang_ggml_prefix_tokens_prefilled();
+    mock_llama_fail_restore_once();
+    compat_text("01234567zz");
+    assert(slang_ggml_tokenize(0) == 10);
+    assert(slang_ggml_eval_prompt() == 10);
+    assert(slang_ggml_sample() == 2);
+    assert(mock_llama_restore_calls() == restores + 1);
+    assert(slang_ggml_prefix_restore_failures() == rfail + 1);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(slang_ggml_prefix_hits() == 1);
+    assert(slang_ggml_prefix_tokens_reused() == 8);
+    assert(slang_ggml_prefix_misses() == 2);
+    assert(slang_ggml_prefix_tokens_prefilled() == prefilled + 10);
+    assert(slang_ggml_free() == 0);
+
+    /* (4) Mode 3 (host_restore == 0) cold fallback on a recycled stream zeroes the
+     * stream without running host restore, and leaks no stale cells. */
+    reload(0);
+    mock_llama_set_n_ubatch(4);
+    assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
+    assert(slang_ggml_prefix_cache_configure(1, 1024) == 1);
+    h = slang_ggml_request_create(64);
+    assert(h > 0);
+    restores = mock_llama_restore_calls();
+    leaks = mock_llama_stale_leaks();
+    begin(h, "QRSTUVWXYZ", 0);                             /* seq 0, 16 cells */
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
+    finish(h);
+    begin(h, "zzzz", 0);                                   /* seq 1, evicts seq 0 */
+    finish(h);
+    begin(h, "yyyy", 0);                                   /* cold on recycled seq 0 */
+    finish(h);
+    begin(h, "0123456789", 0);                             /* seq 1, evicts seq 0 */
+    finish(h);
+    rfail = slang_ggml_prefix_restore_failures();
+    mock_llama_fail_seq_cp_once();
+    begin(h, "01234567zz", 0);                             /* seq 0, seq_cp fails -> zero + cold */
+    finish(h);
+    assert(slang_ggml_prefix_restore_failures() == rfail + 1);
+    assert(mock_llama_restore_calls() == restores);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(mock_llama_bad_positions() == 0);
+    assert(slang_ggml_request_close(h) == 0);
+    assert(slang_ggml_free() == 0);
     return 0;
 }

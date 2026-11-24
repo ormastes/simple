@@ -1,9 +1,9 @@
 # Tree KV cache (mode 3): not bit-exact against cache-off on Vulkan (Gemma branching digest differs)
 
-- **Status:** C1 fixed by option (a) (2026-11-23, `slang_ggml_backend_init` sets `GGML_VK_DISABLE_FUSION`); C2 fixed by option (b) (2026-11-24), at a wall-time cost, see "Resolution of C2". Bit-level exactness was not re-measured; evidence is digest-level plus the mock contract test.
+- **Status:** open (C1 mitigated by option (a) 2026-11-23, `slang_ggml_backend_init` sets `GGML_VK_DISABLE_FUSION=1`; C2 zero-on-recycle in mode 3 plus opt-in host prefix restore in mode 4 landed 2026-11-24, see "Resolution of C2" and "C2 follow-up". Bit-level exactness was not re-measured; evidence is digest-level plus the mock contract test.)
 - **Found:** 2026-11-22, Windows EVO-X5Pro host, Radeon 8065S through the Vulkan llama.cpp build (`build-mingw-vulkan`, llama.cpp `99b9548`)
 - **Seed:** `C:/dev/seeds/simple-release.exe`
-- **Spec:** `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl` (unchanged; it still fails 2/3 on Gemma on Vulkan)
+- **Spec:** `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl` (5/5 pass on `gemma-3-270m-it` Vulkan in mode 3 and opt-in mode 4; bit-level exactness remains unverified)
 
 ## Observed
 
