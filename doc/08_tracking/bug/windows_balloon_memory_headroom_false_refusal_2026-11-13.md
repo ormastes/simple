@@ -166,3 +166,9 @@ and host-config knobs are unchanged. Specs: "build memory balloon commit
 witness" in `test/01_unit/app/cli/build_memory_reserve_spec.spl` (15/15 pass).
 Not verified on a live ballooned guest; the probe path is inferred from the
 documented `FreeVirtualMemory` = free commit KiB.
+
+Free commit can also be high on a physically pressured host with a large page
+file. The ordinary reserve therefore applies by default. Set
+`SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1` on a Windows build host whose
+operator has verified that dynamic memory is enabled. Only opted-in builds
+probe for commit headroom after a reserve refusal.
