@@ -1,0 +1,211 @@
+# Purpose and audience: regression, parity, and benchmark evidence for in-process
+# `simple_lsp_mcp` `lsp_symbols` latency and allocation fixes.
+# @req REQ-SSPEC-UNIT
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.char_from_code_pure.{char_from_code as ascii_ctrl}
+use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{
+    LspVisibilitySourceStatusV1, LspVisibilitySourceV1,
+    LspVisibilitySourceReaderV1, LspVisibilityQueryStatusV1
+}
+use app.io.minimal_runtime_ops.{time_now_unix_micros}
+use app.cli.query_rich_common.{query_file_exists, query_file_read_rich}
+use app.cli.query_visibility.{
+    query_visibility_symbols_payload_core, query_visibility_symbols_payload_v1,
+    query_visibility_last_ok, query_visibility_last_has_boundary
+}
+use app.cli._QueryVisibility.symbol_resolution.{escape_json as qv_escape_json}
+use app.simple_lsp_mcp.json_helpers.{LB, RB, js, escape_json, extract_field}
+use app.simple_lsp_mcp.visibility_state.{
+    lsp_mcp_view_reset, lsp_mcp_view_serve,
+    lsp_mcp_view_line_for_file, lsp_mcp_view_line_for_boundary
+}
+use app.simple_lsp_mcp.tools.{arg_int_field}
+use app.simple_lsp_mcp.lsp_command_metrics.{lsp_command_starts_total}
+use app.simple_lsp_mcp.main.{lsp_handle_message}
+
+var _PERF_READ_COUNTS: {text: i64} = {}
+var _PERF_READ_PATHS: [text] = []
+
+fn _perf_counting_reader(path: text) -> LspVisibilitySourceV1:
+    if _PERF_READ_COUNTS.contains_key(path):
+        _PERF_READ_COUNTS[path] = _PERF_READ_COUNTS[path] + 1
+    else:
+        _PERF_READ_COUNTS[path] = 1
+        _PERF_READ_PATHS.push(path)
+    if query_file_exists(path):
+        return LspVisibilitySourceV1(
+            status: LspVisibilitySourceStatusV1.Ready,
+            path: path,
+            uri: "",
+            source_kind: "disk",
+            content: query_file_read_rich(path),
+            version: -1,
+            lifetime_generation: -1,
+            overlay_generation: -1)
+    LspVisibilitySourceV1(
+        status: LspVisibilitySourceStatusV1.Missing,
+        path: path,
+        uri: "",
+        source_kind: "",
+        content: "",
+        version: -1,
+        lifetime_generation: -1,
+        overlay_generation: -1)
+
+fn _make_lsp_symbols_req(id: text, file: text, vis: text) -> text:
+    val args = LB() + js("file") + ":" + js(file) + "," + js("visibility") + ":" + js(vis) + RB()
+    val params = LB() + js("name") + ":" + js("lsp_symbols") + "," + js("arguments") + ":" + args + RB()
+    LB() + js("jsonrpc") + ":" + js("2.0") + "," + js("id") + ":" + js(id) + "," + js("method") + ":" + js("tools/call") + "," + js("params") + ":" + params + RB()
+
+fn _sorted_p95_us(samples: [i64]) -> i64:
+    var arr: [i64] = []
+    for s in samples:
+        arr.push(s)
+    var i = 1
+    while i < arr.len():
+        val key = arr[i]
+        var j = i - 1
+        while j >= 0 and arr[j] > key:
+            arr[j + 1] = arr[j]
+            j = j - 1
+        arr[j + 1] = key
+        i = i + 1
+    val n = arr.len()
+    if n == 0:
+        return 0
+    val idx = ((n * 95) + 99) / 100 - 1
+    arr[idx]
+
+describe "Simple LSP MCP escape_json single-scan implementation":
+    it "handles empty, plain ASCII fast-path, control bytes, and UTF-8":
+        step("empty and plain ASCII inputs return exact characters")
+        expect(escape_json("")).to_equal("")
+        expect(qv_escape_json("")).to_equal("")
+        expect(escape_json("plain_identifier/path.spl")).to_equal("plain_identifier/path.spl")
+        expect(qv_escape_json("plain_identifier/path.spl")).to_equal("plain_identifier/path.spl")
+
+        step("quotes, backslashes, standard whitespace, and <0x20 control bytes escape accurately")
+        val ctrl_sample = "a\\b\"c\nd\re\tf" + ascii_ctrl(8) + ascii_ctrl(12) + ascii_ctrl(1) + ascii_ctrl(31)
+        val expected_ctrl = "a\\\\b\\\"c\\nd\\re\\tf\\b\\f\\u0001\\u001f"
+        expect(escape_json(ctrl_sample)).to_equal(expected_ctrl)
+        expect(qv_escape_json(ctrl_sample)).to_equal(expected_ctrl)
+
+        step("multibyte UTF-8 text stays intact with and without adjacent escapes")
+        expect(escape_json("한글_βeta")).to_equal("한글_βeta")
+        expect(qv_escape_json("한글_βeta")).to_equal("한글_βeta")
+        expect(escape_json("left\n한글\"βeta\t\\")).to_equal("left\\n한글\\\"βeta\\t\\\\")
+        expect(qv_escape_json("left\n한글\"βeta\t\\")).to_equal("left\\n한글\\\"βeta\\t\\\\")
+
+describe "Simple LSP MCP lsp_symbols parity and single-read invariants":
+    it "preserves visibility filtering across public, layer_private, and all with hidden summary":
+        step("public view hides unexported symbols and retains the hidden summary")
+        lsp_mcp_view_reset()
+        val (core_pub, core_pub_rc) = query_visibility_symbols_payload_core(
+            "src/app/simple_lsp_mcp/main.spl", "", "public", "", "")
+        expect(core_pub_rc).to_equal(0)
+        val pub_hidden = arg_int_field(core_pub, "hidden")
+        expect(pub_hidden).to_be_greater_than(0)
+
+        val out_pub = lsp_handle_message(_make_lsp_symbols_req("pub-1", "src/app/simple_lsp_mcp/main.spl", "public"))
+        expect(extract_field(out_pub, "id")).to_equal("pub-1")
+        expect(out_pub.contains("simpleHiddenSummary")).to_equal(true)
+        expect(out_pub.contains("\"hidden\":" + str(pub_hidden))).to_equal(false)
+        expect(out_pub.contains("\\\"hidden\\\":" + str(pub_hidden))).to_equal(true)
+        expect(out_pub.contains("\\\"next_level\\\":\\\"layer_private\\\"")).to_equal(true)
+        expect(out_pub.contains("\\\"name\\\":\\\"lsp_handle_message\\\"")).to_equal(false)
+        expect(out_pub.contains("view: public (per-request override; session view: public)")).to_equal(true)
+
+        step("layer_private view reveals layer_private functions while keeping module_private hidden")
+        val (core_lp, core_lp_rc) = query_visibility_symbols_payload_core(
+            "src/app/simple_lsp_mcp/main.spl", "", "layer_private", "", "")
+        expect(core_lp_rc).to_equal(0)
+        val lp_hidden = arg_int_field(core_lp, "hidden")
+        expect(lp_hidden).to_be_greater_than(0)
+        expect(pub_hidden).to_be_greater_than(lp_hidden)
+
+        val out_lp = lsp_handle_message(_make_lsp_symbols_req("lp-1", "src/app/simple_lsp_mcp/main.spl", "layer_private"))
+        expect(out_lp.contains("\\\"name\\\":\\\"lsp_handle_message\\\"")).to_equal(true)
+        expect(out_lp.contains("simpleHiddenSummary")).to_equal(true)
+        expect(out_lp.contains("\\\"hidden\\\":" + str(lp_hidden))).to_equal(true)
+        expect(out_lp.contains("view: layer_private (per-request override; session view: public)")).to_equal(true)
+        expect(out_lp.byte_len()).to_be_greater_than(out_pub.byte_len())
+
+        step("all view returns module symbols without a hidden summary")
+        val out_all = lsp_handle_message(_make_lsp_symbols_req("all-1", "src/app/simple_lsp_mcp/main.spl", "all"))
+        expect(out_all.contains("\\\"name\\\":\\\"lsp_handle_message\\\"")).to_equal(true)
+        expect(out_all.contains("\\\"name\\\":\\\"SERVER_NAME\\\"")).to_equal(true)
+        expect(out_all.contains("simpleHiddenSummary")).to_equal(false)
+        expect(out_all.contains("view: all (per-request override; session view: public)")).to_equal(true)
+        expect(out_all.byte_len()).to_be_greater_than(out_lp.byte_len())
+
+    it "reads each source or boundary file at most once and matches core vs v1 output byte-for-byte":
+        step("core disk path matches memoized v1 reader output byte-for-byte for public and all")
+        val (core_pub, core_pub_code) = query_visibility_symbols_payload_core(
+            "src/app/simple_lsp_mcp/main.spl", "", "public", "", "")
+        expect(core_pub_code).to_equal(0)
+        expect(query_visibility_last_ok()).to_equal(true)
+        val has_boundary = query_visibility_last_has_boundary()
+        expect(has_boundary).to_equal(true)
+        lsp_mcp_view_reset()
+        val served_pub = lsp_mcp_view_serve("public", "", "")
+        expect(lsp_mcp_view_line_for_boundary(served_pub, has_boundary)).to_equal(
+            lsp_mcp_view_line_for_file(served_pub, "src/app/simple_lsp_mcp/main.spl"))
+
+        _PERF_READ_COUNTS = {}
+        _PERF_READ_PATHS = []
+        val reader = LspVisibilitySourceReaderV1(_perf_counting_reader)
+        val v1_pub = query_visibility_symbols_payload_v1(
+            "src/app/simple_lsp_mcp/main.spl", "", "public", "", "", reader, 0)
+        expect(v1_pub.status).to_equal(LspVisibilityQueryStatusV1.Ready)
+        expect(v1_pub.payload).to_equal(core_pub)
+        expect(_PERF_READ_COUNTS["src/app/simple_lsp_mcp/main.spl"]).to_equal(1)
+        for p in _PERF_READ_PATHS:
+            expect(_PERF_READ_COUNTS[p]).to_equal(1)
+
+        val (core_all, core_all_code) = query_visibility_symbols_payload_core(
+            "src/app/simple_lsp_mcp/main.spl", "", "all", "", "")
+        expect(core_all_code).to_equal(0)
+        _PERF_READ_COUNTS = {}
+        _PERF_READ_PATHS = []
+        val v1_all = query_visibility_symbols_payload_v1(
+            "src/app/simple_lsp_mcp/main.spl", "", "all", "", "", reader, 0)
+        expect(v1_all.status).to_equal(LspVisibilityQueryStatusV1.Ready)
+        expect(v1_all.payload).to_equal(core_all)
+        for p in _PERF_READ_PATHS:
+            expect(_PERF_READ_COUNTS[p]).to_equal(1)
+
+    it "runs 20 warm in-process lsp_symbols requests with identical outputs and zero subprocess spawns":
+        step("measures 20 warm iterations after a warmup call")
+        lsp_mcp_view_reset()
+        val starts_before = lsp_command_starts_total()
+        val req_pub = _make_lsp_symbols_req("bench", "src/app/simple_lsp_mcp/main.spl", "public")
+        val warm_resp = lsp_handle_message(req_pub)
+        expect(warm_resp.contains("simpleHiddenSummary")).to_equal(true)
+
+        var total_us: i64 = 0
+        var max_us: i64 = 0
+        var samples: [i64] = []
+        var i = 0
+        while i < 20:
+            val t0 = time_now_unix_micros()
+            val resp = lsp_handle_message(req_pub)
+            val t1 = time_now_unix_micros()
+            val dt = t1 - t0
+            expect(resp).to_equal(warm_resp)
+            samples.push(dt)
+            total_us = total_us + dt
+            if dt > max_us:
+                max_us = dt
+            i = i + 1
+
+        val total_ms = total_us / 1000
+        val avg_ms = (total_us / 20) / 1000
+        val p95_ms = _sorted_p95_us(samples) / 1000
+        val max_ms = max_us / 1000
+        print "LSP_SYMBOLS_BENCH_20_PUBLIC total_ms=" + str(total_ms) + " avg_ms=" + str(avg_ms) + " p95_ms=" + str(p95_ms) + " max_ms=" + str(max_ms)
+
+        expect(lsp_command_starts_total()).to_equal(starts_before)
+        expect(total_us).to_be_greater_than(0)
+        expect(avg_ms).to_be_less_than(2000)

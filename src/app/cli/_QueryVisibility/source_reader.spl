@@ -17,8 +17,13 @@ var _VIS_SOURCE_READER: LspVisibilitySourceReaderV1 = LspVisibilitySourceReaderV
 var _VIS_SOURCE_STATUS: LspVisibilityQueryStatusV1 = LspVisibilityQueryStatusV1.Ready
 var _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION: i64 = -1
 var _VIS_SOURCE_PATHS: [text] = []
+var _VIS_SOURCE_PATH_IDX: {text: i64} = {}
 var _VIS_SOURCE_CACHE: [LspVisibilitySourceV1] = []
 var _VIS_SOURCE_DEPENDENCIES: [LspVisibilityDependencyV1] = []
+
+var _VIS_DISK_ACTIVE: bool = false
+var _VIS_DISK_EXISTS: {text: bool} = {}
+var _VIS_DISK_CONTENT: {text: text} = {}
 
 fn _vis_source_unavailable_v1(path: text) -> LspVisibilitySourceV1:
     LspVisibilitySourceV1(
@@ -33,6 +38,7 @@ pub fn query_visibility_source_begin_v1(reader: LspVisibilitySourceReaderV1, ove
     _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION = overlay_generation
     _VIS_SOURCE_STATUS = LspVisibilityQueryStatusV1.Ready
     _VIS_SOURCE_PATHS = []
+    _VIS_SOURCE_PATH_IDX = {}
     _VIS_SOURCE_CACHE = []
     _VIS_SOURCE_DEPENDENCIES = []
 
@@ -46,15 +52,29 @@ pub fn query_visibility_source_finish_v1() -> QueryVisibilitySourceTraceV1:
     _VIS_SOURCE_ACTIVE = false
     _VIS_SOURCE_EXPECTED_OVERLAY_GENERATION = -1
     _VIS_SOURCE_PATHS = []
+    _VIS_SOURCE_PATH_IDX = {}
     _VIS_SOURCE_CACHE = []
     _VIS_SOURCE_DEPENDENCIES = []
     trace
 
+# reason: request-scoped disk cache ownership flag indicating caller owns disk memoization scope
+@allow(primitive_api)
+pub fn query_visibility_source_disk_begin_v1() -> bool:
+    if _VIS_SOURCE_ACTIVE or _VIS_DISK_ACTIVE:
+        return false
+    _VIS_DISK_ACTIVE = true
+    _VIS_DISK_EXISTS = {}
+    _VIS_DISK_CONTENT = {}
+    true
+
+pub fn query_visibility_source_disk_finish_v1():
+    _VIS_DISK_ACTIVE = false
+    _VIS_DISK_EXISTS = {}
+    _VIS_DISK_CONTENT = {}
+
 fn _vis_source_cache_index(path: text) -> i64:
-    var i = 0
-    while i < _VIS_SOURCE_PATHS.len():
-        if _VIS_SOURCE_PATHS[i] == path: return i
-        i = i + 1
+    if _VIS_SOURCE_PATH_IDX.contains_key(path):
+        return _VIS_SOURCE_PATH_IDX[path]
     -1
 
 fn _vis_source_record_dependency(source: LspVisibilitySourceV1):
@@ -100,6 +120,7 @@ fn _vis_source_read(path: text) -> LspVisibilitySourceV1:
     var source = _VIS_SOURCE_READER.read(path)
     if not _vis_source_identity_valid(source, path):
         source = _vis_source_unavailable_v1(path)
+    _VIS_SOURCE_PATH_IDX[path] = _VIS_SOURCE_PATHS.len()
     _VIS_SOURCE_PATHS.push(path)
     _VIS_SOURCE_CACHE.push(source)
     _vis_source_record_dependency(source)
@@ -112,13 +133,40 @@ fn _vis_source_read(path: text) -> LspVisibilitySourceV1:
 
 @allow(primitive_api)  # existence predicate
 pub fn query_visibility_source_exists_v1(path: text) -> bool:
-    _vis_source_read(path).status == LspVisibilitySourceStatusV1.Ready
+    if _VIS_SOURCE_ACTIVE:
+        return _vis_source_read(path).status == LspVisibilitySourceStatusV1.Ready
+    if _VIS_DISK_ACTIVE:
+        if _VIS_DISK_EXISTS.contains_key(path):
+            return _VIS_DISK_EXISTS[path]
+        val found = query_file_exists(path)
+        _VIS_DISK_EXISTS[path] = found
+        return found
+    query_file_exists(path)
 
 pub fn query_visibility_source_read_v1(path: text) -> text?:
-    val source = _vis_source_read(path)
-    if source.status == LspVisibilitySourceStatusV1.Ready: return Some(source.content)
-    None
+    if _VIS_SOURCE_ACTIVE:
+        val source = _vis_source_read(path)
+        if source.status == LspVisibilitySourceStatusV1.Ready: return Some(source.content)
+        return None
+    if _VIS_DISK_ACTIVE:
+        if _VIS_DISK_CONTENT.contains_key(path):
+            return Some(_VIS_DISK_CONTENT[path])
+        var exists = false
+        if _VIS_DISK_EXISTS.contains_key(path):
+            exists = _VIS_DISK_EXISTS[path]
+        else:
+            exists = query_file_exists(path)
+            _VIS_DISK_EXISTS[path] = exists
+        if not exists:
+            return None
+        val content = query_file_read_rich(path)
+        _VIS_DISK_CONTENT[path] = content
+        return Some(content)
+    if not query_file_exists(path):
+        return None
+    Some(query_file_read_rich(path))
 
 export QueryVisibilitySourceTraceV1
 export query_visibility_source_begin_v1, query_visibility_source_begin_disk_v1, query_visibility_source_finish_v1
+export query_visibility_source_disk_begin_v1, query_visibility_source_disk_finish_v1
 export query_visibility_source_exists_v1, query_visibility_source_read_v1

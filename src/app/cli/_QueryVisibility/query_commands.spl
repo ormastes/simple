@@ -9,12 +9,12 @@ use app.cli.query_forwarding.{forwarding_resolve_at}
 
 use app.cli.query_rich_common.{query_process_run, query_cli_get_args}
 use app.cli._QueryVisibility.source_reader.{query_visibility_source_exists_v1, query_visibility_source_read_v1}
-use app.cli._QueryVisibility.source_reader.{query_visibility_source_begin_v1, query_visibility_source_finish_v1}
+use app.cli._QueryVisibility.source_reader.{query_visibility_source_begin_v1, query_visibility_source_finish_v1,
+    query_visibility_source_disk_begin_v1, query_visibility_source_disk_finish_v1}
 use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{
     LspVisibilitySourceReaderV1, LspVisibilityQueryStatusV1, LspVisibilityQueryResultV1
 }
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol}
-use common.text_advanced.{escape_json}
 use app.cli._QueryVisibility.symbol_views.{visibility_class_from_facts, visibility_level_or_error,
     layer_id_of, symbol_view_admits, symbol_view_summary, symbol_view_summary_json, symbol_view_summary_entry}
 use std.nogc_sync_mut.source.visibility_view.{SourceVisibleSymbolV1}
@@ -421,17 +421,27 @@ fn symbol_visibility_reachable(declared: text, display: text, facts: FileBoundar
         return req_facts.is_friend_pkg
     false
 
-fn symbol_feature_export_reason(symbol: text, declared: text, facts: FileBoundaryFacts) -> text:
+fn symbol_feature_export_reason_rel(symbol: text, declared: text, facts: FileBoundaryFacts, owner_rel: text) -> text:
     if facts.feature_dir == "":
         return ""
     if facts.feature_manifest_export_set.contains_key(symbol):
         return "named in an export line of a capsule __init__.spl"
     if facts.feature_exposed:
         if declared != "private":
-            return "declared " + declared + " in exposed port " + relative_to_src(facts.owner_file)
+            return "declared " + declared + " in exposed port " + owner_rel
         if facts.feature_reexport_set.contains_key(symbol):
-            return "re-exported by exposed port " + relative_to_src(facts.owner_file)
+            return "re-exported by exposed port " + owner_rel
     ""
+
+fn symbol_feature_export_reason(symbol: text, declared: text, facts: FileBoundaryFacts) -> text:
+    if facts.feature_dir == "":
+        return ""
+    if facts.feature_manifest_export_set.contains_key(symbol):
+        return "named in an export line of a capsule __init__.spl"
+    if facts.feature_exposed:
+        symbol_feature_export_reason_rel(symbol, declared, facts, relative_to_src(facts.owner_file))
+    else:
+        ""
 
 fn symbol_feature_visibility_json(symbol: text, declared: text, facts: FileBoundaryFacts, req_facts: RequesterBoundaryFacts) -> text:
     if facts.feature_id == "":
@@ -446,6 +456,54 @@ fn symbol_feature_visibility_json(symbol: text, declared: text, facts: FileBound
     if exported:
         parts.push("\"why\":" + json_text(why))
     "{" + parts.join(",") + "}"
+
+struct FileBoundaryJsonCache:
+    boundary_kind_and_mod: text
+    exported_by_field: text
+    friends_and_capsule_fields: text
+    feature_prefix: text
+    owner_rel_src: text
+
+fn build_file_boundary_json_cache(facts: FileBoundaryFacts) -> FileBoundaryJsonCache:
+    var bkm = "\"boundaryKind\":" + json_text(facts.boundary_kind_val)
+    if facts.boundary_module_val != "":
+        bkm = bkm + ",\"boundaryModule\":" + json_text(facts.boundary_module_val)
+    val exp_field = if facts.boundary_manifest != "": ",\"exportedBy\":" + json_text(facts.boundary_manifest) else: ""
+    var fc = ""
+    if facts.friends.len() > 0:
+        fc = fc + ",\"friendPackages\":[" + json_text_array(facts.friends) + "]"
+    if facts.capsule != "":
+        fc = fc + ",\"capsuleName\":" + json_text(facts.capsule) + ",\"capsuleVisibility\":\"internal\""
+    val feat_prefix = if facts.feature_id != "": "{\"feature\":" + json_text(facts.feature_id) else: ""
+    val rel_src = if facts.feature_exposed: relative_to_src(facts.owner_file) else: ""
+    FileBoundaryJsonCache(
+        boundary_kind_and_mod: bkm,
+        exported_by_field: exp_field,
+        friends_and_capsule_fields: fc,
+        feature_prefix: feat_prefix,
+        owner_rel_src: rel_src)
+
+fn symbol_visibility_json_fast(symbol: text, declared: text, display: text, reachable: bool,
+        facts: FileBoundaryFacts, req_facts: RequesterBoundaryFacts, jcache: FileBoundaryJsonCache) -> text:
+    var out = "{\"display\":" + json_text(display) +
+        ",\"reachable\":" + bool_json(reachable) +
+        "," + jcache.boundary_kind_and_mod +
+        ",\"declared\":" + json_text(declared)
+    if symbol_is_layer_exported(symbol, facts):
+        out = out + jcache.exported_by_field
+    if jcache.friends_and_capsule_fields != "":
+        out = out + jcache.friends_and_capsule_fields
+    if jcache.feature_prefix != "":
+        val why = symbol_feature_export_reason_rel(symbol, declared, facts, jcache.owner_rel_src)
+        val exported = why != ""
+        val feat_reach = if exported: true elif req_facts.requester_empty: false else: req_facts.same_feature
+        out = out + ",\"featureVisibility\":" + jcache.feature_prefix +
+            ",\"exported\":" + bool_json(exported) +
+            ",\"reachable\":" + bool_json(feat_reach)
+        if exported:
+            out = out + ",\"why\":" + json_text(why)
+        out = out + "}"
+    out + "}"
 
 fn symbol_visibility_json(symbol: text, declared: text, display: text, reachable: bool,
         facts: FileBoundaryFacts, req_facts: RequesterBoundaryFacts) -> text:
@@ -468,6 +526,39 @@ fn symbol_visibility_json(symbol: text, declared: text, display: text, reachable
         parts.push("\"featureVisibility\":" + feat)
     "{" + parts.join(",") + "}"
 
+var _LAST_SYMBOLS_OK: bool = false
+var _LAST_SYMBOLS_HAS_BOUNDARY: bool = false
+
+# reason: cached success flag from last query_visibility_symbols_payload_core call
+@allow(primitive_api)
+pub fn query_visibility_last_ok() -> bool:
+    _LAST_SYMBOLS_OK
+
+# reason: cached MDSOC boundary flag from last query_visibility_symbols_payload_core call to avoid duplicate tree walks
+@allow(primitive_api)
+pub fn query_visibility_last_has_boundary() -> bool:
+    _LAST_SYMBOLS_HAS_BOUNDARY
+
+fn _qv_vis_level_rank(level: text) -> i64:
+    if level == "public": return 0
+    if level == "feature_private": return 1
+    if level == "layer_private": return 2
+    if level == "all": return 3
+    -1
+
+fn _qv_vis_class_rank(cls: text) -> i64:
+    if cls == "public": return 0
+    if cls == "feature_private": return 1
+    if cls == "layer_private": return 2
+    3
+
+fn _qv_symbol_admits_fast(symbol: SourceVisibleSymbolV1, level_rank: i64, feature: text, layer: text) -> bool:
+    if level_rank < 0: return false
+    if _qv_vis_class_rank(symbol.visibility_class) > level_rank: return false
+    if feature != "" and symbol.feature != feature: return false
+    if layer != "" and symbol.layer != layer: return false
+    true
+
 fn file_visible_symbols_with_facts(facts: FileBoundaryFacts, parsed_symbols: [ParsedSymbol]) -> [SourceVisibleSymbolV1]:
     var result: [SourceVisibleSymbolV1] = []
     for parsed in parsed_symbols:
@@ -481,39 +572,62 @@ fn file_visible_symbols(file: text, parsed_symbols: [ParsedSymbol]) -> [SourceVi
     val facts = build_file_boundary_facts(file, "", false)
     file_visible_symbols_with_facts(facts, parsed_symbols)
 
-pub fn query_visibility_symbols_payload_core(file: text, requester_file: text,
+fn _query_visibility_symbols_payload_inner(clean_file: text, requester: text,
         level: text, feature: text, layer: text) -> (text, i64):
-    val clean_file = sanitize_path(file)
-    val requester = sanitize_path(requester_file_part(requester_file))
-    if clean_file == "":
-        return ("[]", 1)
     val bdir = nearest_boundary_dir(clean_file)
     val has_boundary = bdir != ""
     val effective = match visibility_level_or_error(level, has_boundary):
         Ok(value): value
         Err(reason):
+            _LAST_SYMBOLS_OK = false
+            _LAST_SYMBOLS_HAS_BOUNDARY = has_boundary
             return ("{\"error\":" + json_text(reason) + "}", 1)
     val parsed_symbols = parse_symbols_in_file(file_path: clean_file)
     val facts = build_file_boundary_facts(clean_file, bdir, true)
     val req_facts = build_requester_boundary_facts(facts, requester)
-    val classified = file_visible_symbols_with_facts(facts, parsed_symbols)
+    var classified: [SourceVisibleSymbolV1] = []
+    var declared_list: [text] = []
+    for parsed in parsed_symbols:
+        if parsed.kind == "domain": continue
+        val declared = symbol_declared_vis(parsed, facts)
+        val vis_class = symbol_visibility_class(parsed.name, declared, facts)
+        classified.push(SourceVisibleSymbolV1(parsed.name, parsed.kind, vis_class, facts.feature_id, facts.layer_id))
+        declared_list.push(declared)
+    val jcache = build_file_boundary_json_cache(facts)
+    val level_rank = _qv_vis_level_rank(effective)
     var items: [text] = []
     var index = 0
     for parsed in parsed_symbols:
         if parsed.kind == "domain": continue
         val symbol = classified[index]
+        val declared = declared_list[index]
         index = index + 1
-        if not symbol_view_admits(symbol, effective, feature, layer): continue
-        val declared = symbol_declared_vis(parsed, facts)
+        if not _qv_symbol_admits_fast(symbol, level_rank, feature, layer): continue
         val display = symbol_visibility_display(parsed.name, declared, facts)
         val reachable = symbol_visibility_reachable(declared, display, facts, req_facts)
-        val vis = symbol_visibility_json(parsed.name, declared, display, reachable, facts, req_facts)
+        val vis = symbol_visibility_json_fast(parsed.name, declared, display, reachable, facts, req_facts, jcache)
         val range = symbol_range_json(parsed)
         items.push("{\"name\":" + json_text(parsed.name) + ",\"kind\":" + str(symbol_kind_number(parsed.kind)) + ",\"detail\":" + json_text("[" + display + "]") + ",\"range\":" + range + ",\"selectionRange\":" + range + ",\"visibilityClass\":" + json_text(symbol.visibility_class) + ",\"simpleVisibility\":" + vis + "}")
     val summary = symbol_view_summary(classified, effective, feature, layer)
     if summary.hidden > 0:
         items.push(symbol_view_summary_entry(summary, has_boundary, ""))
+    _LAST_SYMBOLS_OK = true
+    _LAST_SYMBOLS_HAS_BOUNDARY = has_boundary
     ("[" + items.join(",") + "]", 0)
+
+pub fn query_visibility_symbols_payload_core(file: text, requester_file: text,
+        level: text, feature: text, layer: text) -> (text, i64):
+    val clean_file = sanitize_path(file)
+    val requester = sanitize_path(requester_file_part(requester_file))
+    if clean_file == "":
+        _LAST_SYMBOLS_OK = false
+        _LAST_SYMBOLS_HAS_BOUNDARY = false
+        return ("[]", 1)
+    val owns_disk_scope = query_visibility_source_disk_begin_v1()
+    val res = _query_visibility_symbols_payload_inner(clean_file, requester, level, feature, layer)
+    if owns_disk_scope:
+        query_visibility_source_disk_finish_v1()
+    res
 
 pub fn query_visibility_symbols_payload_v1(file: text, requester_file: text,
         level: text, feature: text, layer: text,
@@ -692,10 +806,36 @@ struct ScoredSymbol:
     symbol: ParsedSymbol
     score: i64
 
+fn _parse_decl_kind_and_name(trimmed: text) -> (text, text):
+    val body = strip_visibility_prefix(trimmed)
+    if body.byte_len() < 3:
+        return ("", "")
+    val b0 = body.byte_at(0) as i64
+    if b0 == 102 and body.starts_with("fn "):
+        return ("fn", declaration_token(body.substring(3)))
+    if b0 == 109 and body.starts_with("me "):
+        return ("method", declaration_token(body.substring(3)))
+    if b0 == 118:
+        if body.starts_with("val "):
+            return ("var", declaration_token(body.substring(4)))
+        if body.starts_with("var "):
+            return ("var", declaration_token(body.substring(4)))
+        return ("", "")
+    if b0 == 99 and body.starts_with("class "):
+        return ("class", declaration_token(body.substring(6)))
+    if b0 == 115 and body.starts_with("struct "):
+        return ("struct", declaration_token(body.substring(7)))
+    if b0 == 101 and body.starts_with("enum "):
+        return ("enum", declaration_token(body.substring(5)))
+    if b0 == 116 and body.starts_with("trait "):
+        return ("trait", declaration_token(body.substring(6)))
+    ("", "")
+
 fn parse_symbols_in_file(file_path: text) -> [ParsedSymbol]:
-    if not query_visibility_source_exists_v1(file_path):
+    val content_opt = query_visibility_source_read_v1(file_path)
+    if content_opt.is_none():
         return []
-    val content = query_visibility_source_read_v1(file_path) ?? ""
+    val content = content_opt ?? ""
     val lines = content.split("\n")
     var items: [ParsedSymbol] = []
     var line_num = 1
@@ -708,13 +848,11 @@ fn parse_symbols_in_file(file_path: text) -> [ParsedSymbol]:
                 val end_col = start_col + query_text_len(domain_kind)
                 items.push(ParsedSymbol(name: domain_kind + "{}", kind: "domain", line_num: line_num, start_col: start_col, end_col: end_col, file_path: file_path, raw_line: trimmed))
             else:
-                val kind = declaration_kind(trimmed)
-                if kind != "":
-                    val name = declaration_name(trimmed)
-                    if name != "":
-                        val start_col = leading_space_count(line) + declaration_name_column(trimmed, name)
-                        val end_col = start_col + query_text_len(name)
-                        items.push(ParsedSymbol(name: name, kind: kind, line_num: line_num, start_col: start_col, end_col: end_col, file_path: file_path, raw_line: trimmed))
+                val (kind, name) = _parse_decl_kind_and_name(trimmed)
+                if kind != "" and name != "":
+                    val start_col = leading_space_count(line) + declaration_name_column(trimmed, name)
+                    val end_col = start_col + query_text_len(name)
+                    items.push(ParsedSymbol(name: name, kind: kind, line_num: line_num, start_col: start_col, end_col: end_col, file_path: file_path, raw_line: trimmed))
         line_num = line_num + 1
     items
 
@@ -897,9 +1035,9 @@ fn _find_bounded_ident_byte(line: text, symbol: text, from_byte: i64) -> i64:
                     break
                 j = j + 1
             if matches:
-                val left_ok = if pos == 0: true else: not is_ident_byte(line.byte_at(pos - 1) as i64)
+                val left_ok = if pos == 0: true else: not qv_is_ident_byte(line.byte_at(pos - 1) as i64)
                 val right_pos = pos + sym_len
-                val right_ok = if right_pos >= line_len: true else: not is_ident_byte(line.byte_at(right_pos) as i64)
+                val right_ok = if right_pos >= line_len: true else: not qv_is_ident_byte(line.byte_at(right_pos) as i64)
                 if left_ok and right_ok:
                     return pos
         pos = pos + 1
@@ -910,9 +1048,9 @@ fn declaration_name_column(trimmed: text, name: text) -> i64:
     if name.byte_len() == 0 or n == 0:
         return 0
     var pos = _skip_decl_ws_bytes(trimmed, 0, n)
-    while pos < n and is_ident_byte(trimmed.byte_at(pos) as i64):
+    while pos < n and qv_is_ident_byte(trimmed.byte_at(pos) as i64):
         var word_end = pos + 1
-        while word_end < n and is_ident_byte(trimmed.byte_at(word_end) as i64):
+        while word_end < n and qv_is_ident_byte(trimmed.byte_at(word_end) as i64):
             word_end = word_end + 1
         val word = trimmed.substring(pos, word_end)
         if word == "pub" and word_end < n and (trimmed.byte_at(word_end) as i64) == 40:
@@ -1068,6 +1206,16 @@ fn visibility_reachable(symbol: text, owner_file: text, requester_file: text) ->
 
 fn declared_visibility_from_line(raw_line: text) -> text:
     val line = raw_line.trim()
+    if not line.contains("pub("):
+        if not line.contains("pri"):
+            if line.starts_with("pub "):
+                return "public"
+            return "private"
+        if line.starts_with("pri ") or line.contains(" pri "):
+            return "private"
+        if line.starts_with("pub "):
+            return "public"
+        return "private"
     if line.starts_with("pub(peer)") or line.contains(" pub(peer) "):
         return "peer"
     if line.starts_with("pub(up)") or line.contains(" pub(up) "):
@@ -1104,21 +1252,28 @@ fn declaration_kind(line: text) -> text:
     ""
 
 fn domain_block_kind(line: text) -> text:
-    if line.starts_with("schema") and not line.starts_with("schema "):
-        return "schema"
-    if line.starts_with("style") and not line.starts_with("style "):
-        return "style"
-    if line.starts_with("ui") and not line.starts_with("ui "):
+    if line.byte_len() < 2:
+        return ""
+    val b0 = line.byte_at(0) as i64
+    if b0 == 115:
+        if line.starts_with("schema") and not line.starts_with("schema "):
+            return "schema"
+        if line.starts_with("style") and not line.starts_with("style "):
+            return "style"
+        return ""
+    if b0 == 117 and line.starts_with("ui") and not line.starts_with("ui "):
         return "ui"
-    if line.starts_with("music") and not line.starts_with("music "):
+    if b0 == 109 and line.starts_with("music") and not line.starts_with("music "):
         return "music"
-    if line.starts_with("bim") and not line.starts_with("bim "):
+    if b0 == 98 and line.starts_with("bim") and not line.starts_with("bim "):
         return "bim"
-    if line.starts_with("cad") and not line.starts_with("cad "):
-        return "cad"
-    if line.starts_with("city") and not line.starts_with("city "):
-        return "city"
-    if line.starts_with("rtl") and not line.starts_with("rtl "):
+    if b0 == 99:
+        if line.starts_with("cad") and not line.starts_with("cad "):
+            return "cad"
+        if line.starts_with("city") and not line.starts_with("city "):
+            return "city"
+        return ""
+    if b0 == 114 and line.starts_with("rtl") and not line.starts_with("rtl "):
         return "rtl"
     ""
 
@@ -1127,9 +1282,10 @@ fn boundary_kind(owner_file: text) -> text:
     if dir == "":
         return "open"
     val manifest = dir + "/__init__.spl"
-    if not query_visibility_source_exists_v1(manifest):
+    val content_opt = query_visibility_source_read_v1(manifest)
+    if content_opt.is_none():
         return "open"
-    val content = query_visibility_source_read_v1(manifest) ?? ""
+    val content = content_opt ?? ""
     if content.contains("#[bypass]"):
         return "bypass"
     "boundary"
@@ -1195,9 +1351,9 @@ fn exported_by(symbol: text, owner_file: text) -> text:
     if dir == "":
         return ""
     val manifest = dir + "/__init__.spl"
-    if not query_visibility_source_exists_v1(manifest):
-        return ""
     val content = query_visibility_source_read_v1(manifest) ?? ""
+    if content == "":
+        return ""
     val lines = content.split("\n")
     for line in lines:
         val trimmed = line.trim()
@@ -1211,9 +1367,9 @@ fn friend_packages(owner_file: text) -> [text]:
     if dir == "":
         return []
     val manifest = dir + "/__init__.spl"
-    if not query_visibility_source_exists_v1(manifest):
-        return []
     val content = query_visibility_source_read_v1(manifest) ?? ""
+    if content == "":
+        return []
     val lines = content.split("\n")
     var friends: [text] = []
     for line in lines:
@@ -1257,19 +1413,18 @@ fn package_name(file_path: text) -> text:
     parts[0]
 
 fn scan_semantic_tokens(file_path: text, start_line: i64, end_line: i64) -> [text]:
-    if not query_visibility_source_exists_v1(file_path):
-        return []
     val content = query_visibility_source_read_v1(file_path) ?? ""
+    if content == "":
+        return []
     val lines = content.split("\n")
-    var fn_names: [text] = []
-    var type_names: [text] = []
-    var param_names: [text] = []
+    var fn_names: {text: bool} = {}
+    var type_names: {text: bool} = {}
     val parsed = parse_symbols_in_file(file_path)
     for sym in parsed:
         if sym.kind == "fn" or sym.kind == "method":
-            fn_names = fn_names.push(sym.name)
+            fn_names[sym.name] = true
         elif sym.kind == "class" or sym.kind == "struct" or sym.kind == "enum" or sym.kind == "trait":
-            type_names = type_names.push(sym.name)
+            type_names[sym.name] = true
     var results: [text] = []
     var line_idx = 1
     var last_line = end_line
@@ -1281,68 +1436,72 @@ fn scan_semantic_tokens(file_path: text, start_line: i64, end_line: i64) -> [tex
             continue
         if line_idx > last_line:
             break
-        val chars = text_chars(line)
+        val n = line.byte_len()
+        var bi = 0
         var ci = 0
-        while ci < chars.len():
-            val ch = chars[ci]
-            if ch == " " or ch == "\t":
+        while bi < n:
+            val b = line.byte_at(bi) as i64
+            if b == 32 or b == 9:
+                bi = bi + 1
                 ci = ci + 1
                 continue
-            if ch == "#":
-                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(chars.len() - ci) + ":comment")
+            if b == 35:
+                val rem_chars = query_text_len(line.substring(bi, n))
+                results.push(str(line_idx) + ":" + str(ci) + ":" + str(rem_chars) + ":comment")
                 break
-            if ch == "\"":
-                var si = ci + 1
-                while si < chars.len():
-                    val current = chars[si]
-                    if current == "\"":
+            if b == 34:
+                var si = bi + 1
+                var sc = ci + 1
+                while si < n:
+                    val cb = line.byte_at(si) as i64
+                    if cb < 128 or cb >= 192:
+                        sc = sc + 1
+                    if cb == 34:
                         si = si + 1
                         break
                     si = si + 1
-                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(si - ci) + ":string")
-                ci = si
+                results.push(str(line_idx) + ":" + str(ci) + ":" + str(sc - ci) + ":string")
+                bi = si
+                ci = sc
                 continue
-            if ch >= "0" and ch <= "9":
-                var ni = ci + 1
-                while ni < chars.len():
-                    val current = chars[ni]
-                    if not ((current >= "0" and current <= "9") or current == "."):
+            if b >= 48 and b <= 57:
+                var ni = bi + 1
+                while ni < n:
+                    val cb = line.byte_at(ni) as i64
+                    if not ((cb >= 48 and cb <= 57) or cb == 46):
                         break
                     ni = ni + 1
-                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(ni - ci) + ":number")
-                ci = ni
+                val tok_len = ni - bi
+                results.push(str(line_idx) + ":" + str(ci) + ":" + str(tok_len) + ":number")
+                bi = ni
+                ci = ci + tok_len
                 continue
-            if is_ident_char(ch):
-                var wi = ci + 1
-                while wi < chars.len():
-                    val current = chars[wi]
-                    if not is_ident_char(current):
-                        break
+            if qv_is_ident_byte(b):
+                var wi = bi + 1
+                while wi < n and qv_is_ident_byte(line.byte_at(wi) as i64):
                     wi = wi + 1
-                var word_parts: [text] = []
-                var wj = ci
-                while wj < wi:
-                    word_parts = word_parts.push(chars[wj])
-                    wj = wj + 1
-                val word = word_parts.join("")
+                val word = line.substring(bi, wi)
+                val word_len = wi - bi
                 var token_type = "variable"
                 if list_has_text(matching_keywords(word), word):
                     token_type = "keyword"
-                elif list_has_text(fn_names, word):
+                elif fn_names.contains_key(word):
                     token_type = "function"
-                elif list_has_text(type_names, word):
+                elif type_names.contains_key(word):
                     token_type = "type"
-                elif list_has_text(param_names, word):
-                    token_type = "parameter"
-                results = results.push(str(line_idx) + ":" + str(ci) + ":" + str(wi - ci) + ":" + token_type)
-                ci = wi
+                results.push(str(line_idx) + ":" + str(ci) + ":" + str(word_len) + ":" + token_type)
+                bi = wi
+                ci = ci + word_len
                 continue
-            if ci + 1 < chars.len():
-                val op = chars[ci] + chars[ci + 1]
-                if op == "->" or op == ":=" or op == "==" or op == "!=" or op == ">=" or op == "<=":
-                    results = results.push(str(line_idx) + ":" + str(ci) + ":2:operator")
+            if bi + 1 < n:
+                val b1 = line.byte_at(bi + 1) as i64
+                if (b == 45 and b1 == 62) or (b == 58 and b1 == 61) or (b == 61 and b1 == 61) or (b == 33 and b1 == 61) or (b == 62 and b1 == 61) or (b == 60 and b1 == 61):
+                    results.push(str(line_idx) + ":" + str(ci) + ":2:operator")
+                    bi = bi + 2
                     ci = ci + 2
                     continue
-            ci = ci + 1
+            if b < 128 or b >= 192:
+                ci = ci + 1
+            bi = bi + 1
         line_idx = line_idx + 1
     results
