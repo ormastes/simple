@@ -54,6 +54,19 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
   (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
   `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
   receipt is still per-process.
+- **Object cache not keyed on the cwd source trees in linked workers (2026-11-24):**
+  the scope directory and the module witness config use
+  `native_build_object_producer_identity(debug_info)`. The tree fingerprints stay by
+  default. They are replaced by `embedded+worktree:<sha256(cwd)>` only in a process
+  that took the CLI dispatch into the linked worker entry
+  (`native_build_declare_linked_worker_entry_v1`), with the hashed executable equal
+  to the running image and no debug info; then editing a file under `src/lib` or
+  `src/compiler` keeps the `s<hex>` scope and the per-module witness decides each
+  hit. In-process builds (managed bootstrap stages), debug-info builds, the MIR
+  resume ledger run key, the pre-lowering cache and no-op admission stay tree-bound:
+  an edit rejects the ledger and every module is lowered again; only codegen is
+  reused. Analysis and open gaps:
+  `doc/08_tracking/bug/native_cache_whole_source_tree_in_producer_identity_2026-11-24.md`.
 - **Repeated imports and `-o` (2026-11-24, unexecuted):** a module that names one
   import on several `use` lines got witness `…-witness-v1-invalid`
   (`ambiguous-resolution-fact`; 112 modules in one evidence cache) and never hit.

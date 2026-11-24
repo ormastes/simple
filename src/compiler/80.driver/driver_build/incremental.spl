@@ -12,11 +12,11 @@ use compiler.driver.cache.integration.shadow_mode.{
     ShadowActionInputs, shadow_enabled, shadow_on_compile_start,
     shadow_on_compile_done, shadow_report
 }
-use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_list_optional}
+use std.nogc_sync_mut.io_runtime.{cwd, dir_create_all, dir_list_optional}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
     transient_scope_end, transient_promote}
-use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.process_ops.{eprint, process_runtime_is_aot_native_v1}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
     file_is_regular_no_follow, file_atomic_write, file_lock, file_unlock}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
@@ -706,15 +706,103 @@ fn native_build_unadmitted_producer_identity(executable_hash: text,
         runtime_provider_fingerprint, runtime_bundle, simple_abi_version,
         simple_abi_deferred, "", "unadmitted-v1")
 
+# Set only by the two CLI branches that dispatch a marked coordinator child
+# (`<exe> run src/app/cli/native_build_worker.spl`, SIMPLE_NATIVE_BUILD_WORKER=1)
+# to the worker entry LINKED INTO this image, before any `run` handling:
+# src/app/cli/bootstrap_main.spl and src/app/cli/_CliMain/main_and_help.spl.
+# Never inferred: the runtime-kind probes are constant false in the C and
+# pure-Simple runtimes, so SMF-loaded code looks native to them.
+var _native_build_linked_worker_entry_v1: bool = false
+
+fn native_build_declare_linked_worker_entry_v1():
+    _native_build_linked_worker_entry_v1 = true
+
+fn native_build_source_tree_is_producer_v1(linked_worker_entry: bool,
+        aot_native: bool, executable_hash: text, running_image_hash: text,
+        worktree_root: text, debug_info: bool) -> bool:
+    """Whether the cwd `src/compiler` + `src/lib` trees are part of the PRODUCER
+    (the running compiler), as opposed to being only the sources it compiles.
+
+    True (the default, fail closed) unless every one of these holds:
+    - `linked_worker_entry`: this process took the dispatch branch into the
+      worker entry linked into the image, so the compiler code it runs is the
+      executable's. An in-process build, a `run <x>.smf` host or a cached-SMF
+      interpret never sets it and keeps the trees.
+    - `aot_native`: neither seed probe fired (kept as a second gate only).
+    - the hashed executable is the image this process is executing.
+    - `worktree_root` is known: it replaces the trees as the scope partition.
+    - no debug info: spans are emitted into debug info and are not part of the
+      MIR identity, so a line shift in another module must keep missing.
+    """
+    if not linked_worker_entry or not aot_native:
+        return true
+    if debug_info or worktree_root == "":
+        return true
+    if not native_build_canonical_sha256_v1(executable_hash):
+        return true
+    if running_image_hash != executable_hash:
+        return true
+    false
+
+fn native_build_producer_source_term_v1(compiler_src_fp: text,
+        lib_fp: text, tree_is_producer: bool, worktree_root: text) -> text:
+    """The `compiler=` term of the producer identity.
+
+    When the trees are not the producer the compiler is the code inside the
+    executable ("embedded", as for a deployed compiler outside a checkout) and
+    the term names the worktree instead: objects are stored per module name, so
+    two worktrees with different sources must not share a scope directory and
+    overwrite each other's objects between admission and link. "" for a
+    fingerprint means the tree is not visible from the build cwd.
+    """
+    if not tree_is_producer:
+        return "embedded+worktree:{sha256_text(worktree_root)}"
+    val compiler_only_fp = if compiler_src_fp == "": "embedded" else: compiler_src_fp
+    # stdlib is a compiler-behaviour input (src/lib is interpreted as
+    # source every run); "" outside a checkout keeps the identity unchanged.
+    if lib_fp == "":
+        return compiler_only_fp
+    "{compiler_only_fp}+stdlib:{lib_fp}"
+
 fn native_build_compiler_identity() -> text:
-    val src_fp = native_build_compiler_source_fingerprint()
+    """Producer identity that ALWAYS binds the cwd source trees.
+
+    Every consumer that reuses a result without re-deriving it from the
+    sources keeps this one: the MIR resume ledger run key, the opt-in
+    pre-lowering cache, no-op admission and the stage receipts.
+    """
+    native_build_identity_for_tree_rule_v1(true, true)
+
+fn native_build_object_producer_identity(debug_info: bool) -> text:
+    """Producer identity for the per-module object cache: the scope directory
+    and the module witness config fingerprint.
+
+    Both are consulted only after this run lowered the module, and a hit
+    needs the witness to match (MIR identity, dependency interface slices,
+    resolutions, external layouts, config). In a linked worker the cwd trees
+    are inputs that reach an object through that MIR, so they are left out and
+    one edited source file no longer renames the scope directory. Every other
+    process keeps them (native_build_source_tree_is_producer_v1).
+    """
+    native_build_identity_for_tree_rule_v1(false, debug_info)
+
+fn native_build_identity_for_tree_rule_v1(tree_always_producer: bool,
+        debug_info: bool) -> text:
     val hash = native_build_compiler_executable_hash()
     if hash != "":
-        val lib_fp = native_build_stdlib_source_fingerprint()
-        val compiler_only_fp = if src_fp == "": "embedded" else: src_fp
-        # stdlib is a compiler-behaviour input (src/lib is interpreted as
-        # source every run); "" outside a checkout keeps the identity unchanged.
-        val compiler_fp = if lib_fp == "": compiler_only_fp else: "{compiler_only_fp}+stdlib:{lib_fp}"
+        var tree_is_producer = true
+        var worktree_root = ""
+        if not tree_always_producer and _native_build_linked_worker_entry_v1:
+            worktree_root = cwd()
+            tree_is_producer = native_build_source_tree_is_producer_v1(
+                true, process_runtime_is_aot_native_v1(), hash,
+                native_build_running_image_hash(), worktree_root, debug_info)
+        val compiler_fp = if tree_is_producer:
+            native_build_producer_source_term_v1(
+                native_build_compiler_source_fingerprint(),
+                native_build_stdlib_source_fingerprint(), true, "")
+        else:
+            native_build_producer_source_term_v1("", "", false, worktree_root)
         val runtime_path = sosix_env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
         val runtime_bundle = sosix_env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
@@ -2450,6 +2538,7 @@ fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> 
 
 
 
+export native_build_object_producer_identity, native_build_source_tree_is_producer_v1, native_build_producer_source_term_v1, native_build_declare_linked_worker_entry_v1
 export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity, native_build_unadmitted_producer_identity, native_build_unadmitted_identity_decision_v1
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
