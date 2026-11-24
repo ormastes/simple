@@ -5707,6 +5707,7 @@ int rt_process_close_pinned_executable_owned_value(int64_t handle) {
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "platform/spl_win_utf16_private.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -5807,15 +5808,7 @@ static char* owned_win_build_cmdline(const char* const* argv) {
 }
 
 static WCHAR* owned_win_widen(const char* s) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    if (n <= 0) return NULL;
-    WCHAR* w = (WCHAR*)RT_OWNED_HOST_MALLOC((size_t)n * sizeof(WCHAR));
-    if (!w) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n) <= 0) {
-        RT_OWNED_HOST_FREE(w);
-        return NULL;
-    }
-    return w;
+    return spl_win_utf8_to_wide(s, -1, 0, RT_OWNED_HOST_MALLOC, RT_OWNED_HOST_FREE, NULL);
 }
 
 static int owned_win_is_file(const WCHAR* p) {

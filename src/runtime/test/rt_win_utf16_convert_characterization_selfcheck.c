@@ -147,6 +147,53 @@ static uint8_t* oracle_rev_n_strict(const wchar_t* wide, DWORD length, size_t* o
     return result;
 }
 
+/* ================ HELPERS (post-refactor shared header) ================ */
+/* Each wraps platform/spl_win_utf16_private.h exactly the way the migrated
+ * call site does, so the helper pass must reproduce the oracle transcript. */
+#include "platform/spl_win_utf16_private.h"
+
+static wchar_t* helper_fwd_z_strict(const char* s) {
+    return spl_win_utf8_to_wide(s, -1, MB_ERR_INVALID_CHARS, t_alloc, t_free, NULL);
+}
+static wchar_t* helper_fwd_z_lenient(const char* s) {
+    return spl_win_utf8_to_wide(s, -1, 0, t_alloc, t_free, NULL);
+}
+static wchar_t* helper_fwd_n_strict(const char* text, size_t len) {
+    if (len > (size_t)INT_MAX) return NULL;
+    return spl_win_utf8_to_wide(text, (ptrdiff_t)len, MB_ERR_INVALID_CHARS, t_alloc, t_free, NULL);
+}
+static char* helper_rev_z_lenient(const wchar_t* w) {
+    return spl_win_wide_to_utf8(w, -1, 0, t_alloc, t_free, NULL);
+}
+static uint8_t* helper_rev_n_lenient(const wchar_t* text, size_t len, size_t* out_len) {
+    *out_len = 0;
+    if (len > (size_t)INT_MAX) return NULL;
+    return (uint8_t*)spl_win_wide_to_utf8(text, (ptrdiff_t)len, 0, t_alloc, t_free, out_len);
+}
+static uint8_t* helper_rev_n_strict(const wchar_t* wide, DWORD length, size_t* out_len) {
+    *out_len = 0;
+    if (length == 0) return (uint8_t*)calloc(1, 1);
+    if (length > INT_MAX) return NULL;
+    size_t bytes = 0;
+    char* utf8 = spl_win_wide_to_utf8(wide, (ptrdiff_t)length, WC_ERR_INVALID_CHARS, t_alloc, t_free, &bytes);
+    if (!utf8) return NULL;
+    uint8_t* result = (uint8_t*)malloc(bytes ? bytes : 1);
+    memcpy(result, utf8, bytes);
+    *out_len = bytes;
+    t_free(utf8);
+    return result;
+}
+
+/* pass 0 runs the oracles, pass 1 the helpers; transcripts must match */
+static int g_use_helper;
+static FILE* g_out;
+static wchar_t* conv_fwd_z_strict(const char* s) { return g_use_helper ? helper_fwd_z_strict(s) : oracle_fwd_z_strict(s); }
+static wchar_t* conv_fwd_z_lenient(const char* s) { return g_use_helper ? helper_fwd_z_lenient(s) : oracle_fwd_z_lenient(s); }
+static wchar_t* conv_fwd_n_strict(const char* s, size_t n) { return g_use_helper ? helper_fwd_n_strict(s, n) : oracle_fwd_n_strict(s, n); }
+static char* conv_rev_z_lenient(const wchar_t* w) { return g_use_helper ? helper_rev_z_lenient(w) : oracle_rev_z_lenient(w); }
+static uint8_t* conv_rev_n_lenient(const wchar_t* w, size_t n, size_t* o) { return g_use_helper ? helper_rev_n_lenient(w, n, o) : oracle_rev_n_lenient(w, n, o); }
+static uint8_t* conv_rev_n_strict(const wchar_t* w, DWORD n, size_t* o) { return g_use_helper ? helper_rev_n_strict(w, n, o) : oracle_rev_n_strict(w, n, o); }
+
 /* ============================ transcript ============================ */
 
 static int g_failures;
@@ -159,18 +206,18 @@ static uint32_t fnv(const void* data, size_t n, uint32_t h) {
 
 static void emit(const char* oracle, const char* id, const void* out, size_t bytes, int alloc_calls) {
     if (!out) {
-        printf("%-14s %-24s -> NULL allocs=%d live=%d\n", oracle, id, alloc_calls, g_live);
+        fprintf(g_out, "%-14s %-24s -> NULL allocs=%d live=%d\n", oracle, id, alloc_calls, g_live);
     } else {
-        printf("%-14s %-24s -> len=%zu fnv=%08x head=", oracle, id, bytes, fnv(out, bytes, 2166136261u));
+        fprintf(g_out, "%-14s %-24s -> len=%zu fnv=%08x head=", oracle, id, bytes, fnv(out, bytes, 2166136261u));
         const unsigned char* p = (const unsigned char*)out;
-        for (size_t i = 0; i < bytes && i < 16; i++) printf("%02x", p[i]);
-        printf(" allocs=%d\n", alloc_calls);
+        for (size_t i = 0; i < bytes && i < 16; i++) fprintf(g_out, "%02x", p[i]);
+        fprintf(g_out, " allocs=%d\n", alloc_calls);
     }
 }
 
 static void check_live(const char* oracle, const char* id, int expected) {
     if (g_live != expected) {
-        printf("FAIL leak %s %s live=%d expected=%d\n", oracle, id, g_live, expected);
+        fprintf(g_out, "FAIL leak %s %s live=%d expected=%d\n", oracle, id, g_live, expected);
         g_failures++;
     }
 }
@@ -187,19 +234,19 @@ static void run_fwd(const U8Case* c, int fail_at) {
         memcpy(z, c->bytes, c->len);
         z[c->len] = 0;
         hook_reset(fail_at);
-        wchar_t* w = oracle_fwd_z_strict(z);
+        wchar_t* w = conv_fwd_z_strict(z);
         emit("fwd_z_strict", idbuf, w, w ? wcslen(w) * sizeof(wchar_t) : 0, g_alloc_calls);
         t_free(w);
         check_live("fwd_z_strict", idbuf, 0);
         hook_reset(fail_at);
-        w = oracle_fwd_z_lenient(z);
+        w = conv_fwd_z_lenient(z);
         emit("fwd_z_lenient", idbuf, w, w ? wcslen(w) * sizeof(wchar_t) : 0, g_alloc_calls);
         t_free(w);
         check_live("fwd_z_lenient", idbuf, 0);
         free(z);
     }
     hook_reset(fail_at);
-    wchar_t* w = oracle_fwd_n_strict(c->bytes, c->len);
+    wchar_t* w = conv_fwd_n_strict(c->bytes, c->len);
     /* the length-delimited result may carry embedded NULs: count to the
      * terminator the oracle wrote, which is at index need. */
     size_t wl = 0;
@@ -224,7 +271,7 @@ static void run_rev(const U16Case* c, int fail_at) {
         wmemcpy(z, c->w, c->len);
         z[c->len] = 0;
         hook_reset(fail_at);
-        char* s = oracle_rev_z_lenient(z);
+        char* s = conv_rev_z_lenient(z);
         emit("rev_z_lenient", idbuf, s, s ? strlen(s) : 0, g_alloc_calls);
         t_free(s);
         check_live("rev_z_lenient", idbuf, 0);
@@ -232,12 +279,12 @@ static void run_rev(const U16Case* c, int fail_at) {
     }
     size_t n = 0;
     hook_reset(fail_at);
-    uint8_t* b = oracle_rev_n_lenient(c->w, c->len, &n);
+    uint8_t* b = conv_rev_n_lenient(c->w, c->len, &n);
     emit("rev_n_lenient", idbuf, b, n, g_alloc_calls);
     t_free(b);
     check_live("rev_n_lenient", idbuf, 0);
     hook_reset(fail_at);
-    b = oracle_rev_n_strict(c->w, (DWORD)c->len, &n);
+    b = conv_rev_n_strict(c->w, (DWORD)c->len, &n);
     emit("rev_n_strict", idbuf, b, n, g_alloc_calls);
     free(b); /* result copy is not hooked */
     check_live("rev_n_strict", idbuf, 0);
@@ -261,7 +308,7 @@ static wchar_t* repeat_wide(const wchar_t* unit, size_t unit_len, size_t count, 
 
 #define U8(id, lit) { id, lit, sizeof(lit) - 1 }
 
-int main(void) {
+static void suite(void) {
     static const U8Case u8[] = {
         U8("empty", ""),
         U8("ascii1", "a"),
@@ -384,13 +431,13 @@ int main(void) {
     /* ---- round trips: strict forward then strict reverse ---- */
     for (size_t i = 0; i < nu8; i++) {
         hook_reset(-1);
-        wchar_t* w = oracle_fwd_n_strict(u8[i].bytes, u8[i].len);
-        if (!w) { printf("roundtrip %-24s -> fwd NULL\n", u8[i].id); continue; }
+        wchar_t* w = conv_fwd_n_strict(u8[i].bytes, u8[i].len);
+        if (!w) { fprintf(g_out, "roundtrip %-24s -> fwd NULL\n", u8[i].id); continue; }
         int need = u8[i].len ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, u8[i].bytes, (int)u8[i].len, NULL, 0) : 0;
         size_t n = 0;
-        uint8_t* back = oracle_rev_n_strict(w, (DWORD)need, &n);
+        uint8_t* back = conv_rev_n_strict(w, (DWORD)need, &n);
         int same = back && n == u8[i].len && memcmp(back, u8[i].bytes, n) == 0;
-        printf("roundtrip %-24s -> %s\n", u8[i].id, same ? "identical" : "DIFFERENT");
+        fprintf(g_out, "roundtrip %-24s -> %s\n", u8[i].id, same ? "identical" : "DIFFERENT");
         free(back);
         t_free(w);
     }
@@ -421,40 +468,69 @@ int main(void) {
             }
             wbuf[wlen] = 0;
             hook_reset(-1);
-            wchar_t* w = oracle_fwd_z_strict((const char*)buf);
+            wchar_t* w = conv_fwd_z_strict((const char*)buf);
             if (w) h_zs = fnv(w, wcslen(w) * 2, h_zs); else null_zs++;
             t_free(w);
-            w = oracle_fwd_z_lenient((const char*)buf);
+            w = conv_fwd_z_lenient((const char*)buf);
             if (w) h_zl = fnv(w, wcslen(w) * 2, h_zl); else null_zl++;
             t_free(w);
-            w = oracle_fwd_n_strict((const char*)buf, len);
+            w = conv_fwd_n_strict((const char*)buf, len);
             if (w) h_ns = fnv(w, wcslen(w) * 2, h_ns); else null_ns++;
             t_free(w);
-            char* s = oracle_rev_z_lenient(wbuf);
+            char* s = conv_rev_z_lenient(wbuf);
             if (s) h_rz = fnv(s, strlen(s), h_rz); else null_rz++;
             t_free(s);
             size_t n = 0;
-            uint8_t* b = oracle_rev_n_lenient(wbuf, wlen, &n);
+            uint8_t* b = conv_rev_n_lenient(wbuf, wlen, &n);
             if (b) h_rl = fnv(b, n, h_rl); else null_rl++;
             t_free(b);
-            b = oracle_rev_n_strict(wbuf, (DWORD)wlen, &n);
+            b = conv_rev_n_strict(wbuf, (DWORD)wlen, &n);
             if (b) h_rs = fnv(b, n, h_rs); else null_rs++;
             free(b);
         }
-        printf("fuzz fwd_z_strict  fnv=%08x nulls=%d\n", h_zs, null_zs);
-        printf("fuzz fwd_z_lenient fnv=%08x nulls=%d\n", h_zl, null_zl);
-        printf("fuzz fwd_n_strict  fnv=%08x nulls=%d\n", h_ns, null_ns);
-        printf("fuzz rev_z_lenient fnv=%08x nulls=%d\n", h_rz, null_rz);
-        printf("fuzz rev_n_lenient fnv=%08x nulls=%d\n", h_rl, null_rl);
-        printf("fuzz rev_n_strict  fnv=%08x nulls=%d\n", h_rs, null_rs);
+        fprintf(g_out, "fuzz fwd_z_strict  fnv=%08x nulls=%d\n", h_zs, null_zs);
+        fprintf(g_out, "fuzz fwd_z_lenient fnv=%08x nulls=%d\n", h_zl, null_zl);
+        fprintf(g_out, "fuzz fwd_n_strict  fnv=%08x nulls=%d\n", h_ns, null_ns);
+        fprintf(g_out, "fuzz rev_z_lenient fnv=%08x nulls=%d\n", h_rz, null_rz);
+        fprintf(g_out, "fuzz rev_n_lenient fnv=%08x nulls=%d\n", h_rl, null_rl);
+        fprintf(g_out, "fuzz rev_n_strict  fnv=%08x nulls=%d\n", h_rs, null_rs);
         check_live("fuzz", "all", 0);
     }
+}
 
+static char* slurp(FILE* f, long* len) {
+    fflush(f);
+    *len = ftell(f);
+    char* buf = (char*)malloc((size_t)*len + 1);
+    rewind(f);
+    *len = (long)fread(buf, 1, (size_t)*len, f);
+    return buf;
+}
+
+int main(void) {
+    FILE* passes[2];
+    for (int p = 0; p < 2; p++) {
+        passes[p] = tmpfile();
+        if (!passes[p]) { fprintf(stderr, "tmpfile failed\n"); return 2; }
+        g_use_helper = p;
+        g_out = passes[p];
+        suite();
+    }
+    long n0, n1;
+    char* t0 = slurp(passes[0], &n0);
+    char* t1 = slurp(passes[1], &n1);
+    fwrite(t0, 1, (size_t)n0, stdout); /* oracle transcript == golden */
+    if (n0 != n1 || memcmp(t0, t1, (size_t)n0) != 0) {
+        long i = 0;
+        while (i < n0 && i < n1 && t0[i] == t1[i]) i++;
+        fprintf(stderr, "FAIL helper transcript differs from oracle at byte %ld\n", i);
+        g_failures++;
+    }
     if (g_failures) {
         fprintf(stderr, "rt_win_utf16_convert_characterization: %d failure(s)\n", g_failures);
         return 1;
     }
-    fprintf(stderr, "rt_win_utf16_convert_characterization: PASS\n");
+    fprintf(stderr, "rt_win_utf16_convert_characterization: PASS (oracle == helper)\n");
     return 0;
 }
 #endif
