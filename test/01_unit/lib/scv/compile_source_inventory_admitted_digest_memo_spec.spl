@@ -185,3 +185,36 @@ describe "SCV admitted-digest reads verify once per process per digest":
         expect(in_session).to_equal(false)
         expect(c6 - c5).to_equal(0)
         expect(session_ended).to_equal(true)
+
+    it "REQ-SCV-ADMITTED-MEMO-007 a direct read under a live session is returned but never memoized":
+        # At scope state 0 with a live build session the reader's own promotion
+        # is session adoption: the graph dies at session end, so storing it in
+        # the process-lifetime memo would leave every later hit dangling.
+        val root = memo_spec_root("session")
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, memo_spec_inventory(12, "fn a(): 1"))
+        val scope_free = transient_array_scope_state_v1() == 0
+        val session = transient_session_heap_begin_v1()
+        val session_live = session != 0u32
+        val c0 = compile_source_inventory_full_read_count_v1()
+        val first = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val second = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        # Session-owned results die with the session: keep only scalars.
+        val live_valid = first.valid and second.valid
+        val live_generation = second.inventory!.generation
+        val c1 = compile_source_inventory_full_read_count_v1()
+        val session_ended = transient_session_heap_end_v1(session)
+        step("After the session the same digest is a fresh full read, then memoized")
+        val after = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val again = compile_source_inventory_read_admitted_digest_v1(root, digest)
+        val c2 = compile_source_inventory_full_read_count_v1()
+        dir_remove(root, true)
+        expect(scope_free).to_equal(true)
+        expect(session_live).to_equal(true)
+        expect(live_valid).to_equal(true)
+        expect(live_generation).to_equal(12)
+        expect(c1 - c0).to_equal(2)
+        expect(session_ended).to_equal(true)
+        expect(after.valid).to_equal(true)
+        expect(again.inventory!.generation).to_equal(12)
+        expect(c2 - c1).to_equal(1)
