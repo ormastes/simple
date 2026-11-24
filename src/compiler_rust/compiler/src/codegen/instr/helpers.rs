@@ -799,3 +799,39 @@ pub(crate) fn indirect_call_with_result<M: Module>(
         }
     }
 }
+
+/// Float -> integer conversion with the interpreter's semantics
+/// (`semantics::cast_float_to_numeric`, i.e. Rust `as`): truncate toward
+/// zero, SATURATE to the target width's range, NaN -> 0. Used by every
+/// `x as uN/iN` and `x.to_uN()/to_iN()` lowering so the compiled engines agree
+/// with the interpreter. The old `fcvt_to_{sint,uint}.i64` + `ireduce` wrapped
+/// in-i64-range values (`70000.5.to_u16()` = 4464) and TRAPPED (SIGILL) on a
+/// negative float to an unsigned type and on NaN/out-of-i64-range input.
+/// `to_int` selects the result width (I8/I16/I32/I64); `signed` the range.
+/// doc/08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md
+pub(crate) fn float_to_int_saturating(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    to_int: types::Type,
+    signed: bool,
+) -> cranelift_codegen::ir::Value {
+    let wide = if signed {
+        builder.ins().fcvt_to_sint_sat(types::I64, val)
+    } else {
+        builder.ins().fcvt_to_uint_sat(types::I64, val)
+    };
+    if to_int == types::I64 {
+        return wide;
+    }
+    let bits = to_int.bits();
+    let clamped = if signed {
+        let max = builder.ins().iconst(types::I64, (1i64 << (bits - 1)) - 1);
+        let min = builder.ins().iconst(types::I64, -(1i64 << (bits - 1)));
+        let upper = builder.ins().smin(wide, max);
+        builder.ins().smax(upper, min)
+    } else {
+        let max = builder.ins().iconst(types::I64, ((1u64 << bits) - 1) as i64);
+        builder.ins().umin(wide, max)
+    };
+    builder.ins().ireduce(to_int, clamped)
+}
