@@ -134,7 +134,9 @@ Limits of the follow-up:
 
 - **Explicit `--cache-dir` only.** The pass runs on the directory given by
   `--cache-dir`. That is the one case where the coordinator provably names the
-  directory its workers write scopes into. Not covered, so still unbounded for
+  directory its workers write scopes into; the sanctioned bootstrap
+  (`scripts/bootstrap/build-phase3-phase4.sh`) passes it on every stage. Not
+  covered, so still unbounded for
   sharded and coordinator-lane builds: no `--cache-dir` (the worker picks
   `build/native_cache`, a profile segment under `SIMPLE_NATIVE_BUILD_CACHE_DIR`,
   or the machine cache root), and the `planner-<sha>` / `collection-<sha>`
@@ -157,9 +159,13 @@ Limits of the follow-up:
   than the kept number of scopes present. The link then fails with the "no
   longer in the native cache" message and a re-run recompiles the missing
   modules. Workaround: give concurrent long builds separate `--cache-dir`
-  directories. `SIMPLE_CACHE_SCOPE` lanes also separate them, because the lane
-  is part of the scope identity and each lane has its own ledger root, but the
-  lanes still share one retention count under the same directory.
+  directories. A `SIMPLE_CACHE_SCOPE` lane alone is not enough: it changes the
+  scope name, but every lane's scopes sit side by side in `<cache-dir>/s<32hex>`
+  and one lane's pass scans and can remove another lane's.
+- **New exposure from this follow-up.** After the first fix no sharded build
+  pruned at all, so two sharded builds on one `--cache-dir` could not hurt each
+  other. Now the start of one is a retention pass over the other's scopes,
+  under the conditions above.
 - **Once per process tree, not per build.** A long-lived process that runs
   several coordinator builds prunes only on the first, and a build started from
   inside another build inherits the latch and does not prune.
