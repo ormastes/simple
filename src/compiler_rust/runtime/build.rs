@@ -52,6 +52,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_timestamp.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
     println!("cargo:rerun-if-changed=../../runtime/rt_pool_core.h");
+    println!("cargo:rerun-if-changed=../../runtime/struct_alloc_registry_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_image.c");
     println!("cargo:rerun-if-changed=../../runtime/startup/common/runtime_log_hosted.c");
