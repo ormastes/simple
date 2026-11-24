@@ -1767,9 +1767,20 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
+    # Export the LIVE owner count to the shard workers, as the per-file
+    # worker pool already does (its phase B): each owner's codegen pool reads
+    # SIMPLE_NATIVE_FILE_WORKERS as its peer-shard divisor and otherwise falls
+    # back to min(--mir-shard total, --threads), i.e. the queued batch count.
+    # rb5 (2026-11-24): shards=16 parallel=1, yet every owner divided its
+    # tree share by peer_shards=4 (`[NATIVE] codegen ... peer_shards=4`).
+    # Scheduling-only: excluded from the native cache identity.
+    val old_live_owners = native_build_env_saved_v1("SIMPLE_NATIVE_FILE_WORKERS")
+    val live_owners = if run_parallel > 0: run_parallel else: count
+    env_set("SIMPLE_NATIVE_FILE_WORKERS", "{live_owners}")
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, run_parallel,
         simple_bin, timeout_ms, spawn_limit)
+    native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_live_owners)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     val hir_compile_errors = native_mir_shard_hir_compile_errors_recorded_v1(queue_dir)
     val outcome = native_mir_shard_outcome_after_hir_errors_v1(
