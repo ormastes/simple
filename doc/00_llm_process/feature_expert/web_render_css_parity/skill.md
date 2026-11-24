@@ -4413,3 +4413,55 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - All 32 PPMs (8 pages, 1x/4x, JIT/interpreter) are byte-identical to base.
 - **Spec:** `test/01_unit/lib/gc_async_mut/gpu/engine2d/rect_blend_reads_region_spec.spl`: 200 small blends, JIT 6.07 s -> 0.2 ms, JIT == interpreter.
 - **Bug record:** `doc/08_tracking/bug/engine2d_rect_blend_reads_whole_frame_2026-11-24.md`.
+## 2026-11-24 — forms parity lane (button k=1 width, textarea wrapped lines, hairline corners)
+
+- **Button width at k=1 snaps from its fractional pen.** Chrome holds the label's
+  max-content width as a LayoutUnit (1/64 px, ceil), then pixel-snaps the right
+  edge half-up from the button's LayoutUnit start. `inline_button_k1_snap_px`
+  (layout_foundation) records -1/0 per button into `g_box_device_extra_w` on
+  every k=1 pass. The layout box stays 58 px, because geometry specs pin it.
+  `_html_draw_ir_k1_button_boxes` (paint_layout) narrows only the Draw IR paint.
+  Trap: float vs LayoutUnit differ by 7 milli-px on `OK` (21.257 -> 21.2656),
+  which sits on a .5 boundary, so do this in LU, not f64.
+- **Wrapped textarea lines lost their raster props.** The `_line{n}` commands
+  (`_html_draw_ir_wrap_extra_line_commands`) dropped `font-size-milli` (13 px
+  glyphs instead of 13.333), text-lcd and spacing, and the owner textarea's
+  `pen-origin-milli`. Shared helper: `_html_draw_ir_text_raster_props`.
+  Soft-wrapped lines only. Hard `\n` in a value (drawn as .notdef) and a long
+  value dropping the control to the next line are handed over:
+  `textarea_value_line_breaks_chrome159_spec` (@tag:in-development).
+- **A 1 device px rounded border is a Skia AA hairline, not a ring.** Blink
+  strokes the rrect inset 1/2 px. Skia draws a stroke of 1 device px or less
+  with SkScan_Antihair:
+  - conic weight 0.7071, chopped into quads with tolerance 1/4;
+  - `2^level` lines per quad;
+  - a 16.16 two-row alpha spread;
+  - 26.6 end-cap scaling.
+
+  Chrome's radius-5 corner reads 41 162 231 / 45 222 62 26. The model gives
+  39 161 231 / 42 220 61 24. The exact-area model does NOT fit: (1,1) is 0.55
+  exact vs 0.18 in Chrome. Blink also shrinks the background half a border
+  width inside an opaque border (bleed avoidance), so a filled button's colour
+  never reaches the corner's outer pixels. Code:
+  `engine2d_draw_ir_render_hairline_rrect_border` and
+  `engine2d_draw_ir_render_shrunk_rrect_background` (draw_ir_box_effects).
+  This is the generic div/input/button path, not form-specific. At k=4 the
+  border is 4 device px, so it stays on the ring path.
+- **Seed trap:** `x.ceil().to_i64()` chained returns the f64 BITS
+  (4607182418800017408 for 1.0); `val c = x.ceil(); c.to_i64()` is right.
+  Hand-rolled `_e2d_hair_ceil` avoids it.
+- **Forms-media "0.08 px high" regions (x 528-740) are underscores.** The ink
+  centroid shift is confined to `owner=simple_web_html_…` runs. A 16 px
+  Liberation Sans `_` is 1.25 px in Chrome (row solid + the row below at
+  191), and Simple drops the partial bottom row. That is the glyph raster
+  frame (sfnt_glyf), handed over as `underscore_bottom_row_chrome159_spec`.
+  Method: per-x-band ink-weighted y centroid (`cent.spl`), then a scaled
+  Chrome-over-Simple crop PNG to read the text.
+- **Perf trap (hairline/background):** the first cut cost +45% on forms-media 1x
+  (7.3 -> 11 s). `_e2d_box_ring_side` builds a full `[u32]` image per rect, so
+  using it for a section's ~850 px wide background bands cost the most. Fills
+  of one colour go through `draw_rect_filled`. The corner tables are computed
+  once per radius (top-left) and mirrored to the other three corners; that
+  matches Chrome, whose corners mirror exactly. Only pixels the arc crosses are
+  supersampled. Bisect a regression by `if false and …`-guarding one branch
+  and re-timing; don't guess.
