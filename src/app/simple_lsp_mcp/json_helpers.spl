@@ -46,14 +46,53 @@ fn SB_L() -> text:
 fn SB_R() -> text:
     "]"
 
+val _JSON_HEX_DIGITS = "0123456789abcdef"
+
+fn _escape_json_ctrl(code: i64) -> text:
+    if code == 8:
+        return "\\b"
+    if code == 9:
+        return "\\t"
+    if code == 10:
+        return "\\n"
+    if code == 12:
+        return "\\f"
+    if code == 13:
+        return "\\r"
+    val hi = code / 16
+    val lo = code % 16
+    "\\u00" + _JSON_HEX_DIGITS.substring(hi, hi + 1) + _JSON_HEX_DIGITS.substring(lo, lo + 1)
+
 fn escape_json(s: text) -> text:
-    var out = s
-    out = out.replace("\\", "\\\\")
-    out = out.replace("\"", "\\\"")
-    out = out.replace("\n", "\\n")
-    out = out.replace("\r", "\\r")
-    out = out.replace("\t", "\\t")
-    out
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        val b = s.byte_at(i) as i64
+        if b < 32 or b == 34 or b == 92:
+            break
+        i = i + 1
+    if i == n:
+        return s
+    var parts: [text] = []
+    if i > 0:
+        parts.push(s.substring(0, i))
+    var span_start = i
+    while i < n:
+        val b = s.byte_at(i) as i64
+        if b < 32 or b == 34 or b == 92:
+            if i > span_start:
+                parts.push(s.substring(span_start, i))
+            if b == 34:
+                parts.push("\\\"")
+            elif b == 92:
+                parts.push("\\\\")
+            else:
+                parts.push(_escape_json_ctrl(b))
+            span_start = i + 1
+        i = i + 1
+    if span_start < n:
+        parts.push(s.substring(span_start, n))
+    parts.join("")
 
 fn js(value: text) -> text:
     Q() + escape_json(value) + Q()
@@ -104,10 +143,7 @@ fn _char_at(s: text, i: i64) -> text:
 fn _is_ws(ch: text) -> bool:
     ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
 
-# Char-array view of a text, built ONCE per scan. `_char_at(s, i)` walks `s`
-# from the start on every call, so a scanner that indexes it per position is
-# O(n^2) in the request size (lsp_mcp_hover_definition_hang_windows_2026-10-27,
-# "Left over"). Indices are the same CHAR indices `_slice_text` uses.
+# Char-array view helpers retained for unit specs and callers that test them.
 fn _json_chars(s: text) -> [text]:
     var out: [text] = []
     for ch in s:
@@ -151,129 +187,121 @@ fn _find_json_value_start_chars(chars: [text], key: text) -> i64:
         offset = offset + search_n
     return -1
 
+fn _is_ws_byte(b: i64) -> bool:
+    b == 32 or b == 10 or b == 13 or b == 9
+
+fn _skip_json_string_bytes(json: text, open_quote_idx: i64, json_n: i64) -> i64:
+    var i = open_quote_idx + 1
+    var escaped = false
+    while i < json_n:
+        val b = json.byte_at(i) as i64
+        if escaped:
+            escaped = false
+        elif b == 92:
+            escaped = true
+        elif b == 34:
+            return i + 1
+        i = i + 1
+    json_n
+
+fn _scan_json_container_end(json: text, start: i64, open_b: i64, close_b: i64, json_n: i64) -> i64:
+    var depth = 1
+    var i = start + 1
+    while i < json_n:
+        val b = json.byte_at(i) as i64
+        if b == 34:
+            i = _skip_json_string_bytes(json, i, json_n)
+            continue
+        elif b == open_b:
+            depth = depth + 1
+        elif b == close_b:
+            depth = depth - 1
+            if depth == 0:
+                return i + 1
+        i = i + 1
+    -1
+
+fn _find_json_value_start(json: text, key: text) -> i64:
+    val key_n = key.byte_len()
+    val json_n = json.byte_len()
+    var i = 0
+    while i < json_n:
+        val b = json.byte_at(i) as i64
+        if b == 34:
+            val end_q = _skip_json_string_bytes(json, i, json_n)
+            var is_key_match = false
+            if end_q <= json_n and end_q - i - 2 == key_n:
+                var k = 0
+                is_key_match = true
+                while k < key_n:
+                    if (json.byte_at(i + 1 + k) as i64) != (key.byte_at(k) as i64):
+                        is_key_match = false
+                        break
+                    k = k + 1
+            if is_key_match:
+                var value_start = end_q
+                while value_start < json_n and _is_ws_byte(json.byte_at(value_start) as i64):
+                    value_start = value_start + 1
+                if value_start < json_n and (json.byte_at(value_start) as i64) == 58:
+                    value_start = value_start + 1
+                    while value_start < json_n and _is_ws_byte(json.byte_at(value_start) as i64):
+                        value_start = value_start + 1
+                    return value_start
+            i = end_q
+            continue
+        i = i + 1
+    -1
+
 fn extract_field(json: text, key: text) -> text:
-    val chars = _json_chars(json)
-    val json_n = chars.len()
-    val start = _find_json_value_start_chars(chars, key)
+    val json_n = json.byte_len()
+    val start = _find_json_value_start(json, key)
     if start < 0 or start >= json_n:
         return ""
-    val first = chars[start]
-    if first == Q():
-        var i = start + 1
-        var escaped = false
-        while i < json_n:
-            val ch = chars[i]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == Q():
-                return _json_chars_join(chars, start + 1, i)
-            i = i + 1
+    val first = json.byte_at(start) as i64
+    if first == 34:
+        val end_q = _skip_json_string_bytes(json, start, json_n)
+        if end_q <= json_n and end_q - 1 > start and (json.byte_at(end_q - 1) as i64) == 34:
+            return json.substring(start + 1, end_q - 1)
         return ""
-    elif first == LB():
-        # Return full object including nested braces.
-        var depth = 1
-        var i = start + 1
-        var escaped = false
-        while i < json_n:
-            val ch = chars[i]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == Q():
-                # skip quoted strings while tracking nesting.
-                var j = i + 1
-                var string_escaped = false
-                while j < json_n:
-                    val string_ch = chars[j]
-                    if string_escaped:
-                        string_escaped = false
-                    elif string_ch == "\\":
-                        string_escaped = true
-                    elif string_ch == Q():
-                        break
-                    j = j + 1
-                i = j
-            elif ch == LB():
-                depth = depth + 1
-            elif ch == RB():
-                depth = depth - 1
-                if depth == 0:
-                    return _json_chars_join(chars, start, i + 1)
-            i = i + 1
+    elif first == 123:
+        val end_obj = _scan_json_container_end(json, start, 123, 125, json_n)
+        if end_obj > start:
+            return json.substring(start, end_obj)
         return ""
-    elif first == SB_L():
-        # Return full array including nested braces/brackets.
-        var depth = 1
-        var i = start + 1
-        var escaped = false
-        while i < json_n:
-            val ch = chars[i]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == Q():
-                var j = i + 1
-                var string_escaped = false
-                while j < json_n:
-                    val string_ch = chars[j]
-                    if string_escaped:
-                        string_escaped = false
-                    elif string_ch == "\\":
-                        string_escaped = true
-                    elif string_ch == Q():
-                        break
-                    j = j + 1
-                i = j
-            elif ch == SB_L():
-                depth = depth + 1
-            elif ch == SB_R():
-                depth = depth - 1
-                if depth == 0:
-                    return _json_chars_join(chars, start, i + 1)
-            i = i + 1
+    elif first == 91:
+        val end_arr = _scan_json_container_end(json, start, 91, 93, json_n)
+        if end_arr > start:
+            return json.substring(start, end_arr)
         return ""
     var end = start
     while end < json_n:
-        val ch = chars[end]
-        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+        val b = json.byte_at(end) as i64
+        if b == 44 or b == 125 or b == 93 or _is_ws_byte(b):
             break
         end = end + 1
-    return _json_chars_join(chars, start, end)
+    json.substring(start, end)
 
 fn extract_id(json: text) -> text:
-    val chars = _json_chars(json)
-    val json_n = chars.len()
-    val start = _find_json_value_start_chars(chars, "id")
+    val json_n = json.byte_len()
+    val start = _find_json_value_start(json, "id")
     if start < 0 or start >= json_n:
         return "null"
-    val first = chars[start]
-    if first == Q():
-        var i = start + 1
-        var escaped = false
-        while i < json_n:
-            val ch = chars[i]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == Q():
-                return _json_chars_join(chars, start, i + 1)
-            i = i + 1
+    val first = json.byte_at(start) as i64
+    if first == 34:
+        val end_q = _skip_json_string_bytes(json, start, json_n)
+        if end_q <= json_n and end_q - 1 > start and (json.byte_at(end_q - 1) as i64) == 34:
+            return json.substring(start, end_q)
         return "null"
     var end = start
     while end < json_n:
-        val ch = chars[end]
-        if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
+        val b = json.byte_at(end) as i64
+        if b == 44 or b == 125 or b == 93 or _is_ws_byte(b):
             break
         end = end + 1
-    val raw = _json_chars_join(chars, start, end)
+    val raw = json.substring(start, end)
     if raw == "":
         return "null"
-    return raw
+    raw
 
 # --- JSON-RPC builders ---
 
@@ -384,31 +412,43 @@ fn find_simple_binary() -> text:
     "bin/simple"
 
 fn strip_ansi(s: text) -> text:
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        if (s.byte_at(i) as i64) == 27:
+            break
+        i = i + 1
+    if i == n:
+        return s
     var parts: [text] = []
+    if i > 0:
+        parts.push(s.substring(0, i))
+    var span_start = i
     var in_escape = false
-    for ch in s:
+    while i < n:
+        val b = s.byte_at(i) as i64
         if in_escape:
-            if ch == "m":
+            if b == 109:
                 in_escape = false
-            continue
-        if ch == "\033":
+                span_start = i + 1
+        elif b == 27:
+            if i > span_start:
+                parts.push(s.substring(span_start, i))
             in_escape = true
-            continue
-        parts.push(ch)
+        i = i + 1
+    if not in_escape and span_start < n:
+        parts.push(s.substring(span_start, n))
     parts.join("")
 
-# Drop trailing newlines by CHARACTER. `text.len()` counts bytes while
-# `_slice_text` counts characters, so a non-ASCII char in the output (e.g. the
-# em dash in "[search truncated: ... — part of the tree ...]") made the old
-# `while ends_with("\n"): _slice_text(s, 0, s.len() - 1)` loop never shrink the
-# string: an infinite loop that wedged the whole server.
+# Drop trailing newlines by byte (`\n` = 10 never occurs in a multibyte UTF-8
+# sequence). Keeps index units consistent on both interpreter and compiled paths.
 fn _trim_trailing_newlines(s: text) -> text:
-    var chars: [text] = []
-    for ch in s:
-        chars.push(ch)
-    while chars.len() > 0 and chars[chars.len() - 1] == "\n":
-        chars.pop()
-    chars.join("")
+    var end = s.byte_len()
+    while end > 0 and (s.byte_at(end - 1) as i64) == 10:
+        end = end - 1
+    if end == s.byte_len():
+        return s
+    s.substring(0, end)
 
 fn clean_command_output(stdout: text) -> text:
     val lines = stdout.split("\n")
@@ -432,27 +472,27 @@ fn clean_command_output(stdout: text) -> text:
 var _TRANSPORT_MODE = "framed"
 
 fn _read_line() -> text:
-    var result = ""
+    var parts: [text] = []
     while true:
         val ch = stdin_read_char()
-        if ch.len() == 0:
-            if result.len() == 0:
+        if ch.byte_len() == 0:
+            if parts.len() == 0:
                 return ""
-            return result
-        result = result + ch
+            return parts.join("")
+        parts.push(ch)
         if ch.starts_with("\n"):
-            return result
+            return parts.join("")
 
 fn _read_chars(count: i64) -> text:
-    var result = ""
+    var parts: [text] = []
     var i = 0
     while i < count:
         val ch = stdin_read_char()
-        if ch.len() == 0:
+        if ch.byte_len() == 0:
             break
-        result = result + ch
+        parts.push(ch)
         i = i + 1
-    result
+    parts.join("")
 
 # Delegates to the canonical framing primitives in app.protocol.framing.
 # Behaviour is fixed by test/01_unit/app/protocol/jsonrpc_framing_spec.spl.
