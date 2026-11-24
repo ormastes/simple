@@ -9,6 +9,11 @@ For release compiler selection, apply the
 [phase ladder producer-selection policy](../../../doc/07_guide/infra/toolchain/phase_ladder_ci.md#release-producer-selection)
 before starting or resuming a phase build.
 
+For a bounded manual phase-ladder advance, use `max_rung=1`, `fresh=false`, and
+`publish=false` on the isolated work branch. Resume the highest retained
+handoff; inspect real compiler/Hello evidence before the next phase. Repair a
+failed input before redispatching, and never treat wrapper mocks as admission.
+
 Read the [bootstrap rules](../../../.claude/rules/bootstrap.md) and the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md).
 Use [parallel handoff](../../../doc/07_guide/app/llm/bootstrap_parallel_handoff.md)

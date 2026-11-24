@@ -258,3 +258,23 @@ describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
             if picked.is_err():
                 fail(picked.unwrap_err())
             _check(picked.unwrap(), "multiturn")
+
+    it "vulkan fusion is off once the backend is up, so mode 3 matches cache-off":
+        if not _live_enabled():
+            skip("vulkan fusion is off once the backend is up, so mode 3 matches cache-off", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+        else:
+            expect(engine_set_n_ctx_text("4096")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            step("the cache-off lane loads the backend and runs a request")
+            val off = _lane(picked.unwrap(), false, "branching")
+            if off.is_err():
+                fail("cache-off lane failed: " + off.unwrap_err())
+            step("ggml-vulkan reads GGML_VK_DISABLE_FUSION at device init; the shim sets it in backend init")
+            expect(env_get("GGML_VK_DISABLE_FUSION") ?? "").to_equal("1")
+            step("a cold tree request equals the cache-off request bit for bit in text")
+            val tree = _lane(picked.unwrap(), true, "branching")
+            if tree.is_err():
+                fail("tree lane failed: " + tree.unwrap_err())
+            expect(tree.unwrap().digest).to_equal(off.unwrap().digest)

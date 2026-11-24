@@ -1,0 +1,110 @@
+# @tag: unit, gpu, engine2d, software, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend.spl 5%
+#
+# The readback checksum ((sum of pixels) mod 2147483647) summed every pixel
+# in an interpreted loop: ~3.5 s per 3600 x 3040 frame, the final readback of
+# every 4x web catalog page (cpu_simd lane, CpuBackend.read_pixels_with_source).
+# The checksum must stay exact for every caller: it is compared against the
+# plain per-pixel sum on frames with 0xFFFFFFFF pixels, repeated rows, flat
+# and mixed blocks, a partial last block and a pixel count that is not a
+# multiple of the row width. The full-frame value is pinned as measured on
+# the base implementation (release/1.0.0 1d407c5f2dd), the cost by a budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend.{engine2d_readback}
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (release/1.0.0 1d407c5f2dd).
+val FRAME_CHECKSUM: i64 = 1402049927
+
+fn frame_fixture(w: i32, h: i32, bg: u32) -> [u32]:
+    var px: [u32] = [bg; w * h]
+    var mix: [u32] = [0u32; w + 64]
+    var i = 0
+    # cpu-lane-loop-ok: one mixed source row, w + 64 pixels
+    while i < w + 64:
+        val v = ((i as i64) * 40503 + 12345) % 16777216
+        mix[i] = (4278190080 + v) as u32
+        i = i + 1
+    val box: [u32] = [0xff336699u32; w]
+    val a0 = w / 36
+    val a1 = w * 11 / 36
+    val b0 = w * 5 / 36
+    val b1 = w * 15 / 36
+    val m0 = w * 20 / 36
+    val m1 = w * 26 / 36
+    var y = 0
+    # cpu-lane-loop-ok: one or two span writes per fixture row
+    while y < h:
+        val band = y % 40
+        val row = y * w
+        if band < 20:
+            px.write_span(mix, (row + a0) as i64, 0, (a1 - a0) as i64)
+            if band >= 10:
+                px.write_span(mix, (row + m0) as i64, (y % 64) as i64, (m1 - m0) as i64)
+        elif band < 25:
+            px.write_span(box, (row + b0) as i64, 0, (b1 - b0) as i64)
+        elif band >= 37:
+            px.write_span(mix, row as i64, (y % 64) as i64, w as i64)
+        y = y + 1
+    px
+
+fn reference_checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i: i64 = 0
+    # cpu-lane-loop-ok: spec reference, small frames only
+    while i < pixels.len():
+        sum = sum + (pixels[i] as i64)
+        i = i + 1
+    sum % 2147483647
+
+describe "readback checksum of a full catalog frame":
+    it "equals the per-pixel sum for any pixel count":
+        val px = frame_fixture(300, 90, 0xffffffffu32)
+        expect(engine2d_readback(px, "t").checksum).to_equal(reference_checksum(px))
+        val cut = px.slice(0, px.len() - 37)
+        expect(engine2d_readback(cut, "t").checksum).to_equal(reference_checksum(cut))
+        expect(engine2d_readback([], "t").checksum).to_equal(0)
+        val one: [u32] = [0xffffffffu32]
+        expect(engine2d_readback(one, "t").checksum).to_equal(4294967295 % 2147483647)
+
+    it "equals the per-pixel sum through the cpu and software backends":
+        val w = 300
+        val h = 90
+        val px = frame_fixture(w, h, 0xffffffffu32)
+        var cpu = CpuBackend.create_simd()
+        expect(cpu.init(w, h)).to_equal(true)
+        cpu.draw_image(0, 0, w, h, px)
+        val rb = cpu.read_pixels_with_source()
+        expect(rb.pixels == px).to_equal(true)
+        expect(rb.checksum).to_equal(reference_checksum(px))
+        cpu.shutdown()
+        var sw = SoftwareBackend.create_cpu_simd()
+        expect(sw.init(w, h)).to_equal(true)
+        sw.draw_image(0, 0, w, h, px)
+        val rb2 = sw.read_pixels_with_source()
+        expect(rb2.pixels == px).to_equal(true)
+        expect(rb2.checksum).to_equal(reference_checksum(px))
+        sw.shutdown()
+
+    it "reads back the measured checksum within a time budget":
+        val px = frame_fixture(FRAME_W, FRAME_H, 0xffeef0ffu32)
+        var cpu = CpuBackend.create_simd()
+        expect(cpu.init(FRAME_W, FRAME_H)).to_equal(true)
+        cpu.draw_image(0, 0, FRAME_W, FRAME_H, px)
+        val t0 = time_now_unix_micros()
+        val rb = cpu.read_pixels_with_source()
+        val cpu_us = time_now_unix_micros() - t0
+        cpu.shutdown()
+        val t1 = time_now_unix_micros()
+        val generic = engine2d_readback(px, "t")
+        val generic_us = time_now_unix_micros() - t1
+        print "readback_frame cpu_us={cpu_us} generic_us={generic_us} checksum={rb.checksum}"
+        expect(rb.checksum).to_equal(FRAME_CHECKSUM)
+        expect(generic.checksum).to_equal(FRAME_CHECKSUM)
+        expect(cpu_us < 1800000).to_equal(true)
+        expect(generic_us < 2600000).to_equal(true)

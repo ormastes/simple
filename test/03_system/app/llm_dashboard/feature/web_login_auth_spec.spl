@@ -39,7 +39,7 @@ fn dashboard_auth_exercise(path: text) -> Result<bool, text>:
     if not env_set("DASH_AUTH_FILE", path + ".missing"): return Err("cannot select missing fixture config")
     auth_ensure_bootstrap()
     dashboard_auth_check(auth_authenticate_form(valid_form).0 == nil, "missing config authenticated")?
-    dashboard_auth_check(auth_session_lookup("local") == nil, "static token authenticated")?
+    dashboard_auth_check(auth_session_lookup("local").is_none(), "static token authenticated")?
 
     step("Load a private configured verifier and reject wrong or incomplete credentials")
     if not env_set("DASH_AUTH_FILE", path): return Err("cannot select fixture config")
@@ -56,21 +56,21 @@ fn dashboard_auth_exercise(path: text) -> Result<bool, text>:
     val token_a = first!.session_id
     val digest_cookie = bytes_to_hex(sha256_bytes(crypto_text_to_bytes(token_a)))
     dashboard_auth_check(digest_cookie.len() == 64, "token digest control failed")?
-    dashboard_auth_check(auth_session_lookup(digest_cookie) == nil, "stored token hash was accepted as a bearer cookie")?
+    dashboard_auth_check(auth_session_lookup(digest_cookie).is_none(), "stored token hash was accepted as a bearer cookie")?
     auth_delete_session(digest_cookie)
-    dashboard_auth_check(auth_session_lookup(token_a) != nil, "hash-as-token logout revoked the real bearer")?
+    dashboard_auth_check(auth_session_lookup(token_a).is_some(), "hash-as-token logout revoked the real bearer")?
     val resolved = auth_session_from_headers("Host: localhost\r\ncOoKiE: unrelated=ok; llm_dashboard_session=" + token_a + "\r\n")
-    dashboard_auth_check(resolved != nil, "issued cookie did not resolve")?
-    if resolved == nil: return Err("issued cookie missing")
+    dashboard_auth_check(resolved.is_some(), "issued cookie did not resolve")?
+    if resolved.is_none(): return Err("issued cookie missing")
     dashboard_auth_check(resolved!.username == first!.username, "cookie identity changed")?
     val cookie_header = auth_login_cookie_header(first!)
     dashboard_auth_check(cookie_header.contains("HttpOnly") and cookie_header.contains("SameSite=Strict"), "cookie protections absent")?
 
     step("Reject forged, duplicate, prefixed and folded session headers")
-    dashboard_auth_check(auth_session_lookup("1111111111111111111111111111111111111111111111111111111111111111") == nil, "fabricated random-shaped token authenticated")?
-    dashboard_auth_check(auth_session_from_headers("Cookie: llm_dashboard_session=" + token_a + "; llm_dashboard_session=" + token_a) == nil, "duplicate cookie authenticated")?
-    dashboard_auth_check(auth_session_from_headers("Cookie: other_llm_dashboard_session=" + token_a) == nil, "prefixed cookie authenticated")?
-    dashboard_auth_check(auth_session_from_headers(" Cookie: llm_dashboard_session=" + token_a) == nil, "folded cookie authenticated")?
+    dashboard_auth_check(auth_session_lookup("1111111111111111111111111111111111111111111111111111111111111111").is_none(), "fabricated random-shaped token authenticated")?
+    dashboard_auth_check(auth_session_from_headers("Cookie: llm_dashboard_session=" + token_a + "; llm_dashboard_session=" + token_a).is_none(), "duplicate cookie authenticated")?
+    dashboard_auth_check(auth_session_from_headers("Cookie: other_llm_dashboard_session=" + token_a).is_none(), "prefixed cookie authenticated")?
+    dashboard_auth_check(auth_session_from_headers(" Cookie: llm_dashboard_session=" + token_a).is_none(), "folded cookie authenticated")?
 
     step("Issue independent sessions and enforce the configured registry bound")
     val second = auth_authenticate_form(valid_form).0
@@ -78,31 +78,31 @@ fn dashboard_auth_exercise(path: text) -> Result<bool, text>:
     val token_b = second!.session_id
     dashboard_auth_check(token_b != token_a, "independent logins reused a token")?
     dashboard_auth_check(auth_authenticate_form(valid_form).0 == nil, "capacity bound exceeded")?
-    dashboard_auth_check(auth_session_lookup(token_a) != nil and auth_session_lookup(token_b) != nil, "capacity refusal revoked live leases")?
+    dashboard_auth_check(auth_session_lookup(token_a).is_some() and auth_session_lookup(token_b).is_some(), "capacity refusal revoked live leases")?
 
     step("Logout revokes one lease and allows a fresh replacement")
     auth_delete_session(token_a)
-    dashboard_auth_check(auth_session_lookup(token_a) == nil, "logout token remained valid")?
-    dashboard_auth_check(auth_session_lookup(token_b) != nil, "logout revoked an unrelated lease")?
+    dashboard_auth_check(auth_session_lookup(token_a).is_none(), "logout token remained valid")?
+    dashboard_auth_check(auth_session_lookup(token_b).is_some(), "logout revoked an unrelated lease")?
     val third = auth_authenticate_form(valid_form).0
     if third == nil: return Err("replacement positive login failed")
     dashboard_auth_check(third!.session_id != token_a and third!.session_id != token_b, "replacement reused a token")?
 
     step("Configuration rotation revokes old leases and real monotonic expiry revokes the new lease")
     if not file_write(path, dashboard_auth_config(1)): return Err("fixture config rotation failed")
-    dashboard_auth_check(auth_session_lookup(token_b) == nil and auth_session_lookup(third!.session_id) == nil, "rotation kept old leases")?
+    dashboard_auth_check(auth_session_lookup(token_b).is_none() and auth_session_lookup(third!.session_id).is_none(), "rotation kept old leases")?
     val expiring = auth_authenticate_form(valid_form).0
     if expiring == nil: return Err("rotated positive login failed")
-    dashboard_auth_check(auth_session_lookup(expiring!.session_id) != nil, "new lease not initially live")?
+    dashboard_auth_check(auth_session_lookup(expiring!.session_id).is_some(), "new lease not initially live")?
     sosix_sleep_ms(1100)
-    dashboard_auth_check(auth_session_lookup(expiring!.session_id) == nil, "expired lease remained live")?
+    dashboard_auth_check(auth_session_lookup(expiring!.session_id).is_none(), "expired lease remained live")?
 
     step("Escape reflected login values and reject malformed replacement configuration")
     val escaped = auth_login_page("<script>", "\" autofocus=\"yes")
     dashboard_auth_check(not escaped.contains("<script>") and not escaped.contains("value=\"\" autofocus="), "login HTML reflected active markup")?
     if not file_write(path, "username: \"fixture_operator\"\n"): return Err("malformed fixture config write failed")
     auth_ensure_bootstrap()
-    dashboard_auth_check(auth_session_lookup(expiring!.session_id) == nil, "invalid configuration accepted a token")?
+    dashboard_auth_check(auth_session_lookup(expiring!.session_id).is_none(), "invalid configuration accepted a token")?
     Ok(true)
 
 describe "Dashboard configured authentication":

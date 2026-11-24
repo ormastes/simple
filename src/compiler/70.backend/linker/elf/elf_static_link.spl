@@ -49,7 +49,8 @@ use compiler.backend.linker.reloc_engine.{
     R_AARCH64_GOTPCREL32,
     R_AARCH64_TLSIE_MOVW_GOTTPREL_G1, R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC,
     R_AARCH64_LD64_GOTOFF_LO15, R_AARCH64_LD64_GOTPAGE_LO15}
-use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained_wrapped}
+use compiler.backend.linker.elf.symbol_wrap.{elf_wrap_object}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared_named}
 use compiler.backend.linker.elf.eh_frame_hdr.{elf_eh_frame_fde_count, elf_build_eh_frame_hdr}
 use compiler.backend.linker.elf.section_gc.{
@@ -62,6 +63,8 @@ use compiler.backend.linker.elf.elf_par.{elf_par_acquire, elf_par_release, elf_p
 use compiler.backend.linker.elf.byte_buffers.{elf_u8_zeros, elf_u8_filled, elf_u8_from_i64, elf_i64_from_u8, elf_u8_read_le}
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags_xlen, elf_riscv_hi_index}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
+use compiler.backend.linker.elf.arm_float_abi.{SHT_ARM_ATTRIBUTES,
+    elf_arm_first_attributes, elf_arm_float_flags, elf_arm_float_flags_checked}
 use compiler.backend.linker.elf.riscv_attributes.{elf_riscv_attributes}
 use compiler.backend.linker.elf.elf_nonalloc_section.{elf_append_nonalloc_section_bytes, elf_append_nonalloc_section_bytes_with}
 use compiler.backend.linker.elf.elf_comment_section.{elf_collect_comment_sections, elf_merge_comment_strings, SHF_MERGE_STRINGS}
@@ -147,6 +150,7 @@ struct ElfLinkRequest:
     as_needed: bool = false # emit DT_NEEDED only for provider DSOs
     gc_sections: bool = true # false retains every allocatable input section
     jobs: i64 = 0          # link workers: 0 = auto (SIMPLE_LINK_JOBS or CPUs), 1 = serial
+    wraps: [text] = []     # GNU --wrap view shared by archive closure and relocation
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -1795,102 +1799,6 @@ fn elf_append_symtab32(image: [u8], st: ElfSymtabOut) -> Result<[u8], text>:
     Ok(b)
 
 # ============================================================================
-# ARM float ABI (EF_ARM_ABI_FLOAT_*)
-# ============================================================================
-
-val SHT_ARM_ATTRIBUTES: i64 = 0x70000003
-val EF_ARM_ABI_FLOAT_SOFT: i64 = 0x200
-val EF_ARM_ABI_FLOAT_HARD: i64 = 0x400
-val TAG_ABI_VFP_ARGS: i64 = 28
-
-fn elf_uleb_at(b: [u8], at: i64, end: i64) -> [i64]:
-    """[value, next offset]; next = -1 on truncation."""
-    var v: i64 = 0
-    var shift: i64 = 0
-    var p = at
-    while p < end:
-        val c = b[p] as i64
-        v = v | ((c & 0x7f) << shift)
-        p = p + 1
-        if c & 0x80 == 0: return [v, p]
-        shift = shift + 7
-        if shift > 56: return [0, -1]
-    [0, -1]
-
-fn elf_arm_vfp_args(raw: [u8], start: i64, size: i64) -> i64:
-    """Tag_ABI_VFP_args from one .ARM.attributes section, or -1 if absent.
-    Layout: 'A', then vendor subsections (u32 len, NTBS vendor); "aeabi"
-    holds Tag_File (1) with u32 len followed by ULEB tag/value pairs where
-    tags 4, 5, 67 and odd tags >= 65 carry NTBS and 32 carries ULEB + NTBS."""
-    val end = start + size
-    if size < 1 or end > raw.len() or (raw[start] as i64) != 0x41: return -1
-    var p = start + 1
-    while p + 4 <= end:
-        val sub_len = elf_u8_read_le(raw, p, 4)
-        val sub_end = p + sub_len
-        if sub_len < 5 or sub_end > end: return -1
-        var q = p + 4
-        val vendor_start = q
-        while q < sub_end and (raw[q] as i64) != 0: q = q + 1
-        val is_aeabi = q - vendor_start == 5 and (raw[vendor_start] as i64) == 0x61 and
-            (raw[vendor_start + 1] as i64) == 0x65 and (raw[vendor_start + 2] as i64) == 0x61 and
-            (raw[vendor_start + 3] as i64) == 0x62 and (raw[vendor_start + 4] as i64) == 0x69
-        q = q + 1
-        while is_aeabi and q + 5 <= sub_end:
-            val file_tag = raw[q] as i64
-            val tag_len = elf_u8_read_le(raw, q + 1, 4)
-            val tag_end = q + tag_len
-            if tag_len < 5 or tag_end > sub_end: return -1
-            var t = q + 5
-            while file_tag == 1 and t < tag_end:
-                val tag = elf_uleb_at(raw, t, tag_end)
-                if tag[1] < 0: return -1
-                t = tag[1]
-                if tag[0] == 4 or tag[0] == 5 or tag[0] == 67 or (tag[0] >= 65 and tag[0] % 2 == 1):
-                    while t < tag_end and (raw[t] as i64) != 0: t = t + 1
-                    t = t + 1
-                else if tag[0] == 32:
-                    val v = elf_uleb_at(raw, t, tag_end)
-                    if v[1] < 0: return -1
-                    t = v[1]
-                    while t < tag_end and (raw[t] as i64) != 0: t = t + 1
-                    t = t + 1
-                else:
-                    val v = elf_uleb_at(raw, t, tag_end)
-                    if v[1] < 0: return -1
-                    if tag[0] == TAG_ABI_VFP_ARGS: return v[0]
-                    t = v[1]
-            q = tag_end
-        p = sub_end
-    -1
-
-fn elf_arm_first_attributes(objects: [ElfObject]) -> [i64]:
-    """ld.lld keeps the first input .ARM.attributes section verbatim (no merge)."""
-    for obj in objects:
-        var si: i64 = 0
-        while si < obj.sections.len():
-            val sec = obj.sections[si]
-            if sec.sh_type == SHT_ARM_ATTRIBUTES and sec.sh_size > 0:
-                # sections[si].sh_addr is the FILE offset (elf_parser convention)
-                return elf_i64_from_u8(obj.raw[sec.sh_addr:sec.sh_addr + sec.sh_size])
-            si = si + 1
-    []
-
-fn elf_arm_float_flags(objects: [ElfObject]) -> i64:
-    """ld.lld's float-ABI e_flags bit: HARD when an input declares
-    Tag_ABI_VFP_args = 1 (VFP registers), otherwise SOFT."""
-    for obj in objects:
-        var si: i64 = 0
-        while si < obj.sections.len():
-            val sec = obj.sections[si]
-            if sec.sh_type == SHT_ARM_ATTRIBUTES:
-                # sections[si].sh_addr is the FILE offset (elf_parser convention)
-                if elf_arm_vfp_args(obj.raw, sec.sh_addr, sec.sh_size) == 1:
-                    return EF_ARM_ABI_FLOAT_HARD
-            si = si + 1
-    EF_ARM_ABI_FLOAT_SOFT
-
-# ============================================================================
 # Relocation apply (serial or lockless per-range parallel)
 # ============================================================================
 
@@ -2205,8 +2113,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         i = i + 1
 
     elf_link_trace("shared parsed")
-    val closure = elf_archive_closure_retained(roots, req.archives, retained_symbols)?
-    var all = roots
+    val closure = elf_archive_closure_retained_wrapped(roots, req.archives, retained_symbols, req.wraps)?
+    var all: [ElfObject] = []
+    for root in roots: all = all.push(elf_wrap_object(root, req.wraps))
     for m in closure.members:
         if m.obj.header.e_type != ET_REL:
             return Err("archive member {m.name}: not a relocatable object (e_type {m.obj.header.e_type})")
@@ -2218,19 +2127,14 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     var riscv_flags: i64 = 0
     var riscv_attributes: [i64] = []
     val arm_attributes: [i64] = if target == RelocArch.Arm32: elf_arm_first_attributes(all) else: []
+    val arm_float_flags = if target == RelocArch.Arm32: elf_arm_float_flags_checked(all)? else: 0
     if elf_target_is_riscv(target):
         val xlen: i64 = if target == RelocArch.Riscv32: 32 else: 64
         riscv_flags = elf_riscv_flags_xlen(all, xlen)?
         riscv_attributes = elf_riscv_attributes(all)?
-        if xlen == 64:
-            all = elf_riscv_align_objects(all)?
-        else:
-            # R_RISCV_ALIGN padding removal rewrites ELF64 symtab/RELA tables
-            # only; RV32 inputs carrying ALIGN fail closed until it is ported.
-            for obj in all:
-                for relocation in obj.relocations:
-                    if elf_reloc_type(relocation) == 43:
-                        return Err("RISC-V RV32 R_RISCV_ALIGN is not supported yet (assemble with -mno-relax)")
+        # Normalization handles both ELF widths and preserves archive/wrap
+        # symbol projections while rewriting offsets and sizes together.
+        all = elf_riscv_align_objects(all)?
     all = elf_relax_tls(all, target)?
     var unmerged: [ElfObject] = []
     for o in all: unmerged.push(elf_unmerge_relocated(o))
@@ -3024,7 +2928,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         # i386 defines no e_flags.
         var e_flags: i64 = riscv_flags
         if target == RelocArch.Arm32:
-            e_flags = elf_u8_read_le(roots[0].raw, 36, 4) | elf_arm_float_flags(all)
+            e_flags = (elf_u8_read_le(roots[0].raw, 36, 4) & 0xfffff9ff) | arm_float_flags
         image = elf_write_image32_bytes(e_type, machine, e_flags, entry_addr, plan, out)
     else:
         image = operations.write_image(e_type, machine, entry_addr, plan, out)?

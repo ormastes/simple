@@ -350,6 +350,47 @@ pub fn shared_source(path: &Path) -> SharedSource {
     shared_source_for_target(path, crate::pipeline::cfg_strip::cfg_target())
 }
 
+/// Seed the cross-lane cache with a parse the module loader already did, so
+/// the HIR import loader does not parse the same file a second time.
+///
+/// `raw` is the CRLF-normalized file text, `parsed_text` the exact text the
+/// caller parsed into `ast`. The entry is filled only when `parsed_text` is
+/// byte-identical to what `shared_source_for_target` would parse for this
+/// process's target (`strip_os_when_blocks(raw, cfg_target())`): the same text
+/// through the same parser is the same AST, so no lane can observe the
+/// difference. Otherwise (an `@cfg(<arch>)` global stripped, bootstrap
+/// leniency, a parse-time rewrite) the cache is left to parse its own copy.
+/// Never replaces an entry, nor one whose AST was released to the interpreter.
+/// doc/08_tracking/bug/hir_import_reparses_loader_modules_2026-11-24.md
+pub fn shared_source_seed(path: &Path, raw: String, parsed_text: &str, ast: &simple_parser::ast::Module) {
+    let target = crate::pipeline::cfg_strip::cfg_target();
+    let key = (normalize_path_key(path), target);
+    if PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key).is_some())
+        || RELEASED_SOURCE_TEXT.with(|r| r.borrow().contains_key(&key))
+    {
+        return;
+    }
+    let same_text = match crate::pipeline::cfg_strip::strip_os_when_blocks(&raw, &key.1) {
+        Ok(selected) => selected == parsed_text,
+        Err(_) => false,
+    };
+    if !same_text {
+        return;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_SEEDS, 1);
+    let entry = SharedSource::Parsed {
+        source: Arc::new(raw),
+        ast: Ok(Arc::new(ast.clone())),
+    };
+    let delta = PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, entry.clone()));
+    mirror_stats(
+        delta,
+        &crate::perf_counters::PARSED_SOURCE_EVICTIONS,
+        &crate::perf_counters::PARSED_SOURCE_PINNED_SKIPS,
+        &crate::perf_counters::PARSED_SOURCE_RETAINED_MAX,
+    );
+}
+
 /// Preserve original source bytes while selecting OS branches before parsing.
 /// Callers provide the conditional-compilation target names (`cfg_target()`).
 pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip::CfgTarget) -> SharedSource {

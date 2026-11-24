@@ -1,5 +1,5 @@
 use std.spec.*
-use compiler.backend.simpleos_native_symbols.{simpleos_user_link_arch, simpleos_user_sysroot_default, simpleos_user_link_args_for_arch, simpleos_user_entry_clang_target}
+use compiler.backend.simpleos_native_symbols.{simpleos_user_link_arch, simpleos_user_sysroot_default, simpleos_user_link_args_for_arch, simpleos_user_entry_clang_target, simpleos_user_c_flags}
 use compiler.backend.llvm_native_link_hosted_support.{entry_point_c_target_args}
 use compiler.backend.aot_target_normalization.{backend_aot_simpleos_32bit_user_target_error}
 
@@ -30,15 +30,27 @@ describe "SimpleOS userland link plan":
         expect(simpleos_user_link_arch("aarch64-unknown-simpleos-elf")).to_equal("aarch64")
         expect(simpleos_user_link_arch("riscv64gc-unknown-simpleos")).to_equal("riscv64")
         expect(simpleos_user_link_arch("riscv64-unknown-simpleos")).to_equal("riscv64")
+        expect(simpleos_user_link_arch("i686-unknown-simpleos")).to_equal("i686")
+        expect(simpleos_user_link_arch("i386-unknown-simpleos-elf")).to_equal("i686")
+        expect(simpleos_user_link_arch("armv7-unknown-simpleos")).to_equal("arm32")
+        expect(simpleos_user_link_arch("armv7a-unknown-simpleos-eabi")).to_equal("arm32")
+        expect(simpleos_user_link_arch("riscv32imac-unknown-simpleos")).to_equal("riscv32")
+        expect(simpleos_user_link_arch("riscv32-unknown-simpleos-elf")).to_equal("riscv32")
+        expect(simpleos_user_link_arch("i686-unknown-none-elf")).to_equal("")
+        expect(simpleos_user_link_arch("armv7a-none-eabi")).to_equal("")
+        expect(simpleos_user_link_arch("riscv32imac-unknown-none-elf")).to_equal("")
         expect(simpleos_user_link_arch("aarch64-unknown-none-elf")).to_equal("")
         expect(simpleos_user_link_arch("riscv64gc-unknown-none-elf")).to_equal("")
         expect(simpleos_user_link_arch("")).to_equal("")
 
-    it "defaults each 64-bit user sysroot to its own directory":
+    it "defaults each user sysroot to its own directory":
         # @req REQ-SSPEC-UNIT
-        step("defaults each 64-bit user sysroot to its own directory")
+        step("defaults each user sysroot to its own directory")
         expect(simpleos_user_sysroot_default("aarch64")).to_equal("build/os/sysroot-aarch64")
         expect(simpleos_user_sysroot_default("riscv64")).to_equal("build/os/sysroot-riscv64")
+        expect(simpleos_user_sysroot_default("i686")).to_equal("build/os/sysroot-i686")
+        expect(simpleos_user_sysroot_default("arm32")).to_equal("build/os/sysroot-arm32")
+        expect(simpleos_user_sysroot_default("riscv32")).to_equal("build/os/sysroot-riscv32")
 
     it "links an aarch64 user ELF from the sysroot crt0, libc archive and script":
         # @req REQ-SSPEC-UNIT
@@ -129,12 +141,27 @@ describe "SimpleOS userland link plan":
         expect(_has(rv, "-mabi=lp64d")).to_be(true)
         expect(_has(rv, "-mcmodel=medany")).to_be(true)
 
-    it "fails closed on 32-bit SimpleOS user triples":
+    it "routes recognized 32-bit user triples while rejecting unknown spellings":
         # @req REQ-SSPEC-UNIT
-        step("fails closed on 32-bit SimpleOS user triples")
-        expect(backend_aot_simpleos_32bit_user_target_error("i686-unknown-simpleos")).to_contain("simpleos_32bit_userland")
-        expect(backend_aot_simpleos_32bit_user_target_error("armv7-unknown-simpleos")).to_contain("simpleos_32bit_userland")
-        expect(backend_aot_simpleos_32bit_user_target_error("armv7a-unknown-simpleos-eabi")).to_contain("simpleos_32bit_userland")
-        expect(backend_aot_simpleos_32bit_user_target_error("riscv32imac-unknown-simpleos")).to_contain("simpleos_32bit_userland")
+        step("routes recognized 32-bit user triples while rejecting unknown spellings")
+        expect(backend_aot_simpleos_32bit_user_target_error("i686-unknown-simpleos")).to_equal("")
+        expect(backend_aot_simpleos_32bit_user_target_error("armv7-unknown-simpleos")).to_equal("")
+        expect(backend_aot_simpleos_32bit_user_target_error("armv7a-unknown-simpleos-eabi")).to_equal("")
+        expect(backend_aot_simpleos_32bit_user_target_error("riscv32imac-unknown-simpleos")).to_equal("")
+        expect(backend_aot_simpleos_32bit_user_target_error("riscv32imaf-unknown-simpleos")).to_contain("unsupported triple spelling")
         expect(backend_aot_simpleos_32bit_user_target_error("riscv32imac-unknown-none-elf")).to_equal("")
         expect(backend_aot_simpleos_32bit_user_target_error("x86_64-unknown-simpleos")).to_equal("")
+
+    it "uses the sysroot's 32-bit ISA and float ABI for entry and init objects":
+        # @req REQ-SSPEC-UNIT
+        step("uses the sysroot's 32-bit ISA and float ABI for entry and init objects")
+        expect(simpleos_user_entry_clang_target("i686")).to_equal("i686-unknown-none-elf")
+        expect(simpleos_user_entry_clang_target("arm32")).to_equal("armv7a-none-eabi")
+        expect(simpleos_user_entry_clang_target("riscv32")).to_equal("riscv32-unknown-elf")
+        expect(simpleos_user_entry_clang_target("sparc")).to_equal("")
+        expect(_has(entry_point_c_target_args(simpleos_user_entry_clang_target("riscv32")), "-mabi=ilp32")).to_be(true)
+        expect(_has(entry_point_c_target_args(simpleos_user_entry_clang_target("riscv32")), "-march=rv32imac")).to_be(true)
+        expect(_has(entry_point_c_target_args(simpleos_user_entry_clang_target("arm32")), "-mfloat-abi=soft")).to_be(true)
+        expect(_has(simpleos_user_c_flags("arm32"), "-mfloat-abi=soft")).to_be(true)
+        expect(_has(simpleos_user_c_flags("i686"), "--target=i686-unknown-none-elf")).to_be(true)
+        expect(_has(simpleos_user_c_flags("riscv32"), "-mno-relax")).to_be(true)

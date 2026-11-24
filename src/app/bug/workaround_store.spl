@@ -140,10 +140,10 @@ fn workaround_fragment_gc(root: text, names: [text]) -> i64:
             if modified > 0 and now - modified >= WORKAROUND_FRAGMENT_MIN_AGE_S:
                 if workaround_host_remove(path): removed = removed + 1
     removed
-use std.nogc_sync_mut.database.bug.{BugDatabase, bug_database_from_sdn}
+use std.nogc_sync_mut.database.bug.{BugDatabase, merge_bug_database_shards_checked}
 use std.nogc_sync_mut.database.core.{SdnDatabase, SdnRow, SdnTable, parse_sdn_table, interner_from_sdn}
 use std.nogc_sync_mut.database.csm_seal.{csm_verify_bytes, csm_strip_legacy_header, CsmVerdict, CSM_CORRUPT}
-use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.common.text_bytes.{bytes_to_text}
 
 fn workaround_source_candidate(path: text) -> bool:
     if workaround_path_valid(path) != WorkaroundCheckV1.Valid: return false
@@ -329,41 +329,8 @@ pub fn workaround_bug_snapshot(root: text) -> Result<BugDatabase, text>:
                 if table_name == "bugs" or table_name == "bugs_active": found = true
             case None: pass
     if not found: return Err("canonical bug database has no bug table")
-    Ok(bug_database_from_sdn(db))
+    merge_bug_database_shards_checked(db, path)
 
-
-# Cycle-173: raw-byte substring scan for the canonical-bug-ID validation.
-# Annotated element reads throughout -- the bare indexed reads in this hot
-# loop drew on candidate-seednew (the same per-read draw family as the rest
-# of the cycle).
-fn byte_array_contains(haystack: [u8], needle: [u8]) -> bool:
-    val h: [u8] = haystack
-    val n: [u8] = needle
-    val h_len: i64 = h.len()
-    val n_len: i64 = n.len()
-    if n_len == 0:
-        return true
-    if n_len > h_len:
-        return false
-    val first: u8 = n[0]
-    var i: i64 = 0
-    val last_start: i64 = h_len - n_len
-    while i <= last_start:
-        val hb: u8 = h[i]
-        if hb == first:
-            var matched = true
-            var j: i64 = 1
-            while j < n_len:
-                val h_j: u8 = h[i + j]
-                val n_j: u8 = n[j]
-                if h_j != n_j:
-                    matched = false
-                    break
-                j = j + 1
-            if matched:
-                return true
-        i = i + 1
-    false
 
 fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, discovered: [text]) -> Result<WorkaroundIndex, text>:
     var previous = empty_workaround_index(revision)
@@ -405,29 +372,13 @@ fn workaround_refresh_lockless(root: text, revision: text, fullscan: bool, disco
     # Ordinary builds with no markers need no canonical bug database read.
     # Parse the whole batch before loading its validation dependency once.
     if links.len() > 0:
-        # A pending canonical WAL means the DB bytes below are stale authority.
-        val wal = root + "/doc/08_tracking/bug/bug_db.sdn.wal"
-        if workaround_host_exists(wal):
-            val pending: text = match workaround_host_read(wal, WORKAROUND_FRAGMENT_MAX_BYTES):
-                case Ok(v): v
-                case Err(e): return Err(e)
-            if pending.trim() != "":
-                return Err("checkpoint the canonical bug database WAL before workaround refresh")
-        # Canonical-bug-ID validation against the RAW DB BYTES (cycle-173).
-        # The parsed-table lookup (bugs.get_bug) reads erased on
-        # candidate-seednew -- the sdn parse yields empty tables (0 rows)
-        # even though the same bytes pass the CRC gate -- so an id that IS
-        # in the DB fails with the id printing correctly. The raw bytes
-        # were just CRC-verified against the file, so a substring presence
-        # scan over them validates the annotation against authentic DB
-        # content without the lossy text/parse transports. Bug slugs are
-        # unique per declaration and appear verbatim in the canonical DB.
-        val db_bytes: [u8] = workaround_host_read_bytes(root + "/doc/08_tracking/bug/bug_db.sdn", 33554432)?
+        # Validate exact canonical rows from one integrity-checked merged
+        # snapshot. A shard can add a bug or tombstone a legacy row; mere
+        # occurrence of an ID in a title/report is not a registration.
+        val bugs = workaround_bug_snapshot(root)?
         for raw_link in links:
             val link: WorkaroundLink = raw_link
-            val link_id: text = link.bug_id
-            val needle: [u8] = text_to_utf8_bytes(link_id)
-            if not byte_array_contains(db_bytes, needle):
+            if not bugs.get_bug(link.bug_id).?:
                 return Err("{link.path}:{link.line.value}: unknown canonical bug ID: {link.bug_id}")
     var base = previous
     if fullscan: base = empty_workaround_index(revision)

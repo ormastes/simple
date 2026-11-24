@@ -44,6 +44,24 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
 - **Seed-lane cache identity quirk:** pre-stage4 seed binaries have an uncacheable
   identity (cache validation fails on seed-compiled artifacts; rebuild after
   stage4 redeploy)
+- **Unadmitted compiler identity is stable (2026-11-24):** with `SIMPLE_ABI_POLICY` /
+  `SIMPLE_ABI_ADMISSION_RECEIPT` unset, `native_build_compiler_identity()` used to
+  return `uncacheable-abi-admission-…-<pid>-<micros>` — one object scope (`s<hex>`)
+  and witness config per PROCESS, so no per-file batch or re-run ever hit. It is now
+  `native_build_unadmitted_producer_identity` (exe hash + sources + runtime + ABI
+  epoch, admission `unadmitted-v1`), granted only when BOTH variables are unset and
+  the hashed binary's sha256 equals that of `/proc/self/exe`
+  (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
+  `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
+  receipt is still per-process.
+- **Repeated imports and `-o` (2026-11-24, unexecuted):** a module that names one
+  import on several `use` lines got witness `…-witness-v1-invalid`
+  (`ambiguous-resolution-fact`; 112 modules in one evidence cache) and never hit.
+  `native_module_cache_witness_v1` now folds a repeat once when its resolution
+  digest equals the first one; a differing repeat is still invalid. The `-o` path
+  reached the object scope through `SIMPLE_NATIVE_NOOP_FINAL_OUTPUT` in the module
+  environment digest; the module projection now drops it (the no-op request keeps
+  it). Record: `doc/08_tracking/bug/native_cache_duplicate_import_witness_and_output_scope_2026-11-24.md`.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 

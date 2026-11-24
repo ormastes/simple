@@ -9,7 +9,7 @@ use std.gpu.engine2d.color.{blend as engine2d_color_blend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 use std.common.encoding.sfnt.{OtFont, read_u16_be}
 use std.common.encoding.sfnt_cmap.{CmapFormat4, CmapFormat12, cmap_lookup, cmap12_lookup}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE, SfntGlyfCommand, parse_sfnt_glyf_outline, sfnt_lcd_glyph_outline, SFNT_GLYPH_SELECTOR_INDEX}
+use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE, SfntGlyfCommand, parse_sfnt_glyf_outline, sfnt_lcd_glyph_outline, SFNT_GLYPH_SELECTOR_INDEX}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{gradient_layer_list, parse_gradient_angle_deg, gradient_layer_entries, gradient_layer_split}
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
@@ -738,7 +738,11 @@ fn _ttf_rasterize_glyph(face: _TtfFaceEntry, gid: u32, font_size: i32, font_size
     # scan of the hinted 100 px outline inks the 1/4-px rise of the stem-only
     # H/I/L tops as a whole row that Chrome's gray text does not draw.
     if font_size <= 48 and not synth_bold and not synth_italic:
-        match sfnt_lcd_glyph_outline(face.font.blob, SFNT_GLYPH_SELECTOR_INDEX, gid as i64, font_size as i64, font_size_milli as i64):
+        # A fractional size is rasterised at Chrome's font-cache-key size
+        # (18.72 px -> 1197/64), as font_renderer's LCD lanes do.
+        val frac = font_size_milli > 0 and font_size_milli < 512000 and font_size_milli % 1000 != 0
+        val x_milli: i64 = if frac: (sfnt_font_cache_key_size_26_6(font_size_milli as i64) * 1000 + 32) / 64 else: font_size_milli as i64
+        match sfnt_lcd_glyph_outline(face.font.blob, SFNT_GLYPH_SELECTOR_INDEX, gid as i64, font_size as i64, x_milli):
             Some(hinted):
                 cmds = hinted.slo_commands
                 has_outline = true

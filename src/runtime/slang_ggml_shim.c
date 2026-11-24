@@ -536,7 +536,25 @@ int64_t slang_ggml_out_byte(int64_t i) {
 
 /* ---- lifecycle ------------------------------------------------------- */
 
+/* ggml-vulkan reads GGML_VK_DISABLE_FUSION once, when it creates the device, and
+ * keeps the device for the process. Tree KV mode 3 gives the cache a 16-stream
+ * KV layout; with fusion on, the one-stream cache-off graph runs the fused
+ * rms_norm/rope/set_rows kernels while the multi-stream graph does not, so the
+ * two paths differ in the last bits. Mode 3 can be configured at any time, so
+ * fusion is turned off here, before any device exists. An explicit value from
+ * the environment wins. See doc/08_tracking/bug/
+ * slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md (C1). */
+static void slang_vulkan_fusion_off(void) {
+    if (getenv("GGML_VK_DISABLE_FUSION") != NULL) return;
+#if defined(_WIN32)
+    _putenv_s("GGML_VK_DISABLE_FUSION", "1");
+#else
+    setenv("GGML_VK_DISABLE_FUSION", "1", 0);
+#endif
+}
+
 int64_t slang_ggml_backend_init(void) {
+    slang_vulkan_fusion_off();
     llama_backend_init();
     return 0;
 }

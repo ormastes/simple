@@ -267,10 +267,36 @@ pub fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_
 # #777777).
 # Measured: black text over white gives exactly 255 - 8k per channel,
 # e.g. 0xf7 for s=1 and 0x07 for s=31.
+# True when the quad's atlas cells hold LCD coverage: a cell that is not
+# empty and not a gray cell (low 24 bits 0xFFFFFF). Without one the LCD
+# composite always returns [], so callers skip it (and its destination read).
+# A subrect outside the atlas answers true: the composite keeps its own path.
+fn engine2d_lcd_quad_has_lcd_cell(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
+                                  width: i32, height: i32) -> bool:
+    val atlas_w = atlas_width.to_i64()
+    if atlas_x < 0 or atlas_y < 0 or width <= 0 or height <= 0 or
+            atlas_x.to_i64() + width.to_i64() > atlas_w or
+            (atlas_y + height).to_i64() * atlas_w > atlas_pixels.len():
+        return true
+    var row = 0
+    while row < height:
+        # Index reads, not `atlas_pixels.slice(...)`: a slice of the atlas
+        # parameter raised peak RSS of 4x css-layout from 2.96 to 3.78 GB.
+        val start = (atlas_y + row).to_i64() * atlas_w + atlas_x.to_i64()
+        for i in start..(start + width.to_i64()):
+            # low 24 bits not 0 and not 0xFFFFFF, as one test: +1 maps
+            # them to 1 and 0, every other value above 1 (i64: no wrap).
+            if (((atlas_pixels[i] as i64) + 1) & 0xFFFFFF) > 1:
+                return true
+        row = row + 1
+    false
+
 fn engine2d_lcd_quad_composite(atlas_pixels: [u32], atlas_width: i32, atlas_x: i32, atlas_y: i32,
                                width: i32, height: i32, color: u32, dst: [u32]) -> [u32]:
     val count = width.to_i64() * height.to_i64()
     if width <= 0 or height <= 0 or dst.len() != count:
+        return []
+    if not engine2d_lcd_quad_has_lcd_cell(atlas_pixels, atlas_width, atlas_x, atlas_y, width, height):
         return []
     val src_r = ((color >> 16) & 0xFFu32).to_i64()
     val src_g = ((color >> 8) & 0xFFu32).to_i64()
@@ -400,6 +426,121 @@ var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
 var _font_batch_receipt_count: i32 = 0
+# Glyph-quad memo (Engine2D._draw_glyph_quad_memo): composited quads keyed by
+# "w:h:atlas_x:atlas_y:color:bg", each slot holding the atlas cells it was
+# made from (the validation) and the composited pixels. Cleared whole when
+# full. Every entry is a pure function of its cells and colors, so the memo is
+# shared by all engines.
+val _GLYPH_QUAD_MEMO_LIMIT: i64 = 512
+val _GLYPH_QUAD_MEMO_MAX_PIXELS: i64 = 65536
+var _glyph_quad_memo_slots: Dict<text, i64> = {}
+var _glyph_quad_memo_cells: [[u32]] = []
+var _glyph_quad_memo_pixels: [[u32]] = []
+var _glyph_quad_memo_lcd: [bool] = []
+
+# `composed` (the quad over `bg`) with every pixel whose destination is not
+# `bg` recomposed over its own destination, exactly as the composite does:
+# LCD cells through `engine2d_lcd_quad_composite`'s per-pixel rule, gray cells
+# through `_engine2d_glyph_quad_over`'s. Rows equal to `bg` are skipped by a
+# native compare. Empty when a destination pixel is translucent (the LCD
+# composite declines those; the caller falls back to the per-pixel paths).
+fn _engine2d_glyph_quad_patch(composed: [u32], cells: [u32], dst: [u32], w: i64, bg: u32,
+                              color: u32, kind_lcd: bool) -> [u32]:
+    val n = composed.len()
+    var out: [u32] = [0u32; n]
+    out.write_span(composed, 0, 0, n)
+    val bg_row: [u32] = [bg; w]
+    var row_buf: [u32] = [0u32; w]
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    val src_r = ((color >> 16) & 0xFFu32).to_i64()
+    val src_g = ((color >> 8) & 0xFFu32).to_i64()
+    val src_b = (color & 0xFFu32).to_i64()
+    val s_rgb: [i64] = if kind_lcd: engine2d_lcd_s32_tables(color) else: []
+    var solid_ok = false
+    if kind_lcd:
+        solid_ok = s_rgb[255] == 32 and s_rgb[511] == 32 and s_rgb[767] == 32
+    val solid = 0xFF000000u32 | rgb
+    var row_at: i64 = 0
+    # cpu-lane-loop-ok: per-pixel work only on rows that differ from bg
+    while row_at < n:
+        row_buf.write_span(dst, 0, row_at, w)
+        if not (row_buf == bg_row):
+            var i = row_at
+            while i < row_at + w:
+                val d = dst[i]
+                if d != bg:
+                    if (d >> 24) != 0xFFu32:
+                        return []
+                    val cell = cells[i]
+                    if kind_lcd:
+                        if cell == 0u32 or cell == 0x00FFFFFFu32:
+                            out[i] = d
+                        else if cell == 0xFFFFFFFFu32 and solid_ok:
+                            out[i] = solid
+                        else:
+                            val a = ((cell >> 24) & 0xFFu32).to_i64()
+                            var cr = a
+                            var cg = a
+                            var cb = a
+                            if (cell & 0x00FFFFFFu32) != 0x00FFFFFFu32:
+                                cr = ((cell >> 16) & 0xFFu32).to_i64()
+                                cg = ((cell >> 8) & 0xFFu32).to_i64()
+                                cb = (cell & 0xFFu32).to_i64()
+                            val dr = ((d >> 16) & 0xFFu32).to_i64()
+                            val dg = ((d >> 8) & 0xFFu32).to_i64()
+                            val db = (d & 0xFFu32).to_i64()
+                            val r = dr + (((src_r - dr) * s_rgb[cr]) >> 5)
+                            val g = dg + (((src_g - dg) * s_rgb[256 + cg]) >> 5)
+                            val b = db + (((src_b - db) * s_rgb[512 + cb]) >> 5)
+                            out[i] = 0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+                    else:
+                        val coverage = (cell >> 24) & 0xFFu32
+                        val alpha = (coverage * color_alpha + 127u32) / 255u32
+                        out[i] = if coverage == 0u32 or alpha == 0u32: d else: blend((alpha << 24) | rgb, d)
+                i = i + 1
+        row_at = row_at + w
+    out
+
+# One gray glyph quad composited over an opaque `bg`, pixel for pixel what
+# `font_atlas_subrect_pixels` + `draw_image_blend` paint there: the source is
+# the cell coverage times the color alpha (0 -> the destination stays), then
+# `blend`. The result depends on the coverage byte alone, so it is computed
+# once per distinct coverage. The
+# per-coverage table is kept per (color, bg) across quads: exact-area gray
+# cells carry up to 255 coverage levels, and one `blend` per level per quad
+# was most of a cold quad's cost on the interpreter lane.
+var _glyph_over_tables: Dict<text, [u32]> = {}
+var _glyph_over_table_count: i64 = 0
+
+fn _engine2d_glyph_quad_over(cells: [u32], color: u32, bg: u32) -> [u32]:
+    val rgb = color & 0x00FFFFFFu32
+    val color_alpha = (color >> 24) & 0xFFu32
+    val table_key = "{color}:{bg}"
+    var table: [u32] = [0u32; 256]
+    if val Some(hit) = _glyph_over_tables.get(table_key):
+        table = hit
+    var out: [u32] = [bg; cells.len()]
+    var i: i64 = 0
+    # cpu-lane-loop-ok: one pass per quad on a memo miss; hits copy spans
+    while i < cells.len():
+        val coverage = (cells[i] >> 24) & 0xFFu32
+        if coverage != 0u32:
+            val slot = coverage.to_i64()
+            var composed = table[slot]
+            if composed == 0u32:
+                val alpha = (coverage * color_alpha + 127u32) / 255u32
+                composed = if alpha == 0u32: bg else: blend((alpha << 24) | rgb, bg)
+                table[slot] = composed
+            out[i] = composed
+        i = i + 1
+    if _glyph_over_table_count >= 64:
+        _glyph_over_tables = {}
+        _glyph_over_table_count = 0
+    if not _glyph_over_tables.contains_key(table_key):
+        _glyph_over_table_count = _glyph_over_table_count + 1
+    _glyph_over_tables[table_key] = table
+    out
 # CSS gradient layers whose pixels the HOST evaluated (radial_gradient_pixels /
 # linear_gradient_pixels) inside draw_radial_gradient_ellipse /
 # draw_linear_gradient_line. On Vulkan these stay put while
@@ -1186,6 +1327,10 @@ class Engine2D with DrawIrRenderTarget:
     # web lane turns it on. Applies only on CPU-composited backends, whose
     # font composite blends per channel (_draw_font_batch_cpu_suffix).
     lcd_text: bool = false
+    # True between set_mask and clear_mask. A masked blend scales each source
+    # alpha, so the glyph-quad memo (which draws pre-composited pixels) is
+    # off while a mask is set.
+    mask_active: bool = false
     last_font_size_is_100: bool = false
     # Acceptance item 4 of
     # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
@@ -2702,8 +2847,98 @@ class Engine2D with DrawIrRenderTarget:
             row = row + 1
         ink
 
+    # The glyph-quad memo reads the destination rows natively and writes
+    # whole spans; it applies only on the software surfaces (cpu, cpu_simd,
+    # software) with no mask set.
+    fn _glyph_quad_memo_eligible() -> bool:
+        if self.mask_active or self.vulkan_font_state_unknown:
+            return false
+        if self.virtio_gpu_backend.is_some() or self.baremetal_backend.is_some():
+            return false
+        val name = self.selected_backend_name
+        name == "cpu" or name == "cpu_simd" or name == "software"
+
+    # A glyph quad over an OPAQUE destination is a pixel-wise function of
+    # (cell, color, destination pixel, LCD on/off): the LCD composite when it
+    # applies (`engine2d_lcd_quad_composite`, opaque output; whether it
+    # applies depends on the cells alone), else each pixel is `blend(src, d)`
+    # with src = the subrect pixel (`font_atlas_subrect_pixels`), and d where
+    # the cell is empty. Both are opaque over an opaque destination, so the
+    # blend that would follow is a plain copy inside the clip. Pages repeat
+    # glyphs, so the quad composited over one background color `bg` is kept
+    # and drawn with one span per row (`draw_image`, same clip and damage as
+    # the blend). Keyed by atlas position, size, colors and the LCD flag, and
+    # validated by comparing the cells themselves, so an atlas reset or a face
+    # switch cannot serve stale pixels. Pixels whose destination is not `bg`
+    # (a neighbouring glyph overlapping the cell box) are recomposed one by
+    # one; rows equal to `bg` are found by native row compares. Returns false
+    # (nothing drawn) when any destination pixel is translucent, so those
+    # quads, and quads off the surface, take the per-pixel paths.
+    me _draw_glyph_quad_memo(dst_x: i32, dst_y: i32, atlas: [u32], atlas_width: i32,
+                             atlas_height: i32, quad: FontRenderQuad, lcd: bool) -> bool:
+        val w = quad.width.to_i64()
+        val h = quad.height.to_i64()
+        val aw = atlas_width.to_i64()
+        val ax = quad.atlas_x.to_i64()
+        val ay = quad.atlas_y.to_i64()
+        if ax < 0 or ay < 0 or ax + w > aw or ay + h > atlas_height.to_i64() or
+                atlas.len() < aw * atlas_height.to_i64():
+            return false
+        val n = w * h
+        if n <= 0 or n > _GLYPH_QUAD_MEMO_MAX_PIXELS:
+            return false
+        val dst = self.backend.read_pixels_region_raw(dst_x, dst_y, quad.width, quad.height)
+        if dst.len() != n:
+            return false
+        # Top-right: a left neighbour's overlap lands in the first columns.
+        val bg = dst[w - 1]
+        if (bg >> 24) != 0xFFu32:
+            return false
+        val uniform: [u32] = [bg; n]
+        val all_bg = dst == uniform
+        var cells: [u32] = [0u32; n]
+        var row: i64 = 0
+        # cpu-lane-loop-ok: one native span copy per quad row
+        while row < h:
+            cells.write_span(atlas, row * w, (ay + row) * aw + ax, w)
+            row = row + 1
+        val key = "{lcd}:{w}:{h}:{ax}:{ay}:{quad.color}:{bg}"
+        var composed: [u32] = []
+        var kind_lcd = false
+        if val Some(slot) = _glyph_quad_memo_slots.get(key):
+            if _glyph_quad_memo_cells[slot] == cells:
+                composed = _glyph_quad_memo_pixels[slot]
+                kind_lcd = _glyph_quad_memo_lcd[slot]
+        if composed.len() != n:
+            kind_lcd = false
+            if lcd and engine2d_lcd_quad_has_lcd_cell(atlas, atlas_width, quad.atlas_x, quad.atlas_y, quad.width, quad.height):
+                composed = engine2d_lcd_quad_composite(atlas, atlas_width, quad.atlas_x, quad.atlas_y,
+                    quad.width, quad.height, quad.color, uniform)
+                kind_lcd = composed.len() == n
+            if composed.len() != n:
+                composed = _engine2d_glyph_quad_over(cells, quad.color, bg)
+            if _glyph_quad_memo_cells.len() >= _GLYPH_QUAD_MEMO_LIMIT:
+                _glyph_quad_memo_slots = {}
+                _glyph_quad_memo_cells = []
+                _glyph_quad_memo_pixels = []
+                _glyph_quad_memo_lcd = []
+            _glyph_quad_memo_slots[key] = _glyph_quad_memo_cells.len()
+            _glyph_quad_memo_cells = _glyph_quad_memo_cells.push(cells)
+            _glyph_quad_memo_pixels = _glyph_quad_memo_pixels.push(composed)
+            _glyph_quad_memo_lcd = _glyph_quad_memo_lcd.push(kind_lcd)
+        if all_bg:
+            self.draw_image(dst_x, dst_y, quad.width, quad.height, composed)
+            return true
+        val patched = _engine2d_glyph_quad_patch(composed, cells, dst, w, bg, quad.color, kind_lcd)
+        if patched.len() != n:
+            return false
+        self.draw_image(dst_x, dst_y, quad.width, quad.height, patched)
+        true
+
     me _draw_font_batch_cpu_suffix(x: i32, y: i32, batch: FontRenderBatch, submitted: i64) -> i64:
         var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
+        val memo_ok = self._glyph_quad_memo_eligible()
+        val lcd_active = self._lcd_text_active()
         while quad_index < batch.quads.len():
             val quad = batch.quads[quad_index]
             # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md
@@ -2726,21 +2961,40 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x_end >= -2147483648 and dst_x_end <= 2147483647 and
                 dst_y_i64 >= -2147483648 and dst_y_i64 <= 2147483647 and
                 dst_y_end >= -2147483648 and dst_y_end <= 2147483647)
+            if dst_in_range and memo_ok and self._draw_glyph_quad_memo(
+                    dst_x_i64 as i32, dst_y_i64 as i32, batch.atlas_pixels,
+                    batch.atlas_width, batch.atlas_height, quad, lcd_active):
+                quad_index = quad_index + 1
+                continue
             # LCD first: the grayscale subrect below is built only when the LCD
             # composite declines (no LCD cell, translucent destination, or a
             # quad outside the atlas or the surface).
+            # On the software surfaces the LCD-cell prescan is skipped: the
+            # composite runs the same scan itself, and the prescan only spared
+            # a readback that costs a checksum elsewhere.
             var lcd_drawn = false
-            if dst_in_range and self._lcd_text_active() and
+            if dst_in_range and lcd_active and
                     quad.atlas_x >= 0 and quad.atlas_y >= 0 and
                     quad.atlas_x.to_i64() + quad.width.to_i64() <= batch.atlas_width.to_i64() and
                     quad.atlas_y.to_i64() + quad.height.to_i64() <= batch.atlas_height.to_i64() and
-                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64():
-                val dst = self.read_pixels_region(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height).pixels
+                    batch.atlas_pixels.len() >= batch.atlas_width.to_i64() * batch.atlas_height.to_i64() and
+                    (memo_ok or engine2d_lcd_quad_has_lcd_cell(batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y, quad.width, quad.height)):
+                # The software surfaces answer the rows alone; the readback
+                # identity's checksum is an interpreted pass over the quad.
+                val dst = if memo_ok:
+                    self.backend.read_pixels_region_raw(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height)
+                else:
+                    self.read_pixels_region(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height).pixels
                 val lcd_pixels = engine2d_lcd_quad_composite(
                     batch.atlas_pixels, batch.atlas_width, quad.atlas_x, quad.atlas_y,
                     quad.width, quad.height, quad.color, dst)
                 if lcd_pixels.len() > 0:
-                    self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
+                    # Opaque over an opaque destination: with no mask the
+                    # blend is a copy inside the clip.
+                    if memo_ok:
+                        self.draw_image(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
+                    else:
+                        self.draw_image_blend(dst_x_i64 as i32, dst_y_i64 as i32, quad.width, quad.height, lcd_pixels)
                     lcd_drawn = true
             if lcd_drawn:
                 quad_index = quad_index + 1
@@ -4331,6 +4585,7 @@ class Engine2D with DrawIrRenderTarget:
             emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
 
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
+        self.mask_active = true
         if val Some(vg) = self.virtio_gpu_backend:
             vg.set_mask(mask_pixels, w, h)
         elif val Some(bm) = self.baremetal_backend:
@@ -4349,6 +4604,7 @@ class Engine2D with DrawIrRenderTarget:
             self.backend.set_mask(mask_pixels, w, h)
 
     me clear_mask():
+        self.mask_active = false
         if val Some(vg) = self.virtio_gpu_backend:
             vg.clear_mask()
         elif val Some(bm) = self.baremetal_backend:

@@ -920,19 +920,27 @@ impl<'a> MirLowerer<'a> {
 
         // === JIT method-dispatch audit batch (jit_method_dispatch_audit_2026-07-29) ===
         // `arr.sum()` on an Array<T>: the interpreter
-        // (interpreter_method/collections.rs "sum") only accumulates Int
-        // elements (ignoring anything that isn't `Value::Int`) and always
-        // returns an Int — never a Float, even when the array holds floats.
-        // `rt_array_sum` (runtime/src/value/collections.rs) mixes floats in
-        // and can return a Float when the array holds any float element — a
-        // known, documented divergence from the interpreter for MIXED
-        // int/float arrays only; for a pure-Int array (the overwhelmingly
-        // common case) both agree exactly. `rt_array_sum` already returns a
+        // (interpreter_method/collections.rs "sum") and `rt_array_sum`
+        // (runtime/src/value/collections.rs) both sum signed and unsigned
+        // ints into an Int and promote to a Float when any element is a
+        // float. A `[f64]`/`[f32]` receiver unboxes the result as F64 (HIR
+        // types it F64); every other receiver as I64. An I64 unbox of the
+        // boxed float read the handle as an int:
+        // doc/08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md
+        // `rt_array_sum` already returns a
         // TAG-BOXED int (`RuntimeValue::from_int`), matching what `d[k]`/
         // `.get(k)` return for an Int value, so reuse the same tag-boxing-
         // safe unbox helper `unbox_dict_read_result` (lowering_expr_struct.rs)
         // `get_or` introduced.
         if method == "sum" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+            let float_elements = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if matches!(*element, TypeId::F32 | TypeId::F64)));
+            let result_ty = if float_elements { TypeId::F64 } else { TypeId::I64 };
             let receiver_reg = self.lower_expr(receiver)?;
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -944,7 +952,7 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?;
-            return self.unbox_dict_read_result(raw_result, TypeId::I64);
+            return self.unbox_dict_read_result(raw_result, result_ty);
         }
 
         // `arr.max()` / `arr.min()` on an Array<T>: mirrors the interpreter's

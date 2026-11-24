@@ -396,8 +396,20 @@ fn _emu_shadow_band(mut core: RenderBackend, bx: i32, by: i32, bw: i32, bh: i32,
     val src: [u32] = core.read_pixels_region_raw(bx + nz0, by + r0, cw, rh)
     var outp: [u32] = src
     var line: [u32] = []
-    var prev_base = -1
+    var prev_cur: [u32] = []
     var prev_cov_y = -1
+    # _emu_shadow_px memo: memo_out[cov] is the pixel for destination
+    # memo_dst[cov] (-1 = none). Exact: the colour is fixed for the call.
+    var memo_dst: [i64] = [-1; 256]
+    var memo_out: [u32] = [0u32; 256]
+    # Last composed falloff segment per band (0 left, 1 right): the same
+    # coverage row over the same destination composes the same pixels.
+    var ecov0 = -1
+    var esrc0: [u32] = []
+    var eout0: [u32] = []
+    var ecov1 = -1
+    var esrc1: [u32] = []
+    var eout1: [u32] = []
     var row = 0
     while row < rh:  # cpu-lane-loop-ok: one iteration per shadow-region row
         val cov_y = prof_y[by + r0 + row - py0]
@@ -407,7 +419,7 @@ fn _emu_shadow_band(mut core: RenderBackend, bx: i32, by: i32, bw: i32, bh: i32,
             # A row with the coverage of the last composed row over the same
             # destination composes the same pixels: one native compare and
             # one span instead of a per-pixel pass.
-            if not (cov_y == prev_cov_y and cur == src.slice(prev_base, prev_base + cw)):
+            if not (cov_y == prev_cov_y and cur == prev_cur):
                 line = cur
                 # Interior: coverage is one constant for the whole row segment.
                 val icov = ((255 * cov_y + 127) / 255 * shadow_a + 127) / 255
@@ -418,22 +430,58 @@ fn _emu_shadow_band(mut core: RenderBackend, bx: i32, by: i32, bw: i32, bh: i32,
                         val fill_row: [u32] = [_emu_shadow_px(sr, sg, sb, icov, dst); e1 - e0]
                         line.write_span(fill_row, e0 as i64, 0, (e1 - e0) as i64)
                     else:
+                        # Destination varies: 64-px chunks; a uniform chunk
+                        # (one native compare) is one span, else per pixel.
                         var ix = e0
-                        while ix < e1:  # cpu-lane-loop-ok: destination varies per pixel
-                            line[ix] = _emu_shadow_px(sr, sg, sb, icov, cur[ix])
-                            ix = ix + 1
+                        while ix < e1:  # cpu-lane-loop-ok: one iteration per 64-px chunk
+                            val cend = if ix + 64 < e1: ix + 64 else: e1
+                            val d0 = cur[ix]
+                            if memo_dst[icov] != (d0 as i64):
+                                memo_dst[icov] = d0 as i64
+                                memo_out[icov] = _emu_shadow_px(sr, sg, sb, icov, d0)
+                            if cur[cend - 1] == d0 and cur.slice(ix, cend) == [d0; cend - ix]:
+                                line.write_span([memo_out[icov]; cend - ix], ix as i64, 0, (cend - ix) as i64)
+                                ix = cend
+                            else:
+                                while ix < cend:  # cpu-lane-loop-ok: destination varies within this chunk
+                                    val d = cur[ix]
+                                    if memo_dst[icov] != (d as i64):
+                                        memo_dst[icov] = d as i64
+                                        memo_out[icov] = _emu_shadow_px(sr, sg, sb, icov, d)
+                                    line[ix] = memo_out[icov]
+                                    ix = ix + 1
                 # Edges: the falloff bands, per pixel.
                 var band = 0
                 while band < 2:  # cpu-lane-loop-ok: two edge bands per row
                     var px = if band == 0: 0 else: e1
                     val pend = if band == 0: e0 else: cw
-                    while px < pend:  # cpu-lane-loop-ok: falloff band only, not the whole row
-                        val cov = ((prof_x[px + col_off] * cov_y + 127) / 255 * shadow_a + 127) / 255
-                        if cov > 0:
-                            line[px] = _emu_shadow_px(sr, sg, sb, cov, cur[px])
-                        px = px + 1
+                    if pend > px:
+                        val seg = cur.slice(px, pend)
+                        val hit = if band == 0: cov_y == ecov0 and seg == esrc0 else: cov_y == ecov1 and seg == esrc1
+                        if hit:
+                            line.write_span(if band == 0: eout0 else: eout1, px as i64, 0, (pend - px) as i64)
+                        else:
+                            val seg_start = px
+                            while px < pend:  # cpu-lane-loop-ok: falloff band only, not the whole row
+                                val cov = ((prof_x[px + col_off] * cov_y + 127) / 255 * shadow_a + 127) / 255
+                                if cov > 0:
+                                    val d = cur[px]
+                                    if memo_dst[cov] != (d as i64):
+                                        memo_dst[cov] = d as i64
+                                        memo_out[cov] = _emu_shadow_px(sr, sg, sb, cov, d)
+                                    line[px] = memo_out[cov]
+                                px = px + 1
+                            val out_seg = line.slice(seg_start, pend)
+                            if band == 0:
+                                ecov0 = cov_y
+                                esrc0 = seg
+                                eout0 = out_seg
+                            else:
+                                ecov1 = cov_y
+                                esrc1 = seg
+                                eout1 = out_seg
                     band = band + 1
-                prev_base = row_base
+                prev_cur = cur
                 prev_cov_y = cov_y
             outp.write_span(line, row_base as i64, 0, cw as i64)
         row = row + 1
