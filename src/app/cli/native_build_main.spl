@@ -832,7 +832,8 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0      # streaming parse has no front-end parse cache to warm
     val requested = native_build_shard_threads(args, shard_parse_worker_budget_kb_for_v1(
         env_get("SIMPLE_PARSE_SHARD_WORKER_KB") ?? "", env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "",
-        shard_host_worker_budget_kb(host_limit_value("worker_mem_mib")), SHARD_PARSE_WORKER_KB_V1), true)
+        shard_host_worker_budget_kb(host_limit_value("worker_mem_mib")), SHARD_PARSE_WORKER_KB_V1,
+        native_build_closure_selected_count_v1()), true)
     if requested <= 0:
         return 0
     # A parse shard is a process, not a lightweight task: the seed interpreter
@@ -1330,10 +1331,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 probe_at_ms = round_ms
                 probed_live = pids.len()
             val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib)
+            # Admission (pure arithmetic) before the BLOCKED probe: the probe
+            # formats a path, and with a free slot that admission keeps
+            # refusing it would run, and leave that string behind, every
+            # SHARD_POOL_POLL_MS round for as long as the refusal lasts.
             while pids.len() < window_size and next_pending < pending.len() and
                     not stop_dispatch and
-                    not hir_shard_recovery_blocked(queue_dir) and
-                    shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private):
+                    shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private) and
+                    not hir_shard_recovery_blocked(queue_dir):
                 val index = pending[next_pending]
                 next_pending = next_pending + 1
                 val owner = "{index}/{count}@{generation}"
@@ -1766,9 +1771,20 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
+    # Export the LIVE owner count to the shard workers, as the per-file
+    # worker pool already does (its phase B): each owner's codegen pool reads
+    # SIMPLE_NATIVE_FILE_WORKERS as its peer-shard divisor and otherwise falls
+    # back to min(--mir-shard total, --threads), i.e. the queued batch count.
+    # rb5 (2026-11-24): shards=16 parallel=1, yet every owner divided its
+    # tree share by peer_shards=4 (`[NATIVE] codegen ... peer_shards=4`).
+    # Scheduling-only: excluded from the native cache identity.
+    val old_live_owners = native_build_env_saved_v1("SIMPLE_NATIVE_FILE_WORKERS")
+    val live_owners = if run_parallel > 0: run_parallel else: count
+    env_set("SIMPLE_NATIVE_FILE_WORKERS", "{live_owners}")
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, run_parallel,
         simple_bin, timeout_ms, spawn_limit)
+    native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_live_owners)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     val hir_compile_errors = native_mir_shard_hir_compile_errors_recorded_v1(queue_dir)
     val outcome = native_mir_shard_outcome_after_hir_errors_v1(

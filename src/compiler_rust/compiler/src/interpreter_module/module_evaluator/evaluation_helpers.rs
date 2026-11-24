@@ -480,9 +480,14 @@ pub(super) fn process_imports_and_assignments(
     exports: &mut ExportTable,
     bare_exports: &mut Vec<Vec<(String, String)>>,
 ) -> Result<(), CompileError> {
+    // Classes visible to module-level initializers: this module's own plus
+    // every class merged in by its imports. Built lazily, rebuilt after an
+    // import. See init_classes_view.
+    let mut init_classes_cache: Option<HashMap<String, Arc<ClassDef>>> = None;
     for item in items.iter() {
         match item {
             Node::UseStmt(use_stmt) => {
+                init_classes_cache = None;
                 crate::units::scope::unit_scope_record_use(use_stmt);
                 process_use_stmt(
                     use_stmt,
@@ -497,8 +502,9 @@ pub(super) fn process_imports_and_assignments(
             Node::Let(stmt) => {
                 // Evaluate module-level let statements (for global variables)
                 if let Some(init) = &stmt.value {
+                    let init_classes = init_classes_view(&mut init_classes_cache, local_classes, global_classes);
                     if let Ok(value) =
-                        evaluate_expr(init, env, local_functions, local_classes, local_enums, impl_methods)
+                        evaluate_expr(init, env, local_functions, init_classes, local_enums, impl_methods)
                     {
                         // Apply the declared type exactly as a local `val` does:
                         // an imported `val K: u64 = 0xFFFF_8000_0000_0000` must
@@ -608,6 +614,7 @@ pub(super) fn process_imports_and_assignments(
                 }
             }
             Node::ExportUseStmt(export_stmt) => {
+                init_classes_cache = None;
                 process_export_stmt(
                     export_stmt,
                     module_path,
@@ -662,6 +669,27 @@ pub(super) fn process_imports_and_assignments(
         }
     }
     Ok(())
+}
+
+/// Class map for evaluating a module-level initializer.
+///
+/// `local_classes` holds only this module's own classes, but an initializer
+/// such as `var g: Mutex = mutex_new(0)` runs an imported function whose body
+/// constructs ITS module's class (`Mutex(...)`). With only the local map that
+/// call failed ("function `Mutex` not found"), the error was swallowed and the
+/// var stayed unbound, so the module's own functions later reported
+/// "variable not found" (interp_transitive_import_private_globals_not_linked_2026-11-23).
+/// Local classes win over same-named imported ones.
+fn init_classes_view<'a>(
+    cache: &'a mut Option<HashMap<String, Arc<ClassDef>>>,
+    local_classes: &HashMap<String, Arc<ClassDef>>,
+    global_classes: &HashMap<String, Arc<ClassDef>>,
+) -> &'a mut HashMap<String, Arc<ClassDef>> {
+    cache.get_or_insert_with(|| {
+        let mut merged = global_classes.clone();
+        merged.extend(local_classes.iter().map(|(k, v)| (k.clone(), Arc::clone(v))));
+        merged
+    })
 }
 
 /// Process a use statement (import)

@@ -2,7 +2,8 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_source_pipeline_loading.*
 use compiler.driver.driver_source_parse_streaming.*
-use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled, driver_streaming_surface_route,
+    driver_source_entry_request}
 use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_peek_list_v1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_sdn_quote_v1}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, ModuleSurfaceExportOriginLookup}
@@ -23,6 +24,7 @@ struct NativeSurfaceInspectionRequestV1:
     private_directory: text = ""
     admitted_root: text = ""
     requested_target: text = ""
+    requested_low_memory: bool = false
 
 fn native_surface_inspection_request_error_v1(request: NativeSurfaceInspectionRequestV1) -> text:
     if request.modules.len() < 1 or request.modules.len() > 2:
@@ -40,6 +42,12 @@ fn native_surface_inspection_request_error_v1(request: NativeSurfaceInspectionRe
 
 fn inspection_quote_v1(value: text) -> text:
     go_to_end_sdn_quote_v1(value)
+
+fn native_surface_inspection_apply_cli_options_v1(driver: CompilerDriver,
+        request: NativeSurfaceInspectionRequestV1):
+    # Ordinary native-build honors the canonical CLI parser's --low-memory.
+    # The Stage4 fixed factory has a separate opt-in policy; leave it intact.
+    driver.ctx.options.low_memory = request.requested_low_memory
 
 fn inspection_surface_text_v1(surfaces: ModuleSurfacesByName, index: i64,
         selector: text, item: text) -> Result<text, text>:
@@ -133,11 +141,20 @@ fn driver_inspect_native_surfaces_v1(driver: CompilerDriver,
     # is semantically distinct from an explicit host triple in source indexing.
     val raw_target = driver.ctx.native_target
     val target_policy = if request.requested_target != "": "cli-explicit" else: "implicit-ambient-or-default"
+    native_surface_inspection_apply_cli_options_v1(driver, request)
+    val low_memory_before_load = driver.ctx.options.low_memory
+    val route_before_load = driver_streaming_surface_route(driver.ctx)
+    val entry_before_load = driver_source_entry_request(driver.ctx)
     if not driver_streaming_surface_enabled(driver.ctx):
         return Err("inspection requires the canonical retained streaming surface route")
     # No native output path or artifact receipt is authorized by this API.
     driver.ctx.options.output_file = None
-    val (_, loaded) = driver.load_sources_impl()
+    val (loaded_ctx, loaded) = driver.load_sources_impl()
+    # Match driver_orchestration's canonical commit policy. Stage3 native
+    # aggregate reassignment corrupted the streaming context; route 1 commits
+    # directly to driver.ctx. Nonstreaming routes are rejected above.
+    if route_before_load != 1:
+        driver.ctx = loaded_ctx
     if not loaded: return Err("inspection canonical source loading failed")
     if not driver.parse_all_committing_impl(): return Err("inspection configured parsing or surface freeze failed")
     if not driver.streaming_surface_owner_ready: return Err("inspection retained surface owner is absent")
@@ -145,11 +162,20 @@ fn driver_inspect_native_surfaces_v1(driver: CompilerDriver,
     if not module_surfaces_frozen_alignment(surfaces): return Err("inspection frozen surface alignment failed")
     var out = "schema: simple-native-surface-inspection-v1\nstatus: DIAGNOSTIC_ONLY\nadmission: none\n" +
         "capture_point: prebody-frozen-query\nfailing_body_equivalence: false\nquery_effect_scope: private-query-and-existing-read-index-cache\n" +
+        "load_context_commit_policy: canonical-streaming-in-place\n" +
         "registry_generation: {surfaces.generation}\nregistry_modules: {surfaces.surfaces.len()}\n" +
         "target: " + inspection_quote_v1(driver.ctx.native_target) +
         "\nraw_target_before_load: " + inspection_quote_v1(raw_target) +
         "\nrequested_cli_target: " + inspection_quote_v1(request.requested_target) +
         "\ntarget_selection_policy: " + inspection_quote_v1(target_policy) +
+        "\nrequested_cli_low_memory: {request.requested_low_memory}\nlow_memory_before_load: {low_memory_before_load}\n" +
+        "streaming_route_before_load: {route_before_load}\nlow_memory_after_parse: {driver.ctx.options.low_memory}\n" +
+        "entry_request_before_load: " + inspection_quote_v1(entry_before_load) +
+        "\nentry_request_after_load: " + inspection_quote_v1(driver_source_entry_request(driver.ctx)) +
+        "\nconfigured_library_mode: " + inspection_quote_v1(driver.ctx.options.library_mode) +
+        "\nsource_snapshot_root: " + inspection_quote_v1(driver.ctx.options.native_source_snapshot_root) +
+        "\nfrontend_cache_identity: " + inspection_quote_v1(driver.ctx.environment_variant_frontend_cache_identity) +
+        "\nfrontend_cache_scope_after_parse: " + inspection_quote_v1(env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") +
         "\npolicy_digest: " + inspection_quote_v1(driver.ctx.environment_variant_policy_digest) +
         "\nfrontend_session_id: {driver.ctx.environment_variant_frontend_session_id}\n" +
         "source_root: " + inspection_quote_v1(closure.source_root) +
@@ -198,4 +224,4 @@ fn driver_inspect_native_surfaces_v1(driver: CompilerDriver,
     Ok(out)
 
 export NativeSurfaceInspectionRequestV1, native_surface_inspection_request_error_v1,
-    driver_inspect_native_surfaces_v1
+    native_surface_inspection_apply_cli_options_v1, driver_inspect_native_surfaces_v1

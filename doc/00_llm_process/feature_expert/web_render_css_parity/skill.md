@@ -4313,3 +4313,87 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   page also paints with no overflow clip anywhere (Chrome 40..59, ours 50..89). Only
   the example runner / catalog route shows this. Fixture:
   `<div style="position:absolute;left:40px;top:10px;width:20px;height:20px;overflow:hidden"><div style="margin-left:-10px;width:40px;height:20px;background:#00f"></div></div>`.
+
+## 2026-11-24 — negative horizontal margins; solid-only GPU frame honours overflow:hidden
+
+- **`margin-left:-10px` laid the box out 10px to the RIGHT.** `parse_int` reads only digits,
+  so the sign was lost. A plain negative value could not hold it anyway, because a negative
+  horizontal margin is already the percentage encoding (`0 - pct`, pinned by
+  `css_decl_apply_transform_spec` and `apply_decls_merge_probe_spec`).
+  - A literal `-P` px is now stored as `-(MARGIN_NEG_PX_BASE + P)` with base 1,000,000, so
+    `-9999px` is still a length.
+  - The encoding is set by `horizontal_margin_signed` (foundation_values) and decoded first
+    in `resolve_horizontal_margin_px` (layout_foundation).
+  - It covers the `margin` shorthand (`margin_token_px`), `margin-left`/`-right` on both
+    style paths, `margin-inline` and `margin-inline-start`/`-end`. `-1em` keeps its sign
+    as well, because the restore keys on the token's leading `-`.
+  - All layout readers already go through `resolve`. The raw readers are only the Draw IR
+    `margin-left` prop, the animation computed length, debug probes, and `layout_text`'s
+    positive-only min-content add.
+  - Mirror of the vertical fix (`margin_token_vh_px`, -1000 vh sentinel).
+- **Known gaps:** `-10%` still reads as +10%, and `margin-inline`'s second value still drops
+  its sign (`parse_nth_int`).
+- **An all-solid page at 1x lost `overflow:hidden` entirely.** Such a page takes the
+  GPU-paint solid-only frame (`_web_gpu_solid_only_frame`, no CPU raster and no residual
+  blit). Its fill ops (`_web_gpu_solid_fill_ops`) were the full border boxes.
+  - The fill ops are now intersected with `paint_clip_at(build_ancestor_clip_cache(...))`,
+    the same clip the raster uses. This keeps the offload; disqualifying the frame would
+    have dropped it.
+  - The spec entry point (`..._engine2d_at_device_scale`) never took this route, so only
+    the example runner / catalog 1x path showed it.
+  - Rule: any GPU fill shortcut must apply every clip that `paint()` applies.
+- Pinned by `negative_horizontal_margin_chrome159_spec` (6 cases at 1x and 4x, base 1/6,
+  head 6/6; AC-5, the `10%` guard, stays green).
+- Catalogs 1x and 4x are identical to base `39537bbda5f`, since no catalog page has a
+  negative margin. The css-layout renders are byte-identical at both scales. Matrix: 81.
+- Perf, css-layout, 3 alternated rounds, wall medians base/head: k=1 11729/11680 ms,
+  k=4 31339/31259 ms. RSS is flat at about 2.66 GB / 8.33 GB.
+
+## 2026-11-24 monoflex lane: underline thickness, flex-wrap fractional x
+
+- **"Overview monospace `code` advances" was a misread.** DejaVu Sans Mono
+  advances already match Chrome at 1x and 4x (identical column-run starts).
+  The overview's biggest 4x cluster is the `working anchor` link UNDERLINE.
+- **Auto underline thickness is floor(em / 10), min 1** (Chrome 159, measured
+  at 16/19/20/24/30/40/50/64 px). The old round(0.0733em) gave 1 row at 20
+  and 24 px (Chrome 2), 2 at 30 (Chrome 3) and so on.
+- **At device scale k, Chrome computes the underline on the DEVICE font.** A
+  16 px link at k=4 is 6 rows at baseline + 4, not 4 x (1 row at + 1). The
+  rule now carries `device-rect` (dx 0, device top, run.width * k, device
+  thickness) plus the run's `device-y-offset`. Its x extent is unchanged from
+  base (it is still off by 1-2 device px on a fractional-x flex link, as before).
+- **A flex-WRAP row had no fractional main-axis start.** Only the single-line
+  path carried `item_frac_delta_milli`. The wrap placing pass now accumulates
+  each auto item's exact-width fraction per line (reset on line break) and
+  snaps the next item as `absolute_box_snap` does, except that an exact half
+  device px rounds DOWN for the box. That was measured: the `ul` after
+  `<ol><li>Ordered item</li>` sits at 145.375 css, and Chrome paints its disc
+  at 696 with its text from pen 741.5. `flex_item_text_frac_delta_milli_px`
+  also takes the widest block child's single text run, so an `ol` of `li`s
+  counts.
+- **Open, not fixed:**
+  - 19 px underline is one row low (offset formula, not thickness).
+  - Chrome's skip-ink gaps are not drawn.
+  - A no-wrap `display:flex` row with the same `ol` wraps the `ol` text.
+  - html article header 1 row short at 1x: the h3 line box is 28.08 px
+    (18.72 x 1.5) but block layout keeps it at whole 28, so the flex header
+    is 97.436 -> 97 px where Chrome has 97.52 -> 98 rows.
+- Specs:
+  - `text_underline_auto_thickness_chrome159_spec.spl`
+  - `flex_wrap_list_fractional_x_chrome159_spec.spl`
+- Catalog (bfe4baf76e9 -> lane): overview 1x 0.59 -> 0.41 %, overview 4x
+  0.21 -> 0.16 %; every other page equal at both scales. Perf, 6 alternated
+  rounds at k=4: median document/paint phases equal within noise (overview
+  paint 5609 vs 5615 ms, html paint 8732 vs 8755 ms); RSS flat (2.83/2.89 GB).
+## 2026-11-24 — HIR import loading re-parsed every module the loader had parsed (seed JIT startup)
+
+- **Profile first.** The time was not where the counts pointed. HIR Pass 0.5b took about 370 ms on tab-bar, with 2,817 `load_imported_types` calls for 369 units. An exclusive profile showed `preregister_imported_type_names` at about 245 ms; the re-export, trait-capture and alias tail was only about 1 ms.
+  - Memoizing the 2,612 placeholder scans down to 326 did not change wall time, so it was dropped.
+  - The real cost was the first parse of each unit: `IMPORT_AST_PARSES=375`. The module loader had already parsed all of them and never filled the cross-lane cache.
+  - Trap: an exclusive label measures where a cost first lands, not why it is there. Read the counters (`SIMPLE_PERF_COUNTERS=1`) before building a cache.
+- **Fix:** `module_cache::shared_source_seed` takes the loader's parse. It is used only when the loader's parsed text is byte-identical to `strip_os_when_blocks(raw, cfg_target())`, so the same text gives the same AST. HIR re-parses fell from 375 to 5, saving about 250 ms of tab-bar JIT wall time; RSS is flat.
+- **Evidence:**
+  - Spec: `compiler/tests/hir_reuses_loader_parse.rs`.
+  - 8 pages JIT==interp at 1x and 4x, with the interpreter byte-identical to base.
+  - Strict-vreg is clean.
+- **Bug record:** `doc/08_tracking/bug/hir_import_reparses_loader_modules_2026-11-24.md`.

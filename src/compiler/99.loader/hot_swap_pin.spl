@@ -138,6 +138,25 @@ fn hot_swap_try(slot: HotSwapSlot, observed: i64, image: [u8]) -> Result<i64, te
         return Err("SMF-E-HOTSWAP-STALE: generation {observed} is no longer current")
     Ok(next)
 
+# Writer only: undo the swap that published `committed` because the load
+# that followed it failed, so the slot never ends a generation ahead of the
+# module. One CAS committed -> committed - 1; the previous image is still
+# live because reclaim runs only after a successful load. The rolled-back
+# entry is retired now, or by the next hot_swap_reclaim if a reader holds it.
+# Ok = the restored generation; Err = SMF-E-HOTSWAP-STALE.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn hot_swap_rollback(slot: HotSwapSlot, committed: i64) -> Result<i64, text>:
+    val prev = committed - 1
+    val gen = slot.generation
+    if prev < 0 or not gen.compare_exchange(committed, prev, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        return Err("SMF-E-HOTSWAP-STALE: generation {committed} is not current; nothing to roll back")
+    val entry = slot.entry_for(committed)
+    val readers = entry.readers
+    if readers.compare_exchange(0, HOT_SWAP_RECLAIMED, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
+        entry.image = []
+    Ok(prev)
+
 # Writer only: take back an entry that was filled but never published. A
 # reader can hold it only transiently (generation mismatch makes it unpin).
 fn hot_swap_retire(entry: HotSwapImage):
@@ -170,14 +189,15 @@ fn hot_swap_read_end(read: HotSwapRead):
     val readers = read.entry.readers
     readers.fetch_sub(1, MemoryOrdering.SeqCst)
 
-# Writer only: free every entry older than the current generation that no
+# Writer only: free every entry other than the current generation (older ones,
+# and ones rolled back past) that no
 # reader pins. Returns the number of images freed by this call.
 fn hot_swap_reclaim(slot: HotSwapSlot) -> i64:
     val cur = slot.current_generation()
     var freed = 0
     for e in slot.images:
         val g = e.holds_generation()
-        if g >= 0 and g < cur:
+        if g >= 0 and g != cur:
             val readers = e.readers
             if readers.compare_exchange(0, HOT_SWAP_RECLAIMED, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst):
                 e.image = []
@@ -189,4 +209,4 @@ fn hot_swap_image_live(slot: HotSwapSlot, generation: i64) -> bool:
     e.holds_generation() == generation and not e.is_reclaimed()
 
 export HotSwapSlot, HotSwapImage, HotSwapRead, hot_swap_slot_new, hot_swap_slot_load, hot_swap_try
-export hot_swap_read_begin, hot_swap_read_end, hot_swap_reclaim, hot_swap_image_live
+export hot_swap_read_begin, hot_swap_read_end, hot_swap_reclaim, hot_swap_image_live, hot_swap_rollback

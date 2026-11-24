@@ -109,32 +109,32 @@ fn _staged_proposals_v1(output: text) -> [_StagedProposalV1]?:
         if line.starts_with(prefix):
             val marker = " action="
             val marker_at = line.index_of(marker)
-            if marker_at < prefix.len(): return nil
+            if marker_at < prefix.len(): return None
             val attempt = line[prefix.len():marker_at]
             val action = line[marker_at + marker.len():]
             if attempt == "" or not scheduler_action_digest_valid_v1(action):
-                return nil
+                return None
             for prior in rows:
-                if prior.attempt_id == attempt: return nil
+                if prior.attempt_id == attempt: return None
             rows.push(_StagedProposalV1(attempt, action))
     rows
 
 fn _staged_accepted_v1(ledger: SchedulerLedgerV1,
         action_digest: text) -> AcceptedResult?:
-    var found: AcceptedResult? = nil
+    var found: AcceptedResult? = None
     for row in ledger.accepted:
         if row.action_digest == action_digest:
-            if found != nil: return nil
+            if found.is_some(): return None
             found = row
     found
 
 fn _staged_attempt_v1(ledger: SchedulerLedgerV1,
         accepted: AcceptedResult) -> SchedulerAttemptV1?:
-    var found: SchedulerAttemptV1? = nil
+    var found: SchedulerAttemptV1? = None
     for row in ledger.attempts:
         if row.attempt_id == accepted.accepted_attempt_id and
            row.action_digest == accepted.action_digest:
-            if found != nil: return nil
+            if found.is_some(): return None
             found = row
     found
 
@@ -142,7 +142,7 @@ fn _staged_worker_capability_ok_v1(config: DistBuildConfigV1,
         nonce: text) -> BuildWorkerCapabilityV1?:
     val reply = query_build_worker_capability_ssh_v1(config.node.ssh,
         nonce)
-    if not reply.received or reply.capability == nil: return nil
+    if not reply.received or reply.capability.is_none(): return None
     val cap = reply.capability.unwrap()
     if cap.worker_id != config.node.ssh.node.worker_id or
        cap.nonce != nonce or cap.execution_os != "linux" or
@@ -150,7 +150,7 @@ fn _staged_worker_capability_ok_v1(config: DistBuildConfigV1,
        not ["podman", "docker"].contains(cap.engine) or cap.image == "" or
        not cap.image.contains("@sha256:") or cap.provider_generation <= 0 or
        cap.boot_id == "":
-        return nil
+        return None
     cap
 
 fn _staged_capture_v1(source: text, digest: text, destination: text) -> bool:
@@ -168,7 +168,7 @@ fn _staged_resolved_operands_v1(plan: ParentStagedLinkPlanV1,
         producer_graph: ParentGraphRequestV1,
         producer_action_digest: text,
         resolved: ParentLinkResolutionV1) -> text:
-    if not resolved.valid or resolved.action == nil or
+    if not resolved.valid or resolved.action.is_none() or
        resolved.action_digest == "" or
        action_spec_digest_v1(resolved.action.unwrap()) != resolved.action_digest:
         return ""
@@ -202,7 +202,7 @@ fn _staged_load_v1(fixture: TwoNodeStagedFixtureV1) -> _StagedLoadedV1:
         fixture.issued_record_digest)
     if not issued.valid or issued.record.is_none():
         return _StagedLoadedV1(false, "issued-record-unavailable",
-            nil, nil, [], [])
+            None, None, [], [])
     val record = issued.record.unwrap()
     var args: [text] = ["--staged-plan-digest", record.plan_digest,
         "--template", record.template_path,
@@ -213,12 +213,12 @@ fn _staged_load_v1(fixture: TwoNodeStagedFixtureV1) -> _StagedLoadedV1:
     val loaded = load_parent_staged_link_cli_v1(args)
     if not loaded.valid or loaded.plan.is_none():
         return _StagedLoadedV1(false, "issued-staged-plan-invalid",
-            nil, nil, [], [])
+            None, None, [], [])
     val prepared = prepare_parent_staged_link_v1(loaded.plan.unwrap(),
         loaded.manifest_wire, loaded.request_wires)
-    if not prepared.valid or prepared.graph == nil:
+    if not prepared.valid or prepared.graph.is_none():
         return _StagedLoadedV1(false, "staged-preflight-invalid",
-            nil, nil, [], [])
+            None, None, [], [])
     _StagedLoadedV1(true, "", loaded.plan, prepared.graph,
         prepared.workers, loaded.request_wires)
 
@@ -235,18 +235,18 @@ fn _staged_link_graph_v1(plan: ParentStagedLinkPlanV1,
         producer_graph: ParentGraphRequestV1, request_wires: [text],
         resolved: ParentLinkResolutionV1) -> ParentGraphRequestV1?:
     if producer_graph.requests.len() != 1 or request_wires.len() != 1:
-        return nil
+        return None
     if encode_build_worker_request_v1(producer_graph.requests[0]) !=
        request_wires[0]:
-        return nil
+        return None
     val request = resolved_parent_link_request_v1(resolved,
         plan.link_attempt, 1, plan.link_cpu_tokens, plan.link_fd_tokens)
-    if request == nil: return nil
+    if request.is_none(): return None
     var wires = request_wires
     wires.push(encode_build_worker_request_v1(request.unwrap()))
     val graph = admit_parent_graph_requests_v1(wires,
         resolved.action_digest, plan.link_attempt.worker_id, 0)
-    if not graph.valid or graph.actions.len() != 2: return nil
+    if not graph.valid or graph.actions.len() != 2: return None
     graph
 
 fn _staged_policy_row_v1(fixture: TwoNodeStagedFixtureV1,
@@ -256,20 +256,20 @@ fn _staged_policy_row_v1(fixture: TwoNodeStagedFixtureV1,
     if worker.export_root == "" or
        worker.export_policy_path != fixture.export_policy_path or
        worker.export_policy_digest != fixture.export_policy_digest:
-        return nil
+        return None
     val read = file_read_regular_no_follow_bounded(
         fixture.export_policy_path, PARENT_EXPORT_POLICY_MAX_BYTES_V1)
     if read.is_err() or sha256_text(read.unwrap()) != fixture.export_policy_digest:
-        return nil
+        return None
     val policy = parse_parent_artifact_export_policy_v1(read.unwrap())
     val selected = select_parent_artifact_export_policy_v1(policy,
         fixture.export_policy_row_id)
-    if selected == nil: return nil
+    if selected.is_none(): return None
     val row = selected.unwrap()
     if row.kind != "executable" or row.mode != 0o755 or
        row.action_digest != link_digest or
        row.target_triple != link_target:
-        return nil
+        return None
     row
 
 fn _staged_verify_executable_v1(fixture: TwoNodeStagedFixtureV1,
@@ -332,14 +332,14 @@ fn qualify_issued_two_node_staged_v1(
        plan.link_attempt.worker_id != fixture.link_worker_id:
         return _staged_blocked_v1("producer-link-identity-or-shape-mismatch")
     val producer_action = producer_graph.actions[0].spec
-    var producer_config: DistBuildConfigV1? = nil
-    var link_config: DistBuildConfigV1? = nil
+    var producer_config: DistBuildConfigV1? = None
+    var link_config: DistBuildConfigV1? = None
     for worker in workers:
         if worker.node.ssh.node.worker_id == fixture.producer_worker_id:
             producer_config = worker
         if worker.node.ssh.node.worker_id == fixture.link_worker_id:
             link_config = worker
-    if producer_config == nil or link_config == nil or
+    if producer_config.is_none() or link_config.is_none() or
        producer_config.unwrap().owner_root != link_config.unwrap().owner_root or
        producer_config.unwrap().node.retained_cas_root !=
            link_config.unwrap().node.retained_cas_root:
@@ -352,7 +352,7 @@ fn qualify_issued_two_node_staged_v1(
         producer_config.unwrap(), producer_nonce)
     val link_cap = _staged_worker_capability_ok_v1(
         link_config.unwrap(), link_nonce)
-    if producer_cap == nil or link_cap == nil:
+    if producer_cap.is_none() or link_cap.is_none():
         return _staged_blocked_v1("nonce-bound-linux-oci-worker-unavailable")
     if producer_action.argv.len() == 0 or
        build_worker_execution_profile_problem_v1(producer_action,
@@ -410,7 +410,7 @@ fn qualify_issued_two_node_staged_v1(
         dir_remove_all(stage)
         return _staged_blocked_v1("cold-issued-parent-run-incomplete")
     val proposals = _staged_proposals_v1(_first_out)
-    if proposals == nil or proposals.unwrap().len() != 2 or
+    if proposals.is_none() or proposals.unwrap().len() != 2 or
        _first_out.contains("RESUMING"):
         dir_remove_all(stage)
         return _staged_blocked_v1("cold-proposal-attribution-unavailable")
@@ -433,7 +433,7 @@ fn qualify_issued_two_node_staged_v1(
         return _staged_blocked_v1("cold-owner-ledger-not-exactly-two-successes")
     val producer_accepted = _staged_accepted_v1(ledger,
         fixture.producer_action_digest)
-    if producer_accepted == nil or
+    if producer_accepted.is_none() or
        producer_accepted.unwrap().accepted_attempt_id !=
            producer_proposal.attempt_id:
         scheduler_owner_close_v1(owner_after_first)
@@ -441,13 +441,13 @@ fn qualify_issued_two_node_staged_v1(
         return _staged_blocked_v1("producer-acceptance-attribution-mismatch")
     val producer_attempt = _staged_attempt_v1(ledger,
         producer_accepted.unwrap())
-    if producer_attempt == nil or producer_attempt.unwrap().active or
+    if producer_attempt.is_none() or producer_attempt.unwrap().active or
        producer_attempt.unwrap().worker_id != fixture.producer_worker_id:
         scheduler_owner_close_v1(owner_after_first)
         dir_remove_all(stage)
         return _staged_blocked_v1("producer-attempt-worker-mismatch")
     val resolved = resolve_parent_link_v1(plan.template, ledger, cas_root)
-    if not resolved.valid or resolved.action == nil:
+    if not resolved.valid or resolved.action.is_none():
         scheduler_owner_close_v1(owner_after_first)
         dir_remove_all(stage)
         return _staged_blocked_v1("dynamic-link-resolution-failed")
@@ -467,18 +467,18 @@ fn qualify_issued_two_node_staged_v1(
     val dependency = dependencies[0]
     val combined = _staged_link_graph_v1(plan, producer_graph,
         request_wires, resolved)
-    if combined == nil:
+    if combined.is_none():
         scheduler_owner_close_v1(owner_after_first)
         dir_remove_all(stage)
         return _staged_blocked_v1("resolved-link-graph-invalid")
     val link_accepted = _staged_accepted_v1(ledger, link_digest)
-    if link_accepted == nil or
+    if link_accepted.is_none() or
        link_accepted.unwrap().accepted_attempt_id != link_proposal.attempt_id:
         scheduler_owner_close_v1(owner_after_first)
         dir_remove_all(stage)
         return _staged_blocked_v1("link-acceptance-attribution-mismatch")
     val link_attempt = _staged_attempt_v1(ledger, link_accepted.unwrap())
-    if link_attempt == nil or link_attempt.unwrap().active or
+    if link_attempt.is_none() or link_attempt.unwrap().active or
        link_attempt.unwrap().worker_id != fixture.link_worker_id or
        producer_attempt.unwrap().attempt_id == link_attempt.unwrap().attempt_id:
         scheduler_owner_close_v1(owner_after_first)
@@ -496,7 +496,7 @@ fn qualify_issued_two_node_staged_v1(
     val audit_link_output = _staged_policy_row_v1(fixture,
         link_config.unwrap(), link_digest,
         resolved.action.unwrap().toolchain.target_triple)
-    if audit_link_output == nil or
+    if audit_link_output.is_none() or
        not combined.unwrap().actions[1].spec.output_paths.contains(
            audit_link_output.unwrap().output_name):
         scheduler_owner_close_v1(owner_after_first)

@@ -26,7 +26,8 @@
 # - Embedded deployment descriptor
 # - Combined compiled modules and static assets
 
-use compiler.backend.linker.lib_smf.{ModuleIndexEntry, u32_to_bytes, u64_to_bytes, bytes_to_u32, bytes_to_u64, fnv1a_hash, char_from_byte}
+use compiler.backend.linker.lib_smf.{ModuleIndexEntry, u32_to_bytes, u64_to_bytes, bytes_to_u32, bytes_to_u64, fnv1a_hash}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 # ============================================================================
 # Constants
@@ -278,22 +279,18 @@ impl AssetIndexEntry:
         )
 
     # Get asset path as text.
+    # from_bytes rejects fields that are not valid UTF-8, so the Err arms of
+    # these getters are unreachable for parsed entries.
     fn get_path() -> text:
-        var chars: [text] = []
-        for i in 0..self.path.len():
-            if self.path[i] == 0:
-                return chars.join("")
-            chars.push(char_from_byte(self.path[i]))
-        chars.join("")
+        match swa_field_text(self.path, "SWA asset path"):
+            case Ok(v): v
+            case Err(_): ""
 
     # Get mime type as text.
     fn get_mime_type() -> text:
-        var chars: [text] = []
-        for i in 0..self.mime_type.len():
-            if self.mime_type[i] == 0:
-                return chars.join("")
-            chars.push(char_from_byte(self.mime_type[i]))
-        chars.join("")
+        match swa_field_text(self.mime_type, "SWA asset mime type"):
+            case Ok(v): v
+            case Err(_): ""
 
     # Serialize entry to bytes (exactly 128 bytes).
     fn to_bytes() -> [u8]:
@@ -338,6 +335,12 @@ impl AssetIndexEntry:
         var mime_type: [u8] = []
         for i in (start + 88)..(start + 104):
             mime_type.push(bytes[i])
+        match swa_field_text(path, "SWA asset path"):
+            case Ok(_): ()
+            case Err(e): return Err(e)
+        match swa_field_text(mime_type, "SWA asset mime type"):
+            case Ok(_): ()
+            case Err(e): return Err(e)
 
         # Read reserved (24 bytes)
         var reserved: [u8] = []
@@ -352,6 +355,13 @@ impl AssetIndexEntry:
             mime_type: mime_type,
             reserved: reserved
         ))
+
+# Fixed-width NUL-padded field: bytes up to the first NUL, strict UTF-8.
+fn swa_field_text(raw: [u8], role: text) -> Result<text, text>:
+    var e: i64 = 0
+    while e < raw.len() and raw[e] != 0:
+        e = e + 1
+    linker_name_text(raw[0:e], role)
 
 # ============================================================================
 # Exports
