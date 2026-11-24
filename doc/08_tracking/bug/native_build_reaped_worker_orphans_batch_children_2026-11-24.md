@@ -1,9 +1,58 @@
 # native-build: a reaped pool worker orphans its batch children
 
-Status: open; defect confirmed by reading the code, no fix landed. Nothing in
-this record was executed: a build was running on the host and no runnable
-`simple` binary was available, so every statement below is static reasoning
-over release source `60fdb93e3a50` (PR #11158).
+Status: fix landed in source, not yet observed in a build. The defect analysis
+below is static reasoning over release source `60fdb93e3a50` (PR #11158); see
+"Fix" for what was and was not executed.
+
+## Fix (2026-11-24)
+
+Path 2 below, steps 1 and 2. Step 3 (a spec) was not added: no `simple`
+binary was available to run one.
+
+- Seed: `rt_child_set_pdeathsig` is registered in
+  `interpreter_extern/mod.rs` through a bridge in `bootstrap_runtime.rs` to
+  the one C owner (`runtime_process_tree.c`, already compiled into the seed's
+  runtime). No Rust twin: the symbol is on the designed C-only allowlist.
+- Worker: the three spawn sites go through
+  `native_file_worker_spawn_bound_child_v1`, which publishes the worker's pid
+  in `SIMPLE_NATIVE_WORKER_CHILD_PARENT_PID` for the duration of the spawn.
+- Child: `native_build_child_bind_parent_v1` runs first in
+  `run_native_build_worker` and in bootstrap_main's
+  `run_native_build_bootstrap`. Only a marked process acts: it clears the
+  mark (unset, not emptied: present `SIMPLE_*` keys feed the environment
+  fingerprint), arms SIGKILL-on-parent-death, then exits 1 if the published
+  pid no longer exists (the worker died before the arm, which sends no
+  signal). Process groups are unchanged, so Ctrl-C still reaches everything.
+
+Executed: `cargo check --release --bin simple` and two seed unit tests
+(`dispatch_registers_child_pdeathsig`,
+`child_pdeathsig_bridge_is_registered_and_reaches_the_c_owner`), both green.
+Not executed: any Simple code. No runnable `simple` binary was available, so
+the worker/child path has not run and no reaped worker has been observed
+taking its child down.
+
+Limits:
+
+- The Simple sources now need a seed built from this change or later. An
+  older seed interpreting them fails each marked batch child with "unknown
+  extern function".
+- macOS and Windows have no arm (`-100000`): children stay unbound there.
+- The kernel ties the signal to the worker THREAD that forked, not the
+  process. The spawn is a plain call on the thread running the worker loop;
+  that this thread lives as long as the process was read, not measured.
+- A child killed this way seals none of its claims; the reaped root's
+  recovery seal covers its `+fork` tree as it does for fork children.
+- The re-check is "published pid still exists", not `getppid() == pid`: no
+  engine exposes getppid to Simple. A worker that is dead but not yet reaped
+  when the child arms passes the check and that child stays unbound.
+- Scope is the process the worker spawns. Under `SIMPLE_BOOTSTRAP_STAGE3=1`
+  (the observed self-build) a role child runs the focused capsule in process,
+  so that is the heap holder. A role child that instead delegates through
+  `run_native_build_worker` launches its real worker with
+  `process_run_timeout_live` (`sh` + `setsid`); that worker is in its own
+  session and is NOT bound by this change. Whether any pool configuration
+  takes that route was not established.
+- Tool children (clang, linker) of a killed child are not signalled.
 
 ## Symptom
 
@@ -34,7 +83,7 @@ only for `rt_fork_shared_heap_v1` children (`src/runtime/runtime_fork.c`), not
 for the `process_spawn_async` children above, which carry the same `+fork`
 owner mark. The comment now says so. Comment text only; no behaviour change.
 
-## Why the two candidate fixes are blocked
+## Why the two candidate fixes were blocked (path 2 has since landed)
 
 1. **Spawn pool workers with `process_spawn_session`** so `process_kill`
    routes to `process_kill_tree`. Rejected:

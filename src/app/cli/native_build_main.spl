@@ -14,6 +14,7 @@ use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1,
 use app.io.env_ops.{env_get, env_set, env_unset, cwd, host_os}
 use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
+use app.io.process_ops.{PROCESS_PARENT_DEATH_UNSUPPORTED, process_arm_parent_death_kill, process_exists}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.cli.bootstrap_native_worker_runtime.{native_build_select_worker_runtime, native_build_worker_preflight_code}
@@ -2055,6 +2056,53 @@ var _shard_aggregate_fail_reason_v1: text = ""
 pub fn native_build_shard_aggregate_fail_reason_v1() -> text:
     _shard_aggregate_fail_reason_v1
 
+# A file worker's batch children (the three process_spawn_async sites below)
+# stay in the coordinator's process group, so reaping the worker with
+# process_kill(pid) used to leave them running with their heaps outside the
+# pool's accounting. The worker names itself here for the duration of each
+# spawn; the child (native_build_child_bind_parent_v1) arms a parent-death
+# SIGKILL and exits if that parent is already gone. The mark is unset, never
+# left empty: a present SIMPLE_* key is folded into the environment
+# fingerprint and is an unknown key to the HIR worker profile. See
+# doc/08_tracking/bug/native_build_reaped_worker_orphans_batch_children_2026-11-24.md
+const NATIVE_WORKER_CHILD_PARENT_ENV_V1: text = "SIMPLE_NATIVE_WORKER_CHILD_PARENT_PID"
+
+fn native_file_worker_spawn_bound_child_v1(simple_bin: text, child_args: [text]) -> i64:
+    env_set(NATIVE_WORKER_CHILD_PARENT_ENV_V1, "{getpid()}")
+    val pid = process_spawn_async(simple_bin, child_args)
+    env_unset(NATIVE_WORKER_CHILD_PARENT_ENV_V1)
+    pid
+
+# Child side, called at native-build entry by both CLIs before any ledger
+# claim. True to continue. A process the worker did not mark (coordinator, pool
+# worker, user run) is untouched. The mark is removed before anything can be
+# spawned, so no descendant compares itself with the wrong parent. A host with
+# no arm, or an arm that fails, keeps the old unbound behaviour.
+# reason: continue/stop verdict consumed by the two CLI entry routes
+@allow(primitive_api)
+pub fn native_build_child_bind_parent_v1() -> bool:
+    val mark = env_get(NATIVE_WORKER_CHILD_PARENT_ENV_V1) ?? ""
+    if mark == "":
+        return true
+    env_unset(NATIVE_WORKER_CHILD_PARENT_ENV_V1)
+    val expected = mark.to_i64() ?? 0
+    if expected <= 1:
+        return true
+    val armed = process_arm_parent_death_kill()
+    if armed != 0:
+        if armed != PROCESS_PARENT_DEATH_UNSUPPORTED:
+            eprint("[file-worker] WARNING: parent-death signal not armed (code {armed}); child can outlive worker {expected}")
+        return true
+    # The worker may have died between the spawn and the arm; that death sends
+    # no signal. Existence, not a getppid comparison: no engine exposes
+    # getppid, and this never refuses a child whose worker is alive. A worker
+    # that is dead but not yet reaped still counts as present (a window of
+    # milliseconds; such a child stays unbound).
+    if not process_exists(expected):
+        eprint("[file-worker] worker {expected} exited before this child started; exiting")
+        return false
+    true
+
 # Worker side of `--file-worker=i/n` (bootstrap_main.spl dispatch). Claims
 # one module (SIMPLE_FILE_WORKER_BATCH, default 1) per round through a HIR
 # child, then lowers + emits objects through a MIR child once the HIR ledger is
@@ -2087,7 +2135,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         env_set("SIMPLE_HIR_SHARD_OWNER", child_owner)
         env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "{batch}")
         val hir_start = time_now_monotonic_ms()
-        val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--hir-shard={spec}"))
+        val pid = native_file_worker_spawn_bound_child_v1(simple_bin, native_file_worker_child_args_v1(args, "--hir-shard={spec}"))
         val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker hir", pid, native_build_timeout_ms(args)))
         val hir_done = time_now_monotonic_ms()
         env_set("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "")
@@ -2148,7 +2196,7 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         env_set("SIMPLE_NATIVE_FILE_WORKERS", "{phase_b_pool_workers}")
         env_set("SIMPLE_MIR_SHARD_QUEUE", mir_queue)
         env_set("SIMPLE_MIR_SHARD_OWNER", child_owner)
-        val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--mir-shard=0/{mir_count}"))
+        val pid = native_file_worker_spawn_bound_child_v1(simple_bin, native_file_worker_child_args_v1(args, "--mir-shard=0/{mir_count}"))
         val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker mir", pid, native_build_timeout_ms(args)))
         env_set("SIMPLE_MIR_SHARD_QUEUE", "")
         env_set("SIMPLE_MIR_SHARD_OWNER", "")
@@ -2313,6 +2361,8 @@ pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, grou
 # ledger (Windows async spawn carries no child stderr; see
 # BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010).
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
+    if not native_build_child_bind_parent_v1():
+        return 1
     val code = run_native_build_worker_inner(raw_args)
     if code != 0:
         if (env_get("SIMPLE_HIR_SHARD") ?? "") != "":
@@ -3304,7 +3354,7 @@ impl NativeFileUnitInvokerV1 for NativeFileUnitProcessInvokerV1:
         env_set("SIMPLE_MIR_SHARD", "0/1")
         env_set("SIMPLE_MIR_SHARD_QUEUE", self.mir_queue)
         env_set("SIMPLE_MIR_SHARD_OWNER", mir_owner)
-        val pid = process_spawn_async(self.simple_bin, native_file_worker_child_args_v1(self.args, "--hir-shard={self.spec}"))
+        val pid = native_file_worker_spawn_bound_child_v1(self.simple_bin, native_file_worker_child_args_v1(self.args, "--hir-shard={self.spec}"))
         val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker unit", pid, native_build_timeout_ms(self.args)))
         env_set(NATIVE_FILE_WORKER_UNIT_ENV_V1, "")
         native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_file_workers)
