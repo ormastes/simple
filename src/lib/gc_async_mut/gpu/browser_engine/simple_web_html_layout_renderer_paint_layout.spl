@@ -458,9 +458,11 @@ fn _html_draw_ir_text_shadow_commands(
 # `a:link` and authored underlines). The Draw IR text command carries the
 # decoration only as a style prop, which no Engine2D executor reads, so the
 # rule is emitted as its own rect under each run. Placement follows Chrome:
-# top = baseline + round(0.106em - thickness/2), thickness = round(0.0733em)
+# top = baseline + round(0.106em - thickness/2), thickness = floor(em/10)
 # (min 1) unless `text-decoration-thickness` is set; the baseline is the run's
-# y plus the ascent, i.e. relative to where the glyphs are drawn.
+# y plus the ascent, i.e. relative to where the glyphs are drawn. At device
+# scale k Chrome applies both rules to the DEVICE font (16px at k=4: 6 rows
+# at baseline + 4, not k x the 1 px rule at + 1), carried as `device-rect`.
 fn _html_draw_ir_underline_commands(
     node: HNode, st: Style, runs: [DrawIrCommand]
 ) -> [DrawIrCommand]:
@@ -471,14 +473,28 @@ fn _html_draw_ir_underline_commands(
     val thickness = style_decoration_thickness_px(st)
     val below = (fs * 1060 - thickness * 5000 + 5000) / 10000
     val color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
+    val k = layout_device_scale()
+    val css_top = _html_draw_ir_chrome_ascent(fs) + below + st.text_underline_offset_px
+    val dev_fs = fs * k
+    val dev_auto = if dev_fs / 10 < 1: 1 else: dev_fs / 10
+    val dev_thickness = if st.text_decoration_thickness_px > 0: st.text_decoration_thickness_px * k else: dev_auto
+    val dev_top = _html_draw_ir_chrome_ascent(dev_fs) + (dev_fs * 1060 - dev_thickness * 5000 + 5000) / 10000 + st.text_underline_offset_px * k
     # cpu-lane-loop-ok: one rule per emitted text line of this node; bound is the node's wrapped line count
     for run in runs:
         if run.kind == "text" and run.width > 0:
-            out.push(draw_ir_rect_clipped(
+            var rule = draw_ir_rect_clipped(
                 run.component_id + "::underline", run.x,
-                run.y + _html_draw_ir_chrome_ascent(fs) + below + st.text_underline_offset_px,
-                run.width, thickness, color, run.clip_rect
-            ))
+                run.y + css_top, run.width, thickness, color, run.clip_rect
+            )
+            if k > 1:
+                var props: [DrawIrStyleProp] = [
+                    draw_ir_style_prop("device-rect", "0,{dev_top - k * css_top},{run.width * k},{dev_thickness}")
+                ]
+                for prop in run.computed_style:  # cpu-lane-loop-ok: copies the run's device line offset; bound is the run's prop list
+                    if prop.key == "device-y-offset":
+                        props.push(prop)
+                rule.computed_style = props
+            out.push(rule)
     out
 
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
