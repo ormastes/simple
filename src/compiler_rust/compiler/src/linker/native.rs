@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use simple_common::target::{LinkerFlavor, Target, TargetOS};
+use simple_common::target::{LinkerFlavor, Target, TargetArch, TargetOS};
 
 use super::error::{LinkerError, LinkerResult};
 
@@ -185,6 +185,8 @@ impl NativeLinker {
             Self::Lld => match target.linker_flavor() {
                 LinkerFlavor::Msvc => "lld-link",
                 LinkerFlavor::WasmLd => "wasm-ld",
+                // Windows does not append .exe to an executable name that already has a suffix.
+                LinkerFlavor::Gnu if cfg!(windows) => "ld.lld.exe",
                 LinkerFlavor::Gnu => "ld.lld",
             },
             _ => self.command(),
@@ -272,6 +274,27 @@ impl NativeLinker {
     ///
     /// Returns `Ok(())` on success, or a `LinkerError` on failure.
     pub fn link(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions) -> LinkerResult<()> {
+        self.link_with_target(objects, output, options, None)
+    }
+
+    /// Link using the target's frontend and option dialect, independently of the host.
+    pub fn link_for_target(
+        &self,
+        objects: &[PathBuf],
+        output: &Path,
+        options: &LinkOptions,
+        target: &Target,
+    ) -> LinkerResult<()> {
+        self.link_with_target(objects, output, options, Some(target))
+    }
+
+    fn link_with_target(
+        &self,
+        objects: &[PathBuf],
+        output: &Path,
+        options: &LinkOptions,
+        target: Option<&Target>,
+    ) -> LinkerResult<()> {
         // Verify all input files exist
         for obj in objects {
             if !obj.exists() {
@@ -279,11 +302,43 @@ impl NativeLinker {
             }
         }
 
-        if matches!(self, Self::Msvc) {
-            return self.link_msvc(objects, output, options);
+        let program = target.map_or_else(|| self.command(), |target| self.command_for_target(target));
+        if matches!(self, Self::Msvc)
+            || (matches!(self, Self::Lld) && target.is_some_and(|target| target.linker_flavor() == LinkerFlavor::Msvc))
+        {
+            return self.link_msvc(objects, output, options, program);
         }
 
-        let mut cmd = Command::new(self.command());
+        let gnu_pe =
+            target.is_some_and(|target| target.os == TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu);
+        if gnu_pe
+            && options
+                .extra_flags
+                .iter()
+                .any(|flag| flag.starts_with("--unresolved-symbols="))
+        {
+            return Err(LinkerError::InvalidConfig(
+                "GNU PE does not support --unresolved-symbols; unresolved-symbol probing cannot be silently accepted"
+                    .into(),
+            ));
+        }
+        // Hosted GNU Windows executables need the selected C driver's sysroot
+        // and CRT startup graph. Raw ld cannot discover these from import names.
+        // Explicit-entry and shared links retain their existing low-level path.
+        if gnu_pe && options.entry_point.is_none() && !options.shared && matches!(self, Self::Lld | Self::Ld) {
+            return self.link_gnu_pe_hosted(objects, output, options, target.unwrap());
+        }
+        let mut cmd = Command::new(program);
+        if gnu_pe && matches!(self, Self::Lld | Self::Ld) {
+            let emulation = match target.unwrap().arch {
+                TargetArch::X86_64 => "i386pep",
+                TargetArch::X86 => "i386pe",
+                TargetArch::Aarch64 => "arm64pe",
+                TargetArch::Arm => "thumb2pe",
+                _ => return Err(LinkerError::UnsupportedTarget("GNU PE architecture".into())),
+            };
+            cmd.arg("-m").arg(emulation);
+        }
 
         // Add output file
         cmd.arg("-o").arg(output);
@@ -314,7 +369,11 @@ impl NativeLinker {
         }
 
         // Add linker-specific flags
-        self.add_common_flags(&mut cmd, options);
+        if gnu_pe {
+            self.add_gnu_pe_flags(&mut cmd, options);
+        } else {
+            self.add_common_flags(&mut cmd, options);
+        }
 
         // Add object files
         for obj in objects {
@@ -364,7 +423,8 @@ impl NativeLinker {
         // contain Simple runtime libraries (they are statically linked).
         #[cfg(target_os = "macos")]
         for path in &options.library_paths {
-            if !Self::is_system_library_path(path)
+            if !gnu_pe
+                && !Self::is_system_library_path(path)
                 && (!has_static_runtime_lib || !Self::is_simple_runtime_only_path(path))
             {
                 cmd.arg("-rpath").arg(path);
@@ -372,7 +432,8 @@ impl NativeLinker {
         }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         for path in &options.library_paths {
-            if !Self::is_system_library_path(path)
+            if !gnu_pe
+                && !Self::is_system_library_path(path)
                 && (!has_static_runtime_lib || !Self::is_simple_runtime_only_path(path))
             {
                 cmd.arg(format!("--rpath={}", path.display()));
@@ -425,15 +486,59 @@ impl NativeLinker {
             .any(|prefix| path.starts_with(prefix))
     }
 
+    fn link_gnu_pe_hosted(
+        &self,
+        objects: &[PathBuf],
+        output: &Path,
+        options: &LinkOptions,
+        target: &Target,
+    ) -> LinkerResult<()> {
+        // This owner is reached only after GNU PE dispatch. Pin that selected
+        // ABI before asking the const triple mapper: an implicit host target
+        // has no hint, whose Windows triple otherwise defaults to MSVC.
+        let target = Target { linker_flavor_hint: Some(LinkerFlavor::Gnu), ..*target };
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(&target);
+        let mut cmd = Command::new(cc);
+        cmd.arg(format!("--target={}", target.triple_str()))
+            .arg(if matches!(self, Self::Lld) { "-fuse-ld=lld" } else { "-fuse-ld=bfd" })
+            .arg("-o").arg(output)
+            .args(objects);
+        if let Some(extra) = std::env::var_os("SIMPLE_LINK_OBJECTS") {
+            cmd.args(std::env::split_paths(&extra));
+        }
+        for path in &options.library_paths {
+            cmd.arg("-L").arg(path);
+        }
+        for lib in ordered_libraries_for_static_runtime(&options.libraries) {
+            if lib.starts_with("simple_") { cmd.args(["-Xlinker", "-Bstatic"]); }
+            cmd.arg(format!("-l{lib}"));
+            if lib.starts_with("simple_") { cmd.args(["-Xlinker", "-Bdynamic"]); }
+        }
+        let mut flags = Command::new("unused");
+        self.add_gnu_pe_flags(&mut flags, options);
+        for flag in flags.get_args().chain(options.extra_flags.iter().map(std::ffi::OsStr::new)) {
+            cmd.arg("-Xlinker").arg(flag);
+        }
+        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
+            eprintln!("Link command: {:?}", cmd);
+        }
+        let result = cmd.output()?;
+        if result.status.success() {
+            Ok(())
+        } else {
+            self.classify_link_error(result.status.code().unwrap_or(-1), &String::from_utf8_lossy(&result.stderr))
+        }
+    }
+
     /// MSVC-specific link invocation using /OUT:, /LIBPATH:, etc.
-    fn link_msvc(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions) -> LinkerResult<()> {
-        let mut cmd = Command::new(self.command());
+    fn link_msvc(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions, program: &str) -> LinkerResult<()> {
+        let mut cmd = Command::new(program);
 
         // MSVC uses /OUT: for output
         cmd.arg(format!("/OUT:{}", output.display()));
 
         // Add MSVC-specific flags
-        self.add_common_flags(&mut cmd, options);
+        Self::Msvc.add_common_flags(&mut cmd, options);
 
         // Add object files
         for obj in objects {
@@ -503,6 +608,35 @@ impl NativeLinker {
             message: format!("{} failed", self.name()),
             stderr: stderr.to_string(),
         })
+    }
+
+    /// GNU PE uses dynamic-base ASLR, not the ELF -pie option.
+    fn add_gnu_pe_flags(&self, cmd: &mut Command, options: &LinkOptions) {
+        if matches!(self, Self::Lld) {
+            if let Some(threads) = options
+                .threads
+                .or_else(|| std::env::var("SIMPLE_LINKER_THREADS").ok()?.parse().ok())
+            {
+                cmd.arg(format!("--threads={threads}"));
+            }
+            cmd.arg("--icf=all");
+        }
+        if let Some(path) = options.map_file.as_ref().filter(|_| options.generate_map) {
+            cmd.arg(format!("--Map={}", path.display()));
+        }
+        if options.strip {
+            cmd.arg("--strip-all");
+        }
+        if options.shared {
+            cmd.arg("--shared");
+        }
+        if options.pie {
+            cmd.arg("--dynamicbase");
+        }
+        cmd.arg("--gc-sections");
+        if options.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok() {
+            cmd.arg("-v");
+        }
     }
 
     /// Add common flags based on linker type and options.
@@ -804,6 +938,147 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_gnu_pe_rejects_elf_unresolved_symbol_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let object = temp.path().join("input.obj");
+        std::fs::write(&object, b"not reached: policy rejected before linker launch").unwrap();
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        let mut options = LinkOptions::new();
+        options.extra_flags.push("--unresolved-symbols=ignore-all".into());
+        let output = temp.path().join("must-not-exist.exe");
+        let result = NativeLinker::Lld.link_for_target(&[object], &output, &options, &target);
+        assert!(matches!(result, Err(LinkerError::InvalidConfig(message)) if message.contains("GNU PE")));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires a selected GNU clang driver and ld.lld; executes a real PE"]
+    fn test_gnu_pe_hosted_main_discovers_crt_and_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(&target);
+        let source = temp.path().join("main.c");
+        let object = temp.path().join("main.o");
+        std::fs::write(&source, "#include <stdio.h>\nint main(int argc, char **argv) { if (argc != 2 || argv[1][0] != 'x') return 71; puts(\"Hello, World!\"); return 0; }\n").unwrap();
+        let compiled = Command::new(cc).arg(format!("--target={}", target.triple_str()))
+            .args(["-c", "-o"]).arg(&object).arg(&source).output().unwrap();
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+        let mut options = LinkOptions::new();
+        options.libraries = ["msvcrt", "kernel32", "ws2_32", "winhttp", "mswsock", "advapi32", "d3d11", "dxgi"]
+            .into_iter().map(String::from).collect();
+        // No hand-supplied import paths, startup objects, or __main definition.
+        let executable = temp.path().join("hello.exe");
+        NativeLinker::Lld.link_for_target(&[object], &executable, &options, &target).unwrap();
+        let ran = Command::new(executable).arg("x").output().unwrap();
+        assert!(ran.status.success(), "{:?}", ran);
+        assert_eq!(String::from_utf8(ran.stdout).unwrap().replace("\r\n", "\n"), "Hello, World!\n");
+    }
+
+    #[test]
+    #[cfg(all(windows, target_env = "gnu"))]
+    #[ignore = "requires GNU clang and ld.lld; executes the implicit-host CRT path"]
+    fn test_implicit_gnu_host_uses_gnu_driver_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = Target { linker_flavor_hint: Some(LinkerFlavor::Gnu), ..Target::host() };
+        let source = temp.path().join("main.c");
+        let object = temp.path().join("main.o");
+        std::fs::write(&source, "#include <stdio.h>\nint main(void) { puts(\"implicit GNU host\"); return 37; }\n").unwrap();
+        let cc = simple_common::platform::cc_detect::detect_c_compiler_for_target(&explicit);
+        let compiled = Command::new(cc).arg(format!("--target={}", explicit.triple_str()))
+            .args(["-c", "-o"]).arg(&object).arg(source).output().unwrap();
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+        let host = Target::host();
+        assert_eq!(host.linker_flavor_hint, None);
+        assert_eq!(host.linker_flavor(), LinkerFlavor::Gnu);
+        let executable = temp.path().join("implicit.exe");
+        NativeLinker::Lld.link_for_target(&[object], &executable, &LinkOptions::new(), &host).unwrap();
+        let ran = Command::new(executable).output().unwrap();
+        assert_eq!(ran.status.code(), Some(37));
+        assert_eq!(String::from_utf8(ran.stdout).unwrap().replace("\r\n", "\n"), "implicit GNU host\n");
+    }
+
+    /// Compile real COFF/ELF objects, then exercise the public builder and native linker.
+    #[test]
+    #[ignore = "requires clang, ld.lld, and lld-link; run explicitly for linker changes"]
+    fn test_explicit_target_links_real_pe_and_elf_artifacts() {
+        use crate::linker::builder::LinkerBuilder;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("entry.c");
+        std::fs::write(
+            &source,
+            r#"
+#ifdef _WIN32
+__declspec(dllimport) void *GetStdHandle(unsigned long);
+__declspec(dllimport) int WriteFile(void *, const void *, unsigned long, unsigned long *, void *);
+__declspec(dllimport) void ExitProcess(unsigned int);
+void entry(void) {
+    unsigned long written = 0;
+    const char text[] = "Hello, World!\n";
+    if (!WriteFile(GetStdHandle((unsigned long)-11), text, sizeof(text) - 1, &written, 0)) ExitProcess(99);
+    ExitProcess(written == sizeof(text) - 1 ? 37 : 98);
+}
+#else
+int entry(void) { return 37; }
+#endif
+"#,
+        )
+        .unwrap();
+        let clang = std::env::var("SIMPLE_LINKER_TEST_CLANG").unwrap_or_else(|_| "clang".into());
+        let import_path = Command::new(&clang)
+            .args(["--target=x86_64-w64-windows-gnu", "--print-file-name=libkernel32.a"])
+            .output()
+            .unwrap();
+        assert!(import_path.status.success());
+        let kernel32 = PathBuf::from(String::from_utf8(import_path.stdout).unwrap().trim());
+        assert!(kernel32.is_file(), "MinGW kernel32 import archive required");
+        for (triple, subsystem, magic) in [
+            ("x86_64-pc-windows-gnu", "--subsystem=console", b"MZ".as_slice()),
+            ("x86_64-pc-windows-msvc", "/SUBSYSTEM:CONSOLE", b"MZ".as_slice()),
+            ("x86_64-unknown-linux-gnu", "--build-id=none", b"\x7fELF".as_slice()),
+        ] {
+            let object = temp.path().join(format!("{triple}.obj"));
+            let compiled = Command::new(&clang)
+                .arg(format!("--target={triple}"))
+                .args(["-c", "-ffreestanding", "-fno-stack-protector"])
+                .arg(&source)
+                .arg("-o")
+                .arg(&object)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{triple}: {}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            let output = temp.path().join(format!("{triple}.exe"));
+            let map = temp.path().join(format!("{triple}.map"));
+            let mut builder = LinkerBuilder::new()
+                .target(Target::parse(triple).unwrap())
+                .linker(NativeLinker::Lld)
+                .object(&object)
+                .output(&output)
+                .entry("entry")
+                .pie()
+                .strip()
+                .threads(1)
+                .map(&map)
+                .flag(subsystem);
+            if magic == b"MZ" {
+                builder = builder.object(&kernel32);
+            }
+            builder.link().unwrap();
+            assert!(std::fs::read(&output).unwrap().starts_with(magic), "{triple}");
+            assert!(map.is_file(), "{triple} linker map missing");
+            if cfg!(windows) && magic == b"MZ" {
+                let executed = Command::new(&output).output().unwrap();
+                assert_eq!(executed.status.code(), Some(37), "{triple}");
+                assert_eq!(executed.stdout, b"Hello, World!\n", "{triple}");
+            }
+        }
+    }
+
+    #[test]
     fn test_linker_from_name() {
         assert_eq!(NativeLinker::from_name("mold"), Some(NativeLinker::Mold));
         assert_eq!(NativeLinker::from_name("MOLD"), Some(NativeLinker::Mold));
@@ -834,7 +1109,10 @@ mod tests {
         use simple_common::target::{TargetArch, TargetOS};
 
         let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        assert_eq!(NativeLinker::Lld.command_for_target(&linux), "ld.lld");
+        assert_eq!(
+            NativeLinker::Lld.command_for_target(&linux),
+            if cfg!(windows) { "ld.lld.exe" } else { "ld.lld" }
+        );
 
         // Force MSVC flavor for this test — linker_flavor() auto-detects MSYS2/MinGW
         // at runtime which would return GNU flavor on MSYS2 shells

@@ -1,0 +1,478 @@
+#![allow(primitive_api)]
+# reason: raw Vulkan handles, SPIR-V words, counts and tensor positions are untyped integers at the C ABI and kernel launch parameters
+# @gc — module uses GC runtime
+#
+# spirv_compute — a small pure-Simple SPIR-V 1.3 emitter for Vulkan compute
+# shaders (storage buffers of f32, push constants, workgroup arrays, structured
+# loops and ifs). It emits the binary words directly, so no glslang / shaderc /
+# spirv-as is needed on the host. Used by the slang Vulkan ops provider
+# (tensor_ops_vulkan_kernels.spl).
+#
+# Conventions: every integer is u32, every float is f32. Locals are Function
+# variables (Load/Store, no phi). Buffers live in descriptor set 0, binding
+# 0..n-1, as `struct { float data[]; }` blocks. Push constants are one block of
+# 32-bit members (0 = uint, 1 = float) laid out at offsets 0, 4, 8, ...
+
+use std.common.binary_io.{f32_to_bits}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+val SPV_MAGIC = 119734787
+val SPV_VERSION_1_3 = 66304
+
+# SPIR-V opcodes used below.
+val OP_EXT_INST_IMPORT = 11
+val OP_EXT_INST = 12
+val OP_MEMORY_MODEL = 14
+val OP_ENTRY_POINT = 15
+val OP_EXECUTION_MODE = 16
+val OP_CAPABILITY = 17
+val OP_TYPE_VOID = 19
+val OP_TYPE_BOOL = 20
+val OP_TYPE_INT = 21
+val OP_TYPE_FLOAT = 22
+val OP_TYPE_VECTOR = 23
+val OP_TYPE_ARRAY = 28
+val OP_TYPE_RUNTIME_ARRAY = 29
+val OP_TYPE_STRUCT = 30
+val OP_TYPE_POINTER = 32
+val OP_TYPE_FUNCTION = 33
+val OP_CONSTANT = 43
+val OP_FUNCTION = 54
+val OP_FUNCTION_END = 56
+val OP_VARIABLE = 59
+val OP_LOAD = 61
+val OP_STORE = 62
+val OP_ACCESS_CHAIN = 65
+val OP_DECORATE = 71
+val OP_MEMBER_DECORATE = 72
+val OP_COMPOSITE_EXTRACT = 81
+val OP_CONVERT_U_TO_F = 112
+val OP_F_NEGATE = 127
+val OP_I_ADD = 128
+val OP_F_ADD = 129
+val OP_I_SUB = 130
+val OP_F_SUB = 131
+val OP_I_MUL = 132
+val OP_F_MUL = 133
+val OP_F_DIV = 136
+val OP_U_DIV = 134
+val OP_U_MOD = 137
+val OP_BITCAST = 124
+val OP_LOGICAL_OR = 166
+val OP_LOGICAL_AND = 167
+val OP_F_ORD_EQUAL = 180
+val OP_I_EQUAL = 170
+val OP_U_LESS_THAN = 176
+val OP_F_ORD_GREATER_THAN = 186
+val OP_CONTROL_BARRIER = 224
+val OP_LOOP_MERGE = 246
+val OP_SELECTION_MERGE = 247
+val OP_LABEL = 248
+val OP_BRANCH = 249
+val OP_BRANCH_CONDITIONAL = 250
+val OP_RETURN = 253
+
+# Storage classes.
+val SC_INPUT = 1
+val SC_WORKGROUP = 4
+val SC_FUNCTION = 7
+val SC_PUSH_CONSTANT = 9
+val SC_STORAGE_BUFFER = 12
+
+# GLSL.std.450 instructions.
+val GLSL_EXP = 27
+val GLSL_SQRT = 31
+
+pub val SPV_BUILTIN_WORKGROUP_ID = 26
+pub val SPV_BUILTIN_LOCAL_INVOCATION_ID = 27
+pub val SPV_BUILTIN_GLOBAL_INVOCATION_ID = 28
+
+pub struct SpvLoop:
+    header: i64
+    cond: i64
+    body: i64
+    cont: i64
+    merge: i64
+
+pub struct SpvIf:
+    then_label: i64
+    merge: i64
+
+pub class SpvModule:
+    next_id: i64
+    glsl: i64
+    caps: [i64]
+    imports: [i64]
+    memmodel: [i64]
+    entry: [i64]
+    modes: [i64]
+    annot: [i64]
+    types: [i64]
+    code: [i64]
+    fvars: [i64]
+    fbody: [i64]
+    iface: [i64]
+    nbufs: i64
+    pc_kinds: [i64]
+    pc_var: i64
+    type_cache: Dict<text, i64>
+    fid: i64
+    entry_label: i64
+
+# Word list for one instruction: word-count/opcode header, then `operands`.
+pub fn spv_inst(op: i64, operands: [i64]) -> [i64]:
+    [(operands.len() + 1) * 65536 + op] + operands
+
+# NUL-terminated, 4-byte padded little-endian words of `s`.
+pub fn spv_string_words(s: text) -> [i64]:
+    var b: [u8] = text_to_utf8_bytes(s)
+    b.push(0)
+    while b.len() % 4 != 0:
+        b.push(0)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < b.len():
+        out.push((b[i] as i64) + (b[i + 1] as i64) * 256 + (b[i + 2] as i64) * 65536 + (b[i + 3] as i64) * 16777216)
+        i = i + 4
+    out
+
+pub fn spv_module_new() -> SpvModule:
+    SpvModule(
+        next_id: 2, glsl: 1, caps: [], imports: [], memmodel: [], entry: [], modes: [],
+        annot: [], types: [], code: [], fvars: [], fbody: [], iface: [], nbufs: 0,
+        pc_kinds: [], pc_var: 0, type_cache: {}, fid: 0, entry_label: 0)
+
+impl SpvModule:
+    me alloc() -> i64:
+        val id = self.next_id
+        self.next_id = id + 1
+        id
+
+    # ---- types and constants (cached by key) --------------------------------
+    me _type(key: text, op: i64, operands: [i64]) -> i64:
+        val cached = self.type_cache.get(key)
+        if cached.is_some():
+            return cached.unwrap()
+        val id = self.alloc()
+        self.types = self.types + spv_inst(op, [id] + operands)
+        self.type_cache[key] = id
+        id
+
+    me ty_void() -> i64:
+        self._type("void", OP_TYPE_VOID, [])
+
+    me ty_bool() -> i64:
+        self._type("bool", OP_TYPE_BOOL, [])
+
+    me ty_u32() -> i64:
+        self._type("u32", OP_TYPE_INT, [32, 0])
+
+    me ty_f32() -> i64:
+        self._type("f32", OP_TYPE_FLOAT, [32])
+
+    me ty_uvec3() -> i64:
+        val u = self.ty_u32()
+        self._type("uvec3", OP_TYPE_VECTOR, [u, 3])
+
+    me ty_ptr(sc: i64, pointee: i64) -> i64:
+        self._type("ptr{sc}_{pointee}", OP_TYPE_POINTER, [sc, pointee])
+
+    me cu(v: i64) -> i64:
+        val key = "cu{v}"
+        val cached = self.type_cache.get(key)
+        if cached.is_some():
+            return cached.unwrap()
+        val t = self.ty_u32()
+        val id = self.alloc()
+        self.types = self.types + spv_inst(OP_CONSTANT, [t, id, v])
+        self.type_cache[key] = id
+        id
+
+    me cf(v: f64) -> i64:
+        val bits = (f32_to_bits(v as f32) as i64) & 4294967295
+        val key = "cf{bits}"
+        val cached = self.type_cache.get(key)
+        if cached.is_some():
+            return cached.unwrap()
+        val t = self.ty_f32()
+        val id = self.alloc()
+        self.types = self.types + spv_inst(OP_CONSTANT, [t, id, bits])
+        self.type_cache[key] = id
+        id
+
+    # ---- module-level declarations -------------------------------------------
+    me _global(ptr_ty: i64, sc: i64) -> i64:
+        val id = self.alloc()
+        self.types = self.types + spv_inst(OP_VARIABLE, [ptr_ty, id, sc])
+        id
+
+    me _decorate(target: i64, deco: i64, args: [i64]):
+        self.annot = self.annot + spv_inst(OP_DECORATE, [target, deco] + args)
+
+    me _member_decorate(target: i64, member: i64, deco: i64, args: [i64]):
+        self.annot = self.annot + spv_inst(OP_MEMBER_DECORATE, [target, member, deco] + args)
+
+    # Next storage-buffer binding (set 0): `struct { float data[]; }`.
+    me ssbo() -> i64:
+        val f = self.ty_f32()
+        val cached = self.type_cache.get("ssbo_struct")
+        var st: i64 = 0
+        if cached.is_some():
+            st = cached.unwrap()
+        else:
+            val ra = self._type("ssbo_ra", OP_TYPE_RUNTIME_ARRAY, [f])
+            self._decorate(ra, 6, [4])
+            st = self._type("ssbo_struct", OP_TYPE_STRUCT, [ra])
+            self._decorate(st, 2, [])
+            self._member_decorate(st, 0, 35, [0])
+        val p = self.ty_ptr(SC_STORAGE_BUFFER, st)
+        val v = self._global(p, SC_STORAGE_BUFFER)
+        self._decorate(v, 34, [0])
+        self._decorate(v, 33, [self.nbufs])
+        self.nbufs = self.nbufs + 1
+        v
+
+    # One push-constant block; `kinds` has one entry per 32-bit member: 0 = uint, 1 = float.
+    me push_block(kinds: [i64]):
+        var members: [i64] = []
+        val u = self.ty_u32()
+        val f = self.ty_f32()
+        var i: i64 = 0
+        while i < kinds.len():
+            if kinds[i] == 1:
+                members.push(f)
+            else:
+                members.push(u)
+            i = i + 1
+        val st = self._type("pc_struct", OP_TYPE_STRUCT, members)
+        self._decorate(st, 2, [])
+        var m: i64 = 0
+        while m < kinds.len():
+            self._member_decorate(st, m, 35, [m * 4])
+            m = m + 1
+        val p = self.ty_ptr(SC_PUSH_CONSTANT, st)
+        self.pc_var = self._global(p, SC_PUSH_CONSTANT)
+        self.pc_kinds = kinds
+
+    # Input builtin variable of type uvec3 (listed in the entry iface).
+    me builtin_uvec3(builtin: i64) -> i64:
+        val t = self.ty_uvec3()
+        val p = self.ty_ptr(SC_INPUT, t)
+        val v = self._global(p, SC_INPUT)
+        self._decorate(v, 11, [builtin])
+        self.iface.push(v)
+        v
+
+    # Workgroup float array of `n` elements.
+    me shared_f32(n: i64) -> i64:
+        val f = self.ty_f32()
+        val len_id = self.cu(n)
+        val arr = self._type("arr_f32_{n}", OP_TYPE_ARRAY, [f, len_id])
+        val p = self.ty_ptr(SC_WORKGROUP, arr)
+        self._global(p, SC_WORKGROUP)
+
+    # Workgroup uint array of `n` elements.
+    me shared_u32(n: i64) -> i64:
+        val u = self.ty_u32()
+        val len_id = self.cu(n)
+        val arr = self._type("arr_u32_{n}", OP_TYPE_ARRAY, [u, len_id])
+        val p = self.ty_ptr(SC_WORKGROUP, arr)
+        self._global(p, SC_WORKGROUP)
+
+    # ---- function body ---------------------------------------------------------
+    me _b(op: i64, operands: [i64]):
+        self.fbody = self.fbody + spv_inst(op, operands)
+
+    me _r(op: i64, ty: i64, operands: [i64]) -> i64:
+        val id = self.alloc()
+        self.fbody = self.fbody + spv_inst(op, [ty, id] + operands)
+        id
+
+    me begin_main():
+        val vt = self.ty_void()
+        val ft = self._type("fn_void", OP_TYPE_FUNCTION, [vt])
+        self.fid = self.alloc()
+        self.entry_label = self.alloc()
+        self.fvars = []
+        self.fbody = []
+        self.code = spv_inst(OP_FUNCTION, [vt, self.fid, 0, ft]) + spv_inst(OP_LABEL, [self.entry_label])
+
+    # Finish `main` with local size (lx, 1, 1) and return the SPIR-V binary as bytes.
+    me finish(lx: i64) -> [u8]:
+        self._b(OP_RETURN, [])
+        self.code = self.code + self.fvars + self.fbody + spv_inst(OP_FUNCTION_END, [])
+        self.caps = spv_inst(OP_CAPABILITY, [1])
+        self.imports = spv_inst(OP_EXT_INST_IMPORT, [self.glsl] + spv_string_words("GLSL.std.450"))
+        self.memmodel = spv_inst(OP_MEMORY_MODEL, [0, 1])
+        self.entry = spv_inst(OP_ENTRY_POINT, [5, self.fid] + spv_string_words("main") + self.iface)
+        self.modes = spv_inst(OP_EXECUTION_MODE, [self.fid, 17, lx, 1, 1])
+        val body = self.caps + self.imports + self.memmodel + self.entry + self.modes + self.annot + self.types + self.code
+        val words = [SPV_MAGIC, SPV_VERSION_1_3, 0, self.next_id, 0] + body
+        var out: [u8] = []
+        for w in words:
+            out.push((w & 255) as u8)
+            out.push(((w >> 8) & 255) as u8)
+            out.push(((w >> 16) & 255) as u8)
+            out.push(((w >> 24) & 255) as u8)
+        out
+
+    me fvar_f32() -> i64:
+        val f = self.ty_f32()
+        val p = self.ty_ptr(SC_FUNCTION, f)
+        val id = self.alloc()
+        self.fvars = self.fvars + spv_inst(OP_VARIABLE, [p, id, SC_FUNCTION])
+        id
+
+    me fvar_u32() -> i64:
+        val u = self.ty_u32()
+        val p = self.ty_ptr(SC_FUNCTION, u)
+        val id = self.alloc()
+        self.fvars = self.fvars + spv_inst(OP_VARIABLE, [p, id, SC_FUNCTION])
+        id
+
+    me load_u(ptr: i64) -> i64:
+        val t = self.ty_u32()
+        self._r(OP_LOAD, t, [ptr])
+
+    me load_f(ptr: i64) -> i64:
+        val t = self.ty_f32()
+        self._r(OP_LOAD, t, [ptr])
+
+    me store(ptr: i64, v: i64):
+        self._b(OP_STORE, [ptr, v])
+
+    # Element pointer of an ssbo variable.
+    me buf_ptr(var_id: i64, idx: i64) -> i64:
+        val f = self.ty_f32()
+        val p = self.ty_ptr(SC_STORAGE_BUFFER, f)
+        self._r(OP_ACCESS_CHAIN, p, [var_id, self.cu(0), idx])
+
+    me sh_ptr(var_id: i64, idx: i64) -> i64:
+        val f = self.ty_f32()
+        val p = self.ty_ptr(SC_WORKGROUP, f)
+        self._r(OP_ACCESS_CHAIN, p, [var_id, idx])
+
+    me sh_ptr_u(var_id: i64, idx: i64) -> i64:
+        val u = self.ty_u32()
+        val p = self.ty_ptr(SC_WORKGROUP, u)
+        self._r(OP_ACCESS_CHAIN, p, [var_id, idx])
+
+    # Push-constant member `i` (load).
+    me pc(i: i64) -> i64:
+        var t = self.ty_u32()
+        if self.pc_kinds[i] == 1:
+            t = self.ty_f32()
+        val p = self.ty_ptr(SC_PUSH_CONSTANT, t)
+        val ptr = self._r(OP_ACCESS_CHAIN, p, [self.pc_var, self.cu(i)])
+        self._r(OP_LOAD, t, [ptr])
+
+    # Component `c` (0..2) of a uvec3 builtin.
+    me builtin_x(var_id: i64) -> i64:
+        val t = self.ty_uvec3()
+        val u = self.ty_u32()
+        val v = self._r(OP_LOAD, t, [var_id])
+        self._r(OP_COMPOSITE_EXTRACT, u, [v, 0])
+
+    me iadd(a: i64, b: i64) -> i64:
+        self._r(OP_I_ADD, self.ty_u32(), [a, b])
+
+    me isub(a: i64, b: i64) -> i64:
+        self._r(OP_I_SUB, self.ty_u32(), [a, b])
+
+    me imul(a: i64, b: i64) -> i64:
+        self._r(OP_I_MUL, self.ty_u32(), [a, b])
+
+    me udiv(a: i64, b: i64) -> i64:
+        self._r(OP_U_DIV, self.ty_u32(), [a, b])
+
+    me umod(a: i64, b: i64) -> i64:
+        self._r(OP_U_MOD, self.ty_u32(), [a, b])
+
+    me bitcast_f(a: i64) -> i64:
+        self._r(OP_BITCAST, self.ty_f32(), [a])
+
+    me lor(a: i64, b: i64) -> i64:
+        self._r(OP_LOGICAL_OR, self.ty_bool(), [a, b])
+
+    me land(a: i64, b: i64) -> i64:
+        self._r(OP_LOGICAL_AND, self.ty_bool(), [a, b])
+
+    me feq(a: i64, b: i64) -> i64:
+        self._r(OP_F_ORD_EQUAL, self.ty_bool(), [a, b])
+
+    me fadd(a: i64, b: i64) -> i64:
+        self._r(OP_F_ADD, self.ty_f32(), [a, b])
+
+    me fsub(a: i64, b: i64) -> i64:
+        self._r(OP_F_SUB, self.ty_f32(), [a, b])
+
+    me fmul(a: i64, b: i64) -> i64:
+        self._r(OP_F_MUL, self.ty_f32(), [a, b])
+
+    me fdiv(a: i64, b: i64) -> i64:
+        self._r(OP_F_DIV, self.ty_f32(), [a, b])
+
+    me fneg(a: i64) -> i64:
+        self._r(OP_F_NEGATE, self.ty_f32(), [a])
+
+    me u_to_f(a: i64) -> i64:
+        self._r(OP_CONVERT_U_TO_F, self.ty_f32(), [a])
+
+    me ult(a: i64, b: i64) -> i64:
+        self._r(OP_U_LESS_THAN, self.ty_bool(), [a, b])
+
+    me ueq(a: i64, b: i64) -> i64:
+        self._r(OP_I_EQUAL, self.ty_bool(), [a, b])
+
+    me fgt(a: i64, b: i64) -> i64:
+        self._r(OP_F_ORD_GREATER_THAN, self.ty_bool(), [a, b])
+
+    me ext_f(inst: i64, x: i64) -> i64:
+        self._r(OP_EXT_INST, self.ty_f32(), [self.glsl, inst, x])
+
+    me fexp(x: i64) -> i64:
+        self.ext_f(GLSL_EXP, x)
+
+    me fsqrt(x: i64) -> i64:
+        self.ext_f(GLSL_SQRT, x)
+
+    # Workgroup barrier (execution + workgroup memory, acquire/release).
+    me barrier():
+        val scope = self.cu(2)
+        val sem = self.cu(264)
+        self._b(OP_CONTROL_BARRIER, [scope, scope, sem])
+
+    # ---- structured control flow -----------------------------------------------
+    me loop_begin() -> SpvLoop:
+        val l = SpvLoop(header: self.alloc(), cond: self.alloc(), body: self.alloc(), cont: self.alloc(), merge: self.alloc())
+        self._b(OP_BRANCH, [l.header])
+        self._b(OP_LABEL, [l.header])
+        self._b(OP_LOOP_MERGE, [l.merge, l.cont, 0])
+        self._b(OP_BRANCH, [l.cond])
+        self._b(OP_LABEL, [l.cond])
+        l
+
+    # Call after computing the loop condition `c` in the cond block.
+    me loop_cond(l: SpvLoop, c: i64):
+        self._b(OP_BRANCH_CONDITIONAL, [c, l.body, l.merge])
+        self._b(OP_LABEL, [l.body])
+
+    # End of the body; the increment goes between loop_cont and loop_end.
+    me loop_cont(l: SpvLoop):
+        self._b(OP_BRANCH, [l.cont])
+        self._b(OP_LABEL, [l.cont])
+
+    me loop_end(l: SpvLoop):
+        self._b(OP_BRANCH, [l.header])
+        self._b(OP_LABEL, [l.merge])
+
+    me if_begin(c: i64) -> SpvIf:
+        val i = SpvIf(then_label: self.alloc(), merge: self.alloc())
+        self._b(OP_SELECTION_MERGE, [i.merge, 0])
+        self._b(OP_BRANCH_CONDITIONAL, [c, i.then_label, i.merge])
+        self._b(OP_LABEL, [i.then_label])
+        i
+
+    me if_end(i: SpvIf):
+        self._b(OP_BRANCH, [i.merge])
+        self._b(OP_LABEL, [i.merge])

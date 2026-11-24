@@ -3,6 +3,7 @@ use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusa
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib_for, build_memory_reserve_default_kib_v1, BUILD_MEMORY_RESERVE_CAP_KIB_V1}
 use app.cli.shard_mem_clamp.{build_host_memory_total_kib, build_host_memory_total_kib_from_bytes_field, build_host_memory_total_kib_bounded}
 use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.host_limits.{host_limit_mem_reserve_free_kib}
 use app.cli.native_build_main.{native_build_memory_gate_applies_v1, native_build_memory_admission_refusal_v1}
 
 # A build must not start when RAM+commit headroom is below the reserve: host
@@ -45,23 +46,23 @@ describe "build memory reserve admission":
         expect(build_host_memory_total_kib_bounded(0, 25165824)).to_equal(25165824)
         expect(build_host_memory_total_kib_bounded(0, 0)).to_equal(0)
 
-    it "composes the live default from the host probe and honours SIMPLE_BUILD_MEMORY_RESERVE_BYTES":
+    it "composes the live host policy or automatic default and honours SIMPLE_BUILD_MEMORY_RESERVE_BYTES":
         val old = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
-        val old_host = env_get("SIMPLE_HOST_CONFIG") ?? ""
-        val old_host_key = env_get("SIMPLE_HOST_MEM_RESERVE_FREE_MIB") ?? ""
-        # Isolate from this machine's host.sdn (mem_reserve_free_mib).
-        env_set("SIMPLE_HOST_CONFIG", "build/no-such-host-config.sdn")
-        env_set("SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "")
+        # SIMPLE_HOST_CONFIG selects only the user layer; a missing user file
+        # does not disable the per-host or defaults layers. Preserve all host
+        # policy inputs and compose their effective reserve before the fallback.
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "")
+        val host_reserve = host_limit_mem_reserve_free_kib(0)
+        val expected = build_memory_reserve_kib_for("", build_host_memory_total_kib(), host_reserve)
         val live = build_memory_reserve_kib()
-        expect(live).to_equal(build_memory_reserve_kib_for("", build_host_memory_total_kib()))
-        expect(live > 0).to_be_true()
-        expect(live <= 25165824).to_be_true()
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1073741824")
-        expect(build_memory_reserve_kib()).to_equal(1048576)
+        val explicit = build_memory_reserve_kib()
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old)
-        env_set("SIMPLE_HOST_CONFIG", old_host)
-        env_set("SIMPLE_HOST_MEM_RESERVE_FREE_MIB", old_host_key)
+        expect(live).to_equal(expected)
+        expect(live > 0).to_be_true()
+        if host_reserve <= 0:
+            expect(live <= 25165824).to_be_true()
+        expect(explicit).to_equal(1048576)
 
     it "refuses below the reserve with a clear message and admits at or above it":
         val refusal = build_memory_start_refusal_v1(1048576, 25165824)

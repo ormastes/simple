@@ -1,0 +1,58 @@
+# @tag: unit, gpu, engine2d, software, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl 2%
+#
+# A catalog section's box-shadow (0 6px 18px rgba(30,41,59,.12)) at device
+# scale 4 on a 3600 x 3040 frame: the box is taller than the frame, so its
+# shadow band covers the whole frame. The falloff columns and the rows whose
+# destination varies went pixel by pixel through _emu_shadow_px (~8 us/px):
+# 1-2 s per box. Pixels are pinned by a hash measured on the base
+# implementation (release/1.0.0 0354c53a8be), the cost by a wall budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_emu_adv.{emu_draw_shadow_rect_outside}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (release/1.0.0 0354c53a8be).
+val SHADOW_HASH: i64 = 3495133086
+
+fn sampled_hash(pixels: [u32], w: i32, h: i32) -> i64:
+    var acc: i64 = 17
+    var y = 0
+    # cpu-lane-loop-ok: spec probe over a 1-in-2 row / 1-in-3 column sample
+    while y < h:
+        var x = 0
+        while x < w:
+            acc = (acc * 31 + (pixels[y * w + x] as i64)) % 4294967291
+            x = x + 3
+        y = y + 2
+    acc
+
+fn paint_shadow() -> ([u32], i64):
+    var backend = SoftwareBackend.create_cpu_simd()
+    expect(backend.init(FRAME_W, FRAME_H)).to_equal(true)
+    backend.clear(0xffeef0ffu32)
+    # Content already painted under the shadow: varying destination rows.
+    var i = 0
+    while i < 40:
+        backend.draw_rect_filled(150 + (i % 5) * 600, 900 + i * 50, 400, 20, 0xff1a2b33u32)
+        i = i + 1
+    backend.draw_rect_filled(0, 2400, 3600, 8, 0x80ff4000u32)
+    val t0 = time_now_unix_micros()
+    emu_draw_shadow_rect_outside(backend, 180, 979, 3240, 66844, 0, 24, 72, 0x1f1e293bu32, 0, 0, 0, 0)
+    emu_draw_shadow_rect_outside(backend, 96, -400, 3408, 67908, 0, 24, 72, 0x1f1e293bu32, 0, 0, 0, 0)
+    val elapsed = time_now_unix_micros() - t0
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    (pixels, elapsed)
+
+describe "outer shadow band of a box taller than the frame":
+    it "paints the measured pixels within a time budget":
+        val r = paint_shadow()
+        val h = sampled_hash(r.0, FRAME_W, FRAME_H)
+        print "shadow_band elapsed_us={r.1} hash={h}"
+        expect(r.0.len()).to_equal(FRAME_W * FRAME_H)
+        expect(h).to_equal(SHADOW_HASH)
+        expect(r.1 < 1500000).to_equal(true)

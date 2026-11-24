@@ -9,10 +9,10 @@ use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.memory.user_copy.{user_copyout_bytes, user_copyin_bytes_validated}
-use std.common.text_bytes.{bytes_to_text}
+use os.kernel.text_checked.{kernel_text_checked, kernel_utf8_valid}
 # TEMP DIAG (lane-C1 bring-up): stage markers in _handle_file_stat.
 extern fn serial_println(msg: text)
-use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
+use os.kernel.fd_io.{posix_close, posix_read, posix_write, posix_lseek, posix_write_for_task_observation_v1}
 use os.kernel.ipc.syscall.{MAX_BINARY_PATH_LEN, _is_userspace_range}
 use os.kernel.fd_table.{
     fd_alloc, fd_set, fd_get_type, fd_activate_task,
@@ -43,6 +43,7 @@ val _FS_ERANGE: i64 = -34
 val _FS_ENOMEM: i64 = -12
 val _FS_ENOSYS: i64 = -38
 val _FS_ENAMETOOLONG: i64 = -36
+val _FS_EILSEQ: i64 = -84
 
 fn _fs_clamp_errno(e: i32) -> i64:
     """Normalize an errno extracted from a Result payload for the SVC return.
@@ -164,15 +165,6 @@ fn _fs_copy_user_bytes(ptr_addr: u64, len: u64) -> [u8]?:
 fn _fs_copyout_exact(ptr_addr: u64, bytes: [u8]) -> bool:
     """Publish all bytes through the architecture-selected owner or fail."""
     user_copyout_bytes(ptr_addr, bytes) == bytes.len() as i64
-
-fn _bytes_to_text(b: [u8]) -> text:
-    """Build `text` from raw path bytes via the always-linked `rt_bytes_to_text`
-    primitive (single C pass that DECODEs the tagged [u8] slots the copyin
-    writes). Replaces the per-byte `.chr()` concat loop: that loop degrades on
-    this freestanding lane — run-20260926_042943 showed the built path losing
-    every component, so `Fat32Filesystem.stat_at` failed EINVAL
-    (`fat32_split_path` -> 0 parts) before any FAT I/O."""
-    bytes_to_text(b)
 
 fn _path_is_absolute(p: [u8]) -> bool:
     """True when the path's first byte is '/'."""
@@ -372,7 +364,9 @@ fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
     if raw_copy == nil:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
-    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    val resolved_path: text = match kernel_text_checked(path_resolve(current.id, raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     # Authorization and filesystem lookup consume this one kernel-owned
     # canonical value. Never re-read the mutable userspace path between them.
     var ipc_mgr = ipc
@@ -503,7 +497,9 @@ fn _handle_file_write(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
         return SyscallResult(value: write_r.unwrap() as i64)
     if not _is_userspace_range(buf_ptr, count):
         return SyscallResult(value: -14)
-    SyscallResult(value: posix_write(args.arg0 as i32, buf_ptr, count))
+    var sched = scheduler
+    val current = sched.get_current()
+    SyscallResult(value: posix_write_for_task_observation_v1(fd, buf_ptr, count, current.id))
 
 fn _handle_file_close(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Close a file descriptor through the POSIX fd owner.
@@ -614,7 +610,9 @@ fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -
         return SyscallResult(value: _FS_EFAULT)
     serial_println("[kstat] copyin-ok")
     val raw = raw_copy.unwrap()
-    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    val resolved_path: text = match kernel_text_checked(path_resolve(current.id, raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     serial_println("[kstat] path-ok")
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
@@ -659,7 +657,9 @@ fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
     if raw_copy == nil:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
-    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    val resolved_path: text = match kernel_text_checked(path_resolve(current.id, raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     val mkdir_r = fs.mkdir_at(dev, resolved_path)
@@ -716,7 +716,9 @@ fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
     if raw_copy == nil:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
-    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    val resolved_path: text = match kernel_text_checked(path_resolve(current.id, raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     val list_r = fs.readdir_at(dev, resolved_path)
@@ -751,7 +753,9 @@ fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
     if raw_copy == nil:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
-    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    val resolved_path: text = match kernel_text_checked(path_resolve(current.id, raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     val unlink_r = fs.unlink_at(dev, resolved_path)
@@ -794,8 +798,12 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
         return SyscallResult(value: _FS_EFAULT)
     val old_raw = old_copy.unwrap()
     val new_raw = new_copy.unwrap()
-    val old_resolved = _bytes_to_text(path_resolve(current.id, old_raw))
-    val new_resolved = _bytes_to_text(path_resolve(current.id, new_raw))
+    val old_resolved: text = match kernel_text_checked(path_resolve(current.id, old_raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
+    val new_resolved: text = match kernel_text_checked(path_resolve(current.id, new_raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     val managed = server_data_namespace_path_is_managed_v1(old_resolved) or
         server_data_namespace_path_is_managed_v1(new_resolved)
     val namespace_authorized = managed and
@@ -848,7 +856,9 @@ fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
     if raw_copy == nil:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
-    val resolved_path = _bytes_to_text(path_resolve(current.id, raw))
+    val resolved_path: text = match kernel_text_checked(path_resolve(current.id, raw)):
+        case Ok(p): p
+        case Err(_): return SyscallResult(value: _FS_EILSEQ)
     var fs = fat32_mount_fs()
     val dev = fat32_mount_dev()
     val rmdir_r = fs.rmdir_at(dev, resolved_path)
@@ -946,6 +956,10 @@ fn _handle_chdir(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         return SyscallResult(value: _FS_EFAULT)
     val raw = raw_copy.unwrap()
     val resolved = path_resolve(current.id, raw)
+    # cwd is stored as bytes and prefixed onto every later relative path by
+    # path_resolve, so invalid UTF-8 must be rejected here, not stored.
+    if not kernel_utf8_valid(resolved):
+        return SyscallResult(value: _FS_EILSEQ)
     # NOTE: the target directory's existence is NOT verified — no FAT32
     # directory-kind probe is reachable from Simple today (stream_open opens
     # files only). The cwd state change itself is real and getcwd observes it;

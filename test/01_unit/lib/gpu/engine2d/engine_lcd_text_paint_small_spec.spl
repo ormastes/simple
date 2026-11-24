@@ -1,0 +1,112 @@
+# @tag: unit, gpu, engine2d, text, lcd, perf
+# @cover src/lib/common/encoding/sfnt_glyf.spl 2%
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 1%
+#
+# At device scale 1 text paint is the LCD lane (css-layout, 26 runs, 1x,
+# cpu_simd: ~3.6 s): every cold glyph builds an LCD outline (parse + slight
+# y-hinting), then rasters one cell per quarter pen phase it is drawn at (area
+# accumulation + the 5-tap subpixel filter), and the quads are composited per
+# pixel. These runs draw cold LCD glyphs at body sizes through the route the
+# Draw IR text command takes (`draw_text_with_advances` inside a clip band),
+# on a white and a tinted background. Pixels are pinned by a hash measured on
+# the base implementation (release/1.0.0 398efae3d75); the cost by a wall
+# budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val FRAME_W = 900
+val FRAME_H = 400
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+# Measured on the base implementation (release/1.0.0 398efae3d75).
+val FRAME_HASH: i64 = 1471998438
+# Base: 5.45 s on the interpreter lane (GB10, idle; two runs); lane ~3.8 s.
+# 4.6 s leaves room for a loaded box and is still red on base.
+val BUDGET_US: i64 = 4600000
+
+fn frame_hash(pixels: [u32]) -> i64:
+    var acc: i64 = 17
+    var i: i64 = 0
+    # cpu-lane-loop-ok: spec probe over every pixel of the frame
+    while i < pixels.len():
+        acc = (acc * 31 + (pixels[i] as i64)) % 4294967291
+        i = i + 1
+    acc
+
+fn run_line(eng: Engine2D, x: i32, y: i32, content: text, size: i32, color: u32) -> bool:
+    val advances = eng.fonts().measure_text_advances(content, size)
+    var width = 0
+    for a in advances:
+        width = width + a
+    eng.set_clip(x - 4, 0, width + 8, FRAME_H)
+    val drawn = eng.draw_text_with_advances(x, y, content, advances, color, size)
+    eng.clear_clip()
+    drawn
+
+fn paint() -> ([u32], i64, i64):
+    var eng = Engine2D.create_with_backend(FRAME_W, FRAME_H, "cpu_simd")
+    expect(eng.load_font_bytes(FONT_PATH, file_read_bytes(FONT_PATH))).to_equal(true)
+    eng.clear(0xFFFFFFFFu32)
+    eng.draw_rect(0, 200, FRAME_W, 200, 0xFFE8F0FEu32)
+    eng.set_lcd_text(true)
+    val t0 = time_now_unix_micros()
+    var drawn: i64 = 0
+    if run_line(eng, 10, 8, "The quick brown fox jumps over the lazy dog 0123456789", 16, 0xFF202124u32): drawn = drawn + 1
+    if run_line(eng, 10, 40, "Sphinx of black quartz, judge my vow! (CSS layout)", 14, 0xFF5F6368u32): drawn = drawn + 1
+    if run_line(eng, 10, 70, "Pack my box with five dozen liquor jugs; grid & flex", 13, 0xFF1A73E8u32): drawn = drawn + 1
+    if run_line(eng, 10, 100, "How vexingly quick daft zebras jump: ABCDEFGHIJKLM", 18, 0xFF202124u32): drawn = drawn + 1
+    if run_line(eng, 10, 140, "NOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz []<>", 20, 0xFF3C4043u32): drawn = drawn + 1
+    if run_line(eng, 10, 210, "The quick brown fox jumps over the lazy dog 0123456789", 16, 0xFF202124u32): drawn = drawn + 1
+    if run_line(eng, 10, 240, "Wrapping rows, gaps & order: justify-content", 15, 0xFF174EA6u32): drawn = drawn + 1
+    if run_line(eng, 10, 270, "Sphinx of black quartz, judge my vow! (CSS layout)", 14, 0xFF5F6368u32): drawn = drawn + 1
+    val elapsed = time_now_unix_micros() - t0
+    val pixels = eng.read_pixels()
+    eng.shutdown()
+    (pixels, elapsed, drawn)
+
+describe "Engine2D LCD text paint at body sizes":
+    it "paints the measured pixels within a time budget (cpu_simd)":
+        val r = paint()
+        val h = frame_hash(r.0)
+        print "lcd_text_paint_small elapsed_us={r.1} hash={h} drawn={r.2}"
+        expect(r.2).to_equal(8)
+        expect(r.0.len()).to_equal(FRAME_W * FRAME_H)
+        expect(h).to_equal(FRAME_HASH)
+        expect(r.1 < BUDGET_US).to_equal(true)
+
+# Glyph boxes straddling stripes of two colors (destination not one color:
+# per-pixel recompose of the kept quad) and a translucent band (the memo
+# declines; the per-pixel paths run). Hash measured on base 398efae3d75.
+val STRIPES_HASH: i64 = 2275343177
+
+fn paint_stripes() -> [u32]:
+    var eng = Engine2D.create_with_backend(420, 170, "cpu_simd")
+    expect(eng.load_font_bytes(FONT_PATH, file_read_bytes(FONT_PATH))).to_equal(true)
+    eng.clear(0xFFFFFFFFu32)
+    var x = 0
+    while x < 420:
+        eng.draw_rect(x, 0, 3, 100, 0xFFDDE3EAu32)
+        x = x + 7
+    # draw_image copies: the band keeps alpha 0x80.
+    val band: [u32] = [0x80E8F0FEu32; 420 * 60]
+    eng.draw_image(0, 110, 420, 60, band)
+    eng.set_lcd_text(true)
+    expect(run_line(eng, 6, 6, "Striped LCD quads: AVATAR WAVE 0123", 16, 0xFF202124u32)).to_equal(true)
+    expect(run_line(eng, 6, 30, "Striped LCD quads: AVATAR WAVE 0123", 16, 0xFF202124u32)).to_equal(true)
+    expect(run_line(eng, 6, 100, "Band edge: AVATAR WAVE 0123", 16, 0xFF1A73E8u32)).to_equal(true)
+    expect(run_line(eng, 6, 135, "Translucent band: AVATAR WAVE 0123", 16, 0xFF1A73E8u32)).to_equal(true)
+    eng.set_lcd_text(false)
+    expect(run_line(eng, 6, 56, "Gray on stripes: AVATAR WAVE", 15, 0xFF5F6368u32)).to_equal(true)
+    expect(run_line(eng, 6, 78, "Gray on stripes: AVATAR WAVE", 15, 0x995F6368u32)).to_equal(true)
+    val pixels = eng.read_pixels()
+    eng.shutdown()
+    pixels
+
+describe "Engine2D LCD text over a non-uniform destination":
+    it "paints the base pixels over stripes and a translucent band (cpu_simd)":
+        val h = frame_hash(paint_stripes())
+        print "lcd_text_stripes hash={h}"
+        expect(h).to_equal(STRIPES_HASH)

@@ -14,9 +14,12 @@ class StreamingTests(unittest.TestCase):
     def test_large_report_preserves_raw_diagnostic_lines(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'stdout'
-            report = 'log entry\n' * 100000 + 'Results: 1 total, 1 passed, 0 failed\n'
-            path.write_text(report, encoding='utf-8')
-            self.assertEqual(m.read_report(path), report)
+            for newline in ('\n', '\r\n'):
+                with self.subTest(newline=repr(newline)):
+                    report = ('log entry' + newline) * 100000 + 'Results: 1 total, 1 passed, 0 failed' + newline
+                    # stdout is captured as bytes; avoid host text-mode newline translation.
+                    path.write_bytes(report.encode('utf-8'))
+                    self.assertEqual(m.read_report(path), report)
 
     def test_report_size_limit_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:

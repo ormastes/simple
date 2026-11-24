@@ -7,6 +7,8 @@
 #   - key + env unset     -> exported (frontend: on|off -> 1|0, not exported);
 #   - env set             -> env wins, host value ignored;
 #   - invalid key value   -> hard error naming the key (no fall-through).
+# Also sanity_build_timeout_seconds -> COMPILER_BUILD_TIMEOUT_SECONDS (same
+# rules; applied before each entry script's `:-180` default).
 # Plus text contracts: every lane applies them where its consumer reads them,
 # the matrix tool-row allowlist forwards all four, and the committed
 # DESKTOP-VMF96U6 values validate. Fixture host files under mktemp; nothing is
@@ -94,10 +96,38 @@ write_host '  mir_shard_count: 999
 '
 expect 'invalid host value ignored when env set' '||7||0' "$(probe SIMPLE_MIR_SHARD_COUNT=7)"
 
+# 4b. sanity_build_timeout_seconds -> COMPILER_BUILD_TIMEOUT_SECONDS (unset only).
+probe_timeout() { # [VAR=value ...] -> TIMEOUT|rc
+  env -u COMPILER_BUILD_TIMEOUT_SECONDS -u SIMPLE_HOST_SANITY_BUILD_TIMEOUT_SECONDS \
+    SIMPLE_HOST_CONFIG="$tmp/no-user-host.sdn" "$@" \
+    sh -c '
+      . "$1/scripts/bootstrap/lib/host-bootstrap-settings.shs"
+      rc=0
+      bootstrap_host_apply_sanity_build_timeout "$2" || rc=1
+      printf "%s|%s" "${COMPILER_BUILD_TIMEOUT_SECONDS-}" "$rc"
+    ' probe "$repo" "$root" 2>"$tmp/probe.err"
+}
+write_host ''
+expect 'timeout: no key -> unset' '|0' "$(probe_timeout)"
+write_host '  sanity_build_timeout_seconds: 900
+'
+expect 'timeout: key -> exported' '900|0' "$(probe_timeout)"
+grep -q 'source: host config sanity_build_timeout_seconds' "$tmp/probe.err" || fail "timeout: source not printed"
+expect 'timeout: env wins' '42|0' "$(probe_timeout COMPILER_BUILD_TIMEOUT_SECONDS=42)"
+for bad in 'sanity_build_timeout_seconds: 0' 'sanity_build_timeout_seconds: 12s' 'sanity_build_timeout_seconds: 1234567'; do
+  write_host "  $bad
+"
+  out=$(probe_timeout)
+  expect "invalid '$bad' fails" 1 "${out##*|}"
+  grep -q "error: host config key sanity_build_timeout_seconds is invalid" "$tmp/probe.err" ||
+    fail "invalid '$bad': error does not name the key ($(cat "$tmp/probe.err"))"
+done
+
 # 5. committed DESKTOP-VMF96U6 values validate.
 . "$repo/scripts/bootstrap/lib/host-bootstrap-settings.shs"
 desk="$repo/config/host/DESKTOP-VMF96U6.sdn"
-for kv in frontend_cache:off mir_sharding:1 mir_shard_count:16 mir_shard_worker_kib:31457280; do
+for kv in frontend_cache:off mir_sharding:1 mir_shard_count:16 mir_shard_worker_kib:31457280 \
+    sanity_build_timeout_seconds:900; do
   v=$(awk -v k="${kv%%:*}" '$0 ~ "^  " k ":" { sub("^  " k ":[ \t]*", ""); sub(/[ \t]+#.*$/, ""); print; exit }' "$desk")
   expect "DESKTOP-VMF96U6 ${kv%%:*}" "${kv#*:}" "$v"
   bootstrap_host_valid_matrix_value "${kv%%:*}" "$v" || fail "DESKTOP-VMF96U6 ${kv%%:*}=$v invalid"
@@ -124,6 +154,12 @@ order "$resume" 'bootstrap_host_apply_matrix_settings "$root" || exit 64' \
   'stage3_mir_shard_count=${SIMPLE_MIR_SHARD_COUNT:-' 'resume: knobs applied before the shard-count read'
 order "$resume" 'bootstrap_host_apply_frontend_cache_default "$root" || exit 64' \
   'case "${SIMPLE_FRONTEND_CACHE:-}" in' 'resume: frontend default applied before the W24/W27 pass-through'
+order "$scratch" 'bootstrap_host_apply_sanity_build_timeout "${bootstrap_early_repo_root}" || exit 64' \
+  'COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}' \
+  'from-scratch: sanity build timeout applied before the :-180 default'
+order "$resume" 'bootstrap_host_apply_sanity_build_timeout "$root" || exit 64' \
+  'COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}' \
+  'resume: sanity build timeout applied before the :-180 default'
 keys=$(. "$repo/scripts/bootstrap/phase-c-backend-commands.shs" && bootstrap_phase_c_tool_row_environment_keys) ||
   fail "cannot list the phase-c tool-row environment keys"
 for k in SIMPLE_FRONTEND_CACHE SIMPLE_MIR_SHARDING SIMPLE_MIR_SHARD_COUNT SIMPLE_MIR_SHARD_WORKER_KB; do

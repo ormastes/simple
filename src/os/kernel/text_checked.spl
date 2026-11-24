@@ -1,0 +1,69 @@
+# Kernel checked bytes -> text for paths and names.
+#
+# Owner decision 2026-11-23 (doc/08_tracking/bug/bytes_to_text_rejects_invalid_utf8_2026-11-23.md):
+# invalid UTF-8 never becomes `text`. Kernel paths/names are rejected with
+# EILSEQ; file contents and other payloads stay [u8] and never come here.
+#
+# Validation is pure Simple: the freestanding runtimes
+# (arch/*/freestanding_runtime.c) do not provide rt_utf8_validate, so
+# std.common.text_bytes.utf8_bytes_valid would be an unbacked extern in-kernel.
+# rt_bytes_to_text IS provided there; it is only reached on validated input.
+
+use std.common.text_bytes.{bytes_to_text}
+use os.kernel.errno.{EILSEQ}
+
+fn _kernel_utf8_cont(bytes: [u8], i: i64) -> bool:
+    i < bytes.len() and (bytes[i] as i64) >= 0x80 and (bytes[i] as i64) <= 0xBF
+
+@allow(primitive_api)  # raw syscall path bytes; mirrors text_bytes.utf8_bytes_valid
+pub fn kernel_utf8_valid(bytes: [u8]) -> bool:
+    """Strict UTF-8 (std::str::from_utf8 accept set): no overlongs, no
+    surrogates, nothing above U+10FFFF, no truncated sequences."""
+    var i: i64 = 0
+    val n: i64 = bytes.len()
+    while i < n:
+        val b0: i64 = bytes[i] as i64
+        if b0 < 0x80:
+            i = i + 1
+        elif b0 >= 0xC2 and b0 <= 0xDF:
+            if not _kernel_utf8_cont(bytes, i + 1):
+                return false
+            i = i + 2
+        elif b0 >= 0xE0 and b0 <= 0xEF:
+            if i + 1 >= n:
+                return false
+            val b1: i64 = bytes[i + 1] as i64
+            var lo: i64 = 0x80
+            var hi: i64 = 0xBF
+            if b0 == 0xE0:
+                lo = 0xA0
+            if b0 == 0xED:
+                hi = 0x9F
+            if b1 < lo or b1 > hi or not _kernel_utf8_cont(bytes, i + 2):
+                return false
+            i = i + 3
+        elif b0 >= 0xF0 and b0 <= 0xF4:
+            if i + 1 >= n:
+                return false
+            val b1: i64 = bytes[i + 1] as i64
+            var lo: i64 = 0x80
+            var hi: i64 = 0xBF
+            if b0 == 0xF0:
+                lo = 0x90
+            if b0 == 0xF4:
+                hi = 0x8F
+            if b1 < lo or b1 > hi:
+                return false
+            if not _kernel_utf8_cont(bytes, i + 2) or not _kernel_utf8_cont(bytes, i + 3):
+                return false
+            i = i + 4
+        else:
+            return false
+    true
+
+@allow(primitive_api)  # errno ABI (i32) for syscall path decode
+pub fn kernel_text_checked(bytes: [u8]) -> Result<text, i32>:
+    """Path/name bytes -> text, or Err(EILSEQ) on invalid UTF-8."""
+    if not kernel_utf8_valid(bytes):
+        return Err(EILSEQ)
+    Ok(bytes_to_text(bytes))

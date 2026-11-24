@@ -17,7 +17,7 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_device_dy_rest_add}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
@@ -1851,6 +1851,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         )
     else:
         []
+    # Chrome's fractional left edge of each column just resolved (empty when
+    # unknown); copied now, before a nested table overwrites the global.
+    val auto_column_edge_frac: [i32] = if auto_column_offsets.len() > 0: g_table_column_edge_frac_milli else: []
     if (
         st.display == "table" and (
             st.table_layout == "fixed" or
@@ -2001,6 +2004,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             styles[cell],
                             if cell_layout_width > 0: cell_layout_width else: 1
                         )
+                    # The cell's lines start at Chrome's fractional column edge
+                    # (the border and padding after it are whole pixels).
+                    box_line_start_err_record(
+                        nodes.len() as i32, cell,
+                        if st.table_layout == "auto" and used_columns < auto_column_edge_frac.len().to_i32(): auto_column_edge_frac[used_columns] else: 0
+                    )
                     val cell_result = layout_with_style(
                         nodes, styles, child_index, cell,
                         box_x, table_y - lead_y, allocated_cell_width,
@@ -3757,7 +3766,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
                         styles, cy,
-                        inline_line_h, out_bx, out_by, out_bh
+                        inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                     )
                     out_bx = aligned.bx
                     out_by = aligned.by
@@ -3822,7 +3831,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                                 child_index, st, nodes, inline_baseline_nodes,
                                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                                 styles, cy,
-                                inline_line_h, out_bx, out_by, out_bh
+                                inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                             )
                             out_bx = wbr_aligned.bx
                             out_by = wbr_aligned.by
@@ -4076,7 +4085,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                                 child_index, st, nodes, inline_baseline_nodes,
                                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                                 styles, cy,
-                                inline_line_h, out_bx, out_by, out_bh
+                                inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                             )
                             out_bx = broken.bx
                             out_by = broken.by
@@ -4162,7 +4171,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         child_index, st, nodes, inline_baseline_nodes,
                         inline_baseline_margin_ts, inline_baseline_margin_bs,
                         styles, cy,
-                        inline_line_h, out_bx, out_by, out_bh
+                        inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                     )
                     out_bx = aligned.bx
                     out_by = aligned.by
@@ -4263,6 +4272,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # opens a 1 px gap (centred / rtl lines, after an inline-block).
                     if (run_pen_err == INLINE_PEN_ERR_UNKNOWN or not text_run_aligns_line_left(st)) and nodes[c].tag == "button" and box_device_extra_w_at(c) != 0 and button_has_inline_follower(nodes, child_index, c):
                         box_device_extra_w_record(nodes.len() as i32, c, 0)
+                if layout_device_scale() == 1 and (nodes[c].tag == "input" or nodes[c].tag == "select" or nodes[c].tag == "textarea") and run_pen_origin != 0:
+                    # A form control's box starts at the line's exact pen, and
+                    # so does its text (`Name <input value=Simple>`: Chrome
+                    # paints `Simple` 9 px past a box at 57.12, not 57).
+                    text_pen_origin_record(nodes.len() as i32, c, run_pen_origin)
                 if run_node >= 0 and run_node != c:
                     # The one run of a plain inline element starts at the
                     # element's pen: `<b>o</b>` after 27.56 px of line
@@ -4324,7 +4338,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             child_index, st, nodes, inline_baseline_nodes,
                             inline_baseline_margin_ts, inline_baseline_margin_bs,
                             styles, cy,
-                            inline_line_h, out_bx, out_by, out_bh
+                            inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                         )
                         out_bx = run_first.bx
                         out_by = run_first.by
@@ -4438,7 +4452,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_index, st, nodes, inline_baseline_nodes,
                     inline_baseline_margin_ts, inline_baseline_margin_bs,
                     styles, cy,
-                    inline_line_h, out_bx, out_by, out_bh
+                    inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
                 )
                 out_bx = aligned.bx
                 out_by = aligned.by
@@ -4748,7 +4762,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 child_index, st, nodes, inline_baseline_nodes,
                 inline_baseline_margin_ts, inline_baseline_margin_bs,
                 styles, cy,
-                inline_line_h, out_bx, out_by, out_bh
+                inline_line_h, out_bx, out_by, out_bh, cy_frac, origin_frac
             )
             out_bx = aligned.bx
             out_by = aligned.by

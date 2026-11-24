@@ -1,0 +1,322 @@
+name: Actual attribute store bootstrap diagnostic
+
+on:
+  workflow_dispatch:
+  # Re-enable the restricted PR trigger only after binding a verified producer
+  # containing the RTI repair. The pinned producer below already reproduced the
+  # failure in run 45159597917; unrelated pushes must not repeat that execution.
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: actual-attribute-store-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'work/cross-compile-complete-20261123')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCER_RUN: '45145173990'
+      PRODUCER_SOURCE: 0abba1510a913300a9e8c0bed67e8dde07ebea41
+      # Root verified the fresh handoff and retained bootstrap Hello output.
+      # This consumer remains diagnostic-only; Phase 1 is not suite admission.
+      PRODUCER_ARTIFACT: '14804958792'
+      PRODUCER_SHA256: e551d794b3e1f90b920930fc34680d3839945d3b9c352ee2d1dfeab5306fb420
+      PRODUCER_BYTES: '58490592'
+      FIXTURE_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+      DIAGNOSTIC_OUT: build/verify/actual-attribute-store-diagnostic
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Require the exact reviewed fixture checkout
+        run: |
+          set -euo pipefail
+          [[ "$FIXTURE_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$FIXTURE_SOURCE"
+
+      - name: Require verified fresh producer binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAGNOSTIC_OUT"
+          [[ "$PRODUCER_ARTIFACT" =~ ^[1-9][0-9]*$ ]] || { echo 'BLOCKED: fresh P1 artifact is unbound'; exit 2; }
+          [[ "$PRODUCER_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'BLOCKED: fresh P1 digest is unbound'; exit 2; }
+          [[ "$PRODUCER_BYTES" =~ ^[1-9][0-9]*$ ]] || { echo 'BLOCKED: fresh P1 length is unbound'; exit 2; }
+          # These JSON files are explicit interoperability with the GitHub API.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN" > "$DIAGNOSTIC_OUT/producer-run.github.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PRODUCER_ARTIFACT" > "$DIAGNOSTIC_OUT/producer-artifact.github.json"
+          jq -e --argjson run "$PRODUCER_RUN" --arg source "$PRODUCER_SOURCE" \
+            '.id == $run and .head_sha == $source and .status == "completed"' \
+            "$DIAGNOSTIC_OUT/producer-run.github.json" > /dev/null
+          jq -e --argjson run "$PRODUCER_RUN" --argjson artifact "$PRODUCER_ARTIFACT" --arg source "$PRODUCER_SOURCE" \
+            '.id == $artifact and .name == "ladder-linux-x86_64-r1" and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $source' \
+            "$DIAGNOSTIC_OUT/producer-artifact.github.json" > /dev/null
+
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: ${{ env.PRODUCER_ARTIFACT }}
+          run-id: ${{ env.PRODUCER_RUN }}
+          github-token: ${{ github.token }}
+          path: build/verify/actual-attribute-store-diagnostic/producer
+
+      - name: Verify immutable Phase 1 compiler bytes
+        run: |
+          set -euo pipefail
+          compiler="$PWD/$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/simple"
+          phase="$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/PHASE"
+          test -f "$phase"
+          printf '1\n' | cmp -s - "$phase"
+          test -f "$compiler"
+          test "$(stat -c '%s' "$compiler")" = "$PRODUCER_BYTES"
+          printf '%s  %s\n' "$PRODUCER_SHA256" "$compiler" | sha256sum --check --status
+          chmod +x "$compiler"
+          {
+            printf 'schema: exact-producer-bootstrap-diagnostic-v1\n'
+            printf 'status: BOOTSTRAP_DIAGNOSTIC\nadmission: none\nidentity_verified: true\n'
+            printf 'producer_run: %s\nproducer_artifact: %s\nproducer_source: %s\n' "$PRODUCER_RUN" "$PRODUCER_ARTIFACT" "$PRODUCER_SOURCE"
+            printf 'producer_phase: 1\nproducer_sha256: %s\nproducer_bytes: %s\n' "$PRODUCER_SHA256" "$PRODUCER_BYTES"
+            printf 'fixture_checkout: %s\n' "$(git rev-parse HEAD)"
+            printf 'expected_fixture_checkout: %s\nfixture_checkout_verified: true\n' "$FIXTURE_SOURCE"
+            printf 'runtime_provider: native-build-default-source-selection-see-logs\n'
+            printf 'supplied_runtime_archive: none\n'
+            printf 'available_runtime_source_tree: %s\n' "$(git rev-parse HEAD:src/runtime)"
+            printf 'artifact_execution: NOT_RUN\nsuite_execution: NOT_RUN\n'
+          } > "$DIAGNOSTIC_OUT/producer.sdn"
+
+      - name: Verify and stage exactly the reviewed source projection
+        run: |
+          set -euo pipefail
+          lane="$PWD/$DIAGNOSTIC_OUT/actual_attribute_store"
+          mkdir -p "$lane/projection" "$lane/cache"
+          cat > "$lane/production-projection.sha256" <<'SOURCE_HASHES'
+          404758ed245dba63b8b3d3c98dd49852852d6c391eac77bd79621bb5f71482fc  src/compiler/00.common/data/attribute_schema_v1.spl
+          40a417ece3fefc8a48b6634fcb8fadc502595a35e404edce482134c9b07aa55d  src/compiler/00.common/data/data_schema_contracts.spl
+          87dfdf24d9922574d367ee6c8ca5ff2575922a918b465c049aa366e38b764d7c  src/compiler/00.common/data/data_schema_core_v1.spl
+          e6fc88aa80f7ecfa87db254c4abc57fcbefe39203668e3bb91171b63c6394c17  src/compiler/00.common/data/data_schema_resolver.spl
+          41220c5498219ba8576e07f1879a5e840a198adebc9cf004608ec702430b06c7  src/lib/common/crypto/secure_memory.spl
+          d41bf74e31de9dbba0e089111348c5dbe400fb32187a5fea36aa7df88d85fd53  src/lib/common/crypto/sha256.spl
+          9a73e13d17fba8a3b06f3b7a71f96f73180d5f53184c970715e375a8aadcdcb6  src/lib/common/crypto/sha256_core.spl
+          e29fe297060bb4b59b62c10395575ac2f3796d09033833a217046fe9d27121c9  src/lib/common/crypto/word_ops.spl
+          0fd242c9a4ac3358bdee83fadac70da61dd10b6ae19109a66ae814cf334b7234  src/lib/common/sdn/parser.spl
+          5fddb47d91b451fdb0046354c230e920304c2bf48e196d4305ac33e7f5a6c6e5  src/lib/common/sdn/structural_scalar_value_v1.spl
+          3bed7c6207cadf5fbf5a0b913bef555cc4fdad52344e4fc8d22d2d3bd86489db  src/lib/common/sdn/value.spl
+          f6d04579d8b1238fd3012ee8332ba20dae3fab0a313660714e33fb04f90e6818  src/lib/common/text_bytes.spl
+          ca8130b1a29b92eaa72f20aaa8d6d89e62f4ed5809fd042a5cf3f7ecb13795b7  src/lib/common/types.spl
+          SOURCE_HASHES
+          sha256sum --check --strict "$lane/production-projection.sha256" > "$lane/source-hash-verification.txt"
+          {
+            printf 'schema: actual-attribute-store-projection-v1\nstatus: BOOTSTRAP_DIAGNOSTIC\nadmission: none\n'
+            printf 'static_production_files: 13\ncompiler_closure_complete: NOT_PROVEN\nsources:\n'
+            while read -r digest source; do
+              mkdir -p "$lane/projection/$(dirname "$source")"
+              cp "$source" "$lane/projection/$source"
+              printf '%s  %s\n' "$digest" "$lane/projection/$source" | sha256sum --check --status
+              printf '  - original_path: %s\n    projected_path: %s\n    sha256: %s\n' "$source" "$lane/projection/$source" "$digest"
+            done < "$lane/production-projection.sha256"
+          } > "$lane/projection.sdn"
+          fixture=test/fixtures/compiler/generic_store_factory_result_owner/actual_attribute_store.spl
+          printf '%s  %s\n' d8cc197e7d64801f54094263f07fb777b34b56fad6d4ddad6f89d4bbe1b1cdfe "$fixture" | sha256sum --check --status
+          mkdir -p "$lane/projection/src/app"
+          cp "$fixture" "$lane/projection/src/app/actual_attribute_store.spl"
+          printf '%s  %s\n' d8cc197e7d64801f54094263f07fb777b34b56fad6d4ddad6f89d4bbe1b1cdfe "$lane/projection/src/app/actual_attribute_store.spl" | sha256sum --check --status
+
+      - name: Install canonical native build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev
+          clang --version > "$DIAGNOSTIC_OUT/clang-version.txt"
+          llc --version > "$DIAGNOSTIC_OUT/llc-version.txt"
+          ld.lld --version > "$DIAGNOSTIC_OUT/lld-version.txt"
+
+      - name: Collect the single real-owner native build
+        run: |
+          set -euo pipefail
+          lane="$PWD/$DIAGNOSTIC_OUT/actual_attribute_store"
+          compiler="$PWD/$DIAGNOSTIC_OUT/producer/linux-x86_64-p1/simple"
+          args=(native-build
+            --source "$lane/projection/src/compiler" --source "$lane/projection/src/lib" --source "$lane/projection/src/app"
+            --entry-closure --entry "$lane/projection/src/app/actual_attribute_store.spl"
+            --mode dynload --low-memory --threads 4 --cache-dir "$lane/cache" --output "$lane/program")
+          printf '%q ' "$compiler" "${args[@]}" > "$lane/command.txt"
+          printf '\n' >> "$lane/command.txt"
+          set +e
+          /usr/bin/time -v -o "$lane/resources.txt" timeout --verbose --signal=TERM --kill-after=5s 595s \
+            env RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_MONO_ROOT_DISCOVERY=1 \
+              SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_PARSE_SHARDING=1 \
+              SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_RTI_DIAGNOSTICS=1 \
+              "$compiler" "${args[@]}" > "$lane/native-build.log" 2>&1
+          code=$?
+          set -e
+          printf '%s\n' "$code" > "$lane/native-build.exit"
+          {
+            printf 'schema: actual-attribute-store-fixture-diagnostic-v1\nstatus: BOOTSTRAP_DIAGNOSTIC\nadmission: none\n'
+            printf 'producer_sha256: %s\nnative_build_exit_status: %s\n' "$PRODUCER_SHA256" "$code"
+            printf 'soft_deadline_seconds: 595\nhard_deadline_seconds: 600\n'
+            printf 'runtime_provider: native-build-default-source-selection-see-native-build-log\n'
+            printf 'emitted_program_execution: NOT_RUN\nsuite_execution: NOT_RUN\n'
+          } > "$lane/receipt.sdn"
+          if [ -s "$lane/program" ]; then
+            sha256sum "$lane/program" > "$lane/program.sha256"
+            file "$lane/program" > "$lane/program.file.txt"
+          fi
+          # Collection follows even for a real compile failure. Final status is
+          # decided after retaining actual module/source owner metadata below.
+
+      - name: Retain actual selected-provider module and source records
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, pathlib, re, shutil
+          root = pathlib.Path.cwd()
+          out = root / os.environ['DIAGNOSTIC_OUT']
+          lane = out / 'actual_attribute_store'
+          if not (lane / 'native-build.exit').is_file():
+              raise SystemExit('BLOCKED: compiler was not invoked; producer/projection may be unbound')
+          projection = (lane / 'projection').resolve()
+          metadata = lane / 'observed-provider-metadata'
+          metadata.mkdir(exist_ok=True)
+          quote = lambda value: '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n') + '"'
+          rows, errors, capsules = [], [], []
+          expected = {}
+          for line in (lane / 'production-projection.sha256').read_text().splitlines():
+              digest, source = line.split(None, 1)
+              expected[source.strip()] = digest
+          expected['src/app/actual_attribute_store.spl'] = 'd8cc197e7d64801f54094263f07fb777b34b56fad6d4ddad6f89d4bbe1b1cdfe'
+          for source in (lane / 'cache').rglob('*.object'):
+              if len(capsules) >= 128:
+                  errors.append('object metadata count exceeds bounded collector limit 128')
+                  break
+              capsules.append(source)
+          # driver_types.spl NativeObjectCapsule.expected_identity() defines
+          # these length-prefixed fields. No module name is derived from a path.
+          # Native SCV keys are snapshot-relative identities, not physical source
+          # paths. Keep their raw value and label our checked projection mapping.
+          for source in sorted(capsules):
+              if source.stat().st_size > 131072:
+                  errors.append('object metadata exceeds 128 KiB: ' + str(source))
+                  continue
+              raw = source.read_bytes()
+              target = metadata / source.relative_to(lane / 'cache')
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source, target)
+              candidates = [line for line in raw.splitlines() if line.startswith(b'native-capsule-v1|')]
+              if len(candidates) != 1:
+                  errors.append('no unique native-capsule-v1 record: ' + str(source))
+                  continue
+              data, position, fields = candidates[0], len(b'native-capsule-v1|'), []
+              try:
+                  for _ in range(5):
+                      colon = data.index(b':', position)
+                      length = int(data[position:colon])
+                      if length < 0 or colon + 1 + length > len(data):
+                          raise ValueError('invalid field extent')
+                      position = colon + 1
+                      fields.append(data[position:position + length].decode('utf-8'))
+                      position += length
+                      if data[position:position + 1] != b'|':
+                          raise ValueError('missing field separator')
+                      position += 1
+                  module, _, _, key, source_identity = fields
+                  path_value = key.removeprefix('scv-snapshot:')
+                  observed = pathlib.Path(path_value)
+                  observed = (observed if observed.is_absolute() else root / observed).resolve()
+                  relative = observed.relative_to(projection)
+                  if not module or not observed.is_file():
+                      raise ValueError('empty module or missing projected source')
+                  digest = hashlib.sha256(observed.read_bytes()).hexdigest()
+                  relative_text = relative.as_posix()
+                  if relative_text not in expected or digest != expected[relative_text]:
+                      raise ValueError('observed source is not the reviewed hash-bound projection')
+                  rows.append((module, key, str(observed), relative_text, digest, source_identity, str(target.relative_to(lane))))
+              except (ValueError, UnicodeError, IndexError) as error:
+                  errors.append(str(source) + ': ' + str(error))
+          log_path = lane / 'native-build.log'
+          with log_path.open('rb') as stream:
+              log_bytes = stream.read(16777217)
+          if len(log_bytes) > 16777216:
+              errors.append('native build log exceeds bounded collector limit 16 MiB')
+          log = log_bytes[:16777216].decode('utf-8', errors='replace')
+          selected = re.search(r'\[parse-closure\][^\n]*\bselected=(\d+)', log)
+          # Preserve compiler-issued failure pairs too; they are diagnostic
+          # observations, not invented provider records or successful objects.
+          failures = re.findall(r'\[mir-module-failure\] module=(\S+) path=(\S+)', log)
+          owner_source = 'src/compiler/00.common/data/attribute_schema_v1.spl'
+          owner_path = str((projection / owner_source).resolve())
+          actual_owner = [row for row in rows
+                          if row[0] == 'compiler.common.data.attribute_schema_v1'
+                          and row[2] == owner_path and row[3] == owner_source
+                          and row[4] == expected[owner_source] and bool(row[5].strip())]
+          entry_source = 'src/app/actual_attribute_store.spl'
+          entry_path = str((projection / entry_source).resolve())
+          actual_entry = [row for row in rows
+                          if row[2] == entry_path and row[3] == entry_source
+                          and row[4] == expected[entry_source] and bool(row[5].strip())]
+          selected_count = int(selected.group(1)) if selected else None
+          lines = ['schema: actual-selected-provider-records-v1', 'status: BOOTSTRAP_DIAGNOSTIC', 'admission: none',
+                   'selected_source_count: ' + (selected.group(1) if selected else 'unknown'),
+                   'native_object_provider_records: ' + str(len(rows)),
+                   'actual_attribute_owner_records: ' + str(len(actual_owner)),
+                   'actual_entry_records: ' + str(len(actual_entry)),
+                   'coverage: observed-object-capsules-only-not-full-closure-proof', 'providers:']
+          for module, key, source, relative, digest, source_identity, capsule in rows:
+              lines += ['  - module_name: ' + quote(module), '    raw_compiler_source_key: ' + quote(key),
+                        '    derived_projection_source_path: ' + quote(source),
+                        '    source_path_derivation: checked-native-object-source-key-v1-projection-mapping',
+                        '    projected_relative_source: ' + quote(relative),
+                        '    source_sha256: ' + digest, '    compiler_source_identity: ' + quote(source_identity),
+                        '    raw_capsule: ' + quote(capsule)]
+          lines.append('compiler_failure_pairs:')
+          for module, path in failures[:32]:
+              lines += ['  - module_name: ' + quote(module), '    raw_compiler_diagnostic_source_path: ' + quote(path)]
+          lines.append('collector_errors:')
+          lines += ['  - ' + quote(error) for error in errors]
+          (lane / 'selected-providers.sdn').write_text('\n'.join(lines) + '\n')
+          code = int((lane / 'native-build.exit').read_text())
+          entry_or_multi_module = bool(actual_entry) or (selected_count is not None and selected_count >= 2)
+          metadata_ok = not errors and bool(actual_owner) and selected_count is not None and entry_or_multi_module
+          (lane / 'metadata.status').write_text('OBSERVED\n' if metadata_ok else 'INCOMPLETE\n')
+          program = lane / 'program'
+          output_bytes = program.stat().st_size if program.is_file() else 0
+          outcome = ('NATIVE_BUILD_FAILED' if code != 0 else
+                     'OUTPUT_MISSING_OR_EMPTY' if output_bytes == 0 else
+                     'PROVIDER_METADATA_INCOMPLETE' if not metadata_ok else 'COMPILE_LINK_ONLY')
+          with (lane / 'receipt.sdn').open('a') as stream:
+              stream.write('output_bytes: ' + str(output_bytes) + '\n')
+              stream.write('observed_provider_metadata: ' + ('OBSERVED' if metadata_ok else 'INCOMPLETE') + '\n')
+              stream.write('outcome: ' + outcome + '\n')
+          print('BOOTSTRAP_DIAGNOSTIC native-build rc=' + str(code) + '; actual owner records=' + str(len(actual_owner)) + '; outcome=' + outcome)
+          if code != 0 or output_bytes == 0 or not metadata_ok:
+              raise SystemExit(1)
+          PY
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: actual-attribute-store-bootstrap-diagnostic-${{ github.run_id }}
+          path: |
+            build/verify/actual-attribute-store-diagnostic/producer.sdn
+            build/verify/actual-attribute-store-diagnostic/*.github.json
+            build/verify/actual-attribute-store-diagnostic/*version.txt
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/*.sdn
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/*.sha256
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/*.txt
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/*.status
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/native-build.log
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/native-build.exit
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/projection/**/*.spl
+            build/verify/actual-attribute-store-diagnostic/actual_attribute_store/observed-provider-metadata/**
+          retention-days: 14
+          if-no-files-found: warn

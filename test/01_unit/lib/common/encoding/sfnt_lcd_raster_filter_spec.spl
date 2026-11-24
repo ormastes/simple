@@ -1,0 +1,100 @@
+# @tag: unit, text, sfnt, lcd
+# @cover src/lib/common/encoding/sfnt_glyf.spl 2%
+#
+# The LCD raster tracks the inked extent of each A8 row at coverage changes
+# and slides the 12-tap window by 4 samples. The oracle is the row loop it
+# replaced (sfnt_glyf.spl before 2026-11-23), unchanged, over the same area
+# cells: every gray and RGB byte must match for several glyphs, sizes and
+# all four quarter phases.
+
+use std.spec.*
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, sfnt_lcd_glyph_outline,
+    sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, SfntLcdOutline, _lcd_area_cells, _floor_glyf}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+
+fn reference_rgb_gray(outline: SfntLcdOutline, phase_q: i64) -> [u8]:
+    val frame = sfnt_lcd_outline_frame(outline, phase_q)
+    val width = frame[0]
+    val height = frame[1]
+    val x0 = frame[2]
+    val phase = phase_q as f64 / 4.0
+    val subpixels = width * 3
+    val samples = width * 4
+    val stride = samples + 2
+    val cells = _lcd_area_cells(outline.slo_commands, outline.slo_scale, x0 as f64 - phase, outline.slo_raster_top, stride, height)
+    var gray: [u8] = [0u8; width * height]
+    var rgb: [u8] = [0u8; width * height * 3]
+    var a8: [i64] = [0; samples + 8]
+    var y: i64 = 0
+    while y < height:
+        var acc = 0.0
+        var first: i64 = samples
+        var last: i64 = 0
+        var s: i64 = 0
+        while s < samples:
+            acc = acc + cells[y * stride + s]
+            var cov = if acc < 0.0: 0.0 - acc else: acc
+            if cov > 1.0: cov = 1.0
+            val v = _floor_glyf(cov * 255.0 + 0.5)
+            a8[s + 4] = v
+            if v > 0:
+                if s < first: first = s
+                last = s + 1
+            s = s + 1
+        if last > first:
+            var x: i64 = first / 4 - 1
+            if x < 0: x = 0
+            var x_end: i64 = (last + 3) / 4 + 1
+            if x_end > width: x_end = width
+            while x < x_end:
+                val b = x * 4
+                val s0 = a8[b]
+                val s1 = a8[b + 1]
+                val s2 = a8[b + 2]
+                val s3 = a8[b + 3]
+                val s4 = a8[b + 4]
+                val s5 = a8[b + 5]
+                val s6 = a8[b + 6]
+                val s7 = a8[b + 7]
+                val s8 = a8[b + 8]
+                val s9 = a8[b + 9]
+                val s10 = a8[b + 10]
+                val s11 = a8[b + 11]
+                var r = (3 * s0 + 11 * s1 + 28 * s2 + 51 * s3 + 64 * s4 + 57 * s5 + 36 * s6 + 16 * s7 + 5 * s8 + s9) / 256
+                var g = (2 * s1 + 8 * s2 + 22 * s3 + 43 * s4 + 61 * s5 + 61 * s6 + 43 * s7 + 22 * s8 + 8 * s9 + 2 * s10) / 256
+                var bl = (s2 + 5 * s3 + 16 * s4 + 36 * s5 + 57 * s6 + 64 * s7 + 51 * s8 + 28 * s9 + 11 * s10 + 3 * s11) / 256
+                if r > 255: r = 255
+                if g > 255: g = 255
+                if bl > 255: bl = 255
+                val o = y * subpixels + x * 3
+                rgb[o] = r as u8
+                rgb[o + 1] = g as u8
+                rgb[o + 2] = bl as u8
+                gray[y * width + x] = ((r + g + bl + 1) / 3) as u8
+                x = x + 1
+        y = y + 1
+    rgb + gray
+
+describe "sfnt LCD raster filter":
+    it "matches the per-pixel window loop byte for byte":
+        val blob = file_read_bytes(FONT_PATH)
+        val cps: [i64] = [97, 103, 87, 64, 37, 48, 105, 108, 77, 46]
+        val sizes: [i64] = [11, 13, 16, 24, 41]
+        var compared: i64 = 0
+        var inked: i64 = 0
+        for size in sizes:
+            for cp in cps:
+                if val Some(outline) = sfnt_lcd_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp, size, 0):
+                    var phase: i64 = 0
+                    while phase < 4:
+                        if val Some(g) = sfnt_lcd_outline_raster(outline, phase):
+                            val want = reference_rgb_gray(outline, phase)
+                            expect(g.slg_rgb + g.slg_gray == want).to_equal(true)
+                            for v in g.slg_gray:
+                                if v > 0u8: inked = inked + 1
+                            compared = compared + 1
+                        phase = phase + 1
+        expect(compared).to_equal(200)
+        expect(inked > 5000).to_equal(true)
