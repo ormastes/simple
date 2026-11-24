@@ -1,6 +1,6 @@
 # Typed-facet feature reverted; its specs were left behind — 2026-11-23
 
-Status: open — OWNER DECISION needed (restore the feature or delete the specs).
+Status: verification-pending — resolved by deleting the 3 orphan specs in PR #11352 (76888f0cffb).
 Owner: src/compiler/{10.frontend,20.hir,35.semantics,80.driver}, src/lib/common facet modules.
 
 `test/01_unit/compiler/hir/facet_hir_codec_compat_spec.spl` ran 0 examples on
@@ -26,3 +26,12 @@ The same dead import is in:
 
 Resolution: restore the facet feature from the pre-fcbec1c3b62 tree (then drop
 the tags), or delete all three specs.
+
+## Resolution — 2026-11-25
+
+Resolved by deletion, not restoration: PR #11352 (merge 76888f0cffb) removed
+`facet_hir_codec_compat_spec.spl`, `facet_resolution_spec.spl` and
+`facet_acquire_expression_seal_guard_spec.spl` (no doc/06_spec mirrors existed).
+The typed-facet feature was not restored; the owner can revert that PR to bring
+the specs back with the feature. Status stays verification-pending until a
+native test run confirms no spec imports `common.facet_abi`.
