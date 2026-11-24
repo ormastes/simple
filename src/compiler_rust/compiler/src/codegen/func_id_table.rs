@@ -23,14 +23,25 @@
 //! Semantics are intentionally bit-for-bit those of the previous linear scan
 //! (`reference_resolve` in the tests below is that scan, kept as the oracle).
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::Hash;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use cranelift_module::FuncId;
+
+use super::xlate_view;
 
 /// `func_ids` map plus the tail index. Mutation goes through `insert` /
 /// `or_insert` only, so the index can never fall out of sync with the map.
 /// There is deliberately no `DerefMut`.
+///
+/// A *view* (`FuncIdTable::view_of`) is what a JIT translation worker gets:
+/// `map`/`by_tail` then hold only that translation's own inserts over a frozen
+/// shared `base`, lookups log what they read (`xlate_view::record_read`) and
+/// inserts are logged for the calling thread to replay
+/// (`codegen/xlate_view.rs`).
 #[derive(Debug, Default, Clone)]
 pub struct FuncIdTable {
     map: BTreeMap<String, FuncId>,
@@ -38,12 +49,22 @@ pub struct FuncIdTable {
     /// once per tail it qualifies for (see `qualified_tails`), never twice
     /// under the same tail.
     by_tail: HashMap<String, Vec<String>>,
+    /// Frozen table this view reads through (`None` for an ordinary table).
+    base: Option<Arc<FuncIdTable>>,
+    /// A view's inserts in order: (key, id, was `or_insert`).
+    view_log: Vec<(String, FuncId, bool)>,
 }
 
 impl Deref for FuncIdTable {
     type Target = BTreeMap<String, FuncId>;
 
+    /// A view cannot present the merged map by reference: the access marks the
+    /// translation unreplayable, so its result is discarded.
     fn deref(&self) -> &Self::Target {
+        if let Some(base) = &self.base {
+            xlate_view::mark_unsupported("func_ids map access through Deref");
+            return &base.map;
+        }
         &self.map
     }
 }
@@ -63,10 +84,111 @@ impl FuncIdTable {
         Self::default()
     }
 
+    /// A translation view over `base` (see the type docs).
+    pub(crate) fn view_of(base: Arc<FuncIdTable>) -> Self {
+        debug_assert!(base.base.is_none(), "a view's base must be an ordinary table");
+        Self {
+            base: Some(base),
+            ..Self::default()
+        }
+    }
+
+    /// The inserts a view made, in order.
+    pub(crate) fn take_view_log(&mut self) -> Vec<(String, FuncId, bool)> {
+        std::mem::take(&mut self.view_log)
+    }
+
+    /// An ordinary copy of an ordinary table, for a worker snapshot.
+    pub(crate) fn snapshot_clone(&self) -> Self {
+        debug_assert!(self.base.is_none(), "snapshot of a view");
+        self.clone()
+    }
+
+    pub fn get<Q>(&self, key: &Q) -> Option<&FuncId>
+    where
+        String: Borrow<Q>,
+        Q: Ord + Hash + ?Sized,
+    {
+        match &self.base {
+            None => self.map.get(key),
+            Some(base) => {
+                xlate_view::record_read(xlate_view::func_id_key_hash(key));
+                self.map.get(key).or_else(|| base.map.get(key))
+            }
+        }
+    }
+
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        String: Borrow<Q>,
+        Q: Ord + Hash + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.base {
+            None => self.map.len(),
+            Some(base) => {
+                xlate_view::record_read(xlate_view::func_id_len_hash());
+                base.map.len() + self.map.keys().filter(|k| !base.map.contains_key(*k)).count()
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Entries whose key ends in `.<method>` or `_dot_<method>`, in key order
+    /// (a view merges its own inserts over the base). The method-call lowering
+    /// scans for these when a receiver's type is unknown.
+    pub fn iter_method_suffix<'a>(&'a self, method: &str) -> Box<dyn Iterator<Item = (&'a String, &'a FuncId)> + 'a> {
+        let dot_suffix = format!(".{}", method);
+        let underscore_suffix = format!("_dot_{}", method);
+        let matches = move |k: &String| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix);
+        let Some(base) = &self.base else {
+            return Box::new(self.map.iter().filter(move |(k, _)| matches(k)));
+        };
+        xlate_view::record_read(xlate_view::func_id_method_hash(method));
+        let mut own = self.map.iter().peekable();
+        let mut shared = base.map.iter().peekable();
+        let merged = std::iter::from_fn(move || match (own.peek(), shared.peek()) {
+            (None, None) => None,
+            (Some(_), None) => own.next(),
+            (None, Some(_)) => shared.next(),
+            (Some((a, _)), Some((b, _))) => match a.cmp(b) {
+                std::cmp::Ordering::Less => own.next(),
+                std::cmp::Ordering::Greater => shared.next(),
+                std::cmp::Ordering::Equal => {
+                    shared.next();
+                    own.next()
+                }
+            },
+        });
+        Box::new(merged.filter(move |(k, _)| matches(k)))
+    }
+
     /// Same contract as `BTreeMap::insert`: returns the previous id when the
     /// key was already present (the key's index entries are already there and
     /// unchanged, since they depend only on the key text).
     pub fn insert(&mut self, key: String, id: FuncId) -> Option<FuncId> {
+        if let Some(base) = &self.base {
+            // No read is logged: translation never uses the returned id, and
+            // later lookups of `key` log their own reads.
+            self.view_log.push((key.clone(), id, false));
+            if let Some(slot) = self.map.get_mut(&key) {
+                return Some(std::mem::replace(slot, id));
+            }
+            let previous = base.map.get(&key).copied();
+            if previous.is_none() {
+                for tail in qualified_tails(&key) {
+                    self.by_tail.entry(tail.to_string()).or_default().push(key.clone());
+                }
+            }
+            self.map.insert(key, id);
+            return previous;
+        }
         if let Some(slot) = self.map.get_mut(&key) {
             return Some(std::mem::replace(slot, id));
         }
@@ -80,8 +202,18 @@ impl FuncIdTable {
     /// Same contract as `BTreeMap::entry(key).or_insert(id)`: keeps an
     /// existing mapping, otherwise inserts `id`. Returns the mapping in effect.
     pub fn or_insert(&mut self, key: String, id: FuncId) -> FuncId {
-        if let Some(existing) = self.map.get(&key) {
+        // Unlogged lookup, as in `insert`: callers discard the result.
+        let existing = self.map.get(&key).or_else(|| self.base.as_ref().and_then(|b| b.map.get(&key)));
+        if let Some(existing) = existing {
             return *existing;
+        }
+        if self.base.is_some() {
+            self.view_log.push((key.clone(), id, true));
+            for tail in qualified_tails(&key) {
+                self.by_tail.entry(tail.to_string()).or_default().push(key.clone());
+            }
+            self.map.insert(key, id);
+            return id;
         }
         self.insert(key, id);
         id
@@ -101,14 +233,28 @@ impl FuncIdTable {
     pub fn resolve_unique_module_qualified(&self, name: &str) -> Option<FuncId> {
         let sanitized = name.replace('.', "_dot_");
         let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
-        let keys = self.by_tail.get(tail)?;
+        let empty: Vec<String> = Vec::new();
+        let (shared_keys, own_keys) = match &self.base {
+            None => (self.by_tail.get(tail)?, &empty),
+            Some(base) => {
+                xlate_view::record_read(xlate_view::func_id_tail_hash(tail));
+                (
+                    base.by_tail.get(tail).unwrap_or(&empty),
+                    self.by_tail.get(tail).unwrap_or(&empty),
+                )
+            }
+        };
         let mut unique: Option<FuncId> = None;
-        for key in keys {
+        for key in shared_keys.iter().chain(own_keys) {
             if key.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX) {
                 continue;
             }
             // Keys are never removed, so this is always `Some`; stay total.
-            let Some(&id) = self.map.get(key) else { continue };
+            let id = match &self.base {
+                None => self.map.get(key),
+                Some(base) => self.map.get(key).or_else(|| base.map.get(key)),
+            };
+            let Some(&id) = id else { continue };
             match unique {
                 None => unique = Some(id),
                 Some(seen) if seen == id => {}

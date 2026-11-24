@@ -446,7 +446,7 @@ mod tests {
 ///
 /// Panics if the function is not declared in func_ids.
 pub fn get_func_block_addr<M: Module>(
-    func_ids: &std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    func_ids: &super::func_id_table::FuncIdTable,
     module: &mut M,
     parent_name: &str,
     block: crate::mir::BlockId,

@@ -61,7 +61,7 @@ fn has_defined_local_function<M: Module>(ctx: &InstrContext<'_, M>, name: &str) 
     let Some(&func_id) = ctx.func_ids.get(name) else {
         return false;
     };
-    linkage_is_defined_local(Some(ctx.module.declarations().get_function_decl(func_id).linkage))
+    linkage_is_defined_local(Some(crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, func_id).0))
 }
 
 fn compile_user_function_call<M: Module>(
@@ -4251,7 +4251,7 @@ pub fn compile_call<M: Module>(
         // does not yet carry call origin. For the ordinary SFFI path, a
         // source-defined body owns its name and ABI; empty extern declarations
         // remain imports and continue through the runtime path below.
-        let callee_id = ctx.func_ids[func_name];
+        let callee_id = *ctx.func_ids.get(func_name).expect("has_defined_local_function checked func_ids");
         compile_user_function_call(ctx, builder, dest, func_name, args, callee_id)?;
     } else if let Some(&runtime_id) = ctx.runtime_funcs.get(sffi_name) {
         // Runtime imports need SFFI-specific tagging and text expansion.
