@@ -706,7 +706,7 @@ impl ReturnTypeInterfaceTable:
     fn callee_return(expr: HirExpr, symbols: SymbolTable, receiver_type: HirType?, consumer_params: [text] = []) -> Result<ReturnTypeEntry, RtiError>:
         match expr.kind:
             case HirExprKind.Call(callee, _, type_args): self.call_return(callee, symbols, type_args, consumer_params)
-            case HirExprKind.MethodCall(receiver, method, _, _): self.method_return(receiver, method, symbols, receiver_type)
+            case HirExprKind.MethodCall(receiver, method, _, _): self.method_return(receiver, method, symbols, receiver_type, consumer_params)
             case HirExprKind.Var(sym): self.fn_return(symbols, sym.id, "")
             case HirExprKind.NamedVar(sym, name): self.fn_return(symbols, sym.id, name)
             case _: Err(rti_error("E-RTI-001", "expression is not a call to a declared callable (RTI v1 covers free functions and struct/class methods)"))
@@ -718,7 +718,7 @@ impl ReturnTypeInterfaceTable:
             case HirExprKind.Field(base, field, _):
                 if type_args.len() > 0:
                     return Err(rti_error("E-RTI-002", "explicit call type arguments require an owned free-function declaration"))
-                self.method_return(base, field, symbols, nil)
+                self.method_return(base, field, symbols, nil, consumer_params)
             case _: Err(rti_error("E-RTI-001", "callee expression shape is not covered by RTI v1 (closures/indirect calls)"))
 
     fn explicit_free_row_return_v1(row: ReturnTypeRow, type_args: [HirType], symbols: SymbolTable, consumer_params: [text]) -> Result<ReturnTypeEntry, RtiError>:
@@ -786,21 +786,20 @@ impl ReturnTypeInterfaceTable:
         val (owner, is_static, _) = self.receiver_owner_with_args(receiver, symbols, receiver_type)?
         Ok((owner, is_static))
 
-    fn receiver_owner_with_args(receiver: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<(DeclRef, bool, [RtType]), RtiError>:
-        """Owner decl, static flag, and the receiver's concrete owner type
-        arguments (`Ring<i64, i64>` -> [i64, i64]). Arguments that are not
-        concrete in the consumer (its own type params, Infer) yield [] so the
-        row keeps today's unsubstituted path (ctor-mir-20261031 item 1b)."""
+    fn receiver_owner_with_args(receiver: HirExpr, symbols: SymbolTable, receiver_type: HirType?, consumer_params: [text] = []) -> Result<(DeclRef, bool, [RtType]), RtiError>:
+        """Owner declaration, static flag and receiver type arguments. Caller
+        parameters retain their binder index so other owner slots can still
+        specialize the return type."""
         if val declared = receiver_type:
             match declared.kind:
-                case HirTypeKind.Named(sym, args): return Ok((rti_type_decl_ref(symbols, sym.id)?, false, rti_concrete_owner_args_v1(sym.id, args, symbols)))
+                case HirTypeKind.Named(sym, args): return Ok((rti_type_decl_ref(symbols, sym.id)?, false, rti_owner_args_v1(sym.id, args, symbols, consumer_params)))
                 case HirTypeKind.DynTrait(_): return Err(rti_error("E-RTI-001", "dyn-trait receivers are RTI PR2"))
                 case _: ()
         match receiver.kind:
-            case HirExprKind.Var(sym): return self.static_or_value_owner(symbols, sym.id)
-            case HirExprKind.NamedVar(sym, _): return self.static_or_value_owner(symbols, sym.id)
+            case HirExprKind.Var(sym): return self.static_or_value_owner(symbols, sym.id, consumer_params)
+            case HirExprKind.NamedVar(sym, _): return self.static_or_value_owner(symbols, sym.id, consumer_params)
             case _: ()
-        val resolved = self.resolve(self.callee_return(receiver, symbols, nil)?)?
+        val resolved = self.resolve(self.callee_return(receiver, symbols, nil, consumer_params)?)?
         # Owner discovery reads only the HEAD of the receiver's return type.
         # A builtin head (`opt(..)`, `result(..)`, array, dict, ...) names no
         # struct/class owner whether or not its payload is substituted, so
@@ -818,24 +817,24 @@ impl ReturnTypeInterfaceTable:
             case RtType.Nominal(decl, args): Ok((decl, false, args))
             case _: Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(term)}' is not a struct/class (trait receivers are RTI PR2)"))
 
-    fn static_or_value_owner(symbols: SymbolTable, raw: i64) -> Result<(DeclRef, bool, [RtType]), RtiError>:
+    fn static_or_value_owner(symbols: SymbolTable, raw: i64, consumer_params: [text] = []) -> Result<(DeclRef, bool, [RtType]), RtiError>:
         if val sym = symbols.get_symbol_raw(raw):
             if rti_kind_display(sym.kind) != "":
                 return Ok((rti_type_decl_ref(symbols, raw)?, true, []))
             if val declared = sym.type_:
                 match declared.kind:
-                    case HirTypeKind.Named(type_sym, type_args): return Ok((rti_type_decl_ref(symbols, type_sym.id)?, false, rti_concrete_owner_args_v1(type_sym.id, type_args, symbols)))
+                    case HirTypeKind.Named(type_sym, type_args): return Ok((rti_type_decl_ref(symbols, type_sym.id)?, false, rti_owner_args_v1(type_sym.id, type_args, symbols, consumer_params)))
                     case _: ()
         Err(rti_error("E-RTI-001", "receiver symbol {raw} has no declared struct/class type (trait receivers are RTI PR2)"))
 
-    fn method_return(receiver: HirExpr, method: text, symbols: SymbolTable, receiver_type: HirType?) -> Result<ReturnTypeEntry, RtiError>:
-        val (owner, is_static, owner_args) = self.receiver_owner_with_args(receiver, symbols, receiver_type)?
+    fn method_return(receiver: HirExpr, method: text, symbols: SymbolTable, receiver_type: HirType?, consumer_params: [text] = []) -> Result<ReturnTypeEntry, RtiError>:
+        val (owner, is_static, owner_args) = self.receiver_owner_with_args(receiver, symbols, receiver_type, consumer_params)?
         val row = self.lookup(CalleeKey(module_id: owner.module_id, owner: Some(owner), name: method, is_static: is_static))?
         Ok(rti_apply_owner_args_v1(row, owner_args))
 
-fn rti_concrete_owner_args_v1(owner_raw: i64, args: [HirType], symbols: SymbolTable) -> [RtType]:
-    """Concrete RTI terms for a receiver's type arguments, or [] when any
-    argument is not a concrete declared type in this module, or when the
+fn rti_owner_args_v1(owner_raw: i64, args: [HirType], symbols: SymbolTable, consumer_params: [text]) -> [RtType]:
+    """RTI terms for a receiver's type arguments, or [] when an argument
+    cannot be represented in the consumer binder context, or when the
     receiver names an alias/trait (its args need not follow the owner's
     declared parameter order)."""
     if args.len() == 0:
@@ -846,11 +845,8 @@ fn rti_concrete_owner_args_v1(owner_raw: i64, args: [HirType], symbols: SymbolTa
             case _: return []
     else:
         return []
-    match rti_terms_of_hir_types(args, symbols, []):
-        case Ok(terms):
-            if rti_terms_have_param(terms):
-                return []
-            terms
+    match rti_terms_of_hir_types(args, symbols, consumer_params):
+        case Ok(terms): terms
         case Err(_): []
 
 fn rti_apply_owner_args_v1(row: ReturnTypeRow, owner_args: [RtType]) -> ReturnTypeEntry:

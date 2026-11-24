@@ -231,6 +231,15 @@ describe "return-type interface v1":
         expect(lowering.errors).to_equal([])
         expect(lowering.current_rti_consumer_params).to_equal([])
 
+    it "uses a concrete second owner argument when the key remains generic":
+        val hir = path_spelled_hir("struct Store<K, V>:\n    value: V\n    fn remove(key: K) -> V?:\n        Some(self.value)\nfn test_remove<K>(store: Store<K, bool>, key: K) -> bool:\n    match store.remove(key):\n        case Some(flag): flag\n        case None: false\n", "src/rti_explicit/mixed_owner.spl")
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_hir_module(hir).unwrap()
+        val caller = function_named(hir, "test_remove")
+        val entry = table.callee_return(match_subject(caller), hir.symbols, Some(caller.params[0].type_), ["K"]).unwrap()
+        val term = table.require_concrete(table.resolve(entry).unwrap()).unwrap()
+        expect(rti_term_canonical_text(term)).to_equal(rti_term_canonical_text(RtType.OptionalT(RtType.Builtin("bool"))))
+
     it "reports the exact unbound return-only parameter diagnostic on the direct error path":
         val unbound = rti_param_term("T", [])
         expect(err_code(unbound)).to_equal("E-RTI-007")
