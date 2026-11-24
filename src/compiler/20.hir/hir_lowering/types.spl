@@ -26,6 +26,7 @@ use std.io_runtime.{env_get_opt}
 @unsafe(reason: "raw enum discriminant bridge", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: TypeKind) -> i64
 @unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
+use compiler.common.sdk_errno_observer_v1.{sdk_errno_observer_enabled_v1}
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
 
 @always_inline
@@ -652,6 +653,12 @@ class HirLowering:
     reexport_visit_wanted: [text]
     reexport_visit_depths: [i64]
     reexport_generation: i64
+    sdk_observer_owner_generation_v1: i64
+    sdk_observer_owner_count_v1: i64
+    sdk_observer_owner_frozen_v1: bool
+    sdk_observer_body_generation_v1: i64
+    sdk_observer_body_count_v1: i64
+    sdk_observer_body_frozen_v1: bool
     reexport_registry_valid: bool
     reexport_walk_complete: bool
     reexport_walk_valid: bool
@@ -990,6 +997,12 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         reexport_visit_wanted: empty_reexport_visit_wanted,
         reexport_visit_depths: empty_reexport_visit_depths,
         reexport_generation: 0,
+        sdk_observer_owner_generation_v1: 0,
+        sdk_observer_owner_count_v1: 0,
+        sdk_observer_owner_frozen_v1: false,
+        sdk_observer_body_generation_v1: 0,
+        sdk_observer_body_count_v1: 0,
+        sdk_observer_body_frozen_v1: false,
         reexport_registry_valid: false,
         reexport_walk_complete: true,
         reexport_walk_valid: true,
@@ -1009,15 +1022,29 @@ fn hirlowering_for_module(filename: text, module_surfaces: ModuleSurfacesByName)
     var lowering: HirLowering = hirlowering_new()
     lowering.module_filename = filename
     lowering.module_surfaces = module_surfaces
+    lowering.sdk_observer_capture_owner_v1()
     lowering
 
 fn hirlowering_for_module_with_diagnostics(filename: text, module_surfaces: ModuleSurfacesByName, errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     var lowering: HirLowering = hirlowering_new_with_diagnostics(errors, diagnostic_messages, diagnostic_recovered)
     lowering.module_filename = filename
     lowering.module_surfaces = module_surfaces
+    lowering.sdk_observer_capture_owner_v1()
     lowering
 
 impl HirLowering:
+    me sdk_observer_capture_owner_v1():
+        if not sdk_errno_observer_enabled_v1(): return
+        self.sdk_observer_owner_generation_v1 = self.module_surfaces.generation
+        self.sdk_observer_owner_count_v1 = self.module_surfaces.surfaces.len()
+        self.sdk_observer_owner_frozen_v1 = self.module_surfaces.frozen
+
+    me sdk_observer_capture_body_v1():
+        if not sdk_errno_observer_enabled_v1(): return
+        self.sdk_observer_body_generation_v1 = self.module_surfaces.generation
+        self.sdk_observer_body_count_v1 = self.module_surfaces.surfaces.len()
+        self.sdk_observer_body_frozen_v1 = self.module_surfaces.frozen
+
     static fn new() -> HirLowering: hirlowering_new()
 
     static fn with_filename(filename: text) -> HirLowering:

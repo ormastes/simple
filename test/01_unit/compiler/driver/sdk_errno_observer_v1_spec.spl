@@ -1,0 +1,69 @@
+# @cover src/compiler/00.common/sdk_errno_observer_v1.spl
+use std.spec.*
+use compiler.common.sdk_errno_observer_v1.{sdk_errno_observer_enabled_v1,
+    sdk_errno_observer_matches_v1, sdk_errno_observer_record_v1,
+    sdk_errno_observer_reserve_v1, sdk_observer_sdn_quote_v1}
+use std.nogc_sync_mut.atomic.{atomic_i64_try_new}
+
+fn observer_test_record_v1(module_name: text, path: text) -> text:
+    sdk_errno_observer_record_v1(3, module_name, path, "path_errno_address",
+        "fresh-miss", 19, 691, 79, -1, -1, false, true, true,
+        17, 690, true, 19, 691, true)
+
+describe "bounded SDK errno failure observer":
+    it "keeps production instrumentation explicitly disabled":
+        expect(sdk_errno_observer_enabled_v1()).to_equal(false)
+
+    it "selects the actual importer path and symbol with either path separator":
+        expect(sdk_errno_observer_matches_v1("src/lib/nogc_sync_mut/io/path_identity.spl", "path_errno_address")).to_equal(true)
+        expect(sdk_errno_observer_matches_v1("C:\\src\\lib\\nogc_sync_mut\\io\\path_identity.spl", "path_errno_address")).to_equal(true)
+
+    it "rejects other importers and other requested symbols":
+        expect(sdk_errno_observer_matches_v1("src/other/io/path_identity.spl", "path_errno_address")).to_equal(false)
+        expect(sdk_errno_observer_matches_v1("src/lib/nogc_sync_mut/io/path_identity.spl", "other_name")).to_equal(false)
+        expect(sdk_errno_observer_matches_v1("src/lib/nogc_sync_mut/io/path_identity.spl.extra", "path_errno_address")).to_equal(false)
+
+    it "preserves independent handoff and body values in complete marked SDN":
+        val record = observer_test_record_v1("actual.module", "src/lib/nogc_sync_mut/io/path_identity.spl")
+        expect(record).to_start_with("sdk-observer-begin: 3\n")
+        expect(record).to_contain("owner_generation: 17\nowner_count: 690\nowner_frozen: true")
+        expect(record).to_contain("body_generation: 19\nbody_count: 691\nbody_frozen: true")
+        expect(record).to_contain("found: false\ncomplete: true\nvalid: true")
+        expect(record).to_end_with("sdk-observer-end: 3")
+        expect(record.byte_len() + 1).to_be_less_than(2049)
+
+    it "quotes delimiters and controls rather than injecting SDN rows":
+        expect(sdk_observer_sdn_quote_v1("a\"\\\n\r\t")).to_equal("\"a\\\"\\\\\\n\\r\\t\"")
+
+    it "counts escaped bytes before admitting a record":
+        var module_name = ""
+        var path = ""
+        var index = 0
+        while index < 512:
+            path = path + "\t"
+            if index < 256: module_name = module_name + "\t"
+            index = index + 1
+        val record = observer_test_record_v1(module_name, path)
+        expect(record).to_contain("observation: unavailable")
+        expect(record).to_end_with("sdk-observer-end: 3")
+        expect(record.byte_len() + 1).to_be_less_than(2049)
+
+    it "refuses overlong input before quoting":
+        var path = ""
+        var index = 0
+        while index < 513:
+            path = path + "x"
+            index = index + 1
+        expect(sdk_errno_observer_matches_v1(path, "path_errno_address")).to_equal(false)
+        expect(observer_test_record_v1("m", path)).to_contain("observation: unavailable")
+
+    it "shares the actual typed atomic reservation limit across callers":
+        val allocated = atomic_i64_try_new(0)
+        expect(allocated.is_some()).to_equal(true)
+        if val budget = allocated:
+            var index = 0
+            while index < 8:
+                expect(sdk_errno_observer_reserve_v1(budget)).to_equal(index)
+                index = index + 1
+            expect(sdk_errno_observer_reserve_v1(budget)).to_equal(-1)
+            expect(sdk_errno_observer_reserve_v1(budget)).to_equal(-1)

@@ -1,4 +1,5 @@
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
+use compiler.common.sdk_errno_observer_v1.{sdk_errno_observer_enabled_v1, sdk_errno_observer_matches_v1, sdk_errno_observer_emit_root_v1}
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource, HirReexportWalkState}
@@ -1200,6 +1201,9 @@ impl HirLowering:
             val source_found = hop.found
             val source_index = hop.module_index
             val source_item = hop.item_name
+            if sdk_errno_observer_enabled_v1():
+                self.sdk_observer_root_result_v1(imported_name, "registered-hop", imported_mod.physical_index,
+                    -1, source_index, source_found, self.reexport_walk_complete, self.reexport_walk_valid, source_item)
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={source_found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
             if source_found:
@@ -1516,6 +1520,20 @@ impl HirLowering:
             return resolved
         package_key
 
+    fn sdk_observer_root_result_v1(wanted: text, branch: text, facade_index: i64,
+            memo_slot: i64, terminal_index: i64, found: bool, complete: bool, valid: bool,
+            terminal_item: text = ""):
+        if not sdk_errno_observer_enabled_v1(): return
+        if not sdk_errno_observer_matches_v1(self.module_filename, wanted): return
+        # No pointer identity or second resolver/memo probe is an observation.
+        sdk_errno_observer_emit_root_v1("unavailable", self.module_filename,
+            wanted, branch, self.module_surfaces.generation,
+            self.module_surfaces.surfaces.len(), facade_index, memo_slot,
+            terminal_index, found, complete, valid,
+            self.sdk_observer_owner_generation_v1, self.sdk_observer_owner_count_v1,
+            self.sdk_observer_owner_frozen_v1, self.sdk_observer_body_generation_v1,
+            self.sdk_observer_body_count_v1, self.sdk_observer_body_frozen_v1, terminal_item)
+
     me find_reexport_source(facade_index: i64, wanted: text) -> HirReexportSource:
         """Resolve one root query from its retained physical surface index."""
         val generation = self.module_surfaces.generation
@@ -1540,22 +1558,30 @@ impl HirLowering:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-root-reject] reason=registry-invalid index={facade_index} wanted={wanted}")
             self.reexport_walk_valid = false
+            if sdk_errno_observer_enabled_v1():
+                self.sdk_observer_root_result_v1(wanted, "registry-invalid", facade_index, -1, -1, false, true, false)
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-root-reject] reason=index-bounds index={facade_index} wanted={wanted} surfaces={self.module_surfaces.surfaces.len()}")
             self.reexport_walk_valid = false
+            if sdk_errno_observer_enabled_v1():
+                self.sdk_observer_root_result_v1(wanted, "index-bounds", facade_index, -1, -1, false, true, false)
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         val current_facade: ModuleSurface = self.module_surfaces.surfaces[facade_index]
         if current_facade.physical_index != facade_index:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-root-reject] reason=physical-index index={facade_index} actual={current_facade.physical_index} wanted={wanted}")
             self.reexport_walk_valid = false
+            if sdk_errno_observer_enabled_v1():
+                self.sdk_observer_root_result_v1(wanted, "physical-index", facade_index, -1, -1, false, true, false)
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         if current_facade.generation != self.module_surfaces.generation:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-root-reject] reason=generation index={facade_index} surface_generation={current_facade.generation} registry_generation={self.module_surfaces.generation} wanted={wanted}")
             self.reexport_walk_valid = false
+            if sdk_errno_observer_enabled_v1():
+                self.sdk_observer_root_result_v1(wanted, "generation", facade_index, -1, -1, false, true, false)
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
         # REXMEMO (2026-08-21): the walk below reads only the frozen registry,
@@ -1582,6 +1608,8 @@ impl HirLowering:
                 if verify_index != normalized_terminal:
                     eprint("[rexmemo-mismatch] facade={facade_index} wanted={wanted} memo={terminal_index} walk={verify_index} complete={verify_state.complete} valid={verify_state.valid}")
             if terminal_index == -2:
+                if sdk_errno_observer_enabled_v1():
+                    self.sdk_observer_root_result_v1(wanted, "memo-verified-negative", facade_index, memo_slot, terminal_index, false, self.reexport_walk_complete, self.reexport_walk_valid)
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             if terminal_index < 0:
                 # CHAINTABLE-HARDEN (cycle-36 sweep): a memoized NEGATIVE can
@@ -1600,6 +1628,8 @@ impl HirLowering:
                 self.reexport_walk_valid = recheck_state.valid
                 if recheck.found:
                     self.reexport_root_memo_record(memo_key, recheck.module_index, recheck.item_name)
+                    if sdk_errno_observer_enabled_v1():
+                        self.sdk_observer_root_result_v1(wanted, "memo-negative-recheck-found", facade_index, memo_slot, recheck.module_index, true, recheck_state.complete, recheck_state.valid)
                     return HirReexportSource(
                         found: true,
                         module_index: recheck.module_index,
@@ -1607,10 +1637,16 @@ impl HirLowering:
                         item_name: recheck.item_name)
                 if recheck_state.complete and recheck_state.valid:
                     self.reexport_root_memo_index_values[memo_slot] = -2
+                if sdk_errno_observer_enabled_v1():
+                    self.sdk_observer_root_result_v1(wanted, "memo-negative-recheck-miss", facade_index, memo_slot, -1, false, recheck_state.complete, recheck_state.valid)
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             if terminal_index >= self.module_surfaces.surfaces.len():
                 self.reexport_walk_valid = false
+                if sdk_errno_observer_enabled_v1():
+                    self.sdk_observer_root_result_v1(wanted, "memo-terminal-bounds", facade_index, memo_slot, terminal_index, false, self.reexport_walk_complete, false)
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+            if sdk_errno_observer_enabled_v1():
+                self.sdk_observer_root_result_v1(wanted, "memo-positive", facade_index, memo_slot, terminal_index, true, self.reexport_walk_complete, self.reexport_walk_valid)
             return HirReexportSource(
                 found: true,
                 module_index: terminal_index,
@@ -1631,6 +1667,9 @@ impl HirLowering:
             # Only a COMPLETE, valid miss is a fact about the registry; a
             # depth-truncated or misaligned walk stays retryable.
             self.reexport_root_memo_record(memo_key, -1, "")
+        if sdk_errno_observer_enabled_v1():
+            val observer_branch = if result.found: "fresh-found" else: "fresh-miss"
+            self.sdk_observer_root_result_v1(wanted, observer_branch, facade_index, -1, result.module_index, result.found, state.complete, state.valid)
         result
 
     me reexport_root_memo_lookup(key: text) -> i64:

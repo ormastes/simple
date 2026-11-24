@@ -1,0 +1,92 @@
+# Default-off diagnostic observer. This owner never resolves or changes a symbol.
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_try_new}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid_checked}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+pub const SDK_ERRNO_OBSERVER_ENABLED_V1: bool = false
+pub const SDK_ERRNO_OBSERVER_RECORD_LIMIT_V1: i64 = 8
+pub const SDK_ERRNO_OBSERVER_BYTE_LIMIT_V1: i64 = 2048
+
+var _sdk_errno_observer_initialized_v1: bool = false
+var _sdk_errno_observer_budget_v1: AtomicI64? = None
+var _sdk_errno_observer_pid_v1: i64 = 0
+var _sdk_errno_observer_initial_scope_v1: i64 = -1
+
+# Called only by the serial driver owner, before HIR parser scopes or workers.
+# Emission may be concurrent, but initialization is never a worker operation.
+pub fn sdk_errno_observer_initialize_v1():
+    if not SDK_ERRNO_OBSERVER_ENABLED_V1: return
+    if _sdk_errno_observer_initialized_v1: return
+    val initial_scope = transient_array_scope_state_v1()
+    if initial_scope != 0: return
+    _sdk_errno_observer_initialized_v1 = true
+    _sdk_errno_observer_initial_scope_v1 = initial_scope
+    match getpid_checked():
+        case Ok(pid): _sdk_errno_observer_pid_v1 = pid
+        case Err(_): return
+    _sdk_errno_observer_budget_v1 = atomic_i64_try_new(0)
+
+pub fn sdk_errno_observer_enabled_v1() -> bool:
+    SDK_ERRNO_OBSERVER_ENABLED_V1
+
+pub fn sdk_errno_observer_matches_v1(path: text, wanted: text) -> bool:
+    if wanted != "path_errno_address" or path.byte_len() > 512: return false
+    val normalized = path.replace("\\", "/")
+    normalized.ends_with("/nogc_sync_mut/io/path_identity.spl")
+
+pub fn sdk_errno_observer_reserve_v1(budget: AtomicI64) -> i64:
+    val sequence = budget.fetch_add(1, MemoryOrdering.SeqCst)
+    if sequence < 0 or sequence >= SDK_ERRNO_OBSERVER_RECORD_LIMIT_V1: return -1
+    sequence
+
+# Shared quoting policy for bounded SDN diagnostic text; never raw interpolation.
+pub fn sdk_observer_sdn_quote_v1(value: text) -> text:
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    "\"" + escaped + "\""
+
+pub fn sdk_errno_observer_record_v1(sequence: i64, module_name: text, path: text,
+        wanted: text, branch: text, registry_generation: i64, registry_count: i64,
+        facade_index: i64, memo_slot: i64, terminal_index: i64, found: bool,
+        complete: bool, valid: bool, owner_generation: i64, owner_count: i64,
+        owner_frozen: bool, body_generation: i64, body_count: i64,
+        body_frozen: bool, terminal_item: text = "", process_id: i64 = 0,
+        initialization_scope: i64 = -1) -> text:
+    val unavailable = "sdk-observer-begin: {sequence}\nschema: sdk-worker-reexport-observation-v1\nsequence: {sequence}\nprocess_id: {process_id}\ninitialization_scope: {initialization_scope}\nobservation: unavailable\nsdk-observer-end: {sequence}"
+    if module_name.byte_len() > 256 or path.byte_len() > 512 or wanted.byte_len() > 128 or branch.byte_len() > 64 or terminal_item.byte_len() > 128:
+        return unavailable
+    val out = "sdk-observer-begin: {sequence}\nschema: sdk-worker-reexport-observation-v1\nsequence: {sequence}\n" +
+        "process_id: {process_id}\ninitialization_scope: {initialization_scope}\n" +
+        "module_name: " + sdk_observer_sdn_quote_v1(module_name) + "\nimporter: " + sdk_observer_sdn_quote_v1(path) +
+        "\nnormalized_importer: " + sdk_observer_sdn_quote_v1(path.replace("\\", "/")) +
+        "\nwanted: " + sdk_observer_sdn_quote_v1(wanted) + "\nbranch: " + sdk_observer_sdn_quote_v1(branch) +
+        "\nregistry_generation: {registry_generation}\nregistry_count: {registry_count}\nfacade_index: {facade_index}\n" +
+        "memo_slot: {memo_slot}\nterminal_index: {terminal_index}\nfound: {found}\ncomplete: {complete}\nvalid: {valid}\n" +
+        "terminal_item: " + sdk_observer_sdn_quote_v1(terminal_item) + "\n" +
+        "owner_generation: {owner_generation}\nowner_count: {owner_count}\nowner_frozen: {owner_frozen}\n" +
+        "body_generation: {body_generation}\nbody_count: {body_count}\nbody_frozen: {body_frozen}\n" +
+        "sdk-observer-end: {sequence}"
+    # eprint adds exactly one LF. Include it in the per-record byte budget.
+    if out.byte_len() + 1 > SDK_ERRNO_OBSERVER_BYTE_LIMIT_V1: return unavailable
+    out
+
+pub fn sdk_errno_observer_emit_root_v1(module_name: text, path: text, wanted: text,
+        branch: text, registry_generation: i64, registry_count: i64,
+        facade_index: i64, memo_slot: i64, terminal_index: i64, found: bool,
+        complete: bool, valid: bool, owner_generation: i64, owner_count: i64,
+        owner_frozen: bool, body_generation: i64, body_count: i64,
+        body_frozen: bool, terminal_item: text = ""):
+    if not SDK_ERRNO_OBSERVER_ENABLED_V1: return
+    if not sdk_errno_observer_matches_v1(path, wanted): return
+    if not _sdk_errno_observer_initialized_v1: return
+    if val budget = _sdk_errno_observer_budget_v1:
+        # A typed process-lifetime atomic owner, never reset between modules.
+        val sequence = sdk_errno_observer_reserve_v1(budget)
+        if sequence < 0: return
+        val record = sdk_errno_observer_record_v1(sequence, module_name, path,
+            wanted, branch, registry_generation, registry_count, facade_index,
+            memo_slot, terminal_index, found, complete, valid, owner_generation,
+            owner_count, owner_frozen, body_generation, body_count, body_frozen,
+            terminal_item, _sdk_errno_observer_pid_v1, _sdk_errno_observer_initial_scope_v1)
+        # One real stderr write; retained capture must reject incomplete records.
+        eprint(record)
