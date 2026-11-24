@@ -113,6 +113,9 @@ jobs:
         working-directory: source
         env:
           CLAIM_ID: ${{ steps.claim.outputs.artifact-id }}
+          CLAIM_DIGEST: ${{ steps.claim.outputs.artifact-digest }}
+          CLAIM_URL: ${{ steps.claim.outputs.artifact-url }}
+          CLAIM_OUTCOME: ${{ steps.claim.outcome }}
           SIMPLE_BOOTSTRAP_COMPILER_PHASE: 1
           SIMPLE_HOST_MAX_THREADS: 2
           SIMPLE_HOST_MAX_BUILD_JOBS: 2
@@ -120,10 +123,15 @@ jobs:
           SIMPLE_NATIVE_FILE_TIMING: 1
         run: |
           set -euo pipefail
-          test -n "$CLAIM_ID"
-          gh api "repos/ormastes/simple/actions/artifacts/$CLAIM_ID" \
-            --jq '[.name,.expired,.workflow_run.id]|@tsv' > build/ladder/evidence/claim-api.tsv
-          printf 'xc-final-p2-campaign-claim\tfalse\t%s\n' "$GITHUB_RUN_ID" | cmp -s - build/ladder/evidence/claim-api.tsv
+          # The canonical upload action already finalized this immutable claim.
+          # An immediate second REST read failed 404 in run45291903640, despite
+          # successful publication; it is not an additional ownership receipt.
+          test "$CLAIM_OUTCOME" = success
+          [[ "$CLAIM_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CLAIM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          test "$CLAIM_URL" = "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts/$CLAIM_ID"
+          printf 'schema: xc-final-p2-publication-v1\nowner: actions/upload-artifact@v6\nrun: %s\nartifact: %s\narchive_sha256: %s\nurl: %s\n' \
+            "$GITHUB_RUN_ID" "$CLAIM_ID" "$CLAIM_DIGEST" "$CLAIM_URL" > build/ladder/evidence/claim-publication.sdn
           export SIMPLE_BOOTSTRAP_COMPILER="$PWD/build/ladder/producer/simple"
           printf 'parent_path: %s\nparent_phase: 1\nsource_revision: %s\nworkflow_revision: %s\n' \
             "$SIMPLE_BOOTSTRAP_COMPILER" "$SOURCE_SHA" "$CONTROL_SOURCE" > build/ladder/evidence/build-input.sdn
