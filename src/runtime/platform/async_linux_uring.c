@@ -378,6 +378,49 @@ static int64_t uring_submit_connect(spl_driver* d, int64_t fd,
     return id;
 }
 
+/* ---- buffered recv/send/read/write ---- */
+
+/* Queue one recv/send/read/write SQE over the heap buffer `buf`, which the
+ * caller allocated after bufs_ensure(). Takes ownership of `buf` on every
+ * path: freed on -EAGAIN (ring full, no id consumed), otherwise tracked
+ * until its completion. `offset` is used for BUF_OP_READ/WRITE only. */
+static int64_t uring_submit_buffered(spl_driver* d, int64_t fd, char* buf,
+                                     int64_t len, int64_t offset, int op_type)
+{
+    uring_driver* ud = UD(d);
+    struct io_uring_sqe* sqe = get_sqe(ud);
+    if (!sqe) {
+        free(buf);
+        return -EAGAIN;
+    }
+
+    int64_t id = next_id(d);
+    switch (op_type) {
+    case BUF_OP_RECV:
+        io_uring_prep_recv(sqe, (int)fd, buf, (unsigned)len, 0);
+        break;
+    case BUF_OP_SEND:
+        io_uring_prep_send(sqe, (int)fd, buf, (unsigned)len, 0);
+        break;
+    case BUF_OP_READ:
+        io_uring_prep_read(sqe, (int)fd, buf, (unsigned)len, (uint64_t)offset);
+        break;
+    default: /* BUF_OP_WRITE */
+        io_uring_prep_write(sqe, (int)fd, buf, (unsigned)len, (uint64_t)offset);
+        break;
+    }
+    io_uring_sqe_set_data64(sqe, (uint64_t)id);
+
+    /* Unreachable after the caller's bufs_ensure(); see
+     * doc/08_tracking/bug/2026-11-24_uring_submit_bufs_put_enomem_arm_dead_code.md */
+    if (!bufs_put(ud, id, buf, len, op_type, NULL)) {
+        free(buf);
+        return -ENOMEM;
+    }
+    ud->pending_submits++;
+    return id;
+}
+
 /* ---- submit_recv ---- */
 
 static int64_t uring_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size)
@@ -389,23 +432,7 @@ static int64_t uring_submit_recv(spl_driver* d, int64_t fd, int64_t buf_size)
 
     char* buf = (char*)malloc((size_t)buf_size);
     if (!buf) return -ENOMEM;
-
-    struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) {
-        free(buf);
-        return -EAGAIN;
-    }
-
-    int64_t id = next_id(d);
-    io_uring_prep_recv(sqe, (int)fd, buf, (unsigned)buf_size, 0);
-    io_uring_sqe_set_data64(sqe, (uint64_t)id);
-
-    if (!bufs_put(ud, id, buf, buf_size, BUF_OP_RECV, NULL)) {
-        free(buf);
-        return -ENOMEM;
-    }
-    ud->pending_submits++;
-    return id;
+    return uring_submit_buffered(d, fd, buf, buf_size, 0, BUF_OP_RECV);
 }
 
 /* ---- submit_send ---- */
@@ -420,23 +447,7 @@ static int64_t uring_submit_send(spl_driver* d, int64_t fd,
     char* copy = (char*)malloc((size_t)(len > 0 ? len : 1));
     if (!copy) return -ENOMEM;
     if (len > 0) memcpy(copy, data, (size_t)len);
-
-    struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) {
-        free(copy);
-        return -EAGAIN;
-    }
-
-    int64_t id = next_id(d);
-    io_uring_prep_send(sqe, (int)fd, copy, (unsigned)len, 0);
-    io_uring_sqe_set_data64(sqe, (uint64_t)id);
-
-    if (!bufs_put(ud, id, copy, len, BUF_OP_SEND, NULL)) {
-        free(copy);
-        return -ENOMEM;
-    }
-    ud->pending_submits++;
-    return id;
+    return uring_submit_buffered(d, fd, copy, len, 0, BUF_OP_SEND);
 }
 
 /* ---- submit_sendfile ---- */
@@ -484,23 +495,7 @@ static int64_t uring_submit_read(spl_driver* d, int64_t fd,
 
     char* buf = (char*)malloc((size_t)buf_size);
     if (!buf) return -ENOMEM;
-
-    struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) {
-        free(buf);
-        return -EAGAIN;
-    }
-
-    int64_t id = next_id(d);
-    io_uring_prep_read(sqe, (int)fd, buf, (unsigned)buf_size, (uint64_t)offset);
-    io_uring_sqe_set_data64(sqe, (uint64_t)id);
-
-    if (!bufs_put(ud, id, buf, buf_size, BUF_OP_READ, NULL)) {
-        free(buf);
-        return -ENOMEM;
-    }
-    ud->pending_submits++;
-    return id;
+    return uring_submit_buffered(d, fd, buf, buf_size, offset, BUF_OP_READ);
 }
 
 /* ---- submit_write ---- */
@@ -516,23 +511,7 @@ static int64_t uring_submit_write(spl_driver* d, int64_t fd,
     char* copy = (char*)malloc((size_t)len);
     if (!copy) return -ENOMEM;
     memcpy(copy, data, (size_t)len);
-
-    struct io_uring_sqe* sqe = get_sqe(ud);
-    if (!sqe) {
-        free(copy);
-        return -EAGAIN;
-    }
-
-    int64_t id = next_id(d);
-    io_uring_prep_write(sqe, (int)fd, copy, (unsigned)len, (uint64_t)offset);
-    io_uring_sqe_set_data64(sqe, (uint64_t)id);
-
-    if (!bufs_put(ud, id, copy, len, BUF_OP_WRITE, NULL)) {
-        free(copy);
-        return -ENOMEM;
-    }
-    ud->pending_submits++;
-    return id;
+    return uring_submit_buffered(d, fd, copy, len, offset, BUF_OP_WRITE);
 }
 
 /* ---- submit_open ---- */
