@@ -34,6 +34,15 @@ Traceability: REQ-WEB-MARGIN-TYPED-HORIZONTAL-001 — a horizontal margin keeps 
 # @tag: unit, browser_engine, layout, margin, chrome159
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
 use std.spec.*
+use std.common.structural.layout.{
+    layout_length_auto,
+    layout_length_percent,
+    layout_length_px
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.adapter.{_web_layout_size}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    resolve_horizontal_margin
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend
 }
@@ -141,3 +150,37 @@ describe "A horizontal margin's number, unit and auto flag after the cascade (bo
         expect(_right("margin-inline:0 -10%")).to_equal([-10, 1, 0])
         expect(_right("margin-inline:10px -10px")).to_equal([-10, 0, 0])
         expect(_left("margin-inline:auto 10px")).to_equal([0, 0, 1])
+
+describe "Web layout adapter size and horizontal margin overflow safety":
+    it "AC-10: _web_layout_size maps positive px, negative percent, zero auto, and i32 min safely":
+        val i32_min: i32 = -2147483648
+        val i32_max: i32 = 2147483647
+        expect(_web_layout_size(40)).to_equal(layout_length_px(40))
+        expect(_web_layout_size(i32_max)).to_equal(layout_length_px(2147483647))
+        expect(_web_layout_size(-10)).to_equal(layout_length_percent(10))
+        expect(_web_layout_size(-100)).to_equal(layout_length_percent(100))
+        expect(_web_layout_size(0)).to_equal(layout_length_auto())
+        expect(_web_layout_size(i32_min)).to_equal(layout_length_percent(2147483648))
+
+    it "AC-11: resolve_horizontal_margin avoids i32 overflow and clamps extreme percentage results":
+        val i32_min: i32 = -2147483648
+        val i32_max: i32 = 2147483647
+        val exp_half_large: i32 = 100000000
+        val exp_neg_half_large: i32 = -100000000
+        val exp_half_max: i32 = 1073741823
+        val exp_neg_half_max: i32 = -1073741823
+        val exp_pos_21: i32 = 21
+        val exp_neg_21: i32 = -21
+        val exp_neg_10: i32 = -10
+        val exp_zero: i32 = 0
+        expect(resolve_horizontal_margin(-10, false, 400)).to_equal(exp_neg_10)
+        expect(resolve_horizontal_margin(10, true, 215)).to_equal(exp_pos_21)
+        expect(resolve_horizontal_margin(-10, true, 215)).to_equal(exp_neg_21)
+        expect(resolve_horizontal_margin(50, true, 200000000)).to_equal(exp_half_large)
+        expect(resolve_horizontal_margin(-50, true, 200000000)).to_equal(exp_neg_half_large)
+        expect(resolve_horizontal_margin(50, true, i32_max)).to_equal(exp_half_max)
+        expect(resolve_horizontal_margin(-50, true, i32_max)).to_equal(exp_neg_half_max)
+        expect(resolve_horizontal_margin(i32_min, true, 100)).to_equal(i32_min)
+        expect(resolve_horizontal_margin(i32_min, true, 0)).to_equal(exp_zero)
+        expect(resolve_horizontal_margin(200, true, i32_max)).to_equal(i32_max)
+        expect(resolve_horizontal_margin(-200, true, i32_max)).to_equal(i32_min)
