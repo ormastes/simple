@@ -17,6 +17,7 @@ alwaysApply: false
 - **SDN format** for all config/data files, not JSON/YAML
 - **Error handling:** Use `Result<T, E>` + `?` operator (no try/catch/throw keywords — by design)
 - **nil only inside `unsafe:` (and interpreted scripts)** - safe compiled code handles `T?` only via `None`, `.?`, `??`, `if val`, or match; match arms are `None:`, never `nil:`
+- **Compare Options with `.is_none()` / `.is_some()`, never `== nil` / `!= nil`** - in compiled code `None == nil` is FALSE, so `slot.lease == nil` silently takes the wrong branch once the producer writes `None`; `.is_none()` is right for both `None` and flat nil. Ratchet: `scripts/check/check-nil-option-reader-mix.shs` (required check). In a generic class, bind a call returning `T?` to a local before `.is_some()` (E-RTI-003 on compilers before PR #11283)
 - **Unit type is `Nil`, its value `nil`** - `Result<Nil, E>` / `Ok(nil)`, `-> Nil` / `return nil` are safe (the one `nil` exception); `Nil` is never absence (`Nil?` rejected); `()` is the same type, new code prefers `Nil`. See `doc/07_guide/language/robust_semantic_absence.md` § Unit type
 - **No `Any` / erased access outside `unsafe:`** - it is a compile error
 - **Generics are erased** - there is no monomorphization pass
