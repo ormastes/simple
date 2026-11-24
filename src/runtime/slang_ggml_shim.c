@@ -139,6 +139,7 @@ struct slang_request {
     int tree;
     int seq;
     int tree_owner;
+    int restore_pending;      /* mode 3 host restore still to run (outside the lock) */
     llama_token *path;
     int64_t path_len;
     int64_t path_cap;
@@ -661,6 +662,7 @@ static struct slang_tree_node g_tree_node[SLANG_TREE_MAX_NODES];
 static int g_tree_seq_used[SLANG_TREE_MAX_SEQS];
 static int g_tree_seq_dirty[SLANG_TREE_MAX_SEQS];   /* stream may hold stale K/V data */
 static int g_tree_mode = 0;
+static int g_tree_host_restore = 0;   /* mode 4: restore the reused prefix through host memory */
 static struct llama_context *g_tree_ctx = NULL;
 static int64_t g_tree_limit = 0;      /* per-request context limit of g_tree_ctx */
 static int64_t g_tree_cells_cfg = 0;  /* 0 = 4 x the first request's n_ctx */
@@ -989,14 +991,12 @@ static int slang_tree_flush_stream_copies(void) {
     return rc == 0;
 }
 
-/* Mode 3 reuse: copy the owner's stream, drop the tail, serialise the surviving
+/* Mode 4 reuse (the owner copy and tail drop were queued by prepare): serialise the surviving
  * prefix through host memory, zero the stream, and restore only the prefix, so
  * no cell of the owner's tail survives past the reused frontier. Returns 1 when
  * the stream then holds exactly `reuse` cells. */
-static int slang_tree_restore_prefix_host(int owner_seq, int seq, int64_t reuse) {
-    llama_memory_t memory = llama_get_memory(g_tree_ctx);
-    llama_memory_seq_cp(memory, owner_seq, seq, -1, -1);
-    llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
+static int slang_tree_restore_prefix_host(int seq) {
+    g_tree_seq_dirty[seq] = 1;
     int ok = 0;
     if (!slang_tree_flush_stream_copies()) return 0;
     size_t size = llama_state_seq_get_size(g_tree_ctx, seq);
@@ -1076,15 +1076,15 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
     slang_tree_release_locked(request);
     request->eval_start = 0;
     request->path_len = 0;
+    request->restore_pending = 0;
     while (g_tree_cells > 0 &&
            slang_tree_cached_tokens() + request->context_limit > g_tree_cells &&
            slang_tree_evict_lru()) {}
     int seq = slang_tree_alloc_seq();
     if (seq < 0 && slang_tree_evict_lru()) seq = slang_tree_alloc_seq();
     if (seq < 0) return SLANG_ERR_BUSY;
-    slang_tree_zero_stream(seq);
-    g_tree_seq_dirty[seq] = 1;
     int64_t reuse = 0;
+    int overwritten = 0;   /* an owner copy replaces the whole stream, no zeroing needed first */
     int node = 0;
     int64_t matched = request->tok_len > 1
         ? slang_tree_match(request->tok, request->tok_len, &node) : 0;
@@ -1116,12 +1116,21 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
             /* Per-sequence streams (mode 3) only copy whole sequences, and a copy
              * would carry the owner's tail as stale cells: restore the prefix
              * through the host instead. Unified KV just adds the seq id to cells. */
-            if (g_tree_mode == 3) {
-                slang_tree_restore_prefix_host(g_tree_node[owner].seq, seq, reuse);
+            overwritten = 1;
+            g_tree_seq_dirty[seq] = 1;
+            if (g_tree_mode == 3 && g_tree_host_restore) {
+                /* The flush decodes and the readback run after the lock is released
+                 * (slang_tree_restore_finish); g_tree_active already excludes others. */
+                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
+                llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
+                request->restore_pending = 1;
+            } else if (g_tree_mode == 3) {
+                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
+                llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
             } else {
                 llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, 0, (llama_pos)reuse);
             }
-            if (slang_tree_kv_holds(seq, reuse)) {
+            if (request->restore_pending || slang_tree_kv_holds(seq, reuse)) {
                 g_tree_node[owner].pins++;
                 g_tree_node[owner].last_used = ++g_prefix_clock;
                 request->tree_owner = owner;
@@ -1135,6 +1144,8 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
             reuse = 0;
         }
     }
+    if (!overwritten) slang_tree_zero_stream(seq);
+    g_tree_seq_dirty[seq] = 1;
     if (!slang_tree_path_reserve(request, request->tok_len + 1)) {
         if (request->tree_owner >= 0 && g_tree_node[request->tree_owner].pins > 0)
             g_tree_node[request->tree_owner].pins--;
@@ -1219,6 +1230,33 @@ static int slang_tree_warm_first(struct slang_request *request, int64_t suffix_l
     return rc == 0;
 }
 
+/* Runs the deferred mode 4 host restore with the lock released (two decodes and a
+ * readback), then validates under the lock. A failed restore is a MISS: the stream
+ * is dropped and re-zeroed, the failure counted, and nothing is reused. Returns the
+ * reused token count. */
+static int64_t slang_tree_restore_finish(struct slang_request *request) {
+    int64_t reuse = request->eval_start;
+    int ok = slang_tree_restore_prefix_host(request->seq);
+    SLANG_LOCK();
+    request->restore_pending = 0;
+    if (!(ok && slang_tree_kv_holds(request->seq, reuse))) {
+        if (request->tree_owner >= 0) {
+            struct slang_tree_node *o = &g_tree_node[request->tree_owner];
+            if (o->used && o->pins > 0) o->pins--;
+            request->tree_owner = -1;
+        }
+        llama_memory_seq_rm(llama_get_memory(g_tree_ctx), request->seq, -1, -1);
+        slang_tree_zero_stream(request->seq);
+        g_prefix_restore_failures++;
+        g_prefix_hits--; g_prefix_tokens_reused -= reuse; g_prefix_misses++;
+        request->path_len = 0;
+        request->eval_start = 0;
+        reuse = 0;
+    }
+    SLANG_UNLOCK();
+    return reuse;
+}
+
 static int64_t slang_tree_eval_prompt(struct slang_request *request) {
     if (request->tok_len > request->context_limit) return SLANG_ERR_OVERFLOW;
     if (request->seq < 0) {
@@ -1262,18 +1300,21 @@ static int64_t slang_tree_eval_prompt(struct slang_request *request) {
  * prefix-cache entry count (slang_ggml_prefix_cache_configure), at most
  * SLANG_TREE_MAX_SEQS - 1. Only while no request is open. */
 int64_t slang_ggml_prefix_cache_mode_configure(int64_t mode, int64_t cells) {
-    if (mode < 0 || mode > 3 || cells < 0 || cells > INT32_MAX)
+    if (mode < 0 || mode > 4 || cells < 0 || cells > INT32_MAX)
         return SLANG_ERR_INVALID;
     SLANG_LOCK();
     int64_t result;
     if (g_request_count != 0) {
         result = SLANG_ERR_BUSY;
     } else {
-        if (mode != g_tree_mode || cells != g_tree_cells_cfg) {
+        int restore = mode == 4;
+        int base = restore ? 3 : (int)mode;   /* mode 4 = mode 3 plus the host restore */
+        if (base != g_tree_mode || restore != g_tree_host_restore || cells != g_tree_cells_cfg) {
             slang_tree_destroy();
             if (mode != 0) slang_prefix_clear_all(0);
         }
-        g_tree_mode = (int)mode;
+        g_tree_mode = base;
+        g_tree_host_restore = restore;
         g_tree_cells_cfg = cells;
         result = mode;
     }
@@ -1571,7 +1612,7 @@ static int64_t slang_free_locked(void) {
     if (g_request_count > (compat_active ? 1 : 0)) return SLANG_ERR_BUSY;
     if (compat_active) slang_request_close_locked(g_compat_handle);
     slang_tree_destroy();
-    g_tree_mode = 0; g_tree_cells_cfg = 0;
+    g_tree_mode = 0; g_tree_host_restore = 0; g_tree_cells_cfg = 0;
     if (g_model) { llama_model_free(g_model);  g_model = NULL; }
     slang_prefix_clear_all(0);
     g_prefix_capacity = SLANG_PREFIX_CACHE_DEFAULT_ENTRIES;
@@ -1833,8 +1874,9 @@ int64_t slang_ggml_request_prefix_prepare(int64_t handle) {
         return SLANG_ERR_DECODE;
     SLANG_LOCK();
     int64_t result = slang_request_prefix_prepare_locked(handle);
+    int pending = result > 0 && request != NULL && request->restore_pending;
     SLANG_UNLOCK();
-    return result;
+    return pending ? slang_tree_restore_finish(request) : result;
 }
 
 int64_t slang_ggml_prefix_prepare(void) {
