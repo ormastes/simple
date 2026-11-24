@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include "runtime_env_owned.h"
+#include "runtime_exec_argv_private.h"
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -906,17 +907,6 @@ int64_t rt_term_enable_ansi(void) {
     return rt_value_bool(1);
 }
 
-#if !defined(_WIN32)
-/* argv = { cmd, args..., NULL }; NULL on allocation failure. */
-static char** rt_legacy_spawn_argv(const char* cmd, const char** args, int64_t arg_count) {
-    char** argv = (char**)calloc((size_t)arg_count + 2, sizeof(char*));
-    if (!argv) return NULL;
-    argv[0] = (char*)cmd;
-    for (int64_t i = 0; i < arg_count; i++) argv[i + 1] = (char*)args[i];
-    return argv;
-}
-#endif
-
 /* Argument gate shared by both spawn entry points. */
 static bool rt_legacy_spawn_args_ok(const char* cmd, const char** args, int64_t arg_count) {
     return cmd && *cmd && arg_count >= 0 && (arg_count == 0 || args);
@@ -931,7 +921,7 @@ int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_c
     for (int64_t i = 0; i < arg_count; i++) if (!args[i]) return -1;
     /* argv is built BEFORE fork: a multithreaded parent may hold the
      * allocator lock, so the child must not calloc (it used to). */
-    char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
+    char** argv = spawn_argv_build(cmd, args, arg_count);
     if (!argv) return -1;
 #if defined(__APPLE__)
     pid_t pid = -1;
@@ -978,7 +968,7 @@ int64_t rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg
     if (!rt_legacy_spawn_args_ok(cmd, args, arg_count)) return -1;
     /* argv is built BEFORE fork: a multithreaded parent may hold the
      * allocator lock, so the forked children must not calloc. */
-    char** argv = rt_legacy_spawn_argv(cmd, args, arg_count);
+    char** argv = spawn_argv_build(cmd, args, arg_count);
     if (!argv) return -1;
     pid_t expected_parent = getpid();
     pid_t guardian = fork();

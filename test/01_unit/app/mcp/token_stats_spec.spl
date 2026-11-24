@@ -36,7 +36,7 @@ own `.simple/ctx/` is never written by a test run.
 
 use std.spec
 use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_exists, file_read, time_now_unix_micros}
-use app.mcp.main_lazy_telemetry.{tok_record, tok_record_at, tok_load_events, tok_rollup, tok_tokens_saved, tok_reset, tok_stats_text, tok_memo_key, tok_memo_get, tok_telemetry_path, tok_memo_path, handle_simple_token_stats, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL}
+use app.mcp.main_lazy_telemetry.{tok_record, tok_record_at, tok_load_events, tok_rollup, tok_tokens_saved, tok_reset, tok_stats_text, tok_memo_key, tok_memo_get, tok_telemetry_path, tok_memo_path, handle_simple_token_stats, tok_next_id_from_tail, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL}
 use app.mcp.main_lazy_ctx_tools.{handle_simple_ctx_batch_execute, handle_simple_ctx_execute, ctx_stats_text}
 use app.mcp.main_dispatch.{dispatch_tool}
 
@@ -246,6 +246,40 @@ describe "rollup math, 7-day window, reset, persistence":
         assert_contains(cs, "telemetry_calls: 1")
         assert_contains(cs, "telemetry_bytes_captured: 9000")
         assert_contains(cs, "telemetry_tokens_saved: 2000")
+
+describe "bounded-tail next id (mcp_server_rss_growth_long_session_2026-11-24)":
+    it "reads the next id from the last complete row and refuses what the tail cannot prove":
+        val header = "# telemetry\ntok_events | id, feature, tool, ts, captured, returned, hit |\n"
+        val row7 = "    7, ctx, simple_ctx_execute, 100, 20, 10, 0\n"
+        val row8 = "    8, ctx, simple_ctx_search, 101, 0, 30, 0\n"
+        # Whole ledger: header only -> first id; rows -> last id + 1.
+        assert_equal(tok_next_id_from_tail(header, true), 1)
+        assert_equal(tok_next_id_from_tail(header + row7 + row8, true), 9)
+        # A partial tail: the first segment was cut by the read window and is
+        # never trusted, so `57, ...` (the end of row 1257) is not an id.
+        assert_equal(tok_next_id_from_tail("57, ctx, a, 1, 2, 3, 0\n" + row8, false), 9)
+        assert_equal(tok_next_id_from_tail("    7, ctx, a, 1, 2, 3, 0\n", false), 0)
+        # Torn last row (no trailing newline) and a malformed id fall back.
+        assert_equal(tok_next_id_from_tail(header + row7 + "    8, ctx", true), 0)
+        assert_equal(tok_next_id_from_tail(header + "    x, ctx, a, 1, 2, 3, 0\n", true), 0)
+        assert_equal(tok_next_id_from_tail("", true), 0)
+
+    it "appends ascending ids without rewriting earlier rows":
+        _fresh_store()
+        val now = time_now_unix_micros() / 1000000
+        assert_true(tok_record_at(TOK_FEATURE_CTX, "simple_ctx_execute", now, 10, 5, false))
+        val first = file_read(tok_telemetry_path())
+        assert_true(tok_record_at(TOK_FEATURE_CTX, "simple_ctx_search", now, 0, 7, false))
+        assert_true(tok_record_at(TOK_FEATURE_PONYTAIL, "simple_ponytail", now, 9, 3, true))
+        val ledger = file_read(tok_telemetry_path())
+        assert_true(ledger.starts_with(first))
+        val ev = tok_load_events()
+        assert_equal(ev.len(), 3)
+        assert_equal(ev[0].id, 1)
+        assert_equal(ev[1].id, 2)
+        assert_equal(ev[2].id, 3)
+        assert_equal(ev[1].tool, "simple_ctx_search")
+        assert_true(ev[2].hit)
 
 describe "dispatch":
     it "routes simple_token_stats through dispatch_tool":

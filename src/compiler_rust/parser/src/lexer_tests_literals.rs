@@ -103,6 +103,29 @@ fn test_string_literals() {
     );
 }
 
+/// seed_escaped_backslash_n_lexes_as_newline_2026-11-23: an escaped backslash
+/// is consumed once, so the following letter stays a plain letter.
+#[test]
+fn test_escaped_backslash_before_escape_letter_is_consumed_once() {
+    use crate::token::FStringToken;
+    let cases = [
+        (r#""\\n""#, "\\n"),
+        (r#""a\\nb""#, "a\\nb"),
+        (r#""\\t""#, "\\t"),
+        (r#""\\r""#, "\\r"),
+        (r#""\\\\""#, "\\\\"),
+        (r#""\\N""#, "\\N"),
+        (r#""\\\n""#, "\\\n"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(
+            tokenize(src),
+            vec![TokenKind::FString(vec![FStringToken::Literal(want.to_string())]), TokenKind::Eof],
+            "source {src}"
+        );
+    }
+}
+
 #[test]
 fn test_string_escape_octal_null() {
     use crate::token::FStringToken;

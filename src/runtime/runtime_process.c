@@ -213,6 +213,7 @@ static SplArray* process_timeout_result(const char* stdout_text, const char* std
 #endif
 #include <psapi.h>
 #include "platform/windows_command_line_private.h"
+#include "platform/spl_win_utf16_private.h"
 
 /* Peak working set (KiB) of the child reaped by the most recent
  * win_process_run_capture on this thread; -1 = not measured. */
@@ -389,14 +390,7 @@ static char* win_filtered_environment(void) {
 
 /* Both capture modes receive UTF-8 text at the public command/argv ABI. */
 static wchar_t* win_capture_command_wide(const char* value) {
-    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
-    if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
-    if (wide && !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return spl_win_utf8_to_wide(value, -1, MB_ERR_INVALID_CHARS, malloc, free, NULL);
 }
 
 static wchar_t* win_capture_environment(void) {

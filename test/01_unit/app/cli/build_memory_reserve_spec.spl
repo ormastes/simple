@@ -1,5 +1,6 @@
 use std.spec
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
+use app.cli.shard_mem_clamp.{build_memory_balloon_witness_admits_v1, build_memory_start_decision_v1}
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib_for, build_memory_reserve_default_kib_v1, BUILD_MEMORY_RESERVE_CAP_KIB_V1}
 use app.cli.shard_mem_clamp.{build_host_memory_total_kib, build_host_memory_total_kib_from_bytes_field, build_host_memory_total_kib_bounded}
 use app.io.env_ops.{env_get, env_set}
@@ -98,3 +99,35 @@ describe "build memory reserve admission":
         env_set("SIMPLE_MIR_SHARD_EXPORT_WRITE", old_export)
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old)
         expect(refusal).to_equal("")
+
+# Hyper-V balloon: 3.6 GiB reported free, 24 GiB reserve, 64 GiB host, 52 GiB
+# of free commit (windows_balloon_memory_headroom_false_refusal_2026-11-13.md).
+describe "build memory balloon commit witness":
+    val gib: i64 = 1048576
+
+    it "keeps the resident-memory refusal by default even with ample free commit":
+        val (refusal, warning) = build_memory_start_decision_v1(3717 * 1024, 24 * gib, 64 * gib, 52 * gib)
+        expect(refusal.contains("build refused")).to_be_true()
+        expect(warning).to_equal("")
+
+    it "admits with a warning when an opted-in host has sufficient free commit":
+        val (refusal, warning) = build_memory_start_decision_v1(3717 * 1024, 24 * gib, 64 * gib, 52 * gib, true)
+        expect(refusal).to_equal("")
+        expect(warning.contains("admitted on commit headroom")).to_be_true()
+
+    it "still refuses when free commit is below the reserve":
+        val (refusal, warning) = build_memory_start_decision_v1(3717 * 1024, 24 * gib, 64 * gib, 10 * gib, true)
+        expect(refusal.contains("build refused")).to_be_true()
+        expect(warning).to_equal("")
+
+    it "still refuses when the commit probe failed (unknown is never a witness)":
+        expect(build_memory_balloon_witness_admits_v1(3717 * 1024, 24 * gib, 64 * gib, 0)).to_be_false()
+
+    it "still refuses on a host smaller than twice the reserve":
+        expect(build_memory_balloon_witness_admits_v1(3 * gib, 24 * gib, 47 * gib, 52 * gib)).to_be_false()
+        expect(build_memory_balloon_witness_admits_v1(3 * gib, 24 * gib, 48 * gib, 52 * gib)).to_be_true()
+
+    it "does not touch an admitting reading":
+        val (refusal, warning) = build_memory_start_decision_v1(30 * gib, 24 * gib, 64 * gib, 0)
+        expect(refusal).to_equal("")
+        expect(warning).to_equal("")

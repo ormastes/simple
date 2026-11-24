@@ -6,12 +6,13 @@ struct llama_vocab { int live; llama_token eog; };
 /* Each model owns its vocab; a path containing "eog7" gets EOG id 7 instead
  * of 2, so a check against the wrong model's vocab is observable. */
 struct llama_model { int live; struct llama_vocab vocab; };
-struct llama_context { uint32_t n_ctx; int64_t n_tokens; int64_t decodes; int unified; int kvu; int nseq; int32_t seq_len[16]; };
+struct llama_context { uint32_t n_ctx; int64_t n_tokens; int64_t decodes; int unified; int kvu; int nseq; int32_t seq_len[16]; int32_t hi[16]; };
 static int last_kv_unified = -1;
 static int fail_seq_cp_once;
 static int64_t decoded_tokens;
 static int64_t seq_cp_tokens;
 static int64_t bad_positions;
+static int64_t stale_leaks;
 struct llama_sampler { int live; };
 static int corrupt_restore_once;
 static int short_decode_once;
@@ -57,10 +58,10 @@ int64_t mock_llama_memory_clears(void) { return memory_clears; }
 void llama_memory_clear(llama_memory_t m, bool data) { (void)data; memory_clears++; ((struct llama_context *)m)->n_tokens = 0; }
 bool llama_memory_seq_rm(llama_memory_t m, llama_seq_id id, llama_pos p0, llama_pos p1) { struct llama_context *uc = (struct llama_context *)m; if (uc->unified) { if (p0 < 0) p0 = 0; if (p1 < 0 && uc->seq_len[id] > p0) uc->seq_len[id] = p0; return true; } (void)id; (void)p1; if (fail_remove_once) { fail_remove_once = 0; return false; } if (((struct llama_context *)m)->n_tokens > p0) ((struct llama_context *)m)->n_tokens = p0; return true; }
 size_t llama_state_seq_get_size(struct llama_context *c, llama_seq_id id) { (void)c; (void)id; return sizeof(int64_t); }
-size_t llama_state_seq_get_data(struct llama_context *c, uint8_t *d, size_t n, llama_seq_id id) { (void)id; if (fail_serialize_once) { fail_serialize_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(d, &c->n_tokens, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
-size_t llama_state_seq_set_data(struct llama_context *c, const uint8_t *d, size_t n, llama_seq_id id) { (void)id; restore_calls++; if (corrupt_restore_once) { corrupt_restore_once = 0; if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); c->n_tokens -= 2; return sizeof(c->n_tokens); } if (fail_restore_once) { fail_restore_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
+size_t llama_state_seq_get_data(struct llama_context *c, uint8_t *d, size_t n, llama_seq_id id) { if (c->unified) { int64_t len = c->seq_len[id]; if (n < sizeof(len)) return 0; memcpy(d, &len, sizeof(len)); return sizeof(len); } if (fail_serialize_once) { fail_serialize_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(d, &c->n_tokens, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
+size_t llama_state_seq_set_data(struct llama_context *c, const uint8_t *d, size_t n, llama_seq_id id) { restore_calls++; if (c->unified) { int64_t len; if (n < sizeof(len)) return 0; memcpy(&len, d, sizeof(len)); c->seq_len[id] = (int32_t)len; if (c->hi[id] < len) c->hi[id] = (int32_t)len; return sizeof(len); } (void)id; if (corrupt_restore_once) { corrupt_restore_once = 0; if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); c->n_tokens -= 2; return sizeof(c->n_tokens); } if (fail_restore_once) { fail_restore_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
 struct llama_batch llama_batch_get_one(llama_token *t, int32_t n) { return (struct llama_batch){.token = t, .n_tokens = n}; }
-int32_t llama_decode(struct llama_context *c, struct llama_batch b) { if (b.seq_id && c->unified) { if (fail_decode_once) { fail_decode_once = 0; return 1; } /* Capacity: a unified KV shares n_ctx cells across sequences, a non-unified one gives each stream n_ctx/n_seq_max. */ { int s0 = b.seq_id[0][0]; if (c->kvu) { int64_t tot = 0; for (int q = 0; q < 16; q++) tot += c->seq_len[q]; if (tot + b.n_tokens > (int64_t)c->n_ctx) return 1; } else if (c->seq_len[s0] + b.n_tokens > (int64_t)(c->n_ctx / (uint32_t)c->nseq)) return 1; } if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; for (int32_t i = 0; i < b.n_tokens; i++) { int s = b.seq_id[i][0]; if (b.pos[i] != c->seq_len[s]) { bad_positions++; return -1; } c->seq_len[s]++; } decode_calls++; decoded_tokens += b.n_tokens; return 0; } decoded_tokens += b.n_tokens; if (fail_decode_once) { fail_decode_once = 0; return 1; } decode_calls++; if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; if (short_decode_once) { short_decode_once = 0; c->n_tokens -= 1; } c->n_tokens += b.n_tokens; return c->n_tokens > c->n_ctx ? 1 : 0; }
+int32_t llama_decode(struct llama_context *c, struct llama_batch b) { if (b.seq_id && c->unified) { if (fail_decode_once) { fail_decode_once = 0; return 1; } /* Capacity: a unified KV shares n_ctx cells across sequences, a non-unified one gives each stream n_ctx/n_seq_max. */ { int s0 = b.seq_id[0][0]; if (c->kvu) { int64_t tot = 0; for (int q = 0; q < 16; q++) tot += c->seq_len[q]; if (tot + b.n_tokens > (int64_t)c->n_ctx) return 1; } else if (c->seq_len[s0] + b.n_tokens > (int64_t)(c->n_ctx / (uint32_t)c->nseq)) return 1; } if (!c->kvu) { int s0 = b.seq_id[0][0]; if (c->hi[s0] > c->seq_len[s0] + b.n_tokens) stale_leaks++; } if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; for (int32_t i = 0; i < b.n_tokens; i++) { int s = b.seq_id[i][0]; if (b.pos[i] != c->seq_len[s]) { bad_positions++; return -1; } c->seq_len[s]++; if (c->hi[s] < c->seq_len[s]) c->hi[s] = c->seq_len[s]; } decode_calls++; decoded_tokens += b.n_tokens; return 0; } decoded_tokens += b.n_tokens; if (fail_decode_once) { fail_decode_once = 0; return 1; } decode_calls++; if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; if (short_decode_once) { short_decode_once = 0; c->n_tokens -= 1; } c->n_tokens += b.n_tokens; return c->n_tokens > c->n_ctx ? 1 : 0; }
 llama_token llama_sampler_sample(struct llama_sampler *s, struct llama_context *c, int32_t i) { (void)s; (void)c; (void)i; return 2; }
 /* Fault injection for the fail-closed restore checks. */
 void mock_llama_corrupt_restore_once(void) { corrupt_restore_once = 1; }
@@ -88,6 +89,7 @@ void llama_memory_seq_cp(llama_memory_t m, llama_seq_id src, llama_seq_id dst, l
     if (p1 < 0) p1 = c->seq_len[src];
     if (c->seq_len[src] < p1) return;
     c->seq_len[dst] = p1;
+    c->hi[dst] = c->hi[src];   /* a whole-stream copy carries the data past p1 too */
     seq_cp_tokens += p1;
 }
 struct llama_batch llama_batch_init(int32_t n, int32_t embd, int32_t seq_max) {
@@ -110,6 +112,8 @@ int64_t mock_llama_decoded_tokens(void) { return decoded_tokens; }
 int64_t mock_llama_seq_cp_tokens(void) { return seq_cp_tokens; }
 int mock_llama_last_kv_unified(void) { return last_kv_unified; }
 int64_t mock_llama_bad_positions(void) { return bad_positions; }
+/* Cells past a sequence frontier that still hold an earlier request data when a decode runs on it. */
+int64_t mock_llama_stale_leaks(void) { return stale_leaks; }
 /* Embedding / token-input surface (model handles group). */
 enum llama_pooling_type llama_pooling_type(const struct llama_context *c) { (void)c; return LLAMA_POOLING_TYPE_MEAN; }
 float * llama_get_embeddings(struct llama_context *c) { static float e[64]; (void)c; return e; }

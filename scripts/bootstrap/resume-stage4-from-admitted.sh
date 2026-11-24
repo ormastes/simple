@@ -64,14 +64,9 @@ resume_stage4_prepare() {
     "$(bootstrap_stage3_manifest_value runtime_path "$manifest")") || return 1
   SIMPLE_RUNTIME_PATH=$bootstrap_runtime_authority_path
   export SIMPLE_RUNTIME_PATH
-  planner_sha=$(bootstrap_stage3_hash_file "$planner_receipt") || return 1
-  candidate_sha=$(bootstrap_stage3_hash_file "$candidate") || return 1
   source_sha=$(bootstrap_stage3_manifest_value source_fingerprint "$manifest") || return 1
-  expected_binding=$(printf '%s\n' \
-    "planner_sha256=$planner_sha" \
-    "candidate_sha256=$candidate_sha" \
-    "source_fingerprint=$source_sha" \
-    "backend=$backend" | bootstrap_stage3_hash_stdin) || return 1
+  expected_binding=$(bootstrap_stage3_stage4_binding_sha256 \
+    "$planner_receipt" "$candidate" "$manifest" "$backend") || return 1
   [ "${SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256:-}" = "$expected_binding" ] || {
     echo "error: Stage 4 planner/candidate/source/backend binding mismatch" >&2; return 1;
   }

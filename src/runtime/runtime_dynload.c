@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "platform/spl_win_utf16_private.h"
 #else
 #include <dlfcn.h>
 #include <errno.h>
@@ -133,20 +134,12 @@ static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
 /* Shared UTF-8 loader belongs to both the registry and legacy wrappers. */
 #ifdef _WIN32
 static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        malloc, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;

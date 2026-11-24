@@ -27,6 +27,83 @@ use std.io_runtime.{file_exists, file_read, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1,
+    disk_bound_keep_newest_dirs}
+
+# Native cache scope retention (driver_aot_native_output.spl) removes scope
+# directories idle past its window. A build's children must never run it: a
+# worker or the link child would delete objects that an earlier child of the
+# SAME build published and its ledger still names. Only an unmarked top-level
+# process may evict. Arguments are the raw role environment values.
+# See doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md.
+# reason: raw role environment values in, one admission decision out
+@allow(primitive_api)
+pub fn native_cache_scope_eviction_role_allowed_v1(mir_shard: text, hir_shard: text,
+        parse_shard: text, mir_shard_link: text, file_worker_unit: text,
+        build_worker: text) -> bool:
+    mir_shard == "" and hir_shard == "" and parse_shard == "" and
+        mir_shard_link == "" and file_worker_unit == "" and build_worker == ""
+
+# Set to "1" by the top-level coordinator once its build-start retention pass
+# has been decided; inherited by every nested coordinator and child.
+pub const NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1: text = "SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE"
+
+# Idle window of the scope retention policy, in seconds (6 hours); the same
+# value driver_aot_native_output.spl passes for an unsharded build.
+pub const NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1: i64 = 21600
+
+# Whether this process is the top-level coordinator that owes the one
+# build-start retention pass. Never in a child: any role environment value, a
+# grouped or export-summary child, or a role flag in argv (bootstrap children
+# carry the flag and no role environment) refuses, and so does `already_ran`,
+# the inherited NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1 value.
+# reason: raw role environment values and argv in, one admission decision out
+@allow(primitive_api)
+pub fn native_cache_scope_start_retention_due_v1(mir_shard: text, hir_shard: text,
+        parse_shard: text, mir_shard_link: text, file_worker_unit: text,
+        build_worker: text, group_result: text, export_write: text,
+        already_ran: text, args: [text]) -> bool:
+    if already_ran != "" or group_result != "" or export_write != "":
+        return false
+    if not native_cache_scope_eviction_role_allowed_v1(mir_shard, hir_shard, parse_shard,
+            mir_shard_link, file_worker_unit, build_worker):
+        return false
+    for arg in args:
+        if arg.starts_with("--file-worker") or arg.starts_with("--parse-shard") or
+                arg.starts_with("--hir-shard") or arg.starts_with("--mir-shard") or
+                arg.starts_with("--parse-fibers"):
+            return false
+    true
+
+# The cache scope directory ("<cache>/s<32 hex>") that holds `object_path`, or
+# "" when the path is not under one. The object may sit directly in the scope
+# or in a subdirectory of it; the innermost scope-shaped component wins.
+# reason: a filesystem object path in, its cache scope directory path out
+@allow(primitive_api)
+pub fn native_cache_scope_dir_of_object_v1(object_path: text) -> text:
+    val parts = object_path.replace("\\", "/").split("/")
+    var found = -1
+    var index = 0
+    while index < parts.len() - 1:
+        val part = parts[index]
+        if disk_bound_keyed_hex_name_v1(part, "s", 33):
+            found = index
+        index = index + 1
+    if found < 0:
+        return ""
+    var scope = parts[0]
+    index = 1
+    while index <= found:
+        scope = scope + "/" + parts[index]
+        index = index + 1
+    scope
+
+# A ledger row naming `object_path` keeps that object's scope live: refresh
+# the scope's liveness marker so no concurrent build's retention sees it idle.
+fn _native_mir_shard_keep_scope_live_v1(object_path: text):
+    val scope = native_cache_scope_dir_of_object_v1(object_path)
+    if scope != "":
+        val _marked = disk_bound_mark_dir_used(scope)
 
 pub const NATIVE_MIR_SHARD_ENV_V1: text = "SIMPLE_MIR_SHARD"
 pub const NATIVE_MIR_SHARD_QUEUE_ENV_V1: text = "SIMPLE_MIR_SHARD_QUEUE"
@@ -270,6 +347,7 @@ pub fn native_mir_shard_publish_pass_v1(queue: text, module_name: text,
     val sidecar = native_mir_shard_record_base_v1(queue, module_name) + ".object"
     if not file_atomic_write(sidecar, "{object_path}\n{functions}\n{statics}\n{capsule_identity}\n"):
         return false
+    _native_mir_shard_keep_scope_live_v1(object_path)
     hir_shard_recovery_terminal(queue, native_mir_shard_owner_v1(), module_name,
         "PASS", object_path != "")
 
@@ -325,8 +403,14 @@ pub fn native_mir_shard_link_inputs_v1(queue: text, identity: text) -> Result<Na
             inputs.objectless = inputs.objectless + 1
             inputs.objectless_modules = inputs.objectless_modules.push(name)
         else:
-            if terminal[4] != "CACHE_STORED" or not file_exists(object_path):
-                return Err("MIR shard module object missing: {name} ({object_path})")
+            if terminal[4] != "CACHE_STORED":
+                return Err("MIR shard module object missing: {name} ({object_path}): ledger row is not CACHE_STORED")
+            if not file_exists(object_path):
+                return Err("MIR shard module object missing: {name} ({object_path}): " +
+                    "the ledger recorded this object but it is no longer in the native cache " +
+                    "(evicted or deleted after it was published); re-run the build to " +
+                    "recompile the missing modules")
+            _native_mir_shard_keep_scope_live_v1(object_path)
             inputs.object_files = inputs.object_files.push(object_path)
             inputs.object_modules = inputs.object_modules.push(name)
             inputs.capsule_identities = inputs.capsule_identities.push(sidecar[3])
@@ -471,5 +555,46 @@ pub fn native_mir_shard_resume_adopt_v1(prior: text, queue: text) -> NativeMirSh
         if not file_atomic_write("{base}.object", sidecar) or
                 not hir_shard_recovery_terminal(queue, "resume", name, "PASS", not sidecar.starts_with("\n")):
             return NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "record not published: {name}")
+        _native_mir_shard_keep_scope_live_v1(sidecar.split("\n")[0])
         adopted = adopted + 1
     NativeMirShardResumeV1(adopted: adopted, requeued: requeued, reason: "")
+
+# The distinct cache scope directories named by the object sidecars of MIR
+# ledger `ledger` ([] when it has no readable inventory).
+pub fn native_mir_shard_ledger_scope_dirs_v1(ledger: text) -> [text]:
+    var scopes: [text] = []
+    if ledger == "" or not file_exists("{ledger}/inventory"):
+        return scopes
+    val inventory = file_read("{ledger}/inventory").split("\n")
+    if inventory.len() < 2 or inventory[0] == "":
+        return scopes
+    for name in inventory[1:]:
+        if name == "":
+            continue
+        val sidecar = "{native_mir_shard_record_base_v1(ledger, name)}.object"
+        if not file_exists(sidecar):
+            continue
+        val scope = native_cache_scope_dir_of_object_v1(file_read(sidecar).split("\n")[0])
+        if scope != "" and not scopes.contains(scope):
+            scopes = scopes.push(scope)
+    scopes
+
+# The one build-start retention pass of a sharded or coordinator-lane build,
+# run by the top-level coordinator before it adopts or produces any object.
+# Scopes named by `prior_ledgers` (the ledgers this launch may resume from)
+# get a fresh liveness marker first, so the pass never removes one. No scope
+# is "current" here: the coordinator does not know its scope name, so at most
+# `keep` - 1 scopes survive beyond the idle window and the build's own scope
+# takes the last slot when a child creates it. Returns directories removed.
+# reason: cache directory path, ledger paths and retention count in, removed-directory count out
+@allow(primitive_api)
+pub fn native_cache_scope_start_retention_v1(cache_dir: text, prior_ledgers: [text],
+        keep: i64) -> i64:
+    for ledger in prior_ledgers:
+        for scope in native_mir_shard_ledger_scope_dirs_v1(ledger):
+            val _marked = disk_bound_mark_dir_used(scope)
+    val scopes = disk_bound_keep_newest_dirs(cache_dir, "", "s", 33, keep,
+        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1, true)
+    val legacy = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1,
+        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1, true)
+    scopes + legacy

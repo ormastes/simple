@@ -1,0 +1,58 @@
+#!/bin/sh
+# Builds and runs src/runtime/test/rt_pool_characterization_selfcheck.c against
+# BOTH C pool lanes standalone (outside cargo):
+#   lane A = src/runtime/runtime_pool.c, lane B = src/runtime/runtime_thread.c
+# Usage: sh scripts/check/check-rt-pool-characterization.shs [--sanitize none|tsan|asan] [--out DIR]
+# clang only (CC defaults to clang). Exit 0 = every lane passed; 1 = a lane failed;
+# 2 = nothing was built/run.
+set -u
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+san=none
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sanitize) san=$2; shift 2 ;;
+        --out) out=$2; shift 2 ;;
+        *) echo "usage: $0 [--sanitize none|tsan|asan] [--out DIR]" >&2; exit 2 ;;
+    esac
+done
+CC=${CC:-clang}
+[ -n "$out" ] || out=$(mktemp -d)
+mkdir -p "$out"
+rt="$repo_root/src/runtime"
+flags="-std=gnu11 -O1 -g -I$rt -Wno-unused-function"
+arg=""
+case "$san" in
+    none) ;;
+    tsan) flags="$flags -fsanitize=thread"; arg=q ;;
+    asan) flags="$flags -fsanitize=address,undefined -fno-sanitize-recover=undefined"; arg=q ;;
+    *) echo "unknown sanitizer: $san" >&2; exit 2 ;;
+esac
+libs=""
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        exe=.exe
+        # the dynamic ASan runtime DLL lives beside clang's resource dir
+        resdir=$($CC -print-resource-dir 2>/dev/null)
+        [ -n "$resdir" ] && PATH="$PATH:$resdir/lib/windows" && export PATH ;;
+    *) exe=""; libs="-lpthread" ;;
+esac
+ran=0
+failed=""
+for lane in A B; do
+    if [ "$lane" = A ]; then src="$rt/runtime_pool.c"; def="-DRT_POOL_CHAR_LANE_A"; else src="$rt/runtime_thread.c"; def=""; fi
+    bin="$out/rt_pool_char_${lane}_${san}$exe"
+    # shellcheck disable=SC2086
+    if ! $CC $flags $def "$rt/test/rt_pool_characterization_selfcheck.c" \
+            "$rt/test/rt_pool_characterization_stubs.c" "$src" -o "$bin" $libs; then
+        echo "lane $lane: BUILD FAILED"; failed="$failed $lane"; continue
+    fi
+    ran=$((ran + 1))
+    "$bin" $arg
+    rc=$?
+    if [ "$rc" -ne 0 ]; then echo "lane $lane: FAIL rc=$rc"; failed="$failed $lane"; else echo "lane $lane: PASS"; fi
+done
+if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ -n "$failed" ]; then echo "FAIL — lanes failed:$failed (sanitize=$san)"; exit 1; fi
+echo "PASS — $ran lane(s) checked (sanitize=$san)"
+exit 0

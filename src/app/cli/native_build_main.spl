@@ -73,7 +73,7 @@ use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_p
 use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb_for_v1, shard_host_worker_budget_kb,
     shard_live_threads_selected_v1}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
-use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1, shard_tree_headroom_kib_v1}
+use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_gate_v1, shard_tree_headroom_kib_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
@@ -103,7 +103,10 @@ use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_outcome_after_hir_errors_v1, native_mir_shard_hir_compile_errors_recorded_v1,
     native_mir_shard_hir_compile_errors_path_v1, native_mir_shard_run_key_v1,
     native_mir_shard_run_key_mismatch_v1, native_mir_shard_resume_adopt_v1, native_mir_shard_claim_cap_v1,
-    native_mir_shard_run_key_selection_v1, native_mir_shard_resume_full_pass_line_v1}
+    native_mir_shard_run_key_selection_v1, native_mir_shard_resume_full_pass_line_v1,
+    native_cache_scope_start_retention_due_v1, native_cache_scope_start_retention_v1,
+    NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_cache_lane}
 use compiler.driver.cache.native_build_environment_identity.{native_build_module_environment_fingerprint_v1}
 use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
@@ -1331,10 +1334,14 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                 probe_at_ms = round_ms
                 probed_live = pids.len()
             val est_kib = shard_worker_estimate_clamped_kib_v1(shard_commit_estimate_kib_v1(shard_commit_unmeasured_estimate_kib_v1(static_kib, recorded_peak, override_kib), observed_peak_kib), if pool_base_headroom < 0: -1 else: pool_base_headroom - commit_reserve_kib)
+            # Admission (pure arithmetic) before the BLOCKED probe: the probe
+            # formats a path, and with a free slot that admission keeps
+            # refusing it would run, and leave that string behind, every
+            # SHARD_POOL_POLL_MS round for as long as the refusal lasts.
             while pids.len() < window_size and next_pending < pending.len() and
                     not stop_dispatch and
-                    not hir_shard_recovery_blocked(queue_dir) and
-                    shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private):
+                    shard_commit_spawn_admit_v1(now_headroom, commit_reserve_kib, est_kib, live_private) and
+                    not hir_shard_recovery_blocked(queue_dir):
                 val index = pending[next_pending]
                 next_pending = next_pending + 1
                 val owner = "{index}/{count}@{generation}"
@@ -1767,9 +1774,20 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
     if not env_set("SIMPLE_MIR_SHARD_EXPORT_DIR", export_dir):
         eprint "[mir-shard] export directory environment could not be installed"
         return ("fail", "")
+    # Export the LIVE owner count to the shard workers, as the per-file
+    # worker pool already does (its phase B): each owner's codegen pool reads
+    # SIMPLE_NATIVE_FILE_WORKERS as its peer-shard divisor and otherwise falls
+    # back to min(--mir-shard total, --threads), i.e. the queued batch count.
+    # rb5 (2026-11-24): shards=16 parallel=1, yet every owner divided its
+    # tree share by peer_shards=4 (`[NATIVE] codegen ... peer_shards=4`).
+    # Scheduling-only: excluded from the native cache identity.
+    val old_live_owners = native_build_env_saved_v1("SIMPLE_NATIVE_FILE_WORKERS")
+    val live_owners = if run_parallel > 0: run_parallel else: count
+    env_set("SIMPLE_NATIVE_FILE_WORKERS", "{live_owners}")
     val run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
         "SIMPLE_MIR_SHARD_OWNER", base, queue_dir, args, count, run_parallel,
         simple_bin, timeout_ms, spawn_limit)
+    native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_live_owners)
     native_build_env_restore_v1("SIMPLE_MIR_SHARD_EXPORT_DIR", old_export_dir)
     val hir_compile_errors = native_mir_shard_hir_compile_errors_recorded_v1(queue_dir)
     val outcome = native_mir_shard_outcome_after_hir_errors_v1(
@@ -2346,7 +2364,10 @@ pub fn native_build_memory_admission_refusal_v1(args: [text]) -> text:
     if not native_build_memory_gate_applies_v1(env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "", shard_child,
             env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "", env_get("SIMPLE_MIR_SHARD_LINK") ?? "", args):
         return ""
-    build_memory_start_refusal_v1(shard_mem_available_kb(), build_memory_reserve_kib())
+    val (refusal, warning) = build_memory_start_gate_v1(shard_mem_available_kb(), build_memory_reserve_kib())
+    if warning != "":
+        eprint(warning)
+    refusal
 
 pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, group_result: text,
         mir_shard_link: text, args: [text]) -> bool:
@@ -2357,6 +2378,49 @@ pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, grou
                 arg.starts_with("--hir-shard") or arg.starts_with("--mir-shard"):
             return false
     true
+
+# Native cache scope retention for sharded and coordinator-lane builds. Every
+# process of such a build carries a role, so the driver's own pass
+# (driver_aot_native_output.spl) never runs in one and the cache grew without
+# bound. The top-level coordinator runs the pass here instead: once, at build
+# start, before it adopts or produces any object, so it cannot remove a scope
+# this build has already published into. A scope removed before resume
+# adoption only requeues its rows (object-missing). Runs only for an explicit
+# --cache-dir, the one case where this process provably names the directory
+# its workers write scopes into; see the bug record for the lanes left out.
+# doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md
+pub fn native_build_cache_scope_retention_at_start_v1(args: [text]):
+    if not native_cache_scope_start_retention_due_v1(
+            env_get("SIMPLE_MIR_SHARD") ?? "", env_get("SIMPLE_HIR_SHARD") ?? "",
+            env_get("SIMPLE_PARSE_SHARD") ?? "", env_get("SIMPLE_MIR_SHARD_LINK") ?? "",
+            env_get("SIMPLE_FILE_WORKER_UNIT") ?? "", env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "",
+            env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "", env_get("SIMPLE_MIR_SHARD_EXPORT_WRITE") ?? "",
+            env_get(NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1) ?? "", args):
+        return
+    # Latch before any work: a nested coordinator or child that inherits this
+    # process's environment must never run a second, later pass.
+    if not env_set(NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1, "1"):
+        return
+    val cache_dir = native_build_cache_dir_base_for_v1(args, "")
+    if cache_dir == "" or not dir_exists(cache_dir):
+        return
+    # The ledger this launch may resume from (run_mir_shards_resume_v1). Its
+    # root depends on SIMPLE_HIR_CACHE_DIR, which a later step may bind to
+    # <cache>/<lane>/hir, so both candidates are read.
+    val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane_name = if lane == "": "default" else: lane
+    val (ledger_root, _selection) = shard_ledger_root_v1(args)
+    var prior_ledgers: [text] = []
+    for root in [ledger_root, "{cache_dir}/{lane_name}/hir"]:
+        val latest = "{root}/mir-run-latest"
+        if file_exists(latest):
+            val prior = file_read(latest).trim()
+            if prior != "" and not prior_ledgers.contains(prior):
+                prior_ledgers = prior_ledgers.push(prior)
+    val removed = native_cache_scope_start_retention_v1(cache_dir, prior_ledgers,
+        disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6))
+    if removed > 0:
+        print "[native-cache] build-start retention removed {removed} idle scope dir(s) under {cache_dir}"
 
 # A HIR/MIR ledger shard child that fails leaves an exit receipt beside its
 # ledger (Windows async spawn carries no child stderr; see
@@ -2409,6 +2473,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         # @workaround bug=eprint-noparen-stage2-20261031 reason=pinned-stage2-predates-#5567
         eprint(memory_refusal)
         return 3
+    native_build_cache_scope_retention_at_start_v1(args)
     val compiled_bootstrap_route =
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     val simple_bin = if compiled_bootstrap_route:
