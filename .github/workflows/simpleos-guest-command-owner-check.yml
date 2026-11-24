@@ -13,63 +13,101 @@ concurrency:
 jobs:
   environment-owner:
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 9f5c605e82d11677db2d16a83a4f2058de526d2c
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: 85e06839c9a5eb8560e83b3aacae6db84539a89c
+          ref: 695ec18088e4e51e894783f524fb835830f1afca
           path: sdk-source
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          sparse-checkout: |
+            .github/workflows
+            doc/03_plan/agent_tasks
           persist-credentials: false
       - name: Acquire exact existing RC63 candidate without rebuilding
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
+          test "$GITHUB_RUN_ATTEMPT" = 1
           evidence="$PWD/build/verify/guest-command-owner"
           mkdir -p "$evidence/download" "$evidence/bundle"
           git rev-parse HEAD > "$evidence/source-revision.txt"
+          test "$(git rev-parse HEAD)" = 9f5c605e82d11677db2d16a83a4f2058de526d2c
+          test "$(git -C control rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C control rev-parse HEAD > "$evidence/control-revision.txt"
+          cp control/doc/03_plan/agent_tasks/simpleos_guest_real_runner_extension_2026-11-24.sdn "$evidence/approved-cycles.sdn"
+          grep -Fxq 'cycles_used: 2' "$evidence/approved-cycles.sdn"
+          grep -Fxq 'cycles_remaining: 0' "$evidence/approved-cycles.sdn"
           gh release download rc-1.0.0-rc.63 --repo ormastes/simple \
-            --pattern simple-1.0.0-rc.63-darwin-arm64.tar.gz --dir "$evidence/download"
-          archive="$evidence/download/simple-1.0.0-rc.63-darwin-arm64.tar.gz"
-          test "$(stat -f %z "$archive")" = 396743315
-          printf '%s  %s\n' 0a727acb3c7f3ee5eea755bf676f9f05df987e43722f92056ee6285c6d0c1c47 "$archive" | shasum -a 256 -c -
+            --pattern simple-bootstrap-1.0.0-rc.63-darwin-arm64.spk \
+            --pattern PROVENANCE.sdn --dir "$evidence/download"
+          archive="$evidence/download/simple-bootstrap-1.0.0-rc.63-darwin-arm64.spk"
+          test "$(stat -f %z "$archive")" = 389233308
+          printf '%s  %s\n' 40f4c5377d276e5366081a4d8cb495a62f0eebfdedbce3afec90d339fec7735f "$archive" | shasum -a 256 -c -
+          test "$(stat -f %z "$evidence/download/PROVENANCE.sdn")" = 1559
+          printf '%s  %s\n' 6be38b2093b11cab6160c63a9229ec504b244590c741fbd830a7393c4a38911c "$evidence/download/PROVENANCE.sdn" | shasum -a 256 -c -
           tar -xzf "$archive" -C "$evidence/bundle"
-          package="$evidence/bundle/simple-1.0.0-rc.63-darwin-arm64"
+          package="$evidence/bundle/simple-bootstrap-1.0.0-rc.63-darwin-arm64"
           test -d "$package"
           python3 - "$package" "$evidence" <<'PY'
-          import hashlib, pathlib, sys
+          import hashlib, pathlib, struct, sys
           package, evidence = map(pathlib.Path, sys.argv[1:])
-          provenance = package / 'PROVENANCE.sdn'
+          provenance = evidence / 'download/PROVENANCE.sdn'
           raw = provenance.read_text()
+          assert (package / 'PHASE').read_bytes() == b'3\n'
           expected = {
-              'phase3b_simple_sha256': ('simple', '085796e2d83ae984884bc9d0c1a7c6f40130df6b12f9df6b5aa5c5534bd23e2d'),
+              'phase3b_simple_sha256': ('simple-runtime', '085796e2d83ae984884bc9d0c1a7c6f40130df6b12f9df6b5aa5c5534bd23e2d'),
               'simple_test_runner_sha256': ('simple_test_runner', '9fb60a3a0591d9457a77294bdb1f19f3a0f4b1597544f3b4b8d0327c236c29f2'),
               'simple_build_runner_sha256': ('simple_build_runner', 'f03a6fb9bc5ecdb6b50f323e874cd39550fbc3843d4354b9c623a7f0fca26b5b'),
           }
           assert raw.splitlines().count('source_revision: 0bf70cd733ffbe5e3acb179797d4e91e993e1eef') == 1
-          rows = ['schema: rc63-guest-command-candidate-bytes-v1', 'qualification: candidate-only']
+          rows = ['schema: rc63-guest-command-candidate-bytes-v2', 'qualification: candidate-only',
+                  'archive_sha256: 40f4c5377d276e5366081a4d8cb495a62f0eebfdedbce3afec90d339fec7735f',
+                  'provenance_sha256: 6be38b2093b11cab6160c63a9229ec504b244590c741fbd830a7393c4a38911c',
+                  'composition: all-spk-bytes-matched-to-official-release-provenance',
+                  'phase: 3', 'wrong_tar_images_selected: false']
           for key, (name, digest) in expected.items():
               assert raw.splitlines().count('  ' + key + ': ' + digest) == 1
               path = package / 'bin' / name
               assert path.is_file() and not path.is_symlink()
-              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
-              rows += [name + '_path: ' + str(path), name + '_sha256: ' + digest]
+              assert path.stat().st_mode & 0o111
+              data = path.read_bytes()
+              actual = hashlib.sha256(data).hexdigest()
+              rows += [name + '_path: ' + str(path), name + '_expected_sha256: ' + digest,
+                       name + '_actual_sha256: ' + actual, name + '_size: ' + str(len(data))]
+              (evidence / 'candidate-bytes.sdn').write_text('\n'.join(rows) + '\n')
+              assert actual == digest, name + ': binary digest mismatch'
+              magic, cpu, subtype, kind = struct.unpack_from('<IIII', data)
+              assert magic == 0xfeedfacf and cpu == 0x0100000c and kind == 2
+              if name == 'simple-runtime':
+                  assert len(data) == 19909104
           libraries = {
-              'libsimple_runtime.a': 'b8b93cb95b742f417a49ee8e9a09c6052d078705f5a0df16b22d5709c3b07556',
-              'libsimple_runtime.dylib': '04fd13978d6dcf13131d69e7793cd129cf03827d2802fc237f87dafb6ccef878',
+              'libsimple_runtime_a_sha256': ('libsimple_runtime.a', 'b8b93cb95b742f417a49ee8e9a09c6052d078705f5a0df16b22d5709c3b07556'),
+              'libsimple_runtime_dylib_sha256': ('libsimple_runtime.dylib', '04fd13978d6dcf13131d69e7793cd129cf03827d2802fc237f87dafb6ccef878'),
+              'libsimple_native_all_a_sha256': ('libsimple_native_all.a', '71d8ef10b966672a7a38133618bc15494f439c07a9fd5f96bb624d2ff70ca320'),
+              'libsimple_compiler_backfill_a_sha256': ('libsimple_compiler_backfill.a', '83779d81de3d3fce402ddc86da7eb0b60da28525fc369c9acda3f5413c85e6dd'),
+              'libspl_hosted_runtime_a_sha256': ('libspl_hosted_runtime.a', 'b893d1af8a572afe8abab1e28084cab7e9897da5f9ea1baad9e2fa106ac0c387'),
           }
-          for name, digest in libraries.items():
-              paths = list(package.rglob(name))
-              assert paths
-              for path in paths:
-                  assert path.is_file() and not path.is_symlink()
-                  assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
-                  rows += [name + '_path: ' + str(path), name + '_sha256: ' + digest]
+          for key, (name, digest) in libraries.items():
+              assert raw.splitlines().count('  ' + key + ': ' + digest) == 1
+              path = package / 'lib' / name
+              assert path.is_file() and not path.is_symlink()
+              actual = hashlib.sha256(path.read_bytes()).hexdigest()
+              rows += [name + '_path: ' + str(path), name + '_expected_sha256: ' + digest,
+                       name + '_actual_sha256: ' + actual]
+              (evidence / 'candidate-bytes.sdn').write_text('\n'.join(rows) + '\n')
+              assert actual == digest, name + ': runtime digest mismatch'
           (evidence / 'candidate-bytes.sdn').write_text('\n'.join(rows) + '\n')
           (evidence / 'PROVENANCE.sdn').write_bytes(provenance.read_bytes())
           PY
@@ -79,13 +117,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 - "$SIMPLE_GUEST_CANDIDATE_PACKAGE" "$PWD" <<'PY'
-          import hashlib, json, os, pathlib, re, subprocess, sys, time
+          import hashlib, json, os, pathlib, re, signal, subprocess, sys, time
           package, source = map(pathlib.Path, sys.argv[1:])
           evidence = source / 'build/verify/guest-command-owner'
-          runtime = package / 'bin/simple'
+          runtime = package / 'bin/simple-runtime'
           runner = package / 'bin/simple_test_runner'
           env = os.environ.copy()
-          env.update(SIMPLE_BINARY=str(runtime), SIMPLE_RUNTIME=str(runtime), SIMPLE_LIB=str(source / 'src'))
+          env.update(SIMPLE_BINARY=str(runtime), SIMPLE_RUNTIME=str(runtime), SIMPLE_BIN=str(runtime),
+                     SIMPLE_LIB=str(source / 'src'), SIMPLE_ASSET_ROOT=str(package),
+                     SIMPLE_RUNTIME_PATH=str(package / 'lib/libsimple_runtime.a'),
+                     DYLD_LIBRARY_PATH=str(package / 'lib'), SIMPLE_NATIVE_BUILD_RUST='0',
+                     SIMPLE_NO_STUB_FALLBACK='1', SIMPLE_HOST_MAX_THREADS='2',
+                     SIMPLE_HOST_MAX_BUILD_JOBS='2', SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS='2')
           files = [
               'src/os/kernel/scheduler/process_execution_observation.spl',
               'src/os/kernel/loader/simpleos_tool_execution_probe_v1.spl',
@@ -96,7 +139,7 @@ jobs:
               for path in files) + '\n')
           sdk = source / 'sdk-source'
           sdk_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=sdk, text=True).strip()
-          assert sdk_head == '85e06839c9a5eb8560e83b3aacae6db84539a89c'
+          assert sdk_head == '695ec18088e4e51e894783f524fb835830f1afca'
           sdk_spec = 'test/01_unit/compiler/driver/sdk_errno_observer_v1_spec.spl'
           sdk_files = ['src/compiler/00.common/sdk_errno_observer_v1.spl',
                        'src/compiler/20.hir/hir_lowering/types.spl',
@@ -112,46 +155,62 @@ jobs:
           # Only the two tiny controls qualify the CLI check route; semantic
           # controls below qualify the separately hashed standalone test owner.
           commands = [
-              ('version', [str(runtime), '--version'], 120, source, 0),
-              ('check-route-positive', [str(runtime), 'check', str(good)], 120, source, 0),
-              ('check-route-negative', [str(runtime), 'check', str(bad)], 120, source, -1),
-              ('check-observation', [str(runtime), 'check', files[0]], 600, source, 0),
-              ('check-probe', [str(runtime), 'check', files[1]], 600, source, 0),
-              ('environment-controls', [str(runner), files[2], '--mode=interpreter', '--no-cache'], 600, source, 5),
-              ('sdk-observer-controls', [str(runner), sdk_spec, '--mode=interpreter', '--no-cache'], 600, sdk, 8),
+              ('version', [str(runtime), '--version'], 90, source, 0),
+              ('check-route-positive', [str(runtime), 'check', str(good)], 90, source, 0),
+              ('check-route-negative', [str(runtime), 'check', str(bad)], 90, source, -1),
+              ('check-observation', [str(runtime), 'check', files[0]], 180, source, 0),
+              ('check-probe', [str(runtime), 'check', files[1]], 180, source, 0),
+              ('environment-controls', [str(runner), files[2], '--mode=interpreter', '--no-cache'], 300, source, 5),
+              ('sdk-observer-controls', [str(runner), sdk_spec, '--mode=interpreter', '--no-cache'], 300, sdk, 8),
           ]
           for path in ['src/compiler', 'src/lib', 'src/app/mcp', 'src/app/simple_lsp_mcp']:
-              commands.append(('sdk-check-' + path.replace('/', '-'), [str(runtime), 'check', path], 600, sdk, 0))
+              commands.append(('sdk-check-' + path.replace('/', '-'), [str(runtime), 'check', path], 300, sdk, 0))
           commands.append(('sdk-core-runtime-smoke', ['sh', 'scripts/check/check-core-runtime-smoke.shs',
-              str(runtime)], 600, sdk, 0))
+              str(runtime)], 180, sdk, 0))
           commands.append(('sdk-mcp-stdio', [str(runner),
-              'test/02_integration/app/mcp_stdio_integration_spec.spl', '--mode=interpreter', '--no-cache'], 600, sdk, 1))
+              'test/02_integration/app/mcp_stdio_integration_spec.spl', '--mode=interpreter', '--no-cache'], 300, sdk, 1))
           for name, entry in [('mcp', 'src/app/mcp/main.spl'), ('lsp', 'src/app/simple_lsp_mcp/main.spl')]:
               output = sdk / ('build/verify/guest-owner-mcp-smoke/' + name)
               output.parent.mkdir(parents=True, exist_ok=True)
               commands.append(('sdk-native-' + name, [str(runtime), 'native-build',
                   '--source', 'src/compiler', '--source', 'src/app', '--source', 'src/lib',
-                  '--entry-closure', '--entry', entry, '--strip', '--output', str(output)], 900, sdk, 0))
+                  '--entry-closure', '--entry', entry, '--strip', '--output', str(output)], 600, sdk, 0))
           env['MCP_SERVER'] = str(sdk / 'build/verify/guest-owner-mcp-smoke/mcp')
           env['LSP_MCP_SERVER'] = str(sdk / 'build/verify/guest-owner-mcp-smoke/lsp')
-          commands.append(('sdk-mcp-native-smoke', ['sh', 'scripts/check/check-mcp-native-smoke.shs'], 600, sdk, 0))
+          commands.append(('sdk-mcp-native-smoke', ['sh', 'scripts/check/check-mcp-native-smoke.shs'], 180, sdk, 0))
           failed = False
+          route_qualified = False
+          outcomes = []
+          route_names = {'version', 'check-route-positive', 'check-route-negative'}
           for name, argv, timeout, cwd, expected_tests in commands:
               env['SIMPLE_LIB'] = str(cwd / 'src')
+              env['SIMPLE_PROJECT_ROOT'] = str(cwd)
               start = time.monotonic()
+              timed_argv = ['/usr/bin/time', '-l'] + argv
+              process = subprocess.Popen(timed_argv, cwd=cwd, env=env,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
               try:
-                  result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=timeout)
-                  code, out, err = result.returncode, result.stdout, result.stderr
-              except subprocess.TimeoutExpired as exc:
-                  code, out, err = 124, exc.stdout or b'', exc.stderr or b''
+                  out, err = process.communicate(timeout=timeout)
+                  code = process.returncode
+              except subprocess.TimeoutExpired:
+                  try:
+                      os.killpg(process.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  out, err = process.communicate()
+                  code = 124
               (evidence / (name + '.stdout')).write_bytes(out)
               (evidence / (name + '.stderr')).write_bytes(err)
-              record = {'argv': argv, 'cwd': str(cwd), 'exit': code, 'seconds': time.monotonic()-start,
+              record = {'argv': timed_argv, 'child_argv': argv, 'cwd': str(cwd), 'exit': code, 'seconds': time.monotonic()-start,
                         'stdout_bytes': len(out), 'stderr_bytes': len(err),
                         'stdout_sha256': hashlib.sha256(out).hexdigest(),
-                        'stderr_sha256': hashlib.sha256(err).hexdigest()}
+                        'stderr_sha256': hashlib.sha256(err).hexdigest(),
+                        'selected_environment': {key: env[key] for key in (
+                            'SIMPLE_BINARY', 'SIMPLE_RUNTIME', 'SIMPLE_BIN', 'SIMPLE_LIB',
+                            'SIMPLE_ASSET_ROOT', 'SIMPLE_RUNTIME_PATH', 'DYLD_LIBRARY_PATH',
+                            'SIMPLE_NATIVE_BUILD_RUST', 'SIMPLE_NO_STUB_FALLBACK',
+                            'SIMPLE_HOST_MAX_THREADS', 'SIMPLE_HOST_MAX_BUILD_JOBS')}}
               # JSON is explicit interoperability with the subprocess harness.
-              (evidence / (name + '.json')).write_text(json.dumps(record, indent=2) + '\n')
               print(name + ': exit=' + str(code), flush=True)
               report = re.sub(r'\x1b\[[0-9;]*m', '', (out + err).decode('utf-8', 'replace'))
               rejected_route = any(value in report.lower() for value in ['unknown command', 'unrecognized command', 'unsupported command'])
@@ -163,20 +222,40 @@ jobs:
               if expected_tests > 0 and accepted:
                   counts = re.findall(r'\b(\d+)\s+passed\b|\bPassed:\s*(\d+)\b', report)
                   passed = [int(a or b) for a, b in counts]
-                  zero_failed = re.search(r'\b0\s+failed\b|\bFailed:\s*0\b', report)
+                  failed_counts = [int(a or b) for a, b in re.findall(
+                      r'\b(\d+)\s+failed\b|\bFailed:\s*(\d+)\b', report)]
+                  skipped_counts = [int(a or b) for a, b in re.findall(
+                      r'\b(\d+)\s+(?:skipped|pending)\b|\b(?:Skipped|Pending):\s*(\d+)\b', report)]
+                  zero_failed = bool(failed_counts) and not any(failed_counts)
                   count_ok = expected_tests in passed if name != 'sdk-mcp-stdio' else any(n >= 1 for n in passed)
-                  accepted = bool(count_ok and zero_failed and 'Checkpoint-carried' not in report)
+                  accepted = bool(count_ok and zero_failed and not any(skipped_counts) and 'Checkpoint-carried' not in report)
+                  record['passed_counts'] = passed
+                  record['failed_counts'] = failed_counts
+                  record['skipped_pending_counts'] = skipped_counts
                   (evidence / (name + '-count-admission.sdn')).write_text(
                       'required_passed: ' + str(expected_tests) + '\nrequired_failed: 0\naccepted: '
                       + ('true' if accepted else 'false') + '\n')
+              rss = re.findall(r'(\d+)\s+maximum resident set size', report)
+              record['maximum_resident_set_bytes'] = int(rss[-1]) if rss else None
+              record['accepted'] = accepted
+              (evidence / (name + '.json')).write_text(json.dumps(record, indent=2) + '\n')
+              outcomes.append((name, accepted))
+              if name == 'check-route-negative' and accepted:
+                  route_qualified = True
               if not accepted:
                   failed = True
-                  # Stop on the first actual failure; do not spend later
-                  # checks on an unqualified route or restart passing work.
-                  break
+                  # Immutable bytes and all basic CLI route checks are hard
+                  # gates. Afterward collect independent guest/SDK outcomes
+                  # once, preserving failures rather than hiding later data.
+                  if name in route_names:
+                      break
+          (evidence / 'command-outcomes.sdn').write_text('schema: guest-sdk-host-command-outcomes-v1\ncommands:\n'
+              + ''.join('  - name: ' + name + '\n    accepted: ' + ('true' if accepted else 'false') + '\n'
+                        for name, accepted in outcomes))
           (evidence / 'outcome.sdn').write_text(
               'schema: simpleos-guest-command-owner-host-check-v1\n'
               + 'host_controls: ' + ('FAIL' if failed else 'PASS') + '\n'
+              + 'basic_cli_route_qualified: ' + ('true' if route_qualified else 'false') + '\n'
               + 'guest_execution: false\np3_build: false\nqualification: scoped-host-evidence-only\n')
           sys.exit(1 if failed else 0)
           PY
