@@ -86,23 +86,100 @@ another lane) and for any concurrent build whose scope is only read.
 
 No new extern is introduced.
 
+## Follow-up (same day): retention at coordinator start
+
+Statically reviewed only, like the fix above.
+
+Fix item 1 left no process of a sharded or coordinator-lane build to run
+retention: workers carry a shard role, the bootstrap coordinator installs
+`SIMPLE_MIR_SHARD_LINK` before its in-process link, and the full-CLI
+coordinator sets `SIMPLE_NATIVE_BUILD_WORKER=1` around its own compile
+(`src/app/cli/native_build_main.spl`). A cache used only by such builds grew
+without bound.
+
+- **Where the pass runs now.** The top-level coordinator runs it once, right
+  after build-start memory admission and before any prepass, resume adoption or
+  worker spawn: `native_build_cache_scope_retention_at_start_v1`
+  (`src/app/cli/native_build_main.spl`), called from
+  `run_native_build_worker_inner` and from the bootstrap CLI's
+  `_bootstrap_admit_native_build_memory_v1` (`src/app/cli/bootstrap_main.spl`,
+  all four routes). Because nothing of this build exists yet, the pass cannot
+  remove a scope the build has published into.
+- **Who is refused.** `native_cache_scope_start_retention_due_v1`
+  (`native_mir_shard.spl`) returns false for any role environment value
+  (`SIMPLE_MIR_SHARD`, `SIMPLE_HIR_SHARD`, `SIMPLE_PARSE_SHARD`,
+  `SIMPLE_MIR_SHARD_LINK`, `SIMPLE_FILE_WORKER_UNIT`,
+  `SIMPLE_NATIVE_BUILD_WORKER`), for a grouped child
+  (`SIMPLE_NATIVE_GROUP_RESULT`), for the MIR export-summary child
+  (`SIMPLE_MIR_SHARD_EXPORT_WRITE`), and for a role flag in argv
+  (`--file-worker`, `--parse-shard`, `--parse-fibers`, `--hir-shard`,
+  `--mir-shard`; bootstrap children carry the flag and no role environment).
+- **Once.** The coordinator exports `SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE=1`
+  before it does any work. The same process (the bootstrap route re-enters
+  `run_native_build_worker` in process) and every descendant that inherits its
+  environment are refused from then on.
+- **Liveness.** (a) The existing idle rule: a scope whose `.last-use`, own
+  mtime or newest direct child mtime is within 21,600 s is kept. (b) Before the
+  pass, every scope named by an object sidecar of the ledger this launch may
+  resume from (`mir-run-latest` under the ledger root) gets a fresh `.last-use`
+  (`native_mir_shard_ledger_scope_dirs_v1`,
+  `native_cache_scope_start_retention_v1`). If a prior-ledger scope were removed
+  anyway, adoption requeues its rows as `object-missing`; nothing fails.
+- **Scope shape.** `native_cache_scope_dir_of_object_v1` matched any
+  33-character component starting with `s`. It now requires `s` + 32 lowercase
+  hex (`native_cache_scope_name_valid_v1`), the shape
+  `driver_native_build_cache_scope_for_compiler_id` produces.
+
+Limits of the follow-up:
+
+- **Explicit `--cache-dir` only.** The pass runs on the directory given by
+  `--cache-dir`. That is the one case where the coordinator provably names the
+  directory its workers write scopes into. Not covered, so still unbounded for
+  sharded and coordinator-lane builds: no `--cache-dir` (the worker picks
+  `build/native_cache`, a profile segment under `SIMPLE_NATIVE_BUILD_CACHE_DIR`,
+  or the machine cache root), and the `planner-<sha>` / `collection-<sha>`
+  sub-caches the full CLI derives below `--cache-dir`
+  (`src/app/io/_CliCompile/compile_targets.spl`).
+- **The build's own scope is not exempt.** The coordinator does not know its
+  scope name, so the pass has no current scope: beyond the idle window it keeps
+  `SIMPLE_NATIVE_CACHE_SCOPES_KEEP` - 1 scopes (5 by default). A build whose own
+  scope was idle for more than 6 hours and is not among those loses its warm
+  objects and recompiles.
+- **No live-build marker exists.** A scope holds `phase.marker` and
+  `.cache_scope`, both rewritten on each native compile and so already counted
+  by the idle rule; nothing records a running process or its ledger. A
+  concurrent independent build sharing the cache directory can therefore still
+  lose a scope when all of these hold: its ledger names an object in the scope,
+  the scope is not its own compile scope (rows adopted from a prior run, or
+  published by another compiler identity), no row naming the scope was
+  published or adopted in the last 6 hours, it has not reached link admission,
+  and another top-level build starts (or an unsharded build compiles) with more
+  than the kept number of scopes present. The link then fails with the "no
+  longer in the native cache" message and a re-run recompiles the missing
+  modules. Workaround: give concurrent long builds separate `--cache-dir`
+  directories. `SIMPLE_CACHE_SCOPE` lanes also separate them, because the lane
+  is part of the scope identity and each lane has its own ledger root, but the
+  lanes still share one retention count under the same directory.
+- **Once per process tree, not per build.** A long-lived process that runs
+  several coordinator builds prunes only on the first, and a build started from
+  inside another build inherits the latch and does not prune.
+- An in-process unsharded build still runs the driver's own pass on its first
+  native compile, as before.
+
 ## Known limits
 
-- In a sharded build the workers carry a shard role, and the coordinator
-  installs `SIMPLE_MIR_SHARD_LINK` in its own process before it links
-  (`src/app/cli/bootstrap_main.spl`), so by reading the code no process of
-  such a build runs retention. If that holds, the idle policy now runs only in
-  unsharded top-level builds, and a cache used only by sharded builds is
-  bounded by the number of compiler identities rather than by
-  `SIMPLE_NATIVE_CACHE_SCOPES_KEEP`. Every lane was not traced.
+- No process of a sharded or coordinator-lane build ran retention after fix
+  item 1. The follow-up section above restores it for an explicit
+  `--cache-dir`; the other cache directories stay unbounded for those lanes.
 - The marker refresh depends on a file rewrite moving the marker's mtime. The
   marker now carries the write time as content so the write is never empty;
   this was not observed on a filesystem.
 - The byte-cap sweeps (`disk_bound_enforce`, `disk_cache_admit_v1`) target the
   runtime object, HIR and warm-artifact directories. No caller passes a scope
   directory, so they are not a second path to this failure.
-- A separate unsharded build sharing the cache can still remove a scope that a
-  running build has not referenced through a ledger row for more than 6 hours.
+- A separate build sharing the cache can still remove a scope that a running
+  build has not referenced through a ledger row for more than 6 hours. The
+  exact conditions and the workaround are in the follow-up section.
 - Not verified by execution: no runnable `simple` binary was used and no build
   was run while the fix was written.
 
@@ -110,4 +187,5 @@ No new extern is introduced.
 
 - `test/01_unit/compiler/driver/native_cache_scope_live_build_eviction_spec.spl`
 - `test/01_unit/lib/nogc_sync_mut/io/disk_bound_spec.spl`
-  ("a scope with a fresh liveness marker is not evictable")
+  ("a scope with a fresh liveness marker is not evictable", "the idle window
+  is inclusive at its edge and never covers a future time")
