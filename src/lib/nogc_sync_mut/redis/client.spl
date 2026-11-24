@@ -306,10 +306,12 @@ impl RedisClient:
             buf = buf + chunk!
             val attempt = try_parse_resp(buf, 0)
             match attempt:
-                Some(parsed):
+                Ok(Some(parsed)):
                     return Ok(parsed.reply)
-                nil:
+                Ok(None):
                     pass
+                Err(e):
+                    return Err(IoError(kind: IoErrorKind.InvalidData, message: "reply is not valid UTF-8: {e.reason}", source: nil))
 
 # ============================================================================
 # RESP Reply Type
@@ -351,123 +353,108 @@ fn resp_encode(args: [text]) -> text:
 # RESP Parsing
 # ============================================================================
 
-fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
+fn try_parse_resp(buf: [u8], start: i64) -> Result<Option<ParseResult>, CodecError>:
     """Try to parse a single RESP reply from a byte buffer.
 
-    Returns nil if the buffer is incomplete (need more data).
+    Frame-first: bytes are decoded only once the whole line / bulk payload has
+    arrived. Ok(None) means the buffer is incomplete (need more data); Err means
+    a complete frame carried invalid UTF-8.
     Handles +status, -error, :integer, $bulk, *array, _null replies.
     """
     if start < 0:
-        return None
+        return Ok(None)
     if start >= buf.len():
-        return None
+        return Ok(None)
 
     val type_byte = buf[start]
     val rest_start = start + 1
 
-    if type_byte == 43:
-        val line = try_read_line_from(buf, rest_start)
-        match line:
-            Some(l):
-                return Some(ParseResult(reply: RedisReply.Status(value: l.content), offset: l.end))
-            nil:
-                return nil
-
-    if type_byte == 45:
-        val line = try_read_line_from(buf, rest_start)
-        match line:
-            Some(l):
-                return Some(ParseResult(reply: RedisReply.Error(value: l.content), offset: l.end))
-            nil:
-                return nil
-
-    if type_byte == 58:
-        val line = try_read_line_from(buf, rest_start)
-        match line:
-            Some(l):
-                val num = l.content.to_int() ?? 0
-                return Some(ParseResult(reply: RedisReply.Integer(value: num), offset: l.end))
-            nil:
-                return nil
+    if type_byte == 43 or type_byte == 45 or type_byte == 58:
+        val line = try_read_line_from(buf, rest_start)?
+        val l = match line:
+            Some(parsed_line): parsed_line
+            None: return Ok(None)
+        if type_byte == 43:
+            return Ok(Some(ParseResult(reply: RedisReply.Status(value: l.content), offset: l.end)))
+        if type_byte == 45:
+            return Ok(Some(ParseResult(reply: RedisReply.Error(value: l.content), offset: l.end)))
+        val num = l.content.to_int() ?? 0
+        return Ok(Some(ParseResult(reply: RedisReply.Integer(value: num), offset: l.end)))
 
     if type_byte == 36:
-        val line = try_read_line_from(buf, rest_start)
+        val line = try_read_line_from(buf, rest_start)?
         val l = match line:
-            Some(parsed_line):
-                parsed_line
-            nil:
-                return nil
+            Some(parsed_line): parsed_line
+            None: return Ok(None)
         # Fail-CLOSED: a non-numeric RESP length is a protocol error, not 0.
         # `.to_int() ?? -1` never fired (the intrinsic cannot yield nil), so
         # `$abc\r\n` was read as a valid zero-length bulk and desynced the stream.
         val parsed_length = try_parse_int(l.content)
         val length: i64 = parsed_length ?? -1
         if length < 0:
-            return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
+            return Ok(Some(ParseResult(reply: RedisReply.Nil, offset: l.end)))
         val data_start = l.end
         val data_end = data_start + length
         val after_crlf = data_end + 2
         if after_crlf > buf.len():
-            return None
+            return Ok(None)
         var data_bytes: [u8] = []
         var di = data_start
         while di < data_end:
             data_bytes.push(buf[di])
             di = di + 1
-        val data_text = bytes_to_text(data_bytes)
-        return Some(ParseResult(reply: RedisReply.Bulk(value: data_text), offset: after_crlf))
+        val data_text = bytes_to_text_checked(data_bytes)?
+        return Ok(Some(ParseResult(reply: RedisReply.Bulk(value: data_text), offset: after_crlf)))
 
     if type_byte == 42:
-        val line = try_read_line_from(buf, rest_start)
+        val line = try_read_line_from(buf, rest_start)?
         val l = match line:
-            Some(parsed_line):
-                parsed_line
-            nil:
-                return nil
+            Some(parsed_line): parsed_line
+            None: return Ok(None)
         # Fail-CLOSED: a non-numeric RESP array count is a protocol error, not 0.
         val parsed_count = try_parse_int(l.content)
         val count: i64 = parsed_count ?? -1
         if count < 0:
-            return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
+            return Ok(Some(ParseResult(reply: RedisReply.Nil, offset: l.end)))
         var elements: [RedisReply] = []
         var pos = l.end
         var idx = 0
         while idx < count:
-            val parsed = try_parse_resp(buf, pos)
+            val parsed = try_parse_resp(buf, pos)?
             val p = match parsed:
-                Some(parsed_value):
-                    parsed_value
-                nil:
-                    return nil
+                Some(parsed_value): parsed_value
+                None: return Ok(None)
             elements.push(p.reply)
             pos = p.offset
             idx = idx + 1
-        return Some(ParseResult(reply: RedisReply.Array(values: elements), offset: pos))
+        return Ok(Some(ParseResult(reply: RedisReply.Array(values: elements), offset: pos)))
 
-    Some(ParseResult(reply: RedisReply.Nil, offset: start + 1))
+    Ok(Some(ParseResult(reply: RedisReply.Nil, offset: start + 1)))
 
 struct LineResult:
     """Internal: a line read from a byte buffer."""
     content: text
     end: i64
 
-fn try_read_line_from(buf: [u8], start: i64) -> Option<LineResult>:
-    """Read bytes until CRLF, return as text and position after CRLF.
+fn try_read_line_from(buf: [u8], start: i64) -> Result<Option<LineResult>, CodecError>:
+    """Read bytes until CRLF; decode the complete line and return it with the
+    position after CRLF.
 
-    Returns nil if no CRLF found (incomplete buffer).
+    Ok(None) if no CRLF yet (incomplete buffer); Err if the complete line is
+    not valid UTF-8.
     """
     if start < 0:
-        return None
+        return Ok(None)
     var line_bytes: [u8] = []
     var pos = start
     while pos < buf.len():
         if (pos + 1 < buf.len() and
             buf[pos] == 13 and buf[pos + 1] == 10):
-            val content = bytes_to_text(line_bytes)
-            return Some(LineResult(content: content, end: pos + 2))
+            val content = bytes_to_text_checked(line_bytes)?
+            return Ok(Some(LineResult(content: content, end: pos + 2)))
         line_bytes.push(buf[pos])
         pos = pos + 1
-    nil
+    Ok(None)
 
 # ============================================================================
 # SFFI
@@ -483,4 +470,4 @@ extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 @unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked, CodecError}
