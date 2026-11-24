@@ -44,6 +44,12 @@ static void expect_text(int64_t value, const char* want, size_t want_len, const 
     if (!ok) failures++;
 }
 
+static void expect_nil(int64_t value, const char* what) {
+    int ok = value == 3; /* RT_NIL: TAG_SPECIAL payload 0 == RuntimeValue::NIL */
+    printf("%s %s (value=%lld)\n", ok ? "ok  " : "FAIL", what, (long long)value);
+    if (!ok) failures++;
+}
+
 int main(void) {
     const uint8_t raw[] = {0x68, 0x69, 0xC3, 0xA9}; /* "hi" + U+00E9 */
 
@@ -79,22 +85,37 @@ int main(void) {
 
     SplArray* bad = rt_array_new(1);
     rt_array_push(bad, rt_value_int(300));
-    expect_text(rt_bytes_to_text((int64_t)(uintptr_t)bad), "", 0, "out-of-range slot rejected -> \"\"");
+    expect_nil(rt_bytes_to_text((int64_t)(uintptr_t)bad), "out-of-range slot rejected -> NIL");
 
-    /* Malformed UTF-8 follows Rust from_utf8_lossy: one U+FFFD per maximal bad subsequence. */
+    /* Malformed UTF-8 is REJECTED (owner decision 2026-11-23): the result is
+     * NIL (RT_NIL == 3), matching the Rust runtime. Never repaired, never a
+     * raw-byte carrier -- use rt_tls_wire_from_bytes for exact bytes. */
     {
-        const uint8_t bad1[] = {0x61, 0xFF, 0x62};            /* invalid lead */
-        const uint8_t bad2[] = {0x61, 0xE2, 0x82};            /* truncated 3-byte */
-        const uint8_t bad3[] = {0xE2, 0x82, 0x41};            /* bad continuation, resync */
-        const uint8_t bad4[] = {0xED, 0xA0, 0x80};            /* surrogate: 3 bad bytes */
-        const uint8_t good[] = {0xF0, 0x9F, 0x98, 0x80};      /* valid 4-byte stays */
-        const uint8_t cut4[] = {0xF0, 0x9F, 0x98};            /* 3 bad bytes -> one 3-byte U+FFFD */
-        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)cut4, 3)), "\xEF\xBF\xBD", 3, "truncated 4-byte, same length -> repaired");
-        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad1, 3)), "a�" "b", 5, "malformed lead -> U+FFFD");
-        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad2, 3)), "a�", 4, "truncated sequence -> one U+FFFD");
-        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad3, 3)), "�" "A", 4, "bad continuation resyncs");
-        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)bad4, 3)), "���", 9, "encoded surrogate -> 3 U+FFFD");
-        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)good, 4)), "😀", 4, "valid 4-byte preserved");
+        struct { const uint8_t b[4]; int64_t n; const char* what; } cases[] = {
+            {{0xC0, 0xAF}, 2, "overlong 2-byte '/' rejected"},
+            {{0xE0, 0x80, 0xAF}, 3, "overlong 3-byte rejected"},
+            {{0xF0, 0x80, 0x80, 0xAF}, 4, "overlong 4-byte rejected"},
+            {{0x80}, 1, "lone continuation rejected"},
+            {{0x61, 0xBF, 0x62}, 3, "continuation between ASCII rejected"},
+            {{0xED, 0xA0, 0x80}, 3, "encoded high surrogate rejected"},
+            {{0xED, 0xBF, 0xBF}, 3, "encoded low surrogate rejected"},
+            {{0x61, 0xE2, 0x82}, 3, "truncated 3-byte rejected"},
+            {{0xF0, 0x9F, 0x98}, 3, "truncated 4-byte rejected"},
+            {{0xE2, 0x82, 0x41}, 3, "bad continuation rejected"},
+            {{0x61, 0xFF, 0x62}, 3, "invalid lead 0xFF rejected"},
+            {{0xF4, 0x90, 0x80, 0x80}, 4, "above U+10FFFF rejected"},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            int64_t packed_bad = rt_bytes_from_raw((int64_t)(uintptr_t)cases[i].b, cases[i].n);
+            expect_nil(rt_bytes_to_text(packed_bad), cases[i].what);
+            SplArray* slot_bad = rt_array_new(cases[i].n);
+            for (int64_t k = 0; k < cases[i].n; k++) rt_array_push(slot_bad, rt_value_int(cases[i].b[k]));
+            expect_nil(rt_bytes_to_text((int64_t)(uintptr_t)slot_bad), cases[i].what);
+        }
+        const uint8_t good[] = {0xF0, 0x9F, 0x98, 0x80};
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)good, 4)), "\xF0\x9F\x98\x80", 4, "valid 4-byte preserved");
+        const uint8_t edge[] = {0xF4, 0x8F, 0xBF, 0xBF};
+        expect_text(rt_bytes_to_text(rt_bytes_from_raw((int64_t)(uintptr_t)edge, 4)), "\xF4\x8F\xBF\xBF", 4, "U+10FFFF accepted");
     }
 
     expect_text(rt_char_from_code(65), "A", 1, "rt_char_from_code ASCII");

@@ -652,7 +652,8 @@ int64_t rt_string_from_byte_array(int64_t array_value) {
         if (byte < 0 || byte > 255) { free(buf); return core_io_empty_text(); }
         buf[i] = (uint8_t)byte;
     }
-    int64_t result = spl_text_from_utf8_lossy(buf, (size_t)len);
+    int64_t result = spl_text_from_utf8_strict(buf, (size_t)len);
+    if (result == SPL_UTF8_TEXT_REJECTED) result = core_io_empty_text(); /* facade: invalid UTF-8 -> "" like Rust */
     free(buf);
     return result;
 }

@@ -313,12 +313,62 @@ pub fn rt_array_bytes_copy_checked(value: i64, out: i64, capacity: i64) -> i64:
         i = i + 1
     len
 
+fn _core_utf8_well_formed(ptr: i64, len: i64) -> bool:
+    # Twin of spl_utf8_well_formed (runtime_utf8_lossy_private.h): Unicode
+    # Table 3-7. Overlongs, stray continuations, surrogates, truncation and
+    # > U+10FFFF are ill-formed (owner decision 2026-11-23: strict).
+    var i = 0
+    while i < len:
+        val b = _sffi_core_array_load_u8(ptr, i)
+        if b < 0x80:
+            i = i + 1
+            continue
+        var need = 0
+        var lo = 0x80
+        var hi = 0xBF
+        if b >= 0xC2 and b <= 0xDF:
+            need = 1
+        elif b >= 0xE0 and b <= 0xEF:
+            need = 2
+            if b == 0xE0:
+                lo = 0xA0
+            elif b == 0xED:
+                hi = 0x9F
+        elif b >= 0xF0 and b <= 0xF4:
+            need = 3
+            if b == 0xF0:
+                lo = 0x90
+            elif b == 0xF4:
+                hi = 0x8F
+        else:
+            return false
+        var j = 1
+        while j <= need:
+            if i + j >= len:
+                return false
+            val c = _sffi_core_array_load_u8(ptr, i + j)
+            if c < lo or c > hi:
+                return false
+            lo = 0x80
+            hi = 0xBF
+            j = j + 1
+        i = i + need + 1
+    true
+
 pub fn rt_bytes_to_text(value: i64) -> i64:
-    val len = rt_array_bytes_validate(value)
-    if len <= 0:
+    # STRICT: invalid UTF-8 -> NIL (3), matching runtime_native.c and the
+    # Rust runtime. Exact bytes travel through rt_tls_wire_from_bytes.
+    if array_is_valid(value) < 1:
         return _sffi_core_array_rt_string_new(0, 0)
+    val len = rt_array_bytes_validate(value)
+    if len == 0:
+        return _sffi_core_array_rt_string_new(0, 0)
+    if len < 0:
+        return 3
     val items = array_items(value)
     if array_flags(value) == 8:
+        if not _core_utf8_well_formed(items, len):
+            return 3
         return _sffi_core_array_rt_string_new(items, len)
     val bytes = _sffi_core_array_calloc(len, 1)
     if bytes < 1:
@@ -327,6 +377,9 @@ pub fn rt_bytes_to_text(value: i64) -> i64:
     while i < len:
         _sffi_core_array_store_u8(bytes, i, _sffi_core_array_load_i64(items, i * 8) >> 3)
         i = i + 1
+    if not _core_utf8_well_formed(bytes, len):
+        _sffi_core_array_free(bytes)
+        return 3
     val out = _sffi_core_array_rt_string_new(bytes, len)
     _sffi_core_array_free(bytes)
     return out

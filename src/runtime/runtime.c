@@ -3950,7 +3950,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     const uint8_t* data =
         (const uint8_t*)(uintptr_t)rt_array_data_ptr((SplArray*)(uintptr_t)bytes_value);
     if (!data) return rt_string_new(NULL, 0);
-    return spl_text_from_utf8_lossy(data, (size_t)len);
+    return spl_text_from_utf8_strict(data, (size_t)len);
 }
 
 #endif
