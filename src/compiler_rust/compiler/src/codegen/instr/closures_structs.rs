@@ -11,7 +11,7 @@ use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
     string_cp_len_ref,
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, create_string_constant,
-    get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
+    float_to_int_saturating, get_vreg_or_default, indirect_call_with_result, inline_runtime_len_value,
 };
 use super::{InstrContext, InstrResult};
 
@@ -2289,18 +2289,15 @@ fn try_compile_builtin_method_call<M: Module>(
                     | TypeId::U64
             );
             if actual_is_float && to_is_int {
+                // Saturating, like the interpreter: `(-5.5).to_u8()` = 0, not SIGILL.
                 let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-                let widened = if to_signed {
-                    builder.ins().fcvt_to_sint(types::I64, receiver_val)
-                } else {
-                    builder.ins().fcvt_to_uint(types::I64, receiver_val)
+                let width = match to_ty {
+                    TypeId::U8 | TypeId::I8 => types::I8,
+                    TypeId::U16 | TypeId::I16 => types::I16,
+                    TypeId::U32 | TypeId::I32 => types::I32,
+                    _ => types::I64, // I64/U64
                 };
-                match to_ty {
-                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, widened),
-                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, widened),
-                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, widened),
-                    _ => widened, // I64/U64
-                }
+                float_to_int_saturating(builder, receiver_val, width, to_signed)
             } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
                 // Float→float: promote/demote between F32 and F64.
                 if src_ty == types::F32 && to_ty == TypeId::F64 {

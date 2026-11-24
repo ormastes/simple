@@ -200,7 +200,8 @@ impl HirLowering:
             self.error("unknown unsafe capability `" + unknown_caps[0] + "`; " + valid_unsafe_capability_names_help(), span)
         caps
 
-    me lower_function(fn_: ParserFunction, impl_symbol_name: text = "") -> HirFunction:
+    me lower_function(fn_: ParserFunction, impl_symbol_name: text = "",
+            impl_type_params: [HirTypeParam] = []) -> HirFunction:
         if fn_.attributes.len() == 0:
             join_point_attr_record_empty(self.module_filename, fn_.name)
         else:
@@ -616,25 +617,20 @@ impl HirLowering:
         # Generic predeclarations are untyped until their binders are lowered.
         # Publish their semantic signature independently of the bootstrap ABI;
         # generic callers need the declared result even when a binder occurs only there.
-        # Owner-generic methods may have no method-local binders. Their local
-        # predeclaration can still be untyped until lower_impl binds the owner.
-        # Fill only that exact owned declaration; never rewrite an imported row.
-        if fn_.has_return_type:
+        # lower_impl supplies its already-bound parameters in declaration order;
+        # a method can have none of its own and still belong to a generic owner.
+        # Its body return remains the bootstrap ABI, but that ABI is not the
+        # provider's semantic declaration consumed by imported RTI callers.
+        if fn_.has_return_type and (type_params.len() > 0 or
+                (impl_type_params.len() > 0 and self.current_method_self_symbol_id >= 0)):
             if val declared_symbol = self.symbols.get_symbol_raw(fn_symbol_id.id):
-                var publish_semantic_signature = type_params.len() > 0
-                if not declared_symbol.type_.? and declared_symbol.name == fn_symbol_name:
-                    if val owner_type = self.current_method_self_type:
-                        if val declaration_module = declared_symbol.defining_module:
-                            if declaration_module == self.module_filename:
-                                publish_semantic_signature = true
-                if publish_semantic_signature:
-                    var semantic_symbol = declared_symbol
-                    var semantic_params: [HirType] = []
-                    for raw_param in params:
-                        val semantic_param: HirParam = raw_param
-                        semantic_params = semantic_params.push(semantic_param.type_)
-                    semantic_symbol.type_ = Some(HirType(kind: HirTypeKind.Function(semantic_params, semantic_return_type, initial_effects), span: fn_.span))
-                    self.symbols.symbols[fn_symbol_id.id] = semantic_symbol
+                var semantic_symbol = declared_symbol
+                var semantic_params: [HirType] = []
+                for raw_param in params:
+                    val semantic_param: HirParam = raw_param
+                    semantic_params = semantic_params.push(semantic_param.type_)
+                semantic_symbol.type_ = Some(HirType(kind: HirTypeKind.Function(semantic_params, semantic_return_type, initial_effects), span: fn_.span))
+                self.symbols.symbols[fn_symbol_id.id] = semantic_symbol
 
         # Declaration-level `@unsafe(...)`, rebuilt by the flat-AST bridge as
         # an `unsafe` attribute: args[0] is the reason, the rest capabilities.

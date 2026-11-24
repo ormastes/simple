@@ -5,7 +5,8 @@ Audience: compiler and tooling engineers who maintain this spec.
 """
 # @req: REQ-APP-CLI-001 — stable requirement identity for this spec.
 
-use compiler.tools.duplicate_check.similarity.{SimilarityEngine, SimilarityInput, SimilarityFeatures, similarity_for_mode, lsh_similarity, similar_pairs}
+use compiler.tools.duplicate_check.similarity.{SimilarityEngine, SimilarityInput, SimilarityFeatures, similarity_for_mode, lsh_similarity, similar_pairs, interned_cosine_matches, interned_signature}
+use compiler.tools.duplicate_check.features.{feature_signature}
 use std.spec.step
 
 fn block_a() -> SimilarityInput:
@@ -44,7 +45,77 @@ fn identical_pair_found(engine: SimilarityEngine) -> bool:
             found_unrelated = true
     found_identical and not found_unrelated
 
+fn block_renamed() -> SimilarityInput:
+    SimilarityInput(
+        text_val: "",
+        tokens: ["fn", "sum_items", "(", "as", ",", "bs", ")", "var", "acc", "=", "0", "for", "a", "in", "as", "acc", "=", "acc", "+", "a", "return", "acc"],
+        embedding: [])
+
+# Interns every block's tokens into one first-seen vocab (the cosine grouping
+# path's interner) and returns the per-block id lists.
+fn intern_blocks(blocks: [SimilarityInput], vocab: [text]) -> [[i64]]:
+    var out: [[i64]] = []
+    for input in blocks:
+        var ids: [i64] = []
+        for tok in input.tokens:
+            var k = 0
+            while k < vocab.len() and vocab[k] != tok:
+                k = k + 1
+            if k == vocab.len():
+                vocab.push(tok)
+            ids.push(k)
+        out.push(ids)
+    out
+
+fn interned_matches_equal_engine_pairs() -> bool:
+    val blocks = [block_a(), block_unrelated(), block_renamed(), block_a()]
+    var vocab: [text] = []
+    val ids = intern_blocks(blocks, vocab)
+    val engine = similarity_for_mode("cosine", false)
+    var feats: [SimilarityFeatures] = []
+    for b in blocks:
+        feats.push(engine.featurize(b))
+    val expected = similar_pairs(engine, feats, [], 0.0)
+    val got = interned_cosine_matches(ids, vocab, [], 0.0)
+    if got.matches.len() != expected.len() or got.comparison_count != expected.len():
+        return false
+    var i = 0
+    while i < expected.len():
+        val e = expected[i]
+        val g = got.matches[i]
+        if e.left != g.left or e.right != g.right or e.score != g.score:
+            return false
+        i = i + 1
+    true
+
 describe "duplicate-check SimilarityAlgorithm interface":
+    it "interned cosine matches equal the engine's candidates + scores exactly":
+        step("Verify: interned cosine matches equal the engine's candidates + scores exactly")
+        # @req: REQ-APP-CLI-001
+        expect(interned_matches_equal_engine_pairs()).to_equal(true)  # oracle: true — same pair order and bit-identical scores
+
+    it "interned signature equals the text-dict feature signature":
+        step("Verify: interned signature equals the text-dict feature signature")
+        # @req: REQ-APP-CLI-001
+        val engine = similarity_for_mode("cosine", false)
+        var vocab: [text] = []
+        val ids = intern_blocks([block_a()], vocab)[0]
+        var distinct: [i64] = []
+        var weights: [f64] = []
+        var counts: [i64] = []
+        for id in ids:
+            var k = 0
+            while k < distinct.len() and distinct[k] != id:
+                k = k + 1
+            if k == distinct.len():
+                distinct.push(id)
+                counts.push(0)
+            counts[k] = counts[k] + 1
+        for c in counts:
+            weights.push((c * 1.0) / (ids.len() * 1.0))
+        val expected = feature_signature(engine.featurize(block_a()).sparse, 5)
+        expect(interned_signature(distinct, weights, 0, distinct.len(), vocab, 5)).to_equal(expected)  # oracle: same top-5 names, same order
+
     it "selects a named implementation for every mode":
         step("Verify: selects a named implementation for every mode")
         # @req: REQ-APP-CLI-001

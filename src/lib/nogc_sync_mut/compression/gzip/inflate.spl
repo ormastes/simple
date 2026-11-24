@@ -212,43 +212,43 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
         val symbol: i64 = sr[0]
         bp = sr[1]
         if symbol < 0:
-            return nil
+            return None
         if symbol == 256:
             break
         if symbol < 256:
             if max_output >= 0 and hlen + out.len() >= max_output:
-                return nil
+                return None
             out.push(symbol.to_u8())
         else:
             if symbol > 285:
-                return nil
+                return None
             val len_info = deflate_length_decode_info(symbol)
             val base_len: i64 = len_info[0]
             val ex_cnt: i64 = len_info[1]
             var length = base_len
             if ex_cnt > 0:
                 if bp + ex_cnt > total:
-                    return nil
+                    return None
                 length = base_len + _bits(data, bp, ex_cnt)
                 bp = bp + ex_cnt
             val dr = huffman_decode_symbol(data, bp, total, dc, ds, df)
             val dist_code: i64 = dr[0]
             bp = dr[1]
             if dist_code < 0 or dist_code > 29:
-                return nil
+                return None
             val di_info = deflate_distance_decode_info(dist_code)
             val base_dist: i64 = di_info[0]
             val dex_cnt: i64 = di_info[1]
             var distance = base_dist
             if dex_cnt > 0:
                 if bp + dex_cnt > total:
-                    return nil
+                    return None
                 distance = base_dist + _bits(data, bp, dex_cnt)
                 bp = bp + dex_cnt
             if distance > hlen + out.len():
-                return nil
+                return None
             if max_output >= 0 and hlen + out.len() + length > max_output:
-                return nil
+                return None
             var src = hlen + out.len() - distance
             var j = 0
             if src >= hlen:
@@ -277,13 +277,13 @@ fn _fixed_tables() -> [HuffTable]:
 fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64) -> InflateOut?:
     var bp = bp0
     if bp + 14 > total:
-        return nil
+        return None
     val hlit = _bits(data, bp, 5) + 257
     val hdist = _bits(data, bp + 5, 5) + 1
     val hclen = _bits(data, bp + 10, 4) + 4
     bp = bp + 14
     if hlit > 286 or hdist > 30:
-        return nil
+        return None
 
     # Code-length alphabet lengths, in the RFC's permuted order
     val order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
@@ -293,14 +293,14 @@ fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output:
         clen_lengths.push(0)
         i = i + 1
     if bp + hclen * 3 > total:
-        return nil
+        return None
     i = 0
     while i < hclen:
         clen_lengths[order[i]] = _bits(data, bp, 3)
         bp = bp + 3
         i = i + 1
     if not _huffman_lengths_valid(clen_lengths, false, false):
-        return nil
+        return None
     val clen_huff = huffman_build(clen_lengths)
     val clen_counts: [i64] = clen_huff.counts
     val clen_symbols: [i64] = clen_huff.symbols
@@ -314,21 +314,21 @@ fn _inflate_dynamic(data: [u8], bp0: i64, total: i64, history: [u8], max_output:
         val sym: i64 = sr[0]
         bp = sr[1]
         if sym < 0:
-            return nil
+            return None
         if sym < 16:
             lengths.push(sym)
         else:
             # 16: repeat previous 3-6x (2 bits); 17: zeros 3-10x (3 bits); 18: zeros 11-138x (7 bits)
             val bits_n = if sym == 16: 2 elif sym == 17: 3 else: 7
             if bp + bits_n > total:
-                return nil
+                return None
             val rep_base = if sym == 18: 11 else: 3
             val rep = rep_base + _bits(data, bp, bits_n)
             bp = bp + bits_n
             if sym == 16 and lengths.len() == 0:
-                return nil
+                return None
             if lengths.len() + rep > want:
-                return nil
+                return None
             val fill = if sym == 16: lengths[lengths.len() - 1] else: 0
             var r = 0
             while r < rep:
@@ -376,27 +376,27 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> Infl
     loop:
         # BFINAL (1 bit) and BTYPE (2 bits), LSB-first
         if bp + 3 > total:
-            return nil
+            return None
         val bfinal = _bits(input, bp, 1)
         val btype = _bits(input, bp + 1, 2)
         bp = bp + 3
         if btype < BLOCK_STORED or btype > BLOCK_DYNAMIC:
-            return nil
+            return None
 
         if btype == BLOCK_STORED:
             # Skip to the byte boundary, then LEN and NLEN (RFC 1951 3.2.4)
             var byte_pos = (bp + 7) >> 3
             if byte_pos + 4 > input.len():
-                return nil
+                return None
             val blen = input[byte_pos].to_i64() | (input[byte_pos + 1].to_i64() << 8)
             val bnlen = input[byte_pos + 2].to_i64() | (input[byte_pos + 3].to_i64() << 8)
             byte_pos = byte_pos + 4
             if bnlen != ((~blen) & 0xffff):
-                return nil
+                return None
             if byte_pos + blen > input.len():
-                return nil
+                return None
             if max_output >= 0 and out.len() + blen > max_output:
-                return nil
+                return None
             var k = 0
             while k < blen:
                 out.push(input[byte_pos + k])
@@ -407,7 +407,7 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> Infl
                 fixed_tables = _fixed_tables()
             val br = if btype == BLOCK_FIXED: _inflate_codes(input, bp, total, out, max_output, fixed_tables[0], fixed_tables[1]) else: _inflate_dynamic(input, bp, total, out, max_output)
             if br == nil:
-                return nil
+                return None
             val block_out: [u8] = br!.output
             if out.len() == 0:
                 out = block_out
@@ -420,7 +420,7 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> Infl
 
         if bfinal == 1:
             if not member and consumed_bytes != input.len():
-                return nil
+                return None
             return InflateOut(output: out, end: consumed_bytes)
 
         # Non-final block with the input fully consumed: this is a sync-flush
@@ -428,7 +428,7 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> Infl
         # BFINAL=1 block. Stop cleanly rather than reading past the end.
         if consumed_bytes >= input.len():
             if member:
-                return nil
+                return None
             return InflateOut(output: out, end: consumed_bytes)
 
 # Decompress a complete DEFLATE stream without allowing output beyond max_output.
@@ -436,7 +436,7 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> Infl
 fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
     val r = _inflate_core(input, 0, max_output, false)
     if r == nil:
-        return nil
+        return None
     val out: [u8] = r!.output
     return out
 
@@ -471,10 +471,10 @@ fn deflate_block_parse(data: [u8]?, offset: i64) -> DeflateBlockResult?:
         case None: return nil
 
     if offset < 0:
-        return nil
+        return None
 
     if offset >= input.len():
-        return nil
+        return None
 
     # Peek at first byte to get BFINAL + BTYPE
     val header_byte = input[offset].to_i64()
@@ -484,16 +484,16 @@ fn deflate_block_parse(data: [u8]?, offset: i64) -> DeflateBlockResult?:
     if block_type == BLOCK_STORED:
         var next_offset = offset + 1
         if next_offset + 4 > input.len():
-            return nil
+            return None
 
         val blen  = input[next_offset].to_i64() | (input[next_offset + 1].to_i64() << 8)
         val nlen = input[next_offset + 2].to_i64() | (input[next_offset + 3].to_i64() << 8)
         if (blen ^ nlen) != 65535:
-            return nil
+            return None
         next_offset = next_offset + 4
 
         if next_offset + blen > input.len():
-            return nil
+            return None
 
         var block_data: [u8] = []
         var i = 0

@@ -54,3 +54,21 @@ U+FFFD, no raw-byte carrier.
 - `test/01_unit/lib/common/encoding/bytes_to_text_checked_spec.spl`: 3/3.
 - Note: the strict codec reports overlong/surrogate offsets inside the sequence
   (`[0xC0,0x80]` -> 1), so the spec pins the offset only for the stray-byte case.
+
+## PR3 slice: kernel ipc + vfs (2026-11-23)
+- New `src/os/kernel/text_checked.spl`: `kernel_text_checked(bytes) -> Result<text, i32>`
+  (Err(EILSEQ=84), added to `os.kernel.errno`). Validation is pure Simple because the
+  freestanding runtimes (`arch/*/freestanding_runtime.c`) do not define
+  `rt_utf8_validate`, so `text_bytes.utf8_bytes_valid` would be an unbacked extern
+  in-kernel; `rt_bytes_to_text` is defined there and is reached only on validated input.
+- Converted: `ipc/syscall_file.spl` (8 path decodes -> `_FS_EILSEQ`),
+  `ipc/syscall_process.spl` (spawn/exec paths -> -EILSEQ; dlopen/dlsym and argv/envp
+  cstrs -> existing Err text path), `ipc/syscall_ipc.spl` (port name -> nil),
+  `services/vfs/vfs_dispatch.spl` (read_file_text: invalid -> "" instead of a
+  per-byte Latin-1 decode), `services/vfs/nvfs_connector.spl` (read_text -> InvalidArg).
+- Remaining kernel/vfs sites: vfs_boot_state, vfs_init, direct_fat32_boot_reader,
+  nvme_q35_lease_perf (all via vfs_boot_state/vfs_init `_vfs_bytes_to_text`),
+  vfs_include_tree_proof_v1, loader/executable_source, loader/app_registry,
+  loader/signed_catalog_scr1_decoder_v1, loader/simplebox_catalog_media_boot_v1,
+  memory/vmm_copy, net/*, arch/*/console + up_squared serial/gdb, cortex_m33 shell_lite,
+  security/sandbox_boot_apply.

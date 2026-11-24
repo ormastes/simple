@@ -18,7 +18,7 @@ use compiler.backend.llvm_capability.{find_archive_portable, find_nm_portable, f
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{
-    link_to_native, link_simpleos_internal, NativeLinkConfig,
+    link_to_native, link_simpleos_internal_with_engine_v1, NativeLinkConfig,
     hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
 use compiler.backend.linker.mold.{simpleos_uses_internal_linker}
 use compiler.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
@@ -34,6 +34,8 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256_or_shell, file_hash_sha256_or_empty, file_size_raw, remove_file_if_exists, process_run, process_run_timeout, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
+use compiler.backend.simpleos_sysroot_receipt.{simpleos_sysroot_validate_sdk_v1, simpleos_sdk_canonical_arch_v1}
+use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1}
 use compiler.backend.simpleos_native_symbols.{simpleos_user_link_arch, simpleos_user_sysroot, simpleos_user_entry_clang_target, simpleos_user_c_flags, simpleos_user_link_args_for_arch, simpleos_user_link_inputs_for_arch, simpleos_x86_64_sysroot,simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, simpleos_x86_64_clang, compile_simpleos_arm64, simpleos_spl_start_symbol}
 use compiler.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
 
@@ -42,6 +44,11 @@ fn _simpleos_internal_requested() -> bool:
 
 fn _simpleos_internal_link(objects: [text], archives: [text], output: text,
         target: text, flags: [text], verbose: bool) -> Result<text, text>:
+    native_link_output_v1(_simpleos_internal_link_with_engine_v1(objects, archives, output, target, flags, verbose))
+
+# @allow(primitive_api) Existing native-link boundary carries raw verbosity unchanged; completed engine identity is returned by the execution owner.
+fn _simpleos_internal_link_with_engine_v1(objects: [text], archives: [text], output: text,
+        target: text, flags: [text], verbose: bool) -> Result<NativeLinkSuccessV1, text>:
     var config = NativeLinkConfig.default()
     config.libraries = archives
     config.runtime_path = "none"
@@ -50,13 +57,17 @@ fn _simpleos_internal_link(objects: [text], archives: [text], output: text,
     config.allow_duplicate_definitions = false
     config.allow_cc_fallback = false
     config.extra_flags = flags
-    link_simpleos_internal(objects, output, target, config)
+    link_simpleos_internal_with_engine_v1(objects, output, target, config)
 
 # Filesystem-launched user ELF for aarch64/riscv64 SimpleOS, linked from the
 # sysroot built by scripts/os/simpleos-sysroot-{aarch64,riscv64}.shs
 # (crt0.o, libsimpleos_all.a, share/simpleos/simpleos.ld) with ld.lld.
 # @allow(primitive_api) Internal native-link orchestrator boundary uses the same raw verbosity/optimization inputs as the existing per-architecture linkers; retyping requires the shared native-link API migration.
 pub fn link_simpleos_user(arch: text, user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
+    native_link_output_v1(link_simpleos_user_with_engine_v1(arch, user_objects, output, verbose, opt_level))
+
+# @allow(primitive_api) Same existing native-link verbosity/optimization boundary; engine identity follows completed execution only.
+pub fn link_simpleos_user_with_engine_v1(arch: text, user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<NativeLinkSuccessV1, text>:
     if arch != "aarch64" and arch != "riscv64" and arch != "i686" and arch != "arm32" and arch != "riscv32":
         return Err("SimpleOS user link: unsupported architecture '{arch}'")
     val sysroot = simpleos_user_sysroot(arch)
@@ -69,6 +80,7 @@ pub fn link_simpleos_user(arch: text, user_objects: [text], output: text, verbos
     val script_path = if linker_script != "": linker_script else: "{sysroot}/share/simpleos/simpleos.ld"
     if not file_exists(script_path):
         return Err("SimpleOS {arch} user sysroot is incomplete: missing {script_path}")
+    val sdk_verified = simpleos_sysroot_validate_sdk_v1(sysroot, arch, ".", "", "", script_path)?
     val core_env = env_get("SIMPLE_SIMPLE_CORE_PATH") ?? ""
     val core_archive = if core_env != "" and file_exists(core_env) and not dir_exists(core_env): core_env else: ""
     val configured_cc = env_get("SIMPLE_CC") ?? ""
@@ -120,7 +132,7 @@ pub fn link_simpleos_user(arch: text, user_objects: [text], output: text, verbos
         var internal_flags = ["-T", script_path, "-nostdlib", "-static", "--gc-sections",
             "--start-group", "--end-group"]
         if init_o != "": internal_flags.push("--wrap=__simple_call_module_inits")
-        val internal = _simpleos_internal_link(internal_objects, internal_archives, output,
+        val internal = _simpleos_internal_link_with_engine_v1(internal_objects, internal_archives, output,
             "simpleos-{arch}", internal_flags, verbose)
         file_delete(entry_object)
         if init_o != "": file_delete(init_o)
@@ -137,7 +149,7 @@ pub fn link_simpleos_user(arch: text, user_objects: [text], output: text, verbos
         return Err("SimpleOS {arch} user executable link failed: {err}")
     if verbose:
         print "[llvm-link] SimpleOS {arch} user executable: {output}"
-    Ok(output)
+    native_link_success_v1(Ok(output), "ld.lld")
 
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     if simpleos_user_link_arch(env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "") == "aarch64":
@@ -286,99 +298,109 @@ pub fn simpleos_x86_64_cached_user_module_init(source: text, opt_level: i64) -> 
         return Err("initializer publication has no complete object")
     Ok(init_o)
 
+# @allow(primitive_api) Same existing x64 userspace link verbosity/optimization boundary; actual engine is supplied only after successful execution.
+pub fn link_simpleos_x86_64_user_with_engine_v1(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<NativeLinkSuccessV1, text>:
+    val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if simpleos_user_link_arch(target) != "x86_64":
+        return Err("SimpleOS x86_64 user link requires a canonical userspace target")
+    val sysroot = simpleos_x86_64_sysroot()
+    val support = simpleos_x86_64_user_link_inputs(sysroot)
+    for path in support:
+        if not file_exists(path):
+            return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+    val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
+    val linker_script = if configured_script != "": configured_script else: "{sysroot}/share/simpleos/simpleos.ld"
+    if not file_exists(linker_script):
+        return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
+    val sdk_verified = simpleos_sysroot_validate_sdk_v1(sysroot,
+        simpleos_sdk_canonical_arch_v1(target), ".", support[0], support[2], linker_script)?
+
+    # The entry shim is a SimpleOS cross object: use the same Clang and
+    # target as every other SimpleOS C input. The hosted C-compiler probe
+    # rejects simpleos targets (OS mismatch) and returned "No C compiler
+    # found" for every pure-Simple SimpleOS link.
+    val entry_cc = match simpleos_x86_64_clang():
+        case Ok(cc): cc
+        case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
+    val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level, entry_cc, "x86_64-unknown-none-elf")
+    val entry_object = match entry_result:
+        case Ok(path): path
+        case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
+
+    # The SimpleOS userspace CRT calls this symbol through a weak reference
+    # after the heap is available.  The legacy freestanding branch below
+    # already supplies a concrete caller, but this canonical userspace
+    # branch returned before doing so.  That left every heap-backed module
+    # global (including `[text]` literals) at raw zero under --gc-sections:
+    # no `__module_init_*` body was retained or called.  Discover the
+    # emitted initializer symbols from the user's objects and compile the
+    # same aggregator used by the legacy x86 and RV64 paths.
+    val module_init_names = simpleos_module_init_symbols(user_objects)
+    var init_o = ""
+    # Avoid a compiler subprocess and temporary object for the common
+    # scalar-only case.  The CRT's weak reference is intentionally absent
+    # there; when a module initializer exists, the concrete caller below
+    # keeps it live through --gc-sections.
+    if module_init_names.len() > 0:
+        if not dir_create_all("build/os"):
+            file_delete(entry_object)
+            return Err("SimpleOS x86_64 userspace module-init staging directory creation failed")
+        # The compatibility runtime archive exports an empty strong
+        # __simple_call_module_inits stub. --wrap redirects the CRT's
+        # reference to this generated implementation without admitting a
+        # second strong definition from the archive.
+        val init_source = simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits")
+        match simpleos_x86_64_cached_user_module_init(init_source, opt_level):
+            case Err(e):
+                file_delete(entry_object)
+                return Err("SimpleOS x86_64 userspace module-init caller compilation failed: {e}")
+            case Ok(path): init_o = path
+
+    val support0 = support[0]
+    var user_args: [text] = [
+        "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
+        "-o", output, support0, entry_object
+    ]
+    if init_o != "":
+        user_args.push("--wrap=__simple_call_module_inits")
+        user_args.push(init_o)
+    for obj in user_objects:
+        user_args.push(obj)
+    user_args.push("--start-group")
+    user_args.push(support[1])
+    user_args.push(support[2])
+    user_args.push("--end-group")
+    if _simpleos_internal_requested():
+        var internal_objects = [support0, entry_object]
+        if init_o != "": internal_objects.push(init_o)
+        for obj in user_objects: internal_objects.push(obj)
+        var internal_flags = [
+            "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
+            "--start-group", "--end-group"]
+        if init_o != "":
+            internal_flags.push("--wrap=__simple_call_module_inits")
+        val internal = _simpleos_internal_link_with_engine_v1(
+            internal_objects, [support[1], support[2]], output,
+            "simpleos-x86_64", internal_flags, verbose)
+        file_delete(entry_object)
+        if internal.is_err():
+            return Err("SimpleOS x86_64 user internal link failed: {internal.unwrap_err()}")
+        return internal
+    val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
+    val (_user_out, user_err, user_code) = process_run(linker, user_args)
+    file_delete(entry_object)
+    # The content-keyed initializer object is immutable and survives links.
+    if user_code != 0:
+        return Err("SimpleOS x86_64 user executable link failed: {user_err}")
+    if verbose:
+        print "[llvm-link] SimpleOS x86_64 user executable: {output}"
+    return native_link_success_v1(Ok(output), "ld.lld")
+
+
 fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     if target == "simpleos" or target == "simpleos-x86_64" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos" or target == "x86_64-unknown-simpleos-elf":
-        val sysroot = simpleos_x86_64_sysroot()
-        val support = simpleos_x86_64_user_link_inputs(sysroot)
-        for path in support:
-            if not file_exists(path):
-                return Err("SimpleOS x86_64 sysroot is incomplete: missing {path}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
-        val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
-        val linker_script = if configured_script != "": configured_script else: "{sysroot}/share/simpleos/simpleos.ld"
-        if not file_exists(linker_script):
-            return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
-
-        # The entry shim is a SimpleOS cross object: use the same Clang and
-        # target as every other SimpleOS C input. The hosted C-compiler probe
-        # rejects simpleos targets (OS mismatch) and returned "No C compiler
-        # found" for every pure-Simple SimpleOS link.
-        val entry_cc = match simpleos_x86_64_clang():
-            case Ok(cc): cc
-            case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
-        val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level, entry_cc, "x86_64-unknown-none-elf")
-        val entry_object = match entry_result:
-            case Ok(path): path
-            case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
-
-        # The SimpleOS userspace CRT calls this symbol through a weak reference
-        # after the heap is available.  The legacy freestanding branch below
-        # already supplies a concrete caller, but this canonical userspace
-        # branch returned before doing so.  That left every heap-backed module
-        # global (including `[text]` literals) at raw zero under --gc-sections:
-        # no `__module_init_*` body was retained or called.  Discover the
-        # emitted initializer symbols from the user's objects and compile the
-        # same aggregator used by the legacy x86 and RV64 paths.
-        val module_init_names = simpleos_module_init_symbols(user_objects)
-        var init_o = ""
-        # Avoid a compiler subprocess and temporary object for the common
-        # scalar-only case.  The CRT's weak reference is intentionally absent
-        # there; when a module initializer exists, the concrete caller below
-        # keeps it live through --gc-sections.
-        if module_init_names.len() > 0:
-            if not dir_create_all("build/os"):
-                file_delete(entry_object)
-                return Err("SimpleOS x86_64 userspace module-init staging directory creation failed")
-            # The compatibility runtime archive exports an empty strong
-            # __simple_call_module_inits stub. --wrap redirects the CRT's
-            # reference to this generated implementation without admitting a
-            # second strong definition from the archive.
-            val init_source = simpleos_module_init_caller_source_for_symbol(module_init_names, "__wrap___simple_call_module_inits")
-            match simpleos_x86_64_cached_user_module_init(init_source, opt_level):
-                case Err(e):
-                    file_delete(entry_object)
-                    return Err("SimpleOS x86_64 userspace module-init caller compilation failed: {e}")
-                case Ok(path): init_o = path
-
-        val support0 = support[0]
-        var user_args: [text] = [
-            "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
-            "-o", output, support0, entry_object
-        ]
-        if init_o != "":
-            user_args.push("--wrap=__simple_call_module_inits")
-            user_args.push(init_o)
-        for obj in user_objects:
-            user_args.push(obj)
-        user_args.push("--start-group")
-        user_args.push(support[1])
-        user_args.push(support[2])
-        user_args.push("--end-group")
-        if _simpleos_internal_requested():
-            var internal_objects = [support0, entry_object]
-            if init_o != "": internal_objects.push(init_o)
-            for obj in user_objects: internal_objects.push(obj)
-            var internal_flags = [
-                "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
-                "--start-group", "--end-group"]
-            if init_o != "":
-                internal_flags.push("--wrap=__simple_call_module_inits")
-            val internal = _simpleos_internal_link(
-                internal_objects, [support[1], support[2]], output,
-                "simpleos-x86_64", internal_flags, verbose)
-            file_delete(entry_object)
-            if internal.is_err():
-                return Err("SimpleOS x86_64 user internal link failed: {internal.unwrap_err()}")
-            return internal
-        val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
-        val (_user_out, user_err, user_code) = process_run(linker, user_args)
-        file_delete(entry_object)
-        # The content-keyed initializer object is immutable and survives links.
-        if user_code != 0:
-            return Err("SimpleOS x86_64 user executable link failed: {user_err}")
-        if verbose:
-            print "[llvm-link] SimpleOS x86_64 user executable: {output}"
-        return Ok(output)
+        return native_link_output_v1(link_simpleos_x86_64_user_with_engine_v1(user_objects, output, verbose, opt_level))
 
     # Legacy `*-unknown-none[-elf]` and filename-selected kernel builds keep
     # their boot CRT/stub path. The canonical `*-simpleos` target above is a

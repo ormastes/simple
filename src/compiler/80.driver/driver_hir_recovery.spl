@@ -198,9 +198,14 @@ pub fn hir_shard_recovery_terminal(queue: text, owner: text, path: text, state: 
 # The owner's fork tree ("<owner>+fork..." -- MIR fork children and the
 # per-file unit loop's MIR child, see HIR_SHARD_FORK_OWNER_MARK_V1) is sealed
 # with it, exactly as hir_shard_recovery_owner_tree_progress_v1 counts it:
-# PR_SET_PDEATHSIG takes every fork child down with a killed root, so no child
-# ever seals its own claims, and until 2026-11-13 those rows stayed unsealed
-# (close_inventory -1, crash attribution lost). Each row is terminalized under
+# PR_SET_PDEATHSIG takes every rt_fork_shared_heap_v1 child down with a killed
+# root, so those children never seal their own claims, and until 2026-11-13
+# those rows stayed unsealed (close_inventory -1, crash attribution lost). The
+# file worker's process_spawn_async batch children ("+fork-m<round>") arm the
+# same signal themselves at native-build entry (Linux/FreeBSD; a host with no
+# arm can still leave one running after a reaped root):
+# doc/08_tracking/bug/native_build_reaped_worker_orphans_batch_children_2026-11-24.md
+# Each row is terminalized under
 # ITS OWN claim owner (the terminal must repeat the claim); rows a surviving
 # child already sealed are skipped. Coordinator owners "<i>/<n>@<g>" never
 # contain the mark, so a sibling root's tree is never matched.
@@ -629,6 +634,14 @@ pub fn hir_shard_recovery_replacements_dispatchable(queue: text, queued_replacem
 # result -2) is a TIMEOUT, not a CRASH. Exit/retry handling is identical.
 pub fn hir_shard_reap_deadline_hit_v1(polled: i64, timeout_ms: i64, elapsed_ms: i64) -> bool:
     polled == -2 and timeout_ms > 0 and elapsed_ms >= timeout_ms
+
+# The deadline is a no-progress watchdog: a worker whose owner tree claimed
+# new rows since the clock was last armed gets a fresh window instead of the
+# reap. An unreadable count (-1) never re-arms.
+# reason: pure predicate over ledger claim counts, sibling of hir_shard_reap_deadline_hit_v1
+@allow(primitive_api)
+pub fn hir_shard_reap_deadline_rearm_v1(armed_claims: i64, claims_now: i64) -> bool:
+    armed_claims >= 0 and claims_now > armed_claims
 
 pub fn hir_shard_reap_state_v1(blocked: bool, code: i64, finished: bool, deadline_hit: bool) -> text:
     if blocked: return "BLOCKED"

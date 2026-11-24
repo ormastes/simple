@@ -4068,3 +4068,248 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - Per row, `N = 2s * px + K` is monotonic, so each run end is one division plus a direct comparison. Each run is one `write_span`.
   - This path applies to boxes of 65536 px or more. Smaller boxes keep the per-pixel walk.
   - Result: 3.36 s -> 0.54 s (`emu_linear_gradient_stops_runs_spec`). The spec compares against the per-pixel walk at 15 angles, including the corner directions, three stop shapes and translucent stops. Interpreter and JIT match base.
+
+## 2026-11-24 — style-phase kern misses and 4x PPM encode (perf, byte-identical)
+
+- **Re-ranked profile on b4595a3c0f4 (interpreter, cpu_simd, `SIMPLE_WEB_STYLE_COUNTERS=1`):** style is ~2.9 s on html/css-layout but only 0.25 s on tab-bar; it scales with text nodes. On 4x html the top style sections are `sec_metrics` 1726 ms (of which `sec_resolve` 1389 ms = font metric resolution), `sec_cascade` 545, `sec_inherit` 417, `sec_select` 246. Inside resolve: 193 uncached measures = 1088 ms, of which 691 kern-cache misses = 603 ms and 235 advance misses = 283 ms. Selector matching itself is small (`sel_match` 116 ms).
+- **Kern miss = 0.75 ms of table-directory parsing:** `sfnt_blob_kern_pair_milli_px` ran `parse_offset_table` twice (kern, then head) per pair. `sfnt_blob_kern_face_info` now parses it once and `font_renderer` warms it with the per-face glyph-id slot (`_gid_kern`, same identity key as `_gid_vals`); `sfnt_kern_face_pair_milli_px` is one binary search. 324 distinct Liberation Sans pairs: 434 ms -> 122 ms (`kern_pair_cache_miss_cost_spec`). The remaining ~0.3 ms per miss is the foreign kern call + `cache_identity()` + gid lookup.
+- **Trap — `measure_text_width_milli` re-runs the pen walk:** but on the second pass every advance and kern is a cache hit, so it is only ~85 ms of the 1068 ms measure bucket. Not worth a combined API.
+- **PPM encode on 4x html (4.6 s):** 3.0 s was the per-pixel stores of 29,051 changed 64-px blocks, yet ~96 % of those pixels equal the pixel above. `rowb` still holds the row above, so a changed block now compares 16-px pieces, then 4-px pieces, against the row above and stores only differing pieces. Real frame: 4.6 s -> 3.5 s; `ppm_encode_sparse_change_rows_spec` 14.8 s -> 12.3 s.
+- **Trap — per-element cost model under the interpreter:** a `slice` + `!=` piece compare costs ~10 µs (as much as ~6 pixels of stores), and a `while i < n: row[i]` store loop is slower than `for px in slice`. So a block with no vertical coherence pays MORE: the synthetic `ppm_encode_frame_rows_spec` went 3.8 -> 5.7 s with naive refinement. Mitigation: a 16-px piece that changed in all four 4-px pieces marks the block dense (rest stored directly) and the next 3 changed blocks of the row skip the compares; stores use `for px in piece`. Residual: that synthetic frame is still 3.8 -> 4.1 s (+8 %), while every real catalog frame got faster.
+- **Acceptance (vs 54d47e3ab38, 3 alternated rounds, ms):** 4x html 21157/21498/21258 -> 19221/19382/19161; 4x css-layout 19858/19972/20700 -> 18948/19035/19235; 1x tab-bar 2834/2866/2819 -> 2785/2748/2719; 1x css-layout 12073/12085/12090 -> 11273/11467/11893. 16/16 catalog frames byte-identical, RSS flat (2.955 -> 2.961 GB).
+## 2026-11-24 — 1x LCD text: parse memo, hint extents, area/filter loops, overlap-patching quad memo (perf, byte-identical)
+
+- **Profile (1x css-layout, cpu_simd, interpreter; text Draw-IR 3.6 s):** cold glyph path 0.93 s, LCD pen phases 1.2 s (of it `_lcd_glyph` 0.8 s), LCD quad composite 0.65 s (380 of 616 quads: their destination is not one color because neighbouring glyph boxes overlap), LCD hinting 0.36 s, LCD area 0.52 s, filter 0.47 s.
+- **Triple parse:** a cold glyph parsed the same font directory and outline three times (measure, `sfnt_glyph_gray_row_has_ink`, LCD outline; ~0.8 ms each). `_sfnt_font_memo` / `_sfnt_outline_memo` keep the last blob and serve only a byte-equal blob (native `==` on 277 KB is ~5 us); another blob resets them. 13 resets per page on html / forms-media (3-4 faces alternate), so a single-entry memo is enough. Pin: `sfnt_glyf_parse_memo_spec` (other font, same-length edited unitsPerEm; mutation `==` dropped fails).
+- **Hint knots:** every hinted size looked up 7 reference glyphs through the cmap (~7 ms each, 0.35 s per page); extents are kept with the parse memo.
+- **Trap — helper calls in hot float loops:** a call costs ~2 us on the interpreter lane vs ~0.3 us for the inline arithmetic (100k-iteration microbench: 246 vs 59 ms). `_lcd_area_line` / `_lcd_area_quad_mono` now write `_floor_glyf` / `_ceil_glyf` / quarter-row snap / fdot8 / bit-length out; truncation is the floor only where the value is known >= 0 (`lo`, `y0` after the `< 0` guard, `cov*255+0.5`).
+- **LCD filter:** the 12-tap window slides by 4 (8 taps carried), g pairs summed (symmetric taps), inked extent tracked at coverage changes. Oracle: `sfnt_lcd_raster_filter_spec` keeps the old row loop verbatim, 200 rasters (10 glyphs x 5 sizes x 4 phases); window-shift and first-rise mutations fail it. An over-wide `last` is output-equivalent (pixels outside compute 0), so that mutation survives by design.
+- **Quad memo over a non-uniform destination:** the kept quad over bg (top-right destination pixel) is patched where the destination differs, with the composite's own per-pixel rules (LCD s32 tables / gray `blend`); rows equal to bg skip by native compare; any translucent destination pixel declines to the old path. Pin: second case of `engine_lcd_text_paint_small_spec` (stripes + translucent band via `draw_image`; `draw_rect` blends, so its band stays opaque — trap), hash on base; `out[i] = bg` and `blend(.., bg)` mutations fail it.
+- **`SoftwareBackend.draw_image`:** `native_pixel_rows_enabled()` read once per call, `_span_copy_safe_count` written out (same clamps); `record_simd_copy_hit` still per row.
+- **Result (3 serial rounds, alternating first side):** 1x post-document (paint + encode) median css-layout 6.64 vs 7.70 s base, html 7.13 vs 8.21 s; document equal (5.95/6.04, 5.26/5.26 s); RSS 0.81 GB both. 4x paint median css-layout 12.46 vs 13.05 s, html 15.44 vs 15.94 s; RSS 2.97 GB both. All 16 catalog frames byte-identical to base 398efae3d75. `engine_lcd_text_paint_small_spec` 5.45 -> 3.81 s (budget 4.6 s).
+- **Remaining at 1x:** `_lcd_apply_pen_phases` still builds one phase cell per (glyph, phase) cold (~4 ms each, area + filter + outline), staging 0.27 s, deferred-cell resolve 0.25 s, ink receipt band raster 0.1 s.
+
+## 2026-11-24 — gray glyphs above 48 device px: Skia quarter phase + exact-area coverage (4x catalog parity)
+
+- **Cause ranking (origin c576239ba51, 4x):** css-layout 126.5k / animation 126.1k mismatched px; ~74% / ~91% of it was gray text (> 48 device px). The rest: div.scroll scrollbar + dashed border (claimed, scrollbar lane), canvas/svg/media boxes 1 device row low (~6k), missing `0:00 / 0:00` media time (3.5k), list-bullet offset, corners. forms-media 1x: 16 px LCD raster residual on every line (open).
+- **Chrome model (measured):** pen at Skia quarter phase `round(4*frac(pen))`, outline keeps its fractional left bearing, coverage = exact pixel area. At k > 1 no hinting; at k = 1 Chrome ALSO hints (slight, y) gray glyphs, so 64 px at 1x keeps other rows — the spec's diagonal case therefore runs at k=4 (`lx`, device pen 54.22). Preblend is negligible for dark ink.
+- **Implementation:** `sfnt_gray_glyph_outline` (shared `_glyph_outline(.., gray=true)`: unhinted, `_gray_frame` rows) + `sfnt_gray_outline_frame/raster` (one area sample per px via `_area_cells(.., per_px=1)`, zero-cell skip). font_renderer: `_gray_applies`, gray phase cells `-5 - phase - cell_base`, outlines cached in `_lcd_outline(.., gray=true)`, phase-0 base deferred exactly like LCD cells (`lcd_defer_cells`, `_lcd_frame_glyphs`, fill on resolve), last run advance may mismatch (device-advance anchor).
+- **Trap — y-hinted outline:** first cut reused the LCD (y-hinted) outline: every gray glyph one device row high, 7 specs red. Gray needs the unhinted `_gray_frame` outline.
+- **Perf traps (interpreter lane):** per-call `blob == memo_blob` compare made an uncached outline 7.5 ms -> cache outlines; per-pixel branches in `_insert_font_atlas_glyph` hoisted; the big one: `_engine2d_glyph_quad_over` built its coverage table per quad — exact-area cells have up to 255 levels, so one `blend` per level per quad doubled draw time (1.47 -> 2.90 s on css-layout). Table now shared per (color, bg). Final alternated A/B: css-layout wall 18.69 vs 18.67 s (paint 8.33 -> 8.17), animation +1.2% wall, RSS flat.
+- **Result:** dpr4 catalog overview 0.47->0.22, html 0.79->0.29, css-layout 1.15->0.50, css-paint 1.11->0.32, forms-media 1.09->0.48, animation 1.15->0.40, evidence 0.35->0.10, tab-bar 0.18->0.17; 1x catalog, matrix (81), mandatory specs equal base. Hg 4x vs Chrome mismatch 445 -> 86.
+## 2026-11-24 — JIT startup 2: codegen on worker threads (seed, byte-identical)
+
+- **What:** Cranelift codegen (verify + `Context::compile`) now runs on worker threads (`SIMPLE_JIT_CODEGEN_THREADS`, default `min(4, cores)`; 0 or 1 is serial, as are modules under 64 functions).
+  - MIR→CLIF translation stays on the main thread, which owns `&mut module`.
+  - Results are defined back in submission order, so code layout is unchanged.
+  - Block liveness is computed one function ahead on a helper thread.
+  - Outlining computes liveness only for functions that own an outlined body.
+  - Bug: `doc/08_tracking/bug/jit_serial_cranelift_codegen_startup_2026-11-24.md`.
+- **Result (3 rounds, alternating, medians, ms; doc = `compose_shaping`):**
+
+  | page | k | JIT new | JIT base | interp | doc new / base / interp |
+  |---|---|---|---|---|---|
+  | tab-bar | 1x | 2992 | 5393 | 2948 | 19 / 18 / 653 |
+  | evidence | 1x | 3060 | 5587 | 3453 | 10 / 9 / 398 |
+  | overview | 1x | 3073 | 5388 | 5147 | 18 / 15 / 699 |
+  | html | 1x | 3251 | 5581 | 12253 | 158 / 143 / 5662 |
+  | css-paint | 1x | 3386 | 5645 | 14686 | 231 / 201 / 8573 |
+  | html | 4x | 3789 | 6129 | — | 178 / 166 |
+  | forms-media | 4x | 21857 | 25328 | — | 112 / 102 |
+
+  - JIT startup is cut by ~2.4 s on every page.
+  - **Tab-bar 1x is at parity with the interpreter, not under it** (2.96–3.11 s vs 2.94–2.96 s).
+- **Correctness:** JIT output is byte-identical to the interpreter on all 8 pages at 1x and at 4x. Interpreter output is unchanged vs base. Strict-vreg runs are clean. Every run reached `compile_all:done`.
+- **Trap — window size:** a codegen window of `workers * 4` contexts stalled translation for 190 ms behind bursts of large functions. Use 1,024; it costs ~50 MB RSS.
+- **Trap — more workers:** they do not help. Translation (~720 ms, of which block sealing is ~200) is the critical path.
+- **Trap — user `fn f32`/`fn i32`:** the JIT calls the cast instead of the user function. Avoid those names in generated tests: `doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md`.
+- **Open:**
+  - seal blocks once all MIR predecessors are emitted (~200 ms);
+  - parallel translation, which needs callees and data pre-declared;
+  - HIR Pass 0.5b import-type loads (~370 ms).
+
+## 2026-11-24 — form-control text keeps the line's pen (forms-media 1x 1.11 -> 0.88)
+
+- **Measure the text-only residual on a control fixture before blaming glyph shape.** forms-media 1x's top regions (input `Simple`, select `Alpha`, textarea `Editable text`, the labels after checkbox/radio) were pen and size bugs, not raster bugs: plain `lllll` on a line matched Chrome exactly while the same run inside or after a control did not.
+- **Three causes, one per AC in `form_control_text_pen_chrome159_spec`:**
+  - `inline_item_width_err_milli` returned UNKNOWN for every atomic box, so the label after a 13 px checkbox/radio lost the line's fraction. A default checkbox/radio is a whole box, so its delta is 0.
+  - Control text (input value, a select's option `#text`, textarea `#text`) painted from the integer box column. The inline loop now records the control's `run_pen_origin` at k=1 in the per-node pen table. The input value command and the text children of select/textarea carry it as `pen-origin-milli`.
+  - The input value command had no `font-size-milli`, so `_lcd_apply_pen_phases` staged 13 px pens against 13.333 px advances, and every phase was silently dropped. Before this fix, a pen origin on that command changed **zero bytes**. When a pen-origin probe does nothing, trace `size_milli`/`pens_known` in `_lcd_apply_pen_phases` first.
+- **Open (not fixed):**
+  - At k=4, giving the input value `font-size-milli` puts its first gray ink row at 46 against Chrome's 45 (`form_control_paint_chrome159_spec` AC-11). The prop is therefore scoped to 1x. The gray fractional-size glyph's vertical placement is a separate bug.
+  - Multi-line textarea `_line{n}` commands carry no origin.
+  - The 16px round-glyph LCD residual (~7 px per round glyph on a whole-px grid; straight glyphs are exact) is analysed but unfixed. A per-point IUP model of weak points only moved a 62-glyph grid from 476 to 458 px.
+
+## 2026-11-24 — vplace: fractional gray glyphs and line-start fraction at device scale
+
+- **Gray glyphs (k=4, above 48 device px) scale y by the float size too.** `_glyph_outline`
+  (`src/lib/common/encoding/sfnt_glyf.spl`) used to scale only x by `x_milli`, so a
+  13.333 px input value at k=4 was drawn from a 53 px-tall glyph and its first ink row was
+  46, one below Chrome's 45. Hinted (LCD/mono) glyphs keep the x-only path. Because the
+  root cause is fixed, the input value now carries `font-size-milli` at every k
+  (`_html_draw_ir_input_value_command`), and form_control_paint AC-11 passes at 4x.
+- **A line that starts at a fractional CSS y now snaps from that start.** The block cursor's
+  `cy_frac` was dropped for line-placed boxes, so a canvas or text line under an `<h2>` with
+  a 0.25 CSS px residual sat one device row low. `align_inline_line_baselines` /
+  `align_inline_line_device_dy` take `line_frac_milli` and `origin_frac_milli`. Add
+  `box_device_top_px(k*cy_frac) - box_device_top_px(k*origin_frac)`. Use the delta: the
+  container's own residual is already in its device_top, and adding the absolute value
+  counts it twice. All 7 call sites in `layout_engine` pass `cy_frac, origin_frac`.
+- Re-pinned `device_px_block_height_chrome159_spec` AC-3 against Chrome (k=4, 400x300).
+  The `sub` cell is 47/83, not the earlier 48/83, which was the old 53 px glyph. The 14.4px
+  cell is now exactly 23/61.
+- Specs: `gray_glyph_fractional_size_y_chrome159_spec`, `line_start_fraction_device_rows_chrome159_spec`.
+  dpr4 catalog: animation 0.40 -> 0.35, and css-layout, css-paint, forms-media and tab-bar
+  each fell by 0.01. 1x is unchanged. Perf: animation k=4 median 15125 -> 14993 ms, RSS flat.
+- **Still open:**
+  - svg top row is still 1 device row low. `_dir_scale_command` scales `clip_rect`
+    without `device-y-offset`.
+  - The audio "0:00 / 0:00" label is missing.
+  - Animation 4x text has x offsets.
+  - A 16px round-glyph LCD residual at 1x is unclaimed.
+  - Bug doc: `doc/08_tracking/bug/web_render_device_scale_vertical_row_low_2026-11-24.md`.
+## 2026-11-24 — JIT calls a user `fn f32`/`fn i32`/`fn int`, not the cast (seed correctness)
+
+- **Bug:** HIR lowering turned every one-argument call on a cast name (`i8..u64`, `f32`, `f64`, `int`, `float`, `bool`, `text`, `str`, `String`, `char`) into a `Cast` before it checked for user functions. So under the JIT a user `fn f32(x)` returned `17.0`, while the interpreter called the user function and returned `18`.
+- **Rule:** the interpreter's decided rule (`builtin_wins_over_user_fn`): a module-level or imported `fn` wins, and only `exit`/`dprint`/`panic` are unshadowable. The spec says nothing about function names; built-in TYPE-name shadowing (`struct text`) is still an open question and was not touched.
+- **Fix:** `lower_utility_builtin` skips the cast when `declared_function_returns` holds the name. That map is filled for both the flattened lane and the project lane; `own_declared_function_names` is empty on the flattened lane, so it could not be used.
+- **Evidence:** the spec `jit_user_fn_named_like_primitive.rs` was red (171717) and is now green (201918), and a call with no user function still casts. All 8 pages match JIT == interpreter at 1x and 4x, and JIT output is unchanged from before the fix. Failure counts match the base, and `batch_pipeline` and `native_link` pass.
+- **Bug record:** `doc/08_tracking/bug/jit_user_fn_named_like_primitive_calls_cast_2026-11-24.md`.
+
+## 2026-11-24 — svgaudio: clip follows device-y-offset; audio time text
+
+- **A command's `clip_rect` now moves with its `device-y-offset`** (`_dir_scale_command`,
+  `src/lib/common/ui/draw_ir_device_scale.spl`). Before, an svg snapped up one device row
+  kept its viewport clip at k x the CSS y and lost its top row (Chrome inks row 383, we cut
+  at 384). Pinned by `line_start_fraction_device_rows_chrome159_spec` AC-4. Only the
+  y offset is applied; `device-x-offset` and `device-rect` still leave the clip alone.
+  Gates and both catalogs showed nothing that depends on them.
+- **`<audio controls>` paints Chrome's `0:00 / 0:00` time text.** Measured by rendering
+  candidate spans in Chrome against its own audio control:
+  - The face is 14px Liberation Sans in `#1f1f1f`. DejaVu Sans does not match.
+  - It is two boxes. `0:00` starts at x 47 and `/ 0:00` at x 78.25 of the content box.
+    These offsets reproduce Chrome's 4x pixels exactly (0 px differ). With one run, the
+    slash drifts.
+  - The line is centred in DEVICE px, with the half px rounding down the page:
+    (216 - 63) / 2 = 76.5, so the top is 77 and the baseline 128.
+  - Our CSS-centred top plus the device ascent gave 127. `centred_line_device_dy`
+    (layout_foundation) computes the difference, and the label carries it as
+    `device-y-offset`.
+  - The 78.25 start is `pen-origin-milli` 250, which `draw_ir_adv` honours at k=1 as well.
+  - Pinned by `media_controls_paint_chrome159_spec` AC-8 (ink box and count at 1x and 4x).
+- **The "animation 4x text x offsets" are not offsets.** The largest remaining animation
+  regions are text rows, and their ink centroids are within 0.13-0.23 device px of Chrome.
+  An isolated `<code>x</code> — partial; …` fixture is within 0.2 px on every line. What
+  remains is glyph anti-aliasing, not pen placement. Do not chase it as a layout bug.
+- Catalog: 1x animation 0.98 -> 0.92, and dpr4 animation 0.35 -> 0.33. Every other page
+  is identical. Perf (animation k=4, 6 alternated rounds): median 15268 -> 15434 ms (+1.1%),
+  RSS flat. Earlier 6-round sets read +3.9% at load 12-23; a clip-only vs full bisect
+  showed the label costs nothing, so that was host noise. Use 6+ alternated rounds here.
+- Method note: measure UA-chrome text by rendering candidate spans in Chrome itself and
+  running a box pixel diff (`boxdiff.spl`) against the real control, sweeping font, colour
+  and x. That settles the face and the subpixel offsets before any code is written.
+
+## 2026-11-24 — listdisc: disc markers use the device-size font; cluster sweep of css-paint, html, overview
+
+- **Sweep (4x, svgaudio head 3886f381d01, `region.spl`, 32 px tiles).** The text rows are
+  glyph anti-aliasing, with centroids within 0.4 device px of Chrome. The non-AA clusters are:
+  - **Disc bullets.** In overview's lists, rank 0 is 9,123 px. A 160x64 cluster with a
+    centroid of -7..-9 px recurs on every page's feature inventory.
+  - **html `<article><header>` gradient bottom edge.** It is 2 device rows short (870 vs
+    872), 6,822 px. A standalone header + h3 fixture does NOT reproduce it (4x ends at
+    451 on both sides), so the cause depends on context. Open, unclaimed.
+  - **overview `code` monospace advances.** The rest of the line shifts by up to 8 px.
+    Open, unclaimed.
+  - The clip-rect horizontal offset / `device-rect` did not show up anywhere.
+- **Disc marker fix** (`_html_draw_ir_list_marker_commands`, paint_layout). Chrome runs
+  ListMarker's disc metrics (a = ascent, o = 2a/3, side = (o+1)/2, x = content - o - 7,
+  y = text top + 3(a-o)/2) on the DEVICE font.
+  - At k=4 a 16px face gives a 58, o 38, a 19 px disc at content - 45, text top + 30.
+    The 7 stays unscaled.
+  - We had k x the CSS disc: 20 px wide, 19 device px left and 2 rows high.
+  - At k>1 the disc is now an overlay rect with `device-rect` and a large radius, which
+    the painter clamps to a circle. 1x is unchanged.
+  - Pinned by `list_disc_marker_device_scale_chrome159_spec`.
+  - The `ol` decimal markers were already within 1 px at both scales.
+- **Open from this case:** a `ul` that is a flex item after an `ol` starts at a fractional
+  x (Chrome device 741, ours 740). `flex_item_text_frac_delta_milli_px` only covers
+  single-text-run items. The spec pins that disc's rows and width but not its x.
+- Catalog dpr4 (base 30c19e17c23 -> head):
+
+  | page | before | after |
+  |---|---|---|
+  | overview | 0.22 | 0.21 |
+  | html | 0.29 | 0.28 |
+  | css-layout | 0.49 | 0.48 |
+  | css-paint | 0.31 | 0.29 |
+  | forms-media | 0.45 | 0.43 |
+  | animation | 0.33 | 0.31 |
+
+  The 1x catalog is identical. Perf: overview k=4 median 9695 -> 9669 ms over 6
+  alternated rounds, RSS flat.
+## 2026-11-24 — font-blob copies under the JIT (forms-media 4x)
+
+- **The premise was stale.** The "forms-media 4x is ~22 s and hits the 8 GB cap" numbers came from the Nov-19 blend seed (`cargo-target-webrender-blend`, 60799992 B). That seed predates the 2026-11-23 JIT fixes, and on it html 4x also peaks at 8.36 GB. So the 8 GB was a general JIT leak, not a forms-media one.
+- **On a seed built from the current base** (`cargo-target-wr-jitweb-base`, sha256 d9dcc6f7…, built from c8a6a542373; no seed/runtime diff vs 0ddeaad747c), forms-media 4x is one of the pack:
+  - JIT: 3.4-3.9 s and 2.2 GB, of which document is ~0.1 s and paint ~0.1 s. The rest is the JIT start.
+  - Interpreter: 11.7 s and 0.97 GB.
+  - Other pages at 4x under the JIT take 3.3-4.6 s at 2.1-2.2 GB.
+- **Where the copies were.** Count them with `gdb -batch` on `break *rt_array_copy`. Decode `len` as `*(u64*)(($x0 & ~7) + 8)` and filter len >= 100000. Map `$lr` to the nearest `[jit-addr]` line (from `SIMPLE_JIT_TRACE_ADDR=1`).
+  - forms-media 4x had 799 whole-font copies (LiberationSans 410820 / 414568 B, DejaVuSansMono 343140 B):
+    - `horizontal_kern_milli`: 524
+    - `get_glyph_advance_milli`: 225
+    - `try_load_runtime_ttf`: 24
+    - `parse_cmap_format4` / `parse_cmap_format12`: 25
+  - All of them come from `val blob = self.selected_outline_blob` or `val blob = font.blob`. An array-typed `val` binding lowers to `rt_array_copy`, while passing the field straight as an argument does not copy.
+  - The JIT frees these copies: no RSS growth over 2000 calls. Each one costs ~20 us for 410 KB, so the whole page lost only ~16 ms. The interpreter shares the array and never copies.
+- **Fix (font_renderer.spl, blob plumbing only):** both query methods read `self.selected_outline_blob` in place. The fixture's 1000 queries on a 1.7 MB face dropped from 50-60 ms to 0.12-0.2 ms under the JIT. Interpreter time is unchanged (52 ms). forms-media 4x copies went from 799 to 50, all at load or cmap parse. Those 50 are left as they are: ~20 MB transient, about 1 ms.
+- **Spec:** `test/01_unit/lib/nogc_sync_mut/text_layout/font_blob_no_copy_jit_spec.spl`, with fixture `test/fixtures/font_blob_copy/kern_advance_loop.spl`. A JIT child must finish 1000 queries in under 5 ms, and its results must equal the interpreter's. It needs a current seed in `SIMPLE_BIN`.
+- **Page-level A/B** (3 rounds, alternating which side runs first, 4x, medians, base vs head): page-level deltas are within noise, which matches the ~16 ms the copies cost. All PPMs are byte-identical.
+  - JIT forms-media wall: 3.87 vs 3.80 s; RSS 2218 vs 2161 MB.
+  - Interpreter forms-media wall: 11.72 vs 11.66 s; RSS 973 vs 971 MB.
+  - html and tab-bar: unchanged.
+- **Trap:** for any JIT perf or RSS claim, use a seed built from the base you measure. The brief's blend seed predates the take-idiom and liveness fixes, so it inflates JIT RSS 4x and can OOM pages. The class "array field read copies" is tracked for native AOT in `doc/08_tracking/bug/2026-11-24_native_struct_array_field_read_leaks_copy.md`. That bug leaks; under the JIT the copy is freed.
+## 2026-11-24 — clip edges follow the box that owns them at device scale (`device-clip`)
+
+- **A Draw IR clip edge moves with the box that OWNS that edge, not with the command
+  it clips.** Before this, `_dir_scale_command` moved every `clip_rect` by the
+  command's own `device-y-offset` (#11174) and ignored `device-x-offset`. Measured in
+  Chrome 159 at k=4 (`clip_device_offset_owner_chrome159_spec`, base 1/5, head 5/5):
+  - An `overflow:hidden` box at `left:40.5px` clips its 40px child to device
+    162..241 (base 164..243). AC-1 covers this. AC-3 is the `left:200.25px` case:
+    801..880, where base gave 801..879.
+  - `ab <svg width=40>` with a 60-wide rect: Chrome clips at 169..328, base at
+    169..327. This is AC-4, the x twin of `line_start_fraction` AC-4.
+  - A child at `left:10.5px` / `top:10.5px` inside an UNSHIFTED `overflow:hidden`
+    box keeps that box's clip. AC-2 (x) was already green and guards the naive fix.
+    AC-5 (y) was red on base: the #11174 y-add cut the child's last 2 device rows at
+    its own offset.
+  - Mirroring the y line for x (`clip.x += device-x-offset`) is wrong. It fixes
+    AC-1 and breaks AC-2.
+- **Mechanism.** `_html_draw_ir_device_clip` (paint_layout) runs after the dy/dx
+  passes and does the following:
+  - For each node it derives which overflow box set each of the 4 edges of the
+    node's `clip_cache` clip. A parent owns an edge exactly when the edge changed
+    from the parent's own clip; -1 means the viewport, which never moves.
+  - A command edge equal to its owner node's ancestor clip takes that owner's device
+    offset. Any other edge is the node's own box (svg viewport, image box) and moves
+    with the node: `box_device_dx_total` plus `_html_draw_ir_node_device_dy`, the walk
+    factored out of `_html_draw_ir_device_top`.
+  - It emits `device-clip` = "dl,dt,dr,db" only when one of the four is non-zero.
+    `draw_ir_device_scale` applies the edges and strips the prop. Without the prop
+    the clip is k x CSS.
+  - k=1 returns before any work, so the 1x output is byte-identical.
+- **`device-rect` needs no clip change.** Its dx,dy is a span's offset INSIDE a native
+  control, and those commands carry the ancestor clip. Moving the clip by it would be
+  the AC-2 error.
+- Side effect, measured: the viewport clip no longer moves by a command's dy. On
+  css-layout 4x, the last device row (1199) goes from 1284 to 446 px mismatching vs
+  Chrome; every other row is identical. Catalog 4x: animation 0.33 -> 0.32 (row
+  lowered); all other pages are the same, and 1x is identical. Matrix: 81. Perf on
+  css-layout, 3 alternated rounds, wall medians base/head: k=1 13375/12961 ms,
+  k=4 35942/32296 ms (noisy host, not slower). RSS is flat at about 2.93 GB / 8.34 GB.
+- **Open, unclaimed:** a child with negative `margin-left` inside an abspos
+  `overflow:hidden` box lands at +10 instead of -10, at both 1x and 4x. At 1x, that
+  page also paints with no overflow clip anywhere (Chrome 40..59, ours 50..89). Only
+  the example runner / catalog route shows this. Fixture:
+  `<div style="position:absolute;left:40px;top:10px;width:20px;height:20px;overflow:hidden"><div style="margin-left:-10px;width:40px;height:20px;background:#00f"></div></div>`.
