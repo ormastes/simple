@@ -25,8 +25,8 @@
 #                   bytes_captured / tokens_saved (that double-counted until
 #                   2026-08-28).
 
-use std.io_runtime.{env_get, file_read, file_write, file_exists, file_delete, dir_create, time_now_unix_micros}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros, file_size_signed}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_text_at}
 use std.database.core.{parse_sdn_table}
 use std.common.crypto.sha256.{sha256_text}
 use .main_lazy_json.{extract_field, make_tool_result}
@@ -146,24 +146,79 @@ fn tok_load_events() -> [TokEvent]:
 fn _tok_header() -> text:
     "# token-savings telemetry — written by simple_ctx_* / simple_ponytail. Do not edit by hand.\ntok_events | id, feature, tool, ts, captured, returned, hit |\n"
 
+# Bytes read from the end of the ledger to find the last row's id (a row is
+# ~60 bytes; the bound only has to cover one whole row plus its newline).
+const _TOK_TAIL_BYTES: i64 = 512
+
+# Next event id, read from `tail` = the final bytes of the ledger (`whole`:
+# the tail is the entire file). The ledger is append-only with ascending ids,
+# so the last complete row carries the maximum. Returns 0 when the tail cannot
+# answer — no trailing newline (a torn last row), a first row that is not a
+# well-formed `    <id>, ` prefix, or no complete row in view — and the caller
+# then takes the whole-ledger path. A segment is trusted only when the newline
+# before it lies inside the tail, so a row cut by the tail's start is never
+# read as an id. A complete ledger with no row yet (header only) answers 1.
+fn tok_next_id_from_tail(tail: text, whole: bool) -> i64:
+    if not tail.ends_with("\n"):
+        return 0
+    val lines = tail.split("\n")
+    # The last segment is the "" after the final newline.
+    var i = lines.len() - 2
+    while i >= 0:
+        if i == 0 and not whole:
+            return 0
+        val line = lines[i]
+        if line.starts_with("    "):
+            val rest = line.substring(4)
+            val comma = rest.index_of(", ") ?? -1
+            if comma <= 0:
+                return 0
+            val id = rest.substring(0, comma).to_int() ?? 0
+            if id <= 0:
+                return 0
+            return id + 1
+        i = i - 1
+    if whole:
+        return 1
+    0
+
+fn _tok_next_id_from_file(path: text) -> i64:
+    val size = file_size_signed(path)
+    if size <= 0:
+        return 0
+    val start = if size > _TOK_TAIL_BYTES: size - _TOK_TAIL_BYTES else: 0
+    match file_read_text_at(path, start, size - start):
+        case Ok(tail):
+            return tok_next_id_from_tail(tail, start == 0)
+        case Err(_): pass
+    0
+
 # Append one event with an explicit timestamp (seconds). The explicit `ts`
 # is the seam specs use to plant old events for the 7-day window.
 fn tok_record_at(feature: text, tool: text, ts: i64, captured: i64, returned: i64, hit: bool) -> bool:
     if not _tok_ensure_dir():
         return false
     val path = tok_telemetry_path()
+    val hit_s = if hit: "1" else: "0"
+    val cells = ", " + feature + ", " + tool + ", " + str(ts) + ", " + str(captured) + ", " + str(returned) + ", " + hit_s + "\n"
     var next: i64 = 1
     var body = ""
     if file_exists(path):
+        # Hot path, run by every simple_ctx_* call of a server that never
+        # exits: one bounded tail read + one O_APPEND write. The whole-ledger
+        # path below costs memory proportional to the ledger on EVERY call and
+        # the runtime never frees it outside a transient scope, see
+        # doc/08_tracking/bug/mcp_server_rss_growth_long_session_2026-11-24.md
+        val fast = _tok_next_id_from_file(path)
+        if fast > 0:
+            return file_append_text(path, "    " + str(fast) + cells)
         body = file_read(path)
         for e in tok_load_events():
             if e.id >= next:
                 next = e.id + 1
     else:
         body = _tok_header()
-    val hit_s = if hit: "1" else: "0"
-    val line = "    " + str(next) + ", " + feature + ", " + tool + ", " + str(ts) + ", " + str(captured) + ", " + str(returned) + ", " + hit_s + "\n"
-    _tok_write_atomic(path, body + line)
+    _tok_write_atomic(path, body + "    " + str(next) + cells)
 
 fn tok_record(feature: text, tool: text, captured: i64, returned: i64, hit: bool) -> bool:
     tok_record_at(feature, tool, _tok_now_secs(), captured, returned, hit)
@@ -396,6 +451,6 @@ fn handle_simple_token_stats(id: text, body: text) -> text:
 
 export handle_simple_token_stats, tok_stats_text, tok_rollup, tok_tokens_saved
 export handle_simple_token_burn, tok_burn_text, tok_burn_rows, TokBurn
-export tok_record, tok_record_at, tok_load_events, tok_reset
+export tok_record, tok_record_at, tok_load_events, tok_reset, tok_next_id_from_tail
 export tok_memo_key, tok_memo_get, tok_memo_put, tok_telemetry_path, tok_memo_path
 export TokEvent, TokRollup, TokMemo, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL
