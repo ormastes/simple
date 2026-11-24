@@ -1447,6 +1447,50 @@ fn absolute_box_snap(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     box_device_top_record(n, c, g_origin_frac_milli)
     [ax + sx, ay + sy]
 
+# Wrap ranges of a run whose white-space keeps newlines AND wraps
+# (`pre-wrap`, `pre-line`, a `<textarea>` value): every "\n" ends a line,
+# and each newline-separated segment wraps on its own at `max_width`. The
+# "\n" bytes themselves belong to no range, so nothing draws them (they drew
+# as a .notdef box). Chrome 159: `<textarea>lllll\nlllll\nlllll</textarea>`
+# paints three lines.
+fn compute_newline_wrap_ranges(txt: text, txt_len: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    val segments = compute_preserved_newline_ranges(txt, txt_len)
+    val advances = st.resolved_font_advances
+    var starts: [i32] = []
+    var ends: [i32] = []
+    var s = 0
+    while s < segments.starts.len():  # cpu-lane-loop-ok: one pass over the run's newline segments
+        val a = segments.starts[s]
+        val b = segments.ends[s]
+        if b <= a:
+            starts.push(a)
+            ends.push(a)
+        else:
+            val seg = txt.substring(a, b)
+            # The style's advance table is per codepoint of the WHOLE run;
+            # the segment wraps with its own slice of it, on a COPY of the
+            # style (Style is a class: never mutate the shared one). A
+            # mismatched table sends the wrap to the flat per-char estimate.
+            val seg_st = if advances.len() > 0: style_with_width(st, st.width_px) else: st
+            if advances.len() > 0:
+                val cp0 = text_codepoints(txt.substring(0, a)).len()
+                val cp_n = text_codepoints(seg).len()
+                var seg_adv: [i32] = []
+                var seg_w = 0
+                var k = 0
+                while k < cp_n and cp0 + k < advances.len():  # cpu-lane-loop-ok: one segment's codepoints
+                    seg_adv.push(advances[cp0 + k])
+                    seg_w = seg_w + advances[cp0 + k]
+                    k = k + 1
+                seg_st.resolved_font_advances = seg_adv
+                seg_st.resolved_font_width = seg_w
+                seg_st.resolved_font_width_milli = -1
+            val sub = compute_style_wrap_ranges(seg, max_width, seg_st, fallback_cpl)
+            starts = starts + shifted_i32_list(sub.starts, a)
+            ends = ends + shifted_i32_list(sub.ends, a)
+        s = s + 1
+    LineWrapRanges(starts: starts, ends: ends)
+
 fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], st: Style) -> LayoutResult:
     var out_bx = bx
     var out_by = by
@@ -1615,6 +1659,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             val pre_ranges = compute_preserved_newline_ranges(txt, txt_len)
             out_wrap_starts[i] = pre_ranges.starts
             out_wrap_ends[i] = pre_ranges.ends
+        elif st.white_space_newline and txt.contains("\n"):
+            val nl_ranges = compute_newline_wrap_ranges(txt, txt_len, node_w, st, cpl)
+            out_wrap_starts[i] = nl_ranges.starts
+            out_wrap_ends[i] = nl_ranges.ends
         elif st.white_space_nowrap:
             out_wrap_starts[i] = [0; 1]
             out_wrap_ends[i] = [txt_len; 1]
