@@ -1,5 +1,21 @@
 # Project Statistics
 
+## Latest checkout LOC measurement — 2026-11-24
+
+The [November LOC report](project_loc_2026-11-24.md) measures the requested
+Simple, SHS, SDN, C/header, Rust, and Python files across the tracked working
+checkout, including initialized submodules, vendored code, tests, and fixtures.
+It contains **84,587 files**, **25,736,032 code/data lines**, **2,385,390 comment
+lines**, and **1,685,357 blank lines**: **29,806,779 physical lines** in total.
+SDN contributes data lines; comments and blank lines are excluded from the
+code/data total. The report records tool rules, exclusions, and provenance.
+
+This measurement does not establish build, test, coverage, or guest readiness.
+Its scope differs from the owned-code inventory below, so the two totals are
+not a like-for-like growth comparison.
+
+## Historical inventory — 2026-08-13
+
 > Best-effort 2026-08-13 inventory after the self-hosted generator build stalled. Counts follow `StatsInventoryV2`; generated, vendored, and `*_tldr.md` files are excluded. Native PPTX generation remains blocked and is listed below.
 
 ## Executive Summary
