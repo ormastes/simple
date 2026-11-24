@@ -266,6 +266,9 @@ fn _module_path_naming_sdn_is_file_suffix(mod_path: text) -> bool:
     val stem = mod_path.substring(0, mod_path.byte_len() - 4)
     not stem.contains(".")
 
+fn _module_path_naming_portable_code(code: i64) -> bool:
+    (code >= 97 and code <= 122) or (code >= 65 and code <= 90) or (code >= 48 and code <= 57) or code == 95 or code == 46 or code == 47
+
 fn _module_logical_name_from_path_uncached(path: text) -> text:
     """Derive the dotted logical module name (e.g. `_wallB_mod_a`) from a
     source path (e.g. `src/_wallB_mod_a.spl`). Under `SIMPLE_BOOTSTRAP=1`,
@@ -288,6 +291,15 @@ fn _module_logical_name_from_path_uncached(path: text) -> text:
     elif mod_path.ends_with(".sdn") and _module_path_naming_sdn_is_file_suffix(mod_path):
         mod_path = mod_path.substring(0, mod_path.byte_len() - 4)
     mod_path = _module_path_naming_strip_numbered_dirs(mod_path)
+    # Keep the original spelling when every byte already belongs to the
+    # portable ASCII alphabet. Rebuilding each prefix retains quadratic text
+    # storage in the registry freeze scope.
+    val byte_count = mod_path.byte_len()
+    var pos = 0
+    while pos < byte_count and _module_path_naming_portable_code(mod_path.byte_at(pos) as i64):
+        pos = pos + 1
+    if pos == byte_count:
+        return mod_path.replace("/", ".")
     var portable = ""
     # WORKAROUND: `for ch in <text>` yields a corrupted loop element in the
     # seed interpreter and in pure-Simple-compiled native code, classifying
@@ -298,8 +310,7 @@ fn _module_logical_name_from_path_uncached(path: text) -> text:
     val _san_n = mod_path.byte_len()
     while _san_i < _san_n:
         val _san_code = mod_path.char_code_at(_san_i)
-        val keep = (_san_code >= 97 and _san_code <= 122) or (_san_code >= 65 and _san_code <= 90) or (_san_code >= 48 and _san_code <= 57) or _san_code == 95 or _san_code == 46 or _san_code == 47
-        if keep:
+        if _module_path_naming_portable_code(_san_code):
             portable = portable + mod_path.char_at(_san_i)
         else:
             portable = portable + "_"
