@@ -1,0 +1,100 @@
+# @req REQ-SSPEC-APP
+# Refresh validates exact rows from the checked legacy-plus-shard snapshot.
+# Synthetic fixture priorities/statuses are not production registrations.
+use std.spec.{describe, it, expect}
+use app.bug.workaround_store.{workaround_bug_snapshot, refresh_workarounds_at, WorkaroundScanV1}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_publish,
+    workaround_host_mkdir, workaround_host_temp_dir, workaround_host_process,
+    workaround_host_read}
+use std.nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus,
+    create_bug_database, load_bug_database_checked}
+use std.nogc_sync_mut.database.core.{SdnDatabase}
+
+fn registry_fixture_bug(id: text) -> Bug:
+    Bug(id: id, severity: BugSeverity.P2, status: BugStatus.Open,
+        title: "fixture_missing is mentioned but is not registered",
+        description: ["synthetic registry reader fixture"],
+        file: "src/probe.spl", line: 1,
+        reproducible_by: "test/01_unit/app/bug/workaround_merged_registry_spec.spl",
+        fix_strategy: [], investigation_log: [],
+        created_at: "2026-11-24", updated_at: "2026-11-24", valid: true)
+
+fn registry_fixture_root(id: text) -> text:
+    expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+    val root = workaround_host_temp_dir("build/test-artifacts", "workaround-registry-").unwrap()
+    expect(workaround_host_mkdir(root + "/doc/08_tracking/bug")).to_equal(true)
+    expect(workaround_host_mkdir(root + "/src")).to_equal(true)
+    val path = root + "/doc/08_tracking/bug/bug_db.sdn"
+    var legacy = create_bug_database(path)
+    expect(legacy.add_bug(registry_fixture_bug("fixture_legacy"))).to_equal(true)
+    expect(legacy.save()).to_equal(true)
+    expect(workaround_host_mkdir(root + "/doc/08_tracking/bug/db")).to_equal(true)
+    var merged = load_bug_database_checked(path).unwrap()
+    expect(merged.add_bug(registry_fixture_bug("fixture_shard"))).to_equal(true)
+    expect(merged.save()).to_equal(true)
+    expect(workaround_host_publish(root + "/src/probe.spl",
+        "# @workaround bug={id} reason=synthetic reader fixture\nfn probe():\n    pass\n")).to_equal(true)
+    val (_, _, initialized) = workaround_host_process("git", ["-C", root, "init", "-q"], 10000, 65536)
+    expect(initialized).to_equal(0)
+    val (_, _, added) = workaround_host_process("git", ["-C", root, "add", "src/probe.spl"], 10000, 65536)
+    expect(added).to_equal(0)
+    val (_, _, committed) = workaround_host_process("git", ["-C", root,
+        "-c", "user.name=RegistryFixture", "-c", "user.email=fixture@invalid",
+        "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"], 10000, 65536)
+    expect(committed).to_equal(0)
+    root
+
+fn registry_refresh_error(root: text) -> text:
+    match refresh_workarounds_at(root, WorkaroundScanV1.Incremental, ["src/probe.spl"]):
+        case Ok(_): "<accepted>"
+        case Err(reason): reason
+
+describe "workaround canonical merged registry":
+    it "snapshots both legacy and shard-only registered bugs":
+        val root = registry_fixture_root("fixture_shard")
+        val db = workaround_bug_snapshot(root).unwrap()
+        expect(db.get_bug("fixture_legacy").?).to_equal(true)
+        expect(db.get_bug("fixture_shard").?).to_equal(true)
+        expect(db.get_bug("fixture_missing").?).to_equal(false)
+
+    it "refreshes a shard-only annotation and preserves the legacy bytes":
+        val root = registry_fixture_root("fixture_shard")
+        val path = root + "/doc/08_tracking/bug/bug_db.sdn"
+        val before = workaround_host_read(path, 1048576).unwrap()
+        val index = refresh_workarounds_at(root, WorkaroundScanV1.Incremental, ["src/probe.spl"]).unwrap()
+        expect(index.links.len()).to_equal(1)
+        expect(index.links[0].bug_id).to_equal("fixture_shard")
+        expect(workaround_host_read(path, 1048576).unwrap()).to_equal(before)
+
+    it "rejects an ID appearing only inside another bug's title":
+        val root = registry_fixture_root("fixture_missing")
+        expect(registry_refresh_error(root)).to_contain("unknown canonical bug ID: fixture_missing")
+
+    it "honors a shard tombstone instead of reviving the legacy row":
+        val root = registry_fixture_root("fixture_legacy")
+        var tombstone = SdnDatabase.new(root + "/doc/08_tracking/bug/db/fixture_legacy.sdn")
+        expect(tombstone.save()).to_equal(true)
+        val db = workaround_bug_snapshot(root).unwrap()
+        expect(db.get_bug("fixture_legacy").?).to_equal(false)
+        expect(db.get_bug("fixture_shard").?).to_equal(true)
+        expect(registry_refresh_error(root)).to_contain("unknown canonical bug ID: fixture_legacy")
+
+    it "rejects a tampered shard before publishing a workaround link":
+        val root = registry_fixture_root("fixture_shard")
+        val path = root + "/doc/08_tracking/bug/db/fixture_shard.sdn"
+        val original = workaround_host_read(path, 1048576).unwrap()
+        expect(workaround_host_publish(path, original + "\n# tampered\n")).to_equal(true)
+        expect(workaround_bug_snapshot(root).is_err()).to_equal(true)
+        expect(registry_refresh_error(root)).to_contain("bug shard fixture_shard.sdn")
+
+    it "rejects a validly sealed shard with a foreign row ID":
+        val root = registry_fixture_root("fixture_shard")
+        var misplaced = create_bug_database(root + "/doc/08_tracking/bug/db/fixture_wrong.sdn")
+        expect(misplaced.add_bug(registry_fixture_bug("fixture_shard"))).to_equal(true)
+        expect(misplaced.save()).to_equal(true)
+        expect(registry_refresh_error(root)).to_contain("does not match the shard id")
+
+    it "preserves the pending legacy WAL refusal":
+        val root = registry_fixture_root("fixture_shard")
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn.wal", "pending\n")).to_equal(true)
+        expect(registry_refresh_error(root)).to_contain("checkpoint the canonical bug database WAL")
