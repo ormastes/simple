@@ -7,7 +7,8 @@ use std.common.ui.draw_ir.{
     DrawIrComposition, draw_ir_composition
 }
 use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
-use std.common.base_encoding.utilities.{base_encoding_text_to_bytes as text_to_bytes, base_encoding_bytes_to_text as bytes_to_text}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes as text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.bytes.{ByteSpan, U32le, U64le}
 use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES, SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES,
@@ -306,7 +307,9 @@ fn simpleos_host_gpu_draw_ir_decode(bytes: [u8], max_payload_bytes: i64, max_com
         return _simpleos_host_gpu_draw_ir_decode_reject("empty-payload")
     if bytes.len().to_i64() > max_payload_bytes:
         return _simpleos_host_gpu_draw_ir_decode_reject("payload-too-large")
-    val source = bytes_to_text(bytes)
+    val source = match bytes_to_text_checked(bytes):
+        case Ok(t): t
+        case Err(_): return _simpleos_host_gpu_draw_ir_decode_reject("invalid-utf8")
     if not source.starts_with("draw_ir schema={DRAW_IR_SCHEMA_VERSION}\n"):
         return _simpleos_host_gpu_draw_ir_decode_reject("schema-mismatch")
     val record_reason = _simpleos_host_gpu_draw_ir_record_reason(source, max_commands)
@@ -482,7 +485,9 @@ fn simpleos_host_gpu_image_resources_decode(bytes: [u8], expected_count: i64, ex
             return _simpleos_host_gpu_image_resources_decode_reject("pixel-checksum-mismatch")
         val uri_span = span.slice(uri_start, uri_count)
         val uri_raw = uri_span.to_bytes()
-        val image_uri = bytes_to_text(uri_raw)
+        val image_uri = match bytes_to_text_checked(uri_raw):
+            case Ok(t): t
+            case Err(_): return _simpleos_host_gpu_image_resources_decode_reject("invalid-image-uri")
         if image_uri == "" or not _simpleos_host_gpu_draw_ir_bytes_equal(uri_raw, text_to_bytes(image_uri)):
             return _simpleos_host_gpu_image_resources_decode_reject("invalid-image-uri")
         if _simpleos_host_gpu_text_seen(image_uris, image_uri):
@@ -564,8 +569,12 @@ fn _simpleos_host_gpu_image_entry_reason(entry: SimpleOsHostGpuImageResourceEntr
     val uri_count = uri_len.to_i64()
     if entry.image_uri == "":
         return "missing-image-uri"
-    if uri_len == 0 or uri_count > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES or bytes_to_text(uri_bytes) != entry.image_uri:
+    if uri_len == 0 or uri_count > SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES:
         return "invalid-image-uri"
+    match bytes_to_text_checked(uri_bytes):
+        case Ok(t):
+            if t != entry.image_uri: return "invalid-image-uri"
+        case Err(_): return "invalid-image-uri"
     if entry.width <= 0 or entry.height <= 0 or entry.width.to_i64() > SIMPLEOS_HOST_GPU_MAX_WIDTH or entry.height.to_i64() > SIMPLEOS_HOST_GPU_MAX_HEIGHT:
         return "invalid-image-dimensions"
     if entry.is_reference:
@@ -697,7 +706,9 @@ fn simpleos_host_gpu_image_resources_decode_retained(bytes: [u8], expected_count
             return _simpleos_host_gpu_image_entries_decode_reject("nonzero-padding")
         val uri_span = span.slice(uri_start, uri_count)
         val uri_raw = uri_span.to_bytes()
-        val image_uri = bytes_to_text(uri_raw)
+        val image_uri = match bytes_to_text_checked(uri_raw):
+            case Ok(t): t
+            case Err(_): return _simpleos_host_gpu_image_entries_decode_reject("invalid-image-uri")
         if image_uri == "" or not _simpleos_host_gpu_draw_ir_bytes_equal(uri_raw, text_to_bytes(image_uri)):
             return _simpleos_host_gpu_image_entries_decode_reject("invalid-image-uri")
         if _simpleos_host_gpu_text_seen(image_uris, image_uri):
