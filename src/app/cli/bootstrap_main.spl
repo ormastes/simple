@@ -1,5 +1,6 @@
 use app.cli.native_build_main.{native_build_coordinator_cache_lease,
     native_build_coordinator_cache_finish, native_build_coordinator_may_sweep}
+use compiler.driver.driver_build.native_cache_lease.{native_cache_lease_begin}
 @unsafe(reason: "raw bootstrap argument-vector ABI", capabilities: [ffi])
 extern fn sys_get_args() -> [text]
 
@@ -28,6 +29,7 @@ use app.cli.bootstrap_internal_worker_routing.{bootstrap_internal_worker_entry_v
     bootstrap_internal_worker_args_v1}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
 use app.cli.bootstrap_focused_native_build_args.{focused_native_build_target_profile_v1, focused_native_build_cache_dir,
+    focused_native_build_profile_cache_dir_v1,
     focused_native_build_runtime_path, focused_native_build_runtime_bundle,
     focused_native_build_target, focused_native_build_arg_value, focused_native_build_opt_level,
     focused_native_build_strip, focused_native_build_has_flag}
@@ -518,6 +520,29 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             eprint(reason)
             return 1
     val may_sweep = native_build_coordinator_may_sweep(args)
+    val code = run_native_build_bootstrap_profile_leased(args, lease.cache_root, may_sweep)
+    native_build_coordinator_cache_finish(lease, args, code == 0 and may_sweep)
+    code
+
+fn run_native_build_bootstrap_profile_leased(args: [text], base_root: text, may_sweep: bool) -> i64:
+    # Focused capsules without an explicit --cache-dir can qualify the cache
+    # root by target profile. Hold that root from before the shard prepass.
+    if native_build_entry_from_args(args, 0) == "" or
+            ((env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") != "1" and
+             (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
+        return run_native_build_bootstrap_leased(args)
+    val profile = match focused_native_build_target_profile_v1(args):
+        case Ok(value): value
+        case Err(_): return run_native_build_bootstrap_leased(args)
+    val root = focused_native_build_profile_cache_dir_v1(args,
+        env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "", profile)
+    if root == base_root:
+        return run_native_build_bootstrap_leased(args)
+    val lease = match native_cache_lease_begin(root):
+        case Ok(value): value
+        case Err(reason):
+            eprint(reason)
+            return 1
     val code = run_native_build_bootstrap_leased(args)
     native_build_coordinator_cache_finish(lease, args, code == 0 and may_sweep)
     code
