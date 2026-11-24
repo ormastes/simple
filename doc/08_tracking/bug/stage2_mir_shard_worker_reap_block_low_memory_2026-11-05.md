@@ -1,6 +1,7 @@
 # Stage-2 candidate MIR shard workers BLOCK "could not be reaped" under --low-memory matrix config (2026-11-05)
 
-**Status:** OPEN. Observed in the stage2 compiler-test matrix of the
+**Status:** FIXED by 92d02442782 (match inferred, cell not re-run; see
+"Status 2026-11-24" below). Observed in the stage2 compiler-test matrix of the
 trust-root repro bootstrap (aarch64 Linux, cranelift, worktree at
 df48a86ff5a). Distinct from
 stage2_parse_shard_entry_scv_snapshot_race_2026-11-05 (that one fails entry

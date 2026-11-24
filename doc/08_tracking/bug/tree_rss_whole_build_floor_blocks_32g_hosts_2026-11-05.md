@@ -83,7 +83,9 @@ host with ~28 GiB free admits 1 HIR worker (was 0). Seed-verified:
 `test/01_unit/app/cli/shard_headroom_host_scaled_spec.spl` (RED 1/7 -> GREEN 7/7). Real proof needs a Windows
 32 GiB Stage 2 run: `[hir-shard] tree budget clamped ... headroom 16777216 kB` and >1 worker in the next sanctioned bootstrap.
 Not changed: per-worker estimates already equal measured peaks (parse 3.8 GB, HIR/MIR 9 GB, observed-peak raising exists);
-MIR estimate scaling by closure size (17.7 GB at 3,004 modules) is not wired -- shard counts, not module counts, reach run_ledger_shards.
+MIR estimate scaling by closure size is now wired (superseding the 2026-11-07 "not wired" reading): the MIR worker
+price is clamp(16015 kB x modules, 9.0 GB floor, run-11 ceiling) via `file_worker_pool_mir_price_kb_v1`
+(`SHARD_MIR_WORKER_PER_MODULE_KB_V1`, `src/app/cli/shard_mem_clamp.spl`); unknown closure size prices at the ceiling.
 The Windows SIMPLE_PARSE_SHARD_MAX=1 pin is untouched (owner policy).
 
 ## Re-check 2026-11-24 (release/1.0.0, Windows 64 GiB host)

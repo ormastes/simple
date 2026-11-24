@@ -213,16 +213,18 @@ fn _probe_host_physmem_kib_v1() -> i64:
         return 0
     shard_mem_available_kb_from_field(out.trim())
 
-# Free commit headroom (KiB): Win32_OperatingSystem.FreeVirtualMemory. Probed
-# only when the start gate is about to refuse (windows_balloon_memory_headroom
-# _false_refusal_2026-11-13.md); a failed or timed-out probe is 0 = no witness.
-fn _probe_free_commit_kib_v1() -> i64:
+# Physical RAM not committed (KiB), from one Win32_OperatingSystem read:
+# TotalVisibleMemorySize - (TotalVirtualMemorySize - FreeVirtualMemory).
+# Probed only when the start gate is about to refuse (windows_balloon_memory
+# _headroom_false_refusal_2026-11-13.md); a failed or timed-out probe is 0 =
+# no witness.
+fn _probe_phys_uncommitted_kib_v1() -> i64:
     val (out, _err, code) = process_run_bounded("powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory"],
+        ["-NoProfile", "-NonInteractive", "-Command", "$o = Get-CimInstance Win32_OperatingSystem; \"$($o.TotalVisibleMemorySize) $($o.TotalVirtualMemorySize) $($o.FreeVirtualMemory)\""],
         20000, 65536)
     if code != 0:
         return 0
-    shard_mem_available_kb_from_field(out.trim())
+    build_memory_phys_uncommitted_kib_from_cim_v1(out)
 @else:
 @when(os="freebsd"):
 # FreeBSD has no /proc/meminfo without linprocfs (that probe read 0, clamped
@@ -243,8 +245,8 @@ fn _probe_host_physmem_kib_v1() -> i64:
         return 0
     build_host_memory_total_kib_from_bytes_field(out)
 
-# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
-fn _probe_free_commit_kib_v1() -> i64:
+# Physical-uncommitted RAM (KiB) for the balloon witness; only Windows probes it.
+fn _probe_phys_uncommitted_kib_v1() -> i64:
     0
 @else:
 @when(os="macos"):
@@ -265,8 +267,8 @@ fn _probe_host_physmem_kib_v1() -> i64:
         return 0
     build_host_memory_total_kib_from_bytes_field(out)
 
-# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
-fn _probe_free_commit_kib_v1() -> i64:
+# Physical-uncommitted RAM (KiB) for the balloon witness; only Windows probes it.
+fn _probe_phys_uncommitted_kib_v1() -> i64:
     0
 @else:
 @when(os="simpleos"):
@@ -288,8 +290,8 @@ pub fn shard_mem_available_kb() -> i64:
 fn _probe_host_physmem_kib_v1() -> i64:
     shard_simpleos_kb_from_probe_v1(shard_simpleos_mem_probe_v1(), true)
 
-# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
-fn _probe_free_commit_kib_v1() -> i64:
+# Physical-uncommitted RAM (KiB) for the balloon witness; only Windows probes it.
+fn _probe_phys_uncommitted_kib_v1() -> i64:
     0
 @else:
 # MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
@@ -318,8 +320,8 @@ fn _probe_host_physmem_kib_v1() -> i64:
         return 0
     shard_mem_available_kb_from_field(out.trim())
 
-# Free commit headroom (KiB) for the balloon witness; only Windows probes it.
-fn _probe_free_commit_kib_v1() -> i64:
+# Physical-uncommitted RAM (KiB) for the balloon witness; only Windows probes it.
+fn _probe_phys_uncommitted_kib_v1() -> i64:
     0
 @end
 @end
@@ -1181,33 +1183,55 @@ pub fn build_memory_start_refusal_v1(available_kib: i64, reserve_kib: i64) -> te
         "{reserve_kib / 1024} MiB reserve (SIMPLE_BUILD_MEMORY_RESERVE_BYTES); wait for other builds " +
         "to finish or lower the reserve"
 
-# Check whether free commit covers the reserve on a host configured to
-# use dynamic memory. The installed capacity must also cover twice the reserve.
-# Unknown free commit cannot satisfy the reserve.
+# Physical RAM not committed (KiB) = installed - committed, where committed =
+# TotalVirtualMemorySize - FreeVirtualMemory (all KiB, Win32_OperatingSystem).
+# Free commit alone is not a witness: headroom is already
+# min(AvailPhys, AvailPageFile), and a big page file keeps free commit high
+# while concurrent builds hold the physical RAM. A balloon-reclaimed guest has
+# low committed memory against its installed RAM, so this stays high there.
+# Any unknown or inconsistent field is 0 = no witness.
 @allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
-pub fn build_memory_balloon_witness_admits_v1(available_kib: i64, reserve_kib: i64, total_kib: i64, free_commit_kib: i64) -> bool:
+pub fn build_memory_phys_uncommitted_kib_v1(total_visible_kib: i64, total_virtual_kib: i64, free_virtual_kib: i64) -> i64:
+    if total_visible_kib <= 0 or total_virtual_kib <= 0 or free_virtual_kib <= 0: return 0
+    if free_virtual_kib > total_virtual_kib: return 0
+    val uncommitted = total_visible_kib - (total_virtual_kib - free_virtual_kib)
+    if uncommitted > 0: uncommitted else: 0
+
+# Decode "<TotalVisibleMemorySize> <TotalVirtualMemorySize> <FreeVirtualMemory>"
+# (the probe's one-line output). Anything but three decimal fields is 0.
+@allow(primitive_api)  # byte/KiB accounting boundary: raw probe output decoded to KiB
+pub fn build_memory_phys_uncommitted_kib_from_cim_v1(out: text) -> i64:
+    val fields = out.trim().split(" ")
+    if fields.len() != 3: return 0
+    build_memory_phys_uncommitted_kib_v1(shard_mem_available_kb_from_field(fields[0]),
+        shard_mem_available_kb_from_field(fields[1]), shard_mem_available_kb_from_field(fields[2]))
+
+# Check whether physical RAM not committed covers the reserve on a host
+# configured to use dynamic memory. Unknown (0) cannot satisfy the reserve.
+@allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
+pub fn build_memory_balloon_witness_admits_v1(available_kib: i64, reserve_kib: i64, phys_uncommitted_kib: i64) -> bool:
     if available_kib <= 0 or available_kib >= reserve_kib: return false
-    if reserve_kib <= 0 or total_kib < reserve_kib * 2: return false
-    free_commit_kib >= reserve_kib
+    if reserve_kib <= 0: return false
+    phys_uncommitted_kib >= reserve_kib
 
 # (refusal, warning): refusal is "" when admitted; warning is non-empty when a
-# refusal was overridden by the commit witness.
+# refusal was overridden by the physical-uncommitted witness.
 @allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
-pub fn build_memory_start_decision_v1(available_kib: i64, reserve_kib: i64, total_kib: i64, free_commit_kib: i64, allow_commit_witness: bool = false) -> (text, text):
+pub fn build_memory_start_decision_v1(available_kib: i64, reserve_kib: i64, phys_uncommitted_kib: i64, allow_commit_witness: bool = false) -> (text, text):
     val refusal = build_memory_start_refusal_v1(available_kib, reserve_kib)
     if refusal == "": return ("", "")
-    if allow_commit_witness and build_memory_balloon_witness_admits_v1(available_kib, reserve_kib, total_kib, free_commit_kib):
-        return ("", "warning: build admitted on commit headroom: {available_kib / 1024} MiB of RAM/commit headroom reported, below the {reserve_kib / 1024} MiB reserve, but {free_commit_kib / 1024} MiB of commit is free on a {total_kib / 1024} MiB host (balloon/dynamic memory); lower SIMPLE_BUILD_MEMORY_RESERVE_BYTES to silence")
+    if allow_commit_witness and build_memory_balloon_witness_admits_v1(available_kib, reserve_kib, phys_uncommitted_kib):
+        return ("", "warning: build admitted on uncommitted physical memory: {available_kib / 1024} MiB of RAM/commit headroom reported, below the {reserve_kib / 1024} MiB reserve, but {phys_uncommitted_kib / 1024} MiB of installed RAM is not committed (balloon/dynamic memory); lower SIMPLE_BUILD_MEMORY_RESERVE_BYTES to silence")
     (refusal, "")
 
-# Probe total and commit only after a reserve refusal on a host whose
-# operator set SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1.
+# Probe installed/committed memory only after a reserve refusal on a host
+# whose operator set SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1.
 @allow(primitive_api)  # byte/KiB accounting boundary: pure numeric memory arithmetic, shares units with build_memory_start_refusal_v1
 pub fn build_memory_start_gate_v1(available_kib: i64, reserve_kib: i64) -> (text, text):
     val refusal = build_memory_start_refusal_v1(available_kib, reserve_kib)
     if refusal == "" or (env_get("SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS") ?? "") != "1":
         return (refusal, "")
-    build_memory_start_decision_v1(available_kib, reserve_kib, build_host_memory_total_kib(), _probe_free_commit_kib_v1(), true)
+    build_memory_start_decision_v1(available_kib, reserve_kib, _probe_phys_uncommitted_kib_v1(), true)
 
 # Measured peak + 25% margin, floored at 1 GiB so a near-empty record cannot
 # price a worker at nothing.

@@ -1,7 +1,7 @@
 # Windows memory-headroom gate false-refuses on ballooned VMs (AvailPhys under-reports)
 
 Date: 2026-11-13
-Status: FIXED 2026-11-24 (commit-witness fallback, direction 1)
+Status: fix landed, live ballooned-guest verification pending (opt-in physical-uncommitted witness, 2026-11-24)
 Branch: work/headroom-balloon-refusal (base origin/release/1.0.0 @ 48a03dc9e2b)
 Host: DESKTOP-VMF96U6 (Hyper-V dynamic-memory guest), 64 GiB visible RAM, Windows 11
 
@@ -172,3 +172,18 @@ file. The ordinary reserve therefore applies by default. Set
 `SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS=1` on a Windows build host whose
 operator has verified that dynamic memory is enabled. Only opted-in builds
 probe for commit headroom after a reserve refusal.
+
+## Tightened witness (2026-11-24, review of #11235)
+
+The free-commit witness above was too loose: headroom is already
+min(AvailPhys, AvailPageFile), so it reduced to "free commit >= reserve", which
+a 64 GiB host with a ~160 GiB page file satisfies while concurrent builds hold
+its physical RAM (thrash). The "installed >= 2x reserve" check was vacuous under
+the min(24 GiB, RAM/2) default. The witness is now physical RAM not committed:
+`TotalVisibleMemorySize - (TotalVirtualMemorySize - FreeVirtualMemory) >= reserve`
+(all KiB, one bounded `Win32_OperatingSystem` read,
+`build_memory_phys_uncommitted_kib_v1` / `_from_cim_v1`). Any failed, partial or
+inconsistent probe is 0 = refuse; the warning and the opt-in are unchanged. On
+the incident numbers (64 GiB installed, 17.6 GiB committed) it is ~46 GiB and
+admits; on 64 GiB RAM + 160 GiB page file with 55 GiB committed it is 9 GiB and
+refuses. Seed spec 18/18. Still not verified on a live ballooned guest.
