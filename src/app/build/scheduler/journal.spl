@@ -74,7 +74,7 @@ fn _journal_parse_attempt_v1(value: text) -> SchedulerAttemptV1?:
     val parts = value.split(",")
     if parts.len() != 7 or not _journal_digest_v1(parts[0]) or
        not _journal_field_v1(parts[1]) or not _journal_field_v1(parts[2]):
-        return nil
+        return None
     val fence = _journal_number_v1(parts[3], 1, 1000000000)
     val cpu = _journal_number_v1(parts[4], 1, 1000000000)
     val memory = _journal_number_v1(parts[5], 1, 1000000000000000)
@@ -92,7 +92,7 @@ fn _journal_parse_accepted_v1(value: text) -> AcceptedResult?:
     if parts.len() != 4 or not _journal_digest_v1(parts[0]) or
        not _journal_field_v1(parts[1]) or
        not _journal_digest_v1(parts[2]) or not _journal_digest_v1(parts[3]):
-        return nil
+        return None
     AcceptedResult(1, parts[0], parts[1], parts[2], parts[3])
 
 fn _journal_failure_text_v1(failure: SchedulerFailedAttemptV1) -> text:
@@ -109,7 +109,7 @@ fn _journal_parse_failure_v1(value: text) -> SchedulerFailedAttemptV1?:
        not _journal_field_v1(parts[4]) or
        not _journal_digest_v1(parts[6]) or
        (parts[5] != "-" and not _journal_digest_v1(parts[5])):
-        return nil
+        return None
     val fence = _journal_number_v1(parts[3], 1, 1000000000)
     if fence < 0:
         return None
@@ -203,18 +203,18 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
     if operation == "A":
         val parsed = _journal_parse_attempt_v1(payload)
         if parsed.is_none():
-            return nil
+            return None
         val attempt = parsed.unwrap()
         if ledger.attempts.len() >= 4096 or
            attempt.fence != scheduler_current_fence_v1(ledger, attempt.action_digest) + 1:
-            return nil
+            return None
         for old in ledger.attempts:
             if old.attempt_id == attempt.attempt_id or
                (old.action_digest == attempt.action_digest and old.active):
-                return nil
+                return None
         for accepted in ledger.accepted:
             if accepted.action_digest == attempt.action_digest:
-                return nil
+                return None
         var attempts = ledger.attempts
         attempts.push(attempt)
         val next = _journal_set_fence_v1(
@@ -224,7 +224,7 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
         next
     elif operation == "R":
         if not _journal_field_v1(payload):
-            return nil
+            return None
         var attempts: [SchedulerAttemptV1] = []
         var digest = ""
         for old in ledger.attempts:
@@ -236,7 +236,7 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
             else:
                 attempts.push(old)
         if digest == "" or scheduler_current_fence_v1(ledger, digest) >= 1000000000:
-            return nil
+            return None
         val next = _journal_set_fence_v1(
             SchedulerLedgerV1(attempts, ledger.fences, ledger.accepted,
                 ledger.failures), digest,
@@ -244,12 +244,12 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
         next
     elif operation == "P":
         val parsed = _journal_parse_accepted_v1(payload)
-        if parsed == nil or ledger.accepted.len() >= 256:
-            return nil
+        if parsed.is_none() or ledger.accepted.len() >= 256:
+            return None
         val accepted = parsed.unwrap()
         for old in ledger.accepted:
             if old.action_digest == accepted.action_digest:
-                return nil
+                return None
         var attempts: [SchedulerAttemptV1] = []
         var found = false
         for old in ledger.attempts:
@@ -263,7 +263,7 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
             else:
                 attempts.push(old)
         if not found:
-            return nil
+            return None
         var accepted_rows: [AcceptedResult] = []
         var inserted = false
         for old in ledger.accepted:
@@ -279,7 +279,7 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
     elif operation == "X":
         val parsed = _journal_parse_failure_v1(payload)
         if parsed.is_none():
-            return nil
+            return None
         val failure = parsed.unwrap()
         val candidate = ActionResultCandidate(1, failure.action_digest,
             failure.attempt_id, failure.worker_id,
@@ -287,7 +287,7 @@ fn _journal_apply_v1(ledger: SchedulerLedgerV1, operation: text,
         val transition = fail_attempt_v1(ledger, candidate, failure.fence,
             failure.classification)
         if not transition.admitted or transition.error != "":
-            return nil
+            return None
         transition.ledger
     else:
         nil
@@ -342,7 +342,7 @@ fn _journal_parse_snapshot_body_v1(body: text) -> SchedulerLedgerV1?:
         elif fields.len() == 5 and fields[0] == "P":
             phase = 3
             val parsed = _journal_parse_accepted_v1(row[2:])
-            if parsed == nil:
+            if parsed.is_none():
                 return None
             accepted.push(parsed.unwrap())
         else:
@@ -470,7 +470,7 @@ fn scheduler_journal_open_v1(root: text) -> SchedulerJournalStateV1:
         if seq != replay.sequence + 1 or parts[2] != replay.head_digest:
             return _journal_error_v1("record-chain")
         val next = _journal_apply_v1(replay.ledger, parts[4], parts[5])
-        if next == nil:
+        if next.is_none():
             return _journal_error_v1("record-transition")
         replay = SchedulerJournalStateV1(next.unwrap(), seq, digest, 0, 0, "")
         if seq == state.sequence:
@@ -501,7 +501,7 @@ fn _journal_commit_v1(root: text, current: SchedulerJournalStateV1,
     if on_disk_size != current.journal_bytes:
         return _journal_error_v1("stale-or-corrupt")
     val applied = _journal_apply_v1(current.ledger, operation, payload)
-    if applied == nil or not _journal_ledger_equal_v1(applied.unwrap(), next):
+    if applied.is_none() or not _journal_ledger_equal_v1(applied.unwrap(), next):
         return _journal_error_v1("transition-mismatch")
     if current.sequence >= 1000000000:
         return _journal_error_v1("sequence-bound")
