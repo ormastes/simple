@@ -1,0 +1,25 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use app.cli._QueryVisibility.source_reader.{query_visibility_source_begin_disk_v1,
+    query_visibility_source_finish_v1, query_visibility_source_read_v1}
+
+describe "visibility disk request scope":
+    it "reads each source once per request and retains nothing afterwards":
+        val dir = secure_temp_dir("/tmp", "vis-scope-").unwrap()
+        val path = dir + "/a.spl"
+        file_write(path, "fn one() -> i64: 1\n")
+
+        query_visibility_source_begin_disk_v1()
+        val first = query_visibility_source_read_v1(path) ?? "missing"
+        file_write(path, "fn two() -> i64: 2\n")
+        val second = query_visibility_source_read_v1(path) ?? "missing"
+        val trace = query_visibility_source_finish_v1()
+
+        expect(first).to_equal("fn one() -> i64: 1\n")
+        expect(second).to_equal(first)
+        expect(trace.dependencies.len()).to_equal(1)
+
+        val after = query_visibility_source_read_v1(path) ?? "missing"
+        expect(after).to_equal("fn two() -> i64: 2\n")
+        dir_remove_all(dir)
