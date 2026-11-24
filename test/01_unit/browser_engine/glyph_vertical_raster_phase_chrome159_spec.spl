@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+Purpose: Pin where the ink edges of an Arabic and a Devanagari run land
+vertically once the line box and baseline already match Chrome 159.
+Audience: glyph rasterizer / font_renderer maintainers.
+
+EXPECTED RED, tagged `@tag:in-development`. These two examples came from
+`line_box_used_font_metrics_chrome159_spec.spl`, where the block rows (the line
+box) now match Chrome. One ink edge per run still differs by one device row,
+and the other edge matches. That is the glyph's vertical raster phase, not its
+baseline. Measured 2026-11-24 (darkest channel per row, ink is < 90 at x 20..300):
+- k=4 Devanagari head-line, row 330: Chrome 19 (nearly full coverage), Simple
+  192 (about 25%). The outline sits about 0.7 device px lower in Simple. That
+  fits Skia's slight hinting snapping horizontal edges to the pixel grid, which
+  Simple's raster does not do.
+- k=1 Arabic top, rows 40/41: Chrome 255/23, Simple 23/15. Simple's tallest
+  feature is one row higher. The bottom edge matches (57) on both.
+- k=4 DejaVu Sans 40px underline (AC-8): Chrome 737..752, Simple 738..753. The
+  text ink top matches (608), so the baseline is right; the gap is the shared
+  `(fs x 1060 - thickness x 5000) / 10000` offset term at 160 device px.
+Same pages, oracle and pixel rules as the line-box spec; the values are unchanged.
+"""
+"""
+Traceability: REQ-WEB-LINEBOX-USED-FONTS-001 (follow-up) — fallback-face glyphs raster at Chrome's vertical phase.
+"""
+# @tag:in-development
+# @tag: unit, browser_engine, text, raster, chrome159
+# Tracks: doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val STACK: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px\"><div lang=ar style=\"background:#f00\">مرحبا بالعالم</div><div style=\"background:#0f0\">Hxgl</div><div lang=hi style=\"background:#00f\">हिंदी</div><div style=\"background:#ff0\">Hxgl</div></div></body></html>"
+val UNDERLINE_FACES: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px;text-decoration:underline;text-decoration-color:#0f0\"><div style=\"font-family:DejaVu Sans\">Hxgl Hxgl</div><div style=\"margin-top:20px;font-family:Liberation Serif\">Hxgl Hxgl</div><div style=\"margin-top:20px;font-family:Liberation Mono\">Hxgl Hxgl</div><div style=\"margin-top:20px;font-family:DejaVu Sans;font-size:40px\">Hxgl</div></div></body></html>"
+
+fn _render(page: text, k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, k, "cpu_simd")
+
+# First and last device row with ink (all channels < 90) in rows y0..y1.
+fn _ink_rows(px: [u32], k: i32, y0: i32, y1: i32) -> text:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return "empty frame"
+    var i0 = -1
+    var i1 = -1
+    var y = y0
+    while y <= y1:
+        var x = 20 * k
+        while x < 300 * k:
+            val q = px[y * w + x]
+            if ((q >> 16u32) & 0xFFu32) < 90u32 and ((q >> 8u32) & 0xFFu32) < 90u32 and (q & 0xFFu32) < 90u32:
+                if i0 < 0: i0 = y
+                i1 = y
+            x = x + 1
+        y = y + 1
+    "{i0}..{i1}"
+
+# Device row runs holding green (#0f0-ish) pixels, x in [20k, 320k).
+fn _green_rows(px: [u32], k: i32) -> text:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    if px.len() != (w * h) as i64:
+        return "empty frame"
+    var out = ""
+    var start = -1
+    var y = 0
+    while y <= h:
+        var g = false
+        if y < h:
+            var x = 20 * k
+            while x < 320 * k and not g:
+                val q = px[y * w + x]
+                g = ((q >> 8u32) & 0xFFu32) > 150u32 and ((q >> 16u32) & 0xFFu32) < 120u32 and (q & 0xFFu32) < 120u32
+                x = x + 1
+        if g and start < 0: start = y
+        if not g and start >= 0:
+            out = if out == "": "{start}..{y - 1}" else: out + " {start}..{y - 1}"
+            start = -1
+        y = y + 1
+    out
+
+describe "vertical raster phase of fallback-face glyphs against Chrome 159":
+    it "AC-3: the glyphs sit on the union baseline at k=1":
+        step("Chrome k=1 ink: Arabic 41..57 (baseline 52), Devanagari 82..97 (baseline 96)")
+        val px = _render(STACK, 1)
+        expect(_ink_rows(px, 1, 30, 63) + " " + _ink_rows(px, 1, 82, 102)).to_equal("41..57 82..97")
+
+    it "AC-4: the glyphs sit on the union baseline at k=4":
+        step("Chrome k=4 ink: Arabic 162..232 (baseline 208), Devanagari 330..396 (baseline 388)")
+        val px = _render(STACK, 4)
+        expect(_ink_rows(px, 4, 120, 254) + " " + _ink_rows(px, 4, 329, 413)).to_equal("162..232 330..396")
+
+    it "AC-8: a 40px DejaVu Sans underline at k=4 sits where Chrome puts it":
+        step("Chrome k=4: the fourth underline is 737..752; Simple's text ink top already matches (608), the rule is 1 row low (738)")
+        expect(_green_rows(_render(UNDERLINE_FACES, 4), 4)).to_equal("182..187 336..341 484..489 737..752")

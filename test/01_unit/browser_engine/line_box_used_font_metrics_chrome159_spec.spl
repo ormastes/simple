@@ -1,0 +1,169 @@
+"""
+## Purpose and audience
+Purpose: Pin how a line of Arabic or Devanagari text sizes its line box when the
+primary font (Liberation Sans) lacks the script and a fallback face draws it.
+Audience: web renderer inline layout / line-box maintainers.
+
+Chrome rule (Blink, `line-height: normal`): the line box takes the UNION of the
+primary font's strut and every face the run actually uses. Each face gives its
+own ascent and descent (rounded at the used size, device size at k > 1) plus
+half its line gap. With a fixed `line-height`, only the strut counts.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --window-size=400,300`, `--force-device-scale-factor` 1 and 4).
+Body `font:16px 'Liberation Sans', 'Noto Sans Arabic', 'Noto Sans Devanagari'`:
+the two Noto faces are the bundled files, loaded with `@font-face`. Simple's page
+names Liberation Sans and picks the same Noto files from `lang`.
+
+| block                          | k=1 rows | k=4 rows | DOM height k=1 / k=4 |
+|--------------------------------|----------|----------|----------------------|
+| `lang=ar` مرحبا بالعالم         | 30..63   | 120..254 | 34 / 33.75           |
+| Latin `Hxgl`                   | 64..81   | 255..328 | 18 / 18.5            |
+| `lang=hi` हिंदी                 | 82..102  | 329..413 | 21 / 21.25           |
+| Latin `Hxgl`                   | 103..120 | 414..487 | 18 / 18.5            |
+
+Face metrics, from hhea (ascent / descent / line gap, per 1000 em):
+- Liberation Sans: 905 / 212 / 33. At 16 px that is 14 / 3, gap 1, so line 18 and
+  baseline 14. At 64 px it is 58 / 14, gap 2, so line 74 and baseline 59.
+- Noto Sans Arabic: 1374 / 738 / 0. At 16 px that is 22 / 12; at 64 px, 88 / 47.
+- Noto Sans Devanagari: 896 / 408 / 0. At 16 px that is 14 / 7; at 64 px, 57 / 26.
+
+So the Arabic line is 22 + 12 = 34 (88 + 47 = 135 at k=4), with its baseline 22
+below the line top (88 at k=4). The Devanagari line is 14 + 7 = 21 (59 + 26 = 85
+at k=4), with its baseline on the strut (14, and 59 at k=4).
+
+A wrapped Arabic paragraph of 4 lines is 4 x 34 = 136 (4 x 33.75 = 135 at k=4).
+An underline (`text-decoration-color:#0f0`) sits at the run's own baseline + 1:
+Latin 45, Arabic 91, Devanagari 137 at k=1 (183, 366, 552 at k=4, 6 rows thick).
+The same holds for the primary face: a DejaVu Sans underline is one row lower
+than a Liberation Sans one (ascent 15 vs 14), a Liberation Mono one a row higher.
+With a fixed line-height the glyphs still hang from the strut baseline: k=4 ink of
+a `line-height:20px` Arabic block is 136..206 and of a `1.5` one 544..614.
+A `line-height:40px` Devanagari block is exactly 40 tall, the same as Latin: no
+union.
+
+The ink-edge checks (Chrome Arabic 41..57 / 162..232, Devanagari 82..97 /
+330..396) live in `glyph_vertical_raster_phase_chrome159_spec.spl`: with the
+line box right, one edge per run differs by one raster row there.
+Ink is any pixel whose three channels are all under 90, between x 20 and 300 CSS
+px. Chrome's ink rows: Arabic 41..57 at k=1 and 162..232 at k=4; Devanagari 82..97
+at k=1 and 330..396 at k=4.
+"""
+"""
+Traceability: REQ-WEB-LINEBOX-USED-FONTS-001 — a line-height:normal line box holds every face its text uses.
+"""
+# @tag: unit, browser_engine, layout, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val STACK: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px\"><div lang=ar style=\"background:#f00\">مرحبا بالعالم</div><div style=\"background:#0f0\">Hxgl</div><div lang=hi style=\"background:#00f\">हिंदी</div><div style=\"background:#ff0\">Hxgl</div></div></body></html>"
+
+val WRAP: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px\"><div lang=ar style=\"background:#f00;width:70px\">مرحبا بالعالم مرحبا بالعالم</div><div style=\"background:#0f0\">Hxgl</div><div lang=hi style=\"background:#00f;line-height:40px\">हिंदी</div><div style=\"background:#ff0\">Hxgl</div></div></body></html>"
+
+val UNDERLINE: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px;text-decoration:underline;text-decoration-color:#0f0\"><div lang=en>Hxgl Hxgl</div><div lang=ar style=\"margin-top:20px\">مرحبا بالعالم</div><div lang=hi style=\"margin-top:20px\">हिंदी हिंदी</div></div></body></html>"
+val UNDERLINE_FACES: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px;text-decoration:underline;text-decoration-color:#0f0\"><div style=\"font-family:DejaVu Sans\">Hxgl Hxgl</div><div style=\"margin-top:20px;font-family:Liberation Serif\">Hxgl Hxgl</div><div style=\"margin-top:20px;font-family:Liberation Mono\">Hxgl Hxgl</div><div style=\"margin-top:20px;font-family:DejaVu Sans;font-size:40px\">Hxgl</div></div></body></html>"
+val FIXED_LH: text = "<!doctype html><html lang=\"en\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;width:300px;text-decoration:underline;text-decoration-color:#0f0\"><div lang=ar style=\"line-height:20px\">مرحبا بالعالم</div><div lang=hi style=\"margin-top:20px;line-height:40px\">हिंदी हिंदी</div><div lang=ar style=\"margin-top:20px;line-height:1.5\">مرحبا بالعالم</div></div></body></html>"
+
+fn _render(page: text, k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, k, "cpu_simd")
+
+# Non-white colour runs down the column at CSS x 300, as `a..b` device rows.
+fn _blocks(px: [u32], k: i32) -> text:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    if px.len() != (w * h) as i64:
+        return "empty frame"
+    val cx = 300 * k
+    var out = ""
+    var prev: u32 = 0xFFFFFFu32
+    var start = 0
+    var y = 0
+    while y <= h:
+        val p = if y < h: px[y * w + cx] & 0xFFFFFFu32 else: 0xFFFFFFu32
+        if p != prev:
+            if prev != 0xFFFFFFu32:
+                out = if out == "": "{start}..{y - 1}" else: out + " {start}..{y - 1}"
+            prev = p
+            start = y
+        y = y + 1
+    out
+
+# Device row runs holding green (#0f0-ish) pixels, x in [20k, 320k).
+fn _green_rows(px: [u32], k: i32) -> text:
+    val w = CSS_W * k
+    val h = CSS_H * k
+    if px.len() != (w * h) as i64:
+        return "empty frame"
+    var out = ""
+    var start = -1
+    var y = 0
+    while y <= h:
+        var g = false
+        if y < h:
+            var x = 20 * k
+            while x < 320 * k and not g:
+                val q = px[y * w + x]
+                g = ((q >> 8u32) & 0xFFu32) > 150u32 and ((q >> 16u32) & 0xFFu32) < 120u32 and (q & 0xFFu32) < 120u32
+                x = x + 1
+        if g and start < 0: start = y
+        if not g and start >= 0:
+            out = if out == "": "{start}..{y - 1}" else: out + " {start}..{y - 1}"
+            start = -1
+        y = y + 1
+    out
+
+# First and last device row with ink (all channels < 90) in rows y0..y1.
+fn _ink_rows(px: [u32], k: i32, y0: i32, y1: i32) -> text:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return "empty frame"
+    var i0 = -1
+    var i1 = -1
+    var y = y0
+    while y <= y1:
+        var x = 20 * k
+        while x < 300 * k:
+            val q = px[y * w + x]
+            if ((q >> 16u32) & 0xFFu32) < 90u32 and ((q >> 8u32) & 0xFFu32) < 90u32 and (q & 0xFFu32) < 90u32:
+                if i0 < 0: i0 = y
+                i1 = y
+            x = x + 1
+        y = y + 1
+    "{i0}..{i1}"
+
+describe "line box of a fallback-face run (line-height: normal) against Chrome 159":
+    it "AC-1: Arabic and Devanagari blocks take the fallback face's height at k=1":
+        step("Chrome k=1 rows: Arabic 30..63, Latin 64..81, Devanagari 82..102, Latin 103..120")
+        expect(_blocks(_render(STACK, 1), 1)).to_equal("30..63 64..81 82..102 103..120")
+
+    it "AC-2: the same blocks at device scale 4":
+        step("Chrome k=4 rows: 120..254 255..328 329..413 414..487")
+        expect(_blocks(_render(STACK, 4), 4)).to_equal("120..254 255..328 329..413 414..487")
+
+    it "AC-5: every line of a wrapped Arabic paragraph takes the union; a fixed line-height does not":
+        step("Chrome: the 70px Arabic block (left of the x 300 column) ends at 166 (k=1) / 660 (k=4); the line-height:40px block stays 40 rows")
+        expect(_blocks(_render(WRAP, 1), 1)).to_equal("166..183 184..223 224..241")
+        expect(_blocks(_render(WRAP, 4), 4)).to_equal("660..733 734..893 894..967")
+
+    it "AC-6: an underline sits below the run's own baseline, not the primary font's ascent":
+        step("Chrome green underline rows: Latin 45, Arabic 91 (= 68 + 22 + 1), Devanagari 137 at k=1; 183..188 366..371 552..557 at k=4")
+        expect(_green_rows(_render(UNDERLINE, 1), 1)).to_equal("45..45 91..91 137..137")
+        expect(_green_rows(_render(UNDERLINE, 4), 4)).to_equal("183..188 366..371 552..557")
+
+    it "AC-7: an underline hangs from its own primary face's ascent, not Liberation Sans's":
+        step("Chrome 159: DejaVu Sans 46 (ascent 15), Liberation Serif 84, Liberation Mono 121 (ascent 13), DejaVu Sans 40px 184..187 at k=1")
+        expect(_green_rows(_render(UNDERLINE_FACES, 1), 1)).to_equal("46..46 84..84 121..121 184..187")
+        step("k=4, the three 16px faces: 182..187 336..341 484..489 (the 40px one, 737..752, is in glyph_vertical_raster_phase_chrome159_spec)")
+        val k4 = _green_rows(_render(UNDERLINE_FACES, 4), 4).split(" ")
+        expect(k4[0] + " " + k4[1] + " " + k4[2]).to_equal("182..187 336..341 484..489")
+
+    it "AC-8: under a fixed line-height the Arabic glyphs still hang from the strut baseline":
+        step("Chrome k=4 ink: line-height:20px block 136..206, line-height:1.5 block 544..614 (no union, but the run is shaped by Noto Sans Arabic)")
+        val px = _render(FIXED_LH, 4)
+        expect(_ink_rows(px, 4, 120, 300) + " " + _ink_rows(px, 4, 500, 700)).to_equal("136..206 544..614")

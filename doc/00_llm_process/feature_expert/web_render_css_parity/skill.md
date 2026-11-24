@@ -4664,3 +4664,75 @@ Three open items from the abspos-wrap lane, all measured against Chrome 159 (Lib
 - **Open:**
   - At k=1 Chrome paints a fractional width as round(right) - round(left): `2.55rem` is 41 px and `4.04em` is 65 px. This renderer floors k=1 widths (40 / 64). The abspos `width:30.75px` box has the same gap.
   - The authored and shrink device widths assume a whole-px left edge. A fractional x would need its error, as `absolute_box_snap` has.
+
+
+## 2026-11-24 — line box of a fallback-face run (`line-height: normal`), and the underline baseline
+
+- **Chrome's rule, measured (Chrome 159, k=1 and k=4):** a `line-height: normal`
+  line box is the UNION of the primary font's strut and every face the run
+  actually uses. Each face gives its own ascent and descent, rounded at the used
+  size (device size at k > 1), plus half its line gap (floored above, the rest
+  below). Line = max(ascents) + max(descents). There is no subpixel "borrow" for
+  the fallback face: Noto Sans Devanagari at 16px k=4 is 59 + 26 = 85, while the
+  borrow would give 86. A fixed `line-height` (px, number, em, %) keeps the
+  strut only: a `line-height:40px` Devanagari block is exactly 40.
+  - 16px Liberation Sans + Noto Sans Arabic: 22 + 12 = 34 (k=4: 88 + 47 = 135).
+    The baseline is 22 below the line top.
+  - + Noto Sans Devanagari: 14 + 7 = 21 (k=4: 85). The baseline stays on the
+    strut (14, k=4: 59).
+  - A wrapped Arabic paragraph is n x 34, but n x 33.75 at k=4: the exact device
+    line, not k x the CSS line.
+- **Where it lives:**
+  - Resolve keeps the shaping face's `[ascent, descent, gap, upem]` units
+    (`ResolvedFontMetrics.used_face_units`). The cascade copies them to the
+    #text `Style` ONLY when they differ from the primary face's
+    (`browser_face_line_units`).
+  - `style_used_face_line(st, k)` (layout_text) is the one union helper, behind
+    `style_line_h`, `inline_line_strut_baseline_offset(_device)`,
+    `style_device_line_h_milli` and `line_h_frac_milli`.
+  - The #text top under a union line is baseline − content-area ascent, not
+    the even half-leading split.
+- **Trap — used face == primary face.** A `font-family: Noto Sans Devanagari` run
+  is shaped by its own primary face. Unioning it with itself grew the k=4 block
+  from 83 to 84 rows, because the strut side has the borrow and the used side
+  does not. Hence the units-inequality filter.
+- **Trap — em/percent line-heights** set `line_height_em_milli` while
+  `line_height_px` stays 0. Test both before treating a style as `normal`.
+- **Paint:** the selected-run stager hangs a shaped run from the SHAPING face's
+  hhea ascent. `_html_draw_ir_resolved_text_command` moves the command by
+  (primary − used) ascent at CSS scale. At k > 1 it adds the device remainder
+  as `device-y-offset`; `_html_draw_ir_text_with_device_dy` now SUMS that with
+  layout's offset, because `_dir_device_y_offset` reads only the first prop.
+- **Underline (lineheight2's finding, confirmed):** the rule hung from Liberation
+  Sans's 905/1000 for every family. It now hangs from the run's used face
+  (fallback) or the primary face's own ascent. Chrome 159 at 16px:
+  - Arabic 91 (= 68 + 22 + 1);
+  - DejaVu Sans 46 (ascent 15);
+  - Liberation Mono 121 (ascent 13).
+
+  For Liberation Sans the 4x and 1x catalogs and html.html are byte-equal to
+  base. 905/1000 and the face's 1854/2048 can still round apart at some sizes
+  (for example 174 device px: 157 vs 158), so that claim is per measured size.
+- **Fixed line-height:** the paint correction also applies there (the run is
+  still shaped by the fallback face). At k=4, Arabic ink under `line-height:20px`
+  and `1.5` is exactly Chrome's (136..206, 544..614; base was 30 rows low), and
+  every underline matches. Devanagari under `line-height:40px` at 1x is one row
+  high (80 vs 81) on head and base alike: pre-existing, open.
+- **Not the line box (hand-off spec `glyph_vertical_raster_phase_chrome159_spec`,
+  in-development):** with the line box right, one ink edge per run is still one
+  row off. k=4 Devanagari head-line row 330: Chrome coverage 19, Simple 192. The
+  outline sits about 0.7 device px lower, which fits Skia's slight-hinting
+  y-snap. `devanagari_mark_position` AC-9, corpus AC-10 and `devanagari_glyph_hint`
+  are the same class at 1x; all are unchanged from base.
+  - Carrying mark ys in 1/64 px (`device-glyph-ys`) had no measured effect on
+    these words, so it was reverted. AC-9 and corpus AC-10 are not mark-y
+    rounding either: `द्धू`'s uu-matra has y 1.952 and the payload already carries 2
+    (yet the ink bottom is 49 vs Chrome 50); `कृ` has all-zero ys and is 2 rows
+    low at the bottom. Both are raster-side.
+  - The DejaVu 40px underline at k=4 is 1 row low (738 vs 737) with the text
+    baseline right: the shared `1060/10000` offset term.
+- **Open:** an inline `<span>` holding a fallback-script run gets no union (only
+  #text styles carry the units). A face whose USE_TYPO_METRICS typo ascent
+  differs from hhea would split the paint correction (units) from the stager. A
+  mixed `Hx مرحبا` text node (Chrome: 34) was not rendered in Simple. Also open:
+  (hhea). Both Noto faces have typo == hhea.

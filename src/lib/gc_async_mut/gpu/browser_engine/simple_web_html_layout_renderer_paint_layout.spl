@@ -21,7 +21,8 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_pr
     background_gradient_layers, background_gradient_box_rects,
     canvas_gradient_source, canvas_gradient_layers, background_gradient_clip_shape
 }
-use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, browser_face_ascent_descent_milli_px}
+use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{
     text_codepoint_len, text_is_valid_utf8, utf8_seq_len
 }
@@ -474,11 +475,24 @@ fn _html_draw_ir_underline_commands(
     val below = (fs * 1060 - thickness * 5000 + 5000) / 10000
     val color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
     val k = layout_device_scale()
-    val css_top = _html_draw_ir_chrome_ascent(fs) + below + st.text_underline_offset_px
+    # A run a fallback face shaped (`st.used_face_units`) was hung from the line
+    # baseline by THAT face's ascent (`_html_draw_ir_resolved_text_command`), so
+    # its underline sits that ascent below the run top. Chrome 159, 16px
+    # Liberation Sans over Noto Sans Arabic: baseline 22 below the line top,
+    # underline 91 = 68 + 22 + 1 (k=4: 366), not 68 + 14 + 1.
+    val used_css = sfnt_line_metric_units_ascent_descent_px(st.used_face_units, fs.to_i64())
+    val used_dev = sfnt_line_metric_units_ascent_descent_px(st.used_face_units, (fs * k).to_i64())
+    # Otherwise the primary face's own ascent (Chrome 159: DejaVu Sans 15, Liberation
+    # Mono 13 at 16px, where Liberation Sans's 905/1000 says 14 for every family).
+    val own_css = browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, fs * 1000)
+    val own_dev = browser_face_ascent_descent_milli_px(st.font_family, st.bold, st.font_style_italic, fs * k * 1000)
+    val css_ascent = if used_css.len() == 2: used_css[0] as i32 elif own_css.len() == 2: own_css[0] else: _html_draw_ir_chrome_ascent(fs)
+    val dev_ascent = if used_dev.len() == 2: used_dev[0] as i32 elif own_dev.len() == 2: own_dev[0] else: _html_draw_ir_chrome_ascent(fs * k)
+    val css_top = css_ascent + below + st.text_underline_offset_px
     val dev_fs = fs * k
     val dev_auto = if dev_fs / 10 < 1: 1 else: dev_fs / 10
     val dev_thickness = if st.text_decoration_thickness_px > 0: st.text_decoration_thickness_px * k else: dev_auto
-    val dev_top = _html_draw_ir_chrome_ascent(dev_fs) + (dev_fs * 1060 - dev_thickness * 5000 + 5000) / 10000 + st.text_underline_offset_px * k
+    val dev_top = dev_ascent + (dev_fs * 1060 - dev_thickness * 5000 + 5000) / 10000 + st.text_underline_offset_px * k
     # cpu-lane-loop-ok: one rule per emitted text line of this node; bound is the node's wrapped line count
     for run in runs:
         if run.kind == "text" and run.width > 0:
