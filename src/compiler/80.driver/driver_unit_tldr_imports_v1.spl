@@ -32,7 +32,7 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path,
     module_surface_content_hash, module_surface_admitted_roots_v1,
     module_surface_admitted_logical_id_v1, module_surface_logical_alias_candidates_v1,
-    module_surface_same_admitted_logical_module_v1}
+    module_surface_same_admitted_logical_module_v1, module_surface_same_admitted_ids_v1}
 
 struct UnitTldrPlanV1:
     unit_id: text
@@ -309,6 +309,15 @@ pub fn unit_tldr_module_path_for_v1(module_paths: Dict<text, text>, module_id: t
             return module_paths[init_cand]
     ""
 
+# Within one plan the admitted roots are fixed. Key the derived IDs by path
+# so a surface rebound to another row cannot reuse its old path's ID.
+pub fn unit_tldr_surface_path_ids_v1(plan: UnitTldrPlanV1) -> Dict<text, text>:
+    var ids: Dict<text, text> = {}
+    if plan.admitted_roots.len() > 0:
+        for surface in plan.surfaces:
+            ids[surface.canonical_path] = module_surface_admitted_logical_id_v1(surface.canonical_path, plan.admitted_roots)
+    ids
+
 # Summary surface for an inventory row. The plan names a surface by the import
 # spelling (e.g. `std.common.string_core`) while the row the streaming loop
 # meets first may carry another alias (`lib.common.string_core`); the plan
@@ -316,20 +325,32 @@ pub fn unit_tldr_module_path_for_v1(module_paths: Dict<text, text>, module_id: t
 # that key and to admitted SCV/checkout logical identity. Missing this left the
 # row a placeholder -> CLOSURE-INCOMPLETE.
 pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, canonical_path: text) -> ModuleSurface?:
+    unit_tldr_surface_for_row_with_ids_v1(plan, module_name, canonical_path, {})
+
+pub fn unit_tldr_surface_for_row_with_ids_v1(plan: UnitTldrPlanV1, module_name: text, canonical_path: text, path_ids: Dict<text, text>) -> ModuleSurface?:
     for s in plan.surfaces:
         if s.module_name == module_name:
             return Some(s)
     for s in plan.surfaces:
         if s.canonical_path == canonical_path:
             return Some(s)
-    for s in plan.surfaces:
-        if module_surface_same_admitted_logical_module_v1(
-            s.canonical_path, canonical_path, plan.admitted_roots):
-            return Some(s)
     val row_admitted_logical = if plan.admitted_roots.len() > 0:
         module_surface_admitted_logical_id_v1(canonical_path, plan.admitted_roots)
     else:
         ""
+    if plan.admitted_roots.len() == 0:
+        # Without explicit roots, admission derives them from each path pair.
+        for s in plan.surfaces:
+            if module_surface_same_admitted_logical_module_v1(s.canonical_path, canonical_path, plan.admitted_roots):
+                return Some(s)
+    elif row_admitted_logical != "":
+        for s in plan.surfaces:
+            val surface_id = if path_ids.contains_key(s.canonical_path):
+                path_ids[s.canonical_path]
+            else:
+                module_surface_admitted_logical_id_v1(s.canonical_path, plan.admitted_roots)
+            if module_surface_same_admitted_ids_v1(surface_id, row_admitted_logical):
+                return Some(s)
     if row_admitted_logical != "":
         for s in plan.surfaces:
             if s.canonical_name == row_admitted_logical or s.logical_name == row_admitted_logical or s.module_name == row_admitted_logical:
@@ -344,4 +365,4 @@ pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, can
 export UnitTldrPlanV1, UnitLowerResultV1
 export unit_tldr_log_line_v1, unit_tldr_plan_v1, unit_lower_v1
 export unit_tldr_empty_plan_v1, unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1
-export unit_tldr_module_path_for_v1, unit_tldr_surface_for_row_v1, unit_tldr_relative_module_id_v1
+export unit_tldr_module_path_for_v1, unit_tldr_surface_for_row_v1, unit_tldr_surface_path_ids_v1, unit_tldr_surface_for_row_with_ids_v1, unit_tldr_relative_module_id_v1
