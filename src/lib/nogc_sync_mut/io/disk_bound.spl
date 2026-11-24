@@ -111,6 +111,26 @@ pub fn disk_bound_enforce(dir: text, cap: i64) -> i64:
         return 0
     disk_bound_sweep(dir, cap * 3 / 4)
 
+# True when a keyed directory last used at `used` (unix seconds) is outside
+# the min_age_s protection window at `now` and may be removed. min_age_s <= 0
+# disables the window (pure count-based retention).
+# reason: last-use time, current time, and age threshold are unix-second filesystem cache-bound scalars matching disk_bound_keep_newest_dirs
+@allow(primitive_api)
+pub fn disk_bound_dir_is_idle(used: i64, now: i64, min_age_s: i64) -> bool:
+    min_age_s <= 0 or used <= now - min_age_s
+
+# Refreshes the .last-use liveness marker of keyed directory `dir`, which
+# disk_bound_keep_newest_dirs ranks by. A reader calls this for a directory it
+# still needs but is not writing into: reads move no mtime, so without it a
+# directory in use by a long build looks idle. False when dir does not exist.
+# reason: a filesystem directory path and a write-succeeded status, matching disk_bound_mark_used
+@allow(primitive_api)
+pub fn disk_bound_mark_dir_used(dir: text) -> bool:
+    if dir == "" or not dir_exists(dir):
+        return false
+    # Non-empty content: a rewrite always moves the marker mtime.
+    file_write(dir + "/.last-use", "{time_now_seconds()}\n")
+
 # Keyed-directory retention (one dir per compiler/producer identity): under
 # parent, children named <prefix> + <name_len - prefix.len()> chars are
 # ranked by their .last-use marker (dir mtime when absent). `current` gets a
@@ -120,9 +140,9 @@ pub fn disk_bound_keep_newest_dirs(parent: text, current: text, prefix: text,
         name_len: i64, keep: i64, min_age_s: i64) -> i64:
     if keep <= 0 or not dir_exists(parent):
         return 0
-    if current != "" and dir_exists(parent + "/" + current):
-        val _marked = file_write(parent + "/" + current + "/.last-use", "")
-    val young_after = time_now_seconds() - min_age_s
+    if current != "":
+        val _marked = disk_bound_mark_dir_used(parent + "/" + current)
+    val now = time_now_seconds()
     var rows: [text] = []
     for entry in dir_list_or_empty(parent):
         if entry == "" or entry == "." or entry == "..":
@@ -154,7 +174,7 @@ pub fn disk_bound_keep_newest_dirs(parent: text, current: text, prefix: text,
         index = index + 1
         val used = parts[0].to_i64() ?? 0
         excess = excess - 1
-        if min_age_s > 0 and used > young_after:
+        if not disk_bound_dir_is_idle(used, now, min_age_s):
             continue
         if dir_remove(parent + "/" + parts[1], true):
             removed = removed + 1

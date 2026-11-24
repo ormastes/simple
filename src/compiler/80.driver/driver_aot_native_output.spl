@@ -106,6 +106,7 @@ use compiler.driver.smf.runtime_std_package_membership_v1.{
 use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_cache_scope_eviction_role_allowed_v1}
 use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_link_run_v1,
     go_to_end_trial_manifest_block_v1, GoToEndHostedTrialLinkerV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
@@ -2418,6 +2419,16 @@ fn _clear_staged_active_build_cache_v1():
     _staged_active_build_cache_slot_v1 = []
     _staged_active_build_cache_path_v1 = ""
 
+# Cache scope retention runs at most once per process (its first native
+# compile), never again hours later from a staged batch.
+var _native_cache_scope_retention_ran_v1: bool = false
+
+fn _native_cache_scope_retention_first_call_v1() -> bool:
+    if _native_cache_scope_retention_ran_v1:
+        return false
+    _native_cache_scope_retention_ran_v1 = true
+    true
+
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
         log_phase("aot:native_entry")
@@ -2579,9 +2590,23 @@ impl CompilerDriver:
         # by every backend/opt/target combination) in total; scopes used in
         # the last 6 hours (another lane) are never removed. Legacy
         # "scope-<16hex>" dirs from the previous naming can never match again.
-        val _scopes_evicted = disk_bound_keep_newest_dirs(cache_dir, base_cache_scope_name, "s", 33,
-            disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6), 21600)
-        val _legacy_evicted = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1, 21600)
+        # Only an unmarked top-level process evicts, on its first call. Shard/worker/unit children
+        # and the ledger link child reach here once per batch, hours into a
+        # build: their retention pass deleted scopes that earlier children of
+        # the same build had published into and the link still needed. The
+        # current scope stays live without the pass: the phase and ownership
+        # markers below are rewritten on every call.
+        if native_cache_scope_eviction_role_allowed_v1(
+                env_get_nullable("SIMPLE_MIR_SHARD") ?? "",
+                env_get_nullable("SIMPLE_HIR_SHARD") ?? "",
+                env_get_nullable("SIMPLE_PARSE_SHARD") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_LINK") ?? "",
+                env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "",
+                env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER") ?? "") and
+                _native_cache_scope_retention_first_call_v1():
+            val _scopes_evicted = disk_bound_keep_newest_dirs(cache_dir, base_cache_scope_name, "s", 33,
+                disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6), 21600)
+            val _legacy_evicted = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1, 21600)
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
