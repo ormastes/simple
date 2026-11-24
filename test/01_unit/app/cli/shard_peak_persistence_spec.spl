@@ -1,0 +1,128 @@
+# Unit specs for HIR/MIR worker peak persistence paths, hashed producer keys,
+# enclosing-tree budget calculation, and wave-0 pool admission.
+
+use std.spec
+use std.io_runtime.{dir_create_all, dir_remove_all, file_exists, file_write}
+use app.cli.native_build_main.{native_build_path_parent_v1,
+    native_build_peak_producer_key_v1, native_build_peak_record_path_v1,
+    native_build_peak_record_read_v1, native_build_peak_record_write_v1,
+    native_build_recorded_worker_peaks_for_root_v1}
+use app.cli.shard_mem_clamp.{shard_pool_tree_worker_budget_kib_v1,
+    shard_pool_estimate_budget_cap_kib_v1, shard_pool_tree_admit_v1,
+    shard_pool_spawn_admit_v1, shard_pool_wave0_admitted_count_v1}
+
+fn is_lower_hex_16(s: text) -> bool:
+    if s.byte_len() != 16:
+        return false
+    var i: i64 = 0
+    while i < s.byte_len():
+        val b = s.byte_at(i)
+        val is_digit = b >= 48 and b <= 57
+        val is_hex_a_f = b >= 97 and b <= 102
+        if not is_digit and not is_hex_a_f:
+            return false
+        i = i + 1
+    true
+
+describe "native_build_path_parent_v1 separator and drive-root handling":
+    it "handles POSIX, Windows backslash, mixed separators, roots, and bare names":
+        expect(native_build_path_parent_v1("C:/c/s4mir/frontend/queue-1-0")).to_equal("C:/c/s4mir/frontend")
+        expect(native_build_path_parent_v1("C:\\c\\s4mir\\frontend\\queue-1-0")).to_equal("C:\\c\\s4mir\\frontend")
+        expect(native_build_path_parent_v1("C:\\c/s4mir\\queue-1-0")).to_equal("C:\\c/s4mir")
+        expect(native_build_path_parent_v1("build\\cache\\queue-1-0")).to_equal("build\\cache")
+        expect(native_build_path_parent_v1("C:/queue-1-0")).to_equal("C:/")
+        expect(native_build_path_parent_v1("C:\\queue-1-0")).to_equal("C:\\")
+        expect(native_build_path_parent_v1("C:/")).to_equal("C:/")
+        expect(native_build_path_parent_v1("C:\\")).to_equal("C:\\")
+        expect(native_build_path_parent_v1("/a/b/queue-1-0")).to_equal("/a/b")
+        expect(native_build_path_parent_v1("/a/queue-1-0")).to_equal("/a")
+        expect(native_build_path_parent_v1("/queue-1-0")).to_equal("/")
+        expect(native_build_path_parent_v1("/")).to_equal("/")
+        expect(native_build_path_parent_v1("\\queue-1-0")).to_equal("\\")
+        expect(native_build_path_parent_v1("queue-1-0")).to_equal(".")
+        expect(native_build_path_parent_v1("")).to_equal(".")
+
+describe "native_build_peak_producer_key_v1 safe hashed identity":
+    it "returns unknown for empty producer and 16-char lowercase hex for cache scopes":
+        expect(native_build_peak_producer_key_v1("")).to_equal("unknown")
+        val scope_a = "lane=bootstrap;exe=64:sha256:deadbeef;compiler=C:/dev/simple/bin/simple.exe;target=x86_64"
+        val scope_b = "lane=bootstrap;exe=64:sha256:cafebabe;compiler=C:/dev/simple/bin/simple.exe;target=x86_64"
+        val key_a = native_build_peak_producer_key_v1(scope_a)
+        val key_b = native_build_peak_producer_key_v1(scope_b)
+        expect(is_lower_hex_16(key_a)).to_equal(true)
+        expect(is_lower_hex_16(key_b)).to_equal(true)
+        expect(key_a).to_equal(native_build_peak_producer_key_v1(scope_a))
+        expect(key_a != key_b).to_equal(true)
+        expect(key_a.contains(":")).to_equal(false)
+        expect(key_a.contains(";")).to_equal(false)
+        expect(key_a.contains("=")).to_equal(false)
+        expect(key_a.contains("/")).to_equal(false)
+        expect(key_a.contains("\\")).to_equal(false)
+
+describe "worker peak persistence round-trip":
+    it "avoids UNC double-slash on root parents":
+        expect(native_build_peak_record_path_v1("/", "hir-shard", "")).to_equal("/hir-shard.unknown.peak_kib")
+        expect(native_build_peak_record_path_v1("C:/", "hir-shard", "")).to_equal("C:/hir-shard.unknown.peak_kib")
+        expect(native_build_peak_record_path_v1("C:\\", "mir-shard", "")).to_equal("C:\\mir-shard.unknown.peak_kib")
+
+    it "creates parent dirs, persists monotonically, and reads back peaks for complex scopes":
+        val tmp_root = "build/tests/shard_peak_persistence_spec_tmp"
+        val _pre = dir_remove_all(tmp_root)
+        val nested_root = "{tmp_root}/nested/hir-cache"
+        val scope = "exe=64:sha256:0123456789abcdef;compiler=/opt/simple/bin/simple;backend=cranelift"
+        val rec_path = native_build_peak_record_path_v1(nested_root, "hir-shard", scope)
+        expect(native_build_peak_record_read_v1(rec_path)).to_equal(0)
+        expect(native_build_peak_record_write_v1(rec_path, 25609632)).to_equal(true)
+        expect(file_exists(rec_path)).to_equal(true)
+        expect(native_build_peak_record_read_v1(rec_path)).to_equal(25609632)
+        val peaks = native_build_recorded_worker_peaks_for_root_v1(nested_root, scope)
+        expect(peaks.len()).to_equal(1)
+        expect(peaks[0]).to_equal(25609632)
+        # Lighter subsequent run must never shrink a previously recorded higher peak.
+        expect(native_build_peak_record_write_v1(rec_path, 12000000)).to_equal(true)
+        expect(native_build_peak_record_read_v1(rec_path)).to_equal(25609632)
+        # Heavier run updates the high-water mark.
+        expect(native_build_peak_record_write_v1(rec_path, 28000000)).to_equal(true)
+        expect(native_build_peak_record_read_v1(rec_path)).to_equal(28000000)
+        # Malformed / empty records fail closed as 0.
+        val bad_path = "{nested_root}/bad.peak_kib"
+        val _bad_ok = file_write(bad_path, "not-a-number\n")
+        expect(native_build_peak_record_read_v1(bad_path)).to_equal(0)
+        expect(native_build_peak_record_write_v1("", 100)).to_equal(false)
+        expect(native_build_peak_record_write_v1(rec_path, 0)).to_equal(false)
+        val _post = dir_remove_all(tmp_root)
+
+describe "wave-0 pool admission and enclosing tree cap enforcement":
+    it "computes worker budget inside tightest enclosing tree cap minus coordinator":
+        # 2026-11-20 bug shape: 48 GiB tree cap (50331648 KiB), coordinator 8300820 KiB.
+        val worker_budget = shard_pool_tree_worker_budget_kib_v1(50331648, 50331648, 0, 8300820)
+        expect(worker_budget).to_equal(42030828)
+        # Tighter cgroup memory.max wins over declared budget.
+        expect(shard_pool_tree_worker_budget_kib_v1(50331648, 0, 33554432, 4194304)).to_equal(29360128)
+        # No enclosing tree cap active -> -1.
+        expect(shard_pool_tree_worker_budget_kib_v1(0, 0, 0, 8300820)).to_equal(-1)
+        # Tighter cap between host headroom and tree worker budget.
+        expect(shard_pool_estimate_budget_cap_kib_v1(55236336, 42030828)).to_equal(42030828)
+        expect(shard_pool_estimate_budget_cap_kib_v1(28000000, 42030828)).to_equal(28000000)
+
+    it "stops wave-0 over-admission on 48 GiB tree cap even when host swap headroom is huge":
+        val worker_budget = shard_pool_tree_worker_budget_kib_v1(50331648, 50331648, 0, 8300820)
+        # Run 1 (recorded_peak=0, static=9 GB -> est=18 GB): 2*18=36 <= 42.03 GB, 3*18=54 > 42.03 GB -> 2.
+        val run1_wave0 = shard_pool_wave0_admitted_count_v1(3, 8, 80402160, 25165824, worker_budget, 9000000, 0, 0)
+        expect(run1_wave0).to_equal(2)
+        # Run 2 (persisted peak=25.6 GB -> measured est=32.01 GB): only 1 worker fits 42.03 GB.
+        val run2_wave0 = shard_pool_wave0_admitted_count_v1(3, 8, 80402160, 25165824, worker_budget, 9000000, 25609632, 0)
+        expect(run2_wave0).to_equal(1)
+        # Unknown host commit (-1) must still be gated by active tree worker budget (not admit all 4).
+        val unknown_host_wave0 = shard_pool_wave0_admitted_count_v1(4, 8, -1, 25165824, worker_budget, 9000000, 0, 0)
+        expect(unknown_host_wave0).to_equal(2)
+        # Round-1 refill with unavailable host footprint ([] + live_count=2) still blocks worker #3.
+        expect(shard_pool_spawn_admit_v1(-1, 25165824, worker_budget, 18000000, [], 2)).to_equal(false)
+        # Tighter host commit headroom still caps below tree budget.
+        val host_tight_wave0 = shard_pool_wave0_admitted_count_v1(4, 8, 40000000, 10000000, worker_budget, 9000000, 0, 0)
+        expect(host_tight_wave0).to_equal(1)
+        # Explicit override is honored cleanly when below tree budget.
+        val override_wave0 = shard_pool_wave0_admitted_count_v1(4, 8, 80402160, 25165824, worker_budget, 9000000, 0, 12000000)
+        expect(override_wave0).to_equal(3)
+        # Existing live workers already above estimate reserve their measured footprint against tree budget.
+        expect(shard_pool_tree_admit_v1(42030828, 18000000, [30000000], 1)).to_equal(false)
