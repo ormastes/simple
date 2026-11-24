@@ -1771,14 +1771,14 @@ fn native_build_mir_admission_budget_kb_v1(args: [text]) -> i64:
         shard_worker_estimate_kib_v1(mir_default, native_build_recorded_worker_peaks_v1(args), mir_override),
         file_worker_pool_host_pointer_bits_v1())
 
-fn native_build_mir_parent_tighten_v1(parallel: i64, budget_kb: i64) -> i64:
-    if parallel <= 1:
-        return parallel
-    val measured_peak = process_peak_rss_kb()
-    if measured_peak <= 0:
-        return parallel
-    val capped = shard_threads_mem_cap(parallel, budget_kb, measured_peak)
-    if capped < 1: 1 else: capped
+fn native_build_mir_admitted_workers_v1(args: [text]) -> i64:
+    val budget = native_build_mir_admission_budget_kb_v1(args)
+    val requested = native_build_requested_shard_threads(args)
+    val parent_peak = process_peak_rss_kb()
+    # Passing zero for an unknown peak still checks the enclosing tree cap
+    # for a single worker. A negative value bypasses that check.
+    shard_threads_mem_cap(if requested > 0: requested else: 1, budget,
+        if parent_peak > 0: parent_peak else: 0)
 
 # reason: MIR shard parallelism preflight queried by build coordinator and specs
 @allow(primitive_api)
@@ -1822,10 +1822,12 @@ pub fn native_build_mir_shard_parallel(args: [text]) -> i64:
             (env_get("SIMPLE_NATIVE_GROUP_MANIFEST") ?? "") != ""):
         eprint "[mir-shard] disabled: output format re-reads MIR set"
         return 0
-    val mir_budget = native_build_mir_admission_budget_kb_v1(args)
-    val requested = native_build_shard_threads(args, mir_budget)
-    val bounded = native_build_mir_parent_tighten_v1(requested, mir_budget)
-    if bounded > 0: bounded else: 1
+    val admitted = native_build_mir_admitted_workers_v1(args)
+    if admitted == 0:
+        # Even the final worker on this coordinator route is another process.
+        eprint "[mir-shard] memory budget cannot fit a MIR worker alongside the coordinator"
+        return -1
+    admitted
 
 fn native_build_mir_shard_count(parallel: i64) -> i64:
     val configured = (env_get("SIMPLE_MIR_SHARD_COUNT") ?? "").to_i64() ?? 0
@@ -2079,12 +2081,13 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     var result = ""
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0":
-        val mir_budget = native_build_mir_admission_budget_kb_v1(args)
-        val parallel = native_build_shard_threads(args, mir_budget)
-        val bounded_parallel = native_build_mir_parent_tighten_v1(parallel, mir_budget)
-        val pool_parallel = mir_shard_pool_parallel_v1(bounded_parallel,
+        val admitted = native_build_mir_admitted_workers_v1(args)
+        val pool_parallel = mir_shard_pool_parallel_v1(admitted,
             env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "", mir_flag == "1")
-        if pool_parallel > 0:
+        if admitted == 0 and mir_flag == "1":
+            _shard_aggregate_fail_reason_v1 = "memory budget cannot fit an explicitly requested MIR worker alongside the coordinator"
+            result = "fail"
+        elif pool_parallel > 0:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
             if mir_queue != "":
                 val count = native_build_mir_shard_count(pool_parallel)
