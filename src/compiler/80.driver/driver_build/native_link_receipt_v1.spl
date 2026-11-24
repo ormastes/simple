@@ -1,6 +1,8 @@
 use compiler.common.cache_contract.native_initializer_result_v2.{NativeLinkedArtifactV2, NativeInitializerStartupV2}
 use compiler.driver.driver_build.native_link_receipt_codec_v2.{native_link_receipt_render_v2,
     native_link_receipt_startup_read_v2}
+use compiler.driver.driver_build.native_link_observation_v3.{native_link_observation_render_v3}
+use compiler.backend.simpleos_sysroot_receipt.{simpleos_user_receipt_inputs_v1}
 # Object-hash link receipt: skip the relink when nothing the link reads changed.
 #
 # After every successful native link a receipt `<output>.link-receipt` is
@@ -74,6 +76,12 @@ pub fn native_link_key_v1(object_digests: [text], output: text, options_text: te
     for digest in runtime_digests:
         parts.push("rt=" + digest)
     sha256_text(parts.join("\n"))
+
+# The script dependency closure and generated-entry compiler/link engine
+# identities are unproven for SimpleOS. Preserve other targets' cache policy.
+@allow(primitive_api) # reason: this cache-admission predicate returns the raw boolean consumed by the existing linker hit/skip control-flow boundary
+pub fn native_link_receipt_cache_eligible_v1(caller_inputs: [text]) -> bool:
+    caller_inputs.len() == 0
 
 pub fn native_link_receipt_render_v1(key: text, output_digest: text) -> text:
     LINK_RECEIPT_HEADER_V1 + "\nkey: " + key + "\noutput-sha256: " + output_digest + "\n"
@@ -223,6 +231,26 @@ pub fn native_link_with_receipt_v1(objects: [text], output: text,
 # Unsupported backends still return an absent observation, never invented empty.
 pub fn native_link_with_receipt_v2(objects: [text], output: text,
         opts: NativeLinkOptions, require_fresh_startup: bool = false) -> Result<NativeLinkedArtifactV2, text>:
+    val caller_inputs = simpleos_user_receipt_inputs_v1()?
+    if not native_link_receipt_cache_eligible_v1(caller_inputs):
+        eprint("[link-receipt] SimpleOS fresh link: script dependency closure and selected compiler/engine identity are unproven; cache lookup/publication disabled")
+        val fresh = link_llvm_native_with_receipt_v2(objects, output, opts)
+        if fresh.is_err(): return fresh
+        val final_inputs = simpleos_user_receipt_inputs_v1()?
+        if caller_inputs.join("\n") != final_inputs.join("\n"):
+            return Err("SimpleOS SDK/caller inputs changed during linking; output is not admitted")
+        val artifact = fresh.unwrap()
+        if artifact.output_path != output:
+            return Err("SimpleOS completed linker output does not match the requested output")
+        if val actual_engine = artifact.actual_engine_id:
+            val produced = _file_digest_v1(output)
+            val target = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? opts.target_triple
+            if val observation = native_link_observation_render_v3(target, actual_engine, produced):
+                if not _publish_receipt_v1(output + ".link-receipt", observation):
+                    return Err("SimpleOS completed-link observation could not be published")
+                if _file_digest_v1(output) != produced:
+                    return Err("SimpleOS output changed while publishing its completed-link observation")
+        return fresh
     val mode = env_get_opt("SIMPLE_LINK_RECEIPT") ?? ""
     if mode == "0":
         return link_llvm_native_with_receipt_v2(objects, output, opts)
@@ -281,7 +309,8 @@ pub fn native_link_with_receipt_v2(objects: [text], output: text,
         if not published: final_startup = None
     else:
         final_startup = None
-    Ok(NativeLinkedArtifactV2(output_path: artifact.output_path, startup: final_startup))
+    Ok(NativeLinkedArtifactV2(output_path: artifact.output_path, startup: final_startup,
+        actual_engine_id: artifact.actual_engine_id))
 
 export native_link_options_text_v1, native_link_key_v1
 export native_link_receipt_render_v1, native_link_receipt_output_digest_v1

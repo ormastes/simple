@@ -822,18 +822,22 @@ impl<'a> MirLowerer<'a> {
                 })?;
                 (decoded, TypeId::F64)
             } else {
-                // Integer target: decode through `rt_any_to_int`, not
+                // Integer target: decode through `rt_any_cast_int`, not
                 // `UnboxInt`. `rt_value_unbox_int` passes a heap value through
                 // verbatim, so an `any` holding a heap-boxed FLOAT cast to the
-                // box address (`41.75 as i64` == 4244870612817). `rt_any_to_int`
+                // box address (`41.75 as i64` == 4244870612817). `rt_any_cast_int`
                 // truncates a float and is otherwise the same tag-aware decode
-                // (tagged int, true/false -> 1/0, wide int); text parses.
+                // (tagged int, true/false -> 1/0, wide int).
                 // doc/08_tracking/bug/jit_any_float_cast_to_int_reads_heap_word_2026-11-13.md
+                // Text takes the CAST contract (one code point -> that code
+                // point), NOT `rt_any_to_int`'s `.to_i64()` parse: `char_at`
+                // is ANY-typed, so `s.char_at(i) as i64` parsed "6" to 6.
+                // doc/08_tracking/bug/char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md
                 let decoded = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
                         dest: Some(dest),
-                        target: crate::mir::CallTarget::from_name("rt_any_to_int"),
+                        target: crate::mir::CallTarget::from_name("rt_any_cast_int"),
                         args: vec![source_reg],
                     });
                     dest

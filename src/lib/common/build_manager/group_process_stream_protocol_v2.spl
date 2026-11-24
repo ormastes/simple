@@ -38,7 +38,7 @@ struct GroupProcessStreamLaunchV2:
     delegated_cgroup_path: text
     memory_policy: text = "enforce"
     transport_generation: i64 = 0
-    profile_v3: GroupProcessStreamProfileV3? = nil
+    profile_v3: GroupProcessStreamProfileV3? = None
 
 # Shape only: no normalization, filesystem access, host selection or admission.
 fn group_process_stream_absolute_v2(path: text) -> bool:
@@ -59,13 +59,13 @@ fn group_process_child_argv_digest_v2(program: text, args: [text]) -> text:
 fn group_process_stream_launch_validate_core_v3(value: GroupProcessStreamLaunchV2, profiled: bool,
         template: bool = false) -> text:
     if profiled:
-        if value.profile_v3 == nil: return "stream V3 resource profile required"
+        if value.profile_v3.is_none(): return "stream V3 resource profile required"
         if value.memory_policy != "enforce": return "V3 helper profile requires enforced memory"
         val profile = value.profile_v3.unwrap()
         val invalid = group_process_stream_profile_validate_v3(profile)
         if invalid != "": return invalid
         if not group_process_stream_absolute_v2(profile.broker.cgroup_path): return "invalid broker budget absolute path"
-    elif value.profile_v3 != nil:
+    elif value.profile_v3.is_some():
         return "legacy stream V2 rejects resource profile"
     val request = value.request
     if not builder_memory_policy_valid_v1(value.memory_policy): return "invalid stream memory policy"
@@ -204,7 +204,7 @@ fn group_process_stream_launch_decode_core_v3(payload: text, profiled: bool,
     for i in 0..input_count:
         val path = reader.scalar()
         inputs.push(GroupProcessInputV1(path: path, digest: reader.scalar()))
-    var profile: GroupProcessStreamProfileV3? = nil
+    var profile: GroupProcessStreamProfileV3? = None
     if profiled:
         profile = Some(group_process_stream_profile_decode_v3(reader.scalar())?)
     val wire_error = reader.complete_error()
@@ -237,9 +237,9 @@ fn group_process_stream_launch_decode_v3(payload: text) -> Result<GroupProcessSt
     group_process_stream_launch_decode_core_v3(payload, true)
 
 fn group_process_stream_launch_validate_profiled_v3(value: GroupProcessStreamLaunchV2) -> text:
-    group_process_stream_launch_validate_core_v3(value, value.profile_v3 != nil)
+    group_process_stream_launch_validate_core_v3(value, value.profile_v3.is_some())
 fn group_process_stream_launch_encode_profiled_v3(value: GroupProcessStreamLaunchV2) -> text:
-    group_process_stream_launch_encode_core_v3(value, value.profile_v3 != nil)
+    group_process_stream_launch_encode_core_v3(value, value.profile_v3.is_some())
 fn group_process_stream_launch_decode_profiled_v3(payload: text) -> Result<GroupProcessStreamLaunchV2, text>:
     if payload.starts_with("SIMPLE-GROUP-STREAM-3\n"):
         return group_process_stream_launch_decode_core_v3(payload, true)
@@ -252,7 +252,7 @@ fn group_process_stream_identity_profiled_v3(value: GroupProcessStreamLaunchV2) 
 
 fn group_process_stream_apply_profile_v3(value: GroupProcessStreamLaunchV2,
         profile: GroupProcessStreamProfileV3) -> Result<GroupProcessStreamLaunchV2, text>:
-    if value.transport_generation != 0 or value.profile_v3 != nil:
+    if value.transport_generation != 0 or value.profile_v3.is_some():
         return Err("stream transport/profile already assigned")
     var updated = value
     updated.profile_v3 = Some(profile)
@@ -300,7 +300,7 @@ export group_process_stream_identity_profiled_v3, group_process_stream_apply_pro
 # Planning domain normalizes only fields filled by the trusted admission owner.
 # This is never a launch record: actual validators require positive expiry.
 fn group_process_stream_template_encode_v3(value: GroupProcessStreamLaunchV2) -> Result<text, text>:
-    if value.profile_v3 == nil: return Err("stream template requires V3 resource profile")
+    if value.profile_v3.is_none(): return Err("stream template requires V3 resource profile")
     if value.transport_generation < 0 or value.request.launch_deadline_unix_ms < 0:
         return Err("negative stream template dynamic field")
     var normalized = value

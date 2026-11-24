@@ -384,3 +384,20 @@ interpreter, so a codegen regression spec must compile a child program
 in-process `JitCompiler` harness did not reproduce the free-function shape,
 only `simple run` did. See
 [bug](../../../08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md).
+
+## 2026-11-24 — float -> int conversions saturate on every engine
+
+`x as T`, `x.to_T()` and `to_int` on a float follow the interpreter's
+`semantics::cast_float_to_numeric` (Rust `as`): truncate toward zero, saturate
+to the target width, NaN -> 0. All three Cranelift lowerings (`basic_ops.rs`
+cast, `methods.rs`, `closures_structs.rs`) call
+`helpers::float_to_int_saturating`, which is `fcvt_to_*_sat.i64` + clamp +
+`ireduce`. Do not bring back `fcvt_to_{sint,uint}` + `ireduce` for a user cast:
+`ireduce` wraps (`70000.5.to_u16()` gave 4464), and plain `fcvt` traps (SIGILL)
+on negative->unsigned, NaN, and out-of-i64 input. Integer-source narrowing
+still wraps on every engine. Parity test (861 rows, every width, 5 receiver
+shapes): `compiler/tests/float_to_int_saturating_cast_parity.rs`. Open: the
+LLVM backend still emits `fptosi`/`fptoui`, and the compiled `[f64].sum()`
+reads a boxed float as an int
+([bug](../../../08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md)).
+[Bug](../../../08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md).

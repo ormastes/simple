@@ -72,8 +72,8 @@ fn paged_executor_error_text(error: PagedExecutorError) -> text:
         PagedExecutorError.DecodeFailed: "physical decode failed"
         PagedExecutorError.CleanupFailed: "physical request cleanup failed"
 
-var PAGED_BACKEND: GgmlBackend? = nil
-var PAGED_PENDING_BACKEND: GgmlBackend? = nil
+var PAGED_BACKEND: GgmlBackend? = None
+var PAGED_PENDING_BACKEND: GgmlBackend? = None
 # A direct mutable receiver is required here. Calling `me` methods through an
 # optional unwrap mutates a temporary and loses the page/reference transition.
 var PAGED_MANAGER: KvPageManager = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
@@ -102,16 +102,16 @@ fn _kv_unit_failed(result: Result<(), KvPageError>) -> bool:
         Err(_): true
 
 fn paged_executor_bind_backend(backend: GgmlBackend) -> bool:
-    if PAGED_MANAGER_ACTIVE or PAGED_PENDING_BACKEND != nil:
+    if PAGED_MANAGER_ACTIVE or PAGED_PENDING_BACKEND.is_some():
         return false
     PAGED_PENDING_BACKEND = backend
     true
 
 fn paged_executor_clear_pending_backend():
-    PAGED_PENDING_BACKEND = nil
+    PAGED_PENDING_BACKEND = None
 
 fn paged_executor_active() -> bool:
-    PAGED_BACKEND != nil and PAGED_MANAGER_ACTIVE and PAGED_POOL > 0 and
+    PAGED_BACKEND.is_some() and PAGED_MANAGER_ACTIVE and PAGED_POOL > 0 and
     PAGED_NAMESPACE > 0
 
 fn paged_executor_pool() -> i64:
@@ -122,7 +122,7 @@ fn paged_executor_namespace() -> i64:
 
 fn paged_executor_telemetry() -> KvPageTelemetry?:
     if not paged_executor_active():
-        return nil
+        return None
     return PAGED_MANAGER.telemetry()
 
 fn _page_namespace() -> text:
@@ -142,7 +142,7 @@ fn _token_hash(tokens: [i64], start: i64, count: i64) -> u64:
     hash
 
 fn _drain_reclaimed_pages() -> Result<(), PagedExecutorError>:
-    if not PAGED_MANAGER_ACTIVE or PAGED_BACKEND == nil or PAGED_POOL <= 0:
+    if not PAGED_MANAGER_ACTIVE or PAGED_BACKEND.is_none() or PAGED_POOL <= 0:
         return Err(PagedExecutorError.ProviderUnavailable)
     var handle = PAGED_MANAGER.peek_reclaimed_provider_handle()
     while handle != 0u64:
@@ -679,11 +679,11 @@ fn paged_executor_generate(prompt: text,
         Ok(observed): Ok(observed.output)
 
 fn paged_executor_activate_config(config: text) -> Result<(), PagedExecutorError>:
-    if PAGED_PENDING_BACKEND == nil:
+    if PAGED_PENDING_BACKEND.is_none():
         return Err(PagedExecutorError.ProviderUnavailable)
     val backend = PAGED_PENDING_BACKEND!
     # Consume the pending binding exactly once; every failure path is retryable.
-    PAGED_PENDING_BACKEND = nil
+    PAGED_PENDING_BACKEND = None
     val fields = config.split("|")
     if fields.len() != 6:
         return Err(PagedExecutorError.InvalidConfiguration)
@@ -755,7 +755,7 @@ fn paged_executor_shutdown() -> Result<(), PagedExecutorError>:
     if not paged_executor_active():
         # Binding transfers one pending reference here. Shutdown is also the
         # recovery path when activation is abandoned.
-        PAGED_PENDING_BACKEND = nil
+        PAGED_PENDING_BACKEND = None
         return Ok(())
     val telemetry: KvPageTelemetry = PAGED_MANAGER.telemetry()
     if telemetry.active_requests != 0:
@@ -769,8 +769,8 @@ fn paged_executor_shutdown() -> Result<(), PagedExecutorError>:
     match physical_page_pool_destroy(PAGED_BACKEND!, PAGED_POOL):
         Err(_): return Err(PagedExecutorError.PoolDestroyFailed)
         Ok(_): ()
-    PAGED_BACKEND = nil
-    PAGED_PENDING_BACKEND = nil
+    PAGED_BACKEND = None
+    PAGED_PENDING_BACKEND = None
     PAGED_MANAGER = KvPageManager.create(1u64, 1, 1, 1, 1, 1, 1, 1).unwrap()
     PAGED_MANAGER_ACTIVE = false
     PAGED_POOL = 0

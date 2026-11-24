@@ -44,7 +44,7 @@ pub struct HostPrimaryConnectionHelperTurnV3:
     local: HostLocalRootV3
     helper: HostHelperLeaseV1?
     error: text
-    receipt: HostPreparedReservationReceiptV1? = nil
+    receipt: HostPreparedReservationReceiptV1? = None
     recovery_required: bool = false
 
 # This task contains only the connection obligation, not another Host writer.
@@ -57,14 +57,14 @@ pub class HostPrimaryConnectionTaskV3:
     session: ContainerOwnedTerminalSessionV2?
     consumption_attempted: bool
     error: text
-    inspection: ContainerExecutionProgressV4? = nil
-    receipt: WindowsJournalConsumptionV1? = nil
-    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = nil
+    inspection: ContainerExecutionProgressV4? = None
+    receipt: WindowsJournalConsumptionV1? = None
+    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = None
 
     pub fn plan_v3() -> ContainerPrimaryConnectionPlanV2: self.plan
     pub fn error_v3() -> text: self.error
-    pub fn pending_v3() -> bool: self.pending != nil or self.inspection != nil
-    pub fn has_session_v3() -> bool: self.session != nil
+    pub fn pending_v3() -> bool: self.pending.is_some() or self.inspection.is_some()
+    pub fn has_session_v3() -> bool: self.session.is_some()
     pub fn consumption_attempted_v3() -> bool: self.consumption_attempted
 
 pub struct HostPrimaryConnectionServiceTurnV3:
@@ -94,7 +94,7 @@ pub fn host_primary_connection_supported_v3(local: HostLocalRootV3) -> bool:
 # live issuer lease plus the actual still-executing parent/helper journal pair.
 pub fn host_primary_connection_control_live_v3(local: HostLocalRootV3,
         task: HostPrimaryConnectionTaskV3) -> Result<(), text>:
-    if task.pending != nil or task.inspection != nil or task.session != nil or task.record == nil:
+    if task.pending.is_some() or task.inspection.is_some() or task.session.is_some() or task.record.is_none():
         return Err("host-primary-connection-adopted-task-required")
     match local:
         case HostLocalRootV3.Windows(root):
@@ -203,9 +203,9 @@ pub fn host_primary_connection_open_v3(local: HostLocalRootV3, plan: ContainerPr
             task.error = begun.error
             val saved = root.retain_v3(root.capacity_v3(), begun.owner)
             if saved.is_err(): task.error = saved.unwrap_err()
-            if task.inspection != nil or task.error != "":
+            if task.inspection.is_some() or task.error != "":
                 return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
-            if begun.operation == nil or begun.operation.unwrap().status != RUNTIME_STATUS_OK:
+            if begun.operation.is_none() or begun.operation.unwrap().status != RUNTIME_STATUS_OK:
                 task.error = "host-primary-inspection-failed"
                 return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
             open_observed_v3(root, task)
@@ -225,10 +225,10 @@ fn open_observed_v3(original: HostWindowsLocalRootV3, original_task: HostPrimary
         return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
     task.consumption_attempted = true
     val consumed = host_primary_connection_consume_owned_v3(root, task.plan, task.helper)
-    if consumed.record != nil: task.record = consumed.record
+    if consumed.record.is_some(): task.record = consumed.record
     task.receipt = consumed.receipt
     task.consumption_attempted = consumed.publication_attempted
-    if consumed.error != "" or consumed.authority == nil:
+    if consumed.error != "" or consumed.authority.is_none():
         task.error = consumed.error
         return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(task), task.error)
     val opened = simple_container_primary_connection_begin_observed_v3(root.container_v3(), parent.unwrap().execution,
@@ -246,7 +246,7 @@ pub fn host_primary_connection_progress_v3(local: HostLocalRootV3, task: HostPri
     match local:
         case HostLocalRootV3.Windows(original):
             var root = original
-            if task.inspection != nil:
+            if task.inspection.is_some():
                 var inspected = task
                 if cancel and inspected.error == "": inspected.error = "host-primary-inspection-cancelled"
                 val checked = host_primary_connection_validate_v2(root, task.plan, task.helper)
@@ -256,9 +256,9 @@ pub fn host_primary_connection_progress_v3(local: HostLocalRootV3, task: HostPri
                 if progressed.error != "" and inspected.error == "": inspected.error = progressed.error
                 val saved = root.retain_v3(root.capacity_v3(), progressed.owner)
                 if saved.is_err() and inspected.error == "": inspected.error = saved.unwrap_err()
-                if inspected.inspection != nil or inspected.error != "":
+                if inspected.inspection.is_some() or inspected.error != "":
                     return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(inspected), inspected.error)
-                if progressed.operation == nil or progressed.operation.unwrap().status != RUNTIME_STATUS_OK:
+                if progressed.operation.is_none() or progressed.operation.unwrap().status != RUNTIME_STATUS_OK:
                     inspected.error = "host-primary-inspection-failed"
                     return HostPrimaryConnectionServiceTurnV3(HostLocalRootV3.Windows(root), Some(inspected), inspected.error)
                 return open_observed_v3(root, inspected)
@@ -270,7 +270,7 @@ pub fn host_primary_connection_progress_v3(local: HostLocalRootV3, task: HostPri
         case _: HostPrimaryConnectionServiceTurnV3(local, Some(task), "host-primary-connection-owner-provider-changed")
 
 pub fn host_primary_connection_transfer_v3(task: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionTransferV3:
-    if task.pending != nil or task.inspection != nil or task.session == nil or task.error != "":
+    if task.pending.is_some() or task.inspection.is_some() or task.session.is_none() or task.error != "":
         return HostPrimaryConnectionTransferV3(task, nil, "host-primary-connection-not-transferable")
     var retained = task
     val session = retained.session
@@ -280,7 +280,7 @@ pub fn host_primary_connection_transfer_v3(task: HostPrimaryConnectionTaskV3) ->
 # Failed opening may still retain a real hijacked session. Move it for typed
 # settlement only after exact native closure, preserving the original task error.
 pub fn host_primary_connection_cleanup_transfer_v3(task: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionTransferV3:
-    if task.pending != nil or task.inspection != nil or task.session == nil:
+    if task.pending.is_some() or task.inspection.is_some() or task.session.is_none():
         return HostPrimaryConnectionTransferV3(task, nil, "host-primary-connection-cleanup-pending")
     val closed = container_primary_connection_closed_bytes_v2(task.session.unwrap())
     if closed.is_err(): return HostPrimaryConnectionTransferV3(task, nil, closed.unwrap_err())
@@ -291,7 +291,7 @@ pub fn host_primary_connection_cleanup_transfer_v3(task: HostPrimaryConnectionTa
 
 pub fn host_primary_connection_release_v3(local: HostLocalRootV3, task: HostPrimaryConnectionTaskV3,
         session: ContainerOwnedTerminalSessionV2) -> HostPrimaryConnectionReleaseV3:
-    if task.pending != nil or task.inspection != nil or task.session != nil or task.record == nil:
+    if task.pending.is_some() or task.inspection.is_some() or task.session.is_some() or task.record.is_none():
         return HostPrimaryConnectionReleaseV3(local, task, session, nil, "host-primary-connection-transfer-required")
     match local:
         case HostLocalRootV3.Windows(root):
@@ -314,11 +314,11 @@ pub fn host_primary_connection_cleanup_task_v3(plan: ContainerPrimaryConnectionP
 pub fn host_primary_connection_attempt_release_v3(local: HostLocalRootV3,
         original: HostPrimaryConnectionTaskV3) -> HostPrimaryConnectionAttemptReleaseV3:
     var task = original
-    if task.pending != nil or task.inspection != nil or task.session != nil:
+    if task.pending.is_some() or task.inspection.is_some() or task.session.is_some():
         return HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-attempt-cleanup-pending")
     match local:
         case HostLocalRootV3.Windows(root):
-            if task.terminal == nil:
+            if task.terminal.is_none():
                 if not task.consumption_attempted:
                     val checked = host_primary_connection_cleanup_record_v3(root, task.plan, task.helper)
                     if checked.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, checked.unwrap_err())
@@ -332,13 +332,13 @@ pub fn host_primary_connection_attempt_release_v3(local: HostLocalRootV3,
                         task.helper.operation, bytes.unwrap())
                     if published.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, published.unwrap_err())
                     task.receipt = Some(published.unwrap())
-                if task.record == nil or task.receipt == nil:
+                if task.record.is_none() or task.receipt.is_none():
                     return HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-consumption-uncertain")
                 val abandoned = windows_primary_connection_abandon_v3(root.deployment_authority_v3(),
                     root.capacity_v3().journal, task.record.unwrap(), task.receipt.unwrap())
                 if abandoned.is_err(): return HostPrimaryConnectionAttemptReleaseV3(local, task, false, abandoned.unwrap_err())
                 task.terminal = Some(ContainerPrimaryConnectionAttemptTerminalV3.Abandoned(abandoned.unwrap()))
-            if task.record == nil:
+            if task.record.is_none():
                 return HostPrimaryConnectionAttemptReleaseV3(local, task, false, "host-primary-connection-consumption-missing")
             val settled = host_primary_connection_attempt_settle_v3(root, task.record.unwrap(), task.terminal.unwrap())
             task.terminal = Some(settled.terminal)

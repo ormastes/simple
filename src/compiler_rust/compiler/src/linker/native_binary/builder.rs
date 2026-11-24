@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use simple_common::target::{Target, TargetOS};
+use simple_common::target::TargetOS;
 
 use crate::linker::error::{LinkerError, LinkerResult};
 use crate::linker::layout::LayoutOptimizer;
@@ -17,6 +17,35 @@ pub struct NativeBinaryBuilder {
     pub(super) layout_optimizer: Option<LayoutOptimizer>,
 }
 
+#[cfg(all(test, windows, target_env = "gnu"))]
+mod host_runtime_tests {
+    use super::*;
+    use simple_common::target::{LinkerFlavor, Target, TargetArch};
+
+    #[test]
+    fn explicit_host_gate_accepts_split_runtime_layout_but_rejects_cross_abi_and_arch() {
+        let root = tempfile::tempdir().unwrap();
+        let deps = root.path().join("deps");
+        std::fs::create_dir(&deps).unwrap();
+        // Layout-only gate fixtures: these archives are never linked or executed.
+        std::fs::write(deps.join("libsimple_runtime.a"), b"runtime layout marker").unwrap();
+        std::fs::write(root.path().join("libsimple_native_all.a"), b"native-all layout marker").unwrap();
+        let mut options = NativeBinaryOptions::default();
+        options.target = Target { linker_flavor_hint: Some(LinkerFlavor::Gnu), ..Target::host() };
+        options.library_paths = vec![root.path().to_path_buf(), deps];
+        let mut builder = NativeBinaryBuilder { object_code: vec![], options, layout_optimizer: None };
+        assert!(!builder.has_target_runtime_bundle());
+        assert!(builder.ensure_cross_target_runtime_bundle().is_ok());
+        builder.options.target.linker_flavor_hint = Some(LinkerFlavor::Msvc);
+        assert!(builder.ensure_cross_target_runtime_bundle().is_err());
+        builder.options.target.linker_flavor_hint = Some(LinkerFlavor::Gnu);
+        builder.options.target.arch = if Target::host().arch == TargetArch::X86_64 {
+            TargetArch::Aarch64
+        } else { TargetArch::X86_64 };
+        assert!(builder.ensure_cross_target_runtime_bundle().is_err());
+    }
+}
+
 impl NativeBinaryBuilder {
     fn has_target_runtime_bundle(&self) -> bool {
         let runtime_name = NativeBinaryOptions::static_lib_name("simple_runtime", &self.options.target);
@@ -29,7 +58,7 @@ impl NativeBinaryBuilder {
     }
 
     fn ensure_cross_target_runtime_bundle(&self) -> LinkerResult<()> {
-        if self.options.shared || self.options.target == Target::host() || self.has_target_runtime_bundle() {
+        if self.options.shared || self.options.target.uses_host_runtime_abi() || self.has_target_runtime_bundle() {
             return Ok(());
         }
 

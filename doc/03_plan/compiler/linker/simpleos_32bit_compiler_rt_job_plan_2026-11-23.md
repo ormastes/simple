@@ -176,3 +176,12 @@ commands are checked offline with the repaired oracle before another build;
 that source-oracle result is not a compiler build or guest qualification.
 Two real jobs and the earlier source corrections remain in the same six-cycle
 budget; no unchanged job or previously green C-provider campaign is rerun.
+
+## Run 45192113790 (prepare) root cause — 2026-11-24
+
+Configure passed; the campaign failed with `arm32 has duplicate strong owners`
+(redundant C reverse-subtract wrappers vs. base-PCS assembly owners). Fixed by
+merging release/1.0.0's `ef82294f9d9` composition (exact pinned exclusion,
+derived-archive duplicate check, callable check, fixture selftest
+`scripts/check/tests/simpleos-elf32-builtins-composition-test.shs`). A fresh
+labelled campaign run is still required to evidence the fix on real archives.

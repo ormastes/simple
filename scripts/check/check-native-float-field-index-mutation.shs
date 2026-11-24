@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+TARGET=${1:?usage: check-native-float-field-index-mutation.shs TARGET}
+PRODUCER=${SIMPLE_BINARY:?set SIMPLE_BINARY to an absolute self-hosted compiler path}
+RUNTIME=${SIMPLE_RUNTIME_PATH:?set SIMPLE_RUNTIME_PATH to its matching runtime}
+OUT=${BUILD_DIR:?set BUILD_DIR to a fresh absolute evidence directory}
+[ ! -e "$OUT" ] || { echo "evidence directory already exists: $OUT" >&2; exit 2; }
+mkdir -p "$OUT/project"
+cp "$ROOT/test/fixtures/compiler/native_float_field_index_mutation.spl" "$OUT/project/main.spl"
+git -C "$OUT/project" init -q
+git -C "$OUT/project" add main.spl
+git -C "$OUT/project" -c user.name=NativeRegression -c user.email=native-regression@invalid commit -qm fixture
+sha256sum "$PRODUCER" "$OUT/project/main.spl" > "$OUT/inputs.sha"
+cd "$OUT/project"
+env -u SIMPLE_BOOTSTRAP -u SIMPLE_NATIVE_BUILD_RUST -u SIMPLE_TEST_RUNNER_RUST \
+    SIMPLE_PROJECT_ROOT="$ROOT" SIMPLE_NO_STUB_FALLBACK=1 \
+    timeout 180 "$PRODUCER" native-build --target "$TARGET" --backend cranelift \
+    --profile=prod --release --strip --opt-level=standard \
+    --runtime-bundle core-c-bootstrap --mode one-binary --threads 1 \
+    --cache-dir "$OUT/cache" --runtime-path "$RUNTIME" main.spl \
+    -o "$OUT/probe" > "$OUT/compile.stdout" 2> "$OUT/compile.stderr"
+[ -s "$OUT/probe" ]
+timeout 20 "$OUT/probe" > "$OUT/run.stdout" 2> "$OUT/run.stderr"
+tr -d '\r\n' < "$OUT/run.stdout" > "$OUT/actual.txt"
+printf '%s' 'float indexed store readback PASS' > "$OUT/expected.txt"
+cmp "$OUT/actual.txt" "$OUT/expected.txt"
+sha256sum "$PRODUCER" "$OUT/probe" > "$OUT/outputs.sha"
+printf '%s\n' 'PASS: production float field mutation and nested array writeback'

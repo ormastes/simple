@@ -5,19 +5,27 @@ set -eu
 LLVM_SOURCE_COMMIT=6dfe1677ab8dffbc6ec13d53a1e0215d75147689
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 SELF=$ROOT/scripts/os/prepare-simpleos-elf32-builtins.shs
-llvm_source= llvm_prefix= output= jobs=1
+COMPOSITION=$ROOT/scripts/check/lib/simpleos-elf32-builtins-composition.shs
+. "$COMPOSITION"
+llvm_source= llvm_prefix= output= jobs=1 selected_arch=all
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --llvm-source) llvm_source=${2:?}; shift 2 ;;
         --llvm-prefix) llvm_prefix=${2:?}; shift 2 ;;
         --output) output=${2:?}; shift 2 ;;
         --jobs) jobs=${2:?}; shift 2 ;;
+        --arch) selected_arch=${2:?}; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 fail() { echo "ELF32 builtins preparation: $*" >&2; exit 1; }
 case $(uname -s):$(uname -m) in Linux:x86_64) ;; *) fail 'Linux x86_64 host required' ;; esac
-case $jobs in 1|2) ;; *) fail 'jobs must be 1 or 2 per target; three targets run concurrently' ;; esac
+case $jobs in 1|2) ;; *) fail 'jobs must be 1 or 2 per target; selected targets run concurrently' ;; esac
+case $selected_arch in
+    all) selected_targets='i686 arm32 riscv32'; target_count=3 ;;
+    i686|arm32|riscv32) selected_targets=$selected_arch; target_count=1 ;;
+    *) fail 'arch must be all, i686, arm32 or riscv32' ;;
+esac
 for path in "$llvm_source" "$llvm_prefix" "$output"; do
     case "$path" in /*) ;; *) fail 'source, prefix and output must be absolute paths' ;; esac
     case "$path" in *' '*|*'"'*|*'\'*|*"
@@ -41,10 +49,10 @@ available=$(df -Pk "$(dirname "$output")" | awk 'END {print $4}')
 mkdir -p "$output"
 sdn_quote() { printf '"'; printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'; printf '"'; }
 hash() { sha256sum "$1" | awk '{print $1}'; }
-printf 'schema: simpleos-elf32-builtins-campaign-v1\nadmission: none\nscope: compiler-abi-archive-preparation-only\nsource_revision: %s\nllvm_source_revision: %s\nllvm_version: 23.1.1\nper_target_jobs: %s\nconcurrent_targets: 3\n' \
-    "$(git -C "$ROOT" rev-parse HEAD)" "$LLVM_SOURCE_COMMIT" "$jobs" > "$output/campaign.sdn"
+printf 'schema: simpleos-elf32-builtins-campaign-v1\nadmission: none\nscope: compiler-abi-archive-preparation-only\nsource_revision: %s\nllvm_source_revision: %s\nllvm_version: 23.1.1\nper_target_jobs: %s\nconcurrent_targets: %s\nselected_architectures: "%s"\n' \
+    "$(git -C "$ROOT" rev-parse HEAD)" "$LLVM_SOURCE_COMMIT" "$jobs" "$target_count" "$selected_targets" > "$output/campaign.sdn"
 printf 'schema: simpleos-elf32-builtins-inputs-v1\nfiles:\n' > "$output/inputs.sdn"
-for input in "$SELF" "$ROOT/src/os/port/llvm/compiler_rt_cmake.cmake" "$ROOT/scripts/setup/install-linux-phase23-llvm23.shs"; do
+for input in "$SELF" "$COMPOSITION" "$ROOT/src/os/port/llvm/compiler_rt_cmake.cmake" "$ROOT/scripts/setup/install-linux-phase23-llvm23.shs"; do
     printf '  - path: ' >> "$output/inputs.sdn"; sdn_quote "$input" >> "$output/inputs.sdn"
     printf '\n    sha256: %s\n' "$(hash "$input")" >> "$output/inputs.sdn"
 done
@@ -144,7 +152,7 @@ build_one() (
     }
     case "$arch" in
         i686) triple=i686-unknown-none-elf; processor=i386; isa='-march=i686'; machine=3; required='__divdi3 __moddi3 __udivdi3 __umoddi3' ;;
-        arm32) triple=arm-none-eabi; processor=arm; isa='-march=armv7-a -marm -mfloat-abi=soft'; machine=40; required='__aeabi_dadd __aeabi_dmul __aeabi_ddiv __aeabi_ldivmod __aeabi_uldivmod __aeabi_memclr8' ;;
+        arm32) triple=arm-none-eabi; processor=arm; isa='-march=armv7-a -marm -mfloat-abi=soft'; machine=40; required='__aeabi_dadd __aeabi_dmul __aeabi_ddiv __aeabi_ldivmod __aeabi_uldivmod __aeabi_memclr8 __aeabi_drsub __aeabi_frsub' ;;
         riscv32) triple=riscv32-unknown-elf; processor=riscv32; isa='-march=rv32imac -mabi=ilp32 -mno-relax'; machine=243; required='__adddf3 __divdf3 __divdi3 __udivdi3 __atomic_load_8 __atomic_store_8 __atomic_exchange_8 __atomic_compare_exchange_8 __atomic_fetch_add_8 __atomic_fetch_sub_8 __atomic_fetch_and_8 __atomic_fetch_or_8 __atomic_fetch_xor_8 __atomic_is_lock_free' ;;
     esac
     flags="$isa -fno-pic -ffreestanding -nostdlib -nostdlibinc -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 -isystem $ROOT/src/os/libc/include"
@@ -190,12 +198,22 @@ build_one() (
     done < "$dir/raw-members.list"
     (cd "$dir/raw" && "$llvm_prefix/bin/llvm-nm" --format=posix --print-file-name --defined-only --extern-only "$(basename "$raw")") > "$dir/raw-defined-symbols.txt"
     awk '$3 !~ /^[WwVvUu]$/ {print $2}' "$dir/raw-defined-symbols.txt" | LC_ALL=C sort | uniq -d > "$dir/duplicate-strong.txt"
-    [ ! -s "$dir/duplicate-strong.txt" ] || fail "$arch has duplicate strong owners"
+    : > "$dir/composition-excluded-members.txt"
+    if [ "$arch" = arm32 ]; then
+        # Preserve upstream bytes; only the exact pinned redundant C wrapper
+        # pairs may be substituted by their existing base-PCS assembly owners.
+        simpleos_arm_rsub_exclusions "$dir/raw-defined-symbols.txt" > "$dir/composition-excluded-members.txt" || fail 'arm32 reverse-subtract ownership differs'
+    else
+        [ ! -s "$dir/duplicate-strong.txt" ] || fail "$arch has duplicate strong owners"
+    fi
     awk '{print $2}' "$dir/raw-defined-symbols.txt" | LC_ALL=C sort -u > "$dir/raw-defined-names.txt"
     awk '$2=="__clear_cache" {member=$1;sub(/^.*\[/,"",member);sub(/\]:$/,"",member);print member}' "$dir/raw-defined-symbols.txt" | LC_ALL=C sort -u > "$dir/quarantined-members.txt"
     if [ "$arch" = i686 ]; then : > "$dir/quarantined-members.txt"; else
         [ "$(wc -l < "$dir/quarantined-members.txt" | tr -d ' ')" = 1 ] || fail "$arch cache-sync owner must be uniquely identified for quarantine"
     fi
+    cp "$dir/quarantined-members.txt" "$dir/cache-quarantined-members.txt"
+    cat "$dir/composition-excluded-members.txt" >> "$dir/quarantined-members.txt"
+    LC_ALL=C sort -u "$dir/quarantined-members.txt" -o "$dir/quarantined-members.txt"
     set --
     while IFS= read -r member; do
         if ! grep -Fx "$member" "$dir/quarantined-members.txt" >/dev/null; then set -- "$@" "$dir/raw-members/$member"; fi
@@ -203,6 +221,12 @@ build_one() (
     derived=$dir/derived/libclang_rt.builtins-simpleos-$arch-unqualified.a
     "$llvm_prefix/bin/llvm-ar" rcsD "$derived" "$@"
     "$llvm_prefix/bin/llvm-nm" --format=posix --print-file-name --extern-only "$derived" > "$dir/derived-symbols.txt"
+    awk '$3 !~ /^[WwVvUu]$/ {print $2}' "$dir/derived-symbols.txt" | LC_ALL=C sort | uniq -d > "$dir/derived-duplicate-strong.txt"
+    [ ! -s "$dir/derived-duplicate-strong.txt" ] || fail "$arch derived archive has duplicate strong owners"
+    if [ "$arch" = arm32 ]; then
+        "$llvm_prefix/bin/llvm-readobj" --symbols "$derived" > "$dir/derived-elf-symbols.txt"
+        simpleos_arm_rsub_callable_check "$dir/derived-elf-symbols.txt" || fail 'arm32 retained reverse-subtract functions differ'
+    fi
     awk '$3 !~ /^[Uuwv]$/ {print $2}' "$dir/derived-symbols.txt" | LC_ALL=C sort -u > "$dir/derived-defined-names.txt"
     for symbol in $required; do grep -Fx "$symbol" "$dir/derived-defined-names.txt" >/dev/null || fail "$arch derived archive lacks required compiler ABI symbol: $symbol"; done
     awk '$3=="U" && $2 ~ /^__atomic_/ {print $2}' "$dir/derived-symbols.txt" | LC_ALL=C sort -u > "$dir/atomic-undefined.txt"
@@ -211,6 +235,8 @@ build_one() (
     [ ! -s "$dir/unresolved-atomic-helpers.txt" ] || fail "$arch unresolved atomic helper ownership remains"
     printf 'schema: simpleos-elf32-builtins-derived-v1\nadmission: none\nstatus: prepared-unadmitted\narch: %s\nsource_archive_sha256: %s\nderived_archive_sha256: %s\ncache_sync_contract: %s\nraw_member_count: %s\nrequired_abi_symbols: verified-in-derived-archive\natomic_undefined_owner_check: pass\natomic_recursion_check: not-performed\n' \
         "$arch" "$(hash "$raw")" "$(hash "$derived")" "$(if [ "$arch" = i686 ]; then echo x86-unified-cache; else echo missing-real-simpleos-owner; fi)" "$member_count" > "$dir/derived.sdn"
+    printf 'composition_excluded_member_count: %s\nderived_duplicate_strong_check: pass\narm_reverse_subtract_callable_check: %s\n' \
+        "$(wc -l < "$dir/composition-excluded-members.txt" | tr -d ' ')" "$(if [ "$arch" = arm32 ]; then echo pass; else echo not-applicable; fi)" >> "$dir/derived.sdn"
     status=prepared-unadmitted
 )
 
@@ -222,7 +248,7 @@ stop_workers() {
     exit 143
 }
 trap stop_workers HUP INT TERM
-for arch in i686 arm32 riscv32; do
+for arch in $selected_targets; do
     build_one "$arch" > "$output/$arch.log" 2>&1 &
     pids="$pids $!"
 done

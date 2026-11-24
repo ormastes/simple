@@ -391,7 +391,7 @@ mod tests {
     fn test_default_libraries_windows() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
         let libs = NativeBinaryOptions::default_libraries_for_target(&target);
-        assert!(libs.contains(&"c".to_string()));
+        assert!(!libs.contains(&"c".to_string()));
         assert!(libs.contains(&"msvcrt".to_string()));
         assert!(libs.contains(&"kernel32".to_string()));
         assert!(libs.contains(&"ws2_32".to_string()));

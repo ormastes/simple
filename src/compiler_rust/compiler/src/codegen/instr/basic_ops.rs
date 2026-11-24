@@ -186,8 +186,11 @@ pub fn compile_cast<M: Module>(
             src_val
         };
         let src_ty = builder.func.dfg.value_type(src_val);
-        let widened = if src_ty.is_int() {
-            if src_ty.bits() < 64 {
+        if src_ty.is_float() {
+            // Saturating, like the interpreter: `-5.5 as u8` = 0, not SIGILL.
+            super::helpers::float_to_int_saturating(builder, src_val, to_int_width.unwrap_or(types::I64), to_signed)
+        } else {
+            let widened = if src_ty.bits() < 64 {
                 if to_signed {
                     builder.ins().sextend(types::I64, src_val)
                 } else {
@@ -195,17 +198,13 @@ pub fn compile_cast<M: Module>(
                 }
             } else {
                 src_val
+            };
+            match to_int_width {
+                Some(types::I8) => builder.ins().ireduce(types::I8, widened),
+                Some(types::I16) => builder.ins().ireduce(types::I16, widened),
+                Some(types::I32) => builder.ins().ireduce(types::I32, widened),
+                _ => widened,
             }
-        } else if to_signed {
-            builder.ins().fcvt_to_sint(types::I64, src_val)
-        } else {
-            builder.ins().fcvt_to_uint(types::I64, src_val)
-        };
-        match to_int_width {
-            Some(types::I8) => builder.ins().ireduce(types::I8, widened),
-            Some(types::I16) => builder.ins().ireduce(types::I16, widened),
-            Some(types::I32) => builder.ins().ireduce(types::I32, widened),
-            _ => widened,
         }
     } else if !is_from_float && is_to_float {
         // Int to float conversion
