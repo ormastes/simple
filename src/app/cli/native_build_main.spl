@@ -609,6 +609,24 @@ pub fn native_build_coordinator_cache_finish(lease: NativeCacheLease, args: [tex
             val _removed = native_cache_sweep_with_lease(lease, "", keep + 1)
     native_cache_lease_end(lease)
 
+fn native_build_worker_cache_root(args: [text]) -> text:
+    # Full CLI workers default to build/native_cache and take the last
+    # --cache-dir, unlike bootstrap's focused capsule argument reader.
+    var root = "build/native_cache"
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--cache-dir" and index + 1 < args.len():
+            index = index + 1
+            root = args[index]
+        elif arg.starts_with("--cache-dir="):
+            val value = arg.substring(12)
+            root = if value == "": "build/native_cache" else: value
+        elif native_build_is_value_consuming_flag(arg) and index + 1 < args.len():
+            index = index + 1
+        index = index + 1
+    root
+
 # Focused Stage3/Stage4 capsules and their shard/unit children receive `--cache-dir`
 # or `SIMPLE_NATIVE_BUILD_CACHE_DIR` without entering `run_native_build_worker`,
 # so `SIMPLE_FRONTEND_CACHE_DIR` and `SIMPLE_HIR_CACHE_DIR` were left unset and
@@ -2459,7 +2477,7 @@ pub fn native_build_cache_scope_retention_at_start_v1(args: [text]):
 pub fn run_native_build_worker(raw_args: [text]) -> i64:
     if not native_build_child_bind_parent_v1():
         return 1
-    val lease = match native_build_coordinator_cache_lease(raw_args):
+    val lease = match native_cache_lease_begin(native_build_worker_cache_root(raw_args)):
         case Ok(value): value
         case Err(reason):
             eprint(reason)
