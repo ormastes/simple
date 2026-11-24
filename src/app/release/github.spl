@@ -3,10 +3,9 @@
 use std.nogc_sync_mut.io.dir_ops.{dir_list, is_dir}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_read_bytes}
-use std.nogc_sync_mut.io.http_sffi.{HttpMethod, http_request, url_encode}
+use std.nogc_sync_mut.io.http_sffi.{HttpMethod, http_request, http_request_v2_raw, url_encode}
 use std.json.{JsonValue}
 use std.json.builder.{JsonBuilder}
-use std.common.base_encoding.{bytes_to_text}
 
 
 fn basename(path: text) -> text:
@@ -98,6 +97,10 @@ fn parse_release_html_url(json_text: text) -> text:
         Err(_):
             ""
 
+fn asset_upload_body(file_path: text) -> [u8]:
+    """Raw asset bytes for the upload body; never decoded as text."""
+    file_read_bytes(file_path)
+
 fn upload_asset(upload_url: text, token: text, file_path: text) -> Result<text, text>:
     if not file_exists(file_path):
         return Err("Asset not found: {file_path}")
@@ -105,12 +108,13 @@ fn upload_asset(upload_url: text, token: text, file_path: text) -> Result<text, 
     val file_name = basename(file_path)
     val encoded_name = url_encode(file_name)
     val request_url = "{upload_url}?name={encoded_name}"
-    val body = bytes_to_text(file_read_bytes(file_path))
+    val body = asset_upload_body(file_path)
     val headers = release_headers(token: token, content_type: guess_content_type(file_path))
-    val response = http_request(HttpMethod.POST, request_url, headers, body)
-    if response.is_ok:
+    val response = http_request_v2_raw("POST", request_url, headers, body, 0)
+    val status = response.0
+    if response.4 == "" and status >= 200 and status < 300:
         return Ok(file_name)
-    Err("Upload failed for {file_name}: HTTP {response.status_code} {response.error}\n{response.body}")
+    Err("Upload failed for {file_name}: HTTP {status} {response.4} ({response.3.len()} response bytes)")
 
 fn create_github_release(repo: text, token: text, tag: text, name: text, body: text,
         target: text, draft: bool, prerelease: bool, files_dir: text) -> Result<text, text>:
