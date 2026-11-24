@@ -4542,3 +4542,10 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Bug records:**
   - `doc/08_tracking/bug/float_method_chain_to_i64_returns_bits_2026-11-24.md`
   - `doc/08_tracking/bug/array_repeat_nonliteral_fill_computed_count_2026-11-24.md`
+
+## 2026-11-24 — Seed: a float into an int slot is a type error
+
+- **Change:** the seed's HIR type checker now rejects an `f32`/`f64` value in an integer argument or return slot. You must write `as iN` / `.to_iN()` explicitly. int→float widening is still allowed.
+- **Trap:** a HIR type error makes the JIT `run` silently fall back to the interpreter (`[jit-fallback]`). Use `SIMPLE_JIT_STRICT=1` to see it as a failure.
+- **Sweep:** checked 48,515 `src/` and `test/` files. 10 call sites in 2 files were fixed: `progress_bar` / `progress_bar_html` in the `coverage/stats render_adapter`, which were also passing the wrong number of arguments. The 8 web pages were unaffected.
+- **Bug record:** `doc/08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md`.

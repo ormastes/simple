@@ -1523,6 +1523,11 @@ impl Lowerer {
                                 arg,
                                 &format!("argument {} of `{bare_owner}.{method}`", i + 1),
                             )?;
+                            self.reject_float_for_int_slot(
+                                *pty,
+                                arg,
+                                &format!("argument {} of `{bare_owner}.{method}`", i + 1),
+                            )?;
                         }
                     }
                 }
