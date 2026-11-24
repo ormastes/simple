@@ -3217,13 +3217,21 @@ typedef struct RtCoreTransientPlan {
     size_t seen_len;
 } RtCoreTransientPlan;
 
-#define RT_CORE_TRANSIENT_MAX_NODES ((size_t)1 << 22)
+/* Dynamically grows with overflow checks bounded by SIZE_MAX / allocator availability. */
 /* Only the promotion-share set below ever erases; a per-call plan never does.
  * A tombstone keeps lookup probe chains intact and is dropped on rehash. */
 #define RT_CORE_TRANSIENT_SEEN_TOMBSTONE ((uintptr_t)1)
 
+/* Return non-zero if (len + 1) * 10 >= cap * 7 without unsigned wrap. */
+static inline int rt_core_seen_needs_grow(size_t seen_len, size_t seen_cap) {
+    if (seen_cap == 0 || seen_len >= seen_cap) return 1;
+    size_t thresh = (seen_cap / 10) * 7 + ((seen_cap % 10) * 7 + 9) / 10;
+    return seen_len + 1 >= thresh;
+}
+
 static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t ptr) {
-    if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
+    if (rt_core_seen_needs_grow(plan->seen_len, plan->seen_cap)) {
+        if (plan->seen_cap > SIZE_MAX / 2) return -1;
         size_t next_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
         if (next_cap > SIZE_MAX / sizeof(uintptr_t)) return -1;
         uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(next_cap, sizeof(uintptr_t));
@@ -3251,7 +3259,8 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
      * here forever (stage3 promotion-registry rewalk livelock defense in
      * depth, 2026-10-17). */
     size_t probes;
-    for (probes = 0; probes < plan->seen_cap * 4; probes++) {
+    size_t probe_limit = plan->seen_cap > SIZE_MAX / 4 ? SIZE_MAX : plan->seen_cap * 4;
+    for (probes = 0; probes < probe_limit; probes++) {
         if (!plan->seen[i]) {
             plan->seen[i] = ptr;
             plan->seen_len++;
@@ -3268,8 +3277,9 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
 static int rt_core_transient_plan_push(
     RtCoreTransientPlan* plan, void* ptr, uint8_t kind, size_t bytes) {
     if (plan->len == plan->cap) {
+        if (plan->cap > SIZE_MAX / 2) return 0;
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
-        if (next_cap > RT_CORE_TRANSIENT_MAX_NODES) return 0;
+        if (next_cap > SIZE_MAX / sizeof(RtCoreTransientNode)) return 0;
         RtCoreTransientNode* fresh = (RtCoreTransientNode*)rt_observed_realloc_v1(
             plan->nodes, next_cap * sizeof(RtCoreTransientNode));
         if (!fresh) return 0;
@@ -9496,8 +9506,7 @@ void rt_array_free(SplArray* value) {
 #define RT_CORE_DEEP_FREE_REFUSE 3
 #define RT_CORE_DEEP_FREE_DICT 4
 
-/* Bounds the planner's own memory; exceeding it refuses rather than grows. */
-#define RT_CORE_DEEP_FREE_MAX_NODES ((size_t)1 << 22)
+/* Dynamically grows with overflow checks; allocator OOM refuses atomically. */
 
 typedef struct RtCoreDeepFreeNode {
     void* ptr;
@@ -9515,6 +9524,7 @@ typedef struct RtCoreDeepFreePlan {
 
 /* caller-local table, no lock needed */
 static int rt_core_deep_free_seen_grow(RtCoreDeepFreePlan* plan) {
+    if (plan->seen_cap > SIZE_MAX / 2) return 0;
     size_t new_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
     if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
     uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
@@ -9535,7 +9545,7 @@ static int rt_core_deep_free_seen_grow(RtCoreDeepFreePlan* plan) {
 
 /* 1 = newly inserted, 0 = already present (alias or cycle), -1 = out of memory */
 static int rt_core_deep_free_seen_insert(RtCoreDeepFreePlan* plan, uintptr_t p) {
-    if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
+    if (rt_core_seen_needs_grow(plan->seen_len, plan->seen_cap)) {
         if (!rt_core_deep_free_seen_grow(plan)) return -1;
     }
     size_t mask = plan->seen_cap - 1;
@@ -9554,8 +9564,9 @@ static int rt_core_deep_free_seen_insert(RtCoreDeepFreePlan* plan, uintptr_t p) 
 
 static int rt_core_deep_free_plan_push(RtCoreDeepFreePlan* plan, void* ptr, int kind) {
     if (plan->len == plan->cap) {
+        if (plan->cap > SIZE_MAX / 2) return 0;
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
-        if (next_cap > RT_CORE_DEEP_FREE_MAX_NODES) return 0;
+        if (next_cap > SIZE_MAX / sizeof(RtCoreDeepFreeNode)) return 0;
         RtCoreDeepFreeNode* fresh = (RtCoreDeepFreeNode*)rt_observed_realloc_v1(
             plan->nodes, next_cap * sizeof(RtCoreDeepFreeNode));
         if (!fresh) return 0;
