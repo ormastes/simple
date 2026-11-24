@@ -1,0 +1,168 @@
+name: SDK worker observer cycle one
+on:
+  workflow_dispatch:
+    inputs:
+      producer_artifact:
+        type: string
+        required: true
+      diagnostics_artifact:
+        type: string
+        required: true
+      producer_sha256:
+        type: string
+        required: true
+      producer_bytes:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: sdk-worker-observer-approved-extension-cycle1
+  cancel-in-progress: false
+jobs:
+  observe:
+    if: github.ref == 'refs/heads/work/sdk-observer-consumer-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CONTROL_SOURCE: ${{ github.sha }}
+      PRODUCER_SOURCE: a44544b638a1ba58fb420ecd15eccdc5643be5c6
+      PRODUCER_RUN: '45363596538'
+      PRODUCER_ARTIFACT: ${{ inputs.producer_artifact }}
+      DIAGNOSTICS_ARTIFACT: ${{ inputs.diagnostics_artifact }}
+      PRODUCER_SHA256: ${{ inputs.producer_sha256 }}
+      PRODUCER_BYTES: ${{ inputs.producer_bytes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: 0d9debaf39e604c531b5214f014c290c7c3e044f
+          path: data
+          persist-credentials: false
+      - name: Bind exact successful producer API tuple and unused cycle claim
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = ormastes/simple
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(date -u +%s)" -lt "$(date -u -d 2026-11-26T00:00:00Z +%s)"
+          [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PRODUCER_ARTIFACT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$DIAGNOSTICS_ARTIFACT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PRODUCER_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$PRODUCER_BYTES" =~ ^[1-9][0-9]*$ ]]
+          out=build/verify/sdk-worker-observer-cycle1
+          mkdir -p "$out"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN" > "$out/producer-run.github.json"
+          jq -e --arg source "$PRODUCER_SOURCE" --argjson run "$PRODUCER_RUN" \
+            '.id == $run and .head_sha == $source and .status == "completed" and .conclusion == "success"' \
+            "$out/producer-run.github.json" >/dev/null
+          for kind in producer diagnostics; do
+            if [ "$kind" = producer ]; then id=$PRODUCER_ARTIFACT; name=ladder-linux-x86_64-r1;
+            else id=$DIAGNOSTICS_ARTIFACT; name=bootstrap-ladder-diagnostics-linux-x86_64-r1; fi
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" > "$out/$kind-artifact.github.json"
+            jq -e --arg name "$name" --arg source "$PRODUCER_SOURCE" --argjson id "$id" --argjson run "$PRODUCER_RUN" \
+              '.id == $id and .name == $name and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $source' \
+              "$out/$kind-artifact.github.json" >/dev/null
+          done
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=sdk-worker-observer-extension-cycle1-claim&per_page=1" \
+            --jq .total_count > "$out/prior-claims.count"
+          test "$(cat "$out/prior-claims.count")" = 0
+          printf 'schema: sdk-worker-observer-cycle-claim-v1\ncycle: 1\nmaximum_cycles: 2\nrun: %s\ncontrol_source: %s\nproducer_source: %s\nproducer_run: %s\nproducer_sha256: %s\np3: skipped\nautomatic_retry: false\n' \
+            "$GITHUB_RUN_ID" "$CONTROL_SOURCE" "$PRODUCER_SOURCE" "$PRODUCER_RUN" "$PRODUCER_SHA256" > "$out/claim.sdn"
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: ${{ inputs.producer_artifact }}
+          run-id: ${{ inputs.producer_run }}
+          github-token: ${{ github.token }}
+          path: build/verify/sdk-worker-observer-cycle1/handoff
+      - uses: actions/download-artifact@v7
+        with:
+          artifact-ids: ${{ inputs.diagnostics_artifact }}
+          run-id: ${{ inputs.producer_run }}
+          github-token: ${{ github.token }}
+          path: build/verify/sdk-worker-observer-cycle1/diagnostics
+      - name: Require physical seed, source/Git-state, phase, bytes and retained Hello
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C control rev-parse HEAD)" = "$CONTROL_SOURCE"
+          test "$(git -C control rev-parse HEAD:src/compiler)" = 160364b7718a632828c6ba617f4f0f1ae2be6232
+          test "$(git -C control rev-parse HEAD:src/lib)" = e3206c4c74b3b8bcdc4d967b28e359f314bc22f4
+          test "$(git -C control rev-parse HEAD:test/fixtures/compiler/sdk_errno_observer_enabled_v1.spl)" = 61c7211558e92a1705c8598c24bf5662af30e73b
+          python3 control/scripts/check/sdk-observer-evidence-v1.py bind \
+            --root build/verify/sdk-worker-observer-cycle1 --control-root control --source "$PRODUCER_SOURCE" \
+            --sha256 "$PRODUCER_SHA256" --bytes "$PRODUCER_BYTES" \
+            --seed-sha256 b8f6454a21fe68dc3bcd0123e2a5994529f34147781a21807df5835ab90c49e9
+      - name: Canonical Linux control and SDK prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev
+          clang --version > build/verify/sdk-worker-observer-cycle1/clang-version.txt
+          ld.lld --version > build/verify/sdk-worker-observer-cycle1/lld-version.txt
+          llvm-ar --version > build/verify/sdk-worker-observer-cycle1/ar-version.txt
+      - name: Record capacity and provision isolated swap before claiming the cycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=build/verify/sdk-worker-observer-cycle1
+          free -b > "$out/memory-before.txt"
+          cat /proc/meminfo > "$out/meminfo-before.txt"
+          df -B1 /mnt > "$out/disk-before.txt"
+          swapon --show --bytes > "$out/swap-before.txt"
+          available=$(df -B1 --output=avail /mnt | tail -1 | tr -dc 0-9)
+          swap_gib=$((available / 1073741824 - 32))
+          test "$swap_gib" -ge 24
+          test "$swap_gib" -le 48 || swap_gib=48
+          test ! -e /mnt/sdk-observer-cycle1.swap
+          sudo fallocate -l "${swap_gib}G" /mnt/sdk-observer-cycle1.swap
+          sudo chmod 600 /mnt/sdk-observer-cycle1.swap
+          sudo mkswap /mnt/sdk-observer-cycle1.swap > "$out/mkswap.txt"
+          sudo swapon /mnt/sdk-observer-cycle1.swap
+          free -b > "$out/memory-after.txt"
+          swapon --show --bytes > "$out/swap-after.txt"
+          printf 'schema: sdk-observer-capacity-v1\nprivate_swap_gib: %s\ncache_reserve_gib: 32\noriginal_swap_receipt: unavailable\ncapacity_change: explicit-diagnostic-preflight\n' \
+            "$swap_gib" > "$out/capacity.sdn"
+      - name: Publish non-resetting approved cycle-one claim
+        id: claim
+        uses: actions/upload-artifact@v6
+        with:
+          name: sdk-worker-observer-extension-cycle1-claim
+          path: build/verify/sdk-worker-observer-cycle1/claim.sdn
+          retention-days: 90
+          if-no-files-found: error
+      - name: Run enabled native control then one frozen SDK attempt
+        shell: bash
+        working-directory: control
+        env:
+          CLAIM_ID: ${{ steps.claim.outputs.artifact-id }}
+          CLAIM_DIGEST: ${{ steps.claim.outputs.artifact-digest }}
+          CLAIM_URL: ${{ steps.claim.outputs.artifact-url }}
+          CLAIM_OUTCOME: ${{ steps.claim.outcome }}
+        run: |
+          set -euo pipefail
+          test "$CLAIM_OUTCOME" = success
+          [[ "$CLAIM_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$CLAIM_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          test "$CLAIM_URL" = "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts/$CLAIM_ID"
+          printf 'schema: sdk-observer-action-publication-v1\nid: %s\narchive_digest: %s\nurl: %s\n' \
+            "$CLAIM_ID" "$CLAIM_DIGEST" "$CLAIM_URL" > "$GITHUB_WORKSPACE/build/verify/sdk-worker-observer-cycle1/claim-publication.sdn"
+          sh scripts/check/run-sdk-observer-cycle1.shs
+      - name: Retain actual evidence including compatible caches
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sdk-worker-observer-cycle1-${{ github.run_id }}
+          path: build/verify/sdk-worker-observer-cycle1
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
