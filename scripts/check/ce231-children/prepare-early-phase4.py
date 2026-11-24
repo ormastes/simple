@@ -108,6 +108,7 @@ for role in ['early-phase4']:
            'SIMPLE_RUNTIME_PATH':str(runtime),'SIMPLE_PROJECT_ROOT':str(source),'SIMPLE_LIB':str(source/'src'),
            'SIMPLE_FILE_WORKERS':'1','SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY':'1','SIMPLE_FILE_WORKER_BATCH':'4',
            'SIMPLE_PARSE_SHARDING':'1','SIMPLE_SCV_INVENTORY_COLD_INIT':'1',
+           'SIMPLE_BUILD_MEMORY_RESERVE_BYTES':str(c['phase4_resource_policy']['reserve_kib']*1024),
            'SIMPLE_PROCESS_TREE_RSS_CAP_KIB':str(cap),'SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB':str(cap),
            'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB':str(cap),'SIMPLE_BOOTSTRAP_RSS_CAP_MODE':'enforce',
            'SIMPLE_FRONTEND_CACHE_DIR':str(child_root/'cache/frontend'),'SIMPLE_HIR_CACHE_DIR':str(child_root/'cache/hir'),

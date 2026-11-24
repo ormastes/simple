@@ -4,6 +4,8 @@ from pathlib import Path
 import importlib.util
 _cleanup_spec=importlib.util.spec_from_file_location("owner_cleanup",Path(__file__).with_name("owner-cleanup.py"))
 _cleanup=importlib.util.module_from_spec(_cleanup_spec);_cleanup_spec.loader.exec_module(_cleanup)
+_budget_spec=importlib.util.spec_from_file_location("runner_budget",Path(__file__).with_name("runner-budget.py"))
+_budget=importlib.util.module_from_spec(_budget_spec);_budget_spec.loader.exec_module(_budget)
 import argparse
 import hashlib
 import json
@@ -88,10 +90,12 @@ out = a.output.resolve()
 out.mkdir(parents=True, exist_ok=False)
 for part in ['tmp','storage','cache','pairing']:
     (out/part).mkdir()
-cap = c['phase3_memory_kib']
-assert isinstance(cap,int) and 4*1024*1024 <= cap <= 24*1024*1024
-available = int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemAvailable:')))
-assert cap <= available*3//4 and available >= cap + 2*1024*1024, 'hosted cap plus 2GiB reserve unavailable'
+reservation=_budget.sample('phase3')
+cap=reservation['cap_kib'];available=reservation['available_kib']
+c['phase3_memory_kib']=cap
+c['phase3_resource_policy']=reservation
+a.contract.write_text(json.dumps(c,indent=2))
+(out/'resource-admission.json').write_text(json.dumps(reservation,indent=2))
 assert shutil.disk_usage(source).free >= 20*1024**3
 seconds = c.get('phase3_timeout_seconds',14400)
 assert 0 < seconds <= 14400
@@ -104,6 +108,7 @@ env.update(SIMPLE_BOOTSTRAP_COMPILER=str(producer), SIMPLE_BOOTSTRAP_COMPILER_PH
  SIMPLE_SCV_INVENTORY_COLD_INIT='1', SIMPLE_PARSE_SHARDING='1',
  SIMPLE_CACHE=str(out/'cache'), SIMPLE_USER_STORAGE_ROOT=str(out/'storage'), TMPDIR=str(out/'tmp'),
  SIMPLE_CACHE_PROJECT='ce231-'+sha(producer)[:16]+'-canonical-phase3',
+ SIMPLE_BUILD_MEMORY_RESERVE_BYTES=str(reservation['reserve_kib']*1024),
  SIMPLE_PROCESS_TREE_RSS_CAP_KIB=str(cap), SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=str(cap),
  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=str(cap), SIMPLE_BOOTSTRAP_RSS_CAP_MODE='enforce', CC='clang',
  GITHUB_ENV=str(out/'wrapper.environment'),GITHUB_OUTPUT=str(out/'wrapper.outputs'))
@@ -119,6 +124,8 @@ record = {'status':'RUNNING','source':SOURCE,'producer_sha256':sha(producer),'ru
 stdout=out/'wrapper.stdout'
 try:
  with stdout.open('wb') as log, (out/'wrapper.stderr').open('wb') as err:
+     reservation['launch_available_kib']=_budget.recheck(cap)
+     (out/'resource-admission.json').write_text(json.dumps(reservation,indent=2))
      with _cleanup.acquired_owner(command,out/'controller-cleanup.json',cwd=source,env=env,stdout=log,stderr=err) as child:
          (out/'owner.pid').write_text(str(child.pid)+'\n')
          expected_line=f'Building phase 3 with {producer} (phase 2)'

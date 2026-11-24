@@ -56,7 +56,7 @@ c.update(phase2_artifact_id=pa['id'],phase2_artifact_zip_sha256=pd,phase2_artifa
  source_root=str(Path('source').resolve()),runtime_root=str(runtime),runtime_artifact_zip=rz,
  runtime_files={k:v['sha256'] for k,v in manifest['files'].items()},
  phase2_run_metadata=save('phase2-run.json',p2),fd366_run_metadata=save('fd366-run.json',fd),
- output_root=str(Path('ce231-children').resolve()),early_product=os.environ['EARLY_PRODUCT'],phase4_memory_kib=8*1024*1024)
+ output_root=str(Path('ce231-children').resolve()),early_product=os.environ['EARLY_PRODUCT'],phase4_memory_kib=None)
 save('phase2-artifact.json',pa);save('runtime-artifact.json',ra)
 Path('ce231-contract.json').write_text(json.dumps(c,indent=2))
 

@@ -3,6 +3,8 @@ import hashlib,json,os,subprocess,sys,time,zipfile,stat,importlib.util
 from pathlib import Path,PurePosixPath
 _s=importlib.util.spec_from_file_location("owner_cleanup",Path(__file__).with_name("owner-cleanup.py"))
 _cleanup=importlib.util.module_from_spec(_s);_s.loader.exec_module(_cleanup)
+_b=importlib.util.spec_from_file_location("runner_budget",Path(__file__).with_name("runner-budget.py"))
+_budget=importlib.util.module_from_spec(_b);_b.loader.exec_module(_budget)
 mode=sys.argv[1]
 root=Path('ce231-phase3')
 if mode in ['wait-pairing','wait-terminal']:
@@ -56,13 +58,17 @@ with zipfile.ZipFile(archive) as z:
 proof=list(pairdir.rglob('pairing.json'));assert len(proof)==1
 contract=json.loads(Path('ce231-contract.json').read_text())
 contract.update(runtime_selection_evidence=str(proof[0].resolve()),runtime_selection_evidence_sha256=sha(proof[0]))
+reservation=_budget.sample('early-phase4')
+contract['phase4_memory_kib']=reservation['cap_kib']
+contract['phase4_resource_policy']=reservation
 Path('early-contract.json').write_text(json.dumps(contract,indent=2))
 subprocess.run([sys.executable,str(Path(__file__).with_name('prepare-early-phase4.py')),'early-contract.json','--output','early-plan'],check=True)
 plan=json.loads(Path('early-plan/early-phase4.json').read_text())
 for p,digest in plan['verified_inputs'].items():assert sha(Path(p))==digest
 cap=int(plan['environment']['SIMPLE_PROCESS_TREE_RSS_CAP_KIB'])
-avail=int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemAvailable:')))
-assert cap<=avail*3//4 and avail>=cap+2*1024*1024,'hosted reserve unavailable'
+assert cap==reservation['cap_kib']
+reservation['launch_available_kib']=_budget.recheck(cap)
+Path('early-plan/resource-admission.json').write_text(json.dumps(reservation,indent=2))
 for p in plan['mkdir_before_start']:Path(p).mkdir(parents=True,exist_ok=False)
 env={k:v for k,v in os.environ.items() if not k.startswith('SIMPLE_')};env.update(plan['environment'])
 output=Path(plan['mkdir_before_start'][0]).parent
