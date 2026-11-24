@@ -1,7 +1,8 @@
 use compiler.driver.cache.initializer_link_capture_v1.{native_link_with_initializer_capture_v1}
 use compiler.driver.cache.initializer_object_capture_v1.{driver_capture_initializer_object_v1}
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs, disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_lease_begin, native_cache_lease_end, native_cache_sweep_with_lease, native_cache_build_root}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -920,13 +921,6 @@ fn driver_native_build_threads() -> i64:
     if parsed < 0:
         return 0
     parsed
-
-fn driver_native_build_cache_dir() -> text:
-    val dir = env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
-    if dir == "":
-        _sffi_path_join(machine_cache_root(), "native-build/v1")
-    else:
-        dir
 
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     _sffi_path_join(cache_dir, "build_cache.sdn")
@@ -2431,6 +2425,14 @@ fn _native_cache_scope_retention_first_call_v1() -> bool:
 
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
+        val lease = match native_cache_lease_begin(native_cache_build_root(env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "")):
+            case Ok(value): value
+            case Err(reason): return CompileResult.CodegenError(reason)
+        val result = self._compile_to_native_leased(output, lease)
+        native_cache_lease_end(lease)
+        result
+
+    me _compile_to_native_leased(output: text, lease: NativeCacheLease) -> CompileResult:
         log_phase("aot:native_entry")
         val ctx: CompileContext = _extract_driver_ctx(self)
         val backend_name = ctx.options.backend
@@ -2481,20 +2483,21 @@ impl CompilerDriver:
                     log_phase("aot:native_session_open:ok")
                     var session = loaded_session
                     val result = self._compile_to_native_with_backend_session(
-                        output, Some(session), native_target, native_cpu)
+                        output, Some(session), native_target, native_cpu, lease)
                     if not session.close():
                         return CompileResult.CodegenError(
                             "BACKEND_PLUGIN_TEARDOWN_FAILED: backend session close failed")
                     return result
         log_phase("aot:native_builtin:start")
         self._compile_to_native_with_backend_session(
-            output, nil, native_target, native_cpu)
+            output, nil, native_target, native_cpu, lease)
 
     me _compile_to_native_with_backend_session(
         output: text,
         backend_session: BackendSessionOwnedLeaseV2?,
         native_target: text,
-        native_cpu: text
+        native_cpu: text,
+        lease: NativeCacheLease
     ) -> CompileResult:
         val ctx: CompileContext = _extract_driver_ctx(self)
         val log = ctx.logger
@@ -2529,7 +2532,7 @@ impl CompilerDriver:
             print "[NATIVE] effective_backend={effective_backend}"
 
         # Load build cache
-        val cache_dir = driver_native_build_cache_dir()
+        val cache_dir = lease.cache_root
         if not _sffi_dir_create(cache_dir, true):
             return CompileResult.CodegenError(
                 "native-build failed to create cache directory {cache_dir}")
@@ -2604,9 +2607,8 @@ impl CompilerDriver:
                 env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "",
                 env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER") ?? "") and
                 _native_cache_scope_retention_first_call_v1():
-            val _scopes_evicted = disk_bound_keep_newest_dirs(cache_dir, base_cache_scope_name, "s", 33,
-                disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6), 21600, true)
-            val _legacy_evicted = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1, 21600, true)
+            val _scopes_evicted = native_cache_sweep_with_lease(lease, base_cache_scope_name,
+                disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6))
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")

@@ -27,8 +27,8 @@ use std.io_runtime.{file_exists, file_read, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_empty}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1,
-    disk_bound_keep_newest_dirs}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_sweep_with_lease}
 
 # Native cache scope retention (driver_aot_native_output.spl) removes scope
 # directories idle past its window. A build's children must never run it: a
@@ -588,13 +588,9 @@ pub fn native_mir_shard_ledger_scope_dirs_v1(ledger: text) -> [text]:
 # takes the last slot when a child creates it. Returns directories removed.
 # reason: cache directory path, ledger paths and retention count in, removed-directory count out
 @allow(primitive_api)
-pub fn native_cache_scope_start_retention_v1(cache_dir: text, prior_ledgers: [text],
+pub fn native_cache_scope_start_retention_v1(lease: NativeCacheLease, prior_ledgers: [text],
         keep: i64) -> i64:
     for ledger in prior_ledgers:
         for scope in native_mir_shard_ledger_scope_dirs_v1(ledger):
             val _marked = disk_bound_mark_dir_used(scope)
-    val scopes = disk_bound_keep_newest_dirs(cache_dir, "", "s", 33, keep,
-        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1, true)
-    val legacy = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1,
-        NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1, true)
-    scopes + legacy
+    native_cache_sweep_with_lease(lease, "", keep, NATIVE_CACHE_SCOPE_IDLE_SECONDS_V1)
