@@ -52,6 +52,10 @@ use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_register_import_export_v1,
     reverse_reference_register_module_scc_peer_v1
 }
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
+use std.nogc_sync_mut.io.darwin_image_owner.{darwin_image_path}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.sffi.platform.{platform_name_raw}
 
 pub fn incremental_publish_direct_import_export_v1(subject: text,
         consumer: text, evidence: text):
@@ -662,7 +666,8 @@ fn native_build_unadmitted_identity_decision_v1(hashed_executable_hash: text,
       the kernel's own handle on the running image. A stale SIMPLE_BINARY, or
       a binary replaced on disk mid-run, would otherwise store this compiler's
       objects under another compiler's identity. Where the running image
-      cannot be hashed (no /proc/self/exe) the identity stays per-process."""
+      cannot be hashed via the kernel image handle, the identity stays
+      per-process."""
     if abi_policy != "" and abi_receipt_path != "":
         return "claimed"
     if abi_policy != "" or abi_receipt_path != "":
@@ -675,12 +680,57 @@ fn native_build_unadmitted_identity_decision_v1(hashed_executable_hash: text,
         return "per-process:hashed-path-is-not-the-running-image"
     "stable"
 
+fn _validated_kernel_image_path_v1(image_path: Result<text, text>) -> text:
+    """Return kernel-reported executable path unless empty or an interpreted .spl path."""
+    match image_path:
+        case Ok(path):
+            if path != "" and not path.ends_with(".spl"):
+                return path
+            return ""
+        case Err(_):
+            return ""
+
+# reason: internal running-image selector helper exported for unit specs
+@allow(primitive_api)
+pub fn native_build_select_running_image_path_v1(proc_self_exists: bool,
+        is_windows: bool, raw_platform: text, win_path: Result<text, text>,
+        mac_path: Result<text, text>) -> text:
+    """Select the kernel-owned running executable path without argv[0] or env.
+
+    Windows falls back lexically in _fullpath(\"/proc/self/exe\"), so Windows
+    accepts only GetModuleFileNameW (`win_path`); macOS accepts only
+    `_NSGetExecutablePath` (`mac_path`); Linux/BSD use `/proc/self/exe`."""
+    if is_windows or raw_platform == "windows":
+        return _validated_kernel_image_path_v1(win_path)
+    if raw_platform == "macos" or raw_platform == "darwin":
+        return _validated_kernel_image_path_v1(mac_path)
+    if proc_self_exists:
+        return "/proc/self/exe"
+    ""
+
 fn native_build_running_image_hash() -> text:
     if _running_image_hash_memo == "@@unset@@":
         _running_image_hash_memo = ""
-        if rt_file_exists("/proc/self/exe"):
-            if val image_hash = rt_file_hash_sha256("/proc/self/exe"):
-                _running_image_hash_memo = image_hash
+        val is_windows = host_is_windows_host()
+        val raw_platform = platform_name_raw()
+        val proc_self_exists = if is_windows or raw_platform == "macos" or raw_platform == "darwin":
+            false
+        else:
+            rt_file_exists("/proc/self/exe")
+        val win_path: Result<text, text> = if is_windows or raw_platform == "windows":
+            windows_image_path()
+        else:
+            Err("inactive-platform")
+        val mac_path: Result<text, text> = if (not is_windows) and (raw_platform == "macos" or raw_platform == "darwin"):
+            darwin_image_path()
+        else:
+            Err("inactive-platform")
+        val image_path = native_build_select_running_image_path_v1(
+            proc_self_exists, is_windows, raw_platform, win_path, mac_path)
+        if image_path != "" and rt_file_exists(image_path):
+            if val image_hash = rt_file_hash_sha256(image_path):
+                if native_build_canonical_sha256_v1(image_hash):
+                    _running_image_hash_memo = image_hash
     _running_image_hash_memo
 
 fn native_build_unadmitted_producer_identity(executable_hash: text,
@@ -2539,7 +2589,7 @@ fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> 
 
 
 export native_build_object_producer_identity, native_build_source_tree_is_producer_v1, native_build_producer_source_term_v1, native_build_declare_linked_worker_entry_v1
-export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity, native_build_unadmitted_producer_identity, native_build_unadmitted_identity_decision_v1
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_frontend_portable_source_digest_v1, native_build_compiler_executable_hash, native_build_producer_identity, native_build_unadmitted_producer_identity, native_build_unadmitted_identity_decision_v1, native_build_select_running_image_path_v1, native_build_running_image_hash
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
 # losing both methods and fields). All parameters and results are plain data.
