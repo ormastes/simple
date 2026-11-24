@@ -17,3 +17,6 @@
   `PeImagePolicy.default()` stack reserve raised to 64 MiB for the internal COFF linker.
 - **Still open:** `lower_expr` recursion on long binary-operator chains is unbounded in the source;
   an iterative lowering of left-assoc chains would remove the dependence on stack size entirely.
+- **Open gaps (review 2026-11-24):** the `extra_args` override check matches `/STACK:` exact-case only (lld-link also
+  accepts `/stack:`, `-STACK:`; the explicit flag still wins because it is pushed last). The windows-gnu lane
+  (`native_all_support.spl` `NATIVE_MINGW_STACK_RESERVE_BYTES`, 8 MiB) would recur the overflow for a mingw-built compiler.
