@@ -139,7 +139,7 @@ struct slang_request {
     int tree;
     int seq;
     int tree_owner;
-    int restore_pending;      /* mode 3 host restore still to run (outside the lock) */
+    int restore_pending;      /* mode 4 host restore still to run (outside the lock) */
     llama_token *path;
     int64_t path_len;
     int64_t path_cap;
@@ -538,12 +538,12 @@ int64_t slang_ggml_out_byte(int64_t i) {
 /* ---- lifecycle ------------------------------------------------------- */
 
 /* ggml-vulkan reads GGML_VK_DISABLE_FUSION once, when it creates the device, and
- * keeps the device for the process. Tree KV mode 3 gives the cache a 16-stream
- * KV layout; with fusion on, the one-stream cache-off graph runs the fused
- * rms_norm/rope/set_rows kernels while the multi-stream graph does not, so the
- * two paths differ in the last bits. Mode 3 can be configured at any time, so
- * fusion is turned off here, before any device exists. An explicit value from
- * the environment wins. See doc/08_tracking/bug/
+ * keeps the device for the process. Tree KV modes 3 and 4 give the cache a
+ * 16-stream KV layout; with fusion on, the one-stream cache-off graph runs the
+ * fused rms_norm/rope/set_rows kernels while the multi-stream graph does not,
+ * so the two paths differ in the last bits. Modes 3 and 4 can be configured at
+ * any time, so fusion is turned off here, before any device exists. An explicit
+ * value from the environment wins. See doc/08_tracking/bug/
  * slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md (C1). */
 static void slang_vulkan_fusion_off(void) {
     if (getenv("GGML_VK_DISABLE_FUSION") != NULL) return;
@@ -670,9 +670,9 @@ static int64_t g_tree_cells = 0;
 static int64_t g_tree_active = 0;     /* handle of the request on the context */
 static int g_tree_warm = 0;           /* the context has run a full micro-batch */
 
-/* Mode 3 keeps the last two seq ids out of circulation: the last is a never-decoded
- * "pristine" stream a request stream is zeroed from (slang_tree_zero_stream), the
- * one before it is the scratch stream slang_tree_flush_stream_copies decodes on. */
+/* Modes 3 and 4 keep the last two seq ids out of circulation: the last is a never-decoded
+ * "pristine" stream a request stream is zeroed from (slang_tree_zero_stream), and the
+ * one before it is the scratch stream slang_tree_flush_stream_copies decodes on (mode 4). */
 #define SLANG_TREE_PRISTINE_SEQ (SLANG_TREE_MAX_SEQS - 1)
 #define SLANG_TREE_SCRATCH_SEQ  (SLANG_TREE_MAX_SEQS - 2)
 static int slang_tree_usable_seqs(void) {
@@ -960,7 +960,7 @@ static void slang_tree_destroy(void) {
     g_tree_limit = 0; g_tree_cells = 0; g_tree_active = 0; g_tree_warm = 0;
 }
 
-/* Mode 3, option (b) of slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md:
+/* Modes 3 and 4, option (b) of slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md:
  * a stream a request takes may hold K/V cells of an earlier, longer request past
  * the new frontier, and flash attention is not independent of them. A seq_cp from
  * the never-decoded pristine stream replaces the whole destination stream (data
@@ -1021,6 +1021,8 @@ static int slang_tree_kv_holds(int seq, int64_t count) {
  * terminal (or frees its seq id when it cannot be kept) and frees the context
  * for the next request. Idempotent. */
 static void slang_tree_release_locked(struct slang_request *request) {
+    int was_pending = request->restore_pending;
+    request->restore_pending = 0;
     if (request->tree_owner >= 0) {
         struct slang_tree_node *o = &g_tree_node[request->tree_owner];
         if (o->used && o->pins > 0) o->pins--;
@@ -1030,7 +1032,7 @@ static void slang_tree_release_locked(struct slang_request *request) {
     int seq = request->seq;
     int inserted = 0;
     if (g_tree_ctx != NULL && slang_tree_capacity() > 0 && request->path_len > 0 &&
-        slang_tree_kv_holds(seq, request->path_len))
+        !was_pending && slang_tree_kv_holds(seq, request->path_len))
     {
         /* Exact modes: only whole aligned micro-batches of the PROMPT are
          * reusable. The last prompt token is decoded alone, so the aligned
@@ -1085,6 +1087,7 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
     if (seq < 0) return SLANG_ERR_BUSY;
     int64_t reuse = 0;
     int overwritten = 0;   /* an owner copy replaces the whole stream, no zeroing needed first */
+    int want_restore = 0;
     int node = 0;
     int64_t matched = request->tok_len > 1
         ? slang_tree_match(request->tok, request->tok_len, &node) : 0;
@@ -1092,8 +1095,8 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
         /* At least one trailing token is recomputed so the backend produces
          * fresh boundary logits, as in snapshot mode. */
         reuse = matched < request->tok_len - 1 ? matched : request->tok_len - 1;
-        /* Modes 1 and 3 reuse whole micro-batches only: llama.cpp does not keep
-         * K/V bit-identical across micro-batch shapes, and a cold prompt
+        /* Modes 1, 3 and 4 reuse whole micro-batches only: llama.cpp does not
+         * keep K/V bit-identical across micro-batch shapes, and a cold prompt
          * decodes full n_ubatch chunks from position 0, so resuming on a chunk
          * boundary reproduces those chunks. Mode 2 reuses every matched token. */
         if (g_tree_mode != 2) {
@@ -1113,9 +1116,11 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
         }
         if (owner >= 0) {
             llama_memory_t memory = llama_get_memory(g_tree_ctx);
-            /* Per-sequence streams (mode 3) only copy whole sequences, and a copy
-             * would carry the owner's tail as stale cells: restore the prefix
-             * through the host instead. Unified KV just adds the seq id to cells. */
+            /* Per-sequence streams (modes 3/4) only copy whole sequences; mode 3
+             * reuses in place (`seq_cp` + `seq_rm`), while opt-in mode 4
+             * (`g_tree_host_restore`) restores the surviving prefix through host
+             * memory so no cell of the owner's tail survives past `reuse`.
+             * Unified KV just adds the seq id to cells. */
             overwritten = 1;
             g_tree_seq_dirty[seq] = 1;
             if (g_tree_mode == 3 && g_tree_host_restore) {
@@ -1123,20 +1128,20 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
                  * (slang_tree_restore_finish); g_tree_active already excludes others. */
                 llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
                 llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
-                request->restore_pending = 1;
+                want_restore = 1;
             } else if (g_tree_mode == 3) {
                 llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
                 llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
             } else {
                 llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, 0, (llama_pos)reuse);
             }
-            if (request->restore_pending || slang_tree_kv_holds(seq, reuse)) {
+            if (want_restore || slang_tree_kv_holds(seq, reuse)) {
                 g_tree_node[owner].pins++;
                 g_tree_node[owner].last_used = ++g_prefix_clock;
                 request->tree_owner = owner;
             } else {
                 llama_memory_seq_rm(memory, seq, -1, -1);
-                slang_tree_zero_stream(seq);   /* the failed restore left cells behind */
+                slang_tree_zero_stream(seq);   /* failed seq_cp/tail drop may leave cells behind */
                 g_prefix_restore_failures++;
                 reuse = 0;
             }
@@ -1150,6 +1155,7 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
         if (request->tree_owner >= 0 && g_tree_node[request->tree_owner].pins > 0)
             g_tree_node[request->tree_owner].pins--;
         request->tree_owner = -1;
+        request->restore_pending = 0;
         slang_tree_free_seq(seq);
         return SLANG_ERR_NO_CTX;
     }
@@ -1157,10 +1163,13 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
     request->path_len = reuse;
     request->seq = seq;
     request->eval_start = reuse;
+    request->restore_pending = want_restore;
     g_tree_active = handle;
     if (reuse > 0) {
-        g_prefix_hits++;
-        g_prefix_tokens_reused += reuse;
+        if (!want_restore) {
+            g_prefix_hits++;
+            g_prefix_tokens_reused += reuse;
+        }
     } else {
         g_prefix_misses++;
     }
@@ -1185,8 +1194,8 @@ static int slang_tree_decode(struct slang_request *request, const llama_token *t
     batch.n_tokens = (int32_t)n;
     int rc = llama_decode(request->ctx, batch);
     /* Unified KV shares one pool, so evicting another sequence can free a slot.
-     * In mode 3 every sequence owns its stream: eviction frees nothing here and
-     * would only wipe the cache, so fail fast. */
+     * In modes 3 and 4 every sequence owns its stream: eviction frees nothing
+     * here and would only wipe the cache, so fail fast. */
     while (rc == 1 && g_tree_mode != 3) {
         SLANG_LOCK();
         int evicted = slang_tree_evict_lru();
@@ -1231,24 +1240,38 @@ static int slang_tree_warm_first(struct slang_request *request, int64_t suffix_l
 }
 
 /* Runs the deferred mode 4 host restore with the lock released (two decodes and a
- * readback), then validates under the lock. A failed restore is a MISS: the stream
- * is dropped and re-zeroed, the failure counted, and nothing is reused. Returns the
- * reused token count. */
+ * readback), then validates and commits telemetry under the lock. A failed restore
+ * is a MISS: the stream is dropped, re-zeroed, and kept marked dirty for the cold
+ * decode that follows, the failure is counted, and nothing is reused. Returns the
+ * reused token count (>= 0) or a negative error if cancelled/released. */
 static int64_t slang_tree_restore_finish(struct slang_request *request) {
+    int seq = request->seq;
     int64_t reuse = request->eval_start;
-    int ok = slang_tree_restore_prefix_host(request->seq);
+    int ok = seq >= 0 && reuse > 0 ? slang_tree_restore_prefix_host(seq) : 0;
     SLANG_LOCK();
+    if (!request->active || request->cancelled || !request->restore_pending ||
+        request->seq != seq || seq < 0 || g_tree_ctx == NULL) {
+        request->restore_pending = 0;
+        SLANG_UNLOCK();
+        return request->cancelled ? SLANG_ERR_CANCELLED : SLANG_ERR_DECODE;
+    }
     request->restore_pending = 0;
-    if (!(ok && slang_tree_kv_holds(request->seq, reuse))) {
+    if (ok && slang_tree_kv_holds(seq, reuse)) {
+        g_prefix_hits++;
+        g_prefix_tokens_reused += reuse;
+    } else {
         if (request->tree_owner >= 0) {
             struct slang_tree_node *o = &g_tree_node[request->tree_owner];
             if (o->used && o->pins > 0) o->pins--;
             request->tree_owner = -1;
         }
-        llama_memory_seq_rm(llama_get_memory(g_tree_ctx), request->seq, -1, -1);
-        slang_tree_zero_stream(request->seq);
+        llama_memory_seq_rm(llama_get_memory(g_tree_ctx), seq, -1, -1);
+        slang_tree_zero_stream(seq);
+        /* The caller proceeds to cold prompt decode on seq, so keep it dirty
+         * for any later recycle. */
+        g_tree_seq_dirty[seq] = 1;
         g_prefix_restore_failures++;
-        g_prefix_hits--; g_prefix_tokens_reused -= reuse; g_prefix_misses++;
+        g_prefix_misses++;
         request->path_len = 0;
         request->eval_start = 0;
         reuse = 0;
@@ -1262,8 +1285,16 @@ static int64_t slang_tree_eval_prompt(struct slang_request *request) {
     if (request->seq < 0) {
         SLANG_LOCK();
         int64_t prepared = slang_tree_prepare_locked(request);
+        int pending = prepared > 0 && request->restore_pending;
         SLANG_UNLOCK();
         if (prepared < 0) return prepared;
+        if (pending) {
+            int64_t finished = slang_tree_restore_finish(request);
+            if (finished < 0) {
+                slang_request_release_lease(request);
+                return finished;
+            }
+        }
     }
     if (request->eval_start < 0 || request->eval_start > request->tok_len)
         return SLANG_ERR_DECODE;
@@ -1293,12 +1324,13 @@ static int64_t slang_tree_eval_prompt(struct slang_request *request) {
 
 /* Configures the prefix-cache mode: 0 = snapshot (default); 1 = radix tree over a
  * unified KV, reusing whole micro-batches; 2 = unified, reusing every matched
- * token; 3 = per-sequence KV streams (not unified), whole micro-batches. All tree
- * modes run on
- * one persistent multi-sequence context. cells is the unified KV size in
- * tokens (0 = 4 x the first request's n_ctx). The capacity bound is the
- * prefix-cache entry count (slang_ggml_prefix_cache_configure), at most
- * SLANG_TREE_MAX_SEQS - 1. Only while no request is open. */
+ * token; 3 = per-sequence KV streams (not unified), whole micro-batches, in-place
+ * reuse; 4 = mode 3 plus restoring the reused prefix through host memory (opt-in).
+ * All tree modes run on one persistent multi-sequence context. cells is the
+ * unified KV size in tokens (0 = 4 x the first request's n_ctx). The capacity
+ * bound is the prefix-cache entry count (slang_ggml_prefix_cache_configure),
+ * at most SLANG_TREE_MAX_SEQS - 1 (SLANG_TREE_MAX_SEQS - 3 in modes 3/4).
+ * Only while no request is open. */
 int64_t slang_ggml_prefix_cache_mode_configure(int64_t mode, int64_t cells) {
     if (mode < 0 || mode > 4 || cells < 0 || cells > INT32_MAX)
         return SLANG_ERR_INVALID;
@@ -1354,7 +1386,7 @@ static int64_t slang_request_create_model_locked(struct llama_model *model, int6
         if (g_tree_ctx == NULL) {
             int64_t cells = g_tree_cells_cfg > 0 ? g_tree_cells_cfg : n_ctx * 4;
             if (cells < n_ctx * 2) cells = n_ctx * 2;
-            /* Mode 3 (not unified) splits n_ctx evenly over the sequences. */
+            /* Modes 3 and 4 (not unified) split n_ctx evenly over the sequences. */
             if (g_tree_mode == 3) cells = n_ctx * SLANG_TREE_MAX_SEQS;
             if (cells > INT32_MAX) return SLANG_ERR_INVALID;
             struct llama_context_params tp = llama_context_default_params();
