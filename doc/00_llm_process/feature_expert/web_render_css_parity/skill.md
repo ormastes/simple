@@ -4640,3 +4640,27 @@ Three causes, none specific to absolutely positioned boxes. Measured with Libera
   - `width:30.2px` paints 640..760 (base 640..759).
 - **Spec:** `abspos_wrapped_lines_chrome159_spec` went from 0/4 on base to 4/4 on head. 35 neighbouring abspos / float / flex / button / pen-origin / wrap specs give results identical to base. The 1x catalog is byte-identical to base on all 8 pages.
 - **Open:** the multi-line wrap loop (`wrap_back_off_exact`) still ignores a box's remainder, so a run that wraps in a `30.25px` box fits each line against 30. Floats and inline-blocks sized shrink-to-fit still paint k x whole px at k > 1; only abspos boxes record the device width.
+
+## 2026-11-24 — exact width remainder: wrap loop, float / inline-block device width, em width decimals (exactwidth2 lane)
+
+Spec: `test/01_unit/browser_engine/exact_width_remainder_chrome159_spec.spl` (0/4 on 48d45e53a68, 4/4 after).
+Three open items from the abspos-wrap lane, all measured against Chrome 159 (Liberation Sans 16/20, k=1 and k=4).
+
+- **Wrap loop remainder.** `run_fits` already compared a one-line run with the box's exact width (`box_frac_w`). The multi-line loop (`_lay_compute_style_wrap_ranges_first_inner` + `wrap_back_off_exact`) still fitted against whole px, so `ll ll ll ll ll ll` in a `width:30.25px` box gave 3 lines; Chrome gives 2 (`ll ll ll` is 30.21875).
+  - The loop now takes a signed per-line remainder in milli-px. The greedy pass takes every byte whose whole-px sum may still fit: `sum*1000 < width*1000 + frac + 1000`.
+  - `wrap_back_off_exact` measures exactly every line whose sum is within 1 px of `width + frac`. With frac 0 it is byte-identical to the old rule (only `sum == width` is measured).
+  - Entry point: `compute_style_wrap_ranges_exact(txt, first_w, max_w, frac, first_frac, st, cpl)`. The plain wrappers pass 0.
+- **Mid-line first line.** A run after an inline sibling gets `first_frac = box frac + line_start_err - run_pen_err`. It is handed over by `g_text_first_line_err_pending`, which works like `g_text_first_line_dx_pending`. Without it, `<span>ll</span> ll ll ll ll ll` still took 3 lines.
+- **Device width at k>1.** The abspos rounded-right-edge path now covers three more box kinds:
+  - In-flow and float boxes with an authored width record `device-extra-width = round(k * width_milli)`, at the `box_frac_w_set` site in flow.
+  - Auto-width floats and inline-blocks with one text run record `round(k * (exact max-content - whole))`, via `shrink_box_device_extra_w`, which reuses `flex_item_text_frac_delta_milli_px`.
+
+  Two gates were changed to go with it:
+  - `paint_layout` now consumes `device-extra-width` for every non-`#text` box.
+  - `inline_item_width_err_milli` reads the extra width only for form controls (`form_control_tag`), so inline-block pens are unchanged.
+
+  The trap: the frac is signed. Float `ipsum` is laid out 43 px but is 42.6875 exact, so it is -1 device px (171 at k=4); `Hello world` is +1 (317).
+- **em widths.** `_decl_width_length_px` reads the full decimal for `width` only. `6.33em` at 16 px is 101.28, floored to a LayoutUnit, giving 101.265625 and so 101 px; `parse_decimal_x10` gave 100. Margins and heights keep `_decl_font_relative_length_px`, because the fracmargin lane owns em margins.
+- **Open:**
+  - At k=1 Chrome paints a fractional width as round(right) - round(left): `2.55rem` is 41 px and `4.04em` is 65 px. This renderer floors k=1 widths (40 / 64). The abspos `width:30.75px` box has the same gap.
+  - The authored and shrink device widths assume a whole-px left edge. A fractional x would need its error, as `absolute_box_snap` has.
