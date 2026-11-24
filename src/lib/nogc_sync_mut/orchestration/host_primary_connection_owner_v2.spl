@@ -33,13 +33,13 @@ pub struct HostPrimaryConnectionTurnV2:
     local: HostWindowsLocalRootV3
     helper: HostHelperLeaseV1
     plan: ContainerPrimaryConnectionPlanV2
-    record: ContainerPrimaryConnectionConsumptionV2? = nil
-    pending: ContainerPrimaryConnectionPendingV2? = nil
-    session: ContainerOwnedTerminalSessionV2? = nil
+    record: ContainerPrimaryConnectionConsumptionV2? = None
+    pending: ContainerPrimaryConnectionPendingV2? = None
+    session: ContainerOwnedTerminalSessionV2? = None
     consumption_attempted: bool = false
     error: text = ""
-    receipt: WindowsJournalConsumptionV1? = nil
-    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = nil
+    receipt: WindowsJournalConsumptionV1? = None
+    terminal: ContainerPrimaryConnectionAttemptTerminalV3? = None
 
 # Public metadata is checked against the actual current deployment and signed
 # retained execution. Revalidation never reconstructs a live receipt/session.
@@ -153,14 +153,14 @@ pub fn host_primary_connection_begin_v2(local: HostWindowsLocalRootV3,
     val retained = turn.local.retain_v3(local.capacity_v3(), planned.owner)
     if retained.is_err(): return connection_failed_v2(turn, retained.unwrap_err())
     if planned.error != "": return connection_failed_v2(turn, planned.error)
-    if planned.plan == nil or planned.plan.unwrap().request_digest != plan.request_digest:
+    if planned.plan.is_none() or planned.plan.unwrap().request_digest != plan.request_digest:
         return connection_failed_v2(turn, "host-primary-connection-fresh-plan-mismatch")
     turn.consumption_attempted = true
     val consumption = host_primary_connection_consume_owned_v3(turn.local, plan, helper)
     turn.record = consumption.record
     turn.receipt = consumption.receipt
     turn.consumption_attempted = consumption.publication_attempted
-    if consumption.error != "" or consumption.authority == nil: return connection_failed_v2(turn, consumption.error)
+    if consumption.error != "" or consumption.authority.is_none(): return connection_failed_v2(turn, consumption.error)
     # No fallible propagation beyond acquisition: save every returned owner.
     val opened = simple_container_primary_connection_begin_v2(turn.local.container_v3(), parent.execution,
         ContainerPrimaryConnectionAuthorityV2.WindowsVerified(consumption.authority.unwrap()))
@@ -177,8 +177,8 @@ pub fn host_primary_connection_cancel_v2(turn: HostPrimaryConnectionTurnV2) -> H
     if val pending = turn.pending:
         val cancelled = simple_container_primary_connection_cancel_v2(pending)
         retained.pending = cancelled.pending
-        if cancelled.terminal != nil: retained.terminal = cancelled.terminal
-        if cancelled.session != nil: retained.session = cancelled.session
+        if cancelled.terminal.is_some(): retained.terminal = cancelled.terminal
+        if cancelled.session.is_some(): retained.session = cancelled.session
         if retained.error == "": retained.error = cancelled.error
     if val session = retained.session:
         val cleaned = container_terminal_cleanup_v2(session)
@@ -188,10 +188,10 @@ pub fn host_primary_connection_cancel_v2(turn: HostPrimaryConnectionTurnV2) -> H
 
 pub fn host_primary_connection_step_v2(turn: HostPrimaryConnectionTurnV2) -> HostPrimaryConnectionTurnV2:
     if turn.error != "": return host_primary_connection_cancel_v2(turn)
-    if turn.pending == nil: return turn
+    if turn.pending.is_none(): return turn
     val current = host_primary_connection_validate_v2(turn.local, turn.plan, turn.helper)
     if current.is_err(): return host_primary_connection_cancel_v2(connection_failed_v2(turn, current.unwrap_err()))
-    if turn.record == nil:
+    if turn.record.is_none():
         return host_primary_connection_cancel_v2(connection_failed_v2(turn, "host-primary-connection-consumption-required"))
     val original = container_primary_connection_consumption_bytes_v2(turn.record.unwrap())
     val refreshed = container_primary_connection_consumption_bytes_v2(current.unwrap())
@@ -201,6 +201,6 @@ pub fn host_primary_connection_step_v2(turn: HostPrimaryConnectionTurnV2) -> Hos
     val progressed = simple_container_primary_connection_step_v2(turn.pending.unwrap())
     retained.pending = progressed.pending
     retained.session = progressed.session
-    if progressed.terminal != nil: retained.terminal = progressed.terminal
+    if progressed.terminal.is_some(): retained.terminal = progressed.terminal
     retained.error = progressed.error
     retained

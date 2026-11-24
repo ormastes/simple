@@ -1,0 +1,663 @@
+# @gc — module uses GC runtime
+#
+# cuda_compute — CUDA (NVIDIA) compute backend of the GPU API.
+#
+# Layering: slang -> pure LLM runner -> GPU API -> CUDA / ROCm. This is the CUDA
+# leg and mirrors rocm/hip_compute.spl: the CUDA driver API (nvcuda.dll /
+# libcuda.so.1) and NVRTC are loaded at run time with spl_dlopen / spl_dlsym and
+# called through spl_wffi_call_i64, so nothing links at build time and a host
+# without NVIDIA software only sees Err(text) from cuda_open. Host memory uses
+# the C runtime's malloc/free/memcpy through the same dynamic call path; no rt_*
+# extern is declared here. Every CUDA/NVRTC status other than 0 is Err(text).
+#
+# Differences from the HIP leg: the context is the device's primary context made
+# current on the opening thread (cuDevicePrimaryCtxRetain + cuCtxSetCurrent), so
+# every call on a CudaDevice must come from that thread; kernels are compiled by
+# NVRTC to a CUBIN for the device's sm_XY (PTX only as a fallback, see
+# cuda_kernel) and loaded by cuModuleLoadData; launch uses
+# cuLaunchKernelEx (CUDA 12.0+, 4 pointer arguments) so no wide-arity forwarder
+# is needed. Kernel parameter convention is identical to HIP: device pointers
+# first (8 bytes each), then 32-bit words (ints, or float bit patterns).
+#
+# Loading policy: nothing is loaded at import, link or startup. cuda_open_at is the
+# only loader; failure closes every handle it opened. Kernels compile lazily on
+# first use (cuda_kernel) and are cached per device.
+#
+# NOT verified on NVIDIA hardware (the authoring host is AMD-only): see
+# test/03_system/lib/slang/feature/slang_pure_cuda_ops_spec.spl.
+
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
+use std.nogc_sync_mut.sffi.raw_bytes.{bytes_from_raw}
+use std.common.binary_io.{f32_to_bits}
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.gc_async_mut.slang.host.slang_host.{host_env, host_os_name}
+
+@unsafe(reason: "passes a bounded caller-owned byte payload as one pointer argument", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
+
+# Launch scratch layout: argv at 0, kernel-param pointer array at 1024, config at 2048.
+val LAUNCH_PARAMS_OFF = 1024
+val LAUNCH_CFG_OFF = 2048
+
+# --- library name resolution (pure, per OS) ---------------------------------
+
+# Driver library candidates, most specific first. `os` is host_os_name() text.
+pub fn cuda_driver_lib_names(os: text) -> [text]:
+    if os == "windows":
+        return ["nvcuda.dll"]
+    ["libcuda.so.1", "libcuda.so"]
+
+# NVRTC candidates. Explicit overrides come first: `nvrtc_override` (full path to
+# the library, env SLANG_CUDA_NVRTC) then `bin_dir` (env SLANG_CUDA_BIN, or
+# CUDA_PATH\bin / CUDA_PATH\bin\x64 on Windows). Bare names last, left to the OS
+# loader (PATH / ld.so cache). Windows names: CUDA 13 ships nvrtc64_130_0.dll,
+# CUDA 12.x ships nvrtc64_120_0.dll, CUDA 11.2+ ships nvrtc64_112_0.dll.
+# `driver_major` (from cuDriverGetVersion, 0 = unknown) drops versioned NVRTC
+# names newer than the driver's major version: a driver only loads code from
+# an NVRTC of its own or an older major release. The override is never dropped.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_nvrtc_lib_names(os: text, nvrtc_override: text, bin_dir: text, driver_major: i64) -> [text]:
+    var out: [text] = []
+    if nvrtc_override != "":
+        out.push(nvrtc_override)
+    var all: [text] = []
+    var majors: [i64] = []
+    if os == "windows":
+        all = ["nvrtc64_130_0.dll", "nvrtc64_120_0.dll", "nvrtc64_112_0.dll"]
+        majors = [13, 12, 11]
+    else:
+        all = ["libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11.2", "libnvrtc.so"]
+        majors = [13, 12, 11, 0]
+    var bare: [text] = []
+    var k: i64 = 0
+    while k < all.len():
+        if driver_major <= 0 or majors[k] == 0 or majors[k] <= driver_major:
+            bare.push(all[k])
+        k = k + 1
+    if bin_dir != "":
+        val sep = if os == "windows": "\\" else: "/"
+        for b in bare:
+            out.push(bin_dir + sep + b)
+            if os == "windows":
+                out.push(bin_dir + sep + "x64" + sep + b)
+    for b in bare:
+        out.push(b)
+    out
+
+# C runtime used for host malloc/free/memcpy.
+pub fn cuda_libc_name(os: text) -> text:
+    if os == "windows":
+        return "ucrtbase.dll"
+    "libc.so.6"
+
+# CUDA bin directory hint: SLANG_CUDA_BIN, else CUDA_PATH\bin, else "".
+pub fn cuda_bin_default() -> text:
+    val env_dir = host_env("SLANG_CUDA_BIN")
+    if env_dir != "":
+        return env_dir
+    val cuda_path = host_env("CUDA_PATH")
+    if cuda_path != "":
+        if host_os_name() == "windows":
+            return cuda_path + "\\bin"
+        return cuda_path + "/lib64"
+    ""
+
+# --- argument packing (pure) --------------------------------------------------
+
+fn _i64_bytes(v: i64) -> [u8]:
+    var out: [u8] = []
+    var x = v
+    var i: i64 = 0
+    while i < 8:
+        out.push((x & 255) as u8)
+        x = x >> 8
+        i = i + 1
+    out
+
+fn _i32_bytes(v: i64) -> [u8]:
+    var out: [u8] = []
+    var x = v
+    var i: i64 = 0
+    while i < 4:
+        out.push((x & 255) as u8)
+        x = x >> 8
+        i = i + 1
+    out
+
+# Argument block for one launch, relative to the device's launch scratch `base`.
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub struct CudaArgPack:
+    argv: [u8]
+    params: [u8]
+
+# `argv` holds the argument values back to back (8-byte pointers, then 4-byte
+# words); `params` is the void** array of addresses of those values. Returns Err
+# when the arguments do not fit the scratch layout.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_pack_args(base: i64, ptr_args: [i64], word_args: [i64]) -> Result<CudaArgPack, text>:
+    val np = ptr_args.len()
+    val nw = word_args.len()
+    if np * 8 + nw * 4 > LAUNCH_PARAMS_OFF or (np + nw) * 8 > LAUNCH_CFG_OFF - LAUNCH_PARAMS_OFF:
+        return Err("CUDA: too many kernel arguments")
+    var argv: [u8] = []
+    var params: [u8] = []
+    var i: i64 = 0
+    while i < np:
+        argv = argv + _i64_bytes(ptr_args[i])
+        params = params + _i64_bytes(base + i * 8)
+        i = i + 1
+    var j: i64 = 0
+    while j < nw:
+        argv = argv + _i32_bytes(word_args[j])
+        params = params + _i64_bytes(base + np * 8 + j * 4)
+        j = j + 1
+    Ok(CudaArgPack(argv: argv, params: params))
+
+# CUlaunchConfig (56 bytes): gridDim x/y/z, blockDim x/y/z, sharedMemBytes (7 x
+# u32 at 0..28), 4 bytes padding, hStream (0 = default stream) at 32, attrs
+# pointer at 40, numAttrs (u32) at 48, 4 bytes tail padding.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_launch_config_bytes(grid_x: i64, block_x: i64) -> [u8]:
+    var cfg: [u8] = _i32_bytes(grid_x) + _i32_bytes(1) + _i32_bytes(1) + _i32_bytes(block_x) + _i32_bytes(1) + _i32_bytes(1) + _i32_bytes(0)
+    cfg = cfg + _i32_bytes(0) + _i64_bytes(0) + _i64_bytes(0) + _i32_bytes(0) + _i32_bytes(0)
+    cfg
+
+# f32 bit pattern of `v`, as the i32 word a kernel `float` parameter receives.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_f32_word(v: f64) -> i64:
+    (f32_to_bits(v as f32) as i64) & 4294967295
+
+# Host f64 -> little-endian f32 bytes.
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_f32_bytes(values: [f64]) -> [u8]:
+    var out: [u8] = []
+    for v in values:
+        val bits = f32_to_bits(v as f32) as i64
+        out.push((bits & 255) as u8)
+        out.push(((bits >> 8) & 255) as u8)
+        out.push(((bits >> 16) & 255) as u8)
+        out.push(((bits >> 24) & 255) as u8)
+    out
+
+# --- device ---------------------------------------------------------------------
+
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub class CudaDevice:
+    name: text
+    ctx: i64
+    f_malloc: i64
+    f_free: i64
+    f_htod: i64
+    f_dtoh: i64
+    f_sync: i64
+    f_modload: i64
+    f_getfn: i64
+    f_launch: i64
+    f_modunload: i64
+    f_rtc_create: i64
+    f_rtc_compile: i64
+    f_rtc_log_size: i64
+    f_rtc_log: i64
+    f_rtc_code_size: i64
+    f_rtc_code: i64
+    f_rtc_cubin_size: i64
+    f_rtc_cubin: i64
+    f_rtc_destroy: i64
+    # Compute capability as major*10 + minor (e.g. 86), read at open.
+    cc: i64
+    c_malloc: i64
+    c_free: i64
+    c_memcpy: i64
+    scratch: i64
+    launch_scratch: i64
+    kernels: Dict<text, i64>
+    # Teardown state for cuda_close: every loaded module, the CUdevice whose
+    # primary context was retained, its release entry point, and the three
+    # library handles opened by cuda_open_at.
+    modules: [i64]
+    cu_dev: i64
+    f_release: i64
+    lib_c: i64
+    lib_drv: i64
+    lib_rtc: i64
+
+# Named _cu_need (not _need): hip_compute has a same-signature private _need,
+# and co-compiled same-signature privates collapse to one body, so a CUDA
+# missing-symbol error could read "ROCm: missing symbol".
+fn _cu_need(lib: i64, sym: text) -> Result<i64, text>:
+    val f = spl_dlsym(lib, sym)
+    if f == 0:
+        return Err("CUDA: missing symbol {sym}")
+    Ok(f)
+
+fn _cu_err(what: text, rc: i64) -> text:
+    "CUDA: {what} failed rc={rc}"
+
+# Call a CUDA/NVRTC entry point and return its status. CUresult and
+# nvrtcResult are 32-bit enums: the upper half of the 64-bit return register is
+# unspecified by the ABI, so only the low 32 bits are the status.
+fn _call_rc(f: i64, args: [i64], nargs: i64) -> i64:
+    spl_wffi_call_i64(f, args, nargs) & 4294967295
+
+# NVRTC_ERROR_INVALID_OPTION: the compile options were rejected (here: an
+# --gpu-architecture newer than this NVRTC knows).
+val NVRTC_ERROR_INVALID_OPTION = 5
+
+# Little-endian integer of `width` bytes at host address `addr`.
+fn _read_le(addr: i64, width: i64) -> i64:
+    val b = bytes_from_raw(addr, width)
+    var v: i64 = 0
+    var i: i64 = width - 1
+    while i >= 0:
+        v = v * 256 + (b[i] as i64)
+        i = i - 1
+    v
+
+fn _read_i64(addr: i64) -> i64:
+    _read_le(addr, 8)
+
+fn _host_write(dev: CudaDevice, dst: i64, bytes: [u8], offset: i64, length: i64) -> i64:
+    spl_wffi_call_i64_with_bytes(dev.c_memcpy, [dst], bytes, offset, length, [length])
+
+fn _cstring(dev: CudaDevice, s: text) -> i64:
+    var b: [u8] = text_to_utf8_bytes(s)
+    b.push(0)
+    val p = spl_wffi_call_i64(dev.c_malloc, [b.len()], 1)
+    _host_write(dev, p, b, 0, b.len())
+    p
+
+fn _text_at(addr: i64, cap: i64) -> text:
+    val raw = bytes_from_raw(addr, cap)
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < raw.len() and raw[i] != 0:
+        out.push(raw[i])
+        i = i + 1
+    bytes_to_text(out)
+
+fn _open_first(names: [text]) -> i64:
+    for n in names:
+        val h = spl_dlopen(n)
+        if h != 0:
+            return h
+    0
+
+# True when a CUDA driver library can be located by name. Loads nothing
+# persistently: the probe handle is closed again. Never runs at import time.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_driver_available() -> bool:
+    val h = _open_first(cuda_driver_lib_names(host_os_name()))
+    if h == 0:
+        return false
+    spl_dlclose(h)
+    true
+
+# Resolve every symbol and allocate scratch. Scratch is allocated last, so an
+# Err from here leaks nothing.
+fn _cuda_build(libc: i64, drv: i64, rtc: i64) -> Result<CudaDevice, text>:
+    val c_malloc = _cu_need(libc, "malloc")?
+    val dev = CudaDevice(
+        name: "",
+        ctx: 0,
+        f_malloc: _cu_need(drv, "cuMemAlloc_v2")?,
+        f_free: _cu_need(drv, "cuMemFree_v2")?,
+        f_htod: _cu_need(drv, "cuMemcpyHtoD_v2")?,
+        f_dtoh: _cu_need(drv, "cuMemcpyDtoH_v2")?,
+        f_sync: _cu_need(drv, "cuCtxSynchronize")?,
+        f_modload: _cu_need(drv, "cuModuleLoadData")?,
+        f_getfn: _cu_need(drv, "cuModuleGetFunction")?,
+        f_launch: _cu_need(drv, "cuLaunchKernelEx")?,
+        f_modunload: _cu_need(drv, "cuModuleUnload")?,
+        f_rtc_create: _cu_need(rtc, "nvrtcCreateProgram")?,
+        f_rtc_compile: _cu_need(rtc, "nvrtcCompileProgram")?,
+        f_rtc_log_size: _cu_need(rtc, "nvrtcGetProgramLogSize")?,
+        f_rtc_log: _cu_need(rtc, "nvrtcGetProgramLog")?,
+        f_rtc_code_size: _cu_need(rtc, "nvrtcGetPTXSize")?,
+        f_rtc_code: _cu_need(rtc, "nvrtcGetPTX")?,
+        f_rtc_cubin_size: _cu_need(rtc, "nvrtcGetCUBINSize")?,
+        f_rtc_cubin: _cu_need(rtc, "nvrtcGetCUBIN")?,
+        f_rtc_destroy: _cu_need(rtc, "nvrtcDestroyProgram")?,
+        cc: 0,
+        c_malloc: c_malloc,
+        c_free: _cu_need(libc, "free")?,
+        c_memcpy: _cu_need(libc, "memcpy")?,
+        scratch: spl_wffi_call_i64(c_malloc, [512], 1),
+        launch_scratch: spl_wffi_call_i64(c_malloc, [4096], 1),
+        kernels: {},
+        modules: [],
+        cu_dev: 0,
+        f_release: 0,
+        lib_c: libc,
+        lib_drv: drv,
+        lib_rtc: rtc
+    )
+    Ok(dev)
+
+# cuInit, pick the device, read its name, retain the primary context and make it
+# current on this thread.
+fn _cuda_init(dev: CudaDevice, drv: i64, ordinal: i64) -> Result<i64, text>:
+    val f_init = _cu_need(drv, "cuInit")?
+    val f_get = _cu_need(drv, "cuDeviceGet")?
+    val f_name = _cu_need(drv, "cuDeviceGetName")?
+    val f_attr = _cu_need(drv, "cuDeviceGetAttribute")?
+    val f_retain = _cu_need(drv, "cuDevicePrimaryCtxRetain")?
+    # Resolved before the retain so a missing symbol cannot strand a retained context.
+    val f_release = _cu_need(drv, "cuDevicePrimaryCtxRelease_v2")?
+    val f_setctx = _cu_need(drv, "cuCtxSetCurrent")?
+    val rc_init = _call_rc(f_init, [0], 1)
+    if rc_init != 0:
+        return Err(_cu_err("cuInit", rc_init))
+    # CUdevice is a 32-bit int written to scratch[0..4].
+    val rc_get = _call_rc(f_get, [dev.scratch, ordinal], 2)
+    if rc_get != 0:
+        return Err(_cu_err("cuDeviceGet({ordinal})", rc_get))
+    val cu_dev = _read_le(dev.scratch, 4)
+    dev.cu_dev = cu_dev
+    val rc_name = _call_rc(f_name, [dev.scratch + 16, 256, cu_dev], 3)
+    if rc_name != 0:
+        return Err(_cu_err("cuDeviceGetName", rc_name))
+    dev.name = _text_at(dev.scratch + 16, 256)
+    # CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75, _MINOR = 76 (int out).
+    val rc_major = _call_rc(f_attr, [dev.scratch + 8, 75, cu_dev], 3)
+    if rc_major != 0:
+        return Err(_cu_err("cuDeviceGetAttribute(cc major)", rc_major))
+    val cc_major = _read_le(dev.scratch + 8, 4)
+    val rc_minor = _call_rc(f_attr, [dev.scratch + 8, 76, cu_dev], 3)
+    if rc_minor != 0:
+        return Err(_cu_err("cuDeviceGetAttribute(cc minor)", rc_minor))
+    dev.cc = cc_major * 10 + _read_le(dev.scratch + 8, 4)
+    val rc_ctx = _call_rc(f_retain, [dev.scratch, cu_dev], 2)
+    if rc_ctx != 0:
+        return Err(_cu_err("cuDevicePrimaryCtxRetain", rc_ctx))
+    dev.ctx = _read_i64(dev.scratch)
+    dev.f_release = f_release
+    val rc_cur = _call_rc(f_setctx, [dev.ctx], 1)
+    if rc_cur != 0:
+        spl_wffi_call_i64(f_release, [cu_dev], 1)
+        dev.ctx = 0
+        return Err(_cu_err("cuCtxSetCurrent", rc_cur))
+    Ok(0)
+
+# CUDA driver major version (12 for 12040), 0 when it cannot be read.
+# cuDriverGetVersion needs no cuInit.
+fn _driver_major(libc: i64, drv: i64) -> i64:
+    val f_ver = spl_dlsym(drv, "cuDriverGetVersion")
+    val f_malloc = spl_dlsym(libc, "malloc")
+    val f_free = spl_dlsym(libc, "free")
+    if f_ver == 0 or f_malloc == 0 or f_free == 0:
+        return 0
+    val p = spl_wffi_call_i64(f_malloc, [8], 1)
+    if p == 0:
+        return 0
+    var major: i64 = 0
+    if _call_rc(f_ver, [p], 1) == 0:
+        major = _read_le(p, 4) / 1000
+    spl_wffi_call_i64(f_free, [p], 1)
+    major
+
+# Open device `ordinal`. This is the ONLY place the driver, NVRTC and the C
+# runtime are loaded (never at import, link or startup). On any failure every
+# library handle opened here is closed and the host scratch blocks are freed
+# before the Err (with its reason) is returned. NVRTC kernels are compiled
+# lazily by cuda_kernel on first use and cached on the device.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_open_at(ordinal: i64, bin_dir: text) -> Result<CudaDevice, text>:
+    val os = host_os_name()
+    val libc = spl_dlopen(cuda_libc_name(os))
+    if libc == 0:
+        return Err("CUDA: dlopen failed for {cuda_libc_name(os)}")
+    val drv = _open_first(cuda_driver_lib_names(os))
+    if drv == 0:
+        spl_dlclose(libc)
+        return Err("CUDA: driver library not found (tried {cuda_driver_lib_names(os)}); no NVIDIA driver installed")
+    val driver_major = _driver_major(libc, drv)
+    val rtc = _open_first(cuda_nvrtc_lib_names(os, host_env("SLANG_CUDA_NVRTC"), bin_dir, driver_major))
+    if rtc == 0:
+        spl_dlclose(drv)
+        spl_dlclose(libc)
+        return Err("CUDA: NVRTC (major <= driver major {driver_major}) not found; install the CUDA toolkit or set SLANG_CUDA_NVRTC / SLANG_CUDA_BIN")
+    val built = _cuda_build(libc, drv, rtc)
+    if built.is_err():
+        spl_dlclose(rtc)
+        spl_dlclose(drv)
+        spl_dlclose(libc)
+        return Err(built.unwrap_err())
+    val dev = built.unwrap()
+    var inited: Result<i64, text> = Ok(0)
+    if dev.scratch == 0 or dev.launch_scratch == 0:
+        inited = Err("CUDA: host scratch allocation failed")
+    else:
+        inited = _cuda_init(dev, drv, ordinal)
+    if inited.is_err():
+        if dev.scratch != 0:
+            spl_wffi_call_i64(dev.c_free, [dev.scratch], 1)
+        if dev.launch_scratch != 0:
+            spl_wffi_call_i64(dev.c_free, [dev.launch_scratch], 1)
+        spl_dlclose(rtc)
+        spl_dlclose(drv)
+        spl_dlclose(libc)
+        return Err(inited.unwrap_err())
+    Ok(dev)
+
+# Open device 0 with the default CUDA bin directory hint.
+pub fn cuda_open() -> Result<CudaDevice, text>:
+    cuda_open_at(0, cuda_bin_default())
+
+# Release everything cuda_open_at acquired: wait for pending work, unload every
+# module, release the retained primary context (when its last reference goes,
+# the driver destroys it together with any device buffer still allocated in
+# it), free the host scratch blocks and close NVRTC, the driver and the C
+# runtime. Must run on the opening thread; `dev` must not be used afterwards
+# (a second cuda_close is a no-op).
+pub fn cuda_close(dev: CudaDevice):
+    if dev.ctx != 0:
+        _call_rc(dev.f_sync, [], 0)
+        for m in dev.modules:
+            _call_rc(dev.f_modunload, [m], 1)
+        dev.modules = []
+        dev.kernels = {}
+        _call_rc(dev.f_release, [dev.cu_dev], 1)
+        dev.ctx = 0
+    if dev.scratch != 0:
+        spl_wffi_call_i64(dev.c_free, [dev.scratch], 1)
+        dev.scratch = 0
+    if dev.launch_scratch != 0:
+        spl_wffi_call_i64(dev.c_free, [dev.launch_scratch], 1)
+        dev.launch_scratch = 0
+    if dev.lib_rtc != 0:
+        spl_dlclose(dev.lib_rtc)
+        dev.lib_rtc = 0
+    if dev.lib_drv != 0:
+        spl_dlclose(dev.lib_drv)
+        dev.lib_drv = 0
+    if dev.lib_c != 0:
+        spl_dlclose(dev.lib_c)
+        dev.lib_c = 0
+
+# Device buffer of `n_floats` f32 values. cuMemAlloc rejects 0 bytes
+# (CUDA_ERROR_INVALID_VALUE), so an empty tensor still gets one 4-byte slot,
+# like the Vulkan provider.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_buffer_alloc(dev: CudaDevice, n_floats: i64) -> Result<i64, text>:
+    var bytes = n_floats * 4
+    if bytes < 4:
+        bytes = 4
+    val rc = _call_rc(dev.f_malloc, [dev.scratch, bytes], 2)
+    if rc != 0:
+        return Err(_cu_err("cuMemAlloc", rc))
+    Ok(_read_i64(dev.scratch))
+
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_buffer_free(dev: CudaDevice, ptr: i64) -> Result<i64, text>:
+    val rc = _call_rc(dev.f_free, [ptr], 1)
+    if rc != 0:
+        return Err(_cu_err("cuMemFree", rc))
+    Ok(0)
+
+# A zero-length transfer never reaches the driver.
+# Bulk upload of `byte_len` bytes of `bytes` from `offset` to device address `buf`.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_buffer_upload_bytes(dev: CudaDevice, buf: i64, bytes: [u8], offset: i64, byte_len: i64) -> Result<i64, text>:
+    if offset < 0 or byte_len < 0 or offset + byte_len > bytes.len():
+        return Err("CUDA: upload range {offset}+{byte_len} outside {bytes.len()} bytes")
+    if byte_len == 0:
+        return Ok(0)
+    val rc = spl_wffi_call_i64_with_bytes(dev.f_htod, [buf], bytes, offset, byte_len, [byte_len]) & 4294967295
+    if rc != 0:
+        return Err(_cu_err("cuMemcpyHtoD", rc))
+    Ok(byte_len)
+
+# Bulk download of `byte_len` bytes at device address `buf`.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_buffer_download_bytes(dev: CudaDevice, buf: i64, byte_len: i64) -> Result<[u8], text>:
+    if byte_len <= 0:
+        return Ok([])
+    val host = spl_wffi_call_i64(dev.c_malloc, [byte_len + 8], 1)
+    if host == 0:
+        return Err("CUDA: host allocation of {byte_len} bytes failed")
+    val rc = _call_rc(dev.f_dtoh, [host, buf, byte_len], 3)
+    if rc != 0:
+        spl_wffi_call_i64(dev.c_free, [host], 1)
+        return Err(_cu_err("cuMemcpyDtoH", rc))
+    val out = bytes_from_raw(host, byte_len)
+    spl_wffi_call_i64(dev.c_free, [host], 1)
+    Ok(out)
+
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_upload_f32(dev: CudaDevice, dptr: i64, values: [f64]) -> Result<i64, text>:
+    val b = cuda_f32_bytes(values)
+    cuda_buffer_upload_bytes(dev, dptr, b, 0, b.len())?
+    Ok(values.len())
+
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_sync(dev: CudaDevice) -> Result<i64, text>:
+    val rc = _call_rc(dev.f_sync, [], 0)
+    if rc != 0:
+        return Err(_cu_err("cuCtxSynchronize", rc))
+    Ok(0)
+
+# NVRTC output: `rc` is the nvrtcCompileProgram status (0 = `image` holds a
+# malloc'd, loadable code image), `msg` the Err text when anything failed.
+struct NvrtcImage:
+    rc: i64
+    image: i64
+    msg: text
+
+# One NVRTC compile of `source`. `arch` = "" compiles for NVRTC's default
+# virtual architecture and returns PTX; "sm_XY" returns a CUBIN. The program is
+# destroyed on every path. The program handle stays in scratch[0..8]; other
+# out-parameters use scratch+16; the options pointer array sits at scratch+400.
+fn _nvrtc_image(dev: CudaDevice, kernel: text, source: text, arch: text) -> NvrtcImage:
+    val s = dev.scratch
+    val w = s + 16
+    val opts = s + 400
+    val c_src = _cstring(dev, source)
+    val c_name = _cstring(dev, kernel + ".cu")
+    val rc_create = _call_rc(dev.f_rtc_create, [s, c_src, c_name, 0, 0, 0], 6)
+    spl_wffi_call_i64(dev.c_free, [c_src], 1)
+    spl_wffi_call_i64(dev.c_free, [c_name], 1)
+    if rc_create != 0:
+        return NvrtcImage(rc: rc_create, image: 0, msg: _cu_err("nvrtcCreateProgram", rc_create))
+    val prog = _read_i64(s)
+    var rc_compile: i64 = 0
+    if arch == "":
+        rc_compile = _call_rc(dev.f_rtc_compile, [prog, 0, 0], 3)
+    else:
+        val c_opt = _cstring(dev, "--gpu-architecture=" + arch)
+        _host_write(dev, opts, _i64_bytes(c_opt), 0, 8)
+        rc_compile = _call_rc(dev.f_rtc_compile, [prog, 1, opts], 3)
+        spl_wffi_call_i64(dev.c_free, [c_opt], 1)
+    if rc_compile != 0:
+        var log = "(no log)"
+        if _call_rc(dev.f_rtc_log_size, [prog, w], 2) == 0:
+            val log_n = _read_i64(w)
+            val log_buf = spl_wffi_call_i64(dev.c_malloc, [log_n + 8], 1)
+            if log_buf != 0:
+                if _call_rc(dev.f_rtc_log, [prog, log_buf], 2) == 0:
+                    log = _text_at(log_buf, log_n)
+                spl_wffi_call_i64(dev.c_free, [log_buf], 1)
+        spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
+        return NvrtcImage(rc: rc_compile, image: 0, msg: "CUDA: nvrtc compile of {kernel} ({arch}) failed rc={rc_compile}: {log}")
+    val f_size = if arch == "": dev.f_rtc_code_size else: dev.f_rtc_cubin_size
+    val f_get = if arch == "": dev.f_rtc_code else: dev.f_rtc_cubin
+    val what = if arch == "": "nvrtcGetPTX" else: "nvrtcGetCUBIN"
+    val rc_size = _call_rc(f_size, [prog, w], 2)
+    val code_n = _read_i64(w)
+    if rc_size != 0 or code_n <= 0:
+        spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
+        return NvrtcImage(rc: 0, image: 0, msg: "CUDA: {what}Size failed rc={rc_size} size={code_n}")
+    val code = spl_wffi_call_i64(dev.c_malloc, [code_n + 8], 1)
+    if code == 0:
+        spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
+        return NvrtcImage(rc: 0, image: 0, msg: "CUDA: host allocation of {code_n} image bytes failed")
+    val rc_get = _call_rc(f_get, [prog, code], 2)
+    spl_wffi_call_i64(dev.f_rtc_destroy, [s], 1)
+    if rc_get != 0:
+        spl_wffi_call_i64(dev.c_free, [code], 1)
+        return NvrtcImage(rc: 0, image: 0, msg: _cu_err(what, rc_get))
+    NvrtcImage(rc: 0, image: code, msg: "")
+
+# Compile `source` with NVRTC, load it, return the function handle for
+# `kernel`. Cached per device by `kernel`.
+#
+# Code-image choice: a CUBIN for the device's own sm_XY is tried first because
+# CUBIN is covered by CUDA minor-version compatibility (NVRTC 12.6 output loads
+# on a 12.2 driver), while PTX must be JIT-compiled by the driver and fails with
+# CUDA_ERROR_UNSUPPORTED_PTX_VERSION (rc=222) when the driver is older than the
+# NVRTC that produced it. Only when this NVRTC does not know the device's
+# architecture (NVRTC_ERROR_INVALID_OPTION: device newer than the toolkit) does
+# it fall back to default-architecture PTX, which a newer driver can JIT.
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_kernel(dev: CudaDevice, kernel: text, source: text) -> Result<i64, text>:
+    val cached = dev.kernels.get(kernel)
+    if cached.is_some():
+        return Ok(cached.unwrap())
+    val w = dev.scratch + 16
+    var img = NvrtcImage(rc: NVRTC_ERROR_INVALID_OPTION, image: 0, msg: "")
+    if dev.cc > 0:
+        img = _nvrtc_image(dev, kernel, source, "sm_{dev.cc}")
+    if img.image == 0 and img.rc == NVRTC_ERROR_INVALID_OPTION:
+        img = _nvrtc_image(dev, kernel, source, "")
+    if img.image == 0:
+        return Err(img.msg)
+    # PTX is NUL-terminated (nvrtcGetPTXSize counts the NUL); a CUBIN is an ELF
+    # image. cuModuleLoadData copies (and for PTX JIT-compiles) the image, so
+    # it is released once the module is loaded.
+    val rc_load = _call_rc(dev.f_modload, [w, img.image], 2)
+    spl_wffi_call_i64(dev.c_free, [img.image], 1)
+    if rc_load != 0:
+        return Err(_cu_err("cuModuleLoadData", rc_load))
+    val module = _read_i64(w)
+    val c_kernel = _cstring(dev, kernel)
+    val rc_fn = _call_rc(dev.f_getfn, [w, module, c_kernel], 3)
+    spl_wffi_call_i64(dev.c_free, [c_kernel], 1)
+    if rc_fn != 0:
+        spl_wffi_call_i64(dev.f_modunload, [module], 1)
+        return Err(_cu_err("cuModuleGetFunction({kernel})", rc_fn))
+    val kfn = _read_i64(w)
+    dev.modules.push(module)
+    dev.kernels[kernel] = kfn
+    Ok(kfn)
+
+# Launch `kfn` on a 1-D grid. `ptr_args` are device pointers, `word_args` are
+# 32-bit words (ints or cuda_f32_word values), in kernel parameter order.
+# An empty grid (grid_x < 1, e.g. an elementwise op over an empty tensor) is a
+# no-op: cuLaunchKernelEx rejects a zero grid dimension with
+# CUDA_ERROR_INVALID_VALUE. A block size below 1 is an Err.
+# Asynchronous on the default stream: call cuda_sync before reading results.
+@allow(primitive_api)  # reason: raw CUDA driver pointers, ordinals and byte counts are untyped integers at the C ABI
+pub fn cuda_launch(dev: CudaDevice, kfn: i64, grid_x: i64, block_x: i64, ptr_args: [i64], word_args: [i64]) -> Result<i64, text>:
+    if block_x < 1:
+        return Err("CUDA: block size {block_x} must be >= 1")
+    if grid_x < 1:
+        return Ok(0)
+    val base = dev.launch_scratch
+    val pack = cuda_pack_args(base, ptr_args, word_args)?
+    val cfg = cuda_launch_config_bytes(grid_x, block_x)
+    _host_write(dev, base, pack.argv, 0, pack.argv.len())
+    _host_write(dev, base + LAUNCH_PARAMS_OFF, pack.params, 0, pack.params.len())
+    _host_write(dev, base + LAUNCH_CFG_OFF, cfg, 0, cfg.len())
+    val rc = _call_rc(dev.f_launch, [base + LAUNCH_CFG_OFF, kfn, base + LAUNCH_PARAMS_OFF, 0], 4)
+    if rc != 0:
+        return Err(_cu_err("cuLaunchKernelEx", rc))
+    Ok(0)

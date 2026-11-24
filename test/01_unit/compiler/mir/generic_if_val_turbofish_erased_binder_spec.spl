@@ -1,0 +1,91 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+`if val present = tuple_at<T>(..)` inside `fn get<T>(..) -> T` keeps the
+erased Optional word; `return present` must not int-box the record handle.
+
+Bug: doc/08_tracking/bug/p2_generic_t_return_of_if_val_unwrapped_erased_record_int_boxed_2026_11_24.md
+
+The if-val binder is an ExistsCheck over a turbofish call whose actual is
+itself the enclosing erased binder `T`. `instantiated_direct_call_return_kind`
+has no concrete instantiation for it (`Optional(TypeParam)` is not concrete),
+and after #10930 the declared-signature fallback was skipped for every
+turbofish call, so the binder lost its `TElement?` type, lowered as a bare
+`I64`, and `lower_return_expr`'s `-> T` arm boxed it with rt_value_int_wide
+(record pointer << 3; Stage 3 `lower_index_expr` read garbage). The fallback
+is restored when the instantiation is not concrete.
+
+HIR is lowered with SIMPLE_BOOTSTRAP=1 and SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1
+(how native-build lowers a module). The runtime value itself cannot be
+observed here: that needs the Phase 2 compiler rebuilt from this source
+(probe files tg_a/tg_d/tg_e/tg_f in the bug record).
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val SOURCE: text = "struct R:\n    a: i64\n    b: text\n\n" +
+    "@unsafe(reason: \"fixture raw tuple ABI\", capabilities: [ffi])\nextern fn rt_tuple_get<TElement>(tuple: i64, index: i64) -> TElement?\n\n" +
+    "fn tuple_at<TElement>(tuple: i64, index: i64) -> TElement?:\n    unsafe(capabilities: [ffi]):\n        rt_tuple_get<TElement>(tuple, index)\n\n" +
+    "fn get_a<T>(tuple: i64, index: i64) -> T:\n    if val present = tuple_at<T>(tuple, index):\n        return present\n    panic(\"absent\")\n\n" +
+    "@always_inline\nfn get_e<T>(tuple: i64, index: i64) -> T:\n    if val present = tuple_at<T>(tuple, index):\n        return present\n    panic(\"absent\")\n\n" +
+    "fn get_f<T>(tuple: i64, index: i64) -> T:\n    val slot: T? = tuple_at<T>(tuple, index)\n    if val present = slot:\n        return present\n    panic(\"absent\")\n\n" +
+    "fn use_a(t: i64) -> i64:\n    val p: R = get_a<R>(t, 0)\n    p.a\n\n" +
+    "fn use_concrete(t: i64) -> i64:\n    if val p = tuple_at<R>(t, 0):\n        return p.a\n    0\n"
+
+fn lower_bootstrap_mir() -> Dict<text, text>:
+    val module = parse_and_build_module(SOURCE, "tq.spl")
+    var hir_lowering = HirLowering.with_filename("tq.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var errors = ""
+    for hir_error in hir_lowering.errors:
+        errors = errors + "hir: " + hir_error.message + "\n"
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    for error in mir_lowering.errors:
+        errors = errors + "mir: " + error.message + "\n"
+    var out: Dict<text, text> = {}
+    out["__errors__"] = errors
+    for function in mir.functions.values():
+        val prefix = "tq."
+        val short = if function.name.starts_with(prefix): function.name.substring(prefix.len(), function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+describe "if-val binder over an erased turbofish call in a `-> T` body (bootstrap HIR)":
+    it "lowers the probe module without HIR or MIR errors":
+        expect(lower_bootstrap_mir()["__errors__"] ?? "missing").to_equal("")
+
+    it "does not int-box the if-val binder returned from `-> T`":
+        val fns = lower_bootstrap_mir()
+        val mir = fns["get_a"] ?? "missing"
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
+
+    it "the @always_inline twin lowers the same way":
+        val mir = lower_bootstrap_mir()["get_e"] ?? "missing"
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
+
+    it "the typed `val slot: T?` form (source workaround) stays unboxed":
+        val mir = lower_bootstrap_mir()["get_f"] ?? "missing"
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
+
+    it "a concrete record caller does not int-decode the erased -> T result":
+        val mir = lower_bootstrap_mir()["use_a"] ?? "missing"
+        expect(mir.contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "a concrete turbofish if-val outside a generic body still substitutes":
+        val mir = lower_bootstrap_mir()["use_concrete"] ?? "missing"
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)

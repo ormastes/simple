@@ -1,0 +1,32 @@
+# REQ-MIR-ENUM-ARRAY-GLOBAL: an enum-element array global indexed by a
+# function must lower without demanding a record layout for the enum.
+# Bug: doc/08_tracking/bug/p2_mir_enum_array_global_index_no_unique_provider_layout_2026_11_24.md
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lowering_errors(source: text) -> [text]:
+    val parsed = parse_full_frontend(source, "enum_global.spl", "enum_global", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("enum_global.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for err in lowering.errors:
+        messages.push(err.message)
+    messages
+
+describe "enum array global indexed in a function":
+    """A `[Enum]` global read as `g[0]` must not demand a struct record layout."""
+    it "lowers `g[0]` on a `[Enum]` global without a record-layout demand":
+        """Mirrors `_elf_apply_target: [RelocArch]` in elf_static_link.spl."""
+        val errors = lowering_errors(
+            "enum Mode:\n    A\n    B\n\nvar g: [Mode] = []\n\nfn read_mode() -> Mode:\n    g = [Mode.B]\n    val x = g[0]\n    x\n")
+        for message in errors:
+            expect_not(message.contains("no unique provider layout"))
+        expect(errors.len()).to_equal(0)

@@ -60,7 +60,7 @@ impl WindowsDockerRuntimeProviderV1:
     pub static fn new(policy: WindowsDockerPolicyV1) -> WindowsDockerRuntimeProviderV1:
         WindowsDockerRuntimeProviderV1(policy: policy, scripted_mode: false,
             scripted_results: [], script_error: "", cursor: 0, records: [],
-            managed_scope: nil, launch_deadline: nil, scripted_admission_clock_ms: nil)
+            managed_scope: None, launch_deadline: None, scripted_admission_clock_ms: None)
 
     pub static fn scripted(policy: WindowsDockerPolicyV1,
             results: [WindowsDockerScriptedResultV1]) -> WindowsDockerRuntimeProviderV1:
@@ -91,7 +91,7 @@ impl WindowsDockerRuntimeProviderV1:
             case Some(previous):
                 if container_host_scope_bytes_v2(previous)? != container_host_scope_bytes_v2(scope)?:
                     return Err("windows-docker-scope-rebind-refused")
-            case nil: ()
+            case None: ()
         self.managed_scope = Some(scope)
         Ok(true)
 
@@ -111,11 +111,11 @@ impl WindowsDockerRuntimeProviderV1:
     fn _launch_admit(request: WindowsDockerRequestV1, action: text) -> Result<i64, text>:
         val deadline = match self.launch_deadline:
             case Some(value): value
-            case nil: return Err("docker-launch-deadline-required")
+            case None: return Err("docker-launch-deadline-required")
         val now_ms = if self.scripted_mode:
             match self.scripted_admission_clock_ms:
                 case Some(value): value
-                case nil: return Err("docker-script-admission-clock-required")
+                case None: return Err("docker-script-admission-clock-required")
         else:
             val sampled = time_sample_unix_micros_or_failure()
             if sampled < 0: return Err("docker-launch-clock-unavailable")
@@ -132,7 +132,7 @@ impl WindowsDockerRuntimeProviderV1:
         val now_ms = if self.scripted_mode:
             match self.scripted_admission_clock_ms:
                 case Some(value): value
-                case nil: return Err("docker-script-control-clock-required")
+                case None: return Err("docker-script-control-clock-required")
         else:
             val sampled = time_sample_unix_micros_or_failure()
             if sampled < 0: return Err("docker-control-clock-unavailable")
@@ -386,7 +386,7 @@ impl WindowsDockerRuntimeProviderV1:
         val observed_ms = if self.scripted_mode:
             match self.scripted_admission_clock_ms:
                 case Some(value): value
-                case nil: return Err("docker-script-observation-clock-required")
+                case None: return Err("docker-script-observation-clock-required")
         else:
             val sampled = time_sample_unix_micros_or_failure()
             if sampled < 0: return Err("docker-absence-clock-unavailable")
@@ -414,7 +414,7 @@ impl WindowsDockerRuntimeProviderV1:
         val observed_ms = if self.scripted_mode:
             match self.scripted_admission_clock_ms:
                 case Some(value): value
-                case nil: return Err("docker-script-observation-clock-required")
+                case None: return Err("docker-script-observation-clock-required")
         else:
             val sampled = time_sample_unix_micros_or_failure()
             if sampled < 0: return Err("docker-selected-user-clock-unavailable")
@@ -455,13 +455,13 @@ impl WindowsDockerRuntimeProviderV1:
         self._lifecycle(request, "wait", false)
 
     me fn _lifecycle(request: WindowsDockerRequestV1, operation: text, force: bool,
-            control_context: ContainerControlDeadlineV1? = nil) -> RuntimeOperationV1:
+            control_context: ContainerControlDeadlineV1? = None) -> RuntimeOperationV1:
         val before = match self._guard(request, operation):
             case Ok(value): value
             case Err(error): return self._failure(request, operation, error)
         if operation == "start" and before.phase == "running":
             return self._success(request, operation, runtime_command_empty(), before)
-        if operation == "stop" and before.phase == "exited" and control_context == nil:
+        if operation == "stop" and before.phase == "exited" and control_context.is_none():
             return self._success(request, operation, runtime_command_empty(), before)
         if operation == "start" and before.phase != "created": return self._failure(request, operation, "docker-start-phase-invalid")
         if operation == "destroy" and before.phase == "running" and not force:
@@ -481,7 +481,7 @@ impl WindowsDockerRuntimeProviderV1:
                 admission = match self._control_admit(request, operation, context):
                     case Ok(value): value
                     case Err(error): return self._failure(request, operation, error)
-            case nil: ()
+            case None: ()
         # A no-effect stop still validates an explicitly supplied context.
         if operation == "stop" and before.phase == "exited":
             return self._success(request, operation, runtime_command_empty(), before)
@@ -646,7 +646,7 @@ impl WindowsDockerRuntimeProviderV1:
                 return next
             val planned = match self.managed_scope:
                 case Some(scope): windows_docker_scoped_create_v2(self.policy, request, scope)
-                case nil: windows_docker_create_command_v1(self.policy, request)
+                case None: windows_docker_create_command_v1(self.policy, request)
             if planned.is_err(): return self._progress_fail_v2(next, planned.unwrap_err())
             val admission = self._launch_admit(request, "create")
             if admission.is_err(): return self._progress_fail_v2(next, admission.unwrap_err())

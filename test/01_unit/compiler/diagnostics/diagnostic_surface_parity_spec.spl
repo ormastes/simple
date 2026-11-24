@@ -25,7 +25,7 @@ Audience: diagnostics, lint, and LSP maintainers.
 
 use std.spec.*
 use std.nogc_sync_mut.fs.text_io.{file_read_text}
-use compiler.tools.lint.main.{Linter, lint_cli_source}
+use compiler.tools.lint.main.{Linter, LintRunResult, lint_cli_source}
 use compiler.tools.lint._LintMain.config_and_model.{LintLevel, lint_policy_code_for_rule}
 use app.cli.query_lint.{_qlint_collect_lint_diagnostics_json}
 use std.nogc_sync_mut.lsp.handlers.diagnostics.{_parse_compiler_json_diagnostic}
@@ -35,8 +35,21 @@ val FIXTURE = "test/01_unit/compiler/diagnostics/fixtures/diagnostic_surface_par
 fn fixture_with(attr: text) -> text:
     attr + "\n" + file_read_text(FIXTURE)
 
-fn policy_id(lint_name: text) -> text:
-    lint_policy_code_for_rule(lint_name)
+# The policy ID each surface itself printed (not re-derived by this spec):
+# the CLI prints a `  policy: <ID>` line under the finding, the LSP carries
+# `data.policy_id`. "" means the surface emitted no policy ID.
+fn cli_emitted_policy_id(r: LintRunResult) -> text:
+    for l in r.format().split("\n"):
+        val t = l.trim()
+        if t.starts_with("policy: "):
+            return t.slice(8).trim()
+    ""
+
+fn lsp_emitted_policy_id(d: Dict) -> text:
+    if not d.contains_key("data"):
+        return ""
+    val data = d["data"]
+    data["policy_id"] ?? ""
 
 fn add_unique(acc: [text], key: text) -> [text]:
     var out = acc
@@ -47,28 +60,62 @@ fn add_unique(acc: [text], key: text) -> [text]:
 fn cli_tuples(src: text) -> [text]:
     var out: [text] = []
     for r in lint_cli_source(Linter.new(), FIXTURE, src):
-        val id = policy_id(r.lint.code)
-        if id != "" and id != r.lint.code:
+        val id = cli_emitted_policy_id(r)
+        if id != "":
+            expect(id).to_equal(lint_policy_code_for_rule(r.lint.code))
             val sev = if r.lint.level == LintLevel.Deny: "error" else: if r.lint.level == LintLevel.Warn: "warning" else: "allow"
             out = add_unique(out, "{id}|{sev}|{r.line}")
     out.sort()
 
+fn lsp_diags(src: text) -> [Dict]:
+    var out: [Dict] = []
+    for raw in _qlint_collect_lint_diagnostics_json(FIXTURE, src).1:
+        match _parse_compiler_json_diagnostic(raw):
+            Some(d): out.push(d)
+            _: pass_do_nothing
+    out
+
 fn lsp_tuples(src: text) -> [text]:
     var out: [text] = []
-    val collected = _qlint_collect_lint_diagnostics_json(FIXTURE, src)
-    for raw in collected.1:
-        match _parse_compiler_json_diagnostic(raw):
-            Some(d):
-                val code: text = d["code"] ?? ""
-                val id = policy_id(code)
-                if id != "" and id != code:
-                    val sev_int = d["severity"].to_int()
-                    val sev = if sev_int == 1: "error" else: if sev_int == 2: "warning" else: "info"
-                    val line0: i64 = d["range"]["start"]["line"]
-                    out = add_unique(out, "{id}|{sev}|{line0 + 1}")
-            _: pass_do_nothing
+    for d in lsp_diags(src):
+        val id = lsp_emitted_policy_id(d)
+        if id != "":
+            val code: text = d["code"] ?? ""
+            expect(id).to_equal(lint_policy_code_for_rule(code))
+            val sev_int = d["severity"].to_int()
+            val sev = if sev_int == 1: "error" else: if sev_int == 2: "warning" else: "info"
+            val line0: i64 = d["range"]["start"]["line"]
+            out = add_unique(out, "{id}|{sev}|{line0 + 1}")
     out.sort()
 
+# Every (code, line) a surface reports, one entry per diagnostic (no dedup),
+# so granularity differences show up as count differences.
+fn cli_code_lines(src: text) -> [text]:
+    var out: [text] = []
+    for r in lint_cli_source(Linter.new(), FIXTURE, src):
+        out.push("{r.lint.code}@{r.line}")
+    out.sort()
+
+fn lsp_code_lines(src: text) -> [text]:
+    var out: [text] = []
+    for d in lsp_diags(src):
+        val code: text = d["code"] ?? ""
+        val line0: i64 = d["range"]["start"]["line"]
+        out.push("{code}@{line0 + 1}")
+    out.sort()
+
+fn only_codes(entries: [text], codes: [text]) -> [text]:
+    var out: [text] = []
+    for e in entries:
+        val code = e.split("@")[0]
+        if codes.contains(code):
+            out.push(e)
+    out
+
+# Outside-policy drift probe: a strict-tier file with a two-i64 + one-text
+# public signature and a bare `pass`.
+val DRIFT_SRC = "@lint_profile(strict)\npub fn two(a: i64, b: i64, name: text) -> Reading:\n    Reading(value: a)\n\nfn stub():\n    pass\n"
+val DRIFT_CODES = ["unknown_annotation", "DEPR003", "bare_text", "bare_text_domain", "primitive_api"]
 # @manual_section: diagnostic_surface_parity
 describe "RB-DIAG-01: same rule ID, severity, and line across CLI lint and LSP":
     """One fixture, three severity classes, identical (rule_id, severity, line) sets."""
@@ -93,3 +140,43 @@ describe "RB-DIAG-01: same rule ID, severity, and line across CLI lint and LSP":
         val lsp = lsp_tuples(src)
         expect(cli.len()).to_equal(0)
         expect(lsp).to_equal(cli)
+
+describe "RB-DIAG-01: each surface prints the policy rule ID itself":
+    it "CLI and LSP both emit SPL-TYPE-001 for a primitive_api finding":
+        val src = fixture_with("@warn(primitive_api)")
+        var cli_ids: [text] = []
+        for r in lint_cli_source(Linter.new(), FIXTURE, src):
+            if r.lint.code == "primitive_api":
+                cli_ids = add_unique(cli_ids, cli_emitted_policy_id(r))
+        var lsp_ids: [text] = []
+        for d in lsp_diags(src):
+            val code: text = d["code"] ?? ""
+            if code == "primitive_api":
+                lsp_ids = add_unique(lsp_ids, lsp_emitted_policy_id(d))
+        expect(cli_ids).to_equal(["SPL-TYPE-001"])
+        expect(lsp_ids).to_equal(cli_ids)
+
+describe "RB-DIAG-01: CLI and LSP agree outside the policy table":
+    """Granularity: one finding per exposed type slot (each parameter and the
+    return), on both surfaces. Each slot is fixed, ranked, and `@allow`ed on its
+    own, and the CLI's semantic pass already owns one finding per slot, so
+    collapsing to one-per-signature would hide independent defects."""
+
+    it "neither surface flags @lint_profile(strict) as unknown_annotation":
+        expect(only_codes(cli_code_lines(DRIFT_SRC), ["unknown_annotation"]).len()).to_equal(0)
+        expect(only_codes(lsp_code_lines(DRIFT_SRC), ["unknown_annotation"]).len()).to_equal(0)
+
+    it "both surfaces report DEPR003 for bare pass":
+        expect(only_codes(cli_code_lines(DRIFT_SRC), ["DEPR003"])).to_equal(["DEPR003@6"])
+        expect(only_codes(lsp_code_lines(DRIFT_SRC), ["DEPR003"])).to_equal(["DEPR003@6"])
+
+    it "both surfaces report bare_text for a public text parameter":
+        expect(only_codes(cli_code_lines(DRIFT_SRC), ["bare_text", "bare_text_domain"])).to_equal(["bare_text@2"])
+        expect(only_codes(lsp_code_lines(DRIFT_SRC), ["bare_text", "bare_text_domain"])).to_equal(["bare_text@2"])
+
+    it "both surfaces report primitive_api once per parameter":
+        expect(only_codes(cli_code_lines(DRIFT_SRC), ["primitive_api"])).to_equal(["primitive_api@2", "primitive_api@2"])
+        expect(only_codes(lsp_code_lines(DRIFT_SRC), ["primitive_api"])).to_equal(["primitive_api@2", "primitive_api@2"])
+
+    it "the full outside-policy code set matches between surfaces":
+        expect(only_codes(lsp_code_lines(DRIFT_SRC), DRIFT_CODES)).to_equal(only_codes(cli_code_lines(DRIFT_SRC), DRIFT_CODES))

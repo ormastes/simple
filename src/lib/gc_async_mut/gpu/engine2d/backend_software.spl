@@ -12,7 +12,7 @@
 # Usage:
 #   use std.gpu.engine2d.backend_software.{SoftwareBackend}
 
-use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity, ReadbackSource, readback_source_label}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity, engine2d_readback_rows, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
 use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend, blend_solid}
 use std.gpu.engine2d.backend_emu_math.{_emu_overlay_ch}
@@ -89,26 +89,38 @@ var _session_kernel_registrations: i64 = 0
 var _session_kernel_rejections: i64 = 0
 var _session_kernel_ready: bool = false
 
+# Each probe times the scalar oracle until it has run `iters` reps or this
+# window has passed, then times the SIMD kernel for the same rep count; both
+# loops read the clock once per rep, so the comparison stays fair. Under the
+# interpreter the scalar oracles are slow, and the fixed rep counts made the
+# 16 probes cost ~1.6 s on the first clear of every process (every web page
+# render); compiled code finishes the reps well inside the window. The blend
+# probes count their bit-exact pre-pass as the first rep of each side.
+val KERNEL_PROBE_WINDOW_US: i64 = 2000
+
 fn _kernel_probe_fill_bucket(n: i64, iters: i64) -> i64:
     """Measure scalar vs SIMD-ISA fill_const at `n` pixels x `iters` reps and
     return the KERNEL_PROBE_* verdict bitmask. fill_const is a verbatim store,
     bit-exact by construction, so KERNEL_PROBE_EXACT is always set."""
     var probe: [u32] = [0; n.to_i32()]
     val t0 = time_now_unix_micros()
+    var clock0 = t0
     var i0: i64 = 0
-    while i0 < iters:
+    while i0 < iters and clock0 - t0 < KERNEL_PROBE_WINDOW_US:
         _scalar_fill_row(probe, 0, n, 0xFF102030u32)
         i0 = i0 + 1
-    val t1 = time_now_unix_micros()
-    val scalar_us = t1 - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = clock0 - t0
     # Measure the actual SIMD-ISA fill_const kernel (the same function
     # simd_span_batch_execute calls when a slot resolves to SIMD_ISA).
-    val t2 = time_now_unix_micros()
-    var i2: i64 = 0
-    while i2 < iters:
+    val t1 = time_now_unix_micros()
+    var clock1 = t1
+    var i1: i64 = 0
+    while i1 < i0:
         simd_isa_fill_const(probe, 0, n, 0xFF102030)
-        i2 = i2 + 1
-    val simd_us = time_now_unix_micros() - t2
+        i1 = i1 + 1
+        clock1 = time_now_unix_micros()
+    val simd_us = clock1 - t1
     var verdict: i64 = KERNEL_PROBE_EXACT
     if simd_us < scalar_us:
         verdict = verdict + KERNEL_PROBE_FASTER
@@ -132,8 +144,12 @@ fn _kernel_probe_src_over_const_bucket(n: i64, iters: i64) -> i64:
     var simd_buf: [u32] = [0; n.to_i32()]
     oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
     oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    # The bit-exact pre-pass is also the first timed rep of each side.
+    val tp0 = time_now_unix_micros()
     oracle_src_over_const(oracle_buf, 0, n, colour)
+    val tp1 = time_now_unix_micros()
     simd_isa_src_over_const(simd_buf, 0, n, colour)
+    val tp2 = time_now_unix_micros()
     var exact = true
     var k: i64 = 0
     while k < n:
@@ -141,17 +157,21 @@ fn _kernel_probe_src_over_const_bucket(n: i64, iters: i64) -> i64:
             exact = false
         k = k + 1
     val t0 = time_now_unix_micros()
-    var i0: i64 = 0
-    while i0 < iters:
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
         oracle_src_over_const(oracle_buf, 0, n, colour)
         i0 = i0 + 1
-    val scalar_us = time_now_unix_micros() - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
     val t1 = time_now_unix_micros()
-    var i1: i64 = 0
-    while i1 < iters:
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
         simd_isa_src_over_const(simd_buf, 0, n, colour)
         i1 = i1 + 1
-    val simd_us = time_now_unix_micros() - t1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
     var verdict: i64 = 0
     if exact:
         verdict = verdict + KERNEL_PROBE_EXACT
@@ -169,8 +189,12 @@ fn _kernel_probe_src_over_image_bucket(n: i64, iters: i64) -> i64:
     var simd_buf: [u32] = [0; n.to_i32()]
     oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
     oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    # The bit-exact pre-pass is also the first timed rep of each side.
+    val tp0 = time_now_unix_micros()
     oracle_src_over_image(oracle_buf, 0, src, 0, n)
+    val tp1 = time_now_unix_micros()
     simd_isa_src_over_image(simd_buf, 0, src, 0, n)
+    val tp2 = time_now_unix_micros()
     var exact = true
     var k: i64 = 0
     while k < n:
@@ -178,17 +202,21 @@ fn _kernel_probe_src_over_image_bucket(n: i64, iters: i64) -> i64:
             exact = false
         k = k + 1
     val t0 = time_now_unix_micros()
-    var i0: i64 = 0
-    while i0 < iters:
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
         oracle_src_over_image(oracle_buf, 0, src, 0, n)
         i0 = i0 + 1
-    val scalar_us = time_now_unix_micros() - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
     val t1 = time_now_unix_micros()
-    var i1: i64 = 0
-    while i1 < iters:
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
         simd_isa_src_over_image(simd_buf, 0, src, 0, n)
         i1 = i1 + 1
-    val simd_us = time_now_unix_micros() - t1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
     var verdict: i64 = 0
     if exact:
         verdict = verdict + KERNEL_PROBE_EXACT
@@ -212,8 +240,12 @@ fn _kernel_probe_mask_src_over_bucket(n: i64, iters: i64) -> i64:
     var simd_buf: [u32] = [0; n.to_i32()]
     oracle_fill_const(oracle_buf, 0, n, 0xFF404040)
     oracle_fill_const(simd_buf, 0, n, 0xFF404040)
+    # The bit-exact pre-pass is also the first timed rep of each side.
+    val tp0 = time_now_unix_micros()
     oracle_mask_src_over(oracle_buf, 0, colour, mask, 0, n)
+    val tp1 = time_now_unix_micros()
     simd_isa_mask_src_over(simd_buf, 0, colour, mask, 0, n)
+    val tp2 = time_now_unix_micros()
     var exact = true
     var k: i64 = 0
     while k < n:
@@ -221,17 +253,21 @@ fn _kernel_probe_mask_src_over_bucket(n: i64, iters: i64) -> i64:
             exact = false
         k = k + 1
     val t0 = time_now_unix_micros()
-    var i0: i64 = 0
-    while i0 < iters:
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
         oracle_mask_src_over(oracle_buf, 0, colour, mask, 0, n)
         i0 = i0 + 1
-    val scalar_us = time_now_unix_micros() - t0
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
     val t1 = time_now_unix_micros()
-    var i1: i64 = 0
-    while i1 < iters:
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
         simd_isa_mask_src_over(simd_buf, 0, colour, mask, 0, n)
         i1 = i1 + 1
-    val simd_us = time_now_unix_micros() - t1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
     var verdict: i64 = 0
     if exact:
         verdict = verdict + KERNEL_PROBE_EXACT
@@ -709,6 +745,11 @@ impl RenderBackend for SoftwareBackend:
         var marked_ty = -1
         var marked_cs = -1
         var marked_ce = -1
+        # Per-row helper calls cost ~2 us each on the interpreter lane: the SIMD
+        # row switch is read once, and `_span_copy_safe_count` is written out
+        # below (same clamps: both spans in range, count = the shortest).
+        val simd_rows = not mask_active and self.native_simd_spans and native_pixel_rows_enabled()
+        val buf_len = buf.len()
         var row = 0
         # cpu-lane-loop-ok: one iteration per source image row while blitting; each unmasked row is one bulk span
         while row < h:
@@ -743,12 +784,19 @@ impl RenderBackend for SoftwareBackend:
                             if ce > self.clip_x + self.clip_w:
                                 ce = self.clip_x + self.clip_w
                         if ce > cs:
-                            val dst_off = py * self.w + cs
-                            val safe_count = _span_copy_safe_count(buf.len(), dst_off, pixels_len, src_off + cs - start_x, ce - cs)
+                            val dst_off = (py * self.w + cs).to_i64()
+                            val src_at = (src_off + cs - start_x).to_i64()
+                            var safe_count: i64 = 0
+                            if buf_len > 0 and dst_off >= 0 and dst_off < buf_len and pixels_len > 0 and src_at >= 0 and src_at < pixels_len:
+                                safe_count = (ce - cs).to_i64()
+                                if buf_len - dst_off < safe_count:
+                                    safe_count = buf_len - dst_off
+                                if pixels_len - src_at < safe_count:
+                                    safe_count = pixels_len - src_at
                             if safe_count > 0:
-                                if self.native_simd_spans and native_pixel_rows_enabled():
+                                if simd_rows:
                                     record_simd_copy_hit()
-                                buf.write_span(pixels, dst_off as i64, (src_off + cs - start_x) as i64, safe_count as i64)
+                                buf.write_span(pixels, dst_off, src_at, safe_count)
                             val ty = py / TILE_SIZE
                             if ty != marked_ty or cs != marked_cs or ce != marked_ce:
                                 self.mark_span_dirty(cs, py, ce - cs)
@@ -803,8 +851,8 @@ impl RenderBackend for SoftwareBackend:
         _sw_snapshot_buffer(self.buf, self.w * self.h)
 
     me read_pixels_with_source() -> Engine2DReadback:
-        engine2d_readback(_sw_snapshot_buffer(self.buf, self.w * self.h),
-                          readback_source_label(ReadbackSource.CpuMirror))
+        engine2d_readback_rows(_sw_snapshot_buffer(self.buf, self.w * self.h), self.w.to_i64(),
+                               readback_source_label(ReadbackSource.CpuMirror), 0, 0)
 
     me read_pixels_region(x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
         """Native region read (D9): copies exactly the requested rows out of

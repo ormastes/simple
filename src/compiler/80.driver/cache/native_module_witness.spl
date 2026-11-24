@@ -110,17 +110,37 @@ fn native_module_cache_witness_v1(
 
     var resolution_rows: [text] = []
     var import_ids: [text] = []
+    var import_digests: [text] = []
     for resolution in resolutions:
         if resolution.import_id == "" or resolution.selected == "" or
            resolution.dir_generation == "" or resolution.resolver_version == "" or
            resolution.probes.len() == 0:
             return native_module_cache_witness_invalid_v1("missing-resolution-fact")
-        if resolution.selected_count != 1 or import_ids.contains(resolution.import_id):
+        if resolution.selected_count != 1:
             return native_module_cache_witness_invalid_v1("ambiguous-resolution-fact")
-        import_ids.push(resolution.import_id)
         val digest = resolution_witness_digest(
             resolution.probes, resolution.selected,
             resolution.dir_generation, resolution.resolver_version)
+        # A module may import one target on several `use` lines (`use m.{a}`
+        # then `use m.{b}`, or `use m (...)` beside `export use m.{...}`); the
+        # resolver then records one trace per line with the same import id.
+        # A repeat that resolved exactly as the first one (same ordered probes,
+        # selection, directory generation and resolver version) states nothing
+        # new and is folded once; the items each line imports are bound by the
+        # dependency fold, which unions them per target. A repeat that resolved
+        # differently is a real ambiguity and stays invalid.
+        var seen_at = -1
+        var slot = 0
+        while slot < import_ids.len():
+            if import_ids[slot] == resolution.import_id:
+                seen_at = slot
+            slot = slot + 1
+        if seen_at >= 0:
+            if import_digests[seen_at] != digest:
+                return native_module_cache_witness_invalid_v1("ambiguous-resolution-fact")
+            continue
+        import_ids.push(resolution.import_id)
+        import_digests.push(digest)
         resolution_rows.push(canon_field("import", canon_str(resolution.import_id)) +
             canon_field("witness", canon_str(digest)))
 

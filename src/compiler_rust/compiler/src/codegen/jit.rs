@@ -66,7 +66,7 @@ impl JitCompiler {
         let settings = BackendSettings::jit();
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
-        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa.clone(), cranelift_module::default_libcall_names());
 
         // Register runtime SFFI symbols from the provider
         register_seed_jit_runtime_symbols(&mut builder, &seed_jit_runtime_symbol_table(provider.as_ref()));
@@ -74,7 +74,9 @@ impl JitCompiler {
         builder.symbol_lookup_fn(Box::new(|name| dlsym_lookup(name)));
 
         let module = JITModule::new(builder);
-        let backend = CodegenBackend::with_module(module)?;
+        let mut backend = CodegenBackend::with_module(module)?;
+        backend.codegen_isa = Some(isa);
+        backend.codegen_workers = jit_codegen_workers();
 
         Ok(Self {
             backend,
@@ -939,4 +941,17 @@ fn unresolved_import_kind(name: &str) -> &'static str {
     } else {
         "cross-module Simple function; per-module JIT does not link imported Simple functions"
     }
+}
+
+/// Codegen worker threads for the JIT (`CodegenBackend::codegen_workers`):
+/// `SIMPLE_JIT_CODEGEN_THREADS` (0 or 1 = serial), else up to 4. Translation
+/// stays serial and feeds the workers, so more than ~4 sit idle.
+fn jit_codegen_workers() -> usize {
+    if let Some(n) = std::env::var("SIMPLE_JIT_CODEGEN_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        return n;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get()).min(4)
 }

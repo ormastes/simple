@@ -6461,6 +6461,22 @@ pub extern "C" fn rt_any_to_int(value: RuntimeValue) -> i64 {
     crate::value::sffi::value_ops::rt_value_unbox_int(value)
 }
 
+/// `v as <int>` with `v: any` (MIR `lower_cast_expr`). Same as
+/// `rt_any_to_int` except TEXT, which takes the CAST contract of
+/// `rt_value_as_int` (one code point -> that code point, longer text ->
+/// lenient parse) instead of the `.to_i64()` parse: `s.char_at(i) as i64`
+/// lands here because `char_at` has no static return type, and the parse
+/// turned every ASCII digit into its numeric value under the JIT.
+/// doc/08_tracking/bug/char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md
+/// Twin: `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_any_cast_int(value: RuntimeValue) -> i64 {
+    if value.heap_type() == Some(HeapObjectType::String) {
+        return crate::value::sffi::value_ops::rt_value_as_int(value);
+    }
+    rt_any_to_int(value)
+}
+
 /// Task #118 canonical `int(text)` semantics: a TOTAL, non-erroring,
 /// leading-numeric-prefix parse — never fails. Skips leading whitespace, an
 /// optional `+`/`-` sign, then reads the longest run of leading ASCII

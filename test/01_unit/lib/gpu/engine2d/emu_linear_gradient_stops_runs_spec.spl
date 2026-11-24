@@ -1,0 +1,115 @@
+# @tag: unit, gpu, engine2d, software, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 2%
+#
+# The catalog header's `linear-gradient(120deg, #173b7a, #6d28d9)` at device
+# scale 4 is a 3240 x 388 box: emu_draw_linear_gradient_stops evaluated the
+# ramp position of every pixel (~2.7 us a pixel, 3.3 s on the html page).
+# Pixels must not change: every angle, the corner directions, multi-stop
+# ramps whose colours repeat, and odd widths are compared with the
+# per-pixel evaluation (the reference below is that loop), and translucent
+# stops (draw_image_blend rows) are pinned by a hash measured on the base
+# implementation (release/1.0.0 3a28b397fd7). The cost is pinned by a budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.backend_emu.{emu_draw_linear_gradient_stops, gradient_corner_dir_q16, _emu_gradient_sin_cos_q16, _emu_gradient_color_at_q16}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (release/1.0.0 3a28b397fd7).
+val HEADER_HASH: i64 = 1441753587
+val ALPHA_HASH: i64 = 3872054218
+
+fn reference_pixels(w: i32, h: i32, colors: [u32], positions: [i32], angle_deg: i32) -> [u32]:
+    val sc = if angle_deg >= 1000: gradient_corner_dir_q16(angle_deg, w, h) else: _emu_gradient_sin_cos_q16(angle_deg)
+    val s = sc[0]
+    val c = sc[1]
+    val sw = if s < 0: 0 - s else: s
+    val cw = if c < 0: 0 - c else: c
+    var len_q16 = (w as i64) * sw + (h as i64) * cw
+    if len_q16 < 1:
+        len_q16 = 1
+    var out: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    # cpu-lane-loop-ok: spec reference over the per-pixel ramp
+    while py < h:
+        val row_t = 0 - ((2 * py + 1 - h) as i64) * c
+        var px: i32 = 0
+        while px < w:
+            var t16 = 32768 + (((2 * px + 1 - w) as i64) * s + row_t) * 32768 / len_q16
+            if t16 < 0:
+                t16 = 0
+            if t16 > 65536:
+                t16 = 65536
+            out[py * w + px] = _emu_gradient_color_at_q16(colors, positions, (t16 / 64) * 64)
+            px = px + 1
+        py = py + 1
+    out
+
+fn painted(w: i32, h: i32, colors: [u32], positions: [i32], angle_deg: i32) -> [u32]:
+    var backend = SoftwareBackend.create_cpu_simd()
+    expect(backend.init(w, h)).to_equal(true)
+    backend.clear(0xff000000u32)
+    emu_draw_linear_gradient_stops(backend, 0, 0, w, h, colors, positions, angle_deg)
+    val px = backend.read_pixels()
+    backend.shutdown()
+    px
+
+fn sampled_hash(pixels: [u32], w: i32, h: i32) -> i64:
+    var acc: i64 = 17
+    var y = 0
+    # cpu-lane-loop-ok: spec probe over a 1-in-2 row / 1-in-3 column sample
+    while y < h:
+        var x = 0
+        while x < w:
+            acc = (acc * 31 + (pixels[y * w + x] as i64)) % 4294967291
+            x = x + 3
+        y = y + 2
+    acc
+
+describe "N-stop linear gradient rows":
+    it "matches the per-pixel ramp at every angle and stop shape":
+        val two: [u32] = [0xff173b7au32, 0xff6d28d9u32]
+        val two_pos: [i32] = [0, 1000]
+        val three: [u32] = [0xffff0000u32, 0xff0000ffu32, 0xffff0000u32]
+        val three_pos: [i32] = [0, 500, 1000]
+        val hard: [u32] = [0xff00ff00u32, 0xff00ff00u32, 0xff202020u32, 0xffe0e0e0u32]
+        val hard_pos: [i32] = [0, 300, 300, 1000]
+        val angles: [i32] = [0, 30, 45, 90, 120, 135, 180, 200, 270, 300, 359, 1045, 1135, 1225, 1315]
+        var bad = 0
+        for a in angles:
+            if painted(701, 97, two, two_pos, a) != reference_pixels(701, 97, two, two_pos, a):
+                print "mismatch two angle={a}"
+                bad = bad + 1
+            if painted(397, 171, three, three_pos, a) != reference_pixels(397, 171, three, three_pos, a):
+                print "mismatch three angle={a}"
+                bad = bad + 1
+            if painted(1601, 41, hard, hard_pos, a) != reference_pixels(1601, 41, hard, hard_pos, a):
+                print "mismatch hard angle={a}"
+                bad = bad + 1
+        expect(bad).to_equal(0)
+
+    it "paints translucent stops as measured":
+        val colors: [u32] = [0x80173b7au32, 0xff6d28d9u32, 0x00ffffffu32]
+        val positions: [i32] = [0, 600, 1000]
+        val px = painted(1029, 67, colors, positions, 120)
+        val h = sampled_hash(px, 1029, 67)
+        print "linear_gradient_alpha hash={h}"
+        expect(h).to_equal(ALPHA_HASH)
+
+    it "paints the 4x catalog header within a time budget":
+        var backend = SoftwareBackend.create_cpu_simd()
+        expect(backend.init(FRAME_W, FRAME_H)).to_equal(true)
+        backend.clear(0xffeef0ffu32)
+        val colors: [u32] = [0xff173b7au32, 0xff6d28d9u32]
+        val positions: [i32] = [0, 1000]
+        val t0 = time_now_unix_micros()
+        emu_draw_linear_gradient_stops(backend, 180, 96, 3240, 388, colors, positions, 120)
+        val elapsed = time_now_unix_micros() - t0
+        val px = backend.read_pixels()
+        backend.shutdown()
+        val h = sampled_hash(px, FRAME_W, FRAME_H)
+        print "linear_gradient_header elapsed_us={elapsed} hash={h}"
+        expect(h).to_equal(HEADER_HASH)
+        expect(elapsed < 1000000).to_equal(true)

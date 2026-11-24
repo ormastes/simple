@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Purpose: Pin gray glyphs (above the 48 device px LCD cutoff) at a FRACTIONAL
+size against Chrome 159 at k=4. Chrome scales the outline by the float size on
+both axes. This engine scaled only x by the float size and kept y at the
+integer size, so 13.333px text (53.33 device px) drew 53 px tall glyphs: ink
+mass 0.5-1.3% low and centroid 0.11-0.14 device row low. A text field's value,
+drawn at the 13.333px UA control font, inherited the same error once it took
+the float size (form_control_paint_chrome159_spec AC-11).
+Audience: web renderer text raster maintainers (sfnt_glyf outline, font_renderer
+gray phase cells).
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4`, window
+400x300. Liberation Sans, color #172033 on white (input values #000). Values
+are device (r,g,b).
+
+| case | device row | columns = Chrome rgb |
+|------|-----|----------------------|
+| `Simple` 13.333px | 59 | 67=(65,73,88) 69=(102,108,120) 70=(137,142,151) |
+| `HHHHH` 13.333px (crossbar edge) | 186 | 50=(196,199,203) 52=(196,199,203) 54=(196,199,203) |
+| `<input value=Simple>` | 403 | 87=(40,40,40) 88=(0,0,0) 90=(0,0,0) |
+| `<input value=HHHHH>` | 643 | 81=(0,0,0) 83=(0,0,0) 106=(0,0,0) |
+
+Base (400eae8a4dd): row 59 69=(41,49,67); row 186 50=(255,255,255); row 403
+88=(237,237,237); row 643 81=(255,255,255). Tolerance: 8 per channel, the
+catalog's mismatch threshold.
+"""
+
+"""
+Traceability: REQ-WEB-GRAY-GLYPH-FRACTIONAL-SIZE-001 — a grayscale glyph at a fractional font size is the outline scaled by the float size on both axes.
+"""
+# @tag: unit, browser_engine, text, device_scale, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val K: i32 = 4
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}} body{{margin:0;background:#fff;color:#172033;font:16px/1.5 'Liberation Sans'}} div.a{{position:absolute;left:10px;white-space:nowrap;line-height:normal}} input{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body><div class=\"a\" style=\"top:10px;font-size:13.333px\">Simple</div><div class=\"a\" style=\"top:40px;font-size:13.333px\">HHHHH</div><div class=\"a\" style=\"top:80px\"><input value=\"Simple\"></div><div class=\"a\" style=\"top:140px\"><input value=\"HHHHH\"></div></body></html>"
+
+fn _rgb(p: u32) -> [i32]:
+    [((p >> 16u32) & 0xFFu32) as i32, ((p >> 8u32) & 0xFFu32) as i32, (p & 0xFFu32) as i32]
+
+# "col=(r,g,b)" for each listed column: Chrome's value when every channel is
+# within 8, else ours.
+fn _row_text(px: [u32], y: i32, cols: [i32], chrome: [[i32]]) -> text:
+    val w = CSS_W * K
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _rgb(px[y * w + cols[i]])
+        var close = true
+        var ch = 0
+        while ch < 3:
+            val d = got[ch] - chrome[i][ch]
+            if d > 8 or d < -8:
+                close = false
+            ch = ch + 1
+        val shown = if close: chrome[i] else: got
+        s = s + "{cols[i]}=({shown[0]},{shown[1]},{shown[2]}) "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [[i32]]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}=({chrome[i][0]},{chrome[i][1]},{chrome[i][2]}) "
+        i = i + 1
+    s
+
+var g_px: [u32] = []
+
+fn _px() -> [u32]:
+    if g_px.len() == 0:
+        g_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, K, "cpu_simd")
+    g_px
+
+describe "Gray glyphs at a fractional size scale both axes by the float size (Chrome 159, k=4)":
+    it "AC-1: 13.333px `Simple` has Chrome's edge coverage on row 59":
+        val px = _px()
+        expect(px.len()).to_equal((CSS_W * K * CSS_H * K) as i64)
+        val cols: [i32] = [67, 69, 70]
+        val chrome: [[i32]] = [[65, 73, 88], [102, 108, 120], [137, 142, 151]]
+        expect(_row_text(px, 59, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-2: 13.333px `HHHHH` crossbar edge row 186 is partly covered, as in Chrome":
+        val cols: [i32] = [50, 52, 54]
+        val chrome: [[i32]] = [[196, 199, 203], [196, 199, 203], [196, 199, 203]]
+        expect(_row_text(_px(), 186, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-3: an input value is drawn at the 13.333px control font on device row 403":
+        val cols: [i32] = [87, 88, 90]
+        val chrome: [[i32]] = [[40, 40, 40], [0, 0, 0], [0, 0, 0]]
+        expect(_row_text(_px(), 403, cols, chrome)).to_equal(_want_text(cols, chrome))
+
+    it "AC-4: an input value's glyph foot reaches device row 643, as in Chrome":
+        val cols: [i32] = [81, 83, 106]
+        val chrome: [[i32]] = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+        expect(_row_text(_px(), 643, cols, chrome)).to_equal(_want_text(cols, chrome))

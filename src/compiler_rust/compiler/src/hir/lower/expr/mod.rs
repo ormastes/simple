@@ -2616,13 +2616,21 @@ impl Lowerer {
                 // BoxInt and picks static dispatch, which codegen already
                 // routes to `rt_index_of`.
                 "index_of" => Some(TypeId::I64),
-                // `arr.sum()` (interpreter_method/collections.rs "sum") only
-                // accumulates Int elements and always returns an Int — same
+                // `arr.sum()` (interpreter_method/collections.rs "sum")
+                // accumulates signed and unsigned ints into an Int — same
                 // "raw i64 needs BoxInt" gap class as `index_of` above. The
                 // MIR lowering (lowering_expr_method.rs, task:
                 // jit_method_dispatch_audit_2026-07-29) unboxes
                 // `rt_array_sum`'s tag-boxed result to match this type.
-                "sum" => Some(TypeId::I64),
+                // `[f64]`/`[f32]`: `rt_array_sum` returns a boxed FLOAT, so the
+                // result is F64 (an I64 type read the box handle as an int).
+                // doc/08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md
+                "sum" => match self.module.types.get(receiver.ty) {
+                    Some(HirType::Array { element, .. }) if matches!(*element, TypeId::F32 | TypeId::F64) => {
+                        Some(TypeId::F64)
+                    }
+                    _ => Some(TypeId::I64),
+                },
                 "join" => Some(TypeId::STRING),
                 "slice" | "filter" => Some(receiver.ty),
                 "map" => hir_args.first().map(|callback| {

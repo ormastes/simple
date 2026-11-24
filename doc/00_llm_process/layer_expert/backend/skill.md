@@ -384,3 +384,33 @@ interpreter, so a codegen regression spec must compile a child program
 in-process `JitCompiler` harness did not reproduce the free-function shape,
 only `simple run` did. See
 [bug](../../../08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md).
+
+## 2026-11-24 — float -> int conversions saturate on every engine
+
+`x as T`, `x.to_T()` and `to_int` on a float follow the interpreter's
+`semantics::cast_float_to_numeric` (Rust `as`): truncate toward zero, saturate
+to the target width, NaN -> 0. All three Cranelift lowerings (`basic_ops.rs`
+cast, `methods.rs`, `closures_structs.rs`) call
+`helpers::float_to_int_saturating`, which is `fcvt_to_*_sat.i64` + clamp +
+`ireduce`. Do not bring back `fcvt_to_{sint,uint}` + `ireduce` for a user cast:
+`ireduce` wraps (`70000.5.to_u16()` gave 4464), and plain `fcvt` traps (SIGILL)
+on negative->unsigned, NaN, and out-of-i64 input. Integer-source narrowing
+still wraps on every engine. Parity test (861 rows, every width, 5 receiver
+shapes): `compiler/tests/float_to_int_saturating_cast_parity.rs`. Open: the
+LLVM backend still emits `fptosi`/`fptoui`, and the compiled `[f64].sum()`
+reads a boxed float as an int
+([bug](../../../08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md)).
+[Bug](../../../08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md).
+
+## 2026-11-24 (2) — float sum typing, narrow-slot adapters, C rt_array_min
+
+- `[f64]`/`[f32]` `.sum()` is typed F64 in HIR and unboxed as F64 in MIR. An I64 unbox of
+  `rt_array_sum`'s boxed float read the heap handle as an int. Untyped mixed arrays still
+  use I64 (open).
+- `adapt_value_to_type`, the `calls.rs` argument adapt and the `body.rs` narrow return slot
+  now call `float_to_int_saturating`; there is no trapping `fcvt_to_sint` left in instr/.
+  Unit test: `codegen::instr::helpers::float_adapt_tests`.
+- The C runtime has `rt_array_min` (twin of `rt_array_max`), so native-build of
+  `[T].min()` links. Selfcheck: `src/runtime/test/rt_array_min_selfcheck.c`.
+- Open: a float passed to an int-typed user parameter/return disagrees across engines
+  ([bug](../../../08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md)).
