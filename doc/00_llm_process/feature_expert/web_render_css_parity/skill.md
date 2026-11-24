@@ -4269,3 +4269,47 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - Interpreter forms-media wall: 11.72 vs 11.66 s; RSS 973 vs 971 MB.
   - html and tab-bar: unchanged.
 - **Trap:** for any JIT perf or RSS claim, use a seed built from the base you measure. The brief's blend seed predates the take-idiom and liveness fixes, so it inflates JIT RSS 4x and can OOM pages. The class "array field read copies" is tracked for native AOT in `doc/08_tracking/bug/2026-11-24_native_struct_array_field_read_leaks_copy.md`. That bug leaks; under the JIT the copy is freed.
+## 2026-11-24 — clip edges follow the box that owns them at device scale (`device-clip`)
+
+- **A Draw IR clip edge moves with the box that OWNS that edge, not with the command
+  it clips.** Before this, `_dir_scale_command` moved every `clip_rect` by the
+  command's own `device-y-offset` (#11174) and ignored `device-x-offset`. Measured in
+  Chrome 159 at k=4 (`clip_device_offset_owner_chrome159_spec`, base 1/5, head 5/5):
+  - An `overflow:hidden` box at `left:40.5px` clips its 40px child to device
+    162..241 (base 164..243). AC-1 covers this. AC-3 is the `left:200.25px` case:
+    801..880, where base gave 801..879.
+  - `ab <svg width=40>` with a 60-wide rect: Chrome clips at 169..328, base at
+    169..327. This is AC-4, the x twin of `line_start_fraction` AC-4.
+  - A child at `left:10.5px` / `top:10.5px` inside an UNSHIFTED `overflow:hidden`
+    box keeps that box's clip. AC-2 (x) was already green and guards the naive fix.
+    AC-5 (y) was red on base: the #11174 y-add cut the child's last 2 device rows at
+    its own offset.
+  - Mirroring the y line for x (`clip.x += device-x-offset`) is wrong. It fixes
+    AC-1 and breaks AC-2.
+- **Mechanism.** `_html_draw_ir_device_clip` (paint_layout) runs after the dy/dx
+  passes and does the following:
+  - For each node it derives which overflow box set each of the 4 edges of the
+    node's `clip_cache` clip. A parent owns an edge exactly when the edge changed
+    from the parent's own clip; -1 means the viewport, which never moves.
+  - A command edge equal to its owner node's ancestor clip takes that owner's device
+    offset. Any other edge is the node's own box (svg viewport, image box) and moves
+    with the node: `box_device_dx_total` plus `_html_draw_ir_node_device_dy`, the walk
+    factored out of `_html_draw_ir_device_top`.
+  - It emits `device-clip` = "dl,dt,dr,db" only when one of the four is non-zero.
+    `draw_ir_device_scale` applies the edges and strips the prop. Without the prop
+    the clip is k x CSS.
+  - k=1 returns before any work, so the 1x output is byte-identical.
+- **`device-rect` needs no clip change.** Its dx,dy is a span's offset INSIDE a native
+  control, and those commands carry the ancestor clip. Moving the clip by it would be
+  the AC-2 error.
+- Side effect, measured: the viewport clip no longer moves by a command's dy. On
+  css-layout 4x, the last device row (1199) goes from 1284 to 446 px mismatching vs
+  Chrome; every other row is identical. Catalog 4x: animation 0.33 -> 0.32 (row
+  lowered); all other pages are the same, and 1x is identical. Matrix: 81. Perf on
+  css-layout, 3 alternated rounds, wall medians base/head: k=1 13375/12961 ms,
+  k=4 35942/32296 ms (noisy host, not slower). RSS is flat at about 2.93 GB / 8.34 GB.
+- **Open, unclaimed:** a child with negative `margin-left` inside an abspos
+  `overflow:hidden` box lands at +10 instead of -10, at both 1x and 4x. At 1x, that
+  page also paints with no overflow clip anywhere (Chrome 40..59, ours 50..89). Only
+  the example runner / catalog route shows this. Fixture:
+  `<div style="position:absolute;left:40px;top:10px;width:20px;height:20px;overflow:hidden"><div style="margin-left:-10px;width:40px;height:20px;background:#00f"></div></div>`.
