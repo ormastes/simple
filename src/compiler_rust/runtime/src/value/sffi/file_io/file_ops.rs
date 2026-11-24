@@ -2340,8 +2340,9 @@ pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
     crate::value::collections::rt_string_bytes(text)
 }
 
-/// Convert bytes to UTF-8 text, replacing malformed sequences with U+FFFD.
-/// Invalid array representations/elements still return NIL; binary callers
+/// Convert bytes to UTF-8 text. STRICT (owner decision 2026-11-23): malformed
+/// UTF-8 returns NIL, never U+FFFD, matching the C runtime twin.
+/// Invalid array representations/elements also return NIL; binary callers
 /// must retain their [u8] arrays instead of passing them through text.
 #[no_mangle]
 pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
@@ -2368,10 +2369,12 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     // elements still yield NIL exactly as before.
     // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
     if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
-        // Text is UTF-8, not an unchecked binary carrier. Cow borrows valid
-        // input; malformed sequences use the documented U+FFFD text policy.
-        let text = String::from_utf8_lossy(&packed);
-        return rt_string_new(text.as_ptr(), text.len() as u64);
+        // Text is UTF-8, not an unchecked binary carrier: malformed input is
+        // rejected (NIL) rather than repaired.
+        return match std::str::from_utf8(&packed) {
+            Ok(text) => rt_string_new(text.as_ptr(), text.len() as u64),
+            Err(_) => RuntimeValue::NIL,
+        };
     }
 
     let mut out = Vec::with_capacity(len as usize);
@@ -2387,12 +2390,14 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
         out.push(byte as u8);
     }
 
-    let text = String::from_utf8_lossy(&out);
-    rt_string_new(text.as_ptr(), text.len() as u64)
+    match std::str::from_utf8(&out) {
+        Ok(text) => rt_string_new(text.as_ptr(), text.len() as u64),
+        Err(_) => RuntimeValue::NIL,
+    }
 }
 
 /// TLS wire carrier: preserve exact bytes in counted text without changing
-/// the public UTF-8-repairing bytes-to-text contract.
+/// the public strict (UTF-8-rejecting) bytes-to-text contract.
 #[no_mangle]
 pub extern "C" fn rt_tls_wire_from_bytes(bytes: RuntimeValue) -> RuntimeValue {
     if !bytes.is_heap() || bytes.as_heap_ptr().is_null() {
@@ -3808,10 +3813,10 @@ mod byte_text_utf8_invariant_tests {
     }
 
     #[test]
-    fn text_byte_facade_packed_boxed_and_lossy_copy_contract() {
+    fn text_byte_facade_packed_boxed_and_strict_rejection_contract() {
         use crate::value::collections::{rt_array_free, rt_string_free};
         for (input, expected) in [(&b"A\0B"[..], "A\0B"),
-                                  (&[0, 0xff, 0xe2, 0x82][..], "\0\u{fffd}\u{fffd}"),
+                                  (&[0, 0xff, 0xe2, 0x82][..], ""), // invalid UTF-8 rejected -> facade ""
                                   (&b""[..], "")] {
             for array in [unsafe { bytes_to_runtime_array(input) }, boxed(input)] {
                 let text = rt_string_from_byte_array(array);
@@ -3851,22 +3856,31 @@ mod byte_text_utf8_invariant_tests {
     }
 
     #[test]
-    fn malformed_packed_and_boxed_bytes_become_valid_replacement_text() {
-        let cases: &[(&[u8], &str)] = &[
-            (&[0x80, 0xff, 0xc3], "\u{fffd}\u{fffd}\u{fffd}"),
-            (&[0xc0, 0xaf], "\u{fffd}\u{fffd}"),
-            (&[0xed, 0xa0, 0x80], "\u{fffd}\u{fffd}\u{fffd}"),
-            (&[0xf4, 0x90, 0x80, 0x80], "\u{fffd}\u{fffd}\u{fffd}\u{fffd}"),
-            (&[0xe2, 0x82], "\u{fffd}"),
-            (&[0xf0, 0x9f, 0x98], "\u{fffd}"),
-            (&[b'a', 0xe2, 0x82, b'b'], "a\u{fffd}b"),
-            (&[0xe1, 0x80, 0xff], "\u{fffd}\u{fffd}"),
-            (&[0, 0xff, 0], "\0\u{fffd}\0"),
+    fn malformed_packed_and_boxed_bytes_are_rejected_with_nil() {
+        // Owner decision 2026-11-23 (utf8 rejection part 2): never U+FFFD.
+        // Must match the C runtime (rt_bytes_to_text_layouts_selfcheck.c).
+        let cases: &[&[u8]] = &[
+            &[0xc0, 0xaf],                // overlong 2-byte
+            &[0xe0, 0x80, 0xaf],          // overlong 3-byte
+            &[0xf0, 0x80, 0x80, 0xaf],    // overlong 4-byte
+            &[0x80],                      // lone continuation
+            &[b'a', 0xbf, b'b'],          // continuation between ASCII
+            &[0xed, 0xa0, 0x80],          // encoded high surrogate
+            &[0xed, 0xbf, 0xbf],          // encoded low surrogate
+            &[0xe2, 0x82],                // truncated 3-byte
+            &[0xf0, 0x9f, 0x98],          // truncated 4-byte
+            &[b'a', 0xe2, 0x82, b'b'],    // truncated mid-text
+            &[0xe1, 0x80, 0xff],          // bad continuation
+            &[0, 0xff, 0],                // invalid lead
+            &[0xf4, 0x90, 0x80, 0x80],    // above U+10FFFF
         ];
-        for (input, expected) in cases {
+        for input in cases {
             let packed = unsafe { bytes_to_runtime_array(input) };
-            assert_decoded(rt_bytes_to_text(packed), expected);
-            assert_decoded(rt_bytes_to_text(boxed(input)), expected);
+            assert!(rt_bytes_to_text(packed).is_nil(), "packed {:x?} must be rejected", input);
+            assert!(rt_bytes_to_text(boxed(input)).is_nil(), "boxed {:x?} must be rejected", input);
+            // Non-optional facade keeps its empty-text fallback.
+            let text = rt_string_from_byte_array(boxed(input));
+            assert_decoded(text, "");
         }
     }
 

@@ -300,7 +300,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("arc_box_size", rc::arc_box_size);
     insert_simple!("arc_box_strong_count", rc::arc_box_strong_count);
     insert_simple!("arc_box_weak_count", rc::arc_box_weak_count);
-    insert_simple!("bytes_to_string", conversion::rt_bytes_to_text_fn);
+    insert_simple!("bytes_to_string", conversion::rt_string_from_byte_array_fn);
     // `rt_string_from_byte_array` is the freestanding-kernel-runtime name for
     // the identical byte-array-to-text contract as `rt_bytes_to_text`/
     // `bytes_to_string` above (see src/os/kernel/arch/riscv64/boot/
@@ -311,7 +311,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // spec that reached it failed with "unknown extern function". Register it
     // as an alias for the existing, already-implemented converter rather than
     // duplicating logic.
-    insert_simple!("rt_string_from_byte_array", conversion::rt_bytes_to_text_fn);
+    insert_simple!("rt_string_from_byte_array", conversion::rt_string_from_byte_array_fn);
     // Hosted C runtime names this same UTF-8 text-to-byte conversion
     // rt_string_to_byte_array. Keep both facade names on one converter.
     insert_simple!("rt_string_to_byte_array", conversion::rt_text_to_bytes_fn);

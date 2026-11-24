@@ -187,13 +187,25 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
             let Some(bytes) = value.try_array_bytes() else {
                 return Ok(Value::text(String::new()));
             };
-            // Byte-preserving, like the C and pure-Simple runtimes: invalid
-            // UTF-8 (a scalar split across read fragments) stays `StrBytes`
-            // instead of becoming U+FFFD, and re-validates on concatenation
-            // (seed_rt_bytes_to_text_lossy_utf8_split_scalar_2026-10-31).
-            Ok(Value::text_from_bytes(bytes))
+            // STRICT (owner decision 2026-11-23, utf8 rejection part 2):
+            // invalid UTF-8 is rejected with nil, exactly like the Rust and C
+            // runtimes. Exact-byte carriers use rt_tls_wire_from_bytes.
+            match String::from_utf8(bytes) {
+                Ok(s) => Ok(Value::text(s)),
+                Err(_) => Ok(Value::Nil),
+            }
         }
         _ => Ok(Value::text(String::new())),
+    }
+}
+
+/// Non-optional `[u8] -> text` facade (`rt_string_from_byte_array`,
+/// `bytes_to_string`): a rejected conversion falls back to empty text, like
+/// the Rust/C runtime `rt_string_from_byte_array`.
+pub fn rt_string_from_byte_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match rt_bytes_to_text_fn(args)? {
+        Value::Nil => Ok(Value::text(String::new())),
+        text => Ok(text),
     }
 }
 
@@ -567,24 +579,44 @@ fn glyph_5x7_ascii(ch: u8) -> [u8; 7] {
 mod tests {
     use super::*;
 
-    /// seed_rt_bytes_to_text_lossy_utf8_split_scalar_2026-10-31: fragments of a
-    /// split UTF-8 scalar must round-trip byte-exactly and reassemble.
+    /// Owner decision 2026-11-23 (utf8 rejection part 2): rt_bytes_to_text is
+    /// STRICT. Invalid UTF-8 (including a split scalar fragment) is rejected
+    /// with nil, matching the Rust and C runtimes; exact-byte carriers use
+    /// rt_tls_wire_from_bytes. Supersedes the byte-preserving contract of
+    /// seed_rt_bytes_to_text_lossy_utf8_split_scalar_2026-10-31.
     #[test]
-    fn bytes_to_text_preserves_split_scalar_fragments() {
-        let original = "界😀".as_bytes().to_vec();
-        let mut assembled = Vec::new();
-        for fragment in [&original[0..1], &original[1..5], &original[5..]] {
-            let text = rt_bytes_to_text_fn(&[Value::byte_array(fragment.to_vec())]).unwrap();
-            let back = rt_text_to_bytes_fn(&[text]).unwrap();
-            let back = back.try_array_bytes().expect("byte array");
-            assert_eq!(back, fragment, "fragment must round-trip byte-exactly");
-            assembled.extend(back);
+    fn bytes_to_text_rejects_invalid_utf8() {
+        let cases: &[&[u8]] = &[
+            &[0xc0, 0xaf],
+            &[0xe0, 0x80, 0xaf],
+            &[0xf0, 0x80, 0x80, 0xaf],
+            &[0x80],
+            &[b'a', 0xbf, b'b'],
+            &[0xed, 0xa0, 0x80],
+            &[0xed, 0xbf, 0xbf],
+            &[0xe2, 0x82],
+            &[0xf0, 0x9f, 0x98],
+            &[0, 0xff, 0],
+            &[0xf4, 0x90, 0x80, 0x80],
+        ];
+        for input in cases {
+            let out = rt_bytes_to_text_fn(&[Value::byte_array(input.to_vec())]).unwrap();
+            assert_eq!(out, Value::Nil, "{:x?} must be rejected", input);
         }
-        assert_eq!(assembled, original);
+        let split = "界😀".as_bytes();
+        for fragment in [&split[0..1], &split[1..5], &split[5..]] {
+            let out = rt_bytes_to_text_fn(&[Value::byte_array(fragment.to_vec())]).unwrap();
+            assert_eq!(out, Value::Nil, "split scalar fragment must be rejected");
+        }
         assert_eq!(
-            rt_bytes_to_text_fn(&[Value::byte_array("ok".as_bytes().to_vec())]).unwrap(),
-            Value::text("ok"),
+            rt_bytes_to_text_fn(&[Value::byte_array("ok界".as_bytes().to_vec())]).unwrap(),
+            Value::text("ok界"),
             "valid UTF-8 stays plain text"
+        );
+        assert_eq!(
+            rt_string_from_byte_array_fn(&[Value::byte_array(vec![0xc0, 0xaf])]).unwrap(),
+            Value::text(""),
+            "non-optional facade falls back to empty text"
         );
     }
 
