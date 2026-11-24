@@ -55,7 +55,8 @@
 # `aspect.load` of design §6.7), and every other mode may load lazily.
 # apk_try_facet performs NO I/O and returns only an already-resident facet.
 
-use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.string_core.{text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.compress.gzip.{gzip_crc32}
 use std.common.compress.deflate.{deflate_compress, deflate_decompress}
 
@@ -526,13 +527,25 @@ fn _apk_read_u64(data: [u8], offset: i64) -> i64:
         i = i + 1
     out
 
-fn _apk_read_text(data: [u8], offset: i64, length: i64) -> text:
+fn _apk_read_text(data: [u8], offset: i64, length: i64) -> Result<text, text>:
     var raw: [u8] = []
     var i = 0
     while i < length:
         raw.push(data[offset + i])
         i = i + 1
-    bytes_to_text(raw)
+    match bytes_to_text_checked(raw):
+        case Ok(t): Ok(t)
+        case Err(_): Err("pack text at offset {offset} is not valid UTF-8")
+
+# Byte-exact comparison of a pack text span against `want`; no decode needed.
+fn _apk_text_eq(data: [u8], offset: i64, length: i64, want: text) -> bool:
+    val w = text_to_bytes(want)
+    if w.len() != length: return false
+    var i = 0
+    while i < length:
+        if data[offset + i] != w[i]: return false
+        i = i + 1
+    true
 
 fn _apk_crc(data: [u8]) -> i64:
     (gzip_crc32(data) as i64) & 4294967295
@@ -905,9 +918,8 @@ fn apk_load_module_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkMo
         val f = _apk_dir_next(data, off, dir_end)
         if f.len() == 0:
             return _apk_load_error("APK_DIR_CORRUPT", "directory entry escapes the directory", examined)
-        val mid = _apk_read_text(data, f[0], f[1])
         examined = examined + 1
-        if mid == module_id:
+        if _apk_text_eq(data, f[0], f[1], module_id):
             val fix_off = f[14]
             val payload_off = _apk_read_u64(data, fix_off)
             val comp_size = _apk_read_u64(data, fix_off + 8)
@@ -950,12 +962,19 @@ fn apk_load_module_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> ApkMo
             while mm < member_len:
                 payload.push(frame[member_off + mm])
                 mm = mm + 1
+            var fields: [text] = []
+            var fi = 2
+            while fi < 12:
+                match _apk_read_text(data, f[fi], f[fi + 1]):
+                    case Ok(t): fields.push(t)
+                    case Err(e): return _apk_load_error("APK_TEXT_INVALID", e, examined)
+                fi = fi + 2
             return ApkModuleLoadV1(ok: true, found: true, error_code: "", error_message: "",
-                module_id: mid, aspect_id: _apk_read_text(data, f[2], f[3]),
-                module_abi_hash: _apk_read_text(data, f[4], f[5]),
-                required_core_public_abi_hash: _apk_read_text(data, f[6], f[7]),
-                required_core_layout_hash: _apk_read_text(data, f[8], f[9]),
-                variant_fingerprint: _apk_read_text(data, f[10], f[11]),
+                module_id: module_id, aspect_id: fields[0],
+                module_abi_hash: fields[1],
+                required_core_public_abi_hash: fields[2],
+                required_core_layout_hash: fields[3],
+                variant_fingerprint: fields[4],
                 payload: payload,
                 modules_decompressed: did_decompress, bytes_decompressed: decompressed_bytes,
                 entries_examined: examined)
@@ -987,8 +1006,14 @@ fn apk_pack_chunk_of_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> Apk
             return ApkChunkEntryV1(ok: false, found: false, chunk_id: -1, kind: 0, flags: 0,
                 file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
                 content_crc32: 0, cluster_id: "")
-        if _apk_read_text(data, f[0], f[1]) == module_id:
+        if _apk_text_eq(data, f[0], f[1], module_id):
             val fx = f[14]
+            val chunk_cluster: text = match _apk_read_text(data, f[12], f[13]):
+                case Ok(t): t
+                case Err(_):
+                    return ApkChunkEntryV1(ok: false, found: false, chunk_id: -1, kind: 0, flags: 0,
+                        file_offset: 0, compressed_size: 0, uncompressed_size: 0, alignment: 0,
+                        content_crc32: 0, cluster_id: "")
             return ApkChunkEntryV1(ok: true, found: true,
                 chunk_id: _apk_read_u64(data, fx + 40),
                 kind: _apk_read_u32(data, fx + 48),
@@ -998,7 +1023,7 @@ fn apk_pack_chunk_of_v1(data: [u8], handle: ApkHandleV1, module_id: text) -> Apk
                 uncompressed_size: _apk_read_u64(data, fx + 16),
                 alignment: _apk_read_u32(data, fx + 56),
                 content_crc32: _apk_read_u32(data, fx + 60),
-                cluster_id: _apk_read_text(data, f[12], f[13]))
+                cluster_id: chunk_cluster)
         off = f[15]
         slot = slot + 1
     miss
@@ -1043,7 +1068,7 @@ fn apk_load_cluster_v1(data: [u8], handle: ApkHandleV1, cluster_id: text) -> Apk
         val f = _apk_dir_next(data, off, dir_end)
         if f.len() == 0:
             return _apk_cluster_error("APK_DIR_CORRUPT", "directory entry escapes the directory", cluster_id)
-        if _apk_read_text(data, f[12], f[13]) == cluster_id:
+        if _apk_text_eq(data, f[12], f[13], cluster_id):
             val fx = f[14]
             val p = _apk_read_u64(data, fx)
             if payload_off < 0:
@@ -1054,7 +1079,9 @@ fn apk_load_cluster_v1(data: [u8], handle: ApkHandleV1, cluster_id: text) -> Apk
                 want_crc = _apk_read_u32(data, fx + 60)
             if p != payload_off:
                 return _apk_cluster_error("APK_CLUSTER_CORRUPT", "cluster {cluster_id} spans more than one frame", cluster_id)
-            ids.push(_apk_read_text(data, f[0], f[1]))
+            match _apk_read_text(data, f[0], f[1]):
+                case Ok(t): ids.push(t)
+                case Err(e): return _apk_cluster_error("APK_TEXT_INVALID", e, cluster_id)
             offs.push(_apk_read_u64(data, fx + 24))
             lens.push(_apk_read_u64(data, fx + 32))
         off = f[15]
@@ -1323,7 +1350,7 @@ fn apk_open_catalog_v1(data: [u8]) -> ApkCatalogHandleV1:
         schema_version: schema, entry_count: entry_count, total_size: total_size,
         profile_count: profile_count, body_off: off)
 
-fn _apk_index_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> _ApkCatalogIndexV1:
+fn _apk_index_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> Result<_ApkCatalogIndexV1, text>:
     """Build the private exact index after full catalog validation succeeds."""
     var profile_starts: Dict<text, i64> = {}
     var profile_counts: Dict<text, i64> = {}
@@ -1331,7 +1358,9 @@ fn _apk_index_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> _ApkCatalogI
     var profile = 0
     while profile < handle.profile_count:
         val id_len = _apk_read_u32(data, off)
-        val profile_id = _apk_read_text(data, off + 4, id_len)
+        val profile_id: text = match _apk_read_text(data, off + 4, id_len):
+            case Ok(t): t
+            case Err(e): return Err(e)
         if not profile_starts.has(profile_id):
             profile_starts[profile_id] = _apk_read_u64(data, off + 4 + id_len)
             profile_counts[profile_id] = _apk_read_u64(data, off + 4 + id_len + 8)
@@ -1353,7 +1382,9 @@ fn _apk_index_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> _ApkCatalogI
         val kind_off = module_off + 4 + module_len
         val abi_len = _apk_read_u32(data, kind_off + 8)
         val entry_kind = _apk_read_u32(data, kind_off)
-        val key = _apk_read_text(data, off + 4, key_len)
+        val key: text = match _apk_read_text(data, off + 4, key_len):
+            case Ok(t): t
+            case Err(e): return Err(e)
         val route_key = _apk_catalog_route_index_key(entry_kind, key)
         if route_candidate_counts.has(route_key):
             route_candidate_counts[route_key] = route_candidate_counts[route_key] + 1
@@ -1389,12 +1420,12 @@ fn _apk_index_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> _ApkCatalogI
         route_candidate_offsets[position] = indexed_offsets[indexed_slot]
         route_candidate_cursors[route_key] = route_candidate_cursors[route_key] + 1
         indexed_slot = indexed_slot + 1
-    _ApkCatalogIndexV1(handle: handle, profile_starts: profile_starts,
+    Ok(_ApkCatalogIndexV1(handle: handle, profile_starts: profile_starts,
         profile_counts: profile_counts,
         route_candidate_starts: route_candidate_starts,
         route_candidate_counts: route_candidate_counts,
         route_candidate_slots: route_candidate_slots,
-        route_candidate_offsets: route_candidate_offsets)
+        route_candidate_offsets: route_candidate_offsets))
 
 fn _apk_validate_catalog_slice_semantics(keys: [text], packs: [text], modules: [text],
         kinds: [i64], abi_hashes: [text], start: i64, count: i64) -> text:
@@ -1437,7 +1468,9 @@ fn apk_validate_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> text:
         val id_len = _apk_read_u32(data, off)
         if id_len <= 0 or off + 4 + id_len + 20 > handle.body_off:
             return "profile record escapes the profile table"
-        val profile_id = _apk_read_text(data, off + 4, id_len)
+        val profile_id: text = match _apk_read_text(data, off + 4, id_len):
+            case Ok(t): t
+            case Err(e): return e
         if profile_ids.has(profile_id):
             return "duplicate profile id: {profile_id}"
         profile_ids[profile_id] = true
@@ -1489,10 +1522,18 @@ fn apk_validate_catalog_v1(data: [u8], handle: ApkCatalogHandleV1) -> text:
             return "catalog entry has an unknown route kind"
         if activation < APK_ACT_OFF or activation > APK_ACT_HOT:
             return "catalog entry has an unknown activation mode"
-        val key = _apk_read_text(data, off + 4, key_len)
-        val pack_path = _apk_read_text(data, p_off + 4, pack_len)
-        val module_id = _apk_read_text(data, m_off + 4, mod_len)
-        val abi_hash = _apk_read_text(data, k_off + 12, abi_len)
+        val key: text = match _apk_read_text(data, off + 4, key_len):
+            case Ok(t): t
+            case Err(e): return e
+        val pack_path: text = match _apk_read_text(data, p_off + 4, pack_len):
+            case Ok(t): t
+            case Err(e): return e
+        val module_id: text = match _apk_read_text(data, m_off + 4, mod_len):
+            case Ok(t): t
+            case Err(e): return e
+        val abi_hash: text = match _apk_read_text(data, k_off + 12, abi_len):
+            case Ok(t): t
+            case Err(e): return e
         var joined: [u8] = []
         _apk_push_bytes(joined, text_to_bytes(key))
         _apk_push_bytes(joined, text_to_bytes(pack_path))
@@ -1548,7 +1589,9 @@ fn apk_catalog_profile_ids_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]:
     var p = 0
     while p < handle.profile_count:
         val id_len = _apk_read_u32(data, off)
-        out.push(_apk_read_text(data, off + 4, id_len))
+        match _apk_read_text(data, off + 4, id_len):
+            case Ok(t): out.push(t)
+            case Err(_): return []
         off = off + 4 + id_len + 20
         p = p + 1
     out
@@ -1578,8 +1621,10 @@ fn apk_catalog_select_profile_v1(data: [u8], handle: ApkCatalogHandleV1, profile
         val id_len = _apk_read_u32(data, off)
         if off + 4 + id_len + 20 > handle.body_off:
             return _apk_profile_error("APK_CATALOG_CORRUPT", "profile record escapes the profile table", profile_id, examined)
-        val pid = _apk_read_text(data, off + 4, id_len)
         examined = examined + 1
+        val pid: text = match _apk_read_text(data, off + 4, id_len):
+            case Ok(t): t
+            case Err(e): return _apk_profile_error("APK_CATALOG_CORRUPT", e, profile_id, examined)
         if pid == profile_id:
             val start = _apk_read_u64(data, off + 4 + id_len)
             val count = _apk_read_u64(data, off + 4 + id_len + 8)
@@ -1696,12 +1741,18 @@ fn _apk_catalog_route_at_offset(data: [u8], handle: ApkCatalogHandleV1,
     _apk_push_byte_range(joined, data, kind_off + 12, abi_len)
     if _apk_crc(joined) != _apk_read_u32(data, crc_off):
         return _apk_route_error("APK_CATALOG_CORRUPT", "selected catalog entry failed its checksum")
+    val pack_path: text = match _apk_read_text(data, pack_off + 4, pack_len):
+        case Ok(t): t
+        case Err(e): return _apk_route_error("APK_CATALOG_CORRUPT", e)
+    val module_id: text = match _apk_read_text(data, module_off + 4, module_len):
+        case Ok(t): t
+        case Err(e): return _apk_route_error("APK_CATALOG_CORRUPT", e)
+    val abi_hash: text = match _apk_read_text(data, kind_off + 12, abi_len):
+        case Ok(t): t
+        case Err(e): return _apk_route_error("APK_CATALOG_CORRUPT", e)
     ApkCatalogRouteV1(ok: true, found: true, error_code: "", error_message: "",
-        facet_key: facet_key,
-        pack_path: _apk_read_text(data, pack_off + 4, pack_len),
-        module_id: _apk_read_text(data, module_off + 4, module_len),
-        entry_kind: want_kind, activation: activation,
-        abi_hash: _apk_read_text(data, kind_off + 12, abi_len))
+        facet_key: facet_key, pack_path: pack_path, module_id: module_id,
+        entry_kind: want_kind, activation: activation, abi_hash: abi_hash)
 
 fn _apk_catalog_route_slice_scan(data: [u8], handle: ApkCatalogHandleV1, facet_key: text, want_kind: i64, start: i64, count: i64) -> ApkCatalogRouteV1:
     """Exact (kind, key) match over the entries [start, start+count) of the
@@ -1776,7 +1827,9 @@ fn apk_catalog_startup_keys_v1(data: [u8], handle: ApkCatalogHandleV1) -> [text]
         val activation = _apk_read_u32(data, k_off + 4)
         val abi_len = _apk_read_u32(data, k_off + 8)
         if activation == APK_ACT_STARTUP:
-            out.push(_apk_read_text(data, off + 4, key_len))
+            match _apk_read_text(data, off + 4, key_len):
+                case Ok(t): out.push(t)
+                case Err(_): return []
         off = k_off + 12 + abi_len + 4
         slot = slot + 1
     out
@@ -2233,9 +2286,13 @@ fn _apk_split_facet_key(facet_key: text) -> ApkFacetKeyPartsV1:
         i = i + 1
     if cut < 0:
         return ApkFacetKeyPartsV1(ok: false, concrete_type_id: "", facet_interface_id: "")
-    ApkFacetKeyPartsV1(ok: true,
-        concrete_type_id: _apk_read_text(raw, 0, cut),
-        facet_interface_id: _apk_read_text(raw, cut + 1, raw.len() - cut - 1))
+    val concrete: text = match _apk_read_text(raw, 0, cut):
+        case Ok(t): t
+        case Err(_): return ApkFacetKeyPartsV1(ok: false, concrete_type_id: "", facet_interface_id: "")
+    val facet: text = match _apk_read_text(raw, cut + 1, raw.len() - cut - 1):
+        case Ok(t): t
+        case Err(_): return ApkFacetKeyPartsV1(ok: false, concrete_type_id: "", facet_interface_id: "")
+    ApkFacetKeyPartsV1(ok: true, concrete_type_id: concrete, facet_interface_id: facet)
 
 fn apk_facet_key_parts_v1(facet_key: text) -> ApkFacetKeyPartsV1:
     """design §14.1 FacetBindingRegistry key, part 1/2: decompose a facet key

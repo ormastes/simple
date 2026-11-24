@@ -14,7 +14,7 @@
 # Reference: RFC 9114 (HTTP/3), RFC 9204 (QPACK)
 
 use std.common.string_core.{text_to_bytes}
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 # ============================================================================
 # HTTP/3 Frame Types — RFC 9114 §7.2
@@ -200,7 +200,7 @@ class QpackCodec:
 
         return encoded
 
-    fn decode_headers(data: [u8]) -> [(text, text)]:
+    fn decode_headers(data: [u8]) -> Result<[(text, text)], text>:
         """Decode a QPACK-encoded header block into (name, value) pairs.
 
         Handles static-table-only encoding. Dynamic table references
@@ -208,7 +208,7 @@ class QpackCodec:
         """
         var headers: [(text, text)] = []
         if data.len() < 2:
-            return headers
+            return Ok(headers)
 
         # Skip Required Insert Count (byte 0) and Delta Base (byte 1)
         var pos = 2
@@ -234,7 +234,9 @@ class QpackCodec:
                 val vr = self._decode_length(data, pos)
                 val vlen = vr.0
                 pos = vr.1
-                val value = self._extract_text(data, pos, vlen)
+                val value: text = match self._extract_text(data, pos, vlen):
+                    case Ok(t): t
+                    case Err(e): return Err(e)
                 pos = pos + vlen
                 if idx < self.static_table.len():
                     headers.push((self.static_table[idx].name, value))
@@ -245,12 +247,16 @@ class QpackCodec:
                 val nr = self._decode_length(data, pos)
                 val nlen = nr.0
                 pos = nr.1
-                val name = self._extract_text(data, pos, nlen)
+                val name: text = match self._extract_text(data, pos, nlen):
+                    case Ok(t): t
+                    case Err(e): return Err(e)
                 pos = pos + nlen
                 val vr2 = self._decode_length(data, pos)
                 val vlen2 = vr2.0
                 pos = vr2.1
-                val value2 = self._extract_text(data, pos, vlen2)
+                val value2: text = match self._extract_text(data, pos, vlen2):
+                    case Ok(t): t
+                    case Err(e): return Err(e)
                 pos = pos + vlen2
                 headers.push((name, value2))
 
@@ -258,7 +264,7 @@ class QpackCodec:
                 # Unknown or dynamic table reference — skip byte
                 pos = pos + 1
 
-        return headers
+        return Ok(headers)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -322,7 +328,7 @@ class QpackCodec:
             shift = shift + 7
         return (length, pos)
 
-    fn _extract_text(data: [u8], start: i64, length: i64) -> text:
+    fn _extract_text(data: [u8], start: i64, length: i64) -> Result<text, text>:
         """Extract a text string from data[start..start+length]."""
         var bytes: [u8] = []
         var i = 0
@@ -333,7 +339,9 @@ class QpackCodec:
                 break
             bytes.push(data[start + i])
             i = i + 1
-        return bytes_to_text(bytes)
+        match bytes_to_text_checked(bytes):
+            case Ok(t): Ok(t)
+            case Err(_): Err("qpack field is not valid UTF-8")
 
 # ============================================================================
 # H3 Frame encoding/decoding — RFC 9114 §7.2
@@ -553,7 +561,11 @@ class H3Stream:
 
             if frame.frame_type == H3_FRAME_HEADERS and not got_headers:
                 # Decode QPACK headers
-                val decoded = self.codec.decode_headers(frame.payload)
+                val decoded: [(text, text)] = match self.codec.decode_headers(frame.payload):
+                    case Ok(h): h
+                    case Err(_):
+                        self.rejected = true
+                        return None
                 var k = 0
                 loop:
                     if k >= decoded.len():
