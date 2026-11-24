@@ -1,6 +1,7 @@
 # Windows memory-headroom gate false-refuses on ballooned VMs (AvailPhys under-reports)
 
 Date: 2026-11-13
+Status: FIXED 2026-11-24 (commit-witness fallback, direction 1)
 Branch: work/headroom-balloon-refusal (base origin/release/1.0.0 @ 48a03dc9e2b)
 Host: DESKTOP-VMF96U6 (Hyper-V dynamic-memory guest), 64 GiB visible RAM, Windows 11
 
@@ -150,3 +151,18 @@ incident, so none of these should land without repro across host types:
   - Test cache helpers (`build_host_physmem_cache_reset_v1`, `build_host_physmem_cache_peek_kib_v1`,
     `build_host_physmem_cache_seed_for_test_v1`) pin single-probe memoization, live cgroup
     clamping, and non-positive rejection in `test/01_unit/app/cli/shard_mem_clamp_spec.spl`.
+
+## Fix (2026-11-24): commit-witness fallback (direction 1)
+
+`build_memory_start_gate_v1` (`src/app/cli/shard_mem_clamp.spl`), used by
+`native_build_memory_admission_refusal_v1`, runs only AFTER the plain gate
+refused. It probes installed RAM (memoized) and free commit
+(`Win32_OperatingSystem.FreeVirtualMemory`, bounded 20 s; failure = 0 = no
+witness) and passes them to the pure `build_memory_start_decision_v1`, which
+admits with a stderr warning when free commit alone covers the reserve AND
+installed RAM >= 2x reserve. A commit-tight host (commit < reserve), an unknown
+probe, or a small host still refuses. The `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`
+and host-config knobs are unchanged. Specs: "build memory balloon commit
+witness" in `test/01_unit/app/cli/build_memory_reserve_spec.spl` (15/15 pass).
+Not verified on a live ballooned guest; the probe path is inferred from the
+documented `FreeVirtualMemory` = free commit KiB.
