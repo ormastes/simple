@@ -8,7 +8,7 @@ spec = importlib.util.spec_from_file_location('native_intake', HERE/'proof.py')
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 ROLE=os.environ.get('PRODUCT_ROLE','phase3')
 assert ROLE=='phase3','This correction may not rerun early full CLI'
-n.OUT = n.ROOT/'build/windows-93f7-phase3-pathfix-evidence'; n.OUT.mkdir(parents=True, exist_ok=True)
+n.OUT = n.ROOT/'build/windows-93f7-phase3-retained-evidence'; n.OUT.mkdir(parents=True, exist_ok=True)
 early_spec=importlib.util.spec_from_file_location('early_cli',HERE/'early_cli.py')
 early=importlib.util.module_from_spec(early_spec); early_spec.loader.exec_module(early)
 probe_spec=importlib.util.spec_from_file_location('renamed_probe',HERE/'renamed_probe.py')
@@ -82,14 +82,12 @@ def main():
     source={p:n.sha(n.ROOT/p) for p in tracked if p and (n.ROOT/p).is_file()}
     assert n.command(['git','rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()==n.SOURCE
     n.save('source-files.json',source)
-    probe_cap=n.budget()
-    n.save('preflight-resource.json',json.loads((n.OUT/'resource.json').read_text()))
-    try:
-        probe.run(n,compiler,bundle,env,probe_cap,tools)
-    finally:
-        unchanged=all(n.sha(p)==h for p,h in staged_identities.items()) and all(n.sha(n.OUT/p)==h for p,h in inputs['files'].items()) and all(n.sha(n.ROOT/p)==h for p,h in source.items())
-        n.save('preflight-immutable-inputs.json',{'unchanged':unchanged})
-        assert unchanged
+    import retained_worker
+    retained_worker.intake(n,compiler,inputs)
+    assert all(n.sha(p)==h for p,h in staged_identities.items())
+    assert all(n.sha(n.OUT/p)==h for p,h in inputs['files'].items())
+    assert all(n.sha(n.ROOT/p)==h for p,h in source.items())
+    # Prior worker proof is retained, not executed again.
     cap=n.budget()
     n.save('build-resource.json',json.loads((n.OUT/'resource.json').read_text()))
     # No invented product-specific floor. Canonical worker admission retains its
@@ -102,7 +100,7 @@ def main():
     env.update(SIMPLE_USER_STORAGE_ROOT=str(n.OUT/'storage'),SIMPLE_CACHE=str(n.OUT/'cache'),SIMPLE_NATIVE_BUILD_CACHE_DIR=str(n.OUT/'cache'))
     (n.OUT/'tmp').mkdir()
     env.update(TMP=str(n.OUT/'tmp'),TEMP=str(n.OUT/'tmp'),TMPDIR=n.posix(n.OUT/'tmp'))
-    product=n.ROOT/'build/windows-93f7-phase3-pathfix'
+    product=n.ROOT/'build/windows-93f7-phase3-retained'
     assert not product.exists(),'fresh product namespace required'
     argv=[str(n.BASH),n.posix(n.ROOT/'scripts/bootstrap/build-phase3-phase4.sh'),'--phase=p3a','--compile-mode=file','--win-config=mingw','--target=x86_64-pc-windows-gnu','--backend=llvm','--threads=2','--non-interactive','--source-root='+n.posix(n.ROOT),'--build-root='+n.posix(product),'--p2-bin='+n.posix(compiler),'--runtime-path='+n.posix(bundle)]
     try:
