@@ -16,8 +16,8 @@ use std.net.tcp.{TcpStream}
 # `src/compiler_rust/common/src/runtime_symbols.rs`, so under the JIT they
 # returned nil silently and every telnet call failed with no error. They now go
 # through the registered live path: `std.net.tcp.TcpStream` (facade over
-# `std.nogc_sync_mut.io.tcp`, backed by `rt_io_tcp_*`) and `rt_bytes_to_text`.
-use std.common.string_core.{bytes_to_text}
+# `std.nogc_sync_mut.io.tcp`, backed by `rt_io_tcp_*`) and the strict streaming UTF-8 decoder.
+use std.common.encoding.external_text.{external_text_decoder, utf8_format}
 
 # ============================================================================
 # Telnet Protocol Constants
@@ -359,8 +359,26 @@ fn telnet_receive(conn: TelnetConnection, timeout_ms: i64) -> text:
     if raw.length() == 0:
         return ""
 
-    val clean = telnet_process_iac(conn, raw)
-    bytes_to_text(clean)
+    val decoder = match external_text_decoder(utf8_format()):
+        case Ok(value): value
+        case Err(_): return ""
+    var clean = telnet_process_iac(conn, raw)
+    var output = ""
+    var refills = 0
+    while true:
+        match decoder.push(clean):
+            case Ok(part): output = output + part
+            # Truly invalid UTF-8 is an error (empty result), never lossy text.
+            case Err(_): return ""
+        # A scalar split across reads needs at most 3 more bytes; finish it.
+        if decoder.pending_byte_count() == 0 or refills >= 3:
+            break
+        val more = telnet_receive_raw(conn, timeout_ms)
+        if more.length() == 0:
+            break
+        clean = telnet_process_iac(conn, more)
+        refills = refills + 1
+    output
 
 fn telnet_send(conn: TelnetConnection, data: text) -> bool:
     """Send text data over telnet connection.
