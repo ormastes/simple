@@ -48,6 +48,16 @@ int main(void) {
     assert(rt_array_len((SplArray*)(uintptr_t)split_tagged) == 3);
     assert(rt_string_contains(fpc_raw, nul_raw) == 1);
     assert(rt_string_starts_with(cat, nul_raw) == 1);
+    /* P4 closure scanner passes the unboxed result of removing "use ". */
+    static const char lazy_import[] = "use lazy app.cli.doc_links.{doc_links_command_v1}";
+    int64_t bare_tail = (int64_t)(uintptr_t)(lazy_import + 4);
+    int64_t lazy_prefix = rt_string_new((const uint8_t*)"lazy ", 5);
+    assert(rt_string_starts_with(bare_tail, lazy_prefix) == 1);
+    assert(rt_string_starts_with(lazy_prefix, (int64_t)(uintptr_t)"lazy") == 1);
+    assert(rt_string_starts_with(bare_tail, nul_raw) == 0);
+    assert(rt_string_starts_with((int64_t)(uintptr_t)"la", lazy_prefix) == 0);
+    assert(rt_string_starts_with((int64_t)(uintptr_t)"", (int64_t)(uintptr_t)"") == 1);
+    assert(rt_string_starts_with(3, (int64_t)(uintptr_t)"") == 0);
     assert(rt_string_ends_with(cat, nl_raw) == 1);
     int64_t trimmed = rt_string_trim((int64_t)(uintptr_t)rt_interp_cstr(cat));
     assert(rt_string_len(trimmed) == 1);
