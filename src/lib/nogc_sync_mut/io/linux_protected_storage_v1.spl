@@ -9,7 +9,7 @@ internal_export LinuxProtectedStorageResourcesV1
 # auth-reader handles. They must never copy/dispose these cells independently.
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
 use std.common.encoding.external_text.{bytes_to_text_checked}
-use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid}
 use std.nogc_sync_mut.io.retained_private_credential_protocol_v2.retained_credential_bytes_equal_v2
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.nogc_sync_mut.io.linux_protected_broker_state_v1.*
@@ -535,10 +535,15 @@ pub class LinuxProtectedStorageResourcesV1:
         self.ready = volatile_read_u64(self.cell + 48) == 1
         self.closing = volatile_read_u64(self.cell + 56) == 1
         self.closed = volatile_read_u64(self.cell + 64) == 1
-        self.stage_name = bytes_to_text(self.blob_v1(128, 120))
+        var blob_text_valid = true
+        match bytes_to_text_checked(self.blob_v1(128, 120)):
+            case Ok(t): self.stage_name = t
+            case Err(_): blob_text_valid = false
         self.stage_identity = self.blob_v1(256, 120)
         self.writer_identity = self.blob_v1(384, 120)
-        self.error = bytes_to_text(self.blob_v1(512, 480))
+        match bytes_to_text_checked(self.blob_v1(512, 480)):
+            case Ok(t): self.error = t
+            case Err(_): blob_text_valid = false
         self.fds = []
         self.parents = []
         self.names = []
@@ -547,7 +552,7 @@ pub class LinuxProtectedStorageResourcesV1:
         self.directories = []
         self.private_dirs = []
         val count = volatile_read_u64(self.cell + 104)
-        if count < 0 or count > 256:
+        if not blob_text_valid or count < 0 or count > 256:
             self.ready = false
             self.closing = true
             return
@@ -557,7 +562,12 @@ pub class LinuxProtectedStorageResourcesV1:
             self.parents.push(volatile_read_u64(self.cell + base + 8))
             self.directories.push(volatile_read_u64(self.cell + base + 16) == 1)
             self.private_dirs.push(volatile_read_u64(self.cell + base + 24) == 1)
-            self.names.push(bytes_to_text(self.blob_v1(base + 64, 256)))
+            match bytes_to_text_checked(self.blob_v1(base + 64, 256)):
+                case Ok(t): self.names.push(t)
+                case Err(_):
+                    self.ready = false
+                    self.closing = true
+                    return
             self.identities.push(self.blob_v1(base + 384, 120))
             self.revisions.push(self.blob_v1(base + 512, 120))
 

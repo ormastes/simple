@@ -1,7 +1,7 @@
 # Versioned dynamic SFFI with mandatory plugin-entry negotiation.
 
 use std.nogc_sync_mut.sffi.dynamic.{DynLib, platform_name, spl_wffi_call_i64_checked}
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{
     HostOfferV1, PluginAnswerV1, NegotiateVerdict, negotiate,
@@ -116,13 +116,20 @@ fn sffi_plugin_descriptor_encode_v1(descriptor: SffiPluginDescriptorV1) -> [u8]:
     data[11] = ((size >> 24) & 255) as u8
     data
 
-fn _entry_text_slice(data: [u8], offset: i64, size: i64) -> text:
+fn _entry_text_slice(data: [u8], offset: i64, size: i64) -> Result<text, text>:
     var value: [u8] = []
     var index = 0
     while index < size:
         value.push(data[offset + index])
         index = index + 1
-    bytes_to_text(value)
+    match bytes_to_text_checked(value):
+        case Ok(t): Ok(t)
+        case Err(_): Err("descriptor text is not valid UTF-8")
+
+fn _entry_magic_ok(data: [u8]) -> bool:
+    match _entry_text_slice(data, 0, 8):
+        case Ok(t): t == SFFI_PLUGIN_ENTRY_MAGIC_V1
+        case Err(_): false
 
 fn _entry_read_text(data: [u8], offset: i64) -> Result<_EntryTextV1, text>:
     if offset + 2 > data.len():
@@ -130,12 +137,15 @@ fn _entry_read_text(data: [u8], offset: i64) -> Result<_EntryTextV1, text>:
     val size = _entry_u16(data, offset)
     if size <= 0 or offset + 2 + size > data.len():
         return Err("invalid text extent")
-    Ok(_EntryTextV1(_entry_text_slice(data, offset + 2, size), offset + 2 + size))
+    val value: text = match _entry_text_slice(data, offset + 2, size):
+        case Ok(t): t
+        case Err(e): return Err(e)
+    Ok(_EntryTextV1(value, offset + 2 + size))
 
 fn sffi_plugin_descriptor_decode_v1(data: [u8]) -> Result<SffiPluginDescriptorV1, text>:
     if data.len() < 24 or data.len() > SFFI_PLUGIN_ENTRY_MAX_BYTES_V1:
         return Err("descriptor size outside bounds")
-    if _entry_text_slice(data, 0, 8) != SFFI_PLUGIN_ENTRY_MAGIC_V1:
+    if not _entry_magic_ok(data):
         return Err("descriptor magic mismatch")
     if _entry_u32(data, 8) != data.len():
         return Err("descriptor length mismatch")
@@ -178,7 +188,7 @@ fn _sffi_plugin_descriptor_from_ptr_v1(address: i64) -> Result<SffiPluginDescrip
     while index < 12:
         data.push(rt_ptr_read_u8(address, index) as u8)
         index = index + 1
-    if _entry_text_slice(data, 0, 8) != SFFI_PLUGIN_ENTRY_MAGIC_V1:
+    if not _entry_magic_ok(data):
         return Err("descriptor magic mismatch")
     val size = _entry_u32(data, 8)
     if size < 24 or size > SFFI_PLUGIN_ENTRY_MAX_BYTES_V1:
