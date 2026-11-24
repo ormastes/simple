@@ -134,3 +134,104 @@ transfer). Those harness failures remain separate from this actual compiler
 resource failure. The retained parent native Hello was reused, not repeated.
 The independent Phase3 job was left running; this incident does not give its
 verdict or formal admission status.
+
+## Attribution (2026-11-25, Windows rb5)
+
+The same boundary was reproduced four times on Windows at source
+`0285176e3a7b` ("rb5 pin"), streaming-surfaces route, `--entry-closure`, entry
+`src/app/cli/main.spl`, 3,840 closure modules / 7,124 logical rows, with two
+different compilers (one seed-built, one Simple-built). The worker holds about
+10 GB through every `phase2:surface:file:*` line; immediately after
+`phase2:surface:file:released ... src/lib/nogc_sync_mut/driver/error.spl seq=3840`
+its private bytes grow about 12 GB/min to 63 GB and it is killed.
+
+### Observed stack (measured)
+
+Three all-thread dumps taken 8 s apart during the growth (cdb, resolved through
+the linker map) all show, innermost first:
+
+```
+rt_array_push
+compiler.hir.hir_lowering.module_surface_registry_index.module_surface_registry_index  (+0x194 .. +0x234)
+module_surface_import_resolution_trace_with_generation_v1  (+0xe65)
+module_surfaces_freeze  (+0x17c5)
+ModuleSurfaceBuilder.finish_into
+CompilerDriver.parse_all_streaming_surfaces_in_place_impl  (driver_source_parse_streaming.spl)
+parse_all_committing_impl
+stage_parse
+```
+
+An earlier IP-only sample of the same moment was in
+`rt_core_is_registered_immortal_ptr`. This places the growth inside
+`module_surfaces_freeze`, in `module_surface_registry_index`, which answers the
+"freeze entry/exit" question of the follow-up above for the Windows run.
+
+### Mechanism (by reading; not re-run)
+
+Both this pin and the Linux source `656fa39e` predate `94d86930de6`
+(PR #11343, merged 2026-11-24T14:29Z). In that older text
+`module_surface_registry_index` opens with
+
+```
+val names = registry.ordered_names
+val indices = registry.ordered_indices
+```
+
+A `val`/`var` whose initializer is a place read of an existing array is given
+a private copy by native lowering: `maybe_copy_array_value` in
+`src/compiler/50.mir/mir_lowering_stmts.spl` emits `rt_array_len`,
+`rt_array_new(len)` and an inline `rt_array_get` + `rt_array_push` loop; the
+seed emits `rt_array_copy` for the same shape
+(`src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs`). So every lookup
+copied both complete alias arrays, about 2 x 7,124 x 8 bytes = 114 KB, inside
+`finish_into`'s transient scope where nothing is released until the scope
+ends. Freeze performs several tens of lookups per import (up to 30 candidate
+probes for a `std.` import). The inline copy loop is what produces a
+`rt_array_push` frame called directly from `module_surface_registry_index`,
+and `rt_array_new` is `rt_core_array_new_fill`.
+
+Status of each claim:
+
+- Proven by reading: the two copy bindings exist at `0285176e3a7b` and at
+  `656fa39e`; native lowering copies such bindings with a push loop; the copies
+  are per lookup and unreleased within the scope.
+- Measured elsewhere, not here: PR #11343 reports, on a Darwin native
+  producer, 24,000 lookups over 120 names growing the footprint 52,887,600
+  bytes before the change and 16,384 after, with the hash table built once.
+  That is 2.2 KB per lookup at 120 names, which scales to the 114 KB above.
+- Proven by disassembly (`llvm-objdump -d` on the rb5 Stage 3 binary
+  `fbd55c5ef93a`, symbol `module_surface_registry_index` at `0x140dbf5e0` per
+  `simple-p3-stack64.map`): the sampled return addresses `+0x194`
+  (`0x140dbf774`) and `+0x234` (`0x140dbf814`) are literally the two
+  `callq rt_array_push` (`0x141b21c10`) sites inside the two entry copy loops
+  for `val names = registry.ordered_names` (`0x28(%rax)`, loop
+  `+0x160..+0x1a4`) and `val indices = registry.ordered_indices`
+  (`0x30(%rax)`, loop `+0x200..+0x244`). Both loops execute before
+  `if names.len() != indices.len()` at `+0x246` (`0x140dbf826`), settling
+  that the sampled growth is the per-lookup entry copies rather than the hash
+  table fill loops.
+- Not supported: a repeated index rebuild. No term of `cache_hit` changes
+  inside one freeze: the transient scope identity is constant (freeze opens or
+  ends no scope, pause preserves the identity, and
+  `rt_session_alloc_begin/end` only move a depth counter), the session id is
+  constant, `registry.generation` is assigned once before the import loop, and
+  freeze never appends to `ordered_names`/`ordered_indices`. A rebuild is also
+  cheap: `rt_array_push` grows by doubling `realloc` in place
+  (`rt_core_array_reserve`), so one build of 16,384 buckets + 7,124 chain
+  slots is about 190 KB, not quadratic. The observed rate does not
+  discriminate between the two mechanisms (both need 1-2 thousand calls per
+  second), so the rate is not cited as proof. Repeated rebuild was not
+  measured on Windows at 7,124 names.
+
+### Remedy and what is not verified
+
+`94d86930de6` already removes both copies on `release/1.0.0`; no further
+source change is made here. For the rb5 pin the same source change is a
+backport of that commit's `module_surface_registry_index.spl` hunk. The copy
+is native-only and invisible to the interpreter, so it is pinned by the
+source-contract test in
+`test/01_unit/compiler/hir/module_surface_registry_linear_guard_spec.spl`;
+`test/01_unit/compiler/20.hir/module_surface_freeze_perf_parity_spec.spl` now
+also pins one index build per freeze. Neither the pin with the backport nor
+the release tip was re-run through the full-CLI boundary, so "RSS stays flat
+after the last surface release" remains unverified on both hosts.
