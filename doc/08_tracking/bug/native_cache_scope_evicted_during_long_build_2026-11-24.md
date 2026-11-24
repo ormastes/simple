@@ -114,6 +114,12 @@ without bound.
   (`SIMPLE_MIR_SHARD_EXPORT_WRITE`), and for a role flag in argv
   (`--file-worker`, `--parse-shard`, `--parse-fibers`, `--hir-shard`,
   `--mir-shard`; bootstrap children carry the flag and no role environment).
+- **Latch registration (review fix).** The latch is a present `SIMPLE_*` key in
+  every coordinator and child. It is admitted by the HIR worker profile
+  (`worker_hir_base_environment_keys_v1`; unadmitted, profile admission refused
+  the HIR pool of every coordinator build) and projected out of the module
+  environment fingerprint (`native_build_environment_identity.spl`), so it does
+  not change the object scope.
 - **Once.** The coordinator exports `SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE=1`
   before it does any work. The same process (the bootstrap route re-enters
   `run_native_build_worker` in process) and every descendant that inherits its
