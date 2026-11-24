@@ -38,6 +38,8 @@ pub use app.cli.bootstrap_focused_native_build_args.{
 }
 
 use app.cli.collection_planner_options.{collection_planner_options}
+use app.cli.bootstrap_native_output_args.{bootstrap_native_build_output_mode}
+use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
 
 enum FocusedNativeExecutionV1:
     Compiled(CompileResult)
@@ -49,6 +51,11 @@ pub fn run_focused_native_surface_inspection_v1(args: [text], request: NativeSur
     run_focused_native_build_plan(args, false, Some(request))
 
 pub fn focused_native_build_error(args: [text], inspection: NativeSurfaceInspectionRequestV1? = None) -> text:
+    val output_mode = bootstrap_native_build_output_mode(args)
+    if output_mode == "conflict":
+        return "Error: --emit-object, --emit-entry-object, --emit-archive, and --emit-shared are mutually exclusive"
+    if output_mode != "" and env_get("SIMPLE_BOOTSTRAP_STAGE4") == "1":
+        return "Error: Stage4 strict profile does not support object, entry object, archive, or shared output"
     val plugin_error = focused_native_build_backend_plugin_error(args)
     if plugin_error != "": return plugin_error
     val planner = collection_planner_options(args)
@@ -173,6 +180,17 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool,
     val runtime_path = focused_native_build_runtime_path(args)
     val runtime_bundle = focused_native_build_arg_value(args, "--runtime-bundle")
 
+    # Focused dispatch returns before bootstrap_main's positional binding.
+    # Bind the same driver contract here and restore it on every result path.
+    val previous_output_mode = native_build_output_mode_snapshot()
+    val requested_output_mode = bootstrap_native_build_output_mode(args)
+    if not native_build_output_mode_bind(requested_output_mode):
+        val output_restored = native_build_output_mode_restore(previous_output_mode)
+        if not output_restored:
+            print "error: could not restore focused native-build output-mode environment"
+        print "error: could not bind focused native-build output mode '{requested_output_mode}'"
+        return 1
+
     val old_entry = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_ENTRY")
     val old_entry_closure = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
     val old_target = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_TARGET")
@@ -288,6 +306,11 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool,
     native_build_env_restore_v1("SIMPLE_NATIVE_LIBRARY_UNITS", old_lib_units)
     native_build_env_restore_v1("SIMPLE_STAGE3_LIB_DYNLIB", old_stage3_dynlib)
     native_build_env_restore_v1("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", old_dynlib_explicit)
+
+    val output_restored = native_build_output_mode_restore(previous_output_mode)
+    if not output_restored:
+        print "error: could not restore focused native-build output-mode environment"
+        return 1
 
     # Both branches restore the exact same ambient configuration before reporting.
     val result = match execution:
