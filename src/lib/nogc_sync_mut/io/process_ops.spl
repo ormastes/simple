@@ -105,9 +105,9 @@ extern fn rt_process_observation_v4_reserved_start_pinned_value(token: i64, exec
 @unsafe(reason: "same retained reservation with final Unix submission deadline admission", capabilities: [ffi])
 extern fn rt_process_observation_v5_reserved_start_admitted_value(token: i64, executable: i64, cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
 @unsafe(reason: "nullable observation cannot consume reservation authority", capabilities: [ffi])
-extern fn rt_process_observation_v4_reserved_observe_value(token: i64, wait_ns: i64, retire: i64) -> ([u8], [u8], [u8], [i64])?
+extern fn rt_process_observation_v4_reserved_observe_value(token: i64, wait_ns: i64, retire: i64) -> [[i64]]
 @unsafe(reason: "idempotent frozen acknowledgement retained until confirmation", capabilities: [ffi])
-extern fn rt_process_observation_v4_reserved_ack_value(token: i64, digest: [u8]) -> ([u8], [u8], [u8], [i64])?
+extern fn rt_process_observation_v4_reserved_ack_value(token: i64, digest: [u8]) -> [[i64]]
 @unsafe(reason: "scalar explicit terminal reservation release", capabilities: [ffi])
 extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
 @unsafe(reason: "native V4 unpinned start is an explicit unavailable receipt", capabilities: [ffi])
@@ -1619,10 +1619,8 @@ pub class ProcessObservationReservationV4:
         val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_reserved_observe_value(
                 self.token, caller_wait_ns, if retire: 1 else: 0)
-        val (stdout, stderr, binding, words) = match wire:
-            case Some(value): value
-            case None: return Err("process observation unavailable; reservation retained")
-        self.validate_receipt(_process_observation_wire_v4(stdout, stderr, binding, words)?)
+        val receipt = _process_observation_reserved_wire_v4(wire, "process observation unavailable; reservation retained")?
+        self.validate_receipt(receipt)
 
     pub me fn acknowledge(self, digest: [u8]) -> Result<ProcessObservationReceiptV4, text>:
         if self.released: return Err("process reservation already released")
@@ -1630,10 +1628,8 @@ pub class ProcessObservationReservationV4:
             return Err("process reservation acknowledgement digest malformed")
         val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_reserved_ack_value(self.token, digest)
-        val (stdout, stderr, binding, words) = match wire:
-            case Some(value): value
-            case None: return Err("process acknowledgement unavailable; retry with retained reservation")
-        val receipt = _process_observation_wire_v4(stdout, stderr, binding, words)?
+        val receipt = _process_observation_reserved_wire_v4(wire,
+            "process acknowledgement unavailable; retry with retained reservation")?
         if (receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack and
                 receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck) or
                 receipt.binding_digest != digest:
@@ -1670,6 +1666,14 @@ pub fn process_observation_owner_reserve_v4(
 pub struct ProcessObservationStartV4:
     receipt: ProcessObservationReceiptV4
     lease: ProcessObservationLeaseV4
+
+# The native owner returns a nullable SplArray of four SplArray handles.
+# Read the outer container with the array ABI before validating its columns.
+fn _process_observation_reserved_wire_v4(wire: [[i64]], unavailable: text) -> Result<ProcessObservationReceiptV4, text>:
+    val columns = wire.len()
+    if columns == 0: return Err(unavailable)
+    if columns != 4: return Err("process observation V4 receipt has an invalid column count")
+    _process_observation_wire_v4(wire[0] as [u8], wire[1] as [u8], wire[2] as [u8], wire[3])
 
 fn _process_observation_wire_v4(
     stdout: [u8], stderr: [u8], binding: [u8], words: [i64]

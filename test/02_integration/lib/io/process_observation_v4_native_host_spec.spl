@@ -14,7 +14,7 @@ use std.common.process.observation_v4.{
     freeze_process_observation_cleanup_receipt_v4}
 use std.nogc_sync_mut.io.process_observation_v4.{
     OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationLeaseV4,
-    process_observation_capabilities_v4,
+    process_observation_capabilities_v4, process_observation_owner_reserve_v4,
     process_observation_start_pinned_v4}
 
 fn process_observation_v4_native_fixture_path() -> text:
@@ -54,7 +54,30 @@ fn process_observation_v4_drain_owner(
         return Ok(true)
     Err("owner drain reached its bounded turn limit with a retained live ticket")
 
-fn process_observation_v4_run_pinned_static_child(path: text):
+fn process_observation_v4_reserved_child(executable: OwnedExecutablePin, cwd: OwnedCwdPinV4,
+        request: ProcessObservationRequestV4) -> Result<bool, text>:
+    var owner = process_observation_owner_reserve_v4(executable, cwd)?
+    val _started = owner.start(request)?
+    var turns = 0
+    while turns < 120:
+        # The final 20 polls request retirement through the original owner.
+        val receipt = owner.observe(50000000, turns >= 100)?
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen:
+            val frozen = freeze_process_observation_receipt_v4(receipt)?
+            val ack = owner.acknowledge(frozen.binding_digest)?
+            val released = owner.confirm_release()?
+            return Ok(released and ack.packet.packet_kind == ProcessObservationPacketKindV4.Ack and
+                ack.binding_digest == frozen.binding_digest and frozen.packet.exit_code == 23 and
+                frozen.stdout == [110u8, 97u8, 116u8, 105u8, 118u8, 101u8, 45u8, 118u8, 52u8, 10u8] and frozen.stderr.is_empty())
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)?
+            val _acknowledged = owner.acknowledge(cleanup.binding_digest)?
+            val _released = owner.confirm_release()?
+            return Err("reserved child returned cleanup-only evidence")
+        turns = turns + 1
+    Err("reserved child did not reach a terminal observation")
+
+fn process_observation_v4_run_pinned_static_child(path: text, reserved: bool = false):
     val absolute_path = path_absolute(path)
     expect(file_is_regular_no_follow(absolute_path)).to_equal(true)
     val capabilities = match process_observation_capabilities_v4():
@@ -87,6 +110,14 @@ fn process_observation_v4_run_pinned_static_child(path: text):
         enforcement_kind: ProcessObservationEnforcementKindV4.None,
         descendant_policy: ProcessObservationDescendantPolicyV4.LeaderOnly,
         max_clock_resolution_ns: 10000000)
+    if reserved:
+        val result = process_observation_v4_reserved_child(executable, cwd, request)
+        val _cwd_closed = cwd.close()
+        val _exe_closed = executable.close()
+        match result:
+            case Ok(verified): expect(verified).to_equal(true)
+            case Err(reason): fail(reason)
+        return
     val started = match process_observation_start_pinned_v4(executable, cwd, request):
         case Ok(value): value
         case Err(reason):
@@ -169,3 +200,5 @@ describe "Linux process observation V4 native host lifecycle":
     else:
         it "pins, observes, freezes, and acknowledges a real native child":
             process_observation_v4_run_pinned_static_child(fixture)
+        it "reads the four native reservation columns through observe and acknowledge":
+            process_observation_v4_run_pinned_static_child(fixture, true)
