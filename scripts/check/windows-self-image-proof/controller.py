@@ -5,7 +5,7 @@ HERE=P(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('intake',HERE/'proof.py')
 n=importlib.util.module_from_spec(spec);spec.loader.exec_module(n)
 n.OUT=n.ROOT/'build/windows-self-image-proof';n.OUT.mkdir(parents=True,exist_ok=True)
-SOURCE='7caac0600ded6dfae8882ce3eaf0a0038288e92f'
+SOURCE='67c4722e5507345776aa57ec5865903749ad67ec'
 BASE='002e381e56259b60f7da059f52dd469e5bd60b11'
 
 def main():
@@ -15,11 +15,12 @@ def main():
     current=(n.ROOT/path).read_text(encoding='utf-8')
     added=('    # Windows worker identity is the kernel image, not a particular basename,\n'
            '    # argv[0], or a configured compiler. Renamed native producers are valid.\n'
-           '    if host_os() == "windows":\n'
+           '    if host_is_windows_host():\n'
            '        return cli_kernel_executable_path()\n')
+    original=original.replace('use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}\n', 'use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}\nuse std.nogc_sync_mut.fs.host_path.{host_is_windows_host}\n')
     assert current==original.replace('fn self_exe() -> text:\n','fn self_exe() -> text:\n'+added)
     assert current.count(added)==1
-    helper_paths=['src/app/io/cli_ops.spl','src/app/io/env_ops.spl',
+    helper_paths=['src/lib/nogc_sync_mut/fs/host_path.spl','src/app/io/cli_ops.spl','src/app/io/env_ops.spl',
                   'src/lib/nogc_sync_mut/io/windows_image_owner.spl',
                   'src/lib/nogc_sync_mut/io/windows_process_owner_abi.spl']
     for helper in helper_paths:
@@ -61,17 +62,22 @@ def main():
     digest=n.sha(product)
     runner=n.OUT/'run-renamed.py'
     runner.write_text("import subprocess,sys\np=subprocess.run(['C:/stale/simple.exe',sys.argv[2]],executable=sys.argv[1],timeout=30)\nraise SystemExit(p.returncode)\n",encoding='utf-8')
-    run_env=dict(env);run_env.update(SIMPLE_BINARY='C:/stale/simple.exe',SIMPLE_BIN='C:/stale/another-simple.exe')
-    n.owned('renamed',[sys.executable,str(runner),str(product),digest],262144,45,run_env)
-    output=(n.OUT/'renamed.stdout').read_bytes().replace(b'\r\n',b'\n').decode('utf-8')
-    lines=output.splitlines()
-    assert len(lines)==2 and lines[0]=='windows-native-build-self-image assertions=7',output
-    assert lines[1].startswith('kernel-image=')
-    actual=P(lines[1].split('=',1)[1])
-    assert os.path.samefile(actual,product) and n.sha(actual)==digest
+    profiles={}
+    for profile in ('os-unset','os-spoofed'):
+        run_env=dict(env);run_env.update(SIMPLE_BINARY='C:/stale/simple.exe',SIMPLE_BIN='C:/stale/another-simple.exe')
+        if profile=='os-unset': run_env.pop('OS',None)
+        else: run_env['OS']='Linux'
+        n.owned(profile,[sys.executable,str(runner),str(product),digest],262144,45,run_env)
+        output=(n.OUT/(profile+'.stdout')).read_bytes().replace(b'\r\n',b'\n').decode('utf-8')
+        lines=output.splitlines()
+        assert len(lines)==2 and lines[0]=='windows-native-build-self-image assertions=7',output
+        assert lines[1].startswith('kernel-image=')
+        actual=P(lines[1].split('=',1)[1])
+        assert os.path.samefile(actual,product) and n.sha(actual)==digest
+        profiles[profile]={'assertions':7,'actual_image':str(actual),'OS':run_env.get('OS')}
     assert all(n.sha(n.OUT/p)==h for p,h in identities.items())
     assert all(n.sha(n.ROOT/p)==h for p,h in source_files.items())
-    n.save('terminal.json',{'status':'NATIVE_RENAMED_IMAGE_PASS','assertions':7,'source':SOURCE,
+    n.save('terminal.json',{'status':'NATIVE_RENAMED_IMAGE_OS_PASS','profiles':profiles,'assertions':14,'source':SOURCE,
         'compiler_source':n.SOURCE,'compiler_sha256':n.sha(compiler),'fixture_sha256':digest,
         'image':str(actual),'scope':'actual canonical kernel lookup and source wiring; not rebuilt native_build_main or Phase3 qualification'})
 
