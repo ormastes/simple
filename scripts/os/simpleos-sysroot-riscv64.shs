@@ -21,15 +21,21 @@ set -eu
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-SYSROOT="$REPO_ROOT/build/os/sysroot-riscv64"
+SYSROOT="${SIMPLEOS_SYSROOT_RISCV64:-$REPO_ROOT/build/os/sysroot-riscv64}"
 LIBC_DIR="$REPO_ROOT/src/os/libc"
-LIBC_BUILD="$REPO_ROOT/build/os/libc-riscv64-unknown-simpleos"
+mkdir -p "$SYSROOT/obj"
+LIBC_BUILD=$(mktemp -d "$SYSROOT/obj/libc-generation.XXXXXX")
 CORE_OBJ_DIR="${SIMPLE_CORE_OBJ_DIR:-$REPO_ROOT/build/os/simple-core-simpleos-riscv64/parts/objects}"
 TRIPLE_CC="riscv64-unknown-none-elf"
 CC="${CC:-clang}"
 AR="${AR:-llvm-ar}"
 command -v "$AR" >/dev/null 2>&1 || AR=ar
 CFLAGS="--target=$TRIPLE_CC -march=rv64gc -mabi=lp64d -mcmodel=medany -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Wno-unused-parameter -D__simpleos__=1 -I$LIBC_DIR/include"
+. "$REPO_ROOT/scripts/check/lib/simpleos-sysroot-receipt.shs"
+simpleos_sdk_invalidate "$SYSROOT"
+mkdir -p "$LIBC_BUILD"
+sdk_input_capture="$LIBC_BUILD/prebuild-inputs.sdn"
+simpleos_sdk_capture_inputs "$REPO_ROOT" riscv64 scripts/os/simpleos-sysroot-riscv64.shs "$sdk_input_capture"
 
 mkdir -p "$SYSROOT/lib" "$SYSROOT/share/simpleos" "$LIBC_BUILD"
 printf '%s\n' "riscv64-unknown-simpleos" > "$SYSROOT/share/simpleos/target-triple.txt"
@@ -288,8 +294,7 @@ echo "[sysroot-rv64] Installed libsimpleos_c.a + crt0.o"
 # through the `-print-libgcc-file-name` slot by cc-riscv64-simpleos, because
 # simpleos_user_runtime_paths() in the seed linker is x86_64-gated.
 echo "[sysroot-rv64] Cross-compiling real Simple runtime for riscv64..."
-RT_BUILD="$LIBC_BUILD/simple_runtime_native"
-mkdir -p "$RT_BUILD"
+RT_BUILD=$(mktemp -d "$LIBC_BUILD/simple_runtime_native.XXXXXX")
 RT_CFLAGS="--target=$TRIPLE_CC -march=rv64gc -mabi=lp64d -mcmodel=medany \
     -ffreestanding -nostdlib -nostdlibinc -fno-builtin -fno-stack-protector \
     -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
@@ -449,4 +454,7 @@ SECTIONS {
 LDEOF
 
 echo "[sysroot-rv64] Sysroot ready: $SYSROOT"
+sdk_flags_file="$LIBC_BUILD/build-flags.txt"
+printf 'CFLAGS=%s\nASFLAGS=%s\nRT_CFLAGS=%s\n' "$CFLAGS" "--target=$TRIPLE_CC -march=rv64gc -mabi=lp64d -ffreestanding -nostdlib" "$RT_CFLAGS" > "$sdk_flags_file"
+simpleos_sdk_write "$REPO_ROOT" "$SYSROOT" riscv64 scripts/os/simpleos-sysroot-riscv64.shs "$CC" "$AR" "$sdk_flags_file" "$sdk_input_capture"
 ls -la "$SYSROOT/lib/" "$SYSROOT/share/simpleos/"

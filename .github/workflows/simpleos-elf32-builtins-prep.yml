@@ -1,0 +1,112 @@
+name: SimpleOS ELF32 builtins preparation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ['release/1.0.0']
+    types: [labeled]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: simpleos-elf32-builtins-prep-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || (github.event.label.name == 'simpleos-elf32-builtins-prep' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'work/arm32-builtins-composition-20261124')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      LLVM_SOURCE_REVISION: 6dfe1677ab8dffbc6ec13d53a1e0215d75147689
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact source and prepare bounded logs
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          mkdir -p build/verify/elf32-builtins-logs
+          printf 'schema: simpleos-elf32-builtins-checkout-v1\nsource_revision: %s\nadmission: none\n' "$SOURCE_REVISION" > build/verify/elf32-builtins-logs/checkout.sdn
+
+      # The 11 fixture controls already passed for these exact frozen helper
+      # and fixture bytes. This sole job checks the real raw/derived archives;
+      # do not replay unchanged green fixture controls.
+      - name: Composition fixture controls on explicit manual runs
+        if: github.event_name == 'workflow_dispatch'
+        run: sh scripts/check/tests/simpleos-elf32-builtins-composition-test.shs
+
+      - uses: actions/checkout@v5
+        with:
+          repository: llvm/llvm-project
+          ref: 6dfe1677ab8dffbc6ec13d53a1e0215d75147689
+          persist-credentials: false
+          fetch-depth: 1
+          path: build/llvm-elf32-sources
+          sparse-checkout: |
+            compiler-rt/lib/builtins
+            compiler-rt/cmake
+            compiler-rt/include
+            cmake
+            llvm/cmake
+
+      - name: Install VM build utilities
+        run: |
+          set -euo pipefail
+          timeout -k 10s 600s sudo apt-get update -qq > build/verify/elf32-builtins-logs/apt-update.log 2>&1
+          timeout -k 10s 600s sudo apt-get install -y -qq cmake ninja-build xz-utils libicu70 > build/verify/elf32-builtins-logs/apt-install.log 2>&1
+
+      - name: Install canonical authenticated LLVM 23.1.1 provider
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export SIMPLE_LINUX_PHASE23_LLVM_PREFIX="$RUNNER_TEMP/elf32-llvm-23.1.1"
+          export SIMPLE_LLVM23_ARCHIVE_CACHE="$RUNNER_TEMP/elf32-llvm-archive-cache"
+          timeout -k 10s 900s sh scripts/setup/install-linux-phase23-llvm23.shs > build/verify/elf32-builtins-logs/llvm-install.log 2>&1
+          printf '%s\n' "$SIMPLE_LINUX_PHASE23_LLVM_PREFIX" > build/verify/elf32-builtins-logs/llvm-prefix.txt
+
+      - name: Prepare the single authorized ARM32 builtins inventory
+        run: |
+          set -euo pipefail
+          test "$(git -C build/llvm-elf32-sources rev-parse HEAD)" = "$LLVM_SOURCE_REVISION"
+          sh scripts/os/prepare-simpleos-elf32-builtins.shs \
+            --llvm-source "$GITHUB_WORKSPACE/build/llvm-elf32-sources" \
+            --llvm-prefix "$RUNNER_TEMP/elf32-llvm-23.1.1" \
+            --output "$GITHUB_WORKSPACE/build/verify/simpleos-elf32-builtins-campaign" \
+            --jobs 1 --arch arm32 > build/verify/elf32-builtins-logs/campaign.log 2>&1
+
+      - name: Retain unadmitted diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: simpleos-elf32-builtins-prep-${{ github.run_id }}
+          path: |
+            build/verify/arm-rsub-policy.*/**
+            build/verify/elf32-builtins-logs
+            build/verify/simpleos-elf32-builtins-campaign/*.sdn
+            build/verify/simpleos-elf32-builtins-campaign/*.txt
+            build/verify/simpleos-elf32-builtins-campaign/*.list
+            build/verify/simpleos-elf32-builtins-campaign/*.cmake
+            build/verify/simpleos-elf32-builtins-campaign/*.log
+            build/verify/simpleos-elf32-builtins-campaign/*/*.sdn
+            build/verify/simpleos-elf32-builtins-campaign/*/*.txt
+            build/verify/simpleos-elf32-builtins-campaign/*/*.list
+            build/verify/simpleos-elf32-builtins-campaign/*/*.stdout
+            build/verify/simpleos-elf32-builtins-campaign/*/*.stderr
+            build/verify/simpleos-elf32-builtins-campaign/*/raw/*.a
+            build/verify/simpleos-elf32-builtins-campaign/*/derived/*.a
+            build/verify/simpleos-elf32-builtins-campaign/*/build/CMakeCache.txt
+            build/verify/simpleos-elf32-builtins-campaign/*/build/compile_commands.json
+          if-no-files-found: error
+          retention-days: 14

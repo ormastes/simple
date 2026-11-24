@@ -122,6 +122,14 @@ elif [ $is_win -eq 1 ]; then
   fi
   [ -n "$LLVM_MINGW_DIR" ] || { echo "build-seed: llvm-mingw UCRT not found; run scripts/setup/bootstrap-prereqs.shs install" >&2; exit 2; }
   PATH="$LLVM_MINGW_DIR/bin:$PATH"; export PATH CC=clang CXX=clang++
+  # Rust's windows-gnu target links with -lgcc -lgcc_eh; llvm-mingw has no libgcc.
+  # Serve them from compiler-rt builtins + libunwind via a shim dir (never GCC).
+  rt=$(ls "$LLVM_MINGW_DIR"/lib/clang/*/lib/windows/libclang_rt.builtins-x86_64.a 2>/dev/null | tail -n 1)
+  uw="$LLVM_MINGW_DIR/x86_64-w64-mingw32/lib/libunwind.a"
+  [ -f "$rt" ] && [ -f "$uw" ] || { echo "build-seed: llvm-mingw compiler-rt/libunwind missing" >&2; exit 2; }
+  gccshim="${CARGO_TARGET_DIR:-$crate/target}/gcc-shim"; mkdir -p "$gccshim"
+  cp "$rt" "$gccshim/libgcc.a"; cp "$uw" "$gccshim/libgcc_eh.a"
+  LIBRARY_PATH="$(cd "$gccshim" && pwd -W 2>/dev/null || pwd)${LIBRARY_PATH:+;$LIBRARY_PATH}"; export LIBRARY_PATH
 else
   toolchain=$channel; export CC=clang CXX=clang++
 fi

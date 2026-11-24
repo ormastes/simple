@@ -13,7 +13,7 @@ use compiler.backend.linker.elf_inspect.{
     ET_NONE, ET_REL, ET_EXEC, ET_DYN,
     EM_X86_64, EM_ARM, EM_AARCH64, EM_RISCV
 }
-use std.common.text_bytes.{bytes_to_text}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 # ============================================================================
 # Additional ELF Constants
@@ -124,13 +124,13 @@ fn elf_strtab_byte(strtab: ElfStringTable, index: i64) -> u8:
     """Byte at table-relative `index` (caller bounds-checks against elf_strtab_len)."""
     strtab.data[strtab.win_start + index]
 
-fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
+fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> Result<text, text>:
     """Look up a NUL-terminated string at byte index in the string table.
 
     Returns empty string if index is out of range or table is empty.
     """
     if index < 0 or index >= elf_strtab_len(strtab):
-        return ""
+        return Ok("")
 
     # Find the NUL with native searches over growing windows, then convert
     # the name bytes once. Building names one character at a time dominated
@@ -142,11 +142,11 @@ fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
         val stop = if at + window < len: at + window else: len
         val nul = strtab.data[at:stop].index_of(0u8)
         if nul >= 0:
-            return bytes_to_text(strtab.data[at:at + nul])
+            return linker_name_text(strtab.data[at:at + nul], "ELF string table offset {index}")
         if stop == len:
-            return bytes_to_text(strtab.data[at:len])
+            return linker_name_text(strtab.data[at:len], "ELF string table offset {index}")
         window = window * 4
-    ""
+    Ok("")
 
 # ============================================================================
 # Symbol Helpers
@@ -286,7 +286,7 @@ fn elf_find_section_by_type(obj: ElfObject, sh_type: i64) -> ElfSectionHeader?:
 # Symbol Table Parser
 # ============================================================================
 
-fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfStringTable) -> [ElfSymbol]:
+fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfStringTable) -> Result<[ElfSymbol], text>:
     """Parse all ELF64 symbol table entries from a SHT_SYMTAB section.
 
     ELF64 Sym entry layout (24 bytes):
@@ -303,11 +303,11 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
     val sec_size = symtab_section.sh_size
 
     if sec_size <= 0 or sec_offset < 0:
-        return symbols
+        return Ok(symbols)
 
     val end = sec_offset + sec_size
     if end > bytes.len():
-        return symbols
+        return Ok(symbols)
 
     val entry_size = if elf_is_32(bytes): ELF32_SYM_SIZE else: ELF64_SYM_SIZE
     val count = sec_size / entry_size
@@ -322,7 +322,9 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
         val st_value = if entry_size == ELF32_SYM_SIZE: elf_read_u32_le(bytes, base + 4) else: elf_read_u64_le(bytes, base + 8)
         val st_size = if entry_size == ELF32_SYM_SIZE: elf_read_u32_le(bytes, base + 8) else: elf_read_u64_le(bytes, base + 16)
 
-        var name = elf_strtab_get(strtab, st_name)
+        var name: text = match elf_strtab_get(strtab, st_name):
+            case Ok(v): v
+            case Err(e): return Err("ELF symbol {i}: {e}")
         # `.symver x, name@@VER` in a relocatable: the default-version
         # definition binds plain `name` references (ld.lld). `name@VER` stays.
         if st_shndx != 0:
@@ -341,7 +343,7 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
         ))
         i = i + 1
 
-    symbols
+    Ok(symbols)
 
 # ============================================================================
 # Relocation Table Parser
@@ -463,8 +465,13 @@ fn elf_section_entsize(obj: ElfObject, section_index: i64) -> i64:
     if elf32: elf_read_u32_le(obj.raw, base + 36) else: elf_read_u64_le(obj.raw, base + 56)
 
 fn elf_section_name(obj: ElfObject, section_index: i64) -> text:
-    """Resolve a section's name through .shstrtab."""
-    elf_strtab_get(obj.shstrtab, obj.sections[section_index].sh_name)
+    """Resolve a section's name through .shstrtab.
+
+    elf_parse_object rejects any section name that is not valid UTF-8, so the
+    Err arm is unreachable for parsed objects."""
+    match elf_strtab_get(obj.shstrtab, obj.sections[section_index].sh_name):
+        case Ok(name): name
+        case Err(_): ""
 
 # ============================================================================
 # Top-Level Parser
@@ -556,6 +563,14 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     val shstrndx = header.e_shstrndx
     if shstrndx >= 0 and shstrndx < sections.len():
         shstrtab = elf_parse_string_table(bytes, sections[shstrndx])
+    # Section names must be valid UTF-8 (link error otherwise); checked once
+    # here so elf_section_name can stay infallible.
+    var ni: i64 = 0
+    while ni < sections.len():
+        match elf_strtab_get(shstrtab, sections[ni].sh_name):
+            case Ok(_): ()
+            case Err(e): return Err("ELF section {ni} name: {e}")
+        ni = ni + 1
 
     # Symbol names live in the string table named by the symtab's sh_link.
     # LLVM emits ONE combined .strtab that is also e_shstrndx, so "first
@@ -584,7 +599,9 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     var symbols: [ElfSymbol] = []
     for sec in sections:
         if sec.sh_type == SHT_SYMTAB:
-            symbols = elf_parse_symbols(bytes, sec, strtab)
+            symbols = match elf_parse_symbols(bytes, sec, strtab):
+                case Ok(v): v
+                case Err(e): return Err(e)
 
     # Find and parse all RELA sections, tagging each relocation with the
     # section index it came from (section_idx) so callers can attribute

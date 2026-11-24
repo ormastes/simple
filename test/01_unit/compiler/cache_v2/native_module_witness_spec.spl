@@ -72,6 +72,51 @@ describe "NativeModuleCacheWitnessV1":
         expect(duplicate_dep.valid).to_equal(false)
         expect(duplicate_selection.valid).to_equal(false)
 
+    it "folds an identically resolved repeated import once and rejects a conflicting repeat":
+        # `use m.{a}` + `use m.{b}` gives two traces with one import id.
+        val single = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [witness_resolution("a"), witness_resolution("b")],
+            [], witness_config())
+        val repeated = native_module_cache_witness_v1(
+            "app.main", "mir-1", [],
+            [witness_resolution("a"), witness_resolution("b"), witness_resolution("a")],
+            [], witness_config())
+        expect(single.valid).to_equal(true)
+        expect(repeated.valid).to_equal(true)
+        expect(repeated.digest()).to_equal(single.digest())
+        # The repeat is compared, never dropped: a different selection for the
+        # same import id is still ambiguous.
+        var conflicting = witness_resolution("a")
+        conflicting.selected = "/other/a.spl"
+        val conflict = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [witness_resolution("a"), conflicting],
+            [], witness_config())
+        expect(conflict.valid).to_equal(false)
+        expect(conflict.reason).to_equal("ambiguous-resolution-fact")
+        var stale_generation = witness_resolution("a")
+        stale_generation.dir_generation = "generation-2"
+        val generation_conflict = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [witness_resolution("a"), stale_generation],
+            [], witness_config())
+        expect(generation_conflict.valid).to_equal(false)
+        # Still an input: moving both repeats to a new resolution changes the
+        # witness, and a repeat with selected_count != 1 stays invalid.
+        var moved_first = witness_resolution("a")
+        moved_first.selected = "/other/a.spl"
+        var moved_second = witness_resolution("a")
+        moved_second.selected = "/other/a.spl"
+        val moved = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [moved_first, witness_resolution("b"), moved_second],
+            [], witness_config())
+        expect(moved.valid).to_equal(true)
+        expect(moved.digest() == single.digest()).to_equal(false)
+        var uncounted = witness_resolution("a")
+        uncounted.selected_count = 2
+        val uncounted_repeat = native_module_cache_witness_v1(
+            "app.main", "mir-1", [], [witness_resolution("a"), uncounted],
+            [], witness_config())
+        expect(uncounted_repeat.valid).to_equal(false)
+
     it "fails closed for missing or ambiguous layout ownership":
         var ambiguous = witness_layout("dep", "Thing")
         ambiguous.owner_count = 2

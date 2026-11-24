@@ -1,0 +1,68 @@
+"""
+## Purpose and audience
+Purpose: Pin Chrome 159's `text-decoration: underline` rule for `auto`
+thickness at device scale 1 and 4. Chrome draws floor(font-size / 10) rows
+(min 1) at baseline + round(0.106em - thickness / 2), and at device scale k it
+applies that to the DEVICE font size. This engine used round(0.0733em) and
+scaled the 1x rule by k. A 16px link at k=4 was 4 rows at baseline + 2 against
+Chrome's 6 rows at baseline + 4; every link on the web catalog's pages at 4x
+mismatched (overview: the `working anchor` run, about 5,500 device px).
+Audience: web renderer text-decoration paint maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300 (K=4) / 400x400 (K=1), Liberation Sans via `sans-serif`. Values are
+the device rows with green < 128 in one column, as runs.
+
+| page / column                      | K | Chrome runs                    | base bfe4baf76e9 |
+|------------------------------------|---|--------------------------------|--------------------------|
+| LINK_PAGE, x 177                   | 4 | 79-84 114-119 250-255           | 112-115 (4 rows) ...      |
+| SIZES_PAGE, x 3 (64/40/24 px)      | 1 | 76-81 142-163 166-169 245-257 260-261 | 64px 5 rows, 40px 3 rows |
+| SIZES2_PAGE, x 2 (20/30/19/50 px) | 1 | 58-59 162-164 370-374 (underlines) | 20px 1, 30px 2, 50px 4 rows |
+
+Not pinned: 19px (Chrome row 257, this engine 258; the offset formula, not the
+thickness) and Chrome's skip-ink gaps around descenders.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-UNDERLINE-AUTO-001 — an auto-thickness underline is floor(em/10) rows at baseline + round(0.106em - thickness/2), on the device font at device scale k.
+"""
+# @tag: unit, browser_engine, paint, text_decoration, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val LINK_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}} p{{margin:10px}}</style></head><body><p><a href=\"#x\">mmmm mmmm</a></p><p><a href=\"#x\">working gg</a></p></body></html>"
+
+val SIZES_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;color:#172033;background:#fff;font-family:sans-serif}} p{{margin:0;height:100px}}</style></head><body><p style=\"font-size:64px;line-height:100px\"><a href=\"#x\">mmm</a></p><p style=\"font-size:40px;line-height:100px\"><a href=\"#x\">mmm</a></p><p style=\"font-size:24px;line-height:100px\"><a href=\"#x\">mmm</a></p></body></html>"
+
+val SIZES2_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;color:#172033;background:#fff;font-family:sans-serif}} p{{margin:0;height:100px;line-height:100px}}</style></head><body><p style=\"font-size:20px\"><a href=\"#x\">ooo</a></p><p style=\"font-size:30px\"><a href=\"#x\">ooo</a></p><p style=\"font-size:19px\"><a href=\"#x\">ooo</a></p><p style=\"font-size:50px\"><a href=\"#x\">ooo</a></p></body></html>"
+
+# Runs of device rows y0..y1 whose pixel in column x has green < 128.
+fn _runs(px: [u32], w: i32, x: i32, y0: i32, y1: i32) -> text:
+    var s = ""
+    var start = -1
+    var y = y0
+    while y <= y1:
+        val ink = y < y1 and ((px[y * w + x] >> 8u32) & 255u32) < 128u32
+        if ink and start < 0:
+            start = y
+        if not ink and start >= 0:
+            s = s + " {start}-{y - 1}"
+            start = -1
+        y = y + 1
+    s.trim()
+
+describe "Auto-thickness underline (Chrome 159)":
+    it "AC-1: a 16px link at device scale 4 is 6 rows at baseline + 4":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(LINK_PAGE, 400, 300, 4, "cpu_simd")
+        expect(_runs(px, 1600, 177, 0, 280)).to_equal("79-84 114-119 250-255")
+
+    it "AC-2: at device scale 1 the thickness is floor(em / 10) rows":
+        val big = simple_web_layout_render_html_pixels_engine2d_at_device_scale(SIZES_PAGE, 400, 400, 1, "cpu_simd")
+        expect(_runs(big, 400, 3, 0, 300)).to_equal("76-81 142-163 166-169 245-257 260-261")
+        val mid = simple_web_layout_render_html_pixels_engine2d_at_device_scale(SIZES2_PAGE, 400, 400, 1, "cpu_simd")
+        step("20px: 2 rows at 58; 30px: 3 rows at 162; 50px: 5 rows at 370")
+        expect(_runs(mid, 400, 2, 56, 62) + " " + _runs(mid, 400, 2, 160, 168) + " " + _runs(mid, 400, 2, 365, 380)).to_equal("58-59 162-164 370-374")

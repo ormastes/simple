@@ -115,6 +115,8 @@ counters!(
     // because host `@cfg` stripping changed the bytes.
     SHARED_SRC_PARSES,
     SHARED_SRC_HITS,
+    // entries the module loader seeded with its own parse (module_cache::shared_source_seed)
+    SHARED_SRC_SEEDS,
     INTERP_MODULE_AST_REUSE,
     // AST_REUSEs that took the cache's AST by ownership instead of cloning it
     // (module_cache::take_shared_ast).

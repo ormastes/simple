@@ -53,8 +53,15 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
   the hashed binary's sha256 equals that of `/proc/self/exe`
   (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
   `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
-  receipt is still per-process. Observed in a probe: changing only `-o` gave a new object scope. Modules whose witness is `…-witness-v1-invalid` (e.g.
-  `ambiguous-resolution-fact`) still never hit.
+  receipt is still per-process.
+- **Repeated imports and `-o` (2026-11-24, unexecuted):** a module that names one
+  import on several `use` lines got witness `…-witness-v1-invalid`
+  (`ambiguous-resolution-fact`; 112 modules in one evidence cache) and never hit.
+  `native_module_cache_witness_v1` now folds a repeat once when its resolution
+  digest equals the first one; a differing repeat is still invalid. The `-o` path
+  reached the object scope through `SIMPLE_NATIVE_NOOP_FINAL_OUTPUT` in the module
+  environment digest; the module projection now drops it (the no-op request keeps
+  it). Record: `doc/08_tracking/bug/native_cache_duplicate_import_witness_and_output_scope_2026-11-24.md`.
 - **Zero-hash never accepted:** compile-options mismatch triggers plain cache miss →
   rebuild (not a silent fallback)
 

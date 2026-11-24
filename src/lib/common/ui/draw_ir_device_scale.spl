@@ -237,6 +237,21 @@ fn _dir_device_rect(style: [DrawIrStyleProp]) -> [i32]:
             return out
     []
 
+# `device-clip` = "dl,dt,dr,db": device px the clip's left, top, right and
+# bottom edges move AFTER scaling, each by the device offset of the box that
+# owns that edge (an overflow box, or the command's own box for an svg
+# viewport), not by the command's own offsets: a child shifted inside an
+# unshifted `overflow:hidden` box keeps that box's clip. Never scaled, always
+# stripped; [] when the command has none (the clip stays k x CSS).
+fn _dir_device_clip(style: [DrawIrStyleProp]) -> [i32]:
+    for prop in style:
+        if prop.key == "device-clip":
+            var out: [i32] = []
+            for part in prop.value.split(","):
+                out.push(_dir_parse_int(part) as i32)
+            return out
+    []
+
 # `device-extra-height` / `device-extra-width`: device px a box grows (or, if
 # negative, shrinks) AFTER scaling, for a form control
 # whose device-px size is not k x its CSS size. Never scaled, always stripped.
@@ -301,7 +316,7 @@ fn _dir_without_key(style: [DrawIrStyleProp], key: text) -> [DrawIrStyleProp]:
     out
 
 fn _dir_is_device_prop(key: text) -> bool:
-    key == "device-y-offset" or key == "device-x-offset" or key == "device-rect" or key == "device-extra-height" or key == "device-extra-width" or key == "device-advance-widths"
+    key == "device-y-offset" or key == "device-x-offset" or key == "device-rect" or key == "device-extra-height" or key == "device-extra-width" or key == "device-advance-widths" or key == "device-clip"
 
 fn _dir_grow_rect(rect: DrawIrRect, extra_width: i32, extra_height: i32) -> DrawIrRect:
     if not rect.present:
@@ -332,15 +347,19 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
     scaled.border_rect = _dir_scale_rect(command.border_rect, k)
     scaled.content_rect = _dir_scale_rect(command.content_rect, k)
     scaled.hit_rect = _dir_scale_rect(command.hit_rect, k)
-    # The clip moves with the box it bounds: an svg snapped one device row up
-    # by `device-y-offset` kept its viewport clip at k x CSS y and lost its
-    # top row (Chrome inks it).
     scaled.clip_rect = _dir_scale_rect(command.clip_rect, k)
-    if scaled.clip_rect.present:
-        scaled.clip_rect.y = scaled.clip_rect.y + device_dy
     val has_device_prop = _dir_has_device_prop(command.computed_style)
     var device_pen_origin_folded = false
     if has_device_prop:
+        # The clip moves with the boxes that own its edges (`device-clip`):
+        # an svg snapped one device row up keeps its top row, an
+        # overflow:hidden box at a fractional left clips at its own column.
+        val device_clip = _dir_device_clip(command.computed_style)
+        if device_clip.len() == 4 and scaled.clip_rect.present:
+            scaled.clip_rect.x = scaled.clip_rect.x + device_clip[0]
+            scaled.clip_rect.y = scaled.clip_rect.y + device_clip[1]
+            scaled.clip_rect.width = scaled.clip_rect.width + device_clip[2] - device_clip[0]
+            scaled.clip_rect.height = scaled.clip_rect.height + device_clip[3] - device_clip[1]
         val device_advances = _dir_device_advances(command.computed_style)
         if device_advances.len() > 0 and device_advances.len() == command.advance_widths.len():
             val anchored = _dir_anchor_device_advances(device_advances, scaled.width)

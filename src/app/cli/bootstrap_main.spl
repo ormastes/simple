@@ -11,6 +11,10 @@ extern fn sys_get_args() -> [text]
 # Importing driver.spl directly lets discovery pull the driver and its
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use app.cli.bootstrap_surface_inspection_v1.{bootstrap_surface_inspection_plan_v1,
+    bootstrap_surface_inspection_reserve_v1}
+use app.cli.bootstrap_focused_native_build.{run_focused_native_surface_inspection_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_clear_v1}
 use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
     selected_k1_backend_policy_v1, selected_k1_backend_table_diagnostic_v1}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_smf, compile_result_is_success, compile_result_errors)
@@ -342,6 +346,27 @@ fn _bootstrap_admit_native_build_memory_v1(args: [text]) -> bool:
         eprint(memory_refusal)
         return false
     true
+
+fn run_bootstrap_surface_inspection_v1(args: [text]) -> i64:
+    val parsed_plan = match bootstrap_surface_inspection_plan_v1(args):
+        case Ok(value): value
+        case Err(reason):
+            print "error: surface inspection: {reason}"
+            return 1
+    val plan = match bootstrap_surface_inspection_reserve_v1(parsed_plan):
+        case Ok(value): value
+        case Err(reason):
+            print "error: surface inspection: {reason}"
+            return 1
+    # This is a coordinator request, not a parse/HIR/MIR worker lease.
+    native_entry_closure_handoff_clear_v1()
+    var code = 1
+    if bootstrap_coordinator_publish_authority_v1(plan.native_args):
+        if native_build_coordinator_prepublish_closure_v1(plan.native_args):
+            if native_build_capsule_admit_preclosed_v1(plan.native_args):
+                code = run_focused_native_surface_inspection_v1(plan.native_args, plan.request)
+    native_entry_closure_handoff_clear_v1()
+    code
 
 fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     # The pool re-executes this binary with the same argv plus the role flag;
@@ -1092,6 +1117,8 @@ fn main() -> i64:
         # deliberately falls through to the canonical unknown-command path.
         print "error: unsupported bootstrap internal entry '{all_args[2]}'"
         return 1
+    if first == "inspect-native-surfaces":
+        return run_bootstrap_surface_inspection_v1(all_args)
     if first == "native-build":
         # Decided BEFORE the route runs: a successful prepass installs
         # SIMPLE_MIR_SHARD_LINK in this process, which would otherwise make

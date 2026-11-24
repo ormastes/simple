@@ -458,9 +458,11 @@ fn _html_draw_ir_text_shadow_commands(
 # `a:link` and authored underlines). The Draw IR text command carries the
 # decoration only as a style prop, which no Engine2D executor reads, so the
 # rule is emitted as its own rect under each run. Placement follows Chrome:
-# top = baseline + round(0.106em - thickness/2), thickness = round(0.0733em)
+# top = baseline + round(0.106em - thickness/2), thickness = floor(em/10)
 # (min 1) unless `text-decoration-thickness` is set; the baseline is the run's
-# y plus the ascent, i.e. relative to where the glyphs are drawn.
+# y plus the ascent, i.e. relative to where the glyphs are drawn. At device
+# scale k Chrome applies both rules to the DEVICE font (16px at k=4: 6 rows
+# at baseline + 4, not k x the 1 px rule at + 1), carried as `device-rect`.
 fn _html_draw_ir_underline_commands(
     node: HNode, st: Style, runs: [DrawIrCommand]
 ) -> [DrawIrCommand]:
@@ -471,14 +473,28 @@ fn _html_draw_ir_underline_commands(
     val thickness = style_decoration_thickness_px(st)
     val below = (fs * 1060 - thickness * 5000 + 5000) / 10000
     val color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
+    val k = layout_device_scale()
+    val css_top = _html_draw_ir_chrome_ascent(fs) + below + st.text_underline_offset_px
+    val dev_fs = fs * k
+    val dev_auto = if dev_fs / 10 < 1: 1 else: dev_fs / 10
+    val dev_thickness = if st.text_decoration_thickness_px > 0: st.text_decoration_thickness_px * k else: dev_auto
+    val dev_top = _html_draw_ir_chrome_ascent(dev_fs) + (dev_fs * 1060 - dev_thickness * 5000 + 5000) / 10000 + st.text_underline_offset_px * k
     # cpu-lane-loop-ok: one rule per emitted text line of this node; bound is the node's wrapped line count
     for run in runs:
         if run.kind == "text" and run.width > 0:
-            out.push(draw_ir_rect_clipped(
+            var rule = draw_ir_rect_clipped(
                 run.component_id + "::underline", run.x,
-                run.y + _html_draw_ir_chrome_ascent(fs) + below + st.text_underline_offset_px,
-                run.width, thickness, color, run.clip_rect
-            ))
+                run.y + css_top, run.width, thickness, color, run.clip_rect
+            )
+            if k > 1:
+                var props: [DrawIrStyleProp] = [
+                    draw_ir_style_prop("device-rect", "0,{dev_top - k * css_top},{run.width * k},{dev_thickness}")
+                ]
+                for prop in run.computed_style:  # cpu-lane-loop-ok: copies the run's device line offset; bound is the run's prop list
+                    if prop.key == "device-y-offset":
+                        props.push(prop)
+                rule.computed_style = props
+            out.push(rule)
     out
 
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
@@ -1362,7 +1378,10 @@ fn _html_draw_ir_commands(
         for chrome_command in _html_draw_ir_widget_chrome_text_commands(width, height):
             commands.push(chrome_command)
             owner_nodes.push(-1)
-    (_html_draw_ir_device_dx(_html_draw_ir_device_top(commands, owner_nodes, nodes, boxes), owner_nodes, nodes), owner_nodes)
+    val device_commands = _html_draw_ir_device_clip(
+        _html_draw_ir_device_dx(_html_draw_ir_device_top(commands, owner_nodes, nodes, boxes), owner_nodes, nodes),
+        owner_nodes, nodes, boxes, clip_cache)
+    (device_commands, owner_nodes)
 
 # Legacy widget mode box suppression on a node's Draw IR box command, as the
 # raster `paint` skips it: the background (fill color, background color and,
@@ -1810,6 +1829,90 @@ fn _html_draw_ir_device_dx(commands: [DrawIrCommand], owners: [i32], nodes: [HNo
         c = c + 1
     out
 
+# The device row shift of node `i` (see `_html_draw_ir_device_top`): the
+# snapped device top of its nearest flow-placed box, plus the whole device px
+# each line-placed control on the way up adds. 0 at k == 1 and for i < 0.
+fn _html_draw_ir_node_device_dy(nodes: [HNode], boxes: LayoutResult, i: i32) -> i32:
+    if boxes.device_top.len() != nodes.len():
+        return 0
+    var r = i
+    var inline_dy = 0
+    # cpu-lane-loop-ok: ancestor walk that ends at the nearest flow-placed box, k > 1 renders only
+    while r >= 0 and r < nodes.len() and (boxes.device_top[r] == DEVICE_TOP_UNSET or box_device_top_is_inline_dy(boxes.device_top[r])):
+        if boxes.device_top[r] != DEVICE_TOP_UNSET:
+            inline_dy = inline_dy + boxes.device_top[r] - DEVICE_TOP_REL
+        r = nodes[r].parent
+    inline_dy + (if r >= 0 and r < nodes.len(): box_device_top_px(boxes.device_top[r]) else: 0)
+
+# For each node, 4 entries (left, top, right, bottom): the node whose
+# overflow clip sets that edge of the node's ancestor clip in `clip_cache`,
+# -1 for the viewport. A parent sets an edge exactly when the edge changed
+# from the parent's own clip (`clip_intersect` keeps the outer edge on a tie).
+fn _html_draw_ir_clip_edge_owners(nodes: [HNode], clip_cache: PaintClipCache) -> [i32]:
+    val n = nodes.len()
+    var owner: [i32] = [-1; n * 4]
+    if not clip_cache.has_node_clips or clip_cache.clips.len() != n:
+        return owner
+    var i = 0
+    # cpu-lane-loop-ok: one forward pass over the node list (parents precede children), k > 1 renders with a shifted box only
+    while i < n:
+        val p = nodes[i].parent as i32
+        if p >= 0 and p < n:
+            val ci = clip_cache.clips[i]
+            val cp = clip_cache.clips[p]
+            owner[i * 4] = if ci.x0 != cp.x0: p else: owner[p * 4]
+            owner[i * 4 + 1] = if ci.y0 != cp.y0: p else: owner[p * 4 + 1]
+            owner[i * 4 + 2] = if ci.x1 != cp.x1: p else: owner[p * 4 + 2]
+            owner[i * 4 + 3] = if ci.y1 != cp.y1: p else: owner[p * 4 + 3]
+        i = i + 1
+    owner
+
+fn _html_draw_ir_edge_device_dx(nodes: [HNode], owner: i32) -> i32:
+    if owner >= 0: box_device_dx_total(nodes, owner) else: 0
+
+fn _html_draw_ir_edge_device_dy(nodes: [HNode], boxes: LayoutResult, owner: i32) -> i32:
+    if owner >= 0: _html_draw_ir_node_device_dy(nodes, boxes, owner) else: 0
+
+# Device scale k > 1: a clip edge moves with the box that OWNS it, not with
+# the command it clips (Chrome 159: an `overflow:hidden` box at left 40.5px
+# clips its child at device column 162, while a child at left 10.5px inside
+# an unshifted box keeps that box's clip; `clip_device_offset_owner` spec).
+# An edge equal to the owner node's ancestor clip belongs to the overflow box
+# that set it (the viewport never moves); any other edge is the node's own
+# box (an svg viewport, an image box) and moves with the node. Carried as
+# `device-clip` = "dl,dt,dr,db" device px, which
+# `draw_ir_composition_at_device_scale` applies and strips.
+fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [HNode], boxes: LayoutResult, clip_cache: PaintClipCache) -> [DrawIrCommand]:
+    val n = nodes.len() as i32
+    if layout_device_scale() <= 1 or (not box_device_dx_any() and boxes.device_top.len() != nodes.len()):
+        return commands
+    val edge_owner = _html_draw_ir_clip_edge_owners(nodes, clip_cache)
+    var out: [DrawIrCommand] = []
+    var c = 0
+    # cpu-lane-loop-ok: one clip-edge ownership check per emitted command, k > 1 renders only; offsets are looked up only for a clip edge some box owns
+    while c < commands.len():
+        var command = commands[c]
+        val o = if c < owners.len(): owners[c] else: -1
+        if o >= 0 and o < n and command.clip_rect.present:
+            val nc = paint_clip_at(clip_cache, o)
+            val r = command.clip_rect
+            val ox0 = if r.x == nc.x0: edge_owner[o * 4] else: o
+            val oy0 = if r.y == nc.y0: edge_owner[o * 4 + 1] else: o
+            val ox1 = if r.x + r.width == nc.x1: edge_owner[o * 4 + 2] else: o
+            val oy1 = if r.y + r.height == nc.y1: edge_owner[o * 4 + 3] else: o
+            if ox0 >= 0 or oy0 >= 0 or ox1 >= 0 or oy1 >= 0:
+                val dl = _html_draw_ir_edge_device_dx(nodes, ox0)
+                val dt = _html_draw_ir_edge_device_dy(nodes, boxes, oy0)
+                val dr = _html_draw_ir_edge_device_dx(nodes, ox1)
+                val db = _html_draw_ir_edge_device_dy(nodes, boxes, oy1)
+                if dl != 0 or dt != 0 or dr != 0 or db != 0:
+                    var style = command.computed_style
+                    style.push(draw_ir_style_prop("device-clip", "{dl},{dt},{dr},{db}"))
+                    command.computed_style = style
+        out.push(command)
+        c = c + 1
+    out
+
 # Device scale k > 1: moves every command by the snapped device top of the box
 # that owns it (LayoutResult.device_top) or, for a node no flow pass placed
 # (text, inline boxes, inline-blocks, floats, abspos), of its nearest placed
@@ -1828,14 +1931,7 @@ fn _html_draw_ir_device_top(commands: [DrawIrCommand], owners: [i32], nodes: [HN
     # cpu-lane-loop-ok: one offset lookup per emitted command, k > 1 renders only; the ancestor walk ends at the nearest flow-placed box
     while c < commands.len():
         var command = commands[c]
-        var r = if c < owners.len(): owners[c] else: -1
-        # A line-placed control on the way up adds its own whole device px.
-        var inline_dy = 0
-        while r >= 0 and r < nodes.len() and (boxes.device_top[r] == DEVICE_TOP_UNSET or box_device_top_is_inline_dy(boxes.device_top[r])):
-            if boxes.device_top[r] != DEVICE_TOP_UNSET:
-                inline_dy = inline_dy + boxes.device_top[r] - DEVICE_TOP_REL
-            r = nodes[r].parent
-        val dy = inline_dy + (if r >= 0 and r < nodes.len(): box_device_top_px(boxes.device_top[r]) else: 0)
+        val dy = _html_draw_ir_node_device_dy(nodes, boxes, if c < owners.len(): owners[c] else: -1)
         if dy != 0:
             var style: [DrawIrStyleProp] = []
             var prior = 0
