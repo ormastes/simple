@@ -85,3 +85,46 @@ describe "RB-LOAD-02: loader hot reload goes through the hot-swap slot":
     it "has no reader image for a path that was never pinned":
         var loader = moduleloader_with_defaults()
         expect(moduleloader_hot_swap_read_begin(loader, "build/test_tmp/never.smf").is_err()).to_equal(true)
+
+    it "rolls the slot back when the load after an admitted swap fails":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_wiring_rollback.smf"
+        val v0 = image_with(good_identity(), 0x90)
+        expect(file_write_bytes(path, v0)).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+        expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
+        step("an identity-admitted image whose code the loader refuses")
+        var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        opts.unit_identity_bytes = unit_identity_encode(good_identity()).bytes()
+        expect(file_write_bytes(path, generate_smf_with_options([], opts))).to_equal(true)
+        val r = moduleloader_reload(loader, path)
+        expect(is_success(r)).to_equal(false)
+        step("the slot is not left one generation ahead")
+        val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(read.generation()).to_equal(0)
+        expect(read.image() == v0).to_equal(true)
+        hot_swap_read_end(read)
+        file_delete(path)
+
+    it "a good reload after a rolled-back one is admitted, not refused":
+        val path = "build/test_tmp/hs_wiring_unwedge.smf"
+        expect(file_write_bytes(path, image_with(good_identity(), 0x90))).to_equal(true)
+        var loader = moduleloader_with_defaults()
+        expect(is_success(moduleloader_load(loader, path))).to_equal(true)
+        expect(moduleloader_pin_hot_swap(loader, path, pinned_row(path)).is_ok()).to_equal(true)
+        step("fail a reload after the swap was admitted")
+        var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        opts.unit_identity_bytes = unit_identity_encode(good_identity()).bytes()
+        expect(file_write_bytes(path, generate_smf_with_options([], opts))).to_equal(true)
+        expect(is_success(moduleloader_reload(loader, path))).to_equal(false)
+        step("a good reload afterwards is admitted, not refused as FULL")
+        val v2 = image_with(good_identity(), 0x93)
+        expect(file_write_bytes(path, v2)).to_equal(true)
+        val r = moduleloader_reload(loader, path)
+        expect(error_text(r)).to_equal("")
+        val read = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(read.generation()).to_equal(1)
+        expect(read.image() == v2).to_equal(true)
+        hot_swap_read_end(read)
+        file_delete(path)

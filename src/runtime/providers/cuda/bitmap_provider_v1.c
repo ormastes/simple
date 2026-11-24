@@ -54,7 +54,10 @@ struct driver_table {
 #ifdef _WIN32
 #define CUDA_DRIVER_PRIMARY "nvcuda.dll"
 static const char *const cuda_driver_candidates[] = {"nvcuda.dll"};
-static void *lib_open(const char *path) { return (void *)LoadLibraryA(path); }
+/* System32 only: never resolve the driver from the CWD or PATH (DLL planting). */
+static void *lib_open(const char *path) {
+    return (void *)LoadLibraryExA(path, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
 static void *lib_symbol(void *lib, const char *name) {
     return (void *)(uintptr_t)GetProcAddress((HMODULE)lib, name);
 }
@@ -383,8 +386,7 @@ static int32_t shutdown_provider(void) {
         if (table) {
             if (table->lib && lib_close(table->lib)) result=SIMPLE_GPU_STATUS_FAILED;
             free(table);
-        } else if (driver_unloaded.lib && lib_close(driver_unloaded.lib)) result=SIMPLE_GPU_STATUS_FAILED;
-        if (!result) memset(&driver_unloaded,0,sizeof(driver_unloaded));
+        }
     }
     pthread_mutex_unlock(&mutex); return result;
 }

@@ -2,7 +2,7 @@
 #
 # Uses shared mcp_sdk for JSON, shell helpers, and tool result building.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, lsp_query_path, query_visibility_path, saml_cli_path, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, jsonrpc_result, jsonrpc_error, find_simple_binary, lsp_query_path, query_visibility_path, saml_cli_path, clean_command_output, strip_ansi, make_tool_result, make_tool_error, has_method, _char_len, _slice_text, _is_ws, _json_chars, _json_chars_join, _find_json_value_start_chars}
 use app.cli.query_visibility.{query_visibility_symbols_payload_core}
 use app.io.minimal_runtime_ops.{cwd, env_get, is_aot_native_runtime, process_run_bounded}
 use app.io.cli_ops.{cli_current_exe_path}
@@ -266,35 +266,36 @@ fn handle_logging_set_level(id: text, body: text) -> text:
     jsonrpc_result(id, jo1(jp(key: "level", value: js(level))))
 
 fn arg_field(args: text, key: text) -> text:
-    val args_n = _char_len(args)
+    val chars = _json_chars(args)
+    val args_n = chars.len()
     # Manual scanner - avoids the Cranelift `match Some(i)` codegen bug.
-    # _find_json_value_start already handles whitespace after the colon,
+    # _find_json_value_start_chars already handles whitespace after the colon,
     # so the three original search variants (no-space, with-space,
     # numeric) collapse into a single call.
-    val start = _find_json_value_start(json: args, key: key)
+    val start = _find_json_value_start_chars(chars, key)
     if start < 0 or start >= args_n:
         return ""
-    val first = _char_at(args, start)
+    val first = chars[start]
     if first == Q():
         var i = start + 1
         var escaped = false
         while i < args_n:
-            val ch = _char_at(args, i)
+            val ch = chars[i]
             if escaped:
                 escaped = false
             elif ch == "\\":
                 escaped = true
             elif ch == Q():
-                return _slice_text(args, start + 1, i)
+                return _json_chars_join(chars, start + 1, i)
             i = i + 1
         return ""
     var end = start
     while end < args_n:
-        val ch = _char_at(args, end)
+        val ch = chars[end]
         if ch == "," or ch == RB() or ch == "]" or _is_ws(ch):
             break
         end = end + 1
-    _slice_text(args, start, end)
+    _json_chars_join(chars, start, end)
 
 fn _digit_val(ch: text) -> i64:
     # Explicit `==` match only. `text.to_int()` and text ordering (`>=`/`<=`)
@@ -324,21 +325,22 @@ fn _digit_val(ch: text) -> i64:
     -1
 
 fn arg_int_field(args: text, key: text) -> i64:
-    val args_n = _char_len(args)
+    val chars = _json_chars(args)
+    val args_n = chars.len()
     # Extract + parse an integer field in one pass using only primitives proven
-    # to compile correctly here (_find_json_value_start, _char_at, `==`). Avoids
+    # to compile correctly here (_find_json_value_start_chars, char-array indexing, `==`). Avoids
     # the codegen-broken `.to_int()` round-trip that produced garbage line/char
     # values. Returns -1 when the field is absent or non-numeric.
-    val start = _find_json_value_start(json: args, key: key)
+    val start = _find_json_value_start_chars(chars, key)
     if start < 0 or start >= args_n:
         return -1
     var i = start
-    if _char_at(args, i) == Q():
+    if chars[i] == Q():
         i = i + 1
     var result = 0
     var seen = false
     while i < args_n:
-        val d = _digit_val(_char_at(args, i))
+        val d = _digit_val(chars[i])
         if d < 0:
             break
         result = result * 10 + d

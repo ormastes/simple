@@ -2,9 +2,9 @@
 # Ownership is represented by a nonreused slot, not an OS PID. Copied leases
 # refer to the same slot, so collecting one invalidates every copy before handles
 # can be recycled. This owner is single-threaded and bounded to 100000 starts.
-use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemoryStatusEx, HeapAlloc, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GlobalMemoryStatusEx, HeapFree, rt_host_memory_headroom_bytes_v1, CreateProcessW, CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, ResumeThread, WaitForSingleObject, TerminateJobObject, TerminateProcess, CloseHandle, GetExitCodeProcess, QueryInformationJobObject, GetTickCount64, Sleep, CreateFileW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute, DeleteProcThreadAttributeList, GetLastError}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
-use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_job_peak_memory_offset, windows_abi_job_basic_accounting_size, windows_abi_file_attribute_tag_info_size}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_pointer_bytes, windows_abi_size_t_max, windows_abi_read_ptr, windows_abi_write_ptr, windows_abi_handle_is_invalid, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_update_proc_thread_attribute, windows_abi_security_attributes_size, windows_abi_security_attributes_inherit_offset, windows_abi_startupinfo_flags_offset, windows_abi_startupinfo_std_input_offset, windows_abi_startupinfo_std_output_offset, windows_abi_startupinfo_std_error_offset, windows_abi_startupinfoex_size, windows_abi_startupinfoex_attr_list_offset, windows_abi_process_info_size, windows_abi_process_info_process_offset, windows_abi_process_info_thread_offset, windows_abi_process_info_pid_offset, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_job_peak_memory_offset, windows_abi_job_basic_accounting_size, windows_abi_file_attribute_tag_info_size}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
 
@@ -144,26 +144,26 @@ fn _windows_process_file_v1(heap: i64, path: text, access: u32, sharing: u32, se
 
 @unsafe(reason: "opens exact directory metadata without following reparse points and closes all native resources", capabilities: [ffi, raw_ptr])
 fn windows_process_directory_no_follow_v1(path: text) -> bool:
-    val heap = GetProcessHeap()
+    val heap = windows_abi_get_process_heap()
     if heap == 0: return false
     val wide = _windows_process_wide_v1(heap, path)
-    val metadata = HeapAlloc(heap, 8u32, 8u64)
+    val metadata = windows_abi_heap_alloc(heap, windows_abi_file_attribute_tag_info_size())
     if wide == 0 or metadata == 0:
         if wide != 0:
-            val _free = HeapFree(heap, 0u32, wide)
+            val _free = windows_abi_heap_free(heap, wide)
         if metadata != 0:
-            val _free = HeapFree(heap, 0u32, metadata)
+            val _free = windows_abi_heap_free(heap, metadata)
         return false
     # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT.
     val handle = CreateFileW(wide, 128u32, 7u32, 0, 3u32, 35651584u32, 0)
     var valid = false
-    if handle != -1 and handle != 0:
+    if not windows_abi_handle_is_invalid(handle) and handle != 0:
         if GetFileInformationByHandleEx(handle, 9, metadata, 8u32) != 0:
             val attributes = volatile_read_u32(metadata)
             valid = (attributes & 16) != 0 and (attributes & 1024) == 0
         val _closed = CloseHandle(handle)
-    val _free_path = HeapFree(heap, 0u32, wide)
-    val _free_metadata = HeapFree(heap, 0u32, metadata)
+    val _free_path = windows_abi_heap_free(heap, wide)
+    val _free_metadata = windows_abi_heap_free(heap, metadata)
     valid
 
 export windows_process_directory_no_follow_v1

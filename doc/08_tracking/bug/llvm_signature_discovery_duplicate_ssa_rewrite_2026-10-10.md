@@ -1,7 +1,9 @@
 # LLVM signature discovery rewrites and discards function bodies
 
-Status: **OPEN — source correction proposed; runtime and performance gates
-unexecuted**. No measured RSS/time improvement or bootstrap qualification is
+Status: **FIXED in source (`a6442e6f202`, verified 2026-11-24 at release/1.0.0 tip `b99b512ada8`:
+the discovery loop at `core_codegen.spl:720-753` no longer calls
+`llvm_bootstrap_ssa_function`; only the emission loop at `:754-758` does);
+runtime and performance gates unexecuted**. No measured RSS/time improvement or bootstrap qualification is
 claimed.
 
 ## Source evidence and correction

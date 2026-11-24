@@ -131,6 +131,23 @@ fn _run_boundary() -> Result<([text], i64), text>:
     outs.push(_ask_n(first + reply + " Follow-up: and which request owns page forty", TREE_LIVE_TOKENS)?)
     Ok((outs, c1.0 - c0.0))
 
+# C2 workload: long requests run first so their streams hold many cells; later
+# requests recycle those streams (cold) or reuse a prefix after a different
+# branch ran in between (warm). Stale cells past the new frontier must not change
+# a single logit, so the digest must equal cache-off.
+fn _run_stale() -> Result<[text], text>:
+    var outs: [text] = []
+    val sys = _system_prompt()
+    outs.push(_ask_n(sys + _user_turn(1) + _follow_up(1), "48")?)
+    outs.push(_ask_n(sys + _user_turn(2) + _follow_up(2), "48")?)
+    outs.push(_ask(sys + _user_turn(3))?)
+    outs.push(_ask(sys + _user_turn(1) + " Again: name only the request")?)
+    outs.push(_ask(sys + _user_turn(2) + " Again: name only the request")?)
+    outs.push(_ask(sys + _user_turn(3) + _follow_up(3))?)
+    outs.push(_ask(sys + _user_turn(1) + _follow_up(1) + " Third time")?)
+    outs.push(_ask(sys + _user_turn(4) + _follow_up(4))?)
+    Ok(outs)
+
 fn _run_multiturn() -> Result<[text], text>:
     var outs: [text] = []
     var prompt = _system_prompt() + "\nUser: hello, who owns page one"
@@ -174,6 +191,8 @@ fn _lane(model: NativeModel, tree: bool, workload: text) -> Result<TreeLane, tex
                 first_prompt = pair.1
             Err(reason):
                 run = Err(reason)
+    elif workload == "stale":
+        run = _run_stale()
     else:
         run = _run_multiturn()
     val elapsed = time_now_monotonic_ms() - started
@@ -258,6 +277,16 @@ describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
             if picked.is_err():
                 fail(picked.unwrap_err())
             _check(picked.unwrap(), "multiturn")
+
+    it "stale: warm reuse after a different branch, recycled streams, identical output":
+        if not _live_enabled():
+            skip("stale: warm reuse after a different branch, recycled streams, identical output", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+        else:
+            expect(engine_set_n_ctx_text("4096")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            _check(picked.unwrap(), "stale")
 
     it "vulkan fusion is off once the backend is up, so mode 3 matches cache-off":
         if not _live_enabled():

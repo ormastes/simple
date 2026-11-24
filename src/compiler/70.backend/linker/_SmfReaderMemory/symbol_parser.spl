@@ -13,6 +13,7 @@ use compiler.backend.linker.smf_reader_memory.*
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
 use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 # SMF v1.1 uses the canonical 128-byte packed header layout. Files may store
 # that header either at file offset 0 or as a trailer at EOF-128.
@@ -136,7 +137,9 @@ fn parse_symbol_table(data: [u8], header: SmfMemoryHeader, string_table: [u8]) -
         val tpl_offset = bytes_to_u64(data, entry_off + 48)
 
         # Resolve name from string table
-        val name = read_string_from_table_i64off(string_table, name_offset as i64)
+        val name: text = match read_string_from_table_i64off(string_table, name_offset as i64):
+            case Ok(v): v
+            case Err(e): return Err(e)
 
         val section_idx = smf_decode_symbol_section_index_v1(
             data, entry_off, header.section_count, sym_type)?
@@ -198,27 +201,20 @@ pub fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
 
 """Read a null-terminated string from the string table at the given byte offset.
 
-Performance note: builds a [u8] of the name bytes and calls rt_bytes_to_text once,
+Performance note: builds a [u8] of the name bytes and decodes it once (strict UTF-8),
 instead of O(N) per-byte text concatenation. Required for parsing SMFs with
 tens of thousands of symbols inside the interpreter.
 """
-fn read_string_from_table_i64off(table: [u8], offset: i64) -> text:
+fn read_string_from_table_i64off(table: [u8], offset: i64) -> Result<text, text>:
     var name_bytes: [u8] = []
     var pos = offset
     while pos < table.len():
         val byte = table[pos]
         if byte == 0:
-            return rt_bytes_to_text(name_bytes)
+            return linker_name_text(name_bytes, "SMF symbol name at offset {offset}")
         name_bytes.push(byte)
         pos = pos + 1
-    rt_bytes_to_text(name_bytes)
-
-extern fn rt_bytes_to_text(data: [u8]) -> text
-
-"""Convert a single byte to its ASCII character as text (legacy helper)."""
-fn char_from_byte(b: u8) -> text:
-    val single: [u8] = [b]
-    rt_bytes_to_text(single)
+    linker_name_text(name_bytes, "SMF symbol name at offset {offset}")
 
 """Read an explicit writer section index, retaining legacy SMF compatibility.
 

@@ -13,6 +13,7 @@ use compiler.backend.linker.smf_reader_memory.*
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
 use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR, smf_header_field_shift, smf_header_size_at, smf_header_trailer_offset}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 # Header copy size: the legacy packed layout (128) is the larger of the two
 # layouts; a 96-byte v1.3/seed header is zero-padded to this extent on copy.
@@ -704,17 +705,17 @@ fn locate_string_table(data: [u8], header: SmfMemoryHeader) -> Result<(i64, i64)
 `abs_offset` is the absolute byte offset inside `data` where the name starts.
 `stop_at` is an exclusive upper bound (typically the string-table end).
 """
-fn read_string_at(data: [u8], abs_offset: i64, stop_at: i64) -> text:
+fn read_string_at(data: [u8], abs_offset: i64, stop_at: i64) -> Result<text, text>:
     var name_bytes: [u8] = []
     var pos = abs_offset
     val limit = if stop_at < data.len(): stop_at else: data.len()
     while pos < limit:
         val byte = data[pos]
         if byte == 0:
-            return rt_bytes_to_text(name_bytes)
+            return linker_name_text(name_bytes, "SMF symbol name at offset {abs_offset}")
         name_bytes.push(byte)
         pos = pos + 1
-    rt_bytes_to_text(name_bytes)
+    linker_name_text(name_bytes, "SMF symbol name at offset {abs_offset}")
 
 """Parse the symbol dict using raw data + string-table bounds (no copy)."""
 fn parse_symbol_table_inplace(
@@ -745,7 +746,9 @@ fn parse_symbol_table_inplace(
         val tpl_offset = bytes_to_u64(data, entry_off + 48)
 
         val abs_name_offset = str_off + (name_offset as i64)
-        val name = read_string_at(data, abs_name_offset, str_end)
+        val name: text = match read_string_at(data, abs_name_offset, str_end):
+            case Ok(v): v
+            case Err(e): return Err(e)
 
         val section_idx = smf_decode_symbol_section_index_v1(
             data, entry_off, header.section_count, sym_type)?
@@ -797,7 +800,9 @@ fn parse_symbol_table_ordered_inplace(
         val tpl_offset = bytes_to_u64(data, entry_off + 48)
 
         val abs_name_offset = str_off + (name_offset as i64)
-        val name = read_string_at(data, abs_name_offset, str_end)
+        val name: text = match read_string_at(data, abs_name_offset, str_end):
+            case Ok(v): v
+            case Err(e): return Err(e)
 
         val section_idx = smf_decode_symbol_section_index_v1(
             data, entry_off, header.section_count, sym_type)?

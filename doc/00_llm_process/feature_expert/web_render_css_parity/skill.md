@@ -4385,3 +4385,31 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   0.21 -> 0.16 %; every other page equal at both scales. Perf, 6 alternated
   rounds at k=4: median document/paint phases equal within noise (overview
   paint 5609 vs 5615 ms, html paint 8732 vs 8755 ms); RSS flat (2.83/2.89 GB).
+## 2026-11-24 — HIR import loading re-parsed every module the loader had parsed (seed JIT startup)
+
+- **Profile first.** The time was not where the counts pointed. HIR Pass 0.5b took about 370 ms on tab-bar, with 2,817 `load_imported_types` calls for 369 units. An exclusive profile showed `preregister_imported_type_names` at about 245 ms; the re-export, trait-capture and alias tail was only about 1 ms.
+  - Memoizing the 2,612 placeholder scans down to 326 did not change wall time, so it was dropped.
+  - The real cost was the first parse of each unit: `IMPORT_AST_PARSES=375`. The module loader had already parsed all of them and never filled the cross-lane cache.
+  - Trap: an exclusive label measures where a cost first lands, not why it is there. Read the counters (`SIMPLE_PERF_COUNTERS=1`) before building a cache.
+- **Fix:** `module_cache::shared_source_seed` takes the loader's parse. It is used only when the loader's parsed text is byte-identical to `strip_os_when_blocks(raw, cfg_target())`, so the same text gives the same AST. HIR re-parses fell from 375 to 5, saving about 250 ms of tab-bar JIT wall time; RSS is flat.
+- **Evidence:**
+  - Spec: `compiler/tests/hir_reuses_loader_parse.rs`.
+  - 8 pages JIT==interp at 1x and 4x, with the interpreter byte-identical to base.
+  - Strict-vreg is clean.
+- **Bug record:** `doc/08_tracking/bug/hir_import_reparses_loader_modules_2026-11-24.md`.
+## 2026-11-24 — forms-media 4x JIT 24 s was a whole-frame read per translucent rect blend
+
+- **Two lanes disagreed.** This lane measured 24 s; #11183 reported 3.4-3.9 s / 2.2 GB on the same seed (d9dcc6f7).
+  - Same seed, same tree, same command: peak RSS is **12.7 GB**, not 2.2 GB, and the 2.2 GB does not reproduce. Backend, wrapper order, size and the catalog route all ruled out (the catalog runs the interpreter).
+  - The wall-time gap is the `MemoryMax=8G` cap that `page.sh` sets. Uncapped, the run takes 4.6 s. Capped, the cgroup reclaims and exit stalls (the `wrote` line at ~11 s, exit at 25-76 s).
+  - **Trap:** read peak RSS (`/usr/bin/time -f %M` inside the scope) before trusting a wall time from a capped run.
+- **Cause:** `emu_draw_rect_blend` called `core.read_pixels()` (the whole 10.9M-px frame) to blend one rect.
+  - The `<summary>` disclosure triangle (`_engine2d_draw_ir_path_fill`) blends each anti-aliased edge pixel as a 1x1 rect, so one 44x44 `path` command cost +9071 MB under the JIT.
+  - Found with a per-command `/proc/self/statm` probe in `_engine2d_draw_ir_render_command_plan`; `src/lib` needs no build, so the probe is free.
+  - gdb conditional breakpoints on `__rust_alloc` were far too slow to be usable.
+- **Fix:** read back only the rect, with `core.read_pixels_region_raw(x, y, w, h)` (native on SoftwareBackend/CpuBackend).
+  - forms-media 4x JIT (8 G cap, 3-round median): 24.30 -> 3.87 s, 8096 -> 3338 MB, paint 7550 -> 477 ms.
+  - Interpreter paint: 10.7 -> 8.8 s.
+  - All 32 PPMs (8 pages, 1x/4x, JIT/interpreter) are byte-identical to base.
+- **Spec:** `test/01_unit/lib/gc_async_mut/gpu/engine2d/rect_blend_reads_region_spec.spl`: 200 small blends, JIT 6.07 s -> 0.2 ms, JIT == interpreter.
+- **Bug record:** `doc/08_tracking/bug/engine2d_rect_blend_reads_whole_frame_2026-11-24.md`.

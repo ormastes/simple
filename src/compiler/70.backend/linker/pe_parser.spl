@@ -3,7 +3,7 @@
 # Uses BinaryReader ([u8]) and builds on pe_inspect for header/section parsing.
 
 use std.binary_io.{BinaryReader, ByteOrder}
-use std.common.text_bytes.{bytes_to_text}
+use compiler.backend.linker.name_text.{linker_name_text}
 use std.pe_coff_header.{pe_rva_to_file_offset}
 use compiler.linker.pe_inspect.{
     PeHeader, PeSectionHeader, PeDataDirectory, PeInspector,
@@ -111,20 +111,20 @@ fn pe_parse_debug_directories(data: [u8], inspector: PeInspector) -> [PeDebugDir
 # CodeView / PDB Reference Parsing
 # ============================================================================
 
-fn pe_parse_codeview(data: [u8], debug_dirs: [PeDebugDirectory]) -> PeCodeViewInfo?:
+fn pe_parse_codeview(data: [u8], debug_dirs: [PeDebugDirectory]) -> Result<PeCodeViewInfo?, text>:
     var cv_dir: PeDebugDirectory? = nil
     for dir in debug_dirs:
         if dir.type_val == IMAGE_DEBUG_TYPE_CODEVIEW:
             cv_dir = dir
             break
 
-    if cv_dir == None:
-        return nil
+    if not cv_dir.?:
+        return Ok(None)
 
     val dir = cv_dir!
     val off = dir.pointer_to_raw
     if off + 24 > data.len():
-        return nil
+        return Ok(None)
 
     val order = ByteOrder.LittleEndian
     var reader = BinaryReader.new(data)
@@ -132,7 +132,7 @@ fn pe_parse_codeview(data: [u8], debug_dirs: [PeDebugDirectory]) -> PeCodeViewIn
 
     val sig = reader.read_u32(order) ?? 0
     if sig != CV_SIGNATURE_RSDS:
-        return nil
+        return Ok(None)
 
     var guid: [u8] = []
     var g = 0
@@ -144,22 +144,24 @@ fn pe_parse_codeview(data: [u8], debug_dirs: [PeDebugDirectory]) -> PeCodeViewIn
     val age = reader.read_u32(order) ?? 0
 
     val path_start = off + 24
-    val pdb_path = _read_bounded_cstr(data, path_start, off + dir.size_of_data)
+    val pdb_path: text = match _read_bounded_cstr(data, path_start, off + dir.size_of_data):
+        case Ok(v): v
+        case Err(e): return Err("PE CodeView PDB path: {e}")
 
-    PeCodeViewInfo(
+    Ok(Some(PeCodeViewInfo(
         signature: sig,
         guid: guid,
         age: age,
         pdb_path: pdb_path,
-    )
+    )))
 
 # ============================================================================
 # COFF Symbol Table Parsing
 # ============================================================================
 
-fn pe_parse_coff_symbols(data: [u8], header: PeHeader) -> [PeCoffSymbol]:
+fn pe_parse_coff_symbols(data: [u8], header: PeHeader) -> Result<[PeCoffSymbol], text>:
     if header.symbol_table_offset == 0 or header.symbol_count == 0:
-        return []
+        return Ok([])
 
     val str_table_off = header.symbol_table_offset + (header.symbol_count * COFF_SYMBOL_SIZE)
     val order = ByteOrder.LittleEndian
@@ -175,9 +177,13 @@ fn pe_parse_coff_symbols(data: [u8], header: PeHeader) -> [PeCoffSymbol]:
         val name_zeroes = _read_u32_at(data, off)
         if name_zeroes == 0:
             val str_offset = _read_u32_at(data, off + 4)
-            name = _read_coff_string(data, str_table_off + str_offset)
+            name = match _read_coff_string(data, str_table_off + str_offset):
+                case Ok(v): v
+                case Err(e): return Err("PE COFF symbol {i}: {e}")
         else:
-            name = _read_fixed_ascii(data, off, 8)
+            name = match _read_fixed_ascii(data, off, 8):
+                case Ok(v): v
+                case Err(e): return Err("PE COFF symbol {i}: {e}")
 
         var reader = BinaryReader.new(data)
         reader.skip(off + 8)
@@ -198,7 +204,7 @@ fn pe_parse_coff_symbols(data: [u8], header: PeHeader) -> [PeCoffSymbol]:
         ))
 
         i = i + 1 + aux_count
-    symbols
+    Ok(symbols)
 
 fn _read_u32_at(data: [u8], offset: i64) -> i64:
     if offset + 3 >= data.len():
@@ -209,21 +215,21 @@ fn _read_u32_at(data: [u8], offset: i64) -> i64:
     val b3 = data[offset + 3] as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
-fn _read_bounded_cstr(data: [u8], offset: i64, limit_end: i64) -> text:
+fn _read_bounded_cstr(data: [u8], offset: i64, limit_end: i64) -> Result<text, text>:
     if offset < 0 or offset >= data.len():
-        return ""
+        return Ok("")
     val bound = if limit_end < data.len(): limit_end else: data.len()
     var end = offset
     while end < bound and data[end] != 0:
         end = end + 1
     if end <= offset:
-        return ""
-    bytes_to_text(data[offset:end])
+        return Ok("")
+    linker_name_text(data[offset:end], "PE string at file offset {offset}")
 
-fn _read_coff_string(data: [u8], offset: i64) -> text:
+fn _read_coff_string(data: [u8], offset: i64) -> Result<text, text>:
     _read_bounded_cstr(data, offset, data.len())
 
-fn _read_fixed_ascii(data: [u8], offset: i64, max_len: i64) -> text:
+fn _read_fixed_ascii(data: [u8], offset: i64, max_len: i64) -> Result<text, text>:
     _read_bounded_cstr(data, offset, offset + max_len)
 
 # ============================================================================
@@ -251,7 +257,9 @@ fn pe_parse_object(data: [u8]) -> Result<PeObject, text>:
 
     val inspector = inspect_result.ok()!
     val debug_dirs = pe_parse_debug_directories(data, inspector)
-    val codeview = pe_parse_codeview(data, debug_dirs)
+    val codeview: PeCodeViewInfo? = match pe_parse_codeview(data, debug_dirs):
+        case Ok(v): v
+        case Err(e): return Err(e)
 
     Ok(PeObject(
         header: inspector.header,
@@ -280,7 +288,7 @@ fn pe_pdb_path(obj: PeObject) -> text?:
     return nil
 
 fn pe_has_codeview(obj: PeObject) -> bool:
-    obj.codeview != nil
+    obj.codeview.?
 
 fn pe_has_debug_info(obj: PeObject) -> bool:
     obj.debug_directories.len() > 0

@@ -1,6 +1,6 @@
 # Bug: seed interpreter crashes when worker threads read a shared class object (2026-11-23)
 
-Status: open. Severity: P0 (it blocks the RB-LOAD-02 multithreaded hot-swap stress spec).
+Status: verification-pending (fix in seed `ModuleBindings::get`, value.rs; awaiting native re-verification of the .spl stress specs). Severity: P0 (it blocks the RB-LOAD-02 multithreaded hot-swap stress spec).
 
 ## Symptom
 `C:/dev/simple/bin/simple.exe test <spec>` (Windows, Rust seed) reports
@@ -38,3 +38,15 @@ then confirm the generation. They never scan. A pinned entry is never reused
   threads pin and read while the main thread swaps and reclaims. It asserts a
   reader count >= 1 and a non-empty image while pinned, and zero violations.
   The source is in the hs3 PR description.
+
+## Root cause and fix (2026-11-24)
+`ModuleBindings::get` memoizes layered lookups only on the owning thread. On a
+non-owner thread the memo refused the insert and the code resolved the layers a
+SECOND time. Every layer source is itself a layered table, so the walk doubled
+at each import level (2^depth): worker-thread global/method lookups took
+seconds or overflowed the stack (child-died-by-signal). The fix resolves once
+and hands the same answer out by value; no lock is added (memo stays
+owner-thread-only). Sibling `ModuleTable::get` already resolved once.
+Regression: `value_tests_foreign_thread_bindings.rs`
+(`foreign_thread_layered_binding_lookup_is_linear_in_depth`, 8 threads x 200
+lookups over a depth-40 diamond chain, 20s deadline).
