@@ -7,7 +7,7 @@ NOT rebuilt, NOT redeployed, NOT measured after the change. Structural fix open.
 
 Process: `bin/release/x86_64-unknown-linux-gnu/simple_mcp_server` (built
 2026-11-21 13:20, 2,251,992 bytes), started 2026-11-22 15:18:05 KST, one stdio
-client, single thread. Sampled 2026-11-24 16:14-16:35 KST (uptime ~49 h).
+client, single thread. Sampled 2026-11-24 16:14-16:28 KST (uptime ~49 h).
 
 | metric | value |
 |---|---|
@@ -16,8 +16,8 @@ client, single thread. Sampled 2026-11-24 16:14-16:35 KST (uptime ~49 h).
 | anonymous total (RSS + swap) | ~8.7 GB; `[heap]` (brk) mapping alone is 9,230,108 kB |
 | open fds | 3 (stdin/stdout sockets, stderr log of 0 bytes) |
 | `/proc/<pid>/io` | rchar 220.4 GB, wchar 2.74 GB, syscr 41.2 M, syscw 470 k |
-| growth while idle | none: RSS, swap and all four io counters identical over 20 min with no tool call |
-| calls served | 616 `mcp__simple-mcp__*` tool calls in the client transcript; 612 ctx events in `telemetry.sdn` since process start |
+| growth while idle | none: RSS and swap identical in every 20 s sample over 14 min (16:14-16:28), all four io counters identical between 16:16 and 16:28, no tool call in that window |
+| calls served | 616 `mcp__simple-mcp__*` tool calls in the client transcript; 612 ctx events in `telemetry.sdn` since process start (that ledger is shared by every server on this repo, so 612 is an upper bound for this process) |
 | average growth | ~14 MB per tool call (8.7 GB / 616); ~178 MB per hour of uptime |
 
 So the growth is per request, anonymous, all in the brk heap (many small and
@@ -27,16 +27,22 @@ and the task forbade driving it.
 
 ## Root cause class
 
-The native runtime frees nothing outside a transient scope. Every string made
-outside one is registered immortal (`src/runtime/runtime_native.c:1886`
-`rt_core_register_string` -> `rt_core_register_immortal_ptr` when
-`owner_scope == 0`), and the MCP serve loop (`src/app/mcp/main.spl:386`) opens
-no scope. Every temporary of every request therefore lives until exit, and the
-question is only which path allocates most per call.
+Every string made outside a transient scope is registered immortal
+(`src/runtime/runtime_native.c:1886` `rt_core_register_string` ->
+`rt_core_register_immortal_ptr` when `owner_scope == 0`), and the MCP serve
+loop (`src/app/mcp/main.spl:386`) opens no scope. Every string temporary of
+every request therefore lives until exit, and the question is which path
+allocates most per call. Read for strings only: array and dict lifetime, the
+8-bytes-per-element width assumed for `[u8]`, and the backend's
+`rt_string_free` / `rt_array_free_deep` emission sites
+(`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:1868`) were
+not traced, so the per-byte figures below assume arrays and dicts are retained
+the same way. The measured 8.7 GB against ~8 MB of total request and response
+bytes is consistent with that.
 
 ## Ranked accumulators
 
-1. **`tok_record_at`, `src/app/mcp/main_lazy_telemetry.spl:151` (fixed here).**
+1. **`tok_record_at`, `src/app/mcp/main_lazy_telemetry.spl` (line 151 before this change; fixed here).**
    Ran on every `simple_ctx_*` call and cost memory proportional to the whole
    ledger (`.simple/ctx/telemetry.sdn`, 76 KB / 1,265 rows now, ~39 KB when the
    process started), three ways:
@@ -87,9 +93,17 @@ explained.
 last row's id (`tok_next_id_from_tail`, pure) and appends one row with
 `file_append_text`. It falls back to the previous whole-ledger path when the
 tail cannot answer (no trailing newline, malformed last row, unreadable tail)
-and when the ledger does not exist yet. Row format, ids and every tool result
-are unchanged; the ledger is no longer replaced atomically on each event, it is
-appended like the chunk store.
+and when the ledger does not exist yet. Both primitives are bounded by the
+bytes asked for, not the file: `external_file_read_bytes_at`
+(`src/lib/nogc_sync_mut/io/external_file.spl:17`) `pread`s `size` bytes, and
+the `FileMode.Append` branch of `FileTextSession.write_file`
+(`src/lib/nogc_sync_mut/io/file_text_session.spl:168`) encodes only the new
+content and seeks to EOF. Row format and every tool result are unchanged. The
+next id is now last row + 1 where it was max + 1: equal on a ledger whose last
+row carries the maximum, which the live one does (last = max = 1258). Ids were
+never unique (the live ledger already has 7 duplicated ids from concurrent
+servers) and nothing reads `.id` except this function. The ledger is no longer
+replaced atomically on each event; it is appended like the chunk store.
 
 ## Not verified
 
