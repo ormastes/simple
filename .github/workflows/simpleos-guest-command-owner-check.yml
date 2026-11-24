@@ -1,0 +1,192 @@
+name: SimpleOS guest command owner check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: simpleos-guest-command-owner-approved-cycle
+  cancel-in-progress: false
+
+jobs:
+  environment-owner:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 85e06839c9a5eb8560e83b3aacae6db84539a89c
+          path: sdk-source
+          persist-credentials: false
+      - name: Acquire exact existing RC63 candidate without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          evidence="$PWD/build/verify/guest-command-owner"
+          mkdir -p "$evidence/download" "$evidence/bundle"
+          git rev-parse HEAD > "$evidence/source-revision.txt"
+          gh release download rc-1.0.0-rc.63 --repo ormastes/simple \
+            --pattern simple-1.0.0-rc.63-darwin-arm64.tar.gz --dir "$evidence/download"
+          archive="$evidence/download/simple-1.0.0-rc.63-darwin-arm64.tar.gz"
+          test "$(stat -f %z "$archive")" = 396743315
+          printf '%s  %s\n' 0a727acb3c7f3ee5eea755bf676f9f05df987e43722f92056ee6285c6d0c1c47 "$archive" | shasum -a 256 -c -
+          tar -xzf "$archive" -C "$evidence/bundle"
+          package="$evidence/bundle/simple-1.0.0-rc.63-darwin-arm64"
+          test -d "$package"
+          python3 - "$package" "$evidence" <<'PY'
+          import hashlib, pathlib, sys
+          package, evidence = map(pathlib.Path, sys.argv[1:])
+          provenance = package / 'PROVENANCE.sdn'
+          raw = provenance.read_text()
+          expected = {
+              'phase3b_simple_sha256': ('simple', '085796e2d83ae984884bc9d0c1a7c6f40130df6b12f9df6b5aa5c5534bd23e2d'),
+              'simple_test_runner_sha256': ('simple_test_runner', '9fb60a3a0591d9457a77294bdb1f19f3a0f4b1597544f3b4b8d0327c236c29f2'),
+              'simple_build_runner_sha256': ('simple_build_runner', 'f03a6fb9bc5ecdb6b50f323e874cd39550fbc3843d4354b9c623a7f0fca26b5b'),
+          }
+          assert raw.splitlines().count('source_revision: 0bf70cd733ffbe5e3acb179797d4e91e993e1eef') == 1
+          rows = ['schema: rc63-guest-command-candidate-bytes-v1', 'qualification: candidate-only']
+          for key, (name, digest) in expected.items():
+              assert raw.splitlines().count('  ' + key + ': ' + digest) == 1
+              path = package / 'bin' / name
+              assert path.is_file() and not path.is_symlink()
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+              rows += [name + '_path: ' + str(path), name + '_sha256: ' + digest]
+          libraries = {
+              'libsimple_runtime.a': 'b8b93cb95b742f417a49ee8e9a09c6052d078705f5a0df16b22d5709c3b07556',
+              'libsimple_runtime.dylib': '04fd13978d6dcf13131d69e7793cd129cf03827d2802fc237f87dafb6ccef878',
+          }
+          for name, digest in libraries.items():
+              paths = list(package.rglob(name))
+              assert paths
+              for path in paths:
+                  assert path.is_file() and not path.is_symlink()
+                  assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+                  rows += [name + '_path: ' + str(path), name + '_sha256: ' + digest]
+          (evidence / 'candidate-bytes.sdn').write_text('\n'.join(rows) + '\n')
+          (evidence / 'PROVENANCE.sdn').write_bytes(provenance.read_bytes())
+          PY
+          printf 'SIMPLE_GUEST_CANDIDATE_PACKAGE=%s\n' "$package" >> "$GITHUB_ENV"
+      - name: Execute candidate CLI and the actual environment observation controls once
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$SIMPLE_GUEST_CANDIDATE_PACKAGE" "$PWD" <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, sys, time
+          package, source = map(pathlib.Path, sys.argv[1:])
+          evidence = source / 'build/verify/guest-command-owner'
+          runtime = package / 'bin/simple'
+          runner = package / 'bin/simple_test_runner'
+          env = os.environ.copy()
+          env.update(SIMPLE_BINARY=str(runtime), SIMPLE_RUNTIME=str(runtime), SIMPLE_LIB=str(source / 'src'))
+          files = [
+              'src/os/kernel/scheduler/process_execution_observation.spl',
+              'src/os/kernel/loader/simpleos_tool_execution_probe_v1.spl',
+              'test/01_unit/os/kernel/scheduler/process_execution_environment_spec.spl',
+          ]
+          (evidence / 'source-inputs.sdn').write_text('\n'.join(
+              path + ': ' + hashlib.sha256((source / path).read_bytes()).hexdigest()
+              for path in files) + '\n')
+          sdk = source / 'sdk-source'
+          sdk_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=sdk, text=True).strip()
+          assert sdk_head == '85e06839c9a5eb8560e83b3aacae6db84539a89c'
+          sdk_spec = 'test/01_unit/compiler/driver/sdk_errno_observer_v1_spec.spl'
+          sdk_files = ['src/compiler/00.common/sdk_errno_observer_v1.spl',
+                       'src/compiler/20.hir/hir_lowering/types.spl',
+                       'src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl',
+                       'src/compiler/80.driver/driver_hir_pipeline_lowering.spl', sdk_spec]
+          (evidence / 'sdk-source-inputs.sdn').write_text('source_revision: ' + sdk_head + '\n' + '\n'.join(
+              path + ': ' + hashlib.sha256((sdk / path).read_bytes()).hexdigest()
+              for path in sdk_files) + '\n')
+          good = evidence / 'candidate-valid.spl'
+          bad = evidence / 'candidate-invalid.spl'
+          good.write_text('fn candidate_identity(value: i64) -> i64:\n    value\n')
+          bad.write_text('fn candidate_invalid(\n')
+          # Only the two tiny controls qualify the CLI check route; semantic
+          # controls below qualify the separately hashed standalone test owner.
+          commands = [
+              ('version', [str(runtime), '--version'], 120, source, 0),
+              ('check-route-positive', [str(runtime), 'check', str(good)], 120, source, 0),
+              ('check-route-negative', [str(runtime), 'check', str(bad)], 120, source, -1),
+              ('check-observation', [str(runtime), 'check', files[0]], 600, source, 0),
+              ('check-probe', [str(runtime), 'check', files[1]], 600, source, 0),
+              ('environment-controls', [str(runner), files[2], '--mode=interpreter', '--no-cache'], 600, source, 5),
+              ('sdk-observer-controls', [str(runner), sdk_spec, '--mode=interpreter', '--no-cache'], 600, sdk, 8),
+          ]
+          for path in ['src/compiler', 'src/lib', 'src/app/mcp', 'src/app/simple_lsp_mcp']:
+              commands.append(('sdk-check-' + path.replace('/', '-'), [str(runtime), 'check', path], 600, sdk, 0))
+          commands.append(('sdk-core-runtime-smoke', ['sh', 'scripts/check/check-core-runtime-smoke.shs',
+              str(runtime)], 600, sdk, 0))
+          commands.append(('sdk-mcp-stdio', [str(runner),
+              'test/02_integration/app/mcp_stdio_integration_spec.spl', '--mode=interpreter', '--no-cache'], 600, sdk, 1))
+          for name, entry in [('mcp', 'src/app/mcp/main.spl'), ('lsp', 'src/app/simple_lsp_mcp/main.spl')]:
+              output = sdk / ('build/verify/guest-owner-mcp-smoke/' + name)
+              output.parent.mkdir(parents=True, exist_ok=True)
+              commands.append(('sdk-native-' + name, [str(runtime), 'native-build',
+                  '--source', 'src/compiler', '--source', 'src/app', '--source', 'src/lib',
+                  '--entry-closure', '--entry', entry, '--strip', '--output', str(output)], 900, sdk, 0))
+          env['MCP_SERVER'] = str(sdk / 'build/verify/guest-owner-mcp-smoke/mcp')
+          env['LSP_MCP_SERVER'] = str(sdk / 'build/verify/guest-owner-mcp-smoke/lsp')
+          commands.append(('sdk-mcp-native-smoke', ['sh', 'scripts/check/check-mcp-native-smoke.shs'], 600, sdk, 0))
+          failed = False
+          for name, argv, timeout, cwd, expected_tests in commands:
+              env['SIMPLE_LIB'] = str(cwd / 'src')
+              start = time.monotonic()
+              try:
+                  result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=timeout)
+                  code, out, err = result.returncode, result.stdout, result.stderr
+              except subprocess.TimeoutExpired as exc:
+                  code, out, err = 124, exc.stdout or b'', exc.stderr or b''
+              (evidence / (name + '.stdout')).write_bytes(out)
+              (evidence / (name + '.stderr')).write_bytes(err)
+              record = {'argv': argv, 'cwd': str(cwd), 'exit': code, 'seconds': time.monotonic()-start,
+                        'stdout_bytes': len(out), 'stderr_bytes': len(err),
+                        'stdout_sha256': hashlib.sha256(out).hexdigest(),
+                        'stderr_sha256': hashlib.sha256(err).hexdigest()}
+              # JSON is explicit interoperability with the subprocess harness.
+              (evidence / (name + '.json')).write_text(json.dumps(record, indent=2) + '\n')
+              print(name + ': exit=' + str(code), flush=True)
+              report = re.sub(r'\x1b\[[0-9;]*m', '', (out + err).decode('utf-8', 'replace'))
+              rejected_route = any(value in report.lower() for value in ['unknown command', 'unrecognized command', 'unsupported command'])
+              accepted = code == 0 and not rejected_route
+              if name == 'version':
+                  accepted = accepted and 'simple' in report.lower() and bool(report.strip())
+              if expected_tests == -1:
+                  accepted = code in (1, 2) and not rejected_route and 'error' in report.lower()
+              if expected_tests > 0 and accepted:
+                  counts = re.findall(r'\b(\d+)\s+passed\b|\bPassed:\s*(\d+)\b', report)
+                  passed = [int(a or b) for a, b in counts]
+                  zero_failed = re.search(r'\b0\s+failed\b|\bFailed:\s*0\b', report)
+                  count_ok = expected_tests in passed if name != 'sdk-mcp-stdio' else any(n >= 1 for n in passed)
+                  accepted = bool(count_ok and zero_failed and 'Checkpoint-carried' not in report)
+                  (evidence / (name + '-count-admission.sdn')).write_text(
+                      'required_passed: ' + str(expected_tests) + '\nrequired_failed: 0\naccepted: '
+                      + ('true' if accepted else 'false') + '\n')
+              if not accepted:
+                  failed = True
+                  # Stop on the first actual failure; do not spend later
+                  # checks on an unqualified route or restart passing work.
+                  break
+          (evidence / 'outcome.sdn').write_text(
+              'schema: simpleos-guest-command-owner-host-check-v1\n'
+              + 'host_controls: ' + ('FAIL' if failed else 'PASS') + '\n'
+              + 'guest_execution: false\np3_build: false\nqualification: scoped-host-evidence-only\n')
+          sys.exit(1 if failed else 0)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guest-command-owner-${{ github.run_id }}
+          path: |
+            build/verify/guest-command-owner/*.sdn
+            build/verify/guest-command-owner/*.txt
+            build/verify/guest-command-owner/*.json
+            build/verify/guest-command-owner/*.stdout
+            build/verify/guest-command-owner/*.stderr
