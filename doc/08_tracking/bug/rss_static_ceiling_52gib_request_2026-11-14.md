@@ -68,3 +68,14 @@ With the ceiling at 52 GiB, the 189dabae8e3 corridor (HIR fully green, MIR
 authorized full run (proven in cycles 24a-24d) continue to Stage 3 and
 Stage 4 in-run — which unblocks the native MCP rebuild + deploy + the
 three-client activation queued behind it.
+
+## Status 2026-11-24: SUPERSEDED (acceptance items 2-3 open)
+
+The static ceiling is now 58720256 KiB (56 GiB, "eighth widening", commit 2b8f2f3f440),
+above the requested 52 GiB, in BOTH `scripts/bootstrap/lib/tree-rss-policy.shs`
+(`BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB`) and `scripts/resource/process-tree-rss-watchdog.pl`
+(`$compiler_ceiling_kib`). Acceptance 1 is met by that commit. Not re-checked here:
+item 2 (fixture migration; the policy selftest was not run on this Windows host) and
+item 3 (host-scaled ceiling: the value is still a bare static, so a 64 GiB host without
+balloon headroom is not protected by a host-class bound). Item 3 stays open for the
+tree-RSS owner.

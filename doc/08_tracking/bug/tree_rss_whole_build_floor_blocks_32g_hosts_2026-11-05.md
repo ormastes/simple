@@ -85,3 +85,13 @@ host with ~28 GiB free admits 1 HIR worker (was 0). Seed-verified:
 Not changed: per-worker estimates already equal measured peaks (parse 3.8 GB, HIR/MIR 9 GB, observed-peak raising exists);
 MIR estimate scaling by closure size (17.7 GB at 3,004 modules) is not wired -- shard counts, not module counts, reach run_ledger_shards.
 The Windows SIMPLE_PARSE_SHARD_MAX=1 pin is untouched (owner policy).
+
+## Re-check 2026-11-24 (release/1.0.0, Windows 64 GiB host)
+
+Still fixed. Correction to the 2026-11-07 note: the shard-pool headroom fallback is now
+min(24 GiB, RAM/4), inlined in `shard_tree_headroom_kib_for_v1` (`src/app/cli/shard_mem_clamp.spl`,
+commit e1626778430 "pool headroom default min(24 GiB, RAM/4) so 24 GiB hosts admit 2 workers"),
+not `build_memory_reserve_default_kib_v1` (RAM/2). So a 32 GiB host clamps with headroom
+~8 GiB (8388608 kB), not 16777216 kB. Seed-verified 2026-11-24:
+`test/01_unit/app/cli/shard_headroom_host_scaled_spec.spl` 9/9 GREEN
+(`C:/dev/seeds/simple-release.exe`). Real 32 GiB Stage 2 proof is still pending.

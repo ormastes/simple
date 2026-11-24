@@ -46,3 +46,23 @@ reproduced module failure (`failed_modules > 0`).
 
 /tmp/stage2-repro-wt/.simple/storage/build/bootstrap/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/compiler_cli_build.log
 (matrix run of 2026-11-05, task: stage2 cranelift SIGILL repro attempt 5).
+
+## Status 2026-11-24: FIXED by 92d02442782 (match to this incident inferred)
+
+Commit 92d02442782 (2026-11-13) changed the `run_ledger_shards` kill path to confirm a
+killed worker by liveness (`shard_worker_confirm_kill_v1` /
+`shard_worker_kill_stopped_v1`, `src/app/cli/shard_worker_reap_v1.spl`). Both host
+runtimes reap inside `process_kill`, so the old 5 s re-wait answered -1 for a dead child
+and the pool printed exactly `blocked=worker could not be reaped`.
+
+This incident matches that shape: the cell ran `--timeout 1800` (30 min) but compiled
+for ~47 min, and the owner reported `exit=-2` (still running at the deadline). That is a
+timed-out worker going through the kill path, which the old reading misclassified. The
+match is INFERRED from the log shape; the cell was not re-run.
+
+Seed-verified 2026-11-24 (`C:/dev/seeds/simple-release.exe`,
+`test/01_unit/app/cli/shard_worker_reap_spec.spl`): 19/20. All kill-confirm decision
+cases pass. The one failure is a host-process case, `shard_child_wait_bounded_v1` on
+`sh -c "exit 3"` under a 5000 ms budget, which answered -2. Spawning Git `sh` on this
+loaded Windows host took longer than 5 s, so this is a timing case unrelated to the reap
+decision. It is not filed as a regression of this fix.
