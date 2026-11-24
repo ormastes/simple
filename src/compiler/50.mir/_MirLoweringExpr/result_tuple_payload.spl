@@ -2,7 +2,7 @@ use compiler.mir.mir_instruction_support.{MirCallOrigin}
 # Result tuple payloads use the ordinary raw heap tuple, not rt_tuple_new's
 # multi-argument enum container. Keep unsupported element representations loud.
 use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolKind}
-use compiler.hir.hir_definitions.{HirExpr}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.asm_and_targets.*
@@ -13,6 +13,7 @@ use compiler.mir._MirLoweringExpr.result_err_record_owner.{result_err_layout_ide
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 
 # Match bindings have a separate admission contract from unwrap/? above.
 # A declared wrapper tuple can contain a typed runtime collection handle;
@@ -350,6 +351,21 @@ impl MirLowering:
     me optional_tuple_fallback_matches(expected: HirType, expression: HirExpr, local: LocalId) -> bool:
         if val actual = self.receiver_declared_or_result_type(expression, local):
             return hir_types_equal(expected, actual)
+        # Literal lowering can omit the aggregate HIR owner when an element
+        # has no remembered local type. Check the source elements themselves.
+        match expression.kind:
+            case HirExprKind.TupleLit(elements):
+                match expected.kind:
+                    case HirTypeKind.Tuple(fields):
+                        if fields.len() != elements.len(): return false
+                        for index in 0..elements.len():
+                            if val field_type = self.some_witness_inner_hir_type(elements[index]):
+                                if not hir_types_equal(fields[index], field_type): return false
+                            else:
+                                return false
+                        return true
+                    case _: ()
+            case _: ()
         false
 
     me narrow_optional_tuple_index_base(base: HirExpr, raw: LocalId) -> LocalId?:
