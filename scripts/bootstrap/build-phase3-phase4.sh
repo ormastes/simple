@@ -33,6 +33,7 @@ P2_BIN=""
 P3A_BIN=""
 P3A_EXPLICIT=0
 P3A_SHA256=""
+P3B_CACHE_FROM=""
 P3B_BIN=""
 MEM_GUARD_SCRIPT="${SIMPLE_MEM_GUARD_SCRIPT:-}"
 INTERNAL_LINKER_GATE="auto"
@@ -64,6 +65,7 @@ Options:
   --runtime-path=<DIR>           Runtime directory containing libsimple_runtime.a
   --p2-bin=<FILE>                Compatible minimal producer (Phase 2 or later; bind actual provenance)
   --p3a-bin=<FILE>               Existing qualified P3a (required for --phase=p3b)
+  --p3b-cache-from=<DIR>         Copy a stopped Linux P3b build cache into the fresh build root
   --p3a-sha256=<HEX>             Exact P3a bytes; caller verifies source/runtime/Hello provenance
   --p3b-bin=<FILE>               Existing Phase 3b compiler binary (when running --phase=p4)
   --mem-guard=<FILE>             Optional mem-guard-watchdog.sh script to wrap builds
@@ -112,6 +114,9 @@ while [ "$#" -gt 0 ]; do
     --p3a-bin=*) P3A_BIN=${1#*=}; P3A_EXPLICIT=1; shift ;;
     --p3a-sha256) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; P3A_SHA256=$2; shift 2 ;;
     --p3a-sha256=*) P3A_SHA256=${1#*=}; shift ;;
+    --p3b-cache-from) [ "$#" -ge 2 ] && [ -n "$2" ] || { usage >&2; exit 2; }; P3B_CACHE_FROM=$2; shift 2 ;;
+    --p3b-cache-from=) usage >&2; exit 2 ;;
+    --p3b-cache-from=*) P3B_CACHE_FROM=${1#*=}; shift ;;
     --p3b-bin) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; P3B_BIN=$2; shift 2 ;;
     --p3b-bin=*) P3B_BIN=${1#*=}; shift ;;
     --mem-guard) [ "$#" -ge 2 ] || { usage >&2; exit 2; }; MEM_GUARD_SCRIPT=$2; shift 2 ;;
@@ -278,6 +283,10 @@ if [ "$PHASE" = p3b ]; then
   [ "$P3A_EXPLICIT" -eq 1 ] && [ -n "$P3A_BIN" ] || { echo 'ERROR: standalone P3b requires explicit --p3a-bin' >&2; exit 2; }
   case "$P3A_SHA256" in ''|*[!0-9a-f]*) echo 'ERROR: P3b requires an exact lowercase P3a SHA-256' >&2; exit 2 ;; esac
   [ "${#P3A_SHA256}" -eq 64 ] || { echo 'ERROR: P3a SHA-256 must have 64 digits' >&2; exit 2; }
+fi
+
+if [ -n "$P3B_CACHE_FROM" ] && { [ "$PHASE" != p3b ] || [ "$(uname -s)" != Linux ]; }; then
+  echo 'ERROR: --p3b-cache-from requires Linux and --phase=p3b' >&2; exit 2
 fi
 
 PATH_ACTION_COUNT=0
@@ -814,6 +823,20 @@ case "$PHASE" in
     [ "$(bootstrap_stage3_hash_file "$P3A_BIN")" = "$P3A_SHA256" ] || { echo 'ERROR: P3a digest mismatch before build' >&2; exit 2; }
     # An explicit output outside the fresh root could overwrite the producer.
     [ "$P3B_BIN" = "$P3B_DIR/simple${EXE_EXT}" ] || { echo 'ERROR: standalone P3b output must remain in its fresh build root' >&2; exit 2; }
+    if [ -n "$P3B_CACHE_FROM" ]; then
+      [ -d "$P3B_CACHE_FROM" ] || { echo 'ERROR: P3b cache source must be a directory' >&2; exit 2; }
+      p3b_cache_source=$(realpath -- "$P3B_CACHE_FROM") || exit 2
+      p3b_build_root=$(realpath -m -- "$BUILD_ROOT") || exit 2
+      case "$p3b_build_root/" in
+        "${p3b_cache_source%/}/"*) echo 'ERROR: P3b build root must be outside the source cache' >&2; exit 2 ;;
+      esac
+      p3b_special=$(find "$p3b_cache_source" ! -type f ! -type d -print -quit) || exit 2
+      [ -z "$p3b_special" ] || { echo 'ERROR: P3b cache must contain only regular files and directories' >&2; exit 2; }
+      mkdir -p "$(dirname -- "$BUILD_ROOT")"
+      mkdir -- "$BUILD_ROOT"
+      mkdir -p "$P3B_DIR/cache"
+      cp -a --reflink=auto "$p3b_cache_source/." "$P3B_DIR/cache/"
+    fi
     run_stage3_step "P3b" "$P3A_BIN" "$P3B_DIR" "$P3B_BIN" "stage3-b"
     [ "$(bootstrap_stage3_hash_file "$P3A_BIN")" = "$P3A_SHA256" ] || { echo 'ERROR: P3a changed during build' >&2; exit 2; }
     ;;
