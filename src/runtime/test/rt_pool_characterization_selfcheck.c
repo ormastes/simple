@@ -190,12 +190,23 @@ typedef struct { void (*fn)(void*); void* arg; } char_thunk;
 static DWORD WINAPI char_thread_main(LPVOID p) { char_thunk* t = (char_thunk*)p; t->fn(t->arg); return 0; }
 static int char_thread_start(char_thread_t* th, char_thunk* t) {
     *th = CreateThread(NULL, 0, char_thread_main, t, 0, NULL);
-    return *th != NULL;
+    if (*th == NULL) {
+        fprintf(stderr, "ERROR case=%s: CreateThread failed (%lu)\n", g_case, (unsigned long)GetLastError());
+        exit(2);
+    }
+    return 1;
 }
 static void char_thread_join(char_thread_t th) { WaitForSingleObject(th, INFINITE); CloseHandle(th); }
 #else
 static void* char_thread_main(void* p) { char_thunk* t = (char_thunk*)p; t->fn(t->arg); return NULL; }
-static int char_thread_start(char_thread_t* th, char_thunk* t) { return pthread_create(th, NULL, char_thread_main, t) == 0; }
+static int char_thread_start(char_thread_t* th, char_thunk* t) {
+    int rc = pthread_create(th, NULL, char_thread_main, t);
+    if (rc != 0) {
+        fprintf(stderr, "ERROR case=%s: pthread_create failed (%d)\n", g_case, rc);
+        exit(2);
+    }
+    return 1;
+}
 static void char_thread_join(char_thread_t th) { pthread_join(th, NULL); }
 #endif
 
@@ -387,10 +398,19 @@ static void case_legacy_submit(void) {
     raw[1] = 0;
     int64_t h = rt_pool_submit(W(raw), 0);
     CHECK(h != 0);
+    if (h == 0) exit(1);
     CHECK_EQ(rt_pool_join(h), W(raw) + 1);
     int64_t h2 = rt_pool_submit(0, W(raw)); /* arg1 wins when non-zero */
     CHECK(h2 != 0);
-    while (!rt_pool_is_done(h2)) char_yield();
+    if (h2 == 0) exit(1);
+    uint64_t deadline = char_now_ms() + 10000;
+    while (!rt_pool_is_done(h2)) {
+        if (char_now_ms() >= deadline) {
+            fprintf(stderr, "FAIL case=%s: legacy task did not complete within 10 seconds\n", g_case);
+            exit(1);
+        }
+        char_yield();
+    }
     CHECK_EQ(rt_pool_is_done(h2), 1);
     CHECK_EQ(rt_pool_join(h2), W(raw) + 1);
     /* misaligned raw record is refused */
@@ -738,6 +758,10 @@ static void case_stress(int nthreads, int ntasks, int64_t capacity) {
     stress_arg* args = (stress_arg*)calloc((size_t)nthreads, sizeof(stress_arg));
     char_thunk* th = (char_thunk*)calloc((size_t)nthreads, sizeof(char_thunk));
     char_thread_t* ts = (char_thread_t*)calloc((size_t)nthreads, sizeof(char_thread_t));
+    if (!args || !th || !ts) {
+        fprintf(stderr, "ERROR case=%s: thread argument allocation failed\n", g_case);
+        exit(2);
+    }
     for (int i = 0; i < nthreads; i++) {
         args[i] = (stress_arg){s, ntasks, 0, 0};
         th[i] = (char_thunk){th_stress, &args[i]};
