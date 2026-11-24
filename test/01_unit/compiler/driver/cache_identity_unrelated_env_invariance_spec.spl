@@ -1,0 +1,196 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, driver, cache
+"""
+# HIR/native module cache identity under unrelated environment changes (MP2 Part B)
+
+Verifies that:
+1. Unrelated/cosmetic `SIMPLE_*` variables, non-`SIMPLE_` wrapper variables,
+   and cache directory / root overrides do NOT alter
+   `native_build_module_environment_snapshot_fingerprint_v1`, `hir_cache_key`,
+   or `hir_cache_header`.
+2. Semantic compiler, target, and ABI flags DO still change both module
+   environment fingerprints and HIR cache keys.
+3. Whole-build `native_build_environment_snapshot_fingerprint_v1` still captures
+   complete environment differences and rejects duplicates.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use compiler.driver.cache.native_build_environment_identity.{
+    native_build_environment_snapshot_fingerprint_v1,
+    native_build_module_environment_snapshot_fingerprint_v1
+}
+use compiler.driver.driver_hir_cache.{hir_cache_key, hir_cache_header}
+
+val TEST_SRC: text = "test/fixtures/compiler/hir_cache_source_identity/left.spl"
+val TEST_CLOSURE: text = "mp2-env-invariance-frozen-closure"
+
+fn _restore_env(name: text, old: text?):
+    if old.?:
+        env_set(name, old ?? "")
+    else:
+        env_remove_process(name)
+
+fn _hir_snapshot_for_env(overrides: [(text, text)]) -> (text, text):
+    var saved: [(text, text?)] = []
+    for pair in overrides:
+        saved.push((pair.0, env_get(pair.0)))
+        if pair.1 == "":
+            env_remove_process(pair.0)
+        else:
+            env_set(pair.0, pair.1)
+    val key = hir_cache_key(TEST_SRC, TEST_CLOSURE, false)
+    val header = hir_cache_header("")
+    for entry in saved:
+        _restore_env(entry.0, entry.1)
+    (key, header)
+
+describe "native_build_module_environment_snapshot_fingerprint_v1 allowlist":
+    it "ignores unrelated SIMPLE_* and harness env vars while keeping complete snapshot distinct":
+        val bare: [(text, text)] = [
+            ("PATH", "/usr/bin"),
+            ("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
+            ("SIMPLE_ABI_POLICY", "v1"),
+        ]
+        val run_a: [(text, text)] = [
+            ("PATH", "/usr/bin"),
+            ("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
+            ("SIMPLE_ABI_POLICY", "v1"),
+            ("SIMPLE_FOO_CUSTOM", "1"),
+            ("SIMPLE_P3_RUN", "run-2026-11-24-a"),
+            ("P3_GROUP_NAME", "group-alpha"),
+            ("SIMPLE_ALLOW_LEGACY_P3_SCRIPT", "1"),
+            ("SIMPLE_NONINTERACTIVE", "1"),
+            ("SIMPLE_CACHE_ROOT", "/tmp/cache-root-a"),
+        ]
+        val run_b: [(text, text)] = [
+            ("PATH", "/usr/bin"),
+            ("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu"),
+            ("SIMPLE_ABI_POLICY", "v1"),
+            ("SIMPLE_FOO_CUSTOM", "999"),
+            ("SIMPLE_P3_RUN", "run-2026-11-24-b"),
+            ("P3_GROUP_NAME", "group-beta"),
+            ("SIMPLE_ALLOW_LEGACY_P3_SCRIPT", "0"),
+            ("SIMPLE_NONINTERACTIVE", "0"),
+            ("SIMPLE_CACHE_ROOT", "/var/tmp/cache-root-b"),
+        ]
+        val fp_bare = native_build_module_environment_snapshot_fingerprint_v1(bare)
+        val fp_a = native_build_module_environment_snapshot_fingerprint_v1(run_a)
+        val fp_b = native_build_module_environment_snapshot_fingerprint_v1(run_b)
+        expect(fp_bare.valid).to_equal(true)
+        expect(fp_a.valid).to_equal(true)
+        expect(fp_b.valid).to_equal(true)
+        expect(fp_a.digest).to_equal(fp_bare.digest)
+        expect(fp_b.digest).to_equal(fp_bare.digest)
+        expect(native_build_environment_snapshot_fingerprint_v1(run_a).digest ==
+            native_build_environment_snapshot_fingerprint_v1(bare).digest).to_equal(false)
+
+    it "ignores cache directory location env vars in module identity":
+        val bare: [(text, text)] = [("PATH", "/usr/bin")]
+        val dirs_a: [(text, text)] = [
+            ("PATH", "/usr/bin"),
+            ("SIMPLE_HIR_CACHE_DIR", "/cache/a/hir"),
+            ("SIMPLE_FRONTEND_CACHE_DIR", "/cache/a/frontend"),
+            ("SIMPLE_NATIVE_BUILD_CACHE_DIR", "/cache/a/native"),
+            ("SIMPLE_RT_OBJ_CACHE_DIR", "/cache/a/rt"),
+            ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "/cache/a/compat"),
+            ("SIMPLE_CACHE_ROOT", "/cache/a"),
+        ]
+        val dirs_b: [(text, text)] = [
+            ("PATH", "/usr/bin"),
+            ("SIMPLE_HIR_CACHE_DIR", "/cache/b/hir"),
+            ("SIMPLE_FRONTEND_CACHE_DIR", "/cache/b/frontend"),
+            ("SIMPLE_NATIVE_BUILD_CACHE_DIR", "/cache/b/native"),
+            ("SIMPLE_RT_OBJ_CACHE_DIR", "/cache/b/rt"),
+            ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "/cache/b/compat"),
+            ("SIMPLE_CACHE_ROOT", "/cache/b"),
+        ]
+        val fp_bare = native_build_module_environment_snapshot_fingerprint_v1(bare)
+        val fp_a = native_build_module_environment_snapshot_fingerprint_v1(dirs_a)
+        val fp_b = native_build_module_environment_snapshot_fingerprint_v1(dirs_b)
+        expect(fp_a.digest).to_equal(fp_bare.digest)
+        expect(fp_b.digest).to_equal(fp_bare.digest)
+
+    it "moves module identity when semantic compiler or target switches change":
+        val base: [(text, text)] = [("PATH", "/usr/bin")]
+        val base_digest = native_build_module_environment_snapshot_fingerprint_v1(base).digest
+        val semantic_pairs: [(text, text)] = [
+            ("SIMPLE_NATIVE_BUILD_TARGET", "aarch64-unknown-linux-gnu"),
+            ("SIMPLE_HIR_CFG_SELECT", "1"),
+            ("SIMPLE_REQUIRED_INIT_CHECK", "error"),
+            ("SIMPLE_TARGET_OS", "linux"),
+            ("SIMPLE_TARGET_HIR_MODE", "typed"),
+            ("SIMPLE_MIR_SELECTIVE", "1"),
+            ("SIMPLE_FILE_WORKER_UNIT", "1"),
+            ("SIMPLE_BOOTSTRAP", "1"),
+            ("SIMPLE_OPTIMIZER_KERNEL", "experimental"),
+            ("SIMPLE_RUNTIME_OWNER", "simple"),
+            ("SIMPLE_BACKEND_COMPOSITION", "full"),
+        ]
+        for pair in semantic_pairs:
+            val changed = native_build_module_environment_snapshot_fingerprint_v1([
+                ("PATH", "/usr/bin"),
+                pair,
+            ])
+            expect(changed.valid).to_equal(true)
+            expect(changed.digest == base_digest).to_equal(false)
+
+    it "still rejects duplicate unknown keys in snapshot":
+        val dup = native_build_module_environment_snapshot_fingerprint_v1([
+            ("SIMPLE_FOO_CUSTOM", "1"),
+            ("SIMPLE_FOO_CUSTOM", "2"),
+        ])
+        expect(dup.valid).to_equal(false)
+        expect(dup.reason).to_equal("environment-field-duplicate:SIMPLE_FOO_CUSTOM")
+
+describe "HIR cache key and header env invariance":
+    it "keeps hir_cache_key and hir_cache_header unchanged across cosmetic and cache-dir env changes":
+        val base = _hir_snapshot_for_env([
+            ("SIMPLE_FRONTEND_CACHE_SCOPE", "mp2-invariance-test-scope"),
+            ("SIMPLE_HIR_CFG_SELECT", ""),
+            ("SIMPLE_BOOTSTRAP", ""),
+            ("SIMPLE_FOO_CUSTOM", ""),
+            ("SIMPLE_P3_RUN", ""),
+            ("P3_GROUP_NAME", ""),
+            ("SIMPLE_ALLOW_LEGACY_P3_SCRIPT", ""),
+            ("SIMPLE_NONINTERACTIVE", ""),
+            ("SIMPLE_CACHE_ROOT", ""),
+            ("SIMPLE_HIR_CACHE_DIR", ""),
+            ("SIMPLE_FRONTEND_CACHE_DIR", ""),
+            ("SIMPLE_NATIVE_BUILD_CACHE_DIR", ""),
+            ("SIMPLE_RT_OBJ_CACHE_DIR", ""),
+            ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", ""),
+            ("SIMPLE_ABI_ADMISSION_RECEIPT", ""),
+        ])
+        val noisy = _hir_snapshot_for_env([
+            ("SIMPLE_FRONTEND_CACHE_SCOPE", "mp2-invariance-test-scope"),
+            ("SIMPLE_HIR_CFG_SELECT", ""),
+            ("SIMPLE_BOOTSTRAP", ""),
+            ("SIMPLE_FOO_CUSTOM", "1"),
+            ("SIMPLE_P3_RUN", "42"),
+            ("P3_GROUP_NAME", "g1"),
+            ("SIMPLE_ALLOW_LEGACY_P3_SCRIPT", "1"),
+            ("SIMPLE_NONINTERACTIVE", "1"),
+            ("SIMPLE_CACHE_ROOT", "/tmp/other-root"),
+            ("SIMPLE_HIR_CACHE_DIR", "/tmp/other-hir"),
+            ("SIMPLE_FRONTEND_CACHE_DIR", "/tmp/other-fe"),
+            ("SIMPLE_NATIVE_BUILD_CACHE_DIR", "/tmp/other-native"),
+            ("SIMPLE_RT_OBJ_CACHE_DIR", "/tmp/other-rt"),
+            ("SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "/tmp/other-compat"),
+            ("SIMPLE_ABI_ADMISSION_RECEIPT", "/tmp/other-admission.env"),
+        ])
+        expect(base.0.len()).to_equal(64)
+        expect(noisy.0).to_equal(base.0)
+        expect(noisy.1).to_equal(base.1)
+
+        val semantic_cfg = _hir_snapshot_for_env([
+            ("SIMPLE_FRONTEND_CACHE_SCOPE", "mp2-invariance-test-scope"),
+            ("SIMPLE_HIR_CFG_SELECT", "1"),
+        ])
+        expect(semantic_cfg.0 == base.0).to_equal(false)
+
+        val semantic_boot = _hir_snapshot_for_env([
+            ("SIMPLE_FRONTEND_CACHE_SCOPE", "mp2-invariance-test-scope"),
+            ("SIMPLE_BOOTSTRAP", "1"),
+        ])
+        expect(semantic_boot.0 == base.0).to_equal(false)
