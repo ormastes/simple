@@ -260,3 +260,16 @@ beyond it pin returns `Err`, never evicts a pin. One stderr warning when pins
 reach the cap or exceed `SIMPLE_SCV_SNAPSHOT_MAX`
 (`scv_compile_snapshot_pin_warning_v1`). Spec:
 `test/01_unit/lib/scv/rev01_pinned_revision_lease_spec.spl`.
+
+## Admitted-digest memo needs a seed at scope state 0 (2026-11-24)
+`compile_source_inventory_read_admitted_digest_v1` stores its per-process memo
+only when no transient scope is active, and every native-build caller reads
+under one, so the memo never populated: a warm hello-world build fully re-read
+one 18.6 MB generation 33 times across its processes (8 of the coordinator's 16
+through the admitted reader, scope state 1 at 7 of them). A scope owner must
+call `compile_source_inventory_seed_admitted_digest_v1` BEFORE
+`transient_scope_begin()`; `compiler_source_authority_validate_v1` does. The
+seed is the same full verification, never a skipped one, and is a no-op inside
+a scope. Direct `read_at_pointer` re-reads stay deliberate. Spec:
+`test/01_unit/lib/scv/compile_source_inventory_admitted_digest_memo_spec.spl`
+(REQ-SCV-ADMITTED-MEMO-006).
