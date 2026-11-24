@@ -1,7 +1,7 @@
 // Method call dispatcher - delegates to type-specific handlers
 
 pub(crate) mod collections;
-mod primitives;
+pub(crate) mod primitives;
 pub(crate) mod special;
 
 use super::{

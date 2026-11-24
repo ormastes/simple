@@ -2152,7 +2152,17 @@ fn try_compile_builtin_method_call<M: Module>(
         _ => None,
     };
     if let Some(to_ty) = numeric_cast_target {
-        let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
+        // A Cranelift F32/F64 value is a real float whatever MIR recorded; the
+        // untyped-vreg default (I64) is the unsound direction. A chained
+        // `x.ceil().to_i64()` has no vreg type for the `ceil` dest, and the I64
+        // default sent the raw f64 register to `rt_to_int_dynamic`, which
+        // returned its IEEE bits.
+        // doc/08_tracking/bug/float_method_chain_to_i64_returns_bits_2026-11-24.md
+        let from_ty = match builder.func.dfg.value_type(receiver_val) {
+            types::F64 => TypeId::F64,
+            types::F32 => TypeId::F32,
+            _ => ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64),
+        };
 
         let to_is_int = matches!(
             to_ty,
@@ -2193,7 +2203,11 @@ fn try_compile_builtin_method_call<M: Module>(
         // inflate decoder's `data[byte_pos].to_i64()` read every byte 8x too
         // large and `symbol.to_u8()` pushed the low byte of the tag word.
         let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
-        if erased_receiver && to_is_int && matches!(recv_ty_known, None | Some(TypeId::ANY)) {
+        if erased_receiver
+            && to_is_int
+            && matches!(recv_ty_known, None | Some(TypeId::ANY))
+            && !matches!(from_ty, TypeId::F32 | TypeId::F64)
+        {
             let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
             let converted = match to_ty {
                 TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, decoded),

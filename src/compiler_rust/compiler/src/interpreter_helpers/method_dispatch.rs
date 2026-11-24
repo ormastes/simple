@@ -744,6 +744,23 @@ pub(crate) fn call_method_on_value(
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
             }
+            // The rest of the zero-arg float methods (sqrt, trunc, sin, ...):
+            // same table as a direct receiver, so `x.ceil().sqrt()` no longer
+            // fails "not found ... in nested call context".
+            _ if _args.is_empty() => {
+                if let Some(v) = crate::interpreter::interpreter_method::primitives::handle_float_methods(
+                    *f,
+                    method,
+                    &[],
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                )? {
+                    return Ok(v);
+                }
+            }
             _ => {}
         },
 
@@ -766,6 +783,24 @@ pub(crate) fn call_method_on_value(
                     CastNumericResult::Int(v) => Value::Int(v),
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
+            }
+            // Same delegation as the f64 arm, re-narrowed like the direct path.
+            _ if _args.is_empty() => {
+                if let Some(v) = crate::interpreter::interpreter_method::primitives::handle_float_methods(
+                    *f as f64,
+                    method,
+                    &[],
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                )? {
+                    return Ok(match v {
+                        Value::Float(x) => Value::Float32(x as f32),
+                        other => other,
+                    });
+                }
             }
             _ => {}
         },
