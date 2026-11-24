@@ -28,9 +28,17 @@ run_one() { # name golden src...
   ran=$((ran + 1))
   if [ "$rc" -ne 0 ]; then fails="$fails $name(run rc=$rc)"; return; fi
   if [ -n "$golden" ]; then
-    diff "$out/$name.txt" "$golden" > "$out/$name.diff"
+    if [ "$os" = windows ]; then
+      # MSVC text-mode stdout writes CRLF. Repository goldens use LF.
+      diff --strip-trailing-cr "$out/$name.txt" "$golden" > "$out/$name.diff"
+    else
+      diff "$out/$name.txt" "$golden" > "$out/$name.diff"
+    fi
     rc=$?
-    [ "$rc" -eq 0 ] || fails="$fails $name(golden diff, see $out/$name.diff)"
+    if [ "$rc" -ne 0 ]; then
+      sed -n '1,25p' "$out/$name.diff" >&2
+      fails="$fails $name(golden diff, see $out/$name.diff)"
+    fi
   fi
 }
 
@@ -39,8 +47,10 @@ if [ "$os" = windows ]; then
     "$t/rt_win_utf16_convert_characterization_selfcheck.c"
   grep -q "PASS (oracle == helper)" "$out/utf16.err" 2>/dev/null || fails="$fails utf16(no oracle==helper PASS line)"
 fi
+# Strict C11 on Linux needs the libc declarations for the linked file owner.
+case "$(uname -s)" in Linux) set -- -D_DEFAULT_SOURCE;; *) set --;; esac
 run_one unlock "$t/rt_file_unlock_handle_characterization.$os.golden.txt" \
-  "$t/rt_file_unlock_handle_characterization_selfcheck.c" src/runtime/runtime_host_file_exports.c
+  "$@" "$t/rt_file_unlock_handle_characterization_selfcheck.c" src/runtime/runtime_host_file_exports.c
 
 if [ -n "$fails" ]; then echo "FAIL — $ran selfcheck(s) ran ($os), failed:$fails"; exit 1; fi
 if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked (0 selfchecks ran)"; exit 2; fi
