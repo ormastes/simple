@@ -205,7 +205,7 @@ class ProviderCanonicalJsonDecoderV1:
     me _reserve_token_event(budget: ProviderBudgetPort) -> Result<(), text>:
         if self.token_count >= self.limits.max_tokens:
             return Err("limit_exceeded")
-        if self.pending_event != nil:
+        if self.pending_event.is_some():
             return Err("event_queue_full")
         budget.charge_all([
             ProviderBudgetChargeV1(
@@ -531,7 +531,7 @@ class ProviderCanonicalJsonDecoderV1:
             checkpoint: ProviderCheckpointPort) -> Result<ProviderDecodeStateV1, text>:
         if self.failed: return Err(self.failure_reason)
         if self.finished: return Err("decoder_complete")
-        if self.pending_event != nil:
+        if self.pending_event.is_some():
             return Ok(ProviderDecodeStateV1(kind: "event", consumed_bytes: 0,
                 event_pending: true))
         if self.input_final: return Err("decoder_complete")
@@ -540,7 +540,7 @@ class ProviderCanonicalJsonDecoderV1:
             return self._fail("invalid_input")
 
         var consumed = 0
-        while consumed < count and self.pending_event == nil:
+        while consumed < count and self.pending_event.is_none():
             # A number-ending delimiter belongs to the next parser step.  Emit
             # the primitive without hashing or reporting that delimiter so the
             # caller can move the event and resubmit the exact suffix.
@@ -606,7 +606,7 @@ class ProviderCanonicalJsonDecoderV1:
             candidate.raw_bytes = candidate.raw_bytes + scalar_width
             val checked = checkpoint.checkpoint(ProviderCheckpointProgressV1(
                 stage: "canonical_json", bytes: scalar_width,
-                events: if candidate.pending_event == nil: 0 else: 1,
+                events: if candidate.pending_event.is_none(): 0 else: 1,
                 scalars: scalars.len(), hash_blocks: 0, comparisons: 0))
             if checked.is_err(): return self._fail(checked.unwrap_err())
             val reserved = budget.charge_all(transition_budget.charges)
@@ -635,14 +635,14 @@ class ProviderCanonicalJsonDecoderV1:
                 self.lexical_state == "literal":
                 return self._fail("noncanonical_json")
             self.input_final = true
-        val kind = if self.pending_event != nil: "event" elif self.input_final: "complete" elif consumed == 0: "need_input" else: "progressed"
+        val kind = if self.pending_event.is_some(): "event" elif self.input_final: "complete" elif consumed == 0: "need_input" else: "progressed"
         Ok(ProviderDecodeStateV1(kind: kind, consumed_bytes: consumed,
-            event_pending: self.pending_event != nil))
+            event_pending: self.pending_event.is_some()))
 
     me next_event() -> Result<ProviderJsonEventV1?, text>:
         if self.failed: return Err(self.failure_reason)
         if self.finished: return Err("decoder_complete")
-        if self.pending_event == nil: return Ok(nil)
+        if self.pending_event.is_none(): return Ok(nil)
         val event = self.pending_event.unwrap()
         self.pending_event = nil
         Ok(event)
@@ -651,7 +651,7 @@ class ProviderCanonicalJsonDecoderV1:
               checkpoint: ProviderCheckpointPort) -> Result<ProviderCanonicalJsonResultV1, text>:
         if self.failed: return Err(self.failure_reason)
         if self.finished: return Err("decoder_complete")
-        if self.pending_event != nil: return Err("event_pending")
+        if self.pending_event.is_some(): return Err("event_pending")
         if not self.input_final or not self.root_complete or self.stack.len() != 0:
             self.failed = true
             self.failure_reason = "incomplete_json"

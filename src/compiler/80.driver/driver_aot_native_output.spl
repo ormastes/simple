@@ -1,7 +1,8 @@
 use compiler.driver.cache.initializer_link_capture_v1.{native_link_with_initializer_capture_v1}
 use compiler.driver.cache.initializer_object_capture_v1.{driver_capture_initializer_object_v1}
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs, disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_lease_begin, native_cache_lease_end, native_cache_sweep_with_lease, native_cache_build_root}
 use std.common.cache_host_authority_v1.{CacheRootAuthorityV1, CacheObjectAuthorityV1, CacheTempAuthorityV1,
     cache_host_open_root_v1, cache_host_root_valid_v1, cache_host_open_read_v1,
     cache_host_object_valid_v1, cache_host_size_v1, cache_host_pread_receipt_v1,
@@ -106,6 +107,7 @@ use compiler.driver.smf.runtime_std_package_membership_v1.{
 use compiler.driver.cache.runtime_std_membership_policy_v1.{
     RuntimeStdMembershipPolicyOutputV1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1}
+use compiler.driver.driver_build.native_mir_shard.{native_cache_scope_eviction_role_allowed_v1}
 use compiler.driver.driver_build.go_to_end_trial_link_v1.{go_to_end_trial_link_run_v1,
     go_to_end_trial_manifest_block_v1, GoToEndHostedTrialLinkerV1}
 use compiler.driver.driver_build.native_full_inventory_sources.{
@@ -211,10 +213,10 @@ use compiler.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default}
 
 fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
-    if ctx.demand_scc_publication == nil:
+    if ctx.demand_scc_publication.is_none():
         return true
-    if (ctx.demand_compile_execution == nil or
-            ctx.demand_mir_admission == nil or
+    if (ctx.demand_compile_execution.is_none() or
+            ctx.demand_mir_admission.is_none() or
             ctx.demand_dirty_modules.len() == 0):
         return false
     val dirty_authority = ctx.demand_dirty_modules[0]
@@ -259,7 +261,7 @@ fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
     ctx.demand_compile_execution = Some(execution)
     true
 use compiler.frontend.parser_types.{ParserModule}
-use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity,
+use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_object_producer_identity,
 
     native_module_cache_shadow_mismatch_v1,
     build_cache_module_witness, build_cache_rebind_scv_snapshot_all_v1}
@@ -920,13 +922,6 @@ fn driver_native_build_threads() -> i64:
         return 0
     parsed
 
-fn driver_native_build_cache_dir() -> text:
-    val dir = env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
-    if dir == "":
-        _sffi_path_join(machine_cache_root(), "native-build/v1")
-    else:
-        dir
-
 fn driver_native_build_cache_path(cache_dir: text) -> text:
     _sffi_path_join(cache_dir, "build_cache.sdn")
 
@@ -976,11 +971,14 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
                                    symbol_mode: text, storage_identity: text,
                                    environment_identity: text,
                                    native_profile_identity: text,
-                                   provider_receipt_hash: text = "") -> (text, text):
+                                   provider_receipt_hash: text = "",
+                                   debug_info: bool = true) -> (text, text):
+    # debug_info defaults to true: the tree-bound identity (see
+    # native_build_object_producer_identity).
     driver_native_build_cache_scope_for_compiler_id(
         backend, cache_dir, target, target_cpu, opt_level,
         symbol_mode, storage_identity, environment_identity,
-        native_profile_identity, native_build_compiler_identity(),
+        native_profile_identity, native_build_object_producer_identity(debug_info),
         provider_receipt_hash)
 
 pub fn driver_native_capsule_identity_empty_v1(identity: text) -> bool:
@@ -2418,8 +2416,26 @@ fn _clear_staged_active_build_cache_v1():
     _staged_active_build_cache_slot_v1 = []
     _staged_active_build_cache_path_v1 = ""
 
+# Cache scope retention runs at most once per process (its first native
+# compile), never again hours later from a staged batch.
+var _native_cache_scope_retention_ran_v1: bool = false
+
+fn _native_cache_scope_retention_first_call_v1() -> bool:
+    if _native_cache_scope_retention_ran_v1:
+        return false
+    _native_cache_scope_retention_ran_v1 = true
+    true
+
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
+        val lease = match native_cache_lease_begin(native_cache_build_root(env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "")):
+            case Ok(value): value
+            case Err(reason): return CompileResult.CodegenError(reason)
+        val result = self._compile_to_native_leased(output, lease)
+        native_cache_lease_end(lease)
+        result
+
+    me _compile_to_native_leased(output: text, lease: NativeCacheLease) -> CompileResult:
         log_phase("aot:native_entry")
         val ctx: CompileContext = _extract_driver_ctx(self)
         val backend_name = ctx.options.backend
@@ -2470,20 +2486,21 @@ impl CompilerDriver:
                     log_phase("aot:native_session_open:ok")
                     var session = loaded_session
                     val result = self._compile_to_native_with_backend_session(
-                        output, Some(session), native_target, native_cpu)
+                        output, Some(session), native_target, native_cpu, lease)
                     if not session.close():
                         return CompileResult.CodegenError(
                             "BACKEND_PLUGIN_TEARDOWN_FAILED: backend session close failed")
                     return result
         log_phase("aot:native_builtin:start")
         self._compile_to_native_with_backend_session(
-            output, nil, native_target, native_cpu)
+            output, nil, native_target, native_cpu, lease)
 
     me _compile_to_native_with_backend_session(
         output: text,
         backend_session: BackendSessionOwnedLeaseV2?,
         native_target: text,
-        native_cpu: text
+        native_cpu: text,
+        lease: NativeCacheLease
     ) -> CompileResult:
         val ctx: CompileContext = _extract_driver_ctx(self)
         val log = ctx.logger
@@ -2518,7 +2535,7 @@ impl CompilerDriver:
             print "[NATIVE] effective_backend={effective_backend}"
 
         # Load build cache
-        val cache_dir = driver_native_build_cache_dir()
+        val cache_dir = lease.cache_root
         if not _sffi_dir_create(cache_dir, true):
             return CompileResult.CodegenError(
                 "native-build failed to create cache directory {cache_dir}")
@@ -2564,7 +2581,7 @@ impl CompilerDriver:
         if native_profile_identity == "":
             return CompileResult.CodegenError("native cache requires normalized target policy identity")
         val module_cache_config = NativeModuleConfigFactV1(
-            compiler_identity: native_build_compiler_identity(),
+            compiler_identity: native_build_object_producer_identity(ctx.options.debug_info),
             target_identity: "{native_target}|cpu={native_cpu}",
             options_identity: "backend={effective_backend}|opt={driver_opt_level}|release={is_release}|symbols={symbol_mode}|storage={sha256_text(storage_identity)}|environment={environment_identity.digest}|target-policy={native_profile_identity}",
             provider_identity: provider_receipt_hash,
@@ -2572,16 +2589,30 @@ impl CompilerDriver:
         val (base_cache_scope_root, base_cache_scope_name) = driver_native_build_cache_scope(
             effective_backend, cache_dir, native_target, native_cpu,
             driver_opt_level, symbol_mode, storage_identity,
-            environment_identity.digest, native_profile_identity, provider_receipt_hash)
+            environment_identity.digest, native_profile_identity, provider_receipt_hash,
+            ctx.options.debug_info)
         # Bounded: every compiler/option identity gets its own scope dir and
         # nothing removed old ones. Keep the current scope plus the newest,
         # SIMPLE_NATIVE_CACHE_SCOPES_KEEP (default 6: the default root is shared
         # by every backend/opt/target combination) in total; scopes used in
         # the last 6 hours (another lane) are never removed. Legacy
         # "scope-<16hex>" dirs from the previous naming can never match again.
-        val _scopes_evicted = disk_bound_keep_newest_dirs(cache_dir, base_cache_scope_name, "s", 33,
-            disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6), 21600)
-        val _legacy_evicted = disk_bound_keep_newest_dirs(cache_dir, "", "scope-", 22, 1, 21600)
+        # Only an unmarked top-level process evicts, on its first call. Shard/worker/unit children
+        # and the ledger link child reach here once per batch, hours into a
+        # build: their retention pass deleted scopes that earlier children of
+        # the same build had published into and the link still needed. The
+        # current scope stays live without the pass: the phase and ownership
+        # markers below are rewritten on every call.
+        if native_cache_scope_eviction_role_allowed_v1(
+                env_get_nullable("SIMPLE_MIR_SHARD") ?? "",
+                env_get_nullable("SIMPLE_HIR_SHARD") ?? "",
+                env_get_nullable("SIMPLE_PARSE_SHARD") ?? "",
+                env_get_nullable("SIMPLE_MIR_SHARD_LINK") ?? "",
+                env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "",
+                env_get_nullable("SIMPLE_NATIVE_BUILD_WORKER") ?? "") and
+                _native_cache_scope_retention_first_call_v1():
+            val _scopes_evicted = native_cache_sweep_with_lease(lease, base_cache_scope_name,
+                disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6))
         if ctx.native_sources_fingerprint == "":
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
@@ -3346,7 +3377,7 @@ impl CompilerDriver:
                                 return CompileResult.CodegenError("native collection object binding failed: {reason}")
                         collection_bindings = collection_bindings.push(binding)
                     if native_group.?: group_object_paths[name] = obj_path
-                    if self.ctx.demand_scc_publication != nil:
+                    if self.ctx.demand_scc_publication.is_some():
                         var publication = self.ctx.demand_scc_publication!
                         if not scc_publication_complete_object_v1(
                                 &mut publication, name, obj_path):
@@ -4636,7 +4667,7 @@ pub fn driver_runtime_std_compile_native_members_v1(
     expected_index_digest: text, artifact_root: text,
     target_cpu: text, expected_target: text
 ) -> Result<[RuntimeStdNativeMemberV1], text>:
-    if ctx.runtime_std_full_inventory_selection == nil or
+    if ctx.runtime_std_full_inventory_selection.is_none() or
             artifact_root !=
                 ctx.runtime_std_full_inventory_selection!.artifact_root or
             (package_identity != "simple.runtime" and
@@ -4801,7 +4832,7 @@ fn _runtime_std_compile_native_members_v2(
     expected_index_digest: text, artifact_root: text,
     target_cpu: text, expected_target: text
 ) -> Result<[RuntimeStdNativeMemberV2], text>:
-    if ctx.runtime_std_full_inventory_selection == nil or
+    if ctx.runtime_std_full_inventory_selection.is_none() or
             artifact_root !=
                 ctx.runtime_std_full_inventory_selection!.artifact_root or
             (package_identity != "simple.runtime" and
@@ -4882,7 +4913,7 @@ fn _runtime_std_compile_native_members_v2(
             return Err("runtime/std native v2 target cfg receipt invalid")
         val hir_digest = _runtime_std_hir_emission_digest_v2(ctx,
             member.source_identity, member.source_digest, name)
-        if hir_digest == "" or hir_emission.native_emit_witness == nil or
+        if hir_digest == "" or hir_emission.native_emit_witness.is_none() or
                 not runtime_std_native_emit_witness_valid_v1(
                     hir_emission.native_emit_witness!,
                     member.source_identity, member.source_digest, name,

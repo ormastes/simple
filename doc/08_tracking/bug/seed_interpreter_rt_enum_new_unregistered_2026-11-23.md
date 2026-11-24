@@ -1,7 +1,15 @@
 # Seed interpreter has no `rt_enum_new` extern — 2026-11-23
 
-Status: open; spec parked as `@tag:in-development` in
-test/01_unit/compiler/hir/hir_codec_char_wire_nil_spec.spl.
+Status: verification-pending (fix in interpreter_extern/enum_sffi.rs
+`rt_enum_new_fn`, registered in mod.rs; in-development tag removed from
+test/01_unit/compiler/hir/hir_codec_char_wire_nil_spec.spl). Needs a seed
+redeploy to verify natively.
+
+Before (deployed seed 2026-11-19, explicit-path run): `outcome=ERROR ...
+failed=1`, `semantic: ...:114:9: unknown extern function: rt_enum_new`.
+After: not yet measured — the 2026-11-24 rebuild failed with C: at 0 bytes
+free (os error 112). Rust unit tests: `cargo test -p simple-compiler --lib
+rt_enum_new` -> `4 passed; 0 failed` (2026-11-24).
 Owner: src/compiler_rust/compiler/src/interpreter_extern (extern registry).
 
 Decoding the HIR CharLit wire-nil marker (`4\n\\N\n`) goes through

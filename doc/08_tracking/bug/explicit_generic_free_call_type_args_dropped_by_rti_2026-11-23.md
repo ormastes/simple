@@ -52,3 +52,26 @@ rejection, erased consumer arguments, mixed parameter/missing-owner metadata,
 mixed parameter/Error/Infer metadata, and real MIR lowering for generic free
 and method-owner callers with context restoration. These cases are authored, not run.
 The production fixture remains the actual native regression gate.
+
+## 2026-11-24 — repair insufficient (PR #11099 diagnose run 45194358128)
+
+The repair `ac1fd826bf4` is an ancestor of the frozen producer source
+`5e436b9e62` (P1 run 45179230801, artifact 14824030275), yet the
+`actual_attribute_store` lane still fails native-build (rc=1) with three fatals:
+
+    enum match retained Result/Optional has no complete declaration ownership;
+    retained_proof=!unknown; expression_proof=;
+    receiver_proof=compiler.common.data.attribute_schema_v1.AttributeStoreV1;
+    subject method call AttributeStoreV1.get() at actual_attribute_store.spl:10:19
+    has type known non-enum type; rti: diagnostic resolved=b:i64; bound_before_tuple=i64
+
+So the receiver owner is now proven, but RTI `method_return` for
+`AttributeStoreV1<T>.get(node) -> Result<T, text>` binds to bare `b:i64`
+instead of `Result<text, text>`. Suspects: the `get` row lookup
+(`rti_method_ref(owner, "get")`; sibling `AttrI64StoreV1.get` and
+`AttrGroupStoreV1<T>.get` share the module) or owner-arg substitution in
+`rti_apply_owner_args_v1`. Still open; validation again needs a fresh P1
+producer rebound in `generic-store-owner-diagnostic.yml`.
+
+Separately, the `sdk_owner` lane hit its 1000 s compile timeout (rc=124,
+1036 source files, `--low-memory --threads 4`) — independent of this defect.

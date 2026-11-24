@@ -111,6 +111,7 @@ typedef SSIZE_T ssize_t;
 #include <windows.h>
 #include <psapi.h>
 #include "platform/windows_raw_mapping.h"
+#include "platform/spl_win_utf16_private.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -8630,226 +8631,11 @@ int64_t rt_net_http_plain_local_probe(void) {
  * Memory Operations
  * ================================================================ */
 
-/* Struct field accesses are emitted as direct native loads/stores, so a
- * non-null corrupt receiver must be rejected before Cranelift dereferences it.
- * Keep a dedicated, bounded allocation table: this avoids probing candidate
- * addresses and keeps validation O(1) on the field-access hot path. */
-typedef struct RtStructAllocation {
-    uintptr_t ptr;
-    size_t bytes;
-} RtStructAllocation;
-
-#define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
-
-static RtStructAllocation* rt_struct_allocs = NULL;
-static size_t rt_struct_alloc_cap = 0;
-static size_t rt_struct_alloc_len = 0;
-static size_t rt_struct_alloc_tombs = 0;
-static size_t rt_struct_alloc_failures = 0;
-static size_t rt_struct_alloc_max_cap_for_test = 0;
-#if defined(_WIN32)
-static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
-#else
-static pthread_rwlock_t rt_struct_alloc_lock = PTHREAD_RWLOCK_INITIALIZER;
-#endif
-
-#if defined(SIMPLE_RUNTIME_STRUCT_REGISTRY_TESTING)
+#define STRUCT_ALLOC_REGISTRY_HASH(ptr) rt_core_immortal_hash_ptr(ptr)
 #if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-int64_t rt_struct_registry_len(void) { return (int64_t)rt_struct_alloc_len; }
-int64_t rt_struct_registry_cap(void) { return (int64_t)rt_struct_alloc_cap; }
-int64_t rt_struct_registry_failures(void) { return (int64_t)rt_struct_alloc_failures; }
-void rt_struct_registry_set_max_cap_for_test(size_t max_cap) {
-    rt_struct_alloc_max_cap_for_test = max_cap;
-}
+#define STRUCT_ALLOC_REGISTRY_TEST_EXPORTS 1
 #endif
-#endif
-
-static void rt_struct_alloc_lock_acquire(void) {
-#if defined(_WIN32)
-    AcquireSRWLockExclusive(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_wrlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_lock_release(void) {
-#if defined(_WIN32)
-    ReleaseSRWLockExclusive(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_unlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_read_lock_acquire(void) {
-#if defined(_WIN32)
-    AcquireSRWLockShared(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_rdlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_read_lock_release(void) {
-#if defined(_WIN32)
-    ReleaseSRWLockShared(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_unlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static size_t rt_struct_alloc_hash(uintptr_t ptr) {
-    return rt_core_immortal_hash_ptr(ptr);
-}
-
-static size_t rt_struct_alloc_load_limit(size_t cap) {
-    size_t limit = cap - (cap / 4);
-    if (limit >= cap && cap > 0) limit = cap - 1;
-    return limit;
-}
-
-static size_t rt_struct_alloc_next_cap(size_t current) {
-    const size_t max_entries = SIZE_MAX / sizeof(RtStructAllocation);
-    size_t ceiling = rt_struct_alloc_max_cap_for_test != 0 &&
-            rt_struct_alloc_max_cap_for_test < max_entries
-        ? rt_struct_alloc_max_cap_for_test
-        : max_entries;
-    if (current == 0) return ceiling < 256 ? 0 : 256;
-    if (current >= ceiling || current > max_entries / 2) return 0;
-    size_t next = current * 2;
-    return next > ceiling ? 0 : next;
-}
-
-static int rt_struct_alloc_needs_rehash(size_t cap) {
-    size_t limit = rt_struct_alloc_load_limit(cap);
-    if (rt_struct_alloc_len >= limit) return 1;
-    size_t remaining = limit - rt_struct_alloc_len;
-    return rt_struct_alloc_tombs >= remaining - 1;
-}
-
-static void rt_struct_alloc_record_failure(void) {
-    if (rt_struct_alloc_failures != SIZE_MAX) {
-        rt_struct_alloc_failures++;
-    }
-}
-
-static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
-    size_t mask = rt_struct_alloc_cap - 1;
-    size_t index = rt_struct_alloc_hash(ptr) & mask;
-    size_t first_tomb = SIZE_MAX;
-    for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
-        uintptr_t entry = rt_struct_allocs[index].ptr;
-        if (entry == 0) {
-            size_t target = first_tomb == SIZE_MAX ? index : first_tomb;
-            rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
-            if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
-            rt_struct_alloc_len++;
-            return 1;
-        }
-        if (entry == RT_STRUCT_ALLOC_TOMBSTONE) {
-            if (first_tomb == SIZE_MAX) first_tomb = index;
-        } else if (entry == ptr) {
-            rt_struct_allocs[index].bytes = bytes;
-            return 1;
-        }
-        index = (index + 1) & mask;
-    }
-    if (first_tomb != SIZE_MAX) {
-        rt_struct_allocs[first_tomb] = (RtStructAllocation){ptr, bytes};
-        rt_struct_alloc_tombs--;
-        rt_struct_alloc_len++;
-        return 1;
-    }
-    return 0;
-}
-
-static int rt_struct_alloc_resize(size_t next_cap) {
-    const size_t max_entries = SIZE_MAX / sizeof(RtStructAllocation);
-    if (next_cap == 0 || next_cap > max_entries) return 0;
-    if (rt_struct_alloc_max_cap_for_test != 0 &&
-            next_cap > rt_struct_alloc_max_cap_for_test) return 0;
-    RtStructAllocation* fresh = (RtStructAllocation*)rt_observed_calloc_v1(
-        next_cap, sizeof(RtStructAllocation));
-    if (!fresh) return 0;
-    RtStructAllocation* old = rt_struct_allocs;
-    size_t old_cap = rt_struct_alloc_cap;
-    size_t old_len = rt_struct_alloc_len;
-    size_t old_tombs = rt_struct_alloc_tombs;
-    rt_struct_allocs = fresh;
-    rt_struct_alloc_cap = next_cap;
-    rt_struct_alloc_len = 0;
-    rt_struct_alloc_tombs = 0;
-    for (size_t i = 0; i < old_cap; i++) {
-        uintptr_t ptr = old[i].ptr;
-        if (ptr != 0 && ptr != RT_STRUCT_ALLOC_TOMBSTONE) {
-            if (!rt_struct_alloc_insert_raw(ptr, old[i].bytes)) {
-                free(fresh);
-                rt_struct_allocs = old;
-                rt_struct_alloc_cap = old_cap;
-                rt_struct_alloc_len = old_len;
-                rt_struct_alloc_tombs = old_tombs;
-                return 0;
-            }
-        }
-    }
-    free(old);
-    return 1;
-}
-
-static int rt_struct_alloc_register(void* ptr, size_t bytes) {
-    if (!ptr) return 0;
-    rt_struct_alloc_lock_acquire();
-    int ok = 1;
-    if (rt_struct_alloc_cap == 0) {
-        size_t init_cap = rt_struct_alloc_next_cap(0);
-        ok = init_cap != 0 && rt_struct_alloc_resize(init_cap);
-    } else if (rt_struct_alloc_needs_rehash(rt_struct_alloc_cap)) {
-        if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-        } else {
-            size_t grown = rt_struct_alloc_next_cap(rt_struct_alloc_cap);
-            if (grown != 0) {
-                ok = rt_struct_alloc_resize(grown);
-            } else if (rt_struct_alloc_len + rt_struct_alloc_tombs + 1 >= rt_struct_alloc_cap) {
-                if (rt_struct_alloc_tombs > 0 && rt_struct_alloc_len + 1 < rt_struct_alloc_cap) {
-                    ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-                } else if (rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
-                    ok = 0;
-                }
-            }
-        }
-    }
-    if (ok && rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
-        ok = 0;
-    }
-    if (ok) ok = rt_struct_alloc_insert_raw((uintptr_t)ptr, bytes);
-    if (!ok) rt_struct_alloc_record_failure();
-    rt_struct_alloc_lock_release();
-    return ok;
-}
-
-/* caller holds the struct registry write lock */
-static void rt_struct_alloc_unregister_locked(void* ptr) {
-    if (!ptr || rt_struct_alloc_cap == 0) return;
-    size_t mask = rt_struct_alloc_cap - 1;
-    size_t i = rt_struct_alloc_hash((uintptr_t)ptr) & mask;
-    for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
-        uintptr_t entry = rt_struct_allocs[i].ptr;
-        if (entry == 0) break;
-        if (entry == (uintptr_t)ptr) {
-            rt_struct_allocs[i] = (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
-            rt_struct_alloc_len--;
-            rt_struct_alloc_tombs++;
-            break;
-        }
-        i = (i + 1) & mask;
-    }
-}
-
-static void rt_struct_alloc_unregister(void* ptr) {
-    if (!ptr) return;
-    rt_struct_alloc_lock_acquire();
-    rt_struct_alloc_unregister_locked(ptr);
-    rt_struct_alloc_lock_release();
-}
+#include "struct_alloc_registry_impl.h"
 
 static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count) {
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
@@ -8874,28 +8660,6 @@ static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count) {
         }
     }
 #endif
-}
-
-static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
-    int found = 0;
-    if (!ptr) return 0;
-    rt_struct_alloc_read_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_struct_alloc_hash((uintptr_t)ptr) & mask;
-        for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
-            uintptr_t entry = rt_struct_allocs[i].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                *bytes_out = rt_struct_allocs[i].bytes;
-                found = 1;
-                break;
-            }
-            i = (i + 1) & mask;
-        }
-    }
-    rt_struct_alloc_read_lock_release();
-    return found;
 }
 
 /* runtime_memory.c is the canonical allocator/pointer ABI member whenever it
@@ -11680,20 +11444,12 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * rt_interp_cstr accepts both encodings and is a strict superset. */
 #ifdef _WIN32
 static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        rt_observed_malloc_v1, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;
@@ -14576,50 +14332,12 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
 #include "platform/runtime_win_long_path.h"
 #include "platform/runtime_win_excl_file.h"
 #endif
-static int rt_bucket2_fsync_path(const char* path) {
-    if (!path) return 0;
-#if defined(_WIN32)
-    /* Same fix as runtime.c's rt_fsync_path twin: fopen()+fflush() is both
-     * MAX_PATH-capped (ANSI/narrow-CRT) and not actually durable (fflush()
-     * only empties the CRT's userspace buffer). Use CreateFileW (widened,
-     * extended-length-prefixed) + FlushFileBuffers, falling back to
-     * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
-     * required for FlushFileBuffers to succeed. FILE_FLAG_BACKUP_SEMANTICS is
-     * required too: callers durability-sync DIRECTORIES through this same
-     * worker (native_noop_admission.spl syncs "{root}/generations" after a
-     * rename, the POSIX fsync-the-parent-dir idiom), and CreateFile refuses
-     * to open a directory handle at all without it (ERROR_ACCESS_DENIED);
-     * harmless on a regular file. */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    HANDLE file = INVALID_HANDLE_VALUE;
-    if (wide_path) {
-        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        free(wide_path);
-    } else {
-        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    }
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    int ok = FlushFileBuffers(file) != 0;
-    if (!CloseHandle(file)) ok = 0;
-    return ok ? 1 : 0;
-#else
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    int ok = fsync(fileno(file)) == 0;
-    fclose(file);
-    return ok ? 1 : 0;
-#endif
-}
+/* fsync worker rt_fsync_path: one body shared with runtime.c. */
+#include "runtime_file_fsync_impl.h"
 SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_bucket2_fsync_path(path);
+    return rt_fsync_path(path);
 }
 
 /* ---- mirrors runtime_timestamp.c (rt_progress_* thread-local clock ABI) --- */
@@ -15497,31 +15215,11 @@ bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
-/* Reads the rest of `f` into a RuntimeValue text and closes it. Returns nil
- * (RT_NIL == 3, TAG_SPECIAL payload 0) on allocation failure. */
-static int64_t rt_file_slurp_text_close(FILE* f) {
-    const int64_t rt_nil = 3;
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)rt_observed_malloc_v1(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
-}
+/* Byte-count read to EOF, shared with runtime.c; this lane routes the
+ * growable buffer through the allocation observer. */
+#define RT_FILE_SLURP_MALLOC(n) rt_observed_malloc_v1(n)
+#define RT_FILE_SLURP_REALLOC(p, n) rt_observed_realloc_v1((p), (n))
+#include "runtime_file_slurp_impl.h"
 
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
@@ -15805,173 +15503,23 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
  * interpreter provider documents single-thread, fail-closed parity instead
  * of claiming this native atomic drain contract.
  */
-#define RT_FILE_EXISTS_PROBE_ACCEPTING    (UINT64_C(1) << 63)
-#define RT_FILE_EXISTS_PROBE_TRANSITION   (UINT64_C(1) << 62)
-#define RT_FILE_EXISTS_PROBE_LEASE_MASK   (RT_FILE_EXISTS_PROBE_TRANSITION - 1)
-#define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
-#define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
-
-static atomic_uint_fast64_t rt_file_exists_probe_state = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_generation = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_total = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_failed = ATOMIC_VAR_INIT(0);
-
-/* Reserve one total slot. A failed slot is incremented only after this succeeds,
- * so concurrent records preserve failed <= total <= TOTAL_MAX. */
-static int rt_file_exists_probe_try_add_total(void) {
-    uint_fast64_t current = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_relaxed);
-    while (current < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_total, &current, current + 1,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static uint_fast64_t rt_file_exists_probe_lease_admit(void) {
-    /* Disabled source path: one relaxed gate load, without assembly claims. */
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_relaxed);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-        if ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) ==
-            RT_FILE_EXISTS_PROBE_LEASE_MASK) return 0;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, state + UINT64_C(1),
-                memory_order_acquire, memory_order_relaxed)) {
-            uint_fast64_t generation = atomic_load_explicit(
-                &rt_file_exists_probe_generation, memory_order_acquire);
-            if (generation != 0) return generation;
-            atomic_fetch_sub_explicit(
-                &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-            return 0;
-        }
-    }
-}
-
-static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
-    if (lease != 0 && atomic_load_explicit(
-            &rt_file_exists_probe_generation, memory_order_acquire) == lease) {
-        if (rt_file_exists_probe_try_add_total() && !exists) {
-            uint_fast64_t failed = atomic_load_explicit(
-                &rt_file_exists_probe_failed, memory_order_relaxed);
-            while (failed < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-                if (atomic_compare_exchange_weak_explicit(
-                        &rt_file_exists_probe_failed, &failed, failed + 1,
-                        memory_order_relaxed, memory_order_relaxed)) {
-                    break;
-                }
-            }
-        }
-    }
-    if (lease != 0) {
-        atomic_fetch_sub_explicit(
-            &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-    }
-}
+#include "runtime_file_exists_probe_impl.h"
 
 int64_t rt_file_exists_probe_begin(void) {
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return -1;
-    }
-    uint_fast64_t generation = atomic_load_explicit(
-        &rt_file_exists_probe_generation, memory_order_acquire);
-    if (generation >= RT_FILE_EXISTS_PROBE_GENERATION_MAX) {
-        atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-        return -3;
-    }
-    generation += 1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, generation, memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_state, RT_FILE_EXISTS_PROBE_ACCEPTING,
-        memory_order_release);
-    return (int64_t)generation;
+    return rt_file_exists_probe_begin_impl();
 }
 
 int64_t rt_file_exists_probe_end(int64_t token) {
-    if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
-        atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-            (uint_fast64_t)token) return -2;
-
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-            atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-                (uint_fast64_t)token) {
-            return -2;
-        }
-        uint_fast64_t closing =
-            (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) |
-            RT_FILE_EXISTS_PROBE_TRANSITION;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, closing,
-                memory_order_acq_rel, memory_order_acquire)) {
-            break;
-        }
-    }
-
-    do {
-        state = atomic_load_explicit(
-            &rt_file_exists_probe_state, memory_order_acquire);
-    } while ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0);
-
-    uint_fast64_t total = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_acquire);
-    uint_fast64_t failed = atomic_load_explicit(
-        &rt_file_exists_probe_failed, memory_order_acquire);
-    if (total > RT_FILE_EXISTS_PROBE_TOTAL_MAX) total = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    if (failed > RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        failed = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    }
-    atomic_store_explicit(
-        &rt_file_exists_probe_state,
-        0,
-        memory_order_release);
-    return (int64_t)((total << 32) | failed);
+    return rt_file_exists_probe_end_impl(token);
 }
 
 #if defined(SIMPLE_RUNTIME_TESTING)
 int64_t rt_file_exists_probe_test_seed_generation(int64_t generation) {
-    if (generation < 0 || (uint_fast64_t)generation >
-            RT_FILE_EXISTS_PROBE_GENERATION_MAX) return -3;
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, (uint_fast64_t)generation,
-        memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-    return 0;
+    return rt_file_exists_probe_test_seed_generation_impl(generation);
 }
 
 int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
-    if (total < 0 || failed < 0 || (uint_fast64_t)total >
-            RT_FILE_EXISTS_PROBE_TOTAL_MAX || (uint_fast64_t)failed >
-            (uint_fast64_t)total) return -3;
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-        (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_total, (uint_fast64_t)total, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_failed, (uint_fast64_t)failed, memory_order_relaxed);
-    return 0;
+    return rt_file_exists_probe_test_seed_counters_impl(total, failed);
 }
 #endif
 
@@ -16000,47 +15548,15 @@ bool rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     return exists;
 }
 
+/* No-shell stat probes: one body shared with runtime.c. */
+#include "runtime_file_stat_impl.h"
+
 bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path_buf[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
-    const char* path = path_buf;
-#if defined(_WIN32)
-    if (!path) return 0;
-    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
-     * plain UTF-16 conversion failed past MAX_PATH, so a long
-     * package-module index path read as "not a regular file" and admission
-     * failed package-index:generation-unavailable (2026-09-25). */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    if (!wide_path) return 0;
-    DWORD attributes = GetFileAttributesW(wide_path);
-    free(wide_path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
-#else
-    struct stat st;
-    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
+    return rt_file_is_regular_no_follow_impl(path_ptr, path_len);
 }
 
-/* rt_file_is_char_device: mirrors runtime.c's rt_file_is_char_device for the
- * core-c-bootstrap build (native binaries linked without runtime.c). See
- * that definition for rationale (no-shell char-device probe, symlinks
- * followed). */
 int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len;
-    return 0;
-#else
-    /* The compiler emits the two-argument (ptr, len) form for `text` externs
-     * (runtime_sffi.rs / src/compiler/50.mir/text_extern_abi.spl); a Simple
-     * `text` is NOT NUL-terminated, so the buffer must be copied. */
-    char buf[4096];
-    if (!path_ptr || path_len >= sizeof(buf)) return 0;
-    memcpy(buf, path_ptr, (size_t)path_len);
-    buf[(size_t)path_len] = '\0';
-    struct stat st;
-    return stat(buf, &st) == 0 && S_ISCHR(st.st_mode);
-#endif
+    return rt_file_is_char_device_impl(path_ptr, path_len);
 }
 
 bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
@@ -16962,27 +16478,16 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
 /* UTF-8 -> freshly allocated NUL-terminated UTF-16; NULL on failure. */
 static wchar_t* rt_http_win_wide(const char* text, size_t len) {
     if (len > (size_t)INT_MAX) return NULL;
-    int need = len ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)len, NULL, 0) : 0;
-    if (len && need <= 0) return NULL;
-    wchar_t* out = (wchar_t*)rt_observed_malloc_v1(((size_t)need + 1) * sizeof(wchar_t));
-    if (!out) return NULL;
-    if (need) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, (int)len, out, need);
-    out[need] = L'\0';
-    return out;
+    return spl_win_utf8_to_wide(text, (ptrdiff_t)len, MB_ERR_INVALID_CHARS,
+                                rt_observed_malloc_v1, free, NULL);
 }
 
 /* UTF-16 (len wchar_t) -> allocated UTF-8 bytes (not NUL-counted). */
 static uint8_t* rt_http_win_narrow(const wchar_t* text, size_t len, size_t* out_len) {
     *out_len = 0;
     if (len > (size_t)INT_MAX) return NULL;
-    int need = len ? WideCharToMultiByte(CP_UTF8, 0, text, (int)len, NULL, 0, NULL, NULL) : 0;
-    if (len && need <= 0) return NULL;
-    uint8_t* out = (uint8_t*)rt_observed_malloc_v1((size_t)need + 1);
-    if (!out) return NULL;
-    if (need) WideCharToMultiByte(CP_UTF8, 0, text, (int)len, (char*)out, need, NULL, NULL);
-    out[need] = '\0';
-    *out_len = (size_t)need;
-    return out;
+    return (uint8_t*)spl_win_wide_to_utf8(text, (ptrdiff_t)len, 0,
+                                          rt_observed_malloc_v1, free, out_len);
 }
 
 static void rt_http_win_error(DWORD code, char* error, size_t error_cap, const char* fallback) {
@@ -17461,26 +16966,18 @@ int64_t rt_path_join(
 #if defined(_WIN32)
 /* Environment names and values are UTF-8 at this boundary, never ACP bytes. */
 static wchar_t* native_env_widen(const char* value) {
-    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
-    if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)count * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return spl_win_utf8_to_wide(value, -1, MB_ERR_INVALID_CHARS,
+                                rt_observed_malloc_v1, free, NULL);
 }
 
 static int64_t native_host_text_from_wide(const wchar_t* wide, DWORD length) {
     if (length == 0) return rt_string_new((const uint8_t*)"", 0);
     if (length > INT_MAX) return rt_core_nil();
-    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, NULL, 0, NULL, NULL);
-    if (bytes <= 0) return rt_core_nil();
-    uint8_t* utf8 = (uint8_t*)rt_observed_malloc_v1((size_t)bytes);
+    size_t bytes = 0;
+    char* utf8 = spl_win_wide_to_utf8(wide, (ptrdiff_t)length, WC_ERR_INVALID_CHARS,
+                                      rt_observed_malloc_v1, free, &bytes);
     if (!utf8) return rt_core_nil();
-    int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, (char*)utf8, bytes, NULL, NULL);
-    int64_t result = converted == bytes ? rt_string_new(utf8, (uint64_t)bytes) : rt_core_nil();
+    int64_t result = rt_string_new((const uint8_t*)utf8, (uint64_t)bytes);
     free(utf8);
     return result;
 }
@@ -18413,11 +17910,9 @@ int64_t rt_file_list_dir(int64_t path_value) {
     pattern[path_len + 2] = '\0';
     free(path);
 
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, NULL, 0);
-    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t)) : NULL;
-    if (!wide_pattern ||
-        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
-        if (wide_pattern) free(wide_pattern);
+    wchar_t* wide_pattern = spl_win_utf8_to_wide(pattern, -1, MB_ERR_INVALID_CHARS,
+                                                 rt_observed_malloc_v1, free, NULL);
+    if (!wide_pattern) {
         free(pattern);
         return rt_core_nil();
     }
@@ -19705,14 +19200,11 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * escape sequences. */
 static wchar_t* spl_widen_long_path(const char* path) {
     static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    size_t wide_units = 0;
+    wchar_t* wide = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+                                         rt_observed_malloc_v1, free, &wide_units);
     if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
+    int wide_len = (int)wide_units + 1; /* count includes the terminator */
     /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
      * resolution for a short drive-absolute path; UNC/extended paths retain
      * their existing spelling. */
@@ -20723,19 +20215,12 @@ int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
 
 #if defined(_WIN32)
 static HMODULE simple_load_library_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        rt_observed_malloc_v1, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-            wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;

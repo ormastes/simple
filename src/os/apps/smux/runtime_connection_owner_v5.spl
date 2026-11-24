@@ -118,7 +118,7 @@ pub struct SmuxRuntimeConnectionCloseV5:
 pub fn smux_runtime_connection_stop_allowed_v5(owner: SmuxRuntimeConnectionOwnerV5) -> bool:
     if owner.host.publication_pending_v6(): return false
     if owner.host.inspection_pending_v6(): return false
-    if owner.host.execution_pending_v6() or owner.planning != nil or owner.control_sync_error != "": return false
+    if owner.host.execution_pending_v6() or owner.planning.is_some() or owner.control_sync_error != "": return false
     for entry in owner.entries:
         if entry.geometry.is_some() and entry.geometry.unwrap().pending_v5(): return false
         if not entry.settled and (entry.prepared.is_some() or entry.helper.is_some() or entry.task.is_some() or entry.retained.is_some() or entry.recovery_required): return false
@@ -133,7 +133,7 @@ pub fn smux_runtime_connection_close_v5(owner: SmuxRuntimeConnectionOwnerV5) -> 
 pub fn smux_runtime_connection_release_v5(original: SmuxRuntimeConnectionOwnerV5,
         uid: text) -> SmuxRuntimeConnectionTurnV5:
     if original.host.inspection_pending_v6(): return reply_v5(original, "runtime-controller-inspection-pending")
-    if original.host.execution_pending_v6() or original.planning != nil or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
+    if original.host.execution_pending_v6() or original.planning.is_some() or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
     val index = index_v5(original, uid)
     if index < 0: return reply_v5(original, "runtime-connection-binding-unavailable")
     var owner = original
@@ -224,7 +224,7 @@ fn pane_session_v5(entry: ConnectionEntryV5) -> Result<ContainerOwnedTerminalSes
     val index = snapshot.find_pane_idx(entry.request.target.pane_id)
     if index < 0: return Err("runtime-connection-pane-missing")
     val pane = snapshot.get_pane(index)
-    if pane.owned_terminal_session == nil: return Err("runtime-connection-pane-owner-missing")
+    if pane.owned_terminal_session.is_none(): return Err("runtime-connection-pane-owner-missing")
     val session = pane.owned_terminal_session.unwrap()
     val view = container_primary_terminal_view_v2(session)?
     if view.fingerprint != entry.session_identity or view.adoption.is_none():
@@ -564,7 +564,7 @@ pub fn smux_runtime_connection_plan_v5(original: SmuxRuntimeConnectionOwnerV5,
     var owner = original
     val request_digest = sha256_text(digest.unwrap() + "\n" + resources.cpu_millis.to_text() + "\n" + resources.memory_bytes.to_text() +
         "\n" + client_id + "\n" + sha256_text(attachment_token))
-    if owner.planning != nil:
+    if owner.planning.is_some():
         return reply_v5(owner, if owner.planning_digest == request_digest: "runtime-connection-plan-pending" else: "runtime-connection-inspection-busy")
     owner.planning_request = Some(request)
     owner.planning_digest = request_digest
@@ -581,9 +581,9 @@ fn planning_turn_v5(original: SmuxRuntimeConnectionOwnerV5, turn: HostPrimaryCon
     owner.domain = HostServiceDomainV3(turn.local)
     owner.planning = turn.planning
     owner.planning_error = turn.error
-    if turn.planning != nil: return reply_v5(owner, if turn.error == "": "runtime-connection-plan-pending" else: turn.error)
+    if turn.planning.is_some(): return reply_v5(owner, if turn.error == "": "runtime-connection-plan-pending" else: turn.error)
     if turn.error != "" or turn.plan.is_none(): return reply_v5(owner, if turn.error == "": "runtime-connection-plan-missing" else: turn.error)
-    if owner.planning_request == nil: return reply_v5(owner, "runtime-connection-planning-request-missing")
+    if owner.planning_request.is_none(): return reply_v5(owner, "runtime-connection-planning-request-missing")
     val request = owner.planning_request.unwrap()
     val checked = smux_runtime_binding_target_check_v3(request.target, owner.service_incarnation)
     if checked.is_err():
@@ -612,7 +612,7 @@ fn helper_match_v5(entry: ConnectionEntryV5, request: HostHelperRequestV1) -> bo
 pub fn smux_runtime_connection_prepare_v5(original: SmuxRuntimeConnectionOwnerV5,
         uid: text, request: HostHelperRequestV1) -> SmuxRuntimeConnectionTurnV5:
     val index = index_v5(original, uid)
-    if original.host.execution_pending_v6() or original.planning != nil or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
+    if original.host.execution_pending_v6() or original.planning.is_some() or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
     if index < 0 or original.closing: return reply_v5(original, "runtime-connection-binding-unavailable")
     var owner = original
     var entry = owner.entries[index]
@@ -641,7 +641,7 @@ pub fn smux_runtime_connection_bind_v5(original: SmuxRuntimeConnectionOwnerV5,
         uid: text, request: HostHelperRequestV1, signed: DistributedSignedGrantV2,
         approval: DistributedSignedApprovalV2) -> SmuxRuntimeConnectionTurnV5:
     val index = index_v5(original, uid)
-    if original.host.execution_pending_v6() or original.planning != nil or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
+    if original.host.execution_pending_v6() or original.planning.is_some() or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
     if geometry_pending_v5(original): return reply_v5(original, "runtime-geometry-pending")
     for pending_entry in original.entries:
         if pending_entry.task.is_some() and pending_entry.task.unwrap().pending_v3(): return reply_v5(original, "runtime-connection-opening")
@@ -673,14 +673,14 @@ pub fn smux_runtime_connection_progress_v5(original: SmuxRuntimeConnectionOwnerV
     val index = index_v5(original, uid)
     if original.host.execution_pending_v6() or original.host.inspection_pending_v6(): return reply_v5(original, "runtime-host-execution-pending")
     if index < 0:
-        if original.planning_request != nil and original.planning_request.unwrap().target.binding_uid == uid:
-            if original.planning == nil: return reply_v5(original, original.planning_error)
+        if original.planning_request.is_some() and original.planning_request.unwrap().target.binding_uid == uid:
+            if original.planning.is_none(): return reply_v5(original, original.planning_error)
             var planned_owner = original
             planned_owner.planning_cancelled = original.planning_cancelled or cancel
             val turn = host_primary_connection_plan_step_v4(planned_owner.domain.local, planned_owner.planning.unwrap(), planned_owner.planning_cancelled)
             return planning_turn_v5(planned_owner, turn)
         return reply_v5(original, "runtime-connection-binding-unavailable")
-    if original.planning != nil: return reply_v5(original, "runtime-connection-inspection-pending")
+    if original.planning.is_some(): return reply_v5(original, "runtime-connection-inspection-pending")
     var owner = original
     var entry = owner.entries[index]
     if entry.task.is_none() or entry.adopted or entry.retained.is_some(): return reply_v5(owner, "runtime-connection-progress-state")
@@ -958,7 +958,7 @@ pub fn smux_runtime_connection_geometry_resize_v5(original: SmuxRuntimeConnectio
     if index < 0: return geometry_reply_v5(original, index, revision, "", "runtime-connection-binding-unavailable")
     if original.host.inspection_pending_v6(): return geometry_reply_v5(original, index, revision, "", "runtime-controller-inspection-pending")
     var owner = original
-    if owner.host.execution_pending_v6() or owner.planning != nil: return geometry_reply_v5(owner, index, revision, "", "runtime-host-execution-pending")
+    if owner.host.execution_pending_v6() or owner.planning.is_some(): return geometry_reply_v5(owner, index, revision, "", "runtime-host-execution-pending")
     for other in owner.entries:
         if other.target.binding_uid != uid and other.geometry.is_some() and other.geometry.unwrap().pending_v5():
             return geometry_reply_v5(owner, index, revision, "", "runtime-geometry-pending")

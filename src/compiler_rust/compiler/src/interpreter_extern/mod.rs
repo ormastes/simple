@@ -374,6 +374,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_enum_discriminant", enum_sffi::rt_enum_discriminant_fn);
     insert_simple!("rt_enum_payload", enum_sffi::rt_enum_payload_fn);
     insert_simple!("rt_enum_id", enum_sffi::rt_enum_id_fn);
+    insert_simple!("rt_enum_new", enum_sffi::rt_enum_new_fn);
     insert_simple!("dprint", io::print::dprint);
     insert_simple!("eprintln", io::print::eprintln);
     insert_simple!("exit", process::exit);

@@ -4397,3 +4397,117 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   - 8 pages JIT==interp at 1x and 4x, with the interpreter byte-identical to base.
   - Strict-vreg is clean.
 - **Bug record:** `doc/08_tracking/bug/hir_import_reparses_loader_modules_2026-11-24.md`.
+## 2026-11-24 — forms-media 4x JIT 24 s was a whole-frame read per translucent rect blend
+
+- **Two lanes disagreed.** This lane measured 24 s; #11183 reported 3.4-3.9 s / 2.2 GB on the same seed (d9dcc6f7).
+  - Same seed, same tree, same command: peak RSS is **12.7 GB**, not 2.2 GB, and the 2.2 GB does not reproduce. Backend, wrapper order, size and the catalog route all ruled out (the catalog runs the interpreter).
+  - The wall-time gap is the `MemoryMax=8G` cap that `page.sh` sets. Uncapped, the run takes 4.6 s. Capped, the cgroup reclaims and exit stalls (the `wrote` line at ~11 s, exit at 25-76 s).
+  - **Trap:** read peak RSS (`/usr/bin/time -f %M` inside the scope) before trusting a wall time from a capped run.
+- **Cause:** `emu_draw_rect_blend` called `core.read_pixels()` (the whole 10.9M-px frame) to blend one rect.
+  - The `<summary>` disclosure triangle (`_engine2d_draw_ir_path_fill`) blends each anti-aliased edge pixel as a 1x1 rect, so one 44x44 `path` command cost +9071 MB under the JIT.
+  - Found with a per-command `/proc/self/statm` probe in `_engine2d_draw_ir_render_command_plan`; `src/lib` needs no build, so the probe is free.
+  - gdb conditional breakpoints on `__rust_alloc` were far too slow to be usable.
+- **Fix:** read back only the rect, with `core.read_pixels_region_raw(x, y, w, h)` (native on SoftwareBackend/CpuBackend).
+  - forms-media 4x JIT (8 G cap, 3-round median): 24.30 -> 3.87 s, 8096 -> 3338 MB, paint 7550 -> 477 ms.
+  - Interpreter paint: 10.7 -> 8.8 s.
+  - All 32 PPMs (8 pages, 1x/4x, JIT/interpreter) are byte-identical to base.
+- **Spec:** `test/01_unit/lib/gc_async_mut/gpu/engine2d/rect_blend_reads_region_spec.spl`: 200 small blends, JIT 6.07 s -> 0.2 ms, JIT == interpreter.
+- **Bug record:** `doc/08_tracking/bug/engine2d_rect_blend_reads_whole_frame_2026-11-24.md`.
+## 2026-11-24 — forms parity lane (button k=1 width, textarea wrapped lines, hairline corners)
+
+- **Button width at k=1 snaps from its fractional pen.** Chrome holds the label's
+  max-content width as a LayoutUnit (1/64 px, ceil), then pixel-snaps the right
+  edge half-up from the button's LayoutUnit start. `inline_button_k1_snap_px`
+  (layout_foundation) records -1/0 per button into `g_box_device_extra_w` on
+  every k=1 pass. The layout box stays 58 px, because geometry specs pin it.
+  `_html_draw_ir_k1_button_boxes` (paint_layout) narrows only the Draw IR paint.
+  Trap: float vs LayoutUnit differ by 7 milli-px on `OK` (21.257 -> 21.2656),
+  which sits on a .5 boundary, so do this in LU, not f64.
+- **Wrapped textarea lines lost their raster props.** The `_line{n}` commands
+  (`_html_draw_ir_wrap_extra_line_commands`) dropped `font-size-milli` (13 px
+  glyphs instead of 13.333), text-lcd and spacing, and the owner textarea's
+  `pen-origin-milli`. Shared helper: `_html_draw_ir_text_raster_props`.
+  Soft-wrapped lines only. Hard `\n` in a value (drawn as .notdef) and a long
+  value dropping the control to the next line are handed over:
+  `textarea_value_line_breaks_chrome159_spec` (@tag:in-development).
+- **A 1 device px rounded border is a Skia AA hairline, not a ring.** Blink
+  strokes the rrect inset 1/2 px. Skia draws a stroke of 1 device px or less
+  with SkScan_Antihair:
+  - conic weight 0.7071, chopped into quads with tolerance 1/4;
+  - `2^level` lines per quad;
+  - a 16.16 two-row alpha spread;
+  - 26.6 end-cap scaling.
+
+  Chrome's radius-5 corner reads 41 162 231 / 45 222 62 26. The model gives
+  39 161 231 / 42 220 61 24. The exact-area model does NOT fit: (1,1) is 0.55
+  exact vs 0.18 in Chrome. Blink also shrinks the background half a border
+  width inside an opaque border (bleed avoidance), so a filled button's colour
+  never reaches the corner's outer pixels. Code:
+  `engine2d_draw_ir_render_hairline_rrect_border` and
+  `engine2d_draw_ir_render_shrunk_rrect_background` (draw_ir_box_effects).
+  This is the generic div/input/button path, not form-specific. At k=4 the
+  border is 4 device px, so it stays on the ring path.
+- **Seed trap:** `x.ceil().to_i64()` chained returns the f64 BITS
+  (4607182418800017408 for 1.0); `val c = x.ceil(); c.to_i64()` is right.
+  Hand-rolled `_e2d_hair_ceil` avoids it.
+- **Forms-media "0.08 px high" regions (x 528-740) are underscores.** The ink
+  centroid shift is confined to `owner=simple_web_html_…` runs. A 16 px
+  Liberation Sans `_` is 1.25 px in Chrome (row solid + the row below at
+  191), and Simple drops the partial bottom row. That is the glyph raster
+  frame (sfnt_glyf), handed over as `underscore_bottom_row_chrome159_spec`.
+  Method: per-x-band ink-weighted y centroid (`cent.spl`), then a scaled
+  Chrome-over-Simple crop PNG to read the text.
+- **Perf trap (hairline/background):** the first cut cost +45% on forms-media 1x
+  (7.3 -> 11 s). `_e2d_box_ring_side` builds a full `[u32]` image per rect, so
+  using it for a section's ~850 px wide background bands cost the most. Fills
+  of one colour go through `draw_rect_filled`. The corner tables are computed
+  once per radius (top-left) and mirrored to the other three corners; that
+  matches Chrome, whose corners mirror exactly. Only pixels the arc crosses are
+  supersampled. Bisect a regression by `if false and …`-guarding one branch
+  and re-timing; don't guess.
+
+## 2026-11-24 lineheight lane: fractional number line-heights in block layout
+
+- **Cause:** `style_line_h` floors a number line-height to whole px, so an h3
+  line (18.72 x 1.5 = 28.08) and a 15px/1.3 line (19.5) lost their sub-px
+  part. The block cursor already carries a milli residual (`cy_frac`); the
+  line box just never fed it at k=1. At k>1 only the whole device px
+  (`device_excess`) was fed.
+- **Fix (smallest subset):**
+  - **Strut-only lines in a block container.**
+    `align_inline_line_baselines` now adds `line_h_sub_px_milli`: the
+    sub-px part of the (device) line height, at k=1 and at k>1.
+  - **Blocks whose only content is one n-line text run** (`pre`, wrapped
+    text) add n x `line_h_frac_milli`. Chrome stacks n exact lines: 3 x 19.5
+    is 58.5, not 57.
+  - **Snapped device bottoms.** The block and flex paths now record
+    `box_device_extra_h` as round(k x bottom) - round(k x top). The old value
+    was round(k x (bottom - top)). Every non-control, non-text box paints it
+    as `device-extra-height`. Before this, at k=4 a box was k x its CSS
+    height from a snapped top, which left white rows between 19.5 px boxes.
+    The flex container auto height records the same value: the article
+    header is 390 device rows, as in Chrome.
+- **Spec:** `block_fractional_line_height_chrome159_spec.spl`. It covers the
+  stack edges at k=1 and k=4, pre/wrapped blocks at k=1 and k=4, and the
+  header at k=1.
+- **Out of scope, not done:**
+  - text y of lines 2..n inside a wrapped run
+  - lines taller than their strut (mixed sizes, atomics)
+  - px / `normal` line-heights
+  - inline-block heights
+  - flex-wrap line heights
+- **19 px underline (open):** sizes 12-36 at k=1 and 48-144 at k=4 were
+  compared with Chrome. Ours is off at 19 (one row low), 21-23 (one row
+  high), and device 76 / 104 (one row low). No linear round/floor of
+  em, thickness and ascent fits all 50 sizes (best 46/50). Liberation
+  Sans has post underlinePosition -67 and thickness 150 (upem 2048); FreeType
+  shifts the position to -142. The next step is reading Blink's
+  `ComputeUnderlineOffsetAuto` and its LayoutUnit baseline, not more fitting.
+- **Gates and catalog:** gates equal base (88 specs + matrix). Catalog
+  9ad6ef27f18 -> lane:
+  - 4x: html 0.28 -> 0.22 %, evidence 0.10 -> 0.03 %, tab-bar 0.16 -> 0.13 %;
+    the other pages are equal.
+  - 1x: every page is equal at two decimals.
+- **Perf:** 6 alternated rounds at k=4. Medians: overview doc 830/830 and
+  paint 5473/5474 ms; html doc 5350/5368 and paint 8522/8528 ms. RSS is flat
+  (2.91/2.89 and 2.96/2.95 GB).

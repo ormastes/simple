@@ -156,179 +156,24 @@ typedef long long ssize_t;
 static bool spl_macro_trace_enabled = false;
 static bool spl_debug_mode_enabled = false;
 
-/*
- * Failed existence probes are measured at the rt_file_exists facade, never at
- * spl_file_exists or at a libc/syscall boundary.  A gate holds accepting and
- * in-flight leases; a separate monotonic generation is captured by each lease.
- * end() first closes the gate, then drains those leases before it snapshots.
- */
-#define RT_FILE_EXISTS_PROBE_ACCEPTING    (UINT64_C(1) << 63)
-#define RT_FILE_EXISTS_PROBE_TRANSITION   (UINT64_C(1) << 62)
-#define RT_FILE_EXISTS_PROBE_LEASE_MASK   (RT_FILE_EXISTS_PROBE_TRANSITION - 1)
-#define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
-#define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
-
-static atomic_uint_fast64_t rt_file_exists_probe_state = 0;
-static atomic_uint_fast64_t rt_file_exists_probe_generation = 0;
-static atomic_uint_fast64_t rt_file_exists_probe_total = 0;
-static atomic_uint_fast64_t rt_file_exists_probe_failed = 0;
-
-/* Reserve one total slot. A failed slot is incremented only after this succeeds,
- * so concurrent records preserve failed <= total <= TOTAL_MAX. */
-static int rt_file_exists_probe_try_add_total(void) {
-    uint_fast64_t current = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_relaxed);
-    while (current < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_total, &current, current + 1,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static uint_fast64_t rt_file_exists_probe_lease_admit(void) {
-    /* Disabled source path: one relaxed gate load, without assembly claims. */
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_relaxed);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-        if ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) ==
-            RT_FILE_EXISTS_PROBE_LEASE_MASK) return 0;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, state + UINT64_C(1),
-                memory_order_acquire, memory_order_relaxed)) {
-            uint_fast64_t generation = atomic_load_explicit(
-                &rt_file_exists_probe_generation, memory_order_acquire);
-            if (generation != 0) return generation;
-            atomic_fetch_sub_explicit(
-                &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-            return 0;
-        }
-    }
-}
-
-static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
-    if (lease != 0 && atomic_load_explicit(
-            &rt_file_exists_probe_generation, memory_order_acquire) == lease) {
-        if (rt_file_exists_probe_try_add_total() && !exists) {
-            uint_fast64_t failed = atomic_load_explicit(
-                &rt_file_exists_probe_failed, memory_order_relaxed);
-            while (failed < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-                if (atomic_compare_exchange_weak_explicit(
-                        &rt_file_exists_probe_failed, &failed, failed + 1,
-                        memory_order_relaxed, memory_order_relaxed)) {
-                    break;
-                }
-            }
-        }
-    }
-    if (lease != 0) {
-        atomic_fetch_sub_explicit(
-            &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-    }
-}
+/* Failed-existence-probe counter: one body shared with runtime_native.c. */
+#include "runtime_file_exists_probe_impl.h"
 
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_begin(void) {
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return -1;
-    }
-    uint_fast64_t generation = atomic_load_explicit(
-        &rt_file_exists_probe_generation, memory_order_acquire);
-    if (generation >= RT_FILE_EXISTS_PROBE_GENERATION_MAX) {
-        atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-        return -3;
-    }
-    generation += 1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, generation, memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_state, RT_FILE_EXISTS_PROBE_ACCEPTING,
-        memory_order_release);
-    return (int64_t)generation;
+    return rt_file_exists_probe_begin_impl();
 }
 
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_exists_probe_end(int64_t token) {
-    if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
-        atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-            (uint_fast64_t)token) return -2;
-
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-            atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-                (uint_fast64_t)token) {
-            return -2;
-        }
-        uint_fast64_t closing =
-            (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) |
-            RT_FILE_EXISTS_PROBE_TRANSITION;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, closing,
-                memory_order_acq_rel, memory_order_acquire)) {
-            break;
-        }
-    }
-
-    do {
-        state = atomic_load_explicit(
-            &rt_file_exists_probe_state, memory_order_acquire);
-    } while ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0);
-
-    uint_fast64_t total = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_acquire);
-    uint_fast64_t failed = atomic_load_explicit(
-        &rt_file_exists_probe_failed, memory_order_acquire);
-    if (total > RT_FILE_EXISTS_PROBE_TOTAL_MAX) total = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    if (failed > RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        failed = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    }
-    atomic_store_explicit(
-        &rt_file_exists_probe_state,
-        0,
-        memory_order_release);
-    return (int64_t)((total << 32) | failed);
+    return rt_file_exists_probe_end_impl(token);
 }
 
 #if defined(SIMPLE_RUNTIME_TESTING)
 int64_t rt_file_exists_probe_test_seed_generation(int64_t generation) {
-    if (generation < 0 || (uint_fast64_t)generation >
-            RT_FILE_EXISTS_PROBE_GENERATION_MAX) return -3;
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, (uint_fast64_t)generation,
-        memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-    return 0;
+    return rt_file_exists_probe_test_seed_generation_impl(generation);
 }
 
 int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
-    if (total < 0 || failed < 0 || (uint_fast64_t)total >
-            RT_FILE_EXISTS_PROBE_TOTAL_MAX || (uint_fast64_t)failed >
-            (uint_fast64_t)total) return -3;
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-        (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_total, (uint_fast64_t)total, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_failed, (uint_fast64_t)failed, memory_order_relaxed);
-    return 0;
+    return rt_file_exists_probe_test_seed_counters_impl(total, failed);
 }
 #endif
 
@@ -1238,51 +1083,15 @@ static int rt_text_arg_to_path(const uint8_t* ptr, uint64_t len, char* buf, size
     return 1;
 }
 
+/* No-shell stat probes: one body shared with runtime_native.c. */
+#include "runtime_file_stat_impl.h"
+
 SPL_RUNTIME_NATIVE_TWIN bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path_buf[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
-    const char* path = path_buf;
-#if defined(_WIN32)
-    if (!path) return 0;
-    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
-     * plain UTF-16 conversion failed past MAX_PATH, so a long
-     * package-module index path read as "not a regular file" and admission
-     * failed package-index:generation-unavailable (2026-09-25). */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    if (!wide_path) return 0;
-    DWORD attributes = GetFileAttributesW(wide_path);
-    free(wide_path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
-#else
-    struct stat st;
-    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
+    return rt_file_is_regular_no_follow_impl(path_ptr, path_len);
 }
 
-/* rt_file_is_char_device: no-shell stat(2) probe for whether `path` is a
- * character device (e.g. a DRM render node). Added so callers like
- * os.compositor.vulkan_compositor_backend's detect_virtio_gpu_device() can
- * drop their `/bin/sh -c "test -c '...'"` shell-out entirely -- see
- * doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md.
- * Symlinks are followed (stat, not lstat): the caller wants to know whether
- * the path ultimately resolves to a character device, not whether the leaf
- * entry itself is one. */
 SPL_RUNTIME_NATIVE_TWIN int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len;
-    return 0;
-#else
-    /* The compiler emits the two-argument (ptr, len) form for `text` externs
-     * (runtime_sffi.rs / src/compiler/50.mir/text_extern_abi.spl); a Simple
-     * `text` is NOT NUL-terminated, so the buffer must be copied. */
-    char buf[4096];
-    if (!path_ptr || path_len >= sizeof(buf)) return 0;
-    memcpy(buf, path_ptr, (size_t)path_len);
-    buf[(size_t)path_len] = '\0';
-    struct stat st;
-    return stat(buf, &st) == 0 && S_ISCHR(st.st_mode);
-#endif
+    return rt_file_is_char_device_impl(path_ptr, path_len);
 }
 
 int spl_file_delete(const char* path) {
@@ -1856,6 +1665,8 @@ void spl_prefetch_wait(void) {}
  * as a value with no string tag -- observed as `len=0`, indistinguishable from
  * an empty file or a missing one. The runtime's own handle validator prints
  * "probable compiler/FFI ABI mismatch" on it. */
+#include "runtime_file_slurp_impl.h"
+
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     /* RT_NIL: TAG_SPECIAL(0b011) with payload 0 == 3; matches
@@ -1867,37 +1678,12 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text(const uint8_t* path_ptr, uint6
      * it cannot tell "missing" from "empty". The Rust definition returns NIL
      * for an unreadable path, and Simple callers spell `... ?? ""`, which only
      * fires on nil -- so probe openability first or the `??` arm is dead. */
-    /* Read to EOF into a growable buffer and keep the BYTE COUNT. strlen() on
-     * spl_file_read's result stopped at the first NUL, so a binary file came
-     * back as a NON-nil short text -- an ELF object's e_ident has a NUL at
-     * offset 7, so a 1080-byte aarch64 `.o` read back as 7 bytes, and
-     * FileFingerprint.from_file's sha256 fallback (which fires only on nil)
-     * became dead code. Identical defect and fix in the runtime_native.c lane;
-     * the two are paired by the push-rt-dual-implementation ratchet and must not
-     * diverge. Do NOT size from fseek/ftell -- procfs and sysfs report 0, which
-     * is the incident spl_file_read's own comment records. */
+    /* Byte-count read to EOF: see runtime_file_slurp_impl.h (shared with the
+     * runtime_native.c lane; the two are paired by the push-rt-dual-
+     * implementation ratchet and must not diverge). */
     FILE* f = fopen(path, "rb");
     if (!f) return rt_nil;
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)malloc(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)realloc(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
+    return rt_file_slurp_text_close(f);
 }
 
 /* Single-handle secret/config admission: no path predicate is separated from
@@ -2098,57 +1884,13 @@ SPL_RUNTIME_NATIVE_TWIN int64_t     rt_file_size(const uint8_t* path_ptr, uint64
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
     return spl_file_size(path);
 }
-/* C-internal fsync worker: takes a genuine NUL-terminated C string. The rt_*
- * entry points below convert the compiler's (ptr, len) `text` pair into one of
- * these before calling it, so the conversion lives in exactly one place and
- * C-internal callers do not have to fake a pair. rt_widen_long_path_rc
- * (defined above) supplies the wide, extended-length-prefixed path. */
-static int rt_fsync_path(const char* path) {
-    if (!path) return 0;
-#if defined(_WIN32)
-    /* fopen()+fflush() was doubly wrong on Windows: fopen() is an ANSI/
-     * narrow-CRT entry point capped at MAX_PATH (260 chars) -- the same bug
-     * class as rt_file_create_excl below, and a bootstrap generation path
-     * routinely exceeds it -- and fflush() only empties the CRT's userspace
-     * buffer, it gives no OS-level durability guarantee at all. Use the wide,
-     * extended-length-prefixed CreateFileW + FlushFileBuffers pair instead,
-     * exactly like rt_file_create_excl's fix; fall back to the ANSI
-     * CreateFileA + FlushFileBuffers pair only when the path cannot be
-     * widened. GENERIC_WRITE is required for FlushFileBuffers to succeed
-     * (Windows refuses it on a read-only handle with ERROR_ACCESS_DENIED).
-     * FILE_FLAG_BACKUP_SEMANTICS is required too: callers durability-sync
-     * DIRECTORIES through this same worker (native_noop_admission.spl syncs
-     * "{root}/generations" after a rename, the POSIX fsync-the-parent-dir
-     * idiom), and CreateFile refuses to open a directory handle at all
-     * without that flag (ERROR_ACCESS_DENIED). It is harmless on a regular
-     * file -- the flag only widens what CreateFile will open, it does not
-     * change file semantics. */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    HANDLE file = INVALID_HANDLE_VALUE;
-    if (wide_path) {
-        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        free(wide_path);
-    } else {
-        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    }
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    int ok = FlushFileBuffers(file) != 0;
-    if (!CloseHandle(file)) ok = 0;
-    return ok ? 1 : 0;
-#else
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    int ok = fsync(fileno(file)) == 0;
-    fclose(file);
-    return ok ? 1 : 0;
-#endif
-}
+/* C-internal fsync worker rt_fsync_path (shared with runtime_native.c): takes a
+ * genuine NUL-terminated C string. The rt_* entry points below convert the
+ * compiler's (ptr, len) `text` pair into one of these before calling it, so the
+ * conversion lives in exactly one place and C-internal callers do not have to
+ * fake a pair. rt_widen_long_path_rc (defined above) supplies the wide,
+ * extended-length-prefixed path. */
+#include "runtime_file_fsync_impl.h"
 static int rt_fsync_text_path(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;

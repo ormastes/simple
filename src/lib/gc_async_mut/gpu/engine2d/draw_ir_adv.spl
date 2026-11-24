@@ -67,6 +67,9 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     engine2d_draw_ir_render_legacy_shadow,
     engine2d_draw_ir_render_typed_background,
     engine2d_draw_ir_render_typed_border_ring,
+    engine2d_draw_ir_hairline_rrect_border,
+    engine2d_draw_ir_render_hairline_rrect_border,
+    engine2d_draw_ir_render_shrunk_rrect_background,
     engine2d_draw_ir_render_typed_inset_shadows,
     engine2d_draw_ir_render_typed_outer_shadows,
     engine2d_draw_ir_typed_box_shadows,
@@ -829,6 +832,23 @@ fn _engine2d_draw_ir_gradient_layer_into(buf: [u32], rx: i32, ry: i32, rw: i32, 
 # otherwise paints per-side slivers with `draw_rect_filled`. Engine2D is
 # value-copied across this free-function boundary, so the caller MUST reassign
 # from the returned engine.
+# The box's border is an opaque hairline rrect (see
+# `engine2d_draw_ir_hairline_rrect_border`).
+fn _engine2d_draw_ir_opaque_hairline_border(style: [DrawIrStyleProp], w: i32, h: i32, corners: Engine2dDrawIrCornerRadii) -> bool:
+    val widths: [i32] = [
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32,
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-width"), 0, 0) as i32,
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-width"), 0, 0) as i32,
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-width"), 0, 0) as i32
+    ]
+    val colors: [u32] = [
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-color"), 0, 0) as u32,
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-color"), 0, 0) as u32,
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-color"), 0, 0) as u32,
+        _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-color"), 0, 0) as u32
+    ]
+    ((colors[0] >> 24) & 0xFFu32) == 0xFFu32 and engine2d_draw_ir_hairline_rrect_border(widths, colors, w, h, corners)
+
 fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32, corners: Engine2dDrawIrCornerRadii, nonuniform_corners: bool) -> Engine2D:
     var eng = engine
     val top_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32
@@ -843,6 +863,9 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
     # the (r - width) ellipse (Chrome 159, border_per_corner_radius and
     # border_double_radius specs). `draw_rounded_rect_outline` drew a
     # thicker arc than Chrome for a uniform ring.
+    # A 1 device px rounded border in one colour is a Skia hairline stroke.
+    if (nonuniform_corners or radius > 0) and engine2d_draw_ir_hairline_rrect_border([top_w, right_w, bottom_w, left_w], [top_c, right_c, bottom_c, left_c], w, h, corners):
+        return engine2d_draw_ir_render_hairline_rrect_border(eng, x, y, w, h, top_c, corners)
     if (nonuniform_corners or radius > 0) and (top_w > 0 or right_w > 0 or bottom_w > 0 or left_w > 0):
         return engine2d_draw_ir_render_typed_border_ring(eng, x, y, w, h,
             [top_w, right_w, bottom_w, left_w], [top_c, right_c, bottom_c, left_c], corners)
@@ -1451,7 +1474,11 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         # gradient pixels outside the glass surface.
         eng.draw_rounded_rect(x, y, w, h, radius, command.color)
     elif _engine2d_draw_ir_has_visible_alpha(command.color):
-        if radius > 0:
+        if radius > 0 and _engine2d_draw_ir_opaque_hairline_border(style, w, h, effective_corners):
+            # Blink's bleed avoidance shrinks the background half a border
+            # width inside an opaque border (kBackgroundBleedShrinkBackground).
+            eng = engine2d_draw_ir_render_shrunk_rrect_background(eng, x, y, w, h, command.color, effective_corners)
+        elif radius > 0:
             eng.draw_rounded_rect(x, y, w, h, radius, command.color)
         else:
             eng.draw_rect_filled(x, y, w, h, command.color)

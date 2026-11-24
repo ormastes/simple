@@ -54,6 +54,19 @@ Specs: `test/01_unit/compiler/80.driver/driver_native_build_spec.spl`.
   (`native_build_unadmitted_identity_decision_v1`). A half-made claim, a stale
   `SIMPLE_BINARY`, a host without `/proc/self/exe`, or a named but unreadable/rejected
   receipt is still per-process.
+- **Object cache not keyed on the cwd source trees in linked workers (2026-11-24):**
+  the scope directory and the module witness config use
+  `native_build_object_producer_identity(debug_info)`. The tree fingerprints stay by
+  default. They are replaced by `embedded+worktree:<sha256(cwd)>` only in a process
+  that took the CLI dispatch into the linked worker entry
+  (`native_build_declare_linked_worker_entry_v1`), with the hashed executable equal
+  to the running image and no debug info; then editing a file under `src/lib` or
+  `src/compiler` keeps the `s<hex>` scope and the per-module witness decides each
+  hit. In-process builds (managed bootstrap stages), debug-info builds, the MIR
+  resume ledger run key, the pre-lowering cache and no-op admission stay tree-bound:
+  an edit rejects the ledger and every module is lowered again; only codegen is
+  reused. Analysis and open gaps:
+  `doc/08_tracking/bug/native_cache_whole_source_tree_in_producer_identity_2026-11-24.md`.
 - **Repeated imports and `-o` (2026-11-24, unexecuted):** a module that names one
   import on several `use` lines got witness `…-witness-v1-invalid`
   (`ambiguous-resolution-fact`; 112 modules in one evidence cache) and never hit.
@@ -385,3 +398,11 @@ A stdlib `extern fn` call is FOREIGN origin; MIR reads a tuple result with raw `
 ## SMF half of `--mode dynload`: never fold byte arrays per module (2026-11-18)
 
 `out = bytes_concat_copy_v1(out, part)` inside a per-module loop re-copies the whole prefix into a fresh array each time, and the native runtime never reclaims the superseded array, so N modules retain about N/2 copies of the image. That killed a fully linked Phase 3 at 52 G in `phase=smf_package`; a 397-module closure reproduces it under a 12 G cap in 11 s. Assemble with one `out` and `out.push(byte)` (`smf_object_spool_assemble_v1`, `smf_parts_assemble_manifests_v1`, `serialize_smf_dependencies`). The staged binary is renamed only after the driver returns Success, so an OOM in the SMF half loses the linked output. Sum the running totals of the `.smfpart` sizes to predict the old cost. Record: `doc/08_tracking/bug/smf_package_quadratic_assembly_oom_2026-11-18.md`.
+
+## Cache scope retention never runs in a build's children (2026-11-24)
+
+`_compile_to_native_with_backend_session` removes `cache/s<32hex>` scope directories idle for 6 hours (`disk_bound_keep_newest_dirs`, idle = newest mtime of the scope dir and its direct children). It ran in every shard worker batch and in the link child, so a build longer than 6 hours deleted its own early objects and failed at link with `MIR shard module object missing`. Retention is now gated by `native_cache_scope_eviction_role_allowed_v1` (false under any shard/worker/unit/link role env), and every ledger row naming an object refreshes that scope's `.last-use` marker (`disk_bound_mark_dir_used`). When adding a new child role env, add it to that predicate. Bug: `doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md`.
+
+## Cache scope retention at coordinator start (2026-11-24 follow-up)
+
+With the gate above, no process of a sharded or coordinator-lane build pruned scopes. The top-level coordinator now runs the pass once, after build-start memory admission and before any prepass, resume adoption or worker spawn: `native_build_cache_scope_retention_at_start_v1` (`src/app/cli/native_build_main.spl`; called from `run_native_build_worker_inner` and bootstrap's `_bootstrap_admit_native_build_memory_v1`). Gate: `native_cache_scope_start_retention_due_v1` (role env, grouped/export child, role flag in argv, inherited `SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE`). It first refreshes `.last-use` for scopes named by the `mir-run-latest` ledger. It runs only for an explicit `--cache-dir`; default and `planner-`/`collection-` cache directories are not pruned by sharded builds. No live-build marker exists, so concurrent long builds should use separate `--cache-dir` directories. Limits: `doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md`.

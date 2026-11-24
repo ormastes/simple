@@ -1,0 +1,114 @@
+# The per-module object cache (scope directory + module witness config) is
+# keyed on WHO PRODUCES the objects. For an AOT-native compiler the cwd
+# src/compiler + src/lib trees are inputs, bound per module by the witness, so
+# they leave that identity; interpreted and JIT execution keep them.
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.driver.native_capsule_mir_identity.{native_capsule_static_emission_identity_v1}
+use compiler.driver.driver_build.incremental.{
+    native_build_source_tree_is_producer_v1, native_build_producer_source_term_v1,
+    native_build_producer_identity, native_build_cache_scope_key}
+
+val EXE_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val EXE_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val COMPILER_TREE = "sha256:1111n2900"
+val LIB_BEFORE = "sha256:2222n8700"
+val LIB_AFTER = "sha256:3333n8700"
+val TREE_A = "/work/tree-a"
+val TREE_B = "/work/tree-b"
+
+fn object_identity_in(linked_worker: bool, worktree: text, executable: text,
+        running_image: text, lib_fp: text, runtime: text, abi_version: i64) -> text:
+    val tree_is_producer = native_build_source_tree_is_producer_v1(
+        linked_worker, true, executable, running_image, worktree, false)
+    native_build_producer_identity(executable,
+        native_build_producer_source_term_v1(COMPILER_TREE, lib_fp, tree_is_producer, worktree),
+        runtime, "hosted", abi_version, false, "", "unadmitted-v1")
+
+fn object_identity(linked_worker: bool, executable: text, running_image: text,
+        lib_fp: text, runtime: text, abi_version: i64) -> text:
+    object_identity_in(linked_worker, TREE_A, executable, running_image, lib_fp, runtime, abi_version)
+
+describe "native_build_source_tree_is_producer_v1":
+    it "keeps the trees by default: no linked worker dispatch was taken":
+        expect(native_build_source_tree_is_producer_v1(false, true, EXE_A, EXE_A, TREE_A, false)).to_equal(true)
+
+    it "keeps the trees when a seed probe fired even in a marked process":
+        expect(native_build_source_tree_is_producer_v1(true, false, EXE_A, EXE_A, TREE_A, false)).to_equal(true)
+
+    it "drops the trees only in a linked worker whose hashed executable is the running image":
+        expect(native_build_source_tree_is_producer_v1(true, true, EXE_A, EXE_A, TREE_A, false)).to_equal(false)
+
+    it "keeps the trees when the hashed executable is not the running image":
+        expect(native_build_source_tree_is_producer_v1(true, true, EXE_A, EXE_B, TREE_A, false)).to_equal(true)
+        expect(native_build_source_tree_is_producer_v1(true, true, EXE_A, "", TREE_A, false)).to_equal(true)
+
+    it "keeps the trees when the executable digest is not canonical":
+        expect(native_build_source_tree_is_producer_v1(true, true, "", "", TREE_A, false)).to_equal(true)
+        expect(native_build_source_tree_is_producer_v1(true, true, "not-a-digest", "not-a-digest", TREE_A, false)).to_equal(true)
+
+    it "keeps the trees when the worktree is unknown":
+        expect(native_build_source_tree_is_producer_v1(true, true, EXE_A, EXE_A, "", false)).to_equal(true)
+
+    it "keeps the trees when debug info is emitted":
+        expect(native_build_source_tree_is_producer_v1(true, true, EXE_A, EXE_A, TREE_A, true)).to_equal(true)
+
+describe "native_build_producer_source_term_v1":
+    it "names the worktree when the trees are inputs":
+        expect(native_build_producer_source_term_v1(COMPILER_TREE, LIB_BEFORE, false, TREE_A)).to_equal(
+            "embedded+worktree:" + sha256_text(TREE_A))
+        expect(native_build_producer_source_term_v1("", "", false, TREE_A) ==
+            native_build_producer_source_term_v1("", "", false, TREE_B)).to_equal(false)
+
+    it "keeps the previous encoding when the trees are the producer":
+        expect(native_build_producer_source_term_v1(COMPILER_TREE, LIB_BEFORE, true, TREE_A)).to_equal(
+            "sha256:1111n2900+stdlib:sha256:2222n8700")
+        expect(native_build_producer_source_term_v1("", LIB_BEFORE, true, "")).to_equal(
+            "embedded+stdlib:sha256:2222n8700")
+        expect(native_build_producer_source_term_v1(COMPILER_TREE, "", true, "")).to_equal(COMPILER_TREE)
+        expect(native_build_producer_source_term_v1("", "", true, "")).to_equal("embedded")
+
+describe "native_capsule_static_emission_identity_v1":
+    it "adds nothing at the defaults":
+        expect(native_capsule_static_emission_identity_v1(0, Visibility.Private, false)).to_equal("")
+
+    it "binds alignment, linkage and external declaration":
+        val aligned = native_capsule_static_emission_identity_v1(16, Visibility.Private, false)
+        val public_ = native_capsule_static_emission_identity_v1(0, Visibility.Public, false)
+        val external = native_capsule_static_emission_identity_v1(0, Visibility.Private, true)
+        expect(aligned).to_equal("|emit=align:16:linkage:hidden:external:false")
+        expect(public_).to_equal("|emit=align:0:linkage:public:external:false")
+        expect(external).to_equal("|emit=align:0:linkage:hidden:external:true")
+
+describe "object producer identity":
+    it "is unchanged by a src/lib edit in a linked worker":
+        val before = object_identity(true, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 1)
+        val after = object_identity(true, EXE_A, EXE_A, LIB_AFTER, "runtime-a", 1)
+        expect(after).to_equal(before)
+
+    it "still changes with a src/lib edit in any other process":
+        val before = object_identity(false, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 1)
+        val after = object_identity(false, EXE_A, EXE_A, LIB_AFTER, "runtime-a", 1)
+        expect(after == before).to_equal(false)
+
+    it "changes with the executable hash, runtime provider and ABI epoch":
+        val baseline = object_identity(true, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 1)
+        expect(object_identity(true, EXE_B, EXE_B, LIB_BEFORE, "runtime-a", 1) == baseline).to_equal(false)
+        expect(object_identity(true, EXE_A, EXE_A, LIB_BEFORE, "runtime-b", 1) == baseline).to_equal(false)
+        expect(object_identity(true, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 2) == baseline).to_equal(false)
+
+    it "keeps one scope across a src/lib edit and splits it by backend, target and opt level":
+        val before = object_identity(true, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 1)
+        val after = object_identity(true, EXE_A, EXE_A, LIB_AFTER, "runtime-a", 1)
+        val scope = native_build_cache_scope_key(Some("llvm"), Some("x86-64-v2"), [], 2, before)
+        expect(native_build_cache_scope_key(Some("llvm"), Some("x86-64-v2"), [], 2, after)).to_equal(scope)
+        expect(native_build_cache_scope_key(Some("cranelift"), Some("x86-64-v2"), [], 2, before) == scope).to_equal(false)
+        expect(native_build_cache_scope_key(Some("llvm"), Some("x86-64-v3"), [], 2, before) == scope).to_equal(false)
+        expect(native_build_cache_scope_key(Some("llvm"), Some("x86-64-v2"), [], 0, before) == scope).to_equal(false)
+
+    it "gives two worktrees separate scopes":
+        val tree_a = object_identity_in(true, TREE_A, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 1)
+        val tree_b = object_identity_in(true, TREE_B, EXE_A, EXE_A, LIB_BEFORE, "runtime-a", 1)
+        expect(native_build_cache_scope_key(Some("llvm"), nil, [], 2, tree_a) ==
+            native_build_cache_scope_key(Some("llvm"), nil, [], 2, tree_b)).to_equal(false)

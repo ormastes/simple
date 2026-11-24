@@ -4,6 +4,7 @@ use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, DimExpr,
     DimExprKind, DeviceType, Effect, EffectKind}
 use compiler.mir.mir_types.{MirTypeDef, MirTypeDefKind, LayoutPhase}
 use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttrKind,
     VhdlResetPolarity, VhdlResetSynchrony}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
@@ -287,9 +288,61 @@ pub fn native_capsule_function_metadata_identity_v1(function: MirFunction) -> te
     val identity = "generic={storage_identity_text_v1(generic_rows.join(";"))}|template={function.is_generic_template}|specialization={specialization}|bindings={storage_identity_text_v1(binding_rows.join(";"))}|layout={layout_identity}|kernel={function.is_kernel}:{storage_identity_text_v1(function.gpu_target)}:{storage_identity_text_v1(function.gpu_backend_order)}|export={function.is_export_c}:{storage_identity_text_v1(function.export_name)}|manifest={function.has_driver_manifest_attr}:{manifest_kind}:{manifest_driver_class}:{manifest_vendor}:{storage_identity_text_v1(device_rows.join(";"))}:{storage_identity_text_v1(manifest_version)}:{storage_identity_text_v1(manifest_abi)}|vhdl={function.has_vhdl_metadata}:{function.vhdl_metadata.is_hardware}:{storage_identity_text_v1(vhdl_generic_rows.join(";"))}:{function.vhdl_metadata.has_clocked}:{storage_identity_text_v1(function.vhdl_metadata.clocked.clock_signal)}:{storage_identity_text_v1(function.vhdl_metadata.clocked.reset_signal)}:{function.vhdl_metadata.clocked.has_reset}:{reset_polarity}:{reset_synchrony}:{storage_identity_text_v1(function.vhdl_metadata.clocked.domain)}:{function.vhdl_metadata.clocked.is_valid}:{storage_identity_text_v1(validation_rows.join(";"))}:{storage_identity_text_v1(return_rows.join(";"))}:{function.vhdl_metadata.flatten_struct_output}|fast-math={function.has_fast_math}|fpga={function.unroll_factor}:{function.pipeline_ii}:{function.memory_banks}"
     # XRay sled intent changes emitted code; appended only when set so every
     # static-off identity is unchanged.
+    val emission = native_capsule_function_emission_identity_v1(function)
     if function.xray_mode != 0:
-        return identity + "|xray={function.xray_mode}"
-    identity
+        return identity + "|xray={function.xray_mode}" + emission
+    identity + emission
+
+# reason: canonical identity text of emitter attributes
+@allow(primitive_api)
+pub fn native_capsule_function_emission_identity_v1(function: MirFunction) -> text:
+    """Emitter-read function attributes that no other identity row carries:
+    naked, forced inline, section, alignment, unmangled linkage, comdat, the
+    SIMD requirement, strict no-GC and the short-call contracts
+    (_MirToLlvm/core_codegen.spl). A body instantiated from another module
+    brings these with it, and that module's interface slice drops bodies, so
+    they must be in the consumer's MIR identity. "" when every one is at its
+    default, so identities of ordinary functions are unchanged.
+    """
+    var contract_keys = function.short_call_contracts.keys()
+    var i = 0
+    while i < contract_keys.len():
+        var j = i + 1
+        while j < contract_keys.len():
+            if contract_keys[j] < contract_keys[i]:
+                val temporary = contract_keys[i]
+                contract_keys[i] = contract_keys[j]
+                contract_keys[j] = temporary
+            j = j + 1
+        i = i + 1
+    var contract_rows: [text] = []
+    for key in contract_keys:
+        var value_rows: [text] = []
+        for entry in function.short_call_contracts[key]:
+            value_rows.push(storage_identity_text_v1(entry))
+        contract_rows.push("{storage_identity_text_v1(key)}={storage_identity_text_v1(value_rows.join(","))}")
+    if not function.is_naked and not function.is_inline and function.section == "" and
+            function.align == 0 and not function.is_global and not function.is_comdat and
+            function.simd_req_level == "" and function.simd_req_backend == "" and
+            not function.simd_disabled and not function.nogc_strict and
+            contract_rows.len() == 0:
+        return ""
+    "|emit=naked:{function.is_naked}:inline:{function.is_inline}:section:{storage_identity_text_v1(function.section)}:align:{function.align}:global:{function.is_global}:comdat:{function.is_comdat}:simd:{storage_identity_text_v1(function.simd_req_level)}:{storage_identity_text_v1(function.simd_req_backend)}:{function.simd_disabled}:nogc-strict:{function.nogc_strict}:short-calls:{storage_identity_text_v1(contract_rows.join(";"))}"
+
+# reason: canonical identity text of emitter attributes
+@allow(primitive_api)
+pub fn native_capsule_static_emission_identity_v1(alignment: i64,
+        visibility: Visibility, is_external: bool) -> text:
+    """Emitter-read static attributes (alignment, hidden/default linkage,
+    external declaration). "" at the defaults, so ordinary statics keep their
+    identity. Visibility is folded exactly as llvm_static_linkage reads it.
+    """
+    val linkage = match visibility:
+        case Visibility.Public: "public"
+        case _: "hidden"
+    if alignment == 0 and linkage == "hidden" and not is_external:
+        return ""
+    "|emit=align:{alignment}:linkage:{linkage}:external:{is_external}"
 
 pub fn compute_native_capsule_mir_identity_v1(module: MirModule) -> text:
     # The immutable MIR predates this call. Serialization, metadata rows and
@@ -385,11 +438,14 @@ fn native_capsule_mir_identity_unscoped_v1(module: MirModule) -> text:
         var init_identity = "none"
         if val init = static_value.init:
             init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
-        hasher.feed_row("static|{static_keys[static_i].id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
+        hasher.feed_row("static|{static_keys[static_i].id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}" + native_capsule_static_emission_identity_v1(static_value.alignment, static_value.visibility, static_value.is_external))
         static_i = static_i + 1
     val type_keys = native_capsule_sorted_symbol_ids_v1(module.types.keys())
     var type_i = 0
     while type_i < type_keys.len():
         hasher.feed_row("type|{native_capsule_type_def_identity_v1(module.types[type_keys[type_i]])}")
         type_i = type_i + 1
+    # Read by the emitter (xray ring exports); a row only when set.
+    if module.xray_ring_wrap:
+        hasher.feed_row("xray-ring-wrap|true")
     hasher.finish_digest()

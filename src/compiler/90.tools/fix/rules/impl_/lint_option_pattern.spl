@@ -1,0 +1,82 @@
+# SPL-PAT-001 (`non_option_pattern_match`, config/policy/diagnostic_policy.sdn):
+# a `case Some(...)` / `case None` arm under a `match` whose subject is provably
+# not an Option. Shared by the CLI lint engine and the LSP lint pass so both
+# surfaces report the same lines (RB-DIAG-01).
+#
+# Text-only, so it under-reports by design: a subject is "provably non-Option"
+# only when it is an int/string/bool literal or `E.Variant` of an enum `E`
+# declared in the same file (E is not Option/Result).
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len() and line.slice(n, n + 1) == " ":
+        n = n + 1
+    n
+
+fn _is_int_literal(s: text) -> bool:
+    var body = s
+    if body.starts_with("-"):
+        body = body.slice(1)
+    if body.len() == 0:
+        return false
+    var i = 0
+    while i < body.len():
+        val c = body.slice(i, i + 1)
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
+
+fn _declared_enums(lines: [text]) -> [text]:
+    var out: [text] = []
+    for line in lines:
+        val t = line.trim()
+        var rest = ""
+        if t.starts_with("pub enum "):
+            rest = t.slice(9)
+        elif t.starts_with("enum "):
+            rest = t.slice(5)
+        if rest != "":
+            var name = rest
+            for stop in [":", "<", " "]:
+                name = name.split(stop)[0]
+            out.push(name)
+    out
+
+fn _subject_is_non_option(subject: text, enums: [text]) -> bool:
+    if _is_int_literal(subject) or subject == "true" or subject == "false":
+        return true
+    if subject.starts_with("\"") and subject.ends_with("\"") and subject.len() >= 2:
+        return true
+    val dot = subject.find(".")
+    if dot <= 0:
+        return false
+    val owner = subject.slice(0, dot)
+    owner != "Option" and owner != "Result" and enums.contains(owner)
+
+fn _is_option_arm(trimmed: text) -> bool:
+    (trimmed.starts_with("case Some(") or trimmed.starts_with("case Some:")
+     or trimmed.starts_with("case None:") or trimmed.starts_with("case None "))
+
+# 1-based line numbers of offending `case` arms.
+pub fn non_option_pattern_lines(lines: [text]) -> [i64]:
+    val enums = _declared_enums(lines)
+    var out: [i64] = []
+    var i = 0
+    while i < lines.len():
+        val t = lines[i].trim()
+        if t.starts_with("match ") and t.ends_with(":"):
+            val subject = t.slice(6, t.len() - 1).trim()
+            if _subject_is_non_option(subject, enums):
+                val base = _indent_of(lines[i])
+                var j = i + 1
+                while j < lines.len():
+                    val lt = lines[j].trim()
+                    if lt != "" and not lt.starts_with("#"):
+                        if _indent_of(lines[j]) <= base:
+                            break
+                        if _is_option_arm(lt):
+                            out.push(j + 1)
+                    j = j + 1
+        i = i + 1
+    out

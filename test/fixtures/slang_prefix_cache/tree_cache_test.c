@@ -43,6 +43,8 @@ int64_t mock_llama_decode_calls(void);
 int64_t mock_llama_decoded_tokens(void);
 int64_t mock_llama_seq_cp_tokens(void);
 int64_t mock_llama_bad_positions(void);
+int64_t mock_llama_stale_leaks(void);
+int64_t mock_llama_restore_calls(void);
 int64_t mock_llama_short_first_decodes(void);
 void mock_llama_set_n_ubatch(uint32_t);
 void mock_llama_fail_decode_once(void);
@@ -251,6 +253,41 @@ int main(void) {
     finish(h);
     begin(h, "ABCDEFGHIJklmnopXY", 16);
     finish(h);
+    assert(slang_ggml_request_close(h) == 0);
+
+    /* Mode 3 stale cells (C2 of slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md):
+     * a stream carries the K/V cells of whatever ran on it before. A reused
+     * stream must reach the decode with nothing past its own frontier, whether
+     * the request is a warm hit on a longer owner or a cold request on a stream
+     * freed by an earlier long one. The warm prefix goes through host memory
+     * (state_seq get/set), not a whole-stream copy. */
+    assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
+    assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+    h = slang_ggml_request_create(64);
+    begin(h, "0123456789", 0);
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
+    finish(h);                                             /* owner stream holds 16 cells */
+    int64_t leaks = mock_llama_stale_leaks();
+    int64_t restores = mock_llama_restore_calls();
+    begin(h, "01234567xy", 8);                             /* shares 8 of the owner's 16 */
+    finish(h);
+    assert(mock_llama_restore_calls() == restores + 1);
+    assert(mock_llama_stale_leaks() == leaks);             /* the owner's tail did not follow */
+    assert(slang_ggml_request_close(h) == 0);
+    assert(slang_ggml_prefix_cache_configure(1, 1024) == 1);
+    h = slang_ggml_request_create(64);
+    begin(h, "QRSTUVWXYZ", 0);
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
+    finish(h);
+    begin(h, "zzzz", 0);                                   /* evicts the long terminal, frees its stream */
+    finish(h);
+    leaks = mock_llama_stale_leaks();
+    begin(h, "yyyyyyyy", 0);                               /* cold, takes the freed stream */
+    finish(h);
+    assert(mock_llama_stale_leaks() == leaks);
+    assert(mock_llama_bad_positions() == 0);
     assert(slang_ggml_request_close(h) == 0);
 
     /* Mode 3 decode failure fails fast (no eviction cannot help a per-sequence

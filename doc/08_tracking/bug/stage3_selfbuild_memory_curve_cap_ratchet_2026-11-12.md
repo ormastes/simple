@@ -169,3 +169,32 @@ the actual (MIR-sharded ~13 GiB) footprint. The only honest paths: a host
 memory window >= 74.7 GiB, or a tip change making the admission shard-aware
 (the claim-size comment at resume-stage3-from-admitted.sh:972 says admission
 still prices the full closure).
+
+## Re-check 2026-11-24 (release/1.0.0): still open; MIR price under-prices large closures
+
+- **Ratchet / admission.** Unchanged. `resume-stage3-from-admitted.sh` still says that
+  `SIMPLE_MIR_SHARD_COUNT` (default 9) "sets the claim size only: admission still prices
+  live workers". Stage 3 admission is therefore still not shard-aware, and the
+  host-global ratchet floor applies as recorded above. This re-check made no policy edit.
+- **Driver retained-after-use.** A reference drop is not a lever here. The native runtime
+  has no GC, so reassigning `ctx.hir_modules` / `ctx.modules` frees nothing
+  (`full_cli_native_build_peak_rss_2026-11-13.md` § "Why drop the reference... does not
+  help"). The only real levers are opt-in: interface-only HIR on cache load
+  (`SIMPLE_MIR_SHARD_INTERFACE_HIR=1`) and per-module transient scopes. Ownership work on
+  whole-program HIR/MIR residency belongs to the whole-program MIR memory owner.
+- **New finding (filed here, not fixed).** `file_worker_pool_mir_price_kb_v1`
+  (`src/app/cli/file_worker_pool_refusal.spl`) is clamp(16015 kB x modules, 9 GB,
+  26424115 kB). Every closure above 1650 modules is priced at the 26.4 GB ceiling. The
+  Windows 64 GiB host measured 2026-11-24 a Phase 4 full-CLI build (4436 modules) whose
+  MIR shard worker grew past 65 GB commit. That is about 14.7 MB/module, close to the
+  per-module constant, so the ceiling under-prices that closure by about 2.5x. The shard
+  configuration of that run was not recovered, so the slope past 1650 modules is NOT
+  established.
+- **Why the price was not raised.** `native_build_mir_shard_parallel` floors at 1, and
+  `native_build_mir_shard_count` falls back to `parallel`. A higher price admits fewer
+  workers, which means fewer shards and a LARGER per-worker claim (the run-32 shape:
+  claimed=1664 of 1664). A higher price alone can therefore raise the per-worker peak.
+  A safe fix must first decouple the shard count from the admitted worker count, for
+  example ceil(modules / ~400) shards queued through 1 slot. Until then, lanes over about
+  3000 modules should set `SIMPLE_MIR_SHARD_COUNT` explicitly (>= modules/400) and
+  `SIMPLE_MIR_SHARD_WORKER_KB` to the measured peak.

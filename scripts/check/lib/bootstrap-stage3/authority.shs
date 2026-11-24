@@ -198,6 +198,20 @@ bootstrap_stage3_hash_stdin() {
     fi
 }
 
+# Identity calculation only. Callers first verify planner and admitted Stage 3
+# provenance; the continuation re-verifies both and checks this exact binding.
+bootstrap_stage3_stage4_binding_sha256() {
+    [ "$#" -eq 4 ] || return 1
+    bootstrap_stage4_binding_planner=$(bootstrap_stage3_hash_file "$1") || return 1
+    bootstrap_stage4_binding_candidate=$(bootstrap_stage3_hash_file "$2") || return 1
+    bootstrap_stage4_binding_source=$(bootstrap_stage3_manifest_value source_fingerprint "$3") || return 1
+    printf '%s\n' \
+        "planner_sha256=$bootstrap_stage4_binding_planner" \
+        "candidate_sha256=$bootstrap_stage4_binding_candidate" \
+        "source_fingerprint=$bootstrap_stage4_binding_source" \
+        "backend=$4" | bootstrap_stage3_hash_stdin
+}
+
 bootstrap_stage3_hash_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum | awk '{print $1}'
@@ -6224,6 +6238,14 @@ bootstrap_stage3_git_state() {
                 >"$bootstrap_stage3_git_diff" \
                 2>"$bootstrap_stage3_jj_stderr" || exit 1
             [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            # The immutable diff stays readable even if another jj command
+            # snapshots a newer working copy during the read.
+            bootstrap_stage3_jj_current=$(
+                jj --no-pager --color=never log -r @ --no-graph \
+                    -T 'commit_id ++ "\n"' 2>"$bootstrap_stage3_jj_stderr"
+            ) || exit 1
+            [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            [ "$bootstrap_stage3_jj_current" = "$bootstrap_stage3_git_head" ] || exit 1
             printf 'jj-working-copy-diff-sha256=%s\n' \
                 "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
                 >"$bootstrap_stage3_git_records" || exit 1

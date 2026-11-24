@@ -39,6 +39,7 @@
 #include <windows.h>
 #include <winioctl.h>
 #include "platform/runtime_win_long_path.h"
+#include "platform/spl_win_utf16_private.h"
 #include "platform/windows_system_processor_count.h"
 #include <sys/stat.h>
 #ifndef SYMLINK_FLAG_RELATIVE
@@ -953,15 +954,7 @@ static int core_snapshot_windows_target_kind(const char* path, int32_t kind) {
 }
 
 static wchar_t* core_snapshot_windows_raw_target(const char* target) {
-    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, NULL, 0);
-    if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, target, -1, wide, count)) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return spl_win_utf8_to_wide(target, -1, MB_ERR_INVALID_CHARS, malloc, free, NULL);
 }
 
 static int core_snapshot_windows_match(const char* link, const char* target,

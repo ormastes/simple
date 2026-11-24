@@ -20,7 +20,7 @@
 # with no duration in its container is only sampled over that first stretch.
 # `-fps_mode` needs ffmpeg 5.1 or newer (ffmpeg 9 removed the old `-vsync`).
 
-use std.common.text_bytes.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.io_runtime.{time_now_unix_micros}
 use std.gc_async_mut.slang.host.slang_host.{host_env, host_file_write_bytes, host_file_delete, host_temp_dir, host_random_hex, host_run_bounded_bytes}
 
@@ -215,7 +215,11 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
     # (HLS, concat) must not make ffmpeg open other local files or URLs.
     # `-i` with no output always exits non-zero, so only a server fault counts.
     val probe = _run_ffmpeg(exe, ["-hide_banner", "-nostdin", "-protocol_whitelist", "file", "-i", path])
-    val banner = bytes_to_text(probe.1)
+    val banner = match bytes_to_text_checked(probe.1):
+        case Ok(decoded): decoded
+        case Err(_):
+            host_file_delete(path)
+            return Err("the duration probe diagnostics are not valid UTF-8")
     if video_run_is_server_fault(probe.2, banner):
         host_file_delete(path)
         return Err(VIDEO_SERVER_FAULT + "the duration probe did not finish (exit " + probe.2.to_text() + ")")
@@ -223,7 +227,10 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
     val limit = if seconds > 0.0: n else: VIDEO_UNKNOWN_SCAN
     val run = _run_ffmpeg(exe, ["-v", "error", "-nostdin", "-protocol_whitelist", "file", "-i", path, "-an", "-vf", video_frame_filter(n, seconds, video_fps_from_banner(banner)), "-fps_mode", "passthrough", "-frames:v", limit.to_text(), "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"])
     host_file_delete(path)
-    if video_run_is_server_fault(run.2, bytes_to_text(run.1)):
+    val run_stderr = match bytes_to_text_checked(run.1):
+        case Ok(decoded): decoded
+        case Err(_): return Err("the frame sampler diagnostics are not valid UTF-8")
+    if video_run_is_server_fault(run.2, run_stderr):
         return Err(VIDEO_SERVER_FAULT + "the frame sampler did not finish (exit " + run.2.to_text() + ")")
     # A non-zero exit with some frames is a truncated or partly broken clip;
     # answering from part of it would describe a video the client did not send.

@@ -499,6 +499,11 @@ jobs:
           # rt_* debt stays a red verdict (non-required job: it cannot block a
           # PR, it reports).
           run_gate scripts/check/check-rt-dual-implementation-ratchet.shs --rev "$head"
+          # Option slots read with `== nil` (None == nil is false in compiled
+          # code). FROZEN here for the same reason: fast-gates runs the delta
+          # vs the merge base, so a reader that slipped in through a branch cut
+          # before the gate would otherwise never be reported again.
+          run_gate scripts/check/check-nil-option-reader-mix.shs --rev "$head"
           run_gate scripts/check/check-runtime-api-regression-push.shs --scan-only "$RANGE"
           # The stale-snapshot rewind class itself. `push-no-stale-snapshot-rewind`
           # was DEMOTED from push-blocking on 2026-09-24 (goal item 2: it cost
@@ -963,6 +968,30 @@ jobs:
         run: |
           sh scripts/check/check-runtime-file-view.shs
 
+      - name: Native task-pool characterization (both C lanes)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 3
+        run: |
+          sh scripts/check/check-rt-pool-characterization.shs
+
+      - name: Win32/POSIX lock shim selfcheck (plain + ASan/UBSan + TSan)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 8
+        run: |
+          sh scripts/check/check-spl-lock-shim-selfcheck.shs
+
+      - name: Struct-allocation registry selfcheck (shared impl header, plain + ASan/UBSan)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          sh scripts/check/check-struct-alloc-registry-selfcheck.shs
+
+      - name: runtime.c / runtime_native.c file-io impl headers selfcheck (both providers)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          sh scripts/check/check-runtime-file-io-impl-selfcheck.shs
+
       # rt_free ABI: pure-Simple declarations and calls must pass exactly ONE
       # pointer. rt_free is defined in five places (native runtime, hosted
       # runtime, SimpleOS libc, the Cranelift RuntimeFuncSpec table, and the
@@ -1227,6 +1256,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-rv64-rt-contains-has-dict-arm.shs
+
+      # Linux epoll/io_uring driver + spawn-argv characterization selfchecks
+      # (ASan+UBSan, TSan, -Werror). Pins the dedup refactor in PR #11259.
+      # Without liburing headers on the runner the uring runs SKIP visibly.
+      - name: Linux async driver + spawn argv characterization
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-linux-dedup-characterization.shs "$RUNNER_TEMP/linux-dedup-char"
 
       # SOSIX host file mapping: both C owners of rt_mmap (runtime.c and the
       # core-C runtime_native.c) must satisfy the read + prefetch + bounds

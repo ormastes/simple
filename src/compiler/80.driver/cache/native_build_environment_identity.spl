@@ -246,9 +246,120 @@ fn native_build_environment_fingerprint_rows_v1(
     NativeBuildEnvironmentFingerprintV1(
         true, sha256_text(native_build_environment_frame_v1(rows)), "ok")
 
-# Final delivery intent does not change an executable/entry module's native
-# codegen. Project only this known field, after validating the complete capture.
-# Every other compiler/tool/provider/config/source field remains conservative.
+# Fields in `NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1` (formal-pinned) that
+# route cache directories or shard schedules rather than altering module bytes.
+val NATIVE_BUILD_MODULE_EXCLUDED_FIELDS_V1: [text] = [
+    "SIMPLE_FRONTEND_CACHE_DIR",
+    "SIMPLE_HIR_CACHE_DIR",
+    "SIMPLE_NATIVE_BUILD_CACHE_DIR",
+    "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT",
+    "SIMPLE_RT_OBJ_CACHE_DIR",
+    "SIMPLE_HIR_SHARD",
+    "SIMPLE_HIR_SHARD_QUEUE",
+    "SIMPLE_HIR_SHARDING",
+    "SIMPLE_PARSE_SHARD",
+    "SIMPLE_PARSE_SHARD_QUEUE",
+]
+
+# Semantic compiler/target/lowering switches read outside
+# `NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1`. Using an explicit module
+# allowlist instead of folding every `SIMPLE_*` name prevents unrelated or
+# cosmetic wrapper variables from invalidating module object/prelower caches.
+val NATIVE_BUILD_MODULE_EXTRA_SEMANTIC_FIELDS_V1: [text] = [
+    "SIMPLE_ABI_VERSION",
+    "SIMPLE_ABI_VERSION_DEFERRED",
+    "SIMPLE_ALLOW_UNRESOLVED_RT",
+    "SIMPLE_BACKEND_COMPOSITION",
+    "SIMPLE_BAREMETAL_LD",
+    "SIMPLE_BAREMETAL_LINKER_SCRIPT",
+    "SIMPLE_BOOTSTRAP_DIRECT_IR",
+    "SIMPLE_BOOTSTRAP_REAL_HIR",
+    "SIMPLE_BOOTSTRAP_REAL_LOWER",
+    "SIMPLE_BOOTSTRAP_SKIP_MIR_OPT",
+    "SIMPLE_BOOTSTRAP_STAGE3",
+    "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM",
+    "SIMPLE_BORROW_REF_CALL_ARGS",
+    "SIMPLE_CHAR_CONDITION",
+    "SIMPLE_CHAR_INT_CONTEXT",
+    "SIMPLE_CHAR_LITERAL_LEXER",
+    "SIMPLE_CODEGEN_MODULE_SCOPE",
+    "SIMPLE_CORE_C_STANDALONE",
+    "SIMPLE_CPU_FEATURES",
+    "SIMPLE_DARWIN_CLANG",
+    "SIMPLE_DARWIN_LD",
+    "SIMPLE_DEBUG_INFO_LEVEL",
+    "SIMPLE_EXTREME_PUBLIC_API",
+    "SIMPLE_FEATURES",
+    "SIMPLE_FILE_WORKER_UNIT",
+    "SIMPLE_FILE_WORKERS",
+    "SIMPLE_HIR_CACHE_CLOSURE_KEY",
+    "SIMPLE_HIR_CFG_SELECT",
+    "SIMPLE_HIR_ENFORCE_MEMBER_VISIBILITY",
+    "SIMPLE_KERNEL_K1_POLICY",
+    "SIMPLE_LLVM_BIN",
+    "SIMPLE_MEM_ARENA_DELAY_SLOTS",
+    "SIMPLE_MEM_HARDEN",
+    "SIMPLE_MIR_BOUNDS_DEBUG",
+    "SIMPLE_MIR_EAGER_PROVIDER_LAYOUT",
+    "SIMPLE_MIR_EAGER_PROVIDER_LAYOUTS",
+    "SIMPLE_MIR_EAGER_PROVIDER_METHODS",
+    "SIMPLE_MIR_EAGER_TRAIT_IMPLS",
+    "SIMPLE_MIR_RETRACT_PROVIDER_TYPES",
+    "SIMPLE_MIR_SELECTIVE",
+    "SIMPLE_MIR_SELECTIVE_OBJECT_CONTEXT",
+    "SIMPLE_MIR_STRING_BUILDER_OPT",
+    "SIMPLE_MIR_VERIFY_LEVELS",
+    "SIMPLE_NOGC_STRICT",
+    "SIMPLE_OPTIMIZER_ALLOW_LEGACY",
+    "SIMPLE_OPTIMIZER_KERNEL",
+    "SIMPLE_OPTIMIZER_LEGACY_KERNEL",
+    "SIMPLE_RELOCATABLE_LD",
+    "SIMPLE_REQUIRED_INIT_CHECK",
+    "SIMPLE_RT_HAL_PLAN",
+    "SIMPLE_RUNTIME_NO_ENTRY",
+    "SIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING",
+    "SIMPLE_RUNTIME_NO_WEAK_HEAP",
+    "SIMPLE_RUNTIME_OWNER",
+    "SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS",
+    "SIMPLE_STAGE3_COMPILER",
+    "SIMPLE_STAGE3_STREAMING_SURFACES",
+    "SIMPLE_STAGE4_STREAMING_SURFACES",
+    "SIMPLE_STRICT_FIELD_FORWARDING",
+    "SIMPLE_STRICT_IMPORTS",
+    "SIMPLE_STRICT_MEM",
+    "SIMPLE_STRICT_PRIVATE_IMPORTS",
+    "SIMPLE_TARGET_ARCH",
+    "SIMPLE_TARGET_CPU",
+    "SIMPLE_TARGET_HIR_MODE",
+    "SIMPLE_TARGET_HIR_STORAGE",
+    "SIMPLE_TARGET_HIR_VERIFY",
+    "SIMPLE_TARGET_OS",
+    "SIMPLE_TARGET_TRIPLE",
+    "SIMPLE_VALUE_MATCH_EXHAUSTIVENESS",
+    "SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE",
+    "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256",
+]
+
+fn native_build_module_environment_field_allowed_v1(
+    name: text, value: text, selective_objects: bool
+) -> bool:
+    """True when `name=value` can affect per-module lowering/codegen identity."""
+    # Each selective physical job gets a fresh lowering owner; the admitted
+    # sibling thread count cannot change its emitted object identity.
+    if selective_objects and name == "SIMPLE_NATIVE_BUILD_THREADS":
+        return false
+    # Empty or `entry` emit-object intent does not alter an individual object's
+    # codegen; non-default modes (`1`, `archive`, `shared`) stay separate.
+    if name == "SIMPLE_NATIVE_BUILD_EMIT_OBJECT" and (value == "" or value == "entry"):
+        return false
+    if NATIVE_BUILD_MODULE_EXCLUDED_FIELDS_V1.contains(name):
+        return false
+    NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1.contains(name) or
+        NATIVE_BUILD_MODULE_EXTRA_SEMANTIC_FIELDS_V1.contains(name)
+
+# Project a validated complete environment snapshot onto the module-semantic
+# allowlist so unrelated/cosmetic `SIMPLE_*` variables, cache locations, and
+# per-run orchestration metadata do not invalidate cached objects/scopes.
 fn native_build_module_environment_snapshot_fingerprint_v1(
     snapshot: [(text, text)]
 ) -> NativeBuildEnvironmentFingerprintV1:
@@ -260,195 +371,8 @@ fn native_build_module_environment_snapshot_fingerprint_v1(
             selective_objects = true
     var projected: [(text, text)] = []
     for pair in snapshot:
-        # Each selective physical job gets a fresh lowering owner. Its actual
-        # declaration/context witness remains below; the number of admitted
-        # sibling processes cannot change its object identity.
-        if selective_objects and pair.0 == "SIMPLE_NATIVE_BUILD_THREADS":
-            continue
-        if pair.0 == "SIMPLE_NATIVE_BUILD_EMIT_OBJECT" and
-                (pair.1 == "" or pair.1 == "entry"):
-            continue
-        # MIR sharding / staging only choose WHICH process emits a module
-        # (driver_build/native_mir_shard.spl); the per-pid ledger and per-
-        # worker spec would otherwise give every worker and every build a
-        # private object scope. A cached object is still admitted only by
-        # its capsule's MIR identity, so this cannot reuse a different MIR.
-        if pair.0 == "SIMPLE_MIR_SHARDING" or pair.0 == "SIMPLE_MIR_SHARD" or
-                pair.0 == "SIMPLE_MIR_SHARD_QUEUE" or pair.0 == "SIMPLE_MIR_SHARD_OWNER" or
-                pair.0 == "SIMPLE_MIR_SHARD_LINK" or pair.0 == "SIMPLE_MIR_SHARD_WORKER_KB" or
-                pair.0 == "SIMPLE_PARSE_SHARD_WORKER_KB" or
-                pair.0 == "SIMPLE_HIR_SHARD_WORKER_KB" or
-                pair.0 == "SIMPLE_MIR_SHARD_COUNT" or pair.0 == "SIMPLE_MIR_SHARD_ONLY_PATHS" or
-                pair.0 == "SIMPLE_NATIVE_FILE_WORKERS" or
-                pair.0 == "SIMPLE_MIR_FORK_WORKERS" or pair.0 == "SIMPLE_MIR_FORK_BATCH" or
-                pair.0 == "SIMPLE_MIR_FORK_CHILD_KB" or pair.0 == "SIMPLE_WORKER_MEMORY_RESERVE_KB" or
-                pair.0 == "SIMPLE_MIR_FORK_SOLO_ROWS" or
-                pair.0 == "SIMPLE_SHARD_MEM_CLAMP" or
-                pair.0 == "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" or
-                pair.0 == "SIMPLE_MIR_SHARD_EXPORT_DIR" or
-                pair.0 == "SIMPLE_MIR_SHARD_EXPORT_WRITE" or
-                pair.0 == "SIMPLE_MIR_SHARD_EXPORT_SUMMARIES" or
-                pair.0 == "SIMPLE_MIR_SELECTIVE_PARENT_KIB" or
-                pair.0 == "SIMPLE_MIR_SELECTIVE_WORKER_KIB" or
-                pair.0 == "SIMPLE_MIR_SELECTIVE_EXPORTER_KIB" or
-                pair.0 == "SIMPLE_MIR_SELECTIVE_PHASE_KIB" or
-                pair.0 == "SIMPLE_MIR_SELECTIVE_DISK_BYTES" or
-                pair.0 == "SIMPLE_MIR_SELECTIVE_DISK_RESERVE_BYTES" or
-                pair.0 == "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH" or
-                pair.0 == "SIMPLE_NATIVE_PRELOWER_CACHE" or
-                pair.0 == "SIMPLE_STAGE3_LIB_DYNLIB" or
-                pair.0 == "SIMPLE_NATIVE_LIBRARY_UNITS" or
-                pair.0 == "SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT" or
-                pair.0 == "SIMPLE_DYNLIB_EMBED_CACHE_RPATH" or
-                pair.0 == "SIMPLE_NATIVE_BUILD_MODE" or
-                pair.0 == "SIMPLE_NATIVE_CODEGEN_WORKER_KIB" or
-                pair.0 == "SIMPLE_STAGE3_HOST_TAG" or
-                pair.0 == "SIMPLE_STAGE3_NATIVE_HOST_MATCH" or
-                pair.0 == "SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE" or
-                pair.0 == "SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES" or
-                pair.0 == "SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS" or
-                pair.0 == "SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS":
-            continue
-        # go-to-end (driver_build/go_to_end.spl) only decides whether the
-        # build stops at the first failing phase or emits every producible
-        # object and skips the link; an object's bytes do not depend on it.
-        # Folding it gave a go-to-end run a scope a plain run never hit, so
-        # the "objects reused by a later run" promise in that file's header
-        # was false until this exclusion.
-        if pair.0 == "SIMPLE_NATIVE_GO_TO_END":
-            continue
-        # SIMPLE_ICE_SKIP_MODULES (native_build_relaunch_past_ice_crashes, and
-        # the go-to-end export of the HIR pool's CRASH rows) only names modules
-        # that are NOT compiled; a skipped module emits no object and its
-        # importers are dropped, so no emitted object's bytes depend on it.
-        # Folding it gave every re-launch and every MIR worker after a HIR
-        # crash a private scope and 0 object hits.
-        if pair.0 == "SIMPLE_ICE_SKIP_MODULES":
-            continue
-        # SIMPLE_NATIVE_NOOP_FINAL_OUTPUT is the `-o` path, exported by the CLI
-        # (compile_targets.spl) for one reader: driver_native_noop_request_v1,
-        # which names the final artifact of the whole-build no-op request and
-        # folds the COMPLETE capture above, so a different `-o` is still a
-        # different no-op request. No object's bytes depend on where the link
-        # result is delivered, but folding it here gave a build that changed
-        # only `-o` a new object scope and 0 object hits. Lane isolation is
-        # SIMPLE_CACHE_SCOPE (still folded), never the output path: two builds
-        # with the same `-o` already shared a scope.
-        if pair.0 == "SIMPLE_NATIVE_NOOP_FINAL_OUTPUT":
-            continue
-        # SIMPLE_ICE_DIR (ice_boundary_claim_run: "<pid>_<hash>") and
-        # SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE (candidate-<pid>.receipt)
-        # are per-run, pid-valued evidence locations the CLI sets itself; they
-        # only choose where ICE receipts / warm-closure candidates are written.
-        # Folding them gave every rerun a new cache scope and 0 object hits
-        # (doc/08_tracking/bug/native_cache_scope_pid_env_2026-10-24.md).
-        # Observability sinks and the external RSS ceiling. The bootstrap
-        # stamps the profile/snapshot paths and run id with its pid, so every
-        # relaunch got a private object scope. Each is read only to choose a
-        # log/evidence destination or gate diagnostic printing
-        # (driver_log_helpers.spl, driver_mem_snapshot.spl, the *_trace_enabled
-        # helpers); the ceiling is consumed by the bootstrap scripts' watchdog
-        # and read by no compiler/runtime source. None reaches a compiler
-        # decision, so object bytes cannot depend on them. The complete
-        # capture above still records them for admission/no-op evidence.
-        # The tree-RSS watchdog coordinates (scope group, declared job count,
-        # per-run receipt path, cap, enforce mode, observer budget) are the
-        # same class: shard_mem_clamp.spl consumes the cap/mode to size the
-        # worker pool and no compiler/runtime source reads the rest, so they
-        # only choose how many processes run, never what any of them emits.
-        # The product frontend policy exports campaign-varying values for
-        # these on every phase-C row; folding them gave every retuned
-        # campaign run a private object scope and 0 module reuse.
-        if pair.0 == "SIMPLE_COMPILER_PHASE_PROFILE" or
-                pair.0 == "SIMPLE_COMPILER_PHASE_PROFILE_FILE" or
-                pair.0 == "SIMPLE_MEM_SNAPSHOT_FILE" or
-                pair.0 == "SIMPLE_EVIDENCE_RUN_ID" or
-                pair.0 == "SIMPLE_BUILD_PROGRESS_EVENTS" or
-                pair.0 == "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" or
-                pair.0 == "SIMPLE_ICE_DIR" or
-                pair.0 == "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE" or
-                pair.0 == "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP" or
-                pair.0 == "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS" or
-                pair.0 == "SIMPLE_PROCESS_TREE_RSS_RECEIPT" or
-                pair.0 == "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" or
-                pair.0 == "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE" or
-                pair.0 == "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND" or
-                pair.0 == "SIMPLE_PROCESS_TREE_RSS_CAP_KIB" or
-                pair.0 == "SIMPLE_BOOTSTRAP_RSS_CAP_MODE" or
-                pair.0 == "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS":
-            continue
-        # Build-start admission sizing. SIMPLE_BUILD_MEMORY_RESERVE_BYTES is
-        # read only by build_memory_reserve_kib (shard_mem_clamp.spl) to size
-        # the start guard's free-RAM/commit reserve, and SIMPLE_HOST_CONFIG
-        # only selects which host-config file host_limits reads those knobs
-        # from; neither reaches a compiler decision about emitted bytes.
-        # Both are pre-admitted into the HIR worker profile and the phase-C
-        # row key list, so folding them gives every retuned reserve / every
-        # config-path spelling a private object scope and 0 module reuse
-        # (same class as the watchdog coordinates above; seen live on the
-        # Windows MSVC stage-2 lane, 2026-11-13, when a 1 GiB reserve knob
-        # voided the whole 1654-module stage-2 scope between campaign runs).
-        if pair.0 == "SIMPLE_BUILD_MEMORY_RESERVE_BYTES" or
-                pair.0 == "SIMPLE_HOST_CONFIG":
-            continue
-        # Per-launch values every Stage 3 MIR shard worker inherits; folding
-        # them gave each relaunch a fresh object scope and cached=0 after a
-        # ~3 h pass (bootstrap-fable-35, 2026-11-15).
-        # - SIMPLE_PARSE_CLOSURE_REQUEST/_DIGEST: the coordinator's handoff
-        #   file (closure-request-<pid>-<ms>/request.v1) and the hash of its
-        #   wire, which embeds that path. Two launches' requests differ only
-        #   in that path. What the request selects is bound elsewhere: the
-        #   snapshot by the SIMPLE_SCV_* rows above and each object by its
-        #   own source identity and current-MIR capsule receipt.
-        # - SIMPLE_BOOTSTRAP_SESSION_ID/_EXEC: the RSS watchdog's session
-        #   (its pid, a mktemp helper path); read only to place spawned
-        #   children in that session (process_ops.spl).
-        # - SIMPLE_GLOBAL_DATASET_MAX_BYTES: the per-worker retention cap
-        #   run_ledger_shards derives from live headroom and the recorded
-        #   peak; its only reader is mem/global_dataset.spl's LRU limit.
-        # - SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE/_FALLBACK_ROUTE: launch
-        #   script route knobs. REQUESTED is read only by bootstrap_main's
-        #   dispatch (never in a SIMPLE_NATIVE_BUILD_WORKER=1 shard worker),
-        #   FALLBACK by no compiler source.
-        # - SIMPLE_NATIVE_WORKER_CHILD_PARENT_PID: the file worker's own pid,
-        #   set only across a batch-child spawn and unset by the child at
-        #   entry (native_build_child_bind_parent_v1); selects no input.
-        if pair.0 == "SIMPLE_PARSE_CLOSURE_REQUEST" or
-                pair.0 == "SIMPLE_NATIVE_WORKER_CHILD_PARENT_PID" or
-                pair.0 == "SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST" or
-                pair.0 == "SIMPLE_BOOTSTRAP_SESSION_ID" or
-                pair.0 == "SIMPLE_BOOTSTRAP_SESSION_EXEC" or
-                pair.0 == "SIMPLE_GLOBAL_DATASET_MAX_BYTES" or
-                pair.0 == "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE" or
-                pair.0 == "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE":
-            continue
-        # Per-file worker lane scheduling (NativeFileUnitProcessInvokerV1.run_unit
-        # and the file-worker coordinator in native_build_main.spl). Each value
-        # only routes claims or sizes batches, and several embed a queue path
-        # with the coordinator pid or a per-round owner (`<owner>~h<round>`), so
-        # folding them gave every batch and every relaunch a private object
-        # scope and cached=0. Same class as the SIMPLE_MIR_SHARD* rows above:
-        # - SIMPLE_HIR_SHARD (the child's --hir-shard spec), _QUEUE, _OWNER,
-        #   _CLAIM_LIMIT: HIR claim ledger routing (driver_hir_cache.spl).
-        # - SIMPLE_UNIT_TLDR_ROOT: where unit children keep TLDR summaries
-        #   (`<hir_queue>/frontend`); the summaries are validated against the
-        #   SIMPLE_SCV_* rows, which stay in this identity.
-        # - SIMPLE_FILE_WORKER_QUEUE/_OWNER/_HIR_QUEUE/_BATCH: coordinator
-        #   routing and batch sizing (native_build_main.spl).
-        # - SIMPLE_FILE_WORKER_REUSE: path of the planner's reuse plan; a
-        #   planned module publishes its existing object instead of lowering.
-        # SIMPLE_FILE_WORKER_UNIT and SIMPLE_FILE_WORKERS stay in: they select
-        # the front-end route and are constant for a lane, not per batch.
-        if pair.0 == "SIMPLE_HIR_SHARD" or
-                pair.0 == "SIMPLE_HIR_SHARD_QUEUE" or
-                pair.0 == "SIMPLE_HIR_SHARD_OWNER" or
-                pair.0 == "SIMPLE_HIR_SHARD_CLAIM_LIMIT" or
-                pair.0 == "SIMPLE_UNIT_TLDR_ROOT" or
-                pair.0 == "SIMPLE_FILE_WORKER_QUEUE" or
-                pair.0 == "SIMPLE_FILE_WORKER_OWNER" or
-                pair.0 == "SIMPLE_FILE_WORKER_HIR_QUEUE" or
-                pair.0 == "SIMPLE_FILE_WORKER_BATCH" or
-                pair.0 == "SIMPLE_FILE_WORKER_REUSE":
+        if not native_build_module_environment_field_allowed_v1(
+                pair.0, pair.1, selective_objects):
             continue
         projected = projected.push(pair)
     val module_capture = native_build_environment_snapshot_fingerprint_v1(projected)

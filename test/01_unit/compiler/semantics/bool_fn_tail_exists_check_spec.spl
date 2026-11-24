@@ -1,16 +1,23 @@
 use std.spec.*
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, file_exists}
 
 # Bug dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09:
 # `.?` yields T? (payload-or-nil), so a `-> bool` fn must not end in a bare `.?`.
 # Source-scan guard over the sites fixed here (sibling-prevention).
-fn has_tail_exists_check(path: text, signature: text) -> bool:
+# Returns "clean" only when the file exists, the signature was found, and no
+# `.?` operand leaks; a moved file or renamed signature yields a distinct
+# verdict so the guard fails loudly instead of passing vacuously.
+fn has_tail_exists_check(path: text, signature: text) -> text:
+    if not file_exists(path):
+        return "missing file: {path}"
     val lines = file_read(path).split("\n")
     var in_fn = false
+    var seen_signature = false
     var found = false
     for line in lines:
         if line.contains(signature):
             in_fn = true
+            seen_signature = true
         elif in_fn:
             val t = line.trim()
             val operand_leak = t.ends_with(".?") or t.ends_with(".? and") or t.ends_with(".? or") or t.contains(".? and ") or t.contains(".? or ")
@@ -18,50 +25,53 @@ fn has_tail_exists_check(path: text, signature: text) -> bool:
                 found = true
             if t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("pub fn ") or t.starts_with("class ") or t.starts_with("struct "):
                 in_fn = false
-    found
+    if not seen_signature:
+        return "missing signature in {path}: {signature}"
+    if found:
+        return "leak"
+    "clean"
 
 describe "-> bool functions do not leak .? payload":
     it "TypeAlias has_default":
-        expect(has_tail_exists_check("src/compiler/25.traits/trait_def.spl", "fn has_default() -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/compiler/25.traits/trait_def.spl", "fn has_default() -> bool")).to_equal("clean")
     it "const_keys has_suggestion and can_validate":
-        expect(has_tail_exists_check("src/compiler/35.semantics/const_keys.spl", "fn has_suggestion() -> bool")).to_equal(false)
-        expect(has_tail_exists_check("src/compiler/35.semantics/const_keys.spl", "fn can_validate() -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/compiler/35.semantics/const_keys.spl", "fn has_suggestion() -> bool")).to_equal("clean")
+        expect(has_tail_exists_check("src/compiler/35.semantics/const_keys.spl", "fn can_validate() -> bool")).to_equal("clean")
     it "pkg manifest has_dep":
-        expect(has_tail_exists_check("src/app/pkg/manifest.spl", "fn has_dep(dep_name: text) -> bool")).to_equal(false)
-    it "lazy_val contains (both copies)":
-        expect(has_tail_exists_check("src/app/interpreter/lazy/lazy_val.spl", "fn contains(key: K) -> bool")).to_equal(false)
-        expect(has_tail_exists_check("src/app/interpreter/lazy/lazy_val_fixed.spl", "fn contains(key: K) -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/app/pkg/manifest.spl", "fn has_dep(dep_name: text) -> bool")).to_equal("clean")
+    it "lazy_val contains":
+        expect(has_tail_exists_check("src/app/interpreter/lazy/lazy_val.spl", "fn contains(key: K) -> bool")).to_equal("clean")
     it "bug db is_split_table_db (both copies)":
-        expect(has_tail_exists_check("src/lib/nogc_sync_mut/database/bug.spl", "fn is_split_table_db() -> bool")).to_equal(false)
-        expect(has_tail_exists_check("src/lib/nogc_async_mut/database/bug.spl", "fn is_split_table_db() -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/lib/nogc_sync_mut/database/bug.spl", "fn is_split_table_db() -> bool")).to_equal("clean")
+        expect(has_tail_exists_check("src/lib/nogc_async_mut/database/bug.spl", "fn is_split_table_db() -> bool")).to_equal("clean")
 
 describe "-> bool functions do not leak .? payload (follow-up sites)":
     it "vhdl call lowering (backend and plugin copies)":
         val paths = ["src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl", "src/plugins/backend_vhdl/vhdl/vhdl_call_lowering.spl"]
         for p in paths:
-            expect(has_tail_exists_check(p, "fn hardware_call_uses_port_map(caller: MirFunction, operand: MirOperand) -> bool")).to_equal(false)
-            expect(has_tail_exists_check(p, "fn call_is_lowered_hardware_entity(operand: MirOperand) -> bool")).to_equal(false)
+            expect(has_tail_exists_check(p, "fn hardware_call_uses_port_map(caller: MirFunction, operand: MirOperand) -> bool")).to_equal("clean")
+            expect(has_tail_exists_check(p, "fn call_is_lowered_hardware_entity(operand: MirOperand) -> bool")).to_equal("clean")
     it "nvfs root device superblock probe":
-        expect(has_tail_exists_check("src/os/kernel/boot/nvfs_root_device.spl", "fn nvfs_root_device_has_superblock(dev: BlockDevice) -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/os/kernel/boot/nvfs_root_device.spl", "fn nvfs_root_device_has_superblock(dev: BlockDevice) -> bool")).to_equal("clean")
     it "clang catalog triplet present":
-        expect(has_tail_exists_check("src/os/kernel/loader/clang_filesystem_signed_catalog_boot_v1.spl", "fn _catalog_triplet_present_v1() -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/os/kernel/loader/clang_filesystem_signed_catalog_boot_v1.spl", "fn _catalog_triplet_present_v1() -> bool")).to_equal("clean")
 
 describe "-> bool functions do not leak .? payload (wasm-fixes lane 2026-11-05)":
     it "hir codec symbol id key ordering":
-        expect(has_tail_exists_check("src/compiler/20.hir/hir_codec_key_order.spl", "fn hc_symbol_id_key_before_v1(left: SymbolId, right: SymbolId) -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/compiler/20.hir/hir_codec_key_order.spl", "fn hc_symbol_id_key_before_v1(left: SymbolId, right: SymbolId) -> bool")).to_equal("clean")
     it "interpreter TruthinessRules is_truthy_string":
-        expect(has_tail_exists_check("src/compiler/95.interp/interpreter/operators.spl", "static fn is_truthy_string(v: text) -> bool")).to_equal(false)
+        expect(has_tail_exists_check("src/compiler/95.interp/interpreter/operators.spl", "static fn is_truthy_string(v: text) -> bool")).to_equal("clean")
 
 describe "-> bool functions do not leak .? payload (HB2 sweep 2026-11-05)":
     it "retained binary CAS verify (multi-line call tail)":
-        expect(has_tail_exists_check("src/app/build/scheduler/retained_binary_cas.spl", "fn retained_binary_cas_verify_v1(root: text, name: text,")).to_equal(false)
+        expect(has_tail_exists_check("src/app/build/scheduler/retained_binary_cas.spl", "fn retained_binary_cas_verify_v1(root: text, name: text,")).to_equal("clean")
     it "loader frontend binding liveness (and-chain operand)":
-        expect(has_tail_exists_check("src/compiler/99.loader/environment_variant_startup_binding_v1.spl", "fn _environment_variant_frontend_binding_live_v1(owner_id: u64,")).to_equal(false)
+        expect(has_tail_exists_check("src/compiler/99.loader/environment_variant_startup_binding_v1.spl", "fn _environment_variant_frontend_binding_live_v1(owner_id: u64,")).to_equal("clean")
 
 describe "optional-tail .? leaks in src/os (hbhd leftovers 2026-11-06)":
     it "installed artifact record shape gate (i64? and-chain tail; 0 bytes is valid)":
-        expect(has_tail_exists_check("src/os/kernel/loader/installed_artifact_catalog_v1.spl", "pub fn installed_artifact_record_input_valid_v1(")).to_equal(false)
+        expect(has_tail_exists_check("src/os/kernel/loader/installed_artifact_catalog_v1.spl", "pub fn installed_artifact_record_input_valid_v1(")).to_equal("clean")
     it "simple browser VFS read returns text? not bool":
-        expect(has_tail_exists_check("src/os/apps/simple_browser/main.spl", "fn _read_file_via_vfs(path: text) -> text?:")).to_equal(false)
+        expect(has_tail_exists_check("src/os/apps/simple_browser/main.spl", "fn _read_file_via_vfs(path: text) -> text?:")).to_equal("clean")
     it "helper stops at the next pub fn (no bleed into following decls)":
-        expect(has_tail_exists_check("src/os/kernel/loader/installed_artifact_catalog_v1.spl", "pub fn installed_artifact_alias_text_bytes_bounded_v1(")).to_equal(false)
+        expect(has_tail_exists_check("src/os/kernel/loader/installed_artifact_catalog_v1.spl", "pub fn installed_artifact_alias_text_bytes_bounded_v1(")).to_equal("clean")

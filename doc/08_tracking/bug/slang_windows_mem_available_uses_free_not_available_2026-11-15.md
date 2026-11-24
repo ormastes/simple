@@ -1,6 +1,6 @@
 # slang Windows fit check used FreePhysicalMemory (excludes standby cache)
 
-Date: 2026-11-15. Status: fixed in `model_loader/memory_budget.spl`.
+Date: 2026-11-15. Status: fixed in `model_loader/memory_budget.spl` (re-verified 2026-11-24).
 
 ## Symptom
 After reading multi-GB model files, slang refused a 256M-parameter model with
@@ -28,3 +28,10 @@ like Get-Counter paths); -1 on probe failure still refuses. Verified: `mem_avail
 ## Related, unchanged
 `_runtime_overhead_bytes()` in `engine/llm_engine.spl:219` is a flat 6 GiB regardless of model
 size or context (documented as a deliberately conservative admission figure).
+
+## Update (2026-11-24)
+The Windows lane now tries `slang_windows_available_bytes_fast()` (SOSIX
+`GlobalMemoryStatusEx`, `min(ullAvailPhys, ullAvailPageFile)`; AvailPhys counts
+the standby list) before the CIM `AvailableBytes` fallback. The same C provider
+(`rt_host_memory_headroom_bytes_v1`) backs the build gate, so there is one
+shared Windows availability source. Re-verified by reading the source only.

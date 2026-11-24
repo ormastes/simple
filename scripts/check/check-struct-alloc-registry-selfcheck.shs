@@ -1,0 +1,68 @@
+#!/bin/sh
+# Builds and runs the struct-allocation registry tests against
+# src/runtime/runtime_memory.c (plain and under ASan/UBSan), syntax-checks
+# src/runtime/runtime_native.c in its ownership/testing configurations, and
+# runs the source contract that pins both files to the one shared body in
+# src/runtime/struct_alloc_registry_impl.h. clang only (never gcc).
+# Fail-closed verdict, last line of stdout:
+#   PASS — <n> run(s) ...              exit 0
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked (...)  exit 2
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+cd "$root" || { echo "ERROR — nothing was checked (cd failed)"; exit 2; }
+CC=${CC:-clang}
+case "$(basename "$CC")" in *gcc*|*g++*) echo "ERROR — nothing was checked (gcc is forbidden: $CC)"; exit 2;; esac
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no clang: $CC)"; exit 2; }
+"$CC" --version 2>/dev/null | grep -qi clang || { echo "ERROR — nothing was checked ($CC is not clang)"; exit 2; }
+out="$root/build/struct_alloc_registry_selfcheck"
+mkdir -p "$out" || { echo "ERROR — nothing was checked (mkdir $out)"; exit 2; }
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    os=windows; exe=.exe; libs="-lpthread"; sans="none asan"
+    resdir=$("$CC" -print-resource-dir 2>/dev/null)
+    [ -n "$resdir" ] && PATH="$PATH:$resdir/lib/windows" && export PATH ;;
+  *) os=posix; exe=; libs="-lpthread"; sans="none asan" ;;
+esac
+ran=0; fails=""
+defs="-DSIMPLE_RUNTIME_MEMORY_TESTING -DSIMPLE_RUNTIME_STRUCT_REGISTRY_TESTING"
+tests="struct_receiver_guard_focus_test runtime_memory_struct_scope_focus_test runtime_memory_scope_end_batch_test"
+
+for san in $sans; do
+  case "$san" in
+    none) sf="" ;;
+    asan) sf="-fsanitize=address,undefined -fno-sanitize-recover=undefined" ;;
+  esac
+  for t in $tests; do
+    bin="$out/${t}_$san$exe"
+    # shellcheck disable=SC2086
+    "$CC" -O1 -g $defs -I src/runtime $sf "test/01_unit/runtime/$t.c" src/runtime/runtime_memory.c -o "$bin" $libs > "$out/${t}_$san.build.txt" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then fails="$fails $t-$san(compile rc=$rc)"; continue; fi
+    "$bin" > "$out/${t}_$san.txt" 2>&1
+    rc=$?
+    ran=$((ran + 1))
+    [ "$rc" -eq 0 ] || fails="$fails $t-$san(run rc=$rc)"
+  done
+done
+
+i=0
+for d in "" "-DSIMPLE_RUNTIME_MEMORY_OWNER" "-DSIMPLE_RUNTIME_STRUCT_REGISTRY_TESTING" \
+         "-DSIMPLE_RUNTIME_MEMORY_OWNER -DSIMPLE_RUNTIME_STRUCT_REGISTRY_TESTING -DSIMPLE_RUNTIME_MEMORY_TESTING"; do
+  i=$((i + 1))
+  # shellcheck disable=SC2086
+  "$CC" -fsyntax-only $d -I src/runtime src/runtime/runtime_native.c > "$out/native_$i.txt" 2>&1
+  rc=$?
+  ran=$((ran + 1))
+  [ "$rc" -eq 0 ] || fails="$fails native-syntax-$i(rc=$rc)"
+done
+
+sh test/01_unit/runtime/struct_registry_growth_source_test.shs > "$out/source_contract.txt" 2>&1
+rc=$?
+ran=$((ran + 1))
+[ "$rc" -eq 0 ] || fails="$fails source-contract(rc=$rc)"
+
+if [ -n "$fails" ]; then echo "FAIL — $ran run(s) ($os), failed:$fails (logs: $out)"; exit 1; fi
+if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked (0 runs)"; exit 2; fi
+echo "PASS — $ran run(s) ($os: $sans), struct registry tests + native syntax + source contract green"
+exit 0

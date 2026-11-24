@@ -47,3 +47,8 @@ inventory changes).
 - `coverage_test_flag_times_out_and_mcdc_no_probes_windows_2026-11-03`
 - `windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13`
 - `scv_inventory_cold_rescan_935s_per_tree_change_2026-09-26`
+
+## Triage (2026-11-24)
+Not a memory-accounting/admission decision bug: the cost is the source-loaded
+compiler closure in the coordinator. Still OPEN and blocked on the phase-3
+self-hosted native-build deploy; no change made.
