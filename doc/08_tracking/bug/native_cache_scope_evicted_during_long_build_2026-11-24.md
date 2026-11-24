@@ -127,7 +127,7 @@ without bound.
   anyway, adoption requeues its rows as `object-missing`; nothing fails.
 - **Scope shape.** `native_cache_scope_dir_of_object_v1` matched any
   33-character component starting with `s`. It now requires `s` + 32 lowercase
-  hex (`native_cache_scope_name_valid_v1`), the shape
+  hex (`_native_cache_scope_name_valid_v1`; landed separately as 37d96eb2a04), the shape
   `driver_native_build_cache_scope_for_compiler_id` produces.
 
 Limits of the follow-up:
