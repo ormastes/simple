@@ -403,6 +403,17 @@ and [bootstrap_options.md](../../doc/07_guide/tooling/bootstrap_options.md) for 
    - Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner.
    - Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
 
+## Seed build script (2026-11-24)
+
+The Rust seed `bin/simple.exe` is never committed; build it with
+`sh scripts/setup/build-seed.shs` (pinned nightly from `rust-toolchain.toml`,
+msvc + clang-cl on Windows, clang elsewhere, never gcc; `--locked --profile
+bootstrap -p simple-driver`, `SEED_JOBS` default 4). Install is atomic
+(temp + `mv -f`) and records the seed source revision in the untracked
+`bin/simple.exe.seed-rev`. `--check` reports FRESH/STALE/UNKNOWN against the
+last commit touching `src/compiler_rust`/`src/runtime` (exit 0/1/2; setup.shs
+prints it); `--selftest` runs the verdict fixtures.
+
 ## Bootstrap Commands
 ```bash
 # Fast zero-compile verification of protected bootstrap scripts + alive path matrix:

@@ -1,0 +1,93 @@
+#!/bin/sh
+# Build the Rust bootstrap seed and install it at bin/simple.exe (bin/simple on
+# non-Windows) — the binary is never committed; this script makes it.
+#
+# Pinned recipe (clang only, never gcc):
+#   toolchain  = channel from src/compiler_rust/rust-toolchain.toml
+#   Windows    = <channel>-x86_64-pc-windows-msvc, CC/CXX=clang-cl (LLVM 23)
+#   elsewhere  = <channel>, CC=clang CXX=clang++
+#   cargo build --locked --profile bootstrap -p simple-driver -j $SEED_JOBS
+#
+# Install is atomic: copy to <dest>.new.$$ then mv -f over <dest>. The seed's
+# source revision (last commit touching src/compiler_rust or src/runtime) is
+# recorded next to it in <dest>.seed-rev (untracked).
+#
+# Usage:
+#   sh scripts/setup/build-seed.shs            # build + install
+#   sh scripts/setup/build-seed.shs --check    # report only: FRESH / STALE / UNKNOWN
+#   sh scripts/setup/build-seed.shs --selftest
+# Env: SEED_JOBS (default 4), CARGO_TARGET_DIR, SEED_DEST.
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) exe=.exe; is_win=1 ;;
+  *) exe=; is_win=0 ;;
+esac
+dest=${SEED_DEST:-$repo_root/bin/simple$exe}
+
+seed_src_rev() {
+  git -C "$1" log -1 --format=%H -- src/compiler_rust src/runtime 2>/dev/null
+}
+
+# check_verdict <dest> <want-rev>: prints verdict line, returns 0 fresh / 1 stale / 2 unknown
+check_verdict() {
+  if [ ! -f "$1" ]; then echo "UNKNOWN — no seed at $1"; return 2; fi
+  if [ ! -f "$1.seed-rev" ]; then
+    echo "UNKNOWN — $1 has no .seed-rev record; rebuild with build-seed.shs"; return 2
+  fi
+  have=$(cat "$1.seed-rev")
+  if [ -z "$2" ]; then echo "UNKNOWN — cannot resolve seed source revision"; return 2; fi
+  if [ "$have" = "$2" ]; then echo "FRESH — seed built from $2"; return 0; fi
+  echo "STALE — seed built from $have, seed sources now at $2"; return 1
+}
+
+selftest() {
+  t=$(mktemp -d)
+  trap 'rm -rf "$t"' EXIT
+  r=0
+  check_verdict "$t/none" abc >/dev/null && r=1 || [ $? -eq 2 ] || r=1
+  : > "$t/s"
+  check_verdict "$t/s" abc >/dev/null && r=1 || [ $? -eq 2 ] || r=1
+  echo abc > "$t/s.seed-rev"
+  check_verdict "$t/s" abc >/dev/null || r=1
+  check_verdict "$t/s" def >/dev/null && r=1 || [ $? -eq 1 ] || r=1
+  if [ $r -eq 0 ]; then echo "PASS — 4 selftest fixture(s)"; else echo "FAIL — selftest"; fi
+  return $r
+}
+
+case "${1:-}" in
+  --selftest) selftest; exit $? ;;
+  --check) check_verdict "$dest" "$(seed_src_rev "$repo_root")"; exit $? ;;
+  "") ;;
+  *) echo "usage: build-seed.shs [--check|--selftest]" >&2; exit 2 ;;
+esac
+
+selftest >/dev/null
+
+crate="$repo_root/src/compiler_rust"
+channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$crate/rust-toolchain.toml")
+[ -n "$channel" ] || { echo "build-seed: no channel in rust-toolchain.toml" >&2; exit 2; }
+if [ $is_win -eq 1 ]; then
+  toolchain="$channel-x86_64-pc-windows-msvc"
+  export CC=clang-cl CXX=clang-cl
+else
+  toolchain=$channel
+  export CC=clang CXX=clang++
+fi
+command -v "$CC" >/dev/null || { echo "build-seed: $CC not on PATH (clang only, never gcc)" >&2; exit 2; }
+: "${CARGO_TARGET_DIR:=$crate/target}"
+export CARGO_TARGET_DIR
+
+rev=$(seed_src_rev "$repo_root")
+( cd "$crate" && cargo "+$toolchain" build --locked --profile bootstrap -p simple-driver -j "${SEED_JOBS:-4}" )
+built="$CARGO_TARGET_DIR/bootstrap/simple$exe"
+[ -f "$built" ] || { echo "build-seed: missing $built" >&2; exit 1; }
+
+tmp="$dest.new.$$"
+cp "$built" "$tmp"
+mv -f "$tmp" "$dest"
+printf '%s\n' "$rev" > "$dest.seed-rev.new.$$"
+mv -f "$dest.seed-rev.new.$$" "$dest.seed-rev"
+echo "build-seed: installed $dest (seed sources $rev)"
