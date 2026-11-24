@@ -510,6 +510,7 @@ impl Lowerer {
             for (i, (arg, pty)) in args_hir.iter().zip(slot_types.iter()).enumerate() {
                 if let Some(pty) = pty {
                     self.reject_callable_for_enum_slot(*pty, arg, &format!("argument {} of `{callee_name}`", i + 1))?;
+                    self.reject_float_for_int_slot(*pty, arg, &format!("argument {} of `{callee_name}`", i + 1))?;
                 }
             }
         }

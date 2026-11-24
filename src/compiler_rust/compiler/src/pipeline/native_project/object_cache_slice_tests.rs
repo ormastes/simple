@@ -21,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const PROV_BASE: &str = "struct Pt:\n    x: i64\n    y: i64\n\nfn make_pt() -> Pt:\n    return Pt(1, 2)\n\nfn provide() -> i64:\n    return 11\n";
-const CONS: &str = "use prov.{make_pt, provide, Pt}\n\nfn consume() -> i64:\n    val p: Pt = make_pt()\n    return provide() + p.y\n";
+const CONS: &str = "use prov.{make_pt, provide, Pt}\n\nfn consume() -> i64:\n    val p: Pt = make_pt()\n    return (provide() + p.y) as i64\n";
 const OTHER: &str = "fn other_value() -> i64:\n    return 5\n";
 
 struct Fixture {

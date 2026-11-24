@@ -6,7 +6,7 @@ use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
+    ConcurrencyMode, FunctionLayoutHint, HirContract, HirExpr, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
     LocalVar, PointerKind, TypeId,
 };
 
@@ -148,6 +148,14 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
     body.last().is_some_and(stmt_produces_value) || body.iter().any(|stmt| matches!(stmt, HirStmt::Return(Some(_))))
 }
 
+/// A float flowing into an integer slot (parameter or declared return) is a
+/// type error: the program must write `as iN` / `.to_iN()`, which saturates
+/// identically on every engine. int -> float widening stays implicit.
+/// doc/08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md
+pub(crate) fn is_float_into_int(expected: TypeId, found: TypeId) -> bool {
+    matches!(found, TypeId::F32 | TypeId::F64) && is_numeric_type(expected) && !matches!(expected, TypeId::F32 | TypeId::F64)
+}
+
 fn is_numeric_type(ty: TypeId) -> bool {
     matches!(
         ty,
@@ -201,7 +209,7 @@ impl Lowerer {
             return true;
         }
         if is_numeric_type(expected) && is_numeric_type(found) {
-            return true;
+            return !is_float_into_int(expected, found);
         }
         // Truthiness: the seed itself coerces numeric tails in `-> bool`
         // functions (coerce_exists_tail_in_place), and the interpreter
@@ -453,6 +461,32 @@ impl Lowerer {
             }
             _ => false,
         }
+    }
+
+    /// Reject a float argument bound to an integer-typed parameter (see
+    /// `is_float_into_int`). Called beside `reject_callable_for_enum_slot` at
+    /// every call site whose parameter types are resolved.
+    pub(crate) fn reject_float_for_int_slot(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        if !is_float_into_int(expected, value.ty) {
+            return Ok(());
+        }
+        let name = |t: TypeId| match t {
+            TypeId::I8 => "i8",
+            TypeId::I16 => "i16",
+            TypeId::I32 => "i32",
+            TypeId::I64 => "i64",
+            TypeId::U8 => "u8",
+            TypeId::U16 => "u16",
+            TypeId::U32 => "u32",
+            TypeId::U64 => "u64",
+            TypeId::F32 => "f32",
+            _ => "f64",
+        };
+        let int = name(expected);
+        Err(LowerError::Unsupported(format!(
+            "type mismatch: {slot} is declared as `{int}` but receives `{}`; convert explicitly with `as {int}` or `.to_{int}()`",
+            name(value.ty)
+        )))
     }
 
     pub(crate) fn validate_declared_return_type(&self, expected: TypeId, found: TypeId) -> LowerResult<()> {
