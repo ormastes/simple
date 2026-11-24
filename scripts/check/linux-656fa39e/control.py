@@ -1,10 +1,8 @@
 """Exact-source provisional intake and independent Linux child owners; no promotion."""
 import argparse,hashlib,importlib.util,json,os,re,shutil,stat,subprocess,zipfile
 from pathlib import Path,PurePosixPath
-SOURCE='656fa39e28a7775da0172a4e8eeeea1ac0ea59f0';RUN=45320641691;REPO='ormastes/simple'
-FIXED={'seed':(14887483552,'c6802db38d67e89b5c74b454bcca992425be79425110178cf3e83a5579c430b7'),
- 'startup':(14887673126,'b72e0731292c16011fc2e723d2ea6794faf65f4e9b5dcd7393ef4a4402da2886'),
- 'runtime':(14888456926,'f469dbc2246f6667a9c1f8d893611b6fecd51b4cb6eb2c3d7abb1b51f68784bd')}
+SOURCE='656fa39e28a7775da0172a4e8eeeea1ac0ea59f0';RUN=45326410090;REPO='ormastes/simple'
+UPSTREAM_BRANCH='work/build-binaries-656fa39e-20261124'
 def module(name):
  s=importlib.util.spec_from_file_location(name,Path(__file__).with_name(name+'.py'));m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
 budget=module('runner-budget');cleanup=module('owner-cleanup')
@@ -54,14 +52,19 @@ def qualify(role,binary,source,runtime,out):
 def intake(a):
  out=a.output.resolve();out.mkdir(parents=True,exist_ok=False);source=a.source.resolve()
  source_guard(source);tools=tools_snapshot(out)
- run=api('actions/runs/'+str(RUN));assert run['head_sha']==SOURCE
+ run=api('actions/runs/'+str(RUN));assert run['head_sha']==SOURCE and run['event']=='workflow_dispatch' and run['head_branch']==UPSTREAM_BRANCH
  jobs=api('actions/runs/'+str(RUN)+'/jobs?per_page=100')['jobs']
  job=next(j for j in jobs if j['name']=='Stage 2 — Linux x86_64')
  assert job['conclusion']=='success'
  assert next(s for s in job['steps'] if s['name']=='Qualify Stage 2 Hello compilation and execution (Linux)')['conclusion']=='success'
  save(out/'original-run.json',run);save(out/'original-linux-stage2-job.json',job)
- dirs={k:download(k,n,d,out) for k,(n,d) in FIXED.items()}
- parentdir=download('parent',a.parent_artifact,a.parent_digest,out)
+ pins=json.loads(a.artifact_pins);assert set(pins)=={'seed','startup','runtime','parent'}
+ assert len({row['id'] for row in pins.values()})==4
+ for row in pins.values():
+  assert type(row['id']) is int and row['id']>0 and re.fullmatch('[0-9a-f]{64}',row['sha256'])
+ save(out/'artifact-pins.json',pins)
+ dirs={k:download(k,pins[k]['id'],pins[k]['sha256'],out) for k in ('seed','startup','runtime')}
+ parentdir=download('parent',pins['parent']['id'],pins['parent']['sha256'],out)
  seed=dirs['seed']/'simple';parent=parentdir/'simple_stage2';elf(seed);elf(parent)
  startup=json.loads((dirs['startup']/'seed-startup.json').read_text())
  assert startup['status']=='PASS' and startup['exit_code']==0 and startup['seed_sha256']==startup['seed_sha256_after']==sha(seed)
@@ -74,7 +77,7 @@ def intake(a):
  parent.chmod(0o755)
  proof=qualify('parent',parent,source,runtime,out/'parent-native-hello')
  source_guard(source);assert all(sha(p)==h for p,h in tools.items())
- result={'status':'QUALIFIED_PROVISIONAL_PARENT','source':SOURCE,'original_run':RUN,'parent_sha256':sha(parent),'seed_sha256':sha(seed),'runtime_files':expected,'parent_artifact':a.parent_artifact,'parent_zip_digest':a.parent_digest,'fresh_hello':proof,'scope':'exact new Phase2/runtime exercised ABI; no formal stage admission'}
+ result={'status':'QUALIFIED_PROVISIONAL_PARENT','source':SOURCE,'original_run':RUN,'parent_sha256':sha(parent),'seed_sha256':sha(seed),'runtime_files':expected,'artifact_pins':pins,'fresh_hello':proof,'scope':'exact new Phase2/runtime exercised ABI; no formal stage admission'}
  save(out/'parent.json',result)
  # A sealed per-file manifest binds the actual fresh Hello receipts/logs and
  # inputs for both isolated child runners. ZIPs are transport, not authorities.
@@ -126,6 +129,6 @@ def child(a):
   except Exception as error:result.update(status='FAILED',immutable_inputs_after='FAIL',identity_error=str(error))
   save(out/'terminal.json',result)
  assert result['status']=='BEHAVIOR_PASS',result
-p=argparse.ArgumentParser();p.add_argument('mode',choices=['intake','child']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--parent',type=Path);p.add_argument('--role',choices=['phase3','full-cli']);p.add_argument('--parent-artifact',type=int);p.add_argument('--parent-digest');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('mode',choices=['intake','child']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--parent',type=Path);p.add_argument('--role',choices=['phase3','full-cli']);p.add_argument('--artifact-pins');a=p.parse_args()
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=a.source,text=True).strip()==SOURCE
 (intake if a.mode=='intake' else child)(a)

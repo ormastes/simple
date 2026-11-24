@@ -1,7 +1,7 @@
 # Exact 656fa39e new Linux lineage
 
 Temporary workflow only; no release workflow mutation or publication. Intake
-requires actual successful Linux Stage2 job45320641691, its specific native
+requires actual successful Linux Stage2 job45326410090, its specific native
 Hello step, exact API artifact source/run/digests, Linux seed startup hash,
 ELF x86_64 parent/seed, and both runtime archive checksums. It then executes
 one fresh bounded native Hello with the exact uploaded Phase2/runtime tuple.
@@ -32,5 +32,8 @@ union. No older compiler, manager, runtime, or generation is substituted.
 This is the supported diagnostic native-build route, not managed admission:
 it does not fabricate the missing typed manager/source/runtime receipts.
 
-Parent artifact ID/digest are filled only by the finite external observer
-after actual qualified upload. All other artifact pins are fixed in control.py.
+All four artifact IDs/digests are filled only by the finite external observer
+from the new manual run after actual qualified upload. Intake verifies each
+artifact against this exact manual run/ref/source. No old-run bytes or IDs
+are reused. Original automatic45320641691 was cancelled by superseding pushes;
+that is retained cancellation evidence, not a compiler failure.
