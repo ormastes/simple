@@ -152,6 +152,25 @@ impl Lowerer {
         module_path: &ModulePath,
         target: &ImportTarget,
     ) -> LowerResult<crate::module_resolver::ResolvedModule> {
+        let memo_key = (
+            current_file.to_path_buf(),
+            format!("{:?}\u{1}{}", module_path.segments, Self::import_target_cache_key(target)),
+        );
+        if let Some(hit) = self.resolved_import_paths.borrow().get(&memo_key) {
+            return Ok(hit.clone());
+        }
+        let resolved = self.resolve_imported_module_path_uncached(resolver, current_file, module_path, target)?;
+        self.resolved_import_paths.borrow_mut().insert(memo_key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn resolve_imported_module_path_uncached(
+        &self,
+        resolver: &crate::module_resolver::ModuleResolver,
+        current_file: &std::path::Path,
+        module_path: &ModulePath,
+        target: &ImportTarget,
+    ) -> LowerResult<crate::module_resolver::ResolvedModule> {
         if let Some(candidate_path) = Self::resolve_import_target_module_path(module_path, target) {
             if let Ok(resolved) = resolver.resolve(&candidate_path, current_file) {
                 return Ok(resolved);
@@ -793,6 +812,32 @@ impl Lowerer {
             // but are themselves still placeholders (0 fields).
             let mut needs_registration: Vec<String> = Vec::new();
 
+            // Only names DEFINED in `items` can ever be registered below, so if
+            // none of them is still an unprocessed empty placeholder the
+            // whole-registry reachability scan cannot make progress. Skipping
+            // it avoids an O(|registry|) walk per imported file (the registry
+            // is ~8k types deep into a compiler build).
+            let any_candidate = items.iter().any(|item| {
+                let name = match item {
+                    Node::Class(c) => &c.name,
+                    Node::Struct(s) => &s.name,
+                    Node::Enum(e) => &e.name,
+                    _ => return false,
+                };
+                if transitive_processed.contains(name) {
+                    return false;
+                }
+                match self.module.types.lookup(name).and_then(|id| self.module.types.get(id)) {
+                    Some(HirType::Struct { fields, .. }) => fields.is_empty(),
+                    Some(HirType::Enum { variants, .. }) => variants.is_empty(),
+                    Some(_) => false,
+                    None => true,
+                }
+            });
+            if !any_candidate {
+                break;
+            }
+
             let mut pending = Vec::new();
             for (_tid, hir_ty) in self.module.types.iter() {
                 if let HirType::Struct { fields, .. } = hir_ty {
@@ -1029,6 +1074,13 @@ impl Lowerer {
             Ok(r) => r,
             Err(_) => return Ok(()), // Silently skip unresolvable modules
         };
+
+        // Placeholders depend only on the unit's items (and its package
+        // siblings), are added only when absent and are never removed, so
+        // a unit already pre-registered has nothing left to add.
+        if !self.preregistered_units.insert(crate::interpreter::normalize_path_key(&resolved.path)) {
+            return Ok(());
+        }
 
         // Read and parse the module file (memoized per process: this site
         // re-parsed the same imported module once per `use` that names it).
