@@ -31,5 +31,19 @@ fn main() -> i64:
     if not ended or nested_state == 0 or selected != path: return 11
     val (_, final_scopes, final_nested, _) = driver_owner_scope_counters_v1()
     if final_scopes != scopes_after or final_nested != nested_before + 1: return 12
+    # A cold read during a worker scope can serve its immediate caller. Keep
+    # that value out of the process cache, including both derived arrays.
+    val cold_path = "src/compiler/10.frontend/core/parser_preprocessor.spl"
+    if not rt_transient_array_scope_begin(): return 13
+    val (scoped, _, _, scoped_hit) = _driver_cached_entry_source_scan(cold_path)
+    val (_, _, _, repeat_hit) = _driver_cached_entry_source_scan(cold_path)
+    val scoped_ok = scoped != "" and not scoped_hit and not repeat_hit
+    if not rt_transient_array_scope_end() or not scoped_ok: return 14
+    val (fresh, fresh_imports, fresh_siblings, fresh_hit) = _driver_cached_entry_source_scan(cold_path)
+    if fresh == "" or fresh_hit: return 15
+    val (warm, warm_imports, warm_siblings, warm_hit) = _driver_cached_entry_source_scan(cold_path)
+    if not warm_hit or warm != fresh or warm_imports != fresh_imports or warm_siblings != fresh_siblings: return 16
+    val (original, _, _, original_hit) = _driver_cached_entry_source_scan(path)
+    if not original_hit or original != content: return 17
     print "PASS legacy owner aliases, cache retention, and caller-scope ownership"
     0
