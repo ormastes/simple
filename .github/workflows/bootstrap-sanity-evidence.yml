@@ -1,46 +1,63 @@
-name: Bootstrap Sanity Evidence Archive
-
+name: Provisional ce231 full CLI from verified Phase3
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
-  push:
-    branches: [main, 'release/**']
-    paths:
-      - '.github/workflows/bootstrap-sanity-evidence.yml'
-      - 'scripts/bootstrap/bootstrap-from-scratch.sh'
-      - 'scripts/check/check-bootstrap-sanity-evidence-archive.shs'
-      - 'scripts/check/check-bootstrap-stage2-sanity-environment.shs'
-      - 'scripts/check/check-bootstrap-sanity-reserve-retry.shs'
   workflow_dispatch:
-
+    inputs:
+      parent_run:
+        type: string
+        required: true
+      parent_artifact_id:
+        type: string
+        required: true
+      parent_sha256:
+        type: string
+        required: true
 permissions:
   contents: read
-
+  actions: read
 jobs:
-  sanity-evidence-archive:
-    name: Bootstrap sanity evidence archive regression
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  full-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
+          path: control
           persist-credentials: false
-          sparse-checkout: |
-            scripts/bootstrap
-            scripts/check
-            release
-            src/app/cli
-      - name: Preserve old evidence and refuse collisions before child execution
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-evidence-archive.shs
-      - name: Preserve admission controls across scrub and fresh shell boundaries
-        shell: sh
-        run: sh scripts/check/check-bootstrap-stage2-sanity-environment.shs
-      - name: Retry sanity only on a pure memory-reserve refusal
-        shell: sh
-        run: sh scripts/check/check-bootstrap-sanity-reserve-retry.shs
+      - uses: actions/checkout@v5
+        with:
+          ref: ce231b5b898d797c98d44a9b59a4859a7d792a7b
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify actual Phase3 product and distinct native Hello
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PARENT_RUN: ${{ inputs.parent_run }}
+          PARENT_ARTIFACT: ${{ inputs.parent_artifact_id }}
+          PARENT_SHA: ${{ inputs.parent_sha256 }}
+        run: |
+          python control/scripts/check/ce231-phase4/prepare-parent.py --source "$PWD/source" --intake "$PWD/intake" --parent-run "$PARENT_RUN" --parent-artifact-id "$PARENT_ARTIFACT" --parent-sha256 "$PARENT_SHA"
+      - name: Native tools
+        run: sudo -n apt-get update -qq && sudo -n apt-get install -y clang lld llvm libunwind-dev xxhash
+      - name: Build new full CLI and qualify only that new product
+        env:
+          PARENT_ARTIFACT: ${{ inputs.parent_artifact_id }}
+          PARENT_SHA: ${{ inputs.parent_sha256 }}
+        run: |
+          python control/scripts/check/ce231-phase4/phase4-from-ce231-phase3.py --source "$PWD/source" --parent-evidence "$PWD/intake" --parent-artifact-id "$PARENT_ARTIFACT" --parent-sha256 "$PARENT_SHA"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: provisional-ce231-phase4-from-phase3-${{ github.run_id }}
+          path: |
+            intake/*.json
+            source/build/phase4-from-ce231-phase3/evidence
+            source/build/phase4-from-ce231-phase3/product
+            source/build/phase4-from-ce231-phase3/product-smoke
+            source/build/phase4-from-ce231-phase3/cache
+            source/build/phase4-from-ce231-phase3/tmp
+            source/build/scv
+          include-hidden-files: true
+          retention-days: 14
