@@ -105,7 +105,7 @@ impl NativeBinaryBuilder {
         match self.options.target.os {
             TargetOS::Linux | TargetOS::FreeBSD => vec!["c".to_string()],
             TargetOS::MacOS => vec!["System".to_string()],
-            TargetOS::Windows => vec!["c".to_string(), "msvcrt".to_string(), "kernel32".to_string()],
+            TargetOS::Windows => vec!["msvcrt".to_string(), "kernel32".to_string()],
             _ => vec!["c".to_string()],
         }
     }
@@ -140,7 +140,7 @@ impl NativeBinaryBuilder {
 
         let runtime_dir =
             NativeBinaryOptions::find_runtime_library_path_for_target(&self.options.target).or_else(|| {
-                if self.options.target == simple_common::target::Target::host() {
+                if self.options.target.uses_host_runtime_abi() {
                     std::env::current_dir()
                         .ok()
                         .map(|p| p.join("target/debug"))

@@ -348,6 +348,54 @@ fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_g
 fn blob_u32(blob: [u8], offset: i64) -> u32:
     ((blob[offset] as u32) << 24) | ((blob[offset + 1] as u32) << 16) | ((blob[offset + 2] as u32) << 8) | (blob[offset + 3] as u32)
 
+# Parse memo for the glyph entry points below. A cold text glyph used to parse
+# the same font directory and glyph outline three times (measure, ink
+# receipt, LCD outline); each directory parse is ~0.8 ms on the interpreter
+# lane. The memo keeps the last blob and serves only a byte-equal blob
+# (native array `==`, ~5 us for 277 KB), so another font or an edited blob
+# parses afresh and clears the outlines. Values are stored bare and wrapped
+# on return. Outlines are immutable after parse.
+var _sfnt_memo_blob: [u8] = []
+var _sfnt_memo_fonts: [OtFont] = []
+var _sfnt_memo_outlines: Dict<i64, SfntGlyfOutline> = {}
+var _sfnt_memo_outline_count: i64 = 0
+# Hint reference extents (`_hint_glyph_y_extent`) per codepoint: the cmap
+# lookup behind each costs ~7 ms, seven per hinted size.
+var _sfnt_memo_extents: Dict<i64, [f64]> = {}
+val _SFNT_MEMO_OUTLINE_LIMIT: i64 = 4096
+
+fn _sfnt_memo_holds(blob: [u8]) -> bool:
+    _sfnt_memo_fonts.len() == 1 and blob.len() == _sfnt_memo_blob.len() and blob == _sfnt_memo_blob
+
+fn _sfnt_font_memo(blob: [u8]) -> Option<OtFont>:
+    if _sfnt_memo_holds(blob):
+        return Some(_sfnt_memo_fonts[0])
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return None
+    _sfnt_memo_blob = blob
+    _sfnt_memo_fonts = [font]
+    _sfnt_memo_extents = {}
+    _sfnt_memo_outlines = {}
+    _sfnt_memo_outline_count = 0
+    Some(font)
+
+fn _sfnt_outline_memo(font: OtFont, glyph_id: u32) -> Option<SfntGlyfOutline>:
+    if not _sfnt_memo_holds(font.blob):
+        return parse_sfnt_glyf_outline(font, glyph_id)
+    val key = glyph_id as i64
+    if val Some(hit) = _sfnt_memo_outlines.get(key):
+        return Some(hit)
+    val outline = match parse_sfnt_glyf_outline(font, glyph_id):
+        Some(value): value
+        None: return None
+    if _sfnt_memo_outline_count >= _SFNT_MEMO_OUTLINE_LIMIT:
+        _sfnt_memo_outlines = {}
+        _sfnt_memo_outline_count = 0
+    _sfnt_memo_outlines[key] = outline
+    _sfnt_memo_outline_count = _sfnt_memo_outline_count + 1
+    Some(outline)
+
 fn parse_sfnt_glyf_outline(font: OtFont, glyph_id: u32) -> Option<SfntGlyfOutline>:
     val head_table = match find_table(font, 1751474532):
         Some(value): value
@@ -591,68 +639,120 @@ fn _edge_row_index(edges: [_SfntEdge], height: i64) -> [i64]:
         i = i + 1
     rows
 
-# Whole-bitmap coverage (4x4 supersample, 17 levels). The old per-pixel kernel
-# tested EVERY edge for each of 16 samples (pixels x 16 x edges, and a
-# `push` per pixel). Here each pixel row's 4 sample scanlines gather their edge
-# crossings once, insertion-sort them, and sweep the 4 sample x positions of
-# every pixel left to right with one pointer. A sample is inside when the
-# signed sum of the crossings <= sx is non-zero -- the identical crossing
-# expression, `<=` test, sample positions and integer winding sum as the old
-# kernel, so every coverage byte is unchanged. Returns width*height bytes.
+# Whole-bitmap coverage (4x4 supersample, 17 levels). Each pixel row gathers
+# the edge crossings of its 4 sample scanlines in one pass over the row's
+# edges and insertion-sorts each scanline's list. Sample j of a scanline
+# (j = 4 * px + sample_x) sits at x = px + (2 * sample_x + 1) / 8 = (2j + 1) / 8
+# and is inside when the signed sum of the crossings <= x is non-zero -- the
+# same crossing expression, `<=` test, sample positions and integer winding
+# sum as the per-sample sweep this replaced, so every coverage byte is
+# unchanged. The sweep no longer visits samples: between two consecutive
+# crossings the winding is constant, so each inside run of samples [a, b) is
+# added at once -- its partial end pixels into `hits`, its whole pixels as
+# +4 / -4 marks in `full` that one prefix pass per row resolves. Cost per
+# scanline is O(crossings), not O(4 * width): the 16 interpreted sample steps
+# per pixel were 4.7 s of the 4x css-layout render.
+#
+# The first sample a crossing c counts at is the least j with c <= (2j+1)/8,
+# i.e. j = ceil((8c - 1) / 2). For |c| < 2^49 every step of that expression
+# is exact in f64 (a power-of-two scale, a subtraction whose result is
+# representable, a halving), and so is the sweep's own sample x, so the
+# closed form names exactly the sample where the sweep's `xs[p] <= sx`
+# first held. Values outside [0, samples) clamp, as the sweep's ends did.
+# Returns width*height bytes.
 fn _glyf_raster_alpha(edges: [_SfntEdge], width: i64, height: i64) -> [u8]:
     _glyf_raster_alpha_rows(edges, width, height, 0, height)
 
 # Rows row_from .. row_end - 1 of `_glyf_raster_alpha`; the other rows stay 0.
 fn _glyf_raster_alpha_rows(edges: [_SfntEdge], width: i64, height: i64, row_from: i64, row_end: i64) -> [u8]:
     var out: [u8] = [0u8; width * height]
-    var hits: [i64] = [0; width]
-    var xs: [f64] = [0.0; edges.len() + 1]
-    var dirs: [i64] = [0; edges.len() + 1]
+    var hits: [i64] = [0; width + 1]
+    var full: [i64] = [0; width + 1]
+    # Four crossing lists (one per sample scanline), `stride` apart.
+    val stride = edges.len() + 1
+    var xs: [f64] = [0.0; stride * 4]
+    var dirs: [i64] = [0; stride * 4]
+    var counts: [i64] = [0; 4]
+    var sys: [f64] = [0.0; 4]
+    val samples = width * 4
+    val last_sample = (samples - 1) as f64
     val rows = _edge_row_index(edges, height)
     var y: i64 = row_from
     while y < row_end:
-        var x: i64 = 0
-        while x < width:
-            hits[x] = 0
-            x = x + 1
         val row_end = rows[y + 1]
         var sample_y: i64 = 0
         while sample_y < 4:
-            val sy = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
-            var n: i64 = 0
-            var k = rows[y]
-            while k < row_end:
-                val edge = edges[rows[k]]
-                if edge.y_top <= sy and sy < edge.y_bottom:
-                    val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
-                    var at = n
-                    while at > 0 and xs[at - 1] > crossing:
-                        xs[at] = xs[at - 1]
-                        dirs[at] = dirs[at - 1]
-                        at = at - 1
-                    xs[at] = crossing
-                    dirs[at] = edge.direction
-                    n = n + 1
-                k = k + 1
-            if n > 0:
-                var p: i64 = 0
-                var winding: i64 = 0
-                var px: i64 = 0
-                while px < width:
-                    var sample_x: i64 = 0
-                    while sample_x < 4:
-                        val sx = px as f64 + (sample_x as f64 * 2.0 + 1.0) / 8.0
-                        while p < n and xs[p] <= sx:
-                            winding = winding + dirs[p]
-                            p = p + 1
-                        if winding != 0: hits[px] = hits[px] + 1
-                        sample_x = sample_x + 1
-                    px = px + 1
+            sys[sample_y] = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
+            counts[sample_y] = 0
             sample_y = sample_y + 1
+        var k = rows[y]
+        while k < row_end:
+            val edge = edges[rows[k]]
+            val y_top = edge.y_top
+            val y_bottom = edge.y_bottom
+            var s: i64 = 0
+            while s < 4:
+                val sy = sys[s]
+                if sy >= y_bottom:
+                    # sys ascends: no later scanline of this row meets the edge
+                    s = 4
+                else:
+                    if y_top <= sy:
+                        val crossing = edge.x_top + edge.dx_dy * (sy - y_top)
+                        val base = s * stride
+                        var at = counts[s]
+                        while at > 0 and xs[base + at - 1] > crossing:
+                            xs[base + at] = xs[base + at - 1]
+                            dirs[base + at] = dirs[base + at - 1]
+                            at = at - 1
+                        xs[base + at] = crossing
+                        dirs[base + at] = edge.direction
+                        counts[s] = counts[s] + 1
+                    s = s + 1
+            k = k + 1
+        sample_y = 0
+        while sample_y < 4:
+            val base = sample_y * stride
+            val n = counts[sample_y]
+            # Samples [run_from, first sample of crossing p) carry `winding`.
+            var winding: i64 = 0
+            var run_from: i64 = 0
+            var p: i64 = 0
+            while p <= n:
+                var run_to = samples
+                if p < n:
+                    val first = (xs[base + p] * 8.0 - 1.0) / 2.0
+                    if first <= 0.0:
+                        run_to = 0
+                    elif first <= last_sample:
+                        run_to = first as i64
+                        if (run_to as f64) < first:
+                            run_to = run_to + 1
+                if winding != 0 and run_to > run_from:
+                    val pa = run_from / 4
+                    val pb = run_to / 4
+                    if pa == pb:
+                        hits[pa] = hits[pa] + (run_to - run_from)
+                    else:
+                        hits[pa] = hits[pa] + (4 * (pa + 1) - run_from)
+                        full[pa + 1] = full[pa + 1] + 4
+                        full[pb] = full[pb] - 4
+                        hits[pb] = hits[pb] + (run_to - 4 * pb)
+                if p < n:
+                    winding = winding + dirs[base + p]
+                    run_from = run_to
+                p = p + 1
+            sample_y = sample_y + 1
+        var whole: i64 = 0
         var cx: i64 = 0
         while cx < width:
-            out[y * width + cx] = (hits[cx] * 255 / 16) as u8
+            whole = whole + full[cx]
+            out[y * width + cx] = ((hits[cx] + whole) * 255 / 16) as u8
+            hits[cx] = 0
+            full[cx] = 0
             cx = cx + 1
+        hits[width] = 0
+        full[width] = 0
         y = y + 1
     out
 
@@ -830,7 +930,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
     if meta.len() < 20: return
     if blob.len() == 0 or size_px <= 0 or size_px > 512:
         return
-    val font = match parse_offset_table(blob):
+    val font = match _sfnt_font_memo(blob):
         Some(value): value
         None: return
     var glyph_id: u32 = 0
@@ -864,7 +964,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
         metric_end = long_metrics * 4 + (glyph_id as i64 - long_metrics + 1) * 2
     if metric_end > hmtx_table.length as i64:
         return
-    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+    val parsed_outline = match _sfnt_outline_memo(font, glyph_id):
         Some(value): value
         None: return
     val horizontal = match _hmtx(font, long_metrics, glyph_id):
@@ -941,7 +1041,7 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
         return
     if size_px <= 0 or size_px > 512:
         return
-    val font = match parse_offset_table(blob):
+    val font = match _sfnt_font_memo(blob):
         Some(value): value
         None: return
     var glyph_id: u32 = 0
@@ -966,7 +1066,7 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
     val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
     if units_per_em == 0 or long_metrics == 0:
         return
-    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+    val parsed_outline = match _sfnt_outline_memo(font, glyph_id):
         Some(value): value
         None: return
     val horizontal = match _hmtx(font, long_metrics, glyph_id):
@@ -1010,7 +1110,7 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
 pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> bool:
     if size_px <= 0 or size_px > 512 or glyph_id <= 0 or glyph_id > 4294967295:
         return false
-    val font = match parse_offset_table(blob):
+    val font = match _sfnt_font_memo(blob):
         Some(value): value
         None: return false
     val head_table = match find_table(font, 1751474532):
@@ -1019,7 +1119,7 @@ pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> b
     val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
     if units_per_em == 0:
         return false
-    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id as u32):
+    val parsed_outline = match _sfnt_outline_memo(font, glyph_id as u32):
         Some(value): value
         None: return false
     val commands = parsed_outline.commands
@@ -1100,12 +1200,18 @@ fn _ceil_glyf(value: f64) -> i64:
 # Skia's analytic edges snap every line end to a quarter row
 # (SkAnalyticEdge SnapY, kDefaultAccuracy 2), so a hinted 16 px `H` bar whose
 # top is 1/16 px above a row boundary leaves that row white, as in Chrome.
-fn _lcd_snap_y(y: f64) -> f64:
-    (_floor_glyf(y * 4.0 + 0.5) as f64) / 4.0
-
 fn _lcd_area_line(mut a: [f64], stride: i64, height: i64, ax: f64, ay_raw: f64, bx: f64, by_raw: f64):
-    val ay = _lcd_snap_y(ay_raw)
-    val by = _lcd_snap_y(by_raw)
+    # Ends snap to a quarter row: floor(y * 4 + 0.5) / 4. Floors and ceilings
+    # are written out (a call costs ~2 us on the interpreter lane, more than
+    # the arithmetic); where the value is non-negative truncation is the floor.
+    val ay4 = ay_raw * 4.0 + 0.5
+    var ay_q = ay4 as i64
+    if (ay_q as f64) > ay4: ay_q = ay_q - 1
+    val ay = (ay_q as f64) / 4.0
+    val by4 = by_raw * 4.0 + 0.5
+    var by_q = by4 as i64
+    if (by_q as f64) > by4: by_q = by_q - 1
+    val by = (by_q as f64) / 4.0
     if ay == by: return
     var dir = 1.0
     var x0 = ax
@@ -1123,8 +1229,9 @@ fn _lcd_area_line(mut a: [f64], stride: i64, height: i64, ax: f64, ay_raw: f64, 
     var x = x0
     if y0 < 0.0:
         x = x - y0 * dxdy
-    var row: i64 = if y0 < 0.0: 0 else: _floor_glyf(y0)
-    var row_end = _ceil_glyf(y1)
+    var row: i64 = if y0 < 0.0: 0 else: y0 as i64
+    var row_end = y1 as i64
+    if (row_end as f64) < y1: row_end = row_end + 1
     if row_end > height: row_end = height
     val limit = (stride - 2) as f64
     while row < row_end:
@@ -1140,8 +1247,9 @@ fn _lcd_area_line(mut a: [f64], stride: i64, height: i64, ax: f64, ay_raw: f64, 
         if hi < 0.0: hi = 0.0
         if lo > limit: lo = limit
         if hi > limit: hi = limit
-        val lo_floor = _floor_glyf(lo)
-        val hi_ceil = _ceil_glyf(hi)
+        val lo_floor = lo as i64
+        var hi_ceil = hi as i64
+        if (hi_ceil as f64) < hi: hi_ceil = hi_ceil + 1
         if hi_ceil <= lo_floor + 1:
             val mid = 0.5 * (lo + hi) - lo_floor as f64
             a[base + lo_floor] = a[base + lo_floor] + d - d * mid
@@ -1191,31 +1299,27 @@ fn _lcd_area_quad(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64, cx: 
             return
     _lcd_area_quad_mono(a, stride, height, ax, ay, cx, cy, bx, by)
 
-fn _lcd_fdot8(v: f64) -> i64:
-    (v * 256.0) as i64
-
-fn _lcd_bit_length(v: i64) -> i64:
-    var n: i64 = 0
-    var x = v
-    while x > 0:
-        x = x / 2
-        n = n + 1
-    n
-
 fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64):
-    val x0 = _lcd_fdot8(ax)
-    val y0 = _lcd_fdot8(ay)
-    val x1 = _lcd_fdot8(cx)
-    val y1 = _lcd_fdot8(cy)
-    val x2 = _lcd_fdot8(bx)
-    val y2 = _lcd_fdot8(by)
+    # 24.8 fixed point, bit length and quarter-row snaps written out (see
+    # `_lcd_area_line`).
+    val x0 = (ax * 256.0) as i64
+    val y0 = (ay * 256.0) as i64
+    val x1 = (cx * 256.0) as i64
+    val y1 = (cy * 256.0) as i64
+    val x2 = (bx * 256.0) as i64
+    val y2 = (by * 256.0) as i64
     var ddx = (2 * x1 - x0 - x2) >> 2
     var ddy = (2 * y1 - y0 - y2) >> 2
     if ddx < 0: ddx = 0 - ddx
     if ddy < 0: ddy = 0 - ddy
     var dist = if ddx > ddy: ddx + ddy / 2 else: ddy + ddx / 2
     dist = (dist + 16) >> 5
-    var shift = _lcd_bit_length(dist) >> 1
+    var bits: i64 = 0
+    var rest = dist
+    while rest > 0:
+        rest = rest / 2
+        bits = bits + 1
+    var shift = bits >> 1
     if shift == 0: shift = 1
     if shift > 6: shift = 6
     val count = 1 << shift
@@ -1228,8 +1332,14 @@ fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64,
     var xs: [f64] = [0.0; count + 1]
     var ys: [f64] = [0.0; count + 1]
     xs[0] = sx
-    ys[0] = _lcd_snap_y(sy)
-    val last_y = _lcd_snap_y(ey)
+    val sy4 = sy * 4.0 + 0.5
+    var sy_q = sy4 as i64
+    if (sy_q as f64) > sy4: sy_q = sy_q - 1
+    ys[0] = (sy_q as f64) / 4.0
+    val ey4 = ey * 4.0 + 0.5
+    var ey_q = ey4 as i64
+    if (ey_q as f64) > ey4: ey_q = ey_q - 1
+    val last_y = (ey_q as f64) / 4.0
     var old_x = sx
     var old_y = sy
     var k: i64 = 1
@@ -1245,12 +1355,18 @@ fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64,
         var snap_y = 0.0
         var snap_x = nx
         if (step_y >= 2.0 or step_y <= -2.0) and (if step_y < 0.0: 0.0 - step_y else: step_y) * 64.0 > (if step_x < 0.0: 0.0 - step_x else: step_x):
-            snap_y = _floor_glyf(ny + 0.5) as f64
+            val nr = ny + 0.5
+            var nr_q = nr as i64
+            if (nr_q as f64) > nr: nr_q = nr_q - 1
+            snap_y = nr_q as f64
             if snap_y > last_y: snap_y = last_y
             if ny != prev_y:
                 snap_x = nx - (nx - prev_x) / (ny - prev_y) * (ny - snap_y)
         else:
-            snap_y = _lcd_snap_y(ny)
+            val n4 = ny * 4.0 + 0.5
+            var n4_q = n4 as i64
+            if (n4_q as f64) > n4: n4_q = n4_q - 1
+            snap_y = (n4_q as f64) / 4.0
             if snap_y > last_y: snap_y = last_y
         xs[k] = snap_x
         ys[k] = snap_y
@@ -1272,13 +1388,18 @@ fn _lcd_area_quad_mono(mut a: [f64], stride: i64, height: i64, ax: f64, ay: f64,
 # Signed area / cover cells of `commands` (font units) in the A8 sample grid:
 # x' = (x * scale - left) * 4, y' = -y * scale - top.
 fn _lcd_area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64) -> [f64]:
+    _area_cells(commands, scale, left, top, stride, height, _SFNT_LCD_A8_PER_PX)
+
+# Signed area cells at `per_px` samples per pixel horizontally (4 = the LCD
+# A8 row, 1 = whole-pixel exact area for gray glyphs).
+fn _area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, stride: i64, height: i64, per_px: i64) -> [f64]:
     var a: [f64] = [0.0; stride * height]
     var pen_x = 0.0
     var pen_y = 0.0
     var move_x = 0.0
     var move_y = 0.0
-    val sx = scale * _SFNT_LCD_A8_PER_PX as f64
-    val lx = left * _SFNT_LCD_A8_PER_PX as f64
+    val sx = scale * per_px as f64
+    val lx = left * per_px as f64
     for command in commands:
         val x1 = command.x1 * sx - lx
         val y1 = -command.y1 * scale - top
@@ -1317,9 +1438,18 @@ fn _lcd_area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64,
 var _lcd_hint_cache: Dict<text, [f64]> = {}
 
 fn _hint_glyph_y_extent(font: OtFont, codepoint: i64) -> [f64]:
+    if not _sfnt_memo_holds(font.blob):
+        return _hint_glyph_y_extent_parsed(font, codepoint)
+    if val Some(hit) = _sfnt_memo_extents.get(codepoint):
+        return hit
+    val extent = _hint_glyph_y_extent_parsed(font, codepoint)
+    _sfnt_memo_extents[codepoint] = extent
+    extent
+
+fn _hint_glyph_y_extent_parsed(font: OtFont, codepoint: i64) -> [f64]:
     val gid = sfnt_cmap_glyph_id(font, codepoint as u32)
     if gid == 0: return []
-    val outline = match parse_sfnt_glyf_outline(font, gid):
+    val outline = match _sfnt_outline_memo(font, gid):
         Some(value): value
         None: return []
     val bounds = match _outline_bounds(outline.commands):
@@ -1770,6 +1900,19 @@ fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [Sfn
 pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
     sfnt_render_glyph_lcd_milli(blob, selector_kind, selector_value, size_px, 0, phase_q)
 
+# Chrome 159's font-cache-key size of a computed `font-size` (milli-px), in
+# 26.6 (1/64 px). Blink keys its font cache on `trunc(f32(size) * 100)` and
+# Skia hands FreeType that size truncated to 26.6, so 18.72 px rasterises at
+# 1197/64 (font_cache_key_size_chrome159_spec). Every text lane takes its
+# fractional size from here.
+# reason: milli-px in, 1/64-px out; consumed by font_renderer and the raster lane.
+# @allow(primitive_api)
+pub fn sfnt_font_cache_key_size_26_6(size_milli: i64) -> i64:
+    val size: f32 = ((size_milli as f64) / 1000.0) as f32
+    val hundredths = (size * (100.0 as f32)) as i64
+    val keyed: f32 = ((hundredths as f64) / 100.0) as f32
+    (keyed * (64.0 as f32)) as i64
+
 # Fractional-size twin (`font-size: 18.72px`). `x_milli` is the computed size
 # in milli-px; 0 or a whole `size_px * 1000` is the plain whole-px glyph.
 # Measured against Chrome 159 (Liberation Sans/Serif, 1x): 18.72 px and 19 px
@@ -1808,11 +1951,24 @@ class SfntLcdOutline:
 # text_layout/font_renderer.spl, so it must be public.
 # @allow(primitive_api)
 pub fn sfnt_lcd_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64) -> Option<SfntLcdOutline>:
+    _glyph_outline(blob, selector_kind, selector_value, size_px, x_milli, false)
+
+# The same outline for a GRAYSCALE glyph above the LCD cutoff: unhinted, framed
+# like `sfnt_render_glyph_into` (`_gray_frame`, baseline anchored), so the
+# quarter-phase cells `sfnt_gray_outline_raster` builds sit on the rows the
+# 4x4 path used. A glyph drawn at several phases parses and frames once.
+# reason: SFNT selector/size scalars are the font-table domain; consumed by
+# text_layout/font_renderer.spl.
+# @allow(primitive_api)
+pub fn sfnt_gray_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64) -> Option<SfntLcdOutline>:
+    _glyph_outline(blob, selector_kind, selector_value, size_px, x_milli, true)
+
+fn _glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64, gray: bool) -> Option<SfntLcdOutline>:
     if size_px <= 0 or size_px > 512:
         return None
     if x_milli < 0 or x_milli > 512000:
         return None
-    val font = match parse_offset_table(blob):
+    val font = match _sfnt_font_memo(blob):
         Some(value): value
         None: return None
     var glyph_id: u32 = 0
@@ -1836,24 +1992,33 @@ pub fn sfnt_lcd_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i6
     val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
     if units_per_em == 0 or long_metrics == 0:
         return None
-    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+    val parsed_outline = match _sfnt_outline_memo(font, glyph_id):
         Some(value): value
         None: return None
     val horizontal = match _hmtx(font, long_metrics, glyph_id):
         Some(value): value
         None: return None
     val x_frac = x_milli > 0 and x_milli != size_px * 1000
-    val x_ratio = if x_frac: x_milli as f64 / (size_px * 1000) as f64 else: 1.0
-    val commands = if x_frac: _scale_commands_x(parsed_outline.commands, x_ratio) else: parsed_outline.commands
+    # A gray glyph is unhinted: its float size scales both axes (y too).
+    val gray_frac = gray and x_frac
+    val x_ratio = if x_frac and not gray_frac: x_milli as f64 / (size_px * 1000) as f64 else: 1.0
+    val commands = if x_frac and not gray_frac: _scale_commands_x(parsed_outline.commands, x_ratio) else: parsed_outline.commands
     val bounds = match _outline_bounds(commands):
         Some(value): value
         None: return None
-    val scale = size_px as f64 / units_per_em as f64
+    val scale = if gray_frac: x_milli as f64 / (1000 * units_per_em) as f64 else: size_px as f64 / units_per_em as f64
     var height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
     var raster_top = -bounds.bottom * scale
     var bearing_y = _round_glyf_metric(bounds.top * scale)
     var draw_commands = commands
-    val knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
+    if gray:
+        val frame = _gray_frame(bounds, scale, size_px)
+        height = frame.height
+        raster_top = 0.0 - frame.top
+        bearing_y = frame.bearing_y
+    var knots: [f64] = []
+    if not gray:
+        knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
     if knots.len() > 0:
         draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
         val hinted = match _outline_bounds(draw_commands):
@@ -1914,16 +2079,27 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
         var first: i64 = samples
         var last: i64 = 0
         var s: i64 = 0
+        # A zero cell leaves `acc`, so the sample keeps the previous value;
+        # `cov * 255 + 0.5` is >= 0.5, where truncation is `_floor_glyf`.
+        var v: i64 = 0
+        val row_at = y * stride
         while s < samples:
-            acc = acc + cells[y * stride + s]
-            var cov = if acc < 0.0: 0.0 - acc else: acc
-            if cov > 1.0: cov = 1.0
-            val v = _floor_glyf(cov * 255.0 + 0.5)
+            val cell = cells[row_at + s]
+            if cell != 0.0:
+                acc = acc + cell
+                var cov = if acc < 0.0: 0.0 - acc else: acc
+                if cov > 1.0: cov = 1.0
+                val nv = (cov * 255.0 + 0.5) as i64
+                # `v` changes only here, so the inked extent is tracked at the
+                # changes: the first rise, and the end of the last run.
+                if nv > 0:
+                    if first == samples: first = s
+                else if v > 0:
+                    last = s
+                v = nv
             a8[s + 4] = v
-            if v > 0:
-                if s < first: first = s
-                last = s + 1
             s = s + 1
+        if v > 0: last = samples
         # Skia pack4xHToMask: output pixel x reads A8 samples 4x-4 .. 4x+7
         # (one pixel each side), so pixels more than one pixel away from any
         # coverage stay the 0 they were allocated as.
@@ -1932,32 +2108,46 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
             if x < 0: x = 0
             var x_end: i64 = (last + _SFNT_LCD_A8_PER_PX - 1) / _SFNT_LCD_A8_PER_PX + 1
             if x_end > width: x_end = width
+            # Skia pack4xHToMask taps (table above), unrolled, zero taps dropped.
+            # The 12-sample window slides by 4: eight taps carry over, four
+            # are read; g is symmetric, so its pairs are summed first.
+            var b = x * _SFNT_LCD_A8_PER_PX
+            var s0 = a8[b]
+            var s1 = a8[b + 1]
+            var s2 = a8[b + 2]
+            var s3 = a8[b + 3]
+            var s4 = a8[b + 4]
+            var s5 = a8[b + 5]
+            var s6 = a8[b + 6]
+            var s7 = a8[b + 7]
+            var o = y * subpixels + x * 3
+            var gi = y * width + x
             while x < x_end:
-                # Skia pack4xHToMask taps (table above), unrolled, zero taps dropped.
-                val b = x * _SFNT_LCD_A8_PER_PX
-                val s0 = a8[b]
-                val s1 = a8[b + 1]
-                val s2 = a8[b + 2]
-                val s3 = a8[b + 3]
-                val s4 = a8[b + 4]
-                val s5 = a8[b + 5]
-                val s6 = a8[b + 6]
-                val s7 = a8[b + 7]
                 val s8 = a8[b + 8]
                 val s9 = a8[b + 9]
                 val s10 = a8[b + 10]
                 val s11 = a8[b + 11]
                 var r = (3 * s0 + 11 * s1 + 28 * s2 + 51 * s3 + 64 * s4 + 57 * s5 + 36 * s6 + 16 * s7 + 5 * s8 + s9) / 256
-                var g = (2 * s1 + 8 * s2 + 22 * s3 + 43 * s4 + 61 * s5 + 61 * s6 + 43 * s7 + 22 * s8 + 8 * s9 + 2 * s10) / 256
+                var g = (2 * (s1 + s10) + 8 * (s2 + s9) + 22 * (s3 + s8) + 43 * (s4 + s7) + 61 * (s5 + s6)) / 256
                 var bl = (s2 + 5 * s3 + 16 * s4 + 36 * s5 + 57 * s6 + 64 * s7 + 51 * s8 + 28 * s9 + 11 * s10 + 3 * s11) / 256
                 if r > 255: r = 255
                 if g > 255: g = 255
                 if bl > 255: bl = 255
-                val o = y * subpixels + x * 3
                 rgb[o] = r as u8
                 rgb[o + 1] = g as u8
                 rgb[o + 2] = bl as u8
-                gray[y * width + x] = ((r + g + bl + 1) / 3) as u8
+                gray[gi] = ((r + g + bl + 1) / 3) as u8
+                s0 = s4
+                s1 = s5
+                s2 = s6
+                s3 = s7
+                s4 = s8
+                s5 = s9
+                s6 = s10
+                s7 = s11
+                b = b + 4
+                o = o + 3
+                gi = gi + 1
                 x = x + 1
         y = y + 1
     Some(SfntLcdGlyph(
@@ -1966,6 +2156,69 @@ pub fn sfnt_lcd_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<
         slg_bearing_x: x0,
         slg_bearing_y: outline.slo_bearing_y,
         slg_gray: gray, slg_rgb: rgb))
+
+# Grayscale glyph above the LCD size cutoff at a Skia quarter phase (Chrome
+# 159, measured 2026-11-24: gray_glyph_subpixel_area_chrome159_spec), from
+# `sfnt_gray_glyph_outline` (same vertical frame and unhinted outline as
+# `sfnt_render_glyph_into`). Horizontally the outline keeps its true
+# pen-relative x (`slg_bearing_x` names column 0, shifted right by phase_q/4
+# px) and coverage is the exact pixel area (one area sample per pixel), not
+# the 4x4 supersample's 17 levels. `slg_rgb` is empty.
+# Metrics of the cell `sfnt_gray_outline_raster` builds at `phase_q`, without
+# the raster: [width, height, bearing_x, bearing_y], or [] where the raster
+# answers None.
+# reason: Skia's quarter-pixel index and whole device px are the font-table
+# domain; consumed by text_layout/font_renderer.spl.
+# @allow(primitive_api)
+pub fn sfnt_gray_outline_frame(outline: SfntLcdOutline, phase_q: i64) -> [i64]:
+    if phase_q < 0 or phase_q > 3:
+        return []
+    val phase = phase_q as f64 / 4.0
+    val x0 = _floor_glyf(outline.slo_left * outline.slo_scale + phase)
+    val width = _ceil_glyf(outline.slo_right * outline.slo_scale + phase) - x0
+    val height = outline.slo_height
+    if width <= 0 or height <= 0 or width > 4096 or height > 4096:
+        return []
+    [width, height, x0, outline.slo_bearing_y]
+
+# reason: SFNT selector/size scalars and Skia's quarter-pixel index are the
+# font-table domain; consumed by text_layout/font_renderer.spl.
+# @allow(primitive_api)
+pub fn sfnt_gray_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option<SfntLcdGlyph>:
+    val frame = sfnt_gray_outline_frame(outline, phase_q)
+    if frame.len() != 4:
+        return None
+    val scale = outline.slo_scale
+    val phase = phase_q as f64 / 4.0
+    val width = frame[0]
+    val height = frame[1]
+    val x0 = frame[2]
+    val stride = width + 2
+    val cells = _area_cells(outline.slo_commands, scale, x0 as f64 - phase, outline.slo_raster_top, stride, height, 1)
+    var gray: [u8] = [0u8; width * height]
+    var y: i64 = 0
+    while y < height:
+        var acc = 0.0
+        var x: i64 = 0
+        val row_at = y * stride
+        val gi = y * width
+        # A zero cell leaves `acc`, so the pixel keeps the previous value.
+        var v: u8 = 0u8
+        while x < width:
+            val cell = cells[row_at + x]
+            if cell != 0.0:
+                acc = acc + cell
+                var cov = if acc < 0.0: 0.0 - acc else: acc
+                if cov > 1.0: cov = 1.0
+                v = (cov * 255.0 + 0.5) as u8
+            if v != 0u8:
+                gray[gi + x] = v
+            x = x + 1
+        y = y + 1
+    Some(SfntLcdGlyph(
+        slg_width: width, slg_height: height, slg_advance: 0,
+        slg_bearing_x: x0, slg_bearing_y: outline.slo_bearing_y,
+        slg_gray: gray, slg_rgb: []))
 
 # Blob-level batch glyph-id resolution: one table-directory parse and one cmap
 # parse for the whole `codepoints` array. See `sfnt_cmap_glyph_ids_into`.

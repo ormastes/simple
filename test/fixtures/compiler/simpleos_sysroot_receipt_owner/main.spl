@@ -1,0 +1,67 @@
+# Native bootstrap diagnostic, not an admitted runtime test or SDK qualification.
+# Run from the private real fixture's source directory (see README.md).
+use std.io_runtime.{env_get, env_set, file_read, file_write, file_read_bytes, file_write_bytes}
+use compiler.backend.simpleos_sysroot_receipt.{simpleos_sdk_receipt_decode_v1,
+    simpleos_sysroot_validate_sdk_v1, simpleos_user_receipt_inputs_v1,
+    simpleos_caller_input_digest_v1}
+
+fn probe_check(condition: bool, label: text) -> i64:
+    if not condition: panic("SDK owner native diagnostic failed: " + label)
+    1
+
+fn main():
+    val fixture = env_get("SIMPLEOS_SDK_PROBE_FIXTURE") ?? ""
+    var assertions = probe_check(fixture != "" and fixture.contains("/build/verify/sysroot-receipt.") and not fixture.contains("/../") and file_read(fixture + "/bootstrap-owner-run/marker.txt") == "fresh-private-sdk-owner-native-probe\n", "fresh private fixture wrapper marker and bounded path")
+    val sdk = fixture + "/sdk"
+    val source = fixture + "/source"
+    assertions = assertions + probe_check(env_set("SIMPLE_NATIVE_BUILD_TARGET", "i686-unknown-simpleos"), "select real ELF32 SDK route")
+    assertions = assertions + probe_check(env_set("SIMPLEOS_SYSROOT_I686", sdk), "select private SDK")
+    assertions = assertions + probe_check(env_set("SIMPLE_NATIVE_BUILD_LINKER_SCRIPT", ""), "clear inherited native script")
+    assertions = assertions + probe_check(env_set("SIMPLE_LINKER_SCRIPT", ""), "select SDK script")
+    assertions = assertions + probe_check(env_set("SIMPLE_SIMPLE_CORE_PATH", ""), "clear unrelated compiler runtime override")
+    val receipt = file_read(sdk + "/share/simpleos/sysroot-receipt.sdn")
+    val fields = simpleos_sdk_receipt_decode_v1(receipt, "i686").unwrap()
+    assertions = assertions + probe_check(fields.len() == 19, "consume complete nineteen-field receipt")
+    assertions = assertions + probe_check(fields["runtime_qualification"] == "none", "do not qualify fixture runtime")
+    assertions = assertions + probe_check(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source).is_ok(), "accept valid real ELF and archive receipt")
+    val before = simpleos_user_receipt_inputs_v1().unwrap()
+    assertions = assertions + probe_check(before.len() == 2, "consume SDK receipt and SDK script rows")
+    assertions = assertions + probe_check(before[0].starts_with("sdk|sdk-receipt|"), "SDK receipt identity")
+    assertions = assertions + probe_check(before[1].starts_with("sdk|linker-script|"), "SDK script identity")
+    assertions = assertions + probe_check(simpleos_user_receipt_inputs_v1().unwrap().join("\n") == before.join("\n"), "unchanged pre/post observations")
+
+    val aggregate_path = sdk + "/lib/libsimpleos_all.a"
+    val aggregate = file_read_bytes(aggregate_path)
+    var altered = file_read_bytes(aggregate_path)
+    altered.push(0u8)
+    assertions = assertions + probe_check(file_write_bytes(aggregate_path, altered), "mutate actually consumed aggregate")
+    val bad_archive = simpleos_sysroot_validate_sdk_v1(sdk, "i686", source)
+    val bad_archive_rows = simpleos_user_receipt_inputs_v1()
+    assertions = assertions + probe_check(file_write_bytes(aggregate_path, aggregate), "restore aggregate")
+    assertions = assertions + probe_check(bad_archive.is_err(), "reject changed real aggregate bytes")
+    assertions = assertions + probe_check(bad_archive_rows.is_err(), "pre/post owner rejects stale aggregate")
+
+    val sdk_script = sdk + "/share/simpleos/simpleos.ld"
+    val script = file_read(sdk_script)
+    assertions = assertions + probe_check(file_write(sdk_script, "ENTRY(changed_sdk_entry)\n"), "mutate SDK-owned script")
+    val bad_script = simpleos_sysroot_validate_sdk_v1(sdk, "i686", source)
+    val bad_script_rows = simpleos_user_receipt_inputs_v1()
+    assertions = assertions + probe_check(file_write(sdk_script, script), "restore SDK script")
+    assertions = assertions + probe_check(bad_script.is_err(), "reject changed SDK-owned script bytes")
+    assertions = assertions + probe_check(bad_script_rows.is_err(), "pre/post owner rejects stale SDK script")
+
+    val caller_script = fixture + "/caller-script.ld"
+    assertions = assertions + probe_check(file_write(caller_script, "ENTRY(caller_one)\n"), "create distinct caller script")
+    assertions = assertions + probe_check(env_set("SIMPLE_LINKER_SCRIPT", caller_script), "select caller script")
+    assertions = assertions + probe_check(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source, "", "", caller_script).is_ok(), "preserve arbitrary caller script")
+    val caller_before = simpleos_user_receipt_inputs_v1().unwrap()
+    assertions = assertions + probe_check(caller_before[1].starts_with("caller|linker-script|"), "caller script is not SDK-owned")
+    val caller_digest = simpleos_caller_input_digest_v1(caller_script, 2097152).unwrap()
+    assertions = assertions + probe_check(file_write(caller_script, "ENTRY(caller_two)\n"), "mutate selected caller script")
+    val caller_after = simpleos_user_receipt_inputs_v1().unwrap()
+    assertions = assertions + probe_check(caller_after[0] == caller_before[0], "SDK identity unchanged by caller edit")
+    assertions = assertions + probe_check(caller_after[1] != caller_before[1], "reject caller edit as stable pre/post identity")
+    assertions = assertions + probe_check(simpleos_caller_input_digest_v1(caller_script, 2097152).unwrap() != caller_digest, "hash actual changed caller bytes")
+    assertions = assertions + probe_check(env_set("SIMPLE_LINKER_SCRIPT", ""), "restore SDK script selection")
+    assertions = assertions + probe_check(simpleos_user_receipt_inputs_v1().unwrap().join("\n") == before.join("\n"), "restore original valid SDK observation")
+    print "simpleos-sdk-owner-native-ok assertions={assertions} qualification=none"

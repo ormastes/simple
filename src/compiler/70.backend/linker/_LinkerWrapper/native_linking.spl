@@ -680,6 +680,10 @@ fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
 # @workaround bug=rti007_any_return_rows_2026-11-01 reason=bare Result return is Any in interface row (E-RTI-007); spell Result<text, text>
 pub fn link_simpleos_internal(object_files: [text], output: text, target: text,
         config: NativeLinkConfig) -> Result<text, text>:
+    native_link_output_v1(link_simpleos_internal_with_engine_v1(object_files, output, target, config))
+
+pub fn link_simpleos_internal_with_engine_v1(object_files: [text], output: text, target: text,
+        config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
     """Host-independent production facade for the internal SimpleOS linker."""
     val unsupported_field = internal_simpleos_unsupported_config_field(config)
     if unsupported_field != "":
@@ -687,7 +691,9 @@ pub fn link_simpleos_internal(object_files: [text], output: text, target: text,
     val provider_error = native_runtime_provider_selection_error_for_config_platform(config, false)
     if provider_error != "":
         return Err(link_error_detail("simpleos-runtime-provider-selection", provider_error))
-    internal_link_simpleos(object_files, output, target, config)
+    # This implementation publishes through the in-house BootLayoutPlan/ELF
+    # engines only; it has no external linker fallback.
+    native_link_success_v1(internal_link_simpleos(object_files, output, target, config), "internal:simpleos")
 
 struct InternalSimpleOsFlags:
     script: text
@@ -1505,7 +1511,7 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
     val i386_script = target_arch == RelocArch.I386 and boot_plan.sections.len() > 0
     if elf32 and not i386_script:
         return internal_link_simpleos_elf32(objects, archives, boot_plan, target_arch,
-            flags.gc_sections, output, config)
+            flags.gc_sections, flags.wraps, output, config)
     val linked = elf_boot_link_archives_policy(objects, archives, boot_plan,
         target_arch, config.strip_output, config.retained_symbols,
         flags.gc_sections, flags.wraps)
@@ -1522,7 +1528,7 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
 # upgrade path for arm32/riscv32: ELF32 in elf_boot_link for those machines.
 fn internal_link_simpleos_elf32(objects: [[i64]], archives: [[i64]],
         plan: BootLayoutPlan, target_arch: RelocArch, gc_sections: bool,
-        output: text, config: NativeLinkConfig) -> Result<text, text>:
+        wraps: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     if plan.sections.len() > 0:
         return Err("internal engine: 32-bit SimpleOS user links take no SECTIONS script (ENTRY/INPUT only)")
     var obj_bytes: [[u8]] = []
@@ -1539,7 +1545,7 @@ fn internal_link_simpleos_elf32(objects: [[i64]], archives: [[i64]],
     val operations = elf_builtin_file_operations_v1()?
     val request = ElfLinkRequest(objects: obj_bytes, archives: ar_bytes, shared: [],
         entry: entry, target: target_arch, mode: ELF_LINK_STATIC_EXEC, interp: "",
-        gc_sections: gc_sections)
+        gc_sections: gc_sections, wraps: wraps)
     val linked = elf_link_with_operations(request, config.strip_output,
         config.retained_symbols, operations)
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")

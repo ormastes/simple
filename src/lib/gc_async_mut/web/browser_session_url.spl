@@ -9,7 +9,8 @@
 # - find_text: low-level substring search used by many helpers
 
 use std.common.binary_inspect.{percent_hex_encode_byte}
-use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.string_core.{text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.base_encoding.base64.{base64_decode_bytes}
 use std.common.encoding.utf8.{
     text_is_valid_utf8, text_without_last_codepoint
@@ -633,8 +634,9 @@ fn browser_data_url_decode(url: text) -> BrowserDataUrl?:
     val mime_part = if is_base64: header.slice(0, header.byte_len() - 7) else: header
     val mime = if mime_part.trim() == "": "text/plain" else: mime_part.trim()
     val decoded = _data_url_percent_decode(payload)
-    val body = if is_base64:
-        base64_decode_bytes(bytes_to_text(decoded))
-    else:
-        decoded
-    Some(BrowserDataUrl(mime: mime, body: body))
+    if not is_base64:
+        return Some(BrowserDataUrl(mime: mime, body: decoded))
+    # A base64 payload that is not valid UTF-8 is malformed: reject the URL.
+    match bytes_to_text_checked(decoded):
+        case Ok(b64): Some(BrowserDataUrl(mime: mime, body: base64_decode_bytes(b64)))
+        case Err(_): None

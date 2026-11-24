@@ -21,7 +21,7 @@ use super::types_util::type_to_cranelift;
 // dependency-free source rather than importing this module's HIR/MIR owners.
 #[path = "function_alignment.rs"]
 mod function_alignment;
-pub use function_alignment::{define_function_aligned, MIN_FUNCTION_ALIGNMENT};
+pub use function_alignment::{compile_aligned, define_compiled, define_function_aligned, MIN_FUNCTION_ALIGNMENT};
 
 /// Stable runtime type ID shared by native enum constructors and match checks.
 /// IDs 0 and 1 are reserved for the built-in Result and Option types.
@@ -503,7 +503,9 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
     let mut seen = HashSet::new();
 
     for func in &mir.functions {
-        let live_ins_map = func.compute_live_ins();
+        // Liveness only matters for functions that own an outlined body;
+        // computing it for all ~4,300 JIT functions cost ~150 ms of startup.
+        let mut live_ins_map = None;
         for block in &func.blocks {
             for (inst_index, inst) in block.instructions.iter().enumerate() {
                 if let Some((body_block, kind, lambda_params, capture_regs, lambda_return_type)) = get_body_kind(inst) {
@@ -526,7 +528,7 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
                         kind,
                         &lambda_params,
                         &capture_local_indices,
-                        &live_ins_map,
+                        live_ins_map.get_or_insert_with(|| func.compute_live_ins()),
                         &mut functions,
                         lambda_return_type,
                     );

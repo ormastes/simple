@@ -403,6 +403,21 @@ and [bootstrap_options.md](../../doc/07_guide/tooling/bootstrap_options.md) for 
    - Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner.
    - Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
 
+## Seed build script (2026-11-24)
+
+`bin/simple.exe` is a legacy git-tracked seed and goes stale; do not commit new
+seed binaries. Build one with `sh scripts/setup/build-seed.shs` (pinned nightly
+from `rust-toolchain.toml`; Windows default = `x86_64-pc-windows-gnu` +
+llvm-mingw UCRT clang, `--msvc` = msvc + clang-cl; clang elsewhere, never gcc;
+`--locked --profile bootstrap -p simple-driver`, `SEED_JOBS` default 4). It
+installs atomically to the gitignored `bin/local/simple.exe` (point
+`SIMPLE_BINARY` at it); `--in-place` overwrites the tracked `bin/simple.exe`
+and warns not to commit it. A locked target fails with exit 1 and no temp
+left behind. The seed source revision goes to the untracked `<dest>.seed-rev`.
+`--check` reports FRESH/STALE/DIRTY/UNKNOWN against the last commit and any
+uncommitted change under `src/compiler_rust`/`src/runtime` (exit 0/1/1/2;
+setup.shs prints it); `--selftest` runs 8 fixtures.
+
 ## Bootstrap Commands
 ```bash
 # Fast zero-compile verification of protected bootstrap scripts + alive path matrix:

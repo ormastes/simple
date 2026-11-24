@@ -720,8 +720,8 @@ fn process_observation_owner_poll_turn_v1(
     for byte in stderr_chunk: lease.stderr_bytes.push(byte)
     lease.native_error = Some(words[16])
     lease.stream_counts_observed = words[16] == 0
-    lease.terminal_observed = nil
-    lease.cancel_requested = nil
+    lease.terminal_observed = None
+    lease.cancel_requested = None
     if words[16] == 0:
         lease.terminal_observed = Some(words[2] != 0)
         lease.cancel_requested = Some(words[3] != 0)
@@ -947,6 +947,8 @@ extern fn rt_process_session_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_session_is_running(pid: i64) -> i64
 @unsafe(reason: "SIGKILL every process in the leader's session and reap the leader; 0 success, else -errno / -100000 / -100001 / -100002 (leader reaped, second sweep failed)", capabilities: [ffi])
 extern fn rt_process_kill_tree(pid: i64) -> i64
+@unsafe(reason: "child-side parent-death signal; 0 armed, -errno failed, -100000 no arm on this host", capabilities: [ffi])
+extern fn rt_child_set_pdeathsig(signo: i32) -> i64
 @unsafe(reason: "raw piped-child spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
 extern fn rt_browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64
@@ -3348,6 +3350,19 @@ pub fn process_kill_tree(pid: i64) -> bool:
         case Err(reason):
             eprint("[process_kill_tree] {reason}")
             false
+
+# Child side: ask the kernel to SIGKILL this process when the parent that
+# spawned it exits (Linux prctl(PR_SET_PDEATHSIG), FreeBSD procctl). The arm
+# survives exec but not fork, and a parent that died BEFORE the call never
+# triggers it, so the caller checks afterwards that the parent it expects is
+# still there. 0 armed, -errno failed, PROCESS_PARENT_DEATH_UNSUPPORTED when
+# this host has no arm (macOS, Windows): the caller keeps running unarmed.
+pub const PROCESS_PARENT_DEATH_UNSUPPORTED: i64 = -100000
+
+# @allow(primitive_api) — raw runtime_process_tree.c status code (0 / -errno / -100000 sentinel ABI)
+pub fn process_arm_parent_death_kill() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_child_set_pdeathsig(9)
 
 pub fn _process_kill_group(pgid_file: text):
     # Best effort: the session leader recorded its pid (= the SESSION id of the

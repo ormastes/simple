@@ -46,6 +46,8 @@ use .smf_cache_manager.{
 }
 use .smf_cache.{validated_smf_load}
 use os.smf.smf_generation.{GenerationState, CandidateMapping, SymbolSwap, LifecycleManager}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry}
+use compiler.loader.hot_swap_pin.{HotSwapSlot, HotSwapRead, hot_swap_slot_load, hot_swap_try, hot_swap_read_begin, hot_swap_reclaim}
 
 export use .module_loader_services.{
     moduleloader_ensure_compiler_ctx, moduleloader_ensure_obj_taker,
@@ -187,6 +189,9 @@ struct LazyModuleLoader:
     semantic_exports: Dict<text, [text]>
     # Public ABI/accessor semantic keys each module compiled against.
     semantic_dependencies: Dict<text, [text]>
+    # RB-LOAD-02: hot-swap slots of pinned modules (path -> slot). A pinned
+    # path is live-replaced only through hot_swap_try at the commit point.
+    hot_swap_slots: Dict<text, HotSwapSlot>
 
 
 # ============================================================================
@@ -217,7 +222,8 @@ fn lazymoduleloader_new(config: LazyModuleLoaderConfig) -> LazyModuleLoader:
             native_group_data_sections: {},
             config: config,
             semantic_exports: {},
-            semantic_dependencies: {}
+            semantic_dependencies: {},
+            hot_swap_slots: {}
         )
 
 
@@ -595,6 +601,20 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
             moduleloader_unmap_internal_symbols(self, internal_symbols)
             return LoadResult.Error(message: "Candidate not ready after relocation for {path}")
 
+        # RB-LOAD-02 commit point: the candidate is mapped and relocated, so a
+        # pinned module swaps its slot generation only now. A refusal unmaps
+        # the candidate and keeps the old module and slot image; nothing after
+        # this point can fail, so no rollback is needed.
+        if self.hot_swap_slots.has(path):
+            val slot = self.hot_swap_slots[path]
+            val _stale = hot_swap_reclaim(slot)
+            val swapped = hot_swap_try(slot, slot.current_generation(), module_bytes_result.unwrap())
+            if swapped.is_err():
+                self.modules[path] = old_module
+                moduleloader_unmap_internal_symbols(self, internal_symbols)
+                return LoadResult.Error(message: swapped.unwrap_err())
+            val _freed = hot_swap_reclaim(slot)
+
         # Promote candidate generation state.
         val gen_active = gen_candidate.promote()
         gen_lm = gen_lm.promote_candidate()
@@ -640,6 +660,27 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
 
         LoadResult.Success(module: candidate)
 
+
+# RB-LOAD-02 loader entry: pin a loaded SMF module to `row`; its current
+# artifact bytes become slot generation 0 (identity-admitted, no fallback).
+# Ok = the pinned generation; Err = the loader diagnostic text.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn moduleloader_pin_hot_swap(self: LazyModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
+    if not self.modules.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-LOADED: {path}")
+    val bytes = moduleloader_ensure_provider(self).get_module_bytes(path)?
+    val slot = hot_swap_slot_load(row, bytes)?
+    self.hot_swap_slots[path] = slot
+    Ok(slot.current_generation())
+
+# Per-call reader pin on a pinned module's current image.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn moduleloader_hot_swap_read_begin(self: LazyModuleLoader, path: text) -> Result<HotSwapRead, text>:
+    if not self.hot_swap_slots.has(path):
+        return Err("SMF-E-HOTSWAP-NOT-PINNED: {path}")
+    hot_swap_read_begin(self.hot_swap_slots[path])
 
 fn moduleloader_resolve_symbol(self: LazyModuleLoader, name: text) -> SymbolResult:
         """Resolve a symbol, JIT-compiling if necessary."""

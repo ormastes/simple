@@ -9,7 +9,8 @@
 #   | source_manifest_sha256:64 ASCII | material_sha256:64 ASCII
 #   | revision:u64-le
 
-use std.common.base_encoding.utilities.{base_encoding_bytes_to_text as bytes_to_text, base_encoding_text_to_bytes as text_to_bytes}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes as text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 pub val THEME_CHANGED_V1_METHOD: u32 = 4u32
 pub val THEME_CHANGED_V1_VERSION: u8 = 1u8
@@ -72,7 +73,10 @@ fn _theme_changed_id_bytes(theme_id: text) -> Result<[u8], text>:
         return Err("theme_changed_v1: canonical_theme_id exceeds 128 UTF-8 bytes")
     if theme_id.strip() != theme_id:
         return Err("theme_changed_v1: canonical_theme_id has surrounding whitespace")
-    if bytes_to_text(raw) != theme_id or not _theme_notification_bytes_equal(text_to_bytes(bytes_to_text(raw)), raw):
+    val round_trip: text = match bytes_to_text_checked(raw):
+        case Ok(t): t
+        case Err(_): return Err("theme_changed_v1: canonical_theme_id is not canonical UTF-8")
+    if round_trip != theme_id:
         return Err("theme_changed_v1: canonical_theme_id is not canonical UTF-8")
     var i = 0
     while i < raw.len():
@@ -154,6 +158,11 @@ pub fn theme_changed_v1_encode(message: ThemeChangedV1) -> Result<[u8], text>:
     out = _theme_changed_push_u64_le(out, message.revision)
     Ok(out)
 
+fn _theme_changed_utf8(raw: [u8], field: text) -> Result<text, text>:
+    match bytes_to_text_checked(raw):
+        case Ok(t): Ok(t)
+        case Err(e): Err("theme_changed_v1: {field} has malformed UTF-8 at byte {e.byte_offset}")
+
 pub fn theme_changed_v1_decode(bytes: [u8]) -> Result<ThemeChangedV1, text>:
     if bytes.len() < THEME_CHANGED_V1_MIN_PAYLOAD_BYTES:
         return Err("theme_changed_v1: truncated payload")
@@ -180,13 +189,19 @@ pub fn theme_changed_v1_decode(bytes: [u8]) -> Result<ThemeChangedV1, text>:
     val material_offset = source_offset + THEME_CHANGED_V1_HASH_BYTES
     val revision_offset = material_offset + THEME_CHANGED_V1_HASH_BYTES
     val id_raw = _theme_changed_copy(bytes, id_offset, id_len)
-    val canonical_theme_id = bytes_to_text(id_raw)
+    val canonical_theme_id: text = match _theme_changed_utf8(id_raw, "canonical_theme_id"):
+        case Ok(t): t
+        case Err(e): return Err(e)
     val validated_id = _theme_changed_id_bytes(canonical_theme_id)?
     if not _theme_notification_bytes_equal(validated_id, id_raw):
         return Err("theme_changed_v1: canonical_theme_id has malformed UTF-8")
 
-    val source_manifest_sha256 = bytes_to_text(_theme_changed_copy(bytes, source_offset, THEME_CHANGED_V1_HASH_BYTES))
-    val material_sha256 = bytes_to_text(_theme_changed_copy(bytes, material_offset, THEME_CHANGED_V1_HASH_BYTES))
+    val source_manifest_sha256: text = match _theme_changed_utf8(_theme_changed_copy(bytes, source_offset, THEME_CHANGED_V1_HASH_BYTES), "source_manifest_sha256"):
+        case Ok(t): t
+        case Err(e): return Err(e)
+    val material_sha256: text = match _theme_changed_utf8(_theme_changed_copy(bytes, material_offset, THEME_CHANGED_V1_HASH_BYTES), "material_sha256"):
+        case Ok(t): t
+        case Err(e): return Err(e)
     if not _theme_changed_hash_valid(source_manifest_sha256):
         return Err("theme_changed_v1: malformed source_manifest_sha256")
     if not _theme_changed_hash_valid(material_sha256):

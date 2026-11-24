@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Pin Chrome 159's fractional main-axis start for a `flex-wrap` row
+whose earlier auto-width item is a list (`<ol>` of `<li>`s). Chrome keeps the
+`ol` at its exact (LayoutUnit) max-content width, 133.375 px (40 px padding +
+`Ordered item` at 93.375), so the `ul` after it starts at 145.375 px: device
+column 741.5 at k=4, where the disc paints at 696 and `Unordered item` at 747.
+The wrap path placed every item at whole px (ul at 145), so at k=4 the disc
+was at 695 and the text at 745, and at k=1 the text one column left. The
+catalog's html page carries this row (flex `ol` + `ul`).
+Audience: web renderer flex layout maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300, Liberation Sans via `sans-serif`. Values are the ink box (green <
+128) of the region, as `first-last` columns.
+
+| region (device px)              | K | Chrome     | base bfe4baf76e9 |
+|---------------------------------|---|------------|------------------|
+| ul disc, cols 640-724 rows 60-160 | 4 | 696-714   | 695-713          |
+| ul text, cols 724-1200 rows 60-160| 4 | 747 start | 745              |
+| ul text, cols 181-300 rows 15-40  | 1 | 187-294   | 186-293          |
+
+Not pinned: the `ul` text's right edge at k=4 (Chrome 1177, this engine
+1178); a no-wrap `display:flex` row with the same lists (this engine wraps
+the `ol` text, a separate bug).
+"""
+
+"""
+Traceability: REQ-WEB-FLEX-WRAP-FRAC-X-001 — a flex-wrap item after an auto-width list item starts at the exact (fractional) x, snapped like Chrome at device scale k.
+"""
+# @tag: unit, browser_engine, layout, flex, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}} body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}} .flex{{display:flex;flex-wrap:wrap;gap:12px}}</style></head><body><div class=\"flex\"><ol><li>Ordered item</li><li>Second item</li></ol><ul><li>Unordered item</li><li>Second item</li></ul></div><ul><li>Plain item</li></ul></body></html>"
+
+# "first-last" ink columns (green < 128) of the region, "" when it has none.
+fn _ink_cols(px: [u32], w: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> text:
+    var first = -1
+    var last = -1
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if ((px[y * w + x] >> 8u32) & 255u32) < 128u32:
+                if first < 0 or x < first:
+                    first = x
+                if x > last:
+                    last = x
+            x = x + 1
+        y = y + 1
+    if first < 0: "" else: "{first}-{last}"
+
+describe "Flex-wrap item after an auto-width list (Chrome 159)":
+    it "AC-1: at device scale 4 the ul disc and text start at Chrome's columns":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, 400, 300, 4, "cpu_simd")
+        expect(_ink_cols(px, 1600, 640, 724, 60, 160)).to_equal("696-714")
+        expect(_ink_cols(px, 1600, 724, 1200, 60, 160).split("-")[0]).to_equal("747")
+
+    it "AC-2: at device scale 1 the ul text starts one column right of whole px":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, 400, 300, 1, "cpu_simd")
+        expect(_ink_cols(px, 400, 181, 300, 15, 40)).to_equal("187-294")

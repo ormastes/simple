@@ -1,0 +1,86 @@
+"""
+## Purpose and audience
+Purpose: Pin the `disc` list marker at device scale 4 against Chrome 159.
+Chrome evaluates ListMarker's disc metrics with the DEVICE font: at k=4 the
+16px face is 64 device px, ascent a = round(0.905 x 64) = 58, o = a x 2/3 = 38,
+side = (o + 1) / 2 = 19, x = content - o - 7 and y = text top + 3(a - o)/2, all
+in device px (the 7 is not scaled). This engine evaluated them at the CSS size
+and multiplied by 4: a 20 px disc 19 device px left of Chrome's and 2 rows
+high (web catalog: every `ul` bullet, overview's lists 9,123 px at 4x).
+Audience: web renderer list-marker paint maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300, the page below. First/last device row and column with green < 128.
+
+| disc            | K=1 cols / rows    | K=4 cols / rows      |
+|-----------------|--------------------|----------------------|
+| `ul` in a flex  | 169-173 / 26-30    | 696-714 / 106-124 (x not pinned) |
+| plain `ul`      | 24-28 / 106-110    | 115-133 / 426-444    |
+
+Base 30c19e17c23 at K=4: flex 676-695 / 104-123, plain 96-115 / 424-443;
+at K=1 it already equals Chrome.
+"""
+
+"""
+Traceability: REQ-WEB-LIST-DISC-DEVICE-001 — a disc list marker takes its symbol metrics from the device-size font at device scale k.
+"""
+# @tag: unit, browser_engine, paint, list_marker, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}} body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}} .flex{{display:flex;flex-wrap:wrap;gap:12px}}</style></head><body><div class=\"flex\"><ol><li>Ordered item</li><li>Second item</li></ol><ul><li>Unordered item</li><li>Second item</li></ul></div><ul><li>Plain item</li></ul></body></html>"
+
+# [c0, c1, r0, r1] of the pixels with green < 128 inside the device box.
+fn _ink(px: [u32], k: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> [i32]:
+    val w = CSS_W * k
+    var c0 = 1000000
+    var c1 = -1
+    var r0 = -1
+    var r1 = -1
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            if ((px[y * w + x] >> 8u32) & 255u32) < 128u32:
+                if r0 < 0:
+                    r0 = y
+                r1 = y
+                if x < c0:
+                    c0 = x
+                if x > c1:
+                    c1 = x
+            x = x + 1
+        y = y + 1
+    [c0, c1, r0, r1]
+
+var g_px1: [u32] = []
+var g_px4: [u32] = []
+
+fn _p1() -> [u32]:
+    if g_px1.len() == 0:
+        g_px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+    g_px1
+
+fn _p4() -> [u32]:
+    if g_px4.len() == 0:
+        g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+    g_px4
+
+describe "Disc list markers take the device-size font's metrics (Chrome 159)":
+    it "AC-1: at device scale 4 the discs sit where Chrome paints them":
+        step("plain ul: Chrome 159 cols 115..133, rows 426..444")
+        expect(_ink(_p4(), 4, 60, 152, 380, 480)).to_equal([115, 133, 426, 444])
+        step("ul in the flex row: Chrome 159 rows 106..124 and 19 px wide (its x also needs the fractional x of a non-text flex item, not pinned here)")
+        val flex = _ink(_p4(), 4, 640, 724, 60, 160)
+        expect([flex[1] - flex[0] + 1, flex[2], flex[3]]).to_equal([19, 106, 124])
+
+    it "AC-2: at device scale 1 the discs keep Chrome's place":
+        expect(_ink(_p1(), 1, 15, 38, 95, 120)).to_equal([24, 28, 106, 110])
+        expect(_ink(_p1(), 1, 160, 181, 15, 40)).to_equal([169, 173, 26, 30])

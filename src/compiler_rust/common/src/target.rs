@@ -633,6 +633,20 @@ impl Target {
         self.arch == TargetArch::host() && self.os == TargetOS::host()
     }
 
+    /// Whether libraries built for this compiler's host ABI may be reused.
+    /// A parsed Windows triple carries an ABI hint while `host()` deliberately
+    /// remains const and hint-free. Compare the effective ABI against the
+    /// compiler's build ABI, not an ambient override of the host target.
+    pub fn uses_host_runtime_abi(&self) -> bool {
+        if self.os != TargetOS::Windows {
+            return *self == Self::host();
+        }
+        self.is_host()
+            && self.wasm_runtime == Self::host().wasm_runtime
+            && self.linker_flavor()
+                == if cfg!(target_env = "gnu") { LinkerFlavor::Gnu } else { LinkerFlavor::Msvc }
+    }
+
     /// Parse a target triple string (e.g., "x86_64-linux", "aarch64-macos", "wasm32-wasi").
     pub fn parse(s: &str) -> Result<Self, TargetParseError> {
         let parts: Vec<&str> = s.split('-').collect();
@@ -965,6 +979,23 @@ impl FromStr for Target {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_runtime_reuse_requires_compiler_host_abi_and_arch() {
+        use super::{LinkerFlavor, Target, TargetArch, TargetOS};
+        for flavor in [LinkerFlavor::Gnu, LinkerFlavor::Msvc] {
+            let target = Target { linker_flavor_hint: Some(flavor), ..Target::host() };
+            if cfg!(target_os = "windows") {
+                assert_eq!(target.uses_host_runtime_abi(),
+                    flavor == if cfg!(target_env = "gnu") { LinkerFlavor::Gnu } else { LinkerFlavor::Msvc });
+                let other_arch = if target.arch == TargetArch::X86_64 { TargetArch::Aarch64 } else { TargetArch::X86_64 };
+                assert!(!Target { arch: other_arch, ..target }.uses_host_runtime_abi());
+                assert!(!Target { os: TargetOS::Linux, ..target }.uses_host_runtime_abi());
+            } else {
+                // Preserve the old exact-target rule outside Windows.
+                assert!(!target.uses_host_runtime_abi());
+            }
+        }
+    }
     use super::*;
 
     #[test]

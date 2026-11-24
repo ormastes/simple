@@ -1,0 +1,100 @@
+#!/bin/sh
+# One verification-only completion of the two unfinished EXT2 source guards.
+# Frozen bytes are diagnostic data, never compiled or admitted as runtime proof.
+set -eu
+case "${1:-}" in
+    --whitespace-only) task_mode=whitespace-only ;;
+    --pending-source-and-whitespace) task_mode=pending-source-and-whitespace ;;
+    *) printf 'explicit verification scope required\n' >&2; exit 2 ;;
+esac
+task_root=$(git rev-parse --show-toplevel)
+cd "$task_root"
+task_dir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/i686-pending-source.XXXXXX")
+export task_dir
+python3 - <<'PY'
+import base64, hashlib, os, pathlib, re
+root=pathlib.Path(os.environ['task_dir'])
+source=pathlib.Path('test/fixtures/compiler/i686_pending_source_guards/payload.sdn')
+rows={}
+for line in source.read_text(encoding='ascii').splitlines():
+    key,value=line.split(': ',1)
+    if key in rows: raise SystemExit('duplicate payload key')
+    rows[key]=value.strip('"')
+assert rows['schema']=='i686-pending-source-guard-data-v1'
+assert rows['base_revision']=='7e8d4bc7a2217d88444041dcae10f928d93d5d83'
+expected={'kernel':'2f1286b2f06829bed38572fc6f36ecb07e387d6661eda09cc4de5866c319b8f6',
+          'orchestrator':'7466b0bfd9d5c18c2cece29cb9436c2600bbca543c59b18ab519973f9ee0425c'}
+names=['kernel_before','kernel_after','orchestrator_before','orchestrator_after','primitive','nil']
+names += ['whitespace_'+str(i)+'_'+side for i in range(13) for side in ['before','after']]
+for name in names:
+    data=base64.b64decode(rows[name+'_base64'],validate=True)
+    assert hashlib.sha256(data).hexdigest()==rows[name+'_sha256']
+    assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()==rows[name+'_git_blob']
+    (root/(name+'.spl' if '_' in name else name+'.shs')).write_bytes(data)
+for name,digest in expected.items(): assert rows[name+'_after_sha256']==digest
+assert rows['kernel_base_presence']=='absent' and (root/'kernel_before.spl').stat().st_size==0
+assert rows['orchestrator_base_presence']=='present'
+assert rows['orchestrator_before_git_blob']=='d4103e698d76d7f9612db0d6bb81f2de6d7750ce'
+assert rows['whitespace_12_after_git_blob']=='7cb10ffc985529d1ab69ebcf92dc9a8a273d5142'
+assert rows['primitive_sha256']=='6c9770fc7fd3a594a6bd4972cbf03c9384fc16e7b8f9eaf7bc775bb45008866b'
+assert rows['nil_sha256']=='04efd7bd9d6377fadc9f5325769e2dd0de0a22644fb8c10d8312794645348ecd'
+print('frozen source/base/official-guard byte bindings verified')
+PY
+task_bad=0
+if [ "$task_mode" = pending-source-and-whitespace ]; then
+# Exact official scanner functions and AWK bodies, as in the retained shim.
+head -n 596 "$task_dir/primitive.shs" > "$task_dir/primitive-functions.shs"
+head -n 108 "$task_dir/nil.shs" > "$task_dir/nil-functions.shs"
+. "$task_dir/primitive-functions.shs"
+. "$task_dir/nil-functions.shs"
+task_capture_awk() { printf '%s\n' "$1" > "$task_dir/primitive.awk"; }
+AWK_BIN=task_capture_awk
+count_stdin < /dev/null
+printf '%s\n' "$AWK_PROG" > "$task_dir/nil.awk"
+task_nil_count() {
+    task_nil_file=$1
+    # Capture the actual scanner status before parsing its record. The official
+    # scanner emits no record for a byte-empty file; only that proven case is0.
+    awk -f "$task_dir/nil.awk" "$task_nil_file" > "$task_dir/nil-record.txt" || return 1
+    python3 - "$task_nil_file" "$task_dir/nil-record.txt" <<'PY'
+import pathlib,re,sys
+source,record=map(pathlib.Path,sys.argv[1:])
+raw=record.read_bytes()
+if source.stat().st_size==0:
+    assert raw==b'', 'unexpected empty-source scanner record'
+    print(0)
+else:
+    match=re.fullmatch(rb'([0-9]+) '+re.escape(str(source).encode())+rb'\n',raw)
+    assert match is not None, 'invalid or missing nil scanner record'
+    print(int(match.group(1)))
+PY
+}
+for task_name in kernel orchestrator; do
+    task_old_primitive=$(awk -f "$task_dir/primitive.awk" "$task_dir/${task_name}_before.spl")
+    task_new_primitive=$(awk -f "$task_dir/primitive.awk" "$task_dir/${task_name}_after.spl")
+    task_old_nil=$(task_nil_count "$task_dir/${task_name}_before.spl")
+    task_new_nil=$(task_nil_count "$task_dir/${task_name}_after.spl")
+    printf '%s primitive=%s->%s nil=%s->%s\n' "$task_name" "$task_old_primitive" "$task_new_primitive" "$task_old_nil" "$task_new_nil"
+    if [ "$task_new_primitive" -gt "$task_old_primitive" ] || [ "$task_new_nil" -gt "$task_old_nil" ]; then task_bad=1; fi
+done
+fi
+# Whitespace was unfinished for all original13 owned paths. This does NOT
+# re-run primitive/nil scanners for the10 previously passing SPL inputs.
+task_index=0
+while [ "$task_index" -lt 13 ]; do
+    task_git_rc=0
+    # Frozen Windows bytes may contain CRLF. Treat CR only at EOL as the
+    # line terminator; actual spaces/tabs before it remain whitespace errors.
+    # Disable host checkout-conversion warnings for this read-only comparison.
+    git -c core.autocrlf=false -c core.safecrlf=false -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --no-index --check "$task_dir/whitespace_${task_index}_before.spl" "$task_dir/whitespace_${task_index}_after.spl" > "$task_dir/whitespace.stdout" 2> "$task_dir/whitespace.stderr" || task_git_rc=$?
+    # --no-index reports1 for a clean content difference. Accept0/1 only
+    # when BOTH diagnostic streams are empty; all diagnostics/errors fail.
+    if [ "$task_git_rc" -gt 1 ] || [ -s "$task_dir/whitespace.stdout" ] || [ -s "$task_dir/whitespace.stderr" ]; then
+        cat "$task_dir/whitespace.stdout" "$task_dir/whitespace.stderr"
+        task_bad=1
+    fi
+    task_index=$((task_index + 1))
+done
+printf 'owned whitespace paths checked: 13\n'
+printf 'diagnostic-only source guard completion; no compiler/runtime admission\n'
+exit "$task_bad"

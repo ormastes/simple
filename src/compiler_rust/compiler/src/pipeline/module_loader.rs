@@ -22,23 +22,6 @@ use crate::interpreter::{
 use crate::stdlib_variant::stdlib_root_candidates_present;
 use crate::CompileError as _;
 
-fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
-    match &use_stmt.target {
-        ImportTarget::Group(_) | ImportTarget::Glob => {
-            if resolved.extension().is_some_and(|ext| ext == "spl")
-                && resolved.file_name().is_none_or(|name| name != "__init__.spl")
-            {
-                let package_init = resolved.with_extension("").join("__init__.spl");
-                if p_exists(&package_init) && p_is_file(&package_init) {
-                    return package_init;
-                }
-            }
-            resolved
-        }
-        _ => resolved,
-    }
-}
-
 fn dotted_dir_from(current: &Path, segment: &str) -> Option<PathBuf> {
     let parent = current.parent()?;
     let current_name = current.file_name()?.to_str()?;
@@ -84,7 +67,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     }
     resolved.set_extension("spl");
     if p_exists(&resolved) && p_is_file(&resolved) {
-        return Some(prefer_package_init_for_member_import(resolved, use_stmt));
+        return Some(resolved);
     }
 
     if parts.is_empty() {
@@ -110,7 +93,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
     let last = &parts[parts.len() - 1];
     let dotted_file = dotted_resolved.join(format!("{}.spl", last));
     if p_exists(&dotted_file) && p_is_file(&dotted_file) {
-        return Some(prefer_package_init_for_member_import(dotted_file, use_stmt));
+        return Some(dotted_file);
     }
 
     let dotted_init = dotted_resolved.join(last).join("__init__.spl");
@@ -125,7 +108,7 @@ fn resolve_parts_from_root(root: &Path, parts: &[String], use_stmt: &UseStmt) ->
         }
         let nested_file = dotted_dir.join(format!("{}.spl", last));
         if p_exists(&nested_file) && p_is_file(&nested_file) {
-            return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+            return Some(nested_file);
         }
     }
 
@@ -186,7 +169,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
             let mut file = current.join(part);
             file.set_extension("spl");
             if p_is_file(&file) {
-                return Some(prefer_package_init_for_member_import(file, use_stmt));
+                return Some(file);
             }
             // A plain package directory as the LAST segment under a numbered
             // layer: `compiler.semantics.any_escape` is
@@ -213,11 +196,11 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                 let mut nested_file = alias.join(part);
                 nested_file.set_extension("spl");
                 if p_is_file(&nested_file) {
-                    return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+                    return Some(nested_file);
                 }
             }
             if let Some(alias_file) = layered_alias_child_file(&current, part) {
-                return Some(prefer_package_init_for_member_import(alias_file, use_stmt));
+                return Some(alias_file);
             }
             for (name, path) in cached_read_dir(&current) {
                 if !p_is_dir(&path) {
@@ -240,7 +223,7 @@ fn resolve_numbered_parts_from_root(root: &Path, parts: &[String], use_stmt: &Us
                     let mut nested_file = path.join(part);
                     nested_file.set_extension("spl");
                     if p_is_file(&nested_file) {
-                        return Some(prefer_package_init_for_member_import(nested_file, use_stmt));
+                        return Some(nested_file);
                     }
                 }
             }
@@ -444,7 +427,7 @@ fn resolve_parts_with_search_roots(base: &Path, parts: &[String], use_stmt: &Use
             }
             parent_resolved.set_extension("spl");
             if p_exists(&parent_resolved) && p_is_file(&parent_resolved) {
-                return Some(prefer_package_init_for_member_import(parent_resolved, use_stmt));
+                return Some(parent_resolved);
             }
 
             if let Some(parent_resolved) = resolve_parts_from_root(&parent_dir, parts, use_stmt) {
@@ -542,7 +525,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             }
             stdlib_path.set_extension("spl");
             if p_exists(&stdlib_path) && p_is_file(&stdlib_path) {
-                return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
+                return Some(stdlib_path);
             }
 
             let mut stdlib_init_path = stdlib_root.clone();
@@ -593,7 +576,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
                 }
                 sub_path.set_extension("spl");
                 if p_exists(&sub_path) && p_is_file(&sub_path) {
-                    return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+                    return Some(sub_path);
                 }
 
                 if let Some(numbered) =
@@ -2833,6 +2816,7 @@ fn load_module_with_imports_internal(
     }
 
     let mut source = read_module_source_text_cached(&path)?;
+    let raw_source = (target_arch == simple_common::target::TargetArch::host()).then(|| source.clone());
 
     // Bootstrap leniency: older sources use optional `text?` types which the
     // current parser treats as a bare identifier. During early bootstrap we
@@ -2865,6 +2849,11 @@ fn load_module_with_imports_internal(
     let mut module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
+    // Hand this parse to the cross-lane cache so HIR import loading does not
+    // parse the same file again (375 second parses on the web renderer).
+    if let Some(raw) = raw_source {
+        crate::interpreter::shared_source_seed(&path, raw, &source, &module);
+    }
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
     // Private fn names must be known before any importer's flattened top-level
     // initializer runs, and to the JIT lane, which never runs the interpreter
