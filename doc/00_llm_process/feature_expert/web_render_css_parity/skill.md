@@ -4588,3 +4588,36 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
     above the interpreter;
   - the body loop is ~0.65 s;
   - the front end is ~2.2 s and is the next target.
+## 2026-11-24 — horizontal margins carry a unit (`margin_l_pct` / `margin_r_pct`); one resolver
+
+- **Both sentinels are gone.** `0 - pct` (percentages) and `-(MARGIN_NEG_PX_BASE + P)`
+  (negative px) used the sign as a unit tag, so `-10%` had no encoding and read as +10%.
+- `Style.margin_l` / `margin_r` is now always a signed number. Two bools beside it,
+  `margin_l_pct` / `margin_r_pct`, say whether it is a percent.
+- Every reader goes through `resolve_horizontal_margin(value, is_pct, containing_w)`
+  (layout_foundation; the old `resolve_horizontal_margin_px` was renamed at all 29 sites).
+- Why a unit tag and not a struct: the ~50 existing assertions on `margin_l` as an `i32`
+  stay untouched. Only two specs that pinned the encoding itself changed (25% is now
+  `margin_l = 25` with `margin_l_pct = true`).
+- **`margin-inline` tokenizes.** It now splits with `ws_tokens`, and each side goes
+  through `margin_token_px`, so the second value keeps its sign (`10px -10px`). The old
+  `parse_nth_int` dropped that sign.
+- **Release leak fixed.** The gpu_web layout adapter (`_web_layout_horizontal_margin`)
+  decoded the negative-px sentinel as a ~1000010% length. It now takes the pct flag, and
+  the layout hash includes both flags.
+- `layout_text` min-content adds a margin only when it is positive and not a percent.
+- Pinned by `margin_typed_horizontal_chrome159_spec`:
+  - AC-1 to AC-7 are pixel checks at 1x and 4x against Chrome 159.
+  - AC-8 and AC-9 are style-level checks on the dispatch path and the full path.
+  - Base 1/7, head 9/9.
+- **Open:** `-10%` of a 215px container is -21.5px. Chrome paints 74 device px at 4x; we
+  lay out in whole px and paint 76. AC-2 pins only 1x.
+- Catalogs 1x and 4x are byte-identical to base `41f38e23d7b` (16/16 PPMs). Matrix: 81.
+  - Pre-existing reds are identical on base: `definition_list_rendering_spec` 0/1,
+    `declarations_coverage_closure` 2, `decl_apply_coverage_closure` 1,
+    `gpu_paint_economics` 1.
+- Perf, css-layout, 6 alternated rounds, wall medians base/head:
+  - k=1: 11856 / 11726 ms.
+  - k=4: 31490 / 30402 ms (each side has one outlier, 81.5 s and 20.5 s).
+  - RSS medians: k=1 2.63 / 2.67 GB, k=4 8.38 / 8.33 GB.
+  - The route-stage counters read 0 on this route, so there is no document/paint split.
