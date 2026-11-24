@@ -63,6 +63,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include "platform/spl_win_utf16_private.h"
 #include <direct.h>
 #else
 #include <dirent.h>
@@ -81,15 +82,7 @@
 
 /* UTF-16 -> UTF-8 into a malloc'd buffer, NULL on failure. */
 static char* core_exp_wide_to_utf8(const wchar_t* wide) {
-    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
-    if (len <= 0) return NULL;
-    char* utf8 = (char*)malloc((size_t)len);
-    if (!utf8) return NULL;
-    if (WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, len, NULL, NULL) <= 0) {
-        free(utf8);
-        return NULL;
-    }
-    return utf8;
+    return spl_win_wide_to_utf8(wide, -1, 0, malloc, free, NULL);
 }
 #endif
 
