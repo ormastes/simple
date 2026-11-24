@@ -77,3 +77,39 @@ def parent(n,contract,phase2):
         for name in ('terminal.json','phase3b.owner.env','phase3b.argv.json','wrapper.json','immutable-inputs.json','phase3-intake.json','build-resource.json'):(dest/('parent-'+name)).write_bytes(read(name))
     n.save('phase3b-intake.json',{'artifact':meta,'job':candidates[0],'terminal':terminal,'files':identities})
     return binary,identities
+
+
+def direct_release(n,script,parent,bundle,product,cap,env,qualify):
+    """Actual P3a -> production release CLI, without claiming it is P3b."""
+    # Exact landed run_stage4_all release configuration; no source extraction,
+    # generation relabel, debug/tools replay, or P3a --p3b-bin substitution.
+    smoke_env=dict(env)
+    env=dict(env)
+    assert n.sha(parent)==json.loads((n.OUT/'phase3-intake.json').read_text())['terminal']['compiler_sha256']
+    production=script.read_text(encoding='utf-8')
+    for token in ('--source src/compositions/cuda_disabled','--entry src/app/cli/main.spl','--profile=prod --release --strip'):
+        assert token in production,'pinned canonical release contract changed'
+    for key in ('SIMPLE_BOOTSTRAP_STAGE3','SIMPLE_LINKER','SIMPLE_HIR_SHARDING','SIMPLE_MIR_SHARDING','SIMPLE_BOOTSTRAP_WHOLE_PROGRAM'):
+        env.pop(key,None)
+    cache=product/'cli-release/cache';tmp=product/'cli-release/tmp';binary=product/'bin/simple.exe'
+    for directory in (cache/'frontend',cache/'hir',tmp,binary.parent):directory.mkdir(parents=True,exist_ok=False)
+    env.update(OS=env.get('OS','Windows_NT'),SIMPLE_WINDOWS_ABI='gnu',SIMPLE_LINKER_FLAVOR='gnu',
+        SIMPLE_BINARY=str(parent),SIMPLE_BOOTSTRAP='1',SIMPLE_BOOTSTRAP_STAGE4='1',SIMPLE_STAGE4_STREAMING_SURFACES='1',
+        SIMPLE_NATIVE_GO_TO_END='1',SIMPLE_CACHE_SCOPE='stage4',SIMPLE_FRONTEND_CACHE='1',SIMPLE_FRONTEND_CACHE_DIR=str(cache/'frontend'),
+        SIMPLE_HIR_CACHE='1',SIMPLE_HIR_CACHE_DIR=str(cache/'hir'),SIMPLE_NATIVE_ARENA_DECLS='1',SIMPLE_NO_STUB_FALLBACK='1',
+        SIMPLE_NO_DEPRECATED_WARNINGS='1',SIMPLE_PACKAGE_INDEX_COLD_INIT='1',LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING='1',
+        SIMPLE_NATIVE_BUILD_TARGET='x86_64-pc-windows-gnu',SIMPLE_NATIVE_BUILD_THREADS='2',SIMPLE_NATIVE_BUILD_CACHE_DIR=str(cache),
+        SIMPLE_RUNTIME_PATH=str(bundle),SIMPLE_FILE_WORKERS='1',TMPDIR=n.posix(tmp),TMP=str(tmp),TEMP=str(tmp))
+    argv=[str(parent),'native-build','--target','x86_64-pc-windows-gnu','--backend','llvm','--runtime-bundle','core-c-bootstrap']
+    for source in ('src/compositions/cuda_disabled','src/compiler','src/app','src/lib','src/os','src/plugins'):argv+=['--source',source]
+    argv+=['--entry-closure','--timeout','14400','--profile=prod','--release','--strip','--threads','2','--cache-dir',str(cache),
+        '--mode','dynload','--entry','src/app/cli/main.spl','--runtime-path',str(bundle),'-o',str(binary)]
+    n.save('canonical-scope.json',{'role':'phase4-direct','producer_generation':'P3a','parent_sha256':n.sha(parent),
+        'entry':'src/app/cli/main.spl','wrapper_control':'ed9c404d54065443ed5da8403a07dbaa1d2395fb',
+        'scope':'Production release CLI from P3a, independent of P3b; not canonical P3b-to-P4 bundle or formal admission',
+        'configuration':'landed canonical release source roots/CUDA-disabled/prod/dynload/LLVM/GNU/file-workers/threads2',
+        'products':['release CLI'],'later_distinct_products':'actual P3b-to-P4 release/debug CLI and four essentials'})
+    n.owned('phase4-direct',argv,cap,14400,env)
+    result=qualify(n,binary,bundle,product,cap,smoke_env,parent_phase=3)
+    result.update(producer_generation='P3a',product_generation='direct-P4-release',canonical_phase='P3a-to-P4-release')
+    return result

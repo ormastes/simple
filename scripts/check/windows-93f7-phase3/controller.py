@@ -7,7 +7,7 @@ assert CONTRACT['native_proof'] is not None, 'pending actual native P2 proof: no
 spec = importlib.util.spec_from_file_location('native_intake', HERE/'proof.py')
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 ROLE=os.environ.get('PRODUCT_ROLE','phase3b')
-assert ROLE in ('phase3b','phase4')
+assert ROLE in ('phase3b','phase4-direct','phase4')
 assert CONTRACT['phase3_parent'] is not None,'Pending actual Phase3: no product execution'
 assert CONTRACT['wrapper'] is not None,'Pending landed separately pinned wrapper'
 n.OUT = n.ROOT/('build/windows-93f7-'+ROLE+'-evidence'); n.OUT.mkdir(parents=True, exist_ok=True)
@@ -80,10 +80,10 @@ def main():
     # Recreate and compare every previously qualified payload/tool file; never infer identity from filenames.
     for relative,digest in inputs['files'].items(): assert n.sha(n.OUT/relative)==digest,(relative,'changed qualified tuple')
     phase2_sha=n.sha(compiler)
-    compiler,parent_identities=(parent_gate.accept(n,CONTRACT,compiler) if ROLE=='phase3b' else canonical.parent(n,CONTRACT,compiler))
+    compiler,parent_identities=(parent_gate.accept(n,CONTRACT,compiler) if ROLE in ('phase3b','phase4-direct') else canonical.parent(n,CONTRACT,compiler))
     wrapper,wrapper_identities=canonical.wrapper(n,CONTRACT)
     assert not n.command(['git','status','--porcelain','--untracked-files=no'],capture_output=True,text=True).stdout.strip()
-    if ROLE=='phase4': early.fixtures(n)
+    if ROLE in ('phase4-direct','phase4'): early.fixtures(n)
     tracked=n.command(['git','ls-files','-z'],capture_output=True).stdout.decode().split('\0')
     source={p:n.sha(n.ROOT/p) for p in tracked if p and (n.ROOT/p).is_file()}
     assert n.command(['git','rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()==n.SOURCE
@@ -104,7 +104,7 @@ def main():
     product=n.ROOT/('build/windows-93f7-'+ROLE)
     assert not product.exists(),'fresh product namespace required'
     try:
-        result=canonical.build(n,ROLE,wrapper,compiler,bundle,product,cap,env,early.qualify)
+        result=(canonical.direct_release(n,wrapper,compiler,bundle,product,cap,env,early.qualify) if ROLE=='phase4-direct' else canonical.build(n,ROLE,wrapper,compiler,bundle,product,cap,env,early.qualify))
         files={str(p.relative_to(product)):n.sha(p) for p in product.rglob('*') if p.is_file() and ('cache' not in p.parts and 'tmp' not in p.parts)}
         result.update(role=ROLE,admitted=False,source=n.SOURCE,parent_sha256=n.sha(compiler),ancestor_phase2_sha256=phase2_sha,wrapper_control_sha=CONTRACT['wrapper']['sha'],product_files=files,cap_kib=cap,control_sha=os.environ['GITHUB_SHA'])
     finally:

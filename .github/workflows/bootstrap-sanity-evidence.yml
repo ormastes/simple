@@ -10,6 +10,10 @@ concurrency:
 jobs:
   phase3b:
     name: Windows 93f7 canonical Phase3b
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [phase3b]
     runs-on: windows-latest
     timeout-minutes: 350
     outputs:
@@ -64,6 +68,81 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+  phase4-direct:
+    name: Windows 93f7 direct P3a to Phase4 release
+    runs-on: windows-latest
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        path: control
+    - name: Require sealed wrapper and actual Phase3 parent
+      id: wrapper
+      run: '$pin = Get-Content control/scripts/check/windows-93f7-phase3/handoff.json | ConvertFrom-Json
+
+        if (!$pin.wrapper -or !$pin.phase3_parent) { throw ''Actual parent and landed wrapper bindings required'' }
+
+        "sha=$($pin.wrapper.sha)" >> $env:GITHUB_OUTPUT
+
+        '
+    - uses: actions/checkout@v5
+      with:
+        ref: ${{ steps.wrapper.outputs.sha }}
+        path: wrapper
+    - uses: actions/checkout@v5
+      with:
+        ref: 93f7b103237cbd065b12b04fb4af7b8b39f0a7de
+        path: s
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: Same verified Phase3a to independent production Phase4 release
+      working-directory: s
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PRODUCT_ROLE: phase4-direct
+      run: python ../control/scripts/check/windows-93f7-phase3/controller.py
+    - name: Retain direct Phase4 release and behavior evidence
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-93f7-phase4-direct-${{ github.run_id }}
+        path: 's/build/windows-93f7-phase4-direct-evidence/*.json
+
+          s/build/windows-93f7-phase4-direct-evidence/*.env
+
+          s/build/windows-93f7-phase4-direct-evidence/*.stdout
+
+          s/build/windows-93f7-phase4-direct-evidence/*.stderr
+
+          s/build/windows-93f7-phase4-direct-evidence/native-proof/
+
+          s/build/windows-93f7-phase4-direct-evidence/phase3-parent/parent-*
+
+          s/build/windows-93f7-phase4-direct-evidence/tmp/
+
+          s/build/windows-93f7-phase4-direct/
+
+          s/build/scv/
+
+          s/.simple/scv/
+
+          s/build/windows-93f7-phase4-direct-evidence/smoke/
+
+          s/test/bootstrap_qualification_93f7/
+
+          '
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: 7
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+        - phase4-direct
   phase4:
     name: Windows 93f7 canonical Phase4
     needs: phase3b
