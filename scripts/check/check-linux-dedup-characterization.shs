@@ -1,0 +1,70 @@
+#!/bin/sh
+# Build + run the Linux dedup characterization selfchecks under sanitizers.
+#
+#   sh scripts/check/check-linux-dedup-characterization.shs [OUTDIR]
+#
+# Runs on Linux (incl. WSL). clang only (CC defaults to clang-18, then clang).
+# Configs: asan (address+undefined), tsan (thread), werror (-O2 -Wall -Wextra -Werror).
+# liburing headers: /usr/include or LIBURING_INCLUDE=<dir>; a missing header is
+# an ERROR (exit 2), never a silent skip. Verdict is the last stdout line:
+#   PASS — <n> run(s), <a> assertion(s) passed     exit 0
+#   FAIL — <k> of <n> run(s) failed: <names>       exit 1
+#   ERROR — nothing was checked (<reason>)         exit 2
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:-${TMPDIR:-/tmp}/linux-dedup-char}
+mkdir -p "$out" || { echo "ERROR — nothing was checked (cannot create $out)"; exit 2; }
+export TMPDIR="${TMPDIR:-$out}"
+
+CC=${CC:-}
+if [ -z "$CC" ]; then
+    if command -v clang-18 >/dev/null 2>&1; then CC=clang-18
+    elif command -v clang >/dev/null 2>&1; then CC=clang
+    else echo "ERROR — nothing was checked (no clang)"; exit 2; fi
+fi
+case "$($CC --version 2>/dev/null | head -1)" in
+    *clang*) ;;
+    *) echo "ERROR — nothing was checked ($CC is not clang)"; exit 2 ;;
+esac
+
+uring_inc=${LIBURING_INCLUDE:-/usr/include}
+[ -f "$uring_inc/liburing.h" ] || { echo "ERROR — nothing was checked (liburing.h not in $uring_inc; set LIBURING_INCLUDE)"; exit 2; }
+
+R=$root/src/runtime
+T=$R/test
+base="-std=gnu11 -g -I$R -I$R/platform -I$T"
+
+# name|extra cflags|sources|libs
+targets="epoll||$T/async_linux_driver_characterization_selfcheck.c $R/platform/async_linux_epoll.c|-lpthread
+uring|-DCHAR_URING -DSPL_HAS_IO_URING -I$uring_inc|$T/async_linux_driver_characterization_selfcheck.c $R/platform/async_linux_uring.c|-l:liburing.so.2 -lpthread
+argv||$T/exec_argv_characterization_selfcheck.c $R/runtime_legacy_core.c $R/runtime_process_tree.c|-lpthread"
+
+runs=0; failed=0; names=""; asserts=0
+for cfg in asan tsan werror; do
+    case $cfg in
+        asan) cf="-O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" ;;
+        tsan) cf="-O1 -fsanitize=thread" ;;
+        werror) cf="-O2 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function" ;;
+    esac
+    printf '%s\n' "$targets" | while IFS='|' read -r name extra srcs libs; do
+        exe=$out/${name}_$cfg
+        # shellcheck disable=SC2086
+        if ! $CC $base $cf $extra $srcs -o "$exe" $libs >"$exe.build.log" 2>&1; then
+            echo "BUILDFAIL $name/$cfg"; sed -n 1,20p "$exe.build.log"; continue
+        fi
+        "$exe" >"$exe.log" 2>&1
+        rc=$?
+        tail -1 "$exe.log" | sed "s|^|$cfg: |"
+        [ "$rc" -eq 0 ] || { echo "RUNFAIL $name/$cfg rc=$rc"; grep -E 'FAIL|ERROR|Sanitizer' "$exe.log" | head -20; }
+    done
+done >"$out/summary.txt"
+
+cat "$out/summary.txt"
+runs=$(grep -c ': .*passed' "$out/summary.txt")
+bad=$(grep -E '^(BUILDFAIL|RUNFAIL)' "$out/summary.txt" | awk '{print $2}' | tr '\n' ' ')
+asserts=$(grep -o ': [0-9]* passed' "$out/summary.txt" | awk '{s+=$2} END{print s+0}')
+total=9
+if [ "$runs" -eq 0 ] && [ -z "$bad" ]; then echo "ERROR — nothing was checked"; exit 2; fi
+if [ -n "$bad" ]; then echo "FAIL — $(echo $bad | wc -w) of $total run(s) failed: $bad"; exit 1; fi
+if [ "$runs" -ne "$total" ]; then echo "ERROR — nothing was checked (only $runs of $total runs reported)"; exit 2; fi
+echo "PASS — $runs run(s), $asserts assertion(s) passed"
