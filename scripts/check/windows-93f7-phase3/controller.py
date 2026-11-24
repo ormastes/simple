@@ -6,11 +6,17 @@ CONTRACT = json.loads((HERE/'handoff.json').read_text())
 assert CONTRACT['native_proof'] is not None, 'pending actual native P2 proof: no dispatch'
 spec = importlib.util.spec_from_file_location('native_intake', HERE/'proof.py')
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
-ROLE=os.environ.get('PRODUCT_ROLE','phase3')
-assert ROLE in ('phase3','early-full-cli')
+ROLE=os.environ.get('PRODUCT_ROLE','phase3b')
+assert ROLE in ('phase3b','phase4')
+assert CONTRACT['phase3_parent'] is not None,'Pending actual Phase3: no product execution'
+assert CONTRACT['wrapper'] is not None,'Pending landed separately pinned wrapper'
 n.OUT = n.ROOT/('build/windows-93f7-'+ROLE+'-evidence'); n.OUT.mkdir(parents=True, exist_ok=True)
 early_spec=importlib.util.spec_from_file_location('early_cli',HERE/'early_cli.py')
 early=importlib.util.module_from_spec(early_spec); early_spec.loader.exec_module(early)
+parent_spec=importlib.util.spec_from_file_location('phase3_parent',HERE/'phase3_parent.py')
+parent_gate=importlib.util.module_from_spec(parent_spec);parent_spec.loader.exec_module(parent_gate)
+canonical_spec=importlib.util.spec_from_file_location('canonical',HERE/'canonical.py')
+canonical=importlib.util.module_from_spec(canonical_spec);canonical_spec.loader.exec_module(canonical)
 
 def main():
     assert sys.platform == 'win32'
@@ -73,8 +79,11 @@ def main():
         n.command([n.BASH,n.ROOT/'scripts/setup/bundle-llvm-runtime-dlls.shs',n.posix(compiler),n.posix(llvm)],env=env)
     # Recreate and compare every previously qualified payload/tool file; never infer identity from filenames.
     for relative,digest in inputs['files'].items(): assert n.sha(n.OUT/relative)==digest,(relative,'changed qualified tuple')
+    phase2_sha=n.sha(compiler)
+    compiler,parent_identities=(parent_gate.accept(n,CONTRACT,compiler) if ROLE=='phase3b' else canonical.parent(n,CONTRACT,compiler))
+    wrapper,wrapper_identities=canonical.wrapper(n,CONTRACT)
     assert not n.command(['git','status','--porcelain','--untracked-files=no'],capture_output=True,text=True).stdout.strip()
-    if ROLE=='early-full-cli': early.fixtures(n)
+    if ROLE=='phase4': early.fixtures(n)
     tracked=n.command(['git','ls-files','-z'],capture_output=True).stdout.decode().split('\0')
     source={p:n.sha(n.ROOT/p) for p in tracked if p and (n.ROOT/p).is_file()}
     assert n.command(['git','rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()==n.SOURCE
@@ -88,25 +97,18 @@ def main():
     for key in ('SIMPLE_PROCESS_TREE_RSS_CAP_KIB','SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB','SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB'):
         env[key]=str(cap)
     env['SIMPLE_BUILD_MEMORY_RESERVE_BYTES']=str(2*1024**3)
+    env['SIMPLE_NATIVE_BUILD_RUST']='0'
     env.update(SIMPLE_USER_STORAGE_ROOT=str(n.OUT/'storage'),SIMPLE_CACHE=str(n.OUT/'cache'),SIMPLE_NATIVE_BUILD_CACHE_DIR=str(n.OUT/'cache'))
     (n.OUT/'tmp').mkdir()
     env.update(TMP=str(n.OUT/'tmp'),TEMP=str(n.OUT/'tmp'),TMPDIR=n.posix(n.OUT/'tmp'))
     product=n.ROOT/('build/windows-93f7-'+ROLE)
     assert not product.exists(),'fresh product namespace required'
-    argv=[str(n.BASH),n.posix(n.ROOT/'scripts/bootstrap/build-phase3-phase4.sh'),'--phase=p3a','--compile-mode=file','--win-config=mingw','--target=x86_64-pc-windows-gnu','--backend=llvm','--threads=2','--non-interactive','--source-root='+n.posix(n.ROOT),'--build-root='+n.posix(product),'--p2-bin='+n.posix(compiler),'--runtime-path='+n.posix(bundle)]
     try:
-        if ROLE=='early-full-cli':
-            result=early.build_and_qualify(n,compiler,bundle,product,cap,env)
-        else:
-            n.owned('phase3',argv,cap,18000,env)
-            candidate=product/'phase3-a/simple.exe'; hello=product/'phase3-a/hello/hello.exe'
-            assert candidate.stat().st_size>1024 and hello.stat().st_size>1024
-            assert (hello.parent/'stdout').read_bytes().replace(b'\r\n',b'\n')==b'hello\n'
-            result={'status':'P3_NATIVE_HELLO_PASS','compiler_sha256':n.sha(candidate),'hello_sha256':n.sha(hello)}
+        result=canonical.build(n,ROLE,wrapper,compiler,bundle,product,cap,env,early.qualify)
         files={str(p.relative_to(product)):n.sha(p) for p in product.rglob('*') if p.is_file() and ('cache' not in p.parts and 'tmp' not in p.parts)}
-        result.update(role=ROLE,admitted=False,source=n.SOURCE,parent_sha256=n.sha(compiler),product_files=files,cap_kib=cap,control_sha=os.environ['GITHUB_SHA'])
+        result.update(role=ROLE,admitted=False,source=n.SOURCE,parent_sha256=n.sha(compiler),ancestor_phase2_sha256=phase2_sha,wrapper_control_sha=CONTRACT['wrapper']['sha'],product_files=files,cap_kib=cap,control_sha=os.environ['GITHUB_SHA'])
     finally:
-        unchanged=all(n.sha(n.OUT/p)==h for p,h in inputs['files'].items()) and all(n.sha(n.ROOT/p)==h for p,h in source.items())
+        unchanged=all(n.sha(n.OUT/p)==h for p,h in inputs['files'].items()) and all(n.sha(n.ROOT/p)==h for p,h in source.items()) and all(n.sha(p)==h for p,h in parent_identities.items()) and all(n.sha(p)==h for p,h in wrapper_identities.items())
         n.save('immutable-inputs.json',{'unchanged':unchanged})
         assert unchanged,'qualified inputs/source changed'
     n.save('terminal.json',result)

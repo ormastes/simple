@@ -1,19 +1,72 @@
-name: Provisional Windows 93f7 children
+﻿name: Canonical Windows 93f7 downstream
 on:
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 concurrency:
-  group: windows-93f7-phase3-${{ github.ref }}
+  group: windows-93f7-canonical-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  products:
-    strategy:
-      fail-fast: false
-      matrix:
-        role: [phase3, early-full-cli]
-    name: Windows 93f7 ${{ matrix.role }}
+  phase3b:
+    name: Windows 93f7 canonical Phase3b
+    runs-on: windows-latest
+    timeout-minutes: 350
+    outputs:
+      artifact_id: ${{ steps.payload.outputs.artifact-id }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: control
+      - name: Require sealed wrapper and actual Phase3 parent
+        id: wrapper
+        run: |
+          $pin = Get-Content control/scripts/check/windows-93f7-phase3/handoff.json | ConvertFrom-Json
+          if (!$pin.wrapper -or !$pin.phase3_parent) { throw 'Actual parent and landed wrapper bindings required' }
+          "sha=$($pin.wrapper.sha)" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.wrapper.outputs.sha }}
+          path: wrapper
+      - uses: actions/checkout@v5
+        with:
+          ref: 93f7b103237cbd065b12b04fb4af7b8b39f0a7de
+          path: s
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verified Phase3a to canonical Phase3b and native Hello
+        working-directory: s
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT_ROLE: phase3b
+        run: python ../control/scripts/check/windows-93f7-phase3/controller.py
+      - name: Retain Phase3b product and terminal evidence
+        id: payload
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-93f7-phase3b-${{ github.run_id }}
+          path: |
+            s/build/windows-93f7-phase3b-evidence/*.json
+            s/build/windows-93f7-phase3b-evidence/*.env
+            s/build/windows-93f7-phase3b-evidence/*.stdout
+            s/build/windows-93f7-phase3b-evidence/*.stderr
+            s/build/windows-93f7-phase3b-evidence/native-proof/
+            s/build/windows-93f7-phase3b-evidence/phase3-parent/parent-*
+            s/build/windows-93f7-phase3b-evidence/tmp/
+            s/build/windows-93f7-phase3b/
+            s/build/scv/
+            s/.simple/scv/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+  phase4:
+    name: Windows 93f7 canonical Phase4
+    needs: phase3b
     runs-on: windows-latest
     timeout-minutes: 350
     defaults:
@@ -23,6 +76,16 @@ jobs:
       - uses: actions/checkout@v5
         with:
           path: control
+      - name: Require same sealed wrapper
+        id: wrapper
+        run: |
+          $pin = Get-Content control/scripts/check/windows-93f7-phase3/handoff.json | ConvertFrom-Json
+          if (!$pin.wrapper -or !$pin.phase3_parent) { throw 'Actual parent and landed wrapper bindings required' }
+          "sha=$($pin.wrapper.sha)" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.wrapper.outputs.sha }}
+          path: wrapper
       - uses: actions/checkout@v5
         with:
           ref: 93f7b103237cbd065b12b04fb4af7b8b39f0a7de
@@ -30,27 +93,28 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Qualified parent intake and canonical Windows Phase3
+      - name: Actual Phase3b to canonical Phase4 and release CLI behavior
         working-directory: s
         env:
           GH_TOKEN: ${{ github.token }}
-          PRODUCT_ROLE: ${{ matrix.role }}
+          PRODUCT_ROLE: phase4
+          P3B_ARTIFACT: ${{ needs.phase3b.outputs.artifact_id }}
         run: python ../control/scripts/check/windows-93f7-phase3/controller.py
-      - name: Preserve actual product, Hello, authorities and terminal failure
+      - name: Retain canonical products and behavior evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: windows-93f7-${{ matrix.role }}-${{ github.run_id }}
+          name: windows-93f7-phase4-${{ github.run_id }}
           path: |
-            s/build/windows-93f7-${{ matrix.role }}-evidence/*.json
-            s/build/windows-93f7-${{ matrix.role }}-evidence/*.env
-            s/build/windows-93f7-${{ matrix.role }}-evidence/*.stdout
-            s/build/windows-93f7-${{ matrix.role }}-evidence/*.stderr
-            s/build/windows-93f7-${{ matrix.role }}-evidence/native-proof/
-            s/build/windows-93f7-${{ matrix.role }}-evidence/cache/
-            s/build/windows-93f7-${{ matrix.role }}-evidence/tmp/
-            s/build/windows-93f7-${{ matrix.role }}-evidence/smoke/
-            s/build/windows-93f7-${{ matrix.role }}/
+            s/build/windows-93f7-phase4-evidence/*.json
+            s/build/windows-93f7-phase4-evidence/*.env
+            s/build/windows-93f7-phase4-evidence/*.stdout
+            s/build/windows-93f7-phase4-evidence/*.stderr
+            s/build/windows-93f7-phase4-evidence/native-proof/
+            s/build/windows-93f7-phase4-evidence/phase3b-parent/parent-*
+            s/build/windows-93f7-phase4-evidence/tmp/
+            s/build/windows-93f7-phase4-evidence/smoke/
+            s/build/windows-93f7-phase4/
             s/build/scv/
             s/.simple/scv/
             s/test/bootstrap_qualification_93f7/

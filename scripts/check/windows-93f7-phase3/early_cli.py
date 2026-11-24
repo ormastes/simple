@@ -34,15 +34,18 @@ def cuda(n):
     n.save('cuda.json',{'source_root':root,'manifest_sha256':n.sha(manifest),'selected_sha256':n.sha(chosen),'mode':mode})
     return root
 
-def build_and_qualify(n,parent,bundle,product,cap,env):
+def build_and_qualify(n,parent,bundle,product,cap,env,parent_phase=2):
     product.mkdir(); binary=product/'simple.exe'
     env.update(SIMPLE_BINARY=str(parent),SIMPLE_NATIVE_BUILD_RUST='0',SIMPLE_FILE_WORKERS='1',SIMPLE_FILE_WORKER_SINGLE_LOW_MEMORY='1',SIMPLE_PARSE_SHARDING='1',SIMPLE_FRONTEND_CACHE_DIR=str(n.OUT/'cache/frontend'),SIMPLE_HIR_CACHE_DIR=str(n.OUT/'cache/hir'))
     argv=[str(parent),'native-build','--backend','llvm','--target','x86_64-pc-windows-gnu','--runtime-path',str(bundle),'--runtime-bundle','core-c-bootstrap','--threads','1','--profile=prod','--release','--strip','--managed-build-phase=phase4','--opt-level=standard','--low-memory','--entry-closure','--entry','src/app/cli/_CliMain/main_and_help.spl','--mode','dynload','--cache-dir',str(n.OUT/'cache'),'--output',str(binary)]
     for path in (cuda(n),'src/compositions/kernel_llvm_cranelift','src/compiler','src/app','src/lib','src/os','src/plugins','src/package_ownership','src/compositions'): argv+=['--source',path]
     n.owned('build',argv,cap,14400,env)
+    return qualify(n,binary,bundle,product,cap,env,parent_phase)
+
+def qualify(n,binary,bundle,product,cap,env,parent_phase=3):
     assert binary.stat().st_size>1024
-    digest=n.sha(binary); n.save('build-result.json',{'status':'BUILT_UNQUALIFIED','product_sha256':digest,'parent_phase':2,'admitted':False})
-    product_inputs={str(p.relative_to(product)):n.sha(p) for p in product.rglob('*') if p.is_file()}
+    digest=n.sha(binary); n.save('build-result.json',{'status':'BUILT_UNQUALIFIED','product_sha256':digest,'parent_phase':parent_phase,'admitted':False})
+    product_inputs={str(p.relative_to(product)):n.sha(p) for p in product.rglob('*') if p.is_file() and 'cache' not in p.parts and 'tmp' not in p.parts}
     n.save('product-inputs.json',product_inputs)
     smoke=n.OUT/'smoke'; smoke.mkdir()
     (smoke/'tmp').mkdir()
@@ -69,4 +72,4 @@ def build_and_qualify(n,parent,bundle,product,cap,env):
     run('native-hello-build',[binary,'native-build','--backend','llvm','--target','x86_64-pc-windows-gnu','--runtime-path',bundle,'--runtime-bundle','core-c-bootstrap','--threads','1','--source',FIXTURE,'--entry-closure','--mode','one-binary','--entry',fixture,'--output',hello],600,4194304)
     assert hello.stat().st_size>1024 and run('native-hello-run',[hello],30,262144)==EXPECTED
     assert n.sha(binary)==digest and all(n.sha(product/p)==h for p,h in product_inputs.items())
-    return {'status':'FULL_CLI_BEHAVIOR_PASS','parent_phase':2,'product_sha256':digest,'hello_sha256':n.sha(hello),'claims':['version','help','run','test-positive-1/0','test-negative-0/1','native-hello']}
+    return {'status':'FULL_CLI_BEHAVIOR_PASS','parent_phase':parent_phase,'product_sha256':digest,'hello_sha256':n.sha(hello),'claims':['version','help','run','test-positive-1/0','test-negative-0/1','native-hello']}

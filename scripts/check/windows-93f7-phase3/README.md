@@ -1,48 +1,42 @@
-# Staged Windows 93f7 Phase3 and early full CLI
+# Staged canonical Windows downstream: P3a -> P3b -> P4
 
-The actual native Windows proof is now bound in `handoff.json`: run45353936171,
-control276251ef, artifact14903265381, with full ZIP/compiler/Hello hashes and size.
-Its upstream same-run `binding.json` is retained alongside the controls. Final
-binding review is required before the one authorized temporary dispatch. The
-existing registered `bootstrap-sanity-evidence.yml` is used only on this work ref.
-No compiler
-or native Hello is repeated for the parent: the controller verifies the retained
-proof and reconstructs identical bytes from its immutable artifact/package pins.
+This replaces the separate P3a-to-CLI proposal; it must never dispatch that
+redundant build. The actual Phase3 parent pin remains null until verified.
+The source stays exactly93f7; the wrapper checkout is separately hash-bound to
+PR11275 merge ed9c404d, with its reviewed topic head also recorded. Its helper/config
+bytes are recorded and rechecked, never copied into frozen source.
 
-The matrix schedules Phase3 and early full CLI on separate Windows runners with
-fail-fast disabled. Each independently verifies the same qualified Phase2 tuple;
-neither reruns the parent's native proof. Early CLI is explicitly Phase2-produced,
-not true Phase4. Its full accepted source scope/prod/dynload entry is preserved,
-with the supported single low-memory worker and batch4. Three exact staged test
-fixtures exist before SCV initialization. The resulting executable must pass
-version/help, exact run output, positive1/0 and negative0/1 tests, and its own LLVM
-native Hello. Smokes use separate product-generation storage/cache and bounded
-owners. No resource reservation or failure in one runner affects the other.
+The first hosted job consumes only verified Phase3a job138350557255 in
+run45366816359/control4e69b62fcfa. It verifies actual archive, source/runtime/tool
+ancestry, Windows owner/cap, complete product companions and genuine native Hello.
+It runs canonical --phase=p3b --p3a-bin=<actual> --p3a-sha256=<actual>, file/MinGW,
+LLVM/threads2, fresh build root and the matched runtime. No P3a rebuild or new
+P3a Hello occurs. New output is phase3-b/simple.exe and its canonical native Hello.
 
-True Phase4 remains dependent on genuine Phase3 plus its retained Hello; it must
-never consume the early result as a substitute. Existing provisional Windows
-full-CLI machinery can reuse this product/smoke slice with a reviewed new Phase3
-artifact intake, but the f6f7 and Linux lineage gates are not rebound here. No
-duplicate true-Phase4 controller or automatic dispatch is created.
+The dependent hosted Phase4 job consumes that same-run uploaded artifact ID,
+checking API run/head/name/digest plus actual bytes and complete P3b qualification.
+Only then it runs canonical --phase=p4 --p3b-bin=<actual>, preserving all wrapper
+source roots, CUDA policy and products: release/debug CLIs and four essentials.
+Canonical release entry is src/app/cli/main.spl, which exports main_and_help;
+the prior early product used src/app/cli/_CliMain/main_and_help.spl directly.
+This product/config distinction is recorded. Canonical P4's intrinsic producer
+Hello gate stays intact; no extra external parent Hello is added.
 
-The untouched 93f7 standalone owner builds Phase3a using the actual Phase2 PE,
-GNU ABI, LLVM, file compilation and two workers, then executes its own candidate
-Hello. This is provisional, not scheduler admission or a Phase3b/fixpoint claim.
-The runner independently admits min(75% available physical/commit memory,
-available minus 2GiB). No product-specific 10GiB minimum is asserted: the actual
-canonical two-worker policy retains its estimates/coordinator reserve and can
-refuse the measured budget. Its supported host reserve is explicitly the same
-2GiB retained by the outer admission. Available output-volume disk is recorded;
-this standalone entrypoint has no fixed disk floor, and actual I/O failures remain
-fatal rather than being converted to success. The outer real
-Windows Job has a finite five-hour deadline, and the workflow has 50 minutes
-additional intake/upload allowance. No local resource reservation is made.
+Existing retained behavior checks run on the actual canonical release executable
+p4-from-p3b/bin/simple.exe: version/help, exact run output, positive1/0 and
+negative0/1 tests, then actual LLVM native Hello. There is no second CLI build.
+Three tracked qualification fixtures are staged before first SCV; smoke caches,
+storage and temp are distinct from the compiler generation. All outputs/companions
+and original source/runtime/tool/wrapper identities are rechecked.
 
-Retain product companions, native Hello output and logs, exact product manifest,
-original parent proof, resource/owner records, SCV inventories and caches. A true
-Phase4 intake must verify this actual candidate and its Hello plus runtime/tool
-tuple before a fresh full-CLI build; these records do not fabricate direct-product
-compiled authority receipts. Source and parent/tool files are rehashed at exit.
+Each runner independently samples75% physical/commit available with2GiB reserve;
+real worker estimates/admission remain unchanged, disk is measured without an
+invented fixed floor. P3b owner18000s, P4 owner16200s, each job350minutes leaves
+bounded intake/qualification/upload time. Full canonical P4 may not finish or fit;
+no product is skipped or claimed from another cohort. Terminal failures and exact
+receipts remain evidence. Outputs are provisional; no formal admission/deployment.
 
-Unproven: native Phase3 success, hosted memory sufficiency, and downstream full
-CLI capability. No full build or fixture execution was performed while staging.
+No dispatch, parent reexecution or native test occurred while staging these
+controls. Final actual-parent/wrapper binding review is required before sole use.
+
+Final parent binding: run45366816359/job138350557255/control4e69b62fcfa, artifact windows-93f7-phase3-retained-45366816359. The original failed run45357104625 is not accepted. phase3_parent remains null until actual artifact/PE/Hello pins are verified. Wrapper is landed mergeed9c404d, compiled source remains93f7. No dispatch until root confirms verified parent.
