@@ -1,0 +1,42 @@
+# Invalid UTF-8 must be rejected, never decoded lossily, by the std helpers that
+# used to return bare `text` from `bytes_to_text`.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.provider_contract.{SIMPLE_CLI_RUN}
+use std.nogc_sync_mut.composition.cli_command_wire.{
+    encode_cli_command_request_v1, decode_cli_command_request_v1,
+    encode_cli_command_result_v1, decode_cli_command_result_v1
+}
+use std.tooling.easy_fix.node_view.{hex_decode, hex_decode_fields}
+use std.tooling.easy_fix.closure_api.{edit_decode}
+
+describe "bare-text helpers reject invalid UTF-8":
+    it "rejects an invalid UTF-8 command in a CLI request arena":
+        val encoded = encode_cli_command_request_v1(SIMPLE_CLI_RUN, "fmt", [], 64)
+        var bad = encoded.bytes
+        bad[28] = 255
+        val decoded = decode_cli_command_request_v1(bad)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.diagnostic).to_equal("cli-text-invalid-utf8")
+
+    it "rejects an invalid UTF-8 argument in a CLI request arena":
+        val encoded = encode_cli_command_request_v1(SIMPLE_CLI_RUN, "fmt", ["x"], 64)
+        var bad = encoded.bytes
+        bad[bad.len() - 1] = 192
+        expect(decode_cli_command_request_v1(bad).diagnostic).to_equal("cli-text-invalid-utf8")
+
+    it "rejects invalid UTF-8 output in a CLI result arena":
+        val encoded = encode_cli_command_result_v1(0, "formatted", "")
+        var bad = encoded.bytes
+        bad[20] = 255
+        val decoded = decode_cli_command_result_v1(bad)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.diagnostic).to_equal("cli-text-invalid-utf8")
+
+    it "returns None for hex that decodes to invalid UTF-8":
+        expect(hex_decode("ff").is_none()).to_equal(true)
+        expect(hex_decode("6869") ?? "").to_equal("hi")
+        expect(hex_decode_fields(["6869", "c0"], [0, 1]).is_none()).to_equal(true)
+
+    it "rejects an edit record whose hex fields are invalid UTF-8":
+        expect(edit_decode("@edit|k|ff|00|1|2|61|61|61|1|1").is_none()).to_equal(true)
+        expect(edit_decode("@edit|k|61|30|1|2|61|61|61|1|1").is_some()).to_equal(true)

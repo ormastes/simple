@@ -15,7 +15,7 @@ use std.nogc_sync_mut.composition.cli_provider_wire.{
     encode_cli_command_result_bytes_v1
 }
 
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 class CliCommandRequestArenaV1:
     ok: bool
@@ -47,13 +47,15 @@ fn _append(out: [u8], values: [u8]):
         out.push(values[i])
         i = i + 1
 
-fn _text(data: [u8], offset: i64, length: i64) -> text:
+fn _text(data: [u8], offset: i64, length: i64) -> Result<text, text>:
     var raw: [u8] = []
     var i = 0
     while i < length:
         raw.push(data[offset + i])
         i = i + 1
-    bytes_to_text(raw)
+    match bytes_to_text_checked(raw):
+        case Ok(t): Ok(t)
+        case Err(_): Err("cli-text-invalid-utf8")
 
 fn _operation_valid(operation: u32) -> bool:
     operation == SIMPLE_CLI_DESCRIBE or operation == SIMPLE_CLI_VALIDATE_ARGS or
@@ -114,13 +116,13 @@ fn decode_cli_command_result_v1(data: [u8]) -> CliCommandResultViewV1:
             output_length < 0 or diagnostic_length < 0 or
             diagnostic_offset + diagnostic_length != data.len():
         return CliCommandResultViewV1(false, status, "", "", "cli-result-bounds-invalid")
-    CliCommandResultViewV1(
-        true,
-        status,
-        _text(data, output_offset, output_length),
-        _text(data, diagnostic_offset, diagnostic_length),
-        ""
-    )
+    val output: text = match _text(data, output_offset, output_length):
+        case Ok(t): t
+        case Err(e): return CliCommandResultViewV1(false, status, "", "", e)
+    val diagnostic: text = match _text(data, diagnostic_offset, diagnostic_length):
+        case Ok(t): t
+        case Err(e): return CliCommandResultViewV1(false, status, "", "", e)
+    CliCommandResultViewV1(true, status, output, diagnostic, "")
 
 fn cli_command_result_used_length_v1(data: [u8]) -> i64:
     if data.len() < SIMPLE_CLI_COMMAND_RESULT_V1_SIZE as i64:

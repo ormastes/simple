@@ -9,7 +9,7 @@ use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_CLI_DESCRIBE, SIMPLE_CLI_VALIDATE_ARGS, SIMPLE_CLI_RUN, SIMPLE_CLI_COMPLETE
 }
 
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 class CliCommandRequestViewV1:
     ok: bool
@@ -42,13 +42,15 @@ fn _append(out: [u8], values: [u8]):
         out.push(values[i])
         i = i + 1
 
-fn _text(data: [u8], offset: i64, length: i64) -> text:
+fn _text(data: [u8], offset: i64, length: i64) -> Result<text, text>:
     var raw: [u8] = []
     var i = 0
     while i < length:
         raw.push(data[offset + i])
         i = i + 1
-    bytes_to_text(raw)
+    match bytes_to_text_checked(raw):
+        case Ok(t): Ok(t)
+        case Err(_): Err("cli-text-invalid-utf8")
 
 fn _operation_valid(operation: u32) -> bool:
     operation == SIMPLE_CLI_DESCRIBE or operation == SIMPLE_CLI_VALIDATE_ARGS or
@@ -84,12 +86,17 @@ fn decode_cli_command_request_v1(data: [u8]) -> CliCommandRequestViewV1:
         cursor = cursor + 4
         if length > data.len() - cursor:
             return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-argument-bounds-invalid")
-        args.push(_text(data, cursor, length))
+        match _text(data, cursor, length):
+            case Ok(t): args.push(t)
+            case Err(e): return CliCommandRequestViewV1(false, operation, "", [], output_capacity, e)
         cursor = cursor + length
         i = i + 1
     if cursor != data.len():
         return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-argument-trailing-bytes")
-    CliCommandRequestViewV1(true, operation, _text(data, command_offset, command_length), args, output_capacity, "")
+    val command: text = match _text(data, command_offset, command_length):
+        case Ok(t): t
+        case Err(e): return CliCommandRequestViewV1(false, operation, "", [], output_capacity, e)
+    CliCommandRequestViewV1(true, operation, command, args, output_capacity, "")
 
 fn cli_command_result_lengths_valid_v1(output_length: i64, diagnostic_length: i64) -> bool:
     output_length >= 0 and diagnostic_length >= 0 and

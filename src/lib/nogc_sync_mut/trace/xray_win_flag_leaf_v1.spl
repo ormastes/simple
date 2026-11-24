@@ -18,7 +18,7 @@
 # adapter's serialized control-plane owner (quiescent mode). The handler hot
 # path is the lockless channel CAS of observer_native_channel_v1.
 use std.common.trace.observer_contract_v1.{TraceBackendV1}
-use std.common.text_bytes.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.nogc_sync_mut.ptr.raw.{rt_ptr_read_i64, rt_ptr_write_i64, rt_ptr_read_u8, rt_ptr_write_u8}
 use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XrayLlvmLeafV1, XRAY_LLVM_STATUS_SUCCESS_V1, XRAY_LLVM_STATUS_FAILED_V1, XRAY_LLVM_STATUS_INVALID_ID_V1}
 use std.nogc_sync_mut.trace.observer_native_channel_v1.{trace_native_channel_close_v1, trace_native_channel_record_words_v1}
@@ -224,13 +224,14 @@ impl XrayWinFlagLeafV1:
             if rt_ptr_read_u8(slot, 0) != value: return XRAY_LLVM_STATUS_FAILED_V1
         XRAY_LLVM_STATUS_SUCCESS_V1
 
-# Site -> Simple function name from the exported names table ("" if absent).
-pub fn xray_win_site_name_v1(port: XrayWinModulePortV1, id: i64) -> text:
+# Site -> Simple function name from the exported names table (None if absent
+# or not valid UTF-8).
+pub fn xray_win_site_name_v1(port: XrayWinModulePortV1, id: i64) -> text?:
     val names = port.symbol(XRAY_WIN_NAMES_SYMBOL_V1)
-    if names == 0: return ""
+    if names == 0: return None
     unsafe(capabilities: [ffi]):
         val count = rt_ptr_read_i64(names, 0)
-        if id < 1 or id > count: return ""
+        if id < 1 or id > count: return None
         val cstr = rt_ptr_read_i64(names, id * 8)
         var out: [u8] = []
         var i = 0
@@ -239,7 +240,9 @@ pub fn xray_win_site_name_v1(port: XrayWinModulePortV1, id: i64) -> text:
             if b == 0: break
             out = out.push(b as u8)
             i = i + 1
-        bytes_to_text(out)
+        match bytes_to_text_checked(out):
+            case Ok(t): Some(t)
+            case Err(_): None
 
 impl XrayLlvmLeafV1 for XrayWinFlagLeafV1:
     # Same compiler-emitted LLVM sled family as Linux; only the leaf differs.
