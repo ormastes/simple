@@ -97,6 +97,24 @@ impl NativeStagedCodegenStateV1:
         self.modules_withheld = self.modules_withheld +
             native_staged_withheld_count_v1(batch_module_count, flushed_delta)
 
+    # After the last shard claim the schedule may still contain unclaimed
+    # rows. The ordinary flush can therefore evict even the last survivor.
+    # Require named coverage so a missing claim cannot pass as a facade.
+    # reason: the go-to-end ledger and shard claims both use canonical text module names.
+    @allow(primitive_api)
+    fn shard_survivors_flushed_v1(excluded: [text]) -> bool:
+        if not self.active or self.shard_queue == "" or self.modules_flushed <= 0 or
+                self.modules_withheld != 0 or self.failed_batches.len() != 0 or
+                self.borrow_failed or self.verify_failed or self.lowering_failed:
+            return false
+        var flushed = 0
+        for name in self.shard_claimed_names:
+            if self.module_functions.contains_key(name):
+                flushed = flushed + 1
+            elif not excluded.contains(name):
+                return false
+        flushed == self.modules_flushed and flushed < self.shard_claimed_names.len()
+
     static fn inactive() -> NativeStagedCodegenStateV1:
         NativeStagedCodegenStateV1.begin(0)
 
