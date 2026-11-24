@@ -2288,8 +2288,9 @@ class FontRenderer:
             return foreign * 1000
         if font_size <= 0 or font_size > 512:
             return 0
-        val blob = self.selected_outline_blob
-        if blob.len() == 0:
+        # Read the field in place: `val blob = self.selected_outline_blob`
+        # lowers to rt_array_copy under the JIT, one whole-font copy per call.
+        if self.selected_outline_blob.len() == 0:
             return 0
         # Same face-identity source the advance lane uses (`_adv_identity` in
         # `get_glyph_advance_milli`): the glyph-id table is keyed on it, so a
@@ -2298,14 +2299,14 @@ class FontRenderer:
         val identity: text = if kern_rast != nil: kern_rast.?.cache_identity() else: ""
         if identity == "":
             return 0
-        val gid_slot = _gid_warm(identity, blob)
+        val gid_slot = _gid_warm(identity, self.selected_outline_blob)
         if gid_slot < 0:
             return 0
         val left_gid = _gid_lookup(gid_slot, left_codepoint)
         val right_gid = _gid_lookup(gid_slot, right_codepoint)
         if left_gid <= 0 or right_gid <= 0:
             return 0
-        sfnt_kern_face_pair_milli_px(blob, _gid_kern[gid_slot], left_gid, right_gid, font_size.to_i64()) as i32
+        sfnt_kern_face_pair_milli_px(self.selected_outline_blob, _gid_kern[gid_slot], left_gid, right_gid, font_size.to_i64()) as i32
 
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
@@ -2801,7 +2802,7 @@ class FontRenderer:
         # The selected-outline blob is read BEFORE the glyph-cache answer is
         # used: on that backend the cache may not answer at all (below).
         val _gb_t0 = _fr_probe_now()
-        val _blob = self.selected_outline_blob
+        val _blob_len = self.selected_outline_blob.len()
         _fr_probe_add_gadv_blob(_fr_probe_now() - _gb_t0)
         # Whole-pixel advance of an already rasterised glyph, x1000; -1 = none.
         var _cached_whole_milli: i32 = -1
@@ -2818,7 +2819,7 @@ class FontRenderer:
             # value is kept only as the fallback for a glyph the blob lanes
             # cannot answer.
             val _cached_milli = cached_adv.advance * 1000
-            if _blob.len() == 0 or _adv_identity == "":
+            if _blob_len == 0 or _adv_identity == "":
                 _adv_cache_store(_adv_identity, font_size, codepoint, _cached_milli)
                 return _cached_milli
             _cached_whole_milli = _cached_milli
@@ -2830,9 +2831,9 @@ class FontRenderer:
         # single parse, and a non-zero id is exactly what `has_glyph` reports
         # true for over the same blob. A `-1` (face not warmed, or non-ASCII)
         # falls through to the original path untouched.
-        if _blob.len() > 0 and _adv_identity != "":
+        if _blob_len > 0 and _adv_identity != "":
             val _gw_t0 = _fr_probe_now()
-            val _gid_s = _gid_warm(_adv_identity, _blob)
+            val _gid_s = _gid_warm(_adv_identity, self.selected_outline_blob)
             _fr_probe_add_gadv_warm(_fr_probe_now() - _gw_t0)
             val _gid = _gid_lookup(_gid_s, codepoint)
             # Only a POSITIVE id takes the fast lane. `0` (this face has no such
@@ -2850,7 +2851,7 @@ class FontRenderer:
                 # 0 means the batch could not answer and the per-glyph path
                 # runs unchanged.
                 val _aw_t0 = _fr_probe_now()
-                val _aw_slot = _advw_warm(_adv_identity, font_size, _gid_s, _blob)
+                val _aw_slot = _advw_warm(_adv_identity, font_size, _gid_s, self.selected_outline_blob)
                 val _aw_milli = _advw_lookup(_aw_slot, codepoint)
                 val _aw_px = _advw_lookup_px(_aw_slot, codepoint)
                 _fr_probe_add_gadv_batch(_fr_probe_now() - _aw_t0, _aw_px > 0)
@@ -2867,7 +2868,7 @@ class FontRenderer:
                     return _adv_batched
                 var index_meta: [i64] = [0; 20]
                 val _sa_t0 = _fr_probe_now()
-                sfnt_glyph_advance_into(_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
+                sfnt_glyph_advance_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
                 _fr_probe_add_gadv_sfnt(_fr_probe_now() - _sa_t0)
                 if index_meta[7] == 310031 and index_meta[2] > 0:
                     # meta[18] is the unrounded `hmtx` advance in milli-pixels;
