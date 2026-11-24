@@ -2,7 +2,7 @@
 import argparse,importlib.util,json,stat,subprocess,zipfile
 from pathlib import Path,PurePosixPath
 s=importlib.util.spec_from_file_location('control',Path(__file__).with_name('control.py'));c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
-CONTROL='5f08230a707dbfb0291db381a1c20f6bf7473ace'
+CONTROL='9c1de732ab6c0a57c1bed650ee65e55175584844'
 BRANCH='work/linux-656fa39e-children-20261124'
 def unpack(number,digest,run,name,out):
  meta=c.api('actions/artifacts/'+str(number))
