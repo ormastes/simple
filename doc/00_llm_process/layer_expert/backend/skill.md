@@ -401,3 +401,16 @@ LLVM backend still emits `fptosi`/`fptoui`, and the compiled `[f64].sum()`
 reads a boxed float as an int
 ([bug](../../../08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md)).
 [Bug](../../../08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md).
+
+## 2026-11-24 (2) — float sum typing, narrow-slot adapters, C rt_array_min
+
+- `[f64]`/`[f32]` `.sum()` is typed F64 in HIR and unboxed as F64 in MIR. An I64 unbox of
+  `rt_array_sum`'s boxed float read the heap handle as an int. Untyped mixed arrays still
+  use I64 (open).
+- `adapt_value_to_type`, the `calls.rs` argument adapt and the `body.rs` narrow return slot
+  now call `float_to_int_saturating`; there is no trapping `fcvt_to_sint` left in instr/.
+  Unit test: `codegen::instr::helpers::float_adapt_tests`.
+- The C runtime has `rt_array_min` (twin of `rt_array_max`), so native-build of
+  `[T].min()` links. Selfcheck: `src/runtime/test/rt_array_min_selfcheck.c`.
+- Open: a float passed to an int-typed user parameter/return disagrees across engines
+  ([bug](../../../08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md)).

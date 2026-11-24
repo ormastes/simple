@@ -1420,8 +1420,8 @@ pub fn compile_function_body<M: Module>(
                                     .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), as_f64)
                             } else if val_type.is_float() && ret_ty.is_int() {
                                 // Narrow int return slots (runtime-spec fns): real
-                                // value conversion.
-                                builder.ins().fcvt_to_sint(ret_ty, rv)
+                                // value conversion, saturating like an explicit cast.
+                                super::helpers::float_to_int_saturating(&mut builder, rv, ret_ty, true)
                             } else if val_type.is_float() && ret_ty.is_float() {
                                 // Float width conversion
                                 if val_type.bits() < ret_ty.bits() {
