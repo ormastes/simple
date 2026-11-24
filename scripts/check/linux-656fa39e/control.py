@@ -82,17 +82,24 @@ def intake(a):
  # A sealed per-file manifest binds the actual fresh Hello receipts/logs and
  # inputs for both isolated child runners. ZIPs are transport, not authorities.
  save(out/'files.json',{str(p.relative_to(out)):sha(p) for p in out.rglob('*') if p.is_file()})
-def child(a):
+def child(a,phase3_binding=None):
  source=a.source.resolve();parentroot=a.parent.resolve();out=a.output.resolve();out.mkdir(parents=True,exist_ok=False)
  source_guard(source);tools=tools_snapshot(out)
  disk_free=shutil.disk_usage(out).free
  save(out/'disk.json',{'free_bytes':disk_free,'scope':'measured runner disk; no uninvoked generic-preflight floor imported'})
- manifest=json.loads((parentroot/'files.json').read_text())
- for name,digest in manifest.items():assert sha(parentroot/name)==digest
- pin=json.loads((parentroot/'parent.json').read_text());assert pin['status']=='QUALIFIED_PROVISIONAL_PARENT' and pin['source']==SOURCE and pin['original_run']==RUN
- binary=parentroot/'parent/simple_stage2';binary.chmod(0o755);runtime=parentroot/'runtime'
- assert sha(binary)==pin['parent_sha256']
- q=json.loads((parentroot/'parent-native-hello/qualification.json').read_text());assert q['status']=='BEHAVIOR_PASS' and q['product_sha256']==pin['parent_sha256'] and q['claims']['native_hello']
+ if phase3_binding is None:
+  manifest=json.loads((parentroot/'files.json').read_text())
+  for name,digest in manifest.items():assert sha(parentroot/name)==digest
+  pin=json.loads((parentroot/'parent.json').read_text());assert pin['status']=='QUALIFIED_PROVISIONAL_PARENT' and pin['source']==SOURCE and pin['original_run']==RUN
+  binary=parentroot/'parent/simple_stage2';binary.chmod(0o755);runtime=parentroot/'runtime'
+  assert sha(binary)==pin['parent_sha256']
+  q=json.loads((parentroot/'parent-native-hello/qualification.json').read_text());assert q['status']=='BEHAVIOR_PASS' and q['product_sha256']==pin['parent_sha256'] and q['claims']['native_hello']
+ else:
+  assert a.role=='full-cli' and phase3_binding['status']=='VERIFIED_PHASE3_PARENT'
+  binary=Path(phase3_binding['binary']);runtime=Path(phase3_binding['runtime']);binary.chmod(0o755)
+  pin={'parent_sha256':phase3_binding['phase3_sha256'],'runtime_files':phase3_binding['runtime_files']}
+  assert sha(binary)==pin['parent_sha256']
+  save(out/'phase3-parent.json',phase3_binding)
  policy=budget.sample(a.role);save(out/'resource-policy.json',policy);cap=policy['cap_kib'];budget.recheck(cap)
  env={k:v for k,v in os.environ.items() if not k.startswith('SIMPLE_')}
  for leaf in ('cache','tmp','storage','product'):(out/leaf).mkdir()
@@ -108,7 +115,7 @@ def child(a):
   argv=[str(binary),'native-build','--backend','llvm','--target','x86_64-unknown-linux-gnu','--runtime-path',str(runtime),'--runtime-bundle','core-c-bootstrap','--threads','1','--profile=prod','--release','--strip','--managed-build-phase=phase4','--opt-level=standard','--low-memory','--entry-closure','--entry','src/app/cli/_CliMain/main_and_help.spl','--mode','dynload','--cache-dir',str(out/'cache'),'--output',str(product)]
   for path in ('src/compositions/cuda_static','src/compositions/kernel_llvm_cranelift','src/compiler','src/app','src/lib','src/os','src/plugins','src/package_ownership','src/compositions'):argv+=['--source',path]
  command=['perl',str(source/'scripts/resource/process-tree-rss-watchdog.pl'),'--rss-cap-mode=enforce','--max-rss-kib='+str(cap),'--timeout-seconds='+str(seconds),'--receipt='+str(out/'build.owner.env'),'--']+argv
- save(out/'build.argv.json',command);result={'status':'FAILED','role':a.role,'source':SOURCE,'parent_sha256':pin['parent_sha256'],'runtime_files':pin['runtime_files'],'scope':'provisional only, no admission/deployment'}
+ save(out/'build.argv.json',command);result={'status':'FAILED','role':a.role,'source':SOURCE,'parent_sha256':pin['parent_sha256'],'parent_phase':3 if phase3_binding else 2,'runtime_files':pin['runtime_files'],'scope':'provisional only, no admission/deployment'}
  try:
   with (out/'build.stdout').open('wb') as stdout,(out/'build.stderr').open('wb') as stderr:
    with cleanup.acquired_owner(command,out/'cleanup.json',cwd=source,env=env,stdout=stdout,stderr=stderr) as process:code=process.wait(timeout=seconds+120)
@@ -129,6 +136,7 @@ def child(a):
   except Exception as error:result.update(status='FAILED',immutable_inputs_after='FAIL',identity_error=str(error))
   save(out/'terminal.json',result)
  assert result['status']=='BEHAVIOR_PASS',result
-p=argparse.ArgumentParser();p.add_argument('mode',choices=['intake','child']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--parent',type=Path);p.add_argument('--role',choices=['phase3','full-cli']);p.add_argument('--artifact-pins');a=p.parse_args()
-assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=a.source,text=True).strip()==SOURCE
-(intake if a.mode=='intake' else child)(a)
+if __name__=='__main__':
+ p=argparse.ArgumentParser();p.add_argument('mode',choices=['intake','child']);p.add_argument('--source',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--parent',type=Path);p.add_argument('--role',choices=['phase3','full-cli']);p.add_argument('--artifact-pins');a=p.parse_args()
+ assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=a.source,text=True).strip()==SOURCE
+ (intake if a.mode=='intake' else child)(a)
