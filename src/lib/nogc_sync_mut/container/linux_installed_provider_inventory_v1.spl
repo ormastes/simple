@@ -12,7 +12,7 @@ use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_encode_v1
 use std.common.contracts.container.machine_policy_v1.machine_container_policy_decode_v1
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
-use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 
@@ -231,9 +231,12 @@ fn inventory_bind_v1(slot: i64) -> Result<(), text>:
             process.thread_id != installed.process.thread_id or process.authority_namespace_id != installed.process.authority_namespace_id:
         return Err("inventory-installed-process-context-mismatch")
     val bytes = reader.read_policy_v1()?
-    if not utf8_bytes_valid(bytes) or sha256_u8_hex(bytes) != installed.machine_policy_digest:
+    if sha256_u8_hex(bytes) != installed.machine_policy_digest:
         return Err("inventory-installed-machine-policy-mismatch")
-    val machine = machine_container_policy_decode_v1(bytes_to_text(bytes))?
+    val policy_text: text = match bytes_to_text_checked(bytes):
+        case Ok(t): t
+        case Err(_): return Err("inventory-installed-machine-policy-mismatch")
+    val machine = machine_container_policy_decode_v1(policy_text)?
     if machine.providers.len() != 1: return Err("inventory-incomplete-extra-or-missing-delegated-provider")
     val provider = machine.providers[0]
     if provider.backend != "linux-podman" or provider.policy_bytes != linux_oci_engine_policy_encode_v1(policy.cli_policy)?:

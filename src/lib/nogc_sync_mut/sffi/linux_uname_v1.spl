@@ -4,7 +4,7 @@
 # https://man7.org/linux/man-pages/man2/uname.2.html . No BSD layout assumption.
 use std.sffi.platform.platform_name_raw
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8}
-use std.common.text_bytes.bytes_to_text
+use std.common.encoding.external_text.{bytes_to_text_checked}
 
 @when(os="linux"):
 use std.nogc_sync_mut.io.path_identity_abi.{malloc, free}
@@ -45,7 +45,11 @@ fn _linux_uname_field_v1(pointer: i64, offset: i64) -> Result<text, text>:
     var bytes: [u8] = []
     for index in 0..65:
         val byte = volatile_read_u8(pointer + offset + index) as u8
-        if byte == 0u8: return Ok(bytes_to_text(bytes))
+        if byte == 0u8:
+            val field: text = match bytes_to_text_checked(bytes):
+                case Ok(t): t
+                case Err(_): return Err("linux-uname-field-encoding-invalid")
+            return Ok(field)
         # Linux sysname and supported machine identifiers are ASCII, hence a
         # strict UTF8 subset. Never replace invalid bytes with a guessed name.
         if byte < 33u8 or byte > 126u8: return Err("linux-uname-field-encoding-invalid")

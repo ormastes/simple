@@ -1,0 +1,27 @@
+# Strict UTF-8 decode at source-projection boundaries (owner decision
+# 2026-11-23: bytes_to_text_checked, never lossy).
+
+"""
+## Purpose and audience
+Purpose: pin that source projections reject invalid UTF-8.
+Audience: std source maintainers.
+"""
+
+use std.spec.*
+use std.common.text_bytes.{bytes_to_text}
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1}
+use std.nogc_sync_mut.source.projection.{source_project_ranges_v1}
+
+describe "source projection decode":
+    it "rejects a snapshot whose source is not valid UTF-8":
+        val bad: [u8] = [0x61u8, 0xFFu8]
+        val snapshot = SourceSnapshotV1(snapshot_id: "s1", document_uri: "mem://s1", source: bytes_to_text(bad))
+        match source_project_ranges_v1(snapshot, [SourceRangeV1(0, 1)], 16):
+            case Ok(_): expect("ok").to_equal("err")
+            case Err(e): expect(e).to_equal("unsupported_source_encoding")
+
+    it "projects a valid multibyte selection":
+        val snapshot = SourceSnapshotV1(snapshot_id: "s2", document_uri: "mem://s2", source: "a\u00e9b")
+        match source_project_ranges_v1(snapshot, [SourceRangeV1(1, 3)], 16):
+            case Ok(p): expect(p.source_text).to_equal("\u00e9")
+            case Err(e): expect(e).to_equal("")
