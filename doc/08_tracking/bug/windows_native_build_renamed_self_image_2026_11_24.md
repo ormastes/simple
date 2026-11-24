@@ -21,7 +21,7 @@ identity still fails closed. Linux and macOS behavior is unchanged.
 
 Focused verification uses the actual canonical lookup in a native Windows
 fixture renamed to simple_stage2.exe, with spoofed argv[0] and stale configured
-compiler paths. Its seven assertions require a real Windows host, a nonempty
+compiler paths. Its eight assertions per environment profile require a real Windows host, a nonempty
 existing image, the renamed basename, and SHA-256 equality with the collector's
 independent hash. The collector also verifies the production Windows call-site
 change and unchanged non-Windows body. This proves the lookup and source wiring;
@@ -37,3 +37,15 @@ ambient OS variable. The runtime-backed predicate corrects that selector;
 the additional OS-unset and spoofed profiles require their own native evidence.
 The first passing case is retained and is not repeated.
 The failed P3a generation is retained unchanged and is not retried by this fix.
+
+Final native proof 45366383015 at source bb288a06a006470af1a740a36e0bca310e31d281
+passed OS-unset and OS=Linux profiles, eight assertions each (16 total).
+The renamed executable SHA-256 was
+140b2989fe2e322d786425933fe2befa08204999b57315c0a8fa153492d25b3b.
+Compile and both run owners completed with exit 0, quiescent=1 and enforced
+RSS caps. Compile peak was 3685368 KiB under 8613345 KiB; each execution
+peaked at 1712 KiB under 262144 KiB. Artifact 14906793956 is bound by ZIP
+SHA-256 808562d47551f80540650a64d8f42a32f1460ce54055a01bf77fcf9c5ebee445.
+This resolves the environment-selector coverage finding without repeating the
+original passing profile. It remains actual kernel-helper and source-wiring
+evidence, not a rebuilt full caller or a completed Phase3 generation.
