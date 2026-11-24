@@ -1,6 +1,6 @@
 use std.spec
 use app.cli.file_worker_pool_refusal.{file_worker_pool_serial_memory_admits_v1, shard_aggregate_failure_line_v1}
-use app.cli.shard_mem_clamp.{shard_parse_worker_budget_kb_for_v1}
+use app.cli.shard_mem_clamp.{shard_parse_worker_budget_kb_for_v1, shard_threads_tree_cap_for, shard_threads_guarded_floor_v1}
 
 # Phase-3 2026-11-15 (doc/08_tracking/bug/p3_mir_shard_aggregate_fail_no_diag_2026-11-15.md):
 # a 3216-file closure produced 0 objects. The per-file pool was refused before
@@ -56,3 +56,14 @@ describe "phase-3 shard admission and aggregate diagnostics":
         expect(shard_parse_worker_budget_kb_for_v1("", "", 0, 3800000)).to_equal(3800000)
         step("a HIR override never raises the price")
         expect(shard_parse_worker_budget_kb_for_v1("", "9000000", 0, 3800000)).to_equal(3800000)
+
+
+    it "bounds concurrent parse children using the published closure size":
+        val price = shard_parse_worker_budget_kb_for_v1("2097152", "", 0, 3800000, 1652)
+        expect(price).to_equal(6291456)
+        val count = shard_threads_tree_cap_for(10, price, 13681584, 16777216, true)
+        expect(count).to_equal(1)
+        expect(shard_threads_guarded_floor_v1(10, count, 16777216, 13681584, 0, price, -1, "enforce")).to_equal(1)
+        expect(shard_parse_worker_budget_kb_for_v1("2097152", "", 0, 3800000, 64)).to_equal(2097152)
+        expect(shard_parse_worker_budget_kb_for_v1("", "2000000", 0, 3800000, 826)).to_equal(3145728)
+        expect(shard_parse_worker_budget_kb_for_v1("9000000", "", 0, 3800000, 2000)).to_equal(9000000)
