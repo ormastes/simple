@@ -364,45 +364,7 @@ static int rt_pool_default_worker_count(void) {
 #endif
 }
 
-static int rt_pool_clamp_worker_count(int64_t count) {
-    if (count < 1) return 1;
-    if (count > RT_POOL_MAX_WORKERS) return RT_POOL_MAX_WORKERS;
-    return (int)count;
-}
-
-static int rt_pool_effective_worker_count(void) {
-    return g_pool_configured_worker_count > 0
-        ? g_pool_configured_worker_count
-        : rt_pool_default_worker_count();
-}
-
-static int rt_pool_has_tasks_locked(void) {
-    int count = g_pool_worker_count > 0 ? g_pool_worker_count : rt_pool_effective_worker_count();
-    if (count > RT_POOL_MAX_WORKERS) count = RT_POOL_MAX_WORKERS;
-    for (int i = 0; i < count; i++) {
-        if (g_pool_queues[i].head != NULL) return 1;
-    }
-    return 0;
-}
-
-static RtPoolTask* rt_pool_queue_pop_head(RtPoolQueue* queue) {
-    RtPoolTask* task = queue->head;
-    if (task == NULL) return NULL;
-    queue->head = task->next;
-    if (queue->head == NULL) queue->tail = NULL;
-    task->next = NULL;
-    return task;
-}
-
-static void rt_pool_queue_push_tail(RtPoolQueue* queue, RtPoolTask* task) {
-    task->next = NULL;
-    if (queue->tail != NULL) {
-        queue->tail->next = task;
-    } else {
-        queue->head = task;
-    }
-    queue->tail = task;
-}
+#include "rt_pool_core.h"
 
 static void rt_pool_state_task_started(RtPoolTask* task) {
     RtPoolState* state = task != NULL ? task->state : NULL;
@@ -977,7 +939,12 @@ int64_t rt_pool_state_create_v1(int64_t capacity) {
 /* Pool submit with an explicit function-value kind (RT_WORKER_CLOSURE_*),
  * chosen by the submitter: ADDRESS for a machine-address record (runtime and
  * test callers), VALUE for a tagged Simple function value. Unknown kinds and
- * tags are rejected (-3). Twin of runtime_thread.c. */
+ * tags are rejected (-3). Twin of runtime_thread.c.
+ * Counter ordering is intentionally NOT shared (rt_pool_core.h): this lane
+ * checks closed/capacity and bumps outstanding/pending under the state lock,
+ * then on a failed slot alloc or schedule undoes them via
+ * rt_pool_submit_rollback (after a close-wait on the task slot);
+ * runtime_thread.c rolls back inline against its refcounted v1 table. */
 /* Undo a counted-but-unscheduled submit: drop the state's outstanding/pending
  * counts, tear down and free the task, release the state handle. Returns -3. */
 static int64_t rt_pool_submit_rollback(RtPoolState* state, RtPoolTask* task, int64_t state_handle) {

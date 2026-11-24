@@ -272,4 +272,6 @@ call `compile_source_inventory_seed_admitted_digest_v1` BEFORE
 seed is the same full verification, never a skipped one, and is a no-op inside
 a scope. Direct `read_at_pointer` re-reads stay deliberate. Spec:
 `test/01_unit/lib/scv/compile_source_inventory_admitted_digest_memo_spec.spl`
-(REQ-SCV-ADMITTED-MEMO-006).
+(REQ-SCV-ADMITTED-MEMO-006). Neither the seed nor the reader memoizes while a
+build session heap is live: promotion there is session adoption, reclaimed at
+`rt_session_heap_end`, so a stored graph would dangle (REQ-SCV-ADMITTED-MEMO-007).
