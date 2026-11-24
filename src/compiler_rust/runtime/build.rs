@@ -53,6 +53,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_pool.c");
     println!("cargo:rerun-if-changed=../../runtime/rt_pool_core.h");
     println!("cargo:rerun-if-changed=../../runtime/struct_alloc_registry_impl.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_hosted_backend_stubs_impl.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_dynload_snapshot_private.h");
+    println!("cargo:rerun-if-changed=../../runtime/scilib/scilib_bits_common.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_framebuffer.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_image.c");
     println!("cargo:rerun-if-changed=../../runtime/startup/common/runtime_log_hosted.c");
@@ -411,9 +414,10 @@ fn compile_c_runtime_sources() {
         // (rt_host_gpu_lane_*, rt_host_gpu_queue_*) already have real
         // definitions in this crate's own host_gpu_lane.rs and duplicate-
         // symbol at link time if the whole translation unit is pulled in.
-        // runtime_native_gpu_stub.c carries a verbatim, comment-linked copy
-        // of only the two families' bodies so this crate can link them
-        // without dragging in the rest of runtime_native.c.
+        // runtime_native_gpu_stub.c includes only the two families' shared
+        // bodies (runtime_hosted_backend_stubs_impl.h, also included by
+        // runtime_native.c) so this crate can link them without dragging in
+        // the rest of runtime_native.c.
         "runtime_native_gpu_stub.c",
         // rt_audio_* (31 names, doc/08_tracking/bug/interpreter_extern_unreachable_names.md
         // bucket (a)): runtime_audio.c was absent from this list entirely, so
