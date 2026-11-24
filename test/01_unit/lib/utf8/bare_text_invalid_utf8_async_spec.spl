@@ -1,0 +1,36 @@
+# Invalid UTF-8 must be rejected, never decoded lossily, by the std helpers that
+# used to return bare `text` from `bytes_to_text` (common / async / net family).
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchResponse}
+use std.nogc_async_mut.net.sffi.{bytes_to_string}
+use std.nogc_async_mut.io.quic.h3_stream.{QpackCodec}
+use std.common.aspect_pack.{ApkCatalogEntryV2, ApkProfileRecordV1, apk_build_catalog_v3, apk_open_catalog_v1, apk_catalog_select_profile_v1, APK_ENTRY_FACET, APK_ACT_LAZY_FACET}
+
+describe "bare-text helpers reject invalid UTF-8 (async family)":
+    it "rejects an invalid UTF-8 browser response body":
+        var bad = FetchResponse(status: 200, headers: "", body: [255])
+        expect(bad.body_text().is_err()).to_equal(true)
+        var good = FetchResponse(status: 200, headers: "", body: [104, 105])
+        expect(good.body_text().unwrap()).to_equal("hi")
+
+    it "rejects invalid UTF-8 in net bytes_to_string":
+        expect(bytes_to_string([192, 128]).is_err()).to_equal(true)
+        expect(bytes_to_string([104, 105]).unwrap()).to_equal("hi")
+
+    it "rejects an invalid UTF-8 QPACK literal value":
+        val codec = QpackCodec.create()
+        expect(codec.decode_headers([0, 0, 81, 1, 255]).is_err()).to_equal(true)
+
+    it "reports a corrupt aspect catalog profile id instead of a silent miss":
+        var entries: [ApkCatalogEntryV2] = []
+        entries.push(ApkCatalogEntryV2(facet_key: "debug/Debuggable", pack_path: "aspect/obs.apk",
+            module_id: "metrics.counters", entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET, abi_hash: ""))
+        var profiles: [ApkProfileRecordV1] = []
+        profiles.push(ApkProfileRecordV1(profile_id: "minimal", entry_start: 0, entry_count: 1))
+        val cat = apk_build_catalog_v3(entries, profiles)
+        var bytes = cat.bytes
+        bytes[28] = 255
+        val ch = apk_open_catalog_v1(bytes)
+        val sel = apk_catalog_select_profile_v1(bytes, ch, "minimal")
+        expect(sel.ok).to_equal(false)
+        expect(sel.error_message).to_contain("not valid UTF-8")
