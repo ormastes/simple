@@ -7836,6 +7836,31 @@ int64_t rt_array_max(int64_t receiver) {
     return result;
 }
 
+/* collections.rs rt_array_min -- twin of rt_array_max above: nil for an empty
+ * array or a non-array; packed [u8] / [u64] compare raw UNSIGNED elements. */
+int64_t rt_array_min(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    RtCoreArray* packed = rt_core_array_ptr(arr);
+    if (packed->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        uint64_t best = UINT64_MAX;
+        for (int64_t i = 0; i < packed->len; i++) {
+            uint64_t v = is_bytes ? (uint64_t)((const uint8_t*)packed->data)[i]
+                                  : ((const uint64_t*)packed->data)[i];
+            if (v < best) best = v;
+        }
+        return rt_value_int((int64_t)best);
+    }
+    int64_t result = spl_core_array_value_at(arr, 0);
+    int64_t count = rt_array_len(arr);
+    for (int64_t index = 1; index < count; index++) {
+        int64_t candidate = spl_core_array_value_at(arr, index);
+        if (rt_sort_cmp(candidate, result) < 0) result = candidate;
+    }
+    return result;
+}
+
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
  * A negative n yields an empty result, matching the saturating eval_arg_usize. */
 int64_t rt_take(int64_t receiver, int64_t n) {

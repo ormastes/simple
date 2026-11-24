@@ -81,9 +81,13 @@ for unsigned), then `ireduce`s. All three sites call it. Per conversion this add
 integer ops in place of the trap checks.
 
 **Not changed.**
-- The implicit ABI adapters (`helpers.rs` float->int adapt, `body.rs` return of a float from
-  an int-typed function, `calls.rs` argument adapt) still use trapping `fcvt_to_sint`. They
-  are coercions, not user casts.
+- (Fixed 2026-11-24, work/compiler-numeric-conv2-20261124.) The implicit narrow-slot
+  adapters (`helpers.rs` `adapt_value_to_type`, the `body.rs` narrow int return slot, the
+  `calls.rs` argument adapt) used trapping `fcvt_to_sint`. They now call
+  `float_to_int_saturating` (signed). Red to green: the unit test
+  `codegen::instr::helpers::float_adapt_tests` covers i8/i16/i32 slots x 9 inputs incl.
+  NaN and +/-inf; it died with SIGILL on base and passes on head. The uniform i64 slots
+  keep the float bits, as before.
 - The LLVM backend (`codegen/llvm/instructions.rs`, `emitter.rs`) still emits
   `fptosi`/`fptoui`, which give poison when out of range. It is behind the opt-in `llvm` cargo
   feature (`simple-compiler` default features are `[]`; the driver's default is only

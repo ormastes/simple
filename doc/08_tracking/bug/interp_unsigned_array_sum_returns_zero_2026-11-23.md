@@ -73,9 +73,8 @@ Repro across engines, head seed (base interpreter printed `0` for every unsigned
 | `[0xffffffffffffffffu64, 2u64].sum()` | 1 | 1 | 1 |
 
 **Still open (filed separately).** Compiled float-array sums still return a heap address:
-`compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md`. Also, native-build of a
-program that uses `[T].min()` fails to link: `rt_array_min` has no C-runtime definition,
-while `rt_array_max` links. That is pre-existing; base fails the same way.
+`compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md`. Native-build of `[T].min()` failing to link (no C `rt_array_min`) is fixed by
+work/compiler-numeric-conv2-20261124; see the float-sum bug doc.
 
 **Float promotion: a behaviour change in the reference engine.** Interpreter `[f64].sum()`
 used to return the Int 0. It now returns the float sum. A grep of `.sum()` over `src/lib`,
