@@ -8,7 +8,8 @@ use app.cli.worker_hir_owner_v1.{WorkerHirOwnerV1, WorkerHirSharedExecPinV1,
     worker_hir_owner_retain_failure_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
     native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
-    native_build_hir_warmup_admits_mir_v1, native_build_mir_outcome_after_hir_failures_v1}
+    native_build_hir_warmup_admits_mir_v1, native_build_mir_outcome_after_hir_failures_v1,
+    native_build_capsule_mir_outcome_v1}
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, env_unset, cwd, host_os}
@@ -1317,6 +1318,7 @@ pub struct LedgerShardRunV1:
     blocked_reason: text
     all_stopped: bool
     refused_before_spawn: bool
+    worker_termination: text = ""
 
 # Directory holding a ledger queue ("" -> "."), where per-phase measured
 # worker peaks persist across runs. Supports both POSIX '/' and Windows '\'
@@ -1415,6 +1417,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
         i = i + 1
     var generation: i64 = 0
     var failed_workers: i64 = 0
+    var worker_termination = ""
     var first_error_line = ""
     var done: i64 = 0
     var all_stopped = true
@@ -1602,13 +1605,16 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             if code != 0 or sealed != 0 or not finished:
                 if first_error_line == "":
                     first_error_line = native_file_worker_first_error_line_v1(label, owner, native_file_worker_error_reason_read_v1(queue_dir, owner))
+                val exit_cause = native_build_exit_cause_field_v1(code)
+                if worker_termination == "" and (deadline_hit or exit_cause != ""):
+                    worker_termination = "owner={owner} status={state_label} exit={code}{exit_cause}"
                 failed_workers = failed_workers + 1
-                eprint "[{label}] owner={owner} status={state_label} exit={code} claimed={progress} sealed={sealed} finished={finished}{native_build_exit_cause_field_v1(code)}{shard_worker_exit_hint_v1(code, label)}"
+                eprint "[{label}] owner={owner} status={state_label} exit={code} claimed={progress} sealed={sealed} finished={finished}{exit_cause}{shard_worker_exit_hint_v1(code, label)}"
                 # Name the module this worker (by pid) died in, from its own
                 # breadcrumbs; live siblings keep theirs open.
                 if owner_stopped and code != 0:
-                    val exit_cause = if deadline_hit: " {state_label}" else: native_build_exit_cause_field_v1(code)
-                    for attributed in ice_boundary_attribute_dead_pid_v1(pid, code, exit_cause):
+                    val attribution_cause = if deadline_hit: " {state_label}" else: exit_cause
+                    for attributed in ice_boundary_attribute_dead_pid_v1(pid, code, attribution_cause):
                         eprint "[{label}] owner={owner} {attributed}"
                         if first_error_line == "":
                             first_error_line = native_file_worker_first_error_line_v1(label, owner, attributed)
@@ -1721,7 +1727,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val code = if blocked: 1 else: hir_shard_aggregate_exit(failed_workers, failed_modules)
     LedgerShardRunV1(code: code, failed_modules: failed_modules,
         total_claims: total_claims, blocked_reason: blocked_reason,
-        all_stopped: all_stopped, refused_before_spawn: false)
+        all_stopped: all_stopped, refused_before_spawn: false, worker_termination: worker_termination)
 
 # ===== MIR sharding =========================================================
 #
@@ -2095,19 +2101,23 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 val mir_run = run_ledger_shards("mir-shard", "--mir-shard", "SIMPLE_MIR_SHARD_QUEUE",
                     "SIMPLE_MIR_SHARD_OWNER", base, mir_queue, args, count, pool_parallel,
                     simple_bin, timeout_ms)
-                val outcome = native_build_mir_outcome_after_hir_failures_v1(
+                val ledger_outcome = native_build_mir_outcome_after_hir_failures_v1(
                     native_mir_shard_outcome_after_hir_errors_v1(
                     native_mir_shard_outcome_v1(mir_run.code, mir_run.failed_modules,
                         mir_run.total_claims, mir_run.all_stopped),
                     native_mir_shard_hir_compile_errors_recorded_v1(mir_queue)),
                     hir_module_failures)
+                val fallback_opt_in = (env_get("SIMPLE_MIR_SHARD_INPROCESS_FALLBACK") ?? "") == "1"
+                val outcome = native_build_capsule_mir_outcome_v1(ledger_outcome, mir_run.worker_termination, fallback_opt_in)
+                if ledger_outcome == "fallback" and mir_run.worker_termination != "":
+                    eprint "[capsule-shard] MIR worker terminated before any module verdict: {mir_run.worker_termination} in_process_fallback={fallback_opt_in}"
                 if outcome == "link":
                     result = mir_queue
                 elif outcome == "fail":
-                    eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
-                    _shard_aggregate_fail_reason_v1 = "capsule MIR shards exit={mir_run.code} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; see the [mir-shard] owner= lines above"
+                    eprint "[capsule-shard] MIR aggregate failure exit={mir_run.code} worker_termination={mir_run.worker_termination} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; link blocked"
+                    _shard_aggregate_fail_reason_v1 = "capsule MIR shards exit={mir_run.code} worker_termination={mir_run.worker_termination} failed_modules={mir_run.failed_modules} blocked={mir_run.blocked_reason}; see the [mir-shard] owner= lines above"
                     result = "fail"
-                else:
+                elif mir_run.worker_termination == "":
                     eprint "[capsule-shard] MIR shards recorded no module verdict (lane ineligible or no HIR inventory); falling back to in-process MIR"
     native_build_env_restore_v1("SIMPLE_MEM_SNAPSHOT_FILE", old_mem_snapshot)
     native_build_env_restore_v1("SIMPLE_COMPILER_PHASE_PROFILE_FILE", old_phase_file)
