@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+[ "$(uname -s)" = Darwin ] || exit 0
+root=$(cd "$(dirname "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/lib"
+printf '%s\n' 'int std_value(void) { return 41; }' > "$tmp/std.c"
+printf '%s\n' 'extern int std_value(void); int app_value(void) { return 1 + std_value(); }' > "$tmp/app.c"
+printf '%s\n' 'extern int app_value(void); int main(void) { return app_value() != 42; }' > "$tmp/main.c"
+cc -dynamiclib "$tmp/std.c" -install_name @rpath/libsimple-std.dylib -o "$tmp/lib/libsimple-std.dylib"
+cc -dynamiclib "$tmp/app.c" -install_name @rpath/libsimple-app.dylib -Wl,-rpath,@loader_path \
+    -L"$tmp/lib" -lsimple-std -o "$tmp/lib/libsimple-app.dylib"
+cc "$tmp/main.c" -L"$tmp/lib" -lsimple-app -Wl,-rpath,@executable_path/lib -o "$tmp/compiler"
+cc -std=c11 -mmacosx-version-min=13.0 -Wall -Wextra -Werror -pthread \
+    "$root/src/runtime/test/runtime_process_darwin_pin_selfcheck.c" "$root/src/runtime/runtime_process_tree.c" -o "$tmp/check"
+"$tmp/check" --fixture "$tmp/compiler"

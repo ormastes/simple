@@ -199,14 +199,14 @@ static void check_pin_lifecycle(const char* self) {
     assert(open_fd_count() == baseline);
 }
 
-static void check_owner_with_real_pin(const char* self) {
-    int64_t pin = rt_process_pin_executable_owned(self); assert(pin > 0);
+static void check_owner_with_real_pin(int64_t pin, const char *argument, int expected_exit) {
+    assert(pin > 0);
     char cwd[PATH_MAX]; assert(realpath(".", cwd));
     int64_t cwd_pin = rt_process_observation_v4_pin_cwd_value(cwd, strlen(cwd)); assert(cwd_pin > 0);
     SplArray* cwd_digest_value = rt_process_observation_v4_cwd_digest_value(cwd_pin);
     uint8_t cwd_digest[32];
     assert(rt_array_bytes_copy_checked((int64_t)(uintptr_t)cwd_digest_value, cwd_digest, 32) == 32);
-    SplArray* request = request_bytes(cwd, cwd_pin, cwd_digest, "--slow-child", POV4_DESCENDANT_PROCESS_GROUP);
+    SplArray* request = request_bytes(cwd, cwd_pin, cwd_digest, argument, POV4_DESCENDANT_PROCESS_GROUP);
     set_u64_at(request, 96, (uint64_t)pin);
     const OwnedDarwinPin* record = find_pin(pin); assert(record);
     char directory[PATH_MAX]; strcpy(directory, record->directory);
@@ -220,7 +220,7 @@ static void check_owner_with_real_pin(const char* self) {
     struct stat st; assert(stat(directory, &st) == 0);
     SplArray* ticket = ticket_from(started);
     SplArray* frozen = collect_until(ticket, POV4_KIND_FROZEN);
-    assert(word(frozen, POV4_EXIT_CODE) == 7);
+    assert(word(frozen, POV4_EXIT_CODE) == expected_exit);
     assert(word(frozen, POV4_TREE_EMPTY) == 1 && word(frozen, POV4_LEADER_REAPED) == 1);
     assert(word(rt_process_observation_v4_ack_collect_value(ticket, tuple_item(frozen, 2)),
                 POV4_PACKET_KIND) == POV4_KIND_ACK);
@@ -236,7 +236,32 @@ int main(int argc, char** argv) {
     char canonical[PATH_MAX]; assert(realpath(self, canonical));
     hash_path(canonical, self_digest);
     check_pin_lifecycle(canonical);
-    check_owner_with_real_pin(canonical);
+    check_owner_with_real_pin(rt_process_pin_executable_owned(canonical), "--slow-child", 7);
+    if (argc == 3 && (!strcmp(argv[1], "--bundle") || !strcmp(argv[1], "--fixture"))) {
+        assert(realpath(argv[2], canonical));
+        hash_path(canonical, self_digest);
+        int64_t pin = rt_process_pin_executable_owned(canonical); assert(pin > 0);
+        const OwnedDarwinPin *record = find_pin(pin); assert(record && record->bundle.present);
+        if (!strcmp(argv[1], "--fixture")) {
+            /* Withdraw the generated source libraries after publication. The
+             * actual V4 child must run its transitive closure from the pin. */
+            assert(record->bundle.present == ((1u << 0) | (1u << 3)));
+            char *slash = strrchr(canonical, '/'); assert(slash); *slash = 0;
+            int root = open(canonical, O_RDONLY | O_DIRECTORY); assert(root >= 0);
+            int acquired = rt_process_acquire_pinned_executable(pin); assert(acquired >= 0);
+            char *ambient[] = {"DYLD_LIBRARY_PATH=/tmp", NULL};
+            assert(!owned_darwin_pin_retain(acquired, ambient));
+            close(acquired);
+            assert(renameat(root, "lib", root, "original-lib") == 0);
+            *slash = '/';
+            assert(rt_process_pin_executable_owned(canonical) == -1);
+            check_owner_with_real_pin(pin, "--version", 0);
+            assert(renameat(root, "original-lib", root, "lib") == 0);
+            close(root);
+        } else {
+            check_owner_with_real_pin(pin, "--version", 0);
+        }
+    }
     puts("runtime_process_darwin_pin_selfcheck: PASS");
     return 0;
 }

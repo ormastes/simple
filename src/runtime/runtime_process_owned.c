@@ -84,7 +84,7 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
 #define RT_OWNED_MAYBE_UNUSED
 #endif
 #ifdef RT_OWNED_DARWIN_V4
-static uint64_t owned_darwin_pin_retain(int fd);
+static uint64_t owned_darwin_pin_retain(int fd, char *const *environment);
 static void owned_darwin_pin_release(uint64_t ref);
 #endif
 
@@ -3178,7 +3178,7 @@ static enum Pov4StartOutcome pov4_start_exact_darwin(
     }
     /* Take the snapshot reference before the child exists, so a concurrent
      * close can only retire the pin, never unlink the image it launches. */
-    uint64_t pin_ref = owned_darwin_pin_retain(executable_fd);
+    uint64_t pin_ref = owned_darwin_pin_retain(executable_fd, request->environment);
 #ifndef RT_OWNED_EXTERNAL_PIN
     if (pin_ref == 0) {
         close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]);
@@ -5031,6 +5031,7 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
  * in runtime_process.c, so the seed runtime links the same C owner. */
 #define OWNED_DARWIN_PIN_SLOTS 16
 #define OWNED_DARWIN_PIN_MAX_BYTES ((off_t)512 * 1024 * 1024)
+#include "runtime_process_owned_darwin_bundle_private.h"
 typedef struct OwnedDarwinPin {
     uint64_t handle;
     uint64_t refs;    /* launched children not yet collected */
@@ -5040,6 +5041,7 @@ typedef struct OwnedDarwinPin {
     ino_t inode;
     char directory[PATH_MAX];
     char path[PATH_MAX];
+    OwnedDarwinBundle bundle;
 } OwnedDarwinPin;
 static OwnedDarwinPin owned_darwin_pins[OWNED_DARWIN_PIN_SLOTS];
 static pthread_mutex_t owned_darwin_pins_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -5060,13 +5062,17 @@ static int owned_darwin_pin_valid(const OwnedDarwinPin* pin, int fd) {
         lstat(pin->path, &named) == 0 && S_ISREG(named.st_mode) &&
         named.st_dev == pin->device && named.st_ino == pin->inode &&
         lstat(pin->directory, &directory) == 0 && S_ISDIR(directory.st_mode) &&
-        directory.st_uid == geteuid() && (directory.st_mode & 07777) == 0700;
+        directory.st_uid == geteuid() && (directory.st_mode & 07777) == 0700 &&
+        owned_darwin_check_bundle(pin->directory, &pin->bundle, 0);
 }
 
 static void owned_darwin_pin_discard(OwnedDarwinPin* pin) {
     if (pin->fd >= 0) close(pin->fd);
     if (pin->path[0]) (void)unlink(pin->path);
-    if (pin->directory[0]) (void)rmdir(pin->directory);
+    if (pin->directory[0]) {
+        (void)owned_darwin_check_bundle(pin->directory, &pin->bundle, 1);
+        (void)rmdir(pin->directory);
+    }
     memset(pin, 0, sizeof(*pin));
     pin->fd = -1;
 }
@@ -5126,7 +5132,9 @@ static int64_t owned_darwin_pin_create(const char* canonical_path) {
         owned_darwin_pin_discard(&pin); return -1;
     }
     pin.device = snapshot.st_dev; pin.inode = snapshot.st_ino;
-    if (!owned_darwin_pin_valid(&pin, pin.fd) || !owned_darwin_pin_is_macho(pin.fd)) {
+    if (!owned_darwin_pin_is_macho(pin.fd) ||
+        !owned_darwin_stage_bundle(canonical_path, &st, pin.directory, pin.fd, &pin.bundle) ||
+        !owned_darwin_pin_valid(&pin, pin.fd)) {
         owned_darwin_pin_discard(&pin); return -1;
     }
     if (pthread_mutex_lock(&owned_darwin_pins_lock) != 0) { owned_darwin_pin_discard(&pin); return -1; }
@@ -5216,6 +5224,7 @@ bool rt_process_close_pinned_executable_owned(int64_t handle) {
     if (pin.handle == 0) return false;
     int ok = close(pin.fd) == 0;
     ok = unlink(pin.path) == 0 && ok;
+    ok = owned_darwin_check_bundle(pin.directory, &pin.bundle, 1) && ok;
     ok = rmdir(pin.directory) == 0 && ok;
     return ok;
 }
@@ -5224,7 +5233,7 @@ int rt_process_close_pinned_executable_owned_value(int64_t handle) {
     return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
 }
 
-static uint64_t owned_darwin_pin_retain(int fd) {
+static uint64_t owned_darwin_pin_retain(int fd, char *const *environment) {
     struct stat held;
     if (fd < 0 || fstat(fd, &held) != 0) return 0;
     uint64_t ref = 0;
@@ -5233,6 +5242,14 @@ static uint64_t owned_darwin_pin_retain(int fd) {
         OwnedDarwinPin* pin = &owned_darwin_pins[i];
         if (pin->handle && !pin->retired && pin->device == held.st_dev &&
             pin->inode == held.st_ino) {
+            if (pin->bundle.present) {
+                int clean = owned_darwin_check_bundle(pin->directory, &pin->bundle, 0);
+                for (size_t j = 0; clean && environment && environment[j]; ++j)
+                    if (!strncmp(environment[j], "DYLD_", 5) ||
+                        !strncmp(environment[j], "LD_LIBRARY_PATH=", 16))
+                        clean = 0;
+                if (!clean) break;
+            }
             pin->refs++; ref = pin->handle; break;
         }
     }
@@ -5258,7 +5275,7 @@ static void owned_darwin_pin_release(uint64_t ref) {
 }
 #elif defined(RT_OWNED_DARWIN_V4)
 /* Harnesses with RT_OWNED_EXTERNAL_PIN own their snapshot lifetime. */
-static uint64_t owned_darwin_pin_retain(int fd) { (void)fd; return 0; }
+static uint64_t owned_darwin_pin_retain(int fd, char *const *environment) { (void)fd; (void)environment; return 0; }
 static void owned_darwin_pin_release(uint64_t ref) { (void)ref; }
 #endif
 
