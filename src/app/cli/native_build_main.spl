@@ -2438,7 +2438,7 @@ pub fn native_build_memory_gate_applies_v1(worker: text, shard_child: bool, grou
 # --cache-dir, the one case where this process provably names the directory
 # its workers write scopes into; see the bug record for the lanes left out.
 # doc/08_tracking/bug/native_cache_scope_evicted_during_long_build_2026-11-24.md
-pub fn native_build_cache_scope_retention_at_start_v1(args: [text]):
+pub fn native_build_cache_scope_retention_at_start_v1(args: [text], lease: NativeCacheLease):
     if not native_cache_scope_start_retention_due_v1(
             env_get("SIMPLE_MIR_SHARD") ?? "", env_get("SIMPLE_HIR_SHARD") ?? "",
             env_get("SIMPLE_PARSE_SHARD") ?? "", env_get("SIMPLE_MIR_SHARD_LINK") ?? "",
@@ -2451,7 +2451,7 @@ pub fn native_build_cache_scope_retention_at_start_v1(args: [text]):
     if not env_set(NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1, "1"):
         return
     val cache_dir = native_build_cache_dir_base_for_v1(args, "")
-    if cache_dir == "" or not dir_exists(cache_dir):
+    if cache_dir == "" or cache_dir != lease.cache_root or not dir_exists(cache_dir):
         return
     # The ledger this launch may resume from (run_mir_shards_resume_v1). Its
     # root depends on SIMPLE_HIR_CACHE_DIR, which a later step may bind to
@@ -2466,7 +2466,7 @@ pub fn native_build_cache_scope_retention_at_start_v1(args: [text]):
             val prior = file_read(latest).trim()
             if prior != "" and not prior_ledgers.contains(prior):
                 prior_ledgers = prior_ledgers.push(prior)
-    val removed = native_cache_scope_start_retention_v1(cache_dir, prior_ledgers,
+    val removed = native_cache_scope_start_retention_v1(lease, prior_ledgers,
         disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6))
     if removed > 0:
         print "[native-cache] build-start retention removed {removed} idle scope dir(s) under {cache_dir}"
@@ -2483,7 +2483,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             eprint(reason)
             return 1
     val may_sweep = native_build_coordinator_may_sweep(raw_args)
-    val code = run_native_build_worker_inner(raw_args)
+    val code = run_native_build_worker_inner(raw_args, lease)
     native_build_coordinator_cache_finish(lease, raw_args, code == 0 and may_sweep)
     if code != 0:
         if (env_get("SIMPLE_HIR_SHARD") ?? "") != "":
@@ -2492,7 +2492,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             val _m = native_file_worker_exit_receipt_publish_v1(env_get("SIMPLE_MIR_SHARD_QUEUE") ?? "", env_get("SIMPLE_MIR_SHARD_OWNER") ?? "", "mir-shard", code)
     code
 
-fn run_native_build_worker_inner(raw_args: [text]) -> i64:
+fn run_native_build_worker_inner(raw_args: [text], lease: NativeCacheLease) -> i64:
     val request = match native_build_authority_request_v1(raw_args,
             (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1"):
         case Ok(value): value
@@ -2529,7 +2529,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         # @workaround bug=eprint-noparen-stage2-20261031 reason=pinned-stage2-predates-#5567
         eprint(memory_refusal)
         return 3
-    native_build_cache_scope_retention_at_start_v1(args)
+    native_build_cache_scope_retention_at_start_v1(args, lease)
     val compiled_bootstrap_route =
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     val simple_bin = if compiled_bootstrap_route:

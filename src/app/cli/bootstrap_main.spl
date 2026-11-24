@@ -1,6 +1,6 @@
 use app.cli.native_build_main.{native_build_coordinator_cache_lease,
     native_build_coordinator_cache_finish, native_build_coordinator_may_sweep}
-use compiler.driver.driver_build.native_cache_lease.{native_cache_lease_begin}
+use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_lease_begin}
 @unsafe(reason: "raw bootstrap argument-vector ABI", capabilities: [ffi])
 extern fn sys_get_args() -> [text]
 
@@ -344,7 +344,7 @@ fn bootstrap_coordinator_publish_authority_v1(worker_args: [text]) -> bool:
         return false
     true
 
-fn _bootstrap_admit_native_build_memory_v1(args: [text]) -> bool:
+fn _bootstrap_admit_native_build_memory_v1(args: [text], lease: NativeCacheLease) -> bool:
     val memory_refusal = native_build_memory_admission_refusal_v1(args)
     if memory_refusal != "":
         # @workaround bug=eprint-noparen-stage2-20261031 reason=pinned-stage2-predates-#5567
@@ -353,7 +353,7 @@ fn _bootstrap_admit_native_build_memory_v1(args: [text]) -> bool:
     # Admitted top-level build: the one cache scope retention pass, before any
     # prepass adopts or produces an object (a child or nested entry is refused
     # by the pass's own gate).
-    native_build_cache_scope_retention_at_start_v1(args)
+    native_build_cache_scope_retention_at_start_v1(args, lease)
     true
 
 fn run_bootstrap_surface_inspection_v1(args: [text]) -> i64:
@@ -377,7 +377,7 @@ fn run_bootstrap_surface_inspection_v1(args: [text]) -> i64:
     native_entry_closure_handoff_clear_v1()
     code
 
-fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
+fn run_bootstrap_native_build_coordinator(args: [text], lease: NativeCacheLease) -> i64:
     # The pool re-executes this binary with the same argv plus the role flag;
     # without STAGE3/STAGE4 those children land here, not in the capsule branch.
     if bootstrap_file_worker_requested(args):
@@ -387,7 +387,7 @@ fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     if option_error != "":
         print "Error: " + option_error
         return 1
-    if not _bootstrap_admit_native_build_memory_v1(args):
+    if not _bootstrap_admit_native_build_memory_v1(args, lease):
         return 3
     native_build_apply_failure_policy_v1(worker_args)
     bootstrap_capsule_shard_child_env(args)
@@ -520,34 +520,34 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             eprint(reason)
             return 1
     val may_sweep = native_build_coordinator_may_sweep(args)
-    val code = run_native_build_bootstrap_profile_leased(args, lease.cache_root, may_sweep)
+    val code = run_native_build_bootstrap_profile_leased(args, lease, may_sweep)
     native_build_coordinator_cache_finish(lease, args, code == 0 and may_sweep)
     code
 
-fn run_native_build_bootstrap_profile_leased(args: [text], base_root: text, may_sweep: bool) -> i64:
+fn run_native_build_bootstrap_profile_leased(args: [text], base_lease: NativeCacheLease, may_sweep: bool) -> i64:
     # Focused capsules without an explicit --cache-dir can qualify the cache
     # root by target profile. Hold that root from before the shard prepass.
     if native_build_entry_from_args(args, 0) == "" or
             ((env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") != "1" and
              (env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
-        return run_native_build_bootstrap_leased(args)
+        return run_native_build_bootstrap_leased(args, base_lease)
     val profile = match focused_native_build_target_profile_v1(args):
         case Ok(value): value
-        case Err(_): return run_native_build_bootstrap_leased(args)
+        case Err(_): return run_native_build_bootstrap_leased(args, base_lease)
     val root = focused_native_build_profile_cache_dir_v1(args,
         env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "", profile)
-    if root == base_root:
-        return run_native_build_bootstrap_leased(args)
+    if root == base_lease.cache_root:
+        return run_native_build_bootstrap_leased(args, base_lease)
     val lease = match native_cache_lease_begin(root):
         case Ok(value): value
         case Err(reason):
             eprint(reason)
             return 1
-    val code = run_native_build_bootstrap_leased(args)
+    val code = run_native_build_bootstrap_leased(args, lease)
     native_build_coordinator_cache_finish(lease, args, code == 0 and may_sweep)
     code
 
-fn run_native_build_bootstrap_leased(args: [text]) -> i64:
+fn run_native_build_bootstrap_leased(args: [text], lease: NativeCacheLease) -> i64:
     val composition_error = bootstrap_backend_request_error_v1(
         native_build_backend_from_args(args, 0),
         native_build_backend_plugin_from_args(args, 0))
@@ -638,7 +638,7 @@ fn run_native_build_bootstrap_leased(args: [text]) -> i64:
             if option_error != "":
                 print "Error: {option_error}"
                 return 1
-            if not _bootstrap_admit_native_build_memory_v1(args):
+            if not _bootstrap_admit_native_build_memory_v1(args, lease):
                 return 3
             native_build_apply_failure_policy_v1(worker_args)
             bootstrap_capsule_shard_child_env(args)
@@ -709,7 +709,7 @@ fn run_native_build_bootstrap_leased(args: [text]) -> i64:
                 return 1
             return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
-            return run_bootstrap_native_build_coordinator(args)
+            return run_bootstrap_native_build_coordinator(args, lease)
         if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
             print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
             return 1
@@ -721,7 +721,7 @@ fn run_native_build_bootstrap_leased(args: [text]) -> i64:
         if option_error != "":
             print "Error: {option_error}"
             return 1
-        if not _bootstrap_admit_native_build_memory_v1(args):
+        if not _bootstrap_admit_native_build_memory_v1(args, lease):
             return 3
         native_build_apply_failure_policy_v1(worker_args)
         bootstrap_capsule_shard_child_env(args)
@@ -771,7 +771,7 @@ fn run_native_build_bootstrap_leased(args: [text]) -> i64:
         return bootstrap_stage4_link_or_place_v1(args)
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
-        return run_bootstrap_native_build_coordinator(args)
+        return run_bootstrap_native_build_coordinator(args, lease)
     # Stage3's admitted bootstrap binary is not a general `simple run` host,
     # but it can safely route the coordinator's two exact internal children
     # below. The coordinator owns process/cache sharding, failure fallback, and
@@ -786,7 +786,7 @@ fn run_native_build_bootstrap_leased(args: [text]) -> i64:
     # the whole build itself).
     if bootstrap_file_worker_requested(args):
         return run_native_file_worker_v1(args)
-    if not _bootstrap_admit_native_build_memory_v1(args):
+    if not _bootstrap_admit_native_build_memory_v1(args, lease):
         return 3
     bootstrap_capsule_shard_child_env(args)
     # BUILD MODE (user policy 2026-11-05): a top-level positional native-build
