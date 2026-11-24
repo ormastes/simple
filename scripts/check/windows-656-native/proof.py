@@ -7,7 +7,7 @@ REPO = 'ormastes/simple'
 ARTIFACTS = {
  'compiler': (14893476808, 22788885, 'a515f47708946393151a8cd9e0dd4324611e1f833758a71ec9bb3c0650396414', 'binary-windows-mingw-x86_64-'),
  'native': (14891520003, 19927595, 'aef34adf1310bf75ab6bbcf7054062f8d3c14cedf7c525fd22990bdfb86a0de0', 'native-authority-mingw-x86_64-'),
- 'runtime': (14890009781, 19261550, '2d5b6b4d1e3e9f7a8dd59921691e2cf21e23ac6b9c2cfea1e90cd389463e34f68', 'runtime-mingw-x86_64-'),
+ 'runtime': (14890009781, 19261550, '2d5b6b4d1e3e9f7a8dd59921691e2cf21e23ac6b9c2fea1e90cd389463e34f68', 'runtime-mingw-x86_64-'),
 }
 ROOT = P.cwd().resolve()
 OUT = ROOT/'build/windows-656-proof'
