@@ -1,0 +1,56 @@
+use std.spec
+use std.nogc_sync_mut.redis.server.{next_request_frame, RequestFrame}
+use std.nogc_sync_mut.redis.client.{try_parse_resp, ParseResult, RedisReply}
+use std.common.text_bytes.{text_to_bytes}
+
+fn _join(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    for x in a:
+        out.push(x)
+    for y in b:
+        out.push(y)
+    out
+
+describe "redis server frame-first UTF-8 decode":
+    it "waits for the frame when a character is split across chunks, then decodes it":
+        # *2\r\n$4\r\nECHO\r\n$2\r\n<c3 a9>\r\n  (e-acute is two bytes)
+        val whole = _join(text_to_bytes("*2\r\n$4\r\nECHO\r\n$2\r\n"), [195u8, 169u8, 13u8, 10u8])
+        val first = _join(text_to_bytes("*2\r\n$4\r\nECHO\r\n$2\r\n"), [195u8])
+        match next_request_frame(first):
+            case Ok(r): expect(r.is_none()).to_equal(true)
+            case Err(_): expect("split char is an error").to_equal("need more data")
+        match next_request_frame(whole):
+            case Ok(r):
+                val f = r.unwrap()
+                expect(f.args.len()).to_equal(2)
+                expect(f.args[1]).to_equal("é")
+                expect(f.consumed).to_equal(whole.len())
+            case Err(_): expect("complete frame").to_equal("decoded")
+
+    it "rejects invalid UTF-8 in a complete frame":
+        val bad = _join(text_to_bytes("*1\r\n$1\r\n"), [255u8, 13u8, 10u8])
+        match next_request_frame(bad):
+            case Ok(_): expect("invalid bytes").to_equal("error")
+            case Err(_): expect(true).to_equal(true)
+
+describe "redis client frame-first UTF-8 decode":
+    it "keeps need-more-data separate from a decode error for split bulk data":
+        val partial = _join(text_to_bytes("$2\r\n"), [195u8])
+        match try_parse_resp(partial, 0):
+            case Ok(r): expect(r.is_none()).to_equal(true)
+            case Err(_): expect("split char is an error").to_equal("need more data")
+        val whole = _join(partial, [169u8, 13u8, 10u8])
+        match try_parse_resp(whole, 0):
+            case Ok(r):
+                match r.unwrap().reply:
+                    case RedisReply.Bulk(v): expect(v).to_equal("é")
+                    case _: expect("bulk").to_equal("other")
+            case Err(_): expect("complete frame").to_equal("decoded")
+
+    it "rejects invalid UTF-8 in a bulk reply and in a status line":
+        match try_parse_resp(_join(text_to_bytes("$1\r\n"), [255u8, 13u8, 10u8]), 0):
+            case Ok(_): expect("invalid bulk").to_equal("error")
+            case Err(_): expect(true).to_equal(true)
+        match try_parse_resp(_join(text_to_bytes("+"), [255u8, 13u8, 10u8]), 0):
+            case Ok(_): expect("invalid status").to_equal("error")
+            case Err(_): expect(true).to_equal(true)

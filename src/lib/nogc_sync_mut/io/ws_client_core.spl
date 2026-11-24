@@ -18,7 +18,7 @@ use std.nogc_sync_mut.http.ws.ws_handshake.{ws_build_client_request, ws_compute_
 use std.nogc_sync_mut.http.response.{parse_response}
 use std.nogc_sync_mut.http.headers.{get_header}
 use std.common.base_encoding.base64.{base64_encode_bytes}
-use std.common.text_bytes.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked, CodecError}
 use std.nogc_sync_mut.sffi.math.{random_i64_raw}
 
 val WS_OP_CONT = 0
@@ -148,6 +148,14 @@ fn ws_fd_read_frame(fd: i64) -> (i64, bool, [u8]):
         i = i + 1
     (opcode, fin, payload)
 
+pub fn ws_message_text(bytes: [u8]) -> Result<text, CodecError>:
+    """Strict UTF-8 decode of one complete handshake head or reassembled message.
+
+    Callers only pass a complete unit, so no streaming carry is needed; invalid
+    bytes are an Err and the caller fails the read ("" sentinel).
+    """
+    bytes_to_text_checked(bytes)
+
 fn _ws_read_handshake(fd: i64) -> text:
     var buf: [u8] = []
     while buf.len() < WS_MAX_HANDSHAKE_BYTES:
@@ -157,7 +165,9 @@ fn _ws_read_handshake(fd: i64) -> text:
         buf.push(one[0])
         val m = buf.len()
         if m >= 4 and buf[m - 4] == 13 and buf[m - 3] == 10 and buf[m - 2] == 13 and buf[m - 1] == 10:
-            return bytes_to_text(buf)
+            match ws_message_text(buf):
+                case Ok(head): return head
+                case Err(_): return ""
     ""
 
 fn _ws_upgrade_accepted(head: text, key: text) -> bool:
@@ -224,7 +234,9 @@ fn rt_ws_receive(ws: i64) -> text:
             for b in frame.2:
                 message.push(b)
             if frame.1:
-                return bytes_to_text(message)
+                match ws_message_text(message):
+                    case Ok(msg): return msg
+                    case Err(_): return ""
         else:
             return ""
     ""

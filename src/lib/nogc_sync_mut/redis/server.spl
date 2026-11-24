@@ -290,21 +290,21 @@ class RedisServer:
     me serve_connection(stream: TcpStream):
         """Read RESP requests from one connection and write replies.
 
-        Inbound bytes are converted to text immediately (whole-array
-        `rt_bytes_to_text` is reliable; per-element `[u8]` indexing is not in
-        the interpreter). The text buffer is parsed with `index_of`/`substring`
-        only. Drains every complete command (pipelining), retains an incomplete
-        trailing fragment for the next read, closes on QUIT/EOF.
+        Inbound bytes are buffered as bytes and decoded only once a complete
+        RESP frame has arrived (`next_request_frame`), so a UTF-8 character
+        split across reads is never decoded half-way and invalid UTF-8 is a
+        protocol error. Drains every complete command (pipelining), retains an
+        incomplete trailing fragment for the next read, closes on QUIT/EOF.
         """
         var s = stream
-        var buf = ""
+        var buf: [u8] = []
         var quit = false
         while not quit:
             val chunk = unsafe(capabilities: [ffi]):
                 rt_io_tcp_read(s.fd, 16384)
             if chunk == nil or chunk!.len() == 0:
                 break
-            buf = buf + bytes_to_text(chunk!)
+            buf = buf + chunk!
             val now_micros = unsafe(capabilities: [ffi]):
                 rt_time_now_unix_micros()
             if now_micros < 0:
@@ -316,25 +316,116 @@ class RedisServer:
             var progressed = true
             while progressed:
                 progressed = false
-                match parse_next_request(buf):
-                    case Some(r):
+                match next_request_frame(buf):
+                    case Ok(Some(r)):
                         val reply = self.dispatch(r.args)
                         val written = unsafe(capabilities: [ffi]):
                             rt_io_tcp_write_text(s.fd, reply)
                         if written != reply.len():
                             quit = true
-                        buf = r.rest
+                        buf = byte_slice(buf, r.consumed, buf.len())
                         progressed = true
                         if r.args.len() > 0 and ascii_upper(r.args[0]) == "QUIT":
                             quit = true
                             progressed = false
-                    case None: pass
+                    case Ok(None): pass
+                    case Err(_):
+                        # A complete frame that is not valid UTF-8: reply with a
+                        # protocol error and close rather than guess at text.
+                        val err_reply = resp_error("ERR Protocol error: invalid UTF-8")
+                        unsafe(capabilities: [ffi]):
+                            rt_io_tcp_write_text(s.fd, err_reply)
+                        quit = true
         unsafe(capabilities: [ffi]):
             rt_io_tcp_close(s.fd)
 
 # ============================================================================
 # Request parsing — RESP arrays of bulk strings + inline commands (text-based)
 # ============================================================================
+
+struct RequestFrame:
+    """One complete inbound command: its args plus the bytes it consumed."""
+    args: [text]
+    consumed: i64
+
+fn next_request_frame(buf: [u8]) -> Result<Option<RequestFrame>, CodecError>:
+    """Frame-first parse of one inbound command from the head of a byte buffer.
+
+    Frame boundaries are found on raw bytes and each argument is decoded only
+    once the whole RESP frame has arrived, so a UTF-8 character split across
+    TCP reads is never decoded half-way.
+    Ok(None) = need more data; Err = the complete frame is not valid UTF-8.
+    """
+    if buf.len() == 0:
+        return Ok(None)
+    if buf[0] != 42:
+        var j = 0
+        while j < buf.len():
+            if buf[j] == 10:
+                var line_end = j
+                if j > 0 and buf[j - 1] == 13:
+                    line_end = j - 1
+                val line = bytes_to_text_checked(byte_slice(buf, 0, line_end))?
+                return Ok(Some(RequestFrame(args: split_ws(line), consumed: j + 1)))
+            j = j + 1
+        return Ok(None)
+    val header_end = crlf_index(buf, 0)
+    if header_end < 0:
+        return Ok(None)
+    val count = ascii_i64(buf, 1, header_end)
+    var pos = header_end + 2
+    var args: [text] = []
+    var idx = 0
+    while idx < count:
+        if pos >= buf.len() or buf[pos] != 36:
+            return Ok(None)
+        val len_end = crlf_index(buf, pos)
+        if len_end < 0:
+            return Ok(None)
+        val blen = ascii_i64(buf, pos + 1, len_end)
+        pos = len_end + 2
+        if blen < 0:
+            args.push("")
+        else:
+            if pos + blen + 2 > buf.len():
+                return Ok(None)
+            args.push(bytes_to_text_checked(byte_slice(buf, pos, pos + blen))?)
+            pos = pos + blen + 2
+        idx = idx + 1
+    Ok(Some(RequestFrame(args: args, consumed: pos)))
+
+fn byte_slice(buf: [u8], start: i64, end: i64) -> [u8]:
+    """Copy buf[start:end]."""
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(buf[i])
+        i = i + 1
+    out
+
+fn crlf_index(buf: [u8], start: i64) -> i64:
+    """Index of the first CR LF at or after start, or -1."""
+    var i = start
+    while i + 1 < buf.len():
+        if buf[i] == 13 and buf[i + 1] == 10:
+            return i
+        i = i + 1
+    -1
+
+fn ascii_i64(buf: [u8], start: i64, end: i64) -> i64:
+    """Parse a non-negative ASCII decimal in buf[start:end]; -1 if negative
+    (RESP null) or malformed, matching parse_next_request's `?? -1`."""
+    var i = start
+    if i >= end:
+        return -1
+    var n = 0
+    while i < end:
+        val b = buf[i]
+        if b < 48 or b > 57:
+            return -1
+        n = n * 10 + (b as i64 - 48)
+        i = i + 1
+    n
 
 struct RequestResult:
     """A parsed request: its args plus the remaining unparsed buffer text."""
@@ -495,6 +586,6 @@ extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 @unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-use std.common.string_core.{bytes_to_text}
+use std.common.encoding.external_text.{bytes_to_text_checked, CodecError}
 @unsafe(reason: "raw wall-clock microsecond provider; negative i64 sentinel is failure", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
