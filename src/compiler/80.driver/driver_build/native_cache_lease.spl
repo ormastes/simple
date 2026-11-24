@@ -1,0 +1,85 @@
+# Cache build leases. The directory lock serializes lease registration with
+# deletion; the individual lock stays held for the build's lifetime.
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, secure_temp_dir}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_exists, dir_list_optional, dir_remove}
+use std.nogc_sync_mut.path.{basename, join}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs}
+
+# reason: the OS file-lock handle is consumed by the matching file_unlock owner
+@allow(primitive_api)
+pub struct NativeCacheLease:
+    cache_root: text
+    directory: text
+    handle: i64
+
+pub fn native_cache_build_root(override_root: text) -> text:
+    if override_root != "":
+        return override_root
+    join([machine_cache_root(), "native-build/v1"])
+
+fn lease_base(cache_root: text) -> text:
+    cache_root + "/.native-build-leases"
+
+fn lease_gate(base: text) -> text:
+    base + "/gate.lock"
+
+pub fn native_cache_lease_begin(cache_root: text) -> Result<NativeCacheLease, text>:
+    if cache_root == "":
+        return Err("native cache lease requires a cache root")
+    val base = lease_base(cache_root)
+    if not dir_exists(base) and not dir_create(base, true) and not dir_exists(base):
+        return Err("cannot create native cache lease directory: " + base)
+    val gate = file_lock(lease_gate(base), 30)
+    if gate < 0:
+        return Err("cannot lock native cache lease registry: " + base)
+    val result = native_cache_lease_register(cache_root, base)
+    val _released = file_unlock(gate)
+    result
+
+fn native_cache_lease_register(cache_root: text, base: text) -> Result<NativeCacheLease, text>:
+    match secure_temp_dir(base, "build-"):
+        case Err(reason): Err(reason)
+        case Ok(directory):
+            val handle = file_lock(directory + "/owner.lock", 0)
+            if handle < 0:
+                val _removed = dir_remove(directory, true)
+                return Err("cannot lock native cache build lease: " + directory)
+            Ok(NativeCacheLease(cache_root: cache_root, directory: directory, handle: handle))
+
+pub fn native_cache_lease_end(lease: NativeCacheLease):
+    if not file_unlock(lease.handle):
+        return
+    # Registry scans tolerate a lease disappearing after its owner exits.
+    val _removed = dir_remove(lease.directory, true)
+
+fn native_cache_other_build_active(base: text, own_directory: text) -> bool:
+    val rows = match dir_list_optional(base):
+        case Some(entries): entries
+        case None: return true
+    val own_name = basename(own_directory.replace("\\", "/"))
+    for row in rows:
+        val name = basename(row.replace("\\", "/"))
+        if name != own_name and name.starts_with("build-"):
+            val directory = base + "/" + name
+            val handle = file_lock(directory + "/owner.lock", 0)
+            if handle < 0:
+                return true
+            if not file_unlock(handle):
+                return true
+            val _removed = dir_remove(directory, true)
+    false
+
+# reason: native cache retention count and age use the disk-bound API's scalar contract
+@allow(primitive_api)
+pub fn native_cache_sweep_with_lease(lease: NativeCacheLease, current: text, keep: i64, min_age_s: i64 = 21600) -> i64:
+    val base = lease_base(lease.cache_root)
+    val gate = file_lock(lease_gate(base), 0)
+    if gate < 0:
+        return 0
+    var removed = 0
+    if not native_cache_other_build_active(base, lease.directory):
+        removed = disk_bound_keep_newest_dirs(lease.cache_root, current, "s", 33, keep, min_age_s, true)
+        removed = removed + disk_bound_keep_newest_dirs(lease.cache_root, "", "scope-", 22, 1, min_age_s, true)
+    val _released = file_unlock(gate)
+    removed
