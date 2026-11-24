@@ -714,3 +714,4 @@ route env, file exists/read, directory list and process capture through SOSIX
 
 ## Spec helper names (2026-11-24)
 - Private helpers in a spec are co-compiled with the library under test; a same-named private fn with the same arity (e.g. a spec `_text_part(text) -> text` vs `serving_pooling._text_part(text) -> ChatPart`) can be resolved to the library one, silently producing garbage bodies. `protocol_media_parts_spec` went 7/11 on release/1.0.0 for this reason; its helper is now `_media_text_part`. Give spec helpers a spec-specific prefix.
+- Root cause is a seed-interpreter bug, fixed in source 2026-11-24 (`doc/08_tracking/bug/seed_private_fn_cross_module_collision_2026-11-24.md`); the prefix advice holds until a seed carrying that fix is the one running the specs.
