@@ -1,7 +1,7 @@
 # Staged true Phase3 → full CLI continuation
 
 No observer or dispatch is armed for this work ref. The existing input ref
-work/linux-656fa39e-children-20261124 at9d18d5c80b976c43de0e6fa94f3132bce2a44f47
+work/linux-656fa39e-children-20261124 at5f08230a707dbfb0291db381a1c20f6bf7473ace
 and its manual45326410090 observer remain untouched.
 
 The existing successful P3 runner exports phase3-a/simple, its dynload
@@ -21,11 +21,11 @@ checked after use. New product caches and qualification caches stay separate.
 
 After genuine P3 success, the sole eligible command is:
 
-`gh workflow run bootstrap-sanity-evidence.yml --repo ormastes/simple --ref work/linux-656fa39e-phase4-20261124 -f parent_run=ACTUAL_9d18_CHILD_WORKFLOW_RUN`
+`gh workflow run bootstrap-sanity-evidence.yml --repo ormastes/simple --ref work/linux-656fa39e-phase4-20261124 -f parent_run=ACTUAL_5f082_CHILD_WORKFLOW_RUN`
 
 Prerequisites enforced before any compiler:
 
-* Exact parent control9d18, workflow_dispatch and original input ref; successful
+* Exact parent control5f082, workflow_dispatch and original input ref; successful
   New656fa39e phase3 and intake jobs. The unrelated early-CLI job need not pass.
 * Exactly one artifact of each expected name, source/control/run metadata,
   nonexpired ZIP digest+size, safe unique member paths and actual member hashes.

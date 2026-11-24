@@ -20,10 +20,14 @@ def source_guard(source,allowed=None):
  for line in changes:
   status,name=line.split('\t');assert status=='A' and name in allowed and sha(source/name)==allowed[name]
 def tools_snapshot(out):
- values={}
+ values={};invocations={}
  for name in ('clang','ld.lld','llvm-ar'):
-  path=Path(shutil.which(name)).resolve();values[str(path)]=sha(path)
-  subprocess.run([str(path),'--version'],stdout=(out/(name+'.version')).open('wb'),check=True,timeout=30)
+  invoked=Path(shutil.which(name)).absolute();path=invoked.resolve();values[str(path)]=sha(path)
+  invocations[name]={'invoked':str(invoked),'resolved':str(path),'sha256':values[str(path)]}
+  # LLVM selects driver flavor from argv[0]; resolving ld.lld to lld before
+  # invocation loses the ELF driver even though the executable bytes match.
+  subprocess.run([str(invoked),'--version'],stdout=(out/(name+'.version')).open('wb'),check=True,timeout=30)
+ save(out/'tool-invocations.json',invocations)
  save(out/'tool-files.json',values);return values
 def download(kind,number,digest,out):
  meta=api('actions/artifacts/'+str(number));assert not meta['expired']
