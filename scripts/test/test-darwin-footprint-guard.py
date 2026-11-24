@@ -75,6 +75,8 @@ for i, arg in enumerate(args):
         source = source.replace(marker, marker + '\nstatic int fixture_failed_rusage(int pid, int flavor, rusage_info_t *value) { (void)pid; (void)flavor; (void)value; errno = EIO; return -1; }\n')
         target = Path(sys.argv[0]).parent / 'fault-observer.c'
         target.write_text(source)
+        # The temporary source still uses the observer's private policy header.
+        args.extend(["-iquote", str(Path(arg).parent)])
         args[i] = str(target)
         break
 os.execv('/usr/bin/cc', ['/usr/bin/cc'] + args)
