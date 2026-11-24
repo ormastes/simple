@@ -502,64 +502,9 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_dependency_quarantine_unlock(void)
     return 1;
 }
 
-/* Optional hosted backends are unavailable in the core C runtime. */
-/* oneAPI */
-bool rt_oneapi_init(void) { return false; }
-bool rt_oneapi_is_available(void) { return false; }
-int64_t rt_oneapi_device_count(void) { return 0; }
-int64_t rt_oneapi_malloc_device(int64_t size) { (void)size; return -3; }
-bool rt_oneapi_free(int64_t ptr) { (void)ptr; return false; }
-bool rt_oneapi_memset(int64_t ptr, int64_t value, int64_t size) {
-    (void)ptr; (void)value; (void)size;
-    return false;
-}
-int64_t rt_oneapi_compile_spirv(int64_t bytes, int64_t size) {
-    (void)bytes; (void)size;
-    return -3;
-}
-int64_t rt_oneapi_compile_opencl(int64_t source) { (void)source; return -3; }
-int64_t rt_oneapi_get_function(int64_t module, int64_t name) {
-    (void)module; (void)name;
-    return -3;
-}
-int64_t rt_oneapi_create_queue(void) { return -3; }
-bool rt_oneapi_destroy_queue(int64_t queue) { (void)queue; return false; }
-bool rt_oneapi_submit_kernel(int64_t queue, int64_t kernel,
-                              int64_t global_range, int64_t local_range) {
-    (void)queue; (void)kernel; (void)global_range; (void)local_range;
-    return false;
-}
-
-/* OpenGL */
-int64_t rt_opengl_init(int64_t width, int64_t height) {
-    (void)width; (void)height;
-    return -3;
-}
-bool rt_opengl_destroy(int64_t ctx) { (void)ctx; return false; }
-int64_t rt_opengl_is_available(void) { return 0; }
-int64_t rt_opengl_create_fbo(int64_t ctx, int64_t width, int64_t height) {
-    (void)ctx; (void)width; (void)height;
-    return -3;
-}
-bool rt_opengl_destroy_fbo(int64_t ctx, int64_t fbo) {
-    (void)ctx; (void)fbo;
-    return false;
-}
-bool rt_opengl_bind_fbo(int64_t ctx, int64_t fbo) {
-    (void)ctx; (void)fbo;
-    return false;
-}
-bool rt_opengl_clear(int64_t ctx, int64_t color) {
-    (void)ctx; (void)color;
-    return false;
-}
-bool rt_opengl_draw_image(int64_t ctx, int64_t x, int64_t y, int64_t width,
-                          int64_t height, int64_t pixels, int64_t image_width,
-                          int64_t image_height) {
-    (void)ctx; (void)x; (void)y; (void)width; (void)height;
-    (void)pixels; (void)image_width; (void)image_height;
-    return false;
-}
+/* Optional hosted backends are unavailable in the core C runtime: the oneAPI
+ * and OpenGL fixed-value stubs are shared with runtime_native_gpu_stub.c. */
+#include "runtime_hosted_backend_stubs_impl.h"
 
 /* Intel Engine2D */
 bool rt_intel_engine2d_set_args_blit(int64_t fb, int64_t src, int64_t x,
@@ -622,52 +567,6 @@ bool rt_intel_engine2d_set_args_gradient(int64_t fb, int64_t x, int64_t y, int64
                                          int64_t fb_h) {
     (void)fb; (void)x; (void)y; (void)w; (void)h;
     (void)top_color; (void)bottom_color; (void)fb_w; (void)fb_h;
-    return false;
-}
-
-/* oneAPI backfill (extern decls added .spl-side; unavailable in core C runtime). */
-bool rt_oneapi_queue_wait(int64_t queue) { (void)queue; return false; }
-bool rt_oneapi_unload_module(int64_t module) { (void)module; return false; }
-
-/* OpenGL backfill (unavailable in core C runtime; fail closed like the block above). */
-bool rt_opengl_clear_scissor(int64_t ctx) { (void)ctx; return false; }
-bool rt_opengl_set_scissor(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h;
-    return false;
-}
-bool rt_opengl_draw_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
-                         int64_t color, int64_t filled) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)color; (void)filled;
-    return false;
-}
-bool rt_opengl_draw_rounded_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
-                                 int64_t radius, int64_t color) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)radius; (void)color;
-    return false;
-}
-bool rt_opengl_draw_gradient_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
-                                  int64_t top_color, int64_t bottom_color) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)top_color; (void)bottom_color;
-    return false;
-}
-bool rt_opengl_draw_line(int64_t ctx, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
-                         int64_t color, int64_t thickness) {
-    (void)ctx; (void)x1; (void)y1; (void)x2; (void)y2; (void)color; (void)thickness;
-    return false;
-}
-bool rt_opengl_draw_circle(int64_t ctx, int64_t cx, int64_t cy, int64_t radius,
-                           int64_t color, int64_t filled) {
-    (void)ctx; (void)cx; (void)cy; (void)radius; (void)color; (void)filled;
-    return false;
-}
-bool rt_opengl_draw_triangle(int64_t ctx, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
-                             int64_t x3, int64_t y3, int64_t color) {
-    (void)ctx; (void)x1; (void)y1; (void)x2; (void)y2; (void)x3; (void)y3; (void)color;
-    return false;
-}
-bool rt_opengl_flush(int64_t ctx) { (void)ctx; return false; }
-bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t height) {
-    (void)ctx; (void)pixels; (void)width; (void)height;
     return false;
 }
 
@@ -11487,50 +11386,15 @@ static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
 }
 #endif
 
+#include "runtime_dynload_snapshot_private.h"
+
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
     char* path = rt_text_cstr_dup(path_value);
     if (!path) return -1;
-    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int snapshot = simple_dynload_snapshot_memfd_linux_v1(path, "simple-sffi-provider");
     free(path);
-    if (source < 0) return -1;
-    struct stat source_stat;
-    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
-        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
-        close(source);
-        return -1;
-    }
-    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
-                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (snapshot < 0) { close(source); return -1; }
-    uint8_t buffer[65536];
-    uint64_t total = 0;
-    for (;;) {
-        ssize_t got = read(source, buffer, sizeof(buffer));
-        if (got == 0) break;
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            close(source); close(snapshot); return -1;
-        }
-        if ((uint64_t)got > UINT64_C(1073741824) - total) {
-            close(source); close(snapshot); return -1;
-        }
-        total += (uint64_t)got;
-        ssize_t offset = 0;
-        while (offset < got) {
-            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
-            if (put < 0 && errno == EINTR) continue;
-            if (put <= 0) { close(source); close(snapshot); return -1; }
-            offset += put;
-        }
-    }
-    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
-        lseek(snapshot, 0, SEEK_SET) < 0 ||
-        fcntl(snapshot, F_ADD_SEALS,
-              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
-        close(snapshot);
-        return -1;
-    }
+    if (snapshot < 0) return -1;
     return (int64_t)simple_dynload_unique_snapshot_linux_v1(snapshot);
 #else
     (void)path_value;

@@ -33,19 +33,7 @@ int rt_scilib_is_real(void) { return 1; }
 int64_t rt_scilib_cuda_available(void) { return 0; }
 int64_t rt_scilib_openblas_available(void) { return 1; }
 
-static int64_t scilib_double_to_bits(double value)
-{
-    int64_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    return bits;
-}
-
-static double scilib_bits_to_double(int64_t bits)
-{
-    double value = 0.0;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
+#include "scilib_bits_common.h"
 
 static CBLAS_TRANSPOSE scilib_transpose(int trans)
 {
@@ -171,13 +159,6 @@ int64_t rt_scilib_cuda_dgemv_bits(int64_t params_addr,
     return 1;
 }
 
-int64_t rt_scilib_openblas_ddot_bits(int64_t x_bits_addr,
-                                     int64_t n,
-                                     int64_t y_bits_addr)
-{
-    return rt_scilib_cuda_ddot_bits(x_bits_addr, n, y_bits_addr);
-}
-
 int64_t rt_scilib_openblas_daxpy_bits(int64_t params_addr,
                                       int64_t x_bits_addr,
                                       int64_t y_bits_addr,
@@ -206,26 +187,6 @@ int64_t rt_scilib_openblas_daxpy_bits(int64_t params_addr,
     free(x);
     free(out);
     return 1;
-}
-
-int64_t rt_scilib_openblas_dgemm_bits(int64_t params_addr,
-                                      int64_t a_bits_addr,
-                                      int64_t b_bits_addr,
-                                      int64_t c_bits_addr,
-                                      int64_t out_bits_addr)
-{
-    return rt_scilib_cuda_dgemm_bits(params_addr, a_bits_addr, b_bits_addr,
-                                     c_bits_addr, out_bits_addr);
-}
-
-int64_t rt_scilib_openblas_dgemv_bits(int64_t params_addr,
-                                      int64_t a_bits_addr,
-                                      int64_t x_bits_addr,
-                                      int64_t y_bits_addr,
-                                      int64_t out_bits_addr)
-{
-    return rt_scilib_cuda_dgemv_bits(params_addr, a_bits_addr, x_bits_addr,
-                                     y_bits_addr, out_bits_addr);
 }
 
 int64_t rt_scilib_openblas_dscal_bits(int64_t params_addr,
@@ -364,26 +325,6 @@ void rt_lapack_dgesv(int64_t n, int64_t nrhs,
                                    piv, B, (lapack_int)ldb);
     copy_pivots_from_lapack(ipiv, piv, n);
     free(piv);
-}
-
-int64_t rt_cuda_malloc(int64_t bytes)
-{
-    return (int64_t)malloc((size_t)bytes);
-}
-
-void rt_cuda_free(int64_t dev_ptr)
-{
-    free((void *)dev_ptr);
-}
-
-void rt_cuda_memcpy_htod(int64_t dev_dst, const void *host_src, int64_t bytes)
-{
-    memcpy((void *)dev_dst, host_src, (size_t)bytes);
-}
-
-void rt_cuda_memcpy_dtoh(void *host_dst, int64_t dev_src, int64_t bytes)
-{
-    memcpy(host_dst, (void *)dev_src, (size_t)bytes);
 }
 
 #include "scilib_bits_lapack.inc"
