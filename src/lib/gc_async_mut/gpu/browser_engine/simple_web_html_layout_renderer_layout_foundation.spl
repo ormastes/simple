@@ -688,7 +688,15 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     # only for a block container: an inline box keeps its whole CSS px height,
     # which the line around it aligns by (its device reach is read from its
     # struts there).
-    val height_frac_milli = if line_style.display != "inline" and resolved_height == ascent + descent and middle_ascent64 == 0 and middle_descent64 == 0: device_excess * 1000 / g_layout_device_scale else: 0
+    val strut_only = line_style.display != "inline" and resolved_height == ascent + descent and middle_ascent64 == 0 and middle_descent64 == 0
+    var height_frac_milli = if strut_only: device_excess * 1000 / g_layout_device_scale + line_h_sub_px_milli(line_style, resolved_height, device_excess) else: 0
+    # A block whose only content is one wrapped (or `pre`) text run of n whole
+    # lines: Chrome stacks n exact line boxes, so the box is n x the exact
+    # line height (3 lines of 13px/1.5 are 58.5 px, not 57).
+    if not strut_only and line_style.display != "inline" and nodes.len() == 1 and html_nodes[nodes[0]].tag == "#text" and bh[nodes[0]] == resolved_height and resolved_height == line_height:
+        val run_lh = style_line_h(line_style)
+        if run_lh > 0 and resolved_height > run_lh and resolved_height % run_lh == 0:
+            height_frac_milli = (resolved_height / run_lh) * line_h_frac_milli(line_style)
     InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height, height_frac_milli: height_frac_milli)
 
 fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
@@ -1771,6 +1779,31 @@ fn style_device_font_milli(st: Style) -> i32:
     if style_is_ua_control_font(st):
         return FORM_CONTROL_UA_FONT_NUM * 1000 / FORM_CONTROL_UA_FONT_DEN
     font_milli_of(st.font_size, st.font_size_milli)
+
+# Sub-px part (milli CSS px) of a strut-only line's height that layout's whole
+# px line box drops: Chrome keeps a number line-height in LayoutUnits, so an
+# h3 (18.72px x 1.5) line is 28.08 px and a 15px/1.3 line 19.5, and the block
+# cursor advances by that. At k > 1 the line is the DEVICE strut (112.32 for
+# the h3 at k=4), whose whole px `device_excess` already carries. Only a
+# number line-height has a fraction (px and `normal` are whole); 0 when the
+# line is taller than its strut.
+fn line_h_sub_px_milli(st: Style, css_height: i32, device_excess: i32) -> i32:
+    if st.line_height_px >= 0 or style_is_ua_control_font(st):
+        return 0
+    val k = g_layout_device_scale
+    val dev_milli = style_device_line_h_milli(st, k)
+    if k * css_height + device_excess != dev_milli / 1000:
+        return 0
+    (dev_milli % 1000) / k
+
+# Exact-minus-whole height (milli CSS px) of one line of a number line-height
+# at the layout's device scale k: the device line (k x 28.08 = 112.32 for the
+# h3 at k=4) less k x the whole CSS line, over k. 0 for px and `normal`.
+fn line_h_frac_milli(st: Style) -> i32:
+    if st.line_height_px >= 0 or style_is_ua_control_font(st):
+        return 0
+    val k = g_layout_device_scale
+    (style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000) / k
 
 # Used line-height of `st` in milli DEVICE px at device scale k: Chrome zooms
 # the computed value, so `20px` is 20k, a number multiplies the device font

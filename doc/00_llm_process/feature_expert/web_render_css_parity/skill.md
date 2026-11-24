@@ -4465,3 +4465,49 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
   matches Chrome, whose corners mirror exactly. Only pixels the arc crosses are
   supersampled. Bisect a regression by `if false and …`-guarding one branch
   and re-timing; don't guess.
+
+## 2026-11-24 lineheight lane: fractional number line-heights in block layout
+
+- **Cause:** `style_line_h` floors a number line-height to whole px, so an h3
+  line (18.72 x 1.5 = 28.08) and a 15px/1.3 line (19.5) lost their sub-px
+  part. The block cursor already carries a milli residual (`cy_frac`); the
+  line box just never fed it at k=1. At k>1 only the whole device px
+  (`device_excess`) was fed.
+- **Fix (smallest subset):**
+  - **Strut-only lines in a block container.**
+    `align_inline_line_baselines` now adds `line_h_sub_px_milli`: the
+    sub-px part of the (device) line height, at k=1 and at k>1.
+  - **Blocks whose only content is one n-line text run** (`pre`, wrapped
+    text) add n x `line_h_frac_milli`. Chrome stacks n exact lines: 3 x 19.5
+    is 58.5, not 57.
+  - **Snapped device bottoms.** The block and flex paths now record
+    `box_device_extra_h` as round(k x bottom) - round(k x top). The old value
+    was round(k x (bottom - top)). Every non-control, non-text box paints it
+    as `device-extra-height`. Before this, at k=4 a box was k x its CSS
+    height from a snapped top, which left white rows between 19.5 px boxes.
+    The flex container auto height records the same value: the article
+    header is 390 device rows, as in Chrome.
+- **Spec:** `block_fractional_line_height_chrome159_spec.spl`. It covers the
+  stack edges at k=1 and k=4, pre/wrapped blocks at k=1 and k=4, and the
+  header at k=1.
+- **Out of scope, not done:**
+  - text y of lines 2..n inside a wrapped run
+  - lines taller than their strut (mixed sizes, atomics)
+  - px / `normal` line-heights
+  - inline-block heights
+  - flex-wrap line heights
+- **19 px underline (open):** sizes 12-36 at k=1 and 48-144 at k=4 were
+  compared with Chrome. Ours is off at 19 (one row low), 21-23 (one row
+  high), and device 76 / 104 (one row low). No linear round/floor of
+  em, thickness and ascent fits all 50 sizes (best 46/50). Liberation
+  Sans has post underlinePosition -67 and thickness 150 (upem 2048); FreeType
+  shifts the position to -142. The next step is reading Blink's
+  `ComputeUnderlineOffsetAuto` and its LayoutUnit baseline, not more fitting.
+- **Gates and catalog:** gates equal base (88 specs + matrix). Catalog
+  9ad6ef27f18 -> lane:
+  - 4x: html 0.28 -> 0.22 %, evidence 0.10 -> 0.03 %, tab-bar 0.16 -> 0.13 %;
+    the other pages are equal.
+  - 1x: every page is equal at two decimals.
+- **Perf:** 6 alternated rounds at k=4. Medians: overview doc 830/830 and
+  paint 5473/5474 ms; html doc 5350/5368 and paint 8522/8528 ms. RSS is flat
+  (2.91/2.89 and 2.96/2.95 GB).
