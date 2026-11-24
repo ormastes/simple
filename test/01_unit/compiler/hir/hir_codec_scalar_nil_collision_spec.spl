@@ -117,6 +117,30 @@ describe "HIR codec scalar writers":
         expect(refused.ok).to_equal(false)
         expect(refused.unsupported).to_equal("nil_in_non_optional_scalar:Probe.required")
 
+    it "keeps required scalar bytes aligned at a chunk boundary":
+        var w = HirCodecWriter.create()
+        for i in 0..511:
+            w.put_i64_field(0, "Probe.count")
+        w.put_bool_field(true, "Probe.flag")
+        w.put_i64_field(3, "Probe.count")
+        w.put_bool_field(false, "Probe.flag")
+        var reader = FlatPoolReader.new(w.finish())
+        for i in 0..511:
+            expect(reader.next_i64()).to_equal(0)
+        expect(reader.next()).to_equal("1")
+        expect(reader.next_i64()).to_equal(3)
+        expect(reader.next()).to_equal("0")
+        expect(reader.ok).to_equal(true)
+
+    it "refuses an absent required integer before charging a full writer":
+        val absent: i64? = None
+        var w = HirCodecWriter.create_canonical_bounded(0, 0, 0)
+        w.put_i64_field(absent, "Probe.count")
+        expect(w.failure_kind).to_equal("unsupported")
+        expect(w.unsupported).to_equal("nil_in_non_optional_scalar:Probe.count")
+        expect(w.audit_events).to_equal(0)
+        expect(w.finish()).to_equal("")
+
     it "should write a present optional integer three as 3":
         val present: i64? = 3
         val nested: Option<i64?> = 3
