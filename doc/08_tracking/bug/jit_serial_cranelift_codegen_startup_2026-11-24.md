@@ -118,3 +118,79 @@ Measured on tab-bar with the JIT, using a probe build that was not committed.
   alias materialization is load-bearing for type correctness (see the comments
   in `load_imported_types`), so it needs a union-of-targets design, not a plain
   key change.
+
+## Parallel MIR->CLIF translation — 2026-11-24 (lane work/compiler-jit-parallel-translate-20261124)
+
+Translation now runs on the codegen workers for JIT modules of 64 or more
+bodies (`compile_bodies_xlate_parallel`, `common_backend.rs`). Smaller modules
+and the debug/dump env paths keep the old serial-translate loop.
+
+- **Design.** Each worker translates against an immutable snapshot of the
+  declarations and `func_ids` (`xlate_view.rs`). `XlateModule` is a read-only
+  `Module` view. New names get provisional ids, and every declaration is
+  logged as a command. Every name read is logged as a hash. The calling thread
+  takes results in function order. A result whose reads are untouched since
+  its snapshot is replayed on the real module, so ids equal the serial loop's.
+  Its provisional names are remapped, and the body is defined. A stale result
+  is retranslated on the calling thread; nothing is guessed. No lock was added;
+  workers get jobs and return results over channels.
+- **Trap found by the in-process verifier.** `type_name::<M>().contains("JITModule")`
+  gated the JIT vtable receiver guard. On workers `M` is `XlateModule`, so 74 of
+  4,313 tab-bar bodies lost the guard. `xlate_view::is_jit_module` covers both.
+  Any new lowering keyed on the module type must use it.
+- **Verification knob.** `SIMPLE_JIT_XLATE_VERIFY=1` recompiles the module
+  serially in the same process and prints `[jit-xlate-verify] ... mismatches=N`,
+  comparing name, final CLIF and machine code per body. Two serial runs in
+  separate processes do not digest-match, so cross-process digests cannot be
+  used for this.
+- **Tuning knobs** (defaults in brackets): `SIMPLE_JIT_XLATE_WINDOW` [128],
+  `SIMPLE_JIT_XLATE_SNAPSHOT_EVERY` [512], `SIMPLE_JIT_XLATE_STALE_EVERY`
+  (test: force every Nth result stale), and `SIMPLE_JIT_XLATE_DEBUG` (prints
+  stale reasons). The default worker cap was raised from 4 to 8.
+
+### Evidence
+
+- `tests/jit_parallel_translate.rs`: red at base (ratio 0.82, 0 bodies on
+  workers). Green: calling-thread translate ratio 0.00, 174 bodies on workers,
+  and code identical to serial for 8 workers and for forced staleness. Its
+  trait-dispatch case is red without the `is_jit_module` fix.
+- On 8 pages at 1x and 4x, JIT output was byte-identical to the interpreter,
+  verify reported 0 mismatches, and nothing fell back. On tab-bar, extreme
+  knobs (snapshot every 1/100000, window 1/4096, stale every 2, 3/16 threads)
+  and `SIMPLE_STRICT_VREG=1` all gave 0 mismatches.
+- Seed lib and integration tests: the failures that appear only in the fix run
+  (8 names) pass when run alone, 3 out of 3 each; the base run has its own set
+  of flakes. AOT `batch_pipeline` and `native_link` pass.
+- Idle-host body loop (tab-bar 1x, 8 workers): loop 660–720 ms. Of that, the
+  calling thread waits 440–460 ms, and its own serial work is about 230–260 ms:
+  snapshots ~40 ms, 127–175 stale bodies retranslated and compiled, plus replay
+  and define.
+- **A/B, tab-bar 1x, default knobs.** 5 rounds with alternating order; each
+  sample started only when the 1-min loadavg was below 11 (measured 2.3–3.1).
+
+  | side | median wall | min–max | median max RSS |
+  |---|---|---|---|
+  | parallel translate (8 workers) | **2,900 ms** | 2,860–3,070 | 2.39 GB |
+  | base JIT, 0ddeaad747c (4 workers) | 3,010 ms | 2,980–3,010 | 2.26 GB |
+  | interpreter | 2,590 ms | 2,550–2,680 | 0.81 GB |
+
+  The document phase takes ~20 ms under the JIT and ~535 ms under the
+  interpreter. The rest of the JIT wall is startup and compile.
+- With the old cap of 4 workers, the new loop was **slower** than base (3,290
+  vs 3,090 ms, 6 rounds). That is why the cap is now 8.
+- RSS rises 5.8% (+130 MB) from the extra worker contexts.
+- **The target "JIT below the interpreter" is NOT met.** The JIT is 2.90 s
+  against 2.59 s. The body loop is now 0.6–0.7 s, and the other ~2.2 s is
+  front-end work (HIR, MIR, the imported-type loads above).
+- Translation moves onto workers only with 6 or more workers
+  (`XLATE_PARALLEL_MIN_WORKERS`). With fewer, the old serial-translate loop
+  runs, identical to base, because 4 workers lost to it.
+- Lowering code that prints its own diagnostics (for example
+  `[CODEGEN-AMBIGUOUS-METHOD]`) can now print up to three times for a
+  failing body: on the worker, in the view redo and in the live redo. Not
+  fixed here.
+- **Remaining calling-thread pieces:**
+  - 127–175 stale bodies, nearly all lazily declared runtime imports
+    (`rt_for_iterable` x40, `rt_array_concat`, ...). An "ensure import"
+    command, checked before replay, would remove them.
+  - ~40 ms of snapshots.

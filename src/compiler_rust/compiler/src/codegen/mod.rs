@@ -33,6 +33,7 @@ pub mod shared;
 pub mod types_util;
 pub mod vtable_c8_debug;
 pub mod vulkan;
+pub(crate) mod xlate_view;
 pub mod wasm_bindgen_gen;
 
 #[cfg(all(test, feature = "llvm-tests"))]

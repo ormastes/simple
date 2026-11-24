@@ -4567,3 +4567,24 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Spec trap: base runs need the spec copied into the base worktree.** A spec resolves `src/lib` from its own file's project, so running head's spec from a base cwd tests HEAD's code.
 - **Open — the vertical baseline belongs to the layout lane.** Devanagari is 1 device row high (178 vs 179) and Arabic 1 row low (209 vs 208). Simple's baseline is device_dy (+1, the strut's half-leading) plus the face ascent. Chrome applies the half-leading only when the strut's ascent dominates. Numbers: `doc/08_tracking/bug/web_render_devanagari_k4_shaped_run_2026-11-23.md`.
 - **Open — itemisation of neutrals:** `مرحبا123` reverses the digits, and Chrome takes them from Liberation. This belongs to the layout/shaper owner.
+## 2026-11-24 — JIT parallel MIR->CLIF translation (seed)
+
+- **What changed.** For JIT modules of 64 or more bodies, translation now
+  runs on the codegen workers against a frozen declarations/`func_ids`
+  snapshot. The calling thread replays each body's declarations in order, so
+  ids, CLIF and code equal the serial loop. Code: `codegen/xlate_view.rs` and
+  `common_backend.rs` `compile_bodies_xlate_parallel`. Bug doc:
+  `doc/08_tracking/bug/jit_serial_cranelift_codegen_startup_2026-11-24.md`.
+- **Trap.** A worker's `M` is `XlateModule`, not `JITModule`. Any lowering
+  gated on `type_name::<M>()` must use `xlate_view::is_jit_module`. The
+  vtable receiver guard silently dropped on 74 bodies before this was fixed.
+- **Trap.** Serial JIT runs in separate processes do not produce matching
+  code digests. To check identity, use `SIMPLE_JIT_XLATE_VERIFY=1`, which
+  recompiles serially in-process and prints `mismatches=N`.
+- **Default.** The worker cap is now 8 (it was 4). At 4 workers the new loop
+  lost to base.
+- **Numbers.** Tab-bar 1x, idle host:
+  - JIT is 2.90 s (base 3.01 s), interpreter 2.59 s, so the JIT is still
+    above the interpreter;
+  - the body loop is ~0.65 s;
+  - the front end is ~2.2 s and is the next target.

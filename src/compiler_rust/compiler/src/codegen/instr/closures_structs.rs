@@ -1074,9 +1074,6 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 return None;
             }
 
-            let dot_suffix = format!(".{}", method_part);
-            let underscore_suffix = format!("_dot_{}", method_part);
-
             // If we have a type qualifier (e.g., "VirtioGpuDriver.init_from_grant"),
             // prefer functions whose full path contains the type name
             let type_qualifier = if lookup_name.contains('.') {
@@ -1106,8 +1103,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             let current_fn_tail_sanitized = format!("__{}", current_fn_sanitized);
             let candidates: Vec<_> = ctx
                 .func_ids
-                .iter()
-                .filter(|(k, _)| k.ends_with(&dot_suffix) || k.ends_with(&underscore_suffix))
+                .iter_method_suffix(method_part)
                 .filter(|(k, _)| {
                     let ks = k.as_str();
                     ks != current_fn_name
@@ -1124,7 +1120,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             // candidate DOES fit, so a call no candidate fits keeps today's path.
             let candidates: Vec<_> = if candidates.len() > 1 {
                 let wanted = args.len() + 1;
-                let fits = |id: &FuncId| ctx.module.declarations().get_function_decl(*id).signature.params.len() == wanted;
+                let fits = |id: &FuncId| crate::codegen::xlate_view::func_decl_linkage_params(&*ctx.module, *id).1 == wanted;
                 if candidates.iter().any(|(_, id)| fits(id)) {
                     candidates.into_iter().filter(|(_, id)| fits(id)).collect()
                 } else {
@@ -3109,7 +3105,7 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     // as `self` below; methods untag internally on field access.
     let tag_mask = builder.ins().iconst(types::I64, !0x7i64);
     let recv_obj = builder.ins().band(recv_ptr, tag_mask);
-    if std::any::type_name::<M>().contains("JITModule") {
+    if crate::codegen::xlate_view::is_jit_module::<M>() {
         emit_jit_vtable_receiver_guard(ctx, builder, recv_obj, vtable_slot);
     }
     let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_obj, 0);

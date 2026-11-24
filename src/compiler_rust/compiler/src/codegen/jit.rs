@@ -94,6 +94,21 @@ impl JitCompiler {
         Self::with_provider(static_provider())
     }
 
+    /// Body-loop counters of the most recent `compile_module`.
+    pub fn body_loop_stats(&self) -> super::common_backend::BodyLoopStats {
+        self.backend.body_loop_stats.clone()
+    }
+
+    /// Record every defined body (name, final CLIF, machine code) from now on.
+    pub fn capture_compiled_code(&mut self) {
+        self.backend.capture_code = Some(Vec::new());
+    }
+
+    /// The bodies recorded since `capture_compiled_code`, in define order.
+    pub fn take_captured_code(&mut self) -> Vec<super::common_backend::CapturedFunction> {
+        self.backend.capture_code.take().unwrap_or_default()
+    }
+
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
         let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
@@ -164,9 +179,50 @@ impl JitCompiler {
                 mir.globals.len()
             );
         }
+        // SIMPLE_JIT_XLATE_VERIFY=1: compile this module's bodies again in a
+        // fresh serial JIT (same process, same MIR) and report every body whose
+        // name, final CLIF or machine code differs from the ones defined here.
+        let verify = std::env::var_os("SIMPLE_JIT_XLATE_VERIFY").is_some() && self.backend.capture_code.is_none();
+        if verify {
+            self.backend.capture_code = Some(Vec::new());
+        }
         let functions = self.backend.compile_all_functions(mir)?;
+        if verify {
+            let ours = self.backend.capture_code.take().unwrap_or_default();
+            let mut serial = Self::with_provider(self.provider.clone())?;
+            serial.backend.codegen_workers = 1;
+            serial.backend.capture_code = Some(Vec::new());
+            serial.backend.compile_all_functions(mir)?;
+            let theirs = serial.backend.capture_code.take().unwrap_or_default();
+            let mut mismatches = 0usize;
+            for (i, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+                if a != b {
+                    mismatches += 1;
+                    if mismatches == 1 {
+                        eprintln!("[jit-xlate-verify] OURS\n{}\n[jit-xlate-verify] SERIAL\n{}", a.clif, b.clif);
+                    }
+                    if mismatches <= 5 {
+                        eprintln!(
+                            "[jit-xlate-verify] #{i} {} vs serial {}: name={} clif={} code={}",
+                            a.name,
+                            b.name,
+                            a.name == b.name,
+                            a.clif == b.clif,
+                            a.code == b.code
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "[jit-xlate-verify] bodies={} serial_bodies={} mismatches={}",
+                ours.len(),
+                theirs.len(),
+                mismatches
+            );
+        }
         if stage_trace {
             eprintln!("[jit-stage] compile_all:done compiled={}", functions.len());
+            eprintln!("[jit-stage] body_loop {:?}", self.backend.body_loop_stats);
         }
 
         // Pre-finalize guard against NULL-jump crashes.
@@ -944,8 +1000,9 @@ fn unresolved_import_kind(name: &str) -> &'static str {
 }
 
 /// Codegen worker threads for the JIT (`CodegenBackend::codegen_workers`):
-/// `SIMPLE_JIT_CODEGEN_THREADS` (0 or 1 = serial), else up to 4. Translation
-/// stays serial and feeds the workers, so more than ~4 sit idle.
+/// `SIMPLE_JIT_CODEGEN_THREADS` (0 or 1 = serial), else up to 8. Workers
+/// translate and compile (modules of >= 64 bodies); tab-bar 1x idle-host sweep
+/// 2026-11-24: 4 -> 3.2-3.3 s, 8 -> 2.9 s, 12-16 -> 2.8-2.9 s.
 fn jit_codegen_workers() -> usize {
     if let Some(n) = std::env::var("SIMPLE_JIT_CODEGEN_THREADS")
         .ok()
@@ -953,5 +1010,5 @@ fn jit_codegen_workers() -> usize {
     {
         return n;
     }
-    std::thread::available_parallelism().map_or(1, |n| n.get()).min(4)
+    std::thread::available_parallelism().map_or(1, |n| n.get()).min(8)
 }
