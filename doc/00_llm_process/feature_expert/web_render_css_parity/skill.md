@@ -4736,3 +4736,39 @@ Three open items from the abspos-wrap lane, all measured against Chrome 159 (Lib
   differs from hhea would split the paint correction (units) from the stager. A
   mixed `Hx مرحبا` text node (Chrome: 34) was not rendered in Simple. Also open:
   (hhea). Both Noto faces have typo == hhea.
+
+## 2026-11-24 — underline gap and wrapped / taller line tops (lineheight2)
+
+- **Auto underline position is thickness-only.** Chrome 159 puts an auto
+  underline at baseline + max(1, ceil(thickness / 2)) with the UNFLOORED auto
+  thickness font-size / 10 (`_html_draw_ir_underline_gap`). It ignores the
+  font's `post` underlinePosition: Liberation Sans (-67/2048), Serif (-123) and
+  Mono (-393) leave the same gap below the baseline (H bottom) for 12..36 px
+  (their rows differ only by ascent), and an authored 3px
+  thickness is baseline + 2 at every size. The old round(0.106em - t/2) curve
+  fit 44/50 sizes; this rule fits all 50 (12..36 at k=1, 48..144 device at k=4).
+  Pinned by `text_underline_position_chrome159_spec.spl`. Trap: our baseline
+  still uses Liberation Sans' 0.905em ascent for every family.
+- **Read Chrome's exact line tops instead of inferring from ink.** Add a script
+  that writes `Range.getClientRects()` tops into a `<pre>` and run
+  `chrome --headless --dump-dom` (with `--force-device-scale-factor=4` for the
+  1/256 px LayoutUnits at k=4). That is how 28.5938 (22px/1.3 line) showed up.
+- **Line box arithmetic (Blink):** above = A + floor((lh - (A+D)) / 2) in whole
+  px, below = lh - above keeps the LayoutUnit fraction; the line is max above +
+  max below. `inline_line_below64` carries the fraction into
+  `height_frac_milli` for lines a bigger number line-height box made taller.
+- **Lines 2..n of a wrapped run** are painted from the run's box (`by + j*lh`),
+  so their exact tops live in `LayoutResult.line_y_steps` (3 per node: per-line
+  frac, start residual, milli offset beyond the first line's baseline shift),
+  read by `text_line_frac_dy`. The offset uses the line's baseline
+  (`InlineLineAlignment.baseline`) minus the run's strut ascent, NOT `by - cy`:
+  the run box sits one px below that on a span line. It replaces the old
+  device-only `text_device_dy_rest_add`. Wrapped inline-element background
+  fragments use the same steps at k=1.
+- **A wrapped run that ends its block now takes the `run_first` path at k=1
+  too** when other boxes share its first line, and an empty trailing line keeps
+  its strut fraction (`align_inline_line_baselines` early return).
+- Residual (not fixed): lines with a bigger inline at k=4 still land 1..4
+  device rows early, as on base; inline background fragments at k>1 still
+  step k x whole CSS px. Measured: catalogs 1x/4x and gates equal base;
+  perf medians within 1.7% (overview doc 840/826), RSS flat.

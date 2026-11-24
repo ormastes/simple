@@ -13,7 +13,7 @@ use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, text_line_frac_dy}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.media_control_chrome.{chrome_audio_control_spans, chrome_video_control_spans}
@@ -476,7 +476,10 @@ fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
 # scaled y and strips. At k == 1 both tables are empty: the command is untouched.
 fn _html_draw_ir_text_with_device_dy(command: DrawIrCommand, boxes: LayoutResult, i: i32, line_i: i32) -> DrawIrCommand:
     val table = if line_i == 0: boxes.device_dy else: boxes.device_dy_rest
-    if i < 0 or i >= table.len() or table[i] == 0:
+    val base = if i < 0 or i >= table.len(): 0 else: table[i]
+    # Lines 2..n of a fractional line-height run at their exact device tops.
+    val dy = base + (if line_i > 0 and layout_device_scale() > 1: text_line_frac_dy(boxes.line_y_steps, i, line_i) else: 0)
+    if dy == 0:
         return command
     var out = command
     var style = command.computed_style
@@ -489,7 +492,7 @@ fn _html_draw_ir_text_with_device_dy(command: DrawIrCommand, boxes: LayoutResult
         else:
             kept.push(prop)
     style = kept
-    style.push(draw_ir_style_prop("device-y-offset", (prior + table[i]).to_text()))
+    style.push(draw_ir_style_prop("device-y-offset", (prior + dy).to_text()))
     out.computed_style = style
     out
 
@@ -1076,7 +1079,7 @@ fn _html_draw_ir_wrap_extra_line_commands(
         val line_text = visual_text_rtl.substring(
             wrap_line_starts[line_i], wrap_line_ends[line_i]
         )
-        val line_y = content_y + line_i * lh
+        val line_y = content_y + line_i * lh + (if layout_device_scale() > 1: 0 else: text_line_frac_dy(boxes.line_y_steps, i, line_i))
         # Lines a left float shortened are inset as layout wrapped them.
         val line_dx = text_line_box_dx(boxes.first_line_dx, boxes.line_boxes, i, line_i)
         val line_x = _html_draw_ir_aligned_line_x(
@@ -1121,7 +1124,7 @@ fn _html_draw_ir_inline_fragment_boxes(
     # cpu-lane-loop-ok: one box per wrapped line of this element's run; bound is its layout line count
     while k < starts.len():
         val fx = boxes.bx[run] + text_line_box_dx(boxes.first_line_dx, boxes.line_boxes, run, k)
-        val fy = boxes.by[run] + k * lh
+        val fy = boxes.by[run] + k * lh + (if layout_device_scale() > 1: 0 else: text_line_frac_dy(boxes.line_y_steps, run, k))
         val fw = style_text_line_advance_width_with(
             advances, txt, starts[k], ends[k], style_text_advance(tst), style_space_advance(tst)
         )
