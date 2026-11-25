@@ -1,5 +1,23 @@
 # JIT Method-Dispatch Worklist — remaining gaps after 2026-07-29 sweeps
-## Open 2026-09-16 — needs owner triage
+
+## Closed as fix target 2026-11-25 (release/1.0.0, worktree wt-p3-baf) — SUPERSEDED per the 2026-11-11 section below
+
+The "Open 2026-09-16 — needs owner triage" banner under the title was a stale
+normalization-pass header: the 2026-11-11 section at the bottom of this file
+already records the worklist's actionable scope (the CLEAN-LOWERING batches)
+as fully landed and verified. Re-confirmed cheaply on the tracked
+`bin/simple.exe` (interpreter) with a throwaway probe spec covering
+`text.appended`/`prepended`/`take`/`substr`/`char_count`/`sorted` and
+`array.sort_desc` (return-value form): **4/4 passed**, matching the 2026-11-11
+differential-probe result. One probe-authoring note: `sort_desc` must be
+checked via its returned array (the interpreter does not mutate the receiver
+in place — consistent with this file's own verifier note about `fill`).
+
+The remaining NEEDS-CODEGEN / NEEDS-F64-BOX / NEEDS-RUNTIME classes stay
+tracked below as backlog for scoped follow-up lanes; they were never the
+"ready now" scope of this worklist.
+
+## Open 2026-09-16 — needs owner triage (superseded; see banner above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
