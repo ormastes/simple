@@ -1,4 +1,14 @@
 # `simple check` costs ~2s per function declaration (parse), plus ~20s fixed per worker
+
+**Triage 2026-11-25 (work/p2w1-af-20261125, release/1.0.0):** the 2026-11-06
+partial fix is present in this tree — `env_mark`/`env_unwind` undo trail
+(`src/compiler/30.types/type_infer/context.spl:173-177`) and the
+once-per-`infer_module` env free-var cache (`inference_control.spl:806`,
+`self.module_env_vars = self.env_free_var_ids()`). The remaining super-linear
+semantic term is still unlocated compiler-internals work (candidates per the
+2026-11-06 note: substitution growth, errors array copy); no new attempt made
+in this lane. Status stays OPEN (P2), accurately.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
