@@ -33,7 +33,7 @@ All 89 modules (`539` unique diagnostics in `p3fix2_ll`) were verified at **`any
 ## Wave 3P — `E-MC-REP-001` Unblock Checklist
 
 Tracked in `doc/08_tracking/bug/rep_boundary_p3_seed_and_project_context_blockers_2026-11-25.md`:
-1. Land Rust seed `@representation_boundary` attribute/directive support (`work/fix-rust-seed-rep-boundary-attr-20261125`) and rebuild/promote seed binaries.
-2. Land policy-compliant `E-MC-REP-001` EasyFix reading `config/policy/unsafe_region_owners.sdn` (`work/fix-rep-boundary-autofix-policy-20261125`).
-3. Wire `ctx.options.representation_sources` + HIR body-cache metadata transport in `native-build` / `bootstrap_main` and record Opus `review_ref`s in `config/policy/unsafe_region_owners.sdn`.
-4. Run `simple fix --rule E-MC-REP-001 --safe-only` across the 153 modules and re-run a full Phase 3 LLVM build to confirm 0 warnings.
+1. **Done** — Rust seed `@representation_boundary` attribute/directive support merged (`#11521`); seed rebuilt from merged source and verified on an annotated probe (old seeds still reject the attribute until promoted).
+2. **Done** — Policy-compliant `E-MC-REP-001` EasyFix reading `config/policy/unsafe_region_owners.sdn` merged (`#11518`); `impl`/`extend` methods and unmatched paths fail closed to `FixConfidence.Uncertain` suggestions.
+3. **Done (wiring)** — `CompileOptions.representation_project_root` + nearest-`simple.sdn` per-source context derivation wired into `aot_native_project_with_backend` and `bootstrap_native_driver_with_backend_fixed_v1` (`#11532`, spec `representation_project_context_derivation_spec.spl` 13/13). Still open: HIR body-cache metadata transport (perf) and Opus `review_ref` promotion in `config/policy/unsafe_region_owners.sdn`.
+4. In progress — Run `simple fix --rule E-MC-REP-001 --safe-only` across the 153 modules (with per-fix review) and re-run a full Phase 3 LLVM build to confirm 0 warnings.
