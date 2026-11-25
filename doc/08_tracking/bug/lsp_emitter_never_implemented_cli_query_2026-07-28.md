@@ -1,10 +1,43 @@
 # `LspEmitter` / `LspCodeAction` are imported and called but were never implemented
+## Resolved 2026-11-25 — `std.report.emitter.lsp` implemented and verified
+
+The capability gap this doc records has been closed:
+
+- `src/lib/common/report/emitter/lsp.spl` now declares `LspEmitter` with
+  `static fn default_emitter()` and `me encode_string(value: text) -> text`
+  over the real `json_escape_string` from `std.common.json`. The module's own
+  header cites this bug doc.
+- `LspCodeAction` is no longer imported anywhere: `query_commands.spl:25`
+  imports only `{LspEmitter}`; repo-wide grep for `LspCodeAction` finds only
+  the unrelated `LspCodeActionRequest`/`LspCodeActionRevision` types in
+  `src/lib/nogc_sync_mut/lsp/lsp_code_action.spl`.
+- Reproducer spec exists:
+  `test/01_unit/app/cli/query_check_lsp_emitter_import_spec.spl`.
+
+**2026-11-25 verification** (pinned seed `bin/simple.exe` v1.0.0-rc.1,
+build-commit `1343b77bbaa`, Windows): a program whose only import is
+`use std.report.emitter.lsp.{LspEmitter}` compiles and runs —
+`LspEmitter.default_emitter().encode_string("a\"b\\c")` prints `"a\"b\\c"`
+(complete JSON literal, correct escapes), rc=0. Before the fix this died with
+`Cannot resolve module: std.report.emitter.lsp`. The spec itself could not be
+executed here because `bin/simple.exe test` is repo-wide blocked at this HEAD
+by the seed's `unknown decorator '@representation_boundary'` rejection; the
+spec's subprocess oracle was run directly instead (same program shape as the
+spec's `EMITTER_SOURCE`).
+
+The secondary finding below (the `query_check.spl` shadowed duplicate) still
+stands: `src/app/cli/query_rich.spl:23` still re-exports `query_check` from
+`query_diagnostics`, not from `query_check.spl`. That is a separate cleanup,
+not this bug.
+
+---
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
+**Date:** 2026-07-28 · **Status:** resolved (verified 2026-11-25, see top section) · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
 to `src/app/cli/**`.
 

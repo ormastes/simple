@@ -1,11 +1,30 @@
 # JIT: `text.substring(n).to_int()` chained returns the raw text pointer, silently
 ## Closed 2026-09-16 — fix present in source; 2026-09-06 re-probe not reproducible on either engine
 
+## Verified 2026-11-25 — STAYS CLOSED
+
+Re-ran the exact doc repro on the pinned release seed `bin/simple.exe`
+v1.0.0-rc.1 (build-commit `1343b77bbaa`) on Windows, both engines:
+
+```
+=== JIT (default) ===        === SIMPLE_EXECUTION_MODE=interpret ===
+chained=800                  chained=800
+s=[800] len=3                s=[800] len=3
+viaval=800                   viaval=800
+sub_i64=800                  sub_i64=800
+```
+
+`chained` (the original garbage-pointer symptom) and the `to_i64` variant from
+the 2026-08-07 addendum both return `800` on both engines. Source corroboration:
+`src/compiler_rust/compiler/src/codegen/instr/methods.rs` now routes STRING
+receivers through `rt_string_to_int` (lines ~230, ~294). The stale
+`**Status:** OPEN` header line below is superseded by this note.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.
 
-**Status:** OPEN
+**Status:** CLOSED (verified 2026-11-25)
 **Found:** 2026-08-04
 
 ## Symptom
