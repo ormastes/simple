@@ -1,6 +1,6 @@
 # Second MirCallOrigin.Unknown producer: stage3 codegen abort on driver_hir_archive_schedule_v1 (2026-11-13)
 
-**Status:** OPEN (observed 2026-11-13 02:06 KST, aarch64 Linux, s3gen lane, pinned df719eff44cf)
+**Status:** RESOLVED (2026-11-25). HIR (`HirLowering.forbid_interp_builtin_fallback`, `[E-HIR-BUILTIN-IMPORT-001]`) and MIR (`provider_callable_is_builtin_fallback_v1`) reject unimported `env_get`; calling the imported `env_get_nullable` (`runtime_compiler.spl`) and `sosix_env_get_nullable` (`driver_pipeline_lowering.spl`) is permanent, and all 6 `@workaround` tags have been retired.
 **Area:** compiler / MIR callable authority -> LLVM core_codegen
 **Related:** `unknown_call_origin_panics_codegen_worker_2026-11-12.md` (same panic, different
 producer — its HIR scoping trigger 168a972855a IS an ancestor of the pinned snapshot, so this

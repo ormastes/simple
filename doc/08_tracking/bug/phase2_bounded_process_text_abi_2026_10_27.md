@@ -1,7 +1,7 @@
 # Pinned Phase 2 bounded process call loses command text ABI
 
 - Canonical ID: `phase2_bounded_process_text_abi_2026_10_27`
-- Status: open; source compatibility does not close the underlying bug.
+- Status: resolved & workarounds retired (2026-11-25). MIR `text_extern_abi.spl` (`8f13b29892d`) splits `rt_process_run` / `rt_process_run_bounded` cmd to `(ptr, len)` and LLVM `core_codegen.spl` / `asm_constraints_helpers.spl` route to `rt_process_run_tuple` / `rt_process_run_bounded_tuple` (`process_text_extern_abi_spec.spl`). Reverted the AOT detours in `process_ops.spl` and `minimal_runtime_ops.spl` (keeping `host_path_native(cmd)` for Windows `CreateProcessW`) and retired the `@workaround` tags in `process_capture.spl` (retaining its public SFFI helpers) and `test/fixtures/test_runner_native_process_capture/main.spl`.
 - Owner: DevHub / compiler-runtime owners.
 - Created: 2026-10-27.
 - Producer: P2 `13d73267e690b2cdd46438315e2bfe6d4d6c0c37bcfc15591a921fc9728b270b`.
