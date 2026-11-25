@@ -5,6 +5,10 @@
   and landed, together with both legacy mirrors (see Campaign below). The family is
   **larger than the seven** — a second sweep found 5 more instances, still OPEN, the
   biggest of which (`cuda_strict_spec.spl`) has ~19 prediction-gated examples.
+  *(Header updated 2026-11-25: the second-sweep 5 are no longer open as code —
+  their spec repairs landed as the 2026-11-03 candidate and the production root
+  cause was fixed 2026-11-05; only GPU-host runtime validation remains. See the
+  2026-11-25 triage note at the end.)*
 - **Area:** rendering / engine2d GPU offload
 - **Fixed here:** `test/02_integration/rendering/web_engine2d_gpu_offload_parity_spec.spl`
 
@@ -539,3 +543,34 @@ Known residual (unchanged): on hosts with a real device, the
 `web_engine2d_gpu_offload_parity_spec` pixel-parity examples can still diverge
 from the CPU oracle for rendering reasons unrelated to this factory change —
 verified byte-identical failures with the fix stashed and applied.
+
+## Triage 2026-11-25 — code work landed; only GPU-host validation remains
+
+Row-order re-check on release/1.0.0 (a98bed208e2). The header's "second sweep
+found 5 more instances, still OPEN" predates two later sections of this same
+document:
+
+- The 2026-11-03 candidate changed all five second-sweep specs (modern +
+  legacy `backend_cuda_renderbackend_spec.spl`, modern + legacy
+  `backend_probe_strict_spec.spl`, `x25519mlkem768_backend_matrix_spec.spl`)
+  to branch on actual create Results instead of probe predictions —
+  TEST_BLOCKED pending a qualified runner, not un-fixed code.
+- The 2026-11-05 section records the production root-cause fix:
+  `Engine2D.create_with_backend_strict`
+  (`src/lib/gc_async_mut/gpu/engine2d/engine.spl`) no longer gates the create
+  on a probe prediction, with regression spec
+  `test/01_unit/lib/gpu/engine2d/engine_strict_create_toctou_spec.spl` and
+  disclosed fault-injection knobs `SIMPLE_2D_PROBE_FAULT` /
+  `SIMPLE_2D_CREATE_FAULT`.
+
+Both are present on this branch (verified by code inspection: the fault-knob
+names and the strict-create path exist in `engine.spl`, and the regression
+spec file exists). What remains is runtime validation on a real GPU host —
+CUDA/WebGPU/Metal device runs, fd-pressure sabotage, and the vulkan
+instance-reuse gate — which is hardware-dependent and cannot be performed on
+this Windows lane. Also still open per this document: the separate
+production defect "two independent backend resolvers disagree"
+(`web_render_resolved_engine2d_backend_name` vs `_resolved_render_backend`),
+disclosed but never fixed. Classification: SKIP for this lane (hardware);
+row should move to hardware-validation tracking rather than staying a
+code-fix OPEN.
