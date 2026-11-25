@@ -2760,7 +2760,9 @@ fn try_compile_builtin_method_call<M: Module>(
         // (interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
         "trim" | "trimmed" | "strip" => "rt_string_trim",
         // `trim_left`/`trim_right`: interpreter aliases of trim_start/trim_end.
+        "trim_start" | "trim_left" if args.len() == 1 => "rt_string_trim_start_matches",
         "trim_start" | "trim_left" => "rt_string_trim_start",
+        "trim_end" | "trim_right" if args.len() == 1 => "rt_string_trim_end_matches",
         "trim_end" | "trim_right" => "rt_string_trim_end",
         // `split` is arity-aware, same as `substr` below: with a limit
         // argument the interpreter consumes it via bounded `splitn` semantics

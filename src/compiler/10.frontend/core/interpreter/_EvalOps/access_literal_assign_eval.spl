@@ -55,6 +55,19 @@ extern fn rt_string_byte_at(s: text, index: i64) -> i64
 # in sync was already attempted once (113f0864c7a fixed char_code_at in both)
 # and is precisely what let the drift persist. Do not re-add a second copy;
 # text_byte_at_dispatch_spec.spl now asserts eval_methods.spl does not exist.
+fn _core_eval_trim_matches(s: text, pat: text, from_end: bool) -> text:
+    val pat_bytes = pat.byte_len()
+    if pat_bytes <= 0:
+        return s
+    var out = s
+    if from_end:
+        while out.ends_with(pat):
+            out = out.substring(0, out.byte_len() - pat_bytes)
+    else:
+        while out.starts_with(pat):
+            out = out.substring(pat_bytes, out.byte_len())
+    out
+
 fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
     val s = val_get_text(receiver)
 
@@ -271,11 +284,21 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
     if method_name == "trim" or method_name == "strip":
         return val_make_text(s.trim())
 
-    if method_name == "trim_start" or method_name == "trim_left":
-        return val_make_text(s.trim_start())
+    if method_name == "trim_start" or method_name == "trim_left" or method_name == "trim_start_matches":
+        if arg_eids.len() >= 1:
+            val pat_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_text(_core_eval_trim_matches(s, val_get_text(pat_val), false))
+        if method_name != "trim_start_matches":
+            return val_make_text(s.trim_start())
 
-    if method_name == "trim_end" or method_name == "trim_right":
-        return val_make_text(s.trim_end())
+    if method_name == "trim_end" or method_name == "trim_right" or method_name == "trim_end_matches":
+        if arg_eids.len() >= 1:
+            val pat_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_text(_core_eval_trim_matches(s, val_get_text(pat_val), true))
+        if method_name != "trim_end_matches":
+            return val_make_text(s.trim_end())
 
     # `find` / `find_str` are aliases of index_of and carry the SAME two-arg
     # `(needle, start)` form. They used to ignore the start argument and answer

@@ -4492,7 +4492,9 @@ pub fn compile_call<M: Module>(
                 // `trim_start`/`trim_end` (interpreter_method/string.rs:118-119)
                 // but had no arm here, so they raised "Function 'str.trim_left'
                 // not found" on the JIT while working on the interpreter.
+                "trim_start" | "trim_left" if args.len() >= 2 => Some("rt_string_trim_start_matches"),
                 "trim_start" | "trim_left" => Some("rt_string_trim_start"),
+                "trim_end" | "trim_right" if args.len() >= 2 => Some("rt_string_trim_end_matches"),
                 "trim_end" | "trim_right" => Some("rt_string_trim_end"),
                 // Arity-aware, same as `substr` below and the
                 // `try_compile_builtin_method_call` table: a two-argument
