@@ -51,6 +51,8 @@ use compiler.driver.driver_mir_shard_hir_residency_v1.{
     mir_shard_hir_residency_kind_v1, mir_shard_hir_residency_reload_key_v1,
     mir_shard_hir_residency_mark_full_v1, mir_shard_hir_residency_held_v1,
     mir_shard_hir_residency_interface_v1, mir_shard_hir_residency_counters_v1,
+    file_worker_unit_interface_hir_flag_v1, file_worker_unit_interface_hir_refusal_v1,
+    file_worker_unit_interface_hir_arm_v1, file_worker_unit_interface_hir_armed_v1,
     file_worker_unit_row_interface_only_v1}
 use app.cli.native_build_hir_warmup_outcome.{mir_shard_pool_parallel_v1}
 
@@ -187,6 +189,25 @@ describe "MIR shard HIR residency arming predicate":
         expect(mir_shard_hir_residency_refusal_v1("1", "0/1", "", "", "", "", false, false, true, true, false)).to_equal("")
 
 describe "per-file unit HIR residency selection":
+    it "resolves unit flag over shared shard flag and refuses unsafe contexts":
+        expect(file_worker_unit_interface_hir_flag_v1("", "")).to_equal("")
+        expect(file_worker_unit_interface_hir_flag_v1("", "1")).to_equal("1")
+        expect(file_worker_unit_interface_hir_flag_v1("0", "1")).to_equal("0")
+        expect(file_worker_unit_interface_hir_flag_v1("1", "0")).to_equal("1")
+        # unit_scoped allowed when whole-program bootstrap flat rows are off; fails closed if whole-program flat requested
+        expect(file_worker_unit_interface_hir_refusal_v1("1", true, 2, false, true, true, false)).to_equal("")
+        expect(file_worker_unit_interface_hir_refusal_v1("1", true, 2, true, true, true, false)).to_equal("bootstrap-flat-rows")
+        expect(file_worker_unit_interface_hir_refusal_v1("0", true, 2, false, true, true, false)).to_equal("flag-off")
+        expect(file_worker_unit_interface_hir_refusal_v1("1", false, 2, false, true, true, false)).to_equal("not-scoped-unit")
+        expect(file_worker_unit_interface_hir_refusal_v1("1", true, 0, false, true, true, false)).to_equal("no-targets")
+        expect(file_worker_unit_interface_hir_refusal_v1("1", true, 2, false, true, false, false)).to_equal("not-aot-compile")
+        expect(file_worker_unit_interface_hir_refusal_v1("1", true, 2, false, true, true, true)).to_equal("nogc-strict-module")
+        mir_shard_hir_residency_reset_v1()
+        expect(file_worker_unit_interface_hir_arm_v1(
+            file_worker_unit_interface_hir_refusal_v1("1", true, 2, false, true, true, false))).to_equal(true)
+        expect(file_worker_unit_interface_hir_armed_v1()).to_equal(true)
+        mir_shard_hir_residency_reset_v1()
+
     it "loads only non-entry rows outside the target/advice set interface-only":
         var keep: Dict<text, bool> = {}
         keep["src/a/target.spl"] = true
