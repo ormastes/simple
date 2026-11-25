@@ -1,4 +1,43 @@
 # `test/system/code_quality` specs import three modules/types that exist nowhere in the tree
+## RESOLVED 2026-11-25 — all three specs green on the pinned seed
+
+**Resolution 2026-11-25 (work/p2w1-af-20261125, release/1.0.0 @ 38265c7f249,
+Windows, pinned Rust seed v1.0.0-rc.1 `bin/simple.exe`):** the 2026-11-03
+production repair (below) is verified by execution, and one remaining spec-side
+defect it could not see (TEST_BLOCKED) is fixed in this change.
+
+BEFORE (this host, this binary):
+- `deprecated_removed_spec.spl` — 13/13 PASS (the 2026-11-03 HashSet/HashMap
+  repoint works).
+- `allow_suppressions_spec.spl` — 5/5 PASS (same).
+- `iter_deprecated_spec.spl` — **5/9, 4 failed**. Root cause was spec-side,
+  not the new `std.common.iterable` module (whose `each`/`each_with_index`
+  correctly invoke their callbacks): the 2026-11-03 spec revision collected
+  results by mutating `var`s captured by the callback closures, but closures
+  capture enclosing locals **by value** (the compiler emits W-CAPTURE-MUTATION
+  for exactly these lines), so every collected value was silently dropped.
+  After that was repaired, a second seed-evaluator limit surfaced: method
+  calls and string interpolation on a closure *parameter* (e.g.
+  `"{v}:{i}"`, `n.to_string()`) evaluate to `""` inside the callback under the
+  test evaluator, though the same code is correct under `run`.
+
+Fix (spec-only, `test/system/code_quality/iter_deprecated_spec.spl`):
+collection now goes through module-level accumulator `var`s (the
+compiler-sanctioned workaround named by the W-CAPTURE-MUTATION diagnostic),
+reset per example; callbacks push only the raw parameter, and all string
+building happens outside the callback. **No assertion or expected value was
+changed** — the same order/sum/index/duplicate contracts are checked.
+
+AFTER:
+- `SIMPLE_LIB=src bin/simple.exe test test/system/code_quality/iter_deprecated_spec.spl
+  --mode=interpreter` -> **9 total, 9 passed, 0 failed**.
+
+(Run required a local, reverted strip of `@representation_boundary` decorator
+lines — release/1.0.0 HEAD is source/binary inconsistent with the pinned seed;
+no production source was changed by this verification.) Status: **RESOLVED**.
+
+The 2026-09-16 "needs owner triage" banner below is stale bookkeeping.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
