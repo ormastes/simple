@@ -50,6 +50,8 @@ pub fn is_directive_decorator(name: &str) -> bool {
             | "clocked"
             | "generic"
             | "flatten_struct_output"
+            // A5 representation boundary manifest metadata.
+            | "representation_boundary"
             // Allocation / mangling directives.
             | "noalloc"
             | "alloc"
@@ -251,4 +253,14 @@ fn is_callable(value: &Value) -> bool {
         value,
         Value::Lambda { .. } | Value::Function { .. } | Value::NativeFunction(_) | Value::Object { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_directive_decorator;
+
+    #[test]
+    fn representation_boundary_is_directive_decorator() {
+        assert!(is_directive_decorator("representation_boundary"));
+    }
 }
