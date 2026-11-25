@@ -53,3 +53,53 @@ Do not touch any of the RFC 7748 §5.2/§6.2 expected byte values.
   ECDH examples fail)
 
 **Revalidated 2026-11-02: still plausible because OPEN. Do not touch the expected vectors — RFC 7748 §5.2/§6.2; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution confirmed — 2026-11-25
+
+**Status: FIXED and verified on `release/1.0.0`.** The fix landed
+2026-11-03 in commit `e079bb68500` ("fix(crypto): correct Curve448 field
+subtraction bias and top carry") plus follow-up `79a47bf02cb`; both are
+ancestors of `origin/release/1.0.0` (verified with
+`git merge-base --is-ancestor` on 2026-11-25).
+
+**Root cause (confirmed):** `_f448_sub` in `src/os/crypto/curve448.spl`
+added an all-`0x1FFFFFFE` per-limb bias before subtracting. That bias is
+`2*(2^448 - 1)`, which is **not** a multiple of p = 2^448 − 2^224 − 1, so
+every subtraction returned a result off by a constant multiple of the
+field, corrupting every Montgomery-ladder step. The correct bias is 2p,
+whose limb 8 is `0x1FFFFFFC` (2·(2^28 − 2)) and all other limbs
+`0x1FFFFFFE`. Clamping, A24 = 39081, the Goldilocks fold, and the 56-byte
+little-endian encoding were all correct; the defect was solely the
+subtraction bias (not a shared X25519 primitive — the Curve448 field code
+is self-contained in `src/os/crypto/curve448.spl`; `src/os/crypto/x448.spl`
+is a thin wrapper and `src/lib/common/crypto/typed/ctypes.spl` contains no
+X448 code).
+
+**Before evidence (2026-11-25, worktree on `release/1.0.0` with
+`src/os/crypto/curve448.spl` temporarily restored to `e079bb68500~1`):**
+
+```
+SIMPLE_LIB=src bin/simple.exe test test/01_unit/lib/crypto/curve448_rfc7748_kat_spec.spl --mode=interpreter
+✗ TV1 / TV2 / 1-iteration / Alice pub / Bob pub / Alice DH / Bob DH
+SPEC FILE VERDICT: ... outcome=ERROR executed=7 passed=0 failed=7
+Results: 7 total, 0 passed, 7 failed
+```
+
+**After evidence (2026-11-25, unmodified `release/1.0.0` tree):**
+
+```
+SIMPLE_LIB=src bin/simple.exe test test/01_unit/lib/crypto/curve448_rfc7748_kat_spec.spl --mode=interpreter
+SPEC FILE VERDICT: ... outcome=OK declared>=7 executed=7 passed=7 failed=0
+Results: 7 total, 7 passed, 0 failed
+```
+
+Sibling Curve448 specs run once on the same tree, both green:
+`curve448_field_sub_spec.spl` (2/2) and
+`curve448_field_boundaries_spec.spl` (4/4). The Ed448 KAT spec
+(`ed448_rfc8032_kat_spec.spl`) exercises a separate Ed448 implementation
+untouched by this fix and exceeds practical interpreter runtimes
+(documented perf cliff); it was not used as a gate here.
+
+No code change was required on 2026-11-25; this section records the
+independent re-verification and closes the loop on the stale "OPEN"
+revalidation note above.
