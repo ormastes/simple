@@ -64,5 +64,16 @@ full-import repro is therefore infeasible; it needs a native stage3 lowering run
 
 ## Status 2026-11-09 (Opus rerun) — fixed in source, verification pending
 `enum_owner_unqualified_arms_spec` 3/3 and `enum_owner_full_closure_shapes_spec` 4/4 GREEN against current
-release/1.0.0 source (seed-hosted MIR lowering). `git grep bug=enumowner-mir-20261031 -- src` = 0: the
-qualification workarounds are already gone. Remaining: native stage3 build without regressions.
+release/1.0.0 source (seed-hosted MIR lowering). Note: that rerun grepped the pre-remap tag
+`bug=enumowner-mir-20261031` after `e14fbe60ac5` remapped the 25 markers to `bug=enumowner_mir_2026-10-31`.
+
+## Status 2026-11-25 — all 25 workarounds removed from `src/`
+- Root cause confirmed fixed in `release/1.0.0` (including `f9350456ef9` re-registering `module.enums`
+  consumer-local `SymbolId` payload rows in the bootstrap-flat lane at `module_lowering.spl:3643-3650`,
+  matching the non-bootstrap pass at `module_lowering.spl:3810-3824` and declaration-repo relocation in
+  `declaration_enum_metadata_v1.spl:168-174`; plus `enum_match_type_owner_key` and
+  `option_inner_hir_type_for_local` in `switch_operators_calls.spl`).
+- Removed all 25 `enumowner_mir_2026-10-31` markers across all 11 files in `src/` (`git grep -n enumowner_mir_2026-10-31 -- src/` = 0).
+- Extended `test/01_unit/compiler/50.mir/enum_owner_full_closure_shapes_spec.spl` with a cross-module
+  `HirExprKind`/`HirUnaryOp`/`HirEnumPayload` import + `Visibility` `SymbolId` collision +
+  `register_module_enum_inventory_v1` regression case.
