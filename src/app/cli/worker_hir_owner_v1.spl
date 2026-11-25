@@ -1,6 +1,7 @@
 # Exactly one parent owns each live lease. No PID is a retirement capability.
 use app.cli.worker_hir_profile_v1.{WorkerHirProfileV1}
 use std.nogc_sync_mut.io.process_observation_v4.{OwnedExecutablePin, OwnedCwdPinV4,
+    LaunchRetirementMode,
     ProcessObservationReservationV4, process_observation_capabilities_v4,
     process_observation_owner_reserve_v4, PROCESS_OBSERVATION_RESERVED_READY_V4,
     PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4}
@@ -163,7 +164,7 @@ pub class WorkerHirOwnerV1:
             self.reason = "HIR worker monotonic clock unavailable; retirement unproven"
             if not self.reservations.is_empty():
                 val reservation = self.reservations[0]
-                val _cancel = reservation.observe(0, true)
+                val _cancel = reservation.observe(0, LaunchRetirementMode.Retire)
             else:
                 self.close_pins()
             # No elapsed-time proof: do not retry indefinitely on a broken
@@ -204,7 +205,8 @@ pub class WorkerHirOwnerV1:
                 self.cancelled = true
                 self.cleanup_deadline_ms = worker_hir_cleanup_deadline_v1(self.cleanup_deadline_ms, now)
             else:
-                match reservation.observe(0, self.cancelled):
+                val retire_mode = if self.cancelled: LaunchRetirementMode.Retire else: LaunchRetirementMode.KeepRunning
+                match reservation.observe(0, retire_mode):
                     case Err(message):
                         self.reason = message
                         self.cancelled = true
