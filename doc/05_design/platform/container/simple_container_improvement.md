@@ -75,7 +75,8 @@ Store root layout (all paths relative to a caller-provided root):
 objects/<key[0:2]>/<key>.obj      # immutable payload, no-replace publication
 records/<key>.sdn                 # ObjectRecordV1
 aliases/<algorithm>/<digest_hex>  # file content = object_key text, no-replace
-roots/<name>.sdn                  # root manifest pointer (atomic replace, generation-checked)
+roots/<name>.sdn                  # root pointer: a CACHE of the head generation (may lag)
+roots/<name>.g<N>.claim           # generation N>=2, no-replace, never deleted: the CAS commit
 pins/<pin_id>.sdn                 # retention pin: owner, refs, generation
 collisions/<algorithm>/<digest_hex>_<n>.sdn   # collision records
 staging/<unique>                  # private staging, removed on success/failure
@@ -118,9 +119,9 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1
 3. Miss → object key `<algo>_<hex>`; stage payload + record in `staging/`, verify read-back (length + recomputed digest), then `file_publish_noreplace_raw` into `objects/` and `aliases/`.
 4. Concurrent winner: if no-replace publication loses, open and byte-verify the winner; identical bytes → reuse; different bytes → collision path (3-way safe).
 
-**Roots:** manifest text lists object keys (one per line, SDN header with `generation`). `publish_root` enforces the expected generation (0 = create-only via no-replace; >0 = replace only if current generation matches), so root updates are compare-and-swap.
+**Roots:** manifest text lists object keys (one per line, SDN header with `generation`). Generation 1 is the pointer itself, created via no-replace. An update with `expected_generation = N` walks the claim chain `g<N+1>, g<N+2>, ...` from the cached pointer to find the head, refreshes the pointer, and fails `root-generation-mismatch` unless head == N; it then no-replace-publishes `roots/<name>.g<N+1>.claim`. That claim is the commit, so exactly one writer wins per generation. The pointer write that follows only refreshes a cache: a stalled writer that moves the pointer back loses nothing, because claims are never deleted and the next walk finds the head again. The walk is bounded (4096 steps).
 
-**GC:** reachable set = union of object keys referenced by all roots and pins. Default dry-run lists unreachable keys; `dry_run: false` moves them to `quarantine/<date>/` (SCV discipline — never unlink). Live kernel mappings and in-flight staging are represented by pins; a pin is never collected by GC.
+**GC:** reachable set = union of object keys referenced by every root (pointer and claim-chain head; superseded claims are history) and every pin. GC fails closed: a missing or unlistable `roots/` or `pins/`, or any unreadable or corrupt doc, rejects the run with nothing collected. Default dry-run lists unreachable keys; `dry_run: false` moves them to `quarantine/<date>/` (SCV discipline — never unlink). Live kernel mappings and in-flight staging are represented by pins; a pin is never collected by GC.
 
 ### `src/lib/common/contracts/container/capability_report_v1.spl` (new)
 
@@ -195,4 +196,4 @@ Increment 1 designed; implementation lanes A–D dispatched per `doc/03_plan/pla
 
 ## Status 2026-11-26
 
-Increment 1 implemented and verified: 6 specs / 56 examples green on the Windows host. `immutable_store_v1` moved to `src/lib/nogc_sync_mut/storage/` (it does file I/O; `common/` is pure). Docs moved under `doc/<phase>/platform/container/`. Spec mirror generated. Lands via PR to `release/1.0.0`.
+Increment 1 implemented and verified: 6 specs / 60 examples green on the Windows host. `immutable_store_v1` moved to `src/lib/nogc_sync_mut/storage/` (it does file I/O; `common/` is pure). Docs moved under `doc/<phase>/platform/container/`. Spec mirror generated. Lands via PR to `release/1.0.0`.

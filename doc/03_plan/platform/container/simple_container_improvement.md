@@ -11,10 +11,10 @@
 
 | Lane | Files owned (exclusive) | Depends on | Status |
 |---|---|---|---|
-| A — hash policy | `src/lib/common/hash/hash_policy_v1.spl` | design doc signatures | dispatched |
-| B — immutable store | `src/lib/common/storage/object_record_v1.spl`, `src/lib/nogc_sync_mut/storage/immutable_store_v1.spl` | A signatures (from design doc, not A's file) | dispatched |
-| C — container contracts | `src/lib/common/contracts/container/capability_report_v1.spl`, `src/lib/common/contracts/container/lifecycle_journal_v1.spl` | none | dispatched |
-| D — specs | `test/01_unit/lib/common/hash/hash_policy_v1_spec.spl`, `test/01_unit/lib/common/storage/object_record_v1_spec.spl`, `test/01_unit/lib/nogc_sync_mut/storage/immutable_store_v1_spec.spl`, `test/01_unit/lib/common/contracts/container/capability_report_v1_spec.spl`, `test/01_unit/lib/common/contracts/container/lifecycle_journal_v1_spec.spl`, `test/03_system/app/container/feature/simple_container_store_v1_spec.spl`, generated `doc/06_spec/03_system/app/container/feature/simple_container_store_v1_spec.md` | A+B+C merged into lane branch | after A–C |
+| A — hash policy | `src/lib/common/hash/hash_policy_v1.spl` | design doc signatures | done |
+| B — immutable store | `src/lib/common/storage/object_record_v1.spl`, `src/lib/nogc_sync_mut/storage/immutable_store_v1.spl` | A signatures (from design doc, not A's file) | done |
+| C — container contracts | `src/lib/common/contracts/container/capability_report_v1.spl`, `src/lib/common/contracts/container/lifecycle_journal_v1.spl` | none | done |
+| D — specs | `test/01_unit/lib/common/hash/hash_policy_v1_spec.spl`, `test/01_unit/lib/common/storage/object_record_v1_spec.spl`, `test/01_unit/lib/nogc_sync_mut/storage/immutable_store_v1_spec.spl`, `test/01_unit/lib/common/contracts/container/capability_report_v1_spec.spl`, `test/01_unit/lib/common/contracts/container/lifecycle_journal_v1_spec.spl`, `test/03_system/app/container/feature/simple_container_store_v1_spec.spl`, generated `doc/06_spec/03_system/app/container/feature/simple_container_store_v1_spec.md` | A+B+C merged into lane branch | done |
 
 ## Shared interface contract
 
@@ -40,11 +40,12 @@ Final merge review by the coordinating session at highest capability before PR.
 
 ## Status 2026-11-26
 
-Increment 1 implemented and verified: 6 specs / 56 examples green on the Windows host. `immutable_store_v1` moved to `src/lib/nogc_sync_mut/storage/` (it does file I/O; `common/` is pure). Docs moved under `doc/<phase>/platform/container/`. Spec mirror generated. Lands via PR to `release/1.0.0`.
+Increment 1 implemented and verified: 6 specs / 60 examples green on the Windows host. `immutable_store_v1` moved to `src/lib/nogc_sync_mut/storage/` (it does file I/O; `common/` is pure). Docs moved under `doc/<phase>/platform/container/`. Spec mirror generated. Lands via PR to `release/1.0.0`.
 
 ## Review follow-ups (Fable review 2026-11-26)
 
 Fixed in increment 1: root CAS made atomic via no-replace `roots/<name>.g<N>.claim`
+(the claim chain is the truth and is never deleted; the pointer is a cache)
 with crash roll-forward; GC fails closed when `roots/` or `pins/` is missing or
 unlistable; alias-to-missing-object republish requires matching digest hex; GC
 quarantine move is no-replace; launch qualification rejects an unavailable
@@ -55,4 +56,5 @@ Open (P2, next increment):
 - Root/pin doc decode has no count/terminator, so line-boundary truncation decodes as valid; staged publishes do not fsync.
 - Pin overwrite ignores owner and is read-then-write; ingest takes no pin, so a `reused: true` key can be collected before it is rooted.
 - Non-canonical integers (`_c01`, `generation: 007`) are accepted.
+- Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.

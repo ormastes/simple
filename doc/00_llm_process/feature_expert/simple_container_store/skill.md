@@ -22,7 +22,7 @@ plan `doc/03_plan/platform/container/simple_container_improvement.md`.
 ## Testing (Windows host)
 Old seeds (`C:/dev/seeds/simple-release.exe`) fail on the current test runner
 (`unknown decorator @representation_boundary`). Use a Nov-25+ binary, e.g.
-`C:/dev/keep/seeds/simple-local-20261125.exe test <spec>`. 56 examples across
+`C:/dev/keep/seeds/simple-local-20261125.exe test <spec>`. 60 examples across
 6 specs (5 unit + `test/03_system/app/container/feature/simple_container_store_v1_spec.spl`).
 
 ## Not done (later architecture phases)
