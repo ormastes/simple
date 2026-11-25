@@ -1,5 +1,6 @@
 use std.io_runtime.{file_create, file_read, file_delete, dir_create_all}
 use std.nogc_sync_mut.io_runtime.{mkdtemp_auto}
+use compiler.core.parser.{par_had_error_get, par_had_error_clear_v1, par_had_error_mirror_get, par_had_error_mirror_clear}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1, tldr_summary_produce_v1, read_tldr}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
@@ -278,3 +279,47 @@ describe "TLDR stub keeps attributes whose text contains ';'":
         val tldr_surface = module_surface_from_tldr_v1("test.attrsemi", rows).unwrap()
         # Stub rows are sorted; source order differs (pre-existing, see the cfg case above).
         expect(tldr_surface.callable_names.sorted()).to_equal(source_surface.callable_names.sorted())
+
+describe "TLDR fail-closed guards and multiline const / pub impl support":
+    it "returns None for conditional block directives and cached @when attrs":
+        val cond_src = "@when(os=\"linux\"):\nfn path_errno_address() -> i64: 1\n@else:\nfn path_errno_address() -> i64: 0\n@end\nexport path_errno_address\n"
+        val rows = tldr_summary_entries_v1("test.condblock", cond_src)
+        expect(module_surface_tldr_stub_source_v1(rows).is_none()).to_equal(true)
+        expect(module_surface_from_tldr_v1("test.condblock", rows).is_none()).to_equal(true)
+        val stale_rows = ["decl|fn path_errno_address id=abc cfg=@when(os=\"linux\"): sig=fn path_errno_address() -> i64: 1"]
+        expect(module_surface_tldr_stub_source_v1(stale_rows).is_none()).to_equal(true)
+
+    it "keeps multiline const blocks so subsequent declarations parse cleanly":
+        val const_src = "val HASH256_ZERO: text =\n    \"0000000000000000000000000000000000000000000000000000000000000000\"\n\nfn hash256_byte(digest: text, index: i64) -> i64:\n    0\n"
+        val rows = tldr_summary_entries_v1("test.multiline_const", const_src)
+        val surf = module_surface_from_tldr_v1("test.multiline_const", rows)
+        expect(surf.is_some()).to_equal(true)
+        expect(surf.unwrap().constant_names.contains("HASH256_ZERO")).to_equal(true)
+        expect(surf.unwrap().callable_names.contains("hash256_byte")).to_equal(true)
+
+    it "emits pass bodies for pub members in impl blocks":
+        val impl_src = "pub struct Admission:\n    v: i64\n\nimpl Admission:\n    pub fn provider_identity() -> text:\n        \"ok\"\n"
+        val rows = tldr_summary_entries_v1("test.pub_impl", impl_src)
+        par_had_error_clear_v1()
+        par_had_error_mirror_clear()
+        val surf = module_surface_from_tldr_v1("test.pub_impl", rows)
+        expect(surf.is_some()).to_equal(true)
+        expect(surf.unwrap().impls.len()).to_equal(1)
+        expect(par_had_error_get()).to_equal(false)
+        expect(par_had_error_mirror_get()).to_equal(false)
+
+    it "fails closed and clears parser error flags when a stub fails to parse":
+        val bad_rows = [
+            "decl|type Broken id=111 cfg= sig=pub struct Broken:",
+            "layout|pub struct Broken:\n    x: i64",
+            "impls|impl Broken:",
+            "impl|impl Broken:\n    me multi(a: text,"
+        ]
+        val stub_mod = module_surface_tldr_stub_module_v1("test.bad_stub", bad_rows)
+        expect(stub_mod.is_none()).to_equal(true)
+        expect(par_had_error_get()).to_equal(false)
+        expect(par_had_error_mirror_get()).to_equal(false)
+        val surf = module_surface_from_tldr_v1("test.bad_stub", bad_rows)
+        expect(surf.is_none()).to_equal(true)
+        expect(par_had_error_get()).to_equal(false)
+        expect(par_had_error_mirror_get()).to_equal(false)

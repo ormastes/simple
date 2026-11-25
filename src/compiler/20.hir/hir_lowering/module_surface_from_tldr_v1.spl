@@ -20,6 +20,7 @@
 #
 # Known limits: a `extern`/bodyless header is kept as written.
 
+use compiler.core.parser.{par_had_error_get, par_had_error_clear_v1, par_had_error_mirror_get, par_had_error_mirror_clear}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
@@ -29,6 +30,18 @@ use compiler.common.driver_core_types.{SourceFile}
 fn _tldr_first_line(block: text) -> text:
     val nl = block.index_of("\n")
     if nl < 0: block else: block.substring(0, nl)
+
+fn _tldr_find_section_block_v1(rows: [text], section: text, sig: text) -> text:
+    if section == "":
+        return ""
+    val prefix_len = section.byte_len()
+    var block = ""
+    for candidate in rows:
+        if candidate.starts_with(section):
+            val content = candidate.substring(prefix_len)
+            if _tldr_first_line(content) == sig:
+                block = content
+    block
 
 # Extract impl block headers in source order from the impls| row.
 fn _tldr_impls_source_order_v1(rows: [text]) -> [text]:
@@ -44,7 +57,8 @@ fn _tldr_impl_with_bodies(block: text) -> text:
     for line in block.split("\n"):
         out.push(line)
         val t = line.trim()
-        val is_member = t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("static fn ")
+        val d = if t.starts_with("pub "): t.substring(4) else: t
+        val is_member = d.starts_with("fn ") or d.starts_with("me ") or d.starts_with("static fn ") or d.starts_with("static me ")
         if is_member and t.ends_with(":") and line.starts_with(" "):
             out.push("        pass")
     out.join("\n")
@@ -87,19 +101,24 @@ pub fn module_surface_tldr_stub_source_v1(rows: [text]) -> text?:
                 else:
                     attrs[attrs.len() - 1] = attrs[attrs.len() - 1] + ";" + piece
             for attr in attrs:
+                if attr == "@else" or attr == "@else:" or attr == "@end" or
+                        attr.starts_with("@when(") or attr.starts_with("@elif("):
+                    return None
                 parts.push(attr)
         var section = ""
+        var alt_section = ""
         if kind == "type":
             section = "layout|"
+            alt_section = "type|"
         elif kind == "trait":
             section = "trait|"
+        elif kind == "const":
+            section = "const|"
         elif kind == "fn":
             section = "generic|"
-        var block = ""
-        if section != "":
-            for candidate in rows:
-                if candidate.starts_with(section) and _tldr_first_line(candidate.substring(section.len())) == sig:
-                    block = candidate.substring(section.len())
+        var block = _tldr_find_section_block_v1(rows, section, sig)
+        if block == "":
+            block = _tldr_find_section_block_v1(rows, alt_section, sig)
         if block != "":
             parts.push(block)
         elif kind == "fn" and sig.ends_with(":"):
@@ -127,29 +146,37 @@ pub fn module_surface_tldr_stub_source_v1(rows: [text]) -> text?:
                 parts.push(_tldr_impl_with_bodies(row.substring(5)))
     Some(parts.join("\n") + "\n")
 
+fn _parse_tldr_stub_checked_v1(stub: text, module_path: text) -> ParserModule?:
+    par_had_error_clear_v1()
+    par_had_error_mirror_clear()
+    val parsed = parse_and_build_module(stub, module_path)
+    val stub_failed = par_had_error_get() or par_had_error_mirror_get()
+    par_had_error_clear_v1()
+    par_had_error_mirror_clear()
+    if parsed.name == "" or stub_failed:
+        return None
+    Some(parsed)
+
 pub fn module_surface_tldr_stub_module_v1(module_id: text, rows: [text]) -> ParserModule?:
     val stub = module_surface_tldr_stub_source_v1(rows)
-    if stub == nil:
-        return nil
+    if stub.is_none():
+        return None
     val module_path = module_id.replace(".", "/") + ".spl"
-    val parsed = parse_and_build_module(stub.unwrap(), module_path)
-    if parsed.name == "":
-        return nil
-    Some(parsed)
+    _parse_tldr_stub_checked_v1(stub.unwrap(), module_path)
 
 # Build ModuleSurface from TLDR entries.
 pub fn module_surface_from_tldr_v1(module_id: text, rows: [text]) -> ModuleSurface?:
     val stub = module_surface_tldr_stub_source_v1(rows)
-    if stub == nil:
-        return nil
+    if stub.is_none():
+        return None
     val module_path = module_id.replace(".", "/") + ".spl"
-    val parsed = parse_and_build_module(stub.unwrap(), module_path)
-    if parsed.name == "":
-        return nil
+    val parsed_opt = _parse_tldr_stub_checked_v1(stub.unwrap(), module_path)
+    if parsed_opt.is_none():
+        return None
     val source = SourceFile(path: module_path, module_name: module_id, content: stub.unwrap())
-    val built = module_surface_from_module(parsed, source, 0)
+    val built = module_surface_from_module(parsed_opt.unwrap(), source, 0)
     if built.is_err():
-        return nil
+        return None
     Some(built.unwrap())
 
 export module_surface_tldr_stub_source_v1, module_surface_tldr_stub_module_v1, module_surface_from_tldr_v1
