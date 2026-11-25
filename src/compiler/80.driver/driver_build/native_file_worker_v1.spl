@@ -265,6 +265,15 @@ fn _native_file_worker_spec_count_v1(spec: text) -> i64:
 #     cutting 4,231 unit child process spawns down to ~265 bounded batches while
 #     keeping per-unit HIR/MIR residency safely under 3 GiB.
 pub const NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1: i64 = 16
+pub const NATIVE_FILE_WORKER_LOW_MEM_BATCH_MAX_V1: i64 = 4
+pub const NATIVE_FILE_WORKER_LOW_MEM_HOST_KIB_V1: i64 = 25165824
+
+# reason: raw host physical-memory KiB and adaptive batch-cap scalar matching sibling helpers
+@allow(primitive_api)
+pub fn native_file_worker_host_batch_cap_v1(host_total_kib: i64) -> i64:
+    if host_total_kib > 0 and host_total_kib <= NATIVE_FILE_WORKER_LOW_MEM_HOST_KIB_V1:
+        return NATIVE_FILE_WORKER_LOW_MEM_BATCH_MAX_V1
+    NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1
 
 pub fn native_file_worker_adaptive_batch_v1(closure_modules: i64, workers: i64) -> i64:
     if closure_modules <= 32: return 1
@@ -281,6 +290,17 @@ pub fn native_file_worker_plan_batch_v1(explicit_raw: text, spec: text, closure_
     val closure_modules = if closure_counts.len() > 0: closure_counts[0] else: -1
     val batch = if explicit > 0: explicit else: native_file_worker_adaptive_batch_v1(closure_modules, workers)
     NativeFileWorkerBatchPlanV1(batch_size: batch, worker_count: workers)
+
+# reason: raw explicit batch override, closure counts, and host KiB matching native_file_worker_plan_batch_v1
+@allow(primitive_api)
+pub fn native_file_worker_plan_batch_for_host_v1(explicit_raw: text, spec: text, closure_counts: [i64], host_total_kib: i64) -> NativeFileWorkerBatchPlanV1:
+    val plan = native_file_worker_plan_batch_v1(explicit_raw, spec, closure_counts)
+    val explicit = explicit_raw.trim().to_i64() ?? 0
+    if explicit > 0:
+        return plan
+    val host_cap = native_file_worker_host_batch_cap_v1(host_total_kib)
+    val bounded = if plan.batch_size > host_cap: host_cap else: plan.batch_size
+    NativeFileWorkerBatchPlanV1(batch_size: bounded, worker_count: plan.worker_count)
 
 # MIR child shard count so its claim cap (ceil(scheduled / count)) is `batch`.
 pub fn native_file_worker_mir_count_v1(scheduled: i64, batch: i64) -> i64:
