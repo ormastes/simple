@@ -208,7 +208,7 @@ fn driver_hir_source_body_actual_lowerer_v1(driver: CompilerDriver,
     Ok(actual)
 
 fn driver_hir_failed_shard_receipt_v1(status: i64) -> DriverHirShardTransactionReceiptV1:
-    DriverHirShardTransactionReceiptV1(status: status, archive: nil)
+    DriverHirShardTransactionReceiptV1(status: status, archive: None)
 
 pub fn driver_hir_shard_cache_stored_v1(status: i64) -> bool:
     status == 0 or status == 1
@@ -784,23 +784,23 @@ impl CompilerDriver:
     ) -> i64:
         # Existing shard/default route deliberately requests no bounded receipts.
         val receipt = self.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, is_entry, cache_key, nil, -1)
+            lowering, source, is_entry, cache_key, None, -1)
         receipt.status
 
     me lower_streaming_hir_shard_receipt_transaction_v1(
         lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text,
         archive_selection: DriverHirRuntimeStdArchiveSelectionV1?, source_index: i64,
-        managed_selection: DriverHirManagedRuntimeSelectionV1? = nil
+        managed_selection: DriverHirManagedRuntimeSelectionV1? = None
     ) -> DriverHirShardTransactionReceiptV1:
         self.ctx.directory_aspect_semantics_v2.remove(source.path)
         val representation_contexts = representation_invocation_context_index_v1(self.ctx)
         # 0 = validated cache hit, 1 = published full HIR, 2 = source diagnostic,
         # 3 = codec-refused UNCACHED, -1 = infrastructure/ownership failure.
         # No HirModule escapes this scope.
-        var archive_input: HirBodyArchiveInputV1? = nil
+        var archive_input: HirBodyArchiveInputV1? = None
         var actual_lowering: HirLowering = lowering
         var transaction_cache_key = cache_key
-        if archive_selection != nil and managed_selection != nil:
+        if archive_selection.is_some() and managed_selection.is_some():
             self.ctx.add_error("HIR shard archive selected provider ambiguous")
             return driver_hir_failed_shard_receipt_v1(-1)
         if val Some(selection) = managed_selection:
@@ -881,12 +881,12 @@ impl CompilerDriver:
         var abi_receipt: (text, Result<text, text>) = ("", Err(""))
         var errors: [text] = []
         var warnings: [text] = []
-        var archived_body: HirBodyArchiveV1? = nil
+        var archived_body: HirBodyArchiveV1? = None
         val parser_binding = hir_cache_parser_binding_v1(transaction_cache_key,
             source.module_name, source.path, sha256_text(source.content), self.ctx.options.library_mode)
         var parsed_classification_known = false
         var parsed_code_less = false
-        val cache_result = if archive_input == nil and parser_binding != "": hir_cache_load_in_owned_scope(transaction_cache_key, parser_binding, "", self.ctx.options.library_mode) else: nil
+        val cache_result = if archive_input.is_none() and parser_binding != "": hir_cache_load_in_owned_scope(transaction_cache_key, parser_binding, "", self.ctx.options.library_mode) else: None
         if val found = cache_result:
             parsed_classification_known = true
             parsed_code_less = hir_cache_last_parser_objectless()
@@ -894,7 +894,7 @@ impl CompilerDriver:
             cached = true
             warnings = hir_cache_last_warnings()
         else:
-            val parsed = if archive_input != nil:
+            val parsed = if archive_input.is_some():
                 self.parse_full_frontend_in_borrowed_scope_selected_uncached_v1(source.content, source.path, source.module_name)
             else:
                 self.parse_full_frontend_in_borrowed_scope_selected_v1(source.content, source.path, source.module_name)
@@ -935,7 +935,7 @@ impl CompilerDriver:
         # re-encoded: 3 encodes per module
         # (stage2_hir_registration_reencode_timeout_2026-10-16). Scratch of this
         # scope; never retained past the transaction.
-        var registration_body: HirEncodedBodyV1? = nil
+        var registration_body: HirEncodedBodyV1? = None
         if errors.len() == 0 and infrastructure_error == "":
             if not cached and (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
                 val round_trip = hir_codec_roundtrip_selfcheck(module)
@@ -1029,20 +1029,20 @@ impl CompilerDriver:
         val aspect_owned = aspect_semantic.is_none() or rt_transient_heap_promote(aspect_semantic)
         val abi_owned = rt_transient_heap_promote(abi_receipt)
         val memos_owned = actual_lowering.promote_phase_memo_transient_owners()
-        val cfg_owned = archive_input == nil or self.promote_target_cfg_receipt_v1(source.path)
+        val cfg_owned = archive_input.is_none() or self.promote_target_cfg_receipt_v1(source.path)
         val frontend_owned = driver_promote_retained_frontend_owners_v1(
             parser_initialization_generation_v1() != parser_generation)
         val cache_reason_owned = hir_cache_promote_diagnostic_owner_v1()
         # Exact additional escape set: archive descriptor and compact delta.
         # Neither contains HirModule, full declaration bodies or SymbolTables.
-        val archive_owned = archived_body == nil or rt_transient_heap_promote(archived_body)
+        val archive_owned = archived_body.is_none() or rt_transient_heap_promote(archived_body)
         # Flat rows are unnecessary in a cache worker. Remove their references
         # before reclaiming the graph; the final compiler loads the complete cache.
         driver_rollback_flat_hir_row_or_abort(flat_rows_before)
         # Reset all module-local owners while allocations are paused, so no field
         # on the retained lowerer points into the scope about to be reclaimed.
         actual_lowering.begin_module(source.path)
-        if archive_input != nil:
+        if archive_input.is_some():
             actual_lowering.lowered_trait_count_value = 0
         hir_cache_clear_last_warnings()
         if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned and
@@ -1133,7 +1133,7 @@ impl CompilerDriver:
         # Values are struct/symbol-only HirModule views, not second owners of
         # the complete HIR stored in phase_hir_modules.
         var validation_module_values: [ValueStructLayoutModuleV1] = []
-        var phase_entry_hir: HirModule? = nil
+        var phase_entry_hir: HirModule? = None
         var streaming_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = self.streaming_entry_source_index_owner
         var source_index = 0
@@ -1507,9 +1507,9 @@ impl CompilerDriver:
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
                 hir_cache_load_parsed_v1(hir_stream_key, hir_stream_binding, source.path, self.ctx.options.library_mode, hir_stream_interface_only)
             else:
-                nil
+                None
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
-                val hir_stream_work = if hir_stream_cached == nil: 1 else: 0
+                val hir_stream_work = if hir_stream_cached.is_none(): 1 else: 0
                 print "[M4 lower] module={source.module_name} work={hir_stream_work}"
             if not driver_hir_mem_snapshot(
                 "hir-file-start", source_index, source.path,
@@ -1533,8 +1533,8 @@ impl CompilerDriver:
                 surfaces.surfaces.len(), source.module_name,
                 2, 6, 0, hir_cache_hits(), "running")
             var hir_module: HirModule = nil
-            var hir_cache_stored: bool = hir_stream_cached != nil
-            if hir_stream_cached != nil:
+            var hir_cache_stored: bool = hir_stream_cached.is_some()
+            if hir_stream_cached.is_some():
                 self.capture_native_parsed_objectless_v1(hir_cache_last_parser_objectless(), source)
                 # A cached HIR root is already persistent; preserve the reset
                 # without opening an otherwise unused parse scope.
@@ -1883,7 +1883,7 @@ impl CompilerDriver:
         for owner_word in _driver_source_body_lowerers_v1.keys():
             val owner: DriverHirSourceLoweringOwnerV1 = _driver_source_body_lowerers_v1[owner_word]
             owner.lowering.invalidate_impl_index()
-        self.ctx.module_surfaces = nil
+        self.ctx.module_surfaces = None
         # MIR setup runs after this release; keep the flat call-origin rows
         # (PM3 unit lane, driver_surface_call_origin_rows_v1.spl).
         if self.streaming_surface_owner_ready and worker_hir_loads_restricted_v1():
@@ -2063,7 +2063,7 @@ impl CompilerDriver:
         var validation_module_keys: [text] = []
         # The side array owns only struct layout data and struct symbols.
         var validation_module_values: [ValueStructLayoutModuleV1] = []
-        var phase_entry_hir: HirModule? = nil
+        var phase_entry_hir: HirModule? = None
         var retained_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_idx = 0
@@ -2254,8 +2254,8 @@ impl CompilerDriver:
             val hir_cached: HirModule? = if hir_cache_key_value != "":
                 hir_cache_load_parsed_v1(hir_cache_key_value, hir_cache_parser_binding_v1(hir_cache_key_value, src.module_name, src.path, self.ctx.source_identities_owner[source_idx], self.ctx.options.library_mode), src.path, self.ctx.options.library_mode)
             else:
-                nil
-            val hir_cache_hit: bool = hir_cached != nil
+                None
+            val hir_cache_hit: bool = hir_cached.is_some()
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
                 val hir_work = if hir_cache_hit: 0 else: 1
                 print "[M4 lower] module={name} work={hir_work}"
