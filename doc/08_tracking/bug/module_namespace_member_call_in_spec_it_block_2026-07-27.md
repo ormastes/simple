@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 **Lane:** FSDICT
-Status: OPEN (P2)
+Status: FIXED 2026-11-04 on the redeployed seed (see final section); header corrected 2026-11-25
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Severity:** high — silently reds whole spec files and is easy to misread as "the module didn't resolve"
 
@@ -115,3 +115,34 @@ Regression spec (5 cases: interpolation x2, matcher chain, comparison in expect,
 assignment) added: `test/01_unit/compiler/interpreter/module_namespace_member_in_it_block_spec.spl`
 -> 5 total, 5 passed, ~10 s wall. Status set to fixed. The JIT secondary symptom
 (module-namespace access forces interpreter fallback) was not re-checked.
+
+## 2026-11-25 verification (lane p2w3-ak): fix confirmed in the pinned binary; header corrected
+
+The status header still read OPEN even though the 2026-11-04 section below
+records the fix on the redeployed seed; corrected to FIXED. Re-verified on
+worktree work/p2w3-ak-20261125 (release/1.0.0 tip dd709d76f18) with the
+tracked `bin/simple.exe` (Rust seed v1.0.0-rc.1, Windows) using the
+it-block-closure shape that triggered the defect — a module-namespace
+`fs.exists(P)` call in string-interpolation position inside a closure:
+
+```
+val f = \:
+    print "interp={fs.exists(P)}"     # the failing form: interpolation in a closure
+    val v = fs.exists(P)
+    print "assign={v}"
+f()
+```
+
+Output: `interp=true`, `assign=true`, `direct=true`, exit 0 — no
+`function expects 1 argument(s), but 2 were provided`. The implicit-self
+injection on module-namespace member calls inside closures is gone from the
+pinned seed.
+
+Limit: the committed regression spec
+`test/01_unit/compiler/interpreter/module_namespace_member_in_it_block_spec.spl`
+was not re-run via `bin/simple.exe test` because the pinned seed rejects the
+`@representation_boundary` decorator added repo-wide by cfd89933699 (known
+HEAD source/binary inconsistency, fails in the test runner client); the probe
+above reproduces the spec's interpolation/assignment forms directly. The JIT
+secondary symptom (module-namespace access forcing interpreter fallback) was
+not re-checked, matching the 2026-11-04 note.
