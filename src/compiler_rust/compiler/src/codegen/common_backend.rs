@@ -478,6 +478,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_string_to_int",
                             "rt_any_to_int",
                             "rt_value_as_float",
+                            "rt_value_eq",
                             "rt_value_is_bool",
                             "rt_value_is_float",
                             "rt_value_is_int",
@@ -673,6 +674,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_any_cast_int"
             | "rt_string_to_float"
             | "rt_string_to_int"
+            | "rt_value_eq"
             | "rt_value_is_bool"
             | "rt_value_is_float"
             | "rt_value_is_int"

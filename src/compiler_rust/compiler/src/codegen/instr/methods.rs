@@ -168,6 +168,33 @@ pub(super) fn numeric_cast_target(method: &str) -> Option<TypeId> {
     }
 }
 
+fn int_target_type(ty: TypeId) -> types::Type {
+    match ty {
+        TypeId::U8 | TypeId::I8 => types::I8,
+        TypeId::U16 | TypeId::I16 => types::I16,
+        TypeId::U32 | TypeId::I32 => types::I32,
+        _ => types::I64,
+    }
+}
+
+fn resize_int(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    target_ty: types::Type,
+    from_signed: bool,
+) -> cranelift_codegen::ir::Value {
+    let src_ty = builder.func.dfg.value_type(val);
+    if src_ty == target_ty {
+        val
+    } else if src_ty.bits() > target_ty.bits() {
+        builder.ins().ireduce(target_ty, val)
+    } else if from_signed {
+        builder.ins().sextend(target_ty, val)
+    } else {
+        builder.ins().uextend(target_ty, val)
+    }
+}
+
 /// Lower a numeric cast method (`to_i8`..`to_u64`, `to_int`, `to_f32`,
 /// `to_f64`, `to_float`) uniformly for both `MirInst::BuiltinMethod` and
 /// `MirInst::MethodCallStatic`.
@@ -206,12 +233,7 @@ pub(super) fn compile_numeric_cast_method<M: Module>(
         };
         let parsed = call_runtime_1(ctx, builder, helper, receiver_val);
         let converted = if to_is_int {
-            match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, parsed),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, parsed),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, parsed),
-                _ => parsed,
-            }
+            resize_int(builder, parsed, int_target_type(to_ty), true)
         } else {
             // rt_string_to_float returns a heap-boxed RuntimeValue, so unbox to raw f64.
             let raw = call_runtime_1(ctx, builder, "rt_value_as_float", parsed);
@@ -225,27 +247,66 @@ pub(super) fn compile_numeric_cast_method<M: Module>(
     }
 
     // Erased receiver (`list` element, `any` slot): `receiver_val` is a tagged
-    // `RuntimeValue` (I64). Dispatch by runtime tag rather than bit-casting or
-    // treating tagged ints (`n << 3`) as raw integers.
+    // `RuntimeValue` (I64). Dispatch by runtime tag rather than bit-casting,
+    // treating tagged ints (`n << 3`) as raw bits, or leaking `NIL` (3).
     if erased_receiver
         && src_ty == types::I64
         && matches!(recv_ty_known, None | Some(TypeId::ANY))
         && !matches!(from_ty, TypeId::F32 | TypeId::F64 | TypeId::STRING)
     {
         if to_is_int {
+            let width = int_target_type(to_ty);
+            let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+
+            let is_float_block = builder.create_block();
+            let check_int_block = builder.create_block();
+            let is_int_block = builder.create_block();
+            let is_str_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, width);
+
+            let is_float = call_runtime_1(ctx, builder, "rt_value_is_float", receiver_val);
+            builder.ins().brif(is_float, is_float_block, &[], check_int_block, &[]);
+
+            builder.switch_to_block(is_float_block);
+            builder.seal_block(is_float_block);
+            let f_val = call_runtime_1(ctx, builder, "rt_value_as_float", receiver_val);
+            let sat_int = float_to_int_saturating(builder, f_val, width, to_signed);
+            builder.ins().jump(merge_block, &[sat_int]);
+
+            builder.switch_to_block(check_int_block);
+            builder.seal_block(check_int_block);
+            let is_int = call_runtime_1(ctx, builder, "rt_value_is_int", receiver_val);
+            let is_bool = call_runtime_1(ctx, builder, "rt_value_is_bool", receiver_val);
+            let is_int_or_bool = builder.ins().bor(is_int, is_bool);
+            builder.ins().brif(is_int_or_bool, is_int_block, &[], is_str_block, &[]);
+
+            builder.switch_to_block(is_int_block);
+            builder.seal_block(is_int_block);
             let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
-            let converted = match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, decoded),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, decoded),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, decoded),
-                _ => decoded,
-            };
+            let narrowed = resize_int(builder, decoded, width, true);
+            builder.ins().jump(merge_block, &[narrowed]);
+
+            builder.switch_to_block(is_str_block);
+            builder.seal_block(is_str_block);
+            // `rt_string_to_int` parses strings and safely returns 0 for NIL and
+            // any non-string heap value (never leaking NIL's 3 or a heap address).
+            let parsed = call_runtime_1(ctx, builder, "rt_string_to_int", receiver_val);
+            let parsed_width = resize_int(builder, parsed, width, true);
+            builder.ins().jump(merge_block, &[parsed_width]);
+
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            let converted = builder.block_params(merge_block)[0];
             return Ok(Some((converted, to_ty)));
         }
         if matches!(to_ty, TypeId::F32 | TypeId::F64) {
             let is_float_block = builder.create_block();
             let check_int_block = builder.create_block();
             let is_int_block = builder.create_block();
+            let sint_block = builder.create_block();
+            let heap_sign_check_block = builder.create_block();
+            let uint_block = builder.create_block();
             let is_str_block = builder.create_block();
             let merge_block = builder.create_block();
             builder.append_block_param(merge_block, types::F64);
@@ -268,8 +329,33 @@ pub(super) fn compile_numeric_cast_method<M: Module>(
             builder.switch_to_block(is_int_block);
             builder.seal_block(is_int_block);
             let iv = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
-            let f_from_int = builder.ins().fcvt_from_sint(types::F64, iv);
-            builder.ins().jump(merge_block, &[f_from_int]);
+            // Non-negative or non-heap (TAG_INT / TAG_SPECIAL bool) uses sint;
+            // only a heap-boxed word (`tag == 1`) with `iv < 0` can be either a
+            // negative wide HeapInt or an unsigned HeapUInt >= 2^63.
+            let is_neg = builder.ins().icmp_imm(IntCC::SignedLessThan, iv, 0);
+            let tag = builder.ins().band_imm(receiver_val, 7);
+            let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+            let need_heap_sign_check = builder.ins().band(is_neg, is_heap);
+            builder
+                .ins()
+                .brif(need_heap_sign_check, heap_sign_check_block, &[], sint_block, &[]);
+
+            builder.switch_to_block(heap_sign_check_block);
+            builder.seal_block(heap_sign_check_block);
+            let signed_box = call_runtime_1(ctx, builder, "rt_value_int", iv);
+            let eq_signed = call_runtime_2(ctx, builder, "rt_value_eq", receiver_val, signed_box);
+            let is_signed_int = builder.ins().icmp_imm(IntCC::NotEqual, eq_signed, 0);
+            builder.ins().brif(is_signed_int, sint_block, &[], uint_block, &[]);
+
+            builder.switch_to_block(sint_block);
+            builder.seal_block(sint_block);
+            let f_from_sint = builder.ins().fcvt_from_sint(types::F64, iv);
+            builder.ins().jump(merge_block, &[f_from_sint]);
+
+            builder.switch_to_block(uint_block);
+            builder.seal_block(uint_block);
+            let f_from_uint = builder.ins().fcvt_from_uint(types::F64, iv);
+            builder.ins().jump(merge_block, &[f_from_uint]);
 
             builder.switch_to_block(is_str_block);
             builder.seal_block(is_str_block);
@@ -299,13 +385,7 @@ pub(super) fn compile_numeric_cast_method<M: Module>(
     } else if actual_is_float && to_is_int {
         // Saturating, like the interpreter: `(-5.5).to_u8()` = 0, not SIGILL.
         let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-        let width = match to_ty {
-            TypeId::U8 | TypeId::I8 => types::I8,
-            TypeId::U16 | TypeId::I16 => types::I16,
-            TypeId::U32 | TypeId::I32 => types::I32,
-            _ => types::I64,
-        };
-        float_to_int_saturating(builder, receiver_val, width, to_signed)
+        float_to_int_saturating(builder, receiver_val, int_target_type(to_ty), to_signed)
     } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
         if src_ty == types::F32 && to_ty == TypeId::F64 {
             builder.ins().fpromote(types::F64, receiver_val)
@@ -314,35 +394,21 @@ pub(super) fn compile_numeric_cast_method<M: Module>(
         } else {
             receiver_val
         }
-    } else {
-        match to_ty {
-            TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
-            TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
-            TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
-            TypeId::U64 | TypeId::I64 => match src_ty {
-                types::I8 | types::I16 | types::I32 => {
-                    if from_signed {
-                        builder.ins().sextend(types::I64, receiver_val)
-                    } else {
-                        builder.ins().uextend(types::I64, receiver_val)
-                    }
-                }
-                _ => receiver_val,
-            },
-            TypeId::F32 | TypeId::F64 => {
-                let float_val = if from_signed {
-                    builder.ins().fcvt_from_sint(types::F64, receiver_val)
-                } else {
-                    builder.ins().fcvt_from_uint(types::F64, receiver_val)
-                };
-                if to_ty == TypeId::F32 {
-                    builder.ins().fdemote(types::F32, float_val)
-                } else {
-                    float_val
-                }
-            }
-            _ => receiver_val,
+    } else if to_is_int {
+        resize_int(builder, receiver_val, int_target_type(to_ty), from_signed)
+    } else if matches!(to_ty, TypeId::F32 | TypeId::F64) {
+        let float_val = if from_signed {
+            builder.ins().fcvt_from_sint(types::F64, receiver_val)
+        } else {
+            builder.ins().fcvt_from_uint(types::F64, receiver_val)
+        };
+        if to_ty == TypeId::F32 {
+            builder.ins().fdemote(types::F32, float_val)
+        } else {
+            float_val
         }
+    } else {
+        receiver_val
     };
     Ok(Some((converted, to_ty)))
 }
