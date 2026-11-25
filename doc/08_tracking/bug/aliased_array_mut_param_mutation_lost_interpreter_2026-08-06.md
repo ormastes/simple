@@ -1,13 +1,16 @@
 # Passing one array as both a `mut` and a non-`mut` parameter silently discards the mutation (interpreter)
-## Open 2026-09-16 — needs owner triage
+## CLOSED 2026-11-25 — fixed and re-verified (see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 "needs owner triage" banner was stale bookkeeping: the filed
+defect was fixed 2026-08-17 (`bba6ccae1fd`) and the both-aliases-`mut`
+residual was fixed 2026-11-05 (both documented below with evidence).
+Re-verified on release/1.0.0 @ 0819b116ecb on 2026-11-25 — see the final
+section.
 
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P1)
+- Status: CLOSED (was OPEN (P1) at filing; fixed 2026-08-17 + 2026-11-05, re-verified 2026-11-25)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to a specific function in the out-of-scope Rust seed (see "Not yet done" → now done,
   below); every reachable pure-Simple candidate interpreter was checked and does not share this
@@ -543,3 +546,26 @@ and has no separate copy-out step, so it is structurally immune to this
 defect class. It remains unreachable in this tree without a self-hosted
 bootstrap, so that immunity is argued from source, not re-verified
 dynamically.
+
+## Re-verification 2026-11-25 (release/1.0.0 @ 0819b116ecb, worktree wt-p1w1-aa) — CLOSED
+
+Re-ran the full aliased-write-back probe on the pinned self-hosted-tracked
+binary `bin/simple.exe` (Rust seed v1.0.0-rc.1, 38,403,072 bytes) under BOTH
+engines. The repo spec `test/01_unit/compiler/interpreter/probe_aliased_param_writeback.spl`
+could not be executed directly at HEAD (its `std.io_runtime` import chain hits
+the known `unknown decorator '@representation_boundary'` source/binary
+inconsistency of the pinned seed), so a byte-for-byte self-contained variant
+of the same 13-check probe (only the `exit` import removed) was run from
+`build/`:
+
+- `SIMPLE_EXECUTION_MODE=interpret bin/simple.exe run <probe>` →
+  `ALIASED_PARAM_WRITEBACK PROBE: ALL PASS` (all 13 PASS lines, including the
+  five shapes that failed on 2026-08-17), `OBSERVE aliased_array_both_mut=3`.
+- `SIMPLE_EXECUTION_MODE=jit bin/simple.exe run <probe>` → identical, ALL
+  PASS, `OBSERVE aliased_array_both_mut=3`.
+
+Both engines agree on every shape: the filed mut+non-mut aliasing defect
+(fixed 2026-08-17, `bba6ccae1fd`) and the both-aliases-`mut` residual (fixed
+2026-11-05, three-way merge in `write_back_mutable_arguments`) are both gone
+on the current release binary. No code change in this pass; ledger hygiene
+only.
