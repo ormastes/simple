@@ -801,16 +801,23 @@ impl ReturnTypeInterfaceTable:
             case _: ()
         val resolved = self.resolve(self.callee_return(receiver, symbols, nil, consumer_params)?)?
         # Owner discovery reads only the HEAD of the receiver's return type.
-        # A builtin head (`opt(..)`, `result(..)`, array, dict, ...) names no
-        # struct/class owner whether or not its payload is substituted, so
-        # `inner.remove(key).is_some()` in an erased generic body (receiver
-        # row `opt(p1)`) is the same "RTI cannot answer" as its concrete
-        # twin `opt(b:bool)` -- never the fatal E-RTI-003 below, which stays
-        # for a bare parameter and for a nominal owner carrying parameters.
+        # A nominal head (`Nominal(decl, args)`) already proves the owning
+        # declaration and carries its receiver arguments (including caller
+        # `Param`s or nested parameter containers) into `method_return` so
+        # `rti_apply_owner_args_v1` can specialize the method result while the
+        # outer consumer's `require_concrete` still enforces concreteness on
+        # that result. A builtin head (`opt(..)`, `result(..)`, array, dict,
+        # ...) names no struct/class owner regardless of payload (E-RTI-001),
+        # while bare `Param`, `Union`, and unresolved `AsyncRef` stay on
+        # `require_concrete`.
         match resolved:
             case ReturnTypeEntry.Decided(head):
-                if not rti_term_head_may_own_methods_v1(head):
-                    return Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(head)}' is not a struct/class (trait receivers are RTI PR2)"))
+                match head:
+                    case RtType.Nominal(decl, args):
+                        return Ok((decl, false, args))
+                    case _:
+                        if not rti_term_head_may_own_methods_v1(head):
+                            return Err(rti_error("E-RTI-001", "receiver type '{rti_term_canonical_text(head)}' is not a struct/class (trait receivers are RTI PR2)"))
             case _: ()
         val term = self.require_concrete(resolved)?
         match term:
