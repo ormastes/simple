@@ -439,3 +439,14 @@ above rather than relying on it:
 ## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
 
 Concurs with lane p3-comp8: SUPERSEDED — the position-unification fix is at tip (confirmed by comp8 from source). No independent re-verification in this lane; disposition stands.
+
+## Disposition correction 2026-11-25 (work/p3-bao-20261125)
+
+Per the unwired-extractions audit
+(`unwired_extractions_audit_2026-08-11.md`, instance 5): the disposition
+table above says the dead cluster `src/compiler/10.frontend/core/lexer_scanners.spl`
+was "left in place, guard comment added". That file no longer exists anywhere
+in the tree (confirmed 2026-11-25) — the dead cluster has since been deleted,
+matching the 2026-09-16 closure header. The fix half of this doc (wired
+`lex_token_end_get` / `lex_live_line_get` / `lex_force_set_pos`) is unaffected.
+Table rows describing `lexer_scanners.spl` as present are historical only.
