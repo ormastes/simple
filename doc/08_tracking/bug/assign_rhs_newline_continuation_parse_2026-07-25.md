@@ -1,9 +1,10 @@
 # `name =` with the RHS on the next line does not parse — took a whole example file down silently
 
 - **ID:** assign_rhs_newline_continuation_parse_2026-07-25
-- **Status:** SOURCE FIXED / DEPLOYED ARTIFACT BLOCKED — current lexer source
-  classifies assignment tokens as RHS-requiring; deployed Stage2/old Stage3
-  artifacts still reject the form
+- **Status:** RESOLVED (verified 2026-11-25) — the lexer fix
+  (`token_requires_rhs` in `src/compiler/10.frontend/core/`) is in source, and
+  the current tracked deployed binary now accepts the trailing-`=` newline
+  continuation; see the 2026-11-25 verification section below
 - **Severity:** high — the failure is whole-file (nothing in the module loads) and the
   diagnostic names no line, so the cost to locate it is a manual bisect
 
@@ -78,3 +79,32 @@ surface symptom as a separate, unrelated defect in a separate parser
 implementation, still present as of `92dc586924a` (2026-07-31) and fixed in
 `doc/08_tracking/bug/seed_assignment_trailing_equals_continuation_2026-07-31.md`.
 Don't assume "SOURCE FIXED" here covers the seed.
+
+## Verification 2026-11-25 — deployed artifact no longer blocked
+
+Verified on Windows worktree `D:\wt-p3-bae` (branch `work/p3-bae-20261125`,
+base `origin/release/1.0.0`) with the tracked `bin/simple.exe`
+(38,403,072 bytes), `SIMPLE_LIB=src`:
+
+- Source fix present: `token_requires_rhs` /
+  `token_can_end_expr` are imported and used by
+  `src/compiler/10.frontend/core/lexer_struct.spl` and documented in
+  `src/compiler/10.frontend/core/lexer.spl:754-759`.
+- Deployed-binary probe: a minimal module containing the exact failing form
+
+  ```
+  var current_font_pixel_size = 0
+  current_font_pixel_size =
+      updated_result
+  ```
+
+  now parses and runs to completion: `bin/simple.exe run probe.spl` prints
+  `42`, exit 0. The original whole-file `expected expression, found Newline`
+  failure does not reproduce.
+- The original repro file `examples/06_io/ui/web_render_file_gui.spl` no
+  longer exists in the tree (the examples/06_io/ui directory is gone), so the
+  probe above substitutes for it.
+
+The "DEPLOYED ARTIFACT BLOCKED" caveat referred to Stage2/old Stage3 binaries
+that have since been replaced by the currently tracked binary. Closing as
+RESOLVED.

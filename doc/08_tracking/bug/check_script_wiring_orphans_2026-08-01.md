@@ -485,3 +485,24 @@ rename to chase or a missing implementation to write, and several sit in
 subsystems (`os/compositor`, `os/services/netstack`, `ui.*`, `app.dashboard`)
 that other lanes are live in. Filed here with exact counts so the next pass
 starts from a number rather than a re-scan.
+
+## Triage note 2026-11-25 — ratchet in place and CI-wired; full-tree scan not runnable on this host
+
+Checked on Windows worktree `D:\wt-p3-bae` (branch `work/p3-bae-20261125`,
+base `origin/release/1.0.0`):
+
+- The structural fix this audit demanded is landed and current:
+  `scripts/check/check-guard-wiring.shs` (66 KB) exists with its
+  `scripts/check/guard_wiring_optout.txt` baseline, and it is wired into CI at
+  `.github/workflows/code-idiom-gates.yml:736`.
+- Fresh evidence from this host: the guard's built-in selftest passes —
+  `check-guard-wiring: selftest 43/43 fixtures correct`.
+- Limit, stated explicitly: the full-tree reachability scan could not be
+  completed on this Windows/Git-Bash host — the run died on Cygwin fork
+  exhaustion (`fork: retry: Resource temporarily unavailable`,
+  `dofork: child ... died unexpectedly`) after ~10 minutes. The full
+  orphan-count re-measurement remains CI/Linux evidence.
+
+Status stays OPEN: the remaining debt recorded above (orphan-list shrinkage,
+the 171 dangling references program) is real and explicitly owned; nothing in
+this note changes it.

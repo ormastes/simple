@@ -6,7 +6,7 @@ the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-17
 **Severity:** high (blocks single-file spec runs repo-wide on the deployed binary)
-**Status:** OPEN — hypothesis pending fresh-seed confirmation
+**Status:** RESOLVED (verified 2026-11-25; previously header-marked Obsolete 2026-09-16) — see the 2026-11-25 verification section at the end of this file
 
 ## 2026-07-18 native-owner update
 
@@ -65,3 +65,20 @@ lane S63) so the true self-hosted binary can be redeployed.
   `S61_interpreter_stack_overflow_app_io_mod_2026-07-17.md`.
 - Test-runner infra importing the suspect modules — repo-wide grep negative.
 
+
+## Verification 2026-11-25 — hang does not reproduce on current tracked binary
+
+Verified on Windows worktree `D:\wt-p3-bae` (branch `work/p3-bae-20261125`,
+base `origin/release/1.0.0`) with the tracked `bin/simple.exe`
+(38,403,072 bytes — not the stale Jul-11 seed, sha prefix `561767c6615bc013`,
+this report was filed against):
+
+    SIMPLE_LIB=src bin/simple.exe test test/01_unit/lib/common/array_get_option_spec.spl --mode=interpreter
+
+completed in ~40 s wall clock with exit 0 and verdict
+`outcome=OK declared>=6 executed=6 passed=6 failed=0`. No init spin after the
+test-runner module-load warnings, no `unknown extern function:
+rt_process_run_bounded`. This matches the 2026-09-16 "Obsolete" header: the
+stale Jul-11 seed has long been replaced and single-file `simple test` runs
+are healthy. Marking RESOLVED (was already header-marked Obsolete; the body's
+"Status: OPEN" line predates the redeploy).
