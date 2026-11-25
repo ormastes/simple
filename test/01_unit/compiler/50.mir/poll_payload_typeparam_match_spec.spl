@@ -86,3 +86,71 @@ describe "stage2_poll_payload_typeparam_match generic payload binder":
         expect(d.contains("ambiguous")).to_equal(false)
         expect(d.contains("has type T")).to_equal(false)
         expect(d.contains("unresolved")).to_equal(false)
+
+    it "cross-module Poll<Result<..>> in buffer shapes resolves Ok/Err with colliding enum in closure":
+        val poll_mod = lines([
+            "pub enum Poll<T>:",
+            "    Ready(T)",
+            "    Pending"
+        ])
+        val aes_mod = lines([
+            "pub enum AesGcmResult:",
+            "    Ok(data: [u8])",
+            "    Err(message: text)"
+        ])
+        val io_types_mod = lines([
+            "pub struct IoError:",
+            "    message: text"
+        ])
+        val consumer_mod = lines([
+            "use std.async.poll.{{Poll}}",
+            "use std.common.crypto.aes_gcm.{{AesGcmResult}}",
+            "use std.io.types.{{IoError}}",
+            "",
+            "fn touch_aes() -> i64:",
+            "    val r = AesGcmResult.Ok(data: [1u8])",
+            "    match r:",
+            "        case AesGcmResult.Ok(d): d.len()",
+            "        case AesGcmResult.Err(_): 0",
+            "",
+            "fn poll_bytes(p: Poll<Result<[u8], IoError>>) -> i64:",
+            "    match p:",
+            "        case Poll.Ready(result):",
+            "            match result:",
+            "                case Ok(data):",
+            "                    data.len()",
+            "                case Err(e):",
+            "                    0 - 1",
+            "        case Poll.Pending:",
+            "            0",
+            "",
+            "fn poll_unit(p: Poll<Result<(), IoError>>) -> i64:",
+            "    match p:",
+            "        case Poll.Ready(result):",
+            "            match result:",
+            "                case Ok(_):",
+            "                    1",
+            "                case Err(e):",
+            "                    0 - 1",
+            "        case Poll.Pending:",
+            "            0",
+            "",
+            "fn poll_count(p: Poll<Result<i64, IoError>>) -> i64:",
+            "    match p:",
+            "        case Poll.Ready(result):",
+            "            match result:",
+            "                case Ok(n):",
+            "                    n",
+            "                case Err(e):",
+            "                    0 - 1",
+            "        case Poll.Pending:",
+            "            0"
+        ])
+        val d = lower_closure(
+            ["std.async.poll", "std.common.crypto.aes_gcm", "std.io.types", "app.buffer_probe"],
+            [poll_mod, aes_mod, io_types_mod, consumer_mod]
+        )
+        expect(d.contains("ambiguous")).to_equal(false)
+        expect(d.contains("has type T")).to_equal(false)
+        expect(d.contains("unresolved")).to_equal(false)
+        expect(d).to_equal("")

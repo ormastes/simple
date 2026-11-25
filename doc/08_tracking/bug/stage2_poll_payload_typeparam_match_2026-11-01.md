@@ -2,8 +2,9 @@
 
 - **ID:** stage2_poll_payload_typeparam_match_2026-11-01
 - **Priority:** P1 (blocks phase-3 stage3 self-build)
-- **Status:** fixed in source (2026-11-02); revert-ready after the stage3 self-build. Source workaround in
-  `src/lib/nogc_async_mut/io/buffer.spl` stays tagged until the revert loop removes it.
+- **Status:** fixed in source (2026-11-02); source workaround in
+  `src/lib/nogc_async_mut/io/buffer.spl` (11 tags: 3 helpers + 8 call sites)
+  reverted on `release/1.0.0` (2026-11-25), pending P3 relink verification.
 - **Owner area:** `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl` (enum-match lowering:
   type of a generic enum payload binder used as a nested match subject), with the HIR/RTI pass that
   assigns payload binder types for `Poll<T>` patterns
@@ -91,3 +92,7 @@ green 2/2 after).
 Revert loop: after a stage3 binary built from this source compiles `lib.nogc_async_mut.io.buffer`,
 restore the direct `case Poll.Ready(result): match result:` form at the tagged sites and confirm 0
 `go-to-end failed stage=mir` lines for buffer in the 8 GB-capped closure probe above.
+- **2026-11-25:** Reverted all 11 `# @workaround bug=stage2_poll_payload_typeparam_match_2026-11-01`
+  sites in `src/lib/nogc_async_mut/io/buffer.spl` on `release/1.0.0` and added cross-module
+  `Poll<Result<..>>` coverage in `test/01_unit/compiler/50.mir/poll_payload_typeparam_match_spec.spl`,
+  awaiting per-file P3 relink verification.
