@@ -254,10 +254,7 @@ impl SimpleRing<Op, Cpl>:
         while index < task_keys.len():
             val reservation_result = _as_reservation_result_v1(self.reserve(owner_id, task_keys[index]))
             val reservation = match reservation_result:
-                case Result.Ok(value):
-                    # @workaround bug=simple_ring_result_payload_provenance_2026-11-06 reason=bind the declared record type; the closure-global Result::Ok payload record is unreliable in this lane
-                    val typed_value: RingReservation = value
-                    typed_value
+                case Result.Ok(value): value
                 case Result.Err(error): return Err(error)
             match _as_token_result_v1(self.commit(owner_id, reservation, operations[index])):
                 case Result.Ok(_): ()
@@ -353,10 +350,8 @@ impl SimpleRing<Op, Cpl>:
             case Err(error): Err(error)
             case Ok(maybe):
                 if val completion = maybe:
-                    # @workaround bug=simple_ring_result_payload_provenance_2026-11-06 reason=bind a declared record type; the untyped `if val` binder of a Result<RingCompletion<Cpl>?, E> Ok payload in this generic method intermittently took the closure-global Result::Ok record (a *Receipt), failing `completion.token` in MIR
-                    val typed_completion: RingCompletion<Cpl> = completion
-                    match _as_unit_result_v1(self.release_retained_completion(owner_id, typed_completion.token)):
-                        case Result.Ok(_): Ok(typed_completion)
+                    match _as_unit_result_v1(self.release_retained_completion(owner_id, completion.token)):
+                        case Result.Ok(_): Ok(completion)
                         case Result.Err(error): Err(error)
                 else:
                     Ok(nil)
@@ -399,16 +394,12 @@ impl SimpleRing<Op, Cpl>:
             case Ok(slot):
                 match self.states[slot]:
                     case RingSlotState.Reserved:
-                        # @workaround bug=rti004_mono_specialization_match_subject_2026-11-01 reason=annotate the binder; inside the stage2 mono specialization of cancel the untyped local stays unresolved, so the Ok arm is ambiguous and the Err payload cannot type CancelRejected
-                        val release_result: Result<(), SimpleRingError> = _as_unit_result_v1(self._release_slot(slot))
-                        match release_result:
+                        match _as_unit_result_v1(self._release_slot(slot)):
                             case Result.Ok(_):
                                 self.telemetry_value.cancellations = _ring_next_counter(self.telemetry_value.cancellations)
                                 RingCancelOutcome.CancelledBeforeCommit(token)
                             case Result.Err(error):
-                                # @workaround bug=simple_ring_result_payload_provenance_2026-11-06 reason=bind a declared type; the Err binder of the annotated Result<(), SimpleRingError> carries no payload-type evidence, so MIR rejected CancelRejected(error) as a payload type mismatch
-                                val rejected: SimpleRingError = error
-                                RingCancelOutcome.CancelRejected(rejected)
+                                RingCancelOutcome.CancelRejected(error)
                     case RingSlotState.Committed:
                         self._request_provider_cancel(slot, token)
                     case RingSlotState.InFlight:
