@@ -145,3 +145,27 @@ these tests do not claim to qualify the historical cross-module `char.to_i64`
 or composite `extract_json_int` residuals. Keep the canonical shared SDN row
 open, with the compiler boxing/coalescing family as the underlying ownership.
 No new failure has been demonstrated and no coverage percentage is claimed.
+
+## Confirmation 2026-11-25 (p2w3-al lane, Windows) — closure stands
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), `SIMPLE_LIB=src ... run`, Windows Git Bash, worktree at
+release/1.0.0 @ 1457ddaa176. The named indicator spec cannot run here
+(release/1.0.0 HEAD is source/binary inconsistent — the pinned seed rejects
+`@representation_boundary`, so `bin/simple.exe test` fails repo-wide), so the
+2026-11-05 probe results were re-measured directly:
+
+```
+val s = "abc:def"
+s.index_of(":")   -> 3     (was: nil)
+s.index_of("abc") -> 0
+s.index_of("zzz") -> -1
+"42".to_int()     -> 42    (was: boxed handle / float-mangled)
+"7".to_int() ?? -1        -> 7
+("42".to_int() ?? -1) + 7 -> 49
+```
+
+All values are usable raw `i64`s under the interpreter, matching the 2026-11-05
+audit. The Option<i64> mangling is not reproducible on this binary; the closure
+above stands. The cross-module JIT `char.to_i64`/`extract_json_int` residual
+remains compiler-owned and unverified here, as already recorded.
