@@ -48,3 +48,18 @@ Hits a frozen MIR-empty bug ("MIR module has no functions" for the entry) — no
 redeploy path on the deployed binary. So redeploy cannot bootstrap through the deployed
 binary either; it must go through a fixed seed backend.
 
+
+## Triage 2026-11-25 (p2w6-ak lane, release/1.0.0)
+
+Owner-triage answer: this is a **Rust-seed-only** defect — the fix locus is
+`src/compiler_rust/compiler/src/codegen/` (the seed's llvm-lib direct
+method-call lowering and extern-signature registration), and repo rules make
+the seed bootstrap-only ("Fix .spl not Rust"; the pinned seed binary cannot
+be rebuilt or verified from a bug-fix lane: Rust builds are out of scope on
+verification hosts). It is also **stale-scoped**: the redeploy it blocked has
+since been superseded — the deployed tooling path no longer goes through
+seed `llvm-lib` on `main.spl` (the pure-Simple self-hosted binary is the
+default per `.claude/rules/bootstrap.md`). Not actionable as a bounded P2
+fix; if seed llvm-lib method-arity is still wanted for bootstrap lineage
+work, it belongs to the bootstrap owner as a Rust-side change with a cargo
+rebuild to verify. No code change made; left OPEN for the bootstrap owner.
