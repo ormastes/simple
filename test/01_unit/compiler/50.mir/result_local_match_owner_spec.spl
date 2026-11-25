@@ -24,7 +24,7 @@ use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
-val data_source = "pub enum OtherVerdict:\n    Ok(n: i64)\n    Err(s: text)\n\npub trait Source:\n    fn fetch() -> Result<i64, text>\n\npub class Box:\n    v: i64\n    fn get() -> Result<i64, text>:\n        if self.v < 0:\n            return Err(\"neg\")\n        Ok(self.v)\n\nimpl Source for Box:\n    fn fetch() -> Result<i64, text>:\n        Ok(self.v)\n\npub fn wrap<T>(x: T) -> Result<T, text>:\n    Ok(x)\n"
+val data_source = "pub enum OtherVerdict:\n    Ok(n: i64)\n    Err(s: text)\n\npub struct Sym:\n    id: i64\n\npub trait Source:\n    fn fetch() -> Result<i64, text>\n\npub class Box:\n    v: i64\n    fn get() -> Result<i64, text>:\n        if self.v < 0:\n            return Err(\"neg\")\n        Ok(self.v)\n\nimpl Source for Box:\n    fn fetch() -> Result<i64, text>:\n        Ok(self.v)\n\npub class Reader:\n    sym: Sym\n    fn lookup() -> Result<Sym, text>:\n        Ok(self.sym)\n    fn read_bytes() -> Result<[u8], text>:\n        Ok([1, 2, 3])\n\npub fn wrap<T>(x: T) -> Result<T, text>:\n    Ok(x)\n\npub fn wrap_bool<T>(x: T) -> Result<bool, text>:\n    Ok(true)\n"
 
 fn lower_consumer_mir(body: text) -> (MirModule, text):
     val consumer_source = "use lib.data.*\n\n" + body
@@ -93,4 +93,24 @@ describe "typed Result local subject owns bare Ok/Err over a colliding enum":
     it "the colliding user enum still owns its own Ok/Err (prevention)":
         val (mir, out) = lower_consumer_mir("fn probe(o: OtherVerdict) -> i64:\n    match o:\n        OtherVerdict.Ok(n): n\n        OtherVerdict.Err(s): -4\n")
         expect(out.contains("ambiguous")).to_equal(false)
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "method call returning Result<Struct, text> bound to a typed local":
+        val (mir, out) = lower_consumer_mir("fn probe(r: Reader) -> i64:\n    val sym_result: Result<Sym, text> = r.lookup()\n    val sym: Sym = match sym_result:\n        case Result.Ok(found): found\n        case Result.Err(_): return -1\n    sym.id\n")
+        expect(out).to_equal("")
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "method call returning Result<[u8], text> bound to a typed local":
+        val (mir, out) = lower_consumer_mir("fn probe(r: Reader) -> i64:\n    val code_result: Result<[u8], text> = r.read_bytes()\n    val code: [u8] = match code_result:\n        case Result.Ok(found): found\n        case Result.Err(_): return -1\n    code.len()\n")
+        expect(out).to_equal("")
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "generic fn matching typed Result<bool, text> local with bare Ok/Err":
+        val (mir, out) = lower_consumer_mir("fn probe<T>(node: T) -> i64:\n    val slot: Result<bool, text> = wrap_bool<T>(node)\n    match slot:\n        case Ok(is_nil):\n            if is_nil: 1\n            else: 2\n        case Err(detail): -1\n")
+        expect(out).to_equal("")
+        expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
+
+    it "generic fn matching typed Result<T, text> local returning T?":
+        val (mir, out) = lower_consumer_mir("fn probe<T>(prototype: T) -> T?:\n    val restored_result: Result<T, text> = wrap<T>(prototype)\n    match restored_result:\n        case Ok(restored): return restored\n        case Err(detail): return None\n")
+        expect(out).to_equal("")
         expect(variant_tests_in(mir, "probe") > 0).to_equal(true)
