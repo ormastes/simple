@@ -1,24 +1,67 @@
-# `simple robust inventory <file.spl>...` — print the boundary/origin
-# inventory (origin facts per bound value) for the given files, deterministic
-# text, files in argument order. Exit 2 on usage error or unreadable file.
+# `simple robust inventory [--sdn] <file.spl|dir>...` — print the
+# boundary/origin inventory (origin facts per bound value). Directories are
+# walked for `.spl` files (sorted); text mode prints per-file blocks, `--sdn`
+# prints one cross-file SDN document.
+# `simple robust boundaries <file.spl|dir>...` — list boundary sites only.
+# Exit 2 on usage error or a missing path.
 
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, is_dir, dir_walk}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
-use compiler.semantics.lint.bound_origin_facts.{bound_origin_inventory_text}
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text}
+
+val ROBUST_USAGE = "Usage: simple robust inventory [--sdn] <file.spl|dir>... | simple robust boundaries <file.spl|dir>..."
+
+fn _robust_paths(args: [text]) -> [text]?:
+    # Expand file/dir arguments in argument order; None if a path is missing.
+    var out: [text] = []
+    for a in args:
+        if is_dir(a):
+            var found: [text] = []
+            for p in dir_walk(a):
+                if p.ends_with(".spl"):
+                    found.push(p.replace("\\", "/"))
+            for p in found.sort():
+                out.push(p)
+        elif file_exists(a):
+            out.push(a)
+        else:
+            print "robust: path not found: {a}"
+            return None
+    Some(out)
 
 fn run_robust(args: [text]) -> i64:
-    """Usage: simple robust inventory <file.spl> [more files...]"""
-    if args.len() < 2 or args[0] != "inventory":
-        print "Usage: simple robust inventory <file.spl> [more files...]"
+    """Usage: simple robust inventory [--sdn] <file.spl|dir>... | boundaries <file.spl|dir>..."""
+    if args.len() < 2 or (args[0] != "inventory" and args[0] != "boundaries"):
+        print ROBUST_USAGE
         return 2
+    var sdn = false
+    var targets: [text] = []
     var i = 1
     while i < args.len():
-        val path = args[i]
-        if not file_exists(path):
-            print "robust: file not found: {path}"
-            return 2
-        print bound_origin_inventory_text(file_read(path), path)
+        if args[i] == "--sdn" and args[0] == "inventory":
+            sdn = true
+        else:
+            targets.push(args[i])
         i = i + 1
+    if targets.len() == 0:
+        print ROBUST_USAGE
+        return 2
+    val paths_opt = _robust_paths(targets)
+    if not paths_opt.?:
+        return 2
+    val paths = paths_opt.unwrap()
+    var sources: [text] = []
+    for p in paths:
+        sources.push(file_read(p))
+    if args[0] == "boundaries":
+        print bound_origin_boundaries_text(paths, sources)
+    elif sdn:
+        print bound_origin_inventory_sdn(paths, sources)
+    else:
+        var j = 0
+        while j < paths.len():
+            print bound_origin_inventory_text(sources[j], paths[j])
+            j = j + 1
     0
 
 export run_robust
