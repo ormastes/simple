@@ -1,4 +1,18 @@
 # JIT closure ABI: lambdas refuse the whole module, and named-fn refs SILENTLY MISCOMPILE
+
+## Triage 2026-11-25 (lane p2w3-aa)
+
+The "Open 2026-09-16 — needs owner triage" header above is stale bookkeeping;
+the operative status is the 2026-11-05 mirp2-E3 re-verification at the bottom:
+Defect 2 (silent wrong answer) is CLOSED, row re-scoped to the f08 residual
+(P3, loud-and-correct refusal of a closure returned from an ANY-returning
+fn). Spot-re-verified on the tracked Windows seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1): fixture `f06_named_fn_as_value.spl` prints `f06 marker
+result=42` — correct, no garbage, no fallback. Remaining work (f08 return-slot
+boxing, f10 extern-fn-as-value) is Rust-seed-only under the "seed is
+bootstrap-only" policy. No pure-Simple change possible from a bug lane; left
+OPEN as re-scoped.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

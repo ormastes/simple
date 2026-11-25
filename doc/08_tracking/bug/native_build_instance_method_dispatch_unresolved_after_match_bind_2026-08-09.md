@@ -1,6 +1,25 @@
 # `native-build` MIR lowering: instance methods unresolved on a `match`-bound class local — new blocker after the payload-binding fix
 
-Status: OPEN (P2)
+## Verification 2026-11-25 (lane p2w3-aa) — RESOLVED for this doc's scope; header corrected
+
+The "Status: OPEN (P2)" header was misleading: this doc's own 2026-08-09
+RESOLVED section closed the single-module case, and the remaining
+cross-module failure is tracked separately in
+`doc/08_tracking/bug/native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md`
+(exists at tip). Re-verified the fix by source inspection on release/1.0.0
+tip: the `struct_value_syms` propagation at the arm-merge copy sites is
+present in `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+at all three sites the RESOLVED section names — lines 1951-1952
+(`lower_enum_match`), 2092-2093 (`emit_switch_dispatch`), and 4225-4226
+(`emit_if_chain_dispatch`), each copying the arm-result local's
+`struct_value_syms` entry into the merged `result` local. LIMIT: the minimal
+repro's native-build-worker recipe was not re-executed (multi-GB/multi-minute
+native builds are out of budget on this shared Windows host, per the
+2026-09-13 triage); verification is by code inspection of the landed fix.
+This row is CLOSED for its stated scope; cross-module remainder lives in the
+sibling doc.
+
+Status: RESOLVED (single-module case) 2026-08-09; verified 2026-11-25 — cross-module remainder tracked in native_build_cross_module_result_payload_struct_name_collision_2026-08-09.md
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Summary
