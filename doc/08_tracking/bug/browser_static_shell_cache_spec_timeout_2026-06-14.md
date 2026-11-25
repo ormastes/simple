@@ -1,5 +1,19 @@
 # Browser Static Shell Cache Spec Timeout
 
+## Verification note 2026-11-25 — closure stands; re-run environment-blocked on the Rust seed
+
+- **attempted** (Windows host, release/1.0.0 worktree, Rust seed v1.0.0-rc.1):
+  `SIMPLE_LIB=src bin/simple.exe run test/01_unit/app/ui/browser_static_shell_cache_spec.spl`
+  no longer reaches the examples — the seed rejects
+  `unknown decorator '@representation_boundary'` on
+  `file_read_borrowed_bytes` in the imported `std.io_runtime` (a known
+  module-specific seed limitation; `bin/simple test` fails the same way on the
+  runner's own imports). The 2026-09-13 measured closure below therefore could
+  not be re-executed on this host.
+- **inspected**: the spec file is unchanged since the closure (only the
+  2026-09 tree-transplant commits touch it), so there is no new code that
+  could have reintroduced the timeout. The CLOSED status stands.
+
 ## Closed 2026-09-13 — No longer times out; the three scenarios complete and pass
 
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple run test/01_unit/app/ui/browser_static_shell_cache_spec.spl` finished in **180 s**, exit 0 — `3 examples, 0 failures`, `declared>=3 executed=3 passed=3 failed=0`, outcome=OK. The reported failure was a timeout at both 120 s and 300 s; it now completes inside the 300 s bound.

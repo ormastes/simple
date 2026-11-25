@@ -1,4 +1,19 @@
 # BUG: native-build ignored unknown options
+
+## Verification note 2026-11-25 — fix confirmed present on release/1.0.0
+
+- **inspected**: `cli_native_build_option_error` is defined at
+  `src/app/io/_CliCompile/compile_targets.spl:374` and called from the
+  native-build path at `:1335`; its closed fallback
+  `elif arg.starts_with("-"): return "unknown option: {arg}"` (`:529-530`)
+  rejects any unrecognized `-` token — including the `--entry-clousre`
+  misspelling from the repro — before compilation. The regression spec
+  `test/01_unit/app/compile/cli_native_build_spec.spl` exists.
+- **limit**: the regression spec is not runnable on this host — the Rust seed
+  (v1.0.0-rc.1) rejects `@representation_boundary` in imported stdlib modules
+  (`env_get_nilable`), so the CLOSED status is confirmed by code inspection,
+  not re-execution.
+
 ## Closed 2026-09-16 — ...ack for a token starting with `-`. ## Fix and regression `cli_native_build_option_error` v
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
