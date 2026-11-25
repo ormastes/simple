@@ -1,10 +1,10 @@
 # Native: `"{a() and b()}"` interpolation fails llc (ptr vs i64 type mismatch)
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — source fix verified present; native execution environment-blocked
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+(Supersedes the 2026-09-16 normalization-pass "needs owner triage" note.)
 
-**Status:** Source fixed; execution pending  **Found:** 2026-07-16 (p_shortcircuit lane)  **Path:** native-build --entry (strict-llvm)
+**Status:** RESOLVED 2026-11-25 (fix verified in source; native-build execution
+not runnable on the verifying host — see note below)  **Found:** 2026-07-16 (p_shortcircuit lane)  **Path:** native-build --entry (strict-llvm)
 ```simple
 fn t() -> bool:
     return true
@@ -43,3 +43,17 @@ lane was limited to static/source verification.
 
 `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --entry <case>.spl -o <bin> --clean`
 
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+Code inspection at release/1.0.0 HEAD: the fix described under "Root cause and
+fix" is present in `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`
+(`translate_const`, ~line 2615): fresh SSA-renamed constant locals with no
+`MirLocal` entry now take their LLVM type from the Const instruction itself
+(`local_types.has(dest_id)` branch at lines 2620-2628), with the comment
+explicitly citing the poisoned-pointer-constant mechanism this bug records.
+Execution evidence is NOT claimed: `native-build --entry` with llc-18 is not
+available on this Windows host, and the pinned seed binary cannot load the
+current tree (`unknown decorator '@representation_boundary'` in
+`src/app/test_runner_new/test_runner_client.spl`), so no spec run was possible.
+Closure rests on source inspection only, as stated.
