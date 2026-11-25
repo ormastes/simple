@@ -5495,19 +5495,46 @@ impl MirLowering:
         self.builder = b
         decoded
 
-    me emit_rt_value_is_float_cond(value_local: LocalId) -> LocalId:
-        """Emit `rt_value_is_float(value_local) != 0` as a MirType.bool() condition."""
-        val is_float_fn = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_value_is_float"),
+    me emit_rt_value_tag_pred_cond(pred_name: text, value_local: LocalId) -> LocalId:
+        """Emit `<pred_name>(value_local) != 0` for an i8 RuntimeValue predicate."""
+        val pred_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(pred_name),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)))
         ), call_origin: MirCallOrigin.Runtime)
         var b = self.builder
-        val flag_i8 = b.emit_call_value(is_float_fn, [mir_operand_copy(value_local)], MirType(kind: MirTypeKind.I8))
+        val flag_i8 = b.emit_call_value(pred_fn, [mir_operand_copy(value_local)], MirType(kind: MirTypeKind.I8))
         val flag_i64 = b.emit_cast(mir_operand_copy(flag_i8), MirType.i64())
         val zero_i64 = b.emit_const_int(0)
         val cond = b.emit_binop(MirBinOp.Ne, mir_operand_copy(flag_i64), mir_operand_copy(zero_i64), MirType.bool())
         self.builder = b
         cond
+
+    me emit_rt_is_tagged_string_cond(value_local: LocalId) -> LocalId:
+        """Emit `rt_string_eq(value_local, value_local) != 0` (registry-validated string check)."""
+        val str_eq_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_eq"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        var b = self.builder
+        val flag_i64 = b.emit_call_value(str_eq_fn, [mir_operand_copy(value_local), mir_operand_copy(value_local)], MirType.i64())
+        val zero_i64 = b.emit_const_int(0)
+        val cond = b.emit_binop(MirBinOp.Ne, mir_operand_copy(flag_i64), mir_operand_copy(zero_i64), MirType.bool())
+        self.builder = b
+        cond
+
+    me emit_runtime_panic_unreachable(message_text: text):
+        """Emit `rt_panic(msg, msg.byte_len())` followed by `Unreachable`."""
+        var b = self.builder
+        val message = b.emit_const_str(message_text)
+        val length = b.emit_const_int(message_text.byte_len())
+        val pointer_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
+        val panic_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [pointer_type, MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)))
+        ), call_origin: MirCallOrigin.Runtime)
+        b.emit_call(panic_fn, [mir_operand_copy(message), mir_operand_copy(length)], MirType.unit())
+        b.terminate_unreachable()
+        self.builder = b
 
     me emit_rt_value_as_float(value_local: LocalId) -> LocalId:
         """Unbox a proven-float tagged RuntimeValue word to a raw f64."""
@@ -5520,13 +5547,17 @@ impl MirLowering:
         self.builder = b
         decoded
 
-    me emit_runtime_any_float_decode(operand_local: LocalId, int_fallback_helper: text, parse_text: bool) -> LocalId:
+    me emit_runtime_any_float_decode(operand_local: LocalId, int_fallback_helper: text, parse_text: bool, strict_text_parse: bool, strict_nil_error: bool, target_name: text) -> LocalId:
         """Decode a tagged RuntimeValue word to a raw f64.
 
-        Checks `rt_value_is_float` first to unbox tagged floats without allocation;
-        when `parse_text` is true (method conversions), tries `rt_string_to_float`
-        before falling back to `int_fallback_helper` -> f64."""
-        val is_float = self.emit_rt_value_is_float_cond(operand_local)
+        Dispatches cleanly across float, nil, tagged string, and numeric/bool tags:
+        - `rt_value_is_float`: unbox directly via `rt_value_as_float` (zero allocation);
+        - `rt_value_is_nil`: panic on `strict_nil_error` (`as`/`f64(...)`), else `0.0`;
+        - `rt_string_eq(v, v)`: either strict `f64(text)` parse, total `.to_float()` parse
+          (`rt_string_to_float` -> `0.0` on failure, never falling through to int),
+          or single-codepoint `text as f64` (`lower_text_code_point_cast`);
+        - non-string scalar: `int_fallback_helper` -> `f64`."""
+        val is_float = self.emit_rt_value_tag_pred_cond("rt_value_is_float", operand_local)
         var b = self.builder
         val float_block = b.new_block(Some("any_decode_float"))
         val non_float_block = b.new_block(Some("any_decode_non_float"))
@@ -5547,46 +5578,92 @@ impl MirLowering:
         var b_non_float = self.builder
         b_non_float.switch_to_block(non_float_block)
         self.builder = b_non_float
-        if parse_text:
-            val str_to_float_fn = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_string_to_float"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
-            ), call_origin: MirCallOrigin.Runtime)
-            var b_str_parse = self.builder
-            val parsed_boxed = b_str_parse.emit_call_value(str_to_float_fn, [mir_operand_copy(operand_local)], MirType.i64())
-            self.builder = b_str_parse
-            val parsed_is_float = self.emit_rt_value_is_float_cond(parsed_boxed)
-            var b_branch = self.builder
-            val text_float_block = b_branch.new_block(Some("any_decode_text_float"))
-            val int_fallback_block = b_branch.new_block(Some("any_decode_int_fallback"))
-            b_branch.terminate_if(mir_operand_copy(parsed_is_float), text_float_block, int_fallback_block)
-            self.builder = b_branch
+        val is_nil = self.emit_rt_value_tag_pred_cond("rt_value_is_nil", operand_local)
+        var b_nil_branch = self.builder
+        val nil_block = b_nil_branch.new_block(Some("any_decode_nil"))
+        val non_nil_block = b_nil_branch.new_block(Some("any_decode_non_nil"))
+        b_nil_branch.terminate_if(mir_operand_copy(is_nil), nil_block, non_nil_block)
+        self.builder = b_nil_branch
 
-            var b_text_float = self.builder
-            b_text_float.switch_to_block(text_float_block)
-            self.builder = b_text_float
-            val unboxed_text_float = self.emit_rt_value_as_float(parsed_boxed)
-            var b_text_float_end = self.builder
-            b_text_float_end.emit_copy(result, unboxed_text_float)
-            b_text_float_end.terminate_goto(merge_block)
-            self.builder = b_text_float_end
-
-            var b_int_fallback = self.builder
-            b_int_fallback.switch_to_block(int_fallback_block)
-            self.builder = b_int_fallback
-            val decoded_int = self.emit_runtime_any_int_decode(operand_local, int_fallback_helper)
-            var b_int_cast = self.builder
-            val int_as_f64 = b_int_cast.emit_cast(mir_operand_copy(decoded_int), MirType.f64())
-            b_int_cast.emit_copy(result, int_as_f64)
-            b_int_cast.terminate_goto(merge_block)
-            self.builder = b_int_cast
+        var b_nil = self.builder
+        b_nil.switch_to_block(nil_block)
+        self.builder = b_nil
+        if strict_nil_error:
+            val nil_msg = if parse_text: "cannot convert value to {target_name}" else: "type mismatch: cannot cast nil to {target_name}"
+            self.emit_runtime_panic_unreachable(nil_msg)
         else:
-            val decoded_int = self.emit_runtime_any_int_decode(operand_local, int_fallback_helper)
-            var b_int_cast = self.builder
-            val int_as_f64 = b_int_cast.emit_cast(mir_operand_copy(decoded_int), MirType.f64())
-            b_int_cast.emit_copy(result, int_as_f64)
-            b_int_cast.terminate_goto(merge_block)
-            self.builder = b_int_cast
+            var b_nil_zero = self.builder
+            val zero_nil_f64 = b_nil_zero.emit_const_float(0.0)
+            b_nil_zero.emit_copy(result, zero_nil_f64)
+            b_nil_zero.terminate_goto(merge_block)
+            self.builder = b_nil_zero
+
+        var b_non_nil = self.builder
+        b_non_nil.switch_to_block(non_nil_block)
+        self.builder = b_non_nil
+        val is_string = self.emit_rt_is_tagged_string_cond(operand_local)
+        var b_str_branch = self.builder
+        val string_block = b_str_branch.new_block(Some("any_decode_string"))
+        val int_fallback_block = b_str_branch.new_block(Some("any_decode_int_fallback"))
+        b_str_branch.terminate_if(mir_operand_copy(is_string), string_block, int_fallback_block)
+        self.builder = b_str_branch
+
+        var b_string = self.builder
+        b_string.switch_to_block(string_block)
+        self.builder = b_string
+        if parse_text:
+            if strict_text_parse:
+                val parsed_strict = self.lower_text_parse_to_numeric(operand_local, MirType.f64(), true)
+                var b_strict_end = self.builder
+                b_strict_end.emit_copy(result, parsed_strict)
+                b_strict_end.terminate_goto(merge_block)
+                self.builder = b_strict_end
+            else:
+                val str_to_float_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_string_to_float"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ), call_origin: MirCallOrigin.Runtime)
+                var b_str_parse = self.builder
+                val parsed_boxed = b_str_parse.emit_call_value(str_to_float_fn, [mir_operand_copy(operand_local)], MirType.i64())
+                self.builder = b_str_parse
+                val parsed_is_float = self.emit_rt_value_tag_pred_cond("rt_value_is_float", parsed_boxed)
+                var b_text_branch = self.builder
+                val text_float_block = b_text_branch.new_block(Some("any_decode_text_float"))
+                val text_invalid_block = b_text_branch.new_block(Some("any_decode_text_invalid"))
+                b_text_branch.terminate_if(mir_operand_copy(parsed_is_float), text_float_block, text_invalid_block)
+                self.builder = b_text_branch
+
+                var b_text_float = self.builder
+                b_text_float.switch_to_block(text_float_block)
+                self.builder = b_text_float
+                val unboxed_text_float = self.emit_rt_value_as_float(parsed_boxed)
+                var b_text_float_end = self.builder
+                b_text_float_end.emit_copy(result, unboxed_text_float)
+                b_text_float_end.terminate_goto(merge_block)
+                self.builder = b_text_float_end
+
+                var b_text_invalid = self.builder
+                b_text_invalid.switch_to_block(text_invalid_block)
+                val zero_text_f64 = b_text_invalid.emit_const_float(0.0)
+                b_text_invalid.emit_copy(result, zero_text_f64)
+                b_text_invalid.terminate_goto(merge_block)
+                self.builder = b_text_invalid
+        else:
+            val code_f64 = self.lower_text_code_point_cast(operand_local, MirType.f64(), target_name)
+            var b_code_end = self.builder
+            b_code_end.emit_copy(result, code_f64)
+            b_code_end.terminate_goto(merge_block)
+            self.builder = b_code_end
+
+        var b_int_fallback = self.builder
+        b_int_fallback.switch_to_block(int_fallback_block)
+        self.builder = b_int_fallback
+        val decoded_int = self.emit_runtime_any_int_decode(operand_local, int_fallback_helper)
+        var b_int_cast = self.builder
+        val int_as_f64 = b_int_cast.emit_cast(mir_operand_copy(decoded_int), MirType.f64())
+        b_int_cast.emit_copy(result, int_as_f64)
+        b_int_cast.terminate_goto(merge_block)
+        self.builder = b_int_cast
 
         var b_merge = self.builder
         b_merge.switch_to_block(merge_block)
@@ -5692,15 +5769,16 @@ impl MirLowering:
                         return operand_local
                     case _: ()
         if (target_is_integer or target_is_float) and not operand_is_enum and not operand_is_text and self.local_is_tagged_runtime_scalar(operand_local):
+            val int_helper = if conversion_call: "rt_any_to_int" else: "rt_any_cast_int"
             if target_is_float:
-                val decoded_f64 = self.emit_runtime_any_float_decode(operand_local, "rt_any_cast_int", false)
+                val decoded_f64 = self.emit_runtime_any_float_decode(operand_local, int_helper, conversion_call, conversion_call, true, target_name)
                 if _sffi_enum_discriminant<MirTypeKind>(mir_target.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.F64):
                     return decoded_f64
                 var b_float_narrow = self.builder
                 val narrowed_float = b_float_narrow.emit_cast(mir_operand_copy(decoded_f64), mir_target)
                 self.builder = b_float_narrow
                 return narrowed_float
-            val decoded_int = self.emit_runtime_any_int_decode(operand_local, "rt_any_cast_int")
+            val decoded_int = self.emit_runtime_any_int_decode(operand_local, int_helper)
             if _sffi_enum_discriminant<MirTypeKind>(mir_target.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
                 return decoded_int
             var b_int_narrow = self.builder

@@ -8,6 +8,7 @@ use std.spec
 use std.spec.step
 use compiler.mir.mir.*
 use compiler.backend.cranelift_codegen_adapter.{cl_import_result_narrow_plan, cl_import_call_result_narrow_plan}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "Cranelift imported-call narrow result plan":
     it "zero-extends a declared bool from its low byte":
@@ -72,3 +73,15 @@ describe "Cranelift imported-call narrow result plan":
         val sig = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
         val (tw, _) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
         expect(tw).to_equal(0)
+
+    it "routes i8 runtime predicates rt_value_is_float and rt_value_is_nil through translate_runtime_import_call_i8":
+        step("verify cranelift_codegen_adapter declares i8 return and sexts to i64")
+        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        expect(adapter).to_contain("translate_runtime_import_call_i8")
+        expect(adapter).to_contain("rt_value_is_float")
+        expect(adapter).to_contain("rt_value_is_nil")
+        expect(adapter).to_contain("cranelift_sextend(ctx, CL_TYPE_I64, raw_i8)")
+        val sig = MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)
+        val (ty, signed) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(true)
