@@ -14,13 +14,25 @@ pub fn native_build_capsule_user_args_v1(args: [text]) -> [text]:
         return args[1:]
     args
 
-# Tool-build coordinator (native_build_main.spl). A pool refused before any
-# worker started (profile admission, worker route, owner bound or ledger set-up)
-# left no claim, ledger row or cache entry, and the pool only warms the HIR
-# cache: the final worker lowers HIR serially in process. A pool that started
-# and then failed stays fatal (bootstrap-fable-17, 2026-11-12).
-pub fn native_build_hir_refusal_runs_serial_v1(code: i64, refused_before_spawn: bool) -> bool:
+# Tool-build coordinator (native_build_main.spl). An auto/default pool refused
+# before any worker started (profile admission, worker route, owner bound or
+# ledger set-up) left no claim, ledger row or cache entry, and the pool only
+# warms the HIR cache: the final worker lowers HIR serially in process. An
+# explicit SIMPLE_HIR_SHARDING=1 request stays fail-closed, and a pool that
+# started and then failed stays fatal (bootstrap-fable-17, 2026-11-12).
+# reason: internal CLI coordinator policy checks HIR sharding env flag, exit code, and pre-spawn refusal state
+@allow(primitive_api)
+pub fn native_build_hir_refusal_runs_serial_v1(code: i64, refused_before_spawn: bool,
+        hir_sharding: text = "") -> bool:
+    if hir_sharding == "1":
+        return false
     code != 0 and refused_before_spawn
+
+# reason: internal CLI coordinator policy checks HIR sharding env flag, exit code, and pre-spawn refusal state
+@allow(primitive_api)
+pub fn native_build_hir_refusal_blocks_v1(code: i64, refused_before_spawn: bool,
+        hir_sharding: text = "") -> bool:
+    hir_sharding == "1" and code != 0 and refused_before_spawn
 
 # go-to-end (compiler/80.driver/driver_build/go_to_end.spl), Stage 3 census
 # directive 2026-11-13: HIR runs to the end and MIR lowers every module whose
@@ -93,7 +105,8 @@ pub fn native_build_stage3_capsule_mir_route_v1(per_file_selected: bool, go_to_e
     "hir-warmup"
 
 export native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
-    native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
+    native_build_hir_refusal_runs_serial_v1, native_build_hir_refusal_blocks_v1,
+    native_build_hir_warmup_go_to_end_outcome_v1,
     native_build_hir_warmup_admits_mir_v1, native_build_stage3_capsule_shard_entry_selected_v1,
     native_build_stage3_capsule_mir_route_v1, native_build_mir_outcome_after_hir_failures_v1,
     native_build_capsule_mir_outcome_v1, mir_shard_pool_parallel_v1
