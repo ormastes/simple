@@ -1,0 +1,172 @@
+#![allow(primitive_api)] # ClockApp A2UI adapter formats u64 millisecond duration values
+# ClockApp A2UI Integration Fixture (Second Non-Caret SimpleOS App)
+#
+# Implements Section 15 & Phase 5 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Uses ONLY shared common.ui.a2ui + common.app_interface (zero Caret imports).
+#   - Projects ClockAppWorld (ECS stopwatch/timer state) into an authorized snapshot.
+#   - Uses colliding wire IDs (`root`, `refresh`) to prove multi-app isolation
+#     against Caret or any other concurrent surface in the same A2uiSurfaceRegistry.
+#   - Updates stopwatch/timer presentation dynamically without modifying ClockApp main.
+
+use std.ecs.entity.{Entity}
+use os.apps.clock.ecs.world.{ClockAppWorld}
+use common.ui.widget.{UITree}
+use std.common.ui.a2ui.types.{
+    A2UI_BASIC_CATALOG_ID,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiSurfaceOp
+}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.screen_table.{KeyedCollectionView, a2ui_compile_screen_table, a2ui_lower_screen_to_ops}
+use std.common.ui.a2ui.surface_state.{A2uiSurfaceRegistry, a2ui_surface_to_ui_tree}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    ReleaseAudience,
+    AppFieldSchema,
+    ResourceDescriptor,
+    CommandDescriptor,
+    DraftContract,
+    AppInterfaceRegistry
+}
+use std.common.app_interface.authority.{
+    RegionPolicy,
+    ResourcePolicyRule,
+    OperationPolicyRule,
+    AuthorityPolicy
+}
+
+pub fn clock_screen_sdn_v1() -> text:
+    var lines: [text] = [
+        "|id, parent, slot, order, region, repeat, key, expression|",
+        "root, null, null, 0, main, null, null, \"Column()\"",
+        "title, root, children, 0, main, null, null, \"Text(text=\\\"Clock\\\")\"",
+        "sw_elapsed, root, children, 1, main, null, null, \"Text(text=$/view/stopwatch/elapsed)\"",
+        "timer_rem, root, children, 2, main, null, null, \"Text(text=$/view/timer/remaining)\"",
+        "refresh, root, children, 3, main, null, null, \"Button(action=Event(\\\"clock.refresh\\\"))\"",
+        "refresh_label, refresh, child, 0, main, null, null, \"Text(text=\\\"Refresh\\\")\""
+    ]
+    lines.join("\n")
+
+pub fn clock_authority_policy() -> AuthorityPolicy:
+    AuthorityPolicy(
+        id: "clock_ui_policy",
+        schema_version: 1,
+        revision: 1,
+        default_deny: true,
+        publisher: "clock_app_owner",
+        regions: [
+            RegionPolicy(id: "main", parent: "", ceiling: [AppOpKind.Read, AppOpKind.Subscribe, AppOpKind.Invoke, AppOpKind.Compose])
+        ],
+        resource_rules: [
+            ResourcePolicyRule(
+                resource_id: "clock.state",
+                operations: [AppOpKind.Read, AppOpKind.Subscribe],
+                regions: ["main"],
+                named_query_use_fields: ["elapsed", "remaining"],
+                dynamic_query_fields: ["elapsed", "remaining"],
+                release_fields: ["elapsed", "remaining"],
+                release_audiences: [ReleaseAudience.HumanSurface]
+            )
+        ],
+        operation_rules: [
+            OperationPolicyRule(
+                operation_id: "clock.refresh",
+                operations: [AppOpKind.Invoke],
+                regions: ["main"],
+                requires_activation: false,
+                input_mode: "",
+                payload_release: ReleaseAudience.HumanSurface
+            )
+        ],
+        model_snapshot_release_allowed: false,
+        new_executable_code_allowed: false,
+        policy_changes_allowed: false
+    )
+
+pub fn clock_register_app_interface() -> Result<AppInterfaceRegistry, text>:
+    val draft = DraftContract(
+        owner: "clock_surface",
+        writable_paths: [],
+        protected_paths: [],
+        max_bytes_per_field: 256
+    )
+    var reg = AppInterfaceRegistry.new("clock.ui", "clock_owner", draft)
+    reg.register_resource(ResourceDescriptor(
+        id: "clock.state",
+        schema_version: 1,
+        owner_provider: "clock_owner",
+        key_field: "id",
+        fields: [
+            AppFieldSchema(name: "elapsed", type_name: "text", required: true, max_bytes: 64),
+            AppFieldSchema(name: "remaining", type_name: "text", required: true, max_bytes: 64)
+        ],
+        permitted_ops: [AppOpKind.Read, AppOpKind.Subscribe]
+    ))?
+    reg.register_command(CommandDescriptor(
+        id: "clock.refresh",
+        op_kind: AppOpKind.Invoke,
+        region: "main",
+        arg_fields: [],
+        requires_user_activation: false,
+        payload_release: ReleaseAudience.HumanSurface
+    ))?
+    Ok(reg)
+
+pub fn clock_format_ms(ms: u64) -> text:
+    val total_secs = (ms / 1000u64) as i64
+    val mins = total_secs / 60
+    val secs = total_secs % 60
+    val tenths = ((ms % 1000u64) / 100u64) as i64
+    val m_str = if mins < 10: "0" + mins.to_string() else: mins.to_string()
+    val s_str = if secs < 10: "0" + secs.to_string() else: secs.to_string()
+    m_str + ":" + s_str + "." + tenths.to_string()
+
+# Mount ClockAppWorld onto a shared A2uiSurfaceRegistry under its own owner namespace,
+# populating `/view/stopwatch/elapsed` and `/view/timer/remaining` from live ECS state.
+pub fn clock_mount_world_a2ui_surface(
+    world: ClockAppWorld,
+    stopwatch_entity: Entity,
+    timer_entity: Entity,
+    registry: A2uiSurfaceRegistry,
+    owner_id: text,
+    surface_id: text
+) -> Result<(i64, UITree), text>:
+    val catalog = a2ui_basic_catalog()
+    val compiled = a2ui_compile_screen_table(clock_screen_sdn_v1(), catalog, 32)?
+    val empty_cols: [KeyedCollectionView] = []
+    val ops = a2ui_lower_screen_to_ops(
+        compiled, owner_id, surface_id, 1, false, catalog, empty_cols, 32
+    )?
+    var gen: i64 = 0
+    var i = 0
+    while i < ops.len():
+        gen = registry.apply_op(owner_id, ops[i])?
+        i = i + 1
+    var sw_text = "00:00.0"
+    val sw_slot = world.stopwatches.get_slot(stopwatch_entity)
+    if sw_slot >= 0:
+        sw_text = clock_format_ms(world.stopwatches.dense[sw_slot].elapsed_ms)
+    var tm_text = "05:00.0"
+    val tm_slot = world.timers.get_slot(timer_entity)
+    if tm_slot >= 0:
+        tm_text = clock_format_ms(world.timers.dense[tm_slot].remaining_ms)
+    registry.apply_op(owner_id, A2uiSurfaceOp.UpdateDataModel(
+        surface_id: surface_id,
+        path: "/view/stopwatch/elapsed",
+        value: A2uiArgPresence.Present(value: A2uiValue.Text(value: sw_text))
+    ))?
+    registry.apply_op(owner_id, A2uiSurfaceOp.UpdateDataModel(
+        surface_id: surface_id,
+        path: "/view/timer/remaining",
+        value: A2uiArgPresence.Present(value: A2uiValue.Text(value: tm_text))
+    ))?
+    val surf = match registry.get_surface(owner_id, surface_id):
+        case Some(s): s
+        case None: return Err("clock_surface_missing_after_mount")
+    val tree = a2ui_surface_to_ui_tree(surf)?
+    Ok((gen, tree))
+
+export clock_screen_sdn_v1, clock_authority_policy, clock_register_app_interface
+export clock_format_ms, clock_mount_world_a2ui_surface

@@ -1,0 +1,593 @@
+#![allow(primitive_api)] # Surface registry exposes protocol generations and boolean acceptance states
+# A2UI Surface State, Multi-App Isolation, Wire Codec, and SimpleUI Lowering
+#
+# Implements Sections 2.1, 7.2-7.3, 8.1-8.4, and 16.4:
+#   - Owner-isolated A2uiSurfaceRegistry (two apps with `root` and `refresh`
+#     never collide or observe each other).
+#   - Duplicate createSurface within one owner/renderer is rejected.
+#   - UpdateComponents performs complete component replacement (clearing omitted props).
+#   - UpdateDataModel performs exact path replacement / deletion (not recursive merge).
+#   - Reactive path -> component dependency index for targeted invalidation.
+#   - Bounded wire JSON encode/decode using json_parse_strict_bounded_with_error.
+#   - Native SimpleUI lowering to common.ui.widget.UITree using qualified handles.
+
+use std.common.json.parser.{JsonParseLimits, json_parse_limits_default, json_parse_strict_bounded_with_error}
+use common.ui.widget.{WidgetNode, UITree, WidgetKind}
+use std.common.ui.a2ui.types.{
+    a2ui_wire_version,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiActionEvent,
+    A2uiComponentDef,
+    A2uiSurfaceOp,
+    A2uiRendererAction,
+    A2uiQualifiedHandle,
+    a2ui_no_action,
+    a2ui_event_action,
+    a2ui_obj_get,
+    a2ui_obj_set,
+    a2ui_obj_remove,
+    a2ui_value_as_text,
+    a2ui_qualified_handle,
+    a2ui_qualified_encode
+}
+use std.common.ui.a2ui.catalog.{
+    A2uiCatalog,
+    a2ui_basic_catalog,
+    a2ui_catalog_check_function_call,
+    a2ui_catalog_validate_component
+}
+
+pub struct A2uiDataEntry:
+    path: text
+    value: A2uiValue
+
+pub struct A2uiBindingDep:
+    path: text
+    component_id: text
+
+pub struct A2uiSurfaceState:
+    owner_id: text
+    surface_id: text
+    generation: i64
+    catalog_id: text
+    send_data_model: bool
+    root_id: text
+    components: [A2uiComponentDef]
+    data_model: [A2uiDataEntry]
+    deps: [A2uiBindingDep]
+    retained_component_ids: [text]
+    max_retained_components: i64
+    accepted_ops: [A2uiSurfaceOp]
+    max_history_ops: i64
+
+fn _norm_path(path: text) -> text:
+    if path == "" or path == "/":
+        return "/"
+    if path.starts_with("/"):
+        return path
+    "/" + path
+
+fn _is_path_ancestor_or_eq(ancestor: text, target: text) -> bool:
+    val a = _norm_path(ancestor)
+    val t = _norm_path(target)
+    if a == "/":
+        return true
+    if a == t:
+        return true
+    t.starts_with(a + "/")
+
+fn _collect_value_paths(v: A2uiValue, out: [text]) -> [text]:
+    var acc = out
+    match v:
+        case A2uiValue.Path(p):
+            acc.push(_norm_path(p))
+        case A2uiValue.Array(items):
+            var i = 0
+            while i < items.len():
+                acc = _collect_value_paths(items[i], acc)
+                i = i + 1
+        case A2uiValue.Object(entries):
+            var i = 0
+            while i < entries.len():
+                acc = _collect_value_paths(entries[i].value, acc)
+                i = i + 1
+        case _:
+            ()
+    acc
+
+fn _rebuild_deps(components: [A2uiComponentDef]) -> [A2uiBindingDep]:
+    var deps: [A2uiBindingDep] = []
+    var i = 0
+    while i < components.len():
+        val c = components[i]
+        var paths: [text] = []
+        var pi = 0
+        while pi < c.props.len():
+            paths = _collect_value_paths(c.props[pi].value, paths)
+            pi = pi + 1
+        if c.action.has_action:
+            var ai = 0
+            while ai < c.action.context.len():
+                paths = _collect_value_paths(c.action.context[ai].value, paths)
+                ai = ai + 1
+        var di = 0
+        while di < paths.len():
+            deps.push(A2uiBindingDep(path: paths[di], component_id: c.id))
+            di = di + 1
+        i = i + 1
+    deps
+
+pub fn a2ui_surface_get_data(surface: A2uiSurfaceState, path: text) -> A2uiArgPresence:
+    val norm = _norm_path(path)
+    var i = 0
+    while i < surface.data_model.len():
+        if surface.data_model[i].path == norm:
+            return A2uiArgPresence.Present(value: surface.data_model[i].value)
+        i = i + 1
+    A2uiArgPresence.Omitted
+
+pub fn a2ui_surface_find_component(surface: A2uiSurfaceState, comp_id: text) -> A2uiComponentDef?:
+    var i = 0
+    while i < surface.components.len():
+        if surface.components[i].id == comp_id:
+            return Some(surface.components[i])
+        i = i + 1
+    None
+
+# Return all component IDs invalidated by an update at `changed_path`.
+pub fn a2ui_surface_affected_components(surface: A2uiSurfaceState, changed_path: text) -> [text]:
+    var out: [text] = []
+    var seen: Dict<text, bool> = {}
+    var i = 0
+    while i < surface.deps.len():
+        val dep = surface.deps[i]
+        if _is_path_ancestor_or_eq(changed_path, dep.path) or _is_path_ancestor_or_eq(dep.path, changed_path):
+            if not seen.contains_key(dep.component_id):
+                seen[dep.component_id] = true
+                out.push(dep.component_id)
+        i = i + 1
+    out
+
+# ============================================================================
+# Multi-App Isolated Surface Registry
+# ============================================================================
+
+pub class A2uiSurfaceRegistry:
+    catalog: A2uiCatalog
+    surfaces: [A2uiSurfaceState]
+    next_generation: i64
+    max_surfaces: i64
+    max_retained_per_surface: i64
+    max_history_per_surface: i64
+
+    static fn new(catalog: A2uiCatalog) -> A2uiSurfaceRegistry:
+        A2uiSurfaceRegistry(
+            catalog: catalog,
+            surfaces: [],
+            next_generation: 1,
+            max_surfaces: 64,
+            max_retained_per_surface: 2048,
+            max_history_per_surface: 256
+        )
+
+    fn _find_index(owner_id: text, surface_id: text) -> i64:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].owner_id == owner_id and self.surfaces[i].surface_id == surface_id:
+                return i
+            i = i + 1
+        -1
+
+    fn get_surface(owner_id: text, surface_id: text) -> A2uiSurfaceState?:
+        val idx = self._find_index(owner_id, surface_id)
+        if idx < 0:
+            return None
+        Some(self.surfaces[idx])
+
+    # Apply one typed protocol operation inside `owner_id`'s isolated namespace.
+    me apply_op(owner_id: text, op: A2uiSurfaceOp) -> Result<i64, text>:
+        match op:
+            case A2uiSurfaceOp.CreateSurface(surface_id, catalog_id, send_data_model, root_id):
+                if owner_id == "" or surface_id == "":
+                    return Err("invalid_surface_identity")
+                if catalog_id != self.catalog.catalog_id:
+                    return Err("unregistered_catalog:" + catalog_id)
+                if root_id != "root":
+                    return Err("wire_root_must_be_root")
+                if self._find_index(owner_id, surface_id) >= 0:
+                    return Err("duplicate_create_surface:" + surface_id)
+                if self.surfaces.len() >= self.max_surfaces:
+                    return Err("surface_limit_exceeded")
+                val gen = self.next_generation
+                self.next_generation = self.next_generation + 1
+                var hist: [A2uiSurfaceOp] = [op]
+                self.surfaces.push(A2uiSurfaceState(
+                    owner_id: owner_id,
+                    surface_id: surface_id,
+                    generation: gen,
+                    catalog_id: catalog_id,
+                    send_data_model: send_data_model,
+                    root_id: root_id,
+                    components: [],
+                    data_model: [],
+                    deps: [],
+                    retained_component_ids: [],
+                    max_retained_components: self.max_retained_per_surface,
+                    accepted_ops: hist,
+                    max_history_ops: self.max_history_per_surface
+                ))
+                Ok(gen)
+
+            case A2uiSurfaceOp.UpdateComponents(surface_id, incoming):
+                val idx = self._find_index(owner_id, surface_id)
+                if idx < 0:
+                    return Err("unknown_surface:" + surface_id)
+                var s = self.surfaces[idx]
+                # Stage validation completely before mutating live surface state.
+                var vi = 0
+                while vi < incoming.len():
+                    a2ui_catalog_validate_component(self.catalog, incoming[vi])?
+                    vi = vi + 1
+                # Complete replacement per component ID (clears omitted properties).
+                var next_comps = s.components
+                var next_retained = s.retained_component_ids
+                var ci = 0
+                while ci < incoming.len():
+                    val inc = incoming[ci]
+                    var replaced = false
+                    var ei = 0
+                    while ei < next_comps.len():
+                        if next_comps[ei].id == inc.id:
+                            next_comps[ei] = inc
+                            replaced = true
+                            break
+                        ei = ei + 1
+                    if not replaced:
+                        next_comps.push(inc)
+                    var seen_ret = false
+                    var ri = 0
+                    while ri < next_retained.len():
+                        if next_retained[ri] == inc.id:
+                            seen_ret = true
+                            break
+                        ri = ri + 1
+                    if not seen_ret:
+                        if next_retained.len() >= s.max_retained_components:
+                            return Err("retained_component_limit_exceeded:" + surface_id)
+                        next_retained.push(inc.id)
+                    ci = ci + 1
+                s.components = next_comps
+                s.retained_component_ids = next_retained
+                s.deps = _rebuild_deps(next_comps)
+                if s.accepted_ops.len() < s.max_history_ops:
+                    s.accepted_ops.push(op)
+                self.surfaces[idx] = s
+                Ok(s.generation)
+
+            case A2uiSurfaceOp.UpdateDataModel(surface_id, path, presence):
+                val idx = self._find_index(owner_id, surface_id)
+                if idx < 0:
+                    return Err("unknown_surface:" + surface_id)
+                var s = self.surfaces[idx]
+                val norm = _norm_path(path)
+                # Path replacement/deletion removes prior value and its descendants.
+                var kept: [A2uiDataEntry] = []
+                var i = 0
+                while i < s.data_model.len():
+                    if not _is_path_ancestor_or_eq(norm, s.data_model[i].path):
+                        kept.push(s.data_model[i])
+                    i = i + 1
+                match presence:
+                    case A2uiArgPresence.Omitted:
+                        () # Explicit deletion of path subtree.
+                    case A2uiArgPresence.Present(v):
+                        kept.push(A2uiDataEntry(path: norm, value: v))
+                s.data_model = kept
+                if s.accepted_ops.len() < s.max_history_ops:
+                    s.accepted_ops.push(op)
+                self.surfaces[idx] = s
+                Ok(s.generation)
+
+            case A2uiSurfaceOp.DeleteSurface(surface_id):
+                val idx = self._find_index(owner_id, surface_id)
+                if idx < 0:
+                    return Err("unknown_surface:" + surface_id)
+                val gen = self.surfaces[idx].generation
+                var kept: [A2uiSurfaceState] = []
+                var i = 0
+                while i < self.surfaces.len():
+                    if i != idx:
+                        kept.push(self.surfaces[i])
+                    i = i + 1
+                self.surfaces = kept
+                Ok(gen)
+
+            case A2uiSurfaceOp.CallRendererFunction(function_call_id, surface_id, catalog_id, function_name, _args, caller_id, user_activated):
+                if function_call_id == "":
+                    return Err("missing_function_call_id")
+                a2ui_catalog_check_function_call(self.catalog, catalog_id, function_name, caller_id, user_activated)?
+                if surface_id != "":
+                    val idx = self._find_index(owner_id, surface_id)
+                    if idx < 0:
+                        return Err("unknown_surface:" + surface_id)
+                    return Ok(self.surfaces[idx].generation)
+                # Without explicit surface, execute against isolated empty model (not active window).
+                Ok(0)
+
+            case A2uiSurfaceOp.AgentFunctionResponse(function_call_id, _ok, _result, _error):
+                if function_call_id == "":
+                    return Err("missing_function_call_id")
+                Ok(0)
+
+    # Rotate surface to reclaim remote retained component definitions cleanly.
+    me rotate_surface(owner_id: text, surface_id: text, catalog_id: text, send_data_model: bool) -> Result<i64, text>:
+        if self._find_index(owner_id, surface_id) >= 0:
+            self.apply_op(owner_id, A2uiSurfaceOp.DeleteSurface(surface_id: surface_id))?
+        self.apply_op(owner_id, A2uiSurfaceOp.CreateSurface(
+            surface_id: surface_id,
+            catalog_id: catalog_id,
+            send_data_model: send_data_model,
+            root_id: "root"
+        ))
+
+    # Build an authenticated renderer-to-agent action envelope, verifying live generation.
+    fn build_action(
+        owner_id: text,
+        surface_id: text,
+        expected_generation: i64,
+        source_component_id: text,
+        action_name: text,
+        timestamp: text,
+        context: [A2uiObjectEntry],
+        composition_revision: i64,
+        correlation_id: text
+    ) -> Result<A2uiRendererAction, text>:
+        val idx = self._find_index(owner_id, surface_id)
+        if idx < 0:
+            return Err("unknown_surface:" + surface_id)
+        val s = self.surfaces[idx]
+        if s.generation != expected_generation:
+            return Err("stale_surface_generation")
+        match a2ui_surface_find_component(s, source_component_id):
+            case None:
+                return Err("unknown_source_component:" + source_component_id)
+            case Some(_):
+                ()
+        Ok(A2uiRendererAction(
+            name: action_name,
+            surface_id: surface_id,
+            source_component_id: source_component_id,
+            timestamp: timestamp,
+            context: context,
+            owner_id: owner_id,
+            surface_generation: s.generation,
+            composition_revision: composition_revision,
+            correlation_id: correlation_id
+        ))
+
+# ============================================================================
+# Native SimpleUI Lowering (Qualified Handles, Zero Cross-App Collision)
+# ============================================================================
+
+fn _resolve_prop_text(surface: A2uiSurfaceState, props: [A2uiObjectEntry], key: text) -> text:
+    match a2ui_obj_get(props, key):
+        case A2uiArgPresence.Omitted: ""
+        case A2uiArgPresence.Present(v):
+            match v:
+                case A2uiValue.Path(p):
+                    match a2ui_surface_get_data(surface, p):
+                        case A2uiArgPresence.Present(dv): a2ui_value_as_text(dv)
+                        case A2uiArgPresence.Omitted: ""
+                case _:
+                    a2ui_value_as_text(v)
+
+fn _lower_component_to_widget(surface: A2uiSurfaceState, comp_id: text, depth: i64) -> Result<WidgetNode, text>:
+    if depth > 64:
+        return Err("ui_tree_depth_exceeded")
+    val comp = match a2ui_surface_find_component(surface, comp_id):
+        case Some(c): c
+        case None: return Err("dangling_component_ref:" + comp_id)
+    val qid = a2ui_qualified_encode(a2ui_qualified_handle(
+        surface.owner_id, surface.surface_id, surface.generation, comp.id
+    ))
+    var node = WidgetNode.new(qid, WidgetKind.Panel.to_wire())
+    if comp.component == "Column":
+        node = WidgetNode.new(qid, WidgetKind.Panel.to_wire())
+        node = node.set_layout("vbox")
+    elif comp.component == "Row":
+        node = WidgetNode.new(qid, WidgetKind.Panel.to_wire())
+        node = node.set_layout("hbox")
+    elif comp.component == "List":
+        node = WidgetNode.new(qid, WidgetKind.Panel.to_wire())
+        node = node.set_layout("vbox")
+        node = node.set_prop("a2ui_kind", "List")
+    elif comp.component == "Card":
+        node = WidgetNode.new(qid, WidgetKind.Panel.to_wire())
+        node = node.set_layout("vbox")
+        node = node.set_prop("a2ui_kind", "Card")
+    elif comp.component == "Text":
+        node = WidgetNode.new(qid, WidgetKind.Text.to_wire())
+        node = node.set_prop("content", _resolve_prop_text(surface, comp.props, "text"))
+        val variant = _resolve_prop_text(surface, comp.props, "variant")
+        if variant != "":
+            node = node.set_prop("variant", variant)
+    elif comp.component == "Button":
+        node = WidgetNode.new(qid, WidgetKind.Button.to_wire())
+        if comp.action.has_action:
+            node = node.set_prop("action", comp.action.name)
+    elif comp.component == "TextField":
+        node = WidgetNode.new(qid, WidgetKind.Textfield.to_wire())
+        node = node.set_prop("label", _resolve_prop_text(surface, comp.props, "label"))
+        node = node.set_prop("value", _resolve_prop_text(surface, comp.props, "value"))
+    elif comp.component == "CheckBox":
+        node = WidgetNode.new(qid, WidgetKind.Checkbox.to_wire())
+        node = node.set_prop("label", _resolve_prop_text(surface, comp.props, "label"))
+        node = node.set_prop("checked", _resolve_prop_text(surface, comp.props, "value"))
+    else:
+        return Err("unsupported_native_component:" + comp.component)
+
+    node = node.set_prop("a2ui_wire_id", comp.id)
+    node = node.set_prop("a2ui_owner", surface.owner_id)
+    node = node.set_prop("a2ui_surface", surface.surface_id)
+    if comp.region_request != "":
+        node = node.set_prop("a2ui_region_request", comp.region_request)
+
+    if comp.child != "":
+        val child_node = _lower_component_to_widget(surface, comp.child, depth + 1)?
+        node = node.add_child(child_node)
+    var i = 0
+    while i < comp.children.len():
+        val child_node = _lower_component_to_widget(surface, comp.children[i], depth + 1)?
+        node = node.add_child(child_node)
+        i = i + 1
+    Ok(node)
+
+pub fn a2ui_surface_to_ui_tree(surface: A2uiSurfaceState) -> Result<UITree, text>:
+    val root = _lower_component_to_widget(surface, surface.root_id, 0)?
+    Ok(UITree.new(root))
+
+# ============================================================================
+# Standard Wire JSON Encoder (v1.0) & Bounded JSON Admission
+# ============================================================================
+
+fn _json_esc(s: text) -> text:
+    var out = "\""
+    var i = 0
+    val n = s.byte_len()
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 34: out = out + "\\\""
+        elif b == 92: out = out + "\\\\"
+        elif b == 10: out = out + "\\n"
+        elif b == 13: out = out + "\\r"
+        elif b == 9: out = out + "\\t"
+        else: out = out + s.substring(i, i + 1)
+        i = i + 1
+    out + "\""
+
+fn _json_val(v: A2uiValue) -> text:
+    match v:
+        case A2uiValue.Null: "null"
+        case A2uiValue.Bool(b):
+            if b: "true" else: "false"
+        case A2uiValue.Int(n): n.to_string()
+        case A2uiValue.Number(n): n.to_string()
+        case A2uiValue.Text(s): _json_esc(s)
+        case A2uiValue.Path(p): "{" + "\"path\":" + _json_esc(p) + "}"
+        case A2uiValue.Ref(r): _json_esc(r)
+        case A2uiValue.Array(items):
+            var parts: [text] = []
+            var i = 0
+            while i < items.len():
+                parts.push(_json_val(items[i]))
+                i = i + 1
+            "[" + parts.join(",") + "]"
+        case A2uiValue.Object(entries):
+            _json_obj(entries)
+
+fn _json_obj(entries: [A2uiObjectEntry]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < entries.len():
+        parts.push(_json_esc(entries[i].key) + ":" + _json_val(entries[i].value))
+        i = i + 1
+    "{" + parts.join(",") + "}"
+
+fn _json_component(c: A2uiComponentDef) -> text:
+    var parts: [text] = [
+        "\"id\":" + _json_esc(c.id),
+        "\"component\":" + _json_esc(c.component)
+    ]
+    if c.catalog_override != "":
+        parts.push("\"@catalogId\":" + _json_esc(c.catalog_override))
+    if c.child != "":
+        parts.push("\"child\":" + _json_esc(c.child))
+    if c.children.len() > 0:
+        var ch_parts: [text] = []
+        var ci = 0
+        while ci < c.children.len():
+            ch_parts.push(_json_esc(c.children[ci]))
+            ci = ci + 1
+        parts.push("\"children\":[" + ch_parts.join(",") + "]")
+    if c.action.has_action:
+        var ev_parts: [text] = ["\"name\":" + _json_esc(c.action.name)]
+        if c.action.context.len() > 0:
+            ev_parts.push("\"context\":" + _json_obj(c.action.context))
+        parts.push("\"action\":{" + "\"event\":{" + ev_parts.join(",") + "}" + "}")
+    var pi = 0
+    while pi < c.props.len():
+        parts.push(_json_esc(c.props[pi].key) + ":" + _json_val(c.props[pi].value))
+        pi = pi + 1
+    "{" + parts.join(",") + "}"
+
+# Encode an A2uiSurfaceOp to standard A2UI v1.0 wire JSON.
+# Note: table-only fields (`region`, `repeat`, `key`) never appear on wire.
+pub fn a2ui_op_to_json(op: A2uiSurfaceOp) -> text:
+    match op:
+        case A2uiSurfaceOp.CreateSurface(surface_id, catalog_id, send_data_model, _root_id):
+            val sdm = if send_data_model: "true" else: "false"
+            "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+                ",\"createSurface\":{" + "\"surfaceId\":" + _json_esc(surface_id) +
+                ",\"catalogId\":" + _json_esc(catalog_id) +
+                ",\"sendDataModel\":" + sdm + "}" + "}"
+        case A2uiSurfaceOp.UpdateComponents(surface_id, comps):
+            var cparts: [text] = []
+            var i = 0
+            while i < comps.len():
+                cparts.push(_json_component(comps[i]))
+                i = i + 1
+            "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+                ",\"updateComponents\":{" + "\"surfaceId\":" + _json_esc(surface_id) +
+                ",\"components\":[" + cparts.join(",") + "]}" + "}"
+        case A2uiSurfaceOp.UpdateDataModel(surface_id, path, presence):
+            var body = "\"surfaceId\":" + _json_esc(surface_id) + ",\"path\":" + _json_esc(_norm_path(path))
+            match presence:
+                case A2uiArgPresence.Present(v):
+                    body = body + ",\"value\":" + _json_val(v)
+                case A2uiArgPresence.Omitted:
+                    ()
+            "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+                ",\"updateDataModel\":{" + body + "}" + "}"
+        case A2uiSurfaceOp.DeleteSurface(surface_id):
+            "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+                ",\"deleteSurface\":{" + "\"surfaceId\":" + _json_esc(surface_id) + "}" + "}"
+        case A2uiSurfaceOp.CallRendererFunction(function_call_id, surface_id, catalog_id, function_name, args, _caller, _act):
+            var body = "\"functionCallId\":" + _json_esc(function_call_id) +
+                ",\"catalogId\":" + _json_esc(catalog_id) +
+                ",\"call\":" + _json_esc(function_name) +
+                ",\"args\":" + _json_obj(args)
+            if surface_id != "":
+                body = body + ",\"surfaceId\":" + _json_esc(surface_id)
+            "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+                ",\"callRendererFunction\":{" + body + "}" + "}"
+        case A2uiSurfaceOp.AgentFunctionResponse(function_call_id, ok, result, error):
+            val body = if ok:
+                "\"functionCallId\":" + _json_esc(function_call_id) + ",\"result\":" + _json_val(result)
+            else:
+                "\"functionCallId\":" + _json_esc(function_call_id) + ",\"error\":" + _json_esc(error)
+            "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+                ",\"agentFunctionResponse\":{" + body + "}" + "}"
+
+# Encode renderer-to-agent action with all required protocol fields.
+pub fn a2ui_action_to_json(act: A2uiRendererAction) -> text:
+    "{" + "\"version\":" + _json_esc(a2ui_wire_version()) +
+        ",\"action\":{" +
+        "\"name\":" + _json_esc(act.name) +
+        ",\"surfaceId\":" + _json_esc(act.surface_id) +
+        ",\"sourceComponentId\":" + _json_esc(act.source_component_id) +
+        ",\"timestamp\":" + _json_esc(act.timestamp) +
+        ",\"context\":" + _json_obj(act.context) +
+        "}" + "}"
+
+# Bounded JSON admission check using json_parse_strict_bounded_with_error.
+pub fn a2ui_admit_wire_json(json_text: text, limits: JsonParseLimits) -> Result<bool, text>:
+    val res = json_parse_strict_bounded_with_error(json_text, limits)
+    if res.1 != "":
+        return Err("wire_json_rejected:" + res.1)
+    Ok(true)
+
+export A2uiDataEntry, A2uiBindingDep, A2uiSurfaceState, A2uiSurfaceRegistry
+export a2ui_surface_get_data, a2ui_surface_find_component, a2ui_surface_affected_components
+export a2ui_surface_to_ui_tree, a2ui_op_to_json, a2ui_action_to_json, a2ui_admit_wire_json

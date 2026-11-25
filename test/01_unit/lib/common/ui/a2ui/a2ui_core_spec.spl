@@ -1,0 +1,97 @@
+# @cover src/lib/common/ui/a2ui/express_grammar.spl 80%
+# @cover src/lib/common/ui/a2ui/screen_table.spl 80%
+# @cover src/lib/common/ui/a2ui/surface_state.spl 80%
+# @cover src/lib/common/json/parser.spl 80%
+# @req REQ-A2UI-001 REQ-A2UI-002 REQ-A2UI-003 REQ-A2UI-004 REQ-A2UI-005
+"""
+## Purpose and audience
+Purpose: Verify A2UI v1.0 Express grammar import, shared-VM expression parsing,
+bounded JSON admission, flat SDN screen tables, keyed repetition, complete
+replacement semantics, and multi-app surface isolation.
+Audience: UI, parser, and platform engineers maintaining A2UI above SimpleUI.
+
+## Operator workflow
+Compile and run natively via `test/fixtures/a2ui_native_verify.spl` or execute
+under the pure-Simple SSpec runner (`simple test`).
+"""
+
+use std.spipe.*
+use std.common.json.parser.{JsonParseLimits, json_parse_strict_bounded_with_error}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.ui.a2ui.types.{
+    A2UI_EXPRESS_GRAMMAR_REV,
+    A2uiValue,
+    A2uiArgPresence,
+    A2uiObjectEntry,
+    A2uiSurfaceOp,
+    a2ui_component_def,
+    a2ui_obj_get,
+    a2ui_qualified_handle,
+    a2ui_qualified_encode,
+    a2ui_qualified_decode
+}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.express_grammar.{a2ui_import_express_g4, a2ui_grammar_to_sdn, a2ui_parse_express_constructor}
+use std.common.ui.a2ui.screen_table.{KeyedRowRecord, KeyedCollectionView, a2ui_compile_screen_table, a2ui_expand_screen_table}
+use std.common.ui.a2ui.surface_state.{A2uiSurfaceRegistry, a2ui_surface_find_component}
+
+describe "A2UI Core Protocol and Express-SDN Frontend":
+    it "REQ-A2UI-001: imports pinned Express.g4 to strict-valid grammar SDN and rejects unsupported directives":
+        step("Import pinned Express.g4 rules into normalized grammar model")
+        val g4 = "grammar Express;\nprogram : statement* EOF ;\nIDENT : [a-z]+ ;\n"
+        val res = a2ui_import_express_g4(g4, A2UI_EXPRESS_GRAMMAR_REV, "Express.g4")
+        expect res.is_ok() to_equal true
+        step("Serialize grammar model to strict SDN and validate with strict_v1")
+        match res:
+            case Ok(m):
+                val sdn = a2ui_grammar_to_sdn(m)
+                expect sdn_parse_strict_v1(sdn, sdn_strict_limits_v1()).is_ok() to_equal true
+            case Err(_): expect false to_equal true
+        step("Reject unsupported @members directive with source line error")
+        val bad = a2ui_import_express_g4("grammar X;\n@members { int a; }\np : EOF ;\n", A2UI_EXPRESS_GRAMMAR_REV, "X.g4")
+        expect bad.is_err() to_equal true
+
+    it "REQ-A2UI-001: distinguishes omitted `_` from explicit `null` and enforces shared VM EOF":
+        step("Parse constructor with omitted `_` variant and explicit `null`")
+        val omit_res = a2ui_parse_express_constructor("Text(text=$/s, variant=_)")
+        expect omit_res.is_ok() to_equal true
+        val null_res = a2ui_parse_express_constructor("Text(text=null)")
+        expect null_res.is_ok() to_equal true
+        step("Reject trailing tokens and unsupported `@index()` in first profile")
+        expect a2ui_parse_express_constructor("Column() extra").is_err() to_equal true
+        expect a2ui_parse_express_constructor("Text(text=@index())").is_err() to_equal true
+
+    it "REQ-A2UI-003: enforces byte, token, and depth budgets in bounded strict JSON parsing":
+        step("Reject nesting depth above configured max_depth before descent")
+        val depth_lim = JsonParseLimits(max_source_bytes: 1024, max_tokens: 100, max_depth: 2)
+        val deep = json_parse_strict_bounded_with_error("[[[1]]]", depth_lim)
+        expect deep.1 != "" to_equal true
+        step("Reject duplicate decoded keys")
+        val dup = json_parse_strict_bounded_with_error("{\"a\":1,\"a\":2}", JsonParseLimits(max_source_bytes: 1024, max_tokens: 100, max_depth: 8))
+        expect dup.1 != "" to_equal true
+
+    it "REQ-A2UI-004 REQ-A2UI-005: clears omitted props on component replacement and preserves qualified handles":
+        step("Encode and decode reversible qualified SimpleUI handle")
+        val qh = a2ui_qualified_handle("owner:a", "surf#1", 2, "root")
+        val dec = a2ui_qualified_decode(a2ui_qualified_encode(qh))
+        expect dec.is_ok() to_equal true
+        step("Verify UpdateComponents replaces definition completely and clears omitted props")
+        var reg = A2uiSurfaceRegistry.new(a2ui_basic_catalog())
+        expect reg.apply_op("app1", A2uiSurfaceOp.CreateSurface(surface_id: "main", catalog_id: a2ui_basic_catalog().catalog_id, send_data_model: false, root_id: "root")).is_ok() to_equal true
+        var c1 = a2ui_component_def("title", "Text")
+        c1.props = [A2uiObjectEntry(key: "text", value: A2uiValue.Text(value: "A")), A2uiObjectEntry(key: "variant", value: A2uiValue.Text(value: "caption"))]
+        expect reg.apply_op("app1", A2uiSurfaceOp.UpdateComponents(surface_id: "main", components: [c1])).is_ok() to_equal true
+        var c2 = a2ui_component_def("title", "Text")
+        c2.props = [A2uiObjectEntry(key: "text", value: A2uiValue.Text(value: "B"))]
+        expect reg.apply_op("app1", A2uiSurfaceOp.UpdateComponents(surface_id: "main", components: [c2])).is_ok() to_equal true
+        match reg.get_surface("app1", "main"):
+            case Some(s):
+                match a2ui_surface_find_component(s, "title"):
+                    case Some(c):
+                        val is_omitted = match a2ui_obj_get(c.props, "variant"):
+                            case A2uiArgPresence.Omitted: true
+                            case _: false
+                        expect is_omitted to_equal true
+                    case None: expect false to_equal true
+            case None: expect false to_equal true

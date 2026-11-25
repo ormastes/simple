@@ -1,0 +1,463 @@
+#![allow(primitive_api)] # AppInterfaceRuntime exposes generation/revision counters and lease state
+# Shared App Interface Runtime: View/Draft Separation, Commands, Dynamic Composition, Leases
+#
+# Implements Sections 9.2, 9.4, 12.1-12.3, 14.3-14.4, and 17.9:
+#   - Owner-scoped `/view` (read-only), `/draft` (writable vs protected paths), `/local`.
+#   - Stale query-generation cancellation and late-completion suppression.
+#   - Conditional draft clearing (native sequence vs portable preserve-on-send).
+#   - Typed command admission with exact payload deduplication vs conflict on changed payload.
+#   - Dynamic UI composition admission pipeline (parse -> validate -> region ceiling check
+#     -> atomic publish -> rollback on failure, preserving compatible drafts).
+#   - Request-boundary handler generation & execution lease tracking (hot swap separation).
+
+use std.common.aspect_dynload_lifecycle_v1.{
+    ASPECT_DYNLOAD_ACTIVE_V1,
+    ASPECT_DYNLOAD_QUIESCING_V1,
+    ASPECT_DYNLOAD_RETIRED_V1,
+    AspectDynloadLifecycleHandleV1,
+    AspectDynloadExecutionLeaseV1,
+    aspect_dynload_lifecycle_create_v1,
+    aspect_dynload_callback_begin_v1,
+    aspect_dynload_around_suspend_v1,
+    aspect_dynload_around_resume_v1,
+    aspect_dynload_unload_v1,
+    aspect_dynload_lease_complete_v1,
+    aspect_dynload_lifecycle_snapshot_v1,
+    aspect_dynload_lifecycle_reclaim_v1
+}
+use std.common.ui.a2ui.types.{A2uiValue, A2uiObjectEntry, A2uiArgPresence, A2uiComponentDef, a2ui_obj_get, a2ui_obj_set}
+use std.common.ui.a2ui.catalog.{A2uiCatalog}
+use std.common.ui.a2ui.screen_table.{CompiledScreenTable, KeyedCollectionView, a2ui_compile_screen_table, a2ui_expand_screen_table}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    ReleaseAudience,
+    CommandDeliveryState,
+    AppRevisionState,
+    CommandOutcome,
+    AppInterfaceRegistry,
+    app_revisions_initial,
+    app_schema_validate_args
+}
+use std.common.app_interface.authority.{
+    AuthorityGate,
+    AuthenticatedGrant,
+    authority_check_region_mount
+}
+
+# ============================================================================
+# Owner-Scoped Draft Buffer (§9.2, §9.4)
+# ============================================================================
+
+pub struct OwnerDraftBuffer:
+    draft_id: text
+    owner_principal: text
+    surface_id: text
+    draft_revision: i64
+    local_edit_seq: i64
+    fields: [A2uiObjectEntry]
+
+pub struct DedupeRecord:
+    base_revision: i64
+    command_id: text
+    payload_fingerprint: text
+    outcome: CommandOutcome
+
+# ============================================================================
+# Request-Boundary Handler Generation & Execution Lease (§14.2–14.4)
+# Reuses canonical `std.common.aspect_dynload_lifecycle_v1` leases/quiescence.
+# ============================================================================
+
+pub struct HandlerGenerationLease:
+    aspect_lease: AspectDynloadExecutionLeaseV1
+    lifecycle_handle: AspectDynloadLifecycleHandleV1
+    surface_generation: i64
+
+pub struct HandlerGenerationStats:
+    active_code_generation: i64
+    in_flight_on_active: i64
+    in_flight_on_retired: i64
+    reclaimed_generations: [i64]
+
+pub class HandlerGenerationOwner:
+    facet_key: text
+    abi_tag: text
+    active_generation: i64
+    active_handle: AspectDynloadLifecycleHandleV1
+    quiescing_handles: [AspectDynloadLifecycleHandleV1]
+    reclaimed_generations: [i64]
+    draining: bool
+
+    static fn new_with_facet(facet_key: text, abi_tag: text) -> Result<HandlerGenerationOwner, text>:
+        if facet_key == "" or abi_tag == "":
+            return Err("invalid_handler_facet_or_abi")
+        val h = aspect_dynload_lifecycle_create_v1(facet_key, 1, 256, false)?
+        Ok(HandlerGenerationOwner(
+            facet_key: facet_key,
+            abi_tag: abi_tag,
+            active_generation: 1,
+            active_handle: h,
+            quiescing_handles: [],
+            reclaimed_generations: [],
+            draining: false
+        ))
+
+    static fn new() -> HandlerGenerationOwner:
+        match HandlerGenerationOwner.new_with_facet("app.default.handler", "app_iface_abi_v1"):
+            case Ok(owner): owner
+            case Err(_):
+                HandlerGenerationOwner(
+                    facet_key: "app.default.handler",
+                    abi_tag: "app_iface_abi_v1",
+                    active_generation: 1,
+                    active_handle: AspectDynloadLifecycleHandleV1(lifecycle_id: 0, incarnation: 0),
+                    quiescing_handles: [],
+                    reclaimed_generations: [],
+                    draining: true
+                )
+
+    # Acquire a request-boundary lease atomically on the active handler generation.
+    me begin_request(surface_generation: i64) -> Result<HandlerGenerationLease, text>:
+        if self.draining:
+            return Err("handler_draining_refused")
+        val lease = aspect_dynload_callback_begin_v1(self.active_handle)?
+        Ok(HandlerGenerationLease(
+            aspect_lease: lease,
+            lifecycle_handle: self.active_handle,
+            surface_generation: surface_generation
+        ))
+
+    # Retain code generation lifetime across async suspension (§14.3).
+    me suspend_async(lease: HandlerGenerationLease) -> Result<HandlerGenerationLease, text>:
+        val suspended = aspect_dynload_around_suspend_v1(lease.lifecycle_handle, lease.aspect_lease)?
+        Ok(HandlerGenerationLease(
+            aspect_lease: suspended,
+            lifecycle_handle: lease.lifecycle_handle,
+            surface_generation: lease.surface_generation
+        ))
+
+    # Resume a suspended async continuation on the same retained generation.
+    me resume_async(lease: HandlerGenerationLease) -> Result<HandlerGenerationLease, text>:
+        val resumed = aspect_dynload_around_resume_v1(lease.lifecycle_handle, lease.aspect_lease)?
+        Ok(HandlerGenerationLease(
+            aspect_lease: resumed,
+            lifecycle_handle: lease.lifecycle_handle,
+            surface_generation: lease.surface_generation
+        ))
+
+    # Hot-swap to a prepared candidate generation after verifying ABI compatibility.
+    me hot_swap_generation(candidate_abi_tag: text) -> Result<i64, text>:
+        if candidate_abi_tag != self.abi_tag:
+            return Err("hot_swap_abi_mismatch:" + candidate_abi_tag)
+        val old_handle = self.active_handle
+        aspect_dynload_unload_v1(old_handle)?
+        val next_gen = self.active_generation + 1
+        val new_handle = aspect_dynload_lifecycle_create_v1(self.facet_key, next_gen, 256, false)?
+        self.quiescing_handles.push(old_handle)
+        self.active_handle = new_handle
+        self.active_generation = next_gen
+        self._reclaim_retired()
+        Ok(next_gen)
+
+    me publish_generation() -> i64:
+        match self.hot_swap_generation(self.abi_tag):
+            case Ok(g): g
+            case Err(_): self.active_generation
+
+    me complete_request_lease(lease: HandlerGenerationLease) -> Result<bool, text>:
+        aspect_dynload_lease_complete_v1(lease.lifecycle_handle, lease.aspect_lease)?
+        self._reclaim_retired()
+        Ok(true)
+
+    # Recheck surface generation before committing an async handler transition (§14.3).
+    fn check_commit_fresh(lease: HandlerGenerationLease, live_surface_generation: i64) -> Result<bool, text>:
+        if lease.surface_generation != live_surface_generation:
+            return Err("stale_async_surface_generation")
+        Ok(true)
+
+    me _reclaim_retired():
+        var still_quiescing: [AspectDynloadLifecycleHandleV1] = []
+        var i = 0
+        while i < self.quiescing_handles.len():
+            val h = self.quiescing_handles[i]
+            match aspect_dynload_lifecycle_snapshot_v1(h):
+                case Ok(snap):
+                    if snap.state == ASPECT_DYNLOAD_RETIRED_V1 and snap.outstanding_count == 0:
+                        if aspect_dynload_lifecycle_reclaim_v1(h):
+                            self.reclaimed_generations.push(snap.generation)
+                        else:
+                            still_quiescing.push(h)
+                    else:
+                        still_quiescing.push(h)
+                case Err(_):
+                    ()
+            i = i + 1
+        self.quiescing_handles = still_quiescing
+
+    fn stats() -> HandlerGenerationStats:
+        var act: i64 = 0
+        match aspect_dynload_lifecycle_snapshot_v1(self.active_handle):
+            case Ok(snap): act = snap.outstanding_count
+            case Err(_): ()
+        var ret: i64 = 0
+        var i = 0
+        while i < self.quiescing_handles.len():
+            match aspect_dynload_lifecycle_snapshot_v1(self.quiescing_handles[i]):
+                case Ok(snap): ret = ret + snap.outstanding_count
+                case Err(_): ()
+            i = i + 1
+        HandlerGenerationStats(
+            active_code_generation: self.active_generation,
+            in_flight_on_active: act,
+            in_flight_on_retired: ret,
+            reclaimed_generations: self.reclaimed_generations
+        )
+
+# ============================================================================
+# Shared App Interface Runtime (§9, §12)
+# ============================================================================
+
+fn _list_contains(items: [text], target: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return true
+        i = i + 1
+    false
+
+pub class AppInterfaceRuntime:
+    owner_id: text
+    surface_id: text
+    principal_id: text
+    registry: AppInterfaceRegistry
+    catalog: A2uiCatalog
+    revisions: AppRevisionState
+    active_screen: CompiledScreenTable
+    has_screen: bool
+    view_state: [A2uiObjectEntry]
+    draft: OwnerDraftBuffer
+    local_state: [A2uiObjectEntry]
+    active_query_generation: i64
+    dedupe_log: [DedupeRecord]
+    handler_owner: HandlerGenerationOwner
+
+    static fn new(
+        owner_id: text,
+        surface_id: text,
+        principal_id: text,
+        draft_id: text,
+        registry: AppInterfaceRegistry,
+        catalog: A2uiCatalog
+    ) -> AppInterfaceRuntime:
+        AppInterfaceRuntime(
+            owner_id: owner_id,
+            surface_id: surface_id,
+            principal_id: principal_id,
+            registry: registry,
+            catalog: catalog,
+            revisions: app_revisions_initial(),
+            active_screen: CompiledScreenTable(rows: [], root_id: ""),
+            has_screen: false,
+            view_state: [],
+            draft: OwnerDraftBuffer(
+                draft_id: draft_id,
+                owner_principal: principal_id,
+                surface_id: surface_id,
+                draft_revision: 1,
+                local_edit_seq: 0,
+                fields: []
+            ),
+            local_state: [],
+            active_query_generation: 0,
+            dedupe_log: [],
+            handler_owner: HandlerGenerationOwner.new()
+        )
+
+    # Reject renderer writes to `/view` or protected `/draft` paths (§9.2, §22).
+    me apply_draft_edit(
+        caller_principal: text,
+        caller_surface: text,
+        path: text,
+        new_value: text
+    ) -> Result<i64, text>:
+        if caller_principal != self.draft.owner_principal or caller_surface != self.draft.surface_id:
+            return Err("draft_owner_mismatch")
+        if path.starts_with("/view"):
+            return Err("view_state_read_only")
+        if _list_contains(self.registry.draft_contract.protected_paths, path):
+            return Err("draft_path_protected:" + path)
+        if not _list_contains(self.registry.draft_contract.writable_paths, path):
+            return Err("draft_path_not_writable:" + path)
+        if self.registry.draft_contract.max_bytes_per_field > 0 and
+                new_value.byte_len() > self.registry.draft_contract.max_bytes_per_field:
+            return Err("draft_field_byte_limit_exceeded:" + path)
+        self.draft.fields = a2ui_obj_set(self.draft.fields, path, A2uiValue.Text(value: new_value))
+        self.draft.local_edit_seq = self.draft.local_edit_seq + 1
+        self.draft.draft_revision = self.draft.draft_revision + 1
+        self.revisions.draft_revision = self.draft.draft_revision
+        Ok(self.draft.local_edit_seq)
+
+    # Conditional draft clearing after submission (§9.4, §13.7 step 8):
+    # - Native route clears ONLY if no newer local edits occurred since submitted_seq.
+    # - Portable route preserves the input to avoid clobbering concurrent user edits.
+    me reconcile_draft_after_send(
+        path: text,
+        submitted_edit_seq: i64,
+        native_conditional: bool
+    ) -> bool:
+        if not native_conditional:
+            return false
+        if self.draft.local_edit_seq != submitted_edit_seq:
+            return false
+        self.draft.fields = a2ui_obj_set(self.draft.fields, path, A2uiValue.Text(value: ""))
+        self.draft.draft_revision = self.draft.draft_revision + 1
+        self.revisions.draft_revision = self.draft.draft_revision
+        true
+
+    fn current_code_generation(self) -> i64:
+        self.revisions.code_generation
+
+    fn current_surface_generation(self) -> i64:
+        self.revisions.surface_generation
+
+    fn draft_text(self, path: text) -> text:
+        match a2ui_obj_get(self.draft.fields, path):
+            case A2uiArgPresence.Present(A2uiValue.Text(s)): s
+            case _: ""
+
+    # Publish a new query result ONLY if generation, composition, and policy match (§12.2).
+    me begin_query_generation() -> i64:
+        self.active_query_generation = self.active_query_generation + 1
+        self.active_query_generation
+
+    me publish_view_result(
+        query_gen: i64,
+        composition_rev: i64,
+        policy_rev: i64,
+        destination_path: text,
+        value: A2uiValue
+    ) -> Result<bool, text>:
+        if not destination_path.starts_with("/view"):
+            return Err("query_destination_must_be_under_view")
+        if query_gen != self.active_query_generation:
+            return Err("stale_query_generation")
+        if composition_rev != self.revisions.composition_revision:
+            return Err("stale_composition_revision")
+        if policy_rev != self.revisions.policy_revision:
+            return Err("stale_policy_revision")
+        self.view_state = a2ui_obj_set(self.view_state, destination_path, value)
+        self.revisions.data_revision = self.revisions.data_revision + 1
+        Ok(true)
+
+    # Clear protected view entries immediately on revocation (§11.5).
+    me purge_view_on_revocation(new_policy_rev: i64):
+        self.view_state = []
+        self.active_query_generation = self.active_query_generation + 1
+        self.revisions.policy_revision = new_policy_rev
+
+    # Check exact-payload deduplication vs conflict on reused base revision (§13.7 step 3).
+    fn check_command_dedupe(
+        command_id: text,
+        base_revision: i64,
+        payload_fingerprint: text
+    ) -> Result<CommandOutcome?, text>:
+        var i = 0
+        while i < self.dedupe_log.len():
+            val rec = self.dedupe_log[i]
+            if rec.command_id == command_id and rec.base_revision == base_revision:
+                if rec.payload_fingerprint == payload_fingerprint:
+                    return Ok(Some(rec.outcome))
+                return Err("draft_revision_conflict_different_payload")
+            i = i + 1
+        Ok(None)
+
+    me record_command_outcome(
+        command_id: text,
+        base_revision: i64,
+        payload_fingerprint: text,
+        outcome: CommandOutcome
+    ):
+        self.dedupe_log.push(DedupeRecord(
+            base_revision: base_revision,
+            command_id: command_id,
+            payload_fingerprint: payload_fingerprint,
+            outcome: outcome
+        ))
+
+    # Dynamic composition admission pipeline (§12.2):
+    #   1. Authorize composer grant against trusted policy & region ceiling.
+    #   2. Parse & validate flat SDN screen table.
+    #   3. Verify every row's requested region mount is permitted (no authority widening).
+    #   4. Verify every referenced action names a registered command in an allowed region.
+    #   5. Atomically publish composition_revision; keep prior screen & drafts intact on failure.
+    me admit_screen_composition(
+        gate: AuthorityGate,
+        composer_grant: AuthenticatedGrant,
+        authenticated_principal: text,
+        sdn_table_source: text,
+        max_rows: i64,
+        now_ms: i64
+    ) -> Result<i64, text>:
+        # Check composer authorization on workspace root.
+        gate.verify_grant_authentic(composer_grant, authenticated_principal, now_ms)?
+        var has_compose = false
+        var oi = 0
+        while oi < composer_grant.operations.len():
+            if composer_grant.operations[oi] == AppOpKind.Compose:
+                has_compose = true
+            oi = oi + 1
+        if not has_compose:
+            return Err("composer_lacks_compose_op")
+
+        val compiled = a2ui_compile_screen_table(sdn_table_source, self.catalog, max_rows)?
+
+        # Build id -> region map and verify every row's mount transition.
+        var row_region: Dict<text, text> = {}
+        var ri = 0
+        while ri < compiled.rows.len():
+            row_region[compiled.rows[ri].id] = compiled.rows[ri].region
+            ri = ri + 1
+
+        var vi = 0
+        while vi < compiled.rows.len():
+            val row = compiled.rows[vi]
+            val p_reg = if row.has_parent: row_region[row.parent] else: ""
+            authority_check_region_mount(gate.policy, p_reg, row.region)?
+            # Verify any declared Event(...) action names a registered command permitted in row.region.
+            var ai = 0
+            while ai < row.ast.args.len():
+                val arg = row.ast.args[ai]
+                if arg.has_action:
+                    val cmd = match self.registry.find_command(arg.action_value.name):
+                        case Some(c): c
+                        case None: return Err("unregistered_screen_action:" + arg.action_value.name)
+                    if cmd.region != row.region:
+                        return Err("action_region_mismatch:" + cmd.id + ":" + row.region)
+                ai = ai + 1
+            vi = vi + 1
+
+        # Atomic commit of new composition revision (preserves compatible drafts!).
+        self.active_screen = compiled
+        self.has_screen = true
+        self.revisions.composition_revision = self.revisions.composition_revision + 1
+        self.revisions.policy_revision = gate.policy.revision
+        Ok(self.revisions.composition_revision)
+
+    fn expand_active_screen(
+        collections: [KeyedCollectionView],
+        max_expanded_rows: i64
+    ) -> Result<[A2uiComponentDef], text>:
+        if not self.has_screen:
+            return Err("no_admitted_screen")
+        a2ui_expand_screen_table(
+            self.active_screen,
+            self.owner_id,
+            self.surface_id,
+            self.revisions.surface_generation,
+            self.catalog,
+            collections,
+            max_expanded_rows
+        )
+
+export OwnerDraftBuffer, DedupeRecord
+export HandlerGenerationLease, HandlerGenerationStats, HandlerGenerationOwner
+export AppInterfaceRuntime

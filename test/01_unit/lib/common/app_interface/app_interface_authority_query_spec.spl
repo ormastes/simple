@@ -1,0 +1,81 @@
+# @cover src/lib/common/app_interface/authority.spl 80%
+# @cover src/lib/common/app_interface/query_ir.spl 80%
+# @cover src/lib/common/app_interface/runtime.spl 80%
+# @cover src/app/simple_process_manager/approval_broker.spl 80%
+# @req REQ-A2UI-007 REQ-A2UI-008 REQ-A2UI-011
+"""
+## Purpose and audience
+Purpose: Verify separate trusted authority policies, HMAC-SHA256 grants,
+restricted SPL QueryIR authorization, independent cursor-based change journals,
+and `aspect_dynload_lifecycle_v1` request-boundary hot-swap leases.
+Audience: Security, loader, and app-interface engineers.
+"""
+
+use std.spipe.*
+use std.common.app_interface.contracts.{AppOpKind, ReleaseAudience}
+use std.common.app_interface.authority.{AuthorityGate, authority_result_cache_key}
+use std.common.app_interface.query_ir.{ChangeEventKind, BoundedChangeJournal, query_parse_restricted_spl}
+use std.common.app_interface.runtime.{HandlerGenerationOwner}
+use app.llm_caret.a2ui.cs_app_interface.{caret_default_authority_policy}
+use app.simple_process_manager.approval_broker.{ApprovalBroker, ApprovalIntent}
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.privilege.authority_token.{AuthorityLevel}
+use lib.common.privilege.principal.{Principal, PrincipalKind}
+
+describe "App Interface Authority, QueryIR, and Hot-Swap Execution Leases":
+    it "REQ-A2UI-007 REQ-A2UI-008: rejects raw SQL constructs and isolates cache keys by principal":
+        step("Validate default-deny Caret authority policy")
+        val pol = caret_default_authority_policy()
+        expect pol.is_ok() to_equal true
+        step("Reject forbidden raw_sql query text")
+        val sql = query_parse_restricted_spl("q", "roster", "from caret.roster; raw_sql select *", ReleaseAudience.HumanSurface, 64)
+        expect sql.is_err() to_equal true
+        step("Verify authorization cache keys separate principals")
+        val k1 = authority_result_cache_key("q", "", "alice", "roster", 1, 1, ReleaseAudience.HumanSurface)
+        val k2 = authority_result_cache_key("q", "", "bob", "roster", 1, 1, ReleaseAudience.HumanSurface)
+        expect k1 != k2 to_equal true
+
+    it "REQ-A2UI-007: delivers removal events independently to multiple change-journal cursors":
+        step("Append Upsert and Remove events to BoundedChangeJournal")
+        var j = BoundedChangeJournal.new(4)
+        j.append(ChangeEventKind.Upsert, "k1", 1)
+        j.append(ChangeEventKind.Remove, "k1", 1)
+        step("Confirm two independent subscriber cursors both observe the removal")
+        expect j.poll(0).events.len() to_equal 2
+        expect j.poll(0).events.len() to_equal 2
+
+    it "REQ-A2UI-011: retains retired handler generations across async suspend/resume until completion":
+        step("Begin request lease on generation 1 and suspend across async boundary")
+        var owner = HandlerGenerationOwner.new()
+        val l1_res = owner.begin_request(1)
+        expect l1_res.is_ok() to_equal true
+        match l1_res:
+            case Ok(l1):
+                val susp = owner.suspend_async(l1)
+                expect susp.is_ok() to_equal true
+                step("Hot-swap generation 2 while generation 1 is suspended and verify ABI refusal")
+                expect owner.hot_swap_generation("bad_abi").is_err() to_equal true
+                expect owner.publish_generation() to_equal 2
+                expect owner.stats().in_flight_on_retired to_equal 1
+                step("Resume generation 1, complete lease, and verify lifecycle reclamation")
+                match susp:
+                    case Ok(sl):
+                        val res_l = owner.resume_async(sl)
+                        expect res_l.is_ok() to_equal true
+                        match res_l:
+                            case Ok(rl):
+                                expect owner.complete_request_lease(rl).is_ok() to_equal true
+                            case Err(_): expect false to_equal true
+                    case Err(_): expect false to_equal true
+            case Err(_): expect false to_equal true
+        expect owner.stats().reclaimed_generations.len() to_equal 1
+
+    it "REQ-A2UI-008: uses real 32-byte HMAC-SHA256 and checks level in ApprovalBroker":
+        step("Verify real 32-byte HMAC-SHA256 signature and level enforcement")
+        var broker = ApprovalBroker.new_for_test("/tmp", "secret_key_123456".bytes())
+        val p = Principal(kind: PrincipalKind.Local, id: "alice")
+        val r_intent = ApprovalIntent(app: "caret", action: "read", required: id_path_intern("id.caret"), level: AuthorityLevel.Read)
+        val a_intent = ApprovalIntent(app: "caret", action: "read", required: id_path_intern("id.caret"), level: AuthorityLevel.Admin)
+        broker.test_simulate_user_accept(r_intent)
+        expect broker.test_sign(r_intent, p).hmac.len() to_equal 32
+        expect broker.request_approval(a_intent, p).ok to_equal false

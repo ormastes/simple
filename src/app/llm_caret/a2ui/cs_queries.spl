@@ -1,0 +1,243 @@
+#![allow(primitive_api)] # Caret query projections convert scalar metrics and booleans for UI binding
+# Caret Suite A2UI Pure Queries and Authorized Snapshot Projections
+#
+# Implements Section 10.3 & 13.4 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Pure transformations over owner-supplied Caret snapshots (no IO/polling).
+#   - Preserves -1 unavailable metric sentinels (0 stays 0% / 0 MB; -1 is unavailable).
+#   - Sanitizes terminal pane output (strips ANSI CSI/OSC & control sequences).
+#   - Maps opaque host-issued keys (k001) <-> SessionId(value, generation) in O(N).
+#   - Never serializes raw launch `spec`, `detail`, `log`, or authority tokens.
+
+use app.llm_caret.cs_dashboard_model.{CsAgent, CsDashboard}
+use app.llm_caret.workbench.session_contract.{
+    SessionId,
+    SessionView,
+    ProcessLifecycle,
+    AgentTurn,
+    Transport,
+    CapabilityEvidence
+}
+use std.common.ui.a2ui.types.{A2uiValue, A2uiObjectEntry}
+use std.common.ui.a2ui.screen_table.{KeyedRowRecord}
+use std.common.app_interface.query_ir.{AuthorizedTableSnapshot}
+
+pub struct CaretKeyBinding:
+    opaque_key: text
+    session: SessionId
+    label: text
+
+pub struct CaretRosterRow:
+    key: text
+    label: text
+    lifecycle: text
+    turn: text
+    transport: text
+    evidence: text
+    cpu_label: text
+    memory_label: text
+    summary: text
+    pinned: bool
+
+pub fn caret_metric_label(cpu_pct: f64) -> text:
+    if cpu_pct < 0.0:
+        return "CPU unavailable"
+    val rounded = cpu_pct as i64
+    "CPU " + rounded.to_string() + "%"
+
+pub fn caret_memory_label(rss_mb: i64) -> text:
+    if rss_mb < 0:
+        return "memory unavailable"
+    rss_mb.to_string() + " MB"
+
+fn _lifecycle_label(lc: ProcessLifecycle) -> text:
+    match lc:
+        case ProcessLifecycle.NotStarted: "Not started"
+        case ProcessLifecycle.Starting: "Starting"
+        case ProcessLifecycle.Running: "Running"
+        case ProcessLifecycle.Stopping: "Stopping"
+        case ProcessLifecycle.Exited: "Exited"
+        case ProcessLifecycle.Failed: "Failed"
+        case ProcessLifecycle.Lost: "Ownership uncertain"
+
+fn _turn_label(t: AgentTurn) -> text:
+    match t:
+        case AgentTurn.Idle: "idle"
+        case AgentTurn.Queued: "queued"
+        case AgentTurn.Working: "working"
+        case AgentTurn.WaitingApproval: "waiting for approval"
+        case AgentTurn.WaitingAnswer: "waiting for answer"
+        case AgentTurn.Completed: "completed"
+        case AgentTurn.Cancelled: "cancelled"
+        case AgentTurn.Failed: "failed"
+        case AgentTurn.Unknown: "turn unknown"
+
+fn _transport_label(tr: Transport) -> text:
+    match tr:
+        case Transport.Connecting: "connecting"
+        case Transport.Ready: "ready"
+        case Transport.Stale: "stale"
+        case Transport.Disconnected: "disconnected"
+        case Transport.Reconnecting: "reconnecting"
+        case Transport.Closed: "closed"
+
+fn _evidence_label(ev: CapabilityEvidence) -> text:
+    match ev:
+        case CapabilityEvidence.Declared: "declared"
+        case CapabilityEvidence.Probed: "probed"
+        case CapabilityEvidence.Available: "available"
+        case CapabilityEvidence.Verified: "verified"
+        case CapabilityEvidence.Unavailable: "unavailable"
+        case CapabilityEvidence.Failed: "failed"
+
+# Strip ANSI CSI (`ESC [ ... final`) and non-printable control characters so
+# captured terminal output renders strictly as inert plain text (§11.6, §22).
+pub fn caret_sanitize_terminal_text(raw: text, max_bytes: i64) -> text:
+    var out = ""
+    var i = 0
+    val n = raw.byte_len()
+    while i < n and out.byte_len() < max_bytes:
+        val b = raw.byte_at(i)
+        if b == 27: # ESC
+            i = i + 1
+            if i < n and raw.byte_at(i) == 91: # '[' CSI sequence
+                i = i + 1
+                while i < n:
+                    val cb = raw.byte_at(i)
+                    i = i + 1
+                    if cb >= 64 and cb <= 126:
+                        break
+            elif i < n and raw.byte_at(i) == 93: # ']' OSC sequence
+                i = i + 1
+                while i < n:
+                    val ob = raw.byte_at(i)
+                    i = i + 1
+                    if ob == 7:
+                        break
+            continue
+        if b == 10 or b == 9 or b >= 32:
+            out = out + raw.substring(i, i + 1)
+        i = i + 1
+    out
+
+# Assign deterministic opaque keys (`k_<gen>_<seq>`) bound to exact (value, generation).
+pub fn caret_opaque_key(session: SessionId, seq: i64) -> text:
+    "k_" + session.generation.to_string() + "_" + seq.to_string()
+
+# Build an O(N) indexed AuthorizedTableSnapshot from dashboard + SessionViews.
+# Uses O(N) Dict lookups for pins/MRU/metrics (eliminating legacy nested scans §17.8).
+pub fn caret_build_roster_snapshot(
+    dashboard: CsDashboard,
+    sessions: [SessionView],
+    data_revision: i64
+) -> (AuthorizedTableSnapshot, [CaretKeyBinding]):
+    var agent_by_id: Dict<text, i64> = {}
+    var ai = 0
+    while ai < dashboard.agents.len():
+        agent_by_id[dashboard.agents[ai].agent_id] = ai
+        ai = ai + 1
+
+    var pin_set: Dict<text, bool> = {}
+    var pi = 0
+    while pi < dashboard.pins.len():
+        pin_set[dashboard.pins[pi]] = true
+        pi = pi + 1
+
+    var mru_rank: Dict<text, i64> = {}
+    var mi = 0
+    while mi < dashboard.mru.len():
+        mru_rank[dashboard.mru[mi]] = mi
+        mi = mi + 1
+
+    # Order sessions: pinned first, then MRU, then original order.
+    var ordered: [SessionView] = []
+    var seen_idx: Dict<text, bool> = {}
+    var i = 0
+    while i < sessions.len():
+        val s = sessions[i]
+        if pin_set.contains_key(s.id.value):
+            ordered.push(s)
+            seen_idx[s.id.value] = true
+        i = i + 1
+    var mri = 0
+    while mri < dashboard.mru.len():
+        val target = dashboard.mru[mri]
+        var si = 0
+        while si < sessions.len():
+            if sessions[si].id.value == target and not seen_idx.contains_key(target):
+                ordered.push(sessions[si])
+                seen_idx[target] = true
+            si = si + 1
+        mri = mri + 1
+    var ri = 0
+    while ri < sessions.len():
+        if not seen_idx.contains_key(sessions[ri].id.value):
+            ordered.push(sessions[ri])
+            seen_idx[sessions[ri].id.value] = true
+        ri = ri + 1
+
+    var rows: [KeyedRowRecord] = []
+    var order_keys: [text] = []
+    var bindings: [CaretKeyBinding] = []
+
+    var oi = 0
+    while oi < ordered.len():
+        val sv = ordered[oi]
+        val key = caret_opaque_key(sv.id, oi + 1)
+        var cpu = -1.0
+        var rss: i64 = -1
+        if agent_by_id.contains_key(sv.id.value):
+            val ag = dashboard.agents[agent_by_id[sv.id.value]]
+            cpu = ag.cpu_pct
+            rss = ag.rss_mb
+        val lc = _lifecycle_label(sv.lifecycle)
+        val tn = _turn_label(sv.turn)
+        val tr = _transport_label(sv.transport)
+        val ev = _evidence_label(sv.evidence)
+        val cpu_l = caret_metric_label(cpu)
+        val mem_l = caret_memory_label(rss)
+        val summary = lc + "; " + tn + "; " + cpu_l
+        val pinned = pin_set.contains_key(sv.id.value)
+
+        val fields: [A2uiObjectEntry] = [
+            A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: key)),
+            A2uiObjectEntry(key: "label", value: A2uiValue.Text(value: sv.label)),
+            A2uiObjectEntry(key: "lifecycle", value: A2uiValue.Text(value: lc)),
+            A2uiObjectEntry(key: "turn", value: A2uiValue.Text(value: tn)),
+            A2uiObjectEntry(key: "transport", value: A2uiValue.Text(value: tr)),
+            A2uiObjectEntry(key: "evidence", value: A2uiValue.Text(value: ev)),
+            A2uiObjectEntry(key: "cpu_label", value: A2uiValue.Text(value: cpu_l)),
+            A2uiObjectEntry(key: "memory_label", value: A2uiValue.Text(value: mem_l)),
+            A2uiObjectEntry(key: "summary", value: A2uiValue.Text(value: summary)),
+            A2uiObjectEntry(key: "pinned", value: A2uiValue.Bool(value: pinned))
+        ]
+        rows.push(KeyedRowRecord(key: key, fields: fields))
+        order_keys.push(key)
+        bindings.push(CaretKeyBinding(opaque_key: key, session: sv.id, label: sv.label))
+        oi = oi + 1
+
+    val snap = AuthorizedTableSnapshot(
+        resource_id: "caret.roster",
+        data_revision: data_revision,
+        rows: rows,
+        order: order_keys
+    )
+    (snap, bindings)
+
+pub fn caret_status_summary(visible_count: i64, manager_status: text) -> text:
+    val noun = if visible_count == 1: "visible session" else: "visible sessions"
+    visible_count.to_string() + " " + noun + " (" + manager_status + ")"
+
+pub fn caret_selected_preview(
+    pane_lines: [text],
+    pane_authorized: bool,
+    max_bytes: i64
+) -> text:
+    if not pane_authorized:
+        return "No preview available"
+    if pane_lines.len() == 0:
+        return "No output yet"
+    caret_sanitize_terminal_text(pane_lines.join("\n"), max_bytes)
+
+export CaretKeyBinding, CaretRosterRow
+export caret_metric_label, caret_memory_label, caret_sanitize_terminal_text
+export caret_opaque_key, caret_build_roster_snapshot, caret_status_summary, caret_selected_preview

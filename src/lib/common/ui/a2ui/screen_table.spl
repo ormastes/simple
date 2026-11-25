@@ -1,0 +1,515 @@
+#![allow(primitive_api)] # SDN screen table compiler uses explicit row/order/budget integers
+# A2UI `express_sdn_table_v1` Flat Screen Table Compiler & Keyed Expansion
+#
+# Implements Section 6 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Parses one anonymous root SDN table via std.common.sdn.strict_v1.
+#   - Columns: |id, parent, slot, order, region, repeat, key, expression|
+#   - Parses each expression cell once using the shared VM Express parser.
+#   - Validates single root, acyclicity, unique IDs, unique order per (parent,slot),
+#     slot cardinality, no conflicting explicit child/children arguments, no
+#     repeated root or nested repetition.
+#   - Supports 1-level keyed repetition over {order: [...], by_key: {...}} with
+#     opaque component IDs (c_<hex>) and relative path resolution ($field -> /view/.../by_key/k/field).
+#   - Lowers directly into typed A2uiSurfaceOp values (no text round trips).
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.ui.a2ui.types.{
+    A2UI_BASIC_CATALOG_ID,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiActionEvent,
+    A2uiComponentDef,
+    A2uiSurfaceOp,
+    a2ui_no_action,
+    a2ui_obj_get,
+    a2ui_obj_set,
+    a2ui_encode_opaque_component_id
+}
+use std.common.ui.a2ui.catalog.{
+    A2uiCatalog,
+    A2uiSlotKind,
+    a2ui_catalog_find_component,
+    a2ui_catalog_validate_component
+}
+use std.common.ui.a2ui.express_grammar.{
+    ExpressConstructorAst,
+    a2ui_parse_express_constructor
+}
+
+pub struct ScreenTableRow:
+    id: text
+    parent: text
+    has_parent: bool
+    slot: text
+    has_slot: bool
+    order: i64
+    region: text
+    repeat_path: text
+    has_repeat: bool
+    key_field: text
+    has_key: bool
+    expression: text
+    ast: ExpressConstructorAst
+
+pub struct CompiledScreenTable:
+    rows: [ScreenTableRow]
+    root_id: text
+
+pub struct KeyedRowRecord:
+    key: text
+    fields: [A2uiObjectEntry]
+
+pub struct KeyedCollectionView:
+    path: text
+    order: [text]
+    rows: [KeyedRowRecord]
+
+fn _validate_keyed_collection(col: KeyedCollectionView, max_rows: i64) -> Result<bool, text>:
+    if col.order.len() > max_rows:
+        return Err("keyed_collection_limit_exceeded")
+    if col.order.len() != col.rows.len():
+        return Err("keyed_collection_order_map_mismatch")
+    var seen_order: Dict<text, bool> = {}
+    var i = 0
+    while i < col.order.len():
+        val k = col.order[i]
+        if k == "":
+            return Err("empty_row_key")
+        if seen_order.contains_key(k):
+            return Err("duplicate_order_key:" + k)
+        seen_order[k] = true
+        i = i + 1
+    var seen_rows: Dict<text, bool> = {}
+    var ri = 0
+    while ri < col.rows.len():
+        val r = col.rows[ri]
+        if seen_rows.contains_key(r.key):
+            return Err("duplicate_by_key:" + r.key)
+        if not seen_order.contains_key(r.key):
+            return Err("unreferenced_by_key:" + r.key)
+        seen_rows[r.key] = true
+        ri = ri + 1
+    Ok(true)
+
+fn _find_keyed_collection(cols: [KeyedCollectionView], path: text) -> KeyedCollectionView?:
+    var i = 0
+    while i < cols.len():
+        if cols[i].path == path:
+            return Some(cols[i])
+        i = i + 1
+    None
+
+fn _cell_text_or_null(v: SdnValue) -> Result<(bool, text), text>:
+    match v:
+        case SdnValue.Null: Ok((false, ""))
+        case SdnValue.String(s): Ok((true, s))
+        case _: Err("expected_string_or_null_cell")
+
+fn _cell_req_text(v: SdnValue) -> Result<text, text>:
+    match v:
+        case SdnValue.String(s):
+            if s == "":
+                return Err("empty_required_cell")
+            Ok(s)
+        case _: Err("expected_required_string_cell")
+
+fn _cell_req_int(v: SdnValue) -> Result<i64, text>:
+    match v:
+        case SdnValue.Int(n): Ok(n)
+        case _: Err("expected_integer_order_cell")
+
+fn _check_headers(headers: [text]) -> Result<bool, text>:
+    val expected: [text] = ["id", "parent", "slot", "order", "region", "repeat", "key", "expression"]
+    if headers.len() != expected.len():
+        return Err("invalid_screen_table_column_count")
+    var i = 0
+    while i < expected.len():
+        if headers[i] != expected[i]:
+            return Err("invalid_screen_table_header:" + headers[i])
+        i = i + 1
+    Ok(true)
+
+# Parse and validate a flat SDN screen table into an immutable CompiledScreenTable.
+pub fn a2ui_compile_screen_table(
+    sdn_source: text,
+    catalog: A2uiCatalog,
+    max_rows: i64
+) -> Result<CompiledScreenTable, text>:
+    var limits = sdn_strict_limits_v1()
+    limits.max_rows = max_rows
+    val doc = match sdn_parse_strict_v1(sdn_source, limits):
+        case Ok(d): d
+        case Err(issue): return Err("sdn_parse_error:" + issue.code + ":" + issue.message)
+    val table_pair = match doc.value:
+        case SdnValue.Table(headers, raw_rows): (headers, raw_rows)
+        case _: return Err("screen_must_be_single_anonymous_table")
+    _check_headers(table_pair.0)?
+    val raw_rows = table_pair.1
+    if raw_rows.len() == 0:
+        return Err("empty_screen_table")
+    if raw_rows.len() > max_rows:
+        return Err("screen_table_row_limit")
+
+    var rows: [ScreenTableRow] = []
+    var seen_ids: Dict<text, bool> = {}
+    var row_index: Dict<text, i64> = {}
+    var root_count = 0
+    var root_id = ""
+
+    var i = 0
+    while i < raw_rows.len():
+        val raw = raw_rows[i]
+        if raw.len() != 8:
+            return Err("invalid_row_width")
+        val id = _cell_req_text(raw[0])?
+        if seen_ids.contains_key(id):
+            return Err("duplicate_row_id:" + id)
+        seen_ids[id] = true
+        row_index[id] = i
+
+        val parent_pair = _cell_text_or_null(raw[1])?
+        val slot_pair = _cell_text_or_null(raw[2])?
+        val order = _cell_req_int(raw[3])?
+        val region = _cell_req_text(raw[4])?
+        val repeat_pair = _cell_text_or_null(raw[5])?
+        val key_pair = _cell_text_or_null(raw[6])?
+        val expr_text = _cell_req_text(raw[7])?
+
+        if not parent_pair.0:
+            root_count = root_count + 1
+            root_id = id
+            if id != "root":
+                return Err("root_row_must_be_named_root:" + id)
+            if slot_pair.0:
+                return Err("root_row_cannot_have_slot")
+            if repeat_pair.0:
+                return Err("root_row_cannot_repeat")
+        else:
+            if not slot_pair.0:
+                return Err("non_root_requires_slot:" + id)
+
+        if repeat_pair.0 != key_pair.0:
+            return Err("repeat_and_key_must_pair:" + id)
+
+        val ast = a2ui_parse_express_constructor(expr_text)?
+        # Reject conflicting explicit child/children/id/catalogId in table expression cells.
+        var ai = 0
+        while ai < ast.args.len():
+            val arg = ast.args[ai]
+            if arg.is_named and (arg.name == "child" or arg.name == "children" or arg.name == "id" or arg.name == "catalogId" or arg.name == "@catalogId"):
+                return Err("conflicting_reserved_arg:" + id + "." + arg.name)
+            ai = ai + 1
+
+        rows.push(ScreenTableRow(
+            id: id,
+            parent: parent_pair.1,
+            has_parent: parent_pair.0,
+            slot: slot_pair.1,
+            has_slot: slot_pair.0,
+            order: order,
+            region: region,
+            repeat_path: repeat_pair.1,
+            has_repeat: repeat_pair.0,
+            key_field: key_pair.1,
+            has_key: key_pair.0,
+            expression: expr_text,
+            ast: ast
+        ))
+        i = i + 1
+
+    if root_count != 1:
+        return Err("screen_requires_exactly_one_root")
+
+    # Validate parent references, cycles, slot validity, unique (parent, slot, order),
+    # and no nested repetition.
+    var seen_orders: Dict<text, bool> = {}
+    var single_slot_counts: Dict<text, i64> = {}
+    var ri = 0
+    while ri < rows.len():
+        val r = rows[ri]
+        val comp_spec = match a2ui_catalog_find_component(catalog, r.ast.component):
+            case Some(s): s
+            case None: return Err("unknown_component:" + r.ast.component)
+        if r.has_parent:
+            if not row_index.contains_key(r.parent):
+                return Err("missing_parent:" + r.parent)
+            val p_idx = row_index[r.parent]
+            val p_row = rows[p_idx]
+            val p_spec = match a2ui_catalog_find_component(catalog, p_row.ast.component):
+                case Some(s): s
+                case None: return Err("unknown_parent_component:" + p_row.ast.component)
+            if p_spec.slot_name == "" or p_spec.slot_name != r.slot:
+                return Err("invalid_parent_slot:" + r.parent + "." + r.slot)
+            val ord_key = r.parent + "|" + r.slot + "|" + r.order.to_string()
+            if seen_orders.contains_key(ord_key):
+                return Err("duplicate_order:" + ord_key)
+            seen_orders[ord_key] = true
+            if p_spec.slot_kind == A2uiSlotKind.SingleChild:
+                val skey = r.parent + "|" + r.slot
+                if single_slot_counts.contains_key(skey):
+                    return Err("single_slot_multiple_children:" + r.parent)
+                single_slot_counts[skey] = 1
+        # Cycle + nested repetition walk.
+        var cur = r
+        var steps = 0
+        var repeat_ancestors = 0
+        while cur.has_parent:
+            steps = steps + 1
+            if steps > rows.len():
+                return Err("cycle_in_screen_table:" + r.id)
+            val next_idx = row_index[cur.parent]
+            val anc = rows[next_idx]
+            if anc.has_repeat:
+                repeat_ancestors = repeat_ancestors + 1
+            cur = anc
+        if r.has_repeat and repeat_ancestors > 0:
+            return Err("nested_repetition_not_supported:" + r.id)
+        ri = ri + 1
+
+    Ok(CompiledScreenTable(rows: rows, root_id: root_id))
+
+fn _resolve_relative_value(v: A2uiValue, repeat_base: text, row_key: text) -> A2uiValue:
+    if repeat_base == "":
+        return v
+    match v:
+        case A2uiValue.Path(p):
+            if p.starts_with("/"):
+                A2uiValue.Path(path: p)
+            else:
+                A2uiValue.Path(path: repeat_base + "/by_key/" + row_key + "/" + p)
+        case A2uiValue.Array(items):
+            var out: [A2uiValue] = []
+            var i = 0
+            while i < items.len():
+                out.push(_resolve_relative_value(items[i], repeat_base, row_key))
+                i = i + 1
+            A2uiValue.Array(items: out)
+        case A2uiValue.Object(entries):
+            var out: [A2uiObjectEntry] = []
+            var i = 0
+            while i < entries.len():
+                val e = entries[i]
+                out.push(A2uiObjectEntry(
+                    key: e.key,
+                    value: _resolve_relative_value(e.value, repeat_base, row_key)
+                ))
+                i = i + 1
+            A2uiValue.Object(entries: out)
+        case _:
+            v
+
+fn _resolve_action(ev: A2uiActionEvent, repeat_base: text, row_key: text) -> A2uiActionEvent:
+    if not ev.has_action or repeat_base == "":
+        return ev
+    var out: [A2uiObjectEntry] = []
+    var i = 0
+    while i < ev.context.len():
+        val e = ev.context[i]
+        # Lower `$key` inside repeated actions directly to the stable opaque key literal.
+        val resolved = match e.value:
+            case A2uiValue.Path(p):
+                if p == "key":
+                    A2uiValue.Text(value: row_key)
+                else:
+                    _resolve_relative_value(e.value, repeat_base, row_key)
+            case _:
+                _resolve_relative_value(e.value, repeat_base, row_key)
+        out.push(A2uiObjectEntry(key: e.key, value: resolved))
+        i = i + 1
+    A2uiActionEvent(name: ev.name, context: out, has_action: true)
+
+fn _build_component_from_row(
+    row: ScreenTableRow,
+    comp_id: text,
+    child_id: text,
+    children_ids: [text],
+    catalog: A2uiCatalog,
+    repeat_base: text,
+    row_key: text
+) -> Result<A2uiComponentDef, text>:
+    val spec = match a2ui_catalog_find_component(catalog, row.ast.component):
+        case Some(s): s
+        case None: return Err("unknown_component:" + row.ast.component)
+    var props: [A2uiObjectEntry] = []
+    var action = a2ui_no_action()
+    var pos_idx = 0
+    var i = 0
+    while i < row.ast.args.len():
+        val arg = row.ast.args[i]
+        var target_name = arg.name
+        if not arg.is_named:
+            if pos_idx >= spec.positional_params.len():
+                return Err("too_many_positional_args:" + row.id)
+            target_name = spec.positional_params[pos_idx]
+            pos_idx = pos_idx + 1
+        if arg.has_action:
+            if target_name != "action":
+                return Err("event_only_allowed_in_action_param:" + row.id)
+            action = _resolve_action(arg.action_value, repeat_base, row_key)
+        else:
+            match arg.presence:
+                case A2uiArgPresence.Omitted:
+                    () # `_` omits the property rather than setting null.
+                case A2uiArgPresence.Present(v):
+                    val resolved = _resolve_relative_value(v, repeat_base, row_key)
+                    props = a2ui_obj_set(props, target_name, resolved)
+        i = i + 1
+    val comp = A2uiComponentDef(
+        id: comp_id,
+        component: row.ast.component,
+        catalog_override: "",
+        props: props,
+        child: child_id,
+        children: children_ids,
+        action: action,
+        region_request: row.region
+    )
+    a2ui_catalog_validate_component(catalog, comp)?
+    Ok(comp)
+
+fn _sorted_children(rows: [ScreenTableRow], parent_id: text) -> [ScreenTableRow]:
+    var direct: [ScreenTableRow] = []
+    var i = 0
+    while i < rows.len():
+        if rows[i].has_parent and rows[i].parent == parent_id:
+            direct.push(rows[i])
+        i = i + 1
+    # Insertion sort by order (small fan-out per container, deterministic).
+    var a = 1
+    while a < direct.len():
+        var b = a
+        while b > 0 and direct[b - 1].order > direct[b].order:
+            val tmp = direct[b - 1]
+            direct[b - 1] = direct[b]
+            direct[b] = tmp
+            b = b - 1
+        a = a + 1
+    direct
+
+fn _expand_subtree(
+    table: CompiledScreenTable,
+    row: ScreenTableRow,
+    owner_id: text,
+    surface_id: text,
+    surface_generation: i64,
+    catalog: A2uiCatalog,
+    collections: [KeyedCollectionView],
+    repeat_base: text,
+    row_key: text,
+    max_expanded_rows: i64,
+    out_components: [A2uiComponentDef]
+) -> Result<(text, [A2uiComponentDef]), text>:
+    var acc = out_components
+    val my_id = if row_key != "":
+        a2ui_encode_opaque_component_id(owner_id, surface_id, surface_generation, row.id, row_key)
+    else:
+        row.id
+    val direct = _sorted_children(table.rows, row.id)
+    var child_id = ""
+    var children_ids: [text] = []
+    val spec = match a2ui_catalog_find_component(catalog, row.ast.component):
+        case Some(s): s
+        case None: return Err("unknown_component:" + row.ast.component)
+
+    var di = 0
+    while di < direct.len():
+        val c_row = direct[di]
+        if c_row.has_repeat:
+            val found_col = _find_keyed_collection(collections, c_row.repeat_path)
+            match found_col:
+                case Some(col):
+                    _validate_keyed_collection(col, max_expanded_rows)?
+                    var ki = 0
+                    while ki < col.order.len():
+                        val k = col.order[ki]
+                        val sub = _expand_subtree(
+                            table, c_row, owner_id, surface_id, surface_generation,
+                            catalog, collections, c_row.repeat_path, k,
+                            max_expanded_rows, acc
+                        )?
+                        acc = sub.1
+                        if spec.slot_kind == A2uiSlotKind.SingleChild:
+                            child_id = sub.0
+                        else:
+                            children_ids.push(sub.0)
+                        ki = ki + 1
+                case None:
+                    () # Empty collection before data arrives is valid for List().
+        else:
+            val sub = _expand_subtree(
+                table, c_row, owner_id, surface_id, surface_generation,
+                catalog, collections, repeat_base, row_key,
+                max_expanded_rows, acc
+            )?
+            acc = sub.1
+            if spec.slot_kind == A2uiSlotKind.SingleChild:
+                child_id = sub.0
+            else:
+                children_ids.push(sub.0)
+        di = di + 1
+
+    val comp = _build_component_from_row(row, my_id, child_id, children_ids, catalog, repeat_base, row_key)?
+    acc.push(comp)
+    Ok((my_id, acc))
+
+# Lower a compiled flat screen table + current keyed collections directly into
+# typed A2UI component definitions (ready for UpdateComponents).
+pub fn a2ui_expand_screen_table(
+    table: CompiledScreenTable,
+    owner_id: text,
+    surface_id: text,
+    surface_generation: i64,
+    catalog: A2uiCatalog,
+    collections: [KeyedCollectionView],
+    max_expanded_rows: i64
+) -> Result<[A2uiComponentDef], text>:
+    var root_row_idx = -1
+    var i = 0
+    while i < table.rows.len():
+        if table.rows[i].id == table.root_id:
+            root_row_idx = i
+            break
+        i = i + 1
+    if root_row_idx < 0:
+        return Err("missing_root_row")
+    val empty_acc: [A2uiComponentDef] = []
+    val res = _expand_subtree(
+        table, table.rows[root_row_idx], owner_id, surface_id, surface_generation,
+        catalog, collections, "", "", max_expanded_rows, empty_acc
+    )?
+    Ok(res.1)
+
+# Convenience helper: compile & lower directly into [CreateSurface, UpdateComponents].
+pub fn a2ui_lower_screen_to_ops(
+    table: CompiledScreenTable,
+    owner_id: text,
+    surface_id: text,
+    surface_generation: i64,
+    send_data_model: bool,
+    catalog: A2uiCatalog,
+    collections: [KeyedCollectionView],
+    max_expanded_rows: i64
+) -> Result<[A2uiSurfaceOp], text>:
+    val comps = a2ui_expand_screen_table(
+        table, owner_id, surface_id, surface_generation,
+        catalog, collections, max_expanded_rows
+    )?
+    val ops: [A2uiSurfaceOp] = [
+        A2uiSurfaceOp.CreateSurface(
+            surface_id: surface_id,
+            catalog_id: catalog.catalog_id,
+            send_data_model: send_data_model,
+            root_id: "root"
+        ),
+        A2uiSurfaceOp.UpdateComponents(
+            surface_id: surface_id,
+            components: comps
+        )
+    ]
+    Ok(ops)
+
+export ScreenTableRow, CompiledScreenTable, KeyedRowRecord, KeyedCollectionView
+export a2ui_compile_screen_table, a2ui_expand_screen_table, a2ui_lower_screen_to_ops
