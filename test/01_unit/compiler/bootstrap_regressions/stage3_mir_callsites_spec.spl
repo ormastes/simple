@@ -1,0 +1,242 @@
+# Stage 3 / Phase 4 compiler closure MIR unresolved method call regressions.
+#
+# Covers:
+#   - src/compiler/70.backend/codegen.spl (`address.unwrap()`, `value.unwrap()`, `max_packet.unwrap()`)
+#   - src/compiler/70.backend/linker/mold.spl (`LinkerError.NotFound(...).to_string()` -> `linker_error_to_text(...)`)
+#   - src/compiler/35.semantics/narrowing.spl (`patterns.is_empty()`, `arms.is_empty()`, `else_block.unwrap()`)
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.semantics.narrowing.{classify_match_arm_coverage, definitely_terminates, MatchTerminationStatus}
+use compiler.linker.mold.{LinkerError, linker_error_to_text}
+use compiler.backend.codegen.{CraneliftCodegenState, CodegenMode, CraneliftTarget, CodegenPipeline}
+
+fn sp() -> Span:
+    Span.empty()
+
+fn ty_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 64, signed: true), span: sp())
+
+fn ty_opt(inner: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Optional(inner: inner), span: sp())
+
+fn expr_of(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: ty_i64(), span: sp())
+
+fn unit_expr() -> HirExpr:
+    expr_of(HirExprKind.UnitLit)
+
+fn ret_block() -> HirBlock:
+    val stmt = HirStmt(kind: HirStmtKind.Expr(expr: expr_of(HirExprKind.Return(value: None))), span: sp())
+    HirBlock(stmts: [stmt], has: false, value: unit_expr(), span: sp())
+
+fn non_ret_block() -> HirBlock:
+    val stmt = HirStmt(kind: HirStmtKind.Expr(expr: unit_expr()), span: sp())
+    HirBlock(stmts: [stmt], has: false, value: unit_expr(), span: sp())
+
+fn pat_of(kind: HirPatternKind) -> HirPattern:
+    HirPattern(kind: kind, has_type_: false, type_: ty_i64(), span: sp())
+
+fn arm_of(pat: HirPattern, body: HirBlock) -> HirMatchArm:
+    HirMatchArm(pattern: pat, has_guard: false, guard: unit_expr(), body: body, span: sp())
+
+fn lower_module_fatal_errors(src: text) -> [text]:
+    val module = parse_full_frontend(src, "stage3_callsite_probe.spl", "stage3_callsite_probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("stage3_callsite_probe.spl")
+    val hir = hir_lowering.lower_module(module)
+    var out: [text] = []
+    for he in hir_lowering.errors:
+        out = out.push("hir: " + he.message)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+    for e in mir_lowering.errors:
+        if e.fatal:
+            out = out.push(e.message)
+    out
+
+val CODEGEN_PATTERN_SRC: text =
+    "enum JitRes:\n" +
+    "    Success(code: [u8], symbol: text, address: i64?)\n" +
+    "    NotFound(symbol: text)\n\n" +
+    "enum Term:\n" +
+    "    Goto(target: i64)\n" +
+    "    Ret(value: i64?)\n\n" +
+    "fn load_addr(res: JitRes) -> Result<i64, text>:\n" +
+    "    match res:\n" +
+    "        case Success(_, _, address):\n" +
+    "            match address:\n" +
+    "                case Some(addr):\n" +
+    "                    Ok(addr)\n" +
+    "                case None:\n" +
+    "                    Err(\"main symbol not found in SMF\")\n" +
+    "        case _:\n" +
+    "            Err(\"load failed\")\n\n" +
+    "fn ret_val_or_zero(term: Term) -> i64:\n" +
+    "    match term:\n" +
+    "        case Ret(value):\n" +
+    "            match value:\n" +
+    "                case Some(v): v\n" +
+    "                case None: 0\n" +
+    "        case Goto(t): t\n"
+
+val MOLD_PATTERN_SRC: text =
+    "enum LinkerErr:\n" +
+    "    NotFound(text)\n" +
+    "    Timeout\n\n" +
+    "fn linker_err_text(err: LinkerErr) -> text:\n" +
+    "    match err:\n" +
+    "        case LinkerErr.NotFound(tool): \"Linker tool not found: {{tool}}\"\n" +
+    "        case LinkerErr.Timeout: \"Linker timed out\"\n\n" +
+    "fn check_as(ok: bool) -> Result<(), text>:\n" +
+    "    if not ok:\n" +
+    "        return Err(linker_err_text(LinkerErr.NotFound(\"GNU as not found\")))\n" +
+    "    Ok(())\n"
+
+val NARROWING_PATTERN_SRC: text =
+    "enum PatPayload:\n" +
+    "    Tuple(patterns: [i64])\n" +
+    "    Empty\n\n" +
+    "enum ExprNode:\n" +
+    "    IfChain(arms: [i64], else_block: i64?)\n" +
+    "    MatchCase(arms: [i64])\n\n" +
+    "fn check_payload(payload: PatPayload?) -> bool:\n" +
+    "    match payload:\n" +
+    "        case None: false\n" +
+    "        case Some(PatPayload.Tuple(patterns)):\n" +
+    "            if patterns.len() == 0:\n" +
+    "                return false\n" +
+    "            true\n" +
+    "        case Some(PatPayload.Empty): false\n\n" +
+    "fn check_term(node: ExprNode) -> bool:\n" +
+    "    match node:\n" +
+    "        case IfChain(arms, else_block):\n" +
+    "            if arms.len() == 0:\n" +
+    "                return false\n" +
+    "            match else_block:\n" +
+    "                case Some(b): b > 0\n" +
+    "                case None: false\n" +
+    "        case MatchCase(arms):\n" +
+    "            if arms.len() == 0:\n" +
+    "                return false\n" +
+    "            true\n"
+
+describe "Stage 3 MIR callsite fixes":
+    describe "mold.spl linker_error_to_text":
+        it "formats LinkerError.NotFound identically to to_string without method dispatch":
+            val err = LinkerError.NotFound("GNU as not found")
+            expect(linker_error_to_text(err)).to_equal("Linker tool not found: GNU as not found")
+            expect(linker_error_to_text(err)).to_equal(err.to_string())
+
+        it "preserves formatting across all LinkerError variants":
+            val e_exit = LinkerError.ExitFailure(2, "missing symbol")
+            val e_timeout = LinkerError.Timeout
+            val e_target = LinkerError.UnsupportedTarget("sparc")
+            expect(linker_error_to_text(e_exit)).to_equal(e_exit.to_string())
+            expect(linker_error_to_text(e_timeout)).to_equal(e_timeout.to_string())
+            expect(linker_error_to_text(e_target)).to_equal(e_target.to_string())
+
+    describe "narrowing.spl coverage and termination":
+        it "classify_match_arm_coverage handles empty arms and empty tuple Some payload":
+            expect(classify_match_arm_coverage([])).to_equal(MatchTerminationStatus.MayFallThrough)
+
+            val opt_i64 = ty_opt(ty_i64())
+            val empty_some_pat = pat_of(HirPatternKind.Enum(
+                type_: opt_i64,
+                variant: "Some",
+                payload: Some(HirPatternPayload.Tuple(patterns: []))
+            ))
+            val none_pat = pat_of(HirPatternKind.Enum(
+                type_: opt_i64,
+                variant: "None",
+                payload: None
+            ))
+            val arms_empty_some = [arm_of(empty_some_pat, ret_block()), arm_of(none_pat, ret_block())]
+            expect(classify_match_arm_coverage(arms_empty_some)).to_equal(MatchTerminationStatus.MayFallThrough)
+
+            val valid_some_pat = pat_of(HirPatternKind.Enum(
+                type_: opt_i64,
+                variant: "Some",
+                payload: Some(HirPatternPayload.Tuple(patterns: [pat_of(HirPatternKind.Wildcard)]))
+            ))
+            val arms_valid = [arm_of(valid_some_pat, ret_block()), arm_of(none_pat, ret_block())]
+            expect(classify_match_arm_coverage(arms_valid)).to_equal(MatchTerminationStatus.Exhaustive)
+
+        it "definitely_terminates handles empty MatchCase and IfChain with match on else_block":
+            val empty_match_block = HirBlock(
+                stmts: [HirStmt(kind: HirStmtKind.Expr(expr: expr_of(HirExprKind.MatchCase(scrutinee: unit_expr(), arms: []))), span: sp())],
+                has: false,
+                value: unit_expr(),
+                span: sp()
+            )
+            expect(definitely_terminates(empty_match_block)).to_equal(false)
+
+            val opt_i64 = ty_opt(ty_i64())
+            val some_pat = pat_of(HirPatternKind.Enum(
+                type_: opt_i64,
+                variant: "Some",
+                payload: Some(HirPatternPayload.Tuple(patterns: [pat_of(HirPatternKind.Wildcard)]))
+            ))
+            val none_pat = pat_of(HirPatternKind.Enum(type_: opt_i64, variant: "None", payload: None))
+            val term_match_block = HirBlock(
+                stmts: [HirStmt(kind: HirStmtKind.Expr(expr: expr_of(HirExprKind.MatchCase(
+                    scrutinee: unit_expr(),
+                    arms: [arm_of(some_pat, ret_block()), arm_of(none_pat, ret_block())]
+                ))), span: sp())],
+                has: false,
+                value: unit_expr(),
+                span: sp()
+            )
+            expect(definitely_terminates(term_match_block)).to_equal(true)
+
+            val if_arm_term = HirIfArm(cond: unit_expr(), then_: ret_block(), span: sp())
+            val ifchain_no_else = HirBlock(
+                stmts: [HirStmt(kind: HirStmtKind.Expr(expr: expr_of(HirExprKind.IfChain(arms: [if_arm_term], else_: None))), span: sp())],
+                has: false,
+                value: unit_expr(),
+                span: sp()
+            )
+            expect(definitely_terminates(ifchain_no_else)).to_equal(false)
+
+            val ifchain_fallthrough_else = HirBlock(
+                stmts: [HirStmt(kind: HirStmtKind.Expr(expr: expr_of(HirExprKind.IfChain(arms: [if_arm_term], else_: Some(non_ret_block())))), span: sp())],
+                has: false,
+                value: unit_expr(),
+                span: sp()
+            )
+            expect(definitely_terminates(ifchain_fallthrough_else)).to_equal(false)
+
+            val ifchain_all_term = HirBlock(
+                stmts: [HirStmt(kind: HirStmtKind.Expr(expr: expr_of(HirExprKind.IfChain(arms: [if_arm_term], else_: Some(ret_block())))), span: sp())],
+                has: false,
+                value: unit_expr(),
+                span: sp()
+            )
+            expect(definitely_terminates(ifchain_all_term)).to_equal(true)
+
+    describe "codegen.spl Option matching without unwrap":
+        it "host_gpu_lane_max_packet_value handles None and Some via match":
+            var cg = CraneliftCodegenState.new(CraneliftTarget.Native, CodegenMode.Jit)
+            expect(cg.host_gpu_lane_max_packet_value(None)).to_equal(4096)
+            expect(cg.host_gpu_lane_max_packet_value(Some(MirOperand.const_int(512)))).to_equal(512)
+
+        it "load_smf_and_execute returns Err cleanly when SMF fails to load":
+            var pipeline = CodegenPipeline.jit()
+            val res = pipeline.load_smf_and_execute("/nonexistent_stage3_probe_dir/missing.smf")
+            expect(res.is_err()).to_equal(true)
+
+    describe "MIR lowering rejects zero unresolved method calls on the fixed patterns":
+        it "lowers pattern-bound Option matches without unresolved unwrap":
+            expect(lower_module_fatal_errors(CODEGEN_PATTERN_SRC)).to_equal([])
+
+        it "lowers LinkerError helper call without unresolved to_string":
+            expect(lower_module_fatal_errors(MOLD_PATTERN_SRC)).to_equal([])
+
+        it "lowers pattern-bound collection len and else_block match without unresolved is_empty or unwrap":
+            expect(lower_module_fatal_errors(NARROWING_PATTERN_SRC)).to_equal([])
