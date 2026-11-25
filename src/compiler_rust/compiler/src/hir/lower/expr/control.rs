@@ -487,8 +487,13 @@ impl Lowerer {
             param_local_indices.push(local_index);
         }
 
-        // Lower the lambda body with access to parameters
-        let body_hir = Box::new(self.lower_expr(body, ctx)?);
+        // Lower the lambda body with access to parameters. Typed params carry
+        // their unit identity into the body (SPL-UNIT-002); untyped ones
+        // shadow any outer local of the same name.
+        let unit_scope = self.enter_lambda_unit_scope(params, ctx);
+        let body_result = self.lower_expr(body, ctx);
+        Self::leave_lambda_unit_scope(unit_scope, ctx);
+        let body_hir = Box::new(body_result?);
         let body_ty = body_hir.ty;
 
         // Restore context; lambda-local variables must not leak to the outer function.

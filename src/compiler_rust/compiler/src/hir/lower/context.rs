@@ -38,6 +38,12 @@ pub(super) struct FunctionContext {
     /// Unit identity of locals for SPL-UNIT-002: `Some(unit)` = a record unit,
     /// `None` = a known raw scalar; absent = unknown (never checked).
     pub local_unit_kinds: HashMap<String, Option<String>>,
+    /// Declared (or statically inferred) simple type name of locals that are
+    /// not units, so SPL-UNIT-002 can follow `p.field` / `p.method()`.
+    pub local_type_names: HashMap<String, String>,
+    /// Unit signature of locals bound to a lambda: typed params and the unit
+    /// identity of the body, for SPL-UNIT-002 at `f(x)`.
+    pub local_lambda_unit_sigs: HashMap<String, (Vec<(String, Option<String>)>, super::type_registration::UnitKind)>,
     /// Declared payload types for Result locals, keyed by local slot.
     ///
     /// The ordinary local type stores the runtime carrier (i64), so property
@@ -73,6 +79,8 @@ impl FunctionContext {
             is_me_method: false,
             static_call_type_hints: HashMap::new(),
             local_unit_kinds: HashMap::new(),
+            local_type_names: HashMap::new(),
+            local_lambda_unit_sigs: HashMap::new(),
             result_projection_types: HashMap::new(),
             lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
@@ -92,11 +100,36 @@ impl FunctionContext {
             is_me_method,
             static_call_type_hints: HashMap::new(),
             local_unit_kinds: HashMap::new(),
+            local_type_names: HashMap::new(),
+            local_lambda_unit_sigs: HashMap::new(),
             result_projection_types: HashMap::new(),
             lambda_local_fn_types: HashMap::new(),
             optional_trait_payloads: HashMap::new(),
             unsafe_depth: 0,
         }
+    }
+
+    /// (Re)bind the SPL-UNIT-002 facts of a local; `None` clears a fact so a
+    /// rebinding never inherits the previous binding's identity.
+    pub fn bind_local_unit_facts(
+        &mut self,
+        name: &str,
+        unit_kind: Option<Option<String>>,
+        type_name: Option<String>,
+        lambda_sig: Option<(Vec<(String, Option<String>)>, super::type_registration::UnitKind)>,
+    ) {
+        match unit_kind {
+            Some(kind) => self.local_unit_kinds.insert(name.to_string(), kind),
+            None => self.local_unit_kinds.remove(name),
+        };
+        match type_name {
+            Some(n) => self.local_type_names.insert(name.to_string(), n),
+            None => self.local_type_names.remove(name),
+        };
+        match lambda_sig {
+            Some(sig) => self.local_lambda_unit_sigs.insert(name.to_string(), sig),
+            None => self.local_lambda_unit_sigs.remove(name),
+        };
     }
 
     pub fn add_local(&mut self, name: String, ty: TypeId, mutability: Mutability) -> usize {

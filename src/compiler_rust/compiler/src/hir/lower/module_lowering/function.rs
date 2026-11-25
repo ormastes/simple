@@ -1351,8 +1351,20 @@ impl Lowerer {
                 param.inject,
             );
             self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
-            if let Some(kind) = param.ty.as_ref().and_then(Self::simple_type_name).and_then(|n| self.unit_kind_of_type_name(&n)) {
-                ctx.local_unit_kinds.insert(param.name.clone(), kind);
+            if let Some(n) = param.ty.as_ref().and_then(Self::simple_type_name) {
+                match self.unit_kind_of_type_name(&n) {
+                    Some(kind) => {
+                        ctx.local_unit_kinds.insert(param.name.clone(), kind);
+                    }
+                    None => {
+                        ctx.local_type_names.insert(param.name.clone(), n);
+                    }
+                }
+            }
+        }
+        if let Some(owner) = owner_type {
+            if ctx.lookup("self").is_some() {
+                ctx.local_type_names.insert("self".to_string(), owner.to_string());
             }
         }
 

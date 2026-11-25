@@ -323,6 +323,7 @@ impl Lowerer {
                 args,
                 generic_args,
             } => {
+                self.check_unit_method_call_args(receiver, method, args, ctx)?;
                 if let Some(lowered) = self.lower_trait_field_method_call(receiver, method, args, ctx)? {
                     return Ok(lowered);
                 }
