@@ -1,0 +1,156 @@
+#!/bin/sh
+# Unit contract test for scripts/release/publish-win-stage-rc.shs --abi msvc,
+# RC63 cli_role / provenance identity rules, and check_release_payload.shs gating.
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+pub="$repo/scripts/release/publish-win-stage-rc.shs"
+
+fx=$(mktemp -d) || { echo "ERROR — mktemp failed" >&2; exit 2; }
+trap 'rm -rf "$fx"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+fail() {
+  echo "FAIL — $*" >&2
+  exit 1
+}
+
+# 1. --help exits 0 and documents --abi msvc.
+help_out=$(sh "$pub" --help)
+printf '%s\n' "$help_out" | grep -Fq -- "--abi <gnu|msvc>" || fail "--help missing --abi"
+printf '%s\n' "$help_out" | grep -Fq "x86_64-pc-windows-msvc" || fail "--help missing msvc target"
+
+# 2. Invalid --abi exits 2.
+set +e
+sh "$pub" --abi bogus "$fx/missing" stage3 deadbeef --dry-run >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "expected exit 2 for invalid --abi, got $rc"
+
+# Mock stage3 executable that records env + argv and emits object / runnable hello.exe.
+cat > "$fx/mock-stage3.exe" <<EOF
+#!/bin/sh
+set -eu
+printf 'TARGET=%s FLAVOR=%s ABI=%s BUNDLE=%s LIB=%s INCLUDE=%s ARGS=%s\n' \
+  "\${SIMPLE_NATIVE_BUILD_TARGET:-}" "\${SIMPLE_LINKER_FLAVOR:-}" \
+  "\${SIMPLE_WINDOWS_ABI:-}" "\${SIMPLE_NATIVE_RUNTIME_BUNDLE:-}" \
+  "\${LIB:-}" "\${INCLUDE:-}" "\$*" >> "$fx/mock.log"
+out=
+emit_obj=0
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --emit-object) emit_obj=1; shift ;;
+    -o) out=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "\$out" ] || exit 3
+if [ "\$emit_obj" -eq 1 ]; then
+  printf 'COFF-OBJ-BYTES' > "\$out"
+else
+  cat > "\$out" <<'HELLO'
+#!/bin/sh
+echo "hello world"
+HELLO
+  chmod +x "\$out"
+fi
+EOF
+chmod +x "$fx/mock-stage3.exe"
+mock_sha=$(sha256sum "$fx/mock-stage3.exe" | cut -d' ' -f1)
+
+# 3. --abi msvc dry-run: preserves LIB/INCLUDE, sets msvc env/target, emits PROVENANCE.sdn + sha256.
+: > "$fx/mock.log"
+mkdir -p "$fx/out-msvc"
+out_msvc=$(LIB="/fake/msvc/lib" INCLUDE="/fake/msvc/inc" LIBPATH="/fake/msvc/libpath" \
+  SIMPLE_RC_TAG="rc-1.0.0-rc.99" \
+  sh "$pub" --abi msvc --out-dir "$fx/out-msvc" --dry-run "$fx/mock-stage3.exe" stage3 deadbeef)
+printf '%s\n' "$out_msvc" | grep -Fq "PASS — dry run, not published" || fail "msvc dry-run did not pass"
+printf '%s\n' "$out_msvc" | grep -Fq "abi=msvc target=x86_64-pc-windows-msvc" || fail "msvc summary mismatch: $out_msvc"
+printf '%s\n' "$out_msvc" | grep -Fq "asset=simple-stage3-1.0.0-rc.99-windows-x86_64-msvc.exe" || fail "msvc asset name mismatch"
+printf '%s\n' "$out_msvc" | grep -Fq "cli_role=bootstrap_only" || fail "missing cli_role=bootstrap_only in summary"
+
+grep -Fq "TARGET=x86_64-pc-windows-msvc FLAVOR=msvc ABI=msvc BUNDLE=core-c-bootstrap LIB=/fake/msvc/lib INCLUDE=/fake/msvc/inc" "$fx/mock.log" \
+  || fail "msvc env or LIB/INCLUDE preservation failed: $(cat "$fx/mock.log")"
+grep -Fq -- "--target x86_64-pc-windows-msvc --emit-object" "$fx/mock.log" || fail "missing msvc --emit-object target"
+
+[ -f "$fx/out-msvc/simple-stage3-1.0.0-rc.99-windows-x86_64-msvc.exe" ] || fail "missing staged msvc exe"
+[ -f "$fx/out-msvc/simple-stage3-1.0.0-rc.99-windows-x86_64-msvc.exe.sha256" ] || fail "missing staged msvc exe sha256"
+[ -f "$fx/out-msvc/PROVENANCE.sdn" ] || fail "missing staged PROVENANCE.sdn"
+[ -f "$fx/out-msvc/PROVENANCE.sdn.sha256" ] || fail "missing staged PROVENANCE.sdn.sha256"
+(cd "$fx/out-msvc" && sha256sum -c simple-stage3-1.0.0-rc.99-windows-x86_64-msvc.exe.sha256 >/dev/null) || fail "exe sha256 check failed"
+(cd "$fx/out-msvc" && sha256sum -c PROVENANCE.sdn.sha256 >/dev/null) || fail "PROVENANCE.sdn sha256 check failed"
+
+grep -Fq "cli_role: bootstrap_only" "$fx/out-msvc/PROVENANCE.sdn" || fail "PROVENANCE.sdn missing cli_role: bootstrap_only"
+grep -Fq "phase3_bootstrap_sha256: $mock_sha" "$fx/out-msvc/PROVENANCE.sdn" || fail "PROVENANCE.sdn missing phase3_bootstrap_sha256"
+grep -Fq "phase4_cli_sha256: none" "$fx/out-msvc/PROVENANCE.sdn" || fail "PROVENANCE.sdn must set phase4_cli_sha256: none"
+grep -Fq "phase4_cli_present: false" "$fx/out-msvc/PROVENANCE.sdn" || fail "PROVENANCE.sdn must set phase4_cli_present: false"
+grep -Fq "runtime_bundle: core-c-bootstrap" "$fx/out-msvc/PROVENANCE.sdn" || fail "PROVENANCE.sdn missing runtime_bundle"
+grep -Fq "stack_reserve: 67108864" "$fx/out-msvc/PROVENANCE.sdn" || fail "PROVENANCE.sdn missing stack_reserve"
+
+# 4. RC63 negative: reject --provenance aliasing P3 digest into phase4_cli_sha256.
+cat > "$fx/bad-alias.sdn" <<EOF
+provenance:
+  cli_role: bootstrap_only
+  phase3_bootstrap_sha256: $mock_sha
+  phase4_cli_sha256: $mock_sha
+EOF
+set +e
+SIMPLE_RC_TAG="rc-1.0.0-rc.99" sh "$pub" --abi msvc --provenance "$fx/bad-alias.sdn" --dry-run \
+  "$fx/mock-stage3.exe" stage3 deadbeef >/dev/null 2>"$fx/err-alias"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 for aliased phase4_cli_sha256, got $rc"
+grep -Fq "never be aliased as phase4_cli_sha256" "$fx/err-alias" || fail "missing RC63 alias diagnostic"
+
+# 5. RC63 negative: reject --provenance claiming cli_role: full_cli on stage3.
+cat > "$fx/bad-role.sdn" <<EOF
+provenance:
+  cli_role: full_cli
+  phase4_cli_sha256: none
+EOF
+set +e
+SIMPLE_RC_TAG="rc-1.0.0-rc.99" sh "$pub" --abi msvc --provenance "$fx/bad-role.sdn" --dry-run \
+  "$fx/mock-stage3.exe" stage3 deadbeef >/dev/null 2>"$fx/err-role"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 for cli_role: full_cli on stage3, got $rc"
+grep -Fq "cli_role must be 'bootstrap_only'" "$fx/err-role" || fail "missing RC63 role diagnostic"
+
+# 6. Valid --provenance preserved byte-identically.
+cat > "$fx/good-prov.sdn" <<EOF
+# custom preserved provenance
+provenance:
+  cli_role: bootstrap_only
+  phase3_bootstrap_sha256: $mock_sha
+  phase4_cli_sha256: none
+EOF
+mkdir -p "$fx/out-pres"
+SIMPLE_RC_TAG="rc-1.0.0-rc.99" sh "$pub" --abi msvc --provenance "$fx/good-prov.sdn" \
+  --out-dir "$fx/out-pres" --dry-run "$fx/mock-stage3.exe" stage3 deadbeef >/dev/null
+cmp -s "$fx/good-prov.sdn" "$fx/out-pres/PROVENANCE.sdn" || fail "supplied PROVENANCE.sdn bytes were altered"
+(cd "$fx/out-pres" && sha256sum -c PROVENANCE.sdn.sha256 >/dev/null) || fail "preserved PROVENANCE.sdn sha256 check failed"
+
+# 7. --payload-dir fail-closed via scripts/check_release_payload.shs.
+mkdir -p "$fx/bad-payload"
+set +e
+SIMPLE_RC_TAG="rc-1.0.0-rc.99" sh "$pub" --abi msvc --payload-dir "$fx/bad-payload" --dry-run \
+  "$fx/mock-stage3.exe" stage3 deadbeef >/dev/null 2>"$fx/err-payload"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 for invalid payload dir, got $rc"
+
+mkdir -p "$fx/good-payload"
+cp "$repo/LICENSE" "$fx/good-payload/LICENSE"
+cp "$repo/THIRD_PARTY_NOTICES.md" "$fx/good-payload/THIRD_PARTY_NOTICES.md"
+SIMPLE_RC_TAG="rc-1.0.0-rc.99" sh "$pub" --abi msvc --payload-dir "$fx/good-payload" --dry-run \
+  "$fx/mock-stage3.exe" stage3 deadbeef >/dev/null || fail "valid payload dir should pass"
+
+# 8. Default --abi gnu still unsets LIB/INCLUDE and targets x86_64-pc-windows-gnu.
+: > "$fx/mock.log"
+LIB="/should/be/unset" INCLUDE="/should/be/unset" SIMPLE_RC_TAG="rc-1.0.0-rc.99" \
+  sh "$pub" "$fx/mock-stage3.exe" stage3 deadbeef --dry-run >/dev/null
+grep -Fq "TARGET=x86_64-pc-windows-gnu FLAVOR=gnu ABI=gnu" "$fx/mock.log" || fail "default gnu env mismatch"
+grep -Fq "LIB= INCLUDE=" "$fx/mock.log" || fail "default gnu must unset LIB/INCLUDE"
+
+echo "PASS — publish-win-stage-rc --abi msvc, RC63 provenance, and payload contracts verified (8 checks)"

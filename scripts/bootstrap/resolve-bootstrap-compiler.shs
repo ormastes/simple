@@ -2,33 +2,57 @@
 # Pick the compiler that builds the next bootstrap phase.
 #
 #   sh scripts/bootstrap/resolve-bootstrap-compiler.shs --platform <p> [--config <sdn>]
-#      [--lane-dir build/bootstrap] [--work-dir <dir>]
+#      [--lane-dir build/bootstrap] [--work-dir <dir>] [--min-phase <N>]
 #
 # Selection (config/bootstrap.sdn `compiler:`, env SIMPLE_BOOTSTRAP_COMPILER wins):
 #   auto     local stage4 > stage3 > stage2 > stage1 of the lane, then the release binary,
-#            else none (caller falls back to the Rust seed)
+#            else none (caller falls back to the Rust seed unless min_phase > 1)
 #   local    local phases only;  release  release binary only;  seed  none
 #   <path>   that binary
+# Minimum phase floor (--min-phase > SIMPLE_BOOTSTRAP_MIN_PHASE > config `min_phase:` > 1):
+#   Candidates with phase < min_phase are skipped/rejected before probing.
+#   When --config is omitted and --platform selects Windows MSVC
+#   (x86_64-pc-windows-msvc / windows-msvc / windows-x86_64-msvc),
+#   config/bootstrap/windows-msvc.sdn is loaded automatically (min_phase: 3).
 # Every candidate must native-build AND run a hello world before it is chosen:
 # `--version` alone is not enough (a FreeBSD stage1 answered it and still could
 # not stage a compile). Prints "<path> <phase>" on stdout, exit 0; exit 1 when
-# no candidate qualified (use the seed); exit 2 on usage errors.
+# no candidate qualified (use the seed only when allowed); exit 2 on usage errors.
 set -u
 
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P) || script_root=""
 platform=
 config=config/bootstrap.sdn
+config_explicit=0
 lane_dir=build/bootstrap
 work_dir=${TMPDIR:-/tmp}/simple-bootstrap-compiler
+cli_min_phase=
 while [ $# -gt 0 ]; do
   case $1 in
-    --platform) platform=${2:-}; shift 2 ;;
-    --config) config=${2:-}; shift 2 ;;
-    --lane-dir) lane_dir=${2:-}; shift 2 ;;
-    --work-dir) work_dir=${2:-}; shift 2 ;;
+    --platform) [ $# -ge 2 ] || { printf 'resolve-bootstrap-compiler: --platform requires a value\n' >&2; exit 2; }; platform=$2; shift 2 ;;
+    --config) [ $# -ge 2 ] || { printf 'resolve-bootstrap-compiler: --config requires a value\n' >&2; exit 2; }; config=$2; config_explicit=1; shift 2 ;;
+    --lane-dir) [ $# -ge 2 ] || { printf 'resolve-bootstrap-compiler: --lane-dir requires a value\n' >&2; exit 2; }; lane_dir=$2; shift 2 ;;
+    --work-dir) [ $# -ge 2 ] || { printf 'resolve-bootstrap-compiler: --work-dir requires a value\n' >&2; exit 2; }; work_dir=$2; shift 2 ;;
+    --min-phase) [ $# -ge 2 ] || { printf 'resolve-bootstrap-compiler: --min-phase requires a value\n' >&2; exit 2; }; cli_min_phase=$2; shift 2 ;;
+    --min-phase=*) cli_min_phase=${1#--min-phase=}; shift ;;
+    --help|-h)
+      printf 'usage: sh scripts/bootstrap/resolve-bootstrap-compiler.shs --platform <p> [--config <sdn>] [--lane-dir <dir>] [--work-dir <dir>] [--min-phase <N>]\n'
+      exit 0 ;;
     *) printf 'resolve-bootstrap-compiler: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 [ -n "$platform" ] || { printf 'resolve-bootstrap-compiler: --platform is required\n' >&2; exit 2; }
+
+if [ "$config_explicit" -eq 0 ]; then
+  case $platform in
+    x86_64-pc-windows-msvc|windows-msvc|windows-x86_64-msvc)
+      if [ -f config/bootstrap/windows-msvc.sdn ]; then
+        config=config/bootstrap/windows-msvc.sdn
+      elif [ -n "$script_root" ] && [ -f "$script_root/config/bootstrap/windows-msvc.sdn" ]; then
+        config=$script_root/config/bootstrap/windows-msvc.sdn
+      fi ;;
+  esac
+fi
 
 sdn_value() {
   [ -f "$config" ] || return 0
@@ -44,8 +68,27 @@ mode=${SIMPLE_BOOTSTRAP_COMPILER:-$(sdn_value compiler)}
 mode=${mode:-auto}
 release=$(sdn_value compiler_release)
 release=${release:-latest}
+cfg_min_phase=$(sdn_value min_phase)
+allow_seed_fallback=$(sdn_value allow_seed_fallback)
+allow_seed_fallback=${allow_seed_fallback:-true}
+if [ -n "$cli_min_phase" ]; then
+  min_phase=$cli_min_phase
+elif [ -n "${SIMPLE_BOOTSTRAP_MIN_PHASE:-}" ]; then
+  min_phase=$SIMPLE_BOOTSTRAP_MIN_PHASE
+elif [ -n "$cfg_min_phase" ]; then
+  min_phase=$cfg_min_phase
+else
+  min_phase=1
+fi
+case $min_phase in
+  ''|*[!0-9]*) printf 'resolve-bootstrap-compiler: --min-phase must be a positive integer, got %s\n' "$min_phase" >&2; exit 2 ;;
+esac
+if [ "$min_phase" -lt 1 ]; then
+  printf 'resolve-bootstrap-compiler: --min-phase must be >= 1, got %s\n' "$min_phase" >&2
+  exit 2
+fi
 exe=
-case $platform in windows-*) exe=.exe ;; esac
+case $platform in windows-*|*-windows-*) exe=.exe ;; esac
 
 mkdir -p "$work_dir" || exit 2
 
@@ -93,6 +136,9 @@ qualifies() {
 
 try_local() {
   for phase in 4 3 2 1; do
+    if [ "$phase" -lt "$min_phase" ]; then
+      continue
+    fi
     cand=$lane_dir/stage$phase/simple$exe
     if qualifies "$cand"; then
       printf '%s %s\n' "$cand" "$phase"
@@ -122,7 +168,14 @@ try_release() {
     # needs it to find the bundled stdlib.
     SIMPLE_ASSET_ROOT=$(cd "$(dirname "$cand")/.." && pwd)
     export SIMPLE_ASSET_ROOT
-    phase=$(cat "$(dirname "$cand")/../PHASE" 2>/dev/null || echo 1)
+    phase=$(cat "$(dirname "$cand")/../PHASE" 2>/dev/null | tr -d '[:space:]')
+    case $phase in
+      ''|*[!0-9]*) phase=1 ;;
+    esac
+    if [ "$phase" -lt "$min_phase" ]; then
+      printf 'resolve-bootstrap-compiler: skipping %s from release %s (phase %s < min_phase %s)\n' "$cand" "$tag" "$phase" "$min_phase" >&2
+      continue
+    fi
     if qualifies "$cand"; then
       printf 'resolve-bootstrap-compiler: using %s from release %s (phase %s)\n' "$cand" "$tag" "$phase" >&2
       printf '%s %s\n' "$cand" "$phase"
@@ -132,13 +185,34 @@ try_release() {
   return 1
 }
 
+fail_no_candidate() {
+  if [ "$min_phase" -gt 1 ] || [ "$allow_seed_fallback" = false ]; then
+    printf 'resolve-bootstrap-compiler: no candidate with phase >= %s qualified (allow_seed_fallback=%s)\n' "$min_phase" "$allow_seed_fallback" >&2
+  fi
+  exit 1
+}
+
 case $mode in
-  seed) exit 1 ;;
-  auto) try_local || try_release ;;
-  local) try_local ;;
-  release) try_release ;;
+  seed)
+    if [ "$min_phase" -gt 1 ] || [ "$allow_seed_fallback" = false ]; then
+      printf 'resolve-bootstrap-compiler: refusing seed mode (min_phase=%s, allow_seed_fallback=%s)\n' "$min_phase" "$allow_seed_fallback" >&2
+    fi
+    exit 1 ;;
+  auto) try_local || try_release || fail_no_candidate ;;
+  local) try_local || fail_no_candidate ;;
+  release) try_release || fail_no_candidate ;;
   *)
-    if qualifies "$mode"; then printf '%s %s\n' "$mode" "${SIMPLE_BOOTSTRAP_COMPILER_PHASE:-1}"
+    explicit_phase=${SIMPLE_BOOTSTRAP_COMPILER_PHASE:-1}
+    case $explicit_phase in
+      ''|*[!0-9]*)
+        printf 'resolve-bootstrap-compiler: invalid SIMPLE_BOOTSTRAP_COMPILER_PHASE=%s\n' "$explicit_phase" >&2
+        exit 2 ;;
+    esac
+    if [ "$explicit_phase" -lt "$min_phase" ]; then
+      printf 'resolve-bootstrap-compiler: refusing configured compiler %s (phase %s < min_phase %s)\n' "$mode" "$explicit_phase" "$min_phase" >&2
+      exit 1
+    fi
+    if qualifies "$mode"; then printf '%s %s\n' "$mode" "$explicit_phase"
     else printf 'resolve-bootstrap-compiler: configured compiler %s did not qualify\n' "$mode" >&2; exit 1
     fi ;;
 esac
