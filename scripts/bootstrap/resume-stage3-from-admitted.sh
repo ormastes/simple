@@ -750,10 +750,23 @@ helper_sha_before=$(bootstrap_stage3_hash_file "$helper")
 helper_bundle_before=$(bootstrap_stage3_helper_bundle_fingerprint)
 seed_fingerprint=$(bootstrap_stage3_manifest_value inputs_fingerprint "$stamp")
 progress="$output/bootstrap-build-progress.events"
-memory_snapshot="$stage3/memory-snapshot-v1.$$.events"
-phase_profile="$stage3/phase-profile.$$.events"
-memory_admission="$stage3/memory-admission.$$.env"
-evidence_run_id="stage3-${platform}-$$"
+stage3_attempt_ts=$(date -u '+%Y%m%dT%H%M%SZ') || stage3_attempt_ts=0
+stage3_attempt_nonce="${stage3_attempt_ts}-$$"
+stage3_attempt_seq=0
+while [ "$stage3_attempt_seq" -lt 1000 ] && {
+      [ -e "$stage3/memory-snapshot-v1.${stage3_attempt_nonce}.events" ] ||
+      [ -L "$stage3/memory-snapshot-v1.${stage3_attempt_nonce}.events" ] ||
+      [ -e "$stage3/phase-profile.${stage3_attempt_nonce}.events" ] ||
+      [ -L "$stage3/phase-profile.${stage3_attempt_nonce}.events" ] ||
+      [ -e "$stage3/memory-admission.${stage3_attempt_nonce}.env" ] ||
+      [ -L "$stage3/memory-admission.${stage3_attempt_nonce}.env" ]; }; do
+  stage3_attempt_seq=$((stage3_attempt_seq + 1))
+  stage3_attempt_nonce="${stage3_attempt_ts}-$$-${stage3_attempt_seq}"
+done
+memory_snapshot="$stage3/memory-snapshot-v1.${stage3_attempt_nonce}.events"
+phase_profile="$stage3/phase-profile.${stage3_attempt_nonce}.events"
+memory_admission="$stage3/memory-admission.${stage3_attempt_nonce}.env"
+evidence_run_id="stage3-${platform}-${stage3_attempt_nonce}"
 [ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
 [ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
 [ ! -e "$memory_admission" ] && [ ! -L "$memory_admission" ] || exit 1
