@@ -1,3 +1,40 @@
+## Resolution 2026-11-25 — RESOLVED (fixed in the current seed)
+
+Verified on the pinned release seed `bin/simple.exe` v1.0.0-rc.1
+(build-commit `1343b77bbaa`, 38,403,072 bytes) on Windows, the same
+`bin/simple run` invocation the doc used:
+
+- Exact doc repro (`S(0)` positional constructor, `s.ready = 1`,
+  `s.readonly = 1`, direct `print "ready={s.ready} ro={s.readonly}
+  rsv={s.reserved}"`) now prints `ready=1 ro=1 rsv=0` — was
+  `ready=nil ro=nil rsv=0`.
+- JIT engagement proven, not assumed: the named-field constructor form still
+  demotes with `[engine-demotion] reason=jit-compile-error ... bitfield
+  constructors currently accept exactly one positional raw value`, so the
+  positional form above really executes through the cranelift JIT path.
+- Run-path probe `test/01_unit/compiler/codegen/probe_packed_bitfield_read_jit.spl`
+  under `SIMPLE_EXECUTION_MODE=jit` and `=interpreter`: 24/24 PASS, no `nil`
+  anywhere in the output.
+- The probe was also extended this session with the `status_*` (typed vs
+  erased), `mixed_*` (widths 4/12/16, tag-aliasing payloads 9/2730/43981),
+  `mixed_arith`, and `status_zero_*` arms that
+  `packed_bitfield_field_read_jit_spec.spl` has asserted since 2026-08-17 but
+  the landed probe never printed (transplant-era spec/probe marker mismatch);
+  existing markers used by `packed_bitfield_field_read_tagging_spec.spl` are
+  unchanged. The spec itself could not be executed here — `bin/simple.exe
+  test` is repo-wide blocked at this HEAD by the seed's
+  `unknown decorator '@representation_boundary'` rejection — so the spec was
+  verified through its probe oracle run directly under both engines.
+- The named-field-constructor HIR rejection noted under "Contrast" still
+  exists (interpreter fallback keeps that form correct); it is a separate
+  accepted-limitation surface, not this bug.
+
+The precise fixing commit is not isolable because the release branch history
+contains whole-tree transplants (`88aac2ffe28`), but the current seed's
+behavior on the exact repro is the authoritative evidence.
+
+---
+
 ## Re-verified 2026-08-17 — STILL OPEN, symptom unchanged
 
 ## Triage 2026-09-13
@@ -16,7 +53,7 @@ here (resource rules forbid building the main compiler in this lane).
 
 # JIT: `@packed` bitfield field reads return `nil` (positional raw constructor)
 
-Status: OPEN (P1)
+Status: RESOLVED (verified 2026-11-25 on pinned seed v1.0.0-rc.1 — see Resolution section above)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-10 by stream M3, while restoring `NullBlockStatusRegister`'s
 `@packed` bitfields (`null_block_status_register_lost_packed_bitfields_2026-08-10.md`).
