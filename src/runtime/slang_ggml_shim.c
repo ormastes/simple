@@ -605,6 +605,25 @@ int64_t slang_ggml_request_configure(int64_t entries) {
     return entries;
 }
 
+static struct llama_context *g_idle_ctx = NULL;
+static int64_t g_idle_ctx_limit = 0;
+static uint64_t g_idle_ctx_gen = 0;
+static int g_idle_ctx_warm = 0;
+static int g_idle_ctx_matched_cpu = 0;
+static int32_t g_idle_ctx_threads = 0;
+
+static void slang_idle_ctx_drop(void) {
+    if (g_idle_ctx != NULL) {
+        llama_free(g_idle_ctx);
+        g_idle_ctx = NULL;
+    }
+    g_idle_ctx_limit = 0;
+    g_idle_ctx_gen = 0;
+    g_idle_ctx_warm = 0;
+    g_idle_ctx_matched_cpu = 0;
+    g_idle_ctx_threads = 0;
+}
+
 int64_t slang_ggml_context_profile_configure(int64_t matched_cpu, int64_t threads) {
     if ((matched_cpu != 0 && matched_cpu != 1) || threads < 0 || threads > INT32_MAX)
         return SLANG_ERR_INVALID;
@@ -612,6 +631,7 @@ int64_t slang_ggml_context_profile_configure(int64_t matched_cpu, int64_t thread
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     if (g_physical_pool.active) return SLANG_ERR_BUSY;
 #endif
+    slang_idle_ctx_drop();
     g_matched_cpu_context = matched_cpu != 0;
     g_context_threads = (int32_t)threads;
     return 0;
@@ -1343,6 +1363,7 @@ int64_t slang_ggml_prefix_cache_mode_configure(int64_t mode, int64_t cells) {
         int base = restore ? 3 : (int)mode;   /* mode 4 = mode 3 plus the host restore */
         if (base != g_tree_mode || restore != g_tree_host_restore || cells != g_tree_cells_cfg) {
             slang_tree_destroy();
+            slang_idle_ctx_drop();
             if (mode != 0) slang_prefix_clear_all(0);
         }
         g_tree_mode = base;
@@ -1382,6 +1403,7 @@ static int64_t slang_request_create_model_locked(struct llama_model *model, int6
     /* The tree context is built on the default model; a model-handle request
      * always gets its own context. */
     int tree = g_tree_mode && !physical_only && model_handle == 0;
+    int reused_warm = 0;
     if (tree) {
         if (g_tree_ctx == NULL) {
             int64_t cells = g_tree_cells_cfg > 0 ? g_tree_cells_cfg : n_ctx * 4;
@@ -1409,25 +1431,40 @@ static int64_t slang_request_create_model_locked(struct llama_model *model, int6
         smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
         greedy = llama_sampler_init_greedy();
     } else if (!physical_only) {
-        struct llama_context_params cp = llama_context_default_params();
-        cp.n_ctx = (uint32_t)n_ctx;
-        cp.n_batch = cp.n_ctx;
+        if (model_handle == 0 && g_idle_ctx != NULL &&
+            g_idle_ctx_limit == n_ctx &&
+            g_idle_ctx_gen == g_model_generation &&
+            g_idle_ctx_matched_cpu == g_matched_cpu_context &&
+            g_idle_ctx_threads == g_context_threads) {
+            ctx = g_idle_ctx;
+            reused_warm = g_idle_ctx_warm;
+            g_idle_ctx = NULL;
+            g_idle_ctx_limit = 0;
+            g_idle_ctx_gen = 0;
+            g_idle_ctx_warm = 0;
+            g_idle_ctx_matched_cpu = 0;
+            g_idle_ctx_threads = 0;
+        } else {
+            struct llama_context_params cp = llama_context_default_params();
+            cp.n_ctx = (uint32_t)n_ctx;
+            cp.n_batch = cp.n_ctx;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
-        if (g_matched_cpu_context) {
-            cp.n_ubatch = cp.n_ctx;
-            cp.n_seq_max = 1;
-            cp.type_k = GGML_TYPE_F32;
-            cp.type_v = GGML_TYPE_F32;
-            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
-            cp.offload_kqv = false;
-        }
-        if (g_context_threads > 0) {
-            cp.n_threads = g_context_threads;
-            cp.n_threads_batch = g_context_threads;
-        }
+            if (g_matched_cpu_context) {
+                cp.n_ubatch = cp.n_ctx;
+                cp.n_seq_max = 1;
+                cp.type_k = GGML_TYPE_F32;
+                cp.type_v = GGML_TYPE_F32;
+                cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+                cp.offload_kqv = false;
+            }
+            if (g_context_threads > 0) {
+                cp.n_threads = g_context_threads;
+                cp.n_threads_batch = g_context_threads;
+            }
 #endif
-        ctx = llama_init_from_model(model, cp);
-        if (ctx == NULL) return SLANG_ERR_NO_CTX;
+            ctx = llama_init_from_model(model, cp);
+            if (ctx == NULL) return SLANG_ERR_NO_CTX;
+        }
         struct llama_sampler_chain_params sp = llama_sampler_chain_default_params();
         smpl = llama_sampler_chain_init(sp);
         greedy = llama_sampler_init_greedy();
@@ -1453,6 +1490,7 @@ static int64_t slang_request_create_model_locked(struct llama_model *model, int6
     old->context_limit = n_ctx;
     old->generation = generation; old->model_generation = g_model_generation;
     old->model = model; old->model_handle = model_handle;
+    old->warm = reused_warm;
     old->active = 1;
     g_request_count++;
     return slang_request_handle(slot, generation);
@@ -1605,7 +1643,22 @@ static int64_t slang_request_close_locked(int64_t handle) {
     struct slang_model_slot *model_slot = slang_model_slot_get(request->model_handle);
     if (model_slot != NULL && model_slot->requests > 0) model_slot->requests--;
     if (request->smpl) llama_sampler_free(request->smpl);
-    if (request->ctx && !request->tree) llama_free(request->ctx);
+    if (request->ctx && !request->tree) {
+        if (!request->physical_only && !request->cancelled &&
+            request->model_handle == 0 &&
+            request->model_generation == g_model_generation &&
+            g_idle_ctx == NULL) {
+            llama_memory_clear(llama_get_memory(request->ctx), true);
+            g_idle_ctx = request->ctx;
+            g_idle_ctx_limit = request->context_limit;
+            g_idle_ctx_gen = request->model_generation;
+            g_idle_ctx_warm = request->warm;
+            g_idle_ctx_matched_cpu = g_matched_cpu_context;
+            g_idle_ctx_threads = g_context_threads;
+        } else {
+            llama_free(request->ctx);
+        }
+    }
     free(request->str); free(request->out); free(request->tok);
     free(request->path);
     uint64_t next_generation = request->generation < SLANG_REQUEST_MAX_GENERATION
@@ -1643,6 +1696,7 @@ static int64_t slang_free_locked(void) {
     int compat_active = slang_compat_request() != NULL;
     if (g_request_count > (compat_active ? 1 : 0)) return SLANG_ERR_BUSY;
     if (compat_active) slang_request_close_locked(g_compat_handle);
+    slang_idle_ctx_drop();
     slang_tree_destroy();
     g_tree_mode = 0; g_tree_host_restore = 0; g_tree_cells_cfg = 0;
     if (g_model) { llama_model_free(g_model);  g_model = NULL; }
