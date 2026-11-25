@@ -149,3 +149,16 @@ and no bridge artifact exists. The failure is now classified as old-generation
 bootstrap aggregate HIR transport, not CLI dispatch. Do not run another bridge
 generation until a focused aggregate-construction regression and source repair
 exist.
+
+## Triage 2026-11-25 (work/p2w1-aj-20261125) — SKIP, header remains accurate
+
+No code change this pass. The header ("resolved for entry closure; downstream
+bootstrap remains open") matches the body: the entry-closure stall was fixed
+2026-07-25, and every follow-up since (2026-07-26 sessions) is old-generation
+bootstrap aggregate-HIR transport work that requires bounded
+incremental-generation rebuilds of the self-hosted compiler on the original
+Linux host. That is full-bootstrap work, not a bounded pure-Simple fix, and
+this Windows host cannot run any generation (pinned seed rejects
+`@representation_boundary` repo-wide at HEAD). The doc's own guidance stands:
+do not run another bridge generation until a focused aggregate-construction
+regression and source repair exist.

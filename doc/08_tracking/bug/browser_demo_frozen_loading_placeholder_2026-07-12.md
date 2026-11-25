@@ -65,3 +65,21 @@ Two acceptable directions, either is sufficient:
 
 No navigation logic was implemented as part of filing this bug.
 
+
+## Triage 2026-11-25 (work/p2w1-aj-20261125) — SKIP (owner decision reserved)
+
+No code change this pass. Re-verified the symptom is still live at
+`origin/release/1.0.0` (f3bb6b4549b): `browser_demo_hosted.spl` still calls
+`update_content` exactly once (line 27) before a `while running:` loop that
+only watches `WM_EVENT_CLOSE` — the frozen "Loading:" placeholder is unchanged.
+
+Not fixed here because the doc's two acceptable directions are a product
+decision, not a mechanical repair: (1) real navigation means wiring the Simple
+Web fetch/render pipeline into this app (a feature, not a bug fix); (2)
+demo-only relabeling means renaming a launcher-visible "Browser" identity —
+removing/gating a registered SimpleOS app from the launcher is an owner call
+about product surface. Either direction is bounded once chosen; the choice
+itself is reserved. Recommend the owner pick a direction; direction 2 is the
+small one (relabel window title/body text in `browser_demo_hosted.spl` and
+adjust the launcher entries at
+`src/os/services/launcher/launcher_registry.spl:214-215`).
