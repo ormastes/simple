@@ -1,9 +1,10 @@
 # rt_file_lock (runtime_native.c) uses mixed close spellings
 
-- **Status:** open
+- **Status:** fixed
 - **Severity:** low (consistency and maintainability; no behaviour difference found)
 - **Found:** 2026-11-24, during the Win32/POSIX de-duplication review (plan P3, which is NO-GO)
-- **Location:** `src/runtime/runtime_native.c`, `rt_file_lock` / `rt_file_unlock` (about lines 15007-15090 on release/1.0.0 at 9ad6ef27f18)
+- **Fixed:** 2026-11-25, replaced all 7 raw `_close(fd)` / `close(fd)` sites in `rt_file_lock` and `rt_file_unlock` with `rt_crt_close(fd)`
+- **Location:** `src/runtime/runtime_native.c`, `rt_file_lock` / `rt_file_unlock` (lines 14640-14724)
 
 ## Observation
 
@@ -21,7 +22,10 @@ The descriptor is opened with `rt_crt_open()`, but the close calls are spelled t
 - If `rt_crt_close` ever gains bookkeeping (fd tracking, EINTR policy), the bare `_close`/`close` sites will silently bypass it.
 - The asymmetry also blocked a mechanical de-duplication of the lock poll loop (plan P3): sharing the loop would have quietly "fixed" the spellings.
 
-## Fix (when picked up)
+## Fix (implemented)
 
-- Use `rt_crt_close` at every close site in both functions. Make no other change.
-- Pin the result with `src/runtime/test/runtime_file_lock_zero_timeout_v2_test.c` and a contended-timeout case.
+- Replaced all 7 bare `_close(fd)` / `close(fd)` sites in `rt_file_lock` and `rt_file_unlock` (`src/runtime/runtime_native.c`) with `rt_crt_close(fd)` (4 `_WIN32` error/close sites and 1 POSIX hard-error site in `rt_file_lock`; both `_WIN32` and POSIX close sites in `rt_file_unlock`). Made no other change.
+- Verified with:
+  - `src/runtime/test/rt_file_lock_windows_selfcheck.c` (wired into `scripts/check/check-bootstrap-windows-c-admission.shs` and run against both `runtime_native.c` and `runtime_host_file_exports.c`).
+  - `src/runtime/test/rt_file_lock_crt_close_selfcheck.c` (standalone C selfcheck covering `rt_crt_open`/`rt_crt_close`, `rt_file_lock` error/contention paths, `rt_file_unlock` negative-fd safety, and zero-leak cleanup against `runtime_native.c`, compiled and run on Windows `llvm-mingw`, Windows `clang-cl /MD`, and Linux `clang-18`).
+- Note: `src/runtime/test/runtime_file_lock_zero_timeout_v2_test.c` targets the legacy `runtime.c` / `platform/unix_common.h` provider (`NOT_RUN`, excludes `runtime_native.c`) and was left unmodified.
