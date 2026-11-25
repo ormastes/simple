@@ -1,11 +1,18 @@
 # SCV compile snapshots are bounded: publishing past the cap evicts the oldest.
 use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.scv.compile_snapshot.{scv_compile_snapshot_provenance_v1,
     scv_compile_snapshot_receipt_v1, scv_compile_snapshot_retain_newest_v1,
-    scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1}
+    scv_compile_snapshot_lease_acquire_v1, scv_compile_snapshot_lease_release_v1,
+    scv_compile_snapshot_acquire_v2, scv_compile_snapshot_reuse_select_v1}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_filesystem_event_v1,
+    compile_source_inventory_apply_and_publish_v1}
 use app.io.mod.{dir_create}
 use app.io.file_ops.{path_absolute}
-use std.nogc_sync_mut.io_runtime.{file_write, dir_exists, file_exists}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io_runtime.{file_write, dir_exists, dir_remove, file_exists}
 
 extern fn rt_getpid() -> i64
 
@@ -84,3 +91,28 @@ describe "SCV compile snapshot retention":
         scv_compile_snapshot_lease_release_v1(cache, "scv-revision-v1-000000000000000000000000000000000000000000000000000000000000000a")
         expect(scv_compile_snapshot_retain_newest_v1(cache, "scv-revision-v1-000000000000000000000000000000000000000000000000000000000000000c", 2, 0)).to_equal(1)
         expect(dir_exists(cache + "/snapshots/scv-revision-v1-000000000000000000000000000000000000000000000000000000000000000a")).to_equal(false)
+
+    it "reaps dead-pid staging directories on acquire and skips hidden .tmp entries during reuse selection":
+        val root = path_absolute("build/test-artifacts/scv-recover-acquire-{rt_getpid()}").replace("\\", "/")
+        dir_remove(root, true)
+        val cache = root + "/build/scv"
+        val src_content = "fn recover_probe() -> i64:\n    7\n"
+        expect(dir_create(root + "/src", true)).to_equal(true)
+        expect(file_write_bytes(root + "/src/main.spl", text_to_utf8_bytes(src_content))).to_equal(true)
+        expect(compile_source_inventory_apply_and_publish_v1(cache,
+            [compile_source_inventory_filesystem_event_v1("create", "src/main.spl", src_content)]).valid).to_equal(true)
+        val dead_tmp = cache + "/snapshots/.tmp.2147483000.stale"
+        val live_tmp = cache + "/snapshots/.tmp.{rt_getpid()}.live"
+        expect(dir_create(dead_tmp, true)).to_equal(true)
+        expect(dir_create(live_tmp, true)).to_equal(true)
+        file_write(dead_tmp + "/SCV_COMPILE_SNAPSHOT", "stale")
+        file_write(live_tmp + "/SCV_COMPILE_SNAPSHOT", "live")
+        val row = "src/main.spl|sha256_{sha256_text(src_content)}|{text_to_utf8_bytes(src_content).len()}"
+        val pre_reuse = scv_compile_snapshot_reuse_select_v1(root, cache, [row])
+        expect(pre_reuse.hits).to_equal(0)
+        expect(pre_reuse.snapshot_root).to_equal("")
+        val acquired = scv_compile_snapshot_acquire_v2(root, cache, ["src"])
+        expect(acquired.valid).to_equal(true)
+        expect(dir_exists(dead_tmp)).to_equal(false)
+        expect(dir_exists(live_tmp)).to_equal(true)
+        dir_remove(root, true)

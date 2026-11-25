@@ -30,6 +30,9 @@ use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
 use compiler.backend.jit_extern_resolution.{jit_module_extern_errors, jit_callee_names, jit_refused_import_errors}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
@@ -42,6 +45,39 @@ fn cranelift_file_read_bytes(path: text) -> [u8]:
     # nil on an unreadable file; both call sites already treat an empty result as
     # "empty or unreadable", so collapsing keeps the wrapper total (E-SFFI-016).
     rt_file_read_bytes(path) ?? []
+
+var _cranelift_temp_seq: i64 = 0
+
+pub fn cranelift_sanitize_module_name(module_name: text) -> text:
+    """Replace path separators in a module name so temp object filenames stay flat."""
+    val clean = module_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    if clean == "": "module" else: clean
+
+pub fn cranelift_temp_object_path(module_name: text) -> text:
+    """Build a collision-free temporary .o path scoped to this PID, timestamp, and sequence."""
+    _cranelift_temp_seq = _cranelift_temp_seq + 1
+    val safe_name = cranelift_sanitize_module_name(module_name)
+    "{_get_temp_dir()}/simple_cranelift_{safe_name}_{getpid()}_{time_now_unix_micros()}_{_cranelift_temp_seq}.o"
+
+fn cranelift_emit_and_read_object_bytes(cl_module: i64, module_name: text, log_emit: bool) -> Result<CodegenOutput, CompileError>:
+    """Emit a Cranelift module to a unique temp .o path, read its bytes, and always unlink it."""
+    val output_path = cranelift_temp_object_path(module_name)
+    if log_emit:
+        print "[cranelift-direct] emit {output_path}"
+    val ok = cranelift_emit_object(cl_module, output_path)
+    cranelift_free_module(cl_module)
+
+    if not ok:
+        val _deleted = file_delete(output_path)
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Failed to emit object file"))
+
+    val object_bytes = cranelift_file_read_bytes(output_path)
+    val _deleted = file_delete(output_path)
+    if object_bytes.len() == 0:
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Emitted object file was empty or unreadable: {output_path}"))
+    Ok(CodegenOutput.object(module_name, object_bytes))
 
 # ============================================================================
 # Cranelift Type Constants (must match cranelift_sffi.rs)
@@ -281,21 +317,7 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to compile function: {failed_function}"))
 
-    val output_path = "{_get_temp_dir()}/simple_cranelift_{module.name}.o"
-    print "[cranelift-direct] emit {output_path}"
-    val ok = cranelift_emit_object(cl_module, output_path)
-    cranelift_free_module(cl_module)
-
-    if not ok:
-        return Err(compileerror_backend_error(BackendKind.Cranelift,
-            "Failed to emit object file"))
-
-    val object_bytes = cranelift_file_read_bytes(output_path)
-    if object_bytes.len() == 0:
-        return Err(compileerror_backend_error(BackendKind.Cranelift,
-            "Emitted object file was empty or unreadable: {output_path}"))
-    val cg_out = CodegenOutput.object(module.name, object_bytes)
-    Ok(cg_out)
+    cranelift_emit_and_read_object_bytes(cl_module, module.name, true)
 
 impl Codegen for CraneliftCodegenAdapter:
     fn backend_kind() -> BackendKind: BackendKind.Cranelift
@@ -357,19 +379,7 @@ impl Codegen for CraneliftCodegenAdapter:
                 "Failed to compile function: {failed_function}"))
 
         # Emit object file
-        val output_path = "{_get_temp_dir()}/simple_cranelift_{module.name}.o"
-        val ok = cranelift_emit_object(cl_module, output_path)
-        cranelift_free_module(cl_module)
-
-        if not ok:
-            return Err(compileerror_backend_error(BackendKind.Cranelift,
-                "Failed to emit object file"))
-
-        val object_bytes = cranelift_file_read_bytes(output_path)
-        if object_bytes.len() == 0:
-            return Err(compileerror_backend_error(BackendKind.Cranelift,
-                "Emitted object file was empty or unreadable: {output_path}"))
-        Ok(CodegenOutput.object(module.name, object_bytes))
+        cranelift_emit_and_read_object_bytes(cl_module, module.name, false)
 
 # ============================================================================
 # Target Mapping
