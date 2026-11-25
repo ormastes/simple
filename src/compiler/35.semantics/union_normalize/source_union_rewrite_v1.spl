@@ -35,7 +35,7 @@ impl SourceUnionRewriterV1:
     fn original_symbol_type(symbol: SymbolId) -> HirType?:
         if self.original_types.has(symbol.id):
             return Some(self.original_types[symbol.id])
-        nil
+        None
 
     fn expression_type(expr: HirExpr) -> HirType?:
         match expr.kind:
@@ -47,9 +47,9 @@ impl SourceUnionRewriterV1:
             case _: ()
         if expr.has_type_ and expr.type_ != nil:
             match expr.type_.kind:
-                case Infer(_, _) | Error | Any: return nil
+                case Infer(_, _) | Error | Any: return None
                 case _: return Some(expr.type_)
-        nil
+        None
 
     me require_narrowed(expr: HirExpr) -> Result<(), SourceUnionErrorV1>:
         if val type_ = self.expression_type(expr):
@@ -168,22 +168,22 @@ impl SourceUnionRewriterV1:
                     self.annotate_symbol(symbol, mapped, statement.span)?
                     rewritten.kind = HirStmtKind.Let(symbol, mapped, value)
                 case Expr(value):
-                    rewritten.kind = HirStmtKind.Expr(self.expression(value, nil, result, depth + 2)?)
+                    rewritten.kind = HirStmtKind.Expr(self.expression(value, None, result, depth + 2)?)
                 case Assign(target, op, value):
                     val target_type = self.expression_type(target)
-                    if target_type == nil:
+                    if target_type.is_none():
                         return Err(self.error("assignment lacks resolved target type", statement.span))
-                    if op != nil:
+                    if op.is_some():
                         if val entry = self.map.union_entry(target_type.unwrap())?:
                             return Err(self.error("compound operation on union requires explicit narrowing", statement.span))
                     match target.kind:
                         case Var(_) | NamedVar(_, _): ()
                         case _: return Err(self.error("union-stage assignment requires an owned local", statement.span))
-                    val new_target = self.expression(target, nil, result, depth + 2)?
+                    val new_target = self.expression(target, None, result, depth + 2)?
                     val new_value = self.expression(value, target_type, result, depth + 2)?
                     rewritten.kind = HirStmtKind.Assign(new_target, op, new_value)
                 case Block(nested):
-                    rewritten.kind = HirStmtKind.Block(self.block(nested, nil, result, depth + 2)?)
+                    rewritten.kind = HirStmtKind.Block(self.block(nested, None, result, depth + 2)?)
                 case AsmAssert(_):
                     return Err(self.error("assembly carrier is outside the union source stage", statement.span))
             statements.push(rewritten)
@@ -283,12 +283,12 @@ impl SourceUnionRewriterV1:
             case Var(_) | NamedVar(_, _): out.kind = expr.kind
             case Unary(op, value):
                 self.require_narrowed(value)?
-                out.kind = HirExprKind.Unary(op, self.expression(value, nil, result, depth + 1)?)
+                out.kind = HirExprKind.Unary(op, self.expression(value, None, result, depth + 1)?)
             case Binary(op, left, right):
                 self.require_narrowed(left)?
                 self.require_narrowed(right)?
-                val first = self.expression(left, nil, result, depth + 1)?
-                val second = self.expression(right, nil, result, depth + 1)?
+                val first = self.expression(left, None, result, depth + 1)?
+                val second = self.expression(right, None, result, depth + 1)?
                 out.kind = HirExprKind.Binary(op, first, second)
             case Block(body):
                 out.kind = HirExprKind.Block(self.block(body, expected, result, depth + 1)?)
@@ -297,7 +297,7 @@ impl SourceUnionRewriterV1:
                 val test = self.expression(condition,
                     Some(HirType(kind: HirTypeKind.Bool, span: condition.span)), result, depth + 1)?
                 val yes = self.block(then_, expected, result, depth + 1)?
-                var no: HirBlock? = nil
+                var no: HirBlock? = None
                 if val other = else_: no = Some(self.block(other, expected, result, depth + 1)?)
                 out.kind = HirExprKind.If(test, yes, no)
                 actual = expected
@@ -306,15 +306,15 @@ impl SourceUnionRewriterV1:
                 var rewritten_arms: [HirBlock] = []
                 for arm in arms:
                     rewritten_arms = rewritten_arms.push(self.block(arm, expected, result, depth + 1)?)
-                var rewritten_else: HirBlock? = nil
+                var rewritten_else: HirBlock? = None
                 if val other = else_: rewritten_else = Some(self.block(other, expected, result, depth + 1)?)
                 out.kind = HirExprKind.CfgSelect(conds, rewritten_arms, rewritten_else)
                 actual = expected
             case MatchCase(scrutinee, arms):
                 val subject_type = self.expression_type(scrutinee)
-                var entry: SourceUnionEntryV1? = nil
+                var entry: SourceUnionEntryV1? = None
                 if val subject = subject_type: entry = self.map.union_entry(subject)?
-                val subject = self.expression(scrutinee, nil, result, depth + 1)?
+                val subject = self.expression(scrutinee, None, result, depth + 1)?
                 self.slots(arms.len(), expr.span)?
                 var rewritten: [HirMatchArm] = []
                 for arm in arms:
@@ -323,13 +323,13 @@ impl SourceUnionRewriterV1:
                     else:
                         var ordinary = arm
                         if arm.has_guard:
-                            ordinary.guard = self.expression(arm.guard, nil, result, depth + 1)?
+                            ordinary.guard = self.expression(arm.guard, None, result, depth + 1)?
                         ordinary.body = self.block(arm.body, expected, result, depth + 1)?
                         rewritten.push(ordinary)
                 out.kind = HirExprKind.MatchCase(subject, rewritten)
                 actual = expected
             case Return(value):
-                var returned: HirExpr? = nil
+                var returned: HirExpr? = None
                 if val operand = value:
                     returned = Some(self.expression(operand, Some(result), result, depth + 1)?)
                 elif val entry = self.map.union_entry(result)?:
@@ -339,11 +339,11 @@ impl SourceUnionRewriterV1:
             case Call(callee, args, type_args):
                 if type_args.len() != 0:
                     return Err(self.error("generic call is outside the union source stage", expr.span))
-                var symbol: SymbolId? = nil
+                var symbol: SymbolId? = None
                 match callee.kind:
                     case Var(id) | NamedVar(id, _): symbol = Some(id)
                     case _: ()
-                if symbol == nil:
+                if symbol.is_none():
                     return Err(self.error("indirect union-stage call has no local declaration", expr.span))
                 val id = symbol.unwrap()
                 if not self.map.module.functions.has(id):
@@ -363,11 +363,11 @@ impl SourceUnionRewriterV1:
                 for index in args.len()..function.params.len():
                     if not function.params[index].has_default:
                         return Err(self.error("call omits a required argument", expr.span))
-                out.kind = HirExprKind.Call(self.expression(callee, nil, result, depth + 1)?,
+                out.kind = HirExprKind.Call(self.expression(callee, None, result, depth + 1)?,
                     rewritten, type_args)
                 actual = Some(function.return_type)
             case EnumLit(type_, variant, payload):
-                var rewritten: HirEnumPayload? = nil
+                var rewritten: HirEnumPayload? = None
                 if val supplied = payload:
                     match supplied:
                         case Tuple(values):
@@ -375,14 +375,14 @@ impl SourceUnionRewriterV1:
                             var items: [HirExpr] = []
                             for value in values:
                                 self.require_narrowed(value)?
-                                items.push(self.expression(value, nil, result, depth + 1)?)
+                                items.push(self.expression(value, None, result, depth + 1)?)
                             rewritten = Some(HirEnumPayload.Tuple(items))
                         case Struct(fields):
                             self.slots(fields.len(), expr.span)?
                             var items: [(text, HirExpr)] = []
                             for (name, value) in fields:
                                 self.require_narrowed(value)?
-                                items.push((name, self.expression(value, nil, result, depth + 1)?))
+                                items.push((name, self.expression(value, None, result, depth + 1)?))
                             rewritten = Some(HirEnumPayload.Struct(items))
                 out.kind = HirExprKind.EnumLit(self.map.normalize_type(type_, expr.span)?, variant, rewritten)
                 actual = Some(type_)
@@ -391,7 +391,7 @@ impl SourceUnionRewriterV1:
                 var values: [(text, HirExpr)] = []
                 for (name, value) in fields:
                     self.require_narrowed(value)?
-                    values.push((name, self.expression(value, nil, result, depth + 1)?))
+                    values.push((name, self.expression(value, None, result, depth + 1)?))
                 out.kind = HirExprKind.StructLit(self.map.normalize_type(type_, expr.span)?, values)
                 actual = Some(type_)
             case TupleLit(values):
@@ -399,7 +399,7 @@ impl SourceUnionRewriterV1:
                 var items: [HirExpr] = []
                 for value in values:
                     self.require_narrowed(value)?
-                    items.push(self.expression(value, nil, result, depth + 1)?)
+                    items.push(self.expression(value, None, result, depth + 1)?)
                 out.kind = HirExprKind.TupleLit(items)
             case ArrayLit(values, element):
                 self.slots(values.len(), expr.span)?
@@ -408,28 +408,28 @@ impl SourceUnionRewriterV1:
                 out.kind = HirExprKind.ArrayLit(items, element)
             case Field(base, name, resolved):
                 self.require_narrowed(base)?
-                out.kind = HirExprKind.Field(self.expression(base, nil, result, depth + 1)?, name, resolved)
+                out.kind = HirExprKind.Field(self.expression(base, None, result, depth + 1)?, name, resolved)
             case TupleIndex(base, index):
                 self.require_narrowed(base)?
-                out.kind = HirExprKind.TupleIndex(self.expression(base, nil, result, depth + 1)?, index)
+                out.kind = HirExprKind.TupleIndex(self.expression(base, None, result, depth + 1)?, index)
             case Index(base, index):
                 self.require_narrowed(base)?
                 self.require_narrowed(index)?
-                val subject = self.expression(base, nil, result, depth + 1)?
-                val offset = self.expression(index, nil, result, depth + 1)?
+                val subject = self.expression(base, None, result, depth + 1)?
+                val offset = self.expression(index, None, result, depth + 1)?
                 out.kind = HirExprKind.Index(subject, offset)
             case Cast(value, type_):
                 self.require_narrowed(value)?
-                out.kind = HirExprKind.Cast(self.expression(value, nil, result, depth + 1)?,
+                out.kind = HirExprKind.Cast(self.expression(value, None, result, depth + 1)?,
                     self.map.normalize_type(type_, expr.span)?)
                 actual = Some(type_)
             case ConvertCall(value, type_):
                 self.require_narrowed(value)?
-                out.kind = HirExprKind.ConvertCall(self.expression(value, nil, result, depth + 1)?,
+                out.kind = HirExprKind.ConvertCall(self.expression(value, None, result, depth + 1)?,
                     self.map.normalize_type(type_, expr.span)?)
                 actual = Some(type_)
             case Try(value):
-                out.kind = HirExprKind.Try(self.expression(value, nil, result, depth + 1)?)
+                out.kind = HirExprKind.Try(self.expression(value, None, result, depth + 1)?)
             case _:
                 return Err(self.error("expression position has no admitted union conversion", expr.span))
         self.convert(out, actual, expected)
@@ -463,7 +463,7 @@ impl SourceUnionRewriterV1:
             for clause in contract.clauses:
                 var rewritten_clause = clause
                 rewritten_clause.predicate = self.expression(clause.predicate,
-                    nil, function.return_type, 1)?
+                    None, function.return_type, 1)?
                 clauses.push(rewritten_clause)
             rewritten_contract.clauses = clauses
             out.verification_contract = Some(rewritten_contract)
