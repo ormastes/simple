@@ -1,8 +1,9 @@
 # gen-lean CLI Infinite Recursion — Rust codegen unreachable - 2026-06-30
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — recursion fixed in the pure-Simple wrapper; see bottom section
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+(Previously "Open 2026-09-16 — needs owner triage" from the 2026-09-16
+bug-ledger normalization pass; resolution evidence now at the bottom of this
+file.)
 
 ## Status
 
