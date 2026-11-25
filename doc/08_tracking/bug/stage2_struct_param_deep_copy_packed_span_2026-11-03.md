@@ -3,11 +3,18 @@
 - **ID:** stage2_struct_param_deep_copy_packed_span_2026-11-03
 - **Priority:** P1 (phase 3: every real module -- `app.test_runner_new.test_runner_main` 1/320, `app.cli.native_build_main`
   14/1486, `app.protocol.mcp_request_envelope` 3/156 -- dies in HIR lowering on the stage3 candidate; hello survives)
-- **Status:** fix-implemented-verification-pending (2026-11-03). Tagged source workaround in
-  `src/compiler/20.hir/hir_lowering/binding_types.spl` (`hir_binding_direct_call_return_kind(kind: HirExprKind, symbols)`
-  replaces the by-value `HirExpr` parameter) and its only caller `hir_lowering/statements.spl` (`binding_source_type` passes
-  `source.kind`). Verification = a stage2 rebuild of the two modules (cgprobe/fable_hirfix2d, launched 22:28) relinked into a
-  stage3 candidate, then `C:/dev/p3new/f3/build.ps1 -Bin <candidate>` (test_runner_new closure) must pass HIR 1/320.
+- **Status:** resolved (2026-11-25). Root cause was NOT a packed `Span` in MIR struct-copy codegen:
+  `HirExpr.type_` is a non-optional `HirType` struct field (with `has_type_: bool` as the authoritative presence bit),
+  and producers storing `nil` / `None` / `HirType?` (`Option<HirType>`) directly into `HirExpr.type_` placed an
+  `RtCoreEnum` box (`word[1] = (discriminant << 32) | enum_id = 0x100000000`) where `HirType.span` lives. When any
+  callee ran `copy_struct_value_recursive` (`src/compiler/50.mir/mir_lowering_stmts.spl`), the non-null/non-nil
+  guard passed on the Option box and recursed into `0x100000000` as a `Span*`.
+  Commits `87aaaa999c7`, `735ceebbfc6`, and `105a7883010` fixed almost all `HirExpr` producers (`type_: HirType(Unit, ...)`
+  for untyped placeholders, bare unwrapped `HirType` for `retain_attributed_collection_type`, tuple destructuring, and
+  positional `t.N`), and `switch_operators_calls.spl` (`option_record_receiver_payload_v1`) unwraps typed `T?` records
+  into non-optional `T` fields. The final 3 remaining `type_: nil` / `type_: None` `HirExpr` producers
+  (`expression_core.spl` range index, `declaration_enum_metadata_v1.spl` enum discriminant/field default, and
+  `interpreter.spl` probe/fallback `HirExpr`s) were fixed and all 17 `@workaround` tags removed.
 
 ## Symptom
 `native-build --entry-closure` on a stage3 candidate (s3_fable9b / s3_fable13) parses the closure, then the HIR worker dies

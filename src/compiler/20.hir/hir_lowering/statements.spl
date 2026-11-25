@@ -1,6 +1,6 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_binding_index_element, hir_const_type_settled, hir_binding_tuple_elements}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_type_or_infer, hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_binding_index_element, hir_const_type_settled, hir_binding_tuple_elements}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -79,13 +79,8 @@ impl HirLowering:
     # with Error as the unknown sentinel, avoiding optional aggregate transport.
     me binding_source_type(source: HirExpr, bind_optional_payload: bool = false) -> HirType:
         var resolved: HirType = HirType(kind: HirTypeKind.Error, span: source.span)
-        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=the frozen stage2 loads (deep-copies) source.type_ even when has_type_ is false; the placeholder's packed span is then dereferenced (AV binding_source_type+0x194, addr 0x100000000). Test has_type_ in its own if.
-        var source_has_type: bool = false
         if source.has_type_:
-            if source.type_ != nil:
-                source_has_type = true
-        if source_has_type:
-            resolved = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+            resolved = source.type_
         else:
             # `if val x = e` desugars to `val x = e.?` with bind_optional_payload:
             # the binder's type comes from `e` (then projected below). This is
@@ -104,11 +99,11 @@ impl HirLowering:
                 case _: ()
         resolved
 
-    # Kind-only type transport for an untyped binding initializer (the frozen
-    # stage2 by-value HirExpr constraint above). `expr?` binds the Ok/Some
-    # payload of its operand's type: without it `val found = which(n)?` (which
-    # -> Result<text?, E>) stayed untyped and `if val p = found` bound a unit
-    # slot (E-BACKEND-LLVM-CONST-TYPE, sosix_spawn_checked).
+    # Kind-only type transport for an untyped binding initializer. `expr?`
+    # binds the Ok/Some payload of its operand's type: without it
+    # `val found = which(n)?` (which -> Result<text?, E>) stayed untyped and
+    # `if val p = found` bound a unit slot (E-BACKEND-LLVM-CONST-TYPE,
+    # sosix_spawn_checked).
     fn binding_kind_type(raw_kind: HirExprKind, span: Span) -> HirType:
         val unknown = HirType(kind: HirTypeKind.Error, span: span)
         val source_kind = hir_binding_transparent_kind(raw_kind)
@@ -167,7 +162,6 @@ impl HirLowering:
                 if definition.type_.is_some():
                     return definition.type_ ?? unknown
             return unknown
-        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=see hir_binding_direct_call_return_kind (pass the kind, never the HirExpr by value)
         if val declared_return = hir_binding_direct_call_return_kind(source_kind, self.symbols):
             return declared_return
         if val instantiated_direct = self.instantiated_direct_call_return_kind(source_kind):
@@ -178,10 +172,8 @@ impl HirLowering:
             return instantiated_return
         unknown
 
-    # Branch-tail / payload type for the `if` join. Kinds only cross calls
-    # and `type_` is read only under `has_type_` (frozen-stage2 by-value
-    # HirExpr / placeholder-span hazard,
-    # bug stage2_struct_param_deep_copy_packed_span_2026-11-03).
+    # Branch-tail / payload type for the `if` join (`type_` is read only when
+    # `has_type_` is true):
     # - a builtin `Ok(v)` / `Err(e)` call (symbol tagged by the
     #   unresolved-builtin fallback in expression_support; a user function
     #   named Ok/Err is not tagged) is a Result with the other arm unknown;
@@ -474,26 +466,9 @@ impl HirLowering:
         # Only the concrete Let payload substitutes the inference marker for
         # unknown types; symbol registration keeps its existing Error behavior.
         val resolved: HirType = self.binding_source_type(source, bind_optional_payload)
-        # Inlined hir_binding_type_or_infer (binding_types.spl). The frozen stage2
-        # deep-copies a by-value HirExpr argument at a second call hop and reads
-        # the packed HirType.span of the has_type_=false placeholder as a pointer
-        # (AV at hir_binding_type_or_infer+0x173; as a `me` method the same fault
-        # moved to binding_payload_type+0x137). Read `source` fields in place.
-        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=second by-value HirExpr hop faults on the packed span; read fields in place
         match resolved.kind:
             case HirTypeKind.Error:
-                if source.has_type_:
-                    val source_type: HirType = source.type_
-                    if bind_optional_payload:
-                        match source_type.kind:
-                            case HirTypeKind.Optional(inner):
-                                val payload_type: HirType = inner
-                                return payload_type
-                            case _:
-                                pass
-                    return source_type
-                val infer_span: Span = resolved.span
-                HirType(kind: HirTypeKind.Infer(0, 0), span: infer_span)
+                hir_binding_type_or_infer(source, bind_optional_payload)
             case _:
                 resolved
 
@@ -1118,7 +1093,7 @@ impl HirLowering:
             # stolen by Poll.unwrap and returns raw 0, `??` corrupts it too.
             # Removing the box removes the extraction, so there is nothing to corrupt.
             val v_lowered_init = self.lower_hir_expr(v_init)
-            val v_hir_init = if self.attributed_factory_call_kind(v_lowered_init.kind): self.retain_attributed_collection_type(v_lowered_init, v_hir_type) else: v_lowered_init
+            val v_hir_init = if v_has_annotation: self.retain_attributed_collection_type(v_lowered_init, v_hir_type) else: v_lowered_init
             self.validate_presence_binding(v_hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
             var v_sym_type = v_hir_type
             if not v_has_annotation:
@@ -1180,7 +1155,7 @@ impl HirLowering:
                 # No initializer: is_uninit_marker tells this synthesized NilLit
                 # apart from a source-written `nil`; see interp_is_uninit_marker_init.
                 HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
-            val vr_hir_init = if self.attributed_factory_call_kind(vr_lowered_init.kind): self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type) else: vr_lowered_init
+            val vr_hir_init = if vr_has_annotation: self.retain_attributed_collection_type(vr_lowered_init, vr_hir_type) else: vr_lowered_init
             self.validate_presence_binding(vr_hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
             if not vr_has_annotation:
                 val inferred = self.binding_source_type(vr_hir_init, s.bind_optional_payload)
@@ -1335,7 +1310,7 @@ impl HirLowering:
                 # get_symbol_type wrapper at hir_symbol_table_methods.spl:467) and is
                 # deliberately NOT migrated here, so it keeps receiving the boxed form.
                 val lowered_init = self.lower_hir_expr(init)
-                val hir_init = if self.attributed_factory_call_kind(lowered_init.kind): self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
+                val hir_init = if has_annotation: self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
                 self.validate_presence_binding(hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
                 var sym_type = hir_type
                 if not has_annotation:
@@ -1385,7 +1360,7 @@ impl HirLowering:
                 else:
                     # No initializer: is_uninit_marker marks the synthesized NilLit (see above).
                     HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: s.span), span: s.span, is_uninit_marker: true)
-                val hir_init = if self.attributed_factory_call_kind(lowered_init.kind): self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
+                val hir_init = if has_annotation: self.retain_attributed_collection_type(lowered_init, hir_type) else: lowered_init
                 self.validate_presence_binding(hir_init.kind, s.bind_optional_payload, s.binding_explicit_presence, s.span)
                 if not has_annotation:
                     val inferred = self.binding_source_type(hir_init, s.bind_optional_payload)

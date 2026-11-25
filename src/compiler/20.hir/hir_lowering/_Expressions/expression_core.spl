@@ -228,13 +228,6 @@ impl HirLowering:
                             self.error("attributed collection factory generic arguments do not match {expected}", span)
                     case _: ()
 
-    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=retain_attributed_collection_type takes the initializer HirExpr by value and its prologue copy faults (AV +0x16c, addr 0x100000000) for every binding; callers test the kind first so only attributed factory calls pay the copy
-    fn attributed_factory_call_kind(kind: HirExprKind) -> bool:
-        match kind:
-            case HirExprKind.MethodCall(_, method, _, _):
-                return method == "attributed_at_site" or method == "attributed_with_prior_at_site"
-            case _: return false
-
     me retain_attributed_collection_type(initializer: HirExpr, declared: HirType?) -> HirExpr:
         """Carry a written instance type through the compiler-owned wrapper."""
         if declared.is_none():
@@ -246,13 +239,17 @@ impl HirLowering:
                 if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
                     return initializer
                 val owner = _hir_expr_symbol_or_invalid(receiver.kind)
-                # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=storing the HirType? declared into the non-optional HirExpr.type_ keeps the Option word on stage2, and the next by-value copy of typed_receiver faults (AV validate_attributed_collection_factory+0x21d, addr 0x100000000); rebuild a bare HirType from the matched payload
+                # HirExpr.type_ is a non-optional HirType; unwrap `declared`
+                # into a bare HirType before constructing typed_receiver.
                 var declared_type: HirType = HirType(kind: HirTypeKind.Error, span: receiver.span)
-                match declared.kind:
-                    case HirTypeKind.Named(declared_owner, declared_args):
-                        if owner.id != declared_owner.id: return initializer
-                        declared_type = HirType(kind: HirTypeKind.Named(declared_owner, declared_args), span: receiver.span)
-                    case _: return initializer
+                if val declared_unwrapped = declared:
+                    match declared_unwrapped.kind:
+                        case HirTypeKind.Named(declared_owner, declared_args):
+                            if owner.id != declared_owner.id: return initializer
+                            declared_type = HirType(kind: HirTypeKind.Named(declared_owner, declared_args), span: receiver.span)
+                        case _: return initializer
+                else:
+                    return initializer
                 val typed_receiver = HirExpr(kind: receiver.kind, has_type_: true,
                     type_: declared_type, span: receiver.span, bracket_slice: receiver.bracket_slice)
                 # The ordinary expression path already checks family errors.
@@ -265,7 +262,6 @@ impl HirLowering:
                     has_type_: initializer.has_type_, type_: initializer.type_, span: initializer.span)
             case _: initializer
 
-    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=by-value HirExpr param faults in the frozen stage2 prologue copy (AV declared_static_method_resolution+0x1cd, addr 0x100000000); take the kind only
     fn declared_static_method_resolution(receiver_kind: HirExprKind, method: text) -> MethodResolution:
         # Keep the declared owner while HIR still owns the receiver expression.
         # Native MIR cannot reconstruct this from a nested MethodCall payload;
@@ -359,10 +355,8 @@ impl HirLowering:
         for raw_element in elements:
             # ANY-transport hazard sweep round 3: annotated rebind.
             val element: HirExpr = raw_element
-            # Read `type_` only under `has_type_` in its own if (frozen-stage2
-            # placeholder-span hazard, bug
-            # stage2_struct_param_deep_copy_packed_span_2026-11-03); only the
-            # kind crosses into the text helper.
+            # Read `type_` only when `has_type_` is true (the authoritative
+            # presence bit on HirExpr).
             var element_type = HirType(kind: HirTypeKind.Error, span: span)
             if element.has_type_:
                 element_type = element.type_
@@ -562,7 +556,6 @@ impl HirLowering:
                 return self.struct_type_param_names_by_name[owner_name]
         empty
 
-    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=take the kind, never a by-value HirExpr (frozen stage2 prologue copy fault)
     me instantiated_direct_call_return_kind(kind: HirExprKind) -> HirType?:
         """Instantiate a generic free/extern function's declared return type with explicit turbofish type_args."""
         match kind:
@@ -589,7 +582,6 @@ impl HirLowering:
             case _: ()
         None
 
-    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=take the kind, never a by-value HirExpr (frozen stage2 prologue copy fault)
     me instantiated_method_call_return_kind(kind: HirExprKind) -> HirType?:
         # Bug generic_method_return_subst_2026_11_09: method-call sibling of
         # instantiate_field_type_for_base. `b.poll()` on `b: Box<text?>` must
@@ -948,7 +940,6 @@ impl HirLowering:
                     if method_name_t == "keys" or method_name_t == "values":
                         if hir_args.len() == 0:
                             var mc_recv_type_opt: HirType? = None
-                            # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
                             if mc_lowered_receiver.has_type_:
                                 mc_recv_type_opt = mc_lowered_receiver.type_
                             else:
@@ -971,7 +962,7 @@ impl HirLowering:
                                         type_: HirType(kind: HirTypeKind.Array(mc_dict_value, None), span: e.span),
                                         span: e.span)
                                 case _: ()
-                    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=the by-value receiver copy faults (AV validate_attributed_collection_factory+0x22d) for ordinary method calls the callee rejects at once; test the method name before passing the HirExpr
+                    # Fast-path guard: skip by-value receiver copy for ordinary method calls.
                     if method_name_t == "attributed_at_site" or method_name_t == "attributed_with_prior_at_site":
                         self.validate_attributed_collection_factory(
                             mc_lowered_receiver, method_name_t, hir_args, e.span)
@@ -1102,7 +1093,8 @@ impl HirLowering:
                         val fld_tuple_elem_type = self.field_tuple_element_type(fld_lowered_base.kind, fld_tuple_idx)
                         # Tuple-returning calls need MIR's declared-return
                         # fallback; an absent local annotation is not a type.
-                        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=storing the HirType? fld_tuple_elem_type into the non-optional HirExpr.type_ kept the Option word (span 0x100000000); every later by-value copy of `t.N` faulted (stage3 F3/s4 any_expr_is_any). Store a bare HirType
+                        # HirExpr.type_ is a non-optional HirType; unwrap
+                        # fld_tuple_elem_type (`HirType?`) before storing.
                         var fld_tuple_has_type = false
                         var fld_tuple_type: HirType = HirType(kind: HirTypeKind.Unit, span: e.span)
                         if val fld_tuple_found = fld_tuple_elem_type:
@@ -1338,7 +1330,6 @@ impl HirLowering:
                         # true`. That malformed word later reaches the 16-byte
                         # HirType clone in `lower_hir_block`'s HirBlock
                         # construction and SIGSEGVs.
-                        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
                         # A Var/NamedVar base (a parameter or an inferred
                         # local such as `val param = params[i]`) carries no
                         # `type_` on the expression itself; its declared or
@@ -1365,7 +1356,7 @@ impl HirLowering:
                                         return HirExpr(
                                             kind: HirExprKind.Index(lowered_base, lowered_index),
                                             has_type_: false,
-                                            type_: nil,
+                                            type_: HirType(kind: HirTypeKind.Unit, span: e.span),
                                             span: e.span)
                                     return HirExpr(
                                         kind: HirExprKind.Index(lowered_base, lowered_index),
@@ -1570,7 +1561,6 @@ impl HirLowering:
                 if method_name_t == "keys" or method_name_t == "values":
                     if hir_args.len() == 0:
                         var fb_recv_type_opt: HirType? = None
-                        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=stage2 loads type_ even when has_type_ is false (placeholder packed span AV); has_type_ alone is the authoritative presence bit
                         if lowered_method_receiver.has_type_:
                             fb_recv_type_opt = lowered_method_receiver.type_
                         else:
@@ -1600,10 +1590,7 @@ impl HirLowering:
                 # it is evaluated before any pattern matches, so it must never
                 # see an arm's pattern bindings.
                 val hir_scrutinee = self.lower_hir_expr(scrutinee)
-                var scrutinee_type: HirType = HirType(kind: HirTypeKind.Error, span: hir_scrutinee.span)
-                if hir_scrutinee.has_type_:
-                    scrutinee_type = hir_scrutinee.type_
-                val match_subject_type = self.declared_match_subject_type_parts(hir_scrutinee.kind, hir_scrutinee.has_type_, scrutinee_type, hir_scrutinee.span)
+                val match_subject_type = self.declared_match_subject_type(hir_scrutinee)
                 # One invocation-owned description, shared by all arm/Or
                 # binders. Recursive matches prepare their own local value.
                 val union_pattern_context = self.prepare_source_union_match_v1(match_subject_type, arms)
