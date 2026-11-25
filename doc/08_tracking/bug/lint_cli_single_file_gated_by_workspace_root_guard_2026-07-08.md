@@ -7,7 +7,8 @@
   "clean file lints OK, exit 0".
 - **Area:** `src/app/io/cli_lint_commands.spl` (`cli_run_lint` `:33` root-guard call),
   `src/app/cli/lint_entry.spl` (help-on-bare-command), the `bin/simple` top-level dispatcher.
-- **Status:** OPEN — found 2026-07-08 while updating stale #38 assertions in
+- **Status:** RESOLVED 2026-11-25 (see verification section at bottom) — originally
+  found 2026-07-08 while updating stale #38 assertions in
   `code_quality_tools_spec.spl`.
 
 ## Finding 1 — single-file lint gated by workspace-root guard
@@ -55,3 +56,32 @@ This is why `code_quality_tools_spec.spl` was updated (2026-07-08, #38) to asser
 interpreter-mode failure for a file lint rather than a "clean file → exit 0 + OK" outcome. It fails
 closed (explicit message, non-zero exit) rather than silently, which is acceptable — but ideally the
 spec (or a companion) should drive the compiled `bin/simple lint` to cover real lint behavior.
+
+## 2026-11-25 verification (p3-bav lane) — Findings 1 and 2 FIXED; Finding 3 is accepted behavior — RESOLVED
+
+Verified by source inspection on release/1.0.0 (fe984a4a3a5). Runtime
+confirmation was environment-blocked: the tracked `bin/simple.exe` is the Rust
+seed and cannot load the lint entry (`unknown decorator
+'@representation_boundary'` in `src/app/cli/lint_entry.spl`), so the evidence
+below is code-level.
+
+- **Finding 1 — FIXED.** The workspace-root guard is no longer unconditional:
+  `src/app/io/cli_lint_commands.spl:486-488` runs
+  `_cli_run_workspace_root_guard()` only inside `if run_repo_gates:`, and
+  `run_repo_gates` is set solely by `--all` (`cli_lint_commands.spl:425-427`).
+  Single-file `simple lint <file>` no longer folds repo-wide guard violations
+  into its exit code — exactly the doc's fix direction.
+- **Finding 2 — FIXED.** The top-level dispatcher now fails closed on an
+  unknown bare token: `src/app/cli/_CliMain/main_and_help.spl:482-483` and
+  `:842` return `CLI_USAGE_ERROR_EXIT_CODE` (= 2,
+  `_CliMain/startup_policy.spl:27`) after `file not found: {first}`, with a
+  comment citing the follow-up bug doc
+  `cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md`.
+- **Finding 3 — accepted behavior, unchanged.** The interpreter-mode lint
+  limitation is still the intended fail-closed contract;
+  `test/03_system/feature/app/code_quality_tools_spec.spl:61-70` asserts it
+  (`to_contain("not supported in interpreter mode")`).
+
+Status: RESOLVED (Findings 1-2 fixed in source; Finding 3 documented
+fail-closed behavior). Runtime re-verification of `bin/simple lint <file>` exit
+codes should be re-run once a self-hosted pure-Simple binary is available.
