@@ -1,7 +1,7 @@
 # LLM Caret Messaging Composition Spec Compile Timeout
 
 Date: 2026-08-02
-Status: Open
+Status: Closed (2026-09-13; re-verified 2026-11-25)
 
 ## Symptom
 
@@ -38,3 +38,13 @@ closure rather than being evidence of a routing assertion failure.
 Not reproducible. `bin/simple test test/01_unit/app/llm_caret/messaging/composition_spec.spl --mode=interpreter --no-session-daemon` on the deployed seed completes in 14947ms (well under the 120s watchdog), `5 total, 5 passed, 0 failed`.
 
 - Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+STALE-CLOSED. Re-ran the focused command on this host with the tracked
+self-hosted binary:
+`SIMPLE_LIB=src bin/simple.exe test test/01_unit/app/llm_caret/messaging/composition_spec.spl --mode=interpreter`
+→ `SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0`,
+5/5 passed in 55.2 s wall — well under the 120 s watchdog. The header's
+"Status: Open" was stale against the 2026-09-13 re-check; header updated to
+Closed.
