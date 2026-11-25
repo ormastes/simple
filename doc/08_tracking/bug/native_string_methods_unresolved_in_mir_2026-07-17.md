@@ -1,8 +1,11 @@
 # Native path: `.parse_f64()` and `.to_upper()` unresolved in MIR lowering
-## Open 2026-09-16 — needs owner triage
+## Source-fixed; Cranelift execution evidence pending (re-confirmed 2026-11-25)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+Superseded 2026-11-25: the MIR dispatch arms and both regression specs are
+confirmed present at release/1.0.0 HEAD (see the dated note at the end);
+the 2026-09-01 addendum records green seed-interpreter runs of both specs.
 
 **Date:** 2026-07-17
 **Severity:** Medium (loud build failure, not silent-wrong; but a real
@@ -142,3 +145,27 @@ cranelift-jit via `[engine-receipt]`):
 - `test/01_unit/compiler/mir/text_upper_chars_to_float_mir_lowering_spec.spl` (defect repro + empty-concat pin)
 - `test/01_unit/compiler/mir/text_number_method_mir_arm_census_spec.spl` (class generalization census)
 
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+The source fix is confirmed at release/1.0.0 HEAD by inspection:
+
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` — the
+  text-special dispatch arm (line 5253) now includes `to_upper`, `upper`,
+  `chars`, `to_float`, and the `parse_f64`/`parse_float`/`parse_f64_safe`
+  alias family (`mir_text_parse_float_alias_v1`, line 82); the symbol table
+  at line 5348 maps `to_upper`/`upper` to `rt_string_to_upper`. This is
+  exactly the "Suggested direction" fix, plus the 2026-09-01 addendum class.
+- Both regression specs exist:
+  `test/01_unit/compiler/mir/text_upper_chars_to_float_mir_lowering_spec.spl`
+  and `test/01_unit/compiler/mir/text_number_method_mir_arm_census_spec.spl`.
+- Execution limit: could not re-run the specs on this Windows host — the
+  pinned seed (Rust v1.0.0-rc.1) rejects the tree-wide
+  `@representation_boundary` decorator (cfd89933699), which blocks
+  `bin/simple.exe test` repo-wide at this HEAD (the specs import
+  `src/compiler` modules that carry the decorator). The 2026-09-01
+  addendum's green Windows seed-interpreter runs remain the execution
+  evidence. The addendum's deliberate divergence (`int.to_float()` stays
+  loud natively) and the live-census remainder (other zero-arg methods
+  without MIR arms) are separate, already-documented follow-ups, not this
+  bug.
