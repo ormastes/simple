@@ -1,8 +1,6 @@
 # RISC-V32 hosted Linux contract selects an ELF64 sysroot
-## Open 2026-09-16 — needs owner triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Status:** Resolved 2026-07-16 (source fixed fail-closed); hosted RISC-V32 remains unsupported by design. Verified 2026-11-25 — see note at bottom.
 
 **Status:** Source fixed fail-closed; hosted RISC-V32 remains unsupported  
 **Component:** compiler/backend target and linker contracts  
@@ -47,3 +45,18 @@ of collapsing `none-elf` back to the hosted RV32 contract. The gate then require
 bare-metal recovery target to emit a nonempty ELF32 RISC-V relocatable object;
 first staged CI execution remains pending.
 
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+STALE-CLOSED. The 2026-07-16 resolution is present in current source.
+Inspection of `src/compiler/70.backend/backend/riscv_target.spl:43-65`:
+`riscv_linux_target_contract(CodegenTarget.Riscv32)` keeps the RV32/ILP32D
+codegen metadata but now sets `linker: ""`, `sysroot: ""`, `crt_dir: ""`
+with the comment "Hosted RV32 has no verified ILP32D libc/sysroot contract.
+Keep codegen metadata, but never borrow ELF64 RV64 link inputs." — exactly
+the fail-closed contract the Resolution section describes. The old
+`riscv64-linux-gnu-ld` / `/usr/riscv64-linux-gnu` selections are gone.
+Executable proof (RISC-V toolchain/QEMU gate) is environment-blocked on this
+Windows host; verified by code inspection only. The 2026-09-16 "Open — needs
+owner triage" banner was stale against the 2026-07-16 Resolution; header
+updated.

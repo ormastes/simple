@@ -225,3 +225,14 @@ Also observed:
   the widget theme, unrelated to speed.
 - The JIT demotion and the SIGSEGV that follows once it is lifted are recorded
   in the follow-up bug, since they decide which lane this pipeline runs on.
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+STALE-CLOSED. The 2026-11-13 fix is real on this host. Regression spec
+`test/05_perf/gui/engine2d_interp_full_res_render_budget_spec.spl` run once
+with the tracked self-hosted binary:
+`SIMPLE_LIB=src bin/simple.exe test test/05_perf/gui/engine2d_interp_full_res_render_budget_spec.spl --mode=interpreter`
+→ `SPEC FILE VERDICT: ... outcome=OK declared>=3 executed=3 passed=3 failed=0`,
+3/3 passed, 54.8 s wall on this Windows host. Status header ("fixed
+2026-11-13") confirmed accurate; residual costs remain tracked in
+`engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13`.

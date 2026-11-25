@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26
 - **Lane:** `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`, macOS host
-- **Status:** root-caused (read-only analysis); zero-code-change mitigation identified; small fix set described
+- **Status:** harness-honesty half fixed 2026-11-09 (verified 2026-11-25); compiler-side flush + subprocess-buffering landmine remain open (seed/compiler scope)
 
 ## Symptom
 During harness runs 3-8, both the harness stdout log and `$BUILD_DIR/native-build.out`
@@ -75,3 +75,23 @@ evidence, and a final verdict line; a failing native-build (exit 3) ends
 Still open (out of scope here, seed/compiler scope): root cause #3 — per-line
 `rt_stdout_flush()` after `[NATIVE] compiling module:` prints in the compiler, and
 the `native_build_main.spl` double-subprocess buffering landmine.
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+STALE-CLOSED for the harness-honesty half. The 2026-11-09 fix is present in
+current source, confirmed by code inspection:
+
+- `scripts/check/lib/simpleos-wm-fullscreen/build.shs:154` — the
+  `[WM-BUILD] WARNING ... native-build produced zero output` line, citing
+  this bug doc.
+- `scripts/check/lib/simpleos-wm-fullscreen/report.shs:53` —
+  `simpleos_wm_fullscreen_native_build_log_bytes` recorded in evidence.
+- `scripts/check/lib/simpleos-wm-fullscreen/admission.shs:518-525` — the
+  machine-readable verdict lines `STATUS: PASS|FAIL|ERROR
+  simpleos-wm-fullscreen-evidence`, with `checked=0` on the ERROR path.
+
+Live QEMU execution is environment-blocked on this Windows host (macOS/QEMU
+lane), so verification is by inspection only. Still-open remainder (compiler
+`rt_stdout_flush()` after per-module prints; `native_build_main.spl`
+double-subprocess buffering landmine) is seed/compiler scope, unchanged.
+Status header updated to reflect the 2026-11-09 fix.

@@ -1,8 +1,6 @@
 # Text `.find()` Native Codegen Exposure Audit — 2026-07-31
-## Open 2026-09-16 — needs owner triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Status:** Closed by same-day retraction (2026-07-31) — the 6 BYTE/CHAR-RISK sites are not bugs; verified 2026-11-25, see note at bottom. Surviving follow-ups live in `byte_slice_utf8_boundary_audit_2026-07-31.md` and `lint_replacement_line_vs_file_offset_2026-07-31.md`.
 
 ## RETRACTION (2026-07-31, same day) — the BYTE/CHAR-RISK section is WRONG
 
@@ -221,3 +219,25 @@ val failed_start = output.find("\"failed\":") + 9
 - `doc/08_tracking/bug/native_text_search_http_hot_path_2026-05-13.md` — native codegen bug
 - `doc/08_tracking/bug/interp_text_find_byte_offset_vs_slice_char_offset_2026-06-30.md` — byte/char divergence
 
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+STALE-CLOSED. The retraction's core claim re-verified against the current
+tracked `bin/simple.exe` with a multi-byte probe:
+`"@décorator(x)".substring(1, "@décorator(x)".find("(").unwrap())` returns
+`décorator` (9 chars) — `.find()` byte offset and `.substring()` byte
+indexing agree, so the six retracted BYTE/CHAR-RISK sites (both boundaries
+from `.find()`) are safe as the retraction states. Native-codegen side
+remains inferred-not-run (no native build exercised on this host), matching
+the retraction's own stated limit.
+
+One adjacent observation (NOT one of the six sites, not a new bug filed
+here): `.len()` is character-based while `.substring()` is byte-based, so
+using `.len()` as a substring end on multi-byte text truncates
+(`"// 説明 TODO: fix".substring(find("TODO"), .len())` yields `TODO:`).
+That is the len-vs-slice coordinate question already covered by the
+follow-up `byte_slice_utf8_boundary_audit_2026-07-31.md`, not the
+find+substring idiom this audit flagged.
+
+The 2026-09-16 "Open — needs owner triage" banner was stale against the
+2026-07-31 retraction; header updated.
