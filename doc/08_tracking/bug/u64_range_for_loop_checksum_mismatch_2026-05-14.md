@@ -109,3 +109,32 @@ was fixed. Closing the list traversal and scalar membership gaps should either:
 - speed up unsigned range-loop lowering/codegen first, or
 - add equivalent optimizer support for the existing `while unsigned_index <
   cached_len` shape.
+
+## Verification 2026-11-25 (p3-bam lane, Windows worktree) — SPL fix now verified end-to-end
+
+Binary: worktree-tracked `bin/simple.exe` (38,403,072 bytes, x86_64 Windows),
+`SIMPLE_LIB=src`, branch `work/p3-bam-20261125` off `release/1.0.0`. This
+closes the "Self-hosted SPL compiler: end-to-end run pending a full bootstrap
+rebuild" gap — the deployed pure-Simple toolchain binary now contains the
+`lower_for_range` fix and was exercised directly.
+
+Probe (scratch, not committed): build a `[u64]` of `i*3+1` for i in
+0..100000, `length = data.len().to_u64()`, then checksum
+`checksum + (data[j] ^ 7)` with `for j in 0..length` and compare against the
+equivalent `while` loop. Ground truth (computed independently in Python):
+`14999950000`.
+
+- Default engine (JIT attempt): `for=14999950000` — **CORRECT**, matches
+  ground truth. The u64 range-for checksum bug as filed is fixed.
+- `SIMPLE_EXECUTION_MODE=interpret`: `for=14999950000`, `while=14999950000`,
+  MATCH — both engines correct for the for-loop shape.
+
+RESOLVED status confirmed on the current self-hosted binary. (Incidental,
+unrelated to this bug: the `while`-loop arm of the probe produced
+`120000300000` = `sum((v<<3)|7)` under the JIT engine only — the already-pinned
+`list_get_shifted` JIT list-indexing defect tracked in
+`jit_test_suite_blind_spot_2026-07-30.md`, not a range-for regression.
+Interpreter computes the while arm correctly.)
+
+Performance parity (range-for vs while optimization) remains open as
+recorded above; no perf claim is made here.
