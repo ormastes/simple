@@ -1,0 +1,93 @@
+use std.spec.*
+
+enum MockSymKind:
+    Fn
+    Struct
+    Class
+
+enum MockBackendVal:
+    Empty
+    Value(v: i64)
+
+struct MockSymKey:
+    id: i64
+
+struct MockTaskItem:
+    task_id: text
+    score: i64
+
+fn mock_try_val(ok: bool) -> Result<i64, text>:
+    if ok: Ok(42) else: Err("bad")
+
+fn mock_backend_eval(ok: bool) -> Result<MockBackendVal, text>:
+    Ok(MockBackendVal.Value(v: mock_try_val(ok)?))
+
+fn mock_ntstatus_label(code: i64) -> text:
+    match code:
+        case -1073741819: "0xC0000005"
+        case -1073741795: "0xC000001D"
+        case -1073741502 | 3221225794: "0xC0000142"
+        case _: ""
+
+fn mock_is_aggregate(kind: MockSymKind) -> bool:
+    match kind:
+        case Class | Struct: true
+        case _: false
+
+fn mock_append_task(items: [MockTaskItem], value: MockTaskItem) -> [MockTaskItem]:
+    var out: [MockTaskItem] = []
+    var found = false
+    val value_task_id = value.task_id
+    for item in items:
+        if value_task_id != "" and item.task_id == value_task_id:
+            out.push(value)
+            found = true
+        else:
+            out.push(item)
+    if not found:
+        out.push(value)
+    out
+
+fn mock_apply_cb(cb: fn(text) -> i64) -> i64:
+    cb("hello")
+
+describe "wa_batch_f7 lowering regressions":
+    it "matches negative integer constants accurately":
+        expect(mock_ntstatus_label(-1073741819)).to_equal("0xC0000005")
+        expect(mock_ntstatus_label(-1073741795)).to_equal("0xC000001D")
+        expect(mock_ntstatus_label(3221225794)).to_equal("0xC0000142")
+        expect(mock_ntstatus_label(1)).to_equal("")
+
+    it "slices trailing array suffixes cleanly":
+        val parts = ["compiler", "50.mir", "mir_lowering_stmts.spl"]
+        val tail = parts[2:]
+        expect(tail.len()).to_equal(1)
+        expect(tail[0]).to_equal("mir_lowering_stmts.spl")
+
+    it "dispatches bare enum variants in match OR patterns":
+        expect(mock_is_aggregate(MockSymKind.Class)).to_equal(true)
+        expect(mock_is_aggregate(MockSymKind.Struct)).to_equal(true)
+        expect(mock_is_aggregate(MockSymKind.Fn)).to_equal(false)
+
+    it "unwraps ? operands inside Result enum constructors":
+        val v = match mock_backend_eval(true):
+            case Ok(MockBackendVal.Value(x)): x
+            case _: -1
+        expect(v).to_equal(42)
+
+    it "handles loop-tail compound if/else pushes directly":
+        val updated = mock_append_task(
+            [MockTaskItem(task_id: "t1", score: 1), MockTaskItem(task_id: "t2", score: 2)],
+            MockTaskItem(task_id: "t2", score: 9))
+        expect(updated.len()).to_equal(2)
+        expect(updated[1].score).to_equal(9)
+
+    it "preserves struct key types across untyped if/else initializers":
+        val use_a = true
+        val fn_key = if use_a: MockSymKey(id: 7) else: MockSymKey(id: 8)
+        var table: Dict<MockSymKey, i64> = {}
+        table[fn_key] = 55
+        expect(table[MockSymKey(id: 7)]).to_equal(55)
+
+    it "passes inline lambdas to function parameters across calls":
+        expect(mock_apply_cb(\p: p.len())).to_equal(5)
