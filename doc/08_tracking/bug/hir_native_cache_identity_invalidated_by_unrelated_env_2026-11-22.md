@@ -1,7 +1,7 @@
 # HIR/native cache identity is invalidated by unrelated env changes
 
 - **Date:** 2026-11-22
-- **Status:** fixed
+- **Status:** fixed (53a757bcfff) — re-verified green on release/1.0.0 tip 2026-11-25
 - **Fixed:** 2026-11-24
 - **Severity:** P2
 
@@ -47,4 +47,14 @@ Key the cache on a declared allowlist of semantic env keys instead of the whole 
    - `test/01_unit/compiler/driver/native_module_cache_key_granularity_spec.spl` (11/11 passed)
    - `test/01_unit/compiler/driver/driver_cache_scope_publication_spec.spl` (8/8 passed)
    - `sh scripts/audit/direct-env-runtime-guard.shs --working`: `STATUS: PASS direct-env-runtime-guard`
+5. **Re-verification on release/1.0.0 tip (2026-11-25, Rust seed)**:
+   - `test/01_unit/compiler/driver/cache_identity_unrelated_env_invariance_spec.spl` (5/5 passed)
+   - `test/01_unit/compiler/driver/native_module_environment_projection_spec.spl` (13/13 passed)
+   - `test/01_unit/compiler/cache/release_native_environment_identity_spec.spl` (4/4 passed)
+   - `test/01_unit/compiler/driver/running_image_hash_kernel_owner_spec.spl` (5/5 passed)
+   - `test/01_unit/compiler/driver/native_cache_producer_identity_spec.spl` (15/15 passed)
+   - `test/01_unit/compiler/driver/ctfe_env_inputs_identity_spec.spl` (3/3 passed)
+   - `test/01_unit/compiler/driver/hir_cache_key_target_spec.spl` (4/4 passed)
+   - `test/01_unit/compiler/driver/hir_cache_header_determinism_spec.spl` (4/4 passed)
+   - `test/01_unit/compiler/lint/representation_boundary_autofix_spec.spl` (14/14 passed)
 
