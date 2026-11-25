@@ -113,15 +113,15 @@ fn package_module_index_digest_valid_v1(value: text) -> bool:
 
 fn package_module_index_read_file_v1(path: text, max_bytes: i64) -> text?:
     if max_bytes <= 0 or not rt_file_is_regular_no_follow(path):
-        return nil
+        return None
     val extent = rt_file_size(path)
     if extent <= 0 or extent > max_bytes:
-        return nil
+        return None
     # `?? ""` + length check, not `x == nil or x!.len()` (native Option-box
     # unwrap inside an `or` operand). extent > 0, so "" still returns nil.
     val content = rt_file_read_regular_no_follow_bounded(path, extent) ?? ""
     if content.len() != extent:
-        return nil
+        return None
     Some(content)
 
 fn package_module_index_sorted_unique_v1(values: [text]) -> [text]:
@@ -139,19 +139,19 @@ fn package_module_index_frame_v1(value: text) -> text:
 
 fn package_module_index_frame_read_v1(value: text, start: i64) -> (text, i64)?:
     if start < 0 or start >= value.byte_len():
-        return nil
+        return None
     val tail = value.substring(start, value.byte_len())
     val colon = tail.index_of(":")
     if colon <= 0:
-        return nil
+        return None
     val digits = tail.substring(0, colon)
     val extent = digits.to_i64() ?? -1
     if extent < 0 or "{extent}" != digits:
-        return nil
+        return None
     val body_start = start + colon + 1
     val body_end = body_start + extent
     if body_end > value.len():
-        return nil
+        return None
     Some((value.substring(body_start, body_end), body_end))
 
 fn package_module_index_list_encode_v1(values: [text]) -> text:
@@ -166,33 +166,33 @@ fn package_module_index_list_encode_v1(values: [text]) -> text:
 fn package_module_index_list_decode_v1(value: text) -> [text]?:
     val semicolon = value.index_of(";")
     if semicolon <= 0:
-        return nil
+        return None
     val count_text = value.substring(0, semicolon)
     val count = count_text.to_i64() ?? -1
     if count < 0 or "{count}" != count_text:
-        return nil
+        return None
     var result: [text] = []
     var cursor = semicolon + 1
     var index = 0
     while index < count:
         val item = package_module_index_frame_read_v1(value, cursor)
-        if item == nil:
-            return nil
+        if item.is_none():
+            return None
         val pair = item!
         if not package_module_index_text_valid_v1(pair.0):
-            return nil
+            return None
         result = result.push(pair.0)
         cursor = pair.1
         index = index + 1
     if cursor != value.len():
-        return nil
+        return None
     val canonical = package_module_index_sorted_unique_v1(result)
     if canonical.len() != result.len():
-        return nil
+        return None
     var position = 0
     while position < result.len():
         if result[position] != canonical[position]:
-            return nil
+            return None
         position = position + 1
     Some(result)
 
@@ -249,17 +249,17 @@ fn _package_module_index_entry_decode(
     val expected_fields = if include_generated: 15 else: 14
     while index < expected_fields:
         val field = package_module_index_frame_read_v1(line, cursor)
-        if field == nil:
-            return nil
+        if field.is_none():
+            return None
         fields = fields.push(field!.0)
         cursor = field!.1
         index = index + 1
     if cursor != line.len():
-        return nil
+        return None
     val imports = package_module_index_list_decode_v1(fields[12])
     val dependents = package_module_index_list_decode_v1(fields[13])
-    if imports == nil or dependents == nil:
-        return nil
+    if imports.is_none() or dependents.is_none():
+        return None
     Some(PackageModuleIndexEntryV1(
         package_identity: fields[0],
         module_identity: fields[1],
@@ -334,7 +334,7 @@ fn package_module_index_find_v1(
             high = middle
         else:
             return Some(entry)
-    nil
+    None
 
 fn package_module_index_entry_action_digest_v1(
     generation: PackageModuleIndexGenerationV1,
@@ -517,7 +517,7 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
             lines[0] != "simple-package-module-index-v2" and
             lines[0] != "simple-package-module-index-v3" and
             lines[0] != "simple-package-module-index-v4"):
-        return PackageModuleIndexReadV1(false, "corrupt-header", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-header", "", None)
     val v4 = lines[0] == "simple-package-module-index-v4"
     val scoped = lines[0] == "simple-package-module-index-v3" or
         (v4 and lines.len() > 9 and lines[9].starts_with("scope-entry="))
@@ -526,40 +526,40 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
             (scoped and not v4 and lines[1] != "schema=3") or
             (graph and not scoped and not v4 and lines[1] != "schema=2") or
             (not graph and lines[1] != "schema=1"):
-        return PackageModuleIndexReadV1(false, "unsupported-schema", "", nil)
+        return PackageModuleIndexReadV1(false, "unsupported-schema", "", None)
     if not lines[2].starts_with("producer=") or not lines[3].starts_with("root="):
-        return PackageModuleIndexReadV1(false, "corrupt-generation", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-generation", "", None)
     val producer = lines[2].substring(9, lines[2].len())
     val root = lines[3].substring(5, lines[3].len())
     if (not lines[4].starts_with("scv-revision=") or
             not lines[5].starts_with("scv-commit=") or
             not lines[6].starts_with("scv-tree=") or
             not lines[7].starts_with("inventory=")):
-        return PackageModuleIndexReadV1(false, "corrupt-scv-binding", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-scv-binding", "", None)
     val scv_revision = lines[4].substring(13, lines[4].len())
     val scv_commit = lines[5].substring(11, lines[5].len())
     val scv_tree = lines[6].substring(9, lines[6].len())
     val inventory = lines[7].substring(10, lines[7].len())
     if graph and (lines.len() < 10 or not lines[8].starts_with("variant=")):
-        return PackageModuleIndexReadV1(false, "corrupt-generation", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-generation", "", None)
     if scoped and (lines.len() < 11 or not lines[9].starts_with("scope-entry=")):
-        return PackageModuleIndexReadV1(false, "corrupt-scope", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-scope", "", None)
     val variant_digest = if graph: lines[8].substring(8, lines[8].len()) else: ""
     val scope_entry = if scoped: lines[9].substring(12, lines[9].len()) else: ""
     val count_row = if scoped: 10 else: if graph: 9 else: 8
     val entry_row = count_row + 1
     if not lines[count_row].starts_with("count="):
-        return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-count", "", None)
     val count = lines[count_row].substring(6, lines[count_row].len()).to_i64() ?? -1
     if count < 0 or lines.len() != count + entry_row:
-        return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
+        return PackageModuleIndexReadV1(false, "corrupt-count", "", None)
     var entries: [PackageModuleIndexEntryV1] = []
     var index = entry_row
     while index < lines.len():
         val entry = if v4: package_module_index_entry_decode_v4(lines[index]) else:
             package_module_index_entry_decode_v1(lines[index])
-        if entry == nil:
-            return PackageModuleIndexReadV1(false, "corrupt-entry", "", nil)
+        if entry.is_none():
+            return PackageModuleIndexReadV1(false, "corrupt-entry", "", None)
         entries = entries.push(entry!)
         index = index + 1
     val generation = PackageModuleIndexGenerationV1(
@@ -576,9 +576,9 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     )
     val validation = package_module_index_validate_v1(generation)
     if validation != "ok":
-        return PackageModuleIndexReadV1(false, validation, "", nil)
+        return PackageModuleIndexReadV1(false, validation, "", None)
     if package_module_index_encode_v1(generation) != content:
-        return PackageModuleIndexReadV1(false, "noncanonical-index", "", nil)
+        return PackageModuleIndexReadV1(false, "noncanonical-index", "", None)
     PackageModuleIndexReadV1(true, "ok", sha256_text(content), Some(generation))
 
 fn package_module_index_digest_v1(generation: PackageModuleIndexGenerationV1) -> text:
@@ -595,7 +595,7 @@ fn _package_module_index_publish_locked_v1(
     val pointer = "{dir}/CURRENT"
     if compare_current:
         val current = package_module_index_read_file_v1(pointer, 64)
-        if current == nil:
+        if current.is_none():
             # Missing is different from an unreadable or malformed pointer.
             if expected_current_digest != "" or rt_file_exists(pointer):
                 return false
@@ -687,26 +687,26 @@ fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexR
     # Do not create storage merely to read an absent generation. A publisher
     # racing this preflight may legitimately linearize after the missing read.
     if not rt_file_exists("{dir}/CURRENT"):
-        return PackageModuleIndexReadV1(false, "missing-or-invalid-generation", "", nil)
+        return PackageModuleIndexReadV1(false, "missing-or-invalid-generation", "", None)
     val lock = file_lock("{dir}/CURRENT.lock", 1)
     if lock < 0:
-        return PackageModuleIndexReadV1(false, "generation-lock-unavailable", "", nil)
+        return PackageModuleIndexReadV1(false, "generation-lock-unavailable", "", None)
     # GC/publication share this lock. Capture both pointer and owned bytes before
     # releasing it; hash/decode never extend the filesystem critical section.
     val captured = _package_module_index_capture_locked_v1(dir)
     if not file_unlock(lock):
-        return PackageModuleIndexReadV1(false, "generation-unlock-failed", "", nil)
+        return PackageModuleIndexReadV1(false, "generation-unlock-failed", "", None)
     if captured.2 != "":
-        return PackageModuleIndexReadV1(false, captured.2, "", nil)
+        return PackageModuleIndexReadV1(false, captured.2, "", None)
     val pointer = captured.0
     val content = captured.1
     if sha256_text(content) != pointer:
-        return PackageModuleIndexReadV1(false, "generation-digest-mismatch", "", nil)
+        return PackageModuleIndexReadV1(false, "generation-digest-mismatch", "", None)
     val decoded = package_module_index_decode_v1(content)
     if not decoded.valid:
         return decoded
     if decoded.digest != pointer:
-        return PackageModuleIndexReadV1(false, "generation-pointer-mismatch", "", nil)
+        return PackageModuleIndexReadV1(false, "generation-pointer-mismatch", "", None)
     decoded
 
 fn _package_module_index_gc_locked_v1(
@@ -716,7 +716,7 @@ fn _package_module_index_gc_locked_v1(
         return 0
     val dir = package_module_index_storage_dir_v1(cache_root)
     val current = package_module_index_read_file_v1("{dir}/CURRENT", 64)
-    if current == nil or not package_module_index_digest_valid_v1(current!):
+    if current.is_none() or not package_module_index_digest_valid_v1(current!):
         return 0
     val names = package_module_index_sorted_unique_v1(dir_list_or_empty(dir))
     var removed = 0
@@ -732,7 +732,7 @@ fn _package_module_index_gc_locked_v1(
         val path = "{dir}/{name}"
         val content = package_module_index_read_file_v1(
             path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1)
-        if (content != nil and sha256_text(content!) == digest and
+        if (content.is_some() and sha256_text(content!) == digest and
                 package_module_index_decode_v1(content!).valid and
                 rt_file_delete(path)):
             removed = removed + 1
@@ -763,7 +763,7 @@ fn package_module_index_dirty_packages_v1(
     var packages: [text] = []
     for module_identity in dirty_modules:
         val entry = package_module_index_find_v1(generation, module_identity)
-        if entry != nil:
+        if entry.is_some():
             packages = packages.push(entry!.package_identity)
     package_module_index_sorted_unique_v1(packages)
 
@@ -776,7 +776,7 @@ fn package_module_index_package_depends_v1(
             continue
         for imported in entry.direct_imports:
             val target = package_module_index_find_v1(generation, imported)
-            if target != nil and target!.package_identity == dependency_package:
+            if target.is_some() and target!.package_identity == dependency_package:
                 return true
     false
 
@@ -826,7 +826,7 @@ fn package_module_index_invalidate_v1(
         var cursor = 0
         while cursor < dirty.len():
             val entry = package_module_index_find_v1(generation, dirty[cursor])
-            if entry == nil:
+            if entry.is_none():
                 return PackageModuleInvalidationV1(
                     false, "dirty-module-missing", [], [], [])
             for dependent in entry!.reverse_dependents:
