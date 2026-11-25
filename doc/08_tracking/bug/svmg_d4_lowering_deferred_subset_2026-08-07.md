@@ -1,5 +1,28 @@
 # SVM-G Task D4 lowering pass — deferred subset (design §4.4)
 
+## 2026-11-25 — both gaps verified resolved on release/1.0.0
+
+Verified 2026-11-25 (worktree wt-p3-bas, Windows x86_64, tracked self-hosted
+`bin/simple.exe`, `SIMPLE_LIB=src`, `--mode=interpreter`):
+
+- Both deferred gaps are implemented in
+  `src/compiler/70.backend/svmg_lowering.spl`: `lower_print_int` (line 466,
+  called from the `lower_print` non-string-literal arm at line 618) and the
+  float-aware `assign_opcode(op, is_float, is_signed)` (line 306) mapping
+  `Add/Sub/Mul/Div` to `OP_FADD` etc.
+- `test/01_unit/compiler/backend/svmg_lowering_spec.spl`:
+  `Results: 75 total, 75 passed, 0 failed` (exit 0). The spec also parses
+  cleanly, so the 2026-09-13 "Unterminated f-string" blocker recorded in
+  `svmg_lowering_spec_unterminated_fstring_parse_failure_2026-09-13.md` no
+  longer reproduces on the current binary.
+- `test/02_integration/svmg/conformance/conformance_suite_spec.spl`:
+  `Results: 61 total, 61 passed, 0 failed` (exit 0).
+
+This supplies the executed self-hosted acceptance the 2026-11-07 entry listed
+as pending. Status: resolved. (The compiler/core/MCP gate sweep and release-PR
+bookkeeping named there are separate pipeline steps, not part of this bug's
+two-gap scope.)
+
 ## 2026-11-07 — both gaps under repair, execution qualification pending
 
 Claim owner: `01a1afac/pure-svmg-d4`, isolated branch
