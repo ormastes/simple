@@ -250,27 +250,44 @@ impl MirLowering:
     # touched (call sites keep the established qualified fallback name).
     # Parallel scalar arrays, not ModuleSurfaceCallable values (native
     # composite-transport hazard, same reason as prescan_one_function_v1).
+    me _register_one_surface_callable_origin_v1(owner: text, name: text,
+            is_extern: bool, is_method: bool, is_static: bool) -> bool:
+        if owner == "" or name == "":
+            return false
+        # Bare method/static names (`"len"`, `"make"`) would key the wrong
+        # row against module-level functions, so skip them; owner-qualified
+        # surface impl members (`"OwnerType.method"`) match HIR's
+        # `"{owner}.{type}::{method}"` via mir_provider_callable_key.
+        val dot_idx = name.index_of(".")
+        val qualified_member = dot_idx > 0 and dot_idx < name.byte_len() - 1
+        if (not is_method and not is_static) or qualified_member:
+            val key = mir_provider_callable_key(owner, name)
+            if not self.callable_text_value_abi.has(key):
+                self.callable_text_value_abi[key] = not is_extern
+                return true
+        false
+
     me register_surface_callable_origins_v1(owner: text, names: [text],
             externs: [bool], methods: [bool], statics: [bool]) -> i64:
         if owner == "": return 0
-        var text_value_abi = self.callable_text_value_abi
         var added = 0
         var index = 0
         while index < names.len():
-            val name = names[index]
-            # Bare method/static names (`"len"`, `"make"`) would key the wrong
-            # row against module-level functions, so skip them; owner-qualified
-            # surface impl members (`"OwnerType.method"`) match HIR's
-            # `"{owner}.{type}::{method}"` via mir_provider_callable_key.
-            val dot_idx = name.index_of(".")
-            val qualified_member = dot_idx > 0 and dot_idx < name.len() - 1
-            if name != "" and ((not methods[index] and not statics[index]) or qualified_member):
-                val key = mir_provider_callable_key(owner, name)
-                if not text_value_abi.has(key):
-                    text_value_abi[key] = not externs[index]
-                    added = added + 1
+            if self._register_one_surface_callable_origin_v1(owner, names[index],
+                    externs[index], methods[index], statics[index]):
+                added = added + 1
             index = index + 1
-        self.callable_text_value_abi = text_value_abi
+        added
+
+    me register_surface_callable_origin_rows_v1(owners: [text], names: [text],
+            externs: [bool], methods: [bool], statics: [bool]) -> i64:
+        var added = 0
+        var index = 0
+        while index < names.len():
+            if self._register_one_surface_callable_origin_v1(owners[index], names[index],
+                    externs[index], methods[index], statics[index]):
+                added = added + 1
+            index = index + 1
         added
 
     fn provider_callable_accepts_text_value(symbol: SymbolId) -> bool:
