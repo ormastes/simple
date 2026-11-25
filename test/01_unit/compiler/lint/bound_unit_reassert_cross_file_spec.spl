@@ -1,0 +1,44 @@
+"""
+## Purpose and audience
+Purpose: Prove the SPL-BOUND-003 lint rule follows a linted file's `use`
+imports, so a unit erased in one file and re-asserted as another unit in the
+importing file is reported, while neither file alone shows the violation.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Imports resolve through bound_resolve_module; summaries are one import hop.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit}
+use compiler.tools.lint.rules.bound_unit_reassert_rule.{bound_unit_reassert_lint_rule}
+use compiler.tools.lint.rules.bound_import_graph.{bound_unit_import_summaries}
+
+val FIX_DIR = "test/01_unit/compiler/lint/fixtures/bound_unit_graph"
+
+fn _rule_codes(name: text) -> [text]:
+    val path = FIX_DIR + "/" + name
+    val rule = bound_unit_reassert_lint_rule()
+    val check = rule.check_fn
+    [f.code for f in check(LintParamsV1.defaults(), LintUnit(path: path, content: file_read(path)))]
+
+describe "SPL-BOUND-003 cross-file wiring":
+    it "summarises the imported eraser from the dependency file":
+        step("Build unit summaries for the client's imports")
+        val path = FIX_DIR + "/unit_client.spl"
+        val sums = bound_unit_import_summaries(file_read(path), path)
+        expect(sums.len()).to_equal(1)
+        expect(sums[0].module).to_equal("unit_phys")
+        expect(sums[0].fns.contains("strip")).to_equal(true)
+
+    it "fires the lint rule in the importing file":
+        step("Lint the client; the erasure lives in unit_phys.spl")
+        expect(_rule_codes("unit_client.spl").contains("SPL-BOUND-003")).to_equal(true)
+
+    it "stays clean on the exporter alone":
+        step("Lint the dependency; it erases but never re-asserts")
+        expect(_rule_codes("unit_phys.spl").len()).to_equal(0)
