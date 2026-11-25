@@ -1,0 +1,47 @@
+# The SFFI constrained-unit scanner dispatches `-> bool` externs and externs
+# returning a declared C enum (`enum Name: <int abi>` + variant lines) to the
+# checked bool/enum facades, so the value is validated at the boundary.
+use std.spec.{describe, it, expect}
+use compiler.tools.sffi_gen.constrained_unit_scan.{generate_constrained_unit_facades}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val REAL_EXTERN_FILE = "src/lib/common/encoding/simd_text_ffi.spl"
+
+describe "constrained unit scanner: bool and enum dispatch":
+    it "routes a `-> bool` extern through the checked bool facade":
+        # @req: RB-SFFI-03
+        val r = generate_constrained_unit_facades("extern fn rt_flag(fd: i32) -> bool\n")
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_flag(fd: i32) -> u8")
+        expect(r.source).to_contain("pub fn rt_flag(fd: i32) -> Result<bool, ConstraintError>:")
+        expect(r.source).to_contain("if raw > 1:")
+        expect(r.source).to_contain("use std.common.constraint_error.{{ConstraintError}}")
+
+    it "routes an extern returning a declared enum through the discriminant check":
+        # @req: RB-SFFI-04
+        val src = "enum Color: i32\n    Red\n    Green\n    Blue\n\nextern fn rt_color(id: i64) -> Color\n"
+        val r = generate_constrained_unit_facades(src)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_color(id: i64) -> i32")
+        expect(r.source).to_contain("Result<Color, ConstraintError>")
+        expect(r.source).to_contain("if raw < 0 or raw > 2:")
+
+    it "rejects an enum declared over a non-integer ABI":
+        # @req: RB-SFFI-04
+        val r = generate_constrained_unit_facades("enum Mode: f64\n    A\n    B\nextern fn rt_mode() -> Mode\n")
+        expect(r.source).to_equal("")
+        expect(r.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+
+    it "leaves a plain enum without an ABI type unwrapped":
+        val r = generate_constrained_unit_facades("enum Plain:\n    A\nextern fn rt_plain() -> Plain\n")
+        expect(r.source).to_equal("")
+
+    it "wraps a real bool extern from the tree":
+        # @req: RB-SFFI-03
+        val src = rt_file_read_text(REAL_EXTERN_FILE) ?? ""
+        expect(src).to_contain("extern fn rt_text_is_ascii(s: text) -> bool")
+        val r = generate_constrained_unit_facades(src)
+        expect(r.diagnostic).to_equal("")
+        expect(r.source).to_contain("extern fn __raw_rt_text_is_ascii(s: text) -> u8")
+        expect(r.source).to_contain("pub fn rt_text_is_ascii(s: text) -> Result<bool, ConstraintError>:")
