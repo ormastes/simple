@@ -6602,7 +6602,24 @@ impl MirLowering:
             return Some(HirType(kind: HirTypeKind.Str, span: expression.span))
         None
 
-    me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg]) -> LocalId:
+    me lookup_enum_symbol_for_owner(enum_name: text) -> SymbolId:
+        val bare = self.enum_bare_of(enum_name)
+        if bare != enum_name:
+            val dot_pos = enum_name.rfind(".")
+            if dot_pos > 0:
+                val mod_name = enum_name.substring(0, dot_pos)
+                val q_id = self.symbols.lookup_qualified_type_raw(mod_name, bare)
+                if q_id >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(q_id):
+                    return SymbolId(id: q_id)
+        if bare == enum_name or not (self.enum_bare_ambiguous.get(bare) ?? false):
+            val direct = self.symbols.lookup_or_invalid(bare)
+            if direct.id >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(direct.id):
+                val direct_q = self.enum_qualified_key(direct)
+                if bare == enum_name or direct_q == "" or direct_q == enum_name:
+                    return direct
+        SymbolId.invalid()
+
+    me lower_enum_construct_named(enum_name: text, variant: text, args: [HirCallArg], owner_symbol_id: i64 = -1) -> LocalId:
         """Same as lower_enum_lit but entered from the MethodCall path, where
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
         is known by NAME (registered in enum_variant_index); the single tuple
@@ -6715,7 +6732,8 @@ impl MirLowering:
             # construction path (`Shape.Circle(7)` via receiver=Shape,
             # method=Circle).
             val tagged = self.tag_enum_construct_result(r)
-            if enum_name == "Option":
+            val bare_enum_name = self.enum_bare_of(enum_name)
+            if bare_enum_name == "Option":
                 self.option_value_locals[tagged.id] = true
                 # Retain a proven Some payload witness. A concrete nominal
                 # payload keeps its actual declaration ID, never a bare name.
@@ -6751,11 +6769,15 @@ impl MirLowering:
                                         case _: ()
                                     self.remember_some_record_payload_owner(tagged.id, inner_type)
                             case _: ()
-            elif enum_name != "Result":
+            elif bare_enum_name != "Result":
                 # Avoid both Option<SymbolId> and Option<HirSymbol> transport on
-                # this custom-enum route. The raw-id lookup and proven Dict
-                # bracket hit keep the struct values in their owning frames.
-                val enum_symbol_id = self.symbols.lookup_or_invalid(enum_name)
+                # this custom-enum route. Prefer the caller-resolved owner id or
+                # qualified type lookup so colliding imported enums retain
+                # HirTypeKind.Named provenance.
+                val enum_symbol_id = if owner_symbol_id >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(owner_symbol_id):
+                    SymbolId(id: owner_symbol_id)
+                else:
+                    self.lookup_enum_symbol_for_owner(enum_name)
                 if enum_symbol_id.id >= 0 and self.symbols.symbols.has(enum_symbol_id.id):
                     val enum_span = self.symbols.symbols[enum_symbol_id.id].span
                     self.remember_local_hir_type(tagged.id, HirType(

@@ -3634,7 +3634,47 @@ impl MirLowering:
     me lower_dict_runtime_get(base: HirExpr, base_local: LocalId, dict_key: LocalId) -> LocalId:
         self.lower_dict_runtime_read(base, base_local, dict_key, false)
 
-    me lower_dict_runtime_read(base: HirExpr, base_local: LocalId, dict_key: LocalId, as_option: bool, raw_probe: bool = false) -> LocalId:
+    me resolve_dict_value_hir_type_v1(base: HirExpr, base_local: LocalId) -> HirType?:
+        if base.has_type_ == true and base.type_ != None:
+            if val found = self.runtime_dict_value_hir_type(base.type_):
+                return Some(found)
+        if val remembered_dict = self.find_local_hir_type(base_local.id):
+            if val found = self.runtime_dict_value_hir_type(remembered_dict):
+                return Some(found)
+        if val declared_dict = self.receiver_declared_type(base):
+            if val found = self.runtime_dict_value_hir_type(declared_dict):
+                return Some(found)
+        None
+
+    me resolve_dict_read_mir_type_v1(base: HirExpr, base_local: LocalId, dict_value_hir_type: HirType?) -> MirType:
+        var dict_result_type = MirType.i64()
+        var resolved_from_local = false
+        var resolved_dict_mir_type = MirType.i64()
+        val has_dict_mir_type = if val type_ = self.builder.local_type(base_local):
+            resolved_dict_mir_type = type_
+            true
+        else:
+            false
+        if has_dict_mir_type:
+            if val mir_value_type = self.runtime_dict_value_mir_type(resolved_dict_mir_type):
+                dict_result_type = mir_value_type
+                resolved_from_local = true
+        val value_type_from_hir = not resolved_from_local and dict_value_hir_type != None
+        if value_type_from_hir:
+            if val hir_value_type = dict_value_hir_type:
+                dict_result_type = self.lower_type(hir_value_type)
+                resolved_from_local = true
+        if not value_type_from_hir and _sffi_enum_discriminant<MirTypeKind>(dict_result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
+            if val hir_v = dict_value_hir_type:
+                val hir_v_mir = self.lower_type(hir_v)
+                if _sffi_enum_discriminant<MirTypeKind>(hir_v_mir.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Bool) or _sffi_enum_discriminant<MirTypeKind>(hir_v_mir.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Array(MirType.i64(), 0)):
+                    dict_result_type = hir_v_mir
+        if _sffi_enum_discriminant<MirTypeKind>(dict_result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
+            if val noted_value_type = self.noted_runtime_elem_type(base_local):
+                dict_result_type = noted_value_type
+        dict_result_type
+
+    me lower_dict_runtime_read(base: HirExpr, base_local: LocalId, dict_key: LocalId, as_option: bool, raw_probe: bool = false, fallback_value_type: MirType? = None) -> LocalId:
         """The one `rt_dict_get` read shared by `d[k]` AND `d.get(k)`.
 
         `as_option` is true only for `d.get(k)`, whose declared result is
@@ -3678,58 +3718,12 @@ impl MirLowering:
            stored later would otherwise decode via `>>3` and leak the
            heap-box POINTER).
         """
-        var dict_result_type = MirType.i64()
-        var dict_value_hir_type: HirType? = None
-        var resolved_from_local = false
-        var resolved_dict_mir_type = MirType.i64()
-        val has_dict_mir_type = if val type_ = self.builder.local_type(base_local):
-            resolved_dict_mir_type = type_
-            true
-        else:
-            false
-        if has_dict_mir_type:
-            if val mir_value_type = self.runtime_dict_value_mir_type(resolved_dict_mir_type):
-                dict_result_type = mir_value_type
-                resolved_from_local = true
-        # Global storage and projected fields can use an i64 handle while
-        # their semantic Dict type lives in the declaration/local metadata.
-        # Never decode a nominal value as an integer just because the handle
-        # erased the builder's Dict(K,V) type.
-        # The HIR value type V is resolved from the same three sources
-        # (expression type, remembered local type, declared receiver type)
-        # whether or not the builder's Dict(K, V) MIR type already fixed the
-        # decode: `d.get(k)` needs V for its `V?` tag either way.
-        if base.has_type_ == true and base.type_ != None:
-            dict_value_hir_type = self.runtime_dict_value_hir_type(base.type_)
-        if dict_value_hir_type == None:
-            if val remembered_dict = self.find_local_hir_type(base_local.id):
-                dict_value_hir_type = self.runtime_dict_value_hir_type(remembered_dict)
-        if dict_value_hir_type == None:
-            if val declared_dict = self.receiver_declared_type(base):
-                dict_value_hir_type = self.runtime_dict_value_hir_type(declared_dict)
-        val value_type_from_hir = not resolved_from_local and dict_value_hir_type != None
-        if value_type_from_hir:
-            if val hir_value_type = dict_value_hir_type:
-                dict_result_type = self.lower_type(hir_value_type)
-                resolved_from_local = true
-        # A builder-tracked `Dict(K, i64)` is often the ERASED default (field
-        # projection / codec temp), not the declared V. When the HIR V is
-        # Bool, the i64 `>>3` arm would turn a stored true/false into int 1/0.
-        # Array values likewise require their declared raw-handle decode:
-        # shifting a class-field Dict's array pointer corrupts the receiver.
-        # Prefer these concrete HIR value types over the erased i64 default.
-        if not value_type_from_hir and _sffi_enum_discriminant<MirTypeKind>(dict_result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
-            if val hir_v = dict_value_hir_type:
-                val hir_v_mir = self.lower_type(hir_v)
-                if _sffi_enum_discriminant<MirTypeKind>(hir_v_mir.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Bool) or _sffi_enum_discriminant<MirTypeKind>(hir_v_mir.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Array(MirType.i64(), 0)):
-                    dict_result_type = hir_v_mir
-        # Store-side refinement: an empty `{}` literal fixes the declared
-        # value type at the i64 default, so an f64 stored later would decode
-        # via the integer `>>3` arm and leak the heap-box POINTER. Use the
-        # store-observed type instead.
+        val dict_value_hir_type = self.resolve_dict_value_hir_type_v1(base, base_local)
+        var dict_result_type = self.resolve_dict_read_mir_type_v1(base, base_local, dict_value_hir_type)
         if _sffi_enum_discriminant<MirTypeKind>(dict_result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
-            if val noted_value_type = self.noted_runtime_elem_type(base_local):
-                dict_result_type = noted_value_type
+            if val fb_type = fallback_value_type:
+                dict_result_type = fb_type
+        val resolved_from_local = dict_value_hir_type != None or self.builder.local_type(base_local) != None
         val get_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_dict_get"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -7281,18 +7275,8 @@ impl MirLowering:
         if expr_disc == field_disc:
             match expr_value.kind:
                 case HirExprKind.Field(base, field_name, resolved):
-                    var enum_name = ""
-                    match base.kind:
-                        case HirExprKind.Var(field_symbol):
-                            enum_name = self.symbols.symbol_name_scalar_raw(field_symbol.id)
-                        case HirExprKind.NamedVar(_, field_base_name):
-                            enum_name = field_base_name
-                        case _:
-                            pass
-                    if enum_name != "" and self.enum_variant_index.contains(enum_name):
-                        for variant_name in self.enum_variant_index[enum_name]:
-                            if variant_name == field_name:
-                                return self.lower_enum_construct_named(enum_name, field_name, [])
+                    if val unit_enum_local = self.try_lower_declared_enum_unit_field(base, field_name):
+                        return unit_enum_local
                     if field_name == "ok" or field_name == "err":
                         val projection_type = if field_name == "ok":
                             self.result_ok_hir_type(base)
@@ -8895,26 +8879,11 @@ impl MirLowering:
 
             # Field access: obj.field_name
             case Field(base, field_name, resolved):
-                # Reclassify `Color.Red` — a bare unit-variant construction
-                # parsed as FIELD ACCESS — into enum construction when the base
-                # names a registered enum and the field is one of its variants
-                # (mirrors the MethodCall interception for `Shape.Circle(7)`).
-                # Without this the base lowers as an undefined variable load and
-                # the field read nil-derefs at runtime.
-                var fa_enum_name = ""
-                match base.kind:
-                    case Var(fa_sym):
-                        fa_enum_name = self.symbols.symbol_name_scalar_raw(fa_sym.id)
-                    case NamedVar(_, fa_name):
-                        fa_enum_name = fa_name
-                    case _: ()
-                if fa_enum_name != "" and self.enum_variant_index.contains(fa_enum_name):
-                    var fa_is_variant = false
-                    for fa_vn in self.enum_variant_index[fa_enum_name]:
-                        if fa_vn == field_name:
-                            fa_is_variant = true
-                    if fa_is_variant:
-                        return self.lower_enum_construct_named(fa_enum_name, field_name, [])
+                # Reclassify `Color.Red` / `Value.Unit` — a bare unit-variant
+                # construction parsed as FIELD ACCESS — into enum construction via
+                # owner-qualified tables (mirrors MethodCall enum dispatch).
+                if val fa_unit_enum_local = self.try_lower_declared_enum_unit_field(base, field_name):
+                    return fa_unit_enum_local
                 if field_name == "ok" or field_name == "err":
                     val projection_type = if field_name == "ok":
                         self.result_ok_hir_type(base)

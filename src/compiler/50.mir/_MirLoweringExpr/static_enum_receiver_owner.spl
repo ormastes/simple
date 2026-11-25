@@ -5,60 +5,78 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 
 impl MirLowering:
-    me try_lower_declared_enum_static_call(receiver: HirExpr, method: text,
-            args: [HirCallArg], resolution: MethodResolution) -> LocalId?:
-        # Keep resolved associated methods on their existing call path. Decode
-        # the receiver in this frame, not inside the outer MethodCall payload.
-        match resolution:
-            case MethodResolution.StaticMethod(_, _): return None
-            # WORKAROUND(stage2-optmerge-void): Bug B: unit arm merges void with typed arms; remove when stage2 rebuilt with fix
-            case MethodResolution.Unresolved: pass
-            case _: return None
-        var raw = -1
+    me resolve_declared_enum_symbol_id_v1(receiver: HirExpr) -> i64:
         match receiver.kind:
-            case HirExprKind.Var(symbol): raw = symbol.id
+            case HirExprKind.Var(symbol):
+                if symbol.id >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(symbol.id):
+                    return symbol.id
+                -1
             case HirExprKind.NamedVar(symbol, name):
-                # This is a lexical lookup in the active module SymbolTable,
+                # Lexical lookup in the active module SymbolTable,
                 # never a global variant-name search or a foreign numeric ID.
                 var bound = self.symbols.lookup_or_invalid(name)
+                if bound.id >= 0 and not self.symbols.symbol_is_enum_declaration_scalar_raw(bound.id):
+                    # A non-enum local/class/fn shadows the enum name in scope.
+                    return -1
+                if symbol.id >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(symbol.id) and self.symbols.symbol_name_scalar_raw(symbol.id) == name:
+                    val foreign_owner = self.symbols.symbol_defining_module_scalar_raw(symbol.id)
+                    if foreign_owner != "" and foreign_owner != self.current_module_id:
+                        val qualified_retry = self.symbols.lookup_qualified_type_raw(
+                            foreign_owner, name)
+                        if qualified_retry >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(qualified_retry):
+                            return qualified_retry
+                    return symbol.id
                 if bound.id < 0 and symbol.id >= 0:
-                    # B5b shard-registry family (bug-doc phase2_matrix addendum
-                    # 7): the flat short-name entry can name a foreign owner
-                    # from importer pre-registration and be invisible here.
-                    # Retry through the declaring owner's qualified scope, the
-                    # same owner-qualified resolution as the NamedVar value
-                    # arm in expr_dispatch.spl (`SdnValue.Float(f)` is this
-                    # path: a named-constructor MethodCall, not a NamedVar).
+                    # B5b shard-registry family: the flat short-name entry can name
+                    # a foreign owner from importer pre-registration and miss here.
                     if val foreign_symbol = self.symbols.get_symbol_raw(symbol.id):
-                        if val foreign_owner = foreign_symbol.defining_module:
-                            if foreign_owner != "" and foreign_owner != self.current_module_id:
-                                val qualified_retry = self.symbols.lookup_qualified_type_raw(
-                                    foreign_owner, name)
-                                if qualified_retry >= 0:
-                                    bound = SymbolId(id: qualified_retry)
-                if bound.id < 0:
-                    # CYCLE-42 LANE (in-vivo, verifier-shaped, single-process,
-                    # cold caches): the receiver NamedVar's lexical lookup
-                    # MISSED a declared enum whose payload (module.enums) and
-                    # numeric-id tables are intact -- only the SymbolTable
-                    # NAME index misses it (the BOOT-20 chain-table family at
-                    # 252-module scale). register_enum_variants (lower_module
-                    # start) keys the bare name from the SAME HirModule enums
-                    # dict, so the MIR enum registry is authoritative here.
-                    # Recover the owner from it, unambiguous bare name only.
+                        if foreign_symbol.name == name:
+                            if val foreign_owner = foreign_symbol.defining_module:
+                                if foreign_owner != "" and foreign_owner != self.current_module_id:
+                                    val qualified_retry = self.symbols.lookup_qualified_type_raw(
+                                        foreign_owner, name)
+                                    if qualified_retry >= 0 and self.symbols.symbol_is_enum_declaration_scalar_raw(qualified_retry):
+                                        return qualified_retry
+                if bound.id >= 0:
+                    if symbol.id >= 0 and symbol.id != bound.id:
+                        return -1
+                    return bound.id
+                -1
+            case _: -1
+
+    me try_lower_declared_enum_member_v1(receiver: HirExpr, member: text,
+            args: [HirCallArg], is_call: bool, resolution: MethodResolution) -> LocalId?:
+        val raw = self.resolve_declared_enum_symbol_id_v1(receiver)
+        if raw < 0:
+            match receiver.kind:
+                case HirExprKind.NamedVar(symbol, name):
+                    val bound = self.symbols.lookup_or_invalid(name)
+                    if bound.id >= 0 and not self.symbols.symbol_is_enum_declaration_scalar_raw(bound.id):
+                        return None
+                    if symbol.id >= 0 and self.symbols.symbol_name_scalar_raw(symbol.id) == name:
+                        val sym_q = self.enum_qualified_key(symbol)
+                        if sym_q != "" and self.enum_variant_index_q.has(sym_q):
+                            for variant in self.enum_variant_names(sym_q):
+                                if variant == member:
+                                    return Some(self.lower_enum_construct_named(sym_q, member, args, symbol.id))
+                            if is_call:
+                                return Some(self.lower_method_call(receiver, member, args, resolution, sym_q, symbol.id))
+                            return None
+                    # CYCLE-42 unambiguous bare-name fallback when the SymbolTable name index
+                    # misses a registered enum. Never pick an ambiguous bare name.
                     if self.enum_variant_index.has(name) and not (self.enum_bare_ambiguous.get(name) ?? false):
-                        for variant in self.enum_variant_names(name):
-                            if variant == method:
-                                return Some(self.lower_enum_construct_named(name, method, args))
-                        return Some(self.lower_method_call(receiver, method, args, resolution, name, -1))
+                        val meta_owner = self.enum_constructor_metadata_owner(name)
+                        val owner_key = if meta_owner != "": meta_owner else: name
+                        for variant in self.enum_variant_names(owner_key):
+                            if variant == member:
+                                return Some(self.lower_enum_construct_named(owner_key, member, args))
+                        if is_call:
+                            return Some(self.lower_method_call(receiver, member, args, resolution, owner_key, -1))
                     return None
-                if symbol.id >= 0 and symbol.id != bound.id: return None
-                raw = bound.id
-            case _: return None
-        if raw < 0 or not self.symbols.symbol_is_enum_declaration_scalar_raw(raw):
-            return None
+                case _: return None
         val symbol = SymbolId(id: raw)
         val name = self.symbols.symbol_name_scalar_raw(raw)
         val qualified = self.enum_qualified_key(symbol)
@@ -69,13 +87,30 @@ impl MirLowering:
             self.enum_variant_index.has(name) and not (self.enum_bare_ambiguous.get(name) ?? false)
         if registered:
             for variant in self.enum_variant_names(owner):
-                if variant == method:
-                    return Some(self.lower_enum_construct_named(owner, method, args))
-        elif self.enum_variant_payload_kind.has(owner + "::" + method):
+                if variant == member:
+                    return Some(self.lower_enum_construct_named(owner, member, args, raw))
+        elif is_call and self.enum_variant_payload_kind.has(owner + "::" + member):
             # Only exact provider payload metadata proves that this name was a
             # variant. An arbitrary enum associated method is not an error.
-            self.error_fatal("enum static constructor lacks exact provider registry: {owner}.{method}", Some(receiver.span))
+            self.error_fatal("enum static constructor lacks exact provider registry: {owner}.{member}", Some(receiver.span))
             return Some(self.builder.emit_const_int(0))
-        # Retain the known owner even on normal dispatch. With missing provider
-        # metadata an empty hint would revive the unrelated unique-leaf fallback.
-        return Some(self.lower_method_call(receiver, method, args, resolution, owner, raw))
+        if is_call:
+            # Retain the known owner even on normal dispatch. With missing provider
+            # metadata an empty hint would revive the unrelated unique-leaf fallback.
+            return Some(self.lower_method_call(receiver, member, args, resolution, owner, raw))
+        None
+
+    me try_lower_declared_enum_unit_field(base: HirExpr, field_name: text) -> LocalId?:
+        """Resolve unit enum variant `Enum.Variant` via owner-qualified tables."""
+        self.try_lower_declared_enum_member_v1(base, field_name, [], false, MethodResolution.Unresolved)
+
+    me try_lower_declared_enum_static_call(receiver: HirExpr, method: text,
+            args: [HirCallArg], resolution: MethodResolution) -> LocalId?:
+        # Keep resolved associated methods on their existing call path. Decode
+        # the receiver in this frame, not inside the outer MethodCall payload.
+        match resolution:
+            case MethodResolution.StaticMethod(_, _): return None
+            # WORKAROUND(stage2-optmerge-void): Bug B: unit arm merges void with typed arms; remove when stage2 rebuilt with fix
+            case MethodResolution.Unresolved: pass
+            case _: return None
+        self.try_lower_declared_enum_member_v1(receiver, method, args, true, resolution)
