@@ -65,3 +65,17 @@ Rebuild/deploy a pure-Simple `bin/simple` and rerun the retained 4K/8K SIMD
 performance evidence. Keep `build/bootstrap/native_cache` and use isolated mini
 caches for any further bootstrap probes.
 
+
+## Triage 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+SKIP — the only path to new evidence is a full `--full-bootstrap --deploy`
+plus retained 4K/8K SIMD runs on a pure-Simple binary, both prohibited in this
+lane (no bootstrap builds; the tracked Rust seed `bin/simple.exe` is used
+as-is). The mitigation described above (entry-closure enqueue-time
+deduplication in both walkers, with its focused cargo evidence) is the current
+end state; "full deploy still unproven" remains accurate. The misleading part
+of the header ("Open 2026-09-16 — needs owner triage") is bookkeeping, not a
+status change: the substantive Status section already reads "Mitigated; full
+deploy still unproven", which this triage confirms. Next step is unchanged —
+a host that may run the bootstrap should redeploy and re-run the retained
+4K/8K evidence. No code change made.
