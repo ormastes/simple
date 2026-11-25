@@ -1,0 +1,38 @@
+# Focused guard spec for W45: `_elf_apply_target` in `elf_static_link.spl`
+# must stay a scalar `RelocArch` rather than a `[RelocArch]` global array
+# (which ICEs Phase 2 MIR because the enum array element has no unique
+# provider layout).
+# @req: REQ-COMPILER-LINKER-001
+# @tag: unit, compiler, linker, elf
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val ELF_STATIC_LINK_PATH: text = "src/compiler/70.backend/linker/elf/elf_static_link.spl"
+
+describe "ELF static link apply target scalar guard (W45)":
+    it "declares _elf_apply_target as scalar RelocArch rather than [RelocArch]":
+        val source = rt_file_read_text(ELF_STATIC_LINK_PATH) ?? ""
+        expect(source).to_contain("var _elf_apply_target: RelocArch = RelocArch.X86_64")
+        expect(source).to_not_contain("var _elf_apply_target: [RelocArch]")
+        for raw_line in source.split("\n"):
+            val code_part = raw_line.split("#")[0]
+            expect(code_part.contains("[RelocArch]")).to_equal(false)
+
+    it "reads and resets _elf_apply_target directly as a scalar in elf_apply_worker and elf_apply_jobs":
+        val source = rt_file_read_text(ELF_STATIC_LINK_PATH) ?? ""
+        val worker_pos = source.index_of("pub fn elf_apply_worker(")
+        val jobs_pos = source.index_of("fn elf_apply_jobs(")
+        expect(worker_pos >= 0).to_equal(true)
+        expect(jobs_pos > worker_pos).to_equal(true)
+
+        val worker_body = source.substring(worker_pos, jobs_pos)
+        expect(worker_body).to_contain("val target = _elf_apply_target")
+        expect(worker_body).to_not_contain("_elf_apply_target[0]")
+
+        val jobs_tail = source.substring(jobs_pos, jobs_pos + 1200)
+        expect(jobs_tail).to_contain("_elf_apply_target = target")
+        expect(jobs_tail).to_contain("_elf_apply_target = RelocArch.X86_64")
+        expect(jobs_tail).to_not_contain("_elf_apply_target = [target]")
+        expect(jobs_tail).to_not_contain("_elf_apply_target = []")
