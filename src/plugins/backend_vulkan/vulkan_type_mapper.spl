@@ -66,6 +66,118 @@ class VulkanTypeMapper:
             type_defs: defs
         )
 
+impl VulkanTypeMapper:
+    # === SPIR-V-specific methods ===
+
+    fn map_runtime_array(element: MirType) -> text:
+        """
+        Map runtime array (unsized) to SPIR-V representation.
+
+        SPIR-V: OpTypeRuntimeArray element_type
+        Used for SSBOs with dynamic size.
+        """
+        val elem_ty = self.map_type(element)
+        "OpTypeRuntimeArray {elem_ty}"
+
+    fn map_image_type(dim: SpirvImageDim, sampled: bool, depth: bool) -> text:
+        """
+        Map image type to SPIR-V.
+
+        SPIR-V: OpTypeImage sampled_type dim depth arrayed ms sampled format
+        """
+        val dim_str = match dim:
+            case Dim1D: "Dim1D"
+            case Dim2D: "Dim2D"
+            case Dim3D: "Dim3D"
+            case DimCube: "DimCube"
+            case DimBuffer: "DimBuffer"
+        val depth_val = if depth: 1 else: 0
+        val sampled_val = if sampled: 1 else: 2
+        "OpTypeImage OpTypeFloat 32 {dim_str} {depth_val} 0 {sampled_val} Unknown"
+
+    fn map_sampler_type() -> text:
+        """Map sampler type to SPIR-V."""
+        "OpTypeSampler"
+
+    fn map_sampled_image_type(image_type: text) -> text:
+        """Map sampled image (combined image+sampler) to SPIR-V."""
+        "OpTypeSampledImage {image_type}"
+
+    fn pointer_with_storage(pointee: text, storage: MemorySpace) -> text:
+        """
+        Create pointer type with specific storage class.
+
+        SPIR-V: OpTypePointer storage_class pointee_type
+        """
+        val storage_class = self.map_memory_space(storage)
+        "OpTypePointer {storage_class} {pointee}"
+
+    fn spirv_builtin(builtin: SpirvBuiltin) -> text:
+        """
+        Get SPIR-V builtin name.
+
+        Used for decorating special input/output variables.
+        """
+        match builtin:
+            case GlobalInvocationId: "GlobalInvocationId"
+            case LocalInvocationId: "LocalInvocationId"
+            case WorkgroupId: "WorkgroupId"
+            case WorkgroupSize: "WorkgroupSize"
+            case NumWorkgroups: "NumWorkgroups"
+            case SubgroupId: "SubgroupId"
+            case SubgroupSize: "SubgroupSize"
+            case SubgroupLocalInvocationId: "SubgroupLocalInvocationId"
+
+    fn spirv_execution_model() -> text:
+        """Get execution model for compute shaders."""
+        "GLCompute"
+
+    fn spirv_capability_for_feature(feature: SpirvFeature) -> text:
+        """Get SPIR-V capability for a feature."""
+        match feature:
+            case Float16: "Float16"
+            case Float64: "Float64"
+            case Int64: "Int64"
+            case Int16: "Int16"
+            case Int8: "Int8"
+            case StorageBuffer8BitAccess: "StorageBuffer8BitAccess"
+            case StorageBuffer16BitAccess: "StorageBuffer16BitAccess"
+            case Subgroup: "GroupNonUniform"
+            case AtomicFloat: "AtomicFloat32AddEXT"
+
+    fn required_capabilities() -> [text]:
+        """Get list of required SPIR-V capabilities."""
+        ["Shader"]
+
+    fn required_extensions() -> [text]:
+        """Get list of required SPIR-V extensions."""
+        []
+
+    fn max_workgroup_size() -> (i64, i64, i64):
+        """
+        Get maximum workgroup size.
+        Default Vulkan limit is typically 1024 total invocations.
+        """
+        (1024, 1024, 64)
+
+    fn max_workgroup_invocations() -> i64:
+        """Get maximum total invocations per workgroup."""
+        1024
+
+    fn max_shared_memory() -> i64:
+        """
+        Get maximum shared memory per workgroup in bytes.
+        Typical Vulkan limit is 32KB-64KB.
+        """
+        49152  # 48 KB (common minimum)
+
+    fn subgroup_size() -> i64:
+        """
+        Get subgroup size (wave/warp equivalent).
+        Varies by vendor: NVIDIA=32, AMD=32/64, Intel=8-32.
+        """
+        32  # Conservative default
+
 impl TypeMapper for VulkanTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
         """
@@ -264,118 +376,6 @@ impl TypeMapper for VulkanTypeMapper:
                 max_align
             case _:
                 1
-
-impl VulkanTypeMapper:
-    # === SPIR-V-specific methods ===
-
-    fn map_runtime_array(element: MirType) -> text:
-        """
-        Map runtime array (unsized) to SPIR-V representation.
-
-        SPIR-V: OpTypeRuntimeArray element_type
-        Used for SSBOs with dynamic size.
-        """
-        val elem_ty = self.map_type(element)
-        "OpTypeRuntimeArray {elem_ty}"
-
-    fn map_image_type(dim: SpirvImageDim, sampled: bool, depth: bool) -> text:
-        """
-        Map image type to SPIR-V.
-
-        SPIR-V: OpTypeImage sampled_type dim depth arrayed ms sampled format
-        """
-        val dim_str = match dim:
-            case Dim1D: "Dim1D"
-            case Dim2D: "Dim2D"
-            case Dim3D: "Dim3D"
-            case DimCube: "DimCube"
-            case DimBuffer: "DimBuffer"
-        val depth_val = if depth: 1 else: 0
-        val sampled_val = if sampled: 1 else: 2
-        "OpTypeImage OpTypeFloat 32 {dim_str} {depth_val} 0 {sampled_val} Unknown"
-
-    fn map_sampler_type() -> text:
-        """Map sampler type to SPIR-V."""
-        "OpTypeSampler"
-
-    fn map_sampled_image_type(image_type: text) -> text:
-        """Map sampled image (combined image+sampler) to SPIR-V."""
-        "OpTypeSampledImage {image_type}"
-
-    fn pointer_with_storage(pointee: text, storage: MemorySpace) -> text:
-        """
-        Create pointer type with specific storage class.
-
-        SPIR-V: OpTypePointer storage_class pointee_type
-        """
-        val storage_class = self.map_memory_space(storage)
-        "OpTypePointer {storage_class} {pointee}"
-
-    fn spirv_builtin(builtin: SpirvBuiltin) -> text:
-        """
-        Get SPIR-V builtin name.
-
-        Used for decorating special input/output variables.
-        """
-        match builtin:
-            case GlobalInvocationId: "GlobalInvocationId"
-            case LocalInvocationId: "LocalInvocationId"
-            case WorkgroupId: "WorkgroupId"
-            case WorkgroupSize: "WorkgroupSize"
-            case NumWorkgroups: "NumWorkgroups"
-            case SubgroupId: "SubgroupId"
-            case SubgroupSize: "SubgroupSize"
-            case SubgroupLocalInvocationId: "SubgroupLocalInvocationId"
-
-    fn spirv_execution_model() -> text:
-        """Get execution model for compute shaders."""
-        "GLCompute"
-
-    fn spirv_capability_for_feature(feature: SpirvFeature) -> text:
-        """Get SPIR-V capability for a feature."""
-        match feature:
-            case Float16: "Float16"
-            case Float64: "Float64"
-            case Int64: "Int64"
-            case Int16: "Int16"
-            case Int8: "Int8"
-            case StorageBuffer8BitAccess: "StorageBuffer8BitAccess"
-            case StorageBuffer16BitAccess: "StorageBuffer16BitAccess"
-            case Subgroup: "GroupNonUniform"
-            case AtomicFloat: "AtomicFloat32AddEXT"
-
-    fn required_capabilities() -> [text]:
-        """Get list of required SPIR-V capabilities."""
-        ["Shader"]
-
-    fn required_extensions() -> [text]:
-        """Get list of required SPIR-V extensions."""
-        []
-
-    fn max_workgroup_size() -> (i64, i64, i64):
-        """
-        Get maximum workgroup size.
-        Default Vulkan limit is typically 1024 total invocations.
-        """
-        (1024, 1024, 64)
-
-    fn max_workgroup_invocations() -> i64:
-        """Get maximum total invocations per workgroup."""
-        1024
-
-    fn max_shared_memory() -> i64:
-        """
-        Get maximum shared memory per workgroup in bytes.
-        Typical Vulkan limit is 32KB-64KB.
-        """
-        49152  # 48 KB (common minimum)
-
-    fn subgroup_size() -> i64:
-        """
-        Get subgroup size (wave/warp equivalent).
-        Varies by vendor: NVIDIA=32, AMD=32/64, Intel=8-32.
-        """
-        32  # Conservative default
 
 # ============================================================================
 # SPIR-V Support Types

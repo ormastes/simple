@@ -51,6 +51,104 @@ class CudaTypeMapper:
 fn cuda_type_mapper_create_sm(major: i64, minor: i64) -> CudaTypeMapper:
     CudaTypeMapper.create_sm(major, minor)
 
+impl CudaTypeMapper:
+    # === CUDA-specific methods ===
+
+    fn map_kernel_signature(name: text, params: [MirType]) -> text:
+        """
+        Generate CUDA kernel signature.
+
+        Example:
+            __global__ void kernel_name(float* a, float* b, int n)
+        """
+        val param_decls = params.enumerate().map("{self.map_type(_1.1)} p{_1.0}")
+        "__global__ void {name}({param_decls.join(', ')})"
+
+    fn map_device_function_signature(name: text, params: [MirType], ret: MirType) -> text:
+        """
+        Generate CUDA device function signature.
+
+        Example:
+            __device__ float helper(float x, float y)
+        """
+        val param_decls = params.enumerate().map("{self.map_type(_1.1)} p{_1.0}")
+        val ret_type = self.map_type(ret)
+        "__device__ {ret_type} {name}({param_decls.join(', ')})"
+
+    fn ptx_type(ty: PrimitiveType) -> text:
+        """
+        Map primitive type to PTX type string.
+
+        PTX types:
+        - .s64, .s32, .s16, .s8 (signed)
+        - .u64, .u32, .u16, .u8 (unsigned)
+        - .f64, .f32, .f16 (float)
+        - .pred (predicate/boolean)
+        """
+        match ty:
+            case I64: ".s64"
+            case I32: ".s32"
+            case I16: ".s16"
+            case I8: ".s8"
+            case U64: ".u64"
+            case U32: ".u32"
+            case U16: ".u16"
+            case U8: ".u8"
+            case F64: ".f64"
+            case F32: ".f32"
+            case F16: ".f16"
+            case Bool: ".pred"
+            case Unit: ""
+
+    fn ptx_state_space(space: MemorySpace) -> text:
+        """
+        Map memory space to PTX state space.
+
+        PTX state spaces:
+        - .global: Device global memory
+        - .shared: Per-CTA shared memory
+        - .local: Per-thread local memory
+        - .const: Constant memory
+        - .param: Kernel parameter memory
+        """
+        match space:
+            case Global: ".global"
+            case Shared: ".shared"
+            case Local: ".local"
+            case Constant: ".const"
+            case Uniform: ".const"
+
+    fn supports_tensor_cores() -> bool:
+        """
+        Check if compute capability supports Tensor Cores.
+        Tensor Cores require SM 7.0+ (Volta).
+        """
+        val (major, _) = self.compute_capability
+        major >= 7
+
+    fn max_threads_per_block() -> i64:
+        """
+        Get maximum threads per block for this compute capability.
+        """
+        1024  # Standard limit for modern GPUs
+
+    fn max_shared_memory() -> i64:
+        """
+        Get maximum shared memory per block in bytes.
+        Varies by compute capability.
+        """
+        val (major, _) = self.compute_capability
+        if major >= 8:
+            163840  # 160 KB for Ampere+
+        elif major >= 7:
+            96 * 1024  # 96 KB for Volta/Turing
+        else:
+            48 * 1024  # 48 KB for older
+
+    fn warp_size() -> i64:
+        """Get warp size (always 32 for NVIDIA GPUs)."""
+        32
+
 impl TypeMapper for CudaTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
         """
@@ -245,104 +343,6 @@ impl TypeMapper for CudaTypeMapper:
                 max_align
             case _:
                 1
-
-impl CudaTypeMapper:
-    # === CUDA-specific methods ===
-
-    fn map_kernel_signature(name: text, params: [MirType]) -> text:
-        """
-        Generate CUDA kernel signature.
-
-        Example:
-            __global__ void kernel_name(float* a, float* b, int n)
-        """
-        val param_decls = params.enumerate().map("{self.map_type(_1.1)} p{_1.0}")
-        "__global__ void {name}({param_decls.join(', ')})"
-
-    fn map_device_function_signature(name: text, params: [MirType], ret: MirType) -> text:
-        """
-        Generate CUDA device function signature.
-
-        Example:
-            __device__ float helper(float x, float y)
-        """
-        val param_decls = params.enumerate().map("{self.map_type(_1.1)} p{_1.0}")
-        val ret_type = self.map_type(ret)
-        "__device__ {ret_type} {name}({param_decls.join(', ')})"
-
-    fn ptx_type(ty: PrimitiveType) -> text:
-        """
-        Map primitive type to PTX type string.
-
-        PTX types:
-        - .s64, .s32, .s16, .s8 (signed)
-        - .u64, .u32, .u16, .u8 (unsigned)
-        - .f64, .f32, .f16 (float)
-        - .pred (predicate/boolean)
-        """
-        match ty:
-            case I64: ".s64"
-            case I32: ".s32"
-            case I16: ".s16"
-            case I8: ".s8"
-            case U64: ".u64"
-            case U32: ".u32"
-            case U16: ".u16"
-            case U8: ".u8"
-            case F64: ".f64"
-            case F32: ".f32"
-            case F16: ".f16"
-            case Bool: ".pred"
-            case Unit: ""
-
-    fn ptx_state_space(space: MemorySpace) -> text:
-        """
-        Map memory space to PTX state space.
-
-        PTX state spaces:
-        - .global: Device global memory
-        - .shared: Per-CTA shared memory
-        - .local: Per-thread local memory
-        - .const: Constant memory
-        - .param: Kernel parameter memory
-        """
-        match space:
-            case Global: ".global"
-            case Shared: ".shared"
-            case Local: ".local"
-            case Constant: ".const"
-            case Uniform: ".const"
-
-    fn supports_tensor_cores() -> bool:
-        """
-        Check if compute capability supports Tensor Cores.
-        Tensor Cores require SM 7.0+ (Volta).
-        """
-        val (major, _) = self.compute_capability
-        major >= 7
-
-    fn max_threads_per_block() -> i64:
-        """
-        Get maximum threads per block for this compute capability.
-        """
-        1024  # Standard limit for modern GPUs
-
-    fn max_shared_memory() -> i64:
-        """
-        Get maximum shared memory per block in bytes.
-        Varies by compute capability.
-        """
-        val (major, _) = self.compute_capability
-        if major >= 8:
-            163840  # 160 KB for Ampere+
-        elif major >= 7:
-            96 * 1024  # 96 KB for Volta/Turing
-        else:
-            48 * 1024  # 48 KB for older
-
-    fn warp_size() -> i64:
-        """Get warp size (always 32 for NVIDIA GPUs)."""
-        32
 
 # ============================================================================
 # Export
