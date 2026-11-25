@@ -1,0 +1,238 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/20.hir/hir_lowering/binding_types.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+"""
+# MIR + LLVM lowering: untyped `var library = match loaded:` across `unsafe` static load
+
+Regression reproducer for `phase2_llvm_untyped_match_local_field_void_2026-11-16`
+(`src/compiler/70.backend/backend_plugin/dynamic_loader.spl`):
+1. `val loaded = unsafe(capabilities: [ffi]): DynLib.load_checked(...)` binds an
+   imported static method's `Result<DynLib, text>` through an `unsafe` block.
+2. `var library = match loaded:` binds the `Ok(value)` payload while the `Err`
+   arm diverges via `return Err(...)`.
+3. Subsequent `unsafe(capabilities: [ffi]): library.close()` resolves the
+   imported class method, and `unsafe(capabilities: [ffi, raw_ptr]):
+   dynlib_symbol_address_v1(library.handle, ...)` reads the exact `handle` field
+   index with non-`Unit` MIR type and emits valid LLVM IR with zero codegen
+   errors (no `void` operand).
+"""
+
+# @tag: unit, compiler, mir, llvm
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct DynamicLoaderMirLlvmProbe:
+    fn_count: i64
+    mir_error_text: text
+    llvm_error_text: text
+    getfield_dest_unit: i64
+    getfield_base_unit: i64
+    getfield_indices: [i64]
+    callees: [text]
+    llvm_ir: text
+
+fn run_dynamic_loader_probe(lib_src: text, app_src: text, target_fn: text) -> DynamicLoaderMirLlvmProbe:
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(lib_src, "lib/dynlib.spl", "lib.dynlib", log)
+    val app_ast = parse_full_frontend(app_src, "app/loader.spl", "app.loader", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dynlib"] = lib_ast
+    modules["app.loader"] = app_ast
+    val sources = [
+        SourceFile(path: "lib/dynlib.spl", content: lib_src, module_name: "lib.dynlib"),
+        SourceFile(path: "app/loader.spl", content: app_src, module_name: "app.loader")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_hl = hirlowering_for_module("lib.dynlib", surfaces)
+    var app_hl = hirlowering_for_module("app.loader", surfaces)
+    val lib_hir = lib_hl.lower_module(lib_ast)
+    val app_hir = app_hl.lower_module(app_ast)
+    expect(lib_hl.errors.len()).to_equal(0)
+    expect(app_hl.errors.len()).to_equal(0)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib.dynlib"] = lib_hir
+    prescan_mods["app.loader"] = app_hir
+    var ml = MirLowering.new(app_hir.symbols)
+    ml.prescan_module_struct_names(prescan_mods, "lib.dynlib")
+    ml.prescan_module_struct_names(prescan_mods, "app.loader")
+    val mir = ml.lower_module(app_hir, [lib_hir, app_hir])
+    var mir_err_text = ""
+    for e in ml.errors:
+        mir_err_text = mir_err_text + e.message + "\n"
+    var fn_count = 0
+    var dest_unit = 0
+    var base_unit = 0
+    var field_indices: [i64] = []
+    var callees: [text] = []
+    for function in mir.functions.values():
+        if function.name == target_fn or function.name.ends_with(".{target_fn}") or function.name.ends_with("::{target_fn}"):
+            fn_count = fn_count + 1
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.GetField(dest, base, field_idx):
+                            field_indices = field_indices.push(field_idx)
+                            for local in function.locals:
+                                if local.id.id == dest.id and local.type_.kind == MirTypeKind.Unit:
+                                    dest_unit = dest_unit + 1
+                            match base.kind:
+                                case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                    for local in function.locals:
+                                        if local.id.id == id.id and local.type_.kind == MirTypeKind.Unit:
+                                            base_unit = base_unit + 1
+                                case _: ()
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    callees = callees.push(name)
+                                case _: ()
+                        case _: ()
+    var translator = MirToLlvm.create("app.loader", CodegenTarget.X86_64, None)
+    val llvm_ir = translator.translate_module(mir)
+    val llvm_err_text = translator.codegen_errors.join("\n")
+    DynamicLoaderMirLlvmProbe(
+        fn_count: fn_count,
+        mir_error_text: mir_err_text,
+        llvm_error_text: llvm_err_text,
+        getfield_dest_unit: dest_unit,
+        getfield_base_unit: base_unit,
+        getfield_indices: field_indices,
+        callees: callees,
+        llvm_ir: llvm_ir
+    )
+
+fn has_callee_matching(callees: [text], owner_part: text, method_part: text) -> bool:
+    for c in callees:
+        if c.contains(owner_part) and c.contains(method_part):
+            return true
+    false
+
+fn has_i64_entry(xs: [i64], target: i64) -> bool:
+    for x in xs:
+        if x == target:
+            return true
+    false
+
+describe "untyped match local from unsafe imported static Result load":
+    it "preserves imported class provenance, non-zero field index, method dispatch, and valid LLVM IR":
+        val lib_src = """pub class DynLib:
+    path: text
+    handle: i64
+    lifetime_identity: u64
+
+impl DynLib:
+    static fn load_checked(path: text) -> Result<DynLib, text>:
+        if path == "":
+            return Err("empty path")
+        Ok(DynLib(path: path, handle: 42, lifetime_identity: 1u64))
+
+    me close() -> bool:
+        self.handle != 0
+
+pub fn dynlib_symbol_address_v1(handle: i64, symbol: text) -> i64:
+    if symbol == "":
+        return 0
+    handle
+"""
+        val app_src = """use lib.dynlib.{DynLib, dynlib_symbol_address_v1}
+
+enum LoadError:
+    LoadFailed(detail: text)
+    MissingSymbol(detail: text)
+
+class Staged:
+    staged_path: text
+    build_id: text
+
+impl Staged:
+    me close() -> bool:
+        true
+
+@unsafe(reason: "loads dynamic provider", capabilities: [ffi, raw_ptr])
+fn target(staged: Staged, changed: bool) -> Result<i64, LoadError>:
+    val loaded = unsafe(capabilities: [ffi]):
+        DynLib.load_checked(staged.staged_path)
+    var library = match loaded:
+        case Ok(value): value
+        case Err(detail):
+            staged.close()
+            return Err(LoadError.LoadFailed(detail))
+    if changed:
+        unsafe(capabilities: [ffi]):
+            library.close()
+        staged.close()
+        return Err(LoadError.LoadFailed("changed"))
+    val entry_symbol = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_symbol_address_v1(library.handle, "simple_backend_plugin_v1")
+    if entry_symbol <= 0:
+        unsafe(capabilities: [ffi]):
+            library.close()
+        staged.close()
+        return Err(LoadError.MissingSymbol("missing"))
+    Ok(entry_symbol)
+"""
+        val probe = run_dynamic_loader_probe(lib_src, app_src, "target")
+        expect(probe.fn_count).to_equal(1)
+        expect(probe.mir_error_text).to_equal("")
+        expect(probe.llvm_error_text).to_equal("")
+        expect(probe.getfield_dest_unit).to_equal(0)
+        expect(probe.getfield_base_unit).to_equal(0)
+        expect(has_i64_entry(probe.getfield_indices, 1)).to_equal(true)
+        expect(has_callee_matching(probe.callees, "DynLib", "close")).to_equal(true)
+        expect(probe.llvm_ir.contains("(void ")).to_equal(false)
+        expect(probe.llvm_ir.contains(", void ")).to_equal(false)
+
+    it "preserves imported class provenance when match scrutinee is directly an unsafe block":
+        val lib_src = """pub class DynLib:
+    path: text
+    handle: i64
+
+impl DynLib:
+    static fn load_checked(path: text) -> Result<DynLib, text>:
+        Ok(DynLib(path: path, handle: 99))
+
+    me close() -> bool:
+        self.handle != 0
+
+pub fn dynlib_symbol_address_v1(handle: i64, symbol: text) -> i64:
+    handle
+"""
+        val app_src = """use lib.dynlib.{DynLib, dynlib_symbol_address_v1}
+
+@unsafe(reason: "loads dynamic provider", capabilities: [ffi, raw_ptr])
+fn target(path: text) -> Result<i64, text>:
+    var library = match (unsafe(capabilities: [ffi]): DynLib.load_checked(path)):
+        case Ok(value): value
+        case Err(detail): return Err(detail)
+    val sym = unsafe(capabilities: [ffi, raw_ptr]):
+        dynlib_symbol_address_v1(library.handle, "entry")
+    if sym <= 0:
+        unsafe(capabilities: [ffi]):
+            library.close()
+        return Err("missing")
+    Ok(sym)
+"""
+        val probe = run_dynamic_loader_probe(lib_src, app_src, "target")
+        expect(probe.fn_count).to_equal(1)
+        expect(probe.mir_error_text).to_equal("")
+        expect(probe.llvm_error_text).to_equal("")
+        expect(probe.getfield_dest_unit).to_equal(0)
+        expect(probe.getfield_base_unit).to_equal(0)
+        expect(has_i64_entry(probe.getfield_indices, 1)).to_equal(true)
+        expect(has_callee_matching(probe.callees, "DynLib", "close")).to_equal(true)
+        expect(probe.llvm_ir.contains("(void ")).to_equal(false)
+        expect(probe.llvm_ir.contains(", void ")).to_equal(false)
