@@ -331,15 +331,8 @@ fn _retained_path(path: text) -> i64:
     @end
     ptr
 
-# MIR Result<(..)> tuple slots admit only i64/bool/f64/text/tuple/record (no u64,
-# no [u8]; result_try_tuple_field_type), so the pair is a record instead.
-# @workaround bug=convnodes_retained_file_result_tuple_u64_2026_10_25 reason=see doc/08_tracking/bug/convnodes_retained_file_result_tuple_u64_2026-10-25.md
-struct RetainedMeta:
-    size: u64
-    identity: [u8]
-
 @unsafe(reason: "observes size and identity on exact retained regular-file handle", capabilities: [ffi, raw_ptr])
-fn _retained_metadata(handle: i64) -> Result<RetainedMeta, text>:
+fn _retained_metadata(handle: i64) -> Result<(u64, [u8]), text>:
     val ptr = _retained_alloc(256u64)
     if ptr == 0: return Err("SCVDB_FILE_MEMORY")
     var size = 0u64
@@ -372,7 +365,7 @@ fn _retained_metadata(handle: i64) -> Result<RetainedMeta, text>:
     @end
     _retained_free(ptr)
     if not valid: return Err("SCVDB_FILE_METADATA_UNSUPPORTED")
-    Ok(RetainedMeta(size: size, identity: identity))
+    Ok((size, identity))
 
 @unsafe(reason: "reads Linux owner and mode from the exact retained descriptor", capabilities: [ffi, raw_ptr])
 fn _retained_security_metadata_v1(handle: i64) -> Result<RetainedFileSecurityMetadataV1, text>:
@@ -528,12 +521,12 @@ fn _retained_file_open_at_v1(directory_handle: i64, name: text, maximum: u64) ->
         case Err(error):
             val closed = file.close()
             Err(error)
-        case Ok(meta):
-            if meta.size > maximum:
+        case Ok((size, identity)):
+            if size > maximum:
                 val closed = file.close()
                 return Err("SCVDB_FILE_QUOTA")
-            file.size = meta.size
-            file.identity = meta.identity
+            file.size = size
+            file.identity = identity
             Ok(file)
     @else:
     Err("SCVDB_DIR_HOST_UNSUPPORTED")
@@ -581,9 +574,7 @@ fn retained_file_open(path: text, maximum: u64, create: bool = false) -> Result<
         Err(error):
             val closed = file.close()
             return Err(error)
-        Ok(meta):
-            val size = meta.size
-            val identity = meta.identity
+        Ok((size, identity)):
             if size > maximum:
                 val closed = file.close()
                 return Err("SCVDB_FILE_QUOTA")
@@ -642,23 +633,10 @@ fn retained_directory_is_real_no_follow(path: text) -> bool:
     @end
     @end
 
-# under Stage 2 native codegen `[u8] != [u8]` is true for equal contents, so
-# identity is compared element-wise.
-# @workaround bug=native_u8_array_ne_compares_reference_2026_10_25 reason=see doc/08_tracking/bug/native_u8_array_ne_compares_reference_2026-10-25.md
-fn _retained_bytes_equal(a: [u8], b: [u8]) -> bool:
-    if a.len() != b.len(): return false
-    var index = 0
-    while index < a.len():
-        if a[index] != b[index]: return false
-        index = index + 1
-    true
-
 fn retained_file_identity_unchanged(file: RetainedFile) -> Result<bool, text>:
     if file.closed or file.writable: return Err("SCVDB_FILE_STATE")
-    val meta = _retained_metadata(file.handle)?
-    val size = meta.size
-    val identity = meta.identity
-    if size != file.size or not _retained_bytes_equal(identity, file.identity): return Err("SCVDB_FILE_CHANGED")
+    val (size, identity) = _retained_metadata(file.handle)?
+    if size != file.size or identity != file.identity: return Err("SCVDB_FILE_CHANGED")
     Ok(true)
 
 fn retained_file_unchanged(file: RetainedFile) -> Result<bool, text>:

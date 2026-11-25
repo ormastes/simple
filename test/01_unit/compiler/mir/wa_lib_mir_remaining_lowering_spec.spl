@@ -1,0 +1,40 @@
+# Regression spec: verify pure-Simple MIR lowers the restored patterns for retired lib workarounds.
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_module_errors(src: text, tag: text) -> text:
+    val filename = "wa_lib_mir_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var errs = ""
+    for error in hir_lowering.errors:
+        errs = errs + "HIR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        errs = errs + "MIR:" + error.message + "\n"
+    errs
+
+describe "MIR lowering of retired lib workarounds":
+    it "lowers char_code_at().to_string(16).upper() without error":
+        val src = "fn enc_hex(s: text, i: i64) -> text:\n    var code = s.char_code_at(i)\n    code.to_string(16).upper()\n"
+        expect(lower_module_errors(src, "radix_upper")).to_equal("")
+
+    it "lowers Result<(u64, [u8]), text> via ? and match plus [u8] != [u8]":
+        val src = "fn meta(flag: bool) -> Result<(u64, [u8]), text>:\n    if not flag:\n        return Err(\"bad\")\n    Ok((7u64, [1u8, 2u8]))\n\nfn check_try(flag: bool, expected: [u8]) -> Result<bool, text>:\n    val (size, identity) = meta(flag)?\n    if size != 7u64 or identity != expected:\n        return Err(\"changed\")\n    Ok(true)\n\nfn check_match(flag: bool) -> u64:\n    match meta(flag):\n        case Err(_): 0u64\n        case Ok((size, _id)): size\n"
+        expect(lower_module_errors(src, "result_tuple_u64_bytes")).to_equal("")
+
+    it "lowers text.to_int() on a validated single ASCII digit":
+        val src = "fn digit(value: text) -> i64:\n    if value.byte_len() != 1:\n        return -1\n    val code = value.byte_at(0) as i64\n    if code < 48 or code > 57:\n        return -1\n    value.to_int()\n"
+        expect(lower_module_errors(src, "text_to_int")).to_equal("")
+
+    it "lowers inferred trim().bytes() without explicit text annotation":
+        val src = "fn trimmed_len(source: text) -> i64:\n    val trimmed = source.trim()\n    val bytes = trimmed.bytes()\n    bytes.len()\n"
+        expect(lower_module_errors(src, "trimmed_bytes")).to_equal("")

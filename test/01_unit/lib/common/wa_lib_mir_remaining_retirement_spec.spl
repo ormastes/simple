@@ -1,0 +1,64 @@
+# Regression spec for retiring 7 resolved count=1 @workaround sites under src/lib/ & inventory_scratch.
+
+use std.spec.*
+use std.gc_async_mut.http_client.types.{url_encode}
+use std.common.bytes.span.{ByteSpan}
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.common.build_manager.codec.{builder_wire_digit_v1, BuilderWireReaderV1}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "retired lib/MIR count=1 workarounds":
+    it "encodes URLs using i64.to_hex().upper()":
+        expect(url_encode("hello world")).to_equal("hello%20world")
+        expect(url_encode("a/b?c=1&d=~_-.")).to_equal("a%2Fb%3Fc%3D1%26d%3D~_-.")
+        expect(url_encode("\n\t")).to_equal("%0A%09")
+
+    it "checks ByteSpan.starts_with via chained slice().equals()":
+        val full = ByteSpan.new([10u8, 20u8, 30u8, 40u8])
+        val good = ByteSpan.new([10u8, 20u8])
+        val bad = ByteSpan.new([10u8, 99u8])
+        val longer = ByteSpan.new([10u8, 20u8, 30u8, 40u8, 50u8])
+        expect(full.starts_with(good)).to_equal(true)
+        expect(full.starts_with(bad)).to_equal(false)
+        expect(full.starts_with(longer)).to_equal(false)
+
+    it "parses trimmed SDN scalars without explicit text annotation workaround":
+        val parsed_int = parse("  42  ").unwrap()
+        expect(parsed_int == SdnValue.Int(42)).to_equal(true)
+        val parsed_str = parse("  \"ok\"  ").unwrap()
+        expect(parsed_str == SdnValue.String("ok")).to_equal(true)
+
+    it "parses strict single wire digits using text.to_int()":
+        expect(builder_wire_digit_v1("0")).to_equal(0)
+        expect(builder_wire_digit_v1("9")).to_equal(9)
+        expect(builder_wire_digit_v1("")).to_equal(-1)
+        expect(builder_wire_digit_v1("10")).to_equal(-1)
+        expect(builder_wire_digit_v1("a")).to_equal(-1)
+        expect(builder_wire_digit_v1(" 5")).to_equal(-1)
+        var reader = BuilderWireReaderV1.create("42\n")
+        expect(reader.number(100, false)).to_equal(42)
+        expect(reader.complete_error()).to_equal("")
+
+    it "has zero remaining retired @workaround tags across all 6 source files":
+        val targets = [
+            "src/lib/gc_async_mut/http_client/types.spl",
+            "src/lib/common/bytes/span.spl",
+            "src/lib/common/sdn/parser.spl",
+            "src/lib/common/build_manager/codec.spl",
+            "src/app/compiler_entrypoint/inventory_scratch.spl",
+            "src/lib/nogc_sync_mut/io/retained_file.spl"
+        ]
+        val retired_bugs = [
+            "mir_int_to_string_radix_unresolved_2026-11-14",
+            "mir_chained_named_receiver_owner_2026_10_10",
+            "mir_text_bytes_unresolved_inferred_trim_receiver_2026-10-23",
+            "native_string_methods_unresolved_in_mir_2026-07-17",
+            "optional_text_unwrap_truncates_at_nul_2026-10-25",
+            "native_u8_array_ne_compares_reference_2026_10_25",
+            "convnodes_retained_file_result_tuple_u64_2026_10_25"
+        ]
+        for path in targets:
+            val content = file_read(path)
+            for bug in retired_bugs:
+                expect(content.contains(bug)).to_equal(false)
