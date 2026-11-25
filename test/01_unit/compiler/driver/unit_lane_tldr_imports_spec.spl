@@ -11,7 +11,8 @@ use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_tldr_import_route_v1.{unit_tldr_imports_flag_v1, unit_tldr_imports_enabled_v1,
     unit_tldr_imports_memo_reset_v1, tldr_imports_memo_reset_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_lower_v1}
-use compiler.driver.driver_hir_cache.{hir_shard_key_sidecar_path_v1}
+use compiler.driver.driver_hir_cache.{hir_shard_key_sidecar_path_v1, hir_shard_key_sidecar_write_v1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hirkey_publish_v1}
 use compiler.driver.driver.{compiler_driver_create}
 use compiler.common.driver_compile_options.{driver_core_compile_options_default}
 use compiler.common.driver_core_modes.{CompileMode}
@@ -171,7 +172,17 @@ describe "unit-lane TLDR imports (PM3)":
         expect(early.fallback_modules).to_equal(["pkg.box"])
         expect(early.parse_paths).to_equal([leaf, mods["pkg.box"]])
         expect(early.surfaces.len()).to_equal(0)
-        val _w = file_write(hir_shard_key_sidecar_path_v1(queue, mods["pkg.box"]), "hirkey-v1\nk\nb\n")
+        val provider = mods["pkg.box"]
+        # Reopen a queue written by the previous worker. Its body key used
+        # the interface pathname but cannot identify a parser-bound entry.
+        expect(file_write(hir_shard_key_sidecar_path_v1(queue, provider), provider + "\nbody-key\n")).to_equal(true)
+        val legacy = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
+        expect(legacy.parse_paths).to_equal([leaf, provider])
+        expect(legacy.surfaces.len()).to_equal(0)
+        val binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(hir_shard_key_sidecar_write_v1(queue, provider, "iface-key", binding)).to_equal(true)
+        # A subsequent body receipt must leave the published interface readable.
+        expect(native_file_worker_hirkey_publish_v1(queue, provider, "body-key")).to_equal(true)
         val late = unit_tldr_plan_v1("u4", root + "/tldr", [leaf], mods)
         expect(late.fallbacks).to_equal(0)
         expect(late.surfaces.len()).to_equal(1)
