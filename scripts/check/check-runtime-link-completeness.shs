@@ -171,16 +171,42 @@ hosted_win32"
     fi
     FLAGS="-c -O1 -std=gnu11 -ffunction-sections -fdata-sections -DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1 -Isrc/runtime -Isrc/runtime/platform"
     [ "$IS_WINDOWS" = 1 ] || FLAGS="$FLAGS -fPIC"
+    _rlc_poll() { sleep 0.05 2>/dev/null || sleep 1; }
+    _rlc_throttle() {
+        while :; do
+            _next=""; _n=0
+            for _p in $_pids; do
+                if kill -0 "$_p" 2>/dev/null; then
+                    _next="$_next $_p"
+                    _n=$((_n + 1))
+                fi
+            done
+            _pids=$_next
+            [ "$_n" -lt "$JOBS" ] && break
+            _rlc_poll
+        done
+    }
     : >"$WORK_DIR/compile.failed"
-    running=0
+    _pids=""
     for name in $SOURCES; do
         src="src/runtime/$name.c"
         [ -f "$src" ] || die "listed runtime source missing: $src"
         obj="$WORK_DIR/obj/$(printf '%s' "$name" | tr '/' '_').o"
-        # shellcheck disable=SC2086
-        ( "$CC" $FLAGS "$src" -o "$obj" >"$obj.log" 2>&1 || printf '%s\n' "$name" >>"$WORK_DIR/compile.failed" ) &
-        running=$((running + 1))
-        if [ "$running" -ge "$JOBS" ]; then wait; running=0; fi
+        _rlc_throttle
+        (
+            if "$CC" $FLAGS "$src" -o "$obj" >"$obj.log" 2>&1; then
+                "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}' >"$obj.def"
+                if [ "$HOST_OS" = linux ]; then
+                    case "$(basename "$obj" .o)" in
+                        hosted_cocoa|hosted_win32) : >"$obj.undef" ;;
+                        *) "$NM" -u "$obj" 2>/dev/null | awk '{print $NF}' >"$obj.undef" ;;
+                    esac
+                fi
+            else
+                printf '%s\n' "$name" >>"$WORK_DIR/compile.failed"
+            fi
+        ) &
+        _pids="$_pids $!"
     done
     wait
     if [ -s "$WORK_DIR/compile.failed" ]; then
@@ -190,9 +216,7 @@ hosted_win32"
         done <"$WORK_DIR/compile.failed"
         die "runtime compile failed"
     fi
-    for obj in "$WORK_DIR"/obj/*.o; do
-        "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}'
-    done | sed -E 's/^_//' >"$WORK_DIR/defined.txt"
+    cat "$WORK_DIR"/obj/*.o.def 2>/dev/null | sed -E 's/^_//' >"$WORK_DIR/defined.txt"
 fi
 LC_ALL=C sort -u "$WORK_DIR/defined.txt" -o "$WORK_DIR/defined.txt"
 
@@ -208,8 +232,8 @@ if [ -z "$RUNTIME_LIB" ] && [ "$HOST_OS" = linux ]; then
     : >"$WORK_DIR/bundle_undef.txt"; : >"$WORK_DIR/bundle_def.txt"
     for obj in "$WORK_DIR"/obj/*.o; do
         case "$(basename "$obj" .o)" in hosted_cocoa|hosted_win32) continue ;; esac
-        "$NM" -u "$obj" 2>/dev/null | awk '{print $NF}' >>"$WORK_DIR/bundle_undef.txt"
-        "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}' >>"$WORK_DIR/bundle_def.txt"
+        cat "$obj.undef" >>"$WORK_DIR/bundle_undef.txt"
+        cat "$obj.def" >>"$WORK_DIR/bundle_def.txt"
     done
     grep -E '^(rt|spl)_' "$WORK_DIR/bundle_undef.txt" | LC_ALL=C sort -u >"$WORK_DIR/bundle_undef_rt.txt" || true
     LC_ALL=C sort -u "$WORK_DIR/bundle_def.txt" -o "$WORK_DIR/bundle_def.txt"
@@ -237,7 +261,7 @@ if [ "$CLOSURE_STRICT" = 1 ]; then
             case "$HOST_OS:$(basename "$obj" .o)" in
                 linux:hosted_cocoa|linux:hosted_win32|macos:hosted_win32|windows:hosted_cocoa) continue ;;
             esac
-            "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}'
+            cat "$obj.def"
         done | sed -E 's/^_//' >"$WORK_DIR/defined_native.txt"
         # C sources the Rust runtime lane (src/compiler_rust/runtime/build.rs)
         # compiles into libsimple_native_all; each is platform-guarded inside
@@ -250,21 +274,24 @@ if [ "$CLOSURE_STRICT" = 1 ]; then
             [ -e "$need" ] || die "closure-strict needs $need (sparse checkout? add it, or pass --no-closure-strict)"
         done
         mkdir -p "$WORK_DIR/rlobj"
-        running=0
+        _pids=""
         for name in $(sed -n '/^fn compile_c_runtime_sources/,/^}/p' "$BUILD_RS" | grep -oE '"[A-Za-z0-9_/]+\.c"' | tr -d '"' | sort -u); do
             src="src/runtime/$name"
             [ -f "$src" ] || continue
             obj="$WORK_DIR/rlobj/$(printf '%s' "$name" | tr '/' '_').o"
+            _rlc_throttle
             # shellcheck disable=SC2086
-            ( "$CC" $FLAGS "$src" -o "$obj" >"$obj.log" 2>&1 || printf 'NOTE: rust-lane C source %s does not compile on %s; counted as defining nothing here\n' "$name" "$HOST_OS" >&2 ) &
-            running=$((running + 1))
-            if [ "$running" -ge "$JOBS" ]; then wait; running=0; fi
+            (
+                if "$CC" $FLAGS "$src" -o "$obj" >"$obj.log" 2>&1; then
+                    "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}' >"$obj.def"
+                else
+                    printf 'NOTE: rust-lane C source %s does not compile on %s; counted as defining nothing here\n' "$name" "$HOST_OS" >&2
+                fi
+            ) &
+            _pids="$_pids $!"
         done
         wait
-        for obj in "$WORK_DIR"/rlobj/*.o; do
-            [ -f "$obj" ] || continue
-            "$NM" --defined-only -g "$obj" 2>/dev/null | awk 'NF>=3{print $NF}'
-        done | sed -E 's/^_//' >>"$WORK_DIR/defined_native.txt"
+        cat "$WORK_DIR"/rlobj/*.o.def 2>/dev/null | sed -E 's/^_//' >>"$WORK_DIR/defined_native.txt"
         # Rust exports, honouring the nearest preceding #[cfg(...)] platform
         # attribute: windows/unix families, target_os = "...", and not(...).
         find src/compiler_rust/runtime/src src/compiler_rust/native_all/src -name '*.rs' -print |

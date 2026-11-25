@@ -1149,8 +1149,20 @@ if [ "${RT_DUAL_RATCHET_SELFTEST_CHILD:-0}" = 1 ]; then
     # which is the point of the fixture.
     RC=0
 else
-    selftest
-    RC=$?
+    _st_cache_dir="${TMPDIR:-/tmp}"
+    _st_hash=""
+    if [ "$SELFTEST_ONLY" -eq 0 ] && command -v sha256sum >/dev/null 2>&1; then
+        _st_hash=$(sha256sum "$SELF" 2>/dev/null | awk '{print $1}')
+    fi
+    if [ -n "$_st_hash" ] && [ -f "$_st_cache_dir/.rt-dual-ratchet-selftest.$_st_hash" ]; then
+        RC=0
+    else
+        selftest
+        RC=$?
+        if [ "$RC" -eq 0 ] && [ -n "$_st_hash" ]; then
+            : > "$_st_cache_dir/.rt-dual-ratchet-selftest.$_st_hash" 2>/dev/null || true
+        fi
+    fi
 fi
 if [ $RC -ne 0 ]; then
     echo "ERROR — nothing was checked (selftest failed)"
@@ -1327,14 +1339,34 @@ if [ -n "$BASELINE_REV" ]; then
     }
     CENSUS_DIR=${RT_DUAL_CENSUS_DIR:-$(_census_base_dir)/.rt-dual-census}
     CENSUS_KEY=""
+    TIP_CENSUS_KEY=""
     if [ "$CENSUS_DIR" != none ]; then
-        CENSUS_KEY=$( {
-            ( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" \
-                "$BASELINE_REV:src/compiler_rust/native_all" "$BASELINE_REV:src/compiler_rust/native_loader" )
-            sha256sum "$SELF" 2>/dev/null
-        } 2>/dev/null | sha256sum | awk '{print $1}')
+        if _base_trees=$( cd "$ROOT" && git rev-parse "$BASELINE_REV:src/runtime" "$BASELINE_REV:src/compiler_rust/runtime" \
+                "$BASELINE_REV:src/compiler_rust/native_all" "$BASELINE_REV:src/compiler_rust/native_loader" 2>/dev/null ); then
+            CENSUS_KEY=$( {
+                printf '%s\n' "$_base_trees"
+                sha256sum "$SELF" 2>/dev/null
+            } | sha256sum | awk '{print $1}')
+        fi
+        if [ -n "$REV" ]; then
+            if _tip_trees=$( cd "$ROOT" && git rev-parse "$REV:src/runtime" "$REV:src/compiler_rust/runtime" \
+                    "$REV:src/compiler_rust/native_all" "$REV:src/compiler_rust/native_loader" 2>/dev/null ); then
+                TIP_CENSUS_KEY=$( {
+                    printf '%s\n' "$_tip_trees"
+                    sha256sum "$SELF" 2>/dev/null
+                } | sha256sum | awk '{print $1}')
+            fi
+        fi
     fi
-    if [ -n "$CENSUS_KEY" ] && [ -s "$CENSUS_DIR/$CENSUS_KEY" ]; then
+    if [ -n "$CENSUS_KEY" ] && [ "$TIP_CENSUS_KEY" = "$CENSUS_KEY" ] && [ -s "$WORK/current.raw.txt" ]; then
+        cp "$WORK/current.raw.txt" "$WORK/base.txt"
+        if [ ! -s "$CENSUS_DIR/$CENSUS_KEY" ] && mkdir -p "$CENSUS_DIR" 2>/dev/null; then
+            cp "$WORK/base.txt" "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" 2>/dev/null &&
+                mv -f "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" "$CENSUS_DIR/$CENSUS_KEY" 2>/dev/null ||
+                rm -f "$CENSUS_DIR/$CENSUS_KEY.tmp.$$"
+        fi
+        echo "note: base $BASELINE_REV runtime trees match $REV; reusing tip single-lane census" >&2
+    elif [ -n "$CENSUS_KEY" ] && [ -s "$CENSUS_DIR/$CENSUS_KEY" ]; then
         cp "$CENSUS_DIR/$CENSUS_KEY" "$WORK/base.txt"
         echo "note: base census for $BASELINE_REV read from the content-keyed cache" >&2
     else

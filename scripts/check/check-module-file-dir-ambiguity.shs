@@ -33,6 +33,29 @@ done
 
 # Prints "<X.spl> <X/entry>" for each ambiguous pair under <root>/src.
 list_pairs() {
+    # When inside a Git worktree (including CI sparse checkouts), enumerate
+    # tracked/untracked non-ignored src/**/*.spl via git ls-files so skipped
+    # sparse directories outside the cone are still visible without extra
+    # sparse-checkout add calls.
+    if [ -e "$1/.git" ] && git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        _del=$(mktemp)
+        git -C "$1" -c core.quotePath=false ls-files -d -- 'src' > "$_del" 2>/dev/null
+        { git -C "$1" -c core.quotePath=false ls-files -c -o --exclude-standard -- 'src' 2>/dev/null; } |
+            awk -F'\t' -v delf="$_del" '
+                BEGIN { while ((getline l < delf) > 0) deleted[l] = 1; close(delf) }
+                !( $0 in deleted ) && /\.spl$/ {
+                    all[$0] = 1
+                    if ($0 ~ /\/(__init__|mod)\.spl$/) ent[++ne] = $0
+                }
+                END {
+                    for (i = 1; i <= ne; i++) {
+                        e = ent[i]; d = e; sub(/\/[^/]+$/, "", d)
+                        if ((d ".spl") in all) print d ".spl " e
+                    }
+                }' | sort -u -k1,1
+        rm -f "$_del"
+        return 0
+    fi
     # Walk package entries (few) rather than every file (many).
     (cd "$1" && find src \( -name '__init__.spl' -o -name 'mod.spl' \) 2>/dev/null) | while read -r e; do
         d="${e%/*}"
@@ -44,17 +67,48 @@ list_pairs() {
 scan() {
     s_root=$1
     s_base=$2
-    if [ ! -d "$s_root/src" ]; then
-        echo "ERROR — nothing was checked (no src/ under $s_root)"
-        return 2
-    fi
-    s_files=$( (cd "$s_root" && find src -name '*.spl') | wc -l | tr -d ' ')
-    if [ "$s_files" -eq 0 ]; then
-        echo "ERROR — nothing was checked (0 .spl files under $s_root/src)"
-        return 2
-    fi
     s_tmp=$(mktemp)
-    list_pairs "$s_root" | cut -d' ' -f1 > "$s_tmp"
+    if [ -e "$s_root/.git" ] && git -C "$s_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        _del=$(mktemp)
+        _cnt=$(mktemp)
+        git -C "$s_root" -c core.quotePath=false ls-files -d -- 'src' > "$_del" 2>/dev/null
+        git -C "$s_root" -c core.quotePath=false ls-files -c -o --exclude-standard -- 'src' 2>/dev/null |
+            awk -v delf="$_del" -v cntf="$_cnt" '
+                BEGIN { while ((getline l < delf) > 0) deleted[l] = 1; close(delf); n = 0 }
+                !( $0 in deleted ) && /\.spl$/ && !seen[$0]++ {
+                    n++
+                    all[$0] = 1
+                    if ($0 ~ /\/(__init__|mod)\.spl$/) ent[++ne] = $0
+                }
+                END {
+                    print n > cntf
+                    for (i = 1; i <= ne; i++) {
+                        e = ent[i]; d = e; sub(/\/[^/]+$/, "", d)
+                        if ((d ".spl") in all) print d ".spl"
+                    }
+                }' | sort -u > "$s_tmp"
+        s_files=$(cat "$_cnt" 2>/dev/null || echo 0)
+        rm -f "$_del" "$_cnt"
+        case "$s_files" in
+            ''|*[!0-9]*|0)
+                rm -f "$s_tmp"
+                echo "ERROR — nothing was checked (0 .spl files under $s_root/src)"
+                return 2 ;;
+        esac
+    else
+        if [ ! -d "$s_root/src" ]; then
+            rm -f "$s_tmp"
+            echo "ERROR — nothing was checked (no src/ under $s_root)"
+            return 2
+        fi
+        s_files=$( (cd "$s_root" && find src -name '*.spl') | wc -l | tr -d ' ')
+        if [ "$s_files" -eq 0 ]; then
+            rm -f "$s_tmp"
+            echo "ERROR — nothing was checked (0 .spl files under $s_root/src)"
+            return 2
+        fi
+        list_pairs "$s_root" | cut -d' ' -f1 > "$s_tmp"
+    fi
     if [ -f "$s_base" ]; then
         s_known=$(grep -v '^#' "$s_base" | grep -v '^$' | sort)
     else

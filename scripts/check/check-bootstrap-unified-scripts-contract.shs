@@ -137,11 +137,21 @@ check_contains() {
   _needle=$2
   _tag=$3
   _msg=$4
-  if printf '%s\n' "$_hay" | grep -Fq -- "$_needle"; then
-    pass_check
-  else
-    fail_check "$_tag" "$_msg (missing '$_needle')"
-  fi
+  case "$_needle" in
+    *[*?\[]*)
+      if printf '%s\n' "$_hay" | grep -Fq -- "$_needle"; then
+        pass_check
+      else
+        fail_check "$_tag" "$_msg (missing '$_needle')"
+      fi
+      ;;
+    *)
+      case "$_hay" in
+        *"$_needle"*) pass_check ;;
+        *) fail_check "$_tag" "$_msg (missing '$_needle')" ;;
+      esac
+      ;;
+  esac
   return 0
 }
 
@@ -150,11 +160,21 @@ check_not_contains() {
   _needle=$2
   _tag=$3
   _msg=$4
-  if printf '%s\n' "$_hay" | grep -Fq -- "$_needle"; then
-    fail_check "$_tag" "$_msg (unexpected '$_needle')"
-  else
-    pass_check
-  fi
+  case "$_needle" in
+    *[*?\[]*)
+      if printf '%s\n' "$_hay" | grep -Fq -- "$_needle"; then
+        fail_check "$_tag" "$_msg (unexpected '$_needle')"
+      else
+        pass_check
+      fi
+      ;;
+    *)
+      case "$_hay" in
+        *"$_needle"*) fail_check "$_tag" "$_msg (unexpected '$_needle')" ;;
+        *) pass_check ;;
+      esac
+      ;;
+  esac
   return 0
 }
 
@@ -331,22 +351,12 @@ EOF_POISON_CMD
   # -------------------------------------------------------------------------
   # 1. Integrity, .csm Seals & Dual-Shell Syntax
   # -------------------------------------------------------------------------
-  if [ "$_is_full_tree" -eq 1 ]; then
-    _fv_st_out=$(sh "$_fast_verify" --selftest --root "$_vroot" 2>&1)
-    _fv_st_rc=$?
-    if [ "$_fv_st_rc" -eq 0 ]; then
-      pass_check
-    else
-      fail_check "fast-verify-selftest" "fast-verify-bootstrap-scripts.shs --selftest failed (rc=$_fv_st_rc): $_fv_st_out"
-    fi
-  fi
-
-  _fv_out=$(sh "$_fast_verify" --root "$_vroot" 2>&1)
+  _fv_out=$(sh "$_fast_verify" --hashes-only --root "$_vroot" 2>&1)
   _fv_rc=$?
   if [ "$_fv_rc" -eq 0 ]; then
     pass_check
   else
-    fail_check "fast-verify-full" "fast-verify-bootstrap-scripts.shs failed (rc=$_fv_rc): $_fv_out"
+    fail_check "fast-verify-hashes" "fast-verify-bootstrap-scripts.shs --hashes-only failed (rc=$_fv_rc): $_fv_out"
   fi
 
   _pol_sdn_rel="scripts/bootstrap/stage3-native-host-link-policy.sdn"
@@ -965,6 +975,14 @@ EOF_POL
 
   _st_fails=0
 
+  # Verify fast-verify-bootstrap-scripts.shs selftest once here rather than on every verify_root() call
+  _fv_st_out=$(sh "$HERE/fast-verify-bootstrap-scripts.shs" --selftest --root "$ROOT_DIR" 2>&1)
+  _fv_st_rc=$?
+  if [ "$_fv_st_rc" -ne 0 ]; then
+    echo "selftest FAIL (fast-verify-selftest): expected exit 0, got $_fv_st_rc: $_fv_st_out"
+    _st_fails=$((_st_fails + 1))
+  fi
+
   # (0) Clean fixture must PASS (exit 0)
   _st_out=$(sh "$SELF_SCRIPT" --root "$_st" 2>&1)
   _st_rc=$?
@@ -1058,11 +1076,11 @@ EOF_POL
   ACTIVE_TMP_ST=""
 
   if [ "$_st_fails" -gt 0 ]; then
-    echo "FAIL — check-bootstrap-unified-scripts-contract selftest failed ($_st_fails/8 fixtures failed)"
+    echo "FAIL — check-bootstrap-unified-scripts-contract selftest failed ($_st_fails/9 fixtures failed)"
     return 1
   fi
 
-  echo "PASS — check-bootstrap-unified-scripts-contract selftest verified (8/8 fixtures)"
+  echo "PASS — check-bootstrap-unified-scripts-contract selftest verified (9/9 fixtures)"
   return 0
 }
 

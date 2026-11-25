@@ -98,7 +98,15 @@ set -u
 # process that got reparented (to init/whatever) before the tree walk's
 # single `ps` snapshot observed it.
 HAVE_SETSID=0
-command -v setsid >/dev/null 2>&1 && HAVE_SETSID=1
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) HAVE_SETSID=0 ;;
+    *)
+        if command -v setsid >/dev/null 2>&1; then
+            setsid sh -c 'exit 7' >/dev/null 2>&1
+            [ "$?" -eq 7 ] && HAVE_SETSID=1
+        fi
+        ;;
+esac
 
 # ps_pid_ppid_pairs: print "<pid> <ppid>" for every live process, using
 # whichever invocation this host's `ps` actually accepts (probed once).
@@ -121,20 +129,35 @@ ps_pid_ppid_pairs() {
     esac
 }
 
+# tree_pids_postorder ROOT_PID: print ROOT_PID and every live descendant
+# children-first from ONE `ps` snapshot (single awk pass avoids POSIX shell
+# global parameter clobber across recursive calls, which previously dropped
+# ROOT_PID when recursing into children).
+tree_pids_postorder() {
+    ps_pid_ppid_pairs | awk -v root="$1" '
+        { ppid[$1] = $2; children[$2] = children[$2] " " $1 }
+        function walk(p,   n, arr, i) {
+            if (seen[p]++) return
+            n = split(children[p], arr, " ")
+            for (i = 1; i <= n; i++) {
+                if (arr[i] != "") walk(arr[i])
+            }
+            print p
+        }
+        END { walk(root) }
+    '
+}
+
 # kill_tree ROOT_PID SIG: signal ROOT_PID and every live descendant,
 # children-first, from ONE `ps` snapshot (taken once per call, not once per
 # recursion level -- cheap and avoids racing a fast-exiting child out from
 # under a second `ps` call).
 kill_tree() {
-    _kt_pairs=$(ps_pid_ppid_pairs)
-    _kt_walk "$1" "$2" "$_kt_pairs"
-}
-_kt_walk() {
-    _kt_root=$1; _kt_sig=$2; _kt_pairs=$3
-    for _kt_c in $(printf '%s\n' "$_kt_pairs" | awk -v p="$_kt_root" '$2==p{print $1}'); do
-        _kt_walk "$_kt_c" "$_kt_sig" "$_kt_pairs"
+    _kt_sig=$2
+    _kt_list=$(tree_pids_postorder "$1")
+    for _kt_p in $_kt_list; do
+        kill "-$_kt_sig" "$_kt_p" 2>/dev/null || :
     done
-    kill "-$_kt_sig" "$_kt_root" 2>/dev/null
 }
 
 # cont_tree ROOT_PID: SIGCONT ROOT_PID and every live descendant,
@@ -153,15 +176,10 @@ _kt_walk() {
 # itself or a child by some other path, so waking the tree before terminating
 # it costs nothing and closes the same failure mode here.
 cont_tree() {
-    _ct_pairs=$(ps_pid_ppid_pairs)
-    _ct_walk "$1" "$_ct_pairs"
-}
-_ct_walk() {
-    _ct_root=$1; _ct_pairs=$2
-    for _ct_c in $(printf '%s\n' "$_ct_pairs" | awk -v p="$_ct_root" '$2==p{print $1}'); do
-        _ct_walk "$_ct_c" "$_ct_pairs"
+    _ct_list=$(tree_pids_postorder "$1")
+    for _ct_p in $_ct_list; do
+        kill -CONT "$_ct_p" 2>/dev/null || :
     done
-    kill -CONT "$_ct_root" 2>/dev/null
 }
 
 # kill_row PID SIG: the one function every kill site (budget-kill, the
@@ -228,6 +246,27 @@ now_ms() {
     esac
 }
 
+set_now_ms() {
+    _er=${EPOCHREALTIME:-}
+    case "$_er" in
+        ?*.?*)
+            _er_s=${_er%.*}
+            _er_f="${_er#*.}000"
+            _er_rest=${_er_f#???}
+            _er_ms=${_er_f%"$_er_rest"}
+            _er_ms=${_er_ms#0}
+            _er_ms=${_er_ms#0}
+            [ -n "$_er_ms" ] || _er_ms=0
+            _NOW_MS=$(( _er_s * 1000 + _er_ms ))
+            ;;
+        *) _NOW_MS=$(now_ms) ;;
+    esac
+}
+
+poll_sleep() {
+    sleep 0.05 2>/dev/null || sleep 1
+}
+
 # sed-escape a substitution value: backslash, ampersand, then the delimiter.
 sed_escape() { printf '%s' "$1" | sed -e 's/[\&/]/\\&/g'; }
 
@@ -244,13 +283,28 @@ read_manifest_text() {
 }
 
 # select_rows MANIFEST_TEXT TIER -> tab-separated id\tpush_blocking\tcommand
-# on stdout, one row per line. Applies the local-tier union rule.
+# on stdout, one row per line. Applies the local-tier union rule, scheduling
+# known multi-second rows first (Longest-Processing-Time-First) so parallel
+# workers saturate immediately rather than starting heavy jobs at the tail.
 select_rows() {
     _text=$1
     _tier=$2
     printf '%s\n' "$_text" | awk -F, -v want_tier="$_tier" '
         function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
         function nosp(v) { gsub(/ /, "", v); return v }
+        BEGIN {
+            heavy["local-runtime-link-completeness"] = 1
+            heavy["local-rt-dual-implementation"] = 1
+            heavy["local-bootstrap-unified-scripts-contract"] = 1
+            heavy["local-sdn-crc32-sealed"] = 1
+            heavy["local-no-stale-snapshot-rewind"] = 1
+            heavy["local-admit-stage2-lane"] = 1
+            heavy["local-stage2-candidate-requalification"] = 1
+            heavy["local-bootstrap-path-matrix-all"] = 1
+            heavy["local-fast-verify-bootstrap-scripts"] = 1
+            heavy["push-private-import-baseline"] = 1
+            heavy["push-no-monomorphization"] = 1
+        }
         /^[[:space:]]*#/ { next }
         /^[[:space:]]*$/ { next }
         /^must_check_gates[[:space:]]*\|/ { next }
@@ -268,7 +322,18 @@ select_rows() {
             # tier (bootstrap and ci rows use the same column for a different,
             # tier-local meaning of required).
             if (want_tier == "local" && tier == "push" && blocking == "true") keep = 1
-            if (keep && !seen[id]++) printf "%s\t%s\t%s\t%s\n", id, blocking, kind, cmd
+            if (keep && !seen[id]++) {
+                line = id "\t" blocking "\t" kind "\t" cmd
+                if (id in heavy) {
+                    heavy_lines[++hn] = line
+                } else {
+                    other_lines[++on] = line
+                }
+            }
+        }
+        END {
+            for (i = 1; i <= hn; i++) print heavy_lines[i]
+            for (i = 1; i <= on; i++) print other_lines[i]
         }'
 }
 
@@ -315,7 +380,8 @@ run_tier() {
     cd "$ROOT" || { rm -rf "$_work" "$_rows"; echo "run-gate-tier: ERROR — nothing was checked (cannot cd to repo root $ROOT)" >&2; return 2; }
     _active="$_work/active"; : > "$_active"
     _lines=$(wc -l < "$_rows" | tr -d ' ')
-    _t0=$(now_ms)
+    set_now_ms
+    _t0=$_NOW_MS
     _budget_ms=$(( _budget_s * 1000 ))
     _killed=0
     _bad_placeholder=0
@@ -378,15 +444,18 @@ run_tier() {
         # status POSIX-portably; no bash-only `wait -n` is used).
         while :; do
             _running=0
-            : > "$_active.next"
+            _next_buf=""
+            _reaped=0
             while IFS=" " read -r _pid _rid; do
                 [ -n "$_pid" ] || continue
                 if kill -0 "$_pid" 2>/dev/null; then
-                    echo "$_pid $_rid" >> "$_active.next"
+                    _next_buf="$_next_buf$_pid $_rid
+"
                     _running=$((_running + 1))
                 else
                     wait "$_pid" 2>/dev/null
                     _rc=$?
+                    _reaped=1
                     if [ "$_rc" = 0 ]; then
                         printf '%s pass\n' "$_rid" >> "$_work/verdicts"
                     else
@@ -394,15 +463,17 @@ run_tier() {
                     fi
                 fi
             done < "$_active"
-            mv -f "$_active.next" "$_active"
-            _elapsed=$(( $(now_ms) - _t0 ))
+            if [ "$_reaped" -eq 1 ]; then
+                printf '%s' "$_next_buf" > "$_active"
+            fi
+            set_now_ms
+            _elapsed=$(( _NOW_MS - _t0 ))
             if [ "$_elapsed" -ge "$_budget_ms" ]; then
                 break
             fi
             [ "$_running" -lt "$_jobs" ] && break
-            sleep 1
+            poll_sleep
         done
-        _elapsed=$(( $(now_ms) - _t0 ))
         if [ "$_elapsed" -ge "$_budget_ms" ]; then
             printf '%s error\n' "$_id" >> "$_work/verdicts"
             _killed=1
@@ -432,7 +503,8 @@ run_tier() {
     # Drain remaining rows against whatever budget is left; anything still
     # running when the budget elapses is killed and recorded `error`.
     while [ -s "$_active" ]; do
-        _elapsed=$(( $(now_ms) - _t0 ))
+        set_now_ms
+        _elapsed=$(( _NOW_MS - _t0 ))
         if [ "$_elapsed" -ge "$_budget_ms" ]; then
             # kill_row signals the whole row: the setsid session/group when
             # one was used, AND (always) a recursive ps-based tree walk --
@@ -457,14 +529,17 @@ run_tier() {
             _killed=1
             break
         fi
-        : > "$_active.next"
+        _next_buf=""
+        _reaped=0
         while IFS=" " read -r _pid _rid; do
             [ -n "$_pid" ] || continue
             if kill -0 "$_pid" 2>/dev/null; then
-                echo "$_pid $_rid" >> "$_active.next"
+                _next_buf="$_next_buf$_pid $_rid
+"
             else
                 wait "$_pid" 2>/dev/null
                 _rc=$?
+                _reaped=1
                 if [ "$_rc" = 0 ]; then
                     printf '%s pass\n' "$_rid" >> "$_work/verdicts"
                 else
@@ -472,8 +547,10 @@ run_tier() {
                 fi
             fi
         done < "$_active"
-        mv -f "$_active.next" "$_active"
-        [ -s "$_active" ] && sleep 1
+        if [ "$_reaped" -eq 1 ]; then
+            printf '%s' "$_next_buf" > "$_active"
+        fi
+        [ -n "$_next_buf" ] && poll_sleep
     done
 
     trap - INT TERM
@@ -757,8 +834,38 @@ EOF
     fi
     unset GC11_PIDFILE
 
+    # (S12) Regression test for POSIX global variable clobber in tree walk:
+    # a parent row that spawns short-lived children (so walk recurses into a
+    # leaf PID) must itself be killed when --budget expires, not left running.
+    rm -f "$ST_T/loop12.pid"
+    cat > "$ST_T/loop12_row.sh" <<'SH'
+#!/bin/sh
+echo $$ > "$LOOP12_PIDFILE"
+while :; do sleep 1; done
+SH
+    LOOP12_PIDFILE="$ST_T/loop12.pid"
+    export LOOP12_PIDFILE
+    cat > "$ST_T/m12.sdn" <<EOF
+$HDR
+    g-loop12, local, false, tree, "sh $ST_T/loop12_row.sh", -, -, "looping parent with child sleep must die on budget"
+EOF
+    t0=$(date +%s)
+    sh "$0" --tier local --manifest-file "$ST_T/m12.sdn" --budget 2 --jobs 2 --results "$ST_T/r12.out" >/dev/null 2>"$ST_T/r12.err"
+    rc=$?
+    t1=$(date +%s)
+    dt=$((t1 - t0))
+    sleep 1
+    loop12_pid=$(cat "$ST_T/loop12.pid" 2>/dev/null || echo)
+    if [ -n "$loop12_pid" ] && kill -0 "$loop12_pid" 2>/dev/null; then loop12_alive=1; else loop12_alive=0; fi
+    if [ "$rc" -eq 2 ] && [ "$dt" -lt 25 ] && [ -n "$loop12_pid" ] && [ "$loop12_alive" -eq 0 ]; then
+        st_report ok "(S12) budget kill terminates looping parent row (pid $loop12_pid) promptly (${dt}s)"
+    else
+        st_report bad "(S12) budget kill terminates looping parent row" "rc=$rc dt=${dt}s pid=${loop12_pid:-none} alive=$loop12_alive"
+    fi
+    unset LOOP12_PIDFILE
+
     if [ "$ST_FAILURES" -eq 0 ]; then
-        echo "run-gate-tier: selftest PASS — 11 fixture(s), 0 failed"
+        echo "run-gate-tier: selftest PASS — 12 fixture(s), 0 failed"
         exit 0
     fi
     echo "run-gate-tier: selftest FAIL — $ST_FAILURES fixture(s) failed"
