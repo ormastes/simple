@@ -1,0 +1,653 @@
+#![allow(primitive_api)] # Express parser/lexer uses protocol integer budgets and step counters
+# A2UI Express Expression Parser and Shared Scalar VM Program
+#
+# Implements Section 5 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   1. Validated ParseProgramV2 builder targeting the existing shared scalar VM
+#      (std.common.structural.parse.grammar_cpu_v1).
+#   2. Bounded Express expression lexer/parser for component-constructor calls,
+#      positional/named arguments, explicit omission `_` vs `null`, paths
+#      (`$/a/b`, `$label`), lists, objects, literals, and `Event(...)`.
+#   3. Re-exports G4 importer from `std.common.ui.a2ui.express_g4_import`.
+
+use std.common.structural.parse.dialect.{GrammarProgram, ActionProgram}
+use std.common.structural.parse.parse_types.{
+    PARSE_SCHEMA_ID,
+    ParseSourceBlob,
+    ParseTokenArena,
+    parse_source_blob_from_text
+}
+use std.common.structural.parse.program_v1.{
+    PG_MATCH_KIND_V1,
+    PG_MATCH_BYTE_V1,
+    PG_CALL_V1,
+    PG_RETURN_V1,
+    PG_CHOICE_V1,
+    PG_COMMIT_V1,
+    PG_ACTION_V1,
+    PG_END_V1,
+    PA_CAPTURE_V1,
+    PA_NODE_V1,
+    ParseProgramLimitsV1,
+    ParseProgramV2,
+    parse_program_validate_v2
+}
+use std.common.structural.parse.grammar_cpu_v1.{parse_grammar_execute_v2}
+use std.common.ui.a2ui.types.{
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiActionEvent,
+    a2ui_no_action,
+    a2ui_event_action
+}
+export use std.common.ui.a2ui.express_g4_import.{
+    A2uiGrammarRule,
+    A2uiGrammarModel,
+    a2ui_import_express_g4,
+    a2ui_grammar_to_sdn
+}
+
+# ============================================================================
+# Shared Scalar VM Program for Express Constructor Call Validation
+# ============================================================================
+
+# Token kinds matching the shared structural ParseTokenArena contract:
+# (1=IDENT, 2=STRING, 3=NUMBER, 4=PATH, 5=PUNCT, 6=UNDERSCORE)
+pub val EXPR_TOK_IDENT: u16 = 1u16
+pub val EXPR_TOK_STRING: u16 = 2u16
+pub val EXPR_TOK_NUMBER: u16 = 3u16
+pub val EXPR_TOK_PATH: u16 = 4u16
+pub val EXPR_TOK_PUNCT: u16 = 5u16
+pub val EXPR_TOK_UNDERSCORE: u16 = 6u16
+
+pub struct ExpressLexResult:
+    ok: bool
+    blob: ParseSourceBlob
+    tokens: ParseTokenArena
+    error: text
+    error_offset: i64
+
+fn _is_ident_start(b: i64) -> bool:
+    (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95 or b >= 128
+
+fn _is_ident_cont(b: i64) -> bool:
+    _is_ident_start(b) or (b >= 48 and b <= 57)
+
+fn _is_path_char(b: i64) -> bool:
+    _is_ident_cont(b) or b == 47 or b == 45 or b == 46
+
+# Bounded lexer into ParseSourceBlob + ParseTokenArena (zero text copies per token).
+pub fn a2ui_lex_express(source: text, max_bytes: i64, max_tokens: i64) -> ExpressLexResult:
+    val blob = parse_source_blob_from_text(source)
+    val n = blob.bytes.len()
+    if n > max_bytes:
+        return ExpressLexResult(
+            ok: false,
+            blob: blob,
+            tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: [], start: [], count: []),
+            error: "source_budget_exceeded",
+            error_offset: 0
+        )
+    var kinds: [u16] = []
+    var starts: [u32] = []
+    var counts: [u32] = []
+    var i = 0
+    while i < n:
+        val b = blob.bytes[i] as i64
+        # Skip ASCII whitespace and newlines.
+        if b == 32 or b == 9 or b == 10 or b == 13:
+            i = i + 1
+            continue
+        # Skip `//` line comments.
+        if b == 47 and i + 1 < n and (blob.bytes[i + 1] as i64) == 47:
+            i = i + 2
+            while i < n and (blob.bytes[i] as i64) != 10:
+                i = i + 1
+            continue
+        if kinds.len() >= max_tokens:
+            return ExpressLexResult(
+                ok: false,
+                blob: blob,
+                tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+                error: "token_budget_exceeded",
+                error_offset: i
+            )
+        # Quoted string literal.
+        if b == 34:
+            val start = i
+            i = i + 1
+            var closed = false
+            while i < n:
+                val c = blob.bytes[i] as i64
+                if c == 92:
+                    if i + 1 >= n:
+                        return ExpressLexResult(
+                            ok: false,
+                            blob: blob,
+                            tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+                            error: "unterminated_string_escape",
+                            error_offset: i
+                        )
+                    i = i + 2
+                elif c == 34:
+                    i = i + 1
+                    closed = true
+                    break
+                else:
+                    i = i + 1
+            if not closed:
+                return ExpressLexResult(
+                    ok: false,
+                    blob: blob,
+                    tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+                    error: "unterminated_string",
+                    error_offset: start
+                )
+            kinds.push(2u16)
+            starts.push(start as u32)
+            counts.push((i - start) as u32)
+            continue
+        # Data path: $/a/b or $label
+        if b == 36:
+            val start = i
+            i = i + 1
+            while i < n and _is_path_char(blob.bytes[i] as i64):
+                i = i + 1
+            if i == start + 1:
+                return ExpressLexResult(
+                    ok: false,
+                    blob: blob,
+                    tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+                    error: "empty_data_path",
+                    error_offset: start
+                )
+            kinds.push(4u16)
+            starts.push(start as u32)
+            counts.push((i - start) as u32)
+            continue
+        # Number literal (optional leading '-' followed by digits).
+        if (b >= 48 and b <= 57) or (b == 45 and i + 1 < n and (blob.bytes[i + 1] as i64) >= 48 and (blob.bytes[i + 1] as i64) <= 57):
+            val start = i
+            if b == 45:
+                i = i + 1
+            while i < n and (blob.bytes[i] as i64) >= 48 and (blob.bytes[i] as i64) <= 57:
+                i = i + 1
+            if i < n and (blob.bytes[i] as i64) == 46:
+                i = i + 1
+                while i < n and (blob.bytes[i] as i64) >= 48 and (blob.bytes[i] as i64) <= 57:
+                    i = i + 1
+            kinds.push(3u16)
+            starts.push(start as u32)
+            counts.push((i - start) as u32)
+            continue
+        # Single-byte punctuation: ( ) [ ] { } , : = @
+        if b == 40 or b == 41 or b == 91 or b == 93 or b == 123 or b == 125 or b == 44 or b == 58 or b == 61 or b == 64:
+            kinds.push(5u16)
+            starts.push(i as u32)
+            counts.push(1u32)
+            i = i + 1
+            continue
+        # Identifier or standalone `_` omission token (including UTF-8 identifiers).
+        if _is_ident_start(b):
+            val start = i
+            i = i + 1
+            while i < n and _is_ident_cont(blob.bytes[i] as i64):
+                i = i + 1
+            val len = i - start
+            if len == 1 and b == 95:
+                kinds.push(6u16)
+            else:
+                kinds.push(1u16)
+            starts.push(start as u32)
+            counts.push(len as u32)
+            continue
+        return ExpressLexResult(
+            ok: false,
+            blob: blob,
+            tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+            error: "unexpected_byte",
+            error_offset: i
+        )
+    ExpressLexResult(
+        ok: true,
+        blob: blob,
+        tokens: ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+        error: "",
+        error_offset: 0
+    )
+
+# Build a validated ParseProgramV2 on the shared structural VM recognizing
+# Express component constructor expressions:
+#   Rule 0 (entry): CallExpr EOF
+#   Rule 1 (CallExpr): IDENT '(' (Arg (',' Arg)* ','?)? ')'
+#   Rule 2 (Arg): IDENT '=' Value | Value
+#   Rule 3 (Value): CallExpr | List | Map | STRING | NUMBER | PATH | '_' | IDENT
+#   Rule 4 (List): '[' (Value (',' Value)* ','?)? ']'
+#   Rule 5 (Map): '{' (MapEntry (',' MapEntry)* ','?)? '}'
+#   Rule 6 (MapEntry): (IDENT | STRING) ':' Value
+pub fn a2ui_build_express_vm_program(limits: ParseProgramLimitsV1) -> Result<ParseProgramV2, text>:
+    # Rule 0 (offset 0..6): CALL 1; END
+    # Rule 1 (offset 6..57):
+    #   6: MATCH_KIND IDENT; 9: ACTION 0; 12: MATCH_BYTE '('
+    #   15: CHOICE 51; 18: CALL 2; 21: COMMIT 24
+    #   24: CHOICE 42; 27: MATCH_BYTE ','; 30: CHOICE 48; 33: CALL 2; 36: COMMIT 24
+    #   39: COMMIT 42 (unused) -> tighten cleanly!
+    # Keep exact offsets explicit and verified:
+    # Rule 0 [0..6]:
+    #   0: CALL 1, 3: END
+    # Rule 1 [6..48]:
+    #   6: MATCH_KIND 1 (IDENT)
+    #   9: ACTION 0
+    #   12: MATCH_BYTE 40 ('(')
+    #   15: CHOICE 42
+    #   18: CALL 2
+    #   21: COMMIT 24
+    #   24: CHOICE 42
+    #   27: MATCH_BYTE 44 (',')
+    #   30: CHOICE 39
+    #   33: CALL 2
+    #   36: COMMIT 24
+    #   39: COMMIT 42
+    #   42: MATCH_BYTE 41 (')')
+    #   45: RETURN
+    # Rule 2 (Arg) [48..69]:
+    #   48: CHOICE 63
+    #   51: MATCH_KIND 1 (IDENT)
+    #   54: MATCH_BYTE 61 ('=')
+    #   57: CALL 3
+    #   60: COMMIT 66
+    #   63: CALL 3
+    #   66: RETURN
+    # Rule 3 (Value) [69..126]:
+    #   69: CHOICE 78; 72: CALL 1; 75: COMMIT 123
+    #   78: CHOICE 87; 81: CALL 4; 84: COMMIT 123
+    #   87: CHOICE 96; 90: CALL 5; 93: COMMIT 123
+    #   96: CHOICE 105; 99: MATCH_KIND 2 (STRING); 102: COMMIT 123
+    #   105: CHOICE 114; 108: MATCH_KIND 3 (NUMBER); 111: COMMIT 123
+    #   114: CHOICE 120; 117: MATCH_KIND 4 (PATH); 120->wait let's keep 3-word alignment!
+    val grammar = GrammarProgram(
+        contract_version: 1,
+        entry_rules: [0],
+        production_offsets: [0, 6, 48, 69, 138, 174, 210, 231],
+        opcodes: [
+            # Rule 0 [0..6]: entry -> CallExpr EOF
+            PG_CALL_V1, 1, 0,
+            PG_END_V1, 0, 0,
+            # Rule 1 [6..48]: CallExpr -> IDENT '(' (Arg (',' Arg)* ','?)? ')'
+            PG_MATCH_KIND_V1, 1, 0,
+            PG_ACTION_V1, 0, 0,
+            PG_MATCH_BYTE_V1, 40, 0,
+            PG_CHOICE_V1, 42, 0,
+            PG_CALL_V1, 2, 0,
+            PG_COMMIT_V1, 24, 0,
+            PG_CHOICE_V1, 42, 0,
+            PG_MATCH_BYTE_V1, 44, 0,
+            PG_COMMIT_V1, 33, 0,
+            PG_CHOICE_V1, 42, 0,
+            PG_CALL_V1, 2, 0,
+            PG_COMMIT_V1, 24, 0,
+            PG_MATCH_BYTE_V1, 41, 0,
+            PG_RETURN_V1, 0, 0,
+            # Rule 2 [48..69]: Arg -> IDENT '=' Value | Value
+            PG_CHOICE_V1, 63, 0,
+            PG_MATCH_KIND_V1, 1, 0,
+            PG_MATCH_BYTE_V1, 61, 0,
+            PG_CALL_V1, 3, 0,
+            PG_COMMIT_V1, 66, 0,
+            PG_CALL_V1, 3, 0,
+            PG_RETURN_V1, 0, 0,
+            # Rule 3 [69..138]: Value -> Call | List | Map | STR | NUM | PATH | '_' | IDENT
+            PG_CHOICE_V1, 78, 0,
+            PG_CALL_V1, 1, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_CHOICE_V1, 87, 0,
+            PG_CALL_V1, 4, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_CHOICE_V1, 96, 0,
+            PG_CALL_V1, 5, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_CHOICE_V1, 105, 0,
+            PG_MATCH_KIND_V1, 2, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_CHOICE_V1, 114, 0,
+            PG_MATCH_KIND_V1, 3, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_CHOICE_V1, 123, 0,
+            PG_MATCH_KIND_V1, 4, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_CHOICE_V1, 132, 0,
+            PG_MATCH_KIND_V1, 6, 0,
+            PG_COMMIT_V1, 135, 0,
+            PG_MATCH_KIND_V1, 1, 0,
+            PG_RETURN_V1, 0, 0,
+            # Rule 4 [138..174]: List -> '[' (Value (',' Value)* ','?)? ']'
+            PG_MATCH_BYTE_V1, 91, 0,
+            PG_CHOICE_V1, 168, 0,
+            PG_CALL_V1, 3, 0,
+            PG_COMMIT_V1, 150, 0,
+            PG_CHOICE_V1, 168, 0,
+            PG_MATCH_BYTE_V1, 44, 0,
+            PG_COMMIT_V1, 159, 0,
+            PG_CHOICE_V1, 168, 0,
+            PG_CALL_V1, 3, 0,
+            PG_COMMIT_V1, 150, 0,
+            PG_MATCH_BYTE_V1, 93, 0,
+            PG_RETURN_V1, 0, 0,
+            # Rule 5 [174..210]: Map -> '{' (MapEntry (',' MapEntry)* ','?)? '}'
+            PG_MATCH_BYTE_V1, 123, 0,
+            PG_CHOICE_V1, 204, 0,
+            PG_CALL_V1, 6, 0,
+            PG_COMMIT_V1, 186, 0,
+            PG_CHOICE_V1, 204, 0,
+            PG_MATCH_BYTE_V1, 44, 0,
+            PG_COMMIT_V1, 195, 0,
+            PG_CHOICE_V1, 204, 0,
+            PG_CALL_V1, 6, 0,
+            PG_COMMIT_V1, 186, 0,
+            PG_MATCH_BYTE_V1, 125, 0,
+            PG_RETURN_V1, 0, 0,
+            # Rule 6 [210..231]: MapEntry -> (IDENT | STRING) ':' Value
+            PG_CHOICE_V1, 219, 0,
+            PG_MATCH_KIND_V1, 1, 0,
+            PG_COMMIT_V1, 222, 0,
+            PG_MATCH_KIND_V1, 2, 0,
+            PG_MATCH_BYTE_V1, 58, 0,
+            PG_CALL_V1, 3, 0,
+            PG_RETURN_V1, 0, 0
+        ]
+    )
+    val actions = ActionProgram(
+        contract_version: 1,
+        action_offsets: [0, 3],
+        opcodes: [PA_CAPTURE_V1, 100, 0]
+    )
+    parse_program_validate_v2(grammar, actions, [0], [], limits)
+
+pub fn a2ui_default_vm_limits() -> ParseProgramLimitsV1:
+    ParseProgramLimitsV1(
+        max_program_words: 4096,
+        max_source_bytes: 65536,
+        max_tokens: 4096,
+        max_nodes: 2048,
+        max_children: 4096,
+        max_diagnostics: 256,
+        max_values: 2048,
+        max_calls: 128,
+        max_choices: 256,
+        max_steps: 65536
+    )
+
+# ============================================================================
+# Part 3: Typed Express Constructor AST Parser (backed by Shared VM Gate)
+# ============================================================================
+
+pub struct ExpressArg:
+    name: text
+    is_named: bool
+    presence: A2uiArgPresence
+    action_value: A2uiActionEvent
+    has_action: bool
+
+pub struct ExpressConstructorAst:
+    component: text
+    args: [ExpressArg]
+    vm_steps: i64
+
+fn _tok_text(source: text, arena: ParseTokenArena, idx: i64) -> text:
+    val start = arena.start[idx] as i64
+    val count = arena.count[idx] as i64
+    source.substring(start, start + count)
+
+fn _unescape_express_string(raw: text) -> text:
+    if raw.byte_len() < 2:
+        return ""
+    var out = ""
+    var i = 1
+    val end = raw.byte_len() - 1
+    while i < end:
+        val b = raw.byte_at(i)
+        if b == 92 and i + 1 < end:
+            val nxt = raw.byte_at(i + 1)
+            if nxt == 34: out = out + "\""
+            elif nxt == 92: out = out + "\\"
+            elif nxt == 110: out = out + "\n"
+            elif nxt == 114: out = out + "\r"
+            elif nxt == 116: out = out + "\t"
+            else: out = out + raw.substring(i + 1, i + 2)
+            i = i + 2
+        else:
+            out = out + raw.substring(i, i + 1)
+            i = i + 1
+    out
+
+class _ExpressAstReader:
+    source: text
+    arena: ParseTokenArena
+    pos: i64
+    depth: i64
+    max_depth: i64
+
+    fn at_end() -> bool:
+        self.pos >= self.arena.kind.len()
+
+    fn peek_kind() -> u16:
+        if self.at_end():
+            return 0u16
+        self.arena.kind[self.pos]
+
+    fn peek_text() -> text:
+        if self.at_end():
+            return ""
+        _tok_text(self.source, self.arena, self.pos)
+
+    me parse_value() -> Result<A2uiArgPresence, text>:
+        if self.depth > self.max_depth:
+            return Err("express_depth_exceeded")
+        if self.at_end():
+            return Err("unexpected_eof")
+        val k = self.peek_kind()
+        val t = self.peek_text()
+        if k == 6u16:
+            self.pos = self.pos + 1
+            return Ok(A2uiArgPresence.Omitted)
+        if k == 2u16:
+            self.pos = self.pos + 1
+            return Ok(A2uiArgPresence.Present(value: A2uiValue.Text(value: _unescape_express_string(t))))
+        if k == 3u16:
+            self.pos = self.pos + 1
+            if t.contains("."):
+                return Ok(A2uiArgPresence.Present(value: A2uiValue.Number(value: t.to_float())))
+            return Ok(A2uiArgPresence.Present(value: A2uiValue.Int(value: t.to_int())))
+        if k == 4u16:
+            self.pos = self.pos + 1
+            # Strip leading '$' so $/a/b -> /a/b and $label -> label (relative).
+            return Ok(A2uiArgPresence.Present(value: A2uiValue.Path(path: t.substring(1, t.byte_len()))))
+        if k == 1u16:
+            self.pos = self.pos + 1
+            if t == "null":
+                return Ok(A2uiArgPresence.Present(value: A2uiValue.Null))
+            if t == "true":
+                return Ok(A2uiArgPresence.Present(value: A2uiValue.Bool(value: true)))
+            if t == "false":
+                return Ok(A2uiArgPresence.Present(value: A2uiValue.Bool(value: false)))
+            return Ok(A2uiArgPresence.Present(value: A2uiValue.Ref(component_id: t)))
+        if k == 5u16 and t == "[":
+            self.pos = self.pos + 1
+            self.depth = self.depth + 1
+            var items: [A2uiValue] = []
+            while not self.at_end() and self.peek_text() != "]":
+                val item_p = self.parse_value()?
+                match item_p:
+                    case A2uiArgPresence.Omitted:
+                        self.depth = self.depth - 1
+                        return Err("omission_not_allowed_in_list")
+                    case A2uiArgPresence.Present(v):
+                        items.push(v)
+                if not self.at_end() and self.peek_text() == ",":
+                    self.pos = self.pos + 1
+            if self.at_end() or self.peek_text() != "]":
+                self.depth = self.depth - 1
+                return Err("unclosed_list")
+            self.pos = self.pos + 1
+            self.depth = self.depth - 1
+            return Ok(A2uiArgPresence.Present(value: A2uiValue.Array(items: items)))
+        if k == 5u16 and t == "{":
+            self.pos = self.pos + 1
+            self.depth = self.depth + 1
+            var entries: [A2uiObjectEntry] = []
+            var seen: Dict<text, bool> = {}
+            while not self.at_end() and self.peek_text() != "}":
+                val kk = self.peek_kind()
+                val kt = self.peek_text()
+                var key = ""
+                if kk == 1u16:
+                    key = kt
+                    self.pos = self.pos + 1
+                elif kk == 2u16:
+                    key = _unescape_express_string(kt)
+                    self.pos = self.pos + 1
+                else:
+                    self.depth = self.depth - 1
+                    return Err("expected_map_key")
+                if seen.contains_key(key):
+                    self.depth = self.depth - 1
+                    return Err("duplicate_map_key:" + key)
+                seen[key] = true
+                if self.at_end() or self.peek_text() != ":":
+                    self.depth = self.depth - 1
+                    return Err("expected_colon_in_map")
+                self.pos = self.pos + 1
+                val val_p = self.parse_value()?
+                match val_p:
+                    case A2uiArgPresence.Omitted:
+                        self.depth = self.depth - 1
+                        return Err("omission_not_allowed_in_map")
+                    case A2uiArgPresence.Present(v):
+                        entries.push(A2uiObjectEntry(key: key, value: v))
+                if not self.at_end() and self.peek_text() == ",":
+                    self.pos = self.pos + 1
+            if self.at_end() or self.peek_text() != "}":
+                self.depth = self.depth - 1
+                return Err("unclosed_map")
+            self.pos = self.pos + 1
+            self.depth = self.depth - 1
+            return Ok(A2uiArgPresence.Present(value: A2uiValue.Object(entries: entries)))
+        Err("unexpected_expression_token:" + t)
+
+    me parse_event_call() -> Result<A2uiActionEvent, text>:
+        if self.at_end() or self.peek_text() != "Event":
+            return Err("expected_event_call")
+        self.pos = self.pos + 1
+        if self.at_end() or self.peek_text() != "(":
+            return Err("expected_event_lparen")
+        self.pos = self.pos + 1
+        var ev_name = ""
+        var ev_ctx: [A2uiObjectEntry] = []
+        var arg_idx = 0
+        while not self.at_end() and self.peek_text() != ")":
+            var is_named = false
+            var arg_name = ""
+            if self.peek_kind() == 1u16 and self.pos + 1 < self.arena.kind.len() and _tok_text(self.source, self.arena, self.pos + 1) == "=":
+                is_named = true
+                arg_name = self.peek_text()
+                self.pos = self.pos + 2
+            val v_pres = self.parse_value()?
+            if (is_named and arg_name == "name") or (not is_named and arg_idx == 0):
+                match v_pres:
+                    case A2uiArgPresence.Present(A2uiValue.Text(s)):
+                        ev_name = s
+                    case _:
+                        return Err("event_name_must_be_text")
+            elif (is_named and arg_name == "context") or (not is_named and arg_idx == 1):
+                match v_pres:
+                    case A2uiArgPresence.Present(A2uiValue.Object(es)):
+                        ev_ctx = es
+                    case A2uiArgPresence.Omitted:
+                        ()
+                    case _:
+                        return Err("event_context_must_be_object")
+            else:
+                return Err("unknown_event_argument")
+            arg_idx = arg_idx + 1
+            if not self.at_end() and self.peek_text() == ",":
+                self.pos = self.pos + 1
+        if self.at_end() or self.peek_text() != ")":
+            return Err("unclosed_event_call")
+        self.pos = self.pos + 1
+        if ev_name == "":
+            return Err("empty_event_name")
+        Ok(a2ui_event_action(ev_name, ev_ctx))
+
+    me parse_constructor(vm_steps: i64) -> Result<ExpressConstructorAst, text>:
+        if self.at_end() or self.peek_kind() != 1u16:
+            return Err("expected_component_constructor")
+        val comp_name = self.peek_text()
+        # Reject lifecycle/query/policy calls inside table expression cells.
+        if comp_name == "surface" or comp_name == "deleteSurface" or comp_name == "Event" or comp_name == "import":
+            return Err("forbidden_cell_call:" + comp_name)
+        self.pos = self.pos + 1
+        if self.at_end() or self.peek_text() != "(":
+            return Err("expected_constructor_lparen")
+        self.pos = self.pos + 1
+        var args: [ExpressArg] = []
+        while not self.at_end() and self.peek_text() != ")":
+            var is_named = false
+            var arg_name = ""
+            if self.peek_kind() == 1u16 and self.pos + 1 < self.arena.kind.len() and _tok_text(self.source, self.arena, self.pos + 1) == "=":
+                is_named = true
+                arg_name = self.peek_text()
+                self.pos = self.pos + 2
+            if self.peek_kind() == 1u16 and self.peek_text() == "Event" and self.pos + 1 < self.arena.kind.len() and _tok_text(self.source, self.arena, self.pos + 1) == "(":
+                val ev = self.parse_event_call()?
+                args.push(ExpressArg(
+                    name: arg_name,
+                    is_named: is_named,
+                    presence: A2uiArgPresence.Omitted,
+                    action_value: ev,
+                    has_action: true
+                ))
+            else:
+                # Reject nested `@index()` or arbitrary function calls in first profile.
+                if self.peek_text() == "@":
+                    return Err("unsupported_context_function")
+                val v_pres = self.parse_value()?
+                args.push(ExpressArg(
+                    name: arg_name,
+                    is_named: is_named,
+                    presence: v_pres,
+                    action_value: a2ui_no_action(),
+                    has_action: false
+                ))
+            if not self.at_end() and self.peek_text() == ",":
+                self.pos = self.pos + 1
+        if self.at_end() or self.peek_text() != ")":
+            return Err("unclosed_constructor_call")
+        self.pos = self.pos + 1
+        if not self.at_end():
+            return Err("trailing_tokens_after_expression")
+        Ok(ExpressConstructorAst(component: comp_name, args: args, vm_steps: vm_steps))
+
+# Parse one Express component-constructor expression, validated first by the
+# shared scalar grammar VM (`parse_grammar_execute_v2`) so speculative syntax
+# never leaks into UI state and trailing tokens are strictly rejected.
+pub fn a2ui_parse_express_constructor(source: text) -> Result<ExpressConstructorAst, text>:
+    val limits = a2ui_default_vm_limits()
+    val lexed = a2ui_lex_express(source, limits.max_source_bytes, limits.max_tokens)
+    if not lexed.ok:
+        return Err(lexed.error)
+    val prog = a2ui_build_express_vm_program(limits)?
+    val exec_res = parse_grammar_execute_v2(prog, lexed.blob, lexed.tokens, 0, limits)
+    if not exec_res.ok:
+        return Err("express_grammar_rejected:" + exec_res.error)
+    var reader = _ExpressAstReader(
+        source: source,
+        arena: lexed.tokens,
+        pos: 0,
+        depth: 0,
+        max_depth: 32
+    )
+    reader.parse_constructor(exec_res.steps_used)
+
+export EXPR_TOK_IDENT, EXPR_TOK_STRING, EXPR_TOK_NUMBER, EXPR_TOK_PATH, EXPR_TOK_PUNCT, EXPR_TOK_UNDERSCORE
+export ExpressLexResult, a2ui_lex_express, a2ui_build_express_vm_program, a2ui_default_vm_limits
+export ExpressArg, ExpressConstructorAst, a2ui_parse_express_constructor

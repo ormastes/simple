@@ -17,6 +17,7 @@ Feature: spm-winfs-llm-suite AC-6.
 use lib.common.privilege.id_path.{IdPath, id_path_to_text}
 use lib.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, Scope, TrustSource, authority_level_name}
 use lib.common.privilege.principal.{Principal, PrincipalKind}
+use std.common.crypto.hmac.{hmac_sha256_bytes}
 
 # ---------------------------------------------------------------------------
 # Intent + signed action
@@ -116,28 +117,39 @@ class ApprovalBroker:
         false
 
     me _mint_hmac(intent: ApprovalIntent, principal: Principal) -> [u8]:
-        """Deterministic, non-crypto HMAC replacement:
-            bytes = chrome_secret ++ "|" ++ app ++ "|" ++ action ++
-                    "|" ++ id_path ++ "|" ++ level_name ++ "|" ++ principal.id
-        Replace with a real HMAC-SHA256 when `std.crypto.hmac` is ready."""
-        var out: [u8] = []
+        """Real HMAC-SHA256 over length-prefixed canonical intent and principal fields."""
+        val req_path = id_path_to_text(intent.required)
+        val lvl_name = authority_level_name(intent.level)
+        val canonical = "v1|" +
+            intent.app.byte_len().to_string() + ":" + intent.app + "|" +
+            intent.action.byte_len().to_string() + ":" + intent.action + "|" +
+            req_path.byte_len().to_string() + ":" + req_path + "|" +
+            lvl_name.byte_len().to_string() + ":" + lvl_name + "|" +
+            principal.id.byte_len().to_string() + ":" + principal.id
+        var key_ints: [i64] = []
         var i = 0
-        val n = self.chrome_secret.len()
-        while i < n:
-            out = out + [self.chrome_secret[i]]
+        while i < self.chrome_secret.len():
+            key_ints.push(self.chrome_secret[i] as i64)
             i = i + 1
-        val tail = "|" + intent.app + "|" + intent.action + "|" + id_path_to_text(intent.required) + "|" + authority_level_name(intent.level) + "|" + principal.id
-        val tail_bytes = tail.bytes()
+        var msg_ints: [i64] = []
+        val raw = canonical.bytes()
         var j = 0
-        val m = tail_bytes.len()
-        while j < m:
-            out = out + [tail_bytes[j]]
+        while j < raw.len():
+            msg_ints.push(raw[j] as i64)
             j = j + 1
+        val digest = hmac_sha256_bytes(key_ints, msg_ints)
+        var out: [u8] = []
+        var k = 0
+        while k < digest.len():
+            out.push(digest[k] as u8)
+            k = k + 1
         out
 
 fn _intent_equals(a: ApprovalIntent, b: ApprovalIntent) -> bool:
     if a.app != b.app:
         return false
     if a.action != b.action:
+        return false
+    if authority_level_name(a.level) != authority_level_name(b.level):
         return false
     id_path_to_text(a.required) == id_path_to_text(b.required)

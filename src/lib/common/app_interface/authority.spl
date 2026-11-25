@@ -1,0 +1,513 @@
+#![allow(primitive_api)] # Authority policy/grant layer carries timestamps, revisions, and boolean flags
+# Separate Trusted Authority Policy, Regional Ceilings, and Cryptographic Grants
+#
+# Implements Section 11 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Separate trusted `*.authority.sdn` policy (default-deny).
+#   - Region hierarchy with capability ceilings; child/reparented regions cannot
+#     widen authority beyond their parent ceiling.
+#   - Independent operation grants with HMAC-SHA256 authenticity verification
+#     (std.common.crypto.hmac.hmac_sha256_bytes), principal binding, nonce,
+#     policy revision, and atomic one-shot consumption.
+#   - Field-level authorization separating named_query_use_fields,
+#     dynamic_query_fields, and release_fields, plus release audience checks.
+#   - Policy revision & revocation invalidation and auth-scoped cache keys.
+
+use std.common.crypto.hmac.{hmac_sha256_bytes}
+use std.common.crypto.types.{crypto_text_to_bytes, bytes_to_hex}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    ReleaseAudience,
+    app_op_name,
+    app_op_from_name,
+    release_audience_name,
+    release_audience_from_name
+}
+
+# ============================================================================
+# Region Policy and Hierarchy (§11.3)
+# ============================================================================
+
+pub struct RegionPolicy:
+    id: text
+    parent: text
+    ceiling: [AppOpKind]
+
+pub struct ResourcePolicyRule:
+    resource_id: text
+    operations: [AppOpKind]
+    regions: [text]
+    named_query_use_fields: [text]
+    dynamic_query_fields: [text]
+    release_fields: [text]
+    release_audiences: [ReleaseAudience]
+
+pub struct OperationPolicyRule:
+    operation_id: text
+    operations: [AppOpKind]
+    regions: [text]
+    requires_activation: bool
+    input_mode: text
+    payload_release: ReleaseAudience
+
+pub struct AuthorityPolicy:
+    id: text
+    schema_version: i64
+    revision: i64
+    default_deny: bool
+    publisher: text
+    regions: [RegionPolicy]
+    resource_rules: [ResourcePolicyRule]
+    operation_rules: [OperationPolicyRule]
+    model_snapshot_release_allowed: bool
+    new_executable_code_allowed: bool
+    policy_changes_allowed: bool
+
+fn _contains_op(ops: [AppOpKind], target: AppOpKind) -> bool:
+    var i = 0
+    while i < ops.len():
+        if ops[i] == target:
+            return true
+        i = i + 1
+    false
+
+fn _contains_text(items: [text], target: text) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return true
+        i = i + 1
+    false
+
+fn _contains_audience(items: [ReleaseAudience], target: ReleaseAudience) -> bool:
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return true
+        i = i + 1
+    false
+
+pub fn authority_find_region(policy: AuthorityPolicy, region_id: text) -> RegionPolicy?:
+    var i = 0
+    while i < policy.regions.len():
+        if policy.regions[i].id == region_id:
+            return Some(policy.regions[i])
+        i = i + 1
+    None
+
+# Verify a child region's ceiling never exceeds its ancestor ceilings.
+pub fn authority_validate_region_hierarchy(policy: AuthorityPolicy) -> Result<bool, text>:
+    var i = 0
+    while i < policy.regions.len():
+        val reg = policy.regions[i]
+        if reg.parent != "":
+            val parent = match authority_find_region(policy, reg.parent):
+                case Some(p): p
+                case None: return Err("unknown_parent_region:" + reg.parent)
+            var oi = 0
+            while oi < reg.ceiling.len():
+                if not _contains_op(parent.ceiling, reg.ceiling[oi]):
+                    return Err("child_region_widens_ceiling:" + reg.id + ":" + app_op_name(reg.ceiling[oi]))
+                oi = oi + 1
+        i = i + 1
+    Ok(true)
+
+# Check if mounting `requested_region` inside `parent_region` is permitted without widening.
+pub fn authority_check_region_mount(
+    policy: AuthorityPolicy,
+    parent_region: text,
+    requested_region: text
+) -> Result<bool, text>:
+    val req = match authority_find_region(policy, requested_region):
+        case Some(r): r
+        case None: return Err("unregistered_region:" + requested_region)
+    if parent_region == "":
+        if req.parent != "":
+            return Err("non_root_region_cannot_mount_at_root:" + requested_region)
+        return Ok(true)
+    if parent_region == requested_region:
+        return Ok(true)
+    if req.parent == parent_region:
+        return Ok(true)
+    Err("region_mount_denied:" + parent_region + "->" + requested_region)
+
+# ============================================================================
+# Authenticated Cryptographic Capability Grants (§11.1, §11.5)
+# ============================================================================
+
+pub struct AuthenticatedGrant:
+    grant_id: text
+    principal_id: text
+    surface_id: text
+    resource_or_op: text
+    operations: [AppOpKind]
+    allowed_regions: [text]
+    policy_revision: i64
+    one_shot: bool
+    nonce: text
+    expires_at_ms: i64
+    mac_hex: text
+
+fn _canonical_grant_payload(
+    grant_id: text,
+    principal_id: text,
+    surface_id: text,
+    resource_or_op: text,
+    ops: [AppOpKind],
+    regions: [text],
+    policy_revision: i64,
+    one_shot: bool,
+    nonce: text,
+    expires_at_ms: i64
+) -> text:
+    var op_names: [text] = []
+    var i = 0
+    while i < ops.len():
+        op_names.push(app_op_name(ops[i]))
+        i = i + 1
+    val ops_str = op_names.join(",")
+    val reg_str = regions.join(",")
+    val os_str = if one_shot: "1" else: "0"
+    # Length-prefixed canonical encoding prevents field-concatenation ambiguity.
+    "v1|" +
+        grant_id.byte_len().to_string() + ":" + grant_id + "|" +
+        principal_id.byte_len().to_string() + ":" + principal_id + "|" +
+        surface_id.byte_len().to_string() + ":" + surface_id + "|" +
+        resource_or_op.byte_len().to_string() + ":" + resource_or_op + "|" +
+        ops_str.byte_len().to_string() + ":" + ops_str + "|" +
+        reg_str.byte_len().to_string() + ":" + reg_str + "|" +
+        policy_revision.to_string() + "|" + os_str + "|" +
+        nonce.byte_len().to_string() + ":" + nonce + "|" +
+        expires_at_ms.to_string()
+
+fn _hmac_hex(secret: [i64], payload: text) -> text:
+    bytes_to_hex(hmac_sha256_bytes(secret, crypto_text_to_bytes(payload)))
+
+fn _ct_hex_eq(a: text, b: text) -> bool:
+    if a.byte_len() != b.byte_len() or a.byte_len() == 0:
+        return false
+    var diff = 0
+    var i = 0
+    while i < a.byte_len():
+        diff = diff | (a.byte_at(i) ^ b.byte_at(i))
+        i = i + 1
+    diff == 0
+
+pub class AuthorityGate:
+    policy: AuthorityPolicy
+    issuer_secret: [i64]
+    grants: [AuthenticatedGrant]
+    revoked_grant_ids: [text]
+    consumed_nonces: [text]
+    next_grant_seq: i64
+
+    static fn new(policy: AuthorityPolicy, issuer_secret: text) -> Result<AuthorityGate, text>:
+        if not policy.default_deny:
+            return Err("policy_must_default_deny")
+        if issuer_secret.byte_len() < 16:
+            return Err("issuer_secret_too_short")
+        authority_validate_region_hierarchy(policy)?
+        Ok(AuthorityGate(
+            policy: policy,
+            issuer_secret: crypto_text_to_bytes(issuer_secret),
+            grants: [],
+            revoked_grant_ids: [],
+            consumed_nonces: [],
+            next_grant_seq: 1
+        ))
+
+    # Mint a cryptographically authenticated grant under the trusted gate owner.
+    me mint_grant(
+        principal_id: text,
+        surface_id: text,
+        resource_or_op: text,
+        operations: [AppOpKind],
+        allowed_regions: [text],
+        one_shot: bool,
+        nonce: text,
+        expires_at_ms: i64
+    ) -> Result<AuthenticatedGrant, text>:
+        if principal_id == "" or resource_or_op == "" or nonce == "":
+            return Err("invalid_grant_parameters")
+        val gid = "g_" + self.next_grant_seq.to_string()
+        self.next_grant_seq = self.next_grant_seq + 1
+        val payload = _canonical_grant_payload(
+            gid, principal_id, surface_id, resource_or_op, operations,
+            allowed_regions, self.policy.revision, one_shot, nonce, expires_at_ms
+        )
+        val mac = _hmac_hex(self.issuer_secret, payload)
+        val grant = AuthenticatedGrant(
+            grant_id: gid,
+            principal_id: principal_id,
+            surface_id: surface_id,
+            resource_or_op: resource_or_op,
+            operations: operations,
+            allowed_regions: allowed_regions,
+            policy_revision: self.policy.revision,
+            one_shot: one_shot,
+            nonce: nonce,
+            expires_at_ms: expires_at_ms,
+            mac_hex: mac
+        )
+        self.grants.push(grant)
+        Ok(grant)
+
+    # Delegate a strictly narrowed subset of an existing authenticated grant.
+    me delegate_grant(
+        parent: AuthenticatedGrant,
+        delegate_principal: text,
+        narrow_ops: [AppOpKind],
+        narrow_regions: [text],
+        nonce: text,
+        expires_at_ms: i64,
+        now_ms: i64
+    ) -> Result<AuthenticatedGrant, text>:
+        self.verify_grant_authentic(parent, parent.principal_id, now_ms)?
+        if not _contains_op(parent.operations, AppOpKind.Delegate):
+            return Err("parent_lacks_delegate_op")
+        if expires_at_ms > parent.expires_at_ms:
+            return Err("delegation_cannot_extend_expiry")
+        var oi = 0
+        while oi < narrow_ops.len():
+            if not _contains_op(parent.operations, narrow_ops[oi]):
+                return Err("delegation_widens_operation")
+            oi = oi + 1
+        var ri = 0
+        while ri < narrow_regions.len():
+            if not _contains_text(parent.allowed_regions, narrow_regions[ri]):
+                return Err("delegation_widens_region")
+            ri = ri + 1
+        self.mint_grant(
+            delegate_principal, parent.surface_id, parent.resource_or_op,
+            narrow_ops, narrow_regions, parent.one_shot, nonce, expires_at_ms
+        )
+
+    me revoke_grant(grant_id: text):
+        if not _contains_text(self.revoked_grant_ids, grant_id):
+            self.revoked_grant_ids.push(grant_id)
+        self.policy.revision = self.policy.revision + 1
+
+    me bump_policy_revision():
+        self.policy.revision = self.policy.revision + 1
+
+    # Verify HMAC-SHA256, store membership, caller binding, revision, expiry, and revocation.
+    fn verify_grant_authentic(
+        grant: AuthenticatedGrant,
+        authenticated_principal: text,
+        now_ms: i64
+    ) -> Result<bool, text>:
+        if grant.principal_id != authenticated_principal:
+            return Err("principal_mismatch")
+        if _contains_text(self.revoked_grant_ids, grant.grant_id):
+            return Err("grant_revoked")
+        if grant.policy_revision != self.policy.revision:
+            return Err("stale_policy_revision")
+        if now_ms > 0 and grant.expires_at_ms > 0 and now_ms >= grant.expires_at_ms:
+            return Err("grant_expired")
+        if grant.one_shot and _contains_text(self.consumed_nonces, grant.nonce):
+            return Err("one_shot_grant_replayed")
+        val payload = _canonical_grant_payload(
+            grant.grant_id, grant.principal_id, grant.surface_id, grant.resource_or_op,
+            grant.operations, grant.allowed_regions, grant.policy_revision,
+            grant.one_shot, grant.nonce, grant.expires_at_ms
+        )
+        val expected = _hmac_hex(self.issuer_secret, payload)
+        if not _ct_hex_eq(expected, grant.mac_hex):
+            return Err("forged_grant_mac")
+        # Require membership in the trusted store (prevents offline fabricated tokens).
+        var in_store = false
+        var i = 0
+        while i < self.grants.len():
+            if self.grants[i].grant_id == grant.grant_id and _ct_hex_eq(self.grants[i].mac_hex, grant.mac_hex):
+                in_store = true
+                break
+            i = i + 1
+        if not in_store:
+            return Err("grant_not_in_store")
+        Ok(true)
+
+    # Authorize a resource read/query/release across:
+    #   grant authenticity ∩ region ceiling ∩ resource rule ∩ field policy ∩ audience.
+    fn check_resource_access(
+        grant: AuthenticatedGrant,
+        authenticated_principal: text,
+        surface_id: text,
+        resource_id: text,
+        op: AppOpKind,
+        region_id: text,
+        used_fields: [text],
+        released_fields: [text],
+        is_dynamic_query: bool,
+        audience: ReleaseAudience,
+        now_ms: i64
+    ) -> Result<bool, text>:
+        self.verify_grant_authentic(grant, authenticated_principal, now_ms)?
+        if grant.surface_id != "" and grant.surface_id != surface_id:
+            return Err("surface_mismatch")
+        if grant.resource_or_op != resource_id:
+            return Err("grant_resource_mismatch")
+        if not _contains_op(grant.operations, op):
+            return Err("grant_missing_operation:" + app_op_name(op))
+        if not _contains_text(grant.allowed_regions, region_id):
+            return Err("grant_region_denied:" + region_id)
+        val reg = match authority_find_region(self.policy, region_id):
+            case Some(r): r
+            case None: return Err("unknown_region:" + region_id)
+        if not _contains_op(reg.ceiling, op):
+            return Err("region_ceiling_denied:" + region_id + ":" + app_op_name(op))
+        # Find matching resource rule (default deny).
+        var rule_found = false
+        var matched_rule = ResourcePolicyRule(
+            resource_id: "", operations: [], regions: [],
+            named_query_use_fields: [], dynamic_query_fields: [],
+            release_fields: [], release_audiences: []
+        )
+        var ri = 0
+        while ri < self.policy.resource_rules.len():
+            val r = self.policy.resource_rules[ri]
+            if r.resource_id == resource_id and _contains_op(r.operations, op) and _contains_text(r.regions, region_id):
+                rule_found = true
+                matched_rule = r
+                break
+            ri = ri + 1
+        if not rule_found:
+            return Err("policy_resource_denied:" + resource_id)
+        if not _contains_audience(matched_rule.release_audiences, audience):
+            return Err("release_audience_denied:" + release_audience_name(audience))
+        val allowed_use = if is_dynamic_query: matched_rule.dynamic_query_fields else: matched_rule.named_query_use_fields
+        var ui = 0
+        while ui < used_fields.len():
+            if not _contains_text(allowed_use, used_fields[ui]):
+                return Err("field_use_denied:" + used_fields[ui])
+            ui = ui + 1
+        var fi = 0
+        while fi < released_fields.len():
+            if not _contains_text(matched_rule.release_fields, released_fields[fi]):
+                return Err("field_release_denied:" + released_fields[fi])
+            fi = fi + 1
+        Ok(true)
+
+    # Authorize and (if one-shot) atomically consume a command invocation grant.
+    me check_and_consume_operation(
+        grant: AuthenticatedGrant,
+        authenticated_principal: text,
+        surface_id: text,
+        operation_id: text,
+        op: AppOpKind,
+        region_id: text,
+        user_activated: bool,
+        input_mode: text,
+        payload_release: ReleaseAudience,
+        now_ms: i64
+    ) -> Result<bool, text>:
+        self.verify_grant_authentic(grant, authenticated_principal, now_ms)?
+        if grant.surface_id != "" and grant.surface_id != surface_id:
+            return Err("surface_mismatch")
+        if grant.resource_or_op != operation_id:
+            return Err("grant_operation_mismatch")
+        if not _contains_op(grant.operations, op):
+            return Err("grant_missing_operation:" + app_op_name(op))
+        if not _contains_text(grant.allowed_regions, region_id):
+            return Err("grant_region_denied:" + region_id)
+        val reg = match authority_find_region(self.policy, region_id):
+            case Some(r): r
+            case None: return Err("unknown_region:" + region_id)
+        if not _contains_op(reg.ceiling, op):
+            return Err("region_ceiling_denied:" + region_id + ":" + app_op_name(op))
+        var found = false
+        var matched = OperationPolicyRule(
+            operation_id: "", operations: [], regions: [],
+            requires_activation: false, input_mode: "",
+            payload_release: ReleaseAudience.HumanSurface
+        )
+        var i = 0
+        while i < self.policy.operation_rules.len():
+            val r = self.policy.operation_rules[i]
+            if r.operation_id == operation_id and _contains_op(r.operations, op) and _contains_text(r.regions, region_id):
+                found = true
+                matched = r
+                break
+            i = i + 1
+        if not found:
+            return Err("policy_operation_denied:" + operation_id)
+        if matched.requires_activation and not user_activated:
+            return Err("user_activation_required:" + operation_id)
+        if matched.input_mode != "" and matched.input_mode != input_mode:
+            return Err("input_mode_denied:" + input_mode)
+        if matched.payload_release != payload_release:
+            return Err("payload_release_denied:" + release_audience_name(payload_release))
+        if grant.one_shot:
+            self.consumed_nonces.push(grant.nonce)
+        Ok(true)
+
+# Authorization-scoped result cache key (§11.4, §17.9).
+pub fn authority_result_cache_key(
+    query_id: text,
+    params_canonical: text,
+    principal_id: text,
+    region_id: text,
+    policy_revision: i64,
+    data_revision: i64,
+    audience: ReleaseAudience
+) -> text:
+    query_id + "|p=" + params_canonical + "|u=" + principal_id +
+        "|r=" + region_id + "|pr=" + policy_revision.to_string() +
+        "|dr=" + data_revision.to_string() + "|a=" + release_audience_name(audience)
+
+# Parse trusted `*.authority.sdn` metadata & region ceilings via strict SDN V1.
+pub fn authority_parse_regions_sdn(sdn_source: text) -> Result<[RegionPolicy], text>:
+    val limits = sdn_strict_limits_v1()
+    val doc = match sdn_parse_strict_v1(sdn_source, limits):
+        case Ok(d): d
+        case Err(e): return Err("authority_sdn_parse_error:" + e.code)
+    val root = match doc.value:
+        case SdnValue.Dict(m): m
+        case _: return Err("authority_sdn_must_be_mapping")
+    if not root.contains_key("policy") or not root.contains_key("regions"):
+        return Err("authority_sdn_missing_policy_or_regions")
+    val policy_map = match root["policy"]:
+        case SdnValue.Dict(pm): pm
+        case _: return Err("authority_policy_must_be_mapping")
+    if policy_map.contains_key("default"):
+        match policy_map["default"]:
+            case SdnValue.String(s):
+                if s != "deny":
+                    return Err("authority_policy_must_default_deny")
+            case _:
+                return Err("authority_default_must_be_deny")
+    val regions_map = match root["regions"]:
+        case SdnValue.Dict(rm): rm
+        case _: return Err("authority_regions_must_be_mapping")
+    var out: [RegionPolicy] = []
+    for rname in regions_map.keys():
+        val rval = regions_map[rname]
+        val rdict = match rval:
+            case SdnValue.Dict(rd): rd
+            case _: return Err("region_entry_must_be_mapping:" + rname)
+        var parent_name = ""
+        if rdict.contains_key("parent"):
+            match rdict["parent"]:
+                case SdnValue.Null: parent_name = ""
+                case SdnValue.String(ps): parent_name = ps
+                case _: return Err("invalid_region_parent:" + rname)
+        var ceiling: [AppOpKind] = []
+        if rdict.contains_key("ceiling"):
+            val arr = match rdict["ceiling"]:
+                case SdnValue.Array(items): items
+                case _: return Err("invalid_region_ceiling:" + rname)
+            var ai = 0
+            while ai < arr.len():
+                match arr[ai]:
+                    case SdnValue.String(op_s):
+                        ceiling.push(app_op_from_name(op_s)?)
+                    case _:
+                        return Err("invalid_ceiling_op:" + rname)
+                ai = ai + 1
+        out.push(RegionPolicy(id: rname, parent: parent_name, ceiling: ceiling))
+    Ok(out)
+
+export RegionPolicy, ResourcePolicyRule, OperationPolicyRule, AuthorityPolicy
+export authority_find_region, authority_validate_region_hierarchy, authority_check_region_mount
+export AuthenticatedGrant, AuthorityGate, authority_result_cache_key, authority_parse_regions_sdn

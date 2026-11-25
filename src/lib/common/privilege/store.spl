@@ -5,8 +5,8 @@
 # group declarations to their member id_paths. Supports SDN-style round-trip
 # via `privilege_store_encode` / `privilege_store_decode`.
 
-use std.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource, Scope, authority_level_name, authority_level_from_name}
-use std.common.privilege.id_path.{IdPath, id_path_intern}
+use std.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource, Scope, authority_level_name, authority_level_from_name, authority_level_rank, is_revoked}
+use std.common.privilege.id_path.{IdPath, id_path_intern, id_path_prefix_match}
 use std.common.privilege.principal.{Principal, PrincipalKind}
 use std.common.privilege.group.{GroupDecl, group_expand_nested}
 use std.common.binary_inspect.{bytes_to_hex_canonical}
@@ -119,6 +119,37 @@ impl PrivilegeStore:
         self.tokens = self.tokens.push(token)
         MintResult(ok: true, value: token, error: "")
 
+    # Strictly attenuated mint: requires non-revoked trusted parent, child_path
+    # within parent.id_path prefix, and child level <= parent level.
+    me mint_attenuated(parent: AuthorityToken, child_path: IdPath, level: AuthorityLevel) -> MintResult:
+        if is_revoked(parent) or parent.trust_source == TrustSource.Untrusted or parent.trust_source == TrustSource.Revoked:
+            return MintResult(ok: false, value: AuthorityToken.public(), error: "parent_token_untrusted_or_revoked")
+        if not id_path_prefix_match(parent.id_path, child_path):
+            return MintResult(ok: false, value: AuthorityToken.public(), error: "attenuation_scope_widened")
+        if authority_level_rank(level) > authority_level_rank(parent.level):
+            return MintResult(ok: false, value: AuthorityToken.public(), error: "attenuation_level_widened")
+        self.mint(parent, child_path, level)
+
+    # Verify a token matches an active, non-revoked entry in this store.
+    fn verify_token(self, token: AuthorityToken, principal: Principal, required_path: IdPath, required_level: AuthorityLevel) -> bool:
+        if is_revoked(token) or token.trust_source == TrustSource.Untrusted or token.trust_source == TrustSource.Revoked:
+            return false
+        if token.principal.id != principal.id:
+            return false
+        var i = 0
+        while i < self.tokens.len():
+            val t = self.tokens[i]
+            if t.principal.id == principal.id and _store_bytes_equal(t.issuer_sig, token.issuer_sig):
+                if t.trust_source != TrustSource.Untrusted and t.trust_source != TrustSource.Revoked:
+                    if id_path_prefix_match(t.id_path, required_path) and authority_level_rank(t.level) >= authority_level_rank(required_level):
+                        return true
+            i = i + 1
+        false
+
+    # Verified check wrapper matching service-layer policy requirements.
+    fn check_verified(self, principal: Principal, token: AuthorityToken, required: IdPath, required_level: AuthorityLevel) -> bool:
+        self.verify_token(token, principal, required, required_level)
+
     # Find an active (non-revoked) token bound to `principal` for `path`.
     fn lookup(self, principal: Principal, path: IdPath) -> LookupResult:
         var i = 0
@@ -197,5 +228,26 @@ fn privilege_store_decode(data: text) -> DecodeResult:
         i = i + 1
     DecodeResult(ok: true, value: PrivilegeStore(tokens: tokens, groups: []), error: "")
 
+# Decode untrusted external storage without fabricating SystemTrusted provenance.
+fn privilege_store_decode_untrusted(data: text) -> DecodeResult:
+    val lines = data.split("\n")
+    var tokens: [AuthorityToken] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with("token\t"):
+            val fields = line.split("\t")
+            if fields.len() >= 6:
+                val token = AuthorityToken(
+                    id_path: id_path_intern(fields[1]),
+                    level: authority_level_from_name(fields[2]),
+                    principal: Principal(kind: _principal_kind_from_name(fields[3]), id: fields[4]),
+                    trust_source: TrustSource.Untrusted,
+                    scope: Scope.persistent(),
+                    issuer_sig: _hex_to_bytes(fields[5]))
+                tokens = tokens.push(token)
+        i = i + 1
+    DecodeResult(ok: true, value: PrivilegeStore(tokens: tokens, groups: []), error: "")
+
 export PrivilegeStore, MintResult, LookupResult, DecodeResult
-export privilege_store_encode, privilege_store_decode
+export privilege_store_encode, privilege_store_decode, privilege_store_decode_untrusted

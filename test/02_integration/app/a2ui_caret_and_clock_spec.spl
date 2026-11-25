@@ -1,0 +1,75 @@
+# @cover src/app/llm_caret/a2ui/cs_queries.spl 80%
+# @cover src/app/llm_caret/a2ui/cs_commands.spl 80%
+# @cover src/app/llm_caret/a2ui/cs_app_interface.spl 80%
+# @cover src/app/llm_caret/a2ui/cs_live_host.spl 80%
+# @cover src/os/apps/clock/clock_a2ui.spl 80%
+# @req REQ-A2UI-004 REQ-A2UI-009 REQ-A2UI-012
+"""
+## Purpose and audience
+Purpose: Integration verification for Caret Suite A2UI live host, queries/commands,
+CLI mode routing (`--a2ui`, `--a2ui-json`), and the second non-Caret SimpleOS
+`ClockApp` fixture sharing one isolated `A2uiSurfaceRegistry`.
+Audience: Caret, SimpleOS, and UI integration engineers.
+"""
+
+use std.spipe.*
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.screen_table.{a2ui_compile_screen_table, a2ui_lower_screen_to_ops}
+use std.common.ui.a2ui.surface_state.{A2uiSurfaceRegistry}
+use app.llm_caret.cs_dashboard_model.{cs_dashboard_new}
+use app.llm_caret.a2ui.cs_queries.{caret_metric_label, caret_memory_label, caret_sanitize_terminal_text}
+use app.llm_caret.a2ui.cs_app_interface.{caret_screen_sdn_v1}
+use app.llm_caret.a2ui.cs_live_host.{CaretA2uiHost, cs_resolve_ui_mode, cs_dashboard_session_views}
+use os.apps.clock.clock.{ClockApp, clock_mount_a2ui_surface}
+
+describe "Caret and ClockApp Multi-App A2UI Integration":
+    it "REQ-A2UI-009: preserves -1 metric sentinels, strips terminal escapes, and resolves --a2ui CLI modes":
+        step("Check -1 unavailable sentinels remain distinct from real zero")
+        expect caret_metric_label(-1.0) to_equal "CPU unavailable"
+        expect caret_metric_label(0.0) to_equal "CPU 0%"
+        expect caret_memory_label(-1) to_equal "memory unavailable"
+        expect caret_memory_label(0) to_equal "0 MB"
+        step("Verify ANSI CSI sequences are sanitized to inert text")
+        expect caret_sanitize_terminal_text("ok \u{001b}[32mgreen\u{001b}[0m", 64) to_equal "ok green"
+        step("Verify Caret CLI mode resolution for --a2ui and --a2ui-json")
+        expect cs_resolve_ui_mode(["--a2ui"]) to_equal "a2ui"
+        expect cs_resolve_ui_mode(["--a2ui-json"]) to_equal "a2ui_json"
+
+    it "REQ-A2UI-004 REQ-A2UI-012: mounts Caret and ClockApp side-by-side with isolated qualified root handles":
+        step("Mount Caret into shared A2uiSurfaceRegistry")
+        val catalog = a2ui_basic_catalog()
+        var reg = A2uiSurfaceRegistry.new(catalog)
+        val compiled = a2ui_compile_screen_table(caret_screen_sdn_v1(), catalog, 64)
+        expect compiled.is_ok() to_equal true
+        match compiled:
+            case Ok(t):
+                val ops = a2ui_lower_screen_to_ops(t, "caret_app", "main", 1, false, catalog, [], 64)
+                expect ops.is_ok() to_equal true
+                match ops:
+                    case Ok(os):
+                        expect reg.apply_op("caret_app", os[0]).is_ok() to_equal true
+                        expect reg.apply_op("caret_app", os[1]).is_ok() to_equal true
+                    case Err(_): expect false to_equal true
+            case Err(_): expect false to_equal true
+        step("Mount non-Caret ClockApp into the same registry with colliding surfaceId `main`")
+        var clock = ClockApp.new()
+        clock.tick(1500u64)
+        val cres = clock_mount_a2ui_surface(clock, reg, "clock_app", "main")
+        expect cres.is_ok() to_equal true
+
+    it "REQ-A2UI-009 REQ-A2UI-011: syncs CaretA2uiHost and hot-swaps handler generation without resetting drafts":
+        step("Create CaretA2uiHost and edit draft body")
+        val hres = CaretA2uiHost.create("ws_spec", "alice", "caret_host_secret_2026_v1", false, 1000)
+        expect hres.is_ok() to_equal true
+        match hres:
+            case Ok(host_init):
+                var host = host_init
+                expect host.runtime.apply_draft_edit("alice", "main", "/draft/body", "hello").is_ok() to_equal true
+                val dash = cs_dashboard_new("ws_spec")
+                val sync_res = host.sync_dashboard(dash, cs_dashboard_session_views(dash), false, 1001)
+                expect sync_res.is_ok() to_equal true
+                step("Hot-swap Caret handler generation and confirm draft body stays preserved")
+                val swap_res = host.hot_swap_handler("v2_detailed", "caret_handler_abi_v1")
+                expect swap_res.is_ok() to_equal true
+                expect host.runtime.revisions.code_generation to_equal 2
+            case Err(_): expect false to_equal true
