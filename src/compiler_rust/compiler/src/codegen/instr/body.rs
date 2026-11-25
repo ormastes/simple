@@ -478,7 +478,13 @@ pub(super) fn build_vreg_types(
                             types_map.insert(*dest, ty);
                         }
                     }
-                    MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
+                    MirInst::BoxInt { dest, .. } => {
+                        // BoxInt produces a tagged RuntimeValue, not a raw i64
+                        // (mirrors BoxFloat below), so erased conversions inspect
+                        // its tag instead of treating `n << 3` as raw bits.
+                        types_map.insert(*dest, TypeId::ANY);
+                    }
+                    MirInst::UnboxInt { dest, .. } => {
                         types_map.insert(*dest, TypeId::I64);
                     }
                     MirInst::BoxFloat { dest, .. } => {
@@ -1919,5 +1925,25 @@ mod tests {
         assert_eq!(map.get(&signed).copied(), Some(TypeId::I32));
         assert_eq!(map.get(&unsigned).copied(), Some(TypeId::U32));
         assert_eq!(map.get(&boolean).copied(), Some(TypeId::BOOL));
+    }
+
+    #[test]
+    fn build_vreg_types_marks_box_int_as_any_and_unbox_int_as_i64() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::I64, Visibility::Private);
+        let raw = func.new_vreg();
+        let boxed = func.new_vreg();
+        let unboxed = func.new_vreg();
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::ConstInt { dest: raw, value: 65 });
+        entry.instructions.push(MirInst::BoxInt { dest: boxed, value: raw });
+        entry.instructions.push(MirInst::UnboxInt {
+            dest: unboxed,
+            value: boxed,
+        });
+        entry.terminator = Terminator::Return(Some(unboxed));
+
+        let map = build_vreg_types(&func, &HashMap::new());
+        assert_eq!(map.get(&boxed).copied(), Some(TypeId::ANY));
+        assert_eq!(map.get(&unboxed).copied(), Some(TypeId::I64));
     }
 }
