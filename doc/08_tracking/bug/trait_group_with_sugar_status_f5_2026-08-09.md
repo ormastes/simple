@@ -103,3 +103,32 @@ A deploy of a P0-carrying binary is **warranted but NOT performed** here
 (per the hard constraint). Recommend it be done through the normal
 bootstrap lane, not by copying this cargo artifact.
 
+
+## Triage 2026-11-25 (lane p3-bah, worktree D:\wt-p3-bah, release/1.0.0 @fcd95d41d60)
+
+Re-measured on the tracked release/1.0.0 `bin/simple.exe` (Windows
+x86_64, `SIMPLE_LIB=src`):
+
+- `trait AB with A, B:` PARSES (exit 0) — the "parser rejects" claim is
+  stale, confirming section A. The stale claim in
+  `src/lib/common/debug/debug_profiler.spl` has been corrected.
+- Group DISPATCH still fails on this binary, even with an explicit
+  `impl AB for C:`:
+
+  ```
+  Runtime error: Function 'AB.a_id' not found
+  Runtime error: unresolved symbol -- this is a code-generation dispatch gap
+  ```
+
+  So the F5 measurement "group compiles and dispatches with NO desugar
+  pass" does not hold on the deployed release/1.0.0 binary — it held on
+  the F5 stream's newer cargo build (`5b31f9e687c`). Converting
+  `debug_profiler.spl` to the `with` form remains BLOCKED, now by the
+  dispatch gap rather than the parser. The file's header comment was
+  updated to say exactly this.
+
+Verdict: conversion NOT done (would break `DebugProfiler` consumers:
+`ref_debug_session`, cuda/metal/vulkan debug sessions, `lab_debug`,
+`debug_doctor`). Left OPEN pending a binary whose trait solver carries
+the supertrait rule for groups; the recommended fix path in section C is
+unchanged.
