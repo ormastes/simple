@@ -1,7 +1,14 @@
 # UI C1 native dependency type-name compatibility
 
-Status: source repair prepared; runtime verification pending. Authoritative bug
-database reconciliation is pending because no qualified full CLI is available.
+Status: resolved & workaround tags retired (2026-11-25). Canonical lowercase `unit`
+is the permanent Simple spelling for unit `Result<unit, E>` and `(JsValue) -> unit`
+signatures (pinned by `test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl`);
+HIR (`src/compiler/20.hir/hir_lowering/types.spl`) resolves lowercase `unit`/`void`
+and `Nil` (per `doc/07_guide/language/robust_semantic_absence.md § Unit type`) to
+`HirTypeKind.Unit`, while capital `Unit` is intentionally not aliased. All 29
+`@workaround` tags across `host_taskbar_runtime.spl`, `bounded_channel.spl`,
+`wm_bridge.spl`, and `src/lib/js/builtins/array.spl` have been retired while keeping
+the canonical `unit` signatures intact.
 
 The exact 0CD6 producer, compiling frozen C1, reports unresolved `Unit` and
 `Nil` types in the UI closure. Its HIR type lowering recognizes lowercase
