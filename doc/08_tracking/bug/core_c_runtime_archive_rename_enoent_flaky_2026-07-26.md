@@ -145,3 +145,18 @@ prebuilt archive.
 3. **Staging dirs leak.** 13 `native-objects-*` dirs accumulated in `.simple/`
    over 4 days because the success path calls `TempDir::keep()`. Unbounded growth;
    `disk-retention.shs` does not cover `.simple/`.
+
+## Verification 2026-11-25 (work/p3-bao-20261125)
+
+Fixed status confirmed by inspection on current source (no cargo build, per
+host rules). `src/compiler_rust/driver/src/cli/init.rs:192` defines
+`is_stale_db_temp()` and the cleanup at lines 222/235 deletes only through
+that predicate; the unit test
+`stale_db_cleanup_spares_native_build_object_temporaries` (init.rs:301)
+asserts `*.sdn.tmp`/`*.cache.tmp` are removed while `x/mod_0.o.tmp` and
+arbitrary `*.tmp` survive. The pure-Simple twin path named above
+(`lib/std/src/db/persistence.spl`) no longer exists after tree reorganisation;
+no broad `*.tmp` sweeper exists anywhere in the pure-Simple `src/compiler` /
+`src/app` today (the deployed self-hosted binary never ran the Rust
+`init_runtime` cleanup). The race mechanism this doc root-caused is therefore
+closed in both trees; the historical elimination table stands as record.
