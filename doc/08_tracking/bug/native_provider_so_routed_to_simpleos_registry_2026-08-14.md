@@ -1,6 +1,20 @@
 # Native provider `.so` routed to the SimpleOS registry
 ## Closed 2026-09-16 — ...expose `simple_provider_query_v1`. ## Fix - Add bounded raw-text host runtime entry points
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Header status (Closed) is accurate for the routing fix itself, but the
+remaining gate below is still open and still environment-deferred:
+`TODO(deferred-environment)` requires an admitted Linux Stage 2/3 compiler to
+run `scripts/check/check-native-provider-so-route.shs` and record the
+invocation/startup/max-RSS receipt. That admission does not exist on this
+Windows host (pinned Rust seed only; the seed additionally rejects
+`@representation_boundary` at release/1.0.0 HEAD, so no spec lane runs at
+all). The 2026-09-22 blocker (`provider_query_wire.spl` HIR field-inference
+error under the admitted Stage 2 compiler) is likewise not re-checkable here.
+No status change; do not claim invocation/native-RSS PASS until the deferred
+check runs.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.

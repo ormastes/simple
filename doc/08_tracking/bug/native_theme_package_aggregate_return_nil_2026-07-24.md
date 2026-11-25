@@ -1,5 +1,19 @@
 # Native theme-package aggregate return becomes nil
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Still OPEN and environment-blocked on this host. Re-ran the 2026-11-04
+fixture `test/03_system/native/theme_package_aggregate_return.spl` under the
+pinned seed interpreter (`SIMPLE_LIB=src bin/simple.exe run`): exits rc=42 as
+the doc records — the interpreted lane stays green, which says nothing about
+the native aggregate-return ABI defect. The actual repro requires a Stage 3
+pure-Simple compiler driving `native-build` (command in the fixture section
+below); no Stage 3 binary exists on this Windows host (pinned Rust seed
+only, which additionally rejects `@representation_boundary` at release/1.0.0
+HEAD), and building one (cargo/bootstrap) is out of lane scope. The
+generated-snapshot startup bypass therefore remains in force. Status
+unchanged: OPEN, awaiting a native-capable verification lane.
+
 Status: open compiler/runtime bug; production startup bypasses the unsafe
 boundary with the generated immutable `ThemeRenderSnapshot`.
 
