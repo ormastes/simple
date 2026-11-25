@@ -1,8 +1,9 @@
 # Parser rejects line continuation after a trailing binary comparison operator
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — fixed by 023a60a05aa, verified on the pinned seed (see end of file)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+(Superseded by the 2026-11-25 resolution note at the end of this file.)
 
 - **Date:** 2026-08-04
 - **Area:** compiler/parser (both Rust seed and self-hosted stage binary agree)
@@ -55,3 +56,24 @@ was committed in that style, so some earlier lane accepted or never parsed
 it), or have lint/fmt flag bare trailing-operator continuations at commit
 time so they cannot land unparsed.
 
+
+## Resolved 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03) — STALE, fix already landed
+
+Fixed by `023a60a05aa` ("fix(parser): support trailing-operator line
+continuation for comparison and equality operators", in tree at HEAD): the
+hand-written `parse_comparison`/`parse_equality` in
+`src/compiler_rust/parser/src/expressions/binary.rs` never inherited the
+continuation handling the macro-generated binary parsers had; they do now.
+
+Verified behaviorally on the pinned seed
+(`SIMPLE_LIB=src bin/simple.exe run <probe> --mode=interpreter`) with the
+doc's exact repro shape — `if a >\n   b:` unparenthesized — which now parses
+and runs (`parse-cont ok`).
+
+Known residual, deliberately out of scope of that fix and pinned by its own
+test: `elif` conditions still reject the continuation (statement-level indent
+bookkeeping, not expression parsing) — see
+`elif_condition_continuation_is_still_unsupported` and
+`doc/08_tracking/bug/comparison_operator_line_continuation_parse_2026-07-30.md`.
+
+**Status: RESOLVED.**
