@@ -1,5 +1,26 @@
 # T15 blocked: no "HIR-lowering site" exists for `HirForwardDecl` to wire into — the target pass is dead code with zero production users
 
+## Verification addendum 2026-11-25 (P3 ledger lane, Windows x86_64)
+
+- **measured** (tracked `bin/simple.exe`, `SIMPLE_LIB=src ... run --mode=interpreter`):
+  the characterization claim still holds live — a probe calling
+  `app.desugar.forwarding.desugar_forwarding` on
+  `fn target(x: i64) -> i64:` + `fn alias_name = target` emits exactly the
+  documented one-hop wrapper:
+  ```
+  # DEPRECATED: fn alias_name = target
+  fn alias_name(x):
+      target(x)
+  ```
+- **measured**: `HirForwardDecl` remains unwired into any pass and
+  `forwarding.spl` is untouched, matching the "What was landed" record; the
+  characterization spec `test/01_unit/compiler/hir/hir_forward_decl_spec.spl`
+  exists (harness re-run host-blocked by the tracked-seed
+  /@representation_boundary skew).
+- Verdict: the BLOCKED disposition stands as the final record for this
+  planning defect — T15 as scoped has no target pass; making the syntax
+  native grammar is new-feature work, as concluded below.
+
 - **Status:** BLOCKED — honest gate report, not implemented. Scoped down to a
   characterization spec only (see "What was landed" below).
 - **Found:** 2026-08-07, executing plan unit T15 from

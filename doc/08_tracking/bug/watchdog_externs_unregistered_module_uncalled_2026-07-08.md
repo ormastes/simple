@@ -1,5 +1,27 @@
 # `rt_watchdog_start`/`rt_watchdog_stop` externs have no runtime FFI registration; the app-layer watchdog module has zero callers
 
+## Verification addendum 2026-11-25 (P3 ledger lane, Windows x86_64)
+
+- **measured** (tracked `bin/simple.exe`, `SIMPLE_LIB=src ... run --mode=interpreter`):
+  the original crash symptom is gone — a live probe calling
+  `WatchdogManager.start(5)` then `WatchdogManager.stop()` prints
+  `start ok` / `stop ok` with no `unknown extern function: rt_watchdog_start`
+  abort. (This exact call shape was previously an instant process abort.)
+- **measured** (source inspection): the facade
+  `src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl:18` declares
+  only `extern fn rt_fault_set_timeout(secs: i64)` — backed in both lanes per
+  the 2026-11-13 Resolution below — and
+  `src/app/interpreter/core/watchdog.spl` declares no extern itself. The
+  unregistered `rt_watchdog_start`/`rt_watchdog_stop` externs no longer
+  exist anywhere in the Simple-facing source.
+- **limit stated**: `watchdog_manager_spec.spl` could not be re-run through
+  the harness on this host (tracked-seed/@representation_boundary skew, as
+  in the rest of this lane); the run-mode probe above is the dynamic
+  evidence.
+- The "fixed 2026-11-13" status is confirmed. The two follow-ups named in
+  the Resolution (`fault_detection_module_missing_2026-11-13.md`; C-lane
+  extern only records config) are unchanged and tracked separately.
+
 Date: 2026-07-08
 Status: fixed 2026-11-13 (owner decision: implement and wire)
 Severity: P3
