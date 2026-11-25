@@ -58,3 +58,58 @@ not specs.
 
 Full survey table, orphan list and the 5-step unblock sequence:
 `.spipe/test_tree_dedup/state.md`.
+
+## Resolution 2026-11-25 (lane p2w6-ac, base release/1.0.0 `64dfa6d980f`)
+
+**Status: RESOLVED** — fix item 1 is now complete for the last unfixed copy;
+fix item 2 (numbered-tree classification spec) already existed.
+
+State found at HEAD:
+
+- `detect_test_level` (`src/lib/nogc_sync_mut/test_runner/test_manifest_scanner.spl:245`)
+  already delegates to the segment-based `test_level_of_path`
+  (`src/lib/nogc_sync_mut/test_runner/test_level_detect.spl:68`), which
+  recognizes both the numbered tree and the legacy mirror — so the manifest
+  fast path (`discover_test_files_fast` -> `manifest_entry_matches_level`) was
+  already fixed.
+- The std copy of `matches_level`
+  (`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:261`) was already
+  segment-based and spec-covered (fix item 2):
+  `test/01_unit/app/test_runner_new/runner_files_filters_spec.spl` asserts
+  `test/01_unit/...` -> Unit, `test/02_integration/...` -> Integration,
+  `test/03_system/...` -> System.
+- The **app** copy (`src/app/test_runner_new/test_runner_files.spl`), still
+  used by the no-manifest fallback `discover_test_files_slow`, was NOT fixed:
+  it classified with `path.contains("/unit/")` (never matches `/01_unit/`) and
+  had no `TestLevel.Smoke` arm.
+- The legacy mirror trees `test/unit/` and `test/integration/` no longer exist
+  (only `test/system/` remains), so the "level-filtered run selects the stale
+  mirror" symptom was already moot on the fast path.
+
+Fix: the app copy now delegates to the same `test_level_of_path` (imported via
+the package export `std.nogc_sync_mut.test_runner.{test_level_of_path}`) and
+gained the missing `TestLevel.Smoke` arm, mirroring the std copy. Legacy
+behaviors are preserved (`shared` -> unit, `feature` -> system) and
+`community`/`opportunity` no longer substring-match as unit/system.
+
+Evidence (pinned seed `bin/simple.exe` v1.0.0-rc.1, Windows):
+
+- BEFORE: code inspection of the old substring form at
+  `src/app/test_runner_new/test_runner_files.spl:114-123`. A runtime
+  BEFORE/AFTER of the app module itself is environment-blocked on this host:
+  the pinned seed rejects `@representation_boundary` (added repo-wide by
+  cfd89933699) on `file_read_borrowed_bytes` in the module's transitive
+  imports, so neither `bin/simple.exe test` nor a direct `run` probe of the
+  app module can execute at HEAD.
+- AFTER: a probe replicating the fixed function verbatim (same import form,
+  same body) runs green under the seed: `test/01_unit` -> Unit true,
+  `test/02_integration` -> Integration true, `test/03_system` -> System true,
+  legacy `test/unit` -> Unit true, `test/shared` -> Unit true,
+  `test/feature` -> System true, `test/04_smoke` -> Smoke true, cross-level
+  rejections false, `test/community` -> Unit false. The delegation target
+  `test_level_of_path` was also executed directly with the same verdicts
+  (1/2/3 for the numbered trees, 1 for the legacy mirror).
+
+Fix item 3 (orphan relocation, diverged-pair resolution, mirror retirement)
+is a separate cleanup program tracked in `.spipe/test_tree_dedup/state.md`,
+not part of this runner defect.
