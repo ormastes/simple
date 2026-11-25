@@ -1,5 +1,23 @@
 # SSpec runner suppresses the failing child diagnostic
-## Open 2026-09-16 — needs owner triage
+## Open — 2026-11-25 triage: diagnostic forwarding present in source; acceptance run still pending
+
+## 2026-11-25 triage note
+
+- **measured (code inspection, release/1.0.0):** `make_result_from_output`
+  (`src/app/test_runner_new/test_executor_parsing.spl:261`) now fills
+  `TestFileResult.error` via `extract_error_message(combined)` whenever
+  `failed > 0`, on nonzero exit with no parsed verdict, and on timeout; the
+  canonical printer `print_result_default`
+  (`src/lib/nogc_sync_mut/test_runner/test_runner_output.spl`) prints
+  `Error: {result.error}` on the FAIL, TOUT, and CRASH/TERM/NRUN/GATE paths.
+  The opaque `0 passed, 1 failed` summary described below is no longer the
+  only output on these paths.
+- **limit:** the acceptance criterion below (one intentionally passing and one
+  intentionally failing minimal SSpec on the deployed pure-Simple binary, no
+  seed delegation) cannot be executed on this Windows host: the pinned seed is
+  rejected repo-wide by the `@representation_boundary` source/binary
+  inconsistency at HEAD, and no pure-Simple binary is deployed here. Status
+  stays OPEN pending that run; this note is the requested owner triage.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

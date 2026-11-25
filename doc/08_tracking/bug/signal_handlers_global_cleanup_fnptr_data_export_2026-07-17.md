@@ -1,8 +1,29 @@
 # signal_handlers.spl `_global_cleanup_handler` cross-module fn-pointer misresolved as DATA export
 
-Status: Open.
+Status: Closed 2026-11-25 (fix verified retained; see dated note below).
 
 Date: 2026-07-17
+
+## 2026-11-25 verification — closed
+
+The "Status: Open" header predated the 2026-07-17 bounded-cycle evidence at
+the bottom of this doc, which confirmed the fix on the exercised path (fresh
+715-unit Stage 2 compiled and code-generated the standalone runner with no
+`_global_cleanup_handler` data-export diagnostic).
+
+- **measured (code inspection, release/1.0.0):** the focused regression is
+  retained at
+  `test/01_unit/compiler/mir/module_global_function_pointer_lowering_spec.spl`
+  with the scenarios this doc calls for: "loads the mutable slot and calls its
+  current function indirectly" (`LoadGlobal` + `CallIndirect`), "keeps an
+  ordinary top-level function call direct", and "installs the slot's initial
+  function pointer in a module initializer". `MirInstKind.CallIndirect` and
+  `emit_call_indirect` are present in `src/compiler/50.mir/`.
+- **limit:** the regression spec is tagged `only-compiled` and cannot be
+  executed on this Windows host — the pinned seed rejects
+  `@representation_boundary` repo-wide at HEAD, so no spec run is possible.
+  Closure rests on the retained regression plus the 2026-07-17 build evidence
+  already recorded below.
 
 ## Status
 
