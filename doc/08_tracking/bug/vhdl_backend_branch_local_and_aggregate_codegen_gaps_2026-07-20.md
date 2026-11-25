@@ -65,3 +65,26 @@ behavior change attempted beyond the unrelated `Return`→`Ret` spec rename
 noted above. Needs a compiler-backend engineer to compare
 `backend.compile()`'s branch-local/aggregate lowering against the VHDL
 combinational-process codegen path in `src/compiler/70.backend/backend/`.
+
+## Triage 2026-11-25 (P2 sweep lane) — still open; path references updated
+
+The 9 backend failures were not re-verified: at release/1.0.0 HEAD the pinned
+seed rejects `@representation_boundary` in the `src/compiler` import closure,
+so neither `bin/simple.exe test` nor a direct `run` driver importing
+`plugins.backend_vhdl.vhdl_backend` can load (probe:
+`unknown decorator '@representation_boundary'`). The fix itself is deep
+VHDL-lowering work (branch-local temporaries, struct/array aggregates,
+record-package/enum codegen) — a compiler-backend program, not a bounded
+P2 fix; the one bounded item (the `Return`→`Ret` rename) already landed.
+
+Stale references in this doc, for the next owner:
+- Spec moved: `test/02_integration/compiler/.spipe_matchers_vhdl_backend_e2e_spec.spl`
+  → `test/02_integration/compiler/vhdl_backend_e2e_spec.spl` (the 9 failing
+  example names still exist there verbatim, e.g. lines 366, 433, 524, 971,
+  1023, 1159, 1443, 1478).
+- Backend moved: `src/compiler/70.backend/backend/vhdl_expr.spl` no longer
+  exists; VHDL codegen now lives under `src/compiler/70.backend/backend/vhdl/`
+  and `plugins/backend_vhdl/`.
+
+Status: remains **open**; re-run the renamed spec once the
+seed/`@representation_boundary` inconsistency is resolved.
