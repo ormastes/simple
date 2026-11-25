@@ -1157,6 +1157,38 @@ bootstrap_tree_rss_whole_build_export() {
           bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; Windows per-file route: 2 unit workers under 10485760 KiB, measured available ${btr_wb_raw_avail} KiB minus reserve ${btr_we_reserve} KiB; compiler re-admission remains authoritative"
         fi
       fi ;;
+    *)
+      # POSIX (Linux/macOS) per-file verification uses module-scoped units too;
+      # on a 64 GB host the 50% whole-closure budget forces SMALL-HOST MODE (1
+      # worker), which Phase C then refuses when SIMPLE_FILE_WORKERS=1. Keep
+      # two-pass / explicit-1 requests untouched and cap at available - reserve
+      # and the two-worker default ceiling.
+      if [ "${SIMPLE_FILE_WORKERS:-1}" = 1 ] &&
+         [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ] &&
+         [ "$btr_we_requested" -ge 2 ] && [ "$bootstrap_tree_rss_plan_workers" -eq 1 ]; then
+        btr_we_reserve=$(bootstrap_tree_rss_host_reserve_kib "$bootstrap_tree_rss_host_total_kib" "${2:-}")
+        if bootstrap_tree_rss_is_uint "${btr_wb_raw_avail:-}" 15 &&
+           bootstrap_tree_rss_is_uint "$btr_we_reserve" 15 &&
+           [ "$bootstrap_tree_rss_plan_cap_kib" -ge 10485760 ] &&
+           [ "$btr_wb_raw_avail" -gt "$btr_we_reserve" ]; then
+          btr_we_headroom=$((btr_wb_raw_avail - btr_we_reserve))
+          btr_we_cap=$bootstrap_tree_rss_plan_cap_kib
+          [ "$btr_we_cap" -le "$btr_we_headroom" ] || btr_we_cap=$btr_we_headroom
+          btr_we_def_ceil=$(bootstrap_tree_rss_ceiling_kib 2 "$bootstrap_tree_rss_host_total_kib")
+          [ "$btr_we_cap" -le "$btr_we_def_ceil" ] || btr_we_cap=$btr_we_def_ceil
+          if [ "$btr_we_cap" -ge 10485760 ]; then
+            bootstrap_tree_rss_plan_workers=2
+            bootstrap_tree_rss_plan_cap_kib=$btr_we_cap
+            bootstrap_tree_rss_plan_ceiling_kib=0
+            bootstrap_tree_rss_plan_cli_row_cap_kib=$btr_we_cap
+            bootstrap_tree_rss_plan_cli_row_ceiling_kib=0
+            bootstrap_tree_rss_plan_bound=posix-file-worker-floor
+            bootstrap_tree_rss_plan_cli_row_bound=posix-file-worker-floor
+            bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_we_requested" 2)
+            bootstrap_tree_rss_plan_summary="${bootstrap_tree_rss_plan_summary}; POSIX per-file route: 2 unit workers under ${btr_we_cap} KiB, measured available ${btr_wb_raw_avail} KiB minus reserve ${btr_we_reserve} KiB; compiler re-admission remains authoritative"
+          fi
+        fi
+      fi ;;
   esac
   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$bootstrap_tree_rss_plan_cap_kib
   if [ "$bootstrap_tree_rss_plan_ceiling_kib" -gt 0 ]; then
@@ -1959,6 +1991,11 @@ bootstrap_tree_rss__selftest() {
         # token `;;'"), which broke every `sh` consumer of this file.
         (small-host-one-worker*)
           if [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" -eq 1 ]; then
+            btr_st_per=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
+          fi
+          ;;
+        (posix-file-worker-floor*|windows-file-worker-floor*)
+          if [ "$BOOTSTRAP_VERIFY_BUILD_THREADS" -eq 2 ] && [ "$bootstrap_tree_rss_cap_kib" -ge 10485760 ]; then
             btr_st_per=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
           fi
           ;;
