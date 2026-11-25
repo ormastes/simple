@@ -72,7 +72,17 @@ Specs:
 
 ## Open
 
-1. **Encrypt reads past a short key or nonce** in:
+1. ~~**Encrypt reads past a short key or nonce**~~ **FIXED (2026-11-25):**
+   all six encrypt functions in the four copies below now check key and
+   nonce lengths and `panic` before key expansion (the `db9fa3350a4`
+   canonical approach; the copies return bare `[u8]`, so a Result retrofit
+   touching ~60 call sites stays a possible follow-up). The sshd
+   delegating copy guards ahead of its std.common delegate call.
+   Prevention: `test/01_unit/lib/crypto/aes_gcm_encrypt_length_guard_spec.spl`
+   pins every guard at source level ahead of key expansion (the spec
+   runner cannot assert a panic); valid-input behavior stays pinned by the
+   existing KAT/NIST specs (16/16, 15/15, 15/15, 5/5, sshd guard 7/7).
+   Files:
    - `src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl`
    - `src/os/crypto/aes256_gcm.spl`
    - `src/lib/common/crypto/aes_gcm.spl` (aes128/192/256)
