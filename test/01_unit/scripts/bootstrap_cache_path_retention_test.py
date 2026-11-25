@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
-COLLECTOR = ROOT / "scripts/bootstrap/collect-diagnostic-continuation.py"
+COLLECTOR = ROOT / "scripts/bootstrap/collect-diagnostic-continuation.shs"
 
 class CachePathRetention(unittest.TestCase):
     def test_actual_bootstrap_names_and_owner_metadata(self):
@@ -25,7 +25,7 @@ class CachePathRetention(unittest.TestCase):
                 item.parent.mkdir(parents=True, exist_ok=True)
                 item.write_bytes(b"fixture")
             output = pathlib.Path(directory) / "collected"
-            result = subprocess.run(["python3", str(COLLECTOR), str(root), str(output), "4096"], capture_output=True, text=True)
+            result = subprocess.run(["sh", str(COLLECTOR), str(root), str(output), "4096"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             receipt = json.loads((output / "receipt.json").read_text())
             self.assertEqual({row["path"] for row in receipt["files"]}, set(wanted))
