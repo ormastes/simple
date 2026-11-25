@@ -126,8 +126,20 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(result));
         }
         "trim" | "trimmed" | "strip" => return Ok(Value::text(s.trim().to_string())),
-        "trim_start" | "trim_left" => return Ok(Value::text(s.trim_start().to_string())),
-        "trim_end" | "trim_right" => return Ok(Value::text(s.trim_end().to_string())),
+        "trim_start" | "trim_left" => {
+            if args.is_empty() {
+                return Ok(Value::text(s.trim_start().to_string()));
+            }
+            let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.trim_start_matches(&*prefix).to_string()));
+        }
+        "trim_end" | "trim_right" => {
+            if args.is_empty() {
+                return Ok(Value::text(s.trim_end().to_string()));
+            }
+            let suffix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::text(s.trim_end_matches(&*suffix).to_string()));
+        }
         "trim_start_matches" => {
             // Repeatedly remove prefix until it no longer matches
             let prefix = eval_arg(args, 0, Value::text(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();

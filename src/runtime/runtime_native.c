@@ -7068,9 +7068,8 @@ int64_t rt_string_chomp(int64_t value) {
 
 /* trim_start_matches: repeatedly strip `pattern` from the front. */
 int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
-    RtCoreString* s = rt_core_as_string_or_data(value);
-    RtCoreString* p = rt_core_as_string_or_data(pattern);
-    if (!s || !p) return value;
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_start_matches(promoted, pattern))
+    RT_STRING_RECV_OR_PROMOTE(p, pattern, value, rt_string_trim_start_matches(value, promoted))
     if (p->len == 0) return value;
     uint64_t start = 0;
     while (s->len - start >= p->len && memcmp(s->data + start, p->data, (size_t)p->len) == 0) {
@@ -7082,9 +7081,8 @@ int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
 
 /* trim_end_matches: repeatedly strip `pattern` from the end. */
 int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
-    RtCoreString* s = rt_core_as_string_or_data(value);
-    RtCoreString* p = rt_core_as_string_or_data(pattern);
-    if (!s || !p) return value;
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_end_matches(promoted, pattern))
+    RT_STRING_RECV_OR_PROMOTE(p, pattern, value, rt_string_trim_end_matches(value, promoted))
     if (p->len == 0) return value;
     uint64_t end = s->len;
     while (end >= p->len && memcmp(s->data + end - p->len, p->data, (size_t)p->len) == 0) {
