@@ -1,0 +1,153 @@
+#!/bin/sh
+# Validate a CI Windows bootstrap archive before a Linux cross build.
+# Port of the former check-windows-gnu-runtime-authority.py (+ its -test.py,
+# now --selftest).
+#
+# Usage: sh scripts/check/check-windows-gnu-runtime-authority.shs --root <dir> \
+#          --source-revision <sha> --llvm-bin <dir> --producer <file> --output <json>
+#        sh scripts/check/check-windows-gnu-runtime-authority.shs --selftest
+# Exit: 0 PASS, 1 FAIL, 2 usage.
+set -u
+
+REQUIRED="rt_alloc rt_array_new rt_free rt_native_build rt_set_args rt_string_free rt_string_new rt_string_new_literal"
+
+fail() { echo "FAIL — $1" >&2; exit 1; }
+
+json_str() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN { ORS = ""; printf "\"" }
+        NR > 1 { printf "\\n" } { printf "%s", $0 } END { printf "\"" }'
+}
+
+sha_of() { sha256sum < "$1" | awk '{ print $1 }'; }
+
+# validate_formats <headers-file>: prints "name count" rows (sorted) or returns 1.
+validate_formats() {
+    sed -n 's/^Format: \(.*\)$/\1/p' "$1" | tr -d '\r' > "$1.formats"
+    grep -qx COFF-x86-64 "$1.formats" || return 1
+    grep -qvx -e COFF-x86-64 -e COFF-import-file-x86-64 "$1.formats" && return 1
+    sort "$1.formats" | uniq -c | awk '{ print $2 " " $1 }'
+}
+
+tool() {
+    if [ -e "$1/$2.exe" ]; then echo "$1/$2.exe"; else echo "$1/$2"; fi
+}
+
+main() {
+    root="" rev="" llvm="" producer="" output=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --root) root=$2 ;;
+            --source-revision) rev=$2 ;;
+            --llvm-bin) llvm=$2 ;;
+            --producer) producer=$2 ;;
+            --output) output=$2 ;;
+            *) echo "usage: $0 --root D --source-revision R --llvm-bin D --producer F --output F | --selftest" >&2; exit 2 ;;
+        esac
+        shift 2
+    done
+    [ -n "$root" ] && [ -n "$rev" ] && [ -n "$llvm" ] && [ -n "$producer" ] && [ -n "$output" ] \
+        || { echo "usage: missing required argument" >&2; exit 2; }
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    # utf-8-sig: strip a leading BOM and CRs.
+    sed '1s/^\xEF\xBB\xBF//' "$root/authority.env" | tr -d '\r' > "$work/env"
+    get() { sed -n "s/^$1=//p" "$work/env" | head -n 1; }
+    [ "$(get source_revision)" = "$rev" ] || fail "archive source revision does not match this cross build"
+    [ "$(get target)" = x86_64-pc-windows-gnullvm ] || fail "archive must come from the pinned Windows GNU LLVM target"
+    archive=$root/libsimple_native_all.a
+    expected=$(get native_all_sha256)
+    [ "$(sha_of "$archive")" = "$expected" ] || fail "archive SHA-256 mismatch"
+    timeout 60 "$(tool "$llvm" llvm-readobj)" --file-headers "$archive" > "$work/headers" \
+        || fail "llvm-readobj failed"
+    validate_formats "$work/headers" > "$work/formats" \
+        || fail "expected only x86_64 COFF members, found $(sed -n 's/^Format: //p' "$work/headers" | tr -d '\r' | sort -u | tr '\n' ' ')"
+    timeout 60 "$(tool "$llvm" llvm-nm)" --defined-only --extern-only "$archive" > "$work/nm" \
+        || fail "llvm-nm failed"
+    awk 'NF { s = $NF; sub(/^_+/, "", s); print s }' "$work/nm" | tr -d '\r' | sort -u > "$work/symbols"
+    missing=""
+    for sym in $REQUIRED; do
+        grep -qx "$sym" "$work/symbols" || missing="$missing $sym"
+    done
+    [ -z "$missing" ] || fail "missing bootstrap runtime owners:$missing"
+    [ "$(sha_of "$archive")" = "$expected" ] || fail "archive changed during validation"
+    mkdir -p "$(dirname "$output")"
+    archive_abs=$(cd "$root" && pwd -P)/libsimple_native_all.a
+    if command -v cygpath > /dev/null 2>&1; then archive_abs=$(cygpath -w "$archive_abs"); fi
+    {
+        printf '{\n  "schema": "windows-cross-runtime-evidence-v1",\n  "status": "PASS",\n  "identity": {'
+        sep=""
+        while IFS= read -r line; do
+            case "$line" in *=*) ;; *) continue ;; esac
+            printf '%s\n    %s: %s' "$sep" "$(json_str "${line%%=*}")" "$(json_str "${line#*=}")"
+            sep=","
+        done < "$work/env"
+        printf '\n  },\n  "archive": %s,\n  "formats": {' "$(json_str "$archive_abs")"
+        sep=""
+        while read -r name count; do
+            printf '%s\n    "%s": %s' "$sep" "$name" "$count"
+            sep=","
+        done < "$work/formats"
+        printf '\n  },\n  "producer_sha256": "%s",\n  "required_symbols": [' "$(sha_of "$producer")"
+        sep=""
+        for sym in $REQUIRED; do printf '%s\n    "%s"' "$sep" "$sym"; sep=","; done
+        printf '\n  ],\n  "qualification": "target archive and runtime ownership only; not compiler execution"\n}\n'
+    } > "$output"
+    echo "PASS: Windows GNU archive identity, COFF members and runtime owners; $output"
+}
+
+selftest() {
+    t=$(mktemp -d)
+    fails=0 n=0
+    expect() { # expect <ok|reject> <headers> [<expected rows>]
+        n=$((n + 1))
+        printf '%b' "$2" > "$t/h"
+        if validate_formats "$t/h" > "$t/rows" 2>/dev/null; then got=ok; else got=reject; fi
+        if [ "$got" != "$1" ] || { [ $# -ge 3 ] && [ "$(cat "$t/rows")" != "$(printf '%b' "$3")" ]; }; then
+            echo "selftest: headers [$2] expected $1, got $got [$(cat "$t/rows")]" >&2
+            fails=$((fails + 1))
+        fi
+    }
+    expect ok 'Format: COFF-x86-64\nFormat: COFF-import-file-x86-64\n' \
+        'COFF-import-file-x86-64 1\nCOFF-x86-64 1'
+    expect reject ''
+    expect reject 'Format: ELF64-x86-64\n'
+    expect reject 'Format: COFF-x86-64\nFormat: ELF64-x86-64\n'
+    expect reject 'Format: COFF-ARM64\n'
+    expect reject 'Format: COFF-import-file-x86-64\n'
+    # End to end with fake llvm tools: archive identity, symbols, evidence JSON.
+    n=$((n + 1))
+    mkdir -p "$t/root" "$t/bin"
+    printf 'archive' > "$t/root/libsimple_native_all.a"
+    printf 'producer' > "$t/producer"
+    printf '\357\273\277source_revision=abc\r\ntarget=x86_64-pc-windows-gnullvm\r\nnative_all_sha256=%s\r\n' \
+        "$(sha_of "$t/root/libsimple_native_all.a")" > "$t/root/authority.env"
+    printf '#!/bin/sh\nprintf "Format: COFF-x86-64\\nFormat: COFF-x86-64\\n"\n' > "$t/bin/llvm-readobj"
+    { printf '#!/bin/sh\n'; for s in $REQUIRED; do printf 'echo "0000 T _%s"\n' "$s"; done; } > "$t/bin/llvm-nm"
+    chmod +x "$t/bin/llvm-readobj" "$t/bin/llvm-nm"
+    if ! (main --root "$t/root" --source-revision abc --llvm-bin "$t/bin" --producer "$t/producer" \
+            --output "$t/out.json") > /dev/null 2>&1 \
+        || ! grep -q '"COFF-x86-64": 2' "$t/out.json" \
+        || ! grep -q '"source_revision": "abc"' "$t/out.json"; then
+        echo "selftest: end-to-end PASS case failed" >&2
+        fails=$((fails + 1))
+    fi
+    n=$((n + 1))
+    if (main --root "$t/root" --source-revision other --llvm-bin "$t/bin" --producer "$t/producer" \
+            --output "$t/out2.json") > /dev/null 2>&1; then
+        echo "selftest: revision mismatch was not rejected" >&2
+        fails=$((fails + 1))
+    fi
+    n=$((n + 1))
+    grep -v rt_alloc "$t/bin/llvm-nm" > "$t/nm2" && mv "$t/nm2" "$t/bin/llvm-nm" && chmod +x "$t/bin/llvm-nm"
+    if (main --root "$t/root" --source-revision abc --llvm-bin "$t/bin" --producer "$t/producer" \
+            --output "$t/out3.json") > /dev/null 2>&1; then
+        echo "selftest: missing runtime owner was not rejected" >&2
+        fails=$((fails + 1))
+    fi
+    rm -rf "$t"
+    if [ "$fails" -ne 0 ]; then echo "FAIL — $fails of $n selftest case(s) failed"; return 1; fi
+    echo "PASS — $n selftest case(s) checked"
+}
+
+if [ "${1:-}" = --selftest ]; then selftest; exit $?; fi
+main "$@"

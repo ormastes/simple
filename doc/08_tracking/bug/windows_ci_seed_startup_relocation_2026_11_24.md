@@ -29,13 +29,13 @@ C compilation and Cargo final linking select that same driver and its CRT
 directory, with the GNU target and LLD. The Linux compiler stages remain intact.
 No executable rewriting or security-feature disabling is involved.
 
-`check-seed-startup.py` executes the exact output with `--version`, bounds it to
+`check-seed-startup.shs` executes the exact output with `--version`, bounds it to
 30 seconds, requires zero exit and Simple identification, checks its hash remains
 unchanged, and retains a JSON receipt even on process failure or timeout.
 Publication cannot proceed after failure. The receipt proves startup only,
 not Hello compilation, runtime compatibility, or bootstrap admission.
 
-`python scripts/check/check-seed-startup-test.py` compiles one small native C
+`sh scripts/check/check-seed-startup.shs --selftest` compiles one small native C
 fixture using `CC` (or clang) and verifies success, nonzero exit, wrong output,
 and timeout against real processes. This fixture is not a compiler substitute.
 The Windows fixture regression passed with the pinned LLVM-MinGW driver.
