@@ -151,3 +151,29 @@ Not run: this Windows host has no Vulkan ICD (GPU NVIDIA GT 705, Fermi, no
 Vulkan; no `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` entries), so item #1 cannot
 be reproduced here; item #3 is a Rust-seed module-limit issue. Stays OPEN for
 #1 and #3 on a Linux lavapipe host.
+
+## Triage note 2026-11-25 (p2w2-aj)
+
+**Disposition: SKIP — items #1/#3 need a Linux Vulkan host / Rust-seed
+change; #2 and #4 re-confirmed fixed.** Code inspection on release/1.0.0
+HEAD:
+
+- **#2 (CLOSED) fix still present**: `read_pixels_with_source()` in
+  `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl:2723` still flushes
+  pending batched compute before readback (the `_flush_pending_compute_at`
+  call with the original rationale comment), so the metal-on-vulkan /
+  directx-on-vulkan readback ordering fix holds.
+- **#4 (stale) fix still present**: `simd_kernels_spec.spl:183` reads
+  `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`, which
+  contains the `rt_engine2d_simd_fill_span_u32` dispatch string (grep
+  confirmed). Nothing further to do.
+- **#1** (Vulkan `draw_rect_filled` interior-pixel corruption) remains OPEN
+  and cannot be reproduced here: this Windows host has no usable Vulkan
+  device for the llvmpipe-class repro, and `bin/simple.exe test` fails
+  repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+  (seed/source inconsistency). Needs a Linux lavapipe host.
+- **#3** (module-count-limit 800 failure under `test/01_unit/check/`) is
+  rooted in `src/compiler_rust/compiler/src/memory_guard.rs` — a Rust seed
+  change, forbidden in this lane.
+
+Record stays OPEN for #1 and #3; no code or assertion was changed.

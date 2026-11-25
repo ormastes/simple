@@ -145,3 +145,22 @@ parse_module aging below remains open). Lexer scanning already holds source in t
 
 - `tmp/site12/timing_probe.spl`, `tmp/site12/perf_ab_probe.spl` (marker-file
   mtimes give per-step timings; print buffers are lost on timeout-kill).
+
+## Triage note 2026-11-25 (p2w2-aj)
+
+**Disposition: SKIP — Linux profiling host + bootstrap-gated compiler change;
+environment-blocked.** The two open halves (interpreter `parse_module`
+per-call aging; the latent `generalize_all`/`env_free_var_ids` O(N²) in
+`src/compiler/30.types/type_infer/generalization.spl`, dead until type
+inference is wired into the driver) both require `src/compiler` work verified
+by a full bootstrap, and a credible timing series on a Linux host — the
+2026-09-13 note above already established that Windows-host timings are not
+comparable (runner outer-bound kills). Neither is possible in this lane: no
+bootstrap/cargo builds allowed, and the pinned seed fails repo-wide spec runs
+at HEAD (`unknown decorator '@representation_boundary'`). Code-inspection
+state on release/1.0.0 HEAD: the env-var AST mirror fix's gate remains in
+tree (per-index `SIMPLE_BOOTSTRAP_STMT_/EXPR_` writes gated behind
+`SIMPLE_BOOTSTRAP=1`, see `ast_env_var_quadratic_parse_2026-06-13.md`), and
+`generalization.spl` still uses linear-scan `[i64]` sets as recorded — dead
+today, unchanged. Status header ("Not closed", interp aging open) is
+accurate; remains OPEN for a bootstrap-capable profiling lane.
