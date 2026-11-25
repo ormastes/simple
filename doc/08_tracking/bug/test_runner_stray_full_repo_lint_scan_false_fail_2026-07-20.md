@@ -104,3 +104,27 @@ edited away.
 
 - `test/01_unit/app/llm_caret/provider_spec.spl` (confirmed, reproduced twice)
 
+
+## Triage 2026-11-25 (P2 ledger pass, release/1.0.0)
+
+Classification: SKIP this pass — reproduction is environment-blocked and the
+two cheapest root-cause hypotheses are now refuted by inspection:
+
+- Hypothesis 3 (missing early-return after the usage print in
+  `simple_lint`): NOT present in the current source.
+  `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl:730-754` prints
+  the usage banner and immediately `return 1`s; there is no fall-through to a
+  repo scan on that path.
+- Hypothesis 2 (test-runner lint post-pass): the current test runner
+  (`src/app/test_runner_new/`) contains no `lint` reference at all (grep:
+  zero hits), so the stray scan observed 2026-07-20 does not come from any
+  lint hook in the runner as it exists today.
+
+The spec could not be re-run to confirm current behavior: the pinned
+`bin/simple.exe` seed rejects `@representation_boundary` repo-wide at this
+HEAD (fails in `src/app/test_runner_new/test_runner_client.spl:9` before any
+spec loads). If the symptom still reproduces on a working toolchain, the
+remaining suspect is hypothesis 1 (something in the
+`app.llm_caret.provider` import chain invoking the lint entry with no
+arguments). Status left Open; this note only records the refuted hypotheses
+and the execution limit.
