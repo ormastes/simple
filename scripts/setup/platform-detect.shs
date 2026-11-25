@@ -274,13 +274,26 @@ fi
 export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB LLVM_PROVIDER_KIND
 
 # Windows gnu lane (the default): locate the repo-managed llvm-mingw UCRT
-# toolchain ($SIMPLE_TOOLCHAINS_ROOT/llvm-mingw-*-ucrt-x86_64, newest first) and
-# put its bin/ first on PATH so clang/llvm-ar resolve there rather than to MSYS2.
-# Honors a pre-set SIMPLE_MINGW_ROOT. Sets: SIMPLE_MINGW_ROOT ("" if not found).
+# toolchain ($SIMPLE_TOOLCHAINS_ROOT/llvm-mingw-*-ucrt-x86_64, falling back to
+# /c/dev/tool/llvm-mingw-*-ucrt-x86_64, newest first) and put its bin/ first on
+# PATH so clang/llvm-ar resolve there rather than to MSYS2.
+# Honors a pre-set SIMPLE_MINGW_ROOT or SIMPLE_LLVM_MINGW_ROOT. Sets:
+# SIMPLE_MINGW_ROOT, SIMPLE_LLVM_MINGW_ROOT ("" if not found),
+# SIMPLE_LINKER_FLAVOR (default gnu), and CC when clang.exe is present.
 if [ "${PLATFORM_OS}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
+  if [ -z "${SIMPLE_MINGW_ROOT:-}" ] && [ -n "${SIMPLE_LLVM_MINGW_ROOT:-}" ]; then
+    SIMPLE_MINGW_ROOT="${SIMPLE_LLVM_MINGW_ROOT}"
+  fi
   if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
     for _mw in $(_simple_toolchain_prefixes "llvm-mingw-*-ucrt-x86_64" ""); do
-      if [ -x "${_mw}/bin/x86_64-w64-mingw32-gcc.exe" ] && [ -x "${_mw}/bin/clang.exe" ]; then
+      if [ -x "${_mw}/bin/clang.exe" ] && [ -x "${_mw}/bin/ld.lld.exe" ] && [ -x "${_mw}/bin/llvm-ar.exe" ]; then
+        SIMPLE_MINGW_ROOT="${_mw}"; break
+      fi
+    done
+  fi
+  if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
+    for _mw in $(for _d in /c/dev/tool/llvm-mingw-*-ucrt-x86_64; do [ -d "${_d}" ] && printf '%s\n' "${_d}"; done | sort -r); do
+      if [ -x "${_mw}/bin/clang.exe" ] && [ -x "${_mw}/bin/ld.lld.exe" ] && [ -x "${_mw}/bin/llvm-ar.exe" ]; then
         SIMPLE_MINGW_ROOT="${_mw}"; break
       fi
     done
@@ -291,8 +304,13 @@ if [ "${PLATFORM_OS}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
       *) PATH="${SIMPLE_MINGW_ROOT}/bin:${PATH}" ;;
     esac
     export PATH
+    if [ -x "${SIMPLE_MINGW_ROOT}/bin/clang.exe" ]; then
+      export CC="${CC:-${SIMPLE_MINGW_ROOT}/bin/clang.exe}"
+    fi
   fi
   export SIMPLE_MINGW_ROOT="${SIMPLE_MINGW_ROOT:-}"
+  export SIMPLE_LLVM_MINGW_ROOT="${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT}}"
+  export SIMPLE_LINKER_FLAVOR="${SIMPLE_LINKER_FLAVOR:-gnu}"
   # llvm-mingw's bin also ships a partial libLLVM-23.dll (no BPF/RISCV/Wasm);
   # put the selected CLANG64 LLVM bin ahead of it so the full DLL wins.
   if [ "${LLVM_FOUND}" = 1 ] && [ -f "${LLVM_PREFIX}/lib/libLLVM-${LLVM_VERSION}.dll.a" ]; then

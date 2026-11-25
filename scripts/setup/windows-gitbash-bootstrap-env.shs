@@ -42,10 +42,14 @@ _wgbse_dir=$(CDPATH= cd -- "$(dirname -- "$_wgbse_self")" 2>/dev/null && pwd -P)
 # platform-detect.shs puts llvm-mingw's bin/ first on PATH (SIMPLE_MINGW_ROOT).
 if [ "${SIMPLE_WINDOWS_ABI:-gnu}" != msvc ]; then
     SIMPLE_WINDOWS_ABI=gnu; export SIMPLE_WINDOWS_ABI
+    if [ -z "${SIMPLE_MINGW_ROOT:-}" ] && [ -n "${SIMPLE_LLVM_MINGW_ROOT:-}" ]; then
+        SIMPLE_MINGW_ROOT="$SIMPLE_LLVM_MINGW_ROOT"
+        export SIMPLE_MINGW_ROOT
+    fi
     . "$_wgbse_dir/platform-detect.shs" || return 1 2>/dev/null || exit 1
     if [ -z "${SIMPLE_MINGW_ROOT:-}" ]; then
         echo "windows-gitbash-bootstrap-env: llvm-mingw UCRT toolchain not found" >&2
-        echo "  (looked under ${SIMPLE_TOOLCHAINS_ROOT}/llvm-mingw-*-ucrt-x86_64; set SIMPLE_MINGW_ROOT)" >&2
+        echo "  (looked under ${SIMPLE_TOOLCHAINS_ROOT}/llvm-mingw-*-ucrt-x86_64 and /c/dev/tool/llvm-mingw-*-ucrt-x86_64; set SIMPLE_MINGW_ROOT or SIMPLE_LLVM_MINGW_ROOT)" >&2
         return 1 2>/dev/null || exit 1
     fi
     # clang + lld only; GCC is never used or installed. The seed's Rust std
@@ -61,9 +65,21 @@ if [ "${SIMPLE_WINDOWS_ABI:-gnu}" != msvc ]; then
         echo "windows-gitbash-bootstrap-env: llvm-mingw libunwind.a missing (reinstall llvm-mingw UCRT; do not install GCC)" >&2
         return 1 2>/dev/null || exit 1
     }
+    SIMPLE_LLVM_MINGW_ROOT="${SIMPLE_LLVM_MINGW_ROOT:-$SIMPLE_MINGW_ROOT}"
+    SIMPLE_LINKER_FLAVOR="${SIMPLE_LINKER_FLAVOR:-gnu}"
+    CC="${CC:-$SIMPLE_MINGW_ROOT/bin/clang.exe}"
+    export SIMPLE_MINGW_ROOT SIMPLE_LLVM_MINGW_ROOT SIMPLE_LINKER_FLAVOR CC
+    # Mirror windows-msvc-bootstrap-env.shs: include /usr/bin/core_perl when
+    # present so tool-authority checks can resolve shasum under MSYS2/Git Bash.
+    if [ -d "/usr/bin/core_perl" ]; then
+        case ":${PATH}:" in
+            *":/usr/bin/core_perl:"*) ;;
+            *) PATH="${PATH}:/usr/bin/core_perl"; export PATH ;;
+        esac
+    fi
     command -v vswhere.exe >/dev/null 2>&1 || [ -x "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" ] ||
         echo "windows-gitbash-bootstrap-env: note: Visual Studio not found (optional; only the --msvc lane needs it)" >&2
-    unset _wgbse_self _wgbse_dir
+    unset _wgbse_self _wgbse_dir _wgbse_req
     return 0 2>/dev/null || exit 0
 fi
 

@@ -67,15 +67,27 @@ EXTRA_TARGET=""
 if [ "$IS_WIN" = 1 ]; then
     # Windows = llvm-mingw UCRT + clang only (no MSVC, no GCC).
     unset LIB INCLUDE LIBPATH
-    lm=${SIMPLE_LLVM_MINGW_ROOT:-}
+    lm=${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT:-}}
     if [ -z "$lm" ]; then
-        for c in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64; do [ -d "$c/bin" ] && lm=$c; done
+        _lm_home=${HOME:-}
+        if [ -z "$_lm_home" ] && [ -n "${USERPROFILE:-}" ]; then
+            _lm_home=$(cygpath -u "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE" | tr '\\' '/')
+        fi
+        lm=$(
+            for _lm_base in "${_lm_home:+$_lm_home/.simple/toolchains}" "/c/dev/tool"; do
+                [ -n "$_lm_base" ] || continue
+                for _lm_cand in "$_lm_base"/llvm-mingw-*-ucrt-x86_64; do
+                    [ -d "$_lm_cand/bin" ] || continue
+                    printf '%s\t%s\n' "$(basename "$_lm_cand")" "$_lm_cand"
+                done
+            done | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -r | head -n 1 | cut -f2-
+        )
     fi
     if [ -n "$lm" ]; then
-        export SIMPLE_LLVM_MINGW_ROOT=$lm CC="$lm/bin/clang.exe"
+        export SIMPLE_LLVM_MINGW_ROOT=$lm SIMPLE_MINGW_ROOT=$lm CC="$lm/bin/clang.exe"
         PATH="$PATH:$lm/bin"; export PATH
     elif [ "${P3_DRY_RUN:-0}" != "1" ]; then
-        echo "p3-targeted-stage2-build: llvm-mingw toolchain not found (set SIMPLE_LLVM_MINGW_ROOT)" >&2; exit 2
+        echo "p3-targeted-stage2-build: llvm-mingw toolchain not found (set SIMPLE_LLVM_MINGW_ROOT or SIMPLE_MINGW_ROOT)" >&2; exit 2
     fi
     if [ -d /c/msys64/clang64/bin ]; then PATH="/c/msys64/clang64/bin:$PATH"; export PATH; fi
     if [ -z "${SIMPLE_RELOCATABLE_LD:-}" ]; then
