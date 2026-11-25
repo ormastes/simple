@@ -21,14 +21,15 @@ use std.nogc_sync_mut.compression.gzip.huffman.{
 # =============================================================================
 
 # Create DEFLATE stored block (uncompressed)
-fn deflate_block_stored(data, is_final) -> [u8]:
-    if data == nil:
-        return []
+fn deflate_block_stored(data: [u8]?, is_final: bool) -> [u8]:
+    val input: [u8] = match data:
+        case Some(bytes): bytes
+        case None: return []
 
     # LEN is a 16-bit field (RFC 1951 3.2.4): longer input becomes a run of
     # stored blocks, and only the last one may carry BFINAL.
     var block: [u8] = []
-    val total = data.len()
+    val total = input.len()
     var start = 0
     loop:
         val len = if total - start > 65535: 65535 else: total - start
@@ -44,7 +45,7 @@ fn deflate_block_stored(data, is_final) -> [u8]:
         block.push(((nlen >> 8) & 0xff).to_u8())
         var i = start
         while i < start + len:
-            block.push(data[i])
+            block.push(input[i])
             i = i + 1
         start = start + len
         if last:
@@ -89,9 +90,10 @@ fn deflate_pack_bits(vals: [i64], counts: [i64]) -> [u8]:
 # block's 3 header bits are packed INTO the bitstream *before* padding, so they
 # share the end-of-block symbol's trailing byte whenever there is room; that is
 # what makes the output byte-exact with zlib Z_SYNC_FLUSH.
-fn _deflate_block_fixed_ex(tokens, is_final, sync_flush) -> [u8]:
-    if tokens == nil:
-        return []
+fn _deflate_block_fixed_ex(tokens: [[i64]]?, is_final: bool, sync_flush: bool) -> [u8]:
+    val token_list: [[i64]] = match tokens:
+        case Some(items): items
+        case None: return []
 
     # Fixed codes pre-reversed to send order (codes go out MSB-first, 3.1.1) once per
     # block, indexed by symbol: the per-token path is then two array reads.
@@ -119,8 +121,8 @@ fn _deflate_block_fixed_ex(tokens, is_final, sync_flush) -> [u8]:
     counts.push(2)
 
     var i = 0
-    while i < tokens.len():
-        val token = tokens[i]
+    while i < token_list.len():
+        val token: [i64] = token_list[i]
         val token_type: i64 = token[0]
         val value: i64 = token[1]
 
@@ -171,16 +173,16 @@ fn _deflate_block_fixed_ex(tokens, is_final, sync_flush) -> [u8]:
     out.push(0xFFu8)
     return out
 
-fn deflate_block_fixed(tokens, is_final) -> [u8]:
+fn deflate_block_fixed(tokens: [[i64]]?, is_final: bool) -> [u8]:
     _deflate_block_fixed_ex(tokens, is_final, false)
 
 # Fixed-Huffman block in sync-flush mode: BFINAL=0 plus the empty stored block
 # tail (00 00 FF FF).  Used by RFC 7692 permessage-deflate.
-fn deflate_block_fixed_sync_flush(tokens) -> [u8]:
+fn deflate_block_fixed_sync_flush(tokens: [[i64]]?) -> [u8]:
     _deflate_block_fixed_ex(tokens, false, true)
 
 # Get length code for match length
-fn deflate_length_code(length) -> i64:
+fn deflate_length_code(length: i64) -> i64:
     if length <= 10:
         return 257 + (length - 3)
     if length <= 18:
@@ -196,7 +198,7 @@ fn deflate_length_code(length) -> i64:
     return 285
 
 # Get distance code for match distance
-fn deflate_distance_code(distance) -> i64:
+fn deflate_distance_code(distance: i64) -> i64:
     if distance <= 4:
         return distance - 1
     if distance <= 8:
