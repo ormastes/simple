@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — one assertion inside an otherwise-gating testbench is vacuous
-- **Status:** open
+- **Status:** closed (fixed by `1467cb4dde9`; verified 2026-11-25 — see below)
 - **Found via:** Lane R3 gate-honesty audit
 
 ## Symptom
@@ -42,3 +42,25 @@ Either drop the `generic map` override so the testbench validates the design's
 own default, or add a separate assertion that the design default equals the
 documented silicon IDCODE. Any board/silicon claim resting on "IDCODE verified"
 should cite the second form, not CHECK2 as written.
+
+## Resolution — verified 2026-11-25 (release/1.0.0, worktree wt-p3-baj)
+
+Fixed by `1467cb4dde9` ("fix(hardware): JTAG IDCODE testbenches checked a
+value against itself"), which is in this branch's history. The fix is the
+first suggested form:
+
+- **measured** `src/lib/hardware/debug/tb_jtag_dtm_dmi.vhd:62-73` — the
+  `u_tap` instantiation has **no** `generic map (IDCODE_VALUE =>
+  EXPECTED_IDCODE)`; an in-file comment documents why the override was
+  removed. The DUT now runs on its own default and `EXPECTED_IDCODE` is an
+  independent spec-mandated literal, so a wrong IDCODE in the design fails
+  CHECK2.
+- **measured** `src/lib/hardware/debug/jtag_tap.vhd:32` declares
+  `IDCODE_VALUE : std_logic_vector(31 downto 0) := x"15350067"` and line 112
+  loads it into the IDCODE shift register — the value CHECK2 now genuinely
+  validates.
+
+**Limit:** the injection re-run (flip the `jtag_tap.vhd` default, expect
+CHECK2 FAIL) needs GHDL, which is not installed on this Windows host;
+verification is by source inspection plus the fix commit's own message. The
+self-referential structure the bug describes is gone from the source.

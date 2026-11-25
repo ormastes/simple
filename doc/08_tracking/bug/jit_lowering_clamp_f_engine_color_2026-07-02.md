@@ -128,3 +128,24 @@ baremetal_entry_closure_imported_class_x86_64_none.
 
 The `_clamp_channel` hoist in `src/lib/common/engine/color.spl` is left in
 place on purpose.
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64, worktree wt-p3-baj)
+
+Re-verified the "fixed" status on branch `work/p3-baj-20261125` by git
+ancestry and code inspection (per fleet environment rules, no cargo/rust
+build was run on this host):
+
+- **measured** `git merge-base --is-ancestor 28286aa4f03 HEAD` succeeds — the
+  2026-09-19 HIR nested-fn lowering fix is in this branch's history.
+- **measured** the 2026-11-13 residual fix is also present:
+  `c53a802b2c5` ("fix(hir): bind a fully-annotated nested fn at its declared
+  fn type") landed via merge `6f4cb189867` (PR #8747,
+  `work/jit-nested-fn-20261113`).
+- **measured** `src/compiler_rust/compiler/tests/nested_fn_in_method_jit.rs`
+  exists and `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`
+  carries the `Node::Function` lowering arm (line 1670).
+
+**Limit:** the cargo test matrix quoted above was not re-run here (Rust-seed
+builds are out of scope for this lane); verification is ancestry + source
+inspection. The fix is Rust-seed HIR lowering; the self-hosted pure-Simple
+compiler is unaffected either way.
