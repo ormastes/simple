@@ -140,3 +140,28 @@ test/fixtures/devhub/native_pbkdf2_sha512/main.spl --source src/lib
 25 registry symbols (TLS 1.3 HKDF/X25519/Ed25519, `rt_pbkdf2_hmac_sha1/256/384`,
 SIMD rows, orphaned `rt_native_profile_*`) still lack `extern "C"`
 definitions; this fix removes their only production `.spl` consumer.
+
+## Verification 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+Re-ran the 2026-11-12 fix's regression spec on the current tracked
+self-hosted binary: `SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/lib/database/codec/sqlcipher4_keys_native_link_spec.spl
+--mode=interpreter` -> `Results: 3 total, 3 passed, 0 failed`, exit 0. The
+production-caller fix stands (`sqlcipher4_keys.spl` declares no
+`extern fn rt_pbkdf2_hmac_sha512`; it routes through
+`pbkdf2_hmac_sha512_digest` / `pbkdf2_sha512_bytes_fast`).
+
+Census of the original 28-symbol gap on this tree (grep over `src/runtime/`):
+two symbols have since gained real C definitions —
+`rt_tls13_sha256` (`src/runtime/runtime_native.c:10459`) and
+`rt_pbkdf2_hmac_sha512` (`src/runtime/runtime_native.c:10718`, commit
+5ebdda2d8b4 per the module comment). Still without any C / `extern "C"`
+definition: `rt_tls13_hkdf_*`, `rt_tls13_x25519_*`, `rt_tls13_ed25519_sign`,
+`rt_pbkdf2_hmac_sha1/sha256/sha384`, `rt_ed25519_sign_seed`,
+`rt_simd_copy_row_u32`/`rt_simd_fill_row_u32`, and the orphaned
+`rt_native_profile_count`/`rt_native_profile_event` (still listed in
+`src/compiler_rust/common/src/runtime_symbols.rs:2083-2084`).
+
+Bug stays OPEN for that remainder: the fix is cryptographic/runtime work in
+`src/compiler_rust` + `src/runtime`, reserved for owner triage, and the
+deferred pre/post-fix native link capture is still outstanding.

@@ -1,5 +1,5 @@
 # `bin/simple test` reports only the LAST failure per example
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-04 — seed BDD fixed; re-verified on the self-hosted binary 2026-11-25 (lane p3-bab)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -111,3 +111,22 @@ test-only seed release build (shared target, not deployed) running
 `test test/fixtures/spec_failure_retention/two_failures_block.spl` prints both
 `expected 11 to equal 22` and `expected 33 to equal 44`.
 Status: fixed.
+
+## Verification 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+The header still said "Open — needs owner triage" although the fix landed
+2026-11-04; header corrected. Re-ran the retention fixture on the current
+tracked self-hosted binary (`SIMPLE_LIB=src bin/simple.exe test
+test/fixtures/spec_failure_retention/two_failures_block.spl
+--mode=interpreter`). The single failing example prints BOTH independent
+failure messages:
+
+```
+  ✗ retains both independent failures
+    expected 11 to equal 22
+    expected 33 to equal 44
+```
+
+Totals `2 examples, 1 failure`, exit 1 — exactly the retention contract the
+2026-11-04 seed fix established (both messages retained, continuation to the
+passing example, one failed-example count). Closed.

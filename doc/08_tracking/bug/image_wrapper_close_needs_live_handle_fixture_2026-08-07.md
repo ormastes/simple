@@ -1,6 +1,8 @@
 # Resource wrapper double-close on a genuinely-acquired handle is untested (Image + FileLock)
 
-Status: OPEN (P3)
+Status: RESOLVED for `Image` 2026-11-05 (verified 2026-11-25, see bottom);
+the `SffiFileLock.close()` mutation-persistence remainder noted in the
+2026-11-05 section is still open and tracked there.
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 during WP-J (pilot resource migration,
 `doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
@@ -136,3 +138,17 @@ change): file_lock_resource_wrapper_spec (`FileLock` renamed to
 `SffiFileLock`, import stale) and resource_sffi_pilot_spec (parse error).
 The Optional-unwrap mutation loss itself is a seed-binary runtime issue
 (compiler/runtime, not src/lib) and should be filed separately.
+
+## Verification 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+Ran `SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/io/image_sffi_resource_wrapper_spec.spl --mode=interpreter` on
+the current tracked self-hosted binary (38,403,072 bytes):
+`Results: 13 total, 13 passed, 0 failed`, exit 0 — matching the 2026-11-05
+fix evidence. The live-handle double-close coverage for `Image` (genuine
+`rt_image_load` handle from `test/fixture/io/tiny_1x1.png`, double `.close()`
+no-op, `free_image` double-call fail-closed) is real and green on
+release/1.0.0. Status header updated accordingly: the `Image` half of this
+doc is RESOLVED; the `SffiFileLock.close()` / `file_lock_acquire()` Optional
+mutation-persistence remainder from the 2026-11-05 section remains open and
+is not covered by this spec.

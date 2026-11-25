@@ -186,3 +186,15 @@ in the implementation.
 - Confirmed no stray diffs were left in `src/lib/nogc_sync_mut/dap/*` after
   the sabotage probes (`git status --short` clean on those paths).
 
+
+## Verification 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+Re-verified the 2026-09-16 closure on the current tracked self-hosted binary
+(`SIMPLE_LIB=src bin/simple.exe test <spec> --mode=interpreter`):
+
+- `grep -c "assert_true(true)"` on all four spec files: 0 / 0 / 0 / 0.
+- `adapter_unification_spec.spl`: `Results: 21 total, 21 passed, 0 failed`
+  (exit 0) — matches the post-fix counts recorded above.
+
+The closure stands. The 5 leave-RED gap entries were not re-run this pass;
+their unblock conditions are implementation work, not test work.
