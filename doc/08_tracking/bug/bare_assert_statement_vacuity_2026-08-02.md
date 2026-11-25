@@ -1,8 +1,11 @@
 # Bare `assert` vacuity — remaining inert sites after the interpreter fix
-## Open 2026-09-16 — needs owner triage
+## OPEN 1 remains (pure-Simple path) — triage confirmed 2026-11-25 (see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 "needs owner triage" banner is superseded: OPEN 2 and OPEN 3
+are fixed (commits below, re-confirmed in source 2026-11-25) and the
+interpreter bare-`assert` fix was re-verified dynamically 2026-11-25. What
+remains is OPEN 1 — the pure-Simple compiler discards bare `assert` — which
+needs the two coordinated changes plus a full bootstrap described below.
 
 **Date:** 2026-08-02
 **Status:** interpreter bare-`assert` FIXED (`7d73d4dd3a6e`); OPEN 2 FIXED
@@ -321,3 +324,29 @@ debug binary in the shared working copy and shows no change at all — this
 lane hit exactly that and briefly concluded the fix had no effect. Use
 `<your-binary> run <spec>` to measure the binary you actually built.
 
+
+## Triage note 2026-11-25 (release/1.0.0 @ 76fa786a2b3, worktree wt-p1w1-aa) — OPEN 1 still open, rest confirmed fixed
+
+- **Interpreter bare-`assert` fix (`7d73d4dd3a6e`) re-verified dynamically** on
+  the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1): a two-line probe
+  (`fn helper(): assert 1 == 2` called from `main`) now prints
+  `Assertion violation in function 'helper': contract condition failed` and
+  never reaches the statement after the call. A bare `assert` inside a plain
+  `fn` body is no longer inert.
+- **OPEN 2 fix (`62c075bbe3cf`) present in source:** the
+  `BDD_EXPECT_PROVISIONAL` machinery in
+  `src/compiler_rust/compiler/src/interpreter_call/bdd.rs` is in place.
+- **OPEN 3 fix (`f93a9abb5d0d`) present in source:** the
+  `extract_file_test_meta` module-level-example bail-out exists in
+  `src/compiler_rust/parser/src/test_analyzer.rs` with its pinned unit tests.
+- **OPEN 1 (pure-Simple compiler discards bare `assert`) remains OPEN** and
+  was not attempted: per the analysis above it requires BOTH the parser
+  desugar AND a new runtime `assert` builtin (backend name arm + builtin
+  registry entry + `rt_panic` lowering), verified by a full bootstrap, because
+  the compiler's own sources contain bare `assert` statements. That is a
+  coordinated two-half change plus bootstrap — beyond a bounded P1 lane on a
+  host with no admitted self-hosted binary. The one-line parser-only patch
+  stays deliberately unlanded for the reasons documented above.
+
+Skip classification for OPEN 1: needs full bootstrap; owner-decision
+territory. No code change in this pass.

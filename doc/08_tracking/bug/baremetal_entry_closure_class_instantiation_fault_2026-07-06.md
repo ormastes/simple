@@ -210,3 +210,17 @@ admitted compiler). DB row updated.
 2026-11-12, worktree simple-lfix-baremetal-entry-20261112 (branch work/lfix-baremetal-entry-20261112).
 
 The bug's own regression spec `test/01_unit/compiler/50.mir/entry_closure_imported_class_probe_symbols_spec.spl` was RED on current origin/release/1.0.0 (5/6, seed bootstrap binary): the staged W-HIR-PRIVATE-IMPORT-001 check (2026-11-09/12) flagged the probe entry's cross-directory import of the bare private fn `probe_events_len` in `src/os/gui/class_probe.spl`, and the spec treats any recorded HIR diagnostic as fatal. The worker `--mode=interpreter` argv injection named in the Repro section was already removed upstream (d307a06141b, 2026-07-06). Fix: promote `probe_events_len` to `pub` (same remedy as the 49 promotions in 42001d49e74), which also un-warnings the real probe entry `class_fault_probe_entry.spl`. Results (seed, hosted): probe spec 6/6 PASS; neighbors private_fn_import_cross_module_visibility 7/7, cross_module_unimported_method_surface 4/4, imported_module_val_const 7/7. QEMU CLASSOK run still pending an admitted native compiler.
+
+## Triage note 2026-11-25 (release/1.0.0 @ 76fa786a2b3, worktree wt-p1w1-aa) — remains OPEN, blocked as recorded
+
+Nothing in this lane's environment changes the 2026-11-12 status: the two
+outstanding items are (a) the QEMU `class_fault_probe_entry.spl` CLASSOK run
+and (b) finding 4 (per-module MIR field-map ordering). Both need an admitted
+native `--entry-closure` compiler for current source plus QEMU — neither
+exists on this Windows host (the pinned `bin/simple.exe` is the Rust seed
+v1.0.0-rc.1, and the known `@representation_boundary` source/binary
+inconsistency at HEAD blocks even repo spec runs, let alone a freestanding
+kernel build). The 2026-11-07 static re-verification (findings 1-3 do not
+reproduce) and the 2026-11-12 probe-spec fix (6/6 PASS) stand as the latest
+evidence. The status header (OPEN / INVESTIGATING) is accurate; no code
+change.
