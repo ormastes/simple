@@ -1,7 +1,7 @@
 # `@noalloc` is unbound in the seed interpreter — module fails to load under `bin/simple test`
 
 - **ID:** noalloc_decorator_unbound_in_seed_interpreter_2026-08-08
-- **Status:** FIXED IN SOURCE, NOT YET DEPLOYED
+- **Status:** RESOLVED 2026-11-25 — fixed in source AND deployed (pinned `bin/simple.exe` verified; see end of file). Was: FIXED IN SOURCE, NOT YET DEPLOYED
 - **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** `"noalloc"` skip-list entry present at `interpreter_eval.rs:729`, but the fix is source-only: NOT YET DEPLOYED, awaiting a seed redeploy. `bug_db.sdn` row is `fix-implemented-verification-pending`.
 - **Severity:** high (any stdlib module carrying `@noalloc` is unloadable by the spec harness)
 - **Date:** 2026-08-08
@@ -149,3 +149,27 @@ Results: 1 total, 1 passed, 0 failed
 No `variable noalloc not found` error, no module drop. **Conclusion:
 FIXED-VERIFIED** — the fix is now deployed on this host, not merely landed in
 source.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+The status header ("FIXED IN SOURCE, NOT YET DEPLOYED") is stale — the
+2026-09-06 section below already recorded FIXED-VERIFIED on a deployed seed,
+and the currently pinned `bin/simple.exe` (38,403,072 bytes, v1.0.0-rc.1)
+carries the fix too. Evidence on this host:
+
+- Source: `"noalloc"` is in the seed interpreter decorator skip-list
+  (`src/compiler_rust/compiler/src/interpreter_eval.rs:578`).
+- Behavior: `SIMPLE_LIB=src bin/simple.exe run <probe> --mode=interpreter`
+  importing `std.nogc_async_mut_noalloc.hash.{fnv1a_hash_i64}` (the exact
+  module the bug names, still carrying `@noalloc` at mod.spl:30,:50) loads
+  and runs: `fnv1a_hash_i64(42)` returned `-55488592825689361`. No
+  `variable noalloc not found`, no module drop.
+
+Limit: the `test`-lane spec `test/01_unit/lib/noalloc_decorator_module_load_spec.spl`
+could not be re-run because the pinned seed cannot load the test runner at
+this HEAD (`unknown decorator '@representation_boundary'`, source/binary
+inconsistency from cfd89933699); the `run`-lane probe above exercises the
+same module-load path that failed in the original report.
+
+**Status: RESOLVED — fixed in source and deployed.** Nothing further to
+change in the interpreter.
