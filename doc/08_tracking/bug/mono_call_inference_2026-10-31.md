@@ -43,3 +43,7 @@ Not covered by the fixture: the return-type-only shape `channel_try_recv_by_id(i
 binder is later read as `i64`) -- keep its explicit `<i64>` unless re-probed.
 
 Regression spec: `test/01_unit/compiler/50.mir/generic_call_arg_inference_spec.spl`.
+
+## Status 2026-11-25 — all 13 markers / 26 explicit type-arg sites removed from `src/`
+- Reverted all explicit generic call type arguments added by `571c205b7f7` across `src/app/office/sheets/calc_access_session_host.spl`, `src/app/office/sheets/calc_session_host.spl`, `src/lib/nogc_async_mut/array.spl`, `src/lib/nogc_sync_mut/concurrent/channel.spl`, and `src/lib/nogc_sync_mut/db/dbfs_driver/dbfs_driver.spl`.
+- Extended `test/01_unit/compiler/50.mir/generic_call_arg_inference_spec.spl` (4/4 PASS) to cover both the tuple/unit `_dbfs_finish_result` shapes and the return-type-only `channel_try_recv_by_id(id)` -> `rt_channel_try_recv(id)` shape.
