@@ -1,0 +1,67 @@
+# RB-LOAD-01: drive the REAL cached-SMF admission path, try_load_smf_cached,
+# through the default manifest (build/smf/manifest.sdn), not its helpers.
+# Each case writes a pid-keyed source + SMF under build/smf/ so its manifest
+# row is merged by the real writer (update_smf_manifest_entry) and cannot
+# collide with another run's row. The fully-admitted path executes the SMF and
+# is covered by smf_unit_identity_roundtrip_spec via smf_cached_unit_identity_admit.
+# @req RB-LOAD-01
+use std.spec.step
+
+use std.io_runtime.{dir_create_all, file_exists, hash_text}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_write_bytes, file_delete}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.driver_aot_smf_output.{smf_unit_identity_bytes_v1}
+use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
+use compiler.driver.driver_api_interpret.{try_load_smf_cached}
+use compiler.common.driver_core_types.{CompileResult}
+
+val DIR: text = "build/smf"
+val SRC: text = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+val TRIPLE: text = "x86_64-unknown-linux-gnu"
+
+fn src_path(tag: text) -> text:
+    "{DIR}/rbload_{getpid()}_{tag}.spl"
+
+fn smf_path(tag: text) -> text:
+    "{DIR}/rbload_{getpid()}_{tag}.smf"
+
+# Write source + SMF and record the row for SRC through the real writer.
+fn record(tag: text) -> bool:
+    dir_create_all(DIR)
+    file_atomic_write(src_path(tag), SRC)
+    var opts = SmfBuildOptions.create(Target.host())
+    opts.unit_identity_bytes = smf_unit_identity_bytes_v1(SRC, TRIPLE, "dev", ["io"])
+    file_write_bytes(smf_path(tag), generate_smf_with_options([0xC3], opts))
+    update_smf_manifest_entry(src_path(tag), smf_path(tag), hash_text(SRC), "cranelift", 0,
+        false, false, false, "dev", ["io"], TRIPLE)
+
+fn is_miss(r: Result<CompileResult?, text>) -> bool:
+    match r:
+        case Ok(v): not v.?
+        case Err(_): false
+
+describe "RB-LOAD-01 try_load_smf_cached admission":
+    it "misses when no manifest row names the source":
+        step("unrecorded source")
+        expect(is_miss(try_load_smf_cached(src_path("norow")))).to_equal(true)
+
+    it "misses when the recorded SMF file is gone":
+        step("row present, .smf deleted")
+        expect(record("gone")).to_equal(true)
+        file_delete(smf_path("gone"))
+        expect(is_miss(try_load_smf_cached(src_path("gone")))).to_equal(true)
+
+    it "misses when the body changed but the interface did not":
+        step("source hash mismatch falls back to a full interpret")
+        expect(record("body")).to_equal(true)
+        file_atomic_write(src_path("body"), "fn add(a: i64, b: i64) -> i64:\n    a - b\n")
+        expect(is_miss(try_load_smf_cached(src_path("body")))).to_equal(true)
+
+    it "refuses, not misses, when the interface changed":
+        step("iface digest mismatch is an admission error")
+        expect(record("iface")).to_equal(true)
+        file_atomic_write(src_path("iface"), "fn add(a: i64) -> i64:\n    a\n")
+        val r = try_load_smf_cached(src_path("iface"))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("refused cached SMF")).to_equal(true)
