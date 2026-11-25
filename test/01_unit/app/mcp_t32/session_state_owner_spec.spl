@@ -1,5 +1,6 @@
 use std.spec
-use app.mcp_t32.session_state.{McpT32Core, McpT32Session, McpT32HistoryItem, t32_session_core_count, t32_compact_history, t32_history_fields}
+use app.mcp_t32.session_state.{McpT32Core, McpT32Session, McpT32HistoryItem, MCP_T32_HISTORY, t32_session_core_count, t32_compact_history, t32_keep_recent_history}
+use app.mcp_t32.session_tools.{t32_add_history_with_request}
 
 fn owner_history(count: i64) -> [McpT32HistoryItem]:
     var items: [McpT32HistoryItem] = []
@@ -24,27 +25,53 @@ describe "T32 session state owner":
         val kept = t32_compact_history(owner_history(500))
         expect(kept.len()).to_equal(500)
         expect(kept[0].command).to_equal("cmd-0")
-        val last_fields = t32_history_fields(kept[499])
-        expect(last_fields.4).to_equal("request-499")
+        expect(kept[499].request_id).to_equal("request-499")
 
     it "preserves the ordered suffix and request identity after compaction":
         step("Drop the same first two hundred fifty records as the original range")
         val kept = t32_compact_history(owner_history(501))
         expect(kept.len()).to_equal(251)
         expect(kept[0].command).to_equal("cmd-250")
-        val first_fields = t32_history_fields(kept[0])
-        val last_fields = t32_history_fields(kept[250])
-        expect(first_fields.1).to_equal("value-250")
-        expect(first_fields.2).to_equal("session")
-        expect(first_fields.3).to_equal("core")
-        expect(last_fields.4).to_equal("request-500")
+        expect(kept[0].result).to_equal("value-250")
+        expect(kept[0].session_id).to_equal("session")
+        expect(kept[0].core_id).to_equal("core")
+        expect(kept[250].request_id).to_equal("request-500")
 
-    it "keeps every distinct history field through the declaring-owner view":
-        step("Read an indexed record without imported-field offset fallback")
+    it "keeps every distinct history field on direct indexed reads":
+        step("Read every field of an imported history item directly")
         val items = owner_history(2)
-        val fields = t32_history_fields(items[1])
-        expect(fields.0).to_equal("cmd-1")
-        expect(fields.1).to_equal("value-1")
-        expect(fields.2).to_equal("session")
-        expect(fields.3).to_equal("core")
-        expect(fields.4).to_equal("request-1")
+        expect(items[1].command).to_equal("cmd-1")
+        expect(items[1].result).to_equal("value-1")
+        expect(items[1].session_id).to_equal("session")
+        expect(items[1].core_id).to_equal("core")
+        expect(items[1].request_id).to_equal("request-1")
+
+    it "keeps the newest suffix up to limit in t32_keep_recent_history":
+        step("Slice the trailing recent window and handle zero or negative limits")
+        val empty_recent = t32_keep_recent_history(owner_history(5), 0)
+        expect(empty_recent.len()).to_equal(0)
+        val neg_recent = t32_keep_recent_history(owner_history(5), -2)
+        expect(neg_recent.len()).to_equal(0)
+        val under_limit = t32_keep_recent_history(owner_history(3), 5)
+        expect(under_limit.len()).to_equal(3)
+        expect(under_limit[0].command).to_equal("cmd-0")
+        val trimmed = t32_keep_recent_history(owner_history(70), 64)
+        expect(trimmed.len()).to_equal(64)
+        expect(trimmed[0].command).to_equal("cmd-6")
+        expect(trimmed[63].request_id).to_equal("request-69")
+
+    it "records and caps recent history fields through session_tools":
+        step("Append more than 64 entries and verify slice capping plus direct field reads")
+        val saved = MCP_T32_HISTORY
+        MCP_T32_HISTORY = []
+        var i = 0
+        while i < 66:
+            t32_add_history_with_request("c-" + str(i), "r-" + str(i), "s1", "core0", "req-" + str(i))
+            i = i + 1
+        expect(MCP_T32_HISTORY.len()).to_equal(64)
+        expect(MCP_T32_HISTORY[0].command).to_equal("c-2")
+        expect(MCP_T32_HISTORY[0].result).to_equal("r-2")
+        expect(MCP_T32_HISTORY[63].session_id).to_equal("s1")
+        expect(MCP_T32_HISTORY[63].core_id).to_equal("core0")
+        expect(MCP_T32_HISTORY[63].request_id).to_equal("req-65")
+        MCP_T32_HISTORY = saved
