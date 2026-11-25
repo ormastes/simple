@@ -230,3 +230,26 @@ instead: the 2026-07-29 update section of
 `doc/08_tracking/bug/cancellation_token_two_level_propagation_stale_after_third_alloc_2026-07-29.md`.
 Still not fixable from pure-Simple stdlib source; still belongs to the
 interpreter/compiler team.
+
+## Verification 2026-11-25 (release/1.0.0, pinned seed)
+
+Re-confirmed the 2026-09-18 RESOLVED verdict on the release/1.0.0 pinned
+binary (`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1, Windows).
+The doc's minimal repro (module-level `[bool]` registry, class method mutates,
+free function `_read` reads back) prints `check=true` — the correct, live value
+— on BOTH engines:
+
+```
+bin/simple.exe run probe.spl                              -> check=true   (JIT)
+SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run ...  -> check=true   (tree-walk)
+```
+
+The two covering specs
+(`test/01_unit/interpreter/module_array_read_through_free_fn_spec.spl`,
+`test/01_unit/lib/nogc_async_mut/cancellation_token_spec.spl`) are present in
+the tree. Running them through the spec route was NOT possible in this lane:
+release/1.0.0 HEAD is source/binary inconsistent (the pinned seed rejects the
+`@representation_boundary` decorator added in cfd89933699), so
+`bin/simple.exe test` fails repo-wide before reaching any spec. Verification
+is therefore by direct `run`-lane probe on both engines, which is the exact
+axis this record warns about. Verdict unchanged: RESOLVED.
