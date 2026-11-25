@@ -15,7 +15,6 @@ use std.nogc_sync_mut.src.collections.adaptive_map.{AdaptiveMap}
 use std.nogc_sync_mut.src.collections.adaptive_set.{AdaptiveSet}
 use std.hash.Hash
 use std.nogc_sync_mut.src.collections.hashset.{HashSet}
-use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 use std.nogc_sync_mut.io.file_ops.{file_read}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.io_runtime.{hash_text}
@@ -141,7 +140,7 @@ struct SprofCollectionMetricGroup:
 struct SprofCollectionMetricIndex:
     admitted: bool
     metric_count: i64
-    positions: HashMap
+    positions: Dict<text, text>
     summaries: [SprofCollectionMetricStats]
 
 struct SprofCollectionSelection:
@@ -159,7 +158,7 @@ struct SprofCollectionSetGroup:
 struct SprofCollectionSetIndex:
     admitted: bool
     sample_count: i64
-    positions: HashMap
+    positions: Dict<text, text>
     profiles: [AdaptiveSetWorkloadProfile]
 
 fn _collection_field(line: text, key: text) -> text:
@@ -235,7 +234,7 @@ fn sprof_collection_metric_valid(metric: SprofCollectionMetric) -> bool:
     if not metric.site_id.starts_with("ast://") or not _collection_token_safe(metric.site_id) or
             not _collection_token_safe(metric.target_profile_id) or metric.value < 0:
         return false
-    val names = [
+    val names: [text] = [
         "collection_size", "loop_trip_count", "lookup_count", "distinct_key_count",
         "join_output_count", "filter_selectivity", "hash_probe_count",
         "hash_collision_count", "allocation_bytes", "materialization_count",
@@ -571,7 +570,7 @@ fn _empty_collection_set_selection() -> SprofCollectionSelection:
 
 fn sprof_build_collection_set_index(loaded: SprofCollectionLoad) -> SprofCollectionSetIndex:
     """Group admitted set samples and compute site/target p95 once."""
-    var positions = HashMap.with_capacity(64)
+    var positions: Dict<text, text> = {}
     var profiles: [AdaptiveSetWorkloadProfile] = []
     if loaded.status != "loaded":
         return SprofCollectionSetIndex(admitted: false, sample_count: 0, positions: positions, profiles: profiles)
@@ -581,7 +580,7 @@ fn sprof_build_collection_set_index(loaded: SprofCollectionLoad) -> SprofCollect
         val profile = sample.profile
         val key = _collection_set_identity(profile.site_id, profile.target_profile_id)
         val raw_position = positions.get(key) ?? ""
-        val position = raw_position.to_i64() ?? -1
+        val position = if raw_position == "": -1 else: raw_position.to_i64() ?? -1
         if position >= 0 and position < groups.len():
             var group = groups[position]
             group.sizes.push(profile.size_p95)
@@ -596,7 +595,7 @@ fn sprof_build_collection_set_index(loaded: SprofCollectionLoad) -> SprofCollect
                 sizes: [profile.size_p95], lookups: [profile.lookup_count_p95],
                 hits: [profile.hit_count_p95], misses: [profile.miss_count_p95]
             ))
-            positions.insert(key, "{next}")
+            positions[key] = "{next}"
     for group in groups:
         val probes = sprof_indexed_collection_metric_stats(
             metric_index, group.site_id, group.target_profile_id, "hash_probe_count")
@@ -630,7 +629,7 @@ fn sprof_prepared_collection_profile_for_site(
         return _empty_collection_set_selection()
     val key = _collection_set_identity(site_id, target_profile_id)
     val raw_position = index.positions.get(key) ?? ""
-    val position = raw_position.to_i64() ?? -1
+    val position = if raw_position == "": -1 else: raw_position.to_i64() ?? -1
     if position < 0 or position >= index.profiles.len():
         return _empty_collection_set_selection()
     SprofCollectionSelection(found: true, profile: index.profiles[position])
@@ -732,7 +731,7 @@ fn _collection_metric_identity(site_id: text, target_profile_id: text, name: tex
 
 fn sprof_build_collection_metric_index(loaded: SprofCollectionLoad) -> SprofCollectionMetricIndex:
     """Prepare exact-site summaries once, outside compiler plan lookup paths."""
-    var positions = HashMap.with_capacity(64)
+    var positions: Dict<text, text> = {}
     var summaries: [SprofCollectionMetricStats] = []
     if loaded.status != "loaded":
         return SprofCollectionMetricIndex(admitted: false, metric_count: 0, positions: positions, summaries: summaries)
@@ -741,7 +740,7 @@ fn sprof_build_collection_metric_index(loaded: SprofCollectionLoad) -> SprofColl
         val metric = sample.metric
         val key = _collection_metric_identity(metric.site_id, metric.target_profile_id, metric.name)
         val raw_position = positions.get(key) ?? ""
-        val position = raw_position.to_i64() ?? -1
+        val position = if raw_position == "": -1 else: raw_position.to_i64() ?? -1
         if position >= 0 and position < groups.len():
             var group = groups[position]
             group.values.push(metric.value)
@@ -749,7 +748,7 @@ fn sprof_build_collection_metric_index(loaded: SprofCollectionLoad) -> SprofColl
         else:
             val next = groups.len()
             groups.push(SprofCollectionMetricGroup(values: [metric.value]))
-            positions.insert(key, "{next}")
+            positions[key] = "{next}"
     for group in groups:
         summaries.push(_collection_metric_stats_from_values(group.values))
     SprofCollectionMetricIndex(
@@ -766,7 +765,7 @@ fn sprof_indexed_collection_metric_stats(
         return _empty_collection_metric_stats()
     val key = _collection_metric_identity(site_id, target_profile_id, name)
     val raw_position = index.positions.get(key) ?? ""
-    val position = raw_position.to_i64() ?? -1
+    val position = if raw_position == "": -1 else: raw_position.to_i64() ?? -1
     if position < 0 or position >= index.summaries.len():
         return _empty_collection_metric_stats()
     index.summaries[position]
