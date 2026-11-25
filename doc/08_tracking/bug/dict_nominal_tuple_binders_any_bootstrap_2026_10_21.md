@@ -114,3 +114,8 @@ TDD spec (fails before: "expected infer to equal named"; passes after, seed
 Stage3 repro (native fixture, expected output `PASS: dictionary nominal tuple binders = 31`):
 `bootstrap/stage3/simple native-build test/fixtures/native_dict_nominal_loop/main.spl -o build/dictloop.exe && build/dictloop.exe`
 (remove the typed-local workaround blocks only after this passes on a rebuilt producer).
+
+## Status 2026-11-25 — all 4 workarounds removed from `src/`
+- `HirLowering.binding_kind_type` (`statements.spl:150-162`) now resolves chained `Field` iterables (`self.records`, `module.types`, `self.module.types`, `self.declarations`) recursively via `binding_field_type`.
+- Reverted all 4 typed-local dictionary tuple-for loops (and unused `SymbolId` imports) across `enum_pattern_physical_v1.spl`, `enum_semantic_identity_v1.spl`, and `enum_semantic_validation_v1.spl`.
+- Extended `test/01_unit/compiler/20.hir/dict_tuple_for_binder_types_spec.spl` (2/2 PASS) to verify chained field `Dict<K, V>` iterables (`self.module.types` and `self.records`) retain nominal binder types.

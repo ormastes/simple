@@ -39,3 +39,7 @@ Other array-comparison sites that would be affected (INFERRED; not observed fail
 `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl:486` and `:488`.
 Further candidates from a heuristic grep (not yet observed failing): driver_hir_archive_inventory_v1.spl:176 (`ordered_modules`),
 cold_hir_compiler_publication_v1.spl:166/168 (`source_digests`), smf/package_image_v1.spl:121, 90.tools/verify/compare_features.spl:99.
+
+## Status 2026-11-25 — all 4 workarounds removed from `src/`
+- Root fix landed in `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:6837-6860` (`bin_is_array_eq` routes array `==`/`!=` through `emit_runtime_word_eq` -> `rt_native_eq`, already present in `rb5` `0285176e3a7b`).
+- Removed `_parse_closure_text_list_eq_v1` in `src/app/cli/native_build_parse_closure_owner.spl` and `_entry_closure_text_list_eq_v1` in `src/compiler/80.driver/driver_build/native_entry_closure_owner.spl`, restoring direct `!=` and `==`.
