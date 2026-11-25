@@ -1,3 +1,5 @@
+"""HIR interpreter optional, enum, and method idioms regression suite."""
+
 # The pure-Simple HIR interpreter (the engine behind the native CLI's `run`
 # and `test`) must run the option/result idioms std.spec itself uses:
 # `??`, `.?`, `?` propagation, optional chaining, enum and struct values,
@@ -17,7 +19,9 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.backend.backend_types.*
 use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.env.{EvalContext, Environment}
 use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
 
 fn ws2_run(src: text) -> text:
     val module = parse_full_frontend(src, "ws2_main.spl", "ws2_main", Logger(level: 0))
@@ -32,6 +36,8 @@ fn ws2_run(src: text) -> text:
         case Err(e): "error:" + e.message
 
 describe "HIR interpreter option, enum and method idioms":
+    """Verifies HIR interpreter option/result operators, enum/struct/tuple pattern matching, and trait/method calls."""
+
     it "falls back with ?? on None and nil but keeps a present value":
         expect(ws2_run("fn pick(x: i64?) -> i64:\n    x ?? 7\n\nfn main() -> i64:\n    pick(Some(3)) + pick(None) + pick(nil)\n")).to_equal("int:17")
 
@@ -49,6 +55,49 @@ describe "HIR interpreter option, enum and method idioms":
 
     it "builds and matches a user enum with payload":
         expect(ws2_run("enum Shape:\n    Dot\n    Square(side: i64)\n\nfn area(s: Shape) -> i64:\n    match s:\n        case Shape.Square(n): n * n\n        case Shape.Dot: 1\n\nfn main() -> i64:\n    area(Shape.Square(3)) + area(Shape.Dot)\n")).to_equal("int:10")
+
+    it "builds and matches multi-field tuple and struct enum payloads":
+        expect(ws2_run("enum Pair:\n    Two(i64, i64)\n\nfn calc(p: Pair) -> i64:\n    match p:\n        case Pair.Two(a, b): a * 10 + b\n\nfn main() -> i64:\n    calc(Pair.Two(5, 6))\n")).to_equal("int:56")
+        expect(ws2_run("enum BoxShape:\n    Dot\n    Rect(w: i64, h: i64)\n\nfn area(s: BoxShape) -> i64:\n    match s:\n        case BoxShape.Rect(w: width, h: height): width * 10 + height\n        case BoxShape.Dot: 0\n\nfn main() -> i64:\n    area(BoxShape.Rect(w: 3, h: 4)) + area(BoxShape.Dot)\n")).to_equal("int:34")
+
+    it "binds HirPatternPayload.Struct against EnumPayloadValue.Struct":
+        val sp = Span.empty()
+        val module = parse_full_frontend("fn main() -> i64:\n    0\n", "ws2_struct_pat.spl", "ws2_struct_pat", Logger(level: 0))
+        var lowering = HirLowering.with_filename("ws2_struct_pat.spl")
+        val hir = lowering.lower_module(module)
+        var backend = InterpreterBackendImpl.new()
+        var names: Dict<i64, text> = {}
+        names[101] = "width"
+        names[102] = "height"
+        var env = Environment.new()
+        val ctx = EvalContext(env: env, module: hir, backend: backend, names: names)
+        val unit_ty = HirType(kind: HirTypeKind.Unit, span: sp)
+        val pat_w = HirPattern(kind: HirPatternKind.Binding(SymbolId(id: 101), false), has_type_: false, type_: unit_ty, span: sp)
+        val pat_h = HirPattern(kind: HirPatternKind.Binding(SymbolId(id: 102), false), has_type_: false, type_: unit_ty, span: sp)
+        val pat_payload: HirPatternPayload? = Some(HirPatternPayload.Struct([("w", pat_w), ("h", pat_h)]))
+        var val_fields: Dict<text, Value> = {}
+        val_fields["w"] = Value.Int(3)
+        val_fields["h"] = Value.Int(4)
+        val enum_val = Value.Enum("BoxShape", "Rect", Some(EnumPayloadValue.Struct(val_fields)))
+
+        val matched_tag = match backend.enum_pattern_binds("Rect", pat_payload, enum_val, ctx, sp):
+            case Ok(ok): if ok: "matched" else: "not_matched"
+            case Err(e): "err:" + e.message
+        expect(matched_tag).to_equal("matched")
+        expect(ctx.env.lookup("width")?.as_int() ?? -1).to_equal(3)
+        expect(ctx.env.lookup("height")?.as_int() ?? -1).to_equal(4)
+
+        val missing_payload: HirPatternPayload? = Some(HirPatternPayload.Struct([("missing", pat_w)]))
+        val missing_tag = match backend.enum_pattern_binds("Rect", missing_payload, enum_val, ctx, sp):
+            case Ok(ok): if ok: "matched" else: "not_matched"
+            case Err(e): "err:" + e.message
+        expect(missing_tag).to_equal("not_matched")
+
+        val no_pat_payload: HirPatternPayload? = None
+        val wildcard_tag = match backend.enum_pattern_binds("Rect", no_pat_payload, enum_val, ctx, sp):
+            case Ok(ok): if ok: "matched" else: "not_matched"
+            case Err(e): "err:" + e.message
+        expect(wildcard_tag).to_equal("matched")
 
     it "destructures a tuple in a match arm":
         expect(ws2_run("fn main() -> i64:\n    val t = (3, 4)\n    match t:\n        case (a, b): a * 10 + b\n")).to_equal("int:34")

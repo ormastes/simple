@@ -7,7 +7,7 @@
 # source-text check diagnostic.
 
 use std.spec
-use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, convert_flat_target_later, make_span}
 use compiler.frontend.parser_types.*
 
 fn target_later_lane_score(src: text, fname: text) -> i64:
@@ -30,8 +30,57 @@ fn target_later_lane_score(src: text, fname: text) -> i64:
                 pass
     0
 
+fn make_target_later_call_expr(lane_name: text, arg0_has_name: bool, arg1_has_name: bool) -> Expr:
+    val sp = make_span()
+    val target_ident = Expr(kind: ExprKind.Ident("target"), span: sp)
+    val later_call = Expr(kind: ExprKind.MethodCall(target_ident, "later", []), span: sp)
+    val body_block = Block(stmts: [], span: sp)
+    val body_expr = Expr(kind: ExprKind.Block(body_block), span: sp)
+    val lambda_expr = Expr(kind: ExprKind.Lambda([], body_expr), span: sp)
+    val callee = Expr(kind: ExprKind.Ident(lane_name), span: sp)
+    val arg0 = CallArg(has_name: arg0_has_name, name: if arg0_has_name: "a" else: "", value: later_call, span: sp)
+    val arg1 = CallArg(has_name: arg1_has_name, name: if arg1_has_name: "b" else: "", value: lambda_expr, span: sp)
+    Expr(kind: ExprKind.Call(callee, [arg0, arg1]), span: sp)
+
+fn opt_stmt_tag(s: Stmt?) -> text:
+    match s:
+        case Some(_): "some"
+        case None: "none"
+
 describe "Host/GPU lane structural bridge", tag: ["only-compiled"]:
     it "preserves target.later gpu lane metadata in rich AST":
         val src = "fn f():\n    target.later(max_packet: 512) gpu \\:\n        val draw_ir_batch = \"batch\"\n"
         expect(target_later_lane_score(src, "f")).to_equal(112)
+
+    it "preserves target.later host lane metadata in rich AST":
+        val src = "fn f():\n    target.later(max_packet: 256) host \\:\n        val host_batch = \"host\"\n"
+        expect(target_later_lane_score(src, "f")).to_equal(122)
+
+    it "preserves target.later without max_packet":
+        val src = "fn f():\n    target.later() gpu \\:\n        val x = 1\n"
+        expect(target_later_lane_score(src, "f")).to_equal(12)
+
+    it "leaves non-canonical calls as plain Expr statements":
+        val non_target = "fn f():\n    gpu(other.later(), \\: 1)\n"
+        val named_arg = "fn f():\n    gpu(lane: target.later(), \\: 1)\n"
+        val wrong_arity = "fn f():\n    gpu(target.later())\n"
+        expect(target_later_lane_score(non_target, "f")).to_equal(0)
+        expect(target_later_lane_score(named_arg, "f")).to_equal(0)
+        expect(target_later_lane_score(wrong_arity, "f")).to_equal(0)
+
+    it "lifts canonical Call expressions directly and rejects named CallArgs":
+        val sp = make_span()
+        val good_gpu = convert_flat_target_later(make_target_later_call_expr("gpu", false, false), sp)
+        val gpu_lane = match good_gpu:
+            case Some(stmt):
+                match stmt.kind:
+                    case StmtKind.TargetLater(config, _):
+                        match config.lane:
+                            case TargetLane.Gpu: "gpu"
+                            case TargetLane.Host: "host"
+                    case _: "other_stmt"
+            case None: "none"
+        expect(gpu_lane).to_equal("gpu")
+        expect(opt_stmt_tag(convert_flat_target_later(make_target_later_call_expr("gpu", true, false), sp))).to_equal("none")
+        expect(opt_stmt_tag(convert_flat_target_later(make_target_later_call_expr("host", false, true), sp))).to_equal("none")
 

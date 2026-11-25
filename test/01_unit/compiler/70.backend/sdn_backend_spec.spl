@@ -1,0 +1,197 @@
+"""Unit regressions for SdnBackendImpl.is_allowed / all_exprs_allowed and Stage-3 MIR/LLVM lowering safety."""
+
+# Unit regressions for SdnBackendImpl.is_allowed / all_exprs_allowed and
+# Stage-3 MIR/LLVM lowering safety of the three fixed compiler shapes.
+#
+# @cover src/compiler/70.backend/backend/sdn.spl
+# @cover src/compiler/70.backend/backend/interpreter_optional.spl
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend_types.*
+use compiler.backend.sdn.{SdnBackendImpl}
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.env.{EvalContext, Environment}
+
+fn sdn_allow_tag(allowed: bool) -> text:
+    if allowed: "allowed" else: "rejected"
+
+fn sdn_test_ty() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+fn sdn_test_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: sdn_test_ty(), span: Span.empty())
+
+fn sdn_test_ctx() -> EvalContext:
+    val module = parse_full_frontend("fn main() -> i64:\n    0\n", "sdn_probe.spl", "sdn_probe", Logger(level: 0))
+    var lowering = HirLowering.with_filename("sdn_probe.spl")
+    val hir = lowering.lower_module(module)
+    val backend = InterpreterBackendImpl.new()
+    EvalContext(env: Environment.new(), module: hir, backend: backend)
+
+fn lower_and_emit_llvm(src: text, mod_name: text) -> (MirModule, [text], text):
+    val file = "testdata/" + mod_name + ".spl"
+    var hl = HirLowering.with_filename(file)
+    val m: HirModule = hl.lower_module(parse_full_frontend(src, file, mod_name, Logger(level: 0)))
+    var errs: [text] = []
+    for e in hl.errors:
+        errs.push("hir: " + e.message)
+    var ml = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = ml.lower_module(m)
+    for e in ml.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        errs.push("mir: " + e.message)
+    val ir = MirToLlvm.create(mod_name, CodegenTarget.X86_64, None).translate_module(mir)
+    (mir, errs, ir)
+
+describe "SdnBackendImpl is_allowed and all_exprs_allowed":
+    """Verifies recursive expression allowlisting and evaluation in SDN mode."""
+
+    it "allows scalar literals and rejects non-literal variables":
+        val sdn = SdnBackendImpl()
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.IntLit(42, None))))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.FloatLit(3.5, None))))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.StringLit("hi", None))))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.BoolLit(true))))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.NilLit)))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.UnitLit)))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.Var(SymbolId(id: 1)))))).to_equal("rejected")
+
+    it "checks ArrayLit elements with all_exprs_allowed":
+        val sdn = SdnBackendImpl()
+        val int_e = sdn_test_expr(HirExprKind.IntLit(1, None))
+        val str_e = sdn_test_expr(HirExprKind.StringLit("ok", None))
+        val bad_e = sdn_test_expr(HirExprKind.Var(SymbolId(id: 2)))
+        val nested_ok = sdn_test_expr(HirExprKind.ArrayLit([int_e, str_e], None))
+        val nested_bad = sdn_test_expr(HirExprKind.ArrayLit([int_e, bad_e], None))
+        expect(sdn_allow_tag(sdn.all_exprs_allowed([]))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.all_exprs_allowed([int_e, str_e]))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.all_exprs_allowed([int_e, bad_e]))).to_equal("rejected")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.ArrayLit([nested_ok], None))))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(sdn_test_expr(HirExprKind.ArrayLit([nested_bad], None))))).to_equal("rejected")
+
+    it "checks TupleLit and DictLit recursively":
+        val sdn = SdnBackendImpl()
+        val int_e = sdn_test_expr(HirExprKind.IntLit(7, None))
+        val key_e = sdn_test_expr(HirExprKind.StringLit("k", None))
+        val bad_e = sdn_test_expr(HirExprKind.Var(SymbolId(id: 3)))
+        val tuple_ok = sdn_test_expr(HirExprKind.TupleLit([int_e, key_e]))
+        val tuple_bad = sdn_test_expr(HirExprKind.TupleLit([int_e, bad_e]))
+        val dict_ok = sdn_test_expr(HirExprKind.DictLit([(key_e, int_e)], sdn_test_ty(), None))
+        val dict_bad_val = sdn_test_expr(HirExprKind.DictLit([(key_e, bad_e)], sdn_test_ty(), None))
+        val dict_bad_key = sdn_test_expr(HirExprKind.DictLit([(bad_e, int_e)], sdn_test_ty(), None))
+        expect(sdn_allow_tag(sdn.is_allowed(tuple_ok))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(tuple_bad))).to_equal("rejected")
+        expect(sdn_allow_tag(sdn.is_allowed(dict_ok))).to_equal("allowed")
+        expect(sdn_allow_tag(sdn.is_allowed(dict_bad_val))).to_equal("rejected")
+        expect(sdn_allow_tag(sdn.is_allowed(dict_bad_key))).to_equal("rejected")
+
+    it "evaluates allowed ArrayLit, TupleLit, DictLit and rejects disallowed expressions":
+        val sdn = SdnBackendImpl()
+        val ctx = sdn_test_ctx()
+        val int_e = sdn_test_expr(HirExprKind.IntLit(9, None))
+        val key_e = sdn_test_expr(HirExprKind.StringLit("port", None))
+        val arr_res = sdn.eval_expr(sdn_test_expr(HirExprKind.ArrayLit([int_e], None)), ctx)
+        val arr_tag = match arr_res:
+            case Ok(Value.Array(vs)): "array:" + vs.len().to_text() + ":" + vs[0].as_int().to_text()
+            case Ok(_): "other"
+            case Err(e): "err:" + e.message
+        expect(arr_tag).to_equal("array:1:9")
+
+        val tup_res = sdn.eval_expr(sdn_test_expr(HirExprKind.TupleLit([key_e, int_e])), ctx)
+        val tup_tag = match tup_res:
+            case Ok(Value.Tuple(vs)): "tuple:" + vs.len().to_text() + ":" + vs[0].as_string() + "=" + vs[1].as_int().to_text()
+            case Ok(_): "other"
+            case Err(e): "err:" + e.message
+        expect(tup_tag).to_equal("tuple:2:port=9")
+
+        val dict_res = sdn.eval_expr(sdn_test_expr(HirExprKind.DictLit([(key_e, int_e)], sdn_test_ty(), None)), ctx)
+        val dict_tag = match dict_res:
+            case Ok(Value.Dict(d)):
+                if d.has("port"):
+                    "dict:port=" + d["port"].as_int().to_text()
+                else:
+                    "missing_key"
+            case Ok(_): "other"
+            case Err(e): "err:" + e.message
+        expect(dict_tag).to_equal("dict:port=9")
+
+        val bad_res = sdn.eval_expr(sdn_test_expr(HirExprKind.Var(SymbolId(id: 99))), ctx)
+        val bad_tag = match bad_res:
+            case Err(err):
+                if err.kind == BackendErrorKind.NotAllowed:
+                    "rejected:not_allowed"
+                else:
+                    "rejected:other"
+            case Ok(_): "unexpected_ok"
+        expect(bad_tag).to_equal("rejected:not_allowed")
+
+describe "MIR and LLVM lowering for Stage-3 bug shapes":
+    """Verifies MIR and LLVM lowering produces valid IR for the three fixed Stage-3 patterns."""
+
+    it "lowers typed CallArg indexing, struct enum pattern for-in, and explicit loop helper cleanly":
+        val src =
+            "struct CallArg:\n" +
+            "    has_name: bool\n" +
+            "    val_num: i64\n\n" +
+            "enum Kind:\n" +
+            "    Call(i64, [CallArg])\n" +
+            "    Lit(i64)\n\n" +
+            "struct Expr:\n" +
+            "    kind: Kind\n\n" +
+            "enum PatPayload:\n" +
+            "    Struct(fields: [(text, i64)])\n" +
+            "    Empty\n\n" +
+            "fn typed_call_probe(e: Expr) -> i64:\n" +
+            "    val call_args: [CallArg] = match e.kind:\n" +
+            "        case Kind.Call(_, args): args\n" +
+            "        case _: return -1\n" +
+            "    if call_args.len() != 2:\n" +
+            "        return -1\n" +
+            "    val arg0: CallArg = call_args[0]\n" +
+            "    val arg1: CallArg = call_args[1]\n" +
+            "    if arg0.has_name or arg1.has_name:\n" +
+            "        return -1\n" +
+            "    arg0.val_num + arg1.val_num\n\n" +
+            "fn struct_fields_probe(payload: PatPayload?) -> i64:\n" +
+            "    var total = 0\n" +
+            "    if val pp = payload:\n" +
+            "        match pp:\n" +
+            "            case PatPayload.Struct(fields):\n" +
+            "                val struct_fields: [(text, i64)] = fields\n" +
+            "                for f in struct_fields:\n" +
+            "                    total = total + f[1]\n" +
+            "            case _: ()\n" +
+            "    match payload:\n" +
+            "        case Some(PatPayload.Struct(fields)):\n" +
+            "            val struct_fields: [(text, i64)] = fields\n" +
+            "            for f in struct_fields:\n" +
+            "                total = total + f[1]\n" +
+            "        case _: ()\n" +
+            "    total\n\n" +
+            "fn all_positive(xs: [i64]) -> bool:\n" +
+            "    for elem in xs:\n" +
+            "        if elem <= 0:\n" +
+            "            return false\n" +
+            "    true\n"
+        val (_mir, errs, ir) = lower_and_emit_llvm(src, "stage3_shapes_probe")
+        expect(errs.len()).to_equal(0)
+        expect(ir).to_contain("define ")
+        expect(ir).to_contain("typed_call_probe")
+        expect(ir).to_contain("struct_fields_probe")
+        expect(ir).to_contain("all_positive")
+        val void_cmp_state = if ir.contains("icmp ne void") or ir.contains("icmp eq void"): "invalid_void_icmp" else: "clean"
+        expect(void_cmp_state).to_equal("clean")
