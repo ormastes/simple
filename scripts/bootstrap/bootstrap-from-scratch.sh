@@ -2539,6 +2539,32 @@ bootstrap_cache_stage4_context() {
     bootstrap_stage3_directory_snapshot "${runtime_admitted_snapshot}" "${stage_runtime_absolute}" &&
     bootstrap_stage3_tool_authority_snapshot "${tool_authority_before}" "${PATH}" "${repo_root}"
 }
+bootstrap_stage3_archive_prior_evidence() (
+  bsape_path=$1
+  bsape_generation=$2
+  if [ ! -e "${bsape_path}" ] && [ ! -L "${bsape_path}" ]; then
+    return 0
+  fi
+  case "${bsape_generation}" in
+    ''|*/*) echo "error: invalid Stage 3 evidence generation" >&2; return 1 ;;
+  esac
+  if [ -L "${bsape_path}" ] || [ ! -f "${bsape_path}" ]; then
+    echo "error: refusing non-regular prior Stage 3 evidence: ${bsape_path}" >&2
+    return 1
+  fi
+  bsape_archive="${bsape_path}.prior-to-${bsape_generation}"
+  if [ -e "${bsape_archive}" ] || [ -L "${bsape_archive}" ]; then
+    echo "error: Stage 3 evidence archive already exists: ${bsape_archive}" >&2
+    return 1
+  fi
+  mv "${bsape_path}" "${bsape_archive}" || {
+    echo "error: could not archive prior Stage 3 evidence: ${bsape_path}" >&2
+    return 1
+  }
+  printf '%s  %s\n' "$(hash_file "${bsape_archive}")" "${bsape_archive##*/}" > "${bsape_archive}.sha256" || return 1
+  chmod a-w "${bsape_archive}" "${bsape_archive}.sha256"
+  echo "  Stage 3 evidence: archived prior ${bsape_path}"
+)
 
 # Stage 3 evidence is run-scoped even though its canonical filenames are
 # stable. A reused output may therefore contain a complete prior run. Preserve
