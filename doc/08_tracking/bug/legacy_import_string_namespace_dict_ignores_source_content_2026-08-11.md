@@ -1,6 +1,6 @@
 # `import string` namespace dict ignores src/lib/string.spl source content
 
-Status: OPEN (P2)
+Status: FIXED (seed resolver root-caused 2026-11-05; deployed-binary re-verified 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 export used by `src/lib/nogc_sync_mut/oauth/utilities.spl` and its
 `gc_async_mut`/`nogc_async_mut` sibling copies.
@@ -203,3 +203,13 @@ Status: the original stale-8-`bm_*`-dict symptom is FIXED in the seed
 resolver source. Re-verify against a redeployed `bin/release/<triple>/simple`
 built from this source before closing. The separate caller-local-fn
 shadowing defect above should get its own bug entry if none exists.
+
+## 2026-11-25 — deployed-binary re-verification (fleet agent, worktree wt-p2w3-aj)
+
+The 2026-11-05 note above asked for a re-verify against a redeployed binary
+before closing. The tracked Windows seed `bin/simple.exe` (38,403,072 bytes,
+v1.0.0-rc.1) on current release/1.0.0 contains the fix: the doc's exact
+two-line reproducer (`import string` + `string.char_at("hello", 1)` via
+`SIMPLE_LIB=src bin/simple.exe run`) now prints `char_at=e` — previously the
+stale 8-`bm_*`-key dict error. The original stale-dict symptom is closed on
+the deployed binary; status set to FIXED.

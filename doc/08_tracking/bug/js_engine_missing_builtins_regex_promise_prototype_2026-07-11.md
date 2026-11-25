@@ -1,6 +1,6 @@
 ---
 id: js_engine_missing_builtins_regex_promise_prototype_2026-07-11
-Status: OPEN (P2)
+Status: FIXED (all three items; verified 2026-11-06, re-verified 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 severity: medium
 discovered: 2026-07-11
@@ -255,3 +255,23 @@ TDD evidence (seed binary `build/phase_snapshots/phase1_1793422538/simple`,
 5/5 on the Rust seed (`String.replace` with a RegExp works, see
 `interpreter_string_methods.spl` `_regexp_replace`). No code change needed;
 status: FIXED.
+
+## Re-verification 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The 2026-11-06 "verified GREEN" update above stands; the frontmatter
+`Status: OPEN (P2)` was stale relative to it and is corrected to FIXED.
+Content check on current release/1.0.0 source confirms all three items:
+`interpreter_string_methods.spl:282,452` routes a tagged RegExp search value
+through `_regexp_replace`; `NATIVE_REGEXP_CONSTRUCTOR` /
+`NATIVE_REGEXP_TEST` / `NATIVE_REGEXP_EXEC` and the full Promise native
+family (`NATIVE_PROMISE_ALL`/`RACE`/resolve/reject/then/catch/finally) are
+registered in `interpreter_native.spl`; the named specs
+(`regex_literal_replace_spec.spl`, `regex_replace_noop_repro_spec.spl`,
+`promise_constructor_spec.spl`, `promise_all_race_spec.spl`) all exist in
+`test/01_unit/lib/nogc_sync_mut/js/engine/`.
+
+Spec re-run is environment-blocked on this Windows host: the pinned Rust
+seed rejects `@representation_boundary` (added tree-wide by cfd89933699),
+so `bin/simple.exe test` aborts before any scenario repo-wide. Verified by
+code inspection; no residual gap from this record remains open except the
+feature-sized `async/await` note already recorded above.
