@@ -1,0 +1,38 @@
+# @cover src/lib/nogc_sync_mut/database/core.spl
+# @cover src/lib/nogc_sync_mut/storage_roots/environment_owner.spl
+# Regression guard for seed_map_symbol_ref_trim_empty_2026_11_21 (KEPT-WITH-REASON):
+# Verifies explicit loop column trimming in SdnTable.parse and explicit Result
+# match in resolve_ambient_storage_roots.
+use std.spec.*
+use std.nogc_sync_mut.database.core.{parse_sdn_table, sdn_opaque_tail_key}
+use std.nogc_sync_mut.storage_roots.environment_owner.{
+    resolve_ambient_storage_roots, inspect_ambient_storage_roots, storage_platform_for_host
+}
+use std.nogc_sync_mut.storage_roots.model.{StorageRootOverrides}
+
+describe "seed_map_symbol_ref_trim_empty workaround guards":
+    it "parses and trims SdnTable header columns without collapsing rows into opaque tails":
+        val table_opt = parse_sdn_table("ctx_stats | key , value , note |\n    search_calls, 1, ok\n")
+        expect(table_opt != nil).to_equal(true)
+        val table = table_opt.unwrap()
+        expect(table.columns).to_equal(["key", "value", "note"])
+        expect(table.rows.len()).to_equal(1)
+        expect(table.rows[0].get("key")).to_equal(Some("search_calls"))
+        expect(table.rows[0].get("value")).to_equal(Some("1"))
+        expect(table.rows[0].get("note")).to_equal(Some("ok"))
+        expect(table.rows[0].has_column(sdn_opaque_tail_key())).to_equal(false)
+
+    it "resolves ambient storage roots matching inspect_ambient_storage_roots":
+        val inspected = inspect_ambient_storage_roots(
+            storage_platform_for_host(),
+            StorageRootOverrides(user_root: nil, worktree_root: nil),
+            "wa-lane7-metadata",
+        )
+        val resolved = resolve_ambient_storage_roots("wa-lane7-metadata")
+        expect(inspected.is_ok()).to_equal(true)
+        expect(resolved.is_ok()).to_equal(true)
+        val expected_roots = inspected.unwrap().roots
+        val actual_roots = resolved.unwrap()
+        expect(actual_roots.user_root.value).to_equal(expected_roots.user_root.value)
+        expect(actual_roots.worktree_root.value).to_equal(expected_roots.worktree_root.value)
+        expect(actual_roots.worktree_root.value != "").to_equal(true)

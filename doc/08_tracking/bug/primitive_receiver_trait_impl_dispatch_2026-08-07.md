@@ -1,5 +1,14 @@
 # Trait `impl` blocks on PRIMITIVE Self types are honoured only by the interpreter
 
+## 2026-11-26 — WA-S7 Disposition (`KEPT-WITH-REASON`)
+
+- Checked `src/lib/nogc_sync_mut/src/hash.spl` (`:325`, `hash_text_fnv1a`) and
+  Rust seed codegen (`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`).
+- The Rust seed still only exempts numeric/bool `.hash` and rewrites `text.hash()`
+  to `rt_hash_text` (while pure-Simple native verification remains pending).
+- Kept `# @workaround bug=primitive_receiver_trait_impl_dispatch_2026-08-07` in
+  `hash.spl` and added `test/01_unit/lib/wa_src_lane7_hash_workaround_spec.spl`.
+
 ## 2026-11-10 — pure-Simple primitive declaration identity repair, verification pending
 
 Current-source trace found a remaining HIR owner defect independent of the

@@ -47,3 +47,14 @@ The gate rejects an executable that exits zero without the regression summary;
 a second negative control preserves both diagnostic streams and reports exit 7.
 This validates the native projection boundary, not yet the entire rebuilt
 runner or all SDN output formats.
+
+## 2026-11-26 — WA-S7 Disposition (`KEPT-WITH-REASON`)
+
+- Checked `src/lib/nogc_sync_mut/test_runner/native_owned_process.spl` (`:80`,
+  `scoped_child_usage`, `scoped_child_budget_status`) and `recover=334f5c009cc`
+  (pre-workaround ancestor).
+- Out-of-scope callers in the test runner and resource projection fixtures rely
+  on these helpers while frozen Phase 2 tuple extraction / field offsets remain
+  gated on Phase 2/3 rebuild verification.
+- Kept `# @workaround bug=phase2_runner_tuple_resource_projection_2026_10_28` and
+  added `test/01_unit/lib/test_runner/wa_src_lane7_scoped_child_projection_spec.spl`.

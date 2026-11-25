@@ -132,7 +132,7 @@ class StringInterner:
         table
 
 # Hidden row field holding raw extra fields of an overwide legacy row.
-fn sdn_opaque_tail_key() -> text:
+pub fn sdn_opaque_tail_key() -> text:
     "__opaque_tail"
 
 # ============================================================================
@@ -215,11 +215,11 @@ struct SdnRow:
 # a writer that rebuilds the row from typed fields (BugDatabase.update_bug)
 # would silently drop it; keep the current tail unless the new row sets one.
 # bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27
-fn sdn_row_keep_opaque_tail(current: SdnRow, row: SdnRow) -> SdnRow:
+pub fn sdn_row_keep_opaque_tail(current: SdnRow, row: SdnRow) -> SdnRow:
     val key = sdn_opaque_tail_key()
-    val tail = current.get(key) ?? ""
-    if tail == "" or row.has_column(key):
+    if not current.has_column(key) or row.has_column(key):
         return row
+    val tail = current.get(key) ?? ""
     val kept = SdnRow(fields: {}, _version: row._version)
     for (column, value) in row.fields:
         kept.set(column, value)
@@ -344,8 +344,8 @@ class SdnTable:
                 val formatted = quote_if_needed(value)
                 values.push(formatted)
             parts.push(values.join(", "))
-            val opaque_tail = row.get(sdn_opaque_tail_key()) ?? ""
-            if opaque_tail != "":
+            if row.has_column(sdn_opaque_tail_key()):
+                val opaque_tail = row.get(sdn_opaque_tail_key()) ?? ""
                 parts.push(", ")
                 parts.push(opaque_tail)
             parts.push("\n")
@@ -536,7 +536,8 @@ class SdnDatabase:
 
         var db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: None, metrics: None)
 
-        val sections: [text] = content.split("\n\n")
+        val normalized: text = content.replace("\r\n", "\n")
+        val sections: [text] = normalized.split("\n\n")
         for section in sections:
             if section.trim() == "":
                 continue

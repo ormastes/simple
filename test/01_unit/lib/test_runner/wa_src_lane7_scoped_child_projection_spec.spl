@@ -1,0 +1,66 @@
+# @cover src/lib/nogc_sync_mut/test_runner/native_owned_process.spl
+# Regression guard for phase2_runner_tuple_resource_projection_2026_10_28 (KEPT-WITH-REASON):
+# Verifies ScopedChildRun projection boundary and scoped_cpu_budget_ms invariants.
+use std.spec.*
+use std.nogc_sync_mut.test_runner.native_owned_process.{
+    ScopedChildRun, scoped_child_usage, scoped_child_budget_status, scoped_cpu_budget_ms
+}
+use std.nogc_sync_mut.io.process_ops.{ProcessResult}
+use std.common.perf.execution_metrics.{
+    ResourceUsage, MetricDurationMs, MetricByteCount, MetricProcessCount,
+    MetricSignalNumber, MetricExitCode, ResourceEvidenceQuality, TerminationCause
+}
+
+fn make_sample_usage(wall_ms: i64, io_write: i64) -> ResourceUsage:
+    ResourceUsage(
+        wall_ms: MetricDurationMs(value: wall_ms),
+        user_cpu_ms: MetricDurationMs(value: 11),
+        system_cpu_ms: MetricDurationMs(value: 13),
+        peak_tree_charge_bytes: MetricByteCount(value: 101),
+        peak_direct_child_rss_bytes: MetricByteCount(value: 103),
+        heap_live_end_bytes: MetricByteCount(value: 107),
+        heap_peak_bytes: MetricByteCount(value: 109),
+        io_read_bytes: MetricByteCount(value: 113),
+        io_write_bytes: MetricByteCount(value: io_write),
+        pids_peak: MetricProcessCount(value: 3),
+        evidence_quality: ResourceEvidenceQuality.SampledTree,
+        termination: TerminationCause.Exited,
+        signal: MetricSignalNumber(value: 0),
+        exit_code: MetricExitCode(value: 0)
+    )
+
+fn wrap_scoped_child(present: bool, status: text) -> Result<(ScopedChildRun, text), text>:
+    val usage_opt: ResourceUsage? = if present: Some(make_sample_usage(37, 127)) else: nil
+    val child = ScopedChildRun(
+        result: ProcessResult(stdout: "ok", stderr: "", exit_code: 0, limit_exceeded: status == "failure", limit_type: if status == "failure": "timeout" else: ""),
+        usage: usage_opt,
+        budget_status: status
+    )
+    Ok((child, "evidence-path"))
+
+describe "ScopedChildRun projection boundary":
+    it "projects present usage and budget_status after Result tuple extraction":
+        val pair: (ScopedChildRun, text) = match wrap_scoped_child(true, "pass"):
+            case Ok(v): v
+            case Err(_): return expect(false).to_equal(true)
+        val child: ScopedChildRun = pair.0
+        expect(pair.1).to_equal("evidence-path")
+        expect(scoped_child_budget_status(child)).to_equal("pass")
+        val usage = scoped_child_usage(child).unwrap()
+        expect(usage.wall_ms.value).to_equal(37)
+        expect(usage.io_write_bytes.value).to_equal(127)
+
+    it "projects absent usage and failure budget_status faithfully":
+        val pair: (ScopedChildRun, text) = match wrap_scoped_child(false, "failure"):
+            case Ok(v): v
+            case Err(_): return expect(false).to_equal(true)
+        val child: ScopedChildRun = pair.0
+        expect(scoped_child_budget_status(child)).to_equal("failure")
+        expect(scoped_child_usage(child) == nil).to_equal(true)
+
+    it "keeps CPU budget at least wall timeout when class CPU limit is positive":
+        expect(scoped_cpu_budget_ms(5000, 0)).to_equal(0)
+        expect(scoped_cpu_budget_ms(5000, -1)).to_equal(0)
+        expect(scoped_cpu_budget_ms(120000, 30000)).to_equal(120000)
+        expect(scoped_cpu_budget_ms(10000, 30000)).to_equal(30000)
+        expect(scoped_cpu_budget_ms(0, 30000)).to_equal(30000)

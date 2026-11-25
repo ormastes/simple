@@ -14,7 +14,7 @@
 #
 # For MCP integration, see: std.nogc_async_mut.mcp.bugdb_resource
 
-use nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
+use nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner, sdn_row_keep_opaque_tail}
 use std.io_runtime.{dir_list_or_empty, is_dir, dir_create_all}
 use nogc_sync_mut.database.query
 use std.convert (try_parse_int)
@@ -177,6 +177,23 @@ fn _bug_row_id(row: SdnRow) -> text:
 fn _bug_basename(entry: text) -> text:
     val parts = entry.replace("\\", "/").split("/")
     parts[parts.len() - 1]
+
+# Preserve an overwide row's opaque tail and any extra declared columns not
+# modeled on `Bug` across typed-field rebuilds.
+fn _bug_preserve_opaque_fields(previous: SdnRow, replacement: SdnRow, columns: [text]) -> SdnRow:
+    val preserved = sdn_row_keep_opaque_tail(previous, replacement)
+    var has_extra = false
+    for col in columns:
+        if not preserved.has_column(col) and previous.has_column(col):
+            has_extra = true
+            break
+    if not has_extra:
+        return preserved
+    var merged = preserved.copy()
+    for col in columns:
+        if not merged.has_column(col) and previous.has_column(col):
+            merged.set(col, previous.get(col) ?? "")
+    merged
 
 # Drop every row of `id` from every bug table of `db`.
 fn _bug_remove_rows(db: SdnDatabase, id: text):
@@ -712,20 +729,28 @@ class BugDatabase:
 
         val target_table_name = self.target_table_name(bug.status)
         var current_table = self.db.get_table_mut(current_table_name)?
+        val previous_row = current_table.get_row(id)
 
-        if current_table_name == target_table_name:
-            val updated = current_table.update_row(id, self.bug_to_row_for_table(bug, current_table))
-            self.db.set_table(current_table_name, current_table)
-            return updated
-
-        if not current_table.columns.contains("valid"):
-            val updated = current_table.update_row(id, self.bug_to_row_for_table(bug, current_table))
+        if current_table_name == target_table_name or not current_table.columns.contains("valid"):
+            var next_row = self.bug_to_row_for_table(bug, current_table)
+            if val Some(old_row) = previous_row:
+                next_row = _bug_preserve_opaque_fields(old_row, next_row, current_table.columns)
+            val updated = current_table.update_row(id, next_row)
             self.db.set_table(current_table_name, current_table)
             return updated
 
         current_table.mark_deleted(id)
         self.db.set_table(current_table_name, current_table)
-        self.db.add_row_to_table(target_table_name, self.bug_to_row(bug))
+        var moved_row = match self.db.get_table(target_table_name):
+            case Some(target_table):
+                var built = self.bug_to_row_for_table(bug, target_table)
+                if target_table.columns == current_table.columns:
+                    if val Some(old_row) = previous_row:
+                        built = _bug_preserve_opaque_fields(old_row, built, target_table.columns)
+                built
+            case None:
+                self.bug_to_row(bug)
+        self.db.add_row_to_table(target_table_name, moved_row)
 
     # Resolve bug — marks status Closed and records updated_at timestamp
     me resolve_bug(id: text, timestamp: text) -> bool:
@@ -793,10 +818,9 @@ class BugDatabase:
                 touched.push(id)
         touched
 
-    # Append-only migration path for a legacy registry whose opaque rows must
-    # not be parsed and regenerated. Only new open bugs are serialized; every
-    # pre-existing payload byte remains intact, including overwide old rows.
-    # @workaround bug=bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27 reason=Append only new canonical rows until full registry round trips preserve opaque legacy payloads
+    # Append-only compatibility path for legacy registries whose untouched text,
+    # comments, CRLF line endings, and overwide rows must stay byte-for-byte
+    # intact apart from newly appended open canonical records.
     me append_open_bugs_preserving_legacy(records: [Bug]) -> bool:
         if self.shard_dir != "":
             # Shard mode never rewrites the legacy file: new bugs become shards.
