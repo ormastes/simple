@@ -23,6 +23,7 @@ var _mem_snapshot_fd: i64 = -1
 var _mem_snapshot_seq: i64 = 0
 var _mem_snapshot_enabled: bool = false
 var _mem_snapshot_failed: bool = false
+var _mem_snapshot_last_error: text = ""
 
 fn _snapshot_append(
     event: text, phase: text, source_index: i64, source_path: text,
@@ -59,7 +60,8 @@ fn _snapshot_append(
 fn mem_snapshot_owner_v1(hir_shard_child: bool, mir_shard_child: bool) -> bool:
     not hir_shard_child and not mir_shard_child
 
-# Returns 0 when disabled, 1 when safely established, and -1 on fail-closed
+# Returns 0 when disabled, 1 when safely established, -2 when the target
+# already exists (O_EXCL / ERROR_FILE_EXISTS), and -1 on other fail-closed
 # setup failure.  The runtime owner validates every writable path component
 # without following symlinks and opens an absent regular target O_EXCL,
 # O_NOFOLLOW, O_APPEND and O_CLOEXEC.
@@ -73,13 +75,18 @@ fn mem_snapshot_begin() -> i64:
     _mem_snapshot_enabled = true
     _mem_snapshot_failed = false
     _mem_snapshot_seq = 0
+    _mem_snapshot_last_error = ""
     _mem_snapshot_fd = rt_mem_snapshot_open(path)
     if _mem_snapshot_fd < 0:
+        val open_rc = _mem_snapshot_fd
+        _mem_snapshot_fd = -1
         _mem_snapshot_failed = true
-        return -1
+        _mem_snapshot_last_error = mem_snapshot_format_open_error(path, open_rc)
+        return open_rc
     if not _snapshot_append("open", "hir", -1, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
         val _ = rt_mem_snapshot_close(_mem_snapshot_fd)
         _mem_snapshot_fd = -1
+        _mem_snapshot_last_error = "SIMPLE_MEM_SNAPSHOT_FILE could not write initial open record: {path}"
         return -1
     1
 
@@ -143,6 +150,19 @@ fn mem_snapshot_abort():
     _mem_snapshot_fd = -1
     _mem_snapshot_failed = true
 
+pub fn mem_snapshot_format_open_error(path: text, open_rc: i64) -> text:
+    if open_rc == -2:
+        return "SIMPLE_MEM_SNAPSHOT_FILE already exists (O_EXCL): {path}"
+    return "SIMPLE_MEM_SNAPSHOT_FILE cannot open/unsafe path: {path}"
+
+pub fn mem_snapshot_begin_error() -> text:
+    if _mem_snapshot_last_error != "":
+        return _mem_snapshot_last_error
+    if _mem_snapshot_fd >= 0:
+        return "SIMPLE_MEM_SNAPSHOT_FILE already open in this process"
+    return "SIMPLE_MEM_SNAPSHOT_FILE could not be established safely"
+
 export mem_snapshot_begin, mem_snapshot_record, mem_snapshot_finish
 export mem_snapshot_record_promotion
 export mem_snapshot_finish_with_outcome, mem_snapshot_abort
+export mem_snapshot_format_open_error, mem_snapshot_begin_error

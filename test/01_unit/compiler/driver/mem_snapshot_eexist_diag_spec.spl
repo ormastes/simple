@@ -1,0 +1,57 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# driver_mem_snapshot: surface snapshot path and EEXIST vs unsafe-path cause
+
+When `rt_mem_snapshot_open` fails with `-2` (`EEXIST` / `ERROR_FILE_EXISTS`),
+`driver_mem_snapshot` must surface the configured `SIMPLE_MEM_SNAPSHOT_FILE`
+path and the `already exists (O_EXCL)` cause instead of an opaque error.
+Other open failures (`-1`) must surface `cannot open/unsafe path` with the path.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_delete}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set}
+use compiler.driver.driver_mem_snapshot.{
+    mem_snapshot_begin,
+    mem_snapshot_begin_error,
+    mem_snapshot_format_open_error
+}
+
+describe "driver_mem_snapshot EEXIST and unsafe-path diagnostics":
+    it "formats -2 as already exists (O_EXCL) with the snapshot path":
+        val win_path = "C:\\dev\\stage3\\memory-snapshot-v1.events"
+        expect(mem_snapshot_format_open_error(win_path, -2)).to_equal(
+            "SIMPLE_MEM_SNAPSHOT_FILE already exists (O_EXCL): " + win_path)
+        val posix_path = "/tmp/stage3/memory-snapshot-v1.events"
+        expect(mem_snapshot_format_open_error(posix_path, -2)).to_equal(
+            "SIMPLE_MEM_SNAPSHOT_FILE already exists (O_EXCL): " + posix_path)
+
+    it "formats -1 as cannot open/unsafe path with the snapshot path":
+        val bad_path = "C:\\dev\\missing\\memory-snapshot-v1.events"
+        expect(mem_snapshot_format_open_error(bad_path, -1)).to_equal(
+            "SIMPLE_MEM_SNAPSHOT_FILE cannot open/unsafe path: " + bad_path)
+
+    it "records the failing snapshot path in mem_snapshot_begin_error on an existing file":
+        val prior = env_get_opt("SIMPLE_MEM_SNAPSHOT_FILE") ?? ""
+        val existing = "build/mem-snapshot-eexist-diag-unit.events"
+        expect(file_write(existing, "prior\n")).to_equal(true)
+        env_set("SIMPLE_MEM_SNAPSHOT_FILE", existing)
+        val rc = mem_snapshot_begin()
+        val diag = mem_snapshot_begin_error()
+        env_set("SIMPLE_MEM_SNAPSHOT_FILE", prior)
+        val _ = file_delete(existing)
+        expect(rc).to_be_less_than(0)
+        expect(diag).to_contain("SIMPLE_MEM_SNAPSHOT_FILE")
+        expect(diag).to_contain(existing)
+
+    it "wires both HIR lowering begin sites through mem_snapshot_begin_error and guards -2 sentinels":
+        val lowering = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(lowering.split("mem_snapshot_begin_error()").len() - 1).to_equal(2)
+        expect(lowering.contains("\"SIMPLE_MEM_SNAPSHOT_FILE could not be established safely\"")).to_equal(false)
+        val log_helpers = file_read("src/compiler/80.driver/driver_log_helpers.spl")
+        expect(log_helpers).to_contain("_g_phase_profile_fd = if opened >= 0: opened else: -1")
+        val sec_prof = file_read("src/compiler/50.mir/_MirLowering/section_profile_sffi.spl")
+        expect(sec_prof).to_contain("_mir_section_profile_fd = if opened >= 0: opened else: -1")

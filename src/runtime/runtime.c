@@ -2090,11 +2090,18 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
     wchar_t* wide = rt_win_long_path_widen(path);
     if (!wide) return -1;
     int valid_parent = rt_win_profile_path_parents_are_real(wide);
-    HANDLE file = valid_parent ? CreateFileW(wide, GENERIC_WRITE, 0, NULL,
-        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL) :
-        INVALID_HANDLE_VALUE;
+    DWORD last_err = 0;
+    HANDLE file = INVALID_HANDLE_VALUE;
+    if (valid_parent) {
+        file = CreateFileW(wide, GENERIC_WRITE, 0, NULL,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (file == INVALID_HANDLE_VALUE) last_err = GetLastError();
+    }
     free(wide);
-    return file == INVALID_HANDLE_VALUE ? -1 : (int64_t)(intptr_t)file;
+    if (file == INVALID_HANDLE_VALUE) {
+        return (valid_parent && (last_err == ERROR_FILE_EXISTS || last_err == ERROR_ALREADY_EXISTS)) ? -2 : -1;
+    }
+    return (int64_t)(intptr_t)file;
 #else
     char path[RT_TEXT_PATH_MAX];
     if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
@@ -2111,8 +2118,9 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
     flags |= O_CLOEXEC;
 #endif
     int fd = openat(parent_fd, leaf, flags, 0600);
+    int open_errno = fd < 0 ? errno : 0;
     close(parent_fd);
-    if (fd < 0) return -1;
+    if (fd < 0) return open_errno == EEXIST ? -2 : -1;
     struct stat opened;
     if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode)) { close(fd); return -1; }
     return (int64_t)fd;
@@ -2121,7 +2129,7 @@ int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
 
 int rt_mem_snapshot_append_flush(int64_t fd64, const char* record, int64_t record_len) {
 #if defined(_WIN32)
-    if (fd64 == -1 || !record || record_len <= 0 || record_len > 65536 ||
+    if (fd64 <= 0 || !record || record_len <= 0 || record_len > 65536 ||
             record[record_len - 1] != '\n') return 0;
     HANDLE file = (HANDLE)(intptr_t)fd64;
     int64_t off = 0;
@@ -2217,7 +2225,7 @@ int rt_phase_profile_record(int64_t fd, int64_t seq, const char* message, int64_
 
 bool rt_mem_snapshot_close(int64_t fd) {
 #if defined(_WIN32)
-    return fd != -1 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
+    return fd > 0 && CloseHandle((HANDLE)(intptr_t)fd) != 0;
 #else
     return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
 #endif
