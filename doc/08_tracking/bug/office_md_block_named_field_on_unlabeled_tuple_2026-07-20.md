@@ -1,10 +1,10 @@
 # `parse_markdown_document` accesses named fields on an unlabeled tuple return
-## Open 2026-09-16 — needs owner triage
+## Resolved — verified 2026-11-25: `_md_block` now returns the `MdBlockResult` struct; the named-field access is valid
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** resolved (fix verified 2026-11-25, see note at the bottom)
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/app/office/file_formats.spl`
 
@@ -83,3 +83,30 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 - `test/01_unit/app/office/odf_ooxml_spec.spl` (2 of 10 examples; both trace
   to the same `_md_block` call site)
 
+
+## Verification note — 2026-11-25 (release/1.0.0)
+
+**The reported defect is fixed.** `_md_block`
+(`src/app/office/file_formats.spl:195`) no longer returns an unlabeled
+`(DocBlock, [CommentDef])` tuple: it returns the `MdBlockResult` struct
+(declared at `file_formats.spl:54` with named `block` / `comments` fields),
+so the caller's `r.block` / `r.comments` accesses at lines 244-246 are valid
+named-field accesses on a struct, not on a positional `Tuple`. The
+`undefined field: unknown property or method 'block' on Tuple` semantic
+error can no longer occur on this path.
+
+Verified on the pinned Windows seed (interpreter, standalone probe —
+`bin/simple test` is blocked repo-wide at this tip by the
+`@representation_boundary` seed/source inconsistency): the spec's exact
+scenario `parse_markdown_document("# Annual Report\n\nStrong growth.\n\n-
+Expand team", "d")` runs with no semantic error and produces the correct
+structure — 3 blocks, and `document_to_markdown(doc)` renders
+`# Annual Report`, `Strong growth.`, `- Expand team` byte-correctly.
+
+**Residual observation (separate defect, out of scope here):** the same
+probe shows `document_to_odt_bytes` produces 1233 bytes but
+`odt_bytes_to_document` imports 0 blocks back under the interpreter, so the
+spec's ODT/DOCX *round-trip* examples may still be red for an unrelated
+import-side reason. That is not this bug (this bug is the compile-time
+named-field error) and was not investigated further; noted so the next
+triage of `odf_ooxml_spec.spl` does not attribute it to `_md_block`.
