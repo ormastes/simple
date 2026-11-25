@@ -67,3 +67,7 @@ Seam A: write separate non-generic helpers per output type (`alpha_run_digest`,
 
 - `doc/08_tracking/bug/crypto_digest_generic_struct_2026-06-15.md` — generic struct params
 - `doc/08_tracking/bug/generic_type_alias_parse_reject_2026-06-10.md`
+
+## 2026-11-25 verification (fleet P2 pass, release/1.0.0)
+
+- **measured** (pinned `bin/simple.exe`, Rust seed v1.0.0-rc.1, build-commit `1343b77bbaa`, Windows host): the entry's minimal repro (`trait ByteEq`, `struct Foo` impl, `fn run_typed<T: ByteEq>(a: T, b: T) -> T` called with `Foo(data: [1u8, 2u8])`) prints `2` — no `Unknown type: T`. The generic-fn-with-trait-bound seam resolves its type parameter. Closure of 2026-09-13 confirmed; stays CLOSED.
