@@ -58,3 +58,8 @@ be spec-tested to expose read accessors for all mutable state.
 
 Interpreter-specific: spec `it` block execution context vs module-function
 execution context for shared module-level `var` storage.
+
+## 2026-11-25 verification (fleet P2 pass, release/1.0.0)
+
+- **limit stated**: the named spec `test/01_unit/lib/nogc_sync_mut/diag_spec.spl` is not runnable with the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1, build-commit `1343b77bbaa`) on release/1.0.0 HEAD — the repo-wide `unknown decorator '@representation_boundary'` blocker (commit `cfd89933699` added the annotations; the pinned binary rejects the decorator) fails the run inside the test runner itself (`src/app/test_runner_new/test_runner_client.spl:9`). No live re-run was possible.
+- **verified by provenance + code inspection**: the fix was verified 2026-11-04 on seed `0b2c3d015b7`; `git merge-base --is-ancestor` confirms `0b2c3d015b7` is an ancestor of the pinned binary's build-commit `1343b77bbaa`, so the fix is included in the binary this branch pins. The spec and `std.diag` accessors it documents are unchanged in tree. Status stays FIXED.

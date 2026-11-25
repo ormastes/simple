@@ -47,3 +47,7 @@ Found during `doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026
 W3.1. Likely related to struct-key hashing/equality in the interpreter dict
 implementation. A minimal repro should insert 3 entries keyed by a 2-field
 struct and count iteration visits.
+
+## 2026-11-25 verification (fleet P2 pass, release/1.0.0)
+
+- **measured** (pinned `bin/simple.exe`, Rust seed v1.0.0-rc.1, build-commit `1343b77bbaa`, Windows host): the minimal repro this entry's Notes section asked for — `Dict<SymbolId, i64>` keyed by a 2-field struct (`idx`, `gen`), 3 inserts — prints `count=3 len=3`. Every inserted entry is visited; no single-entry collapse. Closure of 2026-09-13 confirmed; stays CLOSED.

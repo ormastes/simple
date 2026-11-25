@@ -70,3 +70,9 @@ bin/simple gen-lean compare
 - Example/firmware Lean proofs use hand-transcribed mirror defs (marked `gen lean` sections)
   verified by raw `lean <file>`; this is unaffected by the bug.
 
+
+## Closed 2026-11-25 — recursion fixed; CLI reaches the real worker
+
+- **measured** (pinned `bin/simple.exe`, Rust seed v1.0.0-rc.1, build-commit `1343b77bbaa`, Windows host): `bin/simple gen-lean compare` no longer recurses. It dispatched once to the verification worker (`run src/compiler/90.tools/verify/main.spl compare`), compiled and began real work (seed aggregate-typing warnings from the compiler sources), then hit the wrapper's own 30 s `process_run_timeout` deadline (`verification worker timed out`). No `gen-lean gen-lean …` spawn chain.
+- **code inspection**: `src/app/gen_lean/main.spl` `delegate_gen_lean` no longer re-invokes `./bin/simple gen-lean`; it maps `write -> regenerate`, `verify -> check` and forwards to `src/compiler/90.tools/verify/main.spl` (or `source_model_v1.spl` for `source-model`) with a hard 30 s deadline — the second fix option from "Fix options" above, landed in the pure-Simple wrapper (no Rust seed rebuild needed).
+- **residual (separate matter, not this bug)**: the worker did not finish `compare` within the 30 s wrapper deadline under the seed interpreter on this host. That is a worker-latency issue on the interpreted lane, not the recursion defect; the self-hosted binary lane was not exercised here.
