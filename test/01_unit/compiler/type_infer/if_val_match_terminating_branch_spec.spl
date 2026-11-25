@@ -59,6 +59,9 @@ fn tb_stmt_block(stmts: [HirStmt]) -> HirBlock:
 fn tb_wild_pat() -> HirPattern:
     HirPattern(kind: HirPatternKind.Wildcard, has_type_: false, type_: tb_err_ty(), span: tb_sp())
 
+fn tb_bind_pat(sym_id: i64) -> HirPattern:
+    HirPattern(kind: HirPatternKind.Binding(SymbolId(id: sym_id), false), has_type_: false, type_: tb_err_ty(), span: tb_sp())
+
 fn tb_bool_pat(b: bool) -> HirPattern:
     HirPattern(kind: HirPatternKind.Literal(tb_bool_lit(b)), has_type_: false, type_: tb_err_ty(), span: tb_sp())
 
@@ -267,3 +270,70 @@ describe "definite termination and terminating-branch inference (#5904)":
             case MatchTerminationStatus.MayFallThrough: true
             case MatchTerminationStatus.Exhaustive: false
         expect(is_may_fall_through).to_be(true)
+
+    it "classifies Optional Some/None match coverage across Tuple and Struct payloads":
+        step("Verify _enum_some_has_irrefutable_payload for Tuple and Struct payloads via classify_match_arm_coverage")
+        val ret_block = tb_stmt_block([tb_return(Some(tb_int(0)))])
+        val opt_ty = HirType(kind: HirTypeKind.Optional(tb_i64()), span: tb_sp())
+        val opt_none_pat = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "None", None),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+
+        # Irrefutable Tuple payloads -> Exhaustive
+        val tuple_wild_some = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "Some", Some(HirPatternPayload.Tuple([tb_wild_pat()]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val tuple_wild_exhaustive = match classify_match_arm_coverage([tb_arm(tuple_wild_some, ret_block), tb_arm(opt_none_pat, ret_block)]):
+            case MatchTerminationStatus.Exhaustive: true
+            case MatchTerminationStatus.MayFallThrough: false
+        expect(tuple_wild_exhaustive).to_be(true)
+
+        val tuple_bind_some = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "Some", Some(HirPatternPayload.Tuple([tb_bind_pat(1), tb_wild_pat()]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val tuple_bind_exhaustive = match classify_match_arm_coverage([tb_arm(tuple_bind_some, ret_block), tb_arm(opt_none_pat, ret_block)]):
+            case MatchTerminationStatus.Exhaustive: true
+            case MatchTerminationStatus.MayFallThrough: false
+        expect(tuple_bind_exhaustive).to_be(true)
+
+        # Empty or refutable Tuple payloads -> MayFallThrough
+        val tuple_empty_some = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "Some", Some(HirPatternPayload.Tuple([]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val tuple_empty_falls = match classify_match_arm_coverage([tb_arm(tuple_empty_some, ret_block), tb_arm(opt_none_pat, ret_block)]):
+            case MatchTerminationStatus.MayFallThrough: true
+            case MatchTerminationStatus.Exhaustive: false
+        expect(tuple_empty_falls).to_be(true)
+
+        val tuple_refut_some = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "Some", Some(HirPatternPayload.Tuple([tb_wild_pat(), tb_bool_pat(true)]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val tuple_refut_falls = match classify_match_arm_coverage([tb_arm(tuple_refut_some, ret_block), tb_arm(opt_none_pat, ret_block)]):
+            case MatchTerminationStatus.MayFallThrough: true
+            case MatchTerminationStatus.Exhaustive: false
+        expect(tuple_refut_falls).to_be(true)
+
+        # Irrefutable Struct payloads -> Exhaustive
+        val struct_bind_some = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "Some", Some(HirPatternPayload.Struct([("value", tb_bind_pat(2)), ("tag", tb_wild_pat())]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val struct_bind_exhaustive = match classify_match_arm_coverage([tb_arm(struct_bind_some, ret_block), tb_arm(opt_none_pat, ret_block)]):
+            case MatchTerminationStatus.Exhaustive: true
+            case MatchTerminationStatus.MayFallThrough: false
+        expect(struct_bind_exhaustive).to_be(true)
+
+        # Refutable Struct payload -> MayFallThrough
+        val struct_refut_some = HirPattern(
+            kind: HirPatternKind.Enum(opt_ty, "Some", Some(HirPatternPayload.Struct([("value", tb_wild_pat()), ("ok", tb_bool_pat(false))]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val struct_refut_falls = match classify_match_arm_coverage([tb_arm(struct_refut_some, ret_block), tb_arm(opt_none_pat, ret_block)]):
+            case MatchTerminationStatus.MayFallThrough: true
+            case MatchTerminationStatus.Exhaustive: false
+        expect(struct_refut_falls).to_be(true)
