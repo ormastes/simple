@@ -1,0 +1,735 @@
+# EasyFix Rule - Explicit @representation_boundary for Unsafe Functions (E-MC-REP-001)
+#
+# Text-scanning EasyFix producer for functions and methods (`fn`, `pub fn`,
+# `me`, `pub me`, `static fn`, `pub static fn`, plus `async`/`pri` variants)
+# whose body contains an `unsafe:` or `unsafe(capabilities: [...]):` block
+# without an owning `@representation_boundary(...)` attribute.
+#
+# Attachment contract (verified against 10.frontend/core/_ParserDecls):
+#   - Top-level declarations go through `parse_module_body` in
+#     `enum_module_body.spl`, where `@representation_boundary(...)` sets
+#     `representation_pending_v1` and `continue`s. Subsequent `@allow(...)` and
+#     `@unsafe(...)` decorators preserve `representation_pending_v1`, whereas
+#     `@rt` / `@gpu` / `@simd` require `fn`/`me` immediately after them.
+#   - Member declarations inside `class` / `struct` / `trait` / `impl` go
+#     through `parser_parse_member_attribute()` (`fn_struct_decls.spl` /
+#     `parser_decls_use.spl`), where `@representation_boundary(...)`,
+#     `@allow(...)`, and `@unsafe(...)` all stack cleanly before `pub fn`/`fn`/
+#     `me`/`static fn`.
+#   - Standalone module tags (`@layer`, `@no_gc(strict)`, `@required_init`)
+#     call `parser_reset_pending_vhdl_decorators()` (`representation_reject_pending_v1`),
+#     so `@representation_boundary` MUST sit below module-level tags and at the
+#     top of the function's own contiguous decorator stack.
+
+use std.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
+use std.tooling.easy_fix.rules_helpers.{EasyFixSourceView, LineContext, easy_fix_source_view, line_contexts}
+
+val REP_CANONICAL_CAPS: [text] = [
+    "raw_ptr",
+    "ffi",
+    "mmio",
+    "inline_asm",
+    "type_erasure"
+]
+
+struct RepCodeLines:
+    code: [text]
+    in_triple: [bool]
+
+struct RepUnsafeScan:
+    has_unsafe: bool
+    capabilities: [text]
+
+struct RepActiveFn:
+    decl_line: i64
+    fn_indent: i64
+    fn_name: text
+    insert_line: i64
+    has_rep_boundary: bool
+    header_done: bool
+    header_paren_depth: i64
+    header_bracket_depth: i64
+    header_saw_where: bool
+    body_lines: [text]
+
+struct RepFnHeaderMatch:
+    name: text
+    scan_start: i64
+
+fn _rep_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _rep_is_ws_char(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+
+fn _rep_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _rep_is_word_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _rep_indent_text(line: text) -> text:
+    var n = 0
+    while n < line.byte_len():
+        val b = line.byte_at(n)
+        if b != 32 and b != 9:
+            break
+        n = n + 1
+    line.substring(0, n)
+
+fn _rep_indent_len(line: text) -> i64:
+    var n = 0
+    while n < line.byte_len():
+        val b = line.byte_at(n)
+        if b != 32 and b != 9:
+            break
+        n = n + 1
+    n
+
+fn _rep_utf8_char_bytes(first_byte: i64) -> i64:
+    if first_byte < 128:
+        return 1
+    if first_byte < 224:
+        return 2
+    if first_byte < 240:
+        return 3
+    4
+
+fn _rep_is_raw_quote_at(line: text, quote_idx: i64) -> bool:
+    if quote_idx <= 0:
+        return false
+    if line.byte_at(quote_idx - 1) != 114:
+        return false
+    if quote_idx == 1:
+        return true
+    val prev_b = line.byte_at(quote_idx - 2)
+    if prev_b >= 128:
+        return true
+    not _rep_is_word_char(line.substring(quote_idx - 2, quote_idx - 1))
+
+fn _rep_strip_code_lines(lines: [text]) -> RepCodeLines:
+    var out: [text] = []
+    var in_triple_out: [bool] = []
+    var in_triple = false
+
+    for line in lines:
+        val n = line.byte_len()
+        var parts: [text] = []
+        var i = 0
+        var quote_byte = 0
+        var raw_string = false
+        val line_started_triple = in_triple
+
+        while i < n:
+            val b = line.byte_at(i)
+            if in_triple:
+                if b == 34 and i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                    in_triple = false
+                    parts.push("   ")
+                    i = i + 3
+                    continue
+                val step = _rep_utf8_char_bytes(b)
+                var k = 0
+                while k < step and i + k < n:
+                    parts.push(" ")
+                    k = k + 1
+                i = i + step
+                continue
+
+            if quote_byte != 0:
+                if b == 92 and not raw_string and i + 1 < n:
+                    val esc_next = line.byte_at(i + 1)
+                    val esc_step = _rep_utf8_char_bytes(esc_next)
+                    parts.push(" ")
+                    var ek = 0
+                    while ek < esc_step and i + 1 + ek < n:
+                        parts.push(" ")
+                        ek = ek + 1
+                    i = i + 1 + esc_step
+                    continue
+                if b == quote_byte:
+                    quote_byte = 0
+                    raw_string = false
+                    parts.push(line.substring(i, i + 1))
+                    i = i + 1
+                    continue
+                val q_step = _rep_utf8_char_bytes(b)
+                var qk = 0
+                while qk < q_step and i + qk < n:
+                    parts.push(" ")
+                    qk = qk + 1
+                i = i + q_step
+                continue
+
+            if b == 35:
+                break
+
+            if b == 34:
+                if i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                    in_triple = true
+                    parts.push("   ")
+                    i = i + 3
+                    continue
+                quote_byte = 34
+                raw_string = _rep_is_raw_quote_at(line, i)
+                parts.push("\"")
+                i = i + 1
+                continue
+
+            if b == 39:
+                quote_byte = 39
+                raw_string = true
+                parts.push("'")
+                i = i + 1
+                continue
+
+            val c_step = _rep_utf8_char_bytes(b)
+            val end_pos = if i + c_step <= n: i + c_step else: n
+            parts.push(line.substring(i, end_pos))
+            i = end_pos
+
+        val joined = parts.join("")
+        out.push(joined)
+        in_triple_out.push(line_started_triple)
+
+    RepCodeLines(code: out, in_triple: in_triple_out)
+
+fn _rep_strip_leading_word(s: text, word: text) -> text:
+    if s.starts_with(word + " ") or s.starts_with(word + "\t"):
+        return s.substring(word.byte_len() + 1, s.byte_len()).trim()
+    s
+
+fn _rep_strip_words(t: text, words: [text]) -> text:
+    var s = t
+    var changed = true
+    while changed:
+        changed = false
+        for w in words:
+            val next = _rep_strip_leading_word(s, w)
+            if next != s:
+                s = next
+                changed = true
+    s
+
+fn _rep_skip_horiz_ws(s: text, start: i64) -> i64:
+    var i = start
+    val n = s.byte_len()
+    while i < n:
+        val b = s.byte_at(i)
+        if b != 32 and b != 9:
+            break
+        i = i + 1
+    i
+
+fn _rep_match_kw_at(s: text, pos: i64, kw: text) -> i64:
+    val n = s.byte_len()
+    val kw_len = kw.byte_len()
+    if pos + kw_len >= n:
+        return -1
+    if s.substring(pos, pos + kw_len) != kw:
+        return -1
+    val next_b = s.byte_at(pos + kw_len)
+    if next_b != 32 and next_b != 9:
+        return -1
+    _rep_skip_horiz_ws(s, pos + kw_len + 1)
+
+fn _rep_parse_fn_header(code_line: text, indent: i64) -> RepFnHeaderMatch:
+    var pos = _rep_skip_horiz_ws(code_line, indent)
+    val vis_pub = _rep_match_kw_at(code_line, pos, "pub")
+    if vis_pub >= 0:
+        pos = vis_pub
+    else:
+        val vis_pri = _rep_match_kw_at(code_line, pos, "pri")
+        if vis_pri >= 0:
+            pos = vis_pri
+    if _rep_match_kw_at(code_line, pos, "extern") >= 0:
+        return RepFnHeaderMatch(name: "", scan_start: 0)
+    var mod_changed = true
+    while mod_changed:
+        mod_changed = false
+        val st_pos = _rep_match_kw_at(code_line, pos, "static")
+        if st_pos >= 0:
+            pos = st_pos
+            mod_changed = true
+            continue
+        val as_pos = _rep_match_kw_at(code_line, pos, "async")
+        if as_pos >= 0:
+            pos = as_pos
+            mod_changed = true
+    val fn_pos = _rep_match_kw_at(code_line, pos, "fn")
+    if fn_pos >= 0:
+        pos = fn_pos
+    else:
+        val me_pos = _rep_match_kw_at(code_line, pos, "me")
+        if me_pos < 0:
+            return RepFnHeaderMatch(name: "", scan_start: 0)
+        pos = me_pos
+        val me_fn_pos = _rep_match_kw_at(code_line, pos, "fn")
+        if me_fn_pos >= 0:
+            pos = me_fn_pos
+    val rest = code_line.substring(pos, code_line.byte_len())
+    val name = _rep_leading_ident(rest)
+    if name == "":
+        return RepFnHeaderMatch(name: "", scan_start: 0)
+    val after_name_pos = pos + name.byte_len()
+    val after_name = code_line.substring(after_name_pos, code_line.byte_len()).trim()
+    if after_name != "":
+        val first = after_name.substring(0, 1)
+        if first != "(" and first != "<" and first != ":" and not after_name.starts_with("->") and not after_name.starts_with("where ") and not after_name.starts_with("where\t"):
+            return RepFnHeaderMatch(name: "", scan_start: 0)
+    RepFnHeaderMatch(name: name, scan_start: after_name_pos)
+
+fn _rep_is_container_header(trimmed_code: text) -> bool:
+    val s = _rep_strip_words(trimmed_code, ["pub", "export"])
+    if not s.ends_with(":"):
+        return false
+    for prefix in ["class ", "class\t", "class<", "struct ", "struct\t", "struct<", "trait ", "trait\t", "trait<", "impl ", "impl\t", "impl<", "extend ", "extend\t", "extend<"]:
+        if s.starts_with(prefix):
+            return true
+    false
+
+fn _rep_decorator_name(trimmed_code: text) -> text:
+    if not trimmed_code.starts_with("@"):
+        return ""
+    val rest = trimmed_code.substring(1, trimmed_code.byte_len()).trim()
+    _rep_leading_ident(rest)
+
+fn _rep_is_standalone_module_decorator(name: text, trimmed_code: text) -> bool:
+    if name == "layer" or name == "required_init":
+        return true
+    if name == "no_gc" and trimmed_code.contains("strict"):
+        return true
+    false
+
+fn _rep_update_paren_depth(code_line: text, initial_depth: i64) -> i64:
+    var depth = initial_depth
+    var i = 0
+    val n = code_line.byte_len()
+    while i < n:
+        val b = code_line.byte_at(i)
+        if b == 40:
+            depth = depth + 1
+        elif b == 41 and depth > 0:
+            depth = depth - 1
+        i = i + 1
+    depth
+
+fn _rep_scan_header_colon(code_line: text, start_pos: i64, init_paren: i64, init_bracket: i64, init_where: bool) -> (bool, i64, i64, bool, text):
+    var p_depth = init_paren
+    var b_depth = init_bracket
+    var saw_where = init_where
+    var i = start_pos
+    val n = code_line.byte_len()
+    while i < n:
+        val ch = code_line.substring(i, i + 1)
+        if ch == "(":
+            p_depth = p_depth + 1
+        elif ch == ")" and p_depth > 0:
+            p_depth = p_depth - 1
+        elif ch == "[":
+            b_depth = b_depth + 1
+        elif ch == "]" and b_depth > 0:
+            b_depth = b_depth - 1
+        elif p_depth == 0 and b_depth == 0:
+            if ch == "w" and i + 5 <= n and code_line.substring(i, i + 5) == "where":
+                val before_ok = i == 0 or not _rep_is_word_char(code_line.substring(i - 1, i))
+                val after_ok = i + 5 >= n or not _rep_is_word_char(code_line.substring(i + 5, i + 6))
+                if before_ok and after_ok:
+                    saw_where = true
+            elif ch == ":":
+                val tail = code_line.substring(i + 1, n).trim()
+                if not saw_where or tail == "":
+                    return (true, p_depth, b_depth, saw_where, tail)
+        i = i + 1
+    (false, p_depth, b_depth, saw_where, "")
+
+fn _rep_skip_ws(s: text, start: i64) -> i64:
+    var i = start
+    val n = s.byte_len()
+    while i < n and _rep_is_ws_char(s.substring(i, i + 1)):
+        i = i + 1
+    i
+
+fn _rep_find_matching_paren(s: text, open_idx: i64) -> i64:
+    var depth = 0
+    var i = open_idx
+    val n = s.byte_len()
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 40:
+            depth = depth + 1
+        elif b == 41:
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _rep_extract_caps_from_header_args(args: text, seen: Dict<text, bool>) -> Dict<text, bool>:
+    var out = seen
+    val n = args.byte_len()
+    var i = 0
+    while i < n:
+        val at = args.index_of("capabilities", i)
+        if at < 0:
+            break
+        val end_kw = at + 12
+        val before_ok = at == 0 or not _rep_is_word_char(args.substring(at - 1, at))
+        val after_ok = end_kw >= n or not _rep_is_word_char(args.substring(end_kw, end_kw + 1))
+        if not before_ok or not after_ok:
+            i = end_kw
+            continue
+        var cur = _rep_skip_ws(args, end_kw)
+        if cur >= n or args.substring(cur, cur + 1) != ":":
+            i = end_kw
+            continue
+        cur = _rep_skip_ws(args, cur + 1)
+        if cur >= n or args.substring(cur, cur + 1) != "[":
+            i = cur
+            continue
+        val close_br = args.index_of("]", cur + 1)
+        if close_br < 0:
+            break
+        val inner = args.substring(cur + 1, close_br)
+        for raw_item in inner.split(","):
+            var cap = raw_item.trim()
+            if cap.byte_len() >= 2 and cap.starts_with("\"") and cap.ends_with("\""):
+                cap = cap.substring(1, cap.byte_len() - 1).trim()
+            if cap != "":
+                out[cap] = true
+        i = close_br + 1
+    out
+
+fn _rep_scan_unsafe_in_body(body_text: text) -> RepUnsafeScan:
+    var has_unsafe = false
+    var seen: Dict<text, bool> = {}
+    val n = body_text.byte_len()
+    var pos = 0
+
+    while pos < n:
+        val at = body_text.index_of("unsafe", pos)
+        if at < 0:
+            break
+        val after_kw = at + 6
+        val prev = if at > 0: body_text.substring(at - 1, at) else: ""
+        val before_ok = at == 0 or (not _rep_is_word_char(prev) and prev != "." and prev != "@")
+        val after_ok = after_kw >= n or not _rep_is_word_char(body_text.substring(after_kw, after_kw + 1))
+        if not before_ok or not after_ok:
+            pos = after_kw
+            continue
+        val cur = _rep_skip_ws(body_text, after_kw)
+        if cur < n and body_text.substring(cur, cur + 1) == ":":
+            has_unsafe = true
+            pos = cur + 1
+            continue
+        if cur < n and body_text.substring(cur, cur + 1) == "(":
+            val close_p = _rep_find_matching_paren(body_text, cur)
+            if close_p >= 0:
+                val after_p = _rep_skip_ws(body_text, close_p + 1)
+                if after_p < n and body_text.substring(after_p, after_p + 1) == ":":
+                    has_unsafe = true
+                    seen = _rep_extract_caps_from_header_args(body_text.substring(cur + 1, close_p), seen)
+                    pos = after_p + 1
+                    continue
+        pos = after_kw
+
+    var ordered: [text] = []
+    for cap in REP_CANONICAL_CAPS:
+        if seen.contains_key(cap):
+            ordered.push(cap)
+
+    RepUnsafeScan(has_unsafe: has_unsafe, capabilities: ordered)
+
+fn _rep_body_calls_rt(body_text: text) -> bool:
+    val n = body_text.byte_len()
+    var pos = 0
+    while pos < n:
+        val at = body_text.index_of("rt_", pos)
+        if at < 0:
+            return false
+        val before_ok = at == 0 or not _rep_is_word_char(body_text.substring(at - 1, at))
+        if not before_ok:
+            pos = at + 3
+            continue
+        var j = at + 3
+        while j < n and _rep_is_word_char(body_text.substring(j, j + 1)):
+            j = j + 1
+        if j == at + 3:
+            pos = at + 3
+            continue
+        var k = j
+        while k < n and (body_text.substring(k, k + 1) == " " or body_text.substring(k, k + 1) == "\t"):
+            k = k + 1
+        if k < n and body_text.substring(k, k + 1) == "(":
+            return true
+        pos = j
+    false
+
+fn _rep_normalize_path(path: text) -> text:
+    var p = path.replace("\\", "/")
+    while p.starts_with("./"):
+        p = p.substring(2, p.byte_len())
+    p
+
+fn _rep_path_tokens(norm_path: text) -> [text]:
+    var tokens: [text] = []
+    var start = 0
+    val n = norm_path.byte_len()
+    var i = 0
+    while i < n:
+        val ch = norm_path.substring(i, i + 1)
+        if ch == "/" or ch == "_" or ch == "-" or ch == ".":
+            if i > start:
+                tokens.push(norm_path.substring(start, i))
+            start = i + 1
+        i = i + 1
+    if n > start:
+        tokens.push(norm_path.substring(start, n))
+    tokens
+
+fn _rep_path_has_any_token(tokens: [text], targets: [text]) -> bool:
+    for tok in tokens:
+        for t in targets:
+            if tok == t:
+                return true
+    false
+
+fn _rep_path_matches_prefix(norm_path: text, prefix: text) -> bool:
+    norm_path.starts_with(prefix) or norm_path.contains("/" + prefix)
+
+fn _rep_infer_kind(norm_path: text, caps: [text], body_text: text) -> text:
+    val lower_path = norm_path.lower()
+    val tokens = _rep_path_tokens(lower_path)
+    if caps.contains("ffi") or _rep_body_calls_rt(body_text) or _rep_path_has_any_token(tokens, ["sffi", "io", "process", "fs"]) or lower_path.contains("sffi") or lower_path.contains("process"):
+        return "ffi"
+    if caps.contains("mmio") or caps.contains("inline_asm") or _rep_path_has_any_token(tokens, ["volatile", "hardware", "baremetal"]) or lower_path.contains("volatile") or lower_path.contains("hardware") or lower_path.contains("baremetal"):
+        return "hardware"
+    if _rep_path_has_any_token(tokens, ["simd", "atomic"]) or lower_path.contains("simd") or lower_path.contains("atomic"):
+        return "intrinsics"
+    "layout"
+
+fn _rep_infer_reviewer(norm_path: text) -> text:
+    if _rep_path_matches_prefix(norm_path, "src/compiler/"):
+        return "compiler-owner"
+    if _rep_path_matches_prefix(norm_path, "src/lib/nogc_sync_mut/sffi/") or _rep_path_matches_prefix(norm_path, "src/lib/nogc_sync_mut/io") or _rep_path_matches_prefix(norm_path, "src/lib/nogc_async_mut/"):
+        return "runtime-ffi-owner"
+    if _rep_path_matches_prefix(norm_path, "src/lib/"):
+        return "stdlib-owner"
+    if _rep_path_matches_prefix(norm_path, "src/app/"):
+        return "app-owner"
+    "platform-owner"
+
+fn _rep_format_caps_quoted(caps: [text]) -> text:
+    if caps.len() == 0:
+        return ""
+    var quoted: [text] = []
+    for cap in caps:
+        quoted.push("\"" + cap + "\"")
+    quoted.join(", ")
+
+fn _rep_finalize_fn(active: RepActiveFn, raw_lines: [text], offsets: [i64], file: text, norm_path: text) -> [EasyFix]:
+    if not active.header_done or active.has_rep_boundary:
+        return []
+    val body_text = active.body_lines.join("\n")
+    val unsafe_scan = _rep_scan_unsafe_in_body(body_text)
+    if not unsafe_scan.has_unsafe:
+        return []
+
+    val kind = _rep_infer_kind(norm_path, unsafe_scan.capabilities, body_text)
+    val reviewer = _rep_infer_reviewer(norm_path)
+    val reason = "Explicit unsafe {kind} boundary in {active.fn_name}"
+    val caps_quoted = _rep_format_caps_quoted(unsafe_scan.capabilities)
+    val insert_idx = active.insert_line
+    val indent = _rep_indent_text(raw_lines[insert_idx])
+    val new_text = "{indent}@representation_boundary(kind: \"{kind}\", reason: \"{reason}\", reviewers: [\"{reviewer}\"], capabilities: [{caps_quoted}])\n"
+
+    val decl_line_num = active.decl_line + 1
+    val insert_line_num = insert_idx + 1
+    val start_off = offsets[insert_idx]
+
+    var fix = EasyFix.create(
+        id: "E-MC-REP-001:{decl_line_num}",
+        description: "add @representation_boundary(kind: \"{kind}\") for `{active.fn_name}` containing unsafe block",
+        confidence: FixConfidence.Safe
+    )
+    fix.add_replacement(Replacement.create(
+        file: file,
+        start: start_off,
+        end: start_off,
+        line: insert_line_num,
+        column: 1,
+        new_text: new_text
+    ))
+    [fix]
+
+fn _rep_byte_offsets(lines: [text]) -> [i64]:
+    var offsets: [i64] = []
+    var off = 0
+    for line in lines:
+        offsets.push(off)
+        off = off + line.byte_len() + 1
+    offsets
+
+pub fn check_representation_boundary(source: text, file: text) -> [EasyFix]:
+    val lines = source.split("\n")
+    val view: EasyFixSourceView = easy_fix_source_view(lines)
+    check_representation_boundary_with_view(file, view)
+
+pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceView) -> [EasyFix]:
+    val lines = view.lines
+    if lines.len() == 0:
+        return []
+    # Keep contexts referenced via line_contexts contract; byte offsets below
+    # use line.byte_len() so UTF-8 prefixes stay exact for FixApplicator.
+    val _contexts: [LineContext] = if view.contexts.len() == lines.len(): view.contexts else: line_contexts(lines.join("\n"))
+    val offsets = _rep_byte_offsets(lines)
+    val stripped = _rep_strip_code_lines(lines)
+    val code = stripped.code
+    val in_triple = stripped.in_triple
+    val norm_path = _rep_normalize_path(file)
+
+    var fixes: [EasyFix] = []
+    var in_container = false
+    var container_indent = -1
+    var member_indent = -1
+
+    var pending_attr_start = -1
+    var pending_has_rep_boundary = false
+    var attr_paren_depth = 0
+
+    var has_active = false
+    var active = RepActiveFn(
+        decl_line: 0,
+        fn_indent: 0,
+        fn_name: "",
+        insert_line: 0,
+        has_rep_boundary: false,
+        header_done: false,
+        header_paren_depth: 0,
+        header_bracket_depth: 0,
+        header_saw_where: false,
+        body_lines: []
+    )
+
+    var li = 0
+    while li < lines.len():
+        val c = code[li]
+        val t = c.trim()
+        val raw_t = lines[li].trim()
+        val indent = _rep_indent_len(lines[li])
+
+        if has_active:
+            if not active.header_done:
+                if in_triple[li] or t == "":
+                    li = li + 1
+                    continue
+                if indent <= active.fn_indent and active.header_paren_depth == 0:
+                    has_active = false
+                else:
+                    val hdr = _rep_scan_header_colon(c, 0, active.header_paren_depth, active.header_bracket_depth, active.header_saw_where)
+                    active.header_done = hdr.0
+                    active.header_paren_depth = hdr.1
+                    active.header_bracket_depth = hdr.2
+                    active.header_saw_where = hdr.3
+                    if hdr.0 and hdr.4 != "":
+                        active.body_lines.push(hdr.4)
+                    li = li + 1
+                    continue
+            else:
+                val is_comment_or_blank = in_triple[li] or raw_t == "" or raw_t.starts_with("#")
+                if not is_comment_or_blank and indent <= active.fn_indent:
+                    for f in _rep_finalize_fn(active, lines, offsets, file, norm_path):
+                        fixes.push(f)
+                    has_active = false
+                else:
+                    if t != "":
+                        active.body_lines.push(c)
+                    li = li + 1
+                    continue
+
+        if attr_paren_depth > 0:
+            if not in_triple[li]:
+                attr_paren_depth = _rep_update_paren_depth(c, attr_paren_depth)
+            li = li + 1
+            continue
+
+        if in_triple[li]:
+            li = li + 1
+            continue
+
+        if t == "":
+            if raw_t == "" and not pending_has_rep_boundary:
+                pending_attr_start = -1
+            li = li + 1
+            continue
+
+        if in_container and indent <= container_indent:
+            in_container = false
+            container_indent = -1
+            member_indent = -1
+
+        if in_container and member_indent < 0 and indent > container_indent:
+            member_indent = indent
+
+        val at_decl_level = (not in_container and indent == 0) or (in_container and indent == member_indent)
+
+        if at_decl_level and t.starts_with("@"):
+            val deco_name = _rep_decorator_name(t)
+            if _rep_is_standalone_module_decorator(deco_name, t):
+                pending_attr_start = -1
+                pending_has_rep_boundary = false
+            else:
+                if pending_attr_start < 0:
+                    pending_attr_start = li
+                if deco_name == "representation_boundary":
+                    pending_has_rep_boundary = true
+            attr_paren_depth = _rep_update_paren_depth(c, 0)
+            li = li + 1
+            continue
+
+        if not in_container and indent == 0 and _rep_is_container_header(t):
+            in_container = true
+            container_indent = indent
+            member_indent = -1
+            pending_attr_start = -1
+            pending_has_rep_boundary = false
+            li = li + 1
+            continue
+
+        if at_decl_level:
+            val fn_hdr = _rep_parse_fn_header(c, indent)
+            if fn_hdr.name != "":
+                val hdr = _rep_scan_header_colon(c, fn_hdr.scan_start, 0, 0, false)
+                val insert_line = if pending_attr_start >= 0: pending_attr_start else: li
+                var body_init: [text] = []
+                if hdr.0 and hdr.4 != "":
+                    body_init.push(hdr.4)
+                active = RepActiveFn(
+                    decl_line: li,
+                    fn_indent: indent,
+                    fn_name: fn_hdr.name,
+                    insert_line: insert_line,
+                    has_rep_boundary: pending_has_rep_boundary,
+                    header_done: hdr.0,
+                    header_paren_depth: hdr.1,
+                    header_bracket_depth: hdr.2,
+                    header_saw_where: hdr.3,
+                    body_lines: body_init
+                )
+                has_active = true
+                pending_attr_start = -1
+                pending_has_rep_boundary = false
+                li = li + 1
+                continue
+
+        if at_decl_level:
+            pending_attr_start = -1
+            pending_has_rep_boundary = false
+
+        li = li + 1
+
+    if has_active:
+        for f in _rep_finalize_fn(active, lines, offsets, file, norm_path):
+            fixes.push(f)
+
+    fixes
