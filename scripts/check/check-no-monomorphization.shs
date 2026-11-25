@@ -16,8 +16,10 @@
 #   FAIL  — <n> file(s) checked, <k> reference(s): <locations>  exit 1
 #   ERROR — nothing was checked                 exit 2
 #
-#   --rev <rev>  commit to scan (default HEAD)
-#   --selftest   run the fatal selftest only
+#   --rev <rev>    commit to scan (default HEAD)
+#   --base <rev>   optional base commit (or PRIVATE_IMPORT_BASE env) to scope
+#                  test/*.spl scanning in blobless partial clones
+#   --selftest     run the fatal selftest only
 
 set -u
 
@@ -32,7 +34,24 @@ scan() { # <git-dir-root> <rev>
         return 2
     fi
     _hits=$(git -C "$1" grep -nE "$PATTERN" "$2" -- 'src/compiler/*.spl' 'src/app/*.spl' 'src/lib/*.spl' | cut -d: -f2,3)
-    _thits=$(git -C "$1" grep -nE "$TEST_PATTERN" "$2" -- 'test/*.spl' | cut -d: -f2,3)
+    _thits=""
+    _is_partial=0
+    if git -C "$1" config --get-regexp '^remote\..*\.promisor$' 2>/dev/null | grep -q ' true$'; then
+        _is_partial=1
+    fi
+    _base_ref="${BASE:-${PRIVATE_IMPORT_BASE:-}}"
+    _mb=""
+    if [ "$_is_partial" -eq 1 ] && [ -n "$_base_ref" ]; then
+        _mb=$(git -C "$1" merge-base "$_base_ref" "$2" 2>/dev/null || true)
+    fi
+    if [ "$_is_partial" -eq 1 ] && [ -n "$_mb" ]; then
+        _changed_tests=$(git -C "$1" diff --name-only --diff-filter=ACMR "$_mb" "$2" -- 'test/*.spl' 2>/dev/null)
+        if [ -n "$_changed_tests" ]; then
+            _thits=$(printf '%s\n' "$_changed_tests" | tr '\n' '\0' | xargs -0 -r git -C "$1" grep -nE "$TEST_PATTERN" "$2" -- 2>/dev/null | cut -d: -f2,3)
+        fi
+    else
+        _thits=$(git -C "$1" grep -nE "$TEST_PATTERN" "$2" -- 'test/*.spl' | cut -d: -f2,3)
+    fi
     _hits=$(printf '%s\n%s' "$_hits" "$_thits" | sed '/^$/d')
     if [ -n "$_hits" ]; then
         _k=$(printf '%s\n' "$_hits" | wc -l | tr -d ' ')
@@ -73,10 +92,12 @@ selftest() {
 }
 
 REV=HEAD
+BASE=""
 SELFTEST_ONLY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --rev) REV="$2"; shift 2 ;;
+        --base) BASE="$2"; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
     esac
