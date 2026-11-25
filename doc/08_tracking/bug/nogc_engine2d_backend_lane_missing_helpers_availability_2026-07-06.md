@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
-Open.
+Resolved — verified fixed 2026-11-25 (see dated note below).
 
 ## Severity
 Low — routing correctness only for font-offload backend *selection*. Operation-lane
@@ -57,3 +57,22 @@ this backend-priority coupling was left as an explicit divergence rather than
 half-ported. Marked at the call site in
 `src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl`.
 
+
+## 2026-11-25 verification — already fixed (P3 ledger sweep)
+
+The divergence this record describes no longer exists at `origin/release/1.0.0`.
+`src/lib/nogc_async_mut/gpu/engine2d/backend_lane.spl` now scores the font-offload
+candidate picker through the local `engine2d_font_offload_backend_order()`
+(qualcomm/intel-aware) — fix option 2 from this record — and additionally carries
+local `_engine2d_backend_canonical_name`/`_engine2d_backend_priority` helpers with
+`qualcomm` and `intel` present in both preference-order lists.
+
+Verified by execution on Windows with the tracked `bin/simple.exe`
+(`SIMPLE_LIB=src`, run path): the record's exact repro
+`engine2d_backend_lane_preferred_font_offload_candidate(["qualcomm"])` returns
+`"qualcomm"`; also checked `["intel"]` → `"intel"`, `["qualcomm","cuda"]` →
+`"cuda"` (priority order preserved), `["vulkan","qualcomm"]` → `"qualcomm"`,
+unknown candidate → `""`. Probe printed `NOGC FONT OFFLOAD PROBE: ALL PASS`.
+(The `simple test` entrypoint is currently blocked on this host by the pinned
+binary predating seed commit `14a34acbe1e` (`@representation_boundary`), so
+verification used the run path.)
