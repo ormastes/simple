@@ -1,5 +1,5 @@
 # Executable checker failed-only retry peak RSS — 2026-08-02
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — orchestrator ceiling fix landed 2026-11-10; Linux measurement matrix remains as follow-up (see dated verification below)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -61,3 +61,18 @@ workers 1/2/4 measured matrix with the native checker on a Linux build host
 (the per-batch tree-peak fields now needed for it are recorded by the fixed
 orchestrator); the timeout input's historical 120s behavior belongs to the
 old native checker build and was not reproduced on current binaries.
+
+## Verification 2026-11-25 (work/p3-bao-20261125)
+
+The 2026-11-10 fix entry above is confirmed present on current source:
+`scripts/check/compiled-check-tree.py` implements `--max-rss-kib`
+(proc-tree sampler at lines 132-184, `rss_ceiling_exceeded` /
+`rss_tree_peak_kib` / `rss_sampler` batch fields, fail-closed `rss_ceiling`
+classification at line 247-249) and `python -m py_compile` passes.
+`test/01_unit/scripts/compiled_check_tree_test.shs:56-88` carries the
+/proc-gated ceiling phase. The "Open — needs owner triage" header above is
+stale: the code fix landed; what remains is the workers 1/2/4 measured matrix
+on a Linux build host, which is environment-blocked on this Windows host
+(the sampler itself is Linux /proc-only and honestly records
+`rss_sampler=unsupported` elsewhere). Resolved as far as this host can
+verify; the Linux matrix remains as follow-up evidence, not a code gap.
