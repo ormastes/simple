@@ -53,19 +53,19 @@ use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
 pub fn hir_ast_expr_statement_payload_v1(kind: StmtKind) -> Expr?:
     """Project the declared single Expr payload without guessing its ABI."""
     if kind == nil:
-        return nil
+        return None
     # Keep the variant guard: older producers confused the Expr variant with
     # the Expr struct in a broad match. Payload projection stays typed.
     val probe = Expr(kind: ExprKind.NilLit, span: Span.empty())
     val disc = rt_enum_discriminant(kind)
     if disc < 0 or disc != rt_enum_discriminant(StmtKind.Expr(probe)):
-        return nil
+        return None
     match kind:
         case StmtKind.Expr(expr):
             if expr == nil:
-                return nil
+                return None
             Some(expr)
-        case _: nil
+        case _: None
 
 impl HirLowering:
     # Cycle-159 (v18, 2026-10-18): per-field type extraction in a fresh small
@@ -319,7 +319,7 @@ impl HirLowering:
         """
         val fn_body_stmts: [Stmt] = fn_decl.body.stmts
         if fn_body_stmts.len() == 0:
-            return nil
+            return None
         val tail_index: i64 = fn_body_stmts.len() - 1
         val tail_opt: Expr? = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind)
         val fn_params: [Param] = fn_decl.params
@@ -329,7 +329,7 @@ impl HirLowering:
             match tail_expr.kind:
                 case ExprKind.StringLit(_, _):
                     if tail_index == 0:
-                        return nil
+                        return None
                     value_shape = true
                     type_name = "text"
                 case ExprKind.Ident(name):
@@ -343,19 +343,19 @@ impl HirLowering:
                     # value return. Typing it Any gave the function an i64
                     # signature that every bare `return` then contradicted.
                     if tail_elements.len() == 0:
-                        return nil
+                        return None
                     value_shape = true
                 case ExprKind.ArrayLit(_) | ExprKind.ArrayRepeat(_, _) | ExprKind.DictLit(_) | ExprKind.SetLit(_) | ExprKind.Field(_, _) | ExprKind.Index(_, _) | ExprKind.OptionalChain(_, _) | ExprKind.NullCoalesce(_, _) | ExprKind.ExistsCheck(_) | ExprKind.ForceUnwrap(_) | ExprKind.Range(_, _, _, _) | ExprKind.StructLit(_, _) | ExprKind.ListComprehension(_, _) | ExprKind.DictComprehension(_, _, _):
                     value_shape = true
                 case _: ()
             if not value_shape:
-                return nil
+                return None
             if type_name != "" and hir_simple_type_name_is_known(type_name):
                 return Some(HirType(kind: hir_type_kind_from_simple_name(type_name), span: fn_decl.span))
             if not self.registering_import_symbols:
                 self.warning("[W-RET-INFER-001] untyped function '{fn_decl.name}' ends in a value whose type cannot be inferred; it is returned dynamically. Add '-> T'", fn_decl.span)
             return Some(HirType(kind: HirTypeKind.Any, span: fn_decl.span))
-        nil
+        None
 
     me tail_binding_simple_type_name_v1(stmts: [Stmt], tail_index: i64, name: text, params: [Param]) -> text:
         """Simple type name of the newest top-level binding of `name` before
@@ -399,7 +399,7 @@ impl HirLowering:
         """
         val fn_body_stmts: [Stmt] = fn_decl.body.stmts
         if fn_body_stmts.len() == 0:
-            return nil
+            return None
         val tail_index: i64 = fn_body_stmts.len() - 1
         var tail_name = ""
         if val tail_expr = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind):
@@ -407,23 +407,23 @@ impl HirLowering:
                 case ExprKind.Ident(name): tail_name = name
                 case _: ()
         if tail_name == "":
-            return nil
+            return None
         var found_binding = false
-        var found_type: HirType? = nil
+        var found_type: HirType? = None
         var si: i64 = 0
         while si < tail_index:
             match fn_body_stmts[si].kind:
                 case StmtKind.Val(bound_name, bound_type, _):
                     if bound_name == tail_name:
                         found_binding = true
-                        found_type = nil
+                        found_type = None
                         val bound_type_opt: Type? = bound_type
                         if val declared_bound = bound_type_opt:
                             found_type = Some(self.lower_type(declared_bound))
                 case StmtKind.Var(bound_name, bound_type, _):
                     if bound_name == tail_name:
                         found_binding = true
-                        found_type = nil
+                        found_type = None
                         val bound_type_opt: Type? = bound_type
                         if val declared_bound = bound_type_opt:
                             found_type = Some(self.lower_type(declared_bound))
@@ -436,9 +436,9 @@ impl HirLowering:
                     found_type = Some(self.lower_type(param.type_))
         if val tail_type = found_type:
             match tail_type.kind:
-                case HirTypeKind.Unit | HirTypeKind.Infer(_, _) | HirTypeKind.Error: return nil
+                case HirTypeKind.Unit | HirTypeKind.Infer(_, _) | HirTypeKind.Error: return None
                 case _: return Some(tail_type)
-        nil
+        None
 
     me bare_tuple_return_elements_v1(fn_decl: ParserFunction) -> [HirType]:
         """Element types of a bare `-> tuple` return, inferred from the body.
@@ -525,13 +525,13 @@ impl HirLowering:
     me declared_callable_type(fn_decl: ParserFunction, owner_symbol: SymbolId?) -> HirType?:
         # Generic callables keep the existing untyped-symbol behavior.
         if fn_decl.type_params.len() > 0:
-            return nil
+            return None
         # ParserImport/sibling registration is fail-soft: signature diagnostics
         # (untyped returns, param types unlowerable in the importer's
         # context) belong to the defining module's own pass. Register the
         # symbol untyped instead of erroring the importing module.
         if self.registering_import_symbols:
-            return nil
+            return None
 
         # Pre-declaring a callable signature publishes its symbol type before bodies
         # are lowered; written-`Any` diagnostics are emitted once when `lower_function`
@@ -576,7 +576,7 @@ impl HirLowering:
                 # existing inference path.
                 if self.dynamic_callback_function_type(fn_decl).is_none():
                     self.written_any_unsafe_depth = saved_written_any_depth
-                    return nil
+                    return None
                 val callback_type = self.dynamic_callback_param_type(fn_decl, raw_param)
                 param_types.push(callback_type ?? HirType(kind: HirTypeKind.Any, span: raw_param.span))
             else:
@@ -618,14 +618,14 @@ impl HirLowering:
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0:
-            return nil
+            return None
         # A bodyless extern with no arrow has a complete Unit return contract;
         # retaining its callable type is required for imported alias authority.
         # Ordinary untyped functions keep the existing inference path.
         if not callable.has_return_type and not callable.is_extern:
-            return nil
+            return None
         if self.registering_import_symbols:
-            return nil
+            return None
         val saved_written_any_depth = self.written_any_unsafe_depth
         self.written_any_unsafe_depth = saved_written_any_depth + 1
         var param_types: [HirType] = []
@@ -643,7 +643,7 @@ impl HirLowering:
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
                 self.written_any_unsafe_depth = saved_written_any_depth
-                return nil
+                return None
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
         val return_type = if callable.has_return_type:
@@ -1018,7 +1018,7 @@ impl HirLowering:
         # A bodyless extern with no arrow has a complete Unit return contract;
         # retaining its callable type is required for imported alias authority.
         if not callable.has_return_type and not callable.is_extern:
-            return nil
+            return None
         var param_types: [HirType] = []
         var param_idx = 0
         if val owner_id = owner_symbol:
@@ -1030,7 +1030,7 @@ impl HirLowering:
                         param_idx = 1
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
-                return nil
+                return None
             val param: ModuleSurfaceParam = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
                 param.type_, param.type_name, param.array_element_name, imported_module_name))
@@ -1052,7 +1052,7 @@ impl HirLowering:
 
     me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
         if shape != "named" and shape != "named_array":
-            return nil
+            return None
         val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
             imported_module_name, type_name)
         var element: HirType = HirType(kind: HirTypeKind.Error, span: span)
@@ -1071,14 +1071,14 @@ impl HirLowering:
 
     me dynamic_callback_tail_type(fn_decl: ParserFunction) -> HirType?:
         if fn_decl.has_return_type:
-            return nil
+            return None
         if self.dynamic_callback_function_type(fn_decl).is_some():
             return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
-        nil
+        None
 
     me dynamic_callback_param_type(fn_decl: ParserFunction, param: Param) -> HirType?:
         if param.has_type_ or param.has_default:
-            return nil
+            return None
         if val callback_type = self.dynamic_callback_function_type(fn_decl):
             if val tail_expr = hir_ast_expr_statement_payload_v1(fn_decl.body.stmts[0].kind):
                 match tail_expr.kind:
@@ -1088,29 +1088,29 @@ impl HirLowering:
                                 if name == param.name: return callback_type
                             case _: ()
                     case _: ()
-        nil
+        None
 
     me dynamic_callback_function_type(fn_decl: ParserFunction) -> HirType?:
         # A default-Any parameter used as a callee has a dynamic Any result.
         # Do not guess the result of named/typed callees, or override explicit
         # returns with a tail-only decision.
         if self.ambient_bootstrap_enabled() or fn_decl.body.stmts.len() != 1:
-            return nil
+            return None
         for raw_param in fn_decl.params:
             val param: Param = raw_param
             if not param.has_type_ and param.has_default:
-                return nil
+                return None
         if fn_decl.has_return_type:
             val saved_written_any_depth = self.written_any_unsafe_depth
             self.written_any_unsafe_depth = saved_written_any_depth + 1
             val ret_is_unit = self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit
             self.written_any_unsafe_depth = saved_written_any_depth
             if ret_is_unit:
-                return nil
+                return None
         val fn_params: [Param] = fn_decl.params
         val scan: ReturnScan = self.scan_ast_block_for_returns(fn_decl.body, fn_params)
         if scan.found_value_return:
-            return nil
+            return None
         # Cycle-150: bind-free tail reads. The `val tail: Stmt = stmts[len-1]`
         # array-index bind of a large composite drew corrupted (the
         # cycle-116/148 class), and rt_enum_discriminant on the corrupt
@@ -1120,7 +1120,7 @@ impl HirLowering:
         # the Stmt is never named.
         val fn_body_stmts: [Stmt] = fn_decl.body.stmts
         if fn_body_stmts.len() == 0:
-            return nil
+            return None
         val tail_index: i64 = fn_body_stmts.len() - 1
         if val tail_expr = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind):
             match tail_expr.kind:
@@ -1134,12 +1134,12 @@ impl HirLowering:
                                     var argument_types: [HirType] = []
                                     for raw_arg in args:
                                         val arg: CallArg = raw_arg
-                                        if arg.has_name: return nil
+                                        if arg.has_name: return None
                                         argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
                                     return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: fn_body_stmts[tail_index].span), []), span: fn_body_stmts[tail_index].span)
                         case _: ()
                 case _: ()
-        nil
+        None
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
@@ -1155,13 +1155,13 @@ impl HirLowering:
                 Some("bool")
             case ExprKind.Ident(name):
                 var i = 0
-                var found: HirType? = nil
+                var found: HirType? = None
                 while i < params.len():
                     val param: Param = params[i]
                     if param.name == name:
                         found = self.lower_type(param.type_)
                     i = i + 1
-                var found_name: text? = nil
+                var found_name: text? = None
                 if val found_t = found:
                     found_name = hir_type_simple_name(found_t)
                 found_name
@@ -1172,21 +1172,21 @@ impl HirLowering:
                     case UnaryOp.Neg:
                         self.infer_simple_type_name_ast(operand, params)
                     case _:
-                        nil
+                        None
             case ExprKind.Binary(op, left, right):
                 if ast_binop_is_comparison(op):
                     Some("bool")
                 elif ast_binop_is_arith(op):
                     val lt = self.infer_simple_type_name_ast(left, params)
                     val rt = self.infer_simple_type_name_ast(right, params)
-                    var arith_name: text? = nil
+                    var arith_name: text? = None
                     if val lt_v = lt:
                         if val rt_v = rt:
                             if lt_v == rt_v and hir_simple_type_name_is_known(lt_v):
                                 arith_name = lt
                     arith_name
                 else:
-                    nil
+                    None
             case ExprKind.Cast(_, target):
                 hir_type_simple_name(self.lower_type(target))
             case _:
@@ -1198,7 +1198,7 @@ impl HirLowering:
                 # which `merge_return_scan` turns into `ambiguous`, which
                 # `infer_untyped_return_type` turns into the fatal route-(b)
                 # error instead of a silently-wrong return type.
-                nil
+                None
 
     me scan_ast_block_for_returns(b: Block, params: [Param]) -> ReturnScan:
         var acc = return_scan_empty()
