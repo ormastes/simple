@@ -1,8 +1,11 @@
 # `os.*` module-level uninitialized array `var` is unresolvable
-## Open 2026-09-16 — needs owner triage
+## Source-fixed in the seed 2026-11-06; verify on next seed deploy (re-confirmed 2026-11-25)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+Superseded 2026-11-25: the 2026-11-06 fix section below landed in the seed
+source and is confirmed present at release/1.0.0 HEAD (see the dated note
+at the end); closure waits only on a seed redeploy that includes it.
 
 Filed 2026-08-02. Base `a19ce60e1d`. Engine: Rust seed (`bin/simple`), interpreter path.
 
@@ -146,3 +149,25 @@ fn-pointer element types still get `nil` slots (pre-existing evaluator behaviour
 Rust unit: `node_exec::uninit_fixed_array_let_tests`. Spec:
 `test/01_unit/interpreter/uninit_fixed_array_module_var_spec.spl` (RED on deployed seed, GREEN on
 test-only seed). Verify on next seed deploy.
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+The 2026-11-06 fix is confirmed present in the seed source at release/1.0.0
+HEAD:
+
+- `src/compiler_rust/compiler/src/interpreter/node_exec.rs:333` defines
+  `fixed_array_zero_element`, and line 370 binds the zero-filled
+  `FixedSizeArray` for an initializer-less fixed-array `let`/`var` — the
+  exact gap this bug isolated (module evaluator zero-filled; `exec_node`
+  bound nothing).
+- The regression spec exists:
+  `test/01_unit/interpreter/uninit_fixed_array_module_var_spec.spl`.
+- Execution limit: the deployed tracked seed (`bin/simple.exe`, Rust
+  v1.0.0-rc.1) predates the fix, so the spec is expected RED on it (as the
+  fix section itself records: "RED on deployed seed, GREEN on test-only
+  seed"); this lane is forbidden from rebuilding or redeploying the seed.
+  Additionally `bin/simple.exe test` is repo-wide blocked at this HEAD by
+  the `@representation_boundary`/pinned-seed inconsistency, so no spec run
+  was attempted. Verification is by source inspection; closure waits on the
+  next sanctioned seed deploy, at which point the spec should flip GREEN
+  with no further source change.
