@@ -1,0 +1,558 @@
+#![allow(primitive_api)] # Inbound wire JSON & JSONL decoder enforces byte, token, and depth budgets
+# A2UI Inbound Wire JSON Parser, JSONL Streaming Decoder, and Snapshot Replay
+#
+# Implements §16.1, §8.3, §8.4, and §22:
+#   - Typed bounded decoding directly from `json_tokenize_bounded` (no untyped `any`).
+#   - Duplicate object keys rejected at every nesting level.
+#   - Single-operation v1.0 wire envelope decoding for all 6 agent-to-renderer ops
+#     and renderer-to-agent `action` envelopes.
+#   - Incremental byte-bounded JSONL chunk decoder (`A2uiJsonlStreamDecoder`) with
+#     fail-closed truncation checking and optional line-level resynchronization.
+#   - Authoritative surface snapshot export & gap-reconnect replay.
+
+use std.common.json.tokenizer.{json_tokenize_bounded, json_unescape_string}
+use std.common.json.parser.{JsonParseLimits}
+use std.common.ui.a2ui.types.{
+    a2ui_wire_version,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiActionEvent,
+    A2uiComponentDef,
+    A2uiSurfaceOp,
+    A2uiRendererAction,
+    a2ui_no_action,
+    a2ui_event_action,
+    a2ui_obj_get
+}
+use std.common.ui.a2ui.surface_state.{
+    A2uiSurfaceState,
+    A2uiSurfaceRegistry,
+    a2ui_op_to_json
+}
+
+fn _parse_a2ui_value(
+    tokens: [(text, text)],
+    pos: i64,
+    depth: i64,
+    max_depth: i64,
+    as_prop_ctx: bool
+) -> Result<(A2uiValue, i64), text>:
+    if depth > max_depth:
+        return Err("JSON nesting exceeds max_depth budget")
+    if pos >= tokens.len():
+        return Err("Unexpected end of input")
+    val tok = tokens[pos]
+    val kind = tok.0
+    val raw = tok.1
+    if kind == "STRING":
+        return Ok((A2uiValue.Text(value: json_unescape_string(raw)), pos + 1))
+    if kind == "TRUE":
+        return Ok((A2uiValue.Bool(value: true), pos + 1))
+    if kind == "FALSE":
+        return Ok((A2uiValue.Bool(value: false), pos + 1))
+    if kind == "NULL":
+        return Ok((A2uiValue.Null, pos + 1))
+    if kind == "NUMBER":
+        if raw.contains(".") or raw.contains("e") or raw.contains("E"):
+            return Ok((A2uiValue.Number(value: raw.to_float()), pos + 1))
+        return Ok((A2uiValue.Int(value: raw.to_int()), pos + 1))
+    if kind == "LBRACKET":
+        if depth + 1 > max_depth:
+            return Err("JSON nesting exceeds max_depth budget")
+        var items: [A2uiValue] = []
+        var p = pos + 1
+        while p < tokens.len():
+            if tokens[p].0 == "RBRACKET":
+                return Ok((A2uiValue.Array(items: items), p + 1))
+            if items.len() > 0:
+                if tokens[p].0 != "COMMA":
+                    return Err("Expected comma in array")
+                p = p + 1
+            val item_res = _parse_a2ui_value(tokens, p, depth + 1, max_depth, as_prop_ctx)?
+            items.push(item_res.0)
+            p = item_res.1
+        return Err("Unclosed array")
+    if kind == "LBRACE":
+        val obj_res = _parse_a2ui_object(tokens, pos, depth, max_depth, as_prop_ctx)?
+        val entries = obj_res.0
+        val next_p = obj_res.1
+        if as_prop_ctx and entries.len() == 1 and entries[0].key == "path":
+            match entries[0].value:
+                case A2uiValue.Text(pt):
+                    return Ok((A2uiValue.Path(path: pt), next_p))
+                case _:
+                    return Err("invalid_path_binding_value")
+        return Ok((A2uiValue.Object(entries: entries), next_p))
+    if kind == "INVALID":
+        return Err("Unexpected token: " + raw)
+    Err("Unexpected token: " + kind)
+
+fn _parse_a2ui_object(
+    tokens: [(text, text)],
+    pos: i64,
+    depth: i64,
+    max_depth: i64,
+    as_prop_ctx: bool
+) -> Result<([A2uiObjectEntry], i64), text>:
+    if depth + 1 > max_depth:
+        return Err("JSON nesting exceeds max_depth budget")
+    if pos >= tokens.len() or tokens[pos].0 != "LBRACE":
+        return Err("Expected object '{'")
+    var p = pos + 1
+    var entries: [A2uiObjectEntry] = []
+    var seen: Dict<text, bool> = {}
+    while p < tokens.len():
+        if tokens[p].0 == "RBRACE":
+            return Ok((entries, p + 1))
+        if entries.len() > 0:
+            if tokens[p].0 != "COMMA":
+                return Err("Expected comma in object")
+            p = p + 1
+            if p >= tokens.len() or tokens[p].0 == "RBRACE":
+                return Err("Trailing comma or unexpected end in object")
+        if p >= tokens.len() or tokens[p].0 != "STRING":
+            return Err("Expected string key in object")
+        val key = json_unescape_string(tokens[p].1)
+        if seen.contains_key(key):
+            return Err("Duplicate object key:" + key)
+        seen[key] = true
+        p = p + 1
+        if p >= tokens.len() or tokens[p].0 != "COLON":
+            return Err("Expected colon after key:" + key)
+        p = p + 1
+        val val_res = _parse_a2ui_value(tokens, p, depth + 1, max_depth, as_prop_ctx)?
+        entries.push(A2uiObjectEntry(key: key, value: val_res.0))
+        p = val_res.1
+    Err("Unclosed object")
+
+fn _parse_root_object(json_text: text, limits: JsonParseLimits) -> Result<[A2uiObjectEntry], text>:
+    val tok_res = json_tokenize_bounded(json_text, limits.max_source_bytes, limits.max_tokens)
+    if not tok_res.0:
+        return Err(tok_res.2)
+    val tokens = tok_res.1
+    if tokens.len() == 0:
+        return Err("Empty JSON input")
+    val obj_res = _parse_a2ui_object(tokens, 0, 0, limits.max_depth, false)?
+    if obj_res.1 != tokens.len():
+        return Err("Unexpected trailing tokens")
+    Ok(obj_res.0)
+
+fn _req_obj(entries: [A2uiObjectEntry], key: text) -> Result<[A2uiObjectEntry], text>:
+    match a2ui_obj_get(entries, key):
+        case A2uiArgPresence.Present(A2uiValue.Object(es)): Ok(es)
+        case A2uiArgPresence.Present(_): Err("expected_object:" + key)
+        case A2uiArgPresence.Omitted: Err("missing_field:" + key)
+
+fn _req_text(entries: [A2uiObjectEntry], key: text) -> Result<text, text>:
+    match a2ui_obj_get(entries, key):
+        case A2uiArgPresence.Present(A2uiValue.Text(s)): Ok(s)
+        case A2uiArgPresence.Present(_): Err("expected_text:" + key)
+        case A2uiArgPresence.Omitted: Err("missing_field:" + key)
+
+fn _opt_text(entries: [A2uiObjectEntry], key: text) -> Result<text, text>:
+    match a2ui_obj_get(entries, key):
+        case A2uiArgPresence.Present(A2uiValue.Text(s)): Ok(s)
+        case A2uiArgPresence.Present(_): Err("expected_text:" + key)
+        case A2uiArgPresence.Omitted: Ok("")
+
+fn _opt_bool(entries: [A2uiObjectEntry], key: text, default_val: bool) -> Result<bool, text>:
+    match a2ui_obj_get(entries, key):
+        case A2uiArgPresence.Present(A2uiValue.Bool(b)): Ok(b)
+        case A2uiArgPresence.Present(_): Err("expected_bool:" + key)
+        case A2uiArgPresence.Omitted: Ok(default_val)
+
+fn _retag_prop_value(v: A2uiValue) -> A2uiValue:
+    match v:
+        case A2uiValue.Object(entries):
+            if entries.len() == 1 and entries[0].key == "path":
+                match entries[0].value:
+                    case A2uiValue.Text(pt): return A2uiValue.Path(path: pt)
+                    case _: return v
+            var converted: [A2uiObjectEntry] = []
+            var i = 0
+            while i < entries.len():
+                converted.push(A2uiObjectEntry(key: entries[i].key, value: _retag_prop_value(entries[i].value)))
+                i = i + 1
+            A2uiValue.Object(entries: converted)
+        case A2uiValue.Array(items):
+            var converted: [A2uiValue] = []
+            var i = 0
+            while i < items.len():
+                converted.push(_retag_prop_value(items[i]))
+                i = i + 1
+            A2uiValue.Array(items: converted)
+        case _:
+            v
+
+fn _decode_component(entries: [A2uiObjectEntry]) -> Result<A2uiComponentDef, text>:
+    val id = _req_text(entries, "id")?
+    val component = _req_text(entries, "component")?
+    var cat_override = ""
+    var child = ""
+    var children: [text] = []
+    var action = a2ui_no_action()
+    var props: [A2uiObjectEntry] = []
+
+    var i = 0
+    while i < entries.len():
+        val e = entries[i]
+        if e.key == "id" or e.key == "component":
+            ()
+        elif e.key == "region" or e.key == "repeat" or e.key == "key":
+            return Err("table_only_field_forbidden_on_wire:" + e.key)
+        elif e.key == "@catalogId":
+            match e.value:
+                case A2uiValue.Text(s): cat_override = s
+                case _: return Err("expected_text:@catalogId")
+        elif e.key == "child":
+            match e.value:
+                case A2uiValue.Text(s): child = s
+                case _: return Err("expected_text:child")
+        elif e.key == "children":
+            match e.value:
+                case A2uiValue.Array(items):
+                    var ci = 0
+                    while ci < items.len():
+                        match items[ci]:
+                            case A2uiValue.Text(cid): children.push(cid)
+                            case _: return Err("expected_text_in_children")
+                        ci = ci + 1
+                case _: return Err("expected_array:children")
+        elif e.key == "action":
+            match e.value:
+                case A2uiValue.Object(act_es):
+                    val ev_es = _req_obj(act_es, "event")?
+                    val ev_name = _req_text(ev_es, "name")?
+                    var ev_ctx: [A2uiObjectEntry] = []
+                    match a2ui_obj_get(ev_es, "context"):
+                        case A2uiArgPresence.Present(A2uiValue.Object(ctx_es)):
+                            var ki = 0
+                            while ki < ctx_es.len():
+                                ev_ctx.push(A2uiObjectEntry(key: ctx_es[ki].key, value: _retag_prop_value(ctx_es[ki].value)))
+                                ki = ki + 1
+                        case A2uiArgPresence.Present(_):
+                            return Err("expected_object:action.event.context")
+                        case A2uiArgPresence.Omitted:
+                            ()
+                    action = a2ui_event_action(ev_name, ev_ctx)
+                case _: return Err("expected_object:action")
+        else:
+            props.push(A2uiObjectEntry(key: e.key, value: _retag_prop_value(e.value)))
+        i = i + 1
+
+    Ok(A2uiComponentDef(
+        id: id,
+        component: component,
+        catalog_override: cat_override,
+        props: props,
+        child: child,
+        children: children,
+        action: action,
+        region_request: ""
+    ))
+
+# Parse one standard A2UI v1.0 wire envelope into a typed A2uiSurfaceOp.
+pub fn a2ui_op_from_json(json_text: text, limits: JsonParseLimits) -> Result<A2uiSurfaceOp, text>:
+    val top = _parse_root_object(json_text, limits)?
+    val ver = _req_text(top, "version")?
+    if ver != a2ui_wire_version():
+        return Err("unsupported_wire_version:" + ver)
+
+    var op_key = ""
+    var op_entries: [A2uiObjectEntry] = []
+    var op_count = 0
+    var i = 0
+    while i < top.len():
+        val e = top[i]
+        if e.key == "version":
+            ()
+        elif e.key == "createSurface" or e.key == "updateComponents" or e.key == "updateDataModel" or e.key == "deleteSurface" or e.key == "callRendererFunction" or e.key == "agentFunctionResponse":
+            op_count = op_count + 1
+            op_key = e.key
+            match e.value:
+                case A2uiValue.Object(es): op_entries = es
+                case _: return Err("expected_object:" + e.key)
+        else:
+            return Err("unknown_wire_envelope_key:" + e.key)
+        i = i + 1
+
+    if op_count != 1:
+        return Err("wire_envelope_must_contain_exact_one_op")
+
+    if op_key == "createSurface":
+        val sid = _req_text(op_entries, "surfaceId")?
+        val cid = _req_text(op_entries, "catalogId")?
+        val sdm = _opt_bool(op_entries, "sendDataModel", false)?
+        return Ok(A2uiSurfaceOp.CreateSurface(
+            surface_id: sid,
+            catalog_id: cid,
+            send_data_model: sdm,
+            root_id: "root"
+        ))
+
+    if op_key == "updateComponents":
+        val sid = _req_text(op_entries, "surfaceId")?
+        var comps: [A2uiComponentDef] = []
+        match a2ui_obj_get(op_entries, "components"):
+            case A2uiArgPresence.Present(A2uiValue.Array(items)):
+                var ci = 0
+                while ci < items.len():
+                    match items[ci]:
+                        case A2uiValue.Object(ce):
+                            val dec = _decode_component(ce)?
+                            comps.push(dec)
+                        case _: return Err("expected_component_object")
+                    ci = ci + 1
+            case A2uiArgPresence.Present(_):
+                return Err("expected_array:components")
+            case A2uiArgPresence.Omitted:
+                return Err("missing_field:components")
+        return Ok(A2uiSurfaceOp.UpdateComponents(surface_id: sid, components: comps))
+
+    if op_key == "updateDataModel":
+        val sid = _req_text(op_entries, "surfaceId")?
+        val path = _opt_text(op_entries, "path")?
+        val norm_path = if path == "": "/" else: path
+        val val_presence = a2ui_obj_get(op_entries, "value")
+        return Ok(A2uiSurfaceOp.UpdateDataModel(surface_id: sid, path: norm_path, value: val_presence))
+
+    if op_key == "deleteSurface":
+        val sid = _req_text(op_entries, "surfaceId")?
+        return Ok(A2uiSurfaceOp.DeleteSurface(surface_id: sid))
+
+    if op_key == "callRendererFunction":
+        val fcid = _req_text(op_entries, "functionCallId")?
+        val cid = _req_text(op_entries, "catalogId")?
+        val call_name = _req_text(op_entries, "call")?
+        val sid = _opt_text(op_entries, "surfaceId")?
+        val args = match a2ui_obj_get(op_entries, "args"):
+            case A2uiArgPresence.Present(A2uiValue.Object(es)): es
+            case A2uiArgPresence.Present(_): return Err("expected_object:args")
+            case A2uiArgPresence.Omitted: []
+        val caller = _opt_text(op_entries, "caller")?
+        val caller_id = if caller == "": "agent" else: caller
+        val uact = _opt_bool(op_entries, "userActivated", false)?
+        return Ok(A2uiSurfaceOp.CallRendererFunction(
+            function_call_id: fcid,
+            surface_id: sid,
+            catalog_id: cid,
+            function_name: call_name,
+            args: args,
+            caller_id: caller_id,
+            user_activated: uact
+        ))
+
+    if op_key == "agentFunctionResponse":
+        val fcid = _req_text(op_entries, "functionCallId")?
+        val has_err = match a2ui_obj_get(op_entries, "error"):
+            case A2uiArgPresence.Present(A2uiValue.Text(msg)): (true, msg)
+            case A2uiArgPresence.Present(_): return Err("expected_text:error")
+            case A2uiArgPresence.Omitted: (false, "")
+        if has_err.0:
+            return Ok(A2uiSurfaceOp.AgentFunctionResponse(
+                function_call_id: fcid,
+                ok: false,
+                result: A2uiValue.Null,
+                error: has_err.1
+            ))
+        val res_val = match a2ui_obj_get(op_entries, "result"):
+            case A2uiArgPresence.Present(v): v
+            case A2uiArgPresence.Omitted: return Err("missing_field:result_or_error")
+        return Ok(A2uiSurfaceOp.AgentFunctionResponse(
+            function_call_id: fcid,
+            ok: true,
+            result: res_val,
+            error: ""
+        ))
+
+    Err("unknown_wire_op:" + op_key)
+
+# Parse renderer-to-agent action JSON envelope.
+pub fn a2ui_action_from_json(json_text: text, limits: JsonParseLimits) -> Result<A2uiRendererAction, text>:
+    val top = _parse_root_object(json_text, limits)?
+    val ver = _req_text(top, "version")?
+    if ver != a2ui_wire_version():
+        return Err("unsupported_wire_version:" + ver)
+    val act = _req_obj(top, "action")?
+    val name = _req_text(act, "name")?
+    val sid = _req_text(act, "surfaceId")?
+    val comp_id = _req_text(act, "sourceComponentId")?
+    val ts = _req_text(act, "timestamp")?
+    val ctx_es = match a2ui_obj_get(act, "context"):
+        case A2uiArgPresence.Present(A2uiValue.Object(es)): es
+        case A2uiArgPresence.Present(_): return Err("expected_object:action.context")
+        case A2uiArgPresence.Omitted: return Err("missing_field:action.context")
+    Ok(A2uiRendererAction(
+        name: name,
+        surface_id: sid,
+        source_component_id: comp_id,
+        timestamp: ts,
+        context: ctx_es,
+        owner_id: "",
+        surface_generation: 0,
+        composition_revision: 0,
+        correlation_id: ""
+    ))
+
+# ============================================================================
+# Incremental JSONL Streaming Decoder & Snapshot Replay (§16.1, §8.3, §22)
+# ============================================================================
+
+pub class A2uiJsonlStreamDecoder:
+    limits: JsonParseLimits
+    max_line_bytes: i64
+    allow_line_resync: bool
+    carry: text
+    lines_processed: i64
+    discarded_lines: i64
+    last_error: text
+
+    static fn new(
+        limits: JsonParseLimits,
+        max_line_bytes: i64,
+        allow_line_resync: bool
+    ) -> A2uiJsonlStreamDecoder:
+        A2uiJsonlStreamDecoder(
+            limits: limits,
+            max_line_bytes: max_line_bytes,
+            allow_line_resync: allow_line_resync,
+            carry: "",
+            lines_processed: 0,
+            discarded_lines: 0,
+            last_error: ""
+        )
+
+    me _process_line(line: text) -> Result<A2uiSurfaceOp?, text>:
+        val trimmed = line.trim()
+        if trimmed == "":
+            return Ok(None)
+        if trimmed.byte_len() > self.max_line_bytes:
+            self.last_error = "jsonl_line_exceeds_max_line_bytes"
+            if self.allow_line_resync:
+                self.discarded_lines = self.discarded_lines + 1
+                return Ok(None)
+            return Err(self.last_error)
+        self.lines_processed = self.lines_processed + 1
+        match a2ui_op_from_json(trimmed, self.limits):
+            case Ok(op): Ok(Some(op))
+            case Err(e):
+                self.last_error = e
+                if self.allow_line_resync:
+                    self.discarded_lines = self.discarded_lines + 1
+                    return Ok(None)
+                Err(e)
+
+    # Feed an arbitrary UTF-8 chunk without quadratic re-parsing of incomplete prefixes.
+    me feed_chunk(chunk: text) -> Result<[A2uiSurfaceOp], text>:
+        var ops: [A2uiSurfaceOp] = []
+        val combined_len = self.carry.byte_len() + chunk.byte_len()
+        # Check bounded line growth when no newline closes the buffered carry.
+        var start = 0
+        var i = 0
+        val n = chunk.byte_len()
+        while i < n:
+            if chunk.byte_at(i) == 10: # '\n'
+                val piece = chunk.substring(start, i)
+                val full_line = self.carry + piece
+                self.carry = ""
+                start = i + 1
+                match self._process_line(full_line)?:
+                    case Some(op): ops.push(op)
+                    case None: ()
+            i = i + 1
+        if start < n:
+            val rem = chunk.substring(start, n)
+            if self.carry.byte_len() + rem.byte_len() > self.max_line_bytes:
+                return Err("jsonl_unterminated_line_exceeds_budget")
+            self.carry = self.carry + rem
+        elif combined_len > 0 and self.carry.byte_len() > self.max_line_bytes:
+            return Err("jsonl_unterminated_line_exceeds_budget")
+        Ok(ops)
+
+    # Reject unterminated non-whitespace trailing bytes (truncated stream fails closed).
+    me finish() -> Result<[A2uiSurfaceOp], text>:
+        if self.carry.trim() != "":
+            return Err("truncated_jsonl_stream")
+        self.carry = ""
+        Ok([])
+
+# Export a complete authoritative surface snapshot as newline-delimited JSONL.
+pub fn a2ui_surface_export_snapshot_jsonl(surface: A2uiSurfaceState) -> Result<text, text>:
+    if surface.surface_id == "" or surface.root_id == "" or surface.components.len() == 0:
+        return Err("incomplete_surface_snapshot")
+    var lines: [text] = []
+    lines.push(a2ui_op_to_json(A2uiSurfaceOp.CreateSurface(
+        surface_id: surface.surface_id,
+        catalog_id: surface.catalog_id,
+        send_data_model: surface.send_data_model,
+        root_id: surface.root_id
+    )))
+    lines.push(a2ui_op_to_json(A2uiSurfaceOp.UpdateComponents(
+        surface_id: surface.surface_id,
+        components: surface.components
+    )))
+    var i = 0
+    while i < surface.data_model.len():
+        val entry = surface.data_model[i]
+        lines.push(a2ui_op_to_json(A2uiSurfaceOp.UpdateDataModel(
+            surface_id: surface.surface_id,
+            path: entry.path,
+            value: A2uiArgPresence.Present(value: entry.value)
+        )))
+        i = i + 1
+    Ok(lines.join("\n") + "\n")
+
+# Replay an authoritative snapshot strictly, rotating/replacing target surface.
+pub fn a2ui_surface_replay_snapshot_jsonl(
+    registry: A2uiSurfaceRegistry,
+    owner_id: text,
+    jsonl_text: text,
+    limits: JsonParseLimits
+) -> Result<i64, text>:
+    var dec = A2uiJsonlStreamDecoder.new(limits, limits.max_source_bytes, false)
+    val ops = dec.feed_chunk(jsonl_text)?
+    val _tail = dec.finish()?
+    if ops.len() < 2:
+        return Err("incomplete_snapshot_replay_ops")
+
+    val target_sid = match ops[0]:
+        case A2uiSurfaceOp.CreateSurface(sid, cid, sdm, root_id):
+            if root_id != "root":
+                return Err("snapshot_root_must_be_root")
+            sid
+        case _:
+            return Err("snapshot_must_begin_with_create_surface")
+
+    var has_components = false
+    var k = 1
+    while k < ops.len():
+        match ops[k]:
+            case A2uiSurfaceOp.UpdateComponents(sid, comps):
+                if sid != target_sid or comps.len() == 0:
+                    return Err("invalid_snapshot_components_op")
+                has_components = true
+            case A2uiSurfaceOp.UpdateDataModel(sid, _p, _v):
+                if sid != target_sid:
+                    return Err("snapshot_surface_id_mismatch")
+            case _:
+                return Err("unexpected_op_in_snapshot_replay")
+        k = k + 1
+    if not has_components:
+        return Err("snapshot_missing_update_components")
+
+    match ops[0]:
+        case A2uiSurfaceOp.CreateSurface(sid, cid, sdm, _root):
+            registry.rotate_surface(owner_id, sid, cid, sdm)?
+        case _:
+            return Err("snapshot_must_begin_with_create_surface")
+
+    var last_gen: i64 = 0
+    var oi = 1
+    while oi < ops.len():
+        last_gen = registry.apply_op(owner_id, ops[oi])?
+        oi = oi + 1
+    Ok(last_gen)
+
+export a2ui_op_from_json, a2ui_action_from_json, A2uiJsonlStreamDecoder
+export a2ui_surface_export_snapshot_jsonl, a2ui_surface_replay_snapshot_jsonl

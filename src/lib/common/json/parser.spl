@@ -26,9 +26,18 @@
 
 
 
-use std.common.json.tokenizer.{json_tokenize, json_unescape_string}
+use std.common.json.tokenizer.{json_tokenize, json_tokenize_bounded, json_unescape_string}
 
-export use std.common.json.tokenizer.{json_skip_whitespace, json_string_escapes_are_valid, json_number_is_valid, json_tokenize, json_unescape_string}
+export use std.common.json.tokenizer.{json_skip_whitespace, json_string_escapes_are_valid, json_number_is_valid, json_tokenize, json_tokenize_bounded, json_unescape_string}
+
+# @allow(primitive_api): byte/token/depth limit counts
+pub struct JsonParseLimits:
+    max_source_bytes: i64
+    max_tokens: i64
+    max_depth: i64
+
+pub fn json_parse_limits_default() -> JsonParseLimits:
+    JsonParseLimits(max_source_bytes: 1048576, max_tokens: 65536, max_depth: 64)
 
 fn json_parser_null():
     ("null", nil)
@@ -263,3 +272,34 @@ fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i
 
 fn json_parse_tokens(tokens: [(text, text)]) -> (bool, any, text, i64):
     _json_parse_tokens(tokens, false)
+
+fn _json_check_token_depth(tokens: [(text, text)], max_depth: i64) -> text:
+    if max_depth <= 0:
+        return "Invalid JSON max_depth limit"
+    var depth = 0
+    var i = 0
+    while i < tokens.len():
+        val t = tokens[i].0
+        if t == "LBRACE" or t == "LBRACKET":
+            depth = depth + 1
+            if depth > max_depth:
+                return "JSON nesting exceeds max_depth budget"
+        elif t == "RBRACE" or t == "RBRACKET":
+            depth = depth - 1
+            if depth < 0:
+                return "Unbalanced closing delimiter"
+        i = i + 1
+    ""
+
+pub fn json_parse_strict_bounded_with_error(text: text, limits: JsonParseLimits) -> (any, text):
+    """Strict JSON parsing with pre-allocation byte, token, and nesting depth budgets."""
+    val tok_res = json_tokenize_bounded(text, limits.max_source_bytes, limits.max_tokens)
+    if not tok_res.0:
+        return (None, tok_res.2)
+    val depth_err = _json_check_token_depth(tok_res.1, limits.max_depth)
+    if depth_err != "":
+        return (None, depth_err)
+    val result = _json_parse_tokens(tok_res.1, true)
+    if result.0:
+        return (result.1, "")
+    (None, result.2)

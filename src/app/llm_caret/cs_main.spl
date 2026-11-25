@@ -19,6 +19,9 @@ use std.nogc_async_mut.sosix.host_facade.{sosix_platform, sosix_print_raw as pri
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area}
+use app.llm_caret.cs_dashboard_model.{CsAgent as ModelCsAgent, CsDashboard as ModelCsDashboard}
+use app.llm_caret.a2ui.cs_live_host.{CaretA2uiHost, cs_resolve_ui_mode, cs_dashboard_session_views}
+use app.llm_caret.a2ui.cs_session_store.{CaretA2uiSessionStore}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
 use std.io_runtime.{env_get, time_now_unix_micros, time_now_monotonic_ms}
 
@@ -60,9 +63,50 @@ fn cs_session_from_args(args: [text]) -> text:
             session = arg
     session
 
+var _cs_a2ui_store_ready: bool = false
+var _cs_a2ui_store: CaretA2uiSessionStore = CaretA2uiSessionStore.new()
+
+fn _cs_to_model_dashboard(d: CsDashboard) -> ModelCsDashboard:
+    var magents: [ModelCsAgent] = []
+    for a in d.agents:
+        magents.push(ModelCsAgent(
+            agent_id: a.agent_id,
+            spec: a.spec,
+            status: a.status,
+            pid: a.pid,
+            pane_id: a.pane_id,
+            cpu_pct: a.cpu_pct,
+            rss_mb: a.rss_mb,
+            detail: a.detail
+        ))
+    ModelCsDashboard(
+        session: d.session,
+        manager_status: d.manager_status,
+        agents: magents,
+        selected: d.selected,
+        input: d.input,
+        log: d.log,
+        screen: d.screen,
+        pins: [],
+        mru: []
+    )
+
 # One submitted line: the command reducer, then its action. Returns the next
 # dashboard, the outcome to show, and whether the operator quit.
 fn _cs_step(d: CsDashboard, line: text) -> (CsDashboard, text, bool):
+    val trimmed = line.trim()
+    if trimmed == "/a2ui" or trimmed.starts_with("/a2ui "):
+        if not _cs_a2ui_store_ready:
+            _cs_a2ui_store = CaretA2uiSessionStore.new()
+            _cs_a2ui_store_ready = true
+        val md = _cs_to_model_dashboard(d)
+        val views = cs_dashboard_session_views(md)
+        val now_ms = time_now_monotonic_ms()
+        match _cs_a2ui_store.handle_slash(md, views, trimmed, now_ms):
+            case Err(err):
+                return (d, "cs-a2ui error: " + err, false)
+            case Ok(out):
+                return (d, out, false)
     val (after_cmd, action) = cs_handle_command(d, line)
     if action == "quit":
         return (after_cmd, "", true)
@@ -362,7 +406,35 @@ fn cs_live_input_supported(platform: text, stdin_tty: bool, stdout_tty: bool) ->
 # A real terminal gets the live dashboard; a pipe, or a terminal that refuses
 # raw mode, gets the line loop.
 fn main() -> i64:
-    val session = cs_session_from_args(get_cli_args())
+    val args = get_cli_args()
+    val session = cs_session_from_args(args)
+    val ui_mode = cs_resolve_ui_mode(args)
+    if ui_mode == "a2ui" or ui_mode == "a2ui_json":
+        val dash = _cs_to_model_dashboard(cs_refresh(cs_dashboard_new(session)))
+        val views = cs_dashboard_session_views(dash)
+        val now_ms = time_now_monotonic_ms()
+        match CaretA2uiHost.create(session, "local_operator", "caret_session_local_secret_2026", false, now_ms):
+            case Err(err):
+                print "cs-a2ui-error: " + err
+                return 1
+            case Ok(host_init):
+                var host = host_init
+                match host.sync_dashboard(dash, views, dash.selected >= 0, now_ms):
+                    case Err(sync_err):
+                        print "cs-a2ui-error: " + sync_err
+                        return 1
+                    case Ok(tree):
+                        if ui_mode == "a2ui_json":
+                            match host.export_live_wire_messages():
+                                case Ok(msgs):
+                                    for m in msgs:
+                                        print m
+                                case Err(jerr):
+                                    print "cs-a2ui-error: " + jerr
+                                    return 1
+                        else:
+                            print host.render_summary_line(tree)
+                        return 0
     if cs_live_input_supported(sosix_platform(), terminal_stdin_is_tty(), terminal_stdout_is_tty()) and terminal_enter_raw_mode():
         if cs_run_live(session).ok:
             return 0
@@ -372,4 +444,4 @@ fn main() -> i64:
         return 0
     1
 
-export cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
+export cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION, cs_resolve_ui_mode

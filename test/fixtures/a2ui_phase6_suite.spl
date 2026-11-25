@@ -1,0 +1,572 @@
+#![allow(primitive_api)] # Phase 6 native verification & benchmark suite returns pass/fail counts and microsecond timings
+# Phase 6 A2UI & Caret Suite Verification + Section 19 Native Benchmarks
+#
+# Covers:
+#   - Inbound A2UI v1.0 wire JSON round-trip & malformed/multi-op/duplicate/smuggled rejection.
+#   - Streaming JSONL chunk decoder (whole, line, 4-byte tiny chunks), truncation fail-closed,
+#     and line-level resync isolation.
+#   - Authoritative snapshot JSONL export + gap-reconnect replay.
+#   - Executable catalog functions (`formatString`, `required`, `openUrl`) with caller,
+#     user-activation, unsafe-URL, isolated-empty-model, and `functionCallId` correlation.
+#   - Persistent `CaretA2uiSessionStore` `/a2ui`, `/a2ui draft`, `/a2ui compose`, `/a2ui hotswap`,
+#     `/a2ui select`, and `/a2ui json` multi-turn flows + O(N) MRU/roster indexing.
+#   - Section 19 native Cranelift benchmark sweeps with `time_now_unix_micros`.
+
+use std.io_runtime.{time_now_unix_micros}
+use common.ui.widget.{WidgetNode}
+use std.common.json.parser.{JsonParseLimits, json_parse_limits_default}
+use std.common.ui.a2ui.types.{
+    a2ui_basic_catalog_id,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiComponentDef,
+    A2uiSurfaceOp,
+    A2uiRendererAction,
+    a2ui_component_def,
+    a2ui_event_action,
+    a2ui_obj_get
+}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.screen_table.{
+    KeyedRowRecord,
+    KeyedCollectionView,
+    a2ui_compile_screen_table,
+    a2ui_expand_screen_table
+}
+use std.common.ui.a2ui.surface_state.{
+    A2uiSurfaceRegistry,
+    a2ui_surface_affected_components,
+    a2ui_surface_to_ui_tree,
+    a2ui_op_to_json,
+    a2ui_action_to_json,
+    a2ui_execute_renderer_function_rpc
+}
+use std.common.ui.a2ui.wire_codec.{
+    a2ui_op_from_json,
+    a2ui_action_from_json,
+    A2uiJsonlStreamDecoder,
+    a2ui_surface_export_snapshot_jsonl,
+    a2ui_surface_replay_snapshot_jsonl
+}
+use std.common.app_interface.contracts.{AppOpKind, ReleaseAudience}
+use std.common.app_interface.authority.{AuthorityGate}
+use std.common.app_interface.query_ir.{
+    AuthorizedTableSnapshot,
+    BoundedChangeJournal,
+    ChangeEventKind,
+    query_parse_restricted_spl,
+    query_execute_authorized
+}
+use std.common.app_interface.runtime.{HandlerGenerationOwner}
+use app.llm_caret.cs_dashboard_model.{CsAgent, CsDashboard}
+use app.llm_caret.a2ui.cs_app_interface.{caret_default_authority_policy}
+use app.llm_caret.a2ui.cs_live_host.{cs_dashboard_session_views}
+use app.llm_caret.a2ui.cs_session_store.{CaretA2uiSessionStore}
+
+var _p6_pass: i64 = 0
+var _p6_fail: i64 = 0
+
+fn _p6_check(cond: bool, name: text):
+    if cond:
+        _p6_pass = _p6_pass + 1
+    else:
+        _p6_fail = _p6_fail + 1
+        print "PHASE6_FAIL: " + name
+
+fn _make_scale_screen_sdn(comp_count: i64) -> text:
+    var lines: [text] = [
+        "|id, parent, slot, order, region, repeat, key, expression|",
+        "root, null, null, 0, workspace, null, null, \"Column()\""
+    ]
+    var i: i64 = 0
+    while i < comp_count:
+        lines.push("t_" + i.to_string() + ", root, children, " + i.to_string() + ", detail, null, null, \"Text(text=/view/item_" + i.to_string() + ")\"")
+        i = i + 1
+    lines.join("\n")
+
+fn _make_scale_snapshot(row_count: i64) -> AuthorizedTableSnapshot:
+    var rows: [KeyedRowRecord] = []
+    var order: [text] = []
+    var i: i64 = 0
+    while i < row_count:
+        val k = "k_" + i.to_string()
+        val label = if i % 2 == 0: "AgentAlpha " + k else: "WorkerBeta " + k
+        val fields: [A2uiObjectEntry] = [
+            A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: k)),
+            A2uiObjectEntry(key: "label", value: A2uiValue.Text(value: label)),
+            A2uiObjectEntry(key: "status", value: A2uiValue.Text(value: "Running"))
+        ]
+        rows.push(KeyedRowRecord(key: k, fields: fields))
+        order.push(k)
+        i = i + 1
+    AuthorizedTableSnapshot(
+        resource_id: "caret.roster",
+        data_revision: 1,
+        rows: rows,
+        order: order
+    )
+
+fn verify_inbound_wire_and_streaming():
+    val limits = json_parse_limits_default()
+    val cat_id = a2ui_basic_catalog_id()
+
+    # 1. All 6 wire ops + action round-trip cleanly.
+    val op_create = A2uiSurfaceOp.CreateSurface(surface_id: "s1", catalog_id: cat_id, send_data_model: false, root_id: "root")
+    match a2ui_op_from_json(a2ui_op_to_json(op_create), limits):
+        case Ok(A2uiSurfaceOp.CreateSurface(sid, cid, sdm, rid)):
+            _p6_check(sid == "s1" and cid == cat_id and not sdm and rid == "root", "wire_roundtrip_create")
+        case _:
+            _p6_check(false, "wire_roundtrip_create")
+
+    var c_root = a2ui_component_def("root", "Column")
+    c_root.children = ["lbl"]
+    var c_lbl = a2ui_component_def("lbl", "Text")
+    c_lbl.props = [A2uiObjectEntry(key: "text", value: A2uiValue.Path(path: "/view/msg"))]
+    val op_upd = A2uiSurfaceOp.UpdateComponents(surface_id: "s1", components: [c_root, c_lbl])
+    match a2ui_op_from_json(a2ui_op_to_json(op_upd), limits):
+        case Ok(A2uiSurfaceOp.UpdateComponents(sid, comps)):
+            var path_ok = false
+            if comps.len() == 2:
+                match a2ui_obj_get(comps[1].props, "text"):
+                    case A2uiArgPresence.Present(A2uiValue.Path(p)):
+                        path_ok = p == "/view/msg"
+                    case _: ()
+            _p6_check(sid == "s1" and path_ok, "wire_roundtrip_update_components_path")
+        case _:
+            _p6_check(false, "wire_roundtrip_update_components_path")
+
+    val op_data_set = A2uiSurfaceOp.UpdateDataModel(surface_id: "s1", path: "/view/msg", value: A2uiArgPresence.Present(value: A2uiValue.Text(value: "hi")))
+    val op_data_del = A2uiSurfaceOp.UpdateDataModel(surface_id: "s1", path: "/view/msg", value: A2uiArgPresence.Omitted)
+    match a2ui_op_from_json(a2ui_op_to_json(op_data_set), limits):
+        case Ok(A2uiSurfaceOp.UpdateDataModel(_, p, A2uiArgPresence.Present(A2uiValue.Text(v)))):
+            _p6_check(p == "/view/msg" and v == "hi", "wire_roundtrip_data_present")
+        case _:
+            _p6_check(false, "wire_roundtrip_data_present")
+    match a2ui_op_from_json(a2ui_op_to_json(op_data_del), limits):
+        case Ok(A2uiSurfaceOp.UpdateDataModel(_, p, A2uiArgPresence.Omitted)):
+            _p6_check(p == "/view/msg", "wire_roundtrip_data_delete")
+        case _:
+            _p6_check(false, "wire_roundtrip_data_delete")
+
+    val op_del = A2uiSurfaceOp.DeleteSurface(surface_id: "s1")
+    match a2ui_op_from_json(a2ui_op_to_json(op_del), limits):
+        case Ok(A2uiSurfaceOp.DeleteSurface(sid)): _p6_check(sid == "s1", "wire_roundtrip_delete_surface")
+        case _: _p6_check(false, "wire_roundtrip_delete_surface")
+
+    val op_call = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "fc_1", surface_id: "s1", catalog_id: cat_id,
+        function_name: "formatString", args: [A2uiObjectEntry(key: "value", value: A2uiValue.Text(value: "ok"))],
+        caller_id: "agent", user_activated: false
+    )
+    match a2ui_op_from_json(a2ui_op_to_json(op_call), limits):
+        case Ok(A2uiSurfaceOp.CallRendererFunction(fid, sid, cid, fnm, _, _, _)):
+            _p6_check(fid == "fc_1" and sid == "s1" and fnm == "formatString", "wire_roundtrip_call_fn")
+        case _:
+            _p6_check(false, "wire_roundtrip_call_fn")
+
+    val op_resp = A2uiSurfaceOp.AgentFunctionResponse(function_call_id: "fc_1", ok: true, result: A2uiValue.Int(value: 7), error: "")
+    match a2ui_op_from_json(a2ui_op_to_json(op_resp), limits):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fid, ok, A2uiValue.Int(n), _)):
+            _p6_check(fid == "fc_1" and ok and n == 7, "wire_roundtrip_fn_response")
+        case _:
+            _p6_check(false, "wire_roundtrip_fn_response")
+
+    val act = A2uiRendererAction(
+        name: "caret.send", surface_id: "main", source_component_id: "send_btn",
+        timestamp: "2026-11-26T00:00:00Z",
+        context: [A2uiObjectEntry(key: "body", value: A2uiValue.Text(value: "hello"))],
+        owner_id: "alice", surface_generation: 1, composition_revision: 1, correlation_id: "c1"
+    )
+    match a2ui_action_from_json(a2ui_action_to_json(act), limits):
+        case Ok(dec_act):
+            _p6_check(dec_act.name == "caret.send" and dec_act.source_component_id == "send_btn", "wire_roundtrip_action")
+        case Err(_):
+            _p6_check(false, "wire_roundtrip_action")
+
+    # Reject bad envelopes: duplicate key, multi-op, table-only field, bad version.
+    match a2ui_op_from_json("{\"version\":\"1.0\",\"version\":\"1.0\",\"deleteSurface\":{\"surfaceId\":\"s1\"}" + "}", limits):
+        case Err(_): _p6_check(true, "wire_rejects_dup_key")
+        case Ok(_): _p6_check(false, "wire_rejects_dup_key")
+    match a2ui_op_from_json("{\"version\":\"1.0\",\"createSurface\":{\"surfaceId\":\"s1\",\"catalogId\":\"" + cat_id + "\"},\"deleteSurface\":{\"surfaceId\":\"s1\"}" + "}", limits):
+        case Err(_): _p6_check(true, "wire_rejects_multi_op")
+        case Ok(_): _p6_check(false, "wire_rejects_multi_op")
+    match a2ui_op_from_json("{\"version\":\"1.0\",\"updateComponents\":{\"surfaceId\":\"s1\",\"components\":[{\"id\":\"r\",\"component\":\"Column\",\"region\":\"composer\",\"children\":[]}]}" + "}", limits):
+        case Err(_): _p6_check(true, "wire_rejects_table_only_region_field")
+        case Ok(_): _p6_check(false, "wire_rejects_table_only_region_field")
+
+    # 2. Streaming JSONL chunk invariance + truncation fail-closed + line resync.
+    val stream_src = a2ui_op_to_json(op_create) + "\n" + a2ui_op_to_json(op_upd) + "\n" + a2ui_op_to_json(op_data_set) + "\n"
+    var dec_whole = A2uiJsonlStreamDecoder.new(limits, 65536, false)
+    val ops_whole = match dec_whole.feed_chunk(stream_src):
+        case Ok(xs): xs
+        case Err(_): []
+    val fin_whole_ok = match dec_whole.finish():
+        case Ok(_): true
+        case Err(_): false
+
+    var dec_tiny = A2uiJsonlStreamDecoder.new(limits, 65536, false)
+    var ops_tiny: [A2uiSurfaceOp] = []
+    var pos = 0
+    val slen = stream_src.byte_len()
+    var chunk_err = false
+    while pos < slen:
+        val end_p = if pos + 4 < slen: pos + 4 else: slen
+        match dec_tiny.feed_chunk(stream_src.substring(pos, end_p)):
+            case Ok(batch):
+                for item in batch:
+                    ops_tiny.push(item)
+            case Err(_):
+                chunk_err = true
+        pos = end_p
+    val fin_tiny_ok = match dec_tiny.finish():
+        case Ok(_): true
+        case Err(_): false
+    _p6_check(fin_whole_ok and fin_tiny_ok and not chunk_err and ops_whole.len() == 3 and ops_tiny.len() == 3, "jsonl_chunk_invariance")
+
+    var dec_trunc = A2uiJsonlStreamDecoder.new(limits, 65536, false)
+    val _t1 = dec_trunc.feed_chunk("{\"version\":\"1.0\",\"deleteSurface\":{\"surfaceId\"")
+    val trunc_rejected = match dec_trunc.finish():
+        case Err(_): true
+        case Ok(_): false
+    _p6_check(trunc_rejected, "jsonl_truncation_fails_closed")
+
+    var dec_small_budget = A2uiJsonlStreamDecoder.new(limits, 16, false)
+    val budget_rejected = match dec_small_budget.feed_chunk("{\"version\":\"1.0\",\"deleteSurface\":{\"surfaceId\":\"too_long\"}" + "}"):
+        case Err(_): true
+        case Ok(_): false
+    _p6_check(budget_rejected, "jsonl_line_budget_enforced")
+
+    var dec_resync = A2uiJsonlStreamDecoder.new(limits, 65536, true)
+    val resync_ops = match dec_resync.feed_chunk("{" + "bad_json" + "}\n" + a2ui_op_to_json(op_del) + "\n"):
+        case Ok(xs): xs
+        case Err(_): []
+    _p6_check(resync_ops.len() == 1 and dec_resync.discarded_lines == 1, "jsonl_resync_skips_corrupt_line")
+
+    # 3. Authoritative snapshot export & gap-reconnect replay.
+    var reg = A2uiSurfaceRegistry.new(a2ui_basic_catalog())
+    val _g1 = reg.apply_op("app1", op_create)
+    val _g2 = reg.apply_op("app1", op_upd)
+    val _g3 = reg.apply_op("app1", op_data_set)
+    val snap_jsonl = match reg.get_surface("app1", "s1"):
+        case Some(s):
+            match a2ui_surface_export_snapshot_jsonl(s):
+                case Ok(j): j
+                case Err(_): ""
+        case None: ""
+    _p6_check(snap_jsonl != "", "snapshot_export_jsonl_ok")
+    var reg2 = A2uiSurfaceRegistry.new(a2ui_basic_catalog())
+    val replay_ok = match a2ui_surface_replay_snapshot_jsonl(reg2, "app1", snap_jsonl, limits):
+        case Ok(gen): gen == 1
+        case Err(_): false
+    _p6_check(replay_ok, "snapshot_replay_jsonl_ok")
+    val incomplete_rejected = match a2ui_surface_replay_snapshot_jsonl(reg2, "app1", a2ui_op_to_json(op_create) + "\n", limits):
+        case Err(_): true
+        case Ok(_): false
+    _p6_check(incomplete_rejected, "snapshot_replay_rejects_incomplete")
+
+fn verify_catalog_functions_and_caret_store():
+    val cat_id = a2ui_basic_catalog_id()
+    var reg = A2uiSurfaceRegistry.new(a2ui_basic_catalog())
+    val _c = reg.apply_op("appA", A2uiSurfaceOp.CreateSurface(surface_id: "sA", catalog_id: cat_id, send_data_model: false, root_id: "root"))
+    val _d = reg.apply_op("appA", A2uiSurfaceOp.UpdateDataModel(surface_id: "sA", path: "/view/name", value: A2uiArgPresence.Present(value: A2uiValue.Text(value: "Caret"))))
+
+    # formatString binding resolves inside UITree.
+    var root_c = a2ui_component_def("root", "Column")
+    root_c.children = ["hdr"]
+    var hdr_c = a2ui_component_def("hdr", "Text")
+    val fmt_call = A2uiValue.Object(entries: [
+        A2uiObjectEntry(key: "call", value: A2uiValue.Text(value: "formatString")),
+        A2uiObjectEntry(key: "args", value: A2uiValue.Object(entries: [
+            A2uiObjectEntry(key: "value", value: A2uiValue.Text(value: "Hello $" + "{" + "/view/name}!"))
+        ]))
+    ])
+    hdr_c.props = [A2uiObjectEntry(key: "text", value: fmt_call)]
+    val _u = reg.apply_op("appA", A2uiSurfaceOp.UpdateComponents(surface_id: "sA", components: [root_c, hdr_c]))
+    val tree_ok = match reg.get_surface("appA", "sA"):
+        case Some(s):
+            match a2ui_surface_to_ui_tree(s):
+                case Ok(t):
+                    t.root_id == "a2ui:appA:sA:1:root" and WidgetNode(id: "a2ui:appA:sA:1:hdr").get_prop("content") == "Hello Caret!"
+                case Err(_): false
+        case None: false
+    _p6_check(tree_ok, "format_string_renders_in_ui_tree")
+
+    val rpc_req_ok = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_req_1", surface_id: "sA", catalog_id: cat_id,
+        function_name: "required",
+        args: [A2uiObjectEntry(key: "value", value: A2uiValue.Path(path: "/view/name"))],
+        caller_id: "binding", user_activated: false
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_req_ok):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, A2uiValue.Bool(res_b), _)):
+            _p6_check(fcid == "rpc_req_1" and ok and res_b, "rpc_required_non_empty_true")
+        case _:
+            _p6_check(false, "rpc_required_non_empty_true")
+
+    val rpc_req_empty = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_req_2", surface_id: "", catalog_id: cat_id,
+        function_name: "required",
+        args: [A2uiObjectEntry(key: "value", value: A2uiValue.Text(value: "   "))],
+        caller_id: "binding", user_activated: false
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_req_empty):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, A2uiValue.Bool(res_b), _)):
+            _p6_check(fcid == "rpc_req_2" and ok and not res_b, "rpc_required_whitespace_false")
+        case _:
+            _p6_check(false, "rpc_required_whitespace_false")
+
+    # Isolated empty model when surface_id == "" vs explicit surface lookup + correlation echo.
+    val rpc_empty = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_iso_1", surface_id: "", catalog_id: cat_id,
+        function_name: "formatString",
+        args: [A2uiObjectEntry(key: "value", value: A2uiValue.Text(value: "Hi $" + "{" + "/view/name}"))],
+        caller_id: "agent", user_activated: false
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_empty):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, A2uiValue.Text(txt), _)):
+            _p6_check(fcid == "rpc_iso_1" and ok and txt == "Hi ", "rpc_no_surface_uses_empty_model")
+        case _:
+            _p6_check(false, "rpc_no_surface_uses_empty_model")
+
+    val rpc_surf = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_surf_2", surface_id: "sA", catalog_id: cat_id,
+        function_name: "formatString",
+        args: [A2uiObjectEntry(key: "value", value: A2uiValue.Text(value: "Hi $" + "{" + "/view/name}"))],
+        caller_id: "agent", user_activated: false
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_surf):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, A2uiValue.Text(txt), _)):
+            _p6_check(fcid == "rpc_surf_2" and ok and txt == "Hi Caret", "rpc_explicit_surface_resolves_path")
+        case _:
+            _p6_check(false, "rpc_explicit_surface_resolves_path")
+
+    # openUrl enforces user activation, caller allowlist, and https/http safety.
+    val rpc_unactivated = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_u_1", surface_id: "sA", catalog_id: cat_id,
+        function_name: "openUrl",
+        args: [A2uiObjectEntry(key: "url", value: A2uiValue.Text(value: "https://simple-lang.org"))],
+        caller_id: "user_action", user_activated: false
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_unactivated):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, _, err)):
+            _p6_check(fcid == "rpc_u_1" and not ok and err.contains("user_activation_required"), "open_url_requires_user_activation")
+        case _:
+            _p6_check(false, "open_url_requires_user_activation")
+
+    val rpc_js = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_u_2", surface_id: "sA", catalog_id: cat_id,
+        function_name: "openUrl",
+        args: [A2uiObjectEntry(key: "url", value: A2uiValue.Text(value: "javascript:alert(1)"))],
+        caller_id: "user_action", user_activated: true
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_js):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, _, err)):
+            _p6_check(fcid == "rpc_u_2" and not ok and err.contains("unsafe_url"), "open_url_rejects_javascript")
+        case _:
+            _p6_check(false, "open_url_rejects_javascript")
+
+    val rpc_ok = A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "rpc_u_3", surface_id: "sA", catalog_id: cat_id,
+        function_name: "openUrl",
+        args: [A2uiObjectEntry(key: "url", value: A2uiValue.Text(value: "https://simple-lang.org"))],
+        caller_id: "user_action", user_activated: true
+    )
+    match a2ui_execute_renderer_function_rpc(reg, "appA", rpc_ok):
+        case Ok(A2uiSurfaceOp.AgentFunctionResponse(fcid, ok, _, _)):
+            _p6_check(fcid == "rpc_u_3" and ok, "open_url_accepts_activated_https")
+        case _:
+            _p6_check(false, "open_url_accepts_activated_https")
+
+    # Persistent CaretA2uiSessionStore multi-turn workflow.
+    val agents: [CsAgent] = [
+        CsAgent(agent_id: "a1", spec: "claude", status: "running", pid: 101, pane_id: "%1", cpu_pct: 4.0, rss_mb: 120, detail: "d1"),
+        CsAgent(agent_id: "a2", spec: "codex", status: "idle", pid: 102, pane_id: "%2", cpu_pct: -1.0, rss_mb: -1, detail: "d2"),
+        CsAgent(agent_id: "a3", spec: "gemini", status: "working", pid: 103, pane_id: "%3", cpu_pct: 12.0, rss_mb: 240, detail: "d3")
+    ]
+    val dash = CsDashboard(
+        session: "persist_ws", manager_status: "connected: smux",
+        agents: agents, selected: 0, input: "", log: [], screen: ["ok"],
+        pins: ["a2"], mru: ["a3", "a1"]
+    )
+    val views = cs_dashboard_session_views(dash)
+    var store = CaretA2uiSessionStore.new()
+    match store.handle_slash(dash, views, "/a2ui", 1000):
+        case Ok(s): _p6_check(s.contains("code_gen=1"), "store_init_sync")
+        case Err(_): _p6_check(false, "store_init_sync")
+    match store.handle_slash(dash, views, "/a2ui draft multi_turn_msg", 1001):
+        case Ok(s): _p6_check(s.contains("draft_seq="), "store_draft_edit")
+        case Err(_): _p6_check(false, "store_draft_edit")
+    match store.handle_slash(dash, views, "/a2ui compose readonly", 1002):
+        case Ok(s): _p6_check(s.contains("code_gen=1") and store.session_composition_revision("persist_ws") == 3, "store_compose_bumps_comp_rev_not_code")
+        case Err(_): _p6_check(false, "store_compose_bumps_comp_rev_not_code")
+    match store.handle_slash(dash, views, "/a2ui compose full", 1003):
+        case Ok(_): _p6_check(store.session_composition_revision("persist_ws") == 4, "store_compose_full")
+        case Err(_): _p6_check(false, "store_compose_full")
+    match store.handle_slash(dash, views, "/a2ui hotswap v2_fast", 1004):
+        case Ok(s): _p6_check(s.contains("code_gen=2") and s.contains("variant=v2_fast"), "store_hotswap_bumps_code_gen")
+        case Err(_): _p6_check(false, "store_hotswap_bumps_code_gen")
+    _p6_check(store.session_draft_text("persist_ws", "/draft/body") == "multi_turn_msg", "store_preserves_draft_across_compose_and_hotswap")
+    match store.handle_slash(dash, views, "/a2ui select", 1005):
+        case Ok(s): _p6_check(s.contains("[gen=2:v2_fast]"), "store_select_runs_on_swapped_gen2")
+        case Err(_): _p6_check(false, "store_select_runs_on_swapped_gen2")
+    match store.handle_slash(dash, views, "/a2ui json", 1006):
+        case Ok(jsonl):
+            var dec = A2uiJsonlStreamDecoder.new(json_parse_limits_default(), 131072, false)
+            match dec.feed_chunk(jsonl + "\n"):
+                case Ok(ops): _p6_check(ops.len() == 2, "store_json_parses_via_wire_decoder")
+                case Err(_): _p6_check(false, "store_json_parses_via_wire_decoder")
+        case Err(_): _p6_check(false, "store_json_parses_via_wire_decoder")
+
+fn run_phase6_benchmarks():
+    val cat = a2ui_basic_catalog()
+    val limits = json_parse_limits_default()
+
+    # 1. Screen compile + expand (10, 100, 500 components).
+    val sdn10 = _make_scale_screen_sdn(10)
+    val sdn100 = _make_scale_screen_sdn(100)
+    val sdn500 = _make_scale_screen_sdn(500)
+    val _w1 = a2ui_compile_screen_table(sdn10, cat, 600)
+    val t0 = time_now_unix_micros()
+    var iter = 0
+    while iter < 10:
+        match a2ui_compile_screen_table(sdn10, cat, 600):
+            case Ok(t): val _e = a2ui_expand_screen_table(t, "b", "s", 1, cat, [], 600)
+            case Err(_): ()
+        iter = iter + 1
+    val t_screen_10_us = (time_now_unix_micros() - t0) / 10
+
+    val t1 = time_now_unix_micros()
+    iter = 0
+    while iter < 10:
+        match a2ui_compile_screen_table(sdn100, cat, 600):
+            case Ok(t): val _e = a2ui_expand_screen_table(t, "b", "s", 1, cat, [], 600)
+            case Err(_): ()
+        iter = iter + 1
+    val t_screen_100_us = (time_now_unix_micros() - t1) / 10
+
+    val t2 = time_now_unix_micros()
+    iter = 0
+    while iter < 5:
+        match a2ui_compile_screen_table(sdn500, cat, 600):
+            case Ok(t): val _e = a2ui_expand_screen_table(t, "b", "s", 1, cat, [], 600)
+            case Err(_): ()
+        iter = iter + 1
+    val t_screen_500_us = (time_now_unix_micros() - t2) / 5
+
+    # 2. Data model leaf invalidation on 100-component surface.
+    var reg = A2uiSurfaceRegistry.new(cat)
+    val _c = reg.apply_op("b", A2uiSurfaceOp.CreateSurface(surface_id: "s", catalog_id: a2ui_basic_catalog_id(), send_data_model: false, root_id: "root"))
+    match a2ui_compile_screen_table(sdn100, cat, 200):
+        case Ok(ct):
+            match a2ui_expand_screen_table(ct, "b", "s", 1, cat, [], 200):
+                case Ok(comps): val _u = reg.apply_op("b", A2uiSurfaceOp.UpdateComponents(surface_id: "s", components: comps))
+                case Err(_): ()
+        case Err(_): ()
+    val t3 = time_now_unix_micros()
+    iter = 0
+    while iter < 50:
+        val _dm = reg.apply_op("b", A2uiSurfaceOp.UpdateDataModel(surface_id: "s", path: "/view/item_42", value: A2uiArgPresence.Present(value: A2uiValue.Int(value: iter))))
+        match reg.get_surface("b", "s"):
+            case Some(sf): val _aff = a2ui_surface_affected_components(sf, "/view/item_42")
+            case None: ()
+        iter = iter + 1
+    val t_leaf_50_us = (time_now_unix_micros() - t3) / 50
+
+    # 3. Streaming JSONL whole vs 64-byte vs 8-byte chunks (30 ops).
+    var batch_lines: [text] = []
+    var li = 0
+    while li < 30:
+        batch_lines.push(a2ui_op_to_json(A2uiSurfaceOp.UpdateDataModel(surface_id: "s", path: "/view/k_" + li.to_string(), value: A2uiArgPresence.Present(value: A2uiValue.Int(value: li)))))
+        li = li + 1
+    val batch_jsonl = batch_lines.join("\n") + "\n"
+    val t4 = time_now_unix_micros()
+    var d_whole = A2uiJsonlStreamDecoder.new(limits, 65536, false)
+    val _w = d_whole.feed_chunk(batch_jsonl)
+    val t_stream_whole_us = time_now_unix_micros() - t4
+
+    val t5 = time_now_unix_micros()
+    var d_chunk8 = A2uiJsonlStreamDecoder.new(limits, 65536, false)
+    var cp = 0
+    val blen = batch_jsonl.byte_len()
+    while cp < blen:
+        val ce = if cp + 8 < blen: cp + 8 else: blen
+        val _c8 = d_chunk8.feed_chunk(batch_jsonl.substring(cp, ce))
+        cp = ce
+    val t_stream_8b_us = time_now_unix_micros() - t5
+
+    # 4. Hot-swap lease begin + suspend + swap + resume + drain (20 cycles).
+    var ho = HandlerGenerationOwner.new()
+    val t6 = time_now_unix_micros()
+    iter = 0
+    while iter < 20:
+        match ho.begin_request(1):
+            case Ok(l):
+                match ho.suspend_async(l):
+                    case Ok(ls):
+                        val _ng = ho.publish_generation()
+                        match ho.resume_async(ls):
+                            case Ok(lr): val _comp = ho.complete_request_lease(lr)
+                            case Err(_): ()
+                    case Err(_): ()
+            case Err(_): ()
+        iter = iter + 1
+    val t_hotswap_cycle_us = (time_now_unix_micros() - t6) / 20
+
+    # 5. QueryIR 200-row filter/sort vs BoundedChangeJournal poll.
+    val qsnap = _make_scale_snapshot(200)
+    val t7 = time_now_unix_micros()
+    match caret_default_authority_policy():
+        case Ok(pol):
+            match AuthorityGate.new(pol, "bench_secret_key_2026"):
+                case Ok(gate):
+                    match gate.mint_grant("bench", "main", "caret.roster", [AppOpKind.Read], ["roster"], false, "bn1", 999999999):
+                        case Ok(gr):
+                            match query_parse_restricted_spl("qb", "roster", "from caret.roster where label matches \"AgentAlpha\" select key,label order label asc limit 50", ReleaseAudience.HumanSurface, 100):
+                                case Ok(plan):
+                                    iter = 0
+                                    while iter < 10:
+                                        val _qr = query_execute_authorized(gate, gr, "bench", "main", qsnap, plan, "/view/roster", 1000)
+                                        iter = iter + 1
+                                case Err(_): ()
+                        case Err(_): ()
+                case Err(_): ()
+        case Err(_): ()
+    val t_query_200_us = (time_now_unix_micros() - t7) / 10
+
+    var bj = BoundedChangeJournal.new(64)
+    var ji = 0
+    while ji < 40:
+        bj.append(ChangeEventKind.Upsert, "k_" + ji.to_string(), 1)
+        ji = ji + 1
+    val t8 = time_now_unix_micros()
+    iter = 0
+    while iter < 50:
+        val _pr = bj.poll(20)
+        iter = iter + 1
+    val t_journal_delta_us = (time_now_unix_micros() - t8) / 50
+
+    _p6_check(t_screen_10_us >= 0 and t_screen_100_us >= 0 and t_screen_500_us >= 0, "bench_screen_timers_valid")
+    _p6_check(t_stream_whole_us >= 0 and t_stream_8b_us >= 0 and t_hotswap_cycle_us >= 0 and t_query_200_us >= 0, "bench_stream_hotswap_query_valid")
+
+    print "A2UI_BENCH_SDN_BEGIN"
+    print "screen_10_us=" + t_screen_10_us.to_string()
+    print "screen_100_us=" + t_screen_100_us.to_string()
+    print "screen_500_us=" + t_screen_500_us.to_string()
+    print "leaf_invalidation_100_us=" + t_leaf_50_us.to_string()
+    print "stream_30ops_whole_us=" + t_stream_whole_us.to_string()
+    print "stream_30ops_8b_chunks_us=" + t_stream_8b_us.to_string()
+    print "hotswap_lease_cycle_us=" + t_hotswap_cycle_us.to_string()
+    print "query_200rows_us=" + t_query_200_us.to_string()
+    print "journal_delta_poll_us=" + t_journal_delta_us.to_string()
+    print "A2UI_BENCH_SDN_END"
+
+pub fn verify_a2ui_phase6_and_bench() -> (i64, i64):
+    _p6_pass = 0
+    _p6_fail = 0
+    verify_inbound_wire_and_streaming()
+    verify_catalog_functions_and_caret_store()
+    run_phase6_benchmarks()
+    (_p6_pass, _p6_fail)
+
+export verify_a2ui_phase6_and_bench

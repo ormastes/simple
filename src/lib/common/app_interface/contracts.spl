@@ -1,0 +1,307 @@
+#![allow(primitive_api)] # App interface schema/revision/draft contracts carry scalar versions and sizes
+# Shared Application Interface Contracts (Backend-Independent)
+#
+# Implements Section 9 & 11.2 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Semantic resource, query, command, draft, and UI binding descriptors.
+#   - Nine independent operation dimensions (discover, read, subscribe, create,
+#     update, delete, invoke, compose, delegate).
+#   - Separate release audiences (human_surface, model_input, export, clipboard,
+#     logs, selected_provider_only).
+#   - Distinct revision counters (data, draft, composition, policy, surface, code).
+#   - Honest command delivery states (Draft, Queued, Sent, Acknowledged, Rejected, Unknown).
+
+use std.common.ui.a2ui.types.{A2uiValue, A2uiObjectEntry}
+
+# ============================================================================
+# Independent Operation Dimensions (§11.2)
+# ============================================================================
+
+pub enum AppOpKind:
+    Discover
+    Read
+    Subscribe
+    Create
+    Update
+    Delete
+    Invoke
+    Compose
+    Delegate
+
+pub fn app_op_name(op: AppOpKind) -> text:
+    match op:
+        case AppOpKind.Discover: "discover"
+        case AppOpKind.Read: "read"
+        case AppOpKind.Subscribe: "subscribe"
+        case AppOpKind.Create: "create"
+        case AppOpKind.Update: "update"
+        case AppOpKind.Delete: "delete"
+        case AppOpKind.Invoke: "invoke"
+        case AppOpKind.Compose: "compose"
+        case AppOpKind.Delegate: "delegate"
+
+pub fn app_op_from_name(name: text) -> Result<AppOpKind, text>:
+    if name == "discover": return Ok(AppOpKind.Discover)
+    if name == "read": return Ok(AppOpKind.Read)
+    if name == "subscribe": return Ok(AppOpKind.Subscribe)
+    if name == "create": return Ok(AppOpKind.Create)
+    if name == "update": return Ok(AppOpKind.Update)
+    if name == "delete": return Ok(AppOpKind.Delete)
+    if name == "invoke": return Ok(AppOpKind.Invoke)
+    if name == "compose": return Ok(AppOpKind.Compose)
+    if name == "delegate": return Ok(AppOpKind.Delegate)
+    Err("unknown_operation:" + name)
+
+# ============================================================================
+# Release Audiences (§11.4)
+# ============================================================================
+
+pub enum ReleaseAudience:
+    HumanSurface
+    ModelInput
+    Export
+    Clipboard
+    Logs
+    SelectedProviderOnly
+
+pub fn release_audience_name(aud: ReleaseAudience) -> text:
+    match aud:
+        case ReleaseAudience.HumanSurface: "human_surface"
+        case ReleaseAudience.ModelInput: "model_input"
+        case ReleaseAudience.Export: "export"
+        case ReleaseAudience.Clipboard: "clipboard"
+        case ReleaseAudience.Logs: "logs"
+        case ReleaseAudience.SelectedProviderOnly: "selected_provider_only"
+
+pub fn release_audience_from_name(name: text) -> Result<ReleaseAudience, text>:
+    if name == "human_surface": return Ok(ReleaseAudience.HumanSurface)
+    if name == "model_input": return Ok(ReleaseAudience.ModelInput)
+    if name == "export": return Ok(ReleaseAudience.Export)
+    if name == "clipboard": return Ok(ReleaseAudience.Clipboard)
+    if name == "logs": return Ok(ReleaseAudience.Logs)
+    if name == "selected_provider_only": return Ok(ReleaseAudience.SelectedProviderOnly)
+    Err("unknown_release_audience:" + name)
+
+# ============================================================================
+# Honest Command Delivery Outcomes (§13.1, §13.7)
+# ============================================================================
+
+pub enum CommandDeliveryState:
+    Draft
+    Queued
+    Sent
+    Acknowledged
+    Rejected
+    Unknown
+
+pub fn command_delivery_name(state: CommandDeliveryState) -> text:
+    match state:
+        case CommandDeliveryState.Draft: "Draft"
+        case CommandDeliveryState.Queued: "Queued"
+        case CommandDeliveryState.Sent: "Sent"
+        case CommandDeliveryState.Acknowledged: "Acknowledged"
+        case CommandDeliveryState.Rejected: "Rejected"
+        case CommandDeliveryState.Unknown: "Unknown"
+
+# ============================================================================
+# Separate Revision Counters (§17.9)
+# ============================================================================
+
+pub struct AppRevisionState:
+    data_revision: i64
+    draft_revision: i64
+    composition_revision: i64
+    policy_revision: i64
+    surface_generation: i64
+    code_generation: i64
+
+pub fn app_revisions_initial() -> AppRevisionState:
+    AppRevisionState(
+        data_revision: 1,
+        draft_revision: 1,
+        composition_revision: 1,
+        policy_revision: 1,
+        surface_generation: 1,
+        code_generation: 1
+    )
+
+# ============================================================================
+# Descriptors (Privileged App Registration Only, §9.1)
+# ============================================================================
+
+pub struct AppFieldSchema:
+    name: text
+    type_name: text
+    required: bool
+    max_bytes: i64
+
+pub struct ResourceDescriptor:
+    id: text
+    schema_version: i64
+    owner_provider: text
+    key_field: text
+    fields: [AppFieldSchema]
+    permitted_ops: [AppOpKind]
+
+pub struct QueryDescriptor:
+    id: text
+    sources: [text]
+    optional_sources: [text]
+    region: text
+    release_audience: ReleaseAudience
+    destination_path: text
+    max_rows: i64
+    max_work_steps: i64
+
+pub struct CommandDescriptor:
+    id: text
+    op_kind: AppOpKind
+    region: text
+    arg_fields: [AppFieldSchema]
+    requires_user_activation: bool
+    payload_release: ReleaseAudience
+
+pub struct DraftContract:
+    owner: text
+    writable_paths: [text]
+    protected_paths: [text]
+    max_bytes_per_field: i64
+
+pub struct CommandOutcome:
+    request_id: text
+    command_id: text
+    delivery: CommandDeliveryState
+    summary: text
+    error_code: text
+    domain_revision: i64
+
+pub fn app_schema_validate_args(
+    schema: [AppFieldSchema],
+    args: [A2uiObjectEntry]
+) -> Result<bool, text>:
+    # Reject unknown / smuggled arguments (mass-assignment defense).
+    var ai = 0
+    while ai < args.len():
+        val entry = args[ai]
+        var found = false
+        var expected_type = ""
+        var max_b = 0
+        var si = 0
+        while si < schema.len():
+            if schema[si].name == entry.key:
+                found = true
+                expected_type = schema[si].type_name
+                max_b = schema[si].max_bytes
+                break
+            si = si + 1
+        if not found:
+            return Err("smuggled_unknown_argument:" + entry.key)
+        if expected_type == "text":
+            match entry.value:
+                case A2uiValue.Text(s):
+                    if max_b > 0 and s.byte_len() > max_b:
+                        return Err("argument_byte_limit_exceeded:" + entry.key)
+                case _:
+                    return Err("argument_type_mismatch:" + entry.key)
+        elif expected_type == "int":
+            match entry.value:
+                case A2uiValue.Int(n):
+                    if n < 0:
+                        return Err("argument_negative_int:" + entry.key)
+                case _:
+                    return Err("argument_type_mismatch:" + entry.key)
+        elif expected_type == "bool":
+            match entry.value:
+                case A2uiValue.Bool(_): ()
+                case _: return Err("argument_type_mismatch:" + entry.key)
+        ai = ai + 1
+    # Check required fields.
+    var ri = 0
+    while ri < schema.len():
+        if schema[ri].required:
+            var present = false
+            var aj = 0
+            while aj < args.len():
+                if args[aj].key == schema[ri].name:
+                    present = true
+                    break
+                aj = aj + 1
+            if not present:
+                return Err("missing_required_argument:" + schema[ri].name)
+        ri = ri + 1
+    Ok(true)
+
+pub class AppInterfaceRegistry:
+    interface_id: text
+    provider_id: text
+    resources: [ResourceDescriptor]
+    queries: [QueryDescriptor]
+    commands: [CommandDescriptor]
+    draft_contract: DraftContract
+
+    static fn new(interface_id: text, provider_id: text, draft_contract: DraftContract) -> AppInterfaceRegistry:
+        AppInterfaceRegistry(
+            interface_id: interface_id,
+            provider_id: provider_id,
+            resources: [],
+            queries: [],
+            commands: [],
+            draft_contract: draft_contract
+        )
+
+    me register_resource(desc: ResourceDescriptor) -> Result<bool, text>:
+        var i = 0
+        while i < self.resources.len():
+            if self.resources[i].id == desc.id:
+                return Err("duplicate_resource:" + desc.id)
+            i = i + 1
+        self.resources.push(desc)
+        Ok(true)
+
+    me register_query(desc: QueryDescriptor) -> Result<bool, text>:
+        var i = 0
+        while i < self.queries.len():
+            if self.queries[i].id == desc.id:
+                return Err("duplicate_query:" + desc.id)
+            i = i + 1
+        self.queries.push(desc)
+        Ok(true)
+
+    me register_command(desc: CommandDescriptor) -> Result<bool, text>:
+        var i = 0
+        while i < self.commands.len():
+            if self.commands[i].id == desc.id:
+                return Err("duplicate_command:" + desc.id)
+            i = i + 1
+        self.commands.push(desc)
+        Ok(true)
+
+    fn find_resource(id: text) -> ResourceDescriptor?:
+        var i = 0
+        while i < self.resources.len():
+            if self.resources[i].id == id:
+                return Some(self.resources[i])
+            i = i + 1
+        None
+
+    fn find_query(id: text) -> QueryDescriptor?:
+        var i = 0
+        while i < self.queries.len():
+            if self.queries[i].id == id:
+                return Some(self.queries[i])
+            i = i + 1
+        None
+
+    fn find_command(id: text) -> CommandDescriptor?:
+        var i = 0
+        while i < self.commands.len():
+            if self.commands[i].id == id:
+                return Some(self.commands[i])
+            i = i + 1
+        None
+
+export AppOpKind, app_op_name, app_op_from_name
+export ReleaseAudience, release_audience_name, release_audience_from_name
+export CommandDeliveryState, command_delivery_name
+export AppRevisionState, app_revisions_initial
+export AppFieldSchema, ResourceDescriptor, QueryDescriptor, CommandDescriptor, DraftContract, CommandOutcome
+export app_schema_validate_args, AppInterfaceRegistry

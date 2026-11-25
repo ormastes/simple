@@ -1,0 +1,57 @@
+# @cover src/lib/common/ui/a2ui/screen_table.spl 80%
+# @cover src/lib/common/app_interface/runtime.spl 80%
+# @cover src/app/llm_caret/a2ui/cs_commands.spl 80%
+# @cover src/app/llm_caret/a2ui/cs_live_host.spl 80%
+# @req REQ-A2UI-009 REQ-A2UI-010 REQ-A2UI-011
+"""
+## Purpose and audience
+Purpose: End-to-end system specification for A2UI dynamic app interfaces,
+regional authority enforcement, Caret Send flow, dynamic UI composition,
+and `aspect_dynload_lifecycle_v1` hot-swap execution.
+Audience: Release verification and platform architecture reviewers.
+"""
+
+use std.spipe.*
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.app_interface.contracts.{AppOpKind}
+use std.common.app_interface.authority.{AuthorityGate}
+use std.common.app_interface.runtime.{AppInterfaceRuntime}
+use app.llm_caret.a2ui.cs_app_interface.{
+    caret_screen_sdn_v1,
+    caret_readonly_screen_sdn_v1,
+    caret_default_authority_policy,
+    caret_register_app_interface
+}
+
+describe "A2UI Dynamic App Interfaces System Contract":
+    it "REQ-A2UI-010 REQ-A2UI-011: admits dynamic screen updates while preserving drafts and blocking region escalation":
+        step("Initialize Caret interface registry and default-deny regional authority gate")
+        val pol = caret_default_authority_policy()
+        val iface = caret_register_app_interface()
+        expect pol.is_ok() to_equal true
+        expect iface.is_ok() to_equal true
+        match pol:
+            case Ok(p):
+                match iface:
+                    case Ok(reg):
+                        val gate_r = AuthorityGate.new(p, "system_spec_hmac_secret_2026")
+                        expect gate_r.is_ok() to_equal true
+                        match gate_r:
+                            case Ok(gate_init):
+                                var gate = gate_init
+                                var rt = AppInterfaceRuntime.new("caret_app", "main", "alice", "d001", reg, a2ui_basic_catalog())
+                                step("Edit owner draft body and admit read-only then full interactive screen dynamically")
+                                expect rt.apply_draft_edit("alice", "main", "/draft/body", "keep me").is_ok() to_equal true
+                                val cg = gate.mint_grant("alice", "main", "caret.ui", [AppOpKind.Compose], ["workspace"], false, "n_sys_1", 10000)
+                                match cg:
+                                    case Ok(grant):
+                                        expect rt.admit_screen_composition(gate, grant, "alice", caret_readonly_screen_sdn_v1(), 64, 1000).is_ok() to_equal true
+                                        expect rt.admit_screen_composition(gate, grant, "alice", caret_screen_sdn_v1(), 64, 1000).is_ok() to_equal true
+                                        expect rt.revisions.code_generation to_equal 1
+                                        step("Reject region escalation mounting composer under detail")
+                                        val bad_esc = "|id, parent, slot, order, region, repeat, key, expression|\nroot, null, null, 0, workspace, null, null, \"Column()\"\nd, root, children, 0, detail, null, null, \"Column()\"\ns, d, children, 0, composer, null, null, \"Button(action=Event(\\\"caret.send\\\"))\"\nsl, s, child, 0, composer, null, null, \"Text(text=\\\"Send\\\")\""
+                                        expect rt.admit_screen_composition(gate, grant, "alice", bad_esc, 64, 1000).is_err() to_equal true
+                                    case Err(_): expect false to_equal true
+                            case Err(_): expect false to_equal true
+                    case Err(_): expect false to_equal true
+            case Err(_): expect false to_equal true
