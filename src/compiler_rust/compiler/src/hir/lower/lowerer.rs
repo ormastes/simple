@@ -775,12 +775,9 @@ impl Lowerer {
             name: name.to_string(),
             kind,
         };
-        // Mirror into the process-global registry so the native link path can
-        // resolve an "undefined symbol" back to this location. The production
-        // path (`native_project::compile_file_to_object`) calls
-        // `lower_module`, which consumes the lowerer and returns only a
-        // `HirModule`, so this per-instance collector never reaches the linker.
-        super::lenient_global_diag::record_for_link_diagnostics(&entry);
+        // Flushed in batch to the process-global registry when this `Lowerer`
+        // drops so multi-threaded native builds do not contend on a global
+        // mutex per lenient identifier.
         self.lenient_globals.record(entry);
     }
 

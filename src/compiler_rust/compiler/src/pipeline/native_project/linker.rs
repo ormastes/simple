@@ -1684,7 +1684,12 @@ int main(int argc, char** argv) {
     }
 
     /// Link object files into a native binary using LinkerBuilder.
-    pub(crate) fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
+    pub(crate) fn link_objects(
+        &self,
+        temp_dir: &Path,
+        object_paths: &[PathBuf],
+        imports: &ModuleImports,
+    ) -> Result<(), String> {
         self.validate_piped_observer_lane()?;
         // Resolve the `SIMPLE_LINKER` preference FIRST, before any archive is
         // built or any object is projected: an unsupported or uninstallable
@@ -1692,7 +1697,6 @@ int main(int argc, char** argv) {
         // minutes of runtime-capsule work would be indistinguishable from the
         // silent-ignore behaviour this replaces.
         let requested_linker = requested_linker_driver_name()?;
-        let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         let cross_target = effective_target();
         let is_elf_target = matches!(cross_target.os, TargetOS::Linux | TargetOS::FreeBSD);

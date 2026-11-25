@@ -2647,6 +2647,7 @@ impl Lowerer {
         // Absence keeps codegen's existing builtin inference available; ANY
         // placeholders are not authoritative result-type declarations.
         self.method_return_types.retain(|_, ty| *ty != TypeId::ANY);
+        super::super::lenient_global_diag::record_batch_for_link_diagnostics(&self.lenient_globals);
         Ok((self.module, self.method_return_types))
     }
 
@@ -2934,6 +2935,7 @@ impl Lowerer {
             super::super::LoweringOutput::with_lifetime(module, warnings, lifetime_lean4, lifetime_violations);
         // Carry out the attribution index for names that `lenient_types`
         // lowered to globals, so a link-time undefined symbol is traceable.
+        super::super::lenient_global_diag::record_batch_for_link_diagnostics(&self.lenient_globals);
         output.lenient_globals = self.lenient_globals.clone();
         // Carry out the import cycles the loader walked. These are reported,
         // not rejected: the loader has always tolerated cycles and failing here

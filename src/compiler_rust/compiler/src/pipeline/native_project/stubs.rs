@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use object::{Object, ObjectKind, ObjectSymbol};
+use rayon::prelude::*;
 use simple_common::target::TargetOS;
 
 use super::{effective_target, ModuleImports};
@@ -956,6 +958,71 @@ pub(crate) fn generate_stub_object_freestanding(
     Err(format!("failed to compile freestanding stubs: {}", last_stderr))
 }
 
+/// Read defined and undefined global symbol names from an object file or archive.
+///
+/// ELF relocatable objects are parsed in-process so Linux/FreeBSD links do not
+/// fork `nm` serially once per module object (~1,700 subprocesses); archives
+/// and other formats fall back to `nm -g -p`.
+fn scan_object_or_archive_symbols(path: &std::path::Path) -> Result<(Vec<String>, Vec<String>), String> {
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        use std::io::Read;
+        if let Ok(mut file) = std::fs::File::open(path) {
+            let mut magic = [0u8; 4];
+            if file.read_exact(&mut magic).is_ok() && magic == *b"\x7fELF" {
+                drop(file);
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(parsed) = object::File::parse(bytes.as_slice()) {
+                        if parsed.kind() == ObjectKind::Relocatable {
+                            let mut defined = Vec::new();
+                            let mut undefined = Vec::new();
+                            for symbol in parsed.symbols().filter(|s| s.is_global()) {
+                                if let Ok(name) = symbol.name() {
+                                    if name.is_empty() {
+                                        continue;
+                                    }
+                                    if symbol.is_undefined() {
+                                        // Match `nm -g -p`: weak undefined symbols are
+                                        // emitted as `w sym` (not `U sym`) and ignored here.
+                                        if !symbol.is_weak() {
+                                            undefined.push(name.to_string());
+                                        }
+                                    } else {
+                                        defined.push(name.to_string());
+                                    }
+                                }
+                            }
+                            return Ok((defined, undefined));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let output = nm_command()?
+        .arg("-g")
+        .arg("-p")
+        .arg(external_tool_path(path))
+        .output()
+        .map_err(|e| format!("nm: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut defined = Vec::new();
+    let mut undefined = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts.as_slice() {
+            [sym_type, name] if *sym_type == "U" => {
+                undefined.push(name.to_string());
+            }
+            [_addr, sym_type, name] if *sym_type != "U" => {
+                defined.push(name.to_string());
+            }
+            _ => {}
+        }
+    }
+    Ok((defined, undefined))
+}
+
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
 #[cfg(any(
     target_os = "android",
@@ -1015,26 +1082,17 @@ pub(super) fn generate_stub_object_with_policy(
         v
     };
 
-    for path in &scan_paths {
-        let output = nm_command()?
-            .arg("-g")
-            .arg("-p")
-            .arg(external_tool_path(path))
-            .output()
-            .map_err(|e| format!("nm: {e}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            match parts.as_slice() {
-                [sym_type, name] if *sym_type == "U" => {
-                    undefined.insert(name.to_string());
-                }
-                [_addr, sym_type, name] if *sym_type != "U" => {
-                    defined.insert(name.to_string());
-                }
-                _ => {}
-            }
-        }
+    // Scan relocatable object files in parallel in-process using `object`
+    // instead of spawning `nm -g -p` serially per module (~1,700 subprocesses).
+    // Archives or non-relocatable inputs fall back to `nm -g -p`.
+    let scan_results: Vec<Result<(Vec<String>, Vec<String>), String>> = scan_paths
+        .par_iter()
+        .map(|path| scan_object_or_archive_symbols(path))
+        .collect();
+    for res in scan_results {
+        let (defs, undefs) = res?;
+        defined.extend(defs);
+        undefined.extend(undefs);
     }
 
     let fallback_runtime = if selected_runtime_libs.is_empty() {

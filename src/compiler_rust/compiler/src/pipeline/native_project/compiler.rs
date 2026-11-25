@@ -474,33 +474,27 @@ impl NativeProjectBuilder {
         let opt_level = self.config.opt_level;
         let canonical_entry = canonical_entry.clone();
         let imports = imports.clone();
-        // Whole-graph suffix index: identical for every module, so build it
+        // Whole-graph indexes: identical for every module, so build them
         // once per compile phase instead of once per compiled module.
         let global_suffix_index = shared_suffix_index(&imports, &backend, no_mangle);
+        let global_ambiguous_fields = shared_ambiguous_field_names(&imports);
         let admission = NativeCompileAdmission::default();
 
-        // Large public aggregation facades spend most of their time resolving
-        // hundreds of re-exports.  Running one beside every LLVM worker made
-        // its bounded wall-clock timeout measure scheduler/memory-bandwidth
-        // starvation instead of compiler progress (compiler.core reproducibly
-        // finishes in 146s alone but exceeded 300s in a 32-way build). Admit
-        // these rare units before broad fanout; cached units never reach here.
-        let (contention_sensitive, regular): (Vec<_>, Vec<_>) = entries
-            .iter()
-            .cloned()
-            .partition(|(_, _, source, _)| is_contention_sensitive_entry(source));
-        let mut results = if contention_sensitive.is_empty() {
-            Vec::new()
-        } else {
-            self.compile_entries_sequential_with_admission(
-                &contention_sensitive, &temp_dir, &canonical_entry, &imports, &admission,
-            )
-        };
+        // Schedule contention-sensitive facades and largest files first (LPT)
+        // with unit-sized stealing (`with_max_len(1)`) so heavy modules start
+        // immediately in parallel across distinct workers instead of stalling 63
+        // cores behind a serial facade queue or alphabetical tail stragglers.
+        let mut scheduled: Vec<&(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)> = entries.iter().collect();
+        scheduled.sort_by(|a, b| {
+            (is_contention_sensitive_entry(&b.2), b.2.len())
+                .cmp(&(is_contention_sensitive_entry(&a.2), a.2.len()))
+        });
+        let completed_count = std::sync::atomic::AtomicUsize::new(0);
 
-        let mut parallel_results: Vec<_> = regular
+        scheduled
             .par_iter()
-            .enumerate()
-            .map(|(progress_i, (idx, path, source, cache_path))| {
+            .with_max_len(1)
+            .map(|(idx, path, source, cache_path)| {
                 let is_entry = is_entry_file(path, &canonical_entry);
                 if verbose && is_entry {
                     eprintln!("  [entry] {}", path.display());
@@ -519,16 +513,15 @@ impl NativeProjectBuilder {
                     is_entry,
                     imports.clone(),
                     global_suffix_index.clone(),
+                    global_ambiguous_fields.clone(),
                     &admission,
                 ) {
                     Ok(obj_code) => {
-                        let obj_path = temp_dir.join(format!("mod_{}.o", idx));
-                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
-                        if let Some(cache_path) = cache_path {
-                            persist_compiled_object_best_effort(cache_path, &obj_code, path);
-                        }
-                        if verbose && (progress_i + 1) % 50 == 0 {
-                            eprintln!("  [{}/{}] compiled", progress_i + 1, total);
+                        let obj_path =
+                            store_compiled_object(&temp_dir, *idx, cache_path.as_deref(), &obj_code, path)?;
+                        let done = completed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if verbose && done % 50 == 0 {
+                            eprintln!("  [{}/{}] compiled", done, total);
                         }
                         Ok((*idx, obj_path))
                     }
@@ -538,9 +531,7 @@ impl NativeProjectBuilder {
                     }
                 }
             })
-            .collect();
-        results.append(&mut parallel_results);
-        results
+            .collect()
     }
 
     /// Compile entries sequentially (fallback).
@@ -565,10 +556,11 @@ impl NativeProjectBuilder {
         admission: &NativeCompileAdmission,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let total = entries.len();
-        // Same hoist as `compile_entries_parallel`: one whole-graph index for
+        // Same hoists as `compile_entries_parallel`: one whole-graph index for
         // the whole phase, not one per module.
         let global_suffix_index =
             shared_suffix_index(imports, &self.config.backend, self.config.no_mangle);
+        let global_ambiguous_fields = shared_ambiguous_field_names(imports);
         entries
             .iter()
             .enumerate()
@@ -591,14 +583,12 @@ impl NativeProjectBuilder {
                     is_entry,
                     imports.clone(),
                     global_suffix_index.clone(),
+                    global_ambiguous_fields.clone(),
                     admission,
                 ) {
                     Ok(obj_code) => {
-                        let obj_path = temp_dir.join(format!("mod_{}.o", idx));
-                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
-                        if let Some(cache_path) = cache_path {
-                            persist_compiled_object_best_effort(cache_path, &obj_code, path);
-                        }
+                        let obj_path =
+                            store_compiled_object(temp_dir, *idx, cache_path.as_deref(), &obj_code, path)?;
                         if self.config.verbose && (progress_i + 1) % 10 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
@@ -614,16 +604,60 @@ impl NativeProjectBuilder {
     }
 }
 
+/// Persist a compiled object directly to `cache_path` when caching is enabled
+/// so we do not write every `.o` twice (once in `temp_dir` and once in cache).
+/// Falls back to `temp_dir/mod_{idx}.o` when uncached or if cache persist fails.
+fn store_compiled_object(
+    temp_dir: &Path,
+    idx: usize,
+    cache_path: Option<&Path>,
+    obj_code: &[u8],
+    source_path: &Path,
+) -> Result<PathBuf, (PathBuf, String)> {
+    if let Some(cache_path) = cache_path {
+        if persist_compiled_object_best_effort(cache_path, obj_code, source_path) {
+            return Ok(cache_path.to_path_buf());
+        }
+    }
+    let obj_path = temp_dir.join(format!("mod_{}.o", idx));
+    std::fs::write(&obj_path, obj_code).map_err(|e| (source_path.to_path_buf(), format!("write .o: {e}")))?;
+    Ok(obj_path)
+}
+
 /// True for a source facade whose export-resolution cost is large enough that
 /// competing LLVM workers can consume its entire wall-clock timeout budget.
 /// This is deliberately structural rather than path-based so renamed/new
 /// aggregation modules receive the same admission policy.
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_contention_sensitive_entry(source: &str) -> bool {
     source
         .lines()
         .filter(|line| line.trim_start().starts_with("export "))
         .count()
         >= 256
+}
+
+/// Compute `ambiguous_field_names` once per compile phase instead of scanning
+/// `imports.struct_defs` inside every compiled module.
+fn shared_ambiguous_field_names(imports: &ModuleImports) -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
+    if !imports.populate_global_struct_defs {
+        return None;
+    }
+    Some(std::sync::Arc::new(compute_ambiguous_field_names(imports)))
+}
+
+fn compute_ambiguous_field_names(imports: &ModuleImports) -> std::collections::HashSet<String> {
+    use std::collections::{HashMap, HashSet};
+    let mut field_indices: HashMap<&str, HashSet<usize>> = HashMap::new();
+    for fields in imports.struct_defs.values() {
+        for (idx, (fname, _)) in fields.iter().enumerate() {
+            field_indices.entry(fname.as_str()).or_default().insert(idx);
+        }
+    }
+    field_indices
+        .into_iter()
+        .filter_map(|(name, indices)| if indices.len() > 1 { Some(name.to_string()) } else { None })
+        .collect()
 }
 
 /// The whole-graph suffix index shared by every module in the closure.
@@ -696,27 +730,14 @@ pub(crate) fn compile_file_to_object(
     is_entry: bool,
     imports: &ModuleImports,
     global_suffix_index: &Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
+    global_ambiguous_fields: &Option<std::sync::Arc<std::collections::HashSet<String>>>,
 ) -> Result<Vec<u8>, String> {
     let mut phase_timer = FilePhaseTimer::new(file_path);
     // Bootstrap hack: normalize optional types that older lenient type resolver misses
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
     let target = effective_target();
-    let mut source = if is_bootstrap {
-        // FALLBACK-ONLY (2026-07-30): `apply_bootstrap_rewrite` is a TEXTUAL
-        // rewrite and cannot distinguish an optional TYPE suffix (`[u8]?`)
-        // from the TRY OPERATOR on a variable/index (`r?`, `xs[i]?`). The
-        // 2026-07-16 root fix taught it to keep the `)?` call form, but the
-        // variable and index forms were still deleted, so `?` was a silent
-        // NO-OP at those sites in every bootstrap native-build — the same
-        // class of defect fixed for the run/test lane in module_loader
-        // (doc/08_tracking/bug/
-        // bootstrap_strip_optionals_eats_try_operator_2026-07-30.md).
-        //
-        // Parse the pristine source FIRST and only fall back to the legacy
-        // rewrite when that parse genuinely fails: a source the current
-        // parser accepts is never rewritten, which removes the ambiguity
-        // instead of trying (and failing) to resolve it textually.
-        bootstrap_rewrite_if_unparseable(
+    let (rewritten_source, pre_parsed_ast) = if is_bootstrap {
+        bootstrap_rewrite_or_parse(
             source,
             matches!(
                 target.os,
@@ -724,22 +745,24 @@ pub(crate) fn compile_file_to_object(
             ),
         )
     } else {
-        // Non-bootstrap: keep `text?` intact whenever the pristine source
-        // parses. The unconditional `text?` -> `text` rewrite erased the
-        // optional, so `match s: case Some(v)` over a `text?` param/local hit
-        // SPL-PAT-001 ("expects Option<T>, found text") and every native-build
-        // whose closure reached such a site (devhub, llm_caret,
-        // mail_credentials via std.io.process_ops) failed. Same
-        // parse-first rule as the module loader.
-        normalize_text_opt_if_unparseable(source)
+        normalize_text_opt_or_parse(source)
     };
-    source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, effective_target().arch);
+    let filtered_source =
+        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&rewritten_source, target.arch);
 
-    // Parse
-    let mut parser = simple_parser::Parser::new(&source);
-    let mut ast = parser
-        .parse()
-        .map_err(|e| format!("{}: parse: {e}", file_path.display()))?;
+    // Reuse the AST produced during the parse-first check whenever the
+    // `@cfg(<arch>)` strip left the source bytes unchanged.
+    let mut ast = match pre_parsed_ast {
+        Some(ast) if filtered_source == rewritten_source.as_ref() => ast,
+        _ => {
+            let mut parser = simple_parser::Parser::new(&filtered_source);
+            parser
+                .parse()
+                .map_err(|e| format!("{}: parse: {e}", file_path.display()))?
+        }
+    };
+    drop(filtered_source);
+    drop(rewritten_source);
     phase_timer.mark("parse");
     // Drop `@cfg(<arch>)` function variants that do not match the effective
     // build target, before same-named variants collapse to a source-order
@@ -803,26 +826,10 @@ pub(crate) fn compile_file_to_object(
     //
     // Gated on `--entry-closure` to avoid any risk to self-host bootstrap.
     if imports.populate_global_struct_defs {
-        use std::collections::{HashMap, HashSet};
-        // A field name is ambiguous *only* when two structs disagree on its
-        // index within the struct. Two structs that both put `name` at index
-        // 0 produce the same byte offset (0), so picking either struct is
-        // harmless — that's the McpToolEntry / T32DialogItem case, and the
-        // old "any duplication is ambiguous" rule was breaking it.
-        // The case the rule has to catch is the BeDomNode/BeLayoutBox bug
-        // where `children` is at index 3 in one struct and index 7 in the
-        // other; picking the wrong struct would silently load the wrong
-        // memory location.
-        let mut field_indices: HashMap<String, HashSet<usize>> = HashMap::new();
-        for fields in imports.struct_defs.values() {
-            for (idx, (fname, _)) in fields.iter().enumerate() {
-                field_indices.entry(fname.clone()).or_default().insert(idx);
-            }
-        }
-        let ambiguous: HashSet<String> = field_indices
-            .into_iter()
-            .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
-            .collect();
+        let ambiguous = match global_ambiguous_fields {
+            Some(shared) => std::sync::Arc::clone(shared),
+            None => std::sync::Arc::new(compute_ambiguous_field_names(imports)),
+        };
         // These maps are read-only during per-module lowering; share the Arc
         // instead of deep-cloning the whole graph's maps for every module
         // (O(graph^2) copies on wide closures).
@@ -831,7 +838,7 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_unique_global_struct_owners(std::sync::Arc::clone(&imports.unique_struct_owners));
         lowerer.set_struct_module_owners(std::sync::Arc::clone(&imports.struct_module_owners));
         lowerer.set_duplicate_global_struct_defs(std::sync::Arc::clone(&imports.duplicate_struct_defs));
-        lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
+        lowerer.set_ambiguous_field_names(ambiguous);
     } else {
         lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
         lowerer.set_unique_global_struct_owners(std::sync::Arc::new(std::collections::HashMap::new()));
@@ -864,12 +871,14 @@ pub(crate) fn compile_file_to_object(
     let (mut hir, function_return_types) = lowerer
         .lower_module_with_return_types(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
+    drop(ast);
     phase_timer.mark("hir");
     let module_prefix = module_prefix_from_path(file_path, source_root);
     assign_native_dynamic_initializer_identity(&mut hir, &module_prefix);
     let pipeline =
         crate::pipeline::CompilerPipeline::new().map_err(|e| format!("{}: pipeline: {e}", file_path.display()))?;
     pipeline.rewrite_hir_simd_loops(&mut hir);
+    drop(pipeline);
 
     // MIR
     // Freestanding and WASM runtimes do not define the `[i64]` word lane.
@@ -881,6 +890,7 @@ pub(crate) fn compile_file_to_object(
         signed_word_lane,
     )
     .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    drop(hir);
     phase_timer.mark("mir");
     qualify_native_struct_layouts(
         &mut mir,
@@ -1055,7 +1065,7 @@ pub(crate) fn compile_file_to_object(
             llvm.set_import_map(imports.import_map.clone());
             llvm.set_fn_arities(imports.fn_arities.clone());
             llvm.set_data_exports(imports.data_exports.clone());
-            llvm.set_use_map(use_map.clone());
+            llvm.set_use_map(use_map);
             if !no_mangle {
                 llvm.set_module_prefix(module_prefix.clone());
             }
@@ -1084,6 +1094,7 @@ pub(crate) fn compile_file_to_object(
                     file_path.display()
                 ));
             }
+            drop(mir);
 
             if is_entry && std::env::var("SIMPLE_DEBUG_LLVM").is_ok() {
                 if let Ok(ir) = llvm.get_ir() {
@@ -1092,6 +1103,7 @@ pub(crate) fn compile_file_to_object(
                     eprintln!("[llvm] IR dumped to {}", ir_path.display());
                 }
             }
+            drop(llvm);
 
             return Ok(obj);
         }
@@ -1155,6 +1167,194 @@ impl NativeCompileAdmission {
     }
 }
 
+/// Drop any persistent timed-compile worker parked in calling thread's TLS so
+/// worker stacks and `PARSED_SOURCE_CACHE` entries are released before linking.
+pub(super) fn clear_thread_local_compile_worker() {
+    PERSISTENT_COMPILE_WORKER.with(|slot| {
+        slot.borrow_mut().take();
+    });
+}
+
+type CompileWorkerJob = (
+    Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>,
+    std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+);
+
+struct PersistentCompileWorker {
+    stack_size: usize,
+    tx: Option<std::sync::mpsc::Sender<CompileWorkerJob>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PersistentCompileWorker {
+    fn spawn(stack_size: usize) -> Result<Self, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<CompileWorkerJob>();
+        let handle = std::thread::Builder::new()
+            .name("compile-worker".to_string())
+            .stack_size(stack_size)
+            .spawn(move || {
+                while let Ok((job, reply)) = rx.recv() {
+                    let result = job();
+                    let _ = reply.send(result);
+                }
+            })
+            .map_err(|e| format!("spawn: {e}"))?;
+        Ok(Self {
+            stack_size,
+            tx: Some(tx),
+            handle: Some(handle),
+        })
+    }
+
+    fn run(
+        &self,
+        job: Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>,
+        timeout_secs: u64,
+    ) -> Result<Vec<u8>, String> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let tx = self.tx.as_ref().ok_or_else(|| "compile worker closed".to_string())?;
+        tx.send((job, reply_tx))
+            .map_err(|_| "compile worker disconnected".to_string())?;
+        if timeout_secs == 0 {
+            return reply_rx.recv().map_err(|_| "thread join error".to_string())?;
+        }
+        match reply_rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!("timeout ({}s)", timeout_secs)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("thread join error".to_string()),
+        }
+    }
+}
+
+impl Drop for PersistentCompileWorker {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(handle) = self.handle.take() {
+            if !handle.is_finished() {
+                // Only join if the worker isn't wedged on a timed-out job;
+                // Wait briefly so normal cleanup tears down cleanly without hanging.
+                for _ in 0..50 {
+                    if handle.is_finished() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+thread_local! {
+    static PERSISTENT_COMPILE_WORKER: std::cell::RefCell<Option<PersistentCompileWorker>> =
+        const { std::cell::RefCell::new(None) };
+    static COMPILE_CACHE_LIMIT_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_compile_file_job(
+    source: &str,
+    file_path: &Path,
+    project_root: &Path,
+    source_dirs: &[PathBuf],
+    fallback_root: &Path,
+    no_mangle: bool,
+    backend: &str,
+    opt_level: crate::optimizations::NativeOptimizationLevel,
+    is_entry: bool,
+    imports: &ModuleImports,
+    global_suffix_index: &Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
+    global_ambiguous_fields: &Option<std::sync::Arc<std::collections::HashSet<String>>>,
+) -> Result<Vec<u8>, String> {
+    // Bound this worker's parsed-source memo once per persistent thread so it
+    // stays warm across files without growing unboundedly.
+    COMPILE_CACHE_LIMIT_INIT.with(|init| {
+        if !init.get() {
+            crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
+            init.set(true);
+        }
+    });
+    let timing_wall = std::time::Instant::now();
+    let timing_cpu = current_thread_cpu_time();
+    let source_root = source_root_for_file(file_path, source_dirs, fallback_root);
+    let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
+        compile_file_to_object(
+            source,
+            file_path,
+            project_root,
+            &source_root,
+            fallback_root,
+            source_dirs,
+            no_mangle,
+            backend,
+            opt_level,
+            is_entry,
+            imports,
+            global_suffix_index,
+            global_ambiguous_fields,
+        )
+    } else {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compile_file_to_object(
+                source,
+                file_path,
+                project_root,
+                &source_root,
+                fallback_root,
+                source_dirs,
+                no_mangle,
+                backend,
+                opt_level,
+                is_entry,
+                imports,
+                global_suffix_index,
+                global_ambiguous_fields,
+            )
+        })) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = if let Some(s) = e.downcast_ref::<String>() {
+                    format!("panic: {s}")
+                } else if let Some(s) = e.downcast_ref::<&str>() {
+                    format!("panic: {s}")
+                } else {
+                    "panic: unknown".to_string()
+                };
+                Err(msg)
+            }
+        }
+    };
+    if std::env::var("SIMPLE_NATIVE_FILE_TIMING").as_deref() == Ok("1") {
+        let cpu = match (timing_cpu, current_thread_cpu_time()) {
+            (Some(a), Some(b)) => format!("{:.1}s", b.saturating_sub(a).as_secs_f64()),
+            _ => "?".to_string(),
+        };
+        eprintln!(
+            "[native-file-timing] wall={:.1}s cpu={} {}",
+            timing_wall.elapsed().as_secs_f64(),
+            cpu,
+            file_path.display()
+        );
+    }
+    if crate::mem_trace::enabled() {
+        crate::mem_trace::snapshot(&format!("native-build: after file {}", file_path.display()));
+    }
+    thread_local! {
+        static FILES_SINCE_HEAP_RELEASE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    let count = FILES_SINCE_HEAP_RELEASE.with(|c| {
+        let next = c.get().wrapping_add(1);
+        c.set(next);
+        next
+    });
+    if count % 16 == 0 || timing_wall.elapsed() >= Duration::from_millis(500) {
+        crate::mem_trace::release_thread_heap();
+    }
+    result
+}
+
 /// Compile a file with panic catching and timeout.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn compile_file_safe(
@@ -1171,94 +1371,77 @@ pub(crate) fn compile_file_safe(
     is_entry: bool,
     imports: ModuleImports,
     global_suffix_index: Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
+    global_ambiguous_fields: Option<std::sync::Arc<std::collections::HashSet<String>>>,
     admission: &NativeCompileAdmission,
 ) -> Result<Vec<u8>, String> {
-    use std::sync::mpsc;
-
     admission.run(|| {
-        let (tx, rx) = mpsc::channel();
-        let handle = std::thread::Builder::new()
-            .name(format!(
-                "compile-{}",
-                file_path.file_name().unwrap_or_default().to_string_lossy()
-            ))
-            .stack_size(stack_size)
-            .spawn(move || {
-                // Bound this worker's parsed-source memo. The cache is
-                // thread-local, so the phase-wide default (4096) would otherwise
-                // let one worker retain a whole-graph source+AST copy; entries
-                // are pure recomputable memos, so eviction only costs a re-read
-                // and re-parse on a later miss within this worker.
-                crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
-                let timing_wall = std::time::Instant::now();
-                let timing_cpu = current_thread_cpu_time();
-                let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
-                let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
-                    compile_file_to_object(
-                        &source,
-                        &file_path,
-                        &project_root,
-                        &source_root,
-                        &fallback_root,
-                        &source_dirs,
-                        no_mangle,
-                        &backend,
-                        opt_level,
-                        is_entry,
-                        &imports,
-                        &global_suffix_index,
-                    )
-                } else {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compile_file_to_object(
-                            &source,
-                            &file_path,
-                            &project_root,
-                            &source_root,
-                            &fallback_root,
-                            &source_dirs,
-                            no_mangle,
-                            &backend,
-                            opt_level,
-                            is_entry,
-                            &imports,
-                            &global_suffix_index,
-                        )
-                    })) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                                format!("panic: {s}")
-                            } else if let Some(s) = e.downcast_ref::<&str>() {
-                                format!("panic: {s}")
-                            } else {
-                                "panic: unknown".to_string()
-                            };
-                            Err(msg)
-                        }
-                    }
-                };
-                if std::env::var("SIMPLE_NATIVE_FILE_TIMING").as_deref() == Ok("1") {
-                    let cpu = match (timing_cpu, current_thread_cpu_time()) {
-                        (Some(a), Some(b)) => format!("{:.1}s", b.saturating_sub(a).as_secs_f64()),
-                        _ => "?".to_string(),
-                    };
-                    eprintln!(
-                        "[native-file-timing] wall={:.1}s cpu={} {}",
-                        timing_wall.elapsed().as_secs_f64(),
-                        cpu,
-                        file_path.display()
-                    );
-                }
-                if crate::mem_trace::enabled() {
-                    crate::mem_trace::snapshot(&format!("native-build: after file {}", file_path.display()));
-                }
-                let _ = tx.send(());
-                result
-            })
-            .map_err(|e| format!("spawn: {e}"))?;
+        // Fast path: when no per-file timeout is armed and we are already
+        // executing on a `spl-compile-*` rayon worker (initialized with
+        // `stack_size`), run directly in-thread with zero thread spawn or
+        // channel overhead while keeping worker TLS caches warm across files.
+        let on_compile_pool = std::thread::current()
+            .name()
+            .is_some_and(|name| name.starts_with("spl-compile-"));
+        if timeout_secs == 0 && on_compile_pool {
+            return execute_compile_file_job(
+                &source,
+                &file_path,
+                &project_root,
+                &source_dirs,
+                &fallback_root,
+                no_mangle,
+                &backend,
+                opt_level,
+                is_entry,
+                &imports,
+                &global_suffix_index,
+                &global_ambiguous_fields,
+            );
+        }
 
-        wait_for_compiler_thread(rx, handle, timeout_secs)
+        // Timed / small-stack path: reuse one persistent worker per caller
+        // thread so we spawn at most `N_threads` workers instead of one 16 MiB
+        // OS thread per file, preserving `PARSED_SOURCE_CACHE` across jobs.
+        PERSISTENT_COMPILE_WORKER.with(|slot| {
+            let mut slot_ref = slot.borrow_mut();
+            let needs_respawn = match slot_ref.as_ref() {
+                Some(worker) => worker.stack_size < stack_size,
+                None => true,
+            };
+            if needs_respawn {
+                *slot_ref = Some(PersistentCompileWorker::spawn(stack_size)?);
+            }
+            let job: Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send> = Box::new(move || {
+                execute_compile_file_job(
+                    &source,
+                    &file_path,
+                    &project_root,
+                    &source_dirs,
+                    &fallback_root,
+                    no_mangle,
+                    &backend,
+                    opt_level,
+                    is_entry,
+                    &imports,
+                    &global_suffix_index,
+                    &global_ambiguous_fields,
+                )
+            });
+            let result = slot_ref
+                .as_ref()
+                .expect("worker initialized")
+                .run(job, timeout_secs);
+            if let Err(err) = &result {
+                if (err.starts_with("timeout (") && err.ends_with(')')) || err == "compile worker disconnected" {
+                    // Detach wedged worker so it is never reused.
+                    if let Some(mut wedged) = slot_ref.take() {
+                        wedged.tx.take();
+                        wedged.handle.take();
+                    }
+                }
+            }
+            result
+        })
     })
 }
 
@@ -1298,6 +1481,7 @@ fn current_thread_cpu_time() -> Option<Duration> {
 /// A zero timeout is the documented spelling for an unbounded native build.
 /// Calling `recv_timeout(Duration::ZERO)` would instead fail immediately, so
 /// keep the disabled and bounded paths explicit here.
+#[cfg(test)]
 fn wait_for_compiler_thread(
     rx: std::sync::mpsc::Receiver<()>,
     handle: std::thread::JoinHandle<Result<Vec<u8>, String>>,
@@ -1478,6 +1662,72 @@ mod native_compile_timeout_tests {
             "fn main(): 0\n"
         )));
     }
+
+    #[test]
+    fn persistent_compile_worker_reuses_thread_and_handles_timeout() {
+        let worker = super::PersistentCompileWorker::spawn(2 * 1024 * 1024).unwrap();
+        let first_tid = worker
+            .run(
+                Box::new(|| {
+                    let bytes = format!("{:?}", std::thread::current().id()).into_bytes();
+                    Ok(bytes)
+                }),
+                0,
+            )
+            .unwrap();
+        let second_tid = worker
+            .run(
+                Box::new(|| {
+                    let bytes = format!("{:?}", std::thread::current().id()).into_bytes();
+                    Ok(bytes)
+                }),
+                0,
+            )
+            .unwrap();
+        assert_eq!(first_tid, second_tid, "persistent worker must reuse OS thread across jobs");
+
+        let timed_out = worker.run(
+            Box::new(|| {
+                std::thread::sleep(Duration::from_millis(1_100));
+                Ok(Vec::new())
+            }),
+            1,
+        );
+        assert_eq!(timed_out, Err("timeout (1s)".to_string()));
+    }
+
+    #[test]
+    fn store_compiled_object_writes_only_cache_path_when_caching_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp_dir = dir.path().join("staging");
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_path = cache_dir.join("deadbeef.o");
+        let source_path = std::path::PathBuf::from("src/mod.spl");
+        let payload = b"ELF_OBJ_BYTES";
+
+        let returned = super::store_compiled_object(&temp_dir, 42, Some(&cache_path), payload, &source_path).unwrap();
+        assert_eq!(returned, cache_path);
+        assert_eq!(std::fs::read(&cache_path).unwrap(), payload);
+        assert!(
+            !temp_dir.join("mod_42.o").exists(),
+            "cached object must not be duplicated into temp staging directory"
+        );
+    }
+
+    #[test]
+    fn parse_once_helper_returns_ast_when_source_is_valid() {
+        let valid = "fn add(a: i64, b: i64) -> i64:\n    a + b\n";
+        let (cow, ast) = super::bootstrap_rewrite_or_parse(valid, false);
+        assert!(matches!(cow, std::borrow::Cow::Borrowed(_)));
+        assert!(ast.is_some(), "valid source must keep pre-parsed AST");
+
+        let legacy = "fn f() -> text?:\n    ?\n";
+        let (cow, ast) = super::bootstrap_rewrite_or_parse(legacy, false);
+        assert!(matches!(cow, std::borrow::Cow::Owned(_)));
+        assert!(ast.is_none());
+    }
 }
 
 /// Find the matching `>` for a string starting with `<...>`, handling nested `<>`.
@@ -1515,11 +1765,27 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
 ///
 /// See doc/08_tracking/bug/
 /// bootstrap_strip_optionals_eats_try_operator_2026-07-30.md.
-fn bootstrap_rewrite_if_unparseable(source: &str, preserve_module_global_optional_calls: bool) -> String {
-    if simple_parser::Parser::new(source).parse().is_ok() {
-        return source.to_string();
+fn bootstrap_rewrite_or_parse<'a>(
+    source: &'a str,
+    preserve_module_global_optional_calls: bool,
+) -> (std::borrow::Cow<'a, str>, Option<simple_parser::ast::Module>) {
+    if let Ok(ast) = simple_parser::Parser::new(source).parse() {
+        return (std::borrow::Cow::Borrowed(source), Some(ast));
     }
-    apply_bootstrap_rewrite_for_target(source, preserve_module_global_optional_calls)
+    (
+        std::borrow::Cow::Owned(apply_bootstrap_rewrite_for_target(
+            source,
+            preserve_module_global_optional_calls,
+        )),
+        None,
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn bootstrap_rewrite_if_unparseable(source: &str, preserve_module_global_optional_calls: bool) -> String {
+    bootstrap_rewrite_or_parse(source, preserve_module_global_optional_calls)
+        .0
+        .into_owned()
 }
 
 fn apply_bootstrap_rewrite(source: &str) -> String {
@@ -2366,12 +2632,19 @@ mod aggregate_layout_tests {
     }
 }
 
+fn normalize_text_opt_or_parse<'a>(
+    source: &'a str,
+) -> (std::borrow::Cow<'a, str>, Option<simple_parser::ast::Module>) {
+    if let Ok(ast) = simple_parser::Parser::new(source).parse() {
+        (std::borrow::Cow::Borrowed(source), Some(ast))
+    } else {
+        (std::borrow::Cow::Owned(source.replace("text?", "text")), None)
+    }
+}
+
 /// Non-bootstrap `text?` normalisation: keep the pristine source whenever it
 /// parses; only fall back to the legacy `text?` -> `text` rewrite on failure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn normalize_text_opt_if_unparseable(source: &str) -> String {
-    if simple_parser::Parser::new(source).parse().is_ok() {
-        source.to_string()
-    } else {
-        source.replace("text?", "text")
-    }
+    normalize_text_opt_or_parse(source).0.into_owned()
 }

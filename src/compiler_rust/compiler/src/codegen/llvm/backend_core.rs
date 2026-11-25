@@ -1744,6 +1744,11 @@ impl LlvmBackend {
     /// Emit object code from the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        self.emit_object_inner()
+    }
+
+    #[cfg(feature = "llvm")]
+    fn emit_object_inner(&self) -> Result<Vec<u8>, CompileError> {
         // Initialize LLVM targets
         LlvmTarget::initialize_all(&InitializationConfig::default());
 
@@ -1771,6 +1776,11 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        self.emit_object_inner()
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    fn emit_object_inner(&self) -> Result<Vec<u8>, CompileError> {
         Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
@@ -2269,6 +2279,10 @@ impl NativeBackend for LlvmBackend {
         // `__module_init_*` into `__simple_call_module_inits`, run before entry.
         #[cfg(feature = "llvm")]
         self.generate_module_init(module)?;
+        // Drop the cloned MirModule before LLVM IR verification, optimization,
+        // and object emission so the MIR structures do not stay live alongside
+        // LLVM's optimization passes.
+        drop(owned_module);
 
         // Fix linkage after compilation:
         // 1. Declarations (no body) must have External linkage, not WeakAny.
@@ -2311,7 +2325,7 @@ impl NativeBackend for LlvmBackend {
         }
 
         self.verify()?;
-        self.emit_object(module)
+        self.emit_object_inner()
     }
 
     fn name(&self) -> &'static str {

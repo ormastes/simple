@@ -631,3 +631,65 @@ fn leaf_edit_recompile_count_and_time_budget() {
     assert!(same_s <= 30.0, "no-edit rebuild took {same_s:.1}s (budget 30s)");
     assert!(edit_s <= 30.0, "leaf-edit rebuild took {edit_s:.1}s (budget 30s)");
 }
+
+#[test]
+fn precomputed_universal_slice_handles_member_only_and_ascii_tokens() {
+    use super::{
+        fuzzy_norm, source_dotted_pair_tokens, source_label_tokens, InterfaceSliceIndex, ModuleTokens,
+    };
+    let mut r1 = super::imports::ImportMapResult::default();
+    r1.enum_defs.insert(
+        "Color".to_string(),
+        vec![("Red".to_string(), None), ("Custom".to_string(), Some(vec![simple_parser::Type::Simple("Payload".to_string())]))],
+    );
+    r1.struct_defs.insert(
+        "m__Payload".to_string(),
+        vec![("weight".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    r1.struct_defs.insert(
+        "m__Other".to_string(),
+        vec![("Color".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    let idx1 = InterfaceSliceIndex::build(&r1);
+
+    let mut r2 = super::imports::ImportMapResult::default();
+    r2.enum_defs = r1.enum_defs.clone();
+    r2.struct_defs.insert(
+        "m__Payload".to_string(),
+        vec![("weight".to_string(), simple_parser::Type::Simple("f64".to_string()))],
+    );
+    r2.struct_defs.insert(
+        "m__Other".to_string(),
+        vec![("Color".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    let idx2 = InterfaceSliceIndex::build(&r2);
+
+    // Module mentioning neither Color nor Payload still tracks Payload through
+    // the universal Color enum payload closure.
+    let unrelated = "fn main() -> i64:\n    0\n";
+    assert_ne!(idx1.digest_for_source(unrelated), idx2.digest_for_source(unrelated));
+
+    // Accessing `.Color` as a member token reaches the member-only struct row.
+    let mut r3 = super::imports::ImportMapResult::default();
+    r3.enum_defs = r1.enum_defs.clone();
+    r3.struct_defs.insert(
+        "m__Payload".to_string(),
+        vec![("weight".to_string(), simple_parser::Type::Simple("i64".to_string()))],
+    );
+    r3.struct_defs.insert(
+        "m__Other".to_string(),
+        vec![("Color".to_string(), simple_parser::Type::Simple("f64".to_string()))],
+    );
+    let idx3 = InterfaceSliceIndex::build(&r3);
+    assert_eq!(idx1.digest_for_source(unrelated), idx3.digest_for_source(unrelated));
+    assert_ne!(
+        idx1.digest_for_tokens(&ModuleTokens::of_source("fn f(x): x.Color\n")),
+        idx3.digest_for_tokens(&ModuleTokens::of_source("fn f(x): x.Color\n"))
+    );
+
+    // ASCII fast-path token helpers match expected label and dotted pair forms.
+    assert!(source_label_tokens("Pt(x: 1, y: 2)").contains("x"));
+    let pairs = source_dotted_pair_tokens("Type.method()");
+    assert!(pairs.contains("type_method"));
+    assert!(pairs.contains(&fuzzy_norm("Typemethod")));
+}

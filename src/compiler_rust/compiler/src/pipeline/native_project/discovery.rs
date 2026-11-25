@@ -981,6 +981,8 @@ impl NativeProjectBuilder {
                     let mut facade_providers = explicit_providers.clone();
                     let mut extern_weak_providers = explicit_providers.clone();
                     let mut glob_forwarders = Vec::new();
+                    let mut parsed_siblings: Vec<(PathBuf, simple_parser::ast::Module)> =
+                        Vec::with_capacity(siblings.len());
                     for sibling in siblings {
                         let mut sibling_source = match std::fs::read_to_string(&sibling) {
                             Ok(source) => source,
@@ -1002,6 +1004,7 @@ impl NativeProjectBuilder {
                         strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
                         let (explicit, definitions, facades, extern_weak, forwards_glob) =
                             provided_export_names(&sibling_module.items, &requested);
+                        parsed_siblings.push((sibling.clone(), sibling_module));
                         if forwards_glob {
                             glob_forwarders.push(sibling.clone());
                         }
@@ -1075,41 +1078,53 @@ impl NativeProjectBuilder {
                             }
                         }
                     }
-                }
-            }
 
-            // Bare exports in a package facade identify symbols but not their
-            // owning sibling module. Queue only siblings that define one of
-            // those symbols so unrelated files do not enter the closure.
-            let bare_export_names = bare_export_names(&module.items);
-            if canonical.file_name().and_then(|name| name.to_str()) == Some("__init__.spl")
-                && !bare_export_names.is_empty()
-            {
-                if let Some(parent) = canonical.parent() {
-                    if let Ok(entries) = std::fs::read_dir(parent) {
-                        for entry in entries.flatten() {
-                            let sibling = entry.path();
-                            if sibling.extension().and_then(|ext| ext.to_str()) == Some("spl")
-                                && !same_file_path(&sibling, &canonical)
-                            {
-                                let Ok(sibling_source) = std::fs::read_to_string(&sibling) else {
-                                    continue;
-                                };
-                                let sibling_source = preprocess_discovery_os_branches(
-                                    &sibling_source, &sibling, &crate::pipeline::cfg_strip::cfg_target(),
-                                )?;
-                                let sibling_source =
-                                    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&sibling_source, target_arch);
-                                let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
-                                let Ok(mut sibling_module) = sibling_parser.parse() else {
-                                    continue;
-                                };
-                                strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
-                                if bare_export_names.iter().any(|name| {
-                                    defines_top_level_name(&sibling_module.items, name)
-                                        || reexports_top_level_name(&sibling_module.items, name)
-                                }) {
-                                    found_deps.insert(safe_canonicalize(&sibling));
+                    // Bare exports in a package facade identify symbols but not their
+                    // owning sibling module. Reuse the sibling ASTs parsed above so
+                    // facades with both explicit and bare exports never parse siblings twice.
+                    let bare_export_names = bare_export_names(&module.items);
+                    if !bare_export_names.is_empty() {
+                        for (sibling, sibling_module) in &parsed_siblings {
+                            if bare_export_names.iter().any(|name| {
+                                defines_top_level_name(&sibling_module.items, name)
+                                    || reexports_top_level_name(&sibling_module.items, name)
+                            }) {
+                                found_deps.insert(safe_canonicalize(sibling));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let bare_export_names = bare_export_names(&module.items);
+                if canonical.file_name().and_then(|name| name.to_str()) == Some("__init__.spl")
+                    && !bare_export_names.is_empty()
+                {
+                    if let Some(parent) = canonical.parent() {
+                        if let Ok(entries) = std::fs::read_dir(parent) {
+                            for entry in entries.flatten() {
+                                let sibling = entry.path();
+                                if sibling.extension().and_then(|ext| ext.to_str()) == Some("spl")
+                                    && !same_file_path(&sibling, &canonical)
+                                {
+                                    let Ok(sibling_source) = std::fs::read_to_string(&sibling) else {
+                                        continue;
+                                    };
+                                    let sibling_source = preprocess_discovery_os_branches(
+                                        &sibling_source, &sibling, &crate::pipeline::cfg_strip::cfg_target(),
+                                    )?;
+                                    let sibling_source =
+                                        crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&sibling_source, target_arch);
+                                    let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
+                                    let Ok(mut sibling_module) = sibling_parser.parse() else {
+                                        continue;
+                                    };
+                                    strip_inactive_cfg_arch_fns(&mut sibling_module, target_arch);
+                                    if bare_export_names.iter().any(|name| {
+                                        defines_top_level_name(&sibling_module.items, name)
+                                            || reexports_top_level_name(&sibling_module.items, name)
+                                    }) {
+                                        found_deps.insert(safe_canonicalize(&sibling));
+                                    }
                                 }
                             }
                         }
