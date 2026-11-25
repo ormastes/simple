@@ -21,7 +21,7 @@ use compiler.backend.runtime_object_cache_posix.{runtime_posix_cache_fingerprint
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, file_read, file_write, file_hash_sha256_or_empty, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_cap_bytes, disk_bound_mark_dir_used, disk_bound_keep_newest_dirs}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_source_dir_v1, native_runtime_strict_revalidate_v1,
     native_runtime_strict_generated_bind_v1, native_runtime_strict_generated_release_v1}
@@ -972,6 +972,37 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
         return ""
     dir
 
+fn _runtime_posix_cache_keep_v1() -> i64:
+    val raw = (env_get_nullable("SIMPLE_RT_OBJ_CACHE_KEEP") ?? "").trim()
+    val parsed = if raw == "": 4 else: raw.to_i64() ?? 4
+    if parsed > 0: parsed else: 4
+
+fn _runtime_posix_cache_min_age_s_v1() -> i64:
+    val raw = (env_get_nullable("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S") ?? "").trim()
+    val parsed = if raw == "": 3600 else: raw.to_i64() ?? 3600
+    if parsed >= 0: parsed else: 3600
+
+# reason: POSIX runtime cache directory path, publish flag, and evicted-dir count are cache-bound scalars matching disk_bound_keep_newest_dirs
+@allow(primitive_api)
+pub fn runtime_posix_cache_prune_v1(cache_dir: text, published_any: bool) -> i64:
+    """Mark the active POSIX runtime object cache subdir used and prune stale keyed siblings on publish."""
+    if cache_dir == "":
+        return 0
+    val _marked = disk_bound_mark_dir_used(cache_dir)
+    if not published_any:
+        return 0
+    val normalized = cache_dir.replace("\\", "/")
+    val slash = normalized.rfind("/")
+    if slash <= 0:
+        return 0
+    val base = normalized.substring(0, slash)
+    val current_key = normalized.substring(slash + 1)
+    if current_key == "":
+        return 0
+    disk_bound_keep_newest_dirs(
+        base, current_key, "", current_key.byte_len(),
+        _runtime_posix_cache_keep_v1(), _runtime_posix_cache_min_age_s_v1(), true)
+
 pub fn runtime_vector_provider_pin_from_env_v1() -> Result<text, text>:
     """Build-time pin of the levelled vector provider DLL this build produced.
 
@@ -1312,6 +1343,8 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
     var windows_compiler_digest = ""
     var windows_pending_keys: [text] = []
     var windows_published_any = false
+    var posix_cache_hit_any = false
+    var posix_published_any = false
     # Both Windows drivers (clang-cl and llvm-mingw clang.exe) use the content
     # cache; the toolchain identity is "" (uncached) for any other compiler.
     if _is_windows() and not native_tool_strict_requested_v1() and (env_get_nullable("SIMPLE_RT_OBJ_CACHE") ?? "") != "0":
@@ -1523,7 +1556,10 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             # Publish via a private staging name + rename so concurrent builds
             # never observe a half-written object.
             published_cache_obj = runtime_c_cache_publish_object_v1(obj_path, cache_obj, compile_pid, object_count)
+            if published_cache_obj:
+                posix_published_any = true
         if cache_hit:
+            posix_cache_hit_any = true
             resolved_objects.push(cache_obj)
         elif published_cache_obj:
             cleanup_runtime_objects([obj_path])
@@ -1545,6 +1581,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             if p_cache != "" and file_exists(p_cache):
                 cleanup_runtime_objects([rt_pending_objs[pi]])
                 resolved_objects[rt_pending_slots[pi]] = p_cache
+                posix_published_any = true
             pi = pi + 1
 
     if windows_toolchain != "" and not runtime_windows_cache_publish_batch_v1(windows_cache_root, cc, windows_toolchain, windows_pending_keys, objects):
@@ -1558,6 +1595,8 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
     if windows_toolchain != "" and published_any:
         val _swept = disk_bound_enforce(windows_cache_root + "/objects",
             disk_bound_cap_bytes("SIMPLE_RT_OBJ_CACHE_MAX_BYTES", 2147483648))
+    if cache_dir != "" and (posix_cache_hit_any or posix_published_any):
+        val _posix_pruned = runtime_posix_cache_prune_v1(cache_dir, posix_published_any)
     if trace:
         print "[RT-COMPILE] loop done, {object_count} objects compiled"
     if object_count == 0:

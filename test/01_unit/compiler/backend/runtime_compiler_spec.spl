@@ -1,8 +1,8 @@
 use std.spec.*
-use compiler.backend.runtime_compiler.{c_compiler_override, find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, runtime_core_c_sources_v1, runtime_object_paths_v1, runtime_thread_rust_owner_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
+use compiler.backend.runtime_compiler.{c_compiler_override, find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, runtime_core_c_sources_v1, runtime_object_paths_v1, runtime_posix_cache_prune_v1, runtime_thread_rust_owner_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
 use compiler.backend.llvm_native_link_runtime_owner.{llvm_runtime_owner_compile_owner_v1}
 use app.io.mod.{cwd}
-use std.io_runtime.{file_read_nullable, process_run}
+use std.io_runtime.{dir_create, dir_exists, dir_remove_all, file_exists, file_read_nullable, file_write, getpid, process_run}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text)
@@ -240,6 +240,33 @@ describe "Runtime Compiler":
             expect(msg).to_contain("SIMPLE_PROJECT_ROOT=/w1/probe/root")
             expect(msg).to_contain("under the current directory (")
         )
+
+    it "marks POSIX runtime cache subdirs used and prunes stale keyed siblings on publish":
+        val base = "build/test-artifacts/rt-objcache-prune-{getpid()}"
+        dir_remove_all(base)
+        val k1 = "0000000000000000000000000000000000000001"
+        val k2 = "0000000000000000000000000000000000000002"
+        val k3 = "0000000000000000000000000000000000000003"
+        val k4 = "0000000000000000000000000000000000000004"
+        for k in [k1, k2, k3, k4, "foreign-dir"]:
+            expect(dir_create(base + "/" + k, true)).to_equal(true)
+            expect(file_write(base + "/" + k + "/runtime.o", "obj")).to_equal(true)
+        with_env("SIMPLE_RT_OBJ_CACHE_KEEP", "2", fn():
+            with_env("SIMPLE_RT_OBJ_CACHE_MIN_AGE_S", "0", fn():
+                expect(runtime_posix_cache_prune_v1(base + "/" + k1, false)).to_equal(0)
+                expect(file_exists(base + "/" + k1 + "/.last-use")).to_equal(true)
+                expect(dir_exists(base + "/" + k2)).to_equal(true)
+                expect(runtime_posix_cache_prune_v1(base + "/" + k1, true)).to_equal(2)
+                expect(dir_exists(base + "/" + k1)).to_equal(true)
+                expect(dir_exists(base + "/foreign-dir")).to_equal(true)
+                var remaining_keys = 0
+                for k in [k1, k2, k3, k4]:
+                    if dir_exists(base + "/" + k):
+                        remaining_keys = remaining_keys + 1
+                expect(remaining_keys).to_equal(2)
+            )
+        )
+        dir_remove_all(base)
 
 # # Runtime Compiler Unit Tests
 # #

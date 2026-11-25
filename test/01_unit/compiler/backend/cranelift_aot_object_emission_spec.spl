@@ -12,7 +12,10 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
 use compiler.backend.backend.backend_types.{compileoptions_default_options}
-use compiler.backend.cranelift_codegen_adapter.{cranelift_compile_module_direct}
+use compiler.backend.cranelift_codegen_adapter.{cranelift_compile_module_direct, cranelift_sanitize_module_name, cranelift_temp_object_path}
+use compiler.backend.runtime_compiler.{_get_temp_dir}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{dir_list_or_empty}
 
 fn aot_fn(id: i64, name: text, insts: [MirInst], ret: MirOperand) -> MirFunction:
     MirFunction(
@@ -60,3 +63,28 @@ describe "Cranelift AOT lane emits an object through the shared lowering":
             },
             statics: {}, constants: {}, types: {})
         expect(aot_object_size(module) > 0).to_equal(true)
+
+    it "sanitizes module names in unique temp object paths and deletes emitted temp files":
+        val pid = getpid()
+        expect(cranelift_sanitize_module_name("pkg/sub/mod:v1\\win")).to_equal("pkg_sub_mod_v1_win")
+        expect(cranelift_sanitize_module_name("")).to_equal("module")
+        val path_a = cranelift_temp_object_path("pkg/sub/probe")
+        val path_b = cranelift_temp_object_path("pkg/sub/probe")
+        val file_a = path_a.substring(path_a.rfind("/") + 1)
+        val file_b = path_b.substring(path_b.rfind("/") + 1)
+        expect(file_a).to_start_with("simple_cranelift_pkg_sub_probe_{pid}_")
+        expect(file_a).to_end_with(".o")
+        expect(file_b).to_start_with("simple_cranelift_pkg_sub_probe_{pid}_")
+        expect(path_a == path_b).to_equal(false)
+
+        val module = MirModule(name: "pkg/sub/aot_slash_probe",
+            functions: {SymbolId(id: 1): aot_fn(1, "main", [], aot_int(99))},
+            statics: {}, constants: {}, types: {})
+        expect(aot_object_size(module) > 0).to_equal(true)
+        val prefix = "simple_cranelift_pkg_sub_aot_slash_probe_{pid}_"
+        var leaked = 0
+        for entry in dir_list_or_empty(_get_temp_dir()):
+            val name = entry.substring(entry.rfind("/") + 1)
+            if name.starts_with(prefix) and name.ends_with(".o"):
+                leaked = leaked + 1
+        expect(leaked).to_equal(0)
