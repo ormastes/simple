@@ -1,5 +1,13 @@
 # Bug: unit-return function pointer `fn() -> ()` hard-crashes (SIGILL)
 
+## Verification 2026-11-25 — closure evidence re-confirmed (Windows x86_64, pinned `bin/simple.exe` v1.0.0-rc.1)
+
+Re-ran the entry's repro shape at release/1.0.0 HEAD:
+`bin/simple.exe run repro.spl` (`run_warm(iters, body: fn() -> ())` calling
+`body()` once plus in a loop, passed a unit-returning `tick`) prints
+`t t t` then `0`, exit 0. No SIGILL. The 2026-09-13 closure stands; the
+compiled-SMF lane remains unmeasured here as noted below.
+
 ## Closed 2026-09-13 — Fixed: a `fn() -> ()` function pointer calls cleanly
 
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's repro shape — `fn run_warm(iters: i64, body: fn() -> ()) -> i64` calling `body()` once plus twice in a loop, passed a unit-returning `tick` — runs to completion printing `t t t` then `0`, exit 0. No SIGILL, no rc=132.
