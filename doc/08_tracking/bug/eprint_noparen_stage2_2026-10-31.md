@@ -1,7 +1,7 @@
 # eprint no-paren fails in pinned stage2 (2026-10-31)
 
-- **Status:** fixed (PR #5567, 50b383280c3, merged into release/1.0.0; verified 2026-11-02); tagged workarounds revert-ready after stage3 self-build
-- **Confirmed 2026-11-01:** #5567 (50b383280c3) present: `parser_stmts.spl` `if ident_text == "print" or ident_text == "eprint":` and `_ParserDecls/enum_module_body.spl` module-level twin; `test/01_unit/compiler/frontend/eprint_noparen_call_spec.spl` 3/3 pass (seed, pure-Simple frontend).
+- **Status:** resolved & workarounds retired (2026-11-25). Root fix PR #5567 (`50b383280c3`, `parser_stmts.spl` + `_ParserDecls/enum_module_body.spl`) is live on `release/1.0.0`; all 31 parenthesized workarounds and `@workaround` tags across the 12 `src/app/` files have been reverted back to no-paren `eprint <expr>`.
+- **Confirmed 2026-11-01:** #5567 (50b383280c3) present: `parser_stmts.spl` `if ident_text == "print" or ident_text == "eprint":` and `_ParserDecls/enum_module_body.spl` module-level twin; `test/01_unit/compiler/frontend/eprint_noparen_call_spec.spl` passes (seed, pure-Simple frontend), extended with the `eprint output[0:OUTPUT_LIMIT]` slice form.
 
 Root bug: `eprint <expr>` (no parentheses, non-string-literal argument) is rejected by the
 pinned stage2 compiler with `undefined variable eprint` during MIR lowering of stage3 modules
