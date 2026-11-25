@@ -949,19 +949,20 @@ pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
 }
 
 /// True if a `Linkage::Import` symbol named `name` will resolve to a real
-/// address at JIT finalize time — i.e. it is a registered runtime symbol or is
-/// `dlsym`-resolvable in the current process. This is exactly the resolution
-/// cranelift-jit performs in `lookup_symbol` (registered symbols, then
-/// `lookup_with_dlsym`); an import resolving to neither is bound to a NULL GOT
-/// slot and would SIGSEGV when called.
+/// address at JIT finalize time — i.e. it is registered by
+/// [`seed_jit_runtime_symbol_table`] or is `dlsym`-resolvable in the current
+/// process. This must match what `JitCompiler::with_provider` actually hands to
+/// `JITBuilder`: checking `provider`/`elf_utils` for a name absent from
+/// `RUNTIME_SYMBOL_NAMES` caused `rt_process_run_bounded_bytes` to pass both
+/// `exec_core`'s hybrid bridge and `unresolved_imports_called` while still
+/// finalizing to a NULL GOT slot and SIGSEGV'ing on Windows.
 pub fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
-    if provider.get_symbol(name).is_some() {
-        return true;
-    }
     if compiler_owned_symbol(name).is_some() {
         return true;
     }
-    if crate::elf_utils::resolve_runtime_symbol(name).is_some() {
+    if simple_native_loader::RUNTIME_SYMBOL_NAMES.contains(&name)
+        && (provider.get_symbol(name).is_some() || crate::elf_utils::resolve_runtime_symbol(name).is_some())
+    {
         return true;
     }
     dlsym_resolves(name)

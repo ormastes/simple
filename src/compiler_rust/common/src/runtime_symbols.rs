@@ -2128,6 +2128,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_pool_release",
     "rt_process_run_timeout",
     "rt_process_run_bounded",
+    "rt_process_run_bounded_bytes",
     "rt_process_run_owned_bounded_value",
     "rt_process_run_owned_observed_bounded_value",
     "rt_process_run_with_limits",
