@@ -1666,6 +1666,8 @@ impl MirLowering:
                                                     self.struct_value_syms[init_local.id] = declared_record
                                                     if erased_init:
                                                         self.remember_local_hir_type(init_local.id, declared_type, 0, 0)
+                                        case HirTypeKind.Str | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _) | HirTypeKind.Tuple(_):
+                                            init_local = self.option_non_scalar_payload_argument_v1(let_init, init_local, declared_type)
                                         case _:
                                             ()
                         # Bug (any?/any receiver-type erasure, 2026-09-01):
@@ -3329,7 +3331,8 @@ impl MirLowering:
             case HirTypeKind.Named(_, _):
                 # Same for a nil-checked `T?` record into a declared `T`.
                 arg_local = self.option_record_argument_payload_v1(arg.value, arg_local, declared_param_type)
-            case _: ()
+            case _:
+                arg_local = self.option_non_scalar_payload_argument_v1(arg.value, arg_local, declared_param_type)
         arg_local
 
     me lower_receiver_and_args(receiver: HirExpr, args: [HirCallArg], param_types: [HirType]) -> [MirOperand]:
@@ -4604,7 +4607,7 @@ impl MirLowering:
             match declared.kind:
                 case HirTypeKind.Optional(payload):
                     match payload.kind:
-                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _):
                             val extracted = self.option_payload_or_self(raw)
                             return self.decode_declared_enum_payload_slot(extracted, payload)
                         case HirTypeKind.Tuple(_):
@@ -5606,8 +5609,10 @@ impl MirLowering:
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
         var array_iter_local = collection_local
-        if optional_array_payload and not collection_is_erased_word:
-            if val opt_arr_mir = self.local_mir_type_of(collection_local):
+        if optional_array_payload:
+            if collection_is_erased_word:
+                array_iter_local = self.option_payload_or_self(collection_local)
+            elif val opt_arr_mir = self.local_mir_type_of(collection_local):
                 match opt_arr_mir.kind:
                     case MirTypeKind.Tuple(_):
                         array_iter_local = self.option_payload_or_self(collection_local)

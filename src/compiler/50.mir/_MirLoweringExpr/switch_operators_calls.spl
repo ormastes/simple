@@ -1054,6 +1054,56 @@ impl MirLowering:
                 Some(self.decode_declared_enum_payload_slot(word, inner))
             case _: None
 
+    me option_non_scalar_payload_argument_v1(arg: HirExpr, local: LocalId, declared: HirType) -> LocalId:
+        """Call argument or typed binding of `T?` (text, array, slice, dict,
+        or tuple) into a declared plain `T`: unwrap the Option box with
+        rt_unwrap_or_self and decode the payload representation.
+
+        The non-scalar/text/collection twin of `option_scalar_payload_of` and
+        `option_record_argument_payload_v1`
+        (bug optional_array_payload_narrowing_native_2026_10_21): after
+        `if x == nil: return`, `x` still carries `Optional(T)` and holds the
+        canonical Option box, so `sosix_env_set(..., previous)` or `take(arr)`
+        passed the Option handle itself instead of the payload. A parameter
+        declared `T?`, `Any`, `TypeParam`, or mismatching inner type keeps
+        `local` unchanged."""
+        val target_matches = match declared.kind:
+            case HirTypeKind.Str | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Dict(_, _) | HirTypeKind.Tuple(_): true
+            case _: false
+        if not target_matches:
+            return local
+        if val inner = self.option_inner_hir_type_for_local(arg, local):
+            val compatible = match (declared.kind, inner.kind):
+                case (HirTypeKind.Str, HirTypeKind.Str): true
+                case (HirTypeKind.Array(da, _), HirTypeKind.Array(ia, _)):
+                    enum_payload_types_alias_compatible(da, ia, self.symbols)
+                case (HirTypeKind.Array(da, _), HirTypeKind.Slice(ia)):
+                    enum_payload_types_alias_compatible(da, ia, self.symbols)
+                case (HirTypeKind.Slice(da), HirTypeKind.Array(ia, _)):
+                    enum_payload_types_alias_compatible(da, ia, self.symbols)
+                case (HirTypeKind.Slice(da), HirTypeKind.Slice(ia)):
+                    enum_payload_types_alias_compatible(da, ia, self.symbols)
+                case (HirTypeKind.Dict(dk, dv), HirTypeKind.Dict(ik, iv)):
+                    enum_payload_types_alias_compatible(dk, ik, self.symbols) and enum_payload_types_alias_compatible(dv, iv, self.symbols)
+                case (HirTypeKind.Tuple(_), HirTypeKind.Tuple(_)):
+                    enum_payload_types_alias_compatible(declared, inner, self.symbols)
+                case _: false
+            if not compatible:
+                return local
+            val extracted = self.option_payload_or_self(local)
+            if extracted.id == local.id:
+                return local
+            match declared.kind:
+                case HirTypeKind.Str:
+                    val text_local = self.option_text_value(extracted, self.bootstrap_text_type())
+                    self.remember_local_hir_type(text_local.id, declared, 0, 0)
+                    return text_local
+                case HirTypeKind.Tuple(_):
+                    return self.recover_optional_tuple_payload(extracted, declared)
+                case _:
+                    return self.decode_declared_enum_payload_slot(extracted, declared)
+        local
+
     me option_payload_for_int_sink(local: LocalId, sink_type: HirType) -> LocalId:
         """Payload-typed USE of an Optional local in a declared INTEGER sink
         (`-> i64` tail/return, `val y: i64 = ...`).
@@ -10141,6 +10191,11 @@ impl MirLowering:
                         # decode (the x8 class of PR #5661).
                         if self.local_needs_erased_decode(arg_local.id, argument_hir):
                             arg_local = self.decode_runtime_value(arg_local, self.lower_type(declared_param_type))
+                else:
+                    # A nil-checked `T?` text/collection/tuple into a declared
+                    # plain `T` parameter hands over the unwrapped payload
+                    # before text pointer/tagged bridging inspects the slot.
+                    arg_local = self.option_non_scalar_payload_argument_v1(arg_value, arg_local, declared_param_type)
                 # Internal Simple text parameters accept the complete text
                 # value. Unwrapping a tagged handle here discards its length.
                 # Keep the existing pointer bridge at extern/unknown owners;
