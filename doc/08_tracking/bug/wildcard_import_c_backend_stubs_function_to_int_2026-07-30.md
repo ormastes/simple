@@ -312,3 +312,26 @@ wildcard import. The module moved to `plugins.backend_c.c_backend_stubs`
 (`src/compiler/70.backend/backend/c_backend_stubs.spl` no longer exists;
 `backend_capability_spec.spl:12` imports the new path). Re-scoped to the
 interpreter / C-backend plugin family; left open there.
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-ab) — SKIP, stays open
+
+Confirmed at release/1.0.0 HEAD (`64dfa6d980f`):
+
+- The module move from the 2026-11-05 re-scope is real:
+  `src/compiler/70.backend/backend/c_backend_stubs.spl` no longer exists;
+  the module lives at `src/plugins/backend_c/c_backend_stubs.spl`.
+- `test/01_unit/compiler/backend/backend_capability_spec.spl:12` now
+  wildcard-imports the new path (`use plugins.backend_c.c_backend_stubs.*`),
+  i.e. the known-affected spec re-exposes the wildcard form under the new
+  module name. Whether the phantom "cannot convert function to int" red
+  still fires there is unverifiable on this host: `bin/simple.exe test`
+  fails repo-wide at this HEAD (pinned seed rejects
+  `@representation_boundary` in `src/app/test_runner_new/test_runner_client.spl:9:1`).
+
+Root cause is unchanged from the 2026-07-30 analysis: a flat-registry
+collision inside the Rust seed interpreter (`Value::as_int()` fallback,
+`value_impl.rs:137`) that requires instrumenting and rebuilding the seed —
+explicitly out of scope for source-only lanes and for this Windows host
+(no cargo builds permitted). Classification: SKIP (Rust-seed-only
+instrumentation needed); the 2026-11-05 re-scope to the interpreter /
+C-backend plugin family stands. Left open.

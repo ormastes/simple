@@ -1,5 +1,5 @@
 # WM Metal Glass Multi-Receipt and Inactive Opacity
-## Open 2026-09-16 — needs owner triage
+## Triaged 2026-11-25 — fix-implemented-verification-pending; native Metal run needs an admitted macOS producer (not actionable on this host)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -378,3 +378,21 @@ Verification status: **fix-implemented-verification-pending** — the merged
 fix is cited and source-verified; native Metal execution (strict fixture,
 admitted producer) still pending, per the admission constraints documented
 above. DB row updated to `fix-implemented-verification-pending`.
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-ab) — SKIP, stays open
+
+The status header ("Open 2026-09-16 — needs owner triage") understated the
+body: the merged fix commit `fa6bab7921e` is cited and source-verified in
+the 2026-11-12 section, and the row's own status is
+**fix-implemented-verification-pending**. The header now says so.
+
+What remains is exclusively native macOS Metal execution: the strict fixture
+(`test/02_integration/rendering/macos_metal_glass_receipts_native.spl`)
+behind the admitted Stage3 producer gate. That requires a macOS host, the
+coordinated admitted compiler/runtime providers, and the RSS-guarded recipe
+above — none of which exists on this Windows lane (pinned Rust seed only, no
+bootstrap, no Metal device). Source-side spot check at release/1.0.0 HEAD
+(`64dfa6d980f`): the fail-closed sub-opaque Metal gate and the strict native
+fixture file are present. Classification: SKIP (macOS-only native
+verification); left open pending the admitted producer, per the admission
+constraints documented above.

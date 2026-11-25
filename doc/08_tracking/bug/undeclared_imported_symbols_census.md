@@ -906,3 +906,18 @@ fails a push whose range edits one leg and leaves the twin divergent.
 ## HIR-P2 HC triage 2026-11-05
 
 Census row. Making undeclared imports an error depends on the 1,003-name spec-import backlog (spec_imports_declared_nowhere) and the lower_named_kind whitelist work; erroring now would break hundreds of specs. Blocked on backlog triage; remains OPEN.
+
+## 2026-11-25 triage note (release/1.0.0, worktree p2w6-ab)
+
+Status stays OPEN as a large per-cluster program (owner decision reserved);
+this is a spot re-check only, not a census re-run.
+
+The 2026-08-10 spot-check cluster is now FIXED: `src/app/dashboard/main.spl`
+at release/1.0.0 HEAD (`64dfa6d980f`) declares `DASHBOARD_TABLE_DIR` (:28),
+`load_table` (:98), and `load_table_named` (:129), so the Appendix A.1
+entries for `dashboard_collectors.spl:8` / `dashboard_export_runtime.spl:7`
+importing those names from `app.dashboard.main` no longer reproduce by
+inspection. The 1,226-entry totals remain last-measured 2026-08-05 and are
+drifting as clusters get fixed; treat the appendix as a snapshot. Runtime
+re-verification of any entry via `bin/simple.exe test` is blocked repo-wide
+at this HEAD (pinned seed rejects `@representation_boundary`).
