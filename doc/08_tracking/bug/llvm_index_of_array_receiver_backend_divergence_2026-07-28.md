@@ -2,6 +2,16 @@
 
 ## Closed 2026-09-13 — fixed at source; both LLVM tables now emit the polymorphic symbol
 
+**Re-confirmed 2026-11-25 by source inspection** on release/1.0.0 HEAD
+(`a19165ae174`): all three routing sites still emit the receiver-polymorphic
+symbol — `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:362`,
+`.../llvm/functions.rs:3200`, and `.../instr/calls.rs:4627` each map
+`"index_of" => Some("rt_index_of")`. The LLVM A/B re-run remains
+unexecuted in this lane (no cargo builds permitted; LLVM-featured compiler
+build out of scope), so the closure continues to rest on the 2026-09-13
+inspection plus the in-tree regression assertion, now re-checked at today's
+HEAD.
+
 **Evidence class: inferred from source, NOT measured.** Reproducing this
 needs an LLVM native build, which was not run — a bootstrap was in progress
 and no self-hosted binary is deployed on this host. The routing table this

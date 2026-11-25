@@ -50,3 +50,17 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/com
 - The toolchain failure was a dead import (`host.process` module did not exist), repaired by 4b687ebd924 (-> `std.process`), not an alias-scoping defect.
 - A minimal two-file repro (`use pkg.sub.m as mm` used in a free fn and a `static fn`, dotted path, alias equal to last segment) prints the expected values.
 - Regression spec: `test/01_unit/compiler/use_alias/use_alias_fn_body_spec.spl` (2/2 green).
+
+## Verification 2026-11-25 — stale closure confirmed on release/1.0.0
+
+Re-verified on worktree at release/1.0.0 HEAD (`a19165ae174`) with the pinned
+tracked seed `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1),
+Windows 11 / Git Bash. A minimal two-file repro (`use pkg.sub.m as mm` at
+module scope, alias referenced from a free `fn` body and from a `static fn`
+body) printed `hi-from-alias` twice — the alias resolves from inside function
+bodies. The named regression spec could not be executed in this lane:
+`bin/simple.exe test` aborts at HEAD with the known seed/source skew
+(`unknown decorator '@representation_boundary'` in the test-runner harness,
+introduced by cfd89933699), so spec-level evidence rests on the 2026-11-04
+run cited above; the direct `run`-lane repro was executed fresh today.
+Closure stands.
