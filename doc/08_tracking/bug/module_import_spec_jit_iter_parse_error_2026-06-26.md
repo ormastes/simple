@@ -39,3 +39,19 @@ The five iterator implementations in `core/iter.spl` now use the
 canonical `impl Trait for Type` grammar. The seed parser retains its strict
 grammar. The existing module-import spec covers the original JIT/import path;
 its execution remains pending an authorized runtime test run.
+
+## 2026-11-25 verification (p3-bap lane, Windows worktree)
+
+Code inspection at `origin/release/1.0.0` (47d6c5eddd5) confirms the closure:
+`grep 'impl .*: *Iterator' src/compiler_rust/lib/std/src/core/iter.spl` is
+empty; the five implementations use the canonical header form
+(`impl Iterator<T> for SkipIterator<T>:` at line 91, likewise Take/Filter/Map/
+Range at 103/115/130/150). Closure stands.
+
+Execution limit (stated, not hidden): the named spec
+`test/01_unit/lib/common/module_import_spec.spl` could NOT be run here — the
+tracked `bin/simple.exe` on this branch is the Rust seed (v1.0.0-rc.1,
+build-commit 1343b77bbaa) and its `test` lane fails compiling current
+`src/lib` with `unknown decorator '@representation_boundary'` (decorator
+added to `src/lib/nogc_sync_mut/sffi/cli_args.spl:9` after the seed was
+built). Verification is therefore by source inspection only.

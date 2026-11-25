@@ -95,3 +95,13 @@ both fixing commits (`ea2afa2f689`, `1b7d3a320e2`) are ancestors of
 its header recipe with functions extracted from the current
 `runtime_native.c` and PASSes (`printf 'line1\nABCDEFGHIJ' | ./sc` → line,
 char, 3 chars, raw read, EOF). Bug-db row set `fixed` on this evidence.
+
+## 2026-11-25 verification (p3-bap lane, Windows worktree)
+
+Re-verified at `origin/release/1.0.0` (47d6c5eddd5): `grep fgetc
+src/runtime/runtime_native.c` returns nothing; all four stdin readers route
+through `stdin_raw_byte` (raw `read(0, buf, 1)`, EINTR-retried) at
+`src/runtime/runtime_native.c:3967`; fixing commits `ea2afa2f689` and
+`1b7d3a320e2` are ancestors of HEAD (`git merge-base --is-ancestor`). Fix
+confirmed real; entry stays FIXED/resolved. macOS core-c minimal-link repro
+remains host-unavailable here, as in the 2026-11-09 passes.

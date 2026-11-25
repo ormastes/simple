@@ -70,3 +70,14 @@ writer paths (`elf_writer.spl`, `_ElfWriter/writer.spl`, `smf_writer.spl`) so th
 seam is live. Once there is a real call-site driven by target arch, the overlay
 migration is straightforward: replace the `RelocArch` enum dispatch with a
 compile-time-resolved module import.
+
+## 2026-11-25 verification (p3-bap lane, Windows worktree)
+
+Closure stands: this is a rejected overlay-candidate record, not a defect —
+nothing to fix. One premise in the record is now outdated: at
+`origin/release/1.0.0` (47d6c5eddd5) `reloc_engine` IS referenced from
+`src/compiler/70.backend/linker/elf/*` (`arm32_raw_link.spl`,
+`boot_link_cli.spl`, `boot_target_policy.spl`, `elf_boot_link.spl`,
+`elf_operation_bindings.spl`), i.e. the "wire `reloc_apply` into the native
+writer paths" precondition listed above has since been met. That strengthens
+the closure; no action required.
