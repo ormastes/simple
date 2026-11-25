@@ -109,3 +109,27 @@ scope. A real virtio-gpu transport (ring buffer I/O, Venus
 `VK_STRUCTURE_TYPE_*` decode) still does not exist; `_venus_device_available`
 is the single wire-in point for when it does.
 
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-al) — fixed half persists; open half is hardware-lane
+
+Verified by code inspection at release/1.0.0 HEAD (`f3fb8f24dc9`):
+
+- **Fixed half (H1, fail-closed) is intact.**
+  `src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl` still has
+  `VenusTransportError` (`:69`), `VenusCallStatus` (`:57`),
+  `_venus_device_available` (`:445`), and `_venus_transport_send` (`:451`)
+  returning `Err(VenusTransportError.Unavailable(...))` with no fabricated
+  handle; every public `venus_icd_*` entry point maps the typed status
+  through `_venus_result_from_transport` (`:465`). No regression to the old
+  always-`is_ok: true` counter-handle behavior.
+- **Open half is genuinely still open.** All five vendor probes in
+  `src/os/drivers/gpu/gpu_vendor_probe.spl` still hard-code `device_id: 0`
+  (`:45,89,132,176,...`) with `is_available()` defined as
+  `self.device_id > 0`. Closing this half needs a real ICD/DRM query —
+  hardware/owner-lane work, not a bounded pure-Simple fix.
+
+Execution limit: `test/01_unit/os/vulkan/venus_icd_fail_closed_spec.spl`
+exists but could not be re-run on this host — `bin/simple.exe test` fails
+repo-wide at this HEAD (pinned seed rejects `@representation_boundary` in
+the test runner). Status stays **open** for the `gpu_vendor_probe.spl` half
+only; no header change.
