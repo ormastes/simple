@@ -1,8 +1,5 @@
 # `os.*` module JIT unresolved-symbol gate — root cause (2026-07-30)
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Closed for the seed 2026-11-05 (mirp2-E3 re-scope) — re-verified 2026-11-25
 
 Assignment: root-cause why every standalone probe against `os.crypto.*`
 triggers a module-wide "unresolved external symbol" JIT fallback,
@@ -174,3 +171,17 @@ single-module JIT); fallback is loud and answers correct. Seed is
 bootstrap-only and `src/os/**` crypto probes are not a bootstrap lane; the
 verification lane for os crypto is the pure-Simple binary. Re-scoped
 non-bootstrap; CLOSED for the seed.
+
+## Verification note 2026-11-25 (release/1.0.0 tip, worktree wt-p2w4-aj)
+
+STALE-CLOSED. The 2026-09-16 "Open — needs owner triage" banner was stale
+bookkeeping that predated the 2026-11-05 mirp2-E3 re-scope which closed this
+bug for the seed; the banner is corrected above. Root-cause evidence confirmed
+present by code inspection: the unresolved-import gate the doc analyzes lives
+at `first_unresolved_import` in
+`src/compiler_rust/compiler/src/codegen/jit.rs` (referenced at `:140`, `:829`).
+The re-scope rationale stands: the seed is bootstrap-only and the `src/os/**`
+crypto verification lane is the pure-Simple binary, which is outside this
+Windows host's environment (no bootstrapped binary; pinned `bin/simple.exe`
+also rejects the tree-wide `@representation_boundary` decorator at HEAD).
+Verified by inspection; limit stated.
