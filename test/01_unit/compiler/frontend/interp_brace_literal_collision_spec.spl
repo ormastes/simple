@@ -1,0 +1,210 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.string_interpolation_expand.{parse_string_interpolation_regions, decode_interpolation_brace_escapes, interp_brace_warnings_reset, interp_brace_warning_count, interp_brace_warning_at}
+use compiler.frontend.parser_types_expr.{ExprKind}
+use compiler.frontend.parser_types.{StmtKind}
+
+# Bug: interp_brace_literal_collides_with_string_interpolation_2026-07-03
+#      (incl. the 2026-07-17 sub-case: "{ {inner} }" swallowed to EMPTY).
+#
+# Repro + prevention evidence that the reported silent mis-parse is gone on
+# release/1.0.0. Owner rule (2026-11-09, staged): inside a double-quoted
+# literal `{expr}` interpolates, `{{` is a literal `{`, `}}` is a literal `}`;
+# a `{...}` that is not a valid interpolation keeps its verbatim-literal value
+# and records warning W-STR-BRACE-001 (ratchet to error:
+# string_interp_malformed_brace_warning_to_error_2026-11-09).
+#
+# The frontend half pins parse_string_interpolation_regions directly, so it
+# holds on every lane. The eval half asserts only shapes on which the seed and
+# the pure-Simple compiler AGREE byte-for-byte (escapes, valid placeholders,
+# adjacent malformed regions without nested holes); the seed's spec-pinned
+# nested-hole re-interpolation (brace_literal_interp_enum_to_string_spec) is a
+# separate owner-level semantics question and is deliberately not asserted here.
+#
+# Fixtures are BUILT BY CONCATENATION: braces written inline in a frontend
+# fixture would interpolate at run time -- the collision under test.
+
+val LB = "{"
+val RB = "}"
+val LL = LB + LB
+val RR = RB + RB
+val Q = "\""
+
+fn warm(tag: text):
+    val module = parse_and_build_module("fn " + tag + "() -> i64:\n    1\n", tag + ".spl")
+    expect(module.functions.contains(tag)).to_equal(true)
+
+fn bridged_string_value(value: text) -> text:
+    val source = "fn probe():\n    \"" + value + "\"\n"
+    val parsed = parse_and_build_module(source, "interp_brace_collision_probe.spl")
+    val function = parsed.functions["probe"] ?? panic("missing probe")
+    for statement in function.body.stmts:
+        match statement.kind:
+            case StmtKind.Expr(expression):
+                match expression.kind:
+                    case ExprKind.StringLit(decoded, _): return decoded
+                    case _: panic("expected string literal")
+            case _: ()
+    panic("missing string expression")
+
+describe "interp brace literal collision (bug 2026-07-03)":
+    # @manual scenario evidence
+    it "repro: an SDN-shaped literal with a nested placeholder stays verbatim with a warning":
+        # @req REQ-SSPEC-COMPILER
+        step("repro: an SDN-shaped literal with a nested placeholder stays verbatim with a warning")
+        warm("warm_collide_a")
+        # The doc's s2: "{ eye: [0.0, {eye_z}] }" -- silently swallowed before.
+        val s2 = LB + " eye: [0.0, " + LB + "eye_z" + RB + "] " + RB
+        interp_brace_warnings_reset()
+        val (rw2, p2) = parse_string_interpolation_regions(s2)
+        expect(p2.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(interp_brace_warning_at(0).contains("W-STR-BRACE-001")).to_equal(true)
+        expect(decode_interpolation_brace_escapes(rw2)).to_equal(s2)
+
+    it "repro: whitespace-only padding around a lone nested placeholder is verbatim, never empty":
+        # @req REQ-SSPEC-COMPILER
+        step("repro: whitespace-only padding around a lone nested placeholder is verbatim, never empty")
+        warm("warm_collide_b")
+        # The 2026-07-17 sub-case shapes N1/N2/N3: swallowed to EMPTY on the
+        # native path before the fix; the oracle prints them verbatim.
+        val n1 = "N1:" + LB + " " + LB + "inner" + RB + " " + RB + "|END"
+        val n2 = "N2:a" + LB + " " + LB + "inner" + RB + " " + RB + "b|END"
+        val n3 = "N3:" + LB + " " + LB + "inner" + RB + RB + "|END"
+        for shape in [n1, n2, n3]:
+            interp_brace_warnings_reset()
+            val (rwx, px) = parse_string_interpolation_regions(shape)
+            expect(px.len()).to_equal(0)
+            expect(interp_brace_warning_count()).to_equal(1)
+            expect(interp_brace_warning_at(0).contains("W-STR-BRACE-001")).to_equal(true)
+            expect(decode_interpolation_brace_escapes(rwx)).to_equal(shape)
+
+    it "repro: a bare {{ word }} beside a real placeholder is a valid interpolation, not a mis-parse":
+        # @req REQ-SSPEC-COMPILER
+        step("repro: a bare {{ word }} beside a real placeholder is a valid interpolation, not a mis-parse")
+        warm("warm_collide_c")
+        # The doc's s1: "before {x} literal { brace } after". `{ brace }` parses
+        # as an identifier hole, so BOTH regions interpolate; an undefined
+        # `brace` is then an ordinary named semantic error, never a silent
+        # swallow.
+        val s1 = "before " + LB + "x" + RB + " literal " + LB + " brace " + RB + " after"
+        interp_brace_warnings_reset()
+        val (_rw1, p1) = parse_string_interpolation_regions(s1)
+        expect(p1.len()).to_equal(2)
+        expect(interp_brace_warning_count()).to_equal(0)
+
+    it "prevention: adjacent literal brace group and placeholder in one string":
+        # @req REQ-SSPEC-COMPILER
+        step("prevention: adjacent literal brace group and placeholder in one string")
+        warm("warm_collide_d")
+        val src = "a " + LB + " b c " + RB + " " + LB + "name" + RB + " d"
+        interp_brace_warnings_reset()
+        val (rw, parts) = parse_string_interpolation_regions(src)
+        expect(parts.len()).to_equal(1)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(decode_interpolation_brace_escapes(rw)).to_equal(src)
+
+    it "prevention: doubled-brace escapes stay literal, silent, and keep neighbours interpolating":
+        # @req REQ-SSPEC-COMPILER
+        step("prevention: doubled-brace escapes stay literal, silent, and keep neighbours interpolating")
+        warm("warm_collide_e")
+        # The doc's confirmed workaround: "{{ eye: [0.0, {eye_z}] }}".
+        val escaped = LL + " eye: [0.0, " + LB + "eye_z" + RB + "] " + RR
+        interp_brace_warnings_reset()
+        val (rw, parts) = parse_string_interpolation_regions(escaped)
+        expect(parts.len()).to_equal(1)
+        expect(interp_brace_warning_count()).to_equal(0)
+        expect(decode_interpolation_brace_escapes(rw)).to_equal(
+            LB + " eye: [0.0, " + LB + "eye_z" + RB + "] " + RB)
+
+    it "prevention: braces inside nested quotes":
+        # @req REQ-SSPEC-COMPILER
+        step("prevention: braces inside nested quotes")
+        warm("warm_collide_f")
+        # A quoted operand inside a hole is a valid interpolation.
+        interp_brace_warnings_reset()
+        val (_rwv, pv) = parse_string_interpolation_regions(LB + "xs.join(" + Q + "-" + Q + ")" + RB)
+        expect(pv.len()).to_equal(1)
+        expect(interp_brace_warning_count()).to_equal(0)
+        # A JSON-shaped hole is not an expression: warning + verbatim.
+        val json = LB + Q + "key" + Q + ": 1" + RB
+        interp_brace_warnings_reset()
+        val (rwj, pj) = parse_string_interpolation_regions(json)
+        expect(pj.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(decode_interpolation_brace_escapes(rwj)).to_equal(json)
+
+    it "prevention: multiline strings":
+        # @req REQ-SSPEC-COMPILER
+        step("prevention: multiline strings")
+        warm("warm_collide_g")
+        interp_brace_warnings_reset()
+        val (_rwm, pm) = parse_string_interpolation_regions("a\n" + LB + "x" + RB + "\nb")
+        expect(pm.len()).to_equal(1)
+        expect(interp_brace_warning_count()).to_equal(0)
+        val multi = "line1\n" + LB + " color: red; " + RB + "\nline3"
+        interp_brace_warnings_reset()
+        val (rwm, pm2) = parse_string_interpolation_regions(multi)
+        expect(pm2.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(decode_interpolation_brace_escapes(rwm)).to_equal(multi)
+
+    it "prevention: shell-snippet brace groups":
+        # @req REQ-SSPEC-COMPILER
+        step("prevention: shell-snippet brace groups")
+        warm("warm_collide_h")
+        # Unescaped `sid(){ ...; }` (the W-STR-BRACE-001 corpus shape): warning
+        # + verbatim, never a mis-parse.
+        val shell = "sid()" + LB + " if true; then exit; fi; " + RB
+        interp_brace_warnings_reset()
+        val (rws, ps) = parse_string_interpolation_regions(shell)
+        expect(ps.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(decode_interpolation_brace_escapes(rws)).to_equal(shell)
+        # Escaped `sid(){{ ...; }}` (the in-tree mitigation): literal, silent.
+        interp_brace_warnings_reset()
+        val (rwe, pe) = parse_string_interpolation_regions("sid()" + LL + " if true; then exit; fi; " + RR)
+        expect(pe.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(0)
+        expect(decode_interpolation_brace_escapes(rwe)).to_equal(shell)
+
+    it "prevention: an opening brace at end of string and empty braces":
+        # @req REQ-SSPEC-COMPILER
+        step("prevention: an opening brace at end of string and empty braces")
+        warm("warm_collide_i")
+        interp_brace_warnings_reset()
+        val (rwo, po) = parse_string_interpolation_regions("open " + LB)
+        expect(po.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(rwo).to_equal("open " + LB)
+        interp_brace_warnings_reset()
+        val (rwe, pe) = parse_string_interpolation_regions(LB + RB)
+        expect(pe.len()).to_equal(0)
+        expect(interp_brace_warning_count()).to_equal(1)
+        expect(decode_interpolation_brace_escapes(rwe)).to_equal(LB + RB)
+
+    it "end-to-end: the doc's s2 stays a verbatim string literal through module parse":
+        # @req REQ-SSPEC-COMPILER
+        step("end-to-end: the doc's s2 stays a verbatim string literal through module parse")
+        warm("warm_collide_j")
+        val s2 = LB + " eye: [0.0, " + LB + "eye_z" + RB + "] " + RB
+        expect(bridged_string_value(s2)).to_equal(s2)
+
+    it "eval: escapes, valid placeholders, and agreed literal fallbacks":
+        # @req REQ-SSPEC-COMPILER
+        step("eval: escapes, valid placeholders, and agreed literal fallbacks")
+        # Shapes on which the seed and the pure-Simple compiler agree
+        # byte-for-byte; safe to evaluate in the spec's own literals.
+        val name = "bob"
+        val eye_z = 9
+        expect("{name}").to_equal("bob")
+        expect("{{ eye: [0.0, {eye_z}] }}").to_equal(LB + " eye: [0.0, 9] " + RB)
+        expect("a { b c } {name} d").to_equal("a " + LB + " b c " + RB + " bob d")
+        expect("sid(){ if true; then exit; fi; }").to_equal("sid()" + LB + " if true; then exit; fi; " + RB)
+        expect("open {").to_equal("open " + LB)
+        expect("m{} block").to_equal("m" + LB + RB + " block")

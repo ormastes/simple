@@ -1,4 +1,66 @@
 # Literal `{ ... }` sharing a string with other `{placeholder}`s is silently swallowed, not interpolated
+
+## 2026-11-25 — VERIFIED FIXED on release/1.0.0 (repro shapes all deterministic + diagnosed)
+
+Verified on a `release/1.0.0` worktree @ `47d6c5eddd5` (Windows 11 / Git Bash),
+runner: attr-capable Rust seed `simple.exe` executing the pure-Simple toolchain
+sources (`SIMPLE_LIB=src`), plus `cargo test -p simple-parser --lib brace`
+(31/31, incl. `brace_escape_strict` 7/7). The P2 defect this entry reports —
+a literal `{ ... }` sharing a string with other `{placeholder}` holes being
+**silently** swallowed or mis-parsed — no longer reproduces. Every repro shape
+now has a deterministic value and a named diagnostic (`W-STR-BRACE-001` for
+non-expression brace groups, an ordinary named semantic error for a valid hole
+that references an undefined variable):
+
+| Shape (doc repro) | release/1.0.0 behaviour |
+|---|---|
+| `"{ eye: [0.0, {eye_z}] }"` (s2) | `W-STR-BRACE-001` + kept as literal text (was: silent swallow) |
+| `"N1:{ {inner} }"`, `"N2:a{ {inner} }b"`, `"N3:{ {inner}}"` (2026-07-17 sub-case) | `W-STR-BRACE-001` + verbatim fallback — never the empty string (was: swallowed to EMPTY on the native path) |
+| `"before {x} literal { brace } after"` (s1) | `{ brace }` is a valid identifier hole: interpolates; undefined `brace` → named `semantic: variable 'brace' not found` (no silent wrong output) |
+| `"a { b } {name} c"`, `"css {margin:0} then {name}"` | deterministic named diagnostic on every lane (no silent swallow) |
+| `"{{ ... {x} ... }}"` escape | literal braces + working interpolation, no warning (the documented canonical form) |
+
+New executable evidence:
+`test/01_unit/compiler/frontend/interp_brace_literal_collision_spec.spl`
+(11/11) pins the doc's exact repro shapes (s1, s2, N1/N2/N3) plus prevention
+shapes: adjacent literal+placeholder, `{{`/`}}` escapes, braces inside nested
+quotes, multiline strings, shell-snippet `sid(){ ...; }` groups, `{` at end of
+string, and empty `{}`. Sibling evidence:
+`string_interp_brace_escape_spec.spl` (6/6),
+`interp_brace_literal_fragment_spec.spl` (3/3),
+`flat_bridge_string_scan_spec.spl` (5/5), and the seed-pinned
+`brace_literal_interp_enum_to_string_spec.spl` (3/3) all pass unmodified.
+
+**The 2026-07-17 empty-swallow sub-case is fixed**: root-caused to the
+frontend fragment parser accepting a region whose whole content is itself a
+brace literal; `interpolation_fragment_is_brace_literal`
+(`src/compiler/10.frontend/core/string_interpolation_expand.spl`, measured
+2026-08-17) rejects that class uniformly, and the MIR
+`split_interpolation_segments` positional contract is preserved because
+malformed regions are literalized (braces doubled) before lowering.
+
+**Status: fixed (verified 2026-11-25).** Two residual *semantics* questions
+are explicitly NOT part of this bug and stay with the ratchet entry
+`string_interp_malformed_brace_warning_to_error_2026-11-09` (owner decision
+needed; both sides are spec-pinned today):
+
+1. *Nested holes inside a malformed region.* The seed's `literalize_braced`
+   (`src/compiler_rust/parser/src/expressions/primary/literals.rs:204`,
+   spec-pinned 2026-11-05 by `brace_literal_interp_enum_to_string_spec.spl`)
+   still interpolates a complete `{hole}` nested inside a malformed region
+   (`"{ eye: [0.0, {eye_z}] }"` → `{ eye: [0.0, 9] }`), while the pure-Simple
+   compiler keeps the whole region verbatim (spec-pinned 2026-08-17 by
+   `interp_brace_literal_fragment_spec.spl`). Same source, different string
+   value across compilers; the seed's warning text ("kept as literal text")
+   is also imprecise for this shape.
+2. *`{margin:0}`-shape (ident + colon + format-spec-looking tail).* The seed
+   lexes it as `ExprWithFormat(margin, "0")` (Python f-string parity), so an
+   undefined `margin` is a named semantic error; the pure-Simple compiler has
+   no format-spec splitting and treats it as a malformed region (warning +
+   literal). Syntactically indistinguishable from a legitimate `{x:0}`
+   format-spec hole; CSS-authoring guidance (raw strings / `{{ }}`) is already
+   documented in `string_interpolation_css_brace_footgun_2026-07-03.md`.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -41,7 +103,7 @@ to resolve, and it needs the escaping/semantics decision the entry calls for.
 
 **Date:** 2026-07-03
 **Severity:** P2 (silent wrong output, not a crash)
-**Status:** open
+**Status:** fixed (verified 2026-11-25 on release/1.0.0 — see top entry; residual nested-hole/format-spec semantics questions tracked under `string_interp_malformed_brace_warning_to_error_2026-11-09`)
 **Related:** `interp_brace_literal_scope_corruption_2026-06-12.md` (no-identifier
 brace corrupts HIR lowering scope), `string_interp_brace_across_concat_literals_2026-07-03.md`
 (brace spanning concatenated literals leaks source text), `parser_grid_identifier_keyword_collision_2026-07-03.md`
