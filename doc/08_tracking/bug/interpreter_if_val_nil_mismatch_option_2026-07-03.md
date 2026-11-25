@@ -1,5 +1,23 @@
 # Interpreter `if val x = <nil Option>:` Wrongly Takes the Match Branch - 2026-07-03
 
+## Re-verified 2026-11-25 — seed lanes clean at release/1.0.0 HEAD; pure-Simple lane still environment-blocked (LEFT OPEN)
+
+Worktree at release/1.0.0 HEAD (`937f3203504`), pinned tracked seed
+`bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1), Windows 11 /
+Git Bash. Ran the record's repro (nil case + positive `Some` control) twice:
+
+- default lane (`bin/simple.exe run`): `nil case matched=false`,
+  `some case matched=true seen=7`
+- forced interpreter (`bin/simple.exe run ... --mode=interpreter`): identical
+
+Both directions correct on both seed lanes. The pure-Simple self-hosted lane
+remains unverified: no self-hosted binary is deployed on this host and
+bootstrap rebuilds are out of scope for this lane, so per the 2026-09-13
+caveat below this entry **stays OPEN** pending a deployed self-hosted binary.
+`bin/simple.exe test` is additionally unusable at HEAD (known
+`@representation_boundary` seed/source skew from cfd89933699), so a
+spec-harness re-run was not possible either.
+
 ## Re-verified 2026-09-13 — seed lane clean; pure-Simple lane still unverified (LEFT OPEN)
 
 **Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is

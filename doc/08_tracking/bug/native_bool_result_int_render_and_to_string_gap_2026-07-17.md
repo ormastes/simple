@@ -1,8 +1,24 @@
 # Native path: bool-returning string methods print as "1"/"0"; `.to_string()` on primitives unresolved outside SIMPLE_BOOTSTRAP=1 (and type-unaware even when gated on)
-## Open 2026-09-16 — needs owner triage
+## Source-fixed; native-execution verification still pending (header corrected 2026-11-25 — was "Open 2026-09-16 — needs owner triage")
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Verification note 2026-11-25:** on release/1.0.0 HEAD (`937f3203504`):
+
+- **Part A fix present (source inspection):**
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4975` emits
+  `rt_string_starts_with` with a `MirType.bool()` destination (ends_with
+  mirrors it at :4982+), so interpolation renders `true`/`false`.
+- **Part B/C fix present (source inspection):** the `to_string`/`to_text`
+  handler (:6150-6187) is no longer gated on `SIMPLE_BOOTSTRAP` — it lives in
+  the Unresolved-resolution arm and renders through `coerce_concat_operand`,
+  with Bool/Char/F32/F64/U64/I8-I64/U8-U32 receivers all accepted (:6156).
+- **Oracle lane re-run green** on the pinned seed (`bin/simple.exe run`):
+  the doc's Part A/B repro prints `O9:true|END O10:true|END O11:true|END
+  T3:true|END T4:7|END`.
+- **Native execution still NOT verified in this lane:** the 2026-11-04 triage
+  below requires a stage3 `native-build` of the repros, which needs a
+  self-hosted binary; none is deployed on this host and bootstrap rebuilds
+  are out of scope. Status therefore remains
+  fix-implemented-verification-pending, matching the in-body Status line.
 
 **Date:** 2026-07-17
 **Severity:** Medium-High (silent wrong output for the first half; loud build

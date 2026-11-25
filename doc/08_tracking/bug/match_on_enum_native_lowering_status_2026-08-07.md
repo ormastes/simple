@@ -1,8 +1,23 @@
 # `match` on enum — per-engine status verified 2026-08-07 (partial fix, not fully stale)
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-05 on the pure-Simple native lane — see bottom section; header updated 2026-11-25
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Verification note 2026-11-25:** the "Open — needs owner triage" header
+predated the 2026-11-05 FIXED section at the bottom of this doc and was
+misleading; updated. Fresh checks on release/1.0.0 HEAD (`937f3203504`,
+pinned seed `bin/simple.exe`, Windows): the doc's probe (unit-variant
+`describe_kind` + payload-variant `describe_shape`) prints all six expected
+lines (`kind-A/B/C`, `circle:2.5`, `rect:3.0x4.0`, `point`) on the default
+run lane, and the durable spec
+`test/01_unit/compiler/50.mir/enum_eq_and_match_lowering_spec.spl` exists
+in-tree. The pure-Simple `--native` AOT lane was NOT re-run here (no
+self-hosted binary deployed; cargo/bootstrap out of scope) — that lane's
+evidence remains the 2026-11-05 `mirp2a_enum` native run cited below.
+`bin/simple.exe test` is unusable at HEAD (known `@representation_boundary`
+seed/source skew), so the durable spec was not re-executed in this lane.
+
+(History: reviewed in the 2026-09-16 bug-ledger normalization pass as
+"Open — needs owner triage"; that header predated the 2026-11-05 FIXED
+section below and was corrected on 2026-11-25.)
 
 - **ID:** BUG-2026-08-07-enum-match-native-lowering-status
 - **Date:** 2026-08-07
