@@ -94,9 +94,9 @@ Closure re-verified by source inspection at release/1.0.0 tip (4bc2c986375):
 
 - The affected file
   `test/01_unit/lib/editor/.spipe_wrapped_entry_split_pane_spec.spl` no longer
-  exists in the tree. The 7 surviving `.spipe_wrapped_entry_*` dotfiles none
-  use the bare `expect X matcher(Y)` form, and dotfile specs are excluded from
-  discovery (31a5bf2fec8, "dotfile exclusion").
+  exists in the tree. None of the 7 surviving `.spipe_wrapped_entry_*`
+  dotfiles uses the bare `expect X matcher(Y)` form, and dotfile specs are
+  excluded from discovery (31a5bf2fec8, "dotfile exclusion").
 - The wrapped-entry preprocessor rewrites bare infix `expect X matcher Y` to
   `expect(X).matcher(Y)` before the `fn main():` wrap:
   `src/app/test_runner_new/test_runner_execute.spl:233`
