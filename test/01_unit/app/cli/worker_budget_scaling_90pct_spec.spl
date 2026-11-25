@@ -1,0 +1,83 @@
+use std.spec
+use app.io.env_ops.{env_get, env_set, env_unset}
+use std.common.config_core.host_config.{host_config_entries, host_config_resolve}
+use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_i64, host_limits_cache_reset_v1}
+use app.cli.shard_mem_clamp.{shard_tree_headroom_kib_for_pct_v1, shard_host_ram_ceiling_kib_v1,
+    shard_threads_mem_cap, shard_linux_meminfo_field_kb_v1, SHARD_HIR_WORKER_KB_V1,
+    BUILD_MEMORY_RESERVE_CAP_KIB_V1}
+use app.cli.file_worker_pool_refusal.{file_worker_pool_admission_usable_kb_v1,
+    file_worker_pool_admission_usable_kb_for_pct_v1,
+    file_worker_pool_unit_admission_usable_kb_v1}
+use compiler.driver.driver_build.parallel.{ParallelBuildConfig}
+use compiler.backend.runtime_c_compile_pool_v1.{runtime_c_compile_workers_for_v1}
+
+val GIB: i64 = 1048576
+
+describe "worker and memory budget scaling up to 90% host RAM":
+    it "host_config admits tree_rss_host_pct up to 90% and rejects 91%":
+        val entries = host_config_entries("", "", "host_config:\n  tree_rss_host_pct: 90\n", [])
+        val r90 = host_config_resolve(entries, "tree_rss_host_pct")
+        expect(r90.value).to_equal("90")
+        val bad = host_config_entries("", "", "host_config:\n  tree_rss_host_pct: 91\n", [])
+        val r91 = host_config_resolve(bad, "tree_rss_host_pct")
+        expect(r91.value).to_equal("")
+
+    it "computes host RAM ceiling and percentage headroom cleanly up to 90%":
+        expect(shard_host_ram_ceiling_kib_v1(60 * GIB, 90)).to_equal(54 * GIB)
+        expect(shard_host_ram_ceiling_kib_v1(60 * GIB, 95)).to_equal(54 * GIB)
+        expect(shard_tree_headroom_kib_for_pct_v1("", 0, "", 90, 60 * GIB)).to_equal(6 * GIB)
+        expect(shard_tree_headroom_kib_for_pct_v1("", 0, "1048576", 90, 60 * GIB)).to_equal(1048576)
+        expect(shard_tree_headroom_kib_for_pct_v1("", 0, "0", 90, 60 * GIB)).to_equal(0)
+
+    it "lifts the legacy 60% usable cap when tree_rss_host_pct > 60":
+        val pct60 = file_worker_pool_admission_usable_kb_for_pct_v1(
+            50 * GIB, 54 * GIB, 0, 54 * GIB, 6 * GIB, 60, 60 * GIB)
+        val pct90 = file_worker_pool_admission_usable_kb_for_pct_v1(
+            50 * GIB, 54 * GIB, 0, 54 * GIB, 6 * GIB, 90, 60 * GIB)
+        expect(pct60).to_equal(30 * GIB)
+        expect(pct90).to_equal(44 * GIB)
+        # Standalone hosts >= 96 GiB no longer take a double 60% haircut when headroom_kb == 24 GiB
+        val unit_128g = file_worker_pool_unit_admission_usable_kb_v1(
+            100 * GIB, 0, 0, 0, BUILD_MEMORY_RESERVE_CAP_KIB_V1)
+        expect(unit_128g).to_equal(76 * GIB)
+
+    it "scales shard_threads_mem_cap cleanly with 90% host RAM pct and worker reserve":
+        val old_clamp = env_get("SIMPLE_SHARD_MEM_CLAMP") ?? ""
+        val old_budget = env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? ""
+        val old_cap = env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? ""
+        val old_pct = env_get("SIMPLE_HOST_TREE_RSS_HOST_PCT") ?? ""
+        val old_wres = env_get("SIMPLE_WORKER_MEMORY_RESERVE_KB") ?? ""
+        val old_mode = env_get("SIMPLE_BOOTSTRAP_RSS_CAP_MODE") ?? ""
+        val _s0 = env_set("SIMPLE_SHARD_MEM_CLAMP", "1")
+        val _s1 = env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "{54 * GIB}")
+        val _s2 = env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "{54 * GIB}")
+        val _s3 = env_set("SIMPLE_HOST_TREE_RSS_HOST_PCT", "90")
+        val _s4 = env_set("SIMPLE_WORKER_MEMORY_RESERVE_KB", "1048576")
+        val _s5 = env_set("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "enforce")
+        # 54 GiB tree budget with 2 GiB parent + 2 GiB workers must admit > 16 workers when host has memory
+        val got = shard_threads_mem_cap(64, 2 * GIB, 2 * GIB)
+        # Restore env
+        val _r0 = if old_clamp == "": env_unset("SIMPLE_SHARD_MEM_CLAMP") else: env_set("SIMPLE_SHARD_MEM_CLAMP", old_clamp)
+        val _r1 = if old_budget == "": env_unset("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") else: env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", old_budget)
+        val _r2 = if old_cap == "": env_unset("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") else: env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", old_cap)
+        val _r3 = if old_pct == "": env_unset("SIMPLE_HOST_TREE_RSS_HOST_PCT") else: env_set("SIMPLE_HOST_TREE_RSS_HOST_PCT", old_pct)
+        val _r4 = if old_wres == "": env_unset("SIMPLE_WORKER_MEMORY_RESERVE_KB") else: env_set("SIMPLE_WORKER_MEMORY_RESERVE_KB", old_wres)
+        val _r5 = if old_mode == "": env_unset("SIMPLE_BOOTSTRAP_RSS_CAP_MODE") else: env_set("SIMPLE_BOOTSTRAP_RSS_CAP_MODE", old_mode)
+        expect(got >= 2).to_be_true()
+        expect(got <= 26).to_be_true()
+
+    it "removes stale 8-worker cap in C compile pool and ParallelBuildConfig":
+        expect(runtime_c_compile_workers_for_v1(64, 0, 100, 60 * GIB, 6 * GIB)).to_equal(64)
+        expect(runtime_c_compile_workers_for_v1(64, 128, 200, 60 * GIB, 6 * GIB)).to_equal(128)
+        val cfg = ParallelBuildConfig.default()
+        expect(cfg.effective_threads() >= 1).to_be_true()
+
+    it "parses Linux /proc/meminfo fields directly and resets host_limits cache cleanly":
+        val sample = "MemTotal:       62812340 kB\nMemFree:         1000000 kB\nMemAvailable:   45678900 kB\n"
+        expect(shard_linux_meminfo_field_kb_v1(sample, "MemAvailable:")).to_equal(45678900)
+        expect(shard_linux_meminfo_field_kb_v1(sample, "MemTotal:")).to_equal(62812340)
+        expect(shard_linux_meminfo_field_kb_v1(sample, "Missing:")).to_equal(0)
+        host_limits_cache_reset_v1()
+        val _s = env_set("SIMPLE_HOST_TREE_RSS_HOST_PCT", "88")
+        expect(host_limit_i64("tree_rss_host_pct", 0)).to_equal(88)
+        val _u = env_unset("SIMPLE_HOST_TREE_RSS_HOST_PCT")

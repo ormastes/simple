@@ -451,18 +451,7 @@ fn driver_native_shadow_bounded_module(module_name: text) -> text:
     module_name.substring(0, 160)
 
 fn driver_native_shadow_sort(lines: [text]) -> [text]:
-    var sorted: [text] = []
-    for line in lines:
-        var inserted = false
-        var next: [text] = []
-        for current in sorted:
-            if not inserted and line < current:
-                next.push(line)
-                inserted = true
-            next.push(current)
-        if not inserted: next.push(line)
-        sorted = next
-    sorted
+    lines.sort()
 
 # Admit the relocatable linker by probing `--version`, not by name: llvm-mingw
 # installs LLD's MinGW driver as `ld`, which rejects `-r` (measured: every
@@ -1145,20 +1134,43 @@ fn _driver_frozen_projected_signature_v1(
         selected_paths.join("\n")
     )
 
+fn _driver_frozen_fast_array_hash_v1(acc0: i64, items: [text]) -> i64:
+    var acc = acc0 * 1315423911 + items.len()
+    for item in items:
+        acc = acc * 16777619 + hash_text(item) + 1
+    acc
+
+fn _driver_frozen_fast_context_sig_v1(ctx: CompileContext) -> text:
+    val n = ctx.source_module_names_owner.len()
+    if n <= 0 or ctx.source_paths_owner.len() != n or ctx.source_identities_owner.len() != n:
+        return ""
+    var acc = _driver_frozen_fast_array_hash_v1(2166136261, ctx.source_module_names_owner)
+    acc = _driver_frozen_fast_array_hash_v1(acc, ctx.source_paths_owner)
+    acc = _driver_frozen_fast_array_hash_v1(acc, ctx.source_identities_owner)
+    acc = _driver_frozen_fast_array_hash_v1(acc, ctx.frozen_storage_known_module_names)
+    acc = acc * 16777619 + ctx.sources.len()
+    for src_entry in ctx.sources:
+        acc = acc * 16777619 + hash_text(src_entry.module_name) + 1
+        acc = acc * 16777619 + hash_text(src_entry.path) + 1
+    val frozen_flag = if ctx.storage_registry_frozen: 1 else: 0
+    "{n}:{ctx.sources.len()}:{ctx.frozen_storage_known_module_names.len()}:{frozen_flag}:{acc}"
+
 fn _driver_frozen_context_signature_v1(ctx: CompileContext) -> text:
     val (sel_paths, sel_mods) = _driver_selected_source_projection_v1(ctx)
     _driver_frozen_projected_signature_v1(
         ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner,
         sel_paths, sel_mods)
 
-fn _driver_build_projected_frozen_source_index_v1(
+fn _driver_build_projected_frozen_maps_v1(
     source_paths: [text], source_identities: [text], source_module_names: [text],
     selected_paths: [text], selected_module_names: [text]
-) -> {text: (i64, text, text)}:
-    var index_table: {text: (i64, text, text)} = {}
+) -> ({text: i64}, {text: text}, {text: text}):
+    var indices_map: {text: i64} = {}
+    var paths_map: {text: text} = {}
+    var ids_map: {text: text} = {}
     val count = source_module_names.len()
     if source_paths.len() != source_identities.len() or source_paths.len() != count:
-        return index_table
+        return (indices_map, paths_map, ids_map)
     var module_counts: {text: i64} = {}
     var path_counts: {text: i64} = {}
     var path_first_id: {text: text} = {}
@@ -1203,7 +1215,9 @@ fn _driver_build_projected_frozen_source_index_v1(
                 val sp_count = sel_path_counts[p] ?? 0
                 if not has_projection or sp_count == 0 or
                         (sp_count == 1 and (sel_mod_counts[m] ?? 0) == 1 and (sel_mod_path[m] ?? "") == p):
-                    index_table[m] = (build_idx, p, id)
+                    indices_map[m] = build_idx
+                    paths_map[m] = p
+                    ids_map[m] = id
             elif p_count > 1 and has_projection:
                 # Match CompileContext.frozen_native_cache_source_identity_v1:
                 # full-inventory phase-1 rows may alias a physical file (e.g.
@@ -1214,8 +1228,22 @@ fn _driver_build_projected_frozen_source_index_v1(
                         (sel_path_counts[p] ?? 0) == 1 and
                         (sel_mod_path[m] ?? "") == p and
                         (path_id_consistent[p] ?? false):
-                    index_table[m] = (build_idx, p, id)
+                    indices_map[m] = build_idx
+                    paths_map[m] = p
+                    ids_map[m] = id
         build_idx = build_idx + 1
+    (indices_map, paths_map, ids_map)
+
+fn _driver_build_projected_frozen_source_index_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text],
+    selected_paths: [text], selected_module_names: [text]
+) -> {text: (i64, text, text)}:
+    val (indices_map, paths_map, ids_map) = _driver_build_projected_frozen_maps_v1(
+        source_paths, source_identities, source_module_names,
+        selected_paths, selected_module_names)
+    var index_table: {text: (i64, text, text)} = {}
+    for mk in indices_map.keys():
+        index_table[mk] = (indices_map[mk], paths_map[mk], ids_map[mk])
     index_table
 
 fn _driver_build_frozen_source_index_v1(
@@ -1235,10 +1263,7 @@ fn _driver_clear_ctx_frozen_source_lookup_v1(ctx: CompileContext):
     ctx.frozen_source_lookup_identities_v1 = {}
 
 fn _driver_install_frozen_source_table_v1(ctx: CompileContext):
-    val (sel_paths, sel_mods) = _driver_selected_source_projection_v1(ctx)
-    val sig = _driver_frozen_projected_signature_v1(
-        ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner,
-        sel_paths, sel_mods)
+    val sig = _driver_frozen_fast_context_sig_v1(ctx)
     if sig == "":
         _driver_clear_ctx_frozen_source_lookup_v1(ctx)
         return
@@ -1248,17 +1273,10 @@ fn _driver_install_frozen_source_table_v1(ctx: CompileContext):
             ctx.frozen_storage_known_module_names.len() == ctx.frozen_source_lookup_known_len_v1 and
             ctx.storage_registry_frozen == ctx.frozen_source_lookup_frozen_flag_v1:
         return
-    val built = _driver_build_projected_frozen_source_index_v1(
+    val (sel_paths, sel_mods) = _driver_selected_source_projection_v1(ctx)
+    val (indices_map, paths_map, ids_map) = _driver_build_projected_frozen_maps_v1(
         ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner,
         sel_paths, sel_mods)
-    var indices_map: Dict<text, i64> = {}
-    var paths_map: Dict<text, text> = {}
-    var ids_map: Dict<text, text> = {}
-    for mk in built.keys():
-        val (b_idx, b_path, b_id) = built[mk]
-        indices_map[mk] = b_idx
-        paths_map[mk] = b_path
-        ids_map[mk] = b_id
     ctx.frozen_source_lookup_indices_v1 = indices_map
     ctx.frozen_source_lookup_paths_v1 = paths_map
     ctx.frozen_source_lookup_identities_v1 = ids_map
@@ -1277,7 +1295,7 @@ fn _driver_frozen_cached_entry_v1(ctx: CompileContext, module_name: text) -> (te
             ctx.frozen_source_lookup_sources_len_v1 != ctx.sources.len() or
             ctx.frozen_source_lookup_known_len_v1 != ctx.frozen_storage_known_module_names.len() or
             ctx.frozen_source_lookup_frozen_flag_v1 != ctx.storage_registry_frozen or
-            (ctx.native_sources_fingerprint == "" and _driver_frozen_context_signature_v1(ctx) != ctx.frozen_source_lookup_key_v1):
+            (ctx.native_sources_fingerprint == "" and not ctx.storage_registry_frozen and _driver_frozen_fast_context_sig_v1(ctx) != ctx.frozen_source_lookup_key_v1):
         _driver_install_frozen_source_table_v1(ctx)
     if ctx.frozen_source_lookup_paths_v1.contains_key(module_name):
         val idx = ctx.frozen_source_lookup_indices_v1[module_name]

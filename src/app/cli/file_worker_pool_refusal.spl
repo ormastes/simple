@@ -13,11 +13,12 @@ use app.cli.shard_mem_clamp.{SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, SHARD_MIR_WORKER_
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_worker_budget_kb, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
     shard_pool_effective_budget_for_v1, shard_tree_headroom_kib_v1,
-    shard_effective_tree_budget_kb_v1, BUILD_MEMORY_RESERVE_CAP_KIB_V1}
+    shard_effective_tree_budget_kb_v1, BUILD_MEMORY_RESERVE_CAP_KIB_V1,
+    build_host_memory_total_kib, shard_host_ram_ceiling_kib_v1}
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use app.io.cli_ops.{cli_kernel_executable_path}
-use std.nogc_sync_mut.host_limits.{host_limit_value}
+use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_i64}
 
 val FILE_WORKER_POOL_I64_MAX_V1: i64 = 9223372036854775807
 
@@ -124,6 +125,22 @@ pub fn file_worker_pool_admission_usable_kb_v1(avail_kb: i64, declared_kb: i64, 
     if effective < 0 or (usable > 0 and usable <= effective): return usable
     return effective
 
+# Host-percent-aware admission usable memory: preserves the legacy 60% usable
+# cap when `host_pct <= 75`, and scales up to `min(effective, host_pct% * total)`
+# when `host_pct > 75` (up to 90% host RAM) so large hosts do not double-clamp.
+pub fn file_worker_pool_admission_usable_kb_for_pct_v1(avail_kb: i64, declared_kb: i64, cgroup_kb: i64,
+        rss_cap_kb: i64, headroom_kb: i64, host_pct: i64, total_kb: i64) -> i64:
+    if host_pct <= 75:
+        return file_worker_pool_admission_usable_kb_v1(avail_kb, declared_kb, cgroup_kb, rss_cap_kb, headroom_kb)
+    val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, cgroup_kb, rss_cap_kb, headroom_kb)
+    val ceiling = shard_host_ram_ceiling_kib_v1(total_kb, host_pct)
+    if effective < 0:
+        if ceiling > 0: return ceiling
+        return file_worker_pool_usable_kb_v1(avail_kb, shard_tree_budget_kb_for(declared_kb, cgroup_kb))
+    if ceiling > 0 and ceiling < effective:
+        return ceiling
+    effective
+
 # Phase price: a valid SIMPLE_*_SHARD_WORKER_KB env value wins in every mode;
 # the host key worker_mem_mib is a measured SHARD worker figure (26624 MiB on
 # the phase-3 Windows host) and applies only when shard_mode is true; the
@@ -177,7 +194,10 @@ pub fn file_worker_pool_live_admission_usable_kb_v1() -> i64:
     val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
     val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
     val rss_cap_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
-    return file_worker_pool_admission_usable_kb_v1(avail_kb, declared_kb, shard_cgroup_memory_max_kb(), rss_cap_kb, shard_tree_headroom_kib_v1())
+    val host_pct = host_limit_i64("tree_rss_host_pct", 0)
+    val total_kb = if host_pct > 75: build_host_memory_total_kib() else: 0
+    return file_worker_pool_admission_usable_kb_for_pct_v1(avail_kb, declared_kb,
+        shard_cgroup_memory_max_kb(), rss_cap_kb, shard_tree_headroom_kib_v1(), host_pct, total_kb)
 
 # Live HIR per-worker budget (override > host worker_mem_mib > scaled 9 GB
 # default), priced from what HIR admission grants, not from 60% of free.
@@ -293,8 +313,7 @@ pub fn file_worker_pool_unit_price_v1(env_field: text, host_mib_field: text, def
         explicit: default_price.explicit or _file_worker_pool_unit_price_explicit_v1(env_field, host_mib_field, default_price.budget_kb))
 
 pub fn file_worker_pool_unit_admission_usable_kb_v1(avail_kb: i64, declared_kb: i64, cgroup_kb: i64, rss_cap_kb: i64, headroom_kb: i64) -> i64:
-    if declared_kb <= 0 and cgroup_kb <= 0 and rss_cap_kb <= 0 and
-            headroom_kb > 0 and headroom_kb < BUILD_MEMORY_RESERVE_CAP_KIB_V1:
+    if declared_kb <= 0 and cgroup_kb <= 0 and rss_cap_kb <= 0 and headroom_kb > 0:
         val standalone = shard_effective_tree_budget_kb_v1(0, 0, avail_kb, headroom_kb)
         return if standalone > 0: standalone else: 0
     return file_worker_pool_admission_usable_kb_v1(avail_kb, declared_kb, cgroup_kb, rss_cap_kb, headroom_kb)
@@ -317,8 +336,20 @@ fn _file_worker_pool_live_unit_usable_kb_v1() -> i64:
     val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
     val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
     val rss_cap_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
-    return file_worker_pool_unit_admission_usable_kb_v1(avail_kb, declared_kb, shard_cgroup_memory_max_kb(),
-        rss_cap_kb, shard_tree_headroom_kib_v1())
+    val cgroup_kb = shard_cgroup_memory_max_kb()
+    val headroom_kb = shard_tree_headroom_kib_v1()
+    val host_pct = host_limit_i64("tree_rss_host_pct", 0)
+    if host_pct > 75:
+        val total_kb = build_host_memory_total_kib()
+        if declared_kb <= 0 and cgroup_kb <= 0 and rss_cap_kb <= 0 and headroom_kb > 0:
+            val ceiling = shard_host_ram_ceiling_kib_v1(total_kb, host_pct)
+            val standalone = file_worker_pool_unit_admission_usable_kb_v1(avail_kb, 0, 0, 0, headroom_kb)
+            if ceiling > 0 and ceiling < standalone: return ceiling
+            return standalone
+        return file_worker_pool_admission_usable_kb_for_pct_v1(avail_kb, declared_kb, cgroup_kb,
+            rss_cap_kb, headroom_kb, host_pct, total_kb)
+    return file_worker_pool_unit_admission_usable_kb_v1(avail_kb, declared_kb, cgroup_kb,
+        rss_cap_kb, headroom_kb)
 
 pub(package) fn file_worker_pool_live_unit_hir_budget_kb_v1(modules: i64) -> i64:
     val env_field = env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? ""

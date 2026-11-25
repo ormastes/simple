@@ -21,7 +21,8 @@
 # compiler closure in.
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
-use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_mem_reserve_free_kib}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_i64, host_limit_mem_reserve_free_kib}
 use std.nogc_sync_mut.io.host_capacity.{host_memory_admit_v1}
 
 use std.nogc_sync_mut.sffi.process_memory.{freebsd_vm_available_kib_from_sysctl}
@@ -294,31 +295,35 @@ fn _probe_host_physmem_kib_v1() -> i64:
 fn _probe_phys_uncommitted_kib_v1() -> i64:
     0
 @else:
-# MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
-# permits only the existing sequential path, never CPU-count fanout.
-# NOTE: deliberately NOT std.io_runtime.file_read. In the run20-class seed
-# `file_read` infinitely recurses and aborts the process with
-# "fatal runtime error: stack overflow" on ANY file, regular or procfs --
-# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md.
-# The first landing of this clamp (ff095d31591) used it and took down every
-# native-build before step 0/6. `process_run_timeout` is the same mechanism
-# native_build_main already uses for `readlink` on this exact path, so it is
-# proven live here.
+# Pure Linux /proc/meminfo field parser (kB); 0 when absent or invalid.
+# reason: raw procfs text parsing returning KiB scalar matching shard_mem_available_kb_from_field
+@allow(primitive_api)
+pub fn shard_linux_meminfo_field_kb_v1(meminfo: text, field_prefix: text) -> i64:
+    for line in meminfo.split("\n"):
+        if line.starts_with(field_prefix):
+            val rest = line.substring(field_prefix.byte_len()).trim()
+            val parts = rest.split(" ")
+            if parts.len() > 0:
+                return shard_mem_available_kb_from_field(parts[0])
+    0
+
+# MemAvailable (kB) from /proc/meminfo via direct file_read_nullable (no awk fork);
+# 0 when unavailable. Unknown memory permits only the sequential path.
 pub fn shard_mem_available_kb() -> i64:
-    val (out, _err, code) = process_run_timeout("awk", ["/^MemAvailable:/ {print $2}", "/proc/meminfo"], 2000)
-    if code != 0:
+    val meminfo = file_read_nullable("/proc/meminfo") ?? ""
+    if meminfo == "":
         return 0
-    shard_mem_available_kb_from_field(out.trim())
+    shard_linux_meminfo_field_kb_v1(meminfo, "MemAvailable:")
 
 # Installed RAM in kB (MemTotal is already kB); the shared
 # build_host_memory_total_kib() wrapper bounds it by live cgroup memory.max:
 # inside a 24 GiB scope on a 121 GB host the scope, not the host, is the
 # memory a build can ever get.
 fn _probe_host_physmem_kib_v1() -> i64:
-    val (out, _err, code) = process_run_timeout("awk", ["/^MemTotal:/ {print $2}", "/proc/meminfo"], 2000)
-    if code != 0:
+    val meminfo = file_read_nullable("/proc/meminfo") ?? ""
+    if meminfo == "":
         return 0
-    shard_mem_available_kb_from_field(out.trim())
+    shard_linux_meminfo_field_kb_v1(meminfo, "MemTotal:")
 
 # Physical-uncommitted RAM (KiB) for the balloon witness; only Windows probes it.
 fn _probe_phys_uncommitted_kib_v1() -> i64:
@@ -779,12 +784,45 @@ pub fn shard_tree_headroom_kib_for_v1(reserve_bytes_field: text, host_reserve_ki
     val quarter = total_kib / 4
     if quarter <= 0 or quarter >= BUILD_MEMORY_RESERVE_CAP_KIB_V1: BUILD_MEMORY_RESERVE_CAP_KIB_V1 else: quarter
 
+# reason: pure KiB headroom calculation sharing scalar boundary with shard_tree_headroom_kib_for_v1
+@allow(primitive_api)
+pub fn shard_tree_headroom_kib_for_pct_v1(reserve_bytes_field: text, host_reserve_kib: i64,
+        worker_reserve_field: text, host_pct: i64, total_kib: i64 = 0) -> i64:
+    val parsed = shard_mem_available_kb_from_field(reserve_bytes_field)
+    if parsed > 0: return parsed / 1024
+    if host_reserve_kib > 0: return host_reserve_kib
+    val worker_res_trimmed = worker_reserve_field.trim()
+    if worker_res_trimmed != "":
+        val worker_res = shard_mem_available_kb_from_field(worker_res_trimmed)
+        if worker_res > 0 or worker_res_trimmed == "0":
+            return worker_res
+    if host_pct > 75 and host_pct <= 90 and total_kib > 0:
+        val pct_res = (total_kib / 100) * (100 - host_pct) + ((total_kib % 100) * (100 - host_pct)) / 100
+        val min_ten = total_kib / 10
+        val effective_pct_res = if pct_res > min_ten: pct_res else: min_ten
+        if effective_pct_res >= BUILD_MEMORY_RESERVE_CAP_KIB_V1:
+            return BUILD_MEMORY_RESERVE_CAP_KIB_V1
+        if effective_pct_res > 0:
+            return effective_pct_res
+    shard_tree_headroom_kib_for_v1("", 0, total_kib)
+
+# Pure host RAM ceiling (KiB) aligned with up to 90% when `host_pct` (1..90) is
+# requested; returns 0 when total_kib <= 0 or host_pct <= 0.
+# reason: pure KiB memory ceiling scalar matching shard_tree_headroom_kib_for_pct_v1
+@allow(primitive_api)
+pub fn shard_host_ram_ceiling_kib_v1(total_kib: i64, host_pct: i64) -> i64:
+    if total_kib <= 0 or host_pct <= 0: return 0
+    val clamped_pct = if host_pct > 90: 90 else: host_pct
+    (total_kib / 100) * clamped_pct + ((total_kib % 100) * clamped_pct) / 100
+
 pub fn shard_tree_headroom_kib_v1() -> i64:
     val field = env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
     val host_kib = host_limit_mem_reserve_free_kib(0)
-    # An explicit reserve (env or host key) never probes the host total.
-    val explicit = shard_mem_available_kb_from_field(field) > 0 or host_kib > 0
-    shard_tree_headroom_kib_for_v1(field, host_kib, if explicit: 0 else: build_host_memory_total_kib())
+    val worker_res_field = env_get("SIMPLE_WORKER_MEMORY_RESERVE_KB") ?? ""
+    val host_pct = host_limit_i64("tree_rss_host_pct", 0)
+    val explicit = shard_mem_available_kb_from_field(field) > 0 or host_kib > 0 or worker_res_field.trim() != ""
+    val total_kib = if explicit: 0 else: build_host_memory_total_kib()
+    shard_tree_headroom_kib_for_pct_v1(field, host_kib, worker_res_field, host_pct, total_kib)
 
 # Host RAM/commit reserve and enforced tree RSS cap are separate bounds:
 # min(declared, cap, free - headroom) when host free memory is known. A
@@ -976,19 +1014,16 @@ pub fn shard_cgroup_memory_max_kb() -> i64:
 pub fn shard_cgroup_memory_max_kb() -> i64:
     0
 @else:
-# Same subprocess mechanism as shard_mem_available_kb (see the NOTE there); a
-# child inherits this process's cgroup, so its /proc/self/cgroup is ours. v2
-# unified rows and the v1 memory controller row are both probed; when a hybrid
-# table carries both, the tighter bound wins.
+# Direct /proc/self/cgroup + sysfs limit reads via file_read_nullable (no cat forks).
 pub fn shard_cgroup_memory_max_kb() -> i64:
-    val (table, _err, code) = process_run_timeout("cat", ["/proc/self/cgroup"], 2000)
-    if code != 0:
+    val table = file_read_nullable("/proc/self/cgroup") ?? ""
+    if table == "":
         return 0
     var files: {text: text} = {}
     for candidate in shard_cgroup_probe_paths_v1(table):
-        val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
-        if rc == 0:
-            files[candidate] = out.trim()
+        val out = file_read_nullable(candidate)
+        if val content = out:
+            files[candidate] = content.trim()
     shard_cgroup_memory_max_kb_from_probe_v1(table, files)
 @end
 @end
@@ -1093,17 +1128,35 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
     # the RSS guard is the only (or tighter) enclosing limit.
     val tree_kb = shard_tree_budget_kb_for(declared_kb, if parent_peak_kb >= 0: cap_kb else: cgroup_kb)
     val headroom_kb = shard_tree_headroom_kib_v1()
-    val standalone_calibrated = host_clamp and tree_kb <= 0 and cap_kb <= 0 and
-        headroom_kb > 0 and headroom_kb < BUILD_MEMORY_RESERVE_CAP_KIB_V1
+    val host_pct = host_limit_i64("tree_rss_host_pct", 0)
+    val pct_ceiling_kb = if host_pct > 0: shard_host_ram_ceiling_kib_v1(build_host_memory_total_kib(), host_pct) else: 0
+    val standalone_calibrated = host_clamp and tree_kb <= 0 and cap_kb <= 0 and headroom_kb > 0
+    val standalone_avail_kb = if pct_ceiling_kb > 0 and avail_kb > pct_ceiling_kb: pct_ceiling_kb else: avail_kb
+    val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, cgroup_kb, rss_cap, headroom_kb)
+    val use_calibrated_tree = (host_pct > 75 or
+        (headroom_kb > 0 and headroom_kb < BUILD_MEMORY_RESERVE_CAP_KIB_V1 and
+            (parent_peak_kb < 0 or tree_kb > 2 * SHARD_FLOOR_UNKNOWN_PARENT_KB_V1))) and
+        effective >= 0 and (tree_kb > 0 or cap_kb > 0)
     val cap0 = if standalone_calibrated:
-        shard_standalone_host_cap_v1(bounded, budget_kb, avail_kb, headroom_kb, parent_peak_kb)
+        shard_standalone_host_cap_v1(bounded, budget_kb, standalone_avail_kb, headroom_kb, parent_peak_kb)
+    elif use_calibrated_tree:
+        var budget_for_workers = effective
+        if pct_ceiling_kb > 0 and budget_for_workers > pct_ceiling_kb:
+            budget_for_workers = pct_ceiling_kb
+        if parent_peak_kb >= 0 and tree_kb > 0:
+            val tree_rem = if tree_kb > parent_peak_kb: tree_kb - parent_peak_kb else: 0
+            if tree_rem < budget_for_workers:
+                budget_for_workers = tree_rem
+        var slots = shard_pool_workers_v1(budget_for_workers, budget_kb)
+        if parent_peak_kb < 0 and slots < 1 and budget_for_workers > 0:
+            slots = 1
+        if slots > bounded: bounded else: slots
     elif parent_peak_kb >= 0:
         shard_threads_parent_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp, parent_peak_kb)
     else:
         shard_threads_tree_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp)
     var cap = cap0
     if parent_peak_kb >= 0:
-        val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, cgroup_kb, rss_cap, headroom_kb)
         if effective >= 0:
             if effective != tree_kb:
                 print "[hir-shard] tree budget clamped: declared {tree_kb} kB, cap {cap_kb} kB, free {avail_kb} kB, headroom {headroom_kb} kB -> effective {effective} kB"

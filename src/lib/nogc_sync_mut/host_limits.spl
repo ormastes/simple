@@ -15,7 +15,18 @@
 # points (once per pool / build start), never per-module hot paths.
 
 use std.common.config_core.host_config.{host_config_entries, host_config_int, host_config_value, host_config_env_name}
-use std.nogc_sync_mut.io_runtime.{env_get_nullable, file_read_nullable}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, file_read_nullable, cwd}
+
+var _hl_doc_cache_key: text = ""
+var _hl_doc_defaults: text = ""
+var _hl_doc_machine: text = ""
+var _hl_doc_user: text = ""
+
+pub fn host_limits_cache_reset_v1():
+    _hl_doc_cache_key = ""
+    _hl_doc_defaults = ""
+    _hl_doc_machine = ""
+    _hl_doc_user = ""
 
 fn _hl_env(name: text) -> text:
     env_get_nullable(name) ?? ""
@@ -79,10 +90,21 @@ fn host_limits_int_from(key: text, defaults_text: text, host_text: text, user_te
     val env: [(text, text)] = [(host_config_env_name(key), env_value)]
     host_config_int(host_config_entries(defaults_text, host_text, user_text, env), key, default_value)
 
+fn _hl_ensure_docs():
+    val hostname = host_limits_hostname()
+    val user_path = host_limits_user_path()
+    val cache_key = "{cwd()}|{hostname}|{user_path}"
+    if _hl_doc_cache_key == cache_key:
+        return
+    _hl_doc_defaults = _hl_read("config/host/host_config.sdn")
+    _hl_doc_machine = host_limits_machine_text(hostname)
+    _hl_doc_user = _hl_read(user_path)
+    _hl_doc_cache_key = cache_key
+
 # Live lookup: the effective text value of `key` ("" when unconfigured).
 pub fn host_limit_value(key: text) -> text:
-    val machine = host_limits_machine_text(host_limits_hostname())
-    host_limits_value_from(key, _hl_read("config/host/host_config.sdn"), machine, _hl_read(host_limits_user_path()), _hl_env(host_config_env_name(key)))
+    _hl_ensure_docs()
+    host_limits_value_from(key, _hl_doc_defaults, _hl_doc_machine, _hl_doc_user, _hl_env(host_config_env_name(key)))
 
 # Live lookup of a positive integer key, else `default_value`.
 fn host_limit_i64(key: text, default_value: i64) -> i64:
