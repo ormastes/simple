@@ -115,3 +115,9 @@ References: [Time::HiRes contract](https://perldoc.perl.org/Time::HiRes),
 ## Resolution (2026-11-03)
 
 Fixed in source: scripts/resource/process-tree-rss-watchdog.pl uses one CLOCK_MONOTONIC accessor. The Python verifier was ported to scripts/check/check-watchdog-monotonic-budget.shs (12 controlled-clock assertions PASS) and the .py removed (no-Python rule).
+
+## WA-W2-5 Audit & Retirement (2026-11-26)
+
+- **Classification:** `ROOT-FIXED+RETIRED`
+- **Disposition:** Removed the mislabeled `# @workaround bug=bootstrap_watchdog_wall_clock_budget_2026_10_11 gh=#3136` comment from `scripts/resource/process-tree-rss-watchdog.pl` while retaining `monotonic_time()`, `checked_monotonic_startup_time()`, and the `CLOCK_MONOTONIC` requirement (permanent design, `bug_db.sdn` status `fixed`). `git grep` across `scripts/` and `test/` confirmed no tests or scripts depend on the `# @workaround` tag.
+- **Verification:** `perl -c scripts/resource/process-tree-rss-watchdog.pl` (`syntax OK`), `sh scripts/check/check-watchdog-monotonic-budget.shs` (`PASS — 12 monotonic-clock contract checks passed`), and `perl scripts/resource/windows-clang-flags-test.pl` (27/27 checks passed).

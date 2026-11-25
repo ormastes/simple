@@ -31,3 +31,8 @@ Portable helper acceptance is limited to explicit activation, unchanged default 
 ## 2026-11-03 fix-implemented-verification-pending
 
 Native-build shard children (HIR/MIR) that exit nonzero without publishing a reason now leave a bounded exit receipt beside the ledger (`native_file_worker_exit_receipt_publish_v1`, wired in `run_native_build_worker`), which the coordinator prints as the first-error line. Spec: test/01_unit/compiler/80.driver/native_file_worker_exit_receipt_spec.spl (3/3 pass, seed interpreter). Remaining: real Windows async stdio transport (handle allowlist + bounded drain) needs a native Windows run to verify; repro: native-build with SIMPLE_HIR_SHARDING=1 on Windows and force a child failure; expect a first-error line naming the exit code.
+
+## WA-W2-5 Audit (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept `scripts/bootstrap/workarounds/hir-worker-diagnostics.shs:5` (`# @workaround bug=BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010 recover=d6abe34243c4ea9365454eca4c7e8586b8d216bf`) untouched. Although `d61960f51f9` fixed `rt_process_spawn_async_owned_windows` in `src/runtime/runtime_process.c` and `36eeeeee0dd` added shard child exit receipts (`src/compiler/80.driver/driver_build/native_file_worker_v1.spl:708`, whose message still suggests `SIMPLE_HIR_SHARDING=0`), `src/runtime/platform/platform_win.h:643` still uses `bInheritHandles=FALSE`, native Windows shard verification with `SIMPLE_HIR_SHARDING=1` remains pending, `doc/03_plan/compiler/bootstrap/workaround_cleanup_plan_2026_10_25.json` marks `removal_authorized: false`, and `test/00_unit/scripts/hir_worker_diagnostics_workaround_test.shs` tests the helper.
