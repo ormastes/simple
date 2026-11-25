@@ -1,6 +1,6 @@
 ---
 id: cranelift_seed_missing_sffi_externs_2026-07-16
-status: OPEN
+status: RESOLVED 2026-11-25 (missing-extern defect stale w.r.t. pinned seed; see dated note)
 severity: medium
 discovered: 2026-07-16
 discovered_by: scripts/check/check-native-seed-parity.shs strict-cranelift family (all 9 cases red at tip de7cb5a238a)
@@ -140,3 +140,36 @@ every cranelift build still XFAILs either way under this seed — so it is
 pure churn against an already-correct call site for zero verification-gate
 benefit. Fix remains: redeploy the seed/self-hosted binary from current
 source.
+
+## Verification 2026-11-25 (p2w1-ag lane, symbol inspection + bounded probe)
+
+The missing-extern defect is STALE with respect to the currently pinned seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1, Windows, 38,403,072 bytes).
+`nm --defined-only` on that binary finds 82 unique `rt_cranelift_*` symbols
+(the 2026-07-11 Linux seed documented above had 68), and all 10 externs named
+in this entry are present, including the later-added
+`rt_cranelift_new_aot_module_triple`:
+
+- rt_cranelift_call_arg, rt_cranelift_call_args_clear,
+  rt_cranelift_data_addr_in_func, rt_cranelift_declare_global_data,
+  rt_cranelift_declare_string_data, rt_cranelift_emit_object_raw,
+  rt_cranelift_fdemote, rt_cranelift_fpromote,
+  rt_cranelift_function_addr_in_func, rt_cranelift_new_aot_module_triple —
+  all PRESENT.
+
+The root cause this entry names — "the deployed seed simply predates them" —
+is therefore fixed: the current pinned seed was built from source that
+exports the full cranelift SFFI surface, exactly the fix the entry
+prescribed (redeploy from current source).
+
+End-to-end re-verification of `native-build --backend=cranelift` was
+attempted once on this Windows host and is blocked by a SEPARATE, known
+defect: release/1.0.0 HEAD is source/binary inconsistent — commit
+cfd89933699 added `@representation_boundary` annotations the pinned seed
+rejects, so the build dies at
+`error: semantic: src/app/cli/native_build_main.spl:239:1: unknown decorator '@representation_boundary'`
+(rc=1) before any cranelift SFFI call is reached. The probe log shows the
+failure is the decorator, not `unknown extern function: rt_cranelift_*`.
+Once the seed/source inconsistency is resolved, the parity harness's
+`cranelift_seed_supported()` probe should pass unmodified, as this entry
+predicted.
