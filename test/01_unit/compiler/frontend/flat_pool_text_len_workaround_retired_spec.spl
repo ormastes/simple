@@ -1,0 +1,81 @@
+"""
+# Flat-Pool Text-Len Workaround Retirement Contract
+
+Unit tests verifying that:
+1. Cache-restored ParserModule values flow cleanly through
+   `build_module_from_flat_pool_blob` and `ModuleSurfaceBuilder.add_parsed`
+   without the retired `stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22`
+   local-rebind and decode-hit dry-run workarounds.
+2. Permanent transient-scope owner promotion hooks remain wired in
+   `parser_promote_transient_owners()`.
+3. All 11 retired `@workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22`
+   markers and the `SIMPLE_POOLDBG` bisect counter are absent from compiler source.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{
+    parse_and_build_module_scoped,
+    flat_pool_capture_arm,
+    flat_pool_capture_take,
+    build_module_from_flat_pool_blob
+}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder}
+
+describe "stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 workaround retirement":
+    it "restores a cached module and registers its surface directly without local-rebind workarounds":
+        val source = "pub fn greet_utf8() -> text:\n    return \"héllo\"\n"
+        val path = "src/compiler/10.frontend/core/retired_wa_probe.spl"
+        flat_pool_capture_arm()
+        val parsed = parse_and_build_module_scoped(source, path, false)
+        val blob = flat_pool_capture_take()
+        expect(parsed.functions.len()).to_equal(1)
+        expect(blob != "").to_equal(true)
+
+        val restored_opt = build_module_from_flat_pool_blob(blob, source, path)
+        expect(restored_opt.is_some()).to_equal(true)
+        val restored = restored_opt.unwrap()
+        expect(restored.functions.len()).to_equal(1)
+        expect(restored.functions["greet_utf8"].name).to_equal("greet_utf8")
+
+        val sf = SourceFile(
+            path: path,
+            content: source,
+            module_name: "compiler.frontend.core.retired_wa_probe"
+        )
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_parsed(restored, sf, 0).is_ok()).to_equal(true)
+        val finished = builder.finish()
+        expect(finished.is_ok()).to_equal(true)
+        val registry = finished.unwrap()
+        expect(registry.surfaces.len()).to_equal(1)
+        expect(registry.index_by_name["compiler.frontend.core.retired_wa_probe"]).to_equal(0)
+
+    it "removes all retired workaround tags and bisect probes while retaining transient-scope promotion":
+        val files = [
+            "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl",
+            "src/compiler/10.frontend/core/_Ast/decl_nodes.spl",
+            "src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl",
+            "src/compiler/10.frontend/core/_ParserDecls/extend_decls.spl",
+            "src/compiler/10.frontend/core/types.spl",
+            "src/compiler/20.hir/hir_lowering/module_surface_declarations.spl",
+            "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+        ]
+        val marker = "@workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22"
+        for f in files:
+            val content = file_read(f)
+            expect(content.contains(marker)).to_equal(false)
+
+        val types_src = file_read("src/compiler/10.frontend/core/types.spl")
+        expect(types_src.contains("flat_pool_debug_state_v1")).to_equal(false)
+        expect(types_src.contains("SIMPLE_POOLDBG")).to_equal(false)
+
+        val assembly_src = file_read("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        expect(assembly_src.contains("flat_pool_debug_state_v1")).to_equal(false)
+        expect(assembly_src.contains("flat_pool_validate_texts_arm_v1")).to_equal(false)
+
+        val parser_src = file_read("src/compiler/10.frontend/core/parser.spl")
+        expect(parser_src).to_contain("decl_pools_promote_transient_owners()")
+        expect(parser_src).to_contain("parser_decls_pools_promote_transient_owners()")
+        expect(parser_src).to_contain("parser_pending_pools_promote_transient_owners()")
