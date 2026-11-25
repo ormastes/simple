@@ -240,3 +240,20 @@ greens not re-executed):
 Unblock condition 1 (per-directory shared-fixture/setup hook in spec
 discovery/launch) is met by the policy-file mechanism. Header flipped to
 FIXED. The in-body gap analysis below is retained as history.
+
+## Verification 2026-11-25 (release/1.0.0, `47d6c5eddd5`)
+
+Presence/content re-check on this base confirms the FIXED verdict:
+`src/lib/nogc_sync_mut/spec/dir_prevention.spl`,
+`test/01_unit/lib/std/spec/dir_prevention_spec.spl`,
+`test/01_unit/lib/std/spec/dir_prevention_policy_runner_spec.spl`, and the
+`test/fixtures/dir_prevention/policy_dir/` fixture (`_prevention.sdn` +
+`guarded_example.spl` + `nested/`) are all tracked; `spec.spl` imports
+`dir_prevention` (line 21) and wires the `SIMPLE_SPEC_DIR_PREVENTION`
+before/after_each hook pair (lines ~1386-1436). A fresh spec re-run was NOT
+possible in this environment: the tracked `bin/simple.exe` (seed refreshed
+2026-11-17) predates the seed's `@representation_boundary` directive fix
+(`14a34acbe1e`, 2026-11-25), so loading today's annotated std-lib files
+aborts with `unknown decorator '@representation_boundary'` before any spec
+executes. Verification here is by code/content inspection only; the
+2026-11-04 RED->GREEN evidence table above remains the last runtime proof.

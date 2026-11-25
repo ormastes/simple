@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** vhdl_gen RTL generation probes (`test/01_unit/lib/hardware/vhdl_gen/probe_bus_infra_gen.spl`)
-- **Status:** open — non-blocking (graceful interpreter fallback, results correct)
+- **Status:** RESOLVED 2026-11-25 — JIT unresolved-symbol demotion no longer reproduces (see verification note)
 
 ## Observation
 
@@ -53,3 +53,28 @@ normalized, per the standing rule against silently accepting a workaround.
 Determine whether the mangling `Type_dot_method` is emitted for static methods but never
 registered in the JIT symbol table, and whether declining per-call (instead of
 per-module) is feasible so one unresolved symbol stops demoting an entire module.
+
+## Verification 2026-11-25 (release/1.0.0, Windows host)
+
+Reproduced against the tracked `bin/simple.exe` at `origin/release/1.0.0`
+(`47d6c5eddd5`):
+
+- `SIMPLE_LIB=src bin/simple.exe run test/01_unit/lib/hardware/vhdl_gen/probe_bus_infra_gen.spl`
+  — the original `[INFO] JIT compilation failed ... unresolved external symbol
+  'XlenConfig_dot_rv32'` line is **absent** (grep count 0).
+- Forced the JIT lane with `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1
+  SIMPLE_JIT_COVERAGE=1`: no `[jit-coverage]` de-JIT diversion line and no
+  strict unresolved-symbol error — under `SIMPLE_JIT_STRICT=1` an unresolved
+  `XlenConfig_dot_rv32` would have been a hard, non-zero-exit failure
+  (`driver/src/exec_core.rs` propagates strict-tagged unresolved-import
+  failures). The module compiles and runs on the JIT lane; the generator emits
+  real RTL (`got: [library ieee;] ...`).
+- Minimal direct repro (`XlenConfig.rv32()` in a 5-line script) also runs clean.
+
+Environment limit: the probe's byte-identity comparisons FAIL in this worktree
+because the sparse checkout excludes `examples/` (the silicon-proven golden
+`.vhd` files read back as `""`), so `exp: []`. That is a checkout artifact of
+this verification host, unrelated to the JIT symbol bug; determinism checks
+PASS. The specific reported symptom (whole-module JIT demotion on
+`XlenConfig_dot_rv32`) does not reproduce and is considered fixed on
+release/1.0.0.
