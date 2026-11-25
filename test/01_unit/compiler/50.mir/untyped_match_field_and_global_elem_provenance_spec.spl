@@ -139,6 +139,17 @@ describe "nested field method dispatch through Field lowering":
         expect(summary.getfield_dest_unit).to_equal(0)
         expect(has_callee_matching(summary.callees, "InnerWorker", "compute")).to_equal(true)
 
+    it "lowers match over field-projected Result method call holder.mapper.map(holder.exec_mapper, ...)":
+        val other_src = "pub class ExecMapper:\n    base_addr: i64\n\nimpl ExecMapper:\n    me unmap_symbol(sym: text) -> bool:\n        sym != \"\"\n\npub class Mapper:\n    tag: i64\n\nimpl Mapper:\n    me map(exec: ExecMapper, sym: text) -> Result<i64, text>:\n        if sym == \"\":\n            return Err(\"empty\")\n        Ok(exec.base_addr)\n\npub class JitHolder:\n    mapper: Mapper\n    exec_mapper: ExecMapper\n"
+        val main_src = "use lib.other.{ExecMapper, Mapper, JitHolder}\n\nfn target(holder: JitHolder, sym: text) -> i64:\n    val addr = match holder.mapper.map(holder.exec_mapper, sym):\n        case Ok(a): a\n        case Err(_): 0\n    _ = holder.exec_mapper.unmap_symbol(sym)\n    addr\n"
+        val summary = lower_two_modules(other_src, main_src, "target")
+        expect(summary.fn_count).to_equal(1)
+        expect(summary.error_text).to_equal("")
+        expect(summary.getfield_dest_unit).to_equal(0)
+        expect(summary.getfield_base_unit).to_equal(0)
+        expect(has_callee_matching(summary.callees, "Mapper", "map")).to_equal(true)
+        expect(has_callee_matching(summary.callees, "ExecMapper", "unmap_symbol")).to_equal(true)
+
 describe "module-global [Class] array element provenance":
     it "resolves direct BoxedItem.get_val call on items[0].get_val() despite conflicting leaf names":
         val other_src = "pub class BoxedItem:\n    other_name: text\n    other_flag: bool\n"
@@ -147,3 +158,11 @@ describe "module-global [Class] array element provenance":
         expect(summary.fn_count).to_equal(1)
         expect(summary.error_text).to_equal("")
         expect(has_callee_matching(summary.callees, "BoxedItem", "get_val")).to_equal(true)
+
+    it "resolves cross-module generic Store<text> match over global stores[0].get(idx)":
+        val other_src = "pub class TextStore<T>:\n    items: [T]\n\nimpl TextStore<T>:\n    fn get(idx: i64) -> Result<T, text>:\n        if idx < 0 or idx >= self.items.len():\n            return Err(\"oob\")\n        Ok(self.items[idx])\n\nenum LocalConflict:\n    Ok\n    Err\n"
+        val main_src = "use lib.other.{TextStore, LocalConflict}\n\nvar stores: [TextStore<text>] = []\n\nfn target(idx: i64) -> text:\n    match stores[0].get(idx):\n        case Ok(v): v\n        case Err(_): \"\"\n"
+        val summary = lower_two_modules(other_src, main_src, "target")
+        expect(summary.fn_count).to_equal(1)
+        expect(summary.error_text).to_equal("")
+        expect(has_callee_matching(summary.callees, "TextStore", "get")).to_equal(true)

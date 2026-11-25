@@ -2807,8 +2807,9 @@ impl MirLowering:
                                 case _: return Some(declared_ret)
                     case _: ()
             case MethodCall(receiver, method, method_args, resolution):
-                # Try RTI first (with declared receiver type if available)
-                val receiver_type_for_rti = self.receiver_declared_type(receiver)
+                # Try RTI first (with declared receiver type if available,
+                # including container element types for `xs[0].m(...)`).
+                val receiver_type_for_rti = self.method_call_receiver_declared_type_v1(receiver)
                 val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, receiver_type_for_rti)
                 if rti_answered:
                     return rti_type
@@ -2846,7 +2847,7 @@ impl MirLowering:
                 # receiver's own declared payload.
                 if (method == "unwrap" and method_args.len() == 0) or (method == "expect" and method_args.len() == 1):
                     if val unwrapped = self.enum_match_unwrapped_type(receiver): return Some(unwrapped)
-                val receiver_type = self.receiver_declared_type(receiver)
+                val receiver_type = receiver_type_for_rti
                 if receiver_type != None:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: expr.span)
                     val struct_name = match found_receiver_type.kind:
@@ -2965,6 +2966,14 @@ impl MirLowering:
             case _: ()
         None
 
+    me method_call_receiver_declared_type_v1(receiver: HirExpr) -> HirType?:
+        """Declared receiver type for method calls, including indexed container reads."""
+        if val declared = self.receiver_declared_type(receiver):
+            return Some(declared)
+        match receiver.kind:
+            case HirExprKind.Index(_, _): self.declared_container_read_type(receiver)
+            case _: None
+
     me enum_match_declared_owner_key(scrutinee: HirExpr, owner_keys: [text]) -> text:
         """Owner key, among `owner_keys`, of the builtin Result/Option that a
         method-call subject's callee declares as its return
@@ -2976,11 +2985,7 @@ impl MirLowering:
         var wanted = ""
         match scrutinee.kind:
             case MethodCall(receiver, method, _, _):
-                var receiver_type = self.receiver_declared_type(receiver)
-                if receiver_type == None:
-                    match receiver.kind:
-                        case HirExprKind.Index(_, _): receiver_type = self.declared_container_read_type(receiver)
-                        case _: ()
+                val receiver_type = self.method_call_receiver_declared_type_v1(receiver)
                 if val found_receiver = receiver_type:
                     match found_receiver.kind:
                         case HirTypeKind.Named(owner_symbol, _):
@@ -3257,7 +3262,7 @@ impl MirLowering:
         match scrutinee.kind:
             case MethodCall(receiver, method, _, _):
                 var receiver_hint = "unknown receiver"
-                if val receiver_type = self.receiver_declared_type(receiver):
+                if val receiver_type = self.method_call_receiver_declared_type_v1(receiver):
                     match receiver_type.kind:
                         case Named(receiver_symbol, _):
                             if val receiver_owner = self.symbols.get_symbol_raw(receiver_symbol.id):
@@ -3433,7 +3438,7 @@ impl MirLowering:
             case MethodCall(receiver, method, _, resolution):
                 if val method_id = wa_method_resolution_symbol_id(resolution):
                     return self.resolved_call_payload_shape(method_id, variant)
-                val receiver_type = self.receiver_declared_type(receiver)
+                val receiver_type = self.method_call_receiver_declared_type_v1(receiver)
                 if receiver_type != None:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
                     val struct_name = match found_receiver_type.kind:
