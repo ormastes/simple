@@ -119,3 +119,8 @@ Stage3 repro (native fixture, expected output `PASS: dictionary nominal tuple bi
 - `HirLowering.binding_kind_type` (`statements.spl:150-162`) now resolves chained `Field` iterables (`self.records`, `module.types`, `self.module.types`, `self.declarations`) recursively via `binding_field_type`.
 - Reverted all 4 typed-local dictionary tuple-for loops (and unused `SymbolId` imports) across `enum_pattern_physical_v1.spl`, `enum_semantic_identity_v1.spl`, and `enum_semantic_validation_v1.spl`.
 - Extended `test/01_unit/compiler/20.hir/dict_tuple_for_binder_types_spec.spl` (2/2 PASS) to verify chained field `Dict<K, V>` iterables (`self.module.types` and `self.records`) retain nominal binder types.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+RETIRED` (stale `# @workaround` tag on `test/fixtures/native_dict_nominal_loop/typed/main.spl:25`).
+- Verified `test/fixtures/native_dict_nominal_loop/main.spl` (unannotated original form) lowers cleanly (`hir=0 mir=0 llvm=0 void=0`) and passes in `--mode=interpreter` alongside `typed/main.spl`.
+- Retired the stale `# @workaround` tag on line 25 of `typed/main.spl` (consistent with `c62bd857af2` and `verified` DB status) while preserving the `for raw_key, raw_value` explicit nominal control code paired with `../main.spl`.

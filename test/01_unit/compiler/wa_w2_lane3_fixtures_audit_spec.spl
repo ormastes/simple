@@ -1,0 +1,191 @@
+"""
+# WA Wave 2 Lane 3 (WA-W2-3) Fixtures Workaround Audit & Regression Spec
+
+Verifies all 8 assigned `test/fixtures/**` `@workaround` files (7 bug IDs):
+1. `runner_callback_field_owner_2026_10_11` (`ROOT-FIXED+RETIRED` in `callback_field_explicit_call/main.spl`)
+2. `source_change_inferred_return_field_layout_2026_10_11` (`ROOT-FIXED+RETIRED` stale tag in `source_change_contract_native.spl`; dual control preserved)
+3. `BUG-2026-10-27-PHASE2-COMPACT-RTI-IMPORTED-OPTIONAL-RESULT` (`KEPT-WITH-REASON` in `accessor_native_diagnostic.spl` [placement fixed] and `core_native_contract.spl`)
+4. `seed_list_comprehension_join_and_empty_native_2026_10_21` (`ROOT-FIXED+STAGE2-GATED` in `json_comprehension_join/explicit/main.spl`)
+5. `dict_nominal_tuple_binders_any_bootstrap_2026_10_21` (`ROOT-FIXED+RETIRED` stale tag in `native_dict_nominal_loop/typed/main.spl`; paired nominal control preserved)
+6. `native_text_scalar_validation_failure_2026_10_18` (`ROOT-FIXED+STAGE2-GATED` in `char_wire_scalar_cast/main.spl`; pinned by `wa_src_lane4_workaround_audit_spec.spl`)
+7. `phase2_runner_empty_limit_classification_2026_10_28` (`ROOT-FIXED+RETIRED` in `test_runner_scoped_result/main.spl`)
+"""
+# @req REQ-SSPEC-UNIT
+# @tag: unit, compiler, workaround, fixtures
+
+use std.spec.{describe, it, expect, assert_true, expect_not, fail}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use app.bug.workaround_index.{parse_workaround_source}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.text_extern_abi.{tagged_text_value_arg_indices, text_arg_indices}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct TwoModuleInput:
+    label: text
+    first_path: text
+    first_module: text
+    first_src: text
+    second_path: text
+    second_module: text
+    second_src: text
+
+fn lower_single(label: text, path: text, src: text) -> text:
+    """Lower a standalone module through frontend, HIR, MIR, and LLVM IR."""
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, path, label, log)
+    var hl = HirLowering.with_filename(path)
+    val hir = hl.lower_module(ast)
+    var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = ml.lower_module(hir)
+    var tr = MirToLlvm.create("wa_w2_3." + label, CodegenTarget.X86_64, None)
+    val ir = tr.translate_module(mir)
+    val void_flag = if ir.contains("(void ") or ir.contains(", void "): 1 else: 0
+    var detail = ""
+    for e in hl.errors: detail = detail + " | HIR: " + e.message
+    for e in ml.errors: detail = detail + " | MIR: " + e.message
+    for e in tr.codegen_errors: detail = detail + " | LLVM: " + e
+    "hir={hl.errors.len()} mir={ml.errors.len()} llvm={tr.codegen_errors.len()} void={void_flag}{detail}"
+
+fn lower_two(input: TwoModuleInput) -> text:
+    """Lower a two-module pair through surface extraction, HIR, MIR, and LLVM IR."""
+    val log = Logger(level: 0)
+    val a1 = parse_full_frontend(input.first_src, input.first_path, input.first_module, log)
+    val a2 = parse_full_frontend(input.second_src, input.second_path, input.second_module, log)
+    var modules: Dict<text, Module> = {}
+    modules[input.first_module] = a1
+    modules[input.second_module] = a2
+    val sources = [
+        SourceFile(path: input.first_path, content: input.first_src, module_name: input.first_module),
+        SourceFile(path: input.second_path, content: input.second_src, module_name: input.second_module)
+    ]
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(v): v
+        case Err(err): return "SURFACE_ERR={err}"
+    var hl1 = hirlowering_for_module(input.first_module, surfaces)
+    var hl2 = hirlowering_for_module(input.second_module, surfaces)
+    val h1 = hl1.lower_module(a1)
+    val h2 = hl2.lower_module(a2)
+    var mods: Dict<text, HirModule> = {}
+    mods[input.first_module] = h1
+    mods[input.second_module] = h2
+    var ml = MirLowering.new_for_target(h2.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    ml.prescan_module_struct_names(mods, input.first_module)
+    ml.prescan_module_struct_names(mods, input.second_module)
+    val mir = ml.lower_module(h2, [h1, h2])
+    var tr = MirToLlvm.create("wa_w2_3." + input.label, CodegenTarget.X86_64, None)
+    val ir = tr.translate_module(mir)
+    val void_flag = if ir.contains("(void ") or ir.contains(", void "): 1 else: 0
+    var detail = ""
+    for e in hl1.errors: detail = detail + " | H1: " + e.message
+    for e in hl2.errors: detail = detail + " | H2: " + e.message
+    for e in ml.errors: detail = detail + " | MIR: " + e.message
+    for e in tr.codegen_errors: detail = detail + " | LLVM: " + e
+    "hir={hl1.errors.len() + hl2.errors.len()} mir={ml.errors.len()} llvm={tr.codegen_errors.len()} void={void_flag}{detail}"
+
+fn check_retired_marker(path: text):
+    """Verify a retired fixture file has zero @workaround markers and parses cleanly."""
+    val content = file_read(path)
+    expect_not(content.contains("@workaround"))
+    match parse_workaround_source(path, content):
+        case Ok(links): expect(links.len()).to_equal(0)
+        case Err(err): fail("unexpected workaround parse failure for {path}: {err}")
+        case _("Result is exhausted by Ok and Err"): fail("unexpected workaround parse result for {path}")
+
+fn check_kept_marker(path: text):
+    """Verify a kept fixture file retains one validly placed @workaround marker."""
+    val content = file_read(path)
+    match parse_workaround_source(path, content):
+        case Ok(links): expect(links.len()).to_equal(1)
+        case Err(err): fail("invalid workaround marker placement in {path}: {err}")
+        case _("Result is exhausted by Ok and Err"): fail("unexpected workaround parse result for {path}")
+
+describe "WA-W2-3 fixture workaround audit":
+    """Verifies workaround dispositions, placement grammar, and compiler lowering across WA-W2-3 fixtures."""
+
+    it "validates workaround index grammar across all 8 assigned fixture files":
+        check_retired_marker("test/fixtures/compiler/callback_field_explicit_call/main.spl")
+        check_retired_marker("test/fixtures/compiler/source_change_contract_native.spl")
+        check_retired_marker("test/fixtures/native_dict_nominal_loop/typed/main.spl")
+        check_retired_marker("test/fixtures/test_runner_scoped_result/main.spl")
+
+        check_kept_marker("test/fixtures/lockless_map_i64/accessor_native_diagnostic.spl")
+        check_kept_marker("test/fixtures/lockless_map_i64/core_native_contract.spl")
+        check_kept_marker("test/fixtures/native/json_comprehension_join/explicit/main.spl")
+        check_kept_marker("test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl")
+
+    it "1. retires callback_field_explicit_call wrapper shims cleanly across HIR/MIR/LLVM":
+        val cb_main = file_read("test/fixtures/compiler/callback_field_explicit_call/main.spl")
+        val cb_orig = file_read("test/fixtures/compiler/callback_field_explicit_call/original_form.spl")
+        val cb_decl = file_read("test/fixtures/compiler/callback_field_declared_owner/main.spl")
+        expect_not(cb_main.contains("callback_result_owner"))
+        expect_not(cb_main.contains("callback_arena_join_owner"))
+        assert_true(cb_main.contains("val observed = (port.execute_fn)(expected_owner)"))
+        expect(lower_single(label: "cb_main", path: "test/fixtures/compiler/callback_field_explicit_call/main.spl", src: cb_main)).to_equal("hir=0 mir=0 llvm=0 void=0")
+        expect(lower_single(label: "cb_orig", path: "test/fixtures/compiler/callback_field_explicit_call/original_form.spl", src: cb_orig)).to_equal("hir=0 mir=0 llvm=0 void=0")
+        expect(lower_single(label: "cb_decl", path: "test/fixtures/compiler/callback_field_declared_owner/main.spl", src: cb_decl)).to_equal("hir=0 mir=0 llvm=0 void=0")
+
+    it "2. retires stale tag in source_change_contract_native while keeping dual control and clean lowering":
+        val sc_native = file_read("test/fixtures/compiler/source_change_contract_native.spl")
+        assert_true(sc_native.contains("SourceChangeShapeV1"))
+        assert_true(sc_native.contains("SOURCE_CONTRACT_RETURN_INFERRED_OK"))
+        val sc_prov = "pub struct SourceChangeShapeV1:\n    valid: bool\n    reason: text\n\npub fn source_contract_case_v1(index: i64) -> SourceChangeShapeV1:\n    if index == 0:\n        return SourceChangeShapeV1(valid: true, reason: \"well_formed_change_batch\")\n    SourceChangeShapeV1(valid: false, reason: \"invalid_test_case\")\nexport SourceChangeShapeV1, source_contract_case_v1\n"
+        val sc_cons = "use test.sc_prov.{{source_contract_case_v1}}\n\nfn main() -> i64:\n    val result = source_contract_case_v1(0)\n    print(result.reason)\n    if result.valid and result.reason == \"well_formed_change_batch\": return 0\n    1\n"
+        val sc_input = TwoModuleInput(label: "sc_inferred", first_path: "test/sc_prov.spl", first_module: "test.sc_prov", first_src: sc_prov, second_path: "test/sc_cons.spl", second_module: "test.sc_cons", second_src: sc_cons)
+        expect(lower_two(sc_input)).to_equal("hir=0 mir=0 llvm=0 void=0")
+        val b05d = file_read("test/fixtures/repro/verify_sweep2/b05_d.spl")
+        expect(lower_single(label: "b05_d", path: "test/fixtures/repro/verify_sweep2/b05_d.spl", src: b05d)).to_equal("hir=0 mir=0 llvm=0 void=0")
+
+    it "3-4. keeps lockless_map_i64 diagnostics because unannotated TaskPollResult.Ready(outcome) still fails HIR":
+        val rti_lib = "pub struct RingGeneration:\n    value: u64\npub struct RingToken:\n    ring_id: u64\n    slot: u64\n    generation: RingGeneration\npub enum AsyncRefError:\n    InvalidReference\n    CancelledInterest\npub enum TaskPollResult<T>:\n    Ready(T)\n    Pending(RingToken)\npub struct AsyncRefI64:\n    _scope: i64\n    _entry: i64\npub struct AsyncSubscriptionI64:\n    reference: AsyncRefI64\n    _subscriber: i64\nimpl AsyncSubscriptionI64:\n    pub fn poll() -> TaskPollResult<Result<i64, AsyncRefError>>:\n        TaskPollResult.Pending(RingToken(ring_id: 1u64, slot: 2u64, generation: RingGeneration(value: 3u64)))\npub class LocklessMapI64:\n    _scope: i64\n    pub fn request(k: i64, r: i64) -> Result<AsyncRefI64, i64>:\n        Ok(AsyncRefI64(_scope: 1, _entry: 1))\nimpl AsyncRefI64:\n    pub fn subscribe(tok: RingToken) -> Result<AsyncSubscriptionI64, AsyncRefError>:\n        Ok(AsyncSubscriptionI64(reference: self, _subscriber: 1))\nexport RingGeneration, RingToken, AsyncRefError, TaskPollResult, AsyncRefI64, AsyncSubscriptionI64, LocklessMapI64\n"
+        val rti_app = "use lib.rti.{{RingGeneration, RingToken, AsyncRefError, TaskPollResult, AsyncSubscriptionI64, LocklessMapI64}}\nfn run(m: LocklessMapI64, tok: RingToken) -> i64:\n    val r = match m.request(0, 91):\n        case Ok(v): v\n        case Err(_): return 1\n    val sub = match r.subscribe(tok):\n        case Ok(v): v\n        case Err(_): return 2\n    match sub.poll():\n        case TaskPollResult.Pending(ptok):\n            if ptok.ring_id != tok.ring_id: return 3\n            if ptok.slot != tok.slot: return 4\n            if ptok.generation.value != tok.generation.value: return 5\n        case _: return 6\n    match sub.poll():\n        case TaskPollResult.Ready(outcome):\n            match outcome:\n                case Ok(v):\n                    if v != 123: return 7\n                case Err(_): return 8\n        case _: return 9\n    0\n"
+        val rti_input = TwoModuleInput(label: "rti_poll", first_path: "lib/rti.spl", first_module: "lib.rti", first_src: rti_lib, second_path: "app/rti_app.spl", second_module: "app.rti_app", second_src: rti_app)
+        val probe = lower_two(rti_input)
+        expect(probe).to_contain("generic enum pattern requires its declared subject owner")
+
+        val acc_src = file_read("test/fixtures/lockless_map_i64/accessor_native_diagnostic.spl")
+        expect(acc_src).to_contain("# @workaround bug=BUG-2026-10-27-PHASE2-COMPACT-RTI-IMPORTED-OPTIONAL-RESULT")
+        val core_src = file_read("test/fixtures/lockless_map_i64/core_native_contract.spl")
+        expect(core_src).to_contain("# @workaround bug=BUG-2026-10-27-PHASE2-COMPACT-RTI-IMPORTED-OPTIONAL-RESULT")
+
+    it "5-6. verifies json_comprehension_join and native_dict_nominal_loop original lowering and paired controls":
+        val j_worker = file_read("test/fixtures/native/json_comprehension_join/original/worker.spl")
+        val j_orig = file_read("test/fixtures/native/json_comprehension_join/original/main.spl")
+        val j_typed = file_read("test/fixtures/native/json_comprehension_join/typed/main.spl")
+        val j_explicit = file_read("test/fixtures/native/json_comprehension_join/explicit/main.spl")
+        expect(lower_two(TwoModuleInput(label: "json_orig", first_path: "worker.spl", first_module: "worker", first_src: j_worker, second_path: "main.spl", second_module: "main", second_src: j_orig))).to_equal("hir=0 mir=0 llvm=0 void=0")
+        expect(lower_two(TwoModuleInput(label: "json_typed", first_path: "worker.spl", first_module: "worker", first_src: j_worker, second_path: "main.spl", second_module: "main", second_src: j_typed))).to_equal("hir=0 mir=0 llvm=0 void=0")
+        expect(j_explicit).to_contain("for number in [1, 2]:")
+        expect(j_explicit).to_contain("# @workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21")
+
+        val dict_orig = file_read("test/fixtures/native_dict_nominal_loop/main.spl")
+        val dict_typed = file_read("test/fixtures/native_dict_nominal_loop/typed/main.spl")
+        expect(lower_single(label: "dict_orig", path: "test/fixtures/native_dict_nominal_loop/main.spl", src: dict_orig)).to_equal("hir=0 mir=0 llvm=0 void=0")
+        expect(dict_typed).to_contain("val key: LoopKey = raw_key")
+        expect(dict_typed).to_contain("val value: LoopValue = raw_value")
+
+    it "7. keeps char_wire_scalar_cast tag while confirming tagged UTF-8 extern ABI":
+        val utf8_probe = "extern fn rt_text_validate_utf8(s: text) -> bool\nextern fn rt_text_count_codepoints_cached(s: text) -> i64\nfn check(s: text) -> bool:\n    rt_text_validate_utf8(s) and rt_text_count_codepoints_cached(s) == 1\n"
+        expect(lower_single(label: "utf8_probe", path: "probe_utf8.spl", src: utf8_probe)).to_equal("hir=0 mir=0 llvm=0 void=0")
+        expect(tagged_text_value_arg_indices("rt_text_validate_utf8")).to_equal(Some([0]))
+        expect(tagged_text_value_arg_indices("rt_text_count_codepoints_cached")).to_equal(Some([0]))
+        assert_true(text_arg_indices("rt_text_validate_utf8") == None)
+        val cw_src = file_read("test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl")
+        expect(cw_src).to_contain("# @workaround bug=native_text_scalar_validation_failure_2026_10_18")
+
+    it "8. retires scoped_result tuple projection workaround in test_runner_scoped_result":
+        val sr_src = file_read("test/fixtures/test_runner_scoped_result/main.spl")
+        expect(sr_src).to_contain("val (scoped_child, evidence_path) = match invocation:")
+        expect_not(sr_src.contains("invocation_pair"))
+        val sr_destruct = "struct Inner:\n    limit_exceeded: bool\n    limit_type: text\n    exit_code: i64\n    stdout: text\nstruct Run:\n    result: Inner\n    budget_status: text\nfn wrap(flag: bool) -> Result<(Run, text), text>:\n    if not flag:\n        return Err(\"bad\")\n    Ok((Run(result: Inner(limit_exceeded: false, limit_type: \"\", exit_code: 0, stdout: \"ok\"), budget_status: \"pass\"), \"ev\"))\nfn check_wrap(flag: bool) -> i64:\n    val invocation = wrap(flag)\n    val (scoped_child, evidence_path) = match invocation:\n        case Ok(value): value\n        case Err(_): return 1\n    val direct = scoped_child.result\n    if not direct.limit_exceeded and direct.limit_type == \"\" and direct.exit_code == 0 and evidence_path == \"ev\": 0 else: 2\n"
+        expect(lower_single(label: "sr_destruct", path: "probe_sr.spl", src: sr_destruct)).to_equal("hir=0 mir=0 llvm=0 void=0")

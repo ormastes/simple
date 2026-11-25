@@ -68,3 +68,8 @@ admitted self-hosted native compiler. No in-lane change.
 - `src/compiler/50.mir/text_extern_abi.spl` fixes `tagged_text_value_arg_indices` for `rt_text_validate_utf8` / `rt_text_count_codepoints_cached` (`test/01_unit/compiler/mir/text_scalar_validation_tagged_abi_spec.spl`).
 - `hc_char_bytes_valid(bytes: [i64]) -> bool` in `src/compiler/20.hir/hir_codec_support.spl` validates `[i64]` byte slices rather than `text` (`utf8_decode_one` / `utf8_encode_one` contract exercised by `hir_codec_char_spec.spl` and `char_wire_codec/main.spl`, and `simd.rs` in the seed interpreter unconditionally returns `true` for `rt_text_validate_utf8`). Therefore the stale `# @workaround bug=native_text_scalar_validation_failure_2026_10_18 ...` tag on `hc_char_bytes_valid` was retired while preserving the pure `[i64]` implementation and design comment.
 - `test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl` keeps its `# @workaround` repro probe tag pending Stage 3 native isolation.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+STAGE2-GATED` for `test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl:8`.
+- Confirmed `tagged_text_value_arg_indices` (`src/compiler/50.mir/text_extern_abi.spl`) routes `rt_text_validate_utf8` and `rt_text_count_codepoints_cached` cleanly (`hir=0 mir=0 llvm=0 void=0`).
+- Kept `test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl` and its `# @workaround` tag intact, 100% consistent with Wave 1 PR `#11791` (`be176d9d3b4`) and `test/01_unit/compiler/wa_src_lane4_workaround_audit_spec.spl:85-86`.

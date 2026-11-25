@@ -62,3 +62,8 @@ inspection above concluded. A fresh build on a sparse worktree additionally need
 `/src/compositions/` checked out; without them the failures are `llc not found`,
 `Windows GNU linking requires bootstrap-owned clang through CC` and a missing
 `simple_counterpart_abi.h`, none of which are source-change defects.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+RETIRED` (stale `# @workaround` tag on `test/fixtures/compiler/source_change_contract_native.spl:1`).
+- `source_change_contract_native.spl` already asserts `val inferred = source_contract_case_v1(0)` unconditionally alongside the `SourceChangeShapeV1` typed control, and `#7142` (`e61eb9c4a48` / `b6b3c251caa`) landed in `src/compiler`.
+- Retired the stale `# @workaround` marker on line 1 while preserving `SourceChangeShapeV1`, `SOURCE_CONTRACT_RETURN_INFERRED_OK`, and the paired inferred-vs-explicit contract checks (`n88b_native_workaround_shapes_spec.spl` compatibility preserved); verified clean HIR/MIR/LLVM lowering (`hir=0 mir=0 llvm=0 void=0`) on inferred two-module `source_contract_case_v1` and `b05_d.spl`.

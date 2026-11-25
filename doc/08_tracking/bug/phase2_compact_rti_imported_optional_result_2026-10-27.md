@@ -26,3 +26,8 @@ The separate core-only diagnostic did compile/link and execute. With an intentio
 Recovery requires a rebuilt phase2 producer that compiles the original `TaskPollResult.Pending(token)` and `Ready(result)` patterns and preserves the AsyncRefI64/AsyncSubscriptionI64 exact record layouts across module boundaries. Then run the full original native fixture plus the typed AsyncRef/SimpleRing SSpec against that producer, retain raw logs and output hashes, and only afterward remove the scalar-fixture workaround marker in a separate reviewed change.
 
 **Bug DB:** no matching canonical record was found in this checkout's `doc/08_tracking/bug/bug_db.sdn`. Database registration is pending; this report and marker do not claim database coverage.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `KEPT-WITH-REASON` for `test/fixtures/lockless_map_i64/accessor_native_diagnostic.spl` and `test/fixtures/lockless_map_i64/core_native_contract.spl`.
+- In-tree HIR lowering (`src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl:600`) still rejects `match sub.poll(): case TaskPollResult.Ready(outcome):` over an unannotated `val sub = match r.subscribe(tok):` binding (`generic enum pattern requires its declared subject owner`), matching the exact `native_contract.spl` shape.
+- **Grammar fix:** Moved `# @workaround bug=BUG-2026-10-27-PHASE2-COMPACT-RTI-IMPORTED-OPTIONAL-RESULT ...` in `accessor_native_diagnostic.spl` from line 1 (above comments) to immediately precede `val pending_poll = subscription.poll()` so `parse_workaround_source` succeeds. Both fixtures stay intact and pass in `--mode=interpreter`.
