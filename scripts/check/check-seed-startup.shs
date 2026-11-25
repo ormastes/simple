@@ -1,0 +1,144 @@
+#!/bin/sh
+# Execute the exact native seed before publishing it; retain failure evidence.
+# Port of the former check-seed-startup.py (+ its -test.py, now --selftest).
+#
+# Usage: sh scripts/check/check-seed-startup.shs --seed <path> --output <json> [--timeout <s>]
+#        sh scripts/check/check-seed-startup.shs --selftest
+# Exit: 0 PASS, 1 FAIL/TIMEOUT, 2 usage/ERROR.
+set -u
+
+json_str() {
+    # JSON string literal of $1 (escapes \ " and control characters).
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN { ORS = "" ; printf "\"" }
+        NR > 1 { printf "\\n" }
+        { s = $0
+          gsub(/\t/, "\\t", s); gsub(/\r/, "\\r", s)
+          gsub(/[\001-\010\013\014\016-\037]/, "?", s)
+          printf "%s", s }
+        END { printf "\"" }'
+}
+
+json_file() {
+    # JSON string literal of a file's exact contents (keeps a trailing newline).
+    if [ -s "$1" ] && [ -n "$(tail -c1 "$1" | tr -d '
+')" ]; then
+        json_str "$(cat "$1")"
+    else
+        json_str "$(cat "$1"; printf x)" | sed 's/x"$/"/'
+    fi
+}
+
+sha_of() { sha256sum < "$1" | awk '{ print $1 }'; }
+
+check() {
+    seed_in=$1 output=$2 limit=${3:-30}
+    if [ ! -e "$seed_in" ]; then
+        echo "ERROR — nothing was checked (seed not found: $seed_in)" >&2
+        return 2
+    fi
+    seed=$(cd "$(dirname "$seed_in")" && pwd -P)/$(basename "$seed_in")
+    if command -v cygpath > /dev/null 2>&1; then seed=$(cygpath -w "$seed"); fi
+    mkdir -p "$(dirname "$output")"
+    before=$(sha_of "$seed")
+    work=$(mktemp -d)
+    timeout "$limit" "$seed" --version > "$work/out" 2> "$work/err"
+    code=$?
+    status=FAIL
+    if [ "$code" -eq 124 ]; then
+        status=TIMEOUT
+        code_json=null
+    elif [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; then
+        code_json=null
+    else
+        code_json=$code
+        if [ "$code" -eq 0 ] && grep -qiw simple "$work/out"; then
+            status=PASS
+        fi
+    fi
+    after=$(sha_of "$seed")
+    [ "$before" = "$after" ] || status=FAIL
+    {
+        printf '{\n  "schema": "simple-native-seed-startup-v1",\n'
+        printf '  "status": "%s",\n' "$status"
+        printf '  "seed": %s,\n' "$(json_str "$seed")"
+        printf '  "seed_sha256": "%s",\n  "seed_sha256_after": "%s",\n' "$before" "$after"
+        printf '  "command": [\n    %s,\n    "--version"\n  ],\n' "$(json_str "$seed")"
+        printf '  "exit_code": %s,\n' "$code_json"
+        printf '  "stdout": %s,\n' "$(json_file "$work/out")"
+        printf '  "stderr": %s,\n' "$(json_file "$work/err")"
+        printf '  "qualification": "native startup only; not compiler Hello or bootstrap admission"\n}\n'
+    } > "$output"
+    rm -rf "$work"
+    echo "$status: native seed startup; evidence=$output"
+    [ "$status" = PASS ]
+}
+
+selftest() {
+    cc=${CC:-$(command -v clang)}
+    [ -n "$cc" ] || { echo "ERROR — nothing was checked (CC or clang required)"; return 2; }
+    root=$(mktemp -d)
+    cat > "$root/fixture.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+int main(int argc, char **argv) {
+  if (argc != 2 || strcmp(argv[1], "--version")) return 9;
+  if (strstr(argv[0], "hang")) {
+#ifdef _WIN32
+    Sleep(60000);
+#else
+    sleep(60);
+#endif
+  }
+  if (strstr(argv[0], "fail")) return 3;
+  puts(strstr(argv[0], "invalid") ? "unrelated program" : "simple native fixture");
+  return 0;
+}
+EOF
+    ext=""
+    case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ext=.exe ;; esac
+    "$cc" "$root/fixture.c" -o "$root/fixture$ext" || { rm -rf "$root"; echo "ERROR — fixture build failed"; return 2; }
+    fails=0 n=0
+    for row in "good PASS 0 0" "fail FAIL 3 1" "invalid FAIL 0 1" "hang TIMEOUT null 1"; do
+        set -- $row
+        name=$1 want=$2 want_code=$3 want_rc=$4
+        cp "$root/fixture$ext" "$root/$name$ext"
+        limit=5; [ "$name" = hang ] && limit=0.3
+        check "$root/$name$ext" "$root/$name.json" "$limit" > /dev/null
+        rc=$?
+        n=$((n + 1))
+        sha=$(sha_of "$root/$name$ext")
+        if [ "$rc" -ne "$want_rc" ] \
+            || ! grep -q "\"status\": \"$want\"" "$root/$name.json" 2>/dev/null \
+            || ! grep -q "\"exit_code\": $want_code," "$root/$name.json" \
+            || ! grep -q "\"seed_sha256\": \"$sha\"" "$root/$name.json" \
+            || ! grep -q "\"seed_sha256_after\": \"$sha\"" "$root/$name.json" \
+            || ! grep -q '"--version"' "$root/$name.json"; then
+            echo "selftest: case $name expected $want/$want_code rc=$want_rc, got rc=$rc" >&2
+            fails=$((fails + 1))
+        fi
+    done
+    rm -rf "$root"
+    if [ "$fails" -ne 0 ]; then
+        echo "FAIL — $fails of $n selftest case(s) failed"
+        return 1
+    fi
+    echo "PASS — $n selftest case(s) checked"
+}
+
+seed="" output="" limit=30
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; exit $? ;;
+        --seed) seed=$2; shift 2 ;;
+        --output) output=$2; shift 2 ;;
+        --timeout) limit=$2; shift 2 ;;
+        *) echo "usage: $0 --seed <path> --output <json> [--timeout <s>] | --selftest" >&2; exit 2 ;;
+    esac
+done
+[ -n "$seed" ] && [ -n "$output" ] || { echo "usage: $0 --seed <path> --output <json> | --selftest" >&2; exit 2; }
+check "$seed" "$output" "$limit"

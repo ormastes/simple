@@ -32,7 +32,7 @@ irreplaceable ops: `doc/07_guide/os/hal/pure_simple_hal.md`.
   a self-relocation stub, so `BOOTAA64.EFI` can load it with `protocol: linux`
   (MMU-off physical handover — the same contract `-kernel` gave it), gated by
   `scripts/check/check-simpleos-arm64-unified-boot-contract.shs`. The lane source migration is covered by
-  `scripts/check/check-simpleos-arm64-unified-firmware-contract.py`; native
+  `scripts/check/check-simpleos-arm64-unified-firmware-contract.shs`; native
   admission waits on a self-hosted compiler that can build the unified kernel.
   See `doc/08_tracking/bug/arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
 - **Board bring-up path kept alive:** every QEMU-developed feature (kernel, LLVM

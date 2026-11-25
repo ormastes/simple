@@ -549,7 +549,7 @@ read-only MMIO device; input, sound, and host-GPU transport remain in that same
 QEMU process. Missing firmware/image construction fails before daemon startup.
 Firmware/ESP hashes are checked again after readiness waits before launch.
 
-`python3 scripts/check/check-simpleos-arm64-unified-firmware-contract.py`
+`sh scripts/check/check-simpleos-arm64-unified-firmware-contract.shs`
 executes the production preparation and argv fragments. A real clang/LLD ELF
 fixture is extracted by llvm-objcopy, and a raw-ELF negative control is refused.
 It passed quoted-path
