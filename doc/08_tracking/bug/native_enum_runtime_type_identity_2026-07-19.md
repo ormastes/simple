@@ -55,3 +55,30 @@ bytecode writers emit format version 2; both duplicated loaders retain version
   are not claimed as evidence for it.
 - Explicit pure-simple-core execution and freestanding x86_64 QEMU proof remain
   pending with the existing deployed self-hosted compiler crash.
+
+## 2026-11-25 verification (work/p2w4-ae-20261125, origin/release/1.0.0 HEAD ef6a94f8a03)
+
+The source fix described above is present in the tree, verified by code
+inspection:
+
+- HIR carries the canonical declaring-module identity:
+  `HirEnum.runtime_name` at `src/compiler/20.hir/hir_definitions.spl:276`.
+- MIR derives custom enum IDs from the qualified runtime name and reserves
+  IDs 0/1: `register_enum_runtime_name` at
+  `src/compiler/50.mir/_MirLowering/module_lowering.spl:1320` computes
+  `(hm_hash_text(runtime_name) % 2147483646) + 2`, keeps a dual
+  qualified-name index, and fails fatally on an exact-name hash collision
+  (`enum runtime ID collision: ...`).
+- The shared fixture pin exists:
+  `cross_target_enum_type_identity_ok` in
+  `test/fixtures/native_crossmodule_result_u8/main.spl:318`, called from the
+  fixture's main at line 410.
+- The Rust seed side retains typed `ENUM_NEW_TYPED` lowering and the
+  `rt_enum_id`/`rt_enum_discriminant` runtime calls (seed sources unchanged
+  in this lane).
+
+Execution evidence was NOT re-run: the pinned seed cannot run any spec at
+this HEAD (repo-wide `unknown decorator '@representation_boundary'` from
+cfd89933699), and the staged Linux/macOS/Windows/FreeBSD execution gates are
+CI/QEMU lanes outside this Windows worktree. Status unchanged:
+source-fixed; staged execution pending.
