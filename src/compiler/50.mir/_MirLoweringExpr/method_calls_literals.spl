@@ -353,6 +353,37 @@ impl MirLowering:
         b_ets_branch.emit_copy(ets_result, value_local)
         b_ets_branch.terminate_goto(ets_merge_block)
         b_ets_branch.switch_to_block(ets_raw_block)
+        # RtCoreString (runtime_native.c) is {u32 kind, u32 flags, u64 len,
+        # char data[]} behind RT_VALUE_TAG_HEAP (1): when value_local is a
+        # borrowed s->data pointer (e.g. Result unwrap via rt_interp_cstr), the
+        # owner candidate is (word - 16) | 1. rt_string_data checks heap
+        # registry membership before reading a header and returns candidate->data
+        # only for a live registered RtCoreString*, so an exact pointer match
+        # recovers the owning handle without copying the full string buffer.
+        val ets_owner_probe_block = b_ets_branch.new_block(Some("text_owner_probe"))
+        val ets_owner_keep_block = b_ets_branch.new_block(Some("text_owner_keep"))
+        val ets_owner_copy_block = b_ets_branch.new_block(Some("text_owner_copy"))
+        val ets_floor = b_ets_branch.emit_const_int(65552)
+        val ets_plausible = b_ets_branch.emit_binop(MirBinOp.Gt, mir_operand_copy(ets_original_word), mir_operand_copy(ets_floor), MirType.bool())
+        b_ets_branch.terminate_if(mir_operand_copy(ets_plausible), ets_owner_probe_block, ets_owner_copy_block)
+        b_ets_branch.switch_to_block(ets_owner_probe_block)
+        val ets_header_bytes = b_ets_branch.emit_const_int(16)
+        val ets_header_word = b_ets_branch.emit_binop(MirBinOp.Sub, mir_operand_copy(ets_original_word), mir_operand_copy(ets_header_bytes), MirType.i64())
+        val ets_heap_tag = b_ets_branch.emit_const_int(1)
+        val ets_candidate = b_ets_branch.emit_binop(MirBinOp.BitOr, mir_operand_copy(ets_header_word), mir_operand_copy(ets_heap_tag), MirType.i64())
+        val ets_data_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_data"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: ets_type, is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val ets_candidate_data = b_ets_branch.emit_call(ets_data_op, [mir_operand_copy(ets_candidate)], ets_type)
+        val ets_candidate_word = b_ets_branch.emit_bitcast(mir_operand_copy(ets_candidate_data ?? ets_candidate), MirType.i64())
+        val ets_is_owner = b_ets_branch.emit_binop(MirBinOp.Eq, mir_operand_copy(ets_original_word), mir_operand_copy(ets_candidate_word), MirType.bool())
+        b_ets_branch.terminate_if(mir_operand_copy(ets_is_owner), ets_owner_keep_block, ets_owner_copy_block)
+        b_ets_branch.switch_to_block(ets_owner_keep_block)
+        val ets_candidate_str = b_ets_branch.emit_bitcast(mir_operand_copy(ets_candidate), ets_type)
+        b_ets_branch.emit_copy(ets_result, ets_candidate_str)
+        b_ets_branch.terminate_goto(ets_merge_block)
+        b_ets_branch.switch_to_block(ets_owner_copy_block)
         self.builder = b_ets_branch
 
         val ets_len_op = MirOperand(kind: MirOperandKind.Const(

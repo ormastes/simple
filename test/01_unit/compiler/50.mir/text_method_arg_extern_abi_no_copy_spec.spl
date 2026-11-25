@@ -186,3 +186,43 @@ describe "text method operands through the extern ABI (sibling prevention)":
             "fn parts(content: text, sep: text) -> i64:\n" +
             "    content.split(sep).len()\n",
             "rt_string_split")
+
+    it "recovers owning RtCoreString via rt_string_data before copying in ensure_tagged_str":
+        val src =
+            "fn take_slice(content: text, start: i64, finish: i64) -> text:\n" +
+            "    content.substring(start, finish)\n" +
+            "fn find_line(content: text, needle: text, start: i64) -> i64:\n" +
+            "    content.index_of(needle, start)\n"
+        val low = abi_clean(src)
+        var probe_blocks = 0
+        var keep_blocks = 0
+        var copy_blocks = 0
+        var probe_has_data = false
+        var copy_has_new = false
+        var new_outside_copy = 0
+        var i = 0
+        while i < low.block_labels.len():
+            val label = low.block_labels[i]
+            val callees = low.block_callees[i]
+            if label == "text_owner_probe":
+                probe_blocks = probe_blocks + 1
+                if abi_has(callees, "rt_string_data"):
+                    probe_has_data = true
+            if label == "text_owner_keep":
+                keep_blocks = keep_blocks + 1
+            if label == "text_owner_copy":
+                copy_blocks = copy_blocks + 1
+                if abi_has(callees, "rt_string_new"):
+                    copy_has_new = true
+            else:
+                if abi_has(callees, "rt_string_new"):
+                    new_outside_copy = new_outside_copy + 1
+            i = i + 1
+        expect(probe_blocks > 0).to_equal(true)
+        expect(keep_blocks > 0).to_equal(true)
+        expect(copy_blocks > 0).to_equal(true)
+        expect(probe_has_data).to_equal(true)
+        expect(copy_has_new).to_equal(true)
+        expect(new_outside_copy).to_equal(0)
+        expect(abi_copies_beside_primitive(low, "rt_slice_text_bytes")).to_equal(0)
+        expect(abi_copies_beside_primitive(low, "rt_text_find")).to_equal(0)

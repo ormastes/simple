@@ -1833,6 +1833,24 @@ pub fn driver_native_source_interface_text(content: text) -> text:
         out = out.push(line)
     out.join("\n")
 
+fn _driver_native_source_interface_metrics_v1(content: text) -> (i64, i64):
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        val interface_text = driver_native_source_interface_text(content)
+        return (interface_text.len(), _sffi_hash_text(interface_text))
+    val interface_text = driver_native_source_interface_text(content)
+    val iface_len: i64 = interface_text.len()
+    val content_hash: i64 = _sffi_hash_text(interface_text)
+    val _ended = transient_scope_end()
+    (iface_len, content_hash)
+
+fn _driver_native_fingerprint_rows_hash_v1(rows: [text]) -> i64:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return _sffi_hash_text(rows.join("\n"))
+    val manifest = rows.join("\n")
+    val manifest_hash: i64 = _sffi_hash_text(manifest)
+    val _ended = transient_scope_end()
+    manifest_hash
+
 pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
     # Interface-surface closure: hashes only the ABI-visible portion of each
     # loaded source (see driver_native_source_interface_text) rather than the
@@ -1871,13 +1889,12 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
         if iface_memo.contains_key(memo_key):
             row_tail = iface_memo[memo_key]
         else:
-            val interface_text = driver_native_source_interface_text(source.content)
-            val content_hash = _sffi_hash_text(interface_text)
-            row_tail = "{interface_text.len()}:{content_hash}"
+            val (iface_len, content_hash) = _driver_native_source_interface_metrics_v1(source.content)
+            row_tail = "{iface_len}:{content_hash}"
             iface_memo[memo_key] = row_tail
         rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{row_tail}")
-    val manifest = rows.join("\n")
-    "{_sffi_hash_text(manifest)}n{sources.len()}"
+    val manifest_hash = _driver_native_fingerprint_rows_hash_v1(rows)
+    "{manifest_hash}n{sources.len()}"
 
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: ParserModule?) -> bool:
     # Objectless = nothing for a backend to emit. Besides import/export

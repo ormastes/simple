@@ -1866,6 +1866,27 @@ pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: 
         print "[unit-tldr] import interface-hir miss reason=cache path={path}"
     loaded
 
+# Number of concurrent unit owners encoded in a ledger owner id
+# ("<i>/<n>@<gen>~h<round>"), or 0 when the id has no "/<n>" part.
+# reason: raw ledger owner text, as the sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_unit_owner_pool_size_v1(owner: text) -> i64:
+    var index = 0
+    while index < owner.byte_len() and owner.byte_at(index) != 47:
+        index = index + 1
+    if index >= owner.byte_len(): return 0
+    index = index + 1
+    var size = 0
+    var digits = 0
+    while index < owner.byte_len():
+        val code = owner.byte_at(index)
+        if code < 48 or code > 57: break
+        size = size * 10 + (code - 48)
+        digits = digits + 1
+        index = index + 1
+    if digits == 0: return 0
+    size
+
 # True when the provider of `path` has published its .hirkey sidecar. Waits
 # (bounded by budget_ms) while the provider is IN FLIGHT (claimed, no
 # terminal, no sidecar yet) or SCHEDULED (unclaimed but listed in the queue's
@@ -1876,11 +1897,17 @@ pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: 
 # 'SdnRow'". A provider outside the inventory, or a finished one without a
 # sidecar (failure / codec refusal), returns at once: never wait on work
 # nobody is doing. The caller's per-unit total deadline bounds cycles.
+# A single-owner pool (owner "i/1@...") runs one unit at a time: this unit is
+# the only live claimer, so no other unit can publish the sidecar while it
+# waits. Waiting there only burned the whole 60 s budget in every unit of the
+# Stage 4 CLI build (bug p4_unit_whole_inventory_interface_index_2026-11-25).
 # reason: raw ledger path strings and ms budget matching sibling hir_shard_* helpers
 @allow(primitive_api)
 pub fn hir_shard_provider_settle_wait_v1(queue: text, path: text, budget_ms: i64) -> bool:
     val sidecar = hir_shard_key_sidecar_path_v1(queue, path)
     if sidecar == "": return false
+    if hir_unit_owner_pool_size_v1(sosix_env_get_nullable("SIMPLE_HIR_SHARD_OWNER") ?? "") == 1:
+        return file_exists(sidecar)
     val base = "{queue}/{sha256_text(path)}"
     val inventory_rows = (file_read_nullable("{queue}/inventory") ?? "").split("\n")
     # Row 0 is the closure identity; the rest are scheduled source paths.

@@ -7,7 +7,7 @@ use compiler.frontend.parser_types.{ParserImport}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_import_resolution_trace_v1}
 use compiler.driver.cache.native_source_interface_index.{native_source_interface_index_from_sources_v1}
-use compiler.driver.cache.native_module_input_fact_snapshots.{native_module_input_fact_snapshots_v1}
+use compiler.driver.cache.native_module_input_fact_snapshots.{native_module_input_fact_snapshots_v1, native_module_input_fact_snapshots_for_modules_v1}
 use compiler.driver.cache.native_module_witness.{NativeModuleConfigFactV1, native_module_cache_witness_v1}
 
 fn object_reuse_surfaces() -> ModuleSurfacesByName:
@@ -77,3 +77,19 @@ describe "native compact retained input facts":
         val snapshots = native_module_input_fact_snapshots_v1(surfaces, index)
         expect(snapshots["app.main"].valid).to_equal(false)
         expect(snapshots["app.main"].reason).to_equal("unfrozen-native-input-surfaces")
+
+    it "captures only target modules in scoped unit snapshot mode with exact witness parity":
+        val sources = [SourceFile(path: "src/lib/dep.spl",
+            content: "pub fn value() -> i64:\n    21\n", module_name: "lib.dep")]
+        val surfaces = object_reuse_surfaces()
+        val index = native_source_interface_index_from_sources_v1(sources)
+        val full = native_module_input_fact_snapshots_v1(surfaces, index)
+        val scoped = native_module_input_fact_snapshots_for_modules_v1(
+            surfaces, index, {"app.main": true})
+        expect(scoped.contains_key("app.main")).to_equal(true)
+        expect(scoped.contains_key("lib.dep")).to_equal(false)
+        val full_w = native_module_cache_witness_v1("app.main", "current-mir",
+            full["app.main"].dependencies, full["app.main"].resolutions, [], object_reuse_config())
+        val scoped_w = native_module_cache_witness_v1("app.main", "current-mir",
+            scoped["app.main"].dependencies, scoped["app.main"].resolutions, [], object_reuse_config())
+        expect(scoped_w.digest()).to_equal(full_w.digest())

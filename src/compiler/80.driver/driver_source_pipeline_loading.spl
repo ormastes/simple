@@ -59,7 +59,7 @@ use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1,
     library_mode_options_error_v1, library_mode_import_key_v1}
 use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_selected_v1, driver_library_mode_resolve_v1,
     driver_library_mode_native_owner_v1}
-use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
+use compiler.driver.driver_phase_gates.{driver_explicit_source_entry, driver_streaming_surface_enabled}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1,
     native_group_request_v1, native_group_source_paths_v1}
 use compiler.driver.driver_build.native_group_warm_route.{
@@ -1602,13 +1602,23 @@ impl CompilerDriver:
         # before either boxed or streaming source buffers are reclaimed. The
         # adapter validates raw alias ambiguity and reuses phase-1 SHA owners.
         # Pure --parse-shard and --hir-shard workers exit before MIR/codegen
-        # witness assembly, while the parent and unit workers build the index.
-        val pure_frontend_shard = (
-            ((sosix_env_get_nullable("SIMPLE_PARSE_SHARD") ?? "") != "" or
-             (sosix_env_get_nullable("SIMPLE_HIR_SHARD") ?? "") != "") and
-            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "") != "1"
-        )
-        if pure_frontend_shard:
+        # witness assembly, while the parent builds the whole-inventory index.
+        # A per-file unit child (SIMPLE_HIR_SHARD + SIMPLE_FILE_WORKER_UNIT=1)
+        # lowers MIR only for its picked batch, so phase 2 builds a unit-scoped
+        # index for those targets and their direct imports once the pick and
+        # surfaces are known (driver_source_parse_streaming.spl). Building it
+        # here sliced all ~7,000 inventory bodies in EVERY unit: ~45M retained
+        # allocations, ~5.7 GB footprint and ~25 s per unit, which drove the
+        # Stage 4 CLI past its 18 GiB cap. Bug:
+        # doc/08_tracking/bug/p4_unit_whole_inventory_interface_index_2026-11-25.md
+        val hir_shard_child = (sosix_env_get_nullable("SIMPLE_PARSE_SHARD") ?? "") != "" or
+            (sosix_env_get_nullable("SIMPLE_HIR_SHARD") ?? "") != ""
+        val unit_child = hir_shard_child and
+            (sosix_env_get_nullable("SIMPLE_FILE_WORKER_UNIT") ?? "") == "1"
+        # Only the streaming phase 2 owns the unit-scoped build; any other
+        # unit route keeps the whole-inventory index.
+        if (hir_shard_child and not unit_child) or
+                (unit_child and driver_streaming_surface_enabled(self.ctx)):
             self.ctx.native_source_interface_index_v1 = None
         else:
             match native_source_interface_index_from_sources_with_digests_v1(
