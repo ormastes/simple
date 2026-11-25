@@ -1,0 +1,47 @@
+use std.spec
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use app.orchestrator.host_identity_profile_template_v2.{host_identity_profile_selection_v2, host_identity_profile_complete_v2}
+use app.orchestrator.host_identity_profile_v1.host_identity_profile_resolve_v2
+use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.HostIdentitySshPathsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val _LANE6_ROOT = "/home/owner/.simple/identity"
+
+fn _lane6_template_source() -> text:
+    val fields: Dict<text, SdnValue> = {
+        "kind": SdnValue.String("server-ssh-profile-template"),
+        "version": SdnValue.Int(1),
+        "authRef": SdnValue.String("secret://shared-host"),
+        "trustRef": SdnValue.String("trust://build"),
+        "user": SdnValue.String("builder"),
+        "sshExecutable": SdnValue.String("/usr/bin/ssh"),
+        "hostKeyAlias": SdnValue.String("build"),
+        "storeRoot": SdnValue.String(_LANE6_ROOT),
+        "sshDigest": SdnValue.String("c".repeat(64))
+    }
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+describe "WA-S6 orchestrator re-exported nominal constructor retirement":
+    it "Bug 5: constructs re-exported HostIdentitySshPathsV1 via host_identity_ssh_projection_v1":
+        val tmpl_selected = host_identity_profile_selection_v2(_lane6_template_source(), _LANE6_ROOT)
+        expect(tmpl_selected.is_ok()).to_equal(true)
+        val paths = HostIdentitySshPathsV1(
+            identity_path: _LANE6_ROOT + "/journal/" + "a".repeat(64) + ".key",
+            known_hosts_path: _LANE6_ROOT + "/journal/" + "b".repeat(64) + ".hosts"
+        )
+        val resolved = host_identity_profile_resolve_v2(tmpl_selected.unwrap(), _LANE6_ROOT, paths)
+        expect(resolved.is_ok()).to_equal(true)
+        val profile_selected = host_identity_profile_selection_v2(resolved.unwrap().canonical, _LANE6_ROOT)
+        expect(profile_selected.is_ok()).to_equal(true)
+        val sel = profile_selected.unwrap()
+        expect(sel.expected_paths.is_some()).to_equal(true)
+        val expected_paths = sel.expected_paths.unwrap()
+        expect(expected_paths.identity_path).to_equal(paths.identity_path)
+        expect(expected_paths.known_hosts_path).to_equal(paths.known_hosts_path)
+        val completed = host_identity_profile_complete_v2(sel, _LANE6_ROOT, paths)
+        expect(completed.is_ok()).to_equal(true)
+
+        val src = read_file_text("src/app/orchestrator/host_identity_profile_template_v2.spl") ?? ""
+        expect(src.contains("rti004-reexport-nominal-type")).to_equal(false)
+        expect(src.contains("use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.HostIdentitySshPathsV1")).to_equal(true)

@@ -1,0 +1,22 @@
+use std.spec
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use std.nogc_async_mut.io.file.{FileThreadPool}
+use std.async.poll.{Poll}
+
+fn _lane6_poll_i64(pool: FileThreadPool, task: fn() -> i64) -> i64:
+    val fut = pool.exec(task)
+    val state: Poll<i64> = fut.poll()
+    match state:
+        case Poll.Ready(value): value
+        case Poll.Pending: -1
+
+describe "WA-S6 FileThreadPool.exec scalar i64 Future payload":
+    it "Bug 4: returns exact unboxed i64 task payloads and retains the 50.mir guard":
+        val p1 = FileThreadPool.new(2)
+        val p2 = FileThreadPool.default()
+        expect(_lane6_poll_i64(p1, \: 37)).to_equal(37)
+        expect(_lane6_poll_i64(p2, \: 99)).to_equal(99)
+
+        val src = read_file_text("src/lib/nogc_async_mut/io/file.spl") ?? ""
+        expect(src.contains("@workaround bug=native_future_receiver_typeparam_2026_10_18")).to_equal(true)
+        expect(src.contains("Poll.Ready(value)")).to_equal(true)
