@@ -1,4 +1,19 @@
 # Interpreter HIR-Lowering Flake on `<style>`-Block `background`/`color` During Software Paint
+
+## Triage 2026-11-25 (lane p2w3-aa)
+
+The failing engine in every reported instance is the Rust seed's
+interpreter/JIT lazy HIR lowering (`bin/simple` = seed; the fix direction —
+"root-cause the interpreter's lazy HIR lowering" — names seed code, and
+`grep -rln` finds no pure-Simple counterpart lazy-lowering path serving this
+entry). Under the "seed is bootstrap-only" policy this is not fixable from a
+pure-Simple bug lane, and the order-dependent flake makes a probe-based
+verification unreliable even where the seed runs. The pure-Simple renderer
+source (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`)
+is not implicated — the doc itself shows the failure follows the property
+name through the seed's lowering, not a renderer undefined variable. Left
+OPEN for the seed-owning lane; no change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
