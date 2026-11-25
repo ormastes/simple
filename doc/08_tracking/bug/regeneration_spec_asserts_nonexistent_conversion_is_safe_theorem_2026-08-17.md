@@ -1,7 +1,8 @@
 # `regeneration_spec` asserts a `conversion_is_safe` theorem that exists nowhere
 
 - **Filed:** 2026-08-17
-- **Status:** **OPEN (P2)** — REOPENED 2026-08-21: the claimed generator change is absent from the tree (`conversion_is_safe` has 0 hits in `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`; none of its `build_theorem` names is it), while `test/00_formal_verification/compiler/regeneration_spec.spl:26` still asserts `theorem conversion_is_safe`. The only occurrence is the hand-written `lib/std/src/memory/proofs/capabilities.lean:195`, which the spec does not read. The "Resolution" section below records a decision that was never landed in the PRODUCT.
+- **Status:** **CLOSED** (2026-09-13, re-confirmed 2026-11-25 — the 2026-08-21
+  reopening did not hold; see the 2026-09-13 and 2026-11-25 sections below)
 - **Severity:** medium (1 RED example in the formal-verification suite)
 - **Spec:** `test/00_formal_verification/compiler/regeneration_spec.spl:22-26`
 - **Generator:** `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`
@@ -222,3 +223,27 @@ Whatever caused the 2026-08-21 reopening (a stale checkout at the time, or a
 transient revert since re-applied) is not the current state.
 
 - Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`.
+
+## Re-confirmation 2026-11-25 (lane p3-baw, release/1.0.0 @ 1301149fa3f) — CLOSED stands
+
+Source inspection on a fresh Windows worktree:
+
+- The generator emits the theorem:
+  `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl:105-110`
+  — `build_theorem("conversion_is_safe", ..., "canConvert srcCap dstCap = true ↔
+  isMoreRestrictive srcCap dstCap", "cases srcCap <;> cases dstCap <;> simp
+  [canConvert, isMoreRestrictive]")`.
+- The spec still asserts it: `test/00_formal_verification/compiler/regeneration_spec.spl:26`
+  and `test/01_unit/compiler/verification/regeneration_spec.spl:40`
+  (the third `test/unit/...` mirror no longer exists — only two mirrors remain).
+- Spec execution was attempted (`SIMPLE_LIB=src bin/simple.exe test
+  test/00_formal_verification/compiler/regeneration_spec.spl --mode=interpreter`)
+  but is environment-blocked on this host: the seed cannot load
+  `src/app/test_runner_new/test_runner_client.spl` (`unknown decorator
+  '@representation_boundary'`), a known seed limitation unrelated to this bug.
+  Verification is therefore by code inspection: generator and spec agree, and
+  the 2026-09-13 green run stands as the last executable evidence.
+
+The top-of-file status header, which still said "OPEN (P2) — REOPENED
+2026-08-21", was stale relative to the 2026-09-13 closure and has been
+corrected to CLOSED.
