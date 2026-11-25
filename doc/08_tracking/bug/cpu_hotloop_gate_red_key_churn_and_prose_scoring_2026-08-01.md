@@ -396,3 +396,26 @@ numbers describe the pure-Simple self-hosted tool.
   therefore RED for as long as §6's paydown is open. That is the gate working as
   designed, not a spec defect — do not relax the assertion to make it pass.
 
+
+## Triage 2026-11-25 (p3-bar lane, worktree wt-p3-bar) — still red by design
+
+The "needs owner triage" header is stale: triage is complete (sections 2-7)
+and the red state is the intended signal. Fresh measurement at the
+release/1.0.0 tip (`fcd95d41d60`):
+
+```
+cpu_lane_hotloop_baselined=156
+cpu_lane_hotloop_current=186
+cpu_lane_hotloop_new=43
+cpu_lane_hotloop_stale=8
+cpu_lane_hotloop_ok=false
+```
+
+The count has drifted from the 2026-08-02 figure of `new=14` (and the
+baseline from 207 to 156 keys) through ordinary tree churn on this branch;
+the gate remains red **on the merits**, and the remaining items are the same
+class of real defects recorded in section 6.2/6.3, each needing a
+parity-checked refactor. Per lane policy and this document's own section 6
+rule: nothing was absorbed into the baseline, the gate was not weakened, and
+no refactor was attempted. Paydown of the residue remains owner-reserved
+(renderer/compositor lanes). No code change.
