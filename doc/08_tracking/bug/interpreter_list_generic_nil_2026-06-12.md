@@ -1,5 +1,29 @@
 # Bug: seed interpreter — `List<T>()` constructor yields nil receiver
 
+## Verified closed 2026-11-25 (release/1.0.0 @ a19165ae174)
+
+Re-verified on the pinned Windows seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1) with a direct probe of the exact residual-symptom program:
+
+```text
+var xs = List<i64>()
+print "empty len=" + xs.len()   # -> empty len=0
+xs.push(7); xs.push(9)
+print "after len=" + xs.len()   # -> after len=2
+print "get0=" + xs.get(0)       # -> get0=7
+```
+
+Both the filed symptom and the 2026-09-13 "silent successor" (pushes lost,
+`after len=0`) no longer reproduce on the current branch HEAD. Note: the
+`items: [T] = []` default and the `list_zero_arg_ctor_spec.spl` regression
+spec named below are not present in this branch's tree (apparently lost in
+the 2026-09 tree-wipe/revert history), yet the defect does not reproduce —
+current HEAD source + pinned binary are behaviorally correct. `bin/simple.exe
+test` spec-mode runs are environment-blocked repo-wide at this HEAD by the
+known `unknown decorator '@representation_boundary'` seed/source
+inconsistency, so verification used `run`-mode probes only. Status: remains
+**closed**.
+
 ## Closed 2026-09-13 — FIXED: `List<T>()` now usable; missing field default was the residual cause
 
 ### Regression specs (added 2026-09-13)
