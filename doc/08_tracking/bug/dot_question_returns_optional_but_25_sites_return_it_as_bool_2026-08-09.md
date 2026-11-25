@@ -1,6 +1,8 @@
 # `.?` yields `T?`, but 25 `-> bool` functions return it directly
 
-Status: FIX PR #6980 — "wait verification" (host-side native verification pending)
+Status: RESOLVED 2026-11-25 (see verification note at bottom) — all known
+sites converged and the durable checker diagnostic is in place.
+Earlier status: FIX PR #6980 — "wait verification" (host-side native verification pending)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 **Filed:** 2026-08-09 (stream F3)
@@ -289,3 +291,39 @@ was falsy under `.?`); `simple_browser/main.spl` `_read_file_via_vfs -> text?` n
 `test/01_unit/compiler/semantics/bool_fn_tail_exists_check_spec.spl` RED 2/3 -> GREEN 15/15;
 helper now stops at `pub fn`/`class`/`struct`. Verification pending: SimpleOS native build of
 both modules (stage3).
+
+## Verification 2026-11-25 (p2w2-ab lane, release/1.0.0 @ eb3c9c25f74) — RESOLVED
+
+Verified by code inspection on Windows host (pinned seed
+`bin/simple.exe` v1.0.0-rc.1; full spec runs are environment-blocked at HEAD
+because the pinned binary rejects the `@representation_boundary` annotations
+added by cfd89933699 — the known source/binary inconsistency, so the two
+pinning specs could not be executed here):
+
+- Repo-wide census re-run (`\.?\s*$` over all `src/**/*.spl`, vendor
+  excluded): **zero** bare tail-position `.?` statement lines remain. The 174
+  remaining `.?`-at-EOL lines are all `val x = expr.?` bindings (payload
+  binding, correct) or truthy-position `assert x.?` uses — not the defect
+  shape.
+- Spot-checked every site named in the 2026-11-04/05/06 notes:
+  `src/os/apps/simple_browser/main.spl`,
+  `src/os/kernel/loader/installed_artifact_catalog_v1.spl`,
+  `src/compiler/25.traits/trait_def.spl`, `src/app/pkg/lock.spl`,
+  `src/compiler/70.backend/backend/llvm_backend.spl`,
+  `src/compiler/20.hir/hir_codec_key_order.spl`,
+  `src/compiler/35.semantics/const_keys.spl` — none contain a tail `.?`.
+- Durable fix confirmed in place: the implicit-tail diagnostic in
+  `src/compiler/30.types/type_infer/inference_control.spl:756-759` rejects an
+  optional-typed bare tail body in a concrete non-optional-return function
+  ("optional value of type ... cannot satisfy the non-optional return type ...
+  ('.?' yields T?)"), which converts this whole family into compile errors
+  (open question 2 — closed).
+- Pinning specs exist:
+  `test/01_unit/compiler/semantics/bool_fn_tail_exists_check_spec.spl` and
+  `test/01_unit/compiler/type_infer/non_optional_return_optional_payload_spec.spl`
+  (15/15 and 8/8 green per the 2026-11-05/06 lane notes; not re-runnable on
+  this host for the reason above).
+
+The `.?`-yields-`T?` contract ruling the doc asked for is effectively settled:
+all call sites were converged to `!= nil` / explicit comparisons and the
+checker now enforces the contract at the tail position. Marking RESOLVED.
