@@ -26,3 +26,18 @@ the current tail unless the replacement sets one. Not covered (by design): a sta
 move to a different table (`mark_deleted` + new row) — the tail is positional to the
 old table's schema. Spec: `test/01_unit/lib/database/sdn_overwide_row_roundtrip_spec.spl`
 case 4. `bug_db.sdn` data untouched.
+
+## 2026-11-26 — WA-S7 Root-Fixed & Retired (`ROOT-FIXED+RETIRED`)
+
+- Extended `sdn_row_keep_opaque_tail` / `sdn_opaque_tail_key` / `SdnTable.to_sdn`
+  in `src/lib/nogc_sync_mut/database/core.spl` to preserve empty trailing opaque
+  fields via `has_column`, and normalized `\r\n` -> `\n` in `SdnDatabase.load`.
+- Updated `BugDatabase.update_bug` in `src/lib/nogc_sync_mut/database/bug.spl`
+  via `_bug_preserve_opaque_fields` so same-table updates and same-schema
+  cross-table moves (`bugs_active` <-> `bugs`) keep both `__opaque_tail` and
+  extra declared legacy columns.
+- Retired `# @workaround bug=bug_database_roundtrip_drops_overwide_legacy_rows_2026_10_27`
+  from `append_open_bugs_preserving_legacy` (kept the method intact for existing
+  callers/specs).
+- Verified with `test/01_unit/lib/database/wa_src_lane7_bug_roundtrip_spec.spl`
+  and `test/01_unit/lib/database/sdn_overwide_row_roundtrip_spec.spl`.

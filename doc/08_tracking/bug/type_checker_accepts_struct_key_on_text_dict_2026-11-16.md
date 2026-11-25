@@ -56,10 +56,13 @@ target through this same arm. The write side is therefore unchecked too.
 ## Fix (landed 2026-11-25)
 In the `Dict(key, value)` arm, the synthesized `idx_ty` is unified with `key`
 and the unify error is returned (non-slice indexes only; the slice path is
-unchanged). Existing-call-site impact was measured by running the full
-`test/01_unit/compiler/type_infer/` unit suite (the executable consumers of
-this checker) plus the lint semantic-check smoke: no existing spec depended on
-a loose dict key.
+unchanged). Existing-call-site impact was measured by running the
+`test/01_unit/compiler/type_infer/`, `type_inference/`, and `types/` unit
+suites (the executable consumers of this checker) plus the lint
+semantic-check smoke, with the two failing spec files reproduced
+byte-identically on the pristine base commit (pre-existing, unrelated), and by
+a before/after `simple_semantic_check_source` probe on self-contained dict
+snippets whose only delta is the intended new key-mismatch diagnostic.
 
 ## Evidence
 - The mismatch was found by reading the source above. It is now pinned by the

@@ -1,6 +1,6 @@
 # Test runner and imported-module parse errors: no swallow; seed/pure parser divergence (2026-11-25)
 
-Status: verification-pending (lane trparse, `work/test-runner-parse-fail-20261125`)
+Status: verification-pending (lane prsel, `work/parser-multiline-if-else-20261126`)
 
 ## Report
 PR #11363 fixed `src/lib/nogc_sync_mut/container/linux_installed_provider_inventory_v1.spl`.
@@ -47,3 +47,14 @@ so the pure parser's verdict on each site still needs checking.
 - Open: unify the two parsers on this form. Either make the seed reject it or make
   `compiler.core.parser` accept it, with an owner decision on the grammar. Then
   re-check the census sites. No seed change was made and the seed was not rebuilt.
+
+## Resolution (2026-11-26, lane prsel)
+Owner decision: `compiler.core.parser` ACCEPTS the form. `parse_block_lexical_body`
+(`src/compiler/10.frontend/core/parser_stmts.spl`) now returns at an `else`/`elif`
+that starts a line inside an if-expression colon block (after at least one
+statement), leaving the INDENT for `parse_if_expr`'s continued-indent unwind.
+Spec: `test/01_unit/compiler/frontend/ifexpr_multiline_else_parse_spec.spl`.
+Red before fix (pure parser via `bin/simple run`): `ml_else errors=1`,
+`ml_elif errors=2` (E0002 `unexpected token ':'`); after: all 0, one-line,
+same-line-else and statement-if forms still 0. All four census sites parse with
+0 errors. Grammar documented in `doc/07_guide/quick_reference/syntax_quick_reference.md`.

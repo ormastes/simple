@@ -75,3 +75,12 @@ and fails to parse an unrelated file (`windows_redirected_process.spl`). Stage2
 has no `test` command. A native driver executable built with the
 `core-c-bootstrap` bundle failed to link (`rt_process_spawn_session` is
 undefined), also environmental.
+
+## WA-S8 Verification (2026-11-26)
+
+- **Classification:** `KEPT-WITH-REASON`
+- **Disposition:** Kept compact text-encoded tables and `@workaround bug=stage2_codegen_large_array_literal_2026-11-02` in `src/lib/common/search/generated/unicode_17_0_0.spl`. `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl` (`case Array(_):`) still emits `rt_array_new` plus per-element `rt_array_push` calls, and `unicode_17_0_0.spl` lies in the Stage 3 closure compiled by frozen Stage 2 binaries under the 97 GB RSS cap.
+- **Verification (`SIMPLE_BINARY=wa_shared_bin/simple.exe`, build-commit `03a407dabae`, `--mode=interpreter`):**
+  - `test/01_unit/lib/common/search/unicode_17_0_0_text_tables_spec.spl` (2/2 passed)
+  - `test/01_unit/app/devhub/wa_src_lane8_retirement_spec.spl` (5/5 passed — exercises `unicode_table_samples_for_spec`, `unicode_is_alphabetic`, `unicode_canonical_combining_class`)
+  - `test/01_unit/compiler/mir/wa_src_lane8_lowering_spec.spl` (4/4 passed — guards that `MirToLlvm` still emits `rt_array_push` per element for `Array` aggregates)

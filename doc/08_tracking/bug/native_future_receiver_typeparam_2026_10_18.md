@@ -227,3 +227,27 @@ returns `Future<bool>` via `Future.from_value(true)` imported from std; expect t
 ## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
 
 MIR-level spec test/01_unit/compiler/50.mir/generic_static_receiver_typeparam_spec.spl (single module, inferred + explicit receiver) is green: the failure needs the imported std Future owner. Native verification: native-build test/fixtures/compiler/async_file_future_receiver/main.spl.
+
+## WA-S6 re-verification (2026-11-26): still OPEN for `Future<i64>` scalar payloads in `50.mir`
+
+While `Future.from_value(Some(text_val))` (`Future<text?>`) now lowers and
+decodes cleanly through `rt_is_some`/`rt_unwrap_or_self`, replacing the
+concrete constructor in `FileThreadPool.exec(task: fn() -> i64) -> Future<i64>`
+(`src/lib/nogc_async_mut/io/file.spl:235`) with `Future.from_value(task())`
+still miscompiles `i64` payloads in pure-Simple `50.mir` -> `MirToLlvm` IR:
+1. At the generic static-factory call site, `Pool.exec` boxes `task()`'s raw
+   `i64` (`37`) with `call i64 @rt_value_int_wide(i64 %l11)` (`297`) before
+   passing `%l14` to `Future.from_value(i64)`.
+2. Inside `Future.from_value(i64 %l1)`, `Poll.Ready(value)` stores `%l1`
+   verbatim via `rt_enum_new(..., i64 %l1)` (storing `297` in the payload).
+3. At a concrete consumer `val state: Poll<i64> = fut.poll(); match state: case Poll.Ready(v): v`,
+   `decode_instantiated_enum_payload_slot_v1` -> `enum_payload_value` returns
+   raw `rt_enum_payload` with no `rt_value_as_int_wide` unbox (returning
+   `297` instead of `37`). Unannotated `match fut.poll(): case Poll.Ready(v):`
+   also still fails HIR lowering (`expression_components.spl:600`:
+   `generic enum pattern requires its declared subject owner`).
+
+Status for `FileThreadPool.exec` (`Future<i64>`) remains OPEN (`50.mir` erased
+generic `T` vs raw `I64` enum-payload ABI mismatch). Workaround in
+`src/lib/nogc_async_mut/io/file.spl:235` is KEPT with updated reason and
+pinned by `test/01_unit/lib/nogc_async_mut/io/wa_src_lane6_file_future_spec.spl`.

@@ -996,6 +996,12 @@ else:
 
 # Expression form
 val result = if x > 0: "positive" else: "non-positive"
+
+# Expression form, value and else/elif on indented continuation lines
+# (accepted by the seed and the pure-Simple parser)
+r = if n > 0:
+    1
+    else: 2
 ```
 
 ### Chained Comparisons

@@ -1,0 +1,29 @@
+use std.spec
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirTypeDef, MirTypeDefKind, MirFieldDef}
+use plugins.backend_lean.lean_backend.{LeanBackend, VerificationLevel}
+
+describe "WA-S6 LeanBackend constructor default argument guard":
+    it "Bug 6: exports typed struct modules cleanly with explicit LeanRecursiveArrayLimitsV1":
+        val pkt = MirTypeDef(
+            symbol: SymbolId(id: 7),
+            name: "wire.Packet",
+            kind: MirTypeDefKind.Struct([
+                MirFieldDef(name: "byte", type_: MirType(kind: MirTypeKind.U8), offset: 0, has_bits_attr: false, bits_width: 0),
+                MirFieldDef(name: "count", type_: MirType(kind: MirTypeKind.I32), offset: 4, has_bits_attr: false, bits_width: 0)
+            ]),
+            is_export_c: false,
+            export_name: ""
+        )
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[pkt.symbol] = pkt
+        val module = MirModule(name: "LeanDefaultFixture", functions: {}, statics: {}, constants: {}, types: types)
+        val res = LeanBackend.create(VerificationLevel.Contracts).export_module(module)
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap().lean_code).to_contain("Packet")
+
+        val src = read_file_text("src/plugins/backend_lean/lean_backend.spl") ?? ""
+        expect(src.contains("@workaround bug=lean_native_constructor_default_argument_2026_10_21")).to_equal(true)
+        expect(src.contains("LeanRecursiveArrayLimitsV1()")).to_equal(true)
