@@ -48,3 +48,22 @@ fixtures; re-derive with the shape above on the normal native path.)
 
 Confirmed fixed by commit `3f6dbe1b4abd` ("#169 materialize void spill slots as i64 (llc reject)", 2026-07-13). The commit directly addresses the `alloca void` symptom; commit message includes verified native==oracle regression evidence confirming the fix closes the gap.
 
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+Confirmed fixed; closure stands.
+
+- Fix commit `3f6dbe1b4abd` ("fix(backend): #169 materialize void spill slots
+  as i64 (llc reject)") is an ancestor of release/1.0.0 HEAD.
+- Code inspection at HEAD: `translate_alloc` in
+  `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:3674`
+  materializes a void-typed spill slot as the universal `i64` word
+  (`if raw_ty == "void": "i64"`), with the matching load/store arms
+  (`core_codegen.spl:3754`, `:3779`) resolving the slot element type the same
+  way, so `alloca void` can no longer be emitted for statement-form
+  `if`/`match` unit temps.
+- Execution limit: `bin/simple.exe test` is repo-wide blocked at this HEAD —
+  the pinned seed (Rust v1.0.0-rc.1) rejects the `@representation_boundary`
+  decorator added tree-wide by cfd89933699, so the named-repro execution
+  could not be re-run on this Windows host. Verification is by commit
+  ancestry + source inspection only.

@@ -67,3 +67,19 @@ change needed in this lane; this section is the re-verification evidence.
 
   Outcome: `SPEC FILE VERDICT ... outcome=OK declared>=33 executed=33 passed=33 failed=0`.
   **33/33 examples pass.** The original `Cannot resolve module` error is gone.
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+Stale — the 2026-11-05 "already fixed" section is confirmed at release/1.0.0
+HEAD by source inspection:
+
+- `src/hardware/rv64gc/mem/rv64_ram.spl` exists and defines `class Rv64Ram`
+  (line 10), matching the spec's
+  `use hardware.rv64gc.mem.rv64_ram.Rv64Ram` import.
+- The spec lives at `test/01_unit/hardware/rv64gc/rv64_memory_ops_spec.spl`.
+- Execution limit: could not re-run the spec on this Windows host — the
+  pinned seed binary (Rust v1.0.0-rc.1) rejects the tree-wide
+  `@representation_boundary` decorator (cfd89933699), which blocks
+  `bin/simple.exe test` repo-wide at this HEAD. The 2026-11-05 run
+  (33/33 PASS on an aarch64 seed) plus the source evidence above stand;
+  header flipped open → resolved.
