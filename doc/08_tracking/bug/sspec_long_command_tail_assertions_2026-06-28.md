@@ -1,5 +1,21 @@
 # SSpec Long Command Tail Assertions May Be Skipped
 
+## Verification 2026-11-25 — closure re-confirmed by seed-source inspection; execution blocked at HEAD
+
+- **measured (source)** the fixed matcher path is present in the seed source at
+  this HEAD: `finish_bdd_matcher`
+  (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs:127`) only resets
+  `BDD_EXPECT_FAILED` on the outside-`it` fatal path — no matcher pass branch
+  clears a prior failure — and the regression test
+  `bdd_matcher_pass_after_failure_keeps_example_failed`
+  (`src/compiler_rust/driver/tests/interpreter_bdd.rs:13`) is in-tree.
+- **limit** a fresh behavioral re-run was not possible in this lane: any
+  `bin/simple.exe test <spec>` at release/1.0.0 HEAD fails before running
+  examples with `unknown decorator '@representation_boundary'` in the seed's
+  own test-runner closure (known source/binary inconsistency at this HEAD,
+  unrelated to this bug). The 2026-09-13 measured closure on the v1.0.0-rc.1
+  seed stands; this note adds source-level confirmation only.
+
 ## Closed 2026-09-13 — root cause (matcher clearing a prior failure) is fixed; tail assertions are now observed
 
 - **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
