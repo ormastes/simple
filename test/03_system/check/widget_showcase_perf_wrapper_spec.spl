@@ -287,15 +287,25 @@ describe "Widget showcase retained perf wrapper":
         step("Read the wrapper source")
         val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
 
-        step("Assert p50 and p95 are derived from the retained timing window")
+        step("Assert p50 and p95 come from the probe's retained per-frame samples, not the mean")
         expect(script).to_contain("frame_elapsed_ns_status=\"$(positive_int_range_status")
         expect(script).to_contain("\"$FRAMES\" \"$elapsed_ns\"")
         expect(script).to_contain("frame_avg_ns=$((fps_elapsed_ns / FRAMES))")
-        expect(script).to_contain("frame_p50_ns=$frame_avg_ns")
-        expect(script).to_contain("frame_p95_ns=$frame_avg_ns")
+        expect(script).to_contain("frame_p50_ns=\"$(sed -n \"s/^$\{PROBE_PREFIX}_frame_p50_ns=//p\" \"$LOG\")\"")
+        expect(script).to_contain("frame_p95_ns=\"$(sed -n \"s/^$\{PROBE_PREFIX}_frame_p95_ns=//p\" \"$LOG\")\"")
+        expect(script).to_contain("warmup_frames=\"$(sed -n \"s/^$\{PROBE_PREFIX}_warmup_frames=//p\" \"$LOG\")\"")
+        expect(script).to_contain("frame_sample_count=\"$(sed -n \"s/^$\{PROBE_PREFIX}_frame_sample_count=//p\" \"$LOG\")\"")
+        expect_not(script.contains("frame_p50_ns=$frame_avg_ns"))
+        expect_not(script.contains("frame_p95_ns=$frame_avg_ns"))
+
+        step("Assert the distribution gate fails closed on missing samples or p95 below p50")
+        expect(script).to_contain("expected_value_status \"$\{frame_sample_count:-}\" \"$FRAMES\"")
+        expect(script).to_contain("frame_distribution_status \"$frame_avg_ns\" \"$frame_p50_ns\" \"$frame_p95_ns\"")
+        expect(script).to_contain("if [ \"$p95\" -lt \"$p50\" ]; then")
         expect(script).to_contain("_frame_elapsed_ns_status=$frame_elapsed_ns_status")
         expect(script).to_contain("_frame_p50_ns=$frame_p50_ns")
         expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
+        expect(script).to_contain("_frame_distribution_status=$frame_distribution_status")
 
     it "does not let impossible producer timing pass a slow retained probe":
         # @req REQ-SSPEC-SYSTEM
