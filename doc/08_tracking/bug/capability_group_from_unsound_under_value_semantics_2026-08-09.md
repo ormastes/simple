@@ -3,7 +3,8 @@
 **Filed:** 2026-08-09 (stream P2, unified debug/profile capability feature)
 **Affects:** `doc/05_design/app/tools/unified_debug_profile_capability_architecture_2026-08-09.md` §3
 (and therefore streams P0, P3, P4, P9, P10, P11 which code against it)
-Status: OPEN (P2)
+Status: CLOSED 2026-11-09 (closed-obsolete — see the dated section at the
+end; header corrected 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Symptom
@@ -135,3 +136,13 @@ on `a=1 b=1`. (The shared `bin/simple.exe` was built 2026-11-04 16:58, before
 `6c7b4db3d39` landed at 17:49, so it still shows `b=0` with no flag set.) The
 remaining `.from()` single-accessor desugar is feature work. It is tracked by a
 `TODO` marker in `src/compiler/35.semantics/lint/dynamic_capability_acquire.spl`.
+
+## Verification 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — closed-obsolete stands
+
+Confirmed at the release/1.0.0 tip: the 2026-11-09 closure is consistent
+with the tree — the owner decision 2026-11-06 (classes are reference types
+on every lane) obsoletes the value-semantics premise, and the remaining
+`.from()` single-accessor desugar is feature work tracked by the TODO
+marker at `src/compiler/35.semantics/lint/dynamic_capability_acquire.spl:39`.
+The status header still said OPEN; corrected to match the body's closure.
+No code change.

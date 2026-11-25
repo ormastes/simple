@@ -93,3 +93,27 @@ control that actually passes.
 3. Verify against a control that passes (`val BASE: i64 = 5` printed from
    `main` must build and print `5` before any cross-import A/B is meaningful —
    today it does not, so every such A/B is VOID, not negative).
+
+## Triage 2026-11-25 (p2w1-ab lane, release/1.0.0 @ 38265c7f249) — moved, not closable from this lane
+
+Movement since the 2026-08-10 re-verification:
+
+- The blocking bug
+  (`native_build_mir_module_has_no_functions_2026-07-25.md`) is now marked
+  ALREADY-FIXED (re-verified 2026-08-10), removing the ordering precondition
+  above.
+- The HIR import path has been reworked since the cited
+  `module_lowering.spl:502-503`: const imports now register through
+  `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl:1158-1176`
+  with declared-type projection and defining-module identity, and
+  cross-module `val`-const resolution is pinned by the executable spec
+  `test/01_unit/compiler/50.mir/imported_module_val_const_spec.spl`
+  (landed in 8da1624c935).
+
+NOT verified here: the end-to-end native-build `--mode one-binary` control
+(the duplicate-`@g_BASE` link hazard this doc warns about) cannot be
+exercised on this Windows host — the pinned seed rejects the
+`@representation_boundary` decorator tree-wide (cfd89933699), and
+native-build verification with the seed is out of bounds for this lane.
+Left OPEN pending that native-build control; item 3 of "Order of work" has
+still not been run end-to-end here.
