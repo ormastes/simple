@@ -100,3 +100,33 @@ server, `test/03_system/app/llm_caret/feature/fixtures/caret_timeout_server.spl`
 via `$SIMPLE_BINARY run`, and asserts the server ledger (`slow=3`, `echo=1`) in
 its own example. `CARET_TIMEOUT_TEST_URL` still overrides the fixture. Windows
 seed run: `Results: 6 total, 6 passed, 0 failed`, exit 0.
+
+## 2026-11-25 verification (lane p2w3-ak): fix live-verified on the pinned seed
+
+Re-verified on worktree work/p2w3-ak-20261125 (release/1.0.0 tip dd709d76f18),
+tracked `bin/simple.exe` (Rust seed v1.0.0-rc.1, Windows):
+
+- Fix commit a62f411a3c2 confirmed ancestor of HEAD
+  (`git merge-base --is-ancestor`).
+- Timeout classification bridge present in
+  `src/lib/nogc_sync_mut/io/http_client_core.spl` (`_timeout_transport_error`
+  normalizes WSAETIMEDOUT / "os error 10060" / ETIMEDOUT to
+  "HTTP request timed out").
+- Live loopback run: started the committed fixture
+  `test/03_system/app/llm_caret/feature/fixtures/caret_timeout_server.spl`
+  with the pinned seed (published port, ledger file), then drove
+  `http_request_v2_raw` against it:
+  - `POST /slow` with a 100 ms budget -> `status=-1`,
+    `err="HTTP request timed out"` (normalized classification, not the raw
+    WSAETIMEDOUT string);
+  - `POST /echo` with a 3000 ms budget -> `status=200`, 2-byte body
+    round-trip;
+  - negative timeout -> `err="HTTP timeout cannot be negative"`, rejected
+    before any request (server ledger stayed exactly `slow=1`, `echo=1`).
+
+Limit: the full SPipe spec (`llm_caret_attempt_timeout_spec.spl`) was not run
+through `bin/simple.exe test` because the pinned seed rejects the
+`@representation_boundary` decorator added repo-wide by cfd89933699 (known
+HEAD source/binary inconsistency, fails in the test runner client). The probe
+above exercises the same fixture, transport boundary, and assertions as the
+spec's stalled/echo/negative scenarios. Status remains Fixed.

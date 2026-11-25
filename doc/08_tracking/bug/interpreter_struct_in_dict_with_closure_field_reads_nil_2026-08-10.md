@@ -18,7 +18,7 @@ does not prove an interpreter fix; status remains OPEN. Resume with:
 Retain producer/source/backend/runtime identities and all three scenario
 results before choosing the faulty owner or changing the actor library.
 
-Status: OPEN (P2)
+Status: RESOLVED (P2) — verified fixed on the pinned seed 2026-11-25 (see final section)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
@@ -137,3 +137,33 @@ Class reference semantics are the seed-interpreter default now
 (`Value::ClassInstance`; `SIMPLE_INTERP_CLASS_REF=0` opts out). Rebuilt seed,
 default run: `actor_singleton_closure_persistence_spec` 3/3 (was 0/3).
 Coordinator owns the bug_db status change.
+
+## 2026-11-25 verification (lane p2w3-ak): RESOLVED on the pinned seed
+
+Verified on worktree work/p2w3-ak-20261125 (release/1.0.0 tip dd709d76f18)
+with the tracked `bin/simple.exe` (Rust seed v1.0.0-rc.1, Windows). A probe
+replicating the spec's exact assertions — named handler AND lambda-literal
+handler registered via `make_handlers()`, spawned through the public
+`spawn_actor` facade, runtime reacquired via an independent
+`get_actor_runtime()` call — prints:
+
+```
+actor_count=1
+stats=Actor 0: processed=0, errors=0, pending=0, methods=[process, lambda_process]
+contains_not_found=false
+contains_process=true
+```
+
+The original symptom (`actor_count=0`, `not found`, actor silently lost) no
+longer reproduces; both the named-function and the closure-literal trigger
+shapes persist across singleton accessors. This confirms the 2026-11-04
+fix-classref note: the `ActorRuntime` struct→class repair plus the
+interpreter's default class reference semantics (`Value::ClassInstance`) are
+present and effective in the pinned seed.
+
+Limit: `bin/simple.exe test test/01_unit/lib/nogc_async_mut/actor_singleton_closure_persistence_spec.spl`
+itself could not be executed at this HEAD — the pinned seed rejects the
+`@representation_boundary` decorator added repo-wide by cfd89933699 (fails in
+`src/app/test_runner_new/test_runner_client.spl`), the known source/binary
+inconsistency at release/1.0.0 HEAD. The probe above exercises the identical
+production API calls and assertions as the spec's three scenarios.
