@@ -4,9 +4,10 @@
 - **Area:** AES-256 key schedule / CTR-mode implementation exercised via
   `test/unit/lib/crypto/aes_ctr_nist_spec.spl`
 - **Priority:** P1 at filing; the available Rust seed showed a fixture mismatch.
-- **Status:** FIX IMPLEMENTED, PURE-SIMPLE VERIFICATION PENDING (2026-09-21).
-  The expected vector was corrected against
-  [NIST SP 800-38A, F.5.5/F.5.6](https://nvlpubs.nist.gov/nistpubs/legacy/sp/nistspecialpublication800-38a.pdf).
+- **Status:** CLOSED (2026-11-25). Root cause was a wrong spec fixture, not
+  an AES-256 key-schedule defect; the fixture was corrected on 2026-09-21 and
+  the pure-Simple self-hosted verification gate now passes — see
+  "Resolution (2026-11-25)" below.
 
 ## Original symptom
 
@@ -73,3 +74,34 @@ Pure-Simple self-hosted execution of this spec remains the closure gate.
 
 - `test/unit/lib/crypto/aes_ctr_nist_spec.spl` (2 of 4 examples, both
   AES-256-CTR only)
+
+## Resolution (2026-11-25) — CLOSED: no implementation defect; pure-Simple gate passed
+
+**Root cause:** the original mismatch was a wrong expected-ciphertext fixture
+in the spec, not an AES-256 key-expansion or CTR-mode bug. The fixture had
+been corrected to the true NIST SP 800-38A F.5.5/F.5.6 bytes on 2026-09-21
+(see "Root cause and evidence" above); this session closed the remaining
+gate — pure-Simple self-hosted verification.
+
+**Key-expansion audit (FIPS-197):** `src/lib/common/aes/key_expansion.spl`
+implements the Nk=8 schedule correctly — RotWord+SubWord+Rcon at
+`word_idx % nk == 0`, the AES-256-only extra `SubWord` at
+`word_idx % nk == 4`, `num_rounds = 14`, and a correct Rcon table. No code
+change was needed or made.
+
+**Verification (self-hosted `bin/simple.exe`, Windows x86_64,
+`--mode=interpreter`, `SIMPLE_LIB=src`):**
+
+- BEFORE = AFTER (spec was already green on the corrected fixture):
+  `test/01_unit/lib/crypto/aes_ctr_nist_spec.spl` —
+  `outcome=OK declared>=4 executed=4 passed=4 failed=0`. Both AES-256-CTR
+  examples (F.5.5/F.5.6) match SP 800-38A byte-exact; AES-128-CTR
+  (F.5.1/F.5.2) also passes.
+- Sibling regression checks, all green:
+  - `test/01_unit/lib/crypto/aes_block_fips197_kat_spec.spl` — 4/4 passed
+    (FIPS-197 block-cipher KATs including AES-256; decisive evidence the
+    256-bit key schedule is correct).
+  - `test/01_unit/lib/crypto/aes_cbc_fips197_nist_spec.spl` — 18/18 passed.
+
+**Files changed in this resolution:** this bug doc only. No production or
+test source was modified.
