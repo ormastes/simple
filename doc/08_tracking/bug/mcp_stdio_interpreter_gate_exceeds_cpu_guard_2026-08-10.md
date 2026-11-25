@@ -177,3 +177,18 @@ Note also `src/compiler/50.mir/**` is claimed by another lane this session; the
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs measuring CPU-guard behavior under the MCP stdio interpreter gate in a live server session, not reproducible via a unit spec in this lane's budget. No change made.
+
+## Triage 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The pure-Simple source fix named above is present in current source:
+`driver_source_pipeline_loading.spl:1440` excludes `CompileMode.Interpret`
+from `needs_bulk_project_sources`, and the contract spec
+`test/01_unit/compiler/driver/interpret_lazy_project_sources_spec.spl`
+exists. The CPU-guard gate itself could not be re-measured on this Windows
+host: `SIMPLE_LIB=src bin/simple.exe test
+test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+aborts before any scenario with `unknown decorator
+'@representation_boundary'` (known release/1.0.0 source/binary
+inconsistency — the pinned Rust seed predates the decorator added tree-wide
+by cfd89933699). The row stays OPEN for the gate measurement; the note
+above records that the source-side fix is landed, verified by inspection.
