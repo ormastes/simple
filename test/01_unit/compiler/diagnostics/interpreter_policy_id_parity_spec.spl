@@ -1,0 +1,149 @@
+"""
+## Purpose and audience
+RB-DIAG-01 interpreter leg: the interpreter's own warning channel
+(`eval_warnings`) carries the same DiagnosticRulePolicy rule ID that the CLI
+lint prints (`  policy: <ID>`) and the LSP carries (`data.policy_id`).
+
+Each interpreter warning family is bound to a lint name in
+`compiler.common.diagnostics.interpreter_policy_ids`; `lint_policy_rule_ids()`
+merges that table, so all three surfaces resolve one name to one ID, and every
+ID is a row in `config/policy/diagnostic_policy.sdn`.
+
+Only `non_exhaustive_match` has a CLI/LSP detector today, so it is the family
+compared end to end on a fixture (same ID, same line). The others (ignored
+return, match fall-through, wildcard catch, gc-family import, unprovided `use`
+name) are interpreter-only findings: for them the spec pins that the emitted
+message carries the bound ID and that the CLI/LSP lookup resolves the same
+name to the same ID. The `@must_use` / `@profile(critical)` R9 branches are
+not covered here: they are errors already coded `R9` / SPL-USE-00x by the HIR
+must-use pass, whose severity is not policy-driven.
+Audience: diagnostics, interpreter, lint, and LSP maintainers.
+"""
+# @cover src/compiler/00.common/diagnostics/interpreter_policy_ids.spl
+# @cover src/compiler/10.frontend/core/interpreter/eval_tables.spl
+# @cover src/compiler/10.frontend/core/interpreter/eval_stmts.spl
+# @cover src/compiler/10.frontend/core/interpreter/module_loader_core.spl
+# @req REQ-DIAG-POLICY-002
+# @req REQ-DPOL-001
+
+use std.spec.*
+use std.nogc_sync_mut.fs.text_io.{file_read_text}
+use compiler.common.diagnostics.interpreter_policy_ids.{interpreter_policy_rule_ids, interpreter_policy_id}
+use compiler.common.diagnostics.diagnostic_rule_policy.{load_diagnostic_policy_text, diagnostic_policy_default_path, DiagnosticPolicySnapshot}
+use compiler.tools.lint._LintMain.config_and_model.{lint_policy_code_for_rule, build_default_levels}
+use app.cli.query_lint.{_qlint_collect_lint_diagnostics_json}
+use std.nogc_sync_mut.lsp.handlers.diagnostics.{_parse_compiler_json_diagnostic}
+use compiler.core.ast.{ast_reset, decl_fn}
+use compiler.core.interpreter.eval.{eval_warnings}
+use compiler.core.interpreter.eval_tables.{
+    match_fallthrough_message, match_wildcard_catch_message,
+    non_exhaustive_match_message, ignored_return_message
+}
+use compiler.core.interpreter.module_loader_core.{
+    check_gc_family_boundary, module_loader_init, record_module_surface, warn_unprovided_use_names
+}
+
+val FIXTURE = "test/01_unit/compiler/diagnostics/fixtures/interpreter_policy_parity_fixture.spl"
+val SURFACE = "spec/fixture/rbdiag_interp_surface.spl"
+
+fn shipped_policy() -> DiagnosticPolicySnapshot:
+    match load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path())):
+        Ok(snapshot): snapshot
+        Err(err):
+            panic("shipped diagnostic policy failed to load: " + err)
+
+# The ID the interpreter message itself carries ("" when untagged).
+fn interp_emitted_policy_id(msg: text) -> text:
+    val parts = msg.split(" [policy: ")
+    if parts.len() < 2:
+        return ""
+    val ids = parts[1].split("]")
+    if ids.len() < 2:
+        return ""
+    ids[0]
+
+fn lsp_policy_lines(code: text) -> [text]:
+    var out: [text] = []
+    for raw in _qlint_collect_lint_diagnostics_json(FIXTURE, file_read_text(FIXTURE)).1:
+        match _parse_compiler_json_diagnostic(raw):
+            Some(d):
+                val c: text = d["code"] ?? ""
+                if c == code and d.contains_key("data"):
+                    val data = d["data"]
+                    val id: text = data["policy_id"] ?? ""
+                    val line0: i64 = d["range"]["start"]["line"]
+                    if id != "":
+                        out.push("{id}@{line0 + 1}")
+            _: pass_do_nothing
+    out
+
+fn last_warning_since(mark: i64) -> text:
+    if eval_warnings.len() <= mark:
+        return ""
+    eval_warnings[eval_warnings.len() - 1]
+
+# @manual_section: interpreter_policy_id_parity
+describe "RB-DIAG-01: interpreter warnings carry the policy rule ID CLI and LSP print":
+    """One binding table, one ID per warning family, on every surface."""
+
+    it "binds every interpreter warning family to a shipped policy row and a lint level":
+        val snapshot = shipped_policy()
+        val defaults = build_default_levels()
+        val ids = interpreter_policy_rule_ids()
+        expect(ids.len()).to_equal(6)
+        for name in ids.keys():
+            expect(snapshot.has_rule(ids[name])).to_be(true)
+            expect(defaults.contains_key(name)).to_be(true)
+            expect(lint_policy_code_for_rule(name)).to_equal(ids[name])
+
+    it "non_exhaustive_match: interpreter and LSP emit SPL-MATCH-001 for the same match":
+        val interp = interp_emitted_policy_id(non_exhaustive_match_message("Color", ["Blue"]))
+        expect(interp).to_equal("SPL-MATCH-001")
+        # The LSP reports the finding under its diagnostic code MEXH001; the
+        # policy ID resolves through the non_exhaustive_match family.
+        expect(lsp_policy_lines("MEXH001")).to_equal(["SPL-MATCH-001@7"])
+
+    it "the CLI resolves every code of the non_exhaustive_match family to SPL-MATCH-001":
+        # The in-process CLI engine has no match-exhaustiveness detector (gap
+        # recorded in the RB-DIAG-01 plan row); its `policy:` line comes from
+        # the same lookup for any finding it does carry.
+        for code in ["non_exhaustive_match", "C002", "MEXH001", "MEXH002", "MEXH003"]:
+            expect(lint_policy_code_for_rule(code)).to_equal("SPL-MATCH-001")
+        expect(lint_policy_code_for_rule("RET001")).to_equal("SPL-RET-001")
+
+    it "ignored return value warning carries SPL-RET-001":
+        val msg = ignored_return_message("i64", "value")
+        expect(msg.starts_with("warning: return value of type 'i64' from function 'value' is ignored")).to_be(true)
+        expect(interp_emitted_policy_id(msg)).to_equal(lint_policy_code_for_rule("ignored_return"))
+        expect(interp_emitted_policy_id(msg)).to_equal("SPL-RET-001")
+
+    it "match fall-through error carries SPL-MATCH-002":
+        val msg = match_fallthrough_message("Color", "Blue", "enum", [], "x.spl")
+        expect(msg.starts_with("error: non-exhaustive match: no arm matched value ")).to_be(true)
+        expect(interp_emitted_policy_id(msg)).to_equal(lint_policy_code_for_rule("match_fallthrough"))
+        expect(interp_emitted_policy_id(msg)).to_equal("SPL-MATCH-002")
+
+    it "wildcard-catch diagnostic carries SPL-MATCH-003":
+        val msg = match_wildcard_catch_message("Color", "Blue", "enum", "x.spl")
+        expect(msg.starts_with("[match-wildcard-catch] ")).to_be(true)
+        expect(interp_emitted_policy_id(msg)).to_equal(lint_policy_code_for_rule("match_wildcard_catch"))
+        expect(interp_emitted_policy_id(msg)).to_equal("SPL-MATCH-003")
+
+    it "gc-family import warning carries SPL-GC-001 and keeps its [gc-warning] prefix":
+        val mark = eval_warnings.len()
+        check_gc_family_boundary("src/lib/nogc_sync_mut/rbdiag_a.spl", "src/lib/gc_async_mut/rbdiag_b.spl", "rbdiag_gc_mod")
+        val msg = last_warning_since(mark)
+        expect(msg.starts_with("[gc-warning] ")).to_be(true)
+        expect(interp_emitted_policy_id(msg)).to_equal(lint_policy_code_for_rule("gc_family_import"))
+        expect(interp_emitted_policy_id(msg)).to_equal("SPL-GC-001")
+
+    it "unprovided use-name warning carries SPL-IMPORT-001 and keeps its [use-warning] prefix":
+        module_loader_init()
+        ast_reset()
+        record_module_surface(SURFACE, [decl_fn("rbdiag_present", [], [], 0, [], 0, [], 0)])
+        val mark = eval_warnings.len()
+        warn_unprovided_use_names("rbdiag_mod", SURFACE, ["rbdiag_absent"], FIXTURE)
+        val msg = last_warning_since(mark)
+        expect(msg.starts_with("[use-warning] 'rbdiag_absent'")).to_be(true)
+        expect(interp_emitted_policy_id(msg)).to_equal(lint_policy_code_for_rule("use_unprovided_name"))
+        expect(interp_emitted_policy_id(msg)).to_equal("SPL-IMPORT-001")

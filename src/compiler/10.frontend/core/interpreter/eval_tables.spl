@@ -17,6 +17,7 @@
 use compiler.core.ast.{arm_get_pattern, decl_get_param_types, decl_get_ret_type, expr_get}
 use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT}
 use compiler.core.interpreter.eval.{eval_warnings}
+use compiler.common.diagnostics.interpreter_policy_ids.{interpreter_policy_tag}
 use compiler.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu, cfg_eval_key_value}
 use compiler.core.ast.{module_get_path}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
@@ -1333,14 +1334,21 @@ fn check_match_exhaustive(arm_ids: [i64], type_name: text):
             missing.push(variant)
 
     if missing.len() > 0:
-        var msg = "warning: non-exhaustive match on '" + type_name + "' — missing: "
-        var mi: i64 = 0
-        for mv in missing:
-            if mi > 0:
-                msg = msg + ", "
-            msg = msg + mv
-            mi = mi + 1
-        eval_warnings.push(msg)
+        eval_warnings.push(non_exhaustive_match_message(type_name, missing))
+
+fn non_exhaustive_match_message(type_name: text, missing: [text]) -> text:
+    var msg = "warning: non-exhaustive match on '" + type_name + "' — missing: "
+    var mi: i64 = 0
+    for mv in missing:
+        if mi > 0:
+            msg = msg + ", "
+        msg = msg + mv
+        mi = mi + 1
+    interpreter_policy_tag(msg, "non_exhaustive_match")
+
+fn ignored_return_message(type_name: text, fn_name: text) -> text:
+    val msg = "warning: return value of type '" + type_name + "' from function '" + fn_name + "' is ignored"
+    interpreter_policy_tag(msg, "ignored_return")
 
 # ===== Match Fall-Through Diagnostic (BUG-2026-08-01-match-fallthrough) =====
 #
@@ -1405,6 +1413,7 @@ fn match_fallthrough_message(
             ci = ci + 1
     else:
         msg = msg + "; no arm covered any variant"
+    msg = interpreter_policy_tag(msg, "match_fallthrough")
 
     # The collision hint. When the variant NAME appears in the covered list the
     # arms are textually exhaustive, so the mismatch is one of identity, not
@@ -1495,7 +1504,7 @@ fn match_wildcard_catch_message(
     if where_path != "":
         msg = msg + " at " + where_path
     msg = msg + " -- new variants added to '" + enum_label + "' will not be individually diagnosed here"
-    msg
+    interpreter_policy_tag(msg, "match_wildcard_catch")
 
 fn report_match_wildcard_catch(type_name: text, variant: text, kind_name: text):
     """Emit the wildcard-catch diagnostic, gated by match_wildcard_catch_get_enabled()."""
