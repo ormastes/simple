@@ -79,3 +79,30 @@ immutable, collision-safe, and uses existing gates`. No admitted Stage-3
 artifact and planner receipt were present in this worktree, so the live Stage-4
 continuation was correctly not started.
 
+
+## Triage 2026-11-25 — contract test FAILs at HEAD; feature superseded, owner decision needed
+
+Verified on `release/1.0.0` (7998d6ba40d) and `origin/main`, Windows host
+(D:\wt-p2w6-ai):
+
+- `sh test/01_unit/scripts/bootstrap_resume_stage4_from_admitted_contract_test.shs`
+  FAILS at HEAD with `FAIL: effective jobs missing from continuation receipt`
+  (test line 16). The test also greps for `build_jobs_receipt_sha256=`,
+  `stage3_jobs_receipt_path`, `stage4_write_current_tree_identity`,
+  `stage4_verify_stage3_identity_fields`, and `resume_stage4_output` — none of
+  which exist in the current helper on either branch.
+- The 2026-08-17 "Closure audit" claim that this contract test passed is no
+  longer true: `scripts/bootstrap/resume-stage4-from-admitted.sh` drifted from
+  the test (helper last touched by 66d2f7b4c5e).
+- More importantly, the wrapper now REJECTS the feature this bug asked for:
+  `scripts/bootstrap/bootstrap-from-scratch.sh` (~line 4669) errors with
+  "direct Stage 4 resume bypasses the admitted Phase 2 build manager" whenever
+  `--resume-stage4-from-admitted` is passed; full runs take the
+  "admitted Phase 2 → managed Phase 3 and Phase 4" path instead. Same on main.
+
+Classification: SKIP (owner decision reserved, bootstrap lane). The helper and
+its contract test are remnants of a superseded direct-resume design; the owner
+must decide whether to retire both or restore the direct-resume contract.
+Live verification would additionally require an admitted Stage 3 lane and a
+full Linux bootstrap, unavailable on this host. Status header
+("Open — needs owner triage") remains accurate.
