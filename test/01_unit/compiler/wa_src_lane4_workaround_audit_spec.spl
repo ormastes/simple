@@ -1,0 +1,171 @@
+"""
+# WA Src Lane 4 Workaround Audit & Regression Spec
+
+Verifies workaround retirement, Stage-2 guard preservation, `@workaround`
+placement grammar, and `Scope.binding_versions_v1` transient promotion across
+the 8 bugs assigned to WA Src Lane 4 (`WA-S4`).
+"""
+# @req REQ-SSPEC-UNIT
+# @tag: unit, compiler, workaround, transient, regression
+# 1. native_text_scalar_validation_failure_2026_10_18 (stale tag retired on hir_codec_support.spl; pure [i64] validator preserved)
+# 2. native_erased_generic_optional_return_2026-11-15 (AttrI64StoreV1 kept in attribute_schema_v1.spl)
+# 3. s3_binding_versions_keys_freed_transient_scope_2026-11-19 (typed-local promotion hardened + pre-scope root cause documented)
+# 4. s3_parse_selected_result_freed_by_transient_scope_2026-11-02 (Stage-2-gated rebox preserved)
+# 5. stage3_array_copy_unique_static_leaf_2026-11-19 (Stage-2-gated copy loops preserved)
+# 6. stage3_selfbuild_raw_text_strict_extern_2026-11-18 (marker placement fixed; Stage-2-gated guards preserved)
+# 7. text_method_arg_copied_through_extern_abi_per_call_2026-10-25 (Stage-2-gated _driver_line_end preserved)
+# 8. stage2_sanity_reverse_reference_publish_refused_2026_10_22 (scalar/array mirrors + PR #11783/#11784 typed locals preserved)
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+struct AuditScope:
+    id: i64
+    binding_versions_v1: Dict<text, i64>
+
+fn read_source_text(path: text) -> text:
+    if val content = rt_file_read_text(path):
+        return content
+    ""
+
+fn validate_workaround_placement(path: text) -> [text]:
+    """Mirror `workaround_index.spl` adjacency check: every `# @workaround` line
+    must immediately precede non-empty, non-comment code (skipping stacked markers)."""
+    val content = read_source_text(path)
+    var failures: [text] = []
+    if content == "":
+        failures.push("{path}: unreadable or empty")
+        return failures
+    val lines = content.split("\n")
+    var idx = 0
+    while idx < lines.len():
+        val trimmed = (lines.get(idx) ?? "").trim()
+        if trimmed.starts_with("# @workaround "):
+            var next = idx + 1
+            while next < lines.len() and (lines.get(next) ?? "").trim().starts_with("# @workaround "):
+                next = next + 1
+            if next >= lines.len():
+                failures.push("{path}:{idx + 1} missing affected line")
+            else:
+                val affected = (lines.get(next) ?? "").trim()
+                if affected == "" or affected.starts_with("#") or affected.starts_with("//") or affected.starts_with("/*"):
+                    failures.push("{path}:{idx + 1} precedes comment/blank line: {affected}")
+        idx = idx + 1
+    failures
+
+fn promote_scope_binding_versions_typed(scopes: Dict<i64, AuditScope>) -> bool:
+    var all_ok = true
+    for scope_id in scopes.keys():
+        val scope: AuditScope = scopes[scope_id]
+        val binding_versions: Dict<text, i64> = scope.binding_versions_v1
+        if not rt_transient_heap_promote(binding_versions):
+            all_ok = false
+    all_ok
+
+fn churn_transient_strings():
+    var junk: [text] = []
+    var i = 0
+    while i < 128:
+        junk.push("churn_" + "item_" + "slot")
+        i = i + 1
+
+describe "WA Src Lane 4 workaround audit and regression coverage":
+    """Verifies workaround dispositions, marker grammar, and typed-local promotion."""
+    it "retires stale @workaround on hc_char_bytes_valid while preserving pure [i64] validator and repro fixture":
+        val codec = read_source_text("src/compiler/20.hir/hir_codec_support.spl")
+        expect_not(codec.contains("# @workaround bug=native_text_scalar_validation_failure_2026_10_18"))
+        expect(codec.contains("fn hc_char_bytes_valid(bytes: [i64]) -> bool:"))
+        expect(codec.contains("val decoded = utf8_decode_one(bytes, 0)"))
+        expect(codec.contains("val encoded = utf8_encode_one(decoded[0])"))
+        val probe = read_source_text("test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl")
+        expect(probe.contains("# @workaround bug=native_text_scalar_validation_failure_2026_10_18"))
+
+    it "keeps all Stage-2-gated and open workarounds in owned compiler files":
+        val schema = read_source_text("src/compiler/00.common/data/attribute_schema_v1.spl")
+        expect(schema.contains("# @workaround bug=native_erased_generic_optional_return_2026-11-15"))
+        expect(schema.contains("class AttrI64StoreV1:"))
+
+        val types = read_source_text("src/compiler/20.hir/hir_lowering/types.spl")
+        expect(types.contains("# @workaround bug=s3_binding_versions_keys_freed_transient_scope_2026-11-19"))
+        expect(types.contains("val scope: Scope = table.scopes[scope_id]"))
+        expect(types.contains("val binding_versions: Dict<text, i64> = scope.binding_versions_v1"))
+        expect(types.contains("rt_transient_heap_promote(binding_versions)"))
+
+        val parse_sel = read_source_text("src/compiler/80.driver/driver_source_parse_selected.spl")
+        expect(parse_sel.contains("# @workaround bug=s3_parse_selected_result_freed_by_transient_scope_2026-11-02"))
+        expect(parse_sel.contains("# @workaround bug=stage3_array_copy_unique_static_leaf_2026-11-19"))
+        expect(parse_sel.contains("for friend_module in module.friends:"))
+        expect(parse_sel.contains("for internal_export in module.internal_exports:"))
+
+        val mod_surf = read_source_text("src/compiler/20.hir/hir_lowering/module_surface_selected_exports_v1.spl")
+        expect(mod_surf.contains("# @workaround bug=stage3_selfbuild_raw_text_strict_extern_2026-11-18"))
+        expect(mod_surf.contains("while lookup_key < index.lookup_keys.len():"))
+
+        val entry_core = read_source_text("src/compiler/80.driver/driver_entry_closure_core.spl")
+        expect(entry_core.contains("# @workaround bug=text_method_arg_copied_through_extern_abi_per_call_2026-10-25"))
+        expect(entry_core.contains("# @workaround bug=stage3_selfbuild_raw_text_strict_extern_2026-11-18"))
+        expect(entry_core.contains("_driver_resolve_entry_import_scratch_v1(module_path, entry_dir) + \"\""))
+
+        val rr = read_source_text("src/compiler/00.common/cache/reverse_reference_facts.spl")
+        expect(rr.contains("# @workaround bug=stage2_sanity_reverse_reference_publish_refused_2026_10_22"))
+        expect(rr.contains("val facts_v: [ReverseReferenceOwnerFactV1] = batch.facts"))
+        expect(rr.contains("val known_v: [text] = batch.known_families"))
+
+    it "places every kept @workaround marker immediately before executable or declarative code":
+        val owned_files = [
+            "src/compiler/20.hir/hir_codec_support.spl",
+            "src/compiler/00.common/data/attribute_schema_v1.spl",
+            "src/compiler/20.hir/hir_lowering/types.spl",
+            "src/compiler/80.driver/driver_source_parse_selected.spl",
+            "src/compiler/20.hir/hir_lowering/module_surface_selected_exports_v1.spl",
+            "src/compiler/80.driver/driver_entry_closure_core.spl",
+            "src/compiler/00.common/cache/reverse_reference_facts.spl"
+        ]
+        var all_failures: [text] = []
+        for path in owned_files:
+            val errs = validate_workaround_placement(path)
+            for err in errs:
+                all_failures.push(err)
+        expect(all_failures).to_equal([])
+
+    it "retains Scope.binding_versions_v1 keys across transient scope end when promoted via typed locals":
+        # Allocate root Scope(0) before entering transient scope to mirror SymbolTable.reset_module().
+        var scopes: Dict<i64, AuditScope> = {}
+        var root_versions: Dict<text, i64> = {}
+        scopes[0] = AuditScope(id: 0, binding_versions_v1: root_versions)
+
+        val began = rt_transient_array_scope_begin()
+        expect(began)
+        if not began:
+            return
+        var active = scopes[0]
+        var versions = active.binding_versions_v1
+        versions["alpha_" + "sym"] = 1
+        versions["beta_" + "sym"] = 2
+        active.binding_versions_v1 = versions
+        scopes[0] = active
+
+        val paused = rt_transient_array_scope_pause()
+        expect(paused)
+        val promoted_versions = if paused: promote_scope_binding_versions_typed(scopes) else: false
+        val promoted_scopes = if paused: rt_transient_heap_promote(scopes) else: false
+        val ended = rt_transient_array_scope_end()
+        churn_transient_strings()
+
+        expect(promoted_versions)
+        expect(promoted_scopes)
+        expect(ended)
+        val retained = scopes[0].binding_versions_v1
+        expect(retained.get("alpha_sym") ?? -1).to_equal(1)
+        expect(retained.get("beta_sym") ?? -1).to_equal(2)
+
+    it "documents the audit findings in the tracking docs":
+        val doc1 = read_source_text("doc/08_tracking/bug/native_text_scalar_validation_failure_2026_10_18.md")
+        expect(doc1.contains("WA Src Lane 4 Audit (2026-11-26)"))
+        val doc3 = read_source_text("doc/08_tracking/bug/s3_binding_versions_keys_freed_transient_scope_2026-11-19.md")
+        expect(doc3.contains("WA Src Lane 4 Audit & Hardening (2026-11-26)"))

@@ -63,3 +63,8 @@ Concur with the 2026-11-04 disposition: the extern-return-convention hypothesis
 `rt_text_count_codepoints_cached`) needs stage3 native isolation to prove; the
 seed interpreter does not exercise the native extern ABI, and this lane has no
 admitted self-hosted native compiler. No in-lane change.
+
+## WA Src Lane 4 Audit (2026-11-26)
+- `src/compiler/50.mir/text_extern_abi.spl` fixes `tagged_text_value_arg_indices` for `rt_text_validate_utf8` / `rt_text_count_codepoints_cached` (`test/01_unit/compiler/mir/text_scalar_validation_tagged_abi_spec.spl`).
+- `hc_char_bytes_valid(bytes: [i64]) -> bool` in `src/compiler/20.hir/hir_codec_support.spl` validates `[i64]` byte slices rather than `text` (`utf8_decode_one` / `utf8_encode_one` contract exercised by `hir_codec_char_spec.spl` and `char_wire_codec/main.spl`, and `simd.rs` in the seed interpreter unconditionally returns `true` for `rt_text_validate_utf8`). Therefore the stale `# @workaround bug=native_text_scalar_validation_failure_2026_10_18 ...` tag on `hc_char_bytes_valid` was retired while preserving the pure `[i64]` implementation and design comment.
+- `test/fixtures/repro/compiler/char_wire_scalar_cast/main.spl` keeps its `# @workaround` repro probe tag pending Stage 3 native isolation.
