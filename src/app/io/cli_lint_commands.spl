@@ -26,6 +26,7 @@ use lazy compiler.tools.fix.rules.{check_short_grammar_refactor}
 use lazy compiler.tools.fix.rules.impl_.lint_nil_unsafe.{check_nil_unsafe}
 use lazy compiler.tools.fix.rules.impl_.lint_unexported_primitive_pub.{check_unexported_primitive_pub, PrivPubScope, PrivPubScanMode, RepoFileCount}
 use lazy compiler.tools.fix.rules.impl_.lint_single_prim_unit.{check_single_prim_unit}
+use lazy compiler.tools.fix.rules.impl_.lint_warning_autofixes.{check_bare_variant_match, check_any_param_to_generic, check_mir_struct_collision}
 use std.tooling.easy_fix.{FixConfidence}
 use std.tooling.easy_fix.types.{EasyFix, easyfix_id, easyfix_description, easyfix_replacements, fixreport_applied, fixreport_details}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
@@ -907,6 +908,21 @@ pub fn run_fmt_command(all_args: [text]) -> i64:
 val NIL_UNSAFE_FIX_CODE = "NIL-UNSAFE-001"
 val PRIV_PUB_FIX_CODE = "PRIV-PUB-001"
 val UNIT_WRAP_FIX_CODE = "UNIT-WRAP-001"
+val BARE_VARIANT_FIX_CODE = "W-BARE-VARIANT-001"
+val ANY_COMPILE_FIX_CODE = "W-ANY-COMPILE-001"
+val MIR_STRUCT_COLLISION_FIX_CODE = "W-MIR-STRUCT-COLLISION"
+
+fn _fix_print_usage():
+    print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
+    print ""
+    print "Options:"
+    print "  --dry-run   Show what would be fixed without applying"
+    print "  --preview   Dry run plus a unified diff of the proposals"
+    print "  --fix-all   Apply all fixes regardless of confidence"
+    print "  --fix-id=ID Apply only fixes matching ID prefix"
+    print "  --diagnostic=CODE Only proposals with this diagnostic code (e.g. PANIC-W-INDEX)"
+    print "  --rule CODE Same as --diagnostic=CODE; opt-in rules: NIL-UNSAFE-001, PRIV-PUB-001, UNIT-WRAP-001, W-BARE-VARIANT-001, W-ANY-COMPILE-001, W-MIR-STRUCT-COLLISION (paths may be directories)"
+    print "  --safe-only Keep only Safe-confidence proposals (with --rule / --diagnostic)"
 
 fn _fix_is_repo_root(dir_path: text) -> bool:
     var root = dir_path.replace("\\", "/")
@@ -922,7 +938,7 @@ pub fn run_fix_command(args: [text]) -> i64:
         return 2
 
     if args.contains("--help") or args.contains("-h"):
-        print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
+        _fix_print_usage()
         return 0
 
     var dry_run = false
@@ -962,7 +978,10 @@ pub fn run_fix_command(args: [text]) -> i64:
     val nil_rule = diagnostic == NIL_UNSAFE_FIX_CODE
     val priv_pub_rule = diagnostic == PRIV_PUB_FIX_CODE
     val unit_wrap_rule = diagnostic == UNIT_WRAP_FIX_CODE
-    val opt_in_rule = nil_rule or priv_pub_rule or unit_wrap_rule
+    val bare_variant_rule = diagnostic == BARE_VARIANT_FIX_CODE
+    val any_compile_rule = diagnostic == ANY_COMPILE_FIX_CODE
+    val mir_collision_rule = diagnostic == MIR_STRUCT_COLLISION_FIX_CODE
+    val opt_in_rule = nil_rule or priv_pub_rule or unit_wrap_rule or bare_variant_rule or any_compile_rule or mir_collision_rule
 
     # Directory expansion is enabled only for the opt-in refactor/nil rules.
     var files: [text] = []
@@ -974,36 +993,28 @@ pub fn run_fix_command(args: [text]) -> i64:
             files.push(raw_path)
 
     if files.len() == 0:
-        print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
-        print ""
-        print "Options:"
-        print "  --dry-run   Show what would be fixed without applying"
-        print "  --preview   Dry run plus a unified diff of the proposals"
-        print "  --fix-all   Apply all fixes regardless of confidence"
-        print "  --fix-id=ID Apply only fixes matching ID prefix"
-        print "  --diagnostic=CODE Only proposals with this diagnostic code (e.g. PANIC-W-INDEX)"
-        print "  --rule CODE Same as --diagnostic=CODE; opt-in rules: NIL-UNSAFE-001, PRIV-PUB-001, UNIT-WRAP-001 (paths may be directories)"
-        print "  --safe-only Keep only Safe-confidence proposals (with --rule / --diagnostic)"
+        _fix_print_usage()
         return 1
 
-    # PRIV-PUB-001 needs cross-file usage scanning. Safe fixes are emitted only
-    # when the scanned directory provably covers the whole repo (git root).
-    var priv_pub_sources: Dict<text, text> = {}
+    # PRIV-PUB-001 and W-MIR-STRUCT-COLLISION need cross-file source scanning.
+    # For PRIV-PUB-001, Safe fixes are emitted only when the scanned directory
+    # provably covers the whole repo (git root).
+    var cross_file_sources: Dict<text, text> = {}
     var priv_pub_whole_repo = false
-    if priv_pub_rule:
-        if raw_paths.len() == 1 and is_dir(raw_paths[0]) and _fix_is_repo_root(raw_paths[0]):
+    if priv_pub_rule or mir_collision_rule:
+        if priv_pub_rule and raw_paths.len() == 1 and is_dir(raw_paths[0]) and _fix_is_repo_root(raw_paths[0]):
             priv_pub_whole_repo = true
         for p in files:
             match fix_read_source(p):
                 case Ok(content):
-                    priv_pub_sources[p] = content
+                    cross_file_sources[p] = content
                 case Err(_):
                     val _ = 0
     val priv_pub_mode = if priv_pub_whole_repo: PrivPubScanMode.WholeRepo else: PrivPubScanMode.Partial
     val priv_pub_scope = PrivPubScope(
         mode: priv_pub_mode,
-        repo_files_scanned: RepoFileCount(priv_pub_sources.len()),
-        other_sources: priv_pub_sources
+        repo_files_scanned: RepoFileCount(cross_file_sources.len()),
+        other_sources: cross_file_sources
     )
 
     var opt_fix_total = 0
@@ -1012,8 +1023,8 @@ pub fn run_fix_command(args: [text]) -> i64:
     var exit_code = 0
     for file_path in files:
         var source = ""
-        if priv_pub_rule and priv_pub_sources.has(file_path):
-            source = priv_pub_sources[file_path]
+        if (priv_pub_rule or mir_collision_rule) and cross_file_sources.has(file_path):
+            source = cross_file_sources[file_path]
         else:
             match fix_read_source(file_path):
                 case Err(e):
@@ -1023,14 +1034,21 @@ pub fn run_fix_command(args: [text]) -> i64:
                 case Ok(content):
                     source = content
 
-        # Opt-in rules (NIL-UNSAFE-001, PRIV-PUB-001, UNIT-WRAP-001) are NOT in
-        # the built-in producer registry; only `--rule <CODE>` runs them.
+        # Opt-in rules (NIL-UNSAFE-001, PRIV-PUB-001, UNIT-WRAP-001,
+        # W-BARE-VARIANT-001, W-ANY-COMPILE-001, W-MIR-STRUCT-COLLISION) are
+        # NOT in the built-in producer registry; only `--rule <CODE>` runs them.
         val fixes = if nil_rule:
             check_nil_unsafe(source, file_path)
         elif priv_pub_rule:
             check_unexported_primitive_pub(source, file_path, priv_pub_scope)
         elif unit_wrap_rule:
             check_single_prim_unit(source, file_path)
+        elif bare_variant_rule:
+            check_bare_variant_match(source, file_path)
+        elif any_compile_rule:
+            check_any_param_to_generic(source, file_path)
+        elif mir_collision_rule:
+            check_mir_struct_collision(source, file_path, cross_file_sources)
         elif fix_id.starts_with("L:short_grammar_"):
             check_short_grammar_refactor(source, file_path)
         else:
@@ -1103,4 +1121,10 @@ pub fn run_fix_command(args: [text]) -> i64:
         print "PRIV-PUB-001 ({scope_label}): {opt_fix_total} safe fix(es), {opt_suggestion_total} suggestion(s) in {opt_file_total} file(s), {files.len()} file(s) scanned"
     elif unit_wrap_rule:
         print "UNIT-WRAP-001: {opt_suggestion_total} suggestion(s) in {opt_file_total} file(s), {files.len()} file(s) scanned"
+    elif bare_variant_rule:
+        print "W-BARE-VARIANT-001: {opt_fix_total} safe fix(es) in {opt_file_total} file(s), {files.len()} file(s) scanned"
+    elif any_compile_rule:
+        print "W-ANY-COMPILE-001: {opt_fix_total} likely fix(es), {opt_suggestion_total} suggestion(s) in {opt_file_total} file(s), {files.len()} file(s) scanned"
+    elif mir_collision_rule:
+        print "W-MIR-STRUCT-COLLISION: {opt_suggestion_total} suggestion(s) in {opt_file_total} file(s), {files.len()} file(s) scanned"
     exit_code
