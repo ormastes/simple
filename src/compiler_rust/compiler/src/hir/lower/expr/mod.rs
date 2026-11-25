@@ -2858,6 +2858,7 @@ impl Lowerer {
                 "to_u16" => Some(TypeId::U16),
                 "to_u32" => Some(TypeId::U32),
                 "to_u64" => Some(TypeId::U64),
+                "to_f32" => Some(TypeId::F32),
                 "to_float" | "to_f64" => Some(TypeId::F64),
                 "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),

@@ -114,3 +114,23 @@ fn main() -> i64:
 "#;
     assert_eq!(run(src), 4143);
 }
+
+#[test]
+fn erased_any_numeric_float_conversions_dispatch_by_tag() {
+    let src = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val xs: [any] = [box_any(1.5), box_any(7), box_any(true), box_any("2.25"), box_any("bad")]
+    val a = (xs[0].to_f64() * 100.0).to_i64()
+    val b = (xs[1].to_float() * 10.0).to_i64()
+    val c = (xs[2].to_f32() * 10.0).to_i64()
+    val d = (xs[3].to_f64() * 100.0).to_i64()
+    val e = (xs[4].to_f64() * 100.0).to_i64()
+    val f = box_any(65).to_u8().to_i64()
+    a + b + c + d + e + f
+"#;
+    // 150 + 70 + 10 + 225 + 0 + 65 = 520
+    assert_eq!(run(src), 520);
+}

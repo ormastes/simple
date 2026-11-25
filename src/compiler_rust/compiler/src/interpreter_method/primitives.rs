@@ -259,18 +259,9 @@ pub fn handle_int_methods(
     Ok(Some(result))
 }
 
-/// Handle Float methods
-#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
-pub fn handle_float_methods(
-    f: f64,
-    method: &str,
-    args: &[Argument],
-    env: &mut Env,
-    functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, Arc<ClassDef>>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Option<Value>, CompileError> {
+/// Shared float method dispatch operating on pre-evaluated argument values,
+/// used by both direct (`handle_float_methods`) and chained (`method_dispatch`).
+pub(crate) fn handle_float_method_values(f: f64, method: &str, args: &[Value]) -> Result<Option<Value>, CompileError> {
     let result = match method {
         "abs" => Value::Float(f.abs()),
         "sign" | "signum" => Value::Float(f.signum()),
@@ -316,89 +307,45 @@ pub fn handle_float_methods(
         "cosh" => Value::Float(f.cosh()),
         "tanh" => Value::Float(f.tanh()),
         "clamp" => {
-            let min = eval_arg(
-                args,
-                0,
-                Value::Float(f64::MIN),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?
-            .as_float()
-            .unwrap_or(f64::MIN);
-            let max = eval_arg(
-                args,
-                1,
-                Value::Float(f64::MAX),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?
-            .as_float()
-            .unwrap_or(f64::MAX);
+            let min = args.first().and_then(|v| v.as_float().ok()).unwrap_or(f64::MIN);
+            let max = args.get(1).and_then(|v| v.as_float().ok()).unwrap_or(f64::MAX);
             Value::Float(f.clamp(min, max))
         }
         "min" => {
-            let other = eval_arg(args, 0, Value::Float(f), env, functions, classes, enums, impl_methods)?
-                .as_float()
-                .unwrap_or(f);
+            let other = args.first().and_then(|v| v.as_float().ok()).unwrap_or(f);
             Value::Float(f.min(other))
         }
         "max" => {
-            let other = eval_arg(args, 0, Value::Float(f), env, functions, classes, enums, impl_methods)?
-                .as_float()
-                .unwrap_or(f);
+            let other = args.first().and_then(|v| v.as_float().ok()).unwrap_or(f);
             Value::Float(f.max(other))
         }
         "pow" | "powf" => {
-            let exp = eval_arg(args, 0, Value::Float(1.0), env, functions, classes, enums, impl_methods)?
-                .as_float()
-                .unwrap_or(1.0);
+            let exp = args.first().and_then(|v| v.as_float().ok()).unwrap_or(1.0);
             Value::Float(f.powf(exp))
         }
         "powi" => {
-            let exp = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
-                .as_int()
-                .unwrap_or(1) as i32;
+            let exp = args.first().and_then(|v| v.as_int().ok()).unwrap_or(1) as i32;
             Value::Float(f.powi(exp))
         }
         "log" => {
-            let base = eval_arg(
-                args,
-                0,
-                Value::Float(std::f64::consts::E),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?
-            .as_float()
-            .unwrap_or(std::f64::consts::E);
+            let base = args
+                .first()
+                .and_then(|v| v.as_float().ok())
+                .unwrap_or(std::f64::consts::E);
             Value::Float(f.log(base))
         }
         "atan2" => {
-            let other = eval_arg(args, 0, Value::Float(1.0), env, functions, classes, enums, impl_methods)?
-                .as_float()
-                .unwrap_or(1.0);
+            let other = args.first().and_then(|v| v.as_float().ok()).unwrap_or(1.0);
             Value::Float(f.atan2(other))
         }
         "hypot" => {
-            let other = eval_arg(args, 0, Value::Float(0.0), env, functions, classes, enums, impl_methods)?
-                .as_float()
-                .unwrap_or(0.0);
+            let other = args.first().and_then(|v| v.as_float().ok()).unwrap_or(0.0);
             Value::Float(f.hypot(other))
         }
         "to_degrees" => Value::Float(f.to_degrees()),
         "to_radians" => Value::Float(f.to_radians()),
         "round_to" => {
-            let places = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?
-                .as_int()
-                .unwrap_or(0) as i32;
+            let places = args.first().and_then(|v| v.as_int().ok()).unwrap_or(0) as i32;
             let multiplier = 10f64.powi(places);
             Value::Float((f * multiplier).round() / multiplier)
         }
@@ -459,9 +406,7 @@ pub fn handle_float_methods(
         }
         "fdiv" => {
             // Floor division for floats - rounds towards negative infinity
-            let divisor = eval_arg(args, 0, Value::Float(1.0), env, functions, classes, enums, impl_methods)?
-                .as_float()
-                .unwrap_or(1.0);
+            let divisor = args.first().and_then(|v| v.as_float().ok()).unwrap_or(1.0);
 
             if divisor == 0.0 {
                 return Err(CompileError::Runtime("division by zero in fdiv".to_string()));
@@ -472,6 +417,30 @@ pub fn handle_float_methods(
         _ => return Ok(None),
     };
     Ok(Some(result))
+}
+
+/// Handle Float methods
+#[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
+pub fn handle_float_methods(
+    f: f64,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let arity = match method {
+        "clamp" => 2,
+        "min" | "max" | "pow" | "powf" | "powi" | "log" | "atan2" | "hypot" | "round_to" | "fdiv" => 1,
+        _ => 0,
+    };
+    let mut evaluated = Vec::with_capacity(arity);
+    for arg in args.iter().take(arity) {
+        evaluated.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+    }
+    handle_float_method_values(f, method, &evaluated)
 }
 
 /// Handle Bool methods

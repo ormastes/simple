@@ -472,10 +472,15 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_string_parse_int",
                             "rt_string_to_float",
                             // methods.rs parses a STRING receiver rather than
-                            // bit-converting its pointer; both helpers must be
+                            // bit-converting its pointer and runtime-dispatches
+                            // erased numeric conversions; all helpers must be
                             // pre-declared or the emit fails to resolve them.
                             "rt_string_to_int",
+                            "rt_any_to_int",
                             "rt_value_as_float",
+                            "rt_value_is_bool",
+                            "rt_value_is_float",
+                            "rt_value_is_int",
                             "rt_tuple_get",
                             "rt_tuple_len",
                             "rt_tuple_set",
@@ -660,12 +665,17 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // user-facing `.len()` (code points, ADR-005 item 5).
             | "rt_string_char_count"
             | "rt_string_bytes"
-            // Erased `.to_i64()`/`.to_int()` receivers synthesize this call
-            // during Cranelift lowering, so it is absent from MIR call names.
+            // Erased numeric conversions synthesize these calls during
+            // Cranelift lowering, so they can be absent from MIR call names.
             // `rt_any_cast_int` is the MIR call for `any as <int>`.
             | "rt_to_int_dynamic"
             | "rt_any_to_int"
             | "rt_any_cast_int"
+            | "rt_string_to_float"
+            | "rt_string_to_int"
+            | "rt_value_is_bool"
+            | "rt_value_is_float"
+            | "rt_value_is_int"
             | "rt_string_builder_new"
             | "rt_string_builder_push"
             | "rt_string_builder_finish"

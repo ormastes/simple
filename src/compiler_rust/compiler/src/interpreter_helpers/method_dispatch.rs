@@ -542,31 +542,7 @@ pub(crate) fn call_method_on_value(
                 return Ok(Value::array(sorted));
             }
             "sum" => {
-                let mut total = 0i64;
-                let mut is_float = false;
-                let mut ftotal = 0.0f64;
-                for item in arr.iter() {
-                    match item {
-                        Value::Int(n) => {
-                            total += *n;
-                            ftotal += *n as f64;
-                        }
-                        Value::UInt { value, .. } => {
-                            total += *value as i64;
-                            ftotal += *value as f64;
-                        }
-                        Value::Float(f) => {
-                            is_float = true;
-                            ftotal += *f;
-                        }
-                        _ => {}
-                    }
-                }
-                return Ok(if is_float {
-                    Value::Float(ftotal)
-                } else {
-                    Value::Int(total)
-                });
+                return Ok(crate::interpreter::interpreter_method::collections::sum_array_values(arr));
             }
             "any" => {
                 match _args.first() {
@@ -744,24 +720,16 @@ pub(crate) fn call_method_on_value(
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
             }
-            // The rest of the zero-arg float methods (sqrt, trunc, sin, ...):
-            // same table as a direct receiver, so `x.ceil().sqrt()` no longer
-            // fails "not found ... in nested call context".
-            _ if _args.is_empty() => {
-                if let Some(v) = crate::interpreter::interpreter_method::primitives::handle_float_methods(
-                    *f,
-                    method,
-                    &[],
-                    _env,
-                    _functions,
-                    _classes,
-                    _enums,
-                    _impl_methods,
-                )? {
+            // Zero-arg and 1-2 arg float methods (`sqrt`, `pow`, `min`, `max`,
+            // `atan2`, `clamp`, ...): delegate via `handle_float_method_values`
+            // so chained calls match direct calls cleanly.
+            _ => {
+                if let Some(v) =
+                    crate::interpreter::interpreter_method::primitives::handle_float_method_values(*f, method, _args)?
+                {
                     return Ok(v);
                 }
             }
-            _ => {}
         },
 
         // Float32 methods (mirror W5-I UInt arm — preserve f32 precision through
@@ -785,16 +753,9 @@ pub(crate) fn call_method_on_value(
                 });
             }
             // Same delegation as the f64 arm, re-narrowed like the direct path.
-            _ if _args.is_empty() => {
-                if let Some(v) = crate::interpreter::interpreter_method::primitives::handle_float_methods(
-                    *f as f64,
-                    method,
-                    &[],
-                    _env,
-                    _functions,
-                    _classes,
-                    _enums,
-                    _impl_methods,
+            _ => {
+                if let Some(v) = crate::interpreter::interpreter_method::primitives::handle_float_method_values(
+                    *f as f64, method, _args,
                 )? {
                     return Ok(match v {
                         Value::Float(x) => Value::Float32(x as f32),
@@ -802,7 +763,6 @@ pub(crate) fn call_method_on_value(
                     });
                 }
             }
-            _ => {}
         },
 
         // Custom class methods - enable method chaining on user-defined classes
@@ -1602,5 +1562,132 @@ mod is_condition_present_tests {
         let cond = Expr::Integer(0);
         assert!(!is_condition_present(&cond, &Value::Int(0)));
         assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
+}
+
+#[cfg(test)]
+mod chained_sum_and_float_tests {
+    use super::*;
+
+    #[test]
+    fn chained_array_sum_matches_direct_sum_for_wrapping_and_float32() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let wrapped = call_method_on_value(
+            Value::array(vec![Value::Int(i64::MAX), Value::Int(1)]),
+            "sum",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained int wrapping sum");
+        assert_eq!(wrapped, Value::Int(i64::MIN));
+
+        let mixed = call_method_on_value(
+            Value::array(vec![Value::Int(2), Value::Float32(1.5)]),
+            "sum",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained mixed float32 sum");
+        assert_eq!(mixed, Value::Float(3.5));
+    }
+
+    #[test]
+    fn chained_float_and_float32_methods_accept_one_and_two_args() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let p = call_method_on_value(
+            Value::Float(2.0),
+            "pow",
+            &[Value::Float(3.0)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float.pow");
+        assert_eq!(p, Value::Float(8.0));
+
+        let c = call_method_on_value(
+            Value::Float(5.0),
+            "clamp",
+            &[Value::Float(0.0), Value::Float(2.5)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float.clamp");
+        assert_eq!(c, Value::Float(2.5));
+
+        let f32_min = call_method_on_value(
+            Value::Float32(4.0),
+            "min",
+            &[Value::Float32(1.5)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float32.min");
+        assert_eq!(f32_min, Value::Float32(1.5));
+
+        let f32_clamp = call_method_on_value(
+            Value::Float32(10.0),
+            "clamp",
+            &[Value::Float32(1.0), Value::Float32(3.5)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float32.clamp");
+        assert_eq!(f32_clamp, Value::Float32(3.5));
+
+        let f32_pow = call_method_on_value(
+            Value::Float32(3.0),
+            "pow",
+            &[Value::Float32(2.0)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float32.pow");
+        assert_eq!(f32_pow, Value::Float32(9.0));
+
+        let f64_atan2 = call_method_on_value(
+            Value::Float(0.0),
+            "atan2",
+            &[Value::Float(1.0)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float.atan2");
+        assert_eq!(f64_atan2, Value::Float(0.0));
     }
 }
