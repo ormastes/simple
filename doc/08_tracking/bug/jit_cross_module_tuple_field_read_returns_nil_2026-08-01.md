@@ -1,5 +1,5 @@
 # JIT: cross-module tuple `.0` read returns nil
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-11-25 — verified fixed on the release/1.0.0 pinned seed (see bottom section)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -141,4 +141,24 @@ blanket-claim error (which was about the *interpreter*, not the JIT). Status
 unchanged: **OPEN — ARCHITECTURAL (Cranelift JIT codegen,
 `src/compiler_rust/compiler/src/codegen/**`, re-confirmed by fresh repro
 2026-08-10, unchanged output `field0=nil`)**.
+
+## Verified FIXED 2026-11-25 (release/1.0.0 pinned seed)
+
+The doc's exact 2-file minimal repro (`tupmod_a.spl` returning
+`("string", "hi")`, `tupmod_main.spl` printing `v.0`) now prints the correct
+value on BOTH engines under the release/1.0.0 pinned binary
+(`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1, Windows):
+
+```
+bin/simple.exe run tupmod_main.spl                              -> field0=string   (JIT, was nil)
+SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run ...        -> field0=string   (interpreter)
+```
+
+The cross-module positional tuple read through the JIT no longer returns nil;
+the six-week-old repro is fixed in the seed release/1.0.0 ships. The real
+`std.common.yaml.types` variant from the 2026-09-13 re-verification was not
+re-run (its interpreter arm is blocked by the known release/1.0.0
+`@representation_boundary` source/binary inconsistency), but the defect's
+minimal shape — the thing this doc isolates — is verified fixed on both
+engines. **Status: RESOLVED (2026-11-25).**
 
