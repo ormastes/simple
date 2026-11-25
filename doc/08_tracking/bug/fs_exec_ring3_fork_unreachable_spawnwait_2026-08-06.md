@@ -192,3 +192,23 @@ so no false green is possible.
 4. Then wire the clang driver to syscall 120 and run the plan's stated B3
    acceptance (`clang hello.c -o hello` in driver mode). That needs C1
    (`build/os/clang_static` is absent today), so it is a separate lane.
+
+---
+
+## Triage note 2026-11-25 (release/1.0.0 ledger pass)
+
+Update to "Next steps" item 1: **D6 is FIXED.** The dedicated ledger entry
+`simpleos_vmm_kernel_pml4_phys_reads_zero_after_init_2026-08-06.md` records the
+fix verified by a positive in-guest marker and re-confirmed 2026-08-08 from
+four independent post-fix serial logs (`[VMM] portable VMM published kernel
+PML4 ...` followed by `[spawn] user AS ready ...`). However, that same entry
+records that the narrower Lane-B3 `SpawnWait` harness remains blocked for a
+different reason: its entry `.spl` was never committed to HEAD (a build-system
+gap, not a VMM recurrence).
+
+Classification for this pass: SKIP. The remaining proof (in-guest SpawnWait
+round trip under OVMF/QEMU, then wiring the clang driver to syscall 120) is
+QEMU/baremetal-lane work not verifiable on this Windows host, and full fork
+remains the scheduler-integration program described in §2. The OPEN (P2)
+status stays accurate: the SpawnWait primitive is landed but still unproven
+in-guest, and this file must not be claimed green.
