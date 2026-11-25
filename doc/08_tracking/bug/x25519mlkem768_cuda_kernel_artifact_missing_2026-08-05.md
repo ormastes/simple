@@ -197,3 +197,26 @@ present on this host).
   running the script above — gitignored build output, not source)
 - No changes to `src/lib/gc_async_mut/crypto_accel/*`, the Metal/Vulkan
   providers, or any compiler source.
+
+## Triage 2026-11-25 — kernel source now committed on release/1.0.0; remaining blockers unchanged
+
+Verified on `release/1.0.0` (7998d6ba40d), Windows host, by inspection:
+
+- `src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.ptx` is now
+  COMMITTED to git (the original doc recorded it as untracked), and its
+  sha256 is exactly the provider pin
+  `e3201ae10f48e284d703cff81d42a02d9ba7f96e4bcc9b03872094b25a5a26aa`.
+- `scripts/check/check-x25519mlkem768-cuda-ntt.shs` is present and executable.
+- The second blocker is unchanged: `rt_array_data_ptr_u8` still has no
+  interpreter adapter under `src/compiler_rust/compiler/src/interpreter_extern/`
+  (grep finds only a codegen-side reference in
+  `codegen/runtime_sffi.rs:3232`), so the seed-interpreter path for
+  `test/02_integration/os/crypto/x25519mlkem768_cuda_binary_execution_spec.spl`
+  would still fail with `unknown extern function` even before the
+  repo-wide `@representation_boundary` seed inconsistency.
+
+Classification: SKIP. Re-running the CUDA evidence requires the two pinned
+NVIDIA devices + CUDA 13 toolchain (Linux host), and the interpreter adapter
+fix is Rust-seed source, which this lane must not modify or rebuild. The
+"kernel artifact gap: CLOSED" conclusion stands and is strengthened by the
+kernel now being git-tracked on the release branch.
