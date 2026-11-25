@@ -12776,8 +12776,8 @@ int64_t rt_map(int64_t receiver, int64_t closure_value) {
     return rt_option_map(receiver, closure_value);
 }
 
-static int64_t rt_bdd_passed = 0;
-static int64_t rt_bdd_failed = 0;
+static _Atomic int64_t rt_bdd_passed = 0;
+static _Atomic int64_t rt_bdd_failed = 0;
 static int rt_bdd_current_failed = 0;
 static int64_t rt_bdd_skipped = 0;
 
@@ -12793,9 +12793,11 @@ void rt_bdd_describe_start_rv(int64_t name_rv) {
 }
 
 void rt_bdd_describe_end(void) {
+    int64_t passed = atomic_load_explicit(&rt_bdd_passed, memory_order_seq_cst);
+    int64_t failed = atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
     printf("%lld examples, %lld failures\n",
-           (long long)(rt_bdd_passed + rt_bdd_failed),
-           (long long)rt_bdd_failed);
+           (long long)(passed + failed),
+           (long long)failed);
 }
 
 void rt_bdd_it_start_rv(int64_t name_rv) {
@@ -12804,12 +12806,29 @@ void rt_bdd_it_start_rv(int64_t name_rv) {
     rt_bdd_print_text(name_rv);
 }
 
+void rt_bdd_record_result(int64_t passed) {
+    if (passed != 0) {
+        atomic_fetch_add_explicit(&rt_bdd_passed, 1, memory_order_seq_cst);
+    } else {
+        atomic_fetch_add_explicit(&rt_bdd_failed, 1, memory_order_seq_cst);
+    }
+}
+
+int64_t rt_bdd_executed_total(void) {
+    return atomic_load_explicit(&rt_bdd_passed, memory_order_seq_cst) +
+           atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
+}
+
+int64_t rt_bdd_failed_total(void) {
+    return atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
+}
+
 void rt_bdd_it_end(int64_t passed) {
     if (passed != 0 && !rt_bdd_current_failed) {
-        rt_bdd_passed += 1;
+        rt_bdd_record_result(1);
         fputs(" pass\n", stdout);
     } else {
-        rt_bdd_failed += 1;
+        rt_bdd_record_result(0);
         fputs(" fail\n", stdout);
     }
 }
@@ -12867,12 +12886,12 @@ void rt_bdd_expect_truthy(int64_t value) {
 
 int64_t rt_bdd_format_results(void) {
     rt_bdd_describe_end();
-    return rt_bdd_failed;
+    return atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
 }
 
 void rt_bdd_clear_state(void) {
-    rt_bdd_passed = 0;
-    rt_bdd_failed = 0;
+    atomic_store_explicit(&rt_bdd_passed, 0, memory_order_seq_cst);
+    atomic_store_explicit(&rt_bdd_failed, 0, memory_order_seq_cst);
     rt_bdd_current_failed = 0;
     rt_bdd_skipped = 0;
 }
