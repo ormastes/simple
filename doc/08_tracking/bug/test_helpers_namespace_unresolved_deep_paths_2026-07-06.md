@@ -1,6 +1,6 @@
 ---
 id: test_helpers_namespace_unresolved_deep_paths_2026-07-06
-status: OPEN
+status: RESOLVED
 severity: medium
 discovered: 2026-07-06
 discovered_by: backend-only direct spec authoring (test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_only_direct_spec.spl)
@@ -59,3 +59,31 @@ is anchored at `src/lib/`) rather than by bounded parent-walk.
 `assert_color_eq` / `read_pixels_ppm` mirrors of the shared helper, with a
 comment pointing back here. Remove the local mirrors and restore the
 `test.helpers` import once this resolves.
+
+## 2026-11-25 verification (release/1.0.0, worktree p2w6-ab) — RESOLVED
+
+STALE — the root cause was fixed by commit `22ae61c672e` "fix(resolve):
+test.* imports from specs under lib family dirs" (2026-11-05, ancestor of
+release/1.0.0 HEAD `64dfa6d980f`). The ancestor climb in
+`src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs:814-829`
+no longer stops at a nested directory that merely contains a `src/` folder;
+it climbs to the workspace boundary, so `test.*` imports from specs at any
+depth reach `<repo>/test`. Regression spec:
+`test/01_unit/lib/nogc_sync_mut/resolve/test_import_under_src_dir_spec.spl`.
+
+Executable evidence on this host (deployed `bin/simple.exe`, Rust seed
+v1.0.0-rc.1): a one-line probe placed at the exact failing depth from the
+original bisect (`test/01_unit/lib/gc_async_mut/gpu/engine2d/`, depth 5)
+with `use test.helpers.gpu_draw_event_shared.{read_pixels_ppm}` and a real
+call ran to completion — `PROBE_OK len=14`, exit 0. The probe file was
+removed after the run.
+
+Follow-up left open deliberately: the workaround mirrors in
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_only_direct_spec.spl`
+(local `assert_color_eq` / `read_pixels_ppm`, lines ~60-64) can now be
+replaced by the `test.helpers` import per the workaround note above, but
+that edit cannot be verified on this host because `bin/simple.exe test`
+fails repo-wide at this HEAD (`unknown decorator '@representation_boundary'`
+in `src/app/test_runner_new/test_runner_client.spl:9:1`, pinned-seed/source
+mismatch). The doc is closed; the cleanup is a mechanical follow-up for a
+lane with a working spec runner.

@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — silent wrong output, no diagnostic
-- **Status:** open (one known instance fixed; no general guard)
+- **Status:** RESOLVED 2026-11-25 — general guard (lint CINTERP001) landed 2026-11-05; see verification note at end
 
 ## Symptom
 
@@ -74,3 +74,23 @@ strings and empty braces are not flagged. Registered as static lint rule
 — written first and RED (module absent), now 13/13 on the seed
 (`bin/simple.exe run`). The language behaviour (constant braces ARE evaluated)
 is unchanged by design; the lint is the agreed diagnostic.
+
+## 2026-11-25 verification (release/1.0.0, worktree p2w6-ab)
+
+STALE — the 2026-11-05 fix is real and present at release/1.0.0 HEAD
+(`64dfa6d980f`):
+
+- `src/compiler/35.semantics/lint/constant_interpolation.spl` exists and
+  exports `check_constant_interpolation` (line 104).
+- The rule is registered: `src/compiler/90.tools/lint/static_rules.spl:12,40`
+  wires `constant_interpolation_lint_rule()` into the static rule table.
+- Regression spec `test/01_unit/compiler/lint/constant_interpolation_spec.spl`
+  exists with 13 real assertions.
+
+Execution limit: `SIMPLE_LIB=src bin/simple.exe test <spec> --mode=interpreter`
+fails repo-wide at this HEAD before reaching any example — the pinned Rust
+seed (v1.0.0-rc.1) rejects `@representation_boundary`
+(`src/app/test_runner_new/test_runner_client.spl:9:1: unknown decorator`),
+so the 13/13 spec pass could not be re-run on this host. Verified by code
+inspection instead; the original 13/13 seed evidence from 2026-11-05 stands.
+Closing as RESOLVED.
