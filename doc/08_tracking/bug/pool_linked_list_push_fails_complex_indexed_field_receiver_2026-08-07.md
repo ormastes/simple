@@ -191,3 +191,15 @@ Results: 2 total, 2 passed, 0 failed          # rc=0
 Assignment through a complex indexed-field receiver (`pool[i].next = x`) no
 longer fails. Closing as already fixed; no source change was made by this lane.
 
+## Verification note 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+Fix confirmed present in the current tree by inspection:
+`src/lib/nogc_async_mut_noalloc/collections/linked_list.spl` uses the parallel
+primitive arrays (`values: [i64]`, `nexts: [i32]`, `prevs: [i32]`, mutations
+via plain index assignment at :82-91); `ListNode` is gone from both
+`__init__.spl` re-export chains, and the real regression spec
+`test/01_unit/lib/nogc_async_mut_noalloc/collections/linked_list_backing_storage_regression_spec.spl`
+exists. Spec re-run on this Windows host is blocked (pinned seed rejects
+`@representation_boundary` at HEAD); closing evidence stands on the
+sabotage-verified 2026-08-07 run and the 2026-08-17 re-run above.
+

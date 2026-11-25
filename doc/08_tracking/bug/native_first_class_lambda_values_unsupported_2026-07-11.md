@@ -44,3 +44,16 @@ non-member. Execution awaits a fresh runnable pure-Simple compiler artifact.
 
 ## Status 2026-11-04 (n88_a triage)
 Source fix landed 2026-07-15; row moved to fix-implemented-verification-pending. Repro for stage3: `sh scripts/check/check-native-capturing-lambda-values.shs`.
+
+## Verification note 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+Source fix confirmed present in tree: the lambda closure-conversion machinery
+is in `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+(capturing-lambda closure conversion, see the
+`native_capturing_lambda_closure_conversion_2026-08-22` reference at :7672),
+and `scripts/check/check-native-capturing-lambda-values.shs` exists.
+Strict execution remains BLOCKED on this Windows host: the lane needs a fresh
+runnable pure-Simple compiler artifact (native-build), and the pinned
+`bin/simple.exe` seed cannot even run repo specs at HEAD (rejects
+`@representation_boundary`, added by cfd89933699). Status unchanged:
+fix-implemented, strict execution pending a qualified self-hosted compiler.
