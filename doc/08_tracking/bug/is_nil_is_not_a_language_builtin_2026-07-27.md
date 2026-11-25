@@ -144,3 +144,30 @@ the specific name `is_nil` emit a diagnostic pointing at `== nil`. That fix
 belongs in `src/compiler/**` (several lanes live there) and is **out of scope for
 lane MATCHER**, whose owned paths are `interpreter_method/**` /
 `interpreter_helpers/**`. Left open under this bug ID.
+
+---
+
+## Verification 2026-11-25 (P2 ledger sweep, Windows worktree)
+
+The one production fallout named above is FIXED in source:
+`src/os/kernel/log/markers.spl` `validate()` no longer calls `spec.is_nil()`;
+it now reads `if not spec.?:` (commit `44bce8446db`, 2026-11-06). Executed
+probe on the pinned tracked binary (`SIMPLE_LIB=src bin/simple.exe run`,
+interpreter fallback after JIT demotion):
+
+```
+validate("no such marker at all") -> Err("unknown marker: no such marker at all")
+validate("[BOOT] entry")          -> Ok(())
+```
+
+i.e. the unknown-marker gate now executes instead of raising
+``method `is_nil` not found on type `enum` ``. Stated limit:
+`test/01_unit/os/kernel/logging/marker_wire_format_spec.spl` itself could not
+be run at this HEAD — the pinned seed rejects `@representation_boundary` in
+the test runner, so every `bin/simple.exe test` invocation fails before any
+example runs; the probe above is the execution evidence.
+
+STILL OPEN, unchanged: the per-engine failure-phase parity for unresolved
+methods and the `is_nil`-specific diagnostic pointing at `== nil`
+(`src/compiler/**` + Rust seed). That is a compiler-owner decision, not a
+bounded fix; no source change made by this sweep.

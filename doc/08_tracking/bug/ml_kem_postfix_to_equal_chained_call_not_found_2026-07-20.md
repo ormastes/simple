@@ -99,3 +99,28 @@ diagnostic. Also plausibly related to the documented language limitation
 - `test/unit/lib/crypto/ml_kem_768_kat_spec.spl` (ITEM-3, ITEM-4, ITEM-5,
   ITEM-7 — 4 of 8 failures directly; the 2 W12-A probe failures are
   intentional self-diagnostic, not bugs)
+
+## Triage 2026-11-25 (P2 ledger sweep, Windows worktree)
+
+The affected spec no longer exercises the failing form. It now lives at
+`test/01_unit/lib/crypto/ml_kem_768_kat_spec.spl` and was rewritten to the
+`expect(...).to_equal(...)` form by `9c5595b146d` ("fix(test): repair
+mechanical unit-spec failures (crypto, engine)") — e.g. ITEM-3 is now
+`expect(enc.len()).to_equal(384)`. The W12-A postfix probe blocks are gone
+from the current spec. So the four reported failures no longer exist in the
+suite in that shape.
+
+Note, per this record's own "What NOT to do" section: that rewrite is exactly
+the masking shape the section warned about (it changes what is tested). It
+was done by another lane, not this sweep. Consequence: whether postfix
+`.to_equal()` on a CHAINED receiver (`x.f().to_equal(y)`) resolves is now
+untested anywhere in the tree, and the underlying dispatch defect is neither
+fixed nor disproven — only unexercised.
+
+The defect is also unverifiable at this HEAD: `bin/simple.exe test` fails
+repo-wide because the pinned tracked seed rejects `@representation_boundary`
+(added by `cfd89933699`) inside the test runner itself, so no spec — postfix
+probe included — can run. Status stays OPEN for the postfix-chained dispatch
+defect itself; the concrete next step is a minimal postfix-form probe spec
+run once the tracked seed accepts the decorator or a self-hosted binary is
+deployed. No source change made by this sweep.
