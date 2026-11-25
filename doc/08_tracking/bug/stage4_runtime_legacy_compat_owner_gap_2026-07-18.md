@@ -62,3 +62,22 @@ surface is Linux x86_64/AArch64/RISC-V64, macOS x86_64/AArch64, FreeBSD
 x86_64/AArch64, and Windows x86_64; x86, ARM32, and RISC-V32 are not claimed
 for Stage4.
 
+
+## 2026-11-25 verification (p3-bap lane, Windows worktree)
+
+Code inspection at `origin/release/1.0.0` (47d6c5eddd5) supports the Closed
+header: the provider spec exists at
+`test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl`;
+`runtime_legacy_compat` is wired through the hosted link path
+(`src/compiler/70.backend/backend/llvm_native_link_stage4_archives.spl`,
+`llvm_native_link_stage4_projection.spl`, `llvm_native_link_orchestrator.spl`,
+`llvm_native_link_hosted_support.spl`); `rt_dir_remove_all` has real
+implementations in `src/runtime/runtime_legacy_core.c:855` and
+`src/runtime/runtime.c:2607`.
+
+Execution limit (unchanged, stated plainly): the spec's "execution pending"
+half could NOT be closed on this host — the tracked `bin/simple.exe` is the
+Rust seed (v1.0.0-rc.1, build-commit 1343b77bbaa) and its `test` lane fails
+compiling current `src/lib` with `unknown decorator
+'@representation_boundary'`. Verification here is by source inspection only;
+native execution evidence remains pending as the body states.
