@@ -1,4 +1,36 @@
 # Interp TestDatabase class-name collision kills every aggregate `simple test` run
+
+## Triage 2026-11-25 (release/1.0.0, Windows host) — root cause seed-side; .spl mitigation incomplete in app tree
+
+- **root cause remains Rust-seed-only** (global struct/class registry not
+  module-scoped) and is out of .spl scope; the pinned seed must not be patched.
+- **.spl mitigation state by inspection**: the lib tree rename landed —
+  `src/lib/nogc_sync_mut/test_runner/test_db_compat.spl:42` defines
+  `class RunnerTestDb` and exports it (line 458), and
+  `test_db_core.spl:34` defines `struct RunnerTestDbCore`.
+  BUT the app tree was never renamed (or was resurrected by the 2026-09 tree
+  transplant 88aac2ffe28): `src/app/test_runner_new/test_db_compat.spl:30`
+  still defines `class TestDatabase` and `src/app/test_runner_new/test_db_core.spl:19`
+  still defines `struct TestDatabase` — the same class+struct same-name pair
+  this entry's "Second collision" section claims was fixed with "0 leftovers".
+  Users `test_db_migrate.spl:6` / `test_db_perf.spl:5` import
+  `app.test_runner_new.test_db_core.{TestDatabase, ...}`, and
+  `test_runner_helpers.spl:12` / `doc_generator.spl:15` import
+  `std.test_runner.test_db_compat.{TestDatabase, ...}` (the flattened `std.`
+  alias family in `src/compiler/00.common/source_root_resolution.spl` maps
+  `std.test_runner` to the lib tree, which no longer exports `TestDatabase` —
+  a dangling import the seed appears to tolerate).
+- **verification limit**: the aggregate repro
+  (`bin/simple.exe test test/01_unit/os/smf`) cannot run at release/1.0.0 HEAD —
+  the pinned seed rejects `@representation_boundary` repo-wide
+  (`src/app/test_runner_new/test_runner_client.spl:9`), so whether the
+  post-run phase still dies could not be executed. Classified SKIP for this
+  pass: the root cause is seed-only, and a blind app-tree rename across 7+
+  files cannot be executably verified in this environment.
+- **follow-up**: rename the app-tree `TestDatabase` class/struct cluster to
+  match the lib tree (`RunnerTestDb` / `RunnerTestDbCore`) once a binary that
+  accepts `@representation_boundary` is available to verify the aggregate run.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

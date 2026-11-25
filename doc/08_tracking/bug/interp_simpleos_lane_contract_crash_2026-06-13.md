@@ -1,5 +1,25 @@
 # Interpreter crash: simpleos_platform_qemu_smoke_lane / lane-contract field access
 
+## Verification 2026-11-25 (release/1.0.0, Windows host)
+
+- **verified fixed**: the exact former-crash pattern runs clean on the pinned
+  Rust seed (`bin/simple.exe` v1.0.0-rc.1). A standalone repro calling
+  `simpleos_platform_qemu_smoke_lane("riscv64")` — which now deliberately goes
+  through `if val target = simpleos_platform_target_by_name(name)` on
+  `Option<SimpleOsPlatformBuildTarget>` and reads `target.qemu_smoke_lane`
+  (`src/os/port/_SimpleosMultiplatformBuild/platform_target_accessors.spl:306`)
+  — prints `targets: 8` / `target found: riscv64gc-simpleos` /
+  `lane name: riscv64-smoke` with no `'name' on Option` and no exit-248 crash.
+- The generic fix is present in source: `optional_let_binding` in
+  `src/compiler_rust/compiler/src/interpreter_control.rs:139`.
+- **limit**: `bin/simple.exe test test/01_unit/os/port/simpleos_platform_catalog_spec.spl
+  --mode=interpreter` is blocked repo-wide at release/1.0.0 HEAD — the pinned
+  seed rejects the `@representation_boundary` decorators added by cfd89933699
+  (`unknown decorator '@representation_boundary'` in
+  `src/app/test_runner_new/test_runner_client.spl:9`). Verification was by
+  standalone repro (`bin/simple.exe run`) plus code inspection, not a spec run.
+- Status remains **fixed**; no code change needed.
+
 ## Closed 2026-09-13 — Interpreter Option-poison does not reproduce; the QEMU build half is stale-by-host
 
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the site-2 repro is clean. An imported module returning `[QemuScenario]` supports BOTH access patterns — `get_all_scenarios()[0].name` prints `a` and `for s in get_all_scenarios(): print s.name` prints `a` / `b`. No `'name' on Option`, no crash. The seed's element-type resolution no longer differs by call site.

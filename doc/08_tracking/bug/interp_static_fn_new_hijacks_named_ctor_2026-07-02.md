@@ -1,5 +1,22 @@
 # Interpreter: `static fn new` hijacks named-argument class construction
 
+## Verification 2026-11-25 (release/1.0.0, Windows host)
+
+- **verified fixed**: on the pinned Rust seed (`bin/simple.exe` v1.0.0-rc.1,
+  38,403,072 bytes), standalone repros via `bin/simple.exe run`:
+  - `Widget(id: 3, size: 4)` (fields `id, size` + `static fn new(path, size)`)
+    prints `id=3 size=4`; reversed-order `Widget(size: 4, id: 3)` also prints
+    `id=3 size=4` — names honoured, not positional, no `new` hijack.
+  - The worst documented case `Font(path: "x", size: 8)` (`path` is a `new`
+    parameter, not a field) now fails loudly:
+    `error: semantic: class 'Font' has no field named 'path'` — no silent
+    nil-field corruption, no dispatch to `static fn new`.
+- **limit**: the SPipe gate `test/03_system/feature/usage/named_ctor_with_static_new_spec.spl`
+  cannot be executed at release/1.0.0 HEAD with the pinned seed
+  (`unknown decorator '@representation_boundary'` repo-wide); verification was
+  by standalone repro plus code inspection.
+- Status remains **CLOSED**; no code change needed.
+
 ## Closed 2026-09-13 — P1 silent-corruption symptom fixed, re-verified by running
 
 Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
