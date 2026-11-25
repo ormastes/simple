@@ -119,6 +119,22 @@ match patterns — via the `flat_bridge_lexeme_float_literals` mode flag in
 `float_literal_pattern_bridge_spec` and
 `imported_global_infer_storage_spec` all pass together after the change.
 
+## Re-verification — 2026-11-25 (release/1.0.0 P2 batch)
+
+- FIXED status re-confirmed by code inspection on release/1.0.0 HEAD
+  (4bc2c986375, Windows host). Seed half: `split_tuple_index_pair` is present
+  in `src/compiler_rust/parser/src/expressions/postfix.rs:1573` with the
+  `TokenKind::Float` arm at :409 and the `tuple_index_split_tests` unit-test
+  module at :1593. Pure-Simple half: `tuple_index_pair_split` present in
+  `src/compiler/10.frontend/core/parser_expr.spl:996` with the member-access
+  call site at :1353. Both named specs exist
+  (`test/01_unit/compiler/frontend/nested_tuple_index_parse_spec.spl`,
+  `nested_tuple_index_seed_parser_spec.spl`).
+- Spec re-run on this host is blocked: the pinned bin/simple.exe
+  (v1.0.0-rc.1 seed) rejects `@representation_boundary` (added by
+  cfd89933699), so no repo spec executes at HEAD. Verification is therefore
+  by code inspection only; the 2026-11-05 on-host re-measurement stands.
+
 ## Re-verification — 2026-11-05
 
 Both halves re-verified on an aarch64 Linux host:
