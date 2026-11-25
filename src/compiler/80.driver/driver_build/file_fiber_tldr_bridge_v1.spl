@@ -78,7 +78,7 @@ pub class FileFiberTldrBridgeV1:
                     ring_id: ring_id, fiber_count: fiber_count,
                     waiter_capacity: waiter_capacity, waiter_charges: 0,
                     waits: [], keys: [], references: [], cursors: [], cursor_next: 0,
-                    wakes: [], pending_completion: nil, closed: false))
+                    wakes: [], pending_completion: None, closed: false))
 
     fn _wait_index(fiber: i64) -> i64:
         for i in 0..self.waits.len():
@@ -120,10 +120,10 @@ pub class FileFiberTldrBridgeV1:
         if ix < 0:
             self.keys.push(key)
             self.references.push(reference)
-            self.cursors.push(nil)
+            self.cursors.push(None)
         self.waits.push(FileFiberTldrWaitV1(fiber: fiber, key: key,
             reference: reference, token: reservation.token,
-            reservation: Some(reservation), subscription: nil, state: _FF_WAIT_RESERVED))
+            reservation: Some(reservation), subscription: None, state: _FF_WAIT_RESERVED))
         Ok(true)
 
     @unsafe(reason: "subscribes a canonical AsyncRef to a reserved ring token", capabilities: [ffi])
@@ -185,7 +185,7 @@ pub class FileFiberTldrBridgeV1:
                 case Err(error): return Err(error)
                 case Ok(_): ()
             return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
-        self.waits[index].reservation = nil
+        self.waits[index].reservation = None
         self.waits[index].state = _FF_WAIT_ARMED
         # @workaround bug=ctor_mir_2026-10-31 reason=annotate binder; stage2 leaves Op unsubstituted in generic-self method Result
         val taken: Result<RingSubmission<i64>?, SimpleRingError> = self.ring.provider_take(1)
@@ -275,7 +275,7 @@ pub class FileFiberTldrBridgeV1:
                             # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                             case Result.Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
                     case AsyncWakeScanI64.More(next): self.cursors[i] = Some(next)
-                    case AsyncWakeScanI64.Done: self.cursors[i] = nil
+                    case AsyncWakeScanI64.Done: self.cursors[i] = None
                     case AsyncWakeScanI64.Invalid: return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
         if self.cursors.len() > 0: self.cursor_next = index % self.cursors.len()
         match self._drain_completions(table):
@@ -289,7 +289,7 @@ pub class FileFiberTldrBridgeV1:
         # A producer may finish before any consumer subscribes. The table has
         # already validated its canonical claim; no cursor needs retaining.
         if i < 0: return Ok(())
-        if self.cursors[i] != nil: return Ok(())
+        if self.cursors[i].is_some(): return Ok(())
         match self.references[i].try_ready():
             case AsyncRefStateI64.InvalidReference: return Err(FileFiberTldrBridgeErrorV1.Closed)
             case AsyncRefStateI64.Pending: return Err(FileFiberTldrBridgeErrorV1.TokenMismatch)
@@ -343,7 +343,7 @@ pub class FileFiberTldrBridgeV1:
             match released_completion:
                 case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
                 case Ok(_): ()
-            self.pending_completion = nil
+            self.pending_completion = None
             self.wakes.push(FileFiberTldrWakeV1(fiber: fiber, error: error_text))
             self.waits.remove(found)
             drained = drained + 1
@@ -355,7 +355,7 @@ pub class FileFiberTldrBridgeV1:
             match release_result:
                 # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                 case Result.Ok(_):
-                    self.waits[index].reservation = nil
+                    self.waits[index].reservation = None
                     Ok(())
                 # @workaround bug=enumowner_mir_2026-10-31 reason=bare Ok/Err arm ambiguous in pinned stage2 over method-call subject; qualify with Result
                 case Result.Err(error): Err(error)
@@ -437,7 +437,7 @@ pub class FileFiberTldrBridgeV1:
         if (self.waits.len() != 0 or self.ring.occupancy() != 0 or self.wakes.len() != 0 or
             self.pending_completion.is_some()): return false
         for cursor in self.cursors:
-            if cursor != nil: return false
+            if cursor.is_some(): return false
         true
 
     pub fn pending_work() -> i64:
@@ -446,12 +446,12 @@ pub class FileFiberTldrBridgeV1:
     pub fn deliverable_work() -> i64:
         if self.wakes.len() > 0 or self.pending_completion.is_some(): return 1
         for cursor in self.cursors:
-            if cursor != nil: return 1
+            if cursor.is_some(): return 1
         0
 
     fn _has_cursor() -> bool:
         for cursor in self.cursors:
-            if cursor != nil: return true
+            if cursor.is_some(): return true
         false
 
     @unsafe(reason: "clears every raw reference before the table's live map scope closes", capabilities: [ffi])
@@ -462,7 +462,7 @@ pub class FileFiberTldrBridgeV1:
         self.references = []
         self.keys = []
         self.waits = []
-        self.pending_completion = nil
+        self.pending_completion = None
         Ok(true)
 
 export FileFiberTldrBridgeErrorV1, FileFiberTldrWaitV1, FileFiberTldrWakeV1
