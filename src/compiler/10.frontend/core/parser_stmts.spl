@@ -2208,10 +2208,26 @@ fn parse_match_arms_common() -> (i64, [i64]):
     # parse_match_expr and the block-bodied lambda path in
     # _ParserPrimary/primary_expr.spl. Disabled again on every exit below.
     lex_enable_forced_indentation()
+    val match_colon_line = par_line_get()
     parser_expect(161)
     parser_skip_newlines()
     val saw_indent = par_kind_get() == 181
-    parser_expect(181)
+    # Inline match: `match self: case X: expr; case Y: expr`. The first arm
+    # starts on the SAME line as the `:`, so the lexer emits no Indent. The
+    # Rust seed accepts this shape (stmt_parsing/control_flow.rs "Inline
+    # match"); unconditionally expecting an Indent here rejected valid
+    # sources (e.g. 70.backend/linker/symbol_analysis.spl) with "expected
+    # Indent, got case". bug doc: doc/08_tracking/bug/
+    #   backend_linker_check_arm_body_const_assign_2026-07-02.md
+    # A first arm on a LATER line still requires the Indent, so the original
+    # diagnostic is preserved for genuinely un-indented arm blocks.
+    var is_inline = false
+    if not saw_indent:
+        is_inline = par_line_get() == match_colon_line
+    if saw_indent:
+        parser_advance()
+    elif not is_inline:
+        parser_expect(181)
     # Record the arm column so the lexer keeps the Newline before a
     # `| Pat -> expr` arm instead of folding it into the previous arm body.
     if saw_indent:
@@ -2224,6 +2240,22 @@ fn parse_match_arms_common() -> (i64, [i64]):
         i = i + 1
         parser_skip_newlines()
         kind = par_kind_get()
+        # Inline match arm separation: arms sit on the `:` line and are
+        # separated by `;`; the match ends at the first arm not followed by
+        # `;`, and only a `case`/`|` arm may follow a `;` (mirrors the Rust
+        # seed's inline-match loop). This runs BEFORE the DEDENT check
+        # because an inline match opened no Indent of its own: a DEDENT here
+        # belongs to the ENCLOSING block and must stay unconsumed, and a `;`
+        # must not fall through to the caseless-arm branch to be parsed as
+        # the next pattern ("unexpected token in expression: ;").
+        if is_inline and arm_indices.len() > 0:
+            if kind != TOK_SEMICOLON:
+                break
+            parser_advance()
+            parser_skip_newlines()
+            kind = par_kind_get()
+            if kind != TOK_KW_CASE and kind != TOK_PIPE:
+                break
         if kind == 182:
             parser_advance()
             break
