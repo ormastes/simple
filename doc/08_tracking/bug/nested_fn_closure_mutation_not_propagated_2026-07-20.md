@@ -1,7 +1,7 @@
 # Bug: nested `fn` passed by value as a callback does not propagate mutation of an outer `var` back to the caller
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/shared/control_flow/fn_lambda_spec.spl`)
+- **Status:** resolved 2026-11-25 — the silent non-propagation no longer reproduces; captured-variable assignment in a nested `fn` is now a loud compile error (owner ruling 2026-09-27, see verification note below)
 - **Area:** `src/compiler_rust` interpreter (tree-walking fallback, `bin/simple run` / `bin/simple test`, deployed seed at `bin/release/x86_64-unknown-linux-gnu/simple`)
 
 ## Symptom
@@ -100,3 +100,31 @@ false-instead-of-true result. Not checked against the pure-Simple self-hosted
 compiler/interpreter (`src/compiler/`) -- only the Rust seed was probed, and
 per repo convention that seed's interpreter fallback is the default path
 `bin/simple test`/`bin/simple run` exercise when JIT lowering fails.
+
+## Verification 2026-11-25 (release/1.0.0 @ 4c6024f8271, Windows host) — resolved
+
+Ran the exact minimal repro from this bug with the pinned seed
+(`SIMPLE_LIB=src bin/simple.exe run repro.spl`). The silent wrong answer
+(`executed = false` after the assignment ran) no longer occurs. Instead the
+module fails loudly before execution:
+
+```
+error: compile failed: semantic: ... cannot assign to captured variable
+`executed` inside nested fn `set_executed` (line 11): closures capture
+enclosing locals by value and are read-only; return the new value or use a
+module-level `var`
+```
+
+This matches the owner ruling now recorded in `.claude/rules/language.md:30`:
+a nested `fn`/lambda assigning an enclosing local is a compile error in both
+the seed and the pure-Simple interpreter; the capture-by-value limitation is
+deliberate language semantics with an actionable diagnostic, not a silent
+miscompile. `test/shared/control_flow/fn_lambda_spec.spl` was updated to the
+same semantics (its "works with context/it blocks" example now observes block
+execution through the block's RETURN value and cites lint CLOS001).
+
+The defect as filed — a mutation that executes but silently does not propagate
+— is therefore fixed (loud rejection replaces wrong output). The spec itself
+could not be re-run end-to-end on this host: `bin/simple.exe test` fails
+repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+(seed/source skew); the spec source was verified by inspection instead.
