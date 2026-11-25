@@ -84,7 +84,7 @@ password input modes.
 The host-fixture credential executable deliberately implements only synthetic
 encryption orchestration. SDN scenarios require a separate, real
 `MAIL_CONFIG_BIN`; that executable must run the canonical Simple parser.
-`scripts/ci/prepare_mail_config_helper.py` builds the current helper source with
+`scripts/ci/prepare_mail_config_helper.shs` builds the current helper source with
 an existing, pinned Phase-2 compiler and exercises valid and malformed SDN
 before exporting its path to subsequent workflow steps. It never rebuilds the
 compiler or falls back to a seed, another parser, or skipped assertions.

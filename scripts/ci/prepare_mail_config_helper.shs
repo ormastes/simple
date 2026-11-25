@@ -1,0 +1,186 @@
+#!/bin/sh
+# Build the real mail SDN bridge with a pinned, already-built Phase-2 producer.
+#
+# MAIL_CI_PHASE2_PRODUCERS_JSON maps host triples to immutable producer bundles.
+# No compiler is rebuilt and no seed/interpreter/parser substitute is admitted.
+# Port of the former prepare_mail_config_helper.py; --selftest replaces
+# test/scripts/test_prepare_mail_config_helper.py. Needs jq, curl, sha256sum or shasum
+# (and unzip / tar for archive bundles).
+#
+# Usage: sh scripts/ci/prepare-mail-config-helper.shs | --selftest
+set -u
+
+refuse() { echo "MAIL_CI_PHASE2_UNAVAILABLE: $1" >&2; exit 1; }
+
+# macOS runners ship shasum, not sha256sum / timeout (coreutils: gtimeout).
+sha_of() {
+    if command -v sha256sum > /dev/null 2>&1; then sha256sum < "$1"; else shasum -a 256 < "$1"; fi | awk '{ print $1 }'
+}
+
+bounded() { # bounded <seconds> <command...>
+    limit=$1; shift
+    if command -v timeout > /dev/null 2>&1; then timeout "$limit" "$@"
+    elif command -v gtimeout > /dev/null 2>&1; then gtimeout "$limit" "$@"
+    else "$@"; fi
+}
+
+fetch_https() { # fetch_https <url> <dest>
+    curl -fsSL --max-time 120 -A simple-mail-ci -o "$2" "$1"
+}
+fetch=fetch_https
+
+windows=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows=1 ;; esac
+
+# contained <relative>: fail unless the path stays inside its staging root.
+contained() {
+    printf '%s\n' "$1" | awk -F/ '
+        /^\// || /^[A-Za-z]:/ { exit 1 }
+        { depth = 0
+          for (i = 1; i <= NF; i++) {
+              if ($i == "" || $i == ".") continue
+              if ($i == "..") { if (--depth < 0) exit 1 } else depth++ } }' \
+        || refuse "producer bundle path escapes its staging directory"
+}
+
+field() { printf '%s' "$entry" | jq -r "$1"; }
+
+provision() { # provision <destination>; uses $entry; sets $compiler
+    [ "$(printf '%s' "$entry" | jq '.phase == 2')" = true ] || refuse "the pinned producer must declare phase 2"
+    digest=$(field '.sha256 // ""')
+    printf '%s' "$digest" | grep -Eqx '[0-9a-f]{64}' || refuse "a pinned producer bundle SHA-256 is required"
+    url=$(field 'if (.url | type) == "string" then .url else "" end')
+    case "$url" in https://*) ;; *) refuse "the existing producer bundle requires an HTTPS URL" ;; esac
+    archive=$1/producer.download
+    $fetch "$url" "$archive" || refuse "the existing producer bundle could not be downloaded"
+    [ "$(sha_of "$archive")" = "$digest" ] || refuse "the downloaded producer bundle checksum does not match"
+    bundle=$1/producer
+    mkdir "$bundle"
+    kind=$(field '.format // "file"')
+    default_exe=simple; [ "$windows" = 1 ] && default_exe=simple.exe
+    executable=$(field ".compiler // \"$default_exe\"")
+    contained "$executable"
+    compiler=$bundle/$executable
+    case "$kind" in
+        file) mkdir -p "$(dirname "$compiler")" && cp "$archive" "$compiler" ;;
+        tar.gz)
+            tar -tzf "$archive" > "$1/members" || refuse "producer tar.gz is unreadable"
+            while IFS= read -r member; do contained "$member"; done < "$1/members"
+            tar -xzf "$archive" -C "$bundle" --no-same-owner ;;
+        zip)
+            unzip -Z1 "$archive" > "$1/members" || refuse "producer ZIP is unreadable"
+            while IFS= read -r member; do contained "$member"; done < "$1/members"
+            unzip -Z "$archive" | grep -q '^l' && refuse "producer ZIP contains a symbolic link"
+            unzip -q "$archive" -d "$bundle" ;;
+        *) refuse "producer format must be file, tar.gz, or zip" ;;
+    esac
+    [ -f "$compiler" ] || refuse "the pinned bundle does not contain its declared compiler"
+    chmod u+rwx "$compiler"
+    asset_rel=$(field '.asset_root // "."')
+    contained "$asset_rel"
+    asset_root=$(cd "$bundle/$asset_rel" && pwd)
+    export SIMPLE_ASSET_ROOT="$asset_root"
+    export PATH="$asset_root/bin:$asset_root/lib:$PATH"
+}
+
+main() {
+    machine=$(uname -m | tr 'A-Z' 'a-z')
+    case "$machine" in amd64) machine=x86_64 ;; aarch64) machine=arm64 ;; esac
+    case "$(uname -s)" in
+        Linux) system=linux ;; Darwin) system=darwin ;; MINGW*|MSYS*|CYGWIN*) system=windows ;; *) system=None ;;
+    esac
+    host=$system-$machine
+    profiles=${MAIL_CI_PHASE2_PRODUCERS_JSON:-}
+    [ -n "$profiles" ] || profiles='{}'
+    printf '%s' "$profiles" | jq -e . > /dev/null 2>&1 || refuse "MAIL_CI_PHASE2_PRODUCERS_JSON is not valid JSON"
+    entry=$(printf '%s' "$profiles" | jq -c --arg h "$host" 'if type == "object" then .[$h] else null end')
+    [ "$(printf '%s' "$entry" | jq -r type)" = object ] \
+        || refuse "no existing producer is configured for $host; set MAIL_CI_PHASE2_PRODUCERS_JSON with url, sha256, phase=2, format and compiler"
+    checkout=$(pwd -P)
+    destination=${RUNNER_TEMP:-$checkout/build}/mail-config-helper
+    [ ! -e "$destination" ] || refuse "staging directory already exists: $destination"
+    mkdir -p "$destination"
+    provision "$destination"
+    producer_digest=$(sha_of "$compiler")
+    helper=$destination/simple-mail-credentials; [ "$windows" = 1 ] && helper=$helper.exe
+    export SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_NATIVE_BUILD_THREADS=2
+    set -- native-build src/app/mail_credentials/main.spl
+    [ "$windows" = 1 ] && set -- "$@" --source src/providers/windows_native/lib
+    for root in src/app src/lib src/os src/compiler; do set -- "$@" --source "$root"; done
+    bounded 1200 "$compiler" "$@" --backend=llvm -o "$helper" > "$destination/helper-build.log" 2>&1
+    rc=$?
+    [ "$rc" -eq 0 ] && [ -f "$helper" ] \
+        || refuse "the existing producer could not build the real helper; see $destination/helper-build.log"
+    # Exercise the compiled production parser before exporting it to fixtures.
+    document=$destination/probe.sdn
+    printf 'default_account: "ci"\naccounts:\n  ci:\n    protocol: pop3\n    provider: other\n    email: "ci@example.test"\n    pop3_server: "127.0.0.1"\n    tls: implicit\n' > "$document"
+    parsed=$(bounded 20 "$helper" config-json "$document" 2>/dev/null)
+    rc=$?
+    printf '%s' "$parsed" | jq -e . > /dev/null 2>&1 || refuse "the compiled helper returned invalid JSON for the SDN control"
+    [ "$rc" -eq 0 ] && [ "$(printf '%s' "$parsed" | jq -r '.accounts.ci.protocol // empty')" = pop3 ] \
+        || refuse "the compiled helper did not pass the actual SDN parser control"
+    printf 'accounts: [\n' > "$document"
+    rejected=$(bounded 20 "$helper" config-json "$document" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 0 ] || [ -n "$(printf '%s' "$rejected" | tr -d ' \t\r\n')" ]; then
+        refuse "the compiled helper accepted malformed SDN"
+    fi
+    helper_digest=$(sha_of "$helper")
+    jq -n --arg p "$host" --arg ps "$producer_digest" --arg hs "$helper_digest" \
+        '{platform: $p, producer_sha256: $ps, helper_sha256: $hs, compiler_rebuilt: false, actual_parser_controls: 2}' \
+        > "$destination/evidence.json"
+    helper_posix=$helper
+    if command -v cygpath > /dev/null 2>&1; then helper_posix=$(cygpath -m "$helper"); fi
+    printf 'MAIL_CONFIG_BIN=%s\n' "$helper_posix" >> "$GITHUB_ENV"
+    echo "Prepared real mail SDN helper for $host; producer=$producer_digest; helper=$helper_digest"
+}
+
+selftest() {
+    t=$(mktemp -d)
+    fails=0 n=0
+    payload=""
+    fixture_fetch() { echo called >> "$t/fetch-calls"; cp "$payload" "$2"; }
+    expect_refusal() { # expect_refusal <label> <pattern> <command...>
+        label=$1 pattern=$2; shift 2
+        n=$((n + 1))
+        out=$( ("$@") 2>&1 )
+        rc=$?
+        if [ "$rc" -eq 0 ] || ! printf '%s' "$out" | grep -q "$pattern"; then
+            echo "selftest: $label: expected refusal '$pattern', got rc=$rc: $out" >&2
+            fails=$((fails + 1))
+        fi
+    }
+    fetch=fixture_fetch
+    MAIL_CI_PHASE2_PRODUCERS_JSON='{}' expect_refusal "missing producer" "no existing producer is configured" main
+    : > "$t/fetch-calls"
+    mkdir "$t/d1"
+    entry='{"phase": 1}' expect_refusal "wrong generation" "must declare phase 2" provision "$t/d1"
+    n=$((n + 1))
+    [ ! -s "$t/fetch-calls" ] || { echo "selftest: wrong generation downloaded" >&2; fails=$((fails + 1)); }
+    printf 'corrupt bundle' > "$t/corrupt"
+    payload=$t/corrupt
+    mkdir "$t/d2"
+    entry='{"phase": 2, "sha256": "'"$(printf '0%.0s' $(seq 64))"'", "url": "https://example.invalid/pinned-producer", "format": "zip"}' \
+        expect_refusal "corrupted bundle" "checksum does not match" provision "$t/d2"
+    n=$((n + 1))
+    [ ! -e "$t/d2/producer" ] || { echo "selftest: corrupt bundle reached extraction" >&2; fails=$((fails + 1)); }
+    if command -v zip > /dev/null 2>&1; then
+        mkdir -p "$t/z/a/b" && printf 'not executable' > "$t/z/escaped-compiler"
+        (cd "$t/z/a/b" && zip -q "$t/evil.zip" ../../escaped-compiler)
+        payload=$t/evil.zip
+        mkdir "$t/d3"
+        entry='{"phase": 2, "sha256": "'"$(sha_of "$t/evil.zip")"'", "url": "https://example.invalid/pinned-producer", "format": "zip"}' \
+            expect_refusal "zip traversal" "escapes its staging directory" provision "$t/d3"
+    else
+        n=$((n + 1))
+        contained_out=$( (contained ../../escaped-compiler) 2>&1 )
+        printf '%s' "$contained_out" | grep -q "escapes its staging directory" \
+            || { echo "selftest: traversal path not refused" >&2; fails=$((fails + 1)); }
+    fi
+    rm -rf "$t"
+    if [ "$fails" -ne 0 ]; then echo "FAIL — $fails of $n selftest case(s) failed"; return 1; fi
+    echo "PASS — $n selftest case(s) checked"
+}
+
+if [ "${1:-}" = --selftest ]; then selftest; exit $?; fi
+main
