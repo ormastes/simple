@@ -1,9 +1,9 @@
 # Seed parser: `return` with its value entirely on the next line is ambiguous with bare `return` — NOT FIXED, needs a design decision
 
 - **ID:** seed_return_bare_value_next_line_ambiguity_2026-07-31
-- **Status:** open, filed rather than forced — found while enumerating the
-  line-continuation family for
-  `seed_assignment_trailing_equals_continuation_2026-07-31.md`
+- **Status:** resolved 2026-11-04 (seed emits an explicit diagnostic for the
+  ambiguous shape; re-verified with the deployed seed binary 2026-11-25 — see
+  the verification section below)
 - **Severity:** low — no known real-source occurrence found; `return a +\n b`
   (value starting on the `return` line, continuing via a trailing operator)
   already works fine, which covers the natural line-wrap case
@@ -79,3 +79,24 @@ value semantics, not just fix a parse error.
 The self-hosted parser (`parser_stmts.spl`, `kind == 49`) also treats `return` + Newline as a bare return, so both parsers reject the shape. No grammar change: the seed now emits
 "`return` value must be on the same line as `return`" when bare `return` is followed by Newline + Indent
 (`jump.rs::parse_return`). Test: `src/compiler_rust/parser/tests/return_value_next_line_diagnostic.rs`.
+
+## Verification 2026-11-25 (lane p3-baw, release/1.0.0 @ 1301149fa3f) — RESOLVED confirmed
+
+- Source: `src/compiler_rust/parser/src/stmt_parsing/jump.rs:27` carries the
+  new diagnostic ("`return` value must be on the same line as `return` ..."),
+  and the regression test
+  `src/compiler_rust/parser/tests/return_value_next_line_diagnostic.rs` exists.
+- Live binary evidence with the deployed tracked seed (`bin/simple.exe`,
+  v1.0.0-rc.1) on the exact repro shape (`return` alone on a line, value
+  indented on the next):
+
+```
+$ SIMPLE_LIB=src bin/simple.exe run ret_next_line.spl
+error: compile failed: parse: ... Syntax error at 2:11: `return` value must be
+on the same line as `return` (a bare `return` ends at the newline; put the
+value after `return` or continue it with a trailing operator)
+```
+
+The ambiguous shape now fails with the explicit diagnostic instead of the
+opaque `UnexpectedToken { expected: "expression", found: "Indent" }`, which is
+exactly the resolution recorded above. Status → resolved.

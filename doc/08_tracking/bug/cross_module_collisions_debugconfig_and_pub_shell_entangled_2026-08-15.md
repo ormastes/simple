@@ -79,3 +79,21 @@ The single residual differing-signature shell row (app tuple mirror
 and the wider collision list are live-tracked under
 `cross_module_public_symbol_collisions_2026-08-16`; nothing this row named remains
 open here.
+
+## Verification 2026-11-25 (lane p3-baw, release/1.0.0 @ 1301149fa3f) — SUPERSEDED confirmed
+
+Independent re-check on a fresh Windows worktree, source inspection only:
+
+- `class DebugConfig` in owned src: exactly two hits —
+  `src/lib/nogc_sync_mut/debug/remote/types.spl:79` (the surviving lib copy) and
+  `src/lib/nogc_async_mut_noalloc/qemu/debug_boot_runner.spl:23` (the known
+  non-co-compiling same-named class). The app-side copy stays gone.
+- `pub fn shell(command: text) -> ProcessResult` in both
+  `src/lib/nogc_sync_mut/io/process_ops.spl:3176` and
+  `src/lib/nogc_sync_mut/io_runtime.spl:169` — signatures converged.
+- `src/lib/nogc_sync_mut/io/file_shell.spl` retains only `shell_output` (no
+  tuple `shell`); the residual app tuple mirror `src/app/io/file_shell.spl:10`
+  is unchanged and remains tracked under
+  `cross_module_public_symbol_collisions_2026-08-16`.
+
+Verdict unchanged: SUPERSEDED; nothing filed here remains open.
