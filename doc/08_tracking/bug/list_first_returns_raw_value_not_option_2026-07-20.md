@@ -75,3 +75,44 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/generics_spe
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+## Resolution 2026-11-25 (p2w3-ah lane, release/1.0.0) — FIXED via option (b), guide aligned to the recorded owner decision
+
+The open question this doc left ("option (a) change the runtime vs option (b)
+fix the guide ... needs an owner with the full picture") is settled by a
+recorded owner decision: `src/compiler_rust/compiler/src/interpreter_method/
+collections.rs` (array `get` arm comment) cites **owner decision 2026-11-09,
+`array_get_contract_drift_crypto_2026-10-18`: `a.get(i)` returns `T?` on EVERY
+lane** — the raw-nilable contract is the decided one, so option (b) applies.
+
+Behavior re-confirmed on release/1.0.0 HEAD with the pinned seed,
+`SIMPLE_EXECUTION_MODE=interpreter` (the evaluator `bin/simple test` uses):
+`[1,2,3].first == 1` true, `[1,2,3].first == nil` false, `[].first == nil`
+true — a raw nilable value, never an `Option` tag. The generic-fn shape from
+the spec (`fn first<T>(items: List<T>) -> T?: items.first`) was probed the
+same way: returns the raw element, `== nil` on empty.
+
+Changes landed:
+
+1. `doc/07_guide/quick_reference/syntax_quick_reference.md` — the
+   "Refactoring Patterns" row claiming `list.first().is_some()` ⇔
+   `list.first.?` is corrected to `list.first != nil` ⇔ `list.first.?`, with
+   an explicit note that `.first`/`.last` return raw `T?` and have no
+   `.is_some()`; the "No-Paren Method Calls" section gained the same
+   one-sentence contract note.
+2. `test/feature/usage/generics_spec.spl` — the four examples that asserted
+   the pre-decision `Option<T>` contract (`expect ....first == Some(x)`) now
+   assert the decided `T?` contract (`== x`), and the one
+   `fn first<T>(...) -> Option<T>` signature returning `items.first` is now
+   `-> T?`. This is aligning the spec with the recorded owner decision, not
+   weakening it: the new assertions are the strict equality oracles for the
+   decided contract, each verified by an equivalent interpreter probe on this
+   host (g1-g4 all true; `-> T?` signature accepted, empty case `== nil`).
+
+**Verification limit:** the spec file itself was not executed —
+`bin/simple test` is repo-wide blocked at this HEAD (pinned seed rejects
+`@representation_boundary`, added by cfd89933699) and this lane may not
+rebuild the seed. Each changed assertion was verified individually via
+`bin/simple run` interpreter probes replicating the exact spec bodies. A
+follow-up lane with a working test runner should re-run
+`test/feature/usage/generics_spec.spl` end to end.
