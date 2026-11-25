@@ -286,11 +286,13 @@ int main(void) {
     assert(slang_ggml_prefix_hits() == 0);
     assert(slang_ggml_prefix_resident_bytes() == 0);
 
-    /* With layers offloaded, the first decode a context runs is always one
+    /* With layers offloaded, the first decode a fresh context runs is always one
      * full micro-batch: a cold prompt shorter than that is preceded by a
-     * throwaway full micro-batch, and a restore gives reuse back until its
-     * suffix is a full micro-batch. */
+     * throwaway full micro-batch, and a restore on a fresh (cold) context gives
+     * reuse back until its suffix is a full micro-batch. Once a context is warm
+     * and recycled for a serial follow-up, it keeps full reuse without backing off. */
     text("model"); assert(slang_ggml_model_load(-1) == 0);
+    assert(slang_ggml_request_configure(4) == 4);
     assert(slang_ggml_prefix_cache_configure(2, 1024) == 2);
     mock_llama_set_n_ubatch(4);
     int64_t short_first = mock_llama_short_first_decodes();
@@ -298,21 +300,28 @@ int main(void) {
     request_prefill(tiny, "ab", 0);
     assert(mock_llama_short_first_decodes() == short_first);
     assert(slang_ggml_request_close(tiny) == 0);
+    /* Open a fresh context for seeded, keeping tiny's warm ctx consumed, then
+     * keep seeded open so backed_off and full_suffix get fresh cold contexts. */
     int64_t seeded = slang_ggml_request_create(32);
     request_prefill(seeded, "warmup", 0);
-    assert(slang_ggml_request_close(seeded) == 0);
     int64_t backed_off = slang_ggml_request_create(32);
     request_prefill(backed_off, "warmupX", 4);
     assert(mock_llama_short_first_decodes() == short_first);
-    assert(slang_ggml_request_close(backed_off) == 0);
     int64_t full_suffix = slang_ggml_request_create(32);
     request_prefill(full_suffix, "warmupXabcd", 7);
     assert(mock_llama_short_first_decodes() == short_first);
     assert(slang_ggml_request_close(full_suffix) == 0);
-    /* Off again when the micro-batch is the whole context. */
-    mock_llama_set_n_ubatch(32);
+    assert(slang_ggml_request_close(backed_off) == 0);
+    assert(slang_ggml_request_close(seeded) == 0);
+    /* Serial request reuses the warm idle context: full reuse (6 of 7), no short first decode. */
+    int64_t warm_serial = slang_ggml_request_create(32);
+    request_prefill(warm_serial, "warmupY", 6);
+    assert(mock_llama_short_first_decodes() == short_first);
+    assert(slang_ggml_request_close(warm_serial) == 0);
+    /* Off again when the micro-batch is the whole context (fresh ctx of different size). */
+    mock_llama_set_n_ubatch(33);
     decodes = mock_llama_decode_calls();
-    int64_t whole = slang_ggml_request_create(32);
+    int64_t whole = slang_ggml_request_create(33);
     request_prefill(whole, "zz", 0);
     assert(mock_llama_decode_calls() == decodes + 2);
     assert(slang_ggml_request_close(whole) == 0);
