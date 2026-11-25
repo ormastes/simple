@@ -9,6 +9,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 
 describe "low-memory native source metadata":
     it "preserves cache identity and path metadata while evicting content":
@@ -131,3 +132,18 @@ describe "low-memory native source metadata":
         regular.backend = "vhdl"
         regular_ctx = CompileContext.create(regular)
         expect(regular_ctx.source_contents_reclaimable()).to_equal(false)
+
+    it "produces identical fingerprints at outer scope, inside an active scope, and ignores body-only edits":
+        val mod_a = SourceFile(path: "a.spl", content: "pub fn a(x: i64) -> i64:\n    val y = x + 1\n    y\n", module_name: "a")
+        val mod_a_body_edit = SourceFile(path: "a.spl", content: "pub fn a(x: i64) -> i64:\n    val z = x + 2\n    z * 3\n", module_name: "a")
+        val mod_a_sig_edit = SourceFile(path: "a.spl", content: "pub fn a(x: i64, w: i64) -> i64:\n    val y = x + 1\n    y\n", module_name: "a")
+        val mod_b = SourceFile(path: "b.spl", content: "pub fn b() -> i64:\n    2\n", module_name: "b")
+        val fp_outer_1 = driver_native_sources_fingerprint([mod_a, mod_b])
+        val fp_outer_2 = driver_native_sources_fingerprint([mod_a_body_edit, mod_b])
+        val fp_sig = driver_native_sources_fingerprint([mod_a_sig_edit, mod_b])
+        expect(fp_outer_1).to_equal(fp_outer_2)
+        expect(fp_outer_1 == fp_sig).to_equal(false)
+        if transient_scope_begin():
+            val fp_scoped = driver_native_sources_fingerprint([mod_a, mod_b])
+            val _ended = transient_scope_end()
+            expect(fp_scoped).to_equal(fp_outer_1)

@@ -31,7 +31,7 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.mir.mir_data.{bootstrap_fn_ret_hir_type_lookup}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1, hir_shard_provider_settle_wait_v1, hir_unit_import_iface_wait_ms_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1, hir_shard_provider_settle_wait_v1, hir_unit_import_iface_wait_ms_v1, hir_unit_owner_pool_size_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_owner_disposition_v1}
 use app.io.env_ops.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
@@ -209,3 +209,36 @@ describe "interface import wait budget":
     it "takes an explicit budget, zero included":
         expect(hir_unit_import_iface_wait_ms_v1("250")).to_equal(250)
         expect(hir_unit_import_iface_wait_ms_v1("0")).to_equal(0)
+
+# A single-owner pool (owner "0/1@0~hN") runs one unit at a time, so an
+# inventoried-but-unclaimed provider cannot be published while this unit
+# waits. The Stage 4 CLI build slept the whole 60 s budget in every unit
+# (bug p4_unit_whole_inventory_interface_index_2026-11-25).
+describe "single-owner unit pool never waits on a provider":
+    it "parses the pool size from the ledger owner id":
+        expect(hir_unit_owner_pool_size_v1("0/1@0~h3")).to_equal(1)
+        expect(hir_unit_owner_pool_size_v1("2/12@0+fork-m1")).to_equal(12)
+        expect(hir_unit_owner_pool_size_v1("0/1")).to_equal(1)
+        expect(hir_unit_owner_pool_size_v1("owner")).to_equal(0)
+        expect(hir_unit_owner_pool_size_v1("0/@0")).to_equal(0)
+        expect(hir_unit_owner_pool_size_v1("")).to_equal(0)
+
+    it "returns at once for an inventoried unclaimed provider when the pool has one owner":
+        val q = "build/uih_settle_solo_{rt_getpid()}"
+        expect(rt_dir_create_all(q)).to_be(true)
+        expect(file_atomic_write(q + "/inventory", "identity\ncore.spl\nwal.spl")).to_be(true)
+        val old_owner = env_get("SIMPLE_HIR_SHARD_OWNER") ?? ""
+        expect(env_set("SIMPLE_HIR_SHARD_OWNER", "0/1@0~h0")).to_be(true)
+        val t0 = current_time_ms()
+        expect(hir_shard_provider_settle_wait_v1(q, "core.spl", 60000)).to_equal(false)
+        expect(current_time_ms() - t0 < 5000).to_equal(true)
+        # A published sidecar is still a hit.
+        expect(hir_shard_key_sidecar_write_v1(q, "core.spl", sha256_text("k"), sha256_text("b"))).to_be(true)
+        expect(hir_shard_provider_settle_wait_v1(q, "core.spl", 60000)).to_equal(true)
+        # A multi-owner pool keeps the bounded wait for scheduled work.
+        expect(env_set("SIMPLE_HIR_SHARD_OWNER", "0/2@0~h0")).to_be(true)
+        val t1 = current_time_ms()
+        expect(hir_shard_provider_settle_wait_v1(q, "wal.spl", 400)).to_equal(false)
+        expect(current_time_ms() - t1 >= 400).to_equal(true)
+        expect(env_set("SIMPLE_HIR_SHARD_OWNER", old_owner)).to_be(true)
+        expect(rt_dir_remove_all(q)).to_be(true)

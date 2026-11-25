@@ -32,16 +32,56 @@ pub fn visibility_manifest_path_valid_v1(path: text) -> bool:
                 not "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(path.substring(0, 1)):
             return false
         relative_start = 3
-    for part in path.substring(relative_start).split("/"):
-        if part == "" or part == "." or part == "..": return false
+    val n = path.byte_len()
+    var idx = relative_start
+    var seg_start = relative_start
+    var has_non_ascii = false
+    while idx < n:
+        val b = path.byte_at(idx)
+        if b >= 128:
+            has_non_ascii = true
+            break
+        if b == 47:
+            val seg_len = idx - seg_start
+            if seg_len == 0: return false
+            if seg_len == 1 and path.byte_at(seg_start) == 46: return false
+            if seg_len == 2 and path.byte_at(seg_start) == 46 and path.byte_at(seg_start + 1) == 46: return false
+            seg_start = idx + 1
+        idx = idx + 1
+    if has_non_ascii:
+        for part in path.substring(relative_start).split("/"):
+            if part == "" or part == "." or part == "..": return false
+        return true
+    val tail_len = n - seg_start
+    if tail_len == 0: return false
+    if tail_len == 1 and path.byte_at(seg_start) == 46: return false
+    if tail_len == 2 and path.byte_at(seg_start) == 46 and path.byte_at(seg_start + 1) == 46: return false
     true
 
 pub fn visibility_manifest_parent_v1(path: text) -> text:
-    val pieces = path.split("/")
-    if pieces.len() < 3: return ""
-    var parent: [text] = []
-    for index in 0..pieces.len() - 1: parent.push(pieces[index])
-    parent.join("/")
+    val n = path.byte_len()
+    var slash_count: i64 = 0
+    var last_slash: i64 = -1
+    var has_non_ascii = false
+    var idx: i64 = 0
+    while idx < n:
+        val b = path.byte_at(idx)
+        if b >= 128:
+            has_non_ascii = true
+            break
+        if b == 47:
+            slash_count = slash_count + 1
+            last_slash = idx
+        idx = idx + 1
+    if has_non_ascii:
+        val pieces = path.split("/")
+        if pieces.len() < 3: return ""
+        var parent: [text] = []
+        for index in 0..pieces.len() - 1: parent.push(pieces[index])
+        return parent.join("/")
+    if slash_count < 2 or last_slash <= 0:
+        return ""
+    path.substring(0, last_slash)
 
 # Pure projection under a caller-owned complete inventory. Both maps use exact
 # canonical absolute spelling. `inventory` is the complete source universe;

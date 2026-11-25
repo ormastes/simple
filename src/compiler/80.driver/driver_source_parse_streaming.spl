@@ -8,8 +8,10 @@ use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.driver.driver_native_objectless_proof.{driver_native_parser_can_persist_objectless, driver_native_objectless_proof_key, driver_native_retained_objectless_proofs}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1}
-use compiler.driver.cache.native_module_input_fact_snapshots.{native_module_input_fact_snapshots_v1}
+use compiler.driver.cache.native_source_interface_index.{NativeSourceInterfaceIndexV1,
+    native_source_interface_index_from_sources_with_digests_v1}
+use compiler.driver.cache.native_module_input_fact_snapshots.{
+    native_module_input_fact_snapshots_v1, native_module_input_fact_snapshots_for_modules_v1}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_gap_v1, worker_surface_gap_message_v1}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
@@ -265,6 +267,8 @@ impl CompilerDriver:
             unit_tldr_imports_enabled_v1(true)
         var unit_tldr_plan: UnitTldrPlanV1 = unit_tldr_empty_plan_v1()
         val frozen_tldr_route = tldr_imports_enabled_v1()
+        var unit_snapshot_modules: Dict<text, bool> = {}
+        var unit_snapshot_scoped = false
         val tldr_parser_calls_before = flat_parse_module_body_calls()
         var frozen_tldr_plan = TldrFrozenRoutePlanV1(parse_texts: [],
             source_parses: 0, interface_parses: 0, fallbacks: 0)
@@ -712,6 +716,33 @@ impl CompilerDriver:
                                 load_paths.push(cp)
                         ci = ci + 1
                 worker_hir_restrict_loads_v1(load_paths)
+                # Unit-scoped native input facts: phase 1 no longer slices the
+                # whole inventory in a unit (driver_source_pipeline_loading.spl).
+                # Only this unit's targets reach MIR, and their dependency
+                # witnesses read the interfaces of their direct imports. Build
+                # that slice now, before unloaded bodies are reclaimed below.
+                if worker_unit and not self.ctx.native_source_interface_index_v1.?:
+                    var unit_fact_paths: Dict<text, bool> = {}
+                    for fact_root in root_indices:
+                        val root_surface = retained_surfaces.surfaces[fact_root]
+                        unit_fact_paths[root_surface.canonical_path] = true
+                        for fact_target in root_surface.import_target_indices:
+                            if fact_target >= 0 and fact_target < retained_surfaces.surfaces.len():
+                                unit_fact_paths[retained_surfaces.surfaces[fact_target].canonical_path] = true
+                    if not self.install_unit_interface_index_v1(canonical_paths, unit_fact_paths, false):
+                        return false
+                if worker_unit:
+                    var root_canonical_set: Dict<text, bool> = {}
+                    for fact_root in root_indices:
+                        root_canonical_set[retained_surfaces.surfaces[fact_root].canonical_path] = true
+                    var snap_i = 0
+                    while snap_i < retained_surfaces.ordered_names.len() and snap_i < retained_surfaces.ordered_indices.len():
+                        val surf_idx = retained_surfaces.ordered_indices[snap_i]
+                        if surf_idx >= 0 and surf_idx < retained_surfaces.surfaces.len():
+                            if root_canonical_set.contains_key(retained_surfaces.surfaces[surf_idx].canonical_path):
+                                unit_snapshot_modules[retained_surfaces.ordered_names[snap_i]] = true
+                        snap_i = snap_i + 1
+                    unit_snapshot_scoped = true
                 # Free C-heap `.spl` source allocations (~95 MB across ~7,000 rows)
                 # for unloaded physical files in unit children before HIR/MIR/LLVM.
                 if worker_unit and (driver_parse_env_get_v1("SIMPLE_KEEP_SOURCE_CONTENTS") ?? "") != "1":
@@ -735,9 +766,18 @@ impl CompilerDriver:
         if (parse_shard or worker_spec != "") and not worker_unit:
             self.ctx.native_module_input_fact_snapshots_v1 = {}
         else:
+            if worker_unit and not self.ctx.native_source_interface_index_v1.?:
+                # A unit route that skipped the scoped build above (no module-
+                # scoped closure) still owns every body here: index them all.
+                if not self.install_unit_interface_index_v1(canonical_paths, {}, true):
+                    return false
             val native_source_facts = self.ctx.native_source_interface_index_v1 ?? NativeSourceInterfaceIndexV1(facts: {}, source_count: 0, digest_count: 0)
-            self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_v1(
-                retained_surfaces, native_source_facts)
+            if unit_snapshot_scoped:
+                self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_for_modules_v1(
+                    retained_surfaces, native_source_facts, unit_snapshot_modules)
+            else:
+                self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_v1(
+                    retained_surfaces, native_source_facts)
         self.ctx.modules = {}
         ast_reset()
         lexer_release_parse_source_globals()
@@ -755,6 +795,36 @@ impl CompilerDriver:
     me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
         val ok = self.parse_all_streaming_surfaces_in_place_impl()
         (self.ctx, ok)
+
+    # Unit child: install the native source interface index for the rows
+    # whose canonical path is in `keep` (or every row when `all_rows`). Rows
+    # are the retained phase-1 owners, so paths, bodies and SHA identities
+    # stay aligned exactly as in the phase-1 whole-inventory build.
+    me install_unit_interface_index_v1(canonical_paths: [text], keep: Dict<text, bool>,
+            all_rows: bool) -> bool:
+        var unit_sources: [SourceFile] = []
+        var unit_paths: [text] = []
+        var unit_digests: [text] = []
+        var row = 0
+        while row < self.ctx.sources.len():
+            val selected = all_rows or
+                (row < canonical_paths.len() and keep.contains_key(canonical_paths[row]))
+            if selected:
+                val row_source = self.ctx.sources[row]
+                var row_digest = ""
+                if row < self.ctx.source_identities_owner.len():
+                    row_digest = self.ctx.source_identities_owner[row]
+                unit_sources.push(row_source)
+                unit_paths.push(row_source.path)
+                unit_digests.push(row_digest)
+            row = row + 1
+        val built = native_source_interface_index_from_sources_with_digests_v1(
+            unit_sources, unit_paths, unit_digests)
+        if built.is_err():
+            self.ctx.add_error("native source interface index refused: " + built.unwrap_err())
+            return false
+        self.ctx.native_source_interface_index_v1 = Some(built.unwrap())
+        true
 
     me parse_all_committing_impl() -> bool:
         self.ctx.native_objectless_decl_proofs = {}
