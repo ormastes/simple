@@ -45,13 +45,13 @@ use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 /// Retention limit for `PARSED_SOURCE_CACHE`; `SIMPLE_PARSED_SOURCE_CACHE_MAX`
 /// overrides, `0` means unbounded.
 pub const PARSED_SOURCE_CACHE_MAX_DEFAULT: usize = 4096;
-/// Retention limit for `PARSED_SOURCE_CACHE` on native-compile worker threads.
-/// `SIMPLE_PARSED_SOURCE_CACHE_MAX` overrides when set; the default is modest
-/// because one whole-closure compile can walk thousands of modules inside a
-/// single worker, and every entry retains a whole source string AND its parsed
-/// AST. Entries are pure recomputable memos, so eviction only costs a re-read
-/// and re-parse on a later miss in that worker.
-pub const PARSED_SOURCE_CACHE_COMPILE_MAX_DEFAULT: usize = 256;
+/// Retention limit for `PARSED_SOURCE_CACHE` on persistent native-compile
+/// worker threads. `SIMPLE_PARSED_SOURCE_CACHE_MAX` overrides when set; kept
+/// small because up to `N_threads` (e.g. 64) rayon workers stay live across
+/// the whole build and each entry retains a source string AND its parsed AST.
+/// Entries are pure recomputable memos, so eviction only costs a re-read and
+/// re-parse on a miss in that worker.
+pub const PARSED_SOURCE_CACHE_COMPILE_MAX_DEFAULT: usize = 24;
 /// Retention limit for `PROBE_SOURCE_CACHE`; `SIMPLE_PROBE_SOURCE_CACHE_MAX`
 /// overrides, `0` means unbounded.
 pub const PROBE_SOURCE_CACHE_MAX_DEFAULT: usize = 4096;
