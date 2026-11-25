@@ -189,3 +189,30 @@ ceiling and the monitor's 24GB RSS guard, so no memory limiter fires; this
 was purely the wall-clock default. The unrelated Rust-seed JIT panic
 ("can't resolve symbol simple_contract_check" in cranelift finalize, seen
 once adjacent to a timeout kill) is a separate seed defect, not this bug.
+
+## Verification note (2026-11-25, release/1.0.0)
+
+The 2026-11-05 fix is present and intact at release/1.0.0 HEAD
+(dfbd7c9d765) — the 2026-09 transplant did not revert it:
+- `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl:335` —
+  `var timeout = 900` (direct-dispatch default, comment cites this bug).
+- `src/app/test_runner_new/timeout_budget.spl:35` —
+  `CLIENT_DEFAULT_TIMEOUT_SECS = 900`; the app single lane
+  (`test_runner_single.spl:339`) derives its default from
+  `client_default_timeout_secs()`.
+- `src/lib/nogc_sync_mut/test_runner/test_runner_single.spl:52` —
+  std twin default `var timeout_secs = 900`.
+- `src/lib/nogc_sync_mut/test_runner/native_owned_process.spl:16,43` —
+  `scoped_cpu_budget_ms` keeps the CPU grant >= the wall grant.
+
+Runtime re-verification is environment-blocked on this Windows host:
+both `bin/simple.exe test <pin spec> --mode=interpreter` and
+`bin/simple.exe run <pin spec>` fail at HEAD with
+`unknown decorator '@representation_boundary'` (known seed/source
+inconsistency from cfd89933699; the pinned v1.0.0-rc.1 seed predates the
+annotation). The ~600s end-to-end spec run from the 2026-11-05 note
+stands as the last full runtime evidence; this note confirms the fix
+code is still in the tree.
+
+**Status:** resolved (fix verified present at tip by inspection;
+runtime evidence from 2026-11-05 lane).

@@ -87,3 +87,26 @@ owner stays in place. Measured (release seed, interpreter mode): 200k
 `fill_rect`->`put_pixel` writes into a 1024x768 `[u32]` = ~2.6 s total including
 the 786k-element build (old behaviour: ~28 ms/px, hours). Pinned by
 `test/01_unit/compiler/interp_array_field_write_budget_spec.spl` (60 s budget).
+
+## Verification note (2026-11-25, release/1.0.0)
+
+Re-verified the root-cause pattern at release/1.0.0 HEAD (dfbd7c9d765)
+with the pinned binary (`SIMPLE_LIB=src bin/simple.exe run <probe>
+--mode=interpreter`, Windows 11): a probe class whose `me fn fill_rect`
+delegates per-pixel to `me fn put_pixel`, writing into a 1024x768
+`[u32]` field — 200,000 writes completed in ~9.2 s total including the
+786k-element buffer build (~46 us/px; old pathology was ~28 ms/px, i.e.
+this probe would have taken ~90+ minutes), and the written pixel reads
+back the correct value (0xFF223344). Same order as the 2026-11-04
+resolution measurement (~2.6 s on that host); the full-array-clone
+me->me pathology does not reproduce.
+
+The pin spec `test/01_unit/compiler/interp_array_field_write_budget_spec.spl`
+exists but cannot be executed at HEAD: both `bin/simple.exe test` and
+`run` on it fail with `unknown decorator '@representation_boundary'`
+inside the spec framework (known seed/source inconsistency from
+cfd89933699). The direct probe above is the runtime evidence; the
+resolution stands.
+
+**Status:** resolved (re-verified at tip with the pinned seed via direct
+me->me per-pixel probe).

@@ -46,3 +46,22 @@ policy checks only), and TLS 1.3 remains absent (separate GAP-TLS-2). The
 2026-09-13 triage line "tls_server.spl is the only TLS surface" is outdated
 (ALPN feed lives in tls_server.spl + nogc_async_mut/io/tls_handshake.spl), but
 "not closable by triage" still holds. DB must stay OPEN, not closed.
+
+## Triage note (2026-11-25, release/1.0.0)
+
+Header correction: the "Status: closed (2026-09-13 triage)" line above is
+misleading and contradicted by the 2026-11-13 ground-truth section, which
+states "DB must stay OPEN, not closed". This entry is OPEN.
+
+Re-confirmed at release/1.0.0 HEAD (dfbd7c9d765) by source inspection:
+- `tls_server.spl` still carries `alpn_negotiate` (:124) and the
+  production dispatch surface `tls_server_accept` (:222);
+  `nogc_async_mut/io/tls_handshake.spl` still carries
+  `find_alpn_extension_data` (:434) and `negotiate_alpn` (:467);
+  `test/01_unit/lib/nogc_async_mut/io/tls_alpn_negotiation_spec.spl`
+  exists. The ALPN feed remains present.
+- The unblock condition is still unmet: no live-socket SSpec oracle
+  drives a real server handshake to ALPN-negotiated dispatch, and
+  TLS 1.3 remains absent (GAP-TLS-2). Building that oracle is a
+  capability build-out reserved for the Pure-Simple TLS/HTTP server
+  lane, not a bounded fix.
