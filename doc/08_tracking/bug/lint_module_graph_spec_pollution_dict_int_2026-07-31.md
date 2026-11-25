@@ -1,6 +1,17 @@
 # Specs importing compiler.tools.lint.main gain a file-level failure: "cannot convert dict to int"
 ## Obsolete 2026-09-16 — Root-caused as test-runner defect; tracking moved to test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md (verified exists, same symptom)
 
+**Re-verified 2026-11-25** (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`,
+`--no-cache --no-cover-check`, temporary `@representation_boundary` strip to
+work around the separate pinned-binary decorator inconsistency):
+`test/01_unit/compiler/lint/collection_easy_fix_spec.spl` no longer shows
+the `cannot convert dict to int` phantom file-level failure — the file-level
+verdict now reflects real example results. Note: the spec currently has one
+GENUINE example failure (`keeps the array-rebuild fallback hint-only`,
+`assert_true failed: got false`) — a lint-behavior question unrelated to
+this bug's phantom-pollution symptom; not investigated in this pass.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
 the subject is removed, superseded, or duplicated elsewhere in the ledger.
 

@@ -1,8 +1,19 @@
 # JIT-compile failure anywhere in the whole-program closure → interpreter fallback loses a struct's 2nd+ static method registration
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — deployed-binary verification done; `with_heap_size` resolves after JIT fallback
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Verification 2026-11-25 (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`):** the exact
+minimal repro from this doc (`GcConfig.with_heap_size(20 * 1024)`) triggers
+the same JIT failure (`GcHeap.with_config`: unresolved `AtomicBool.new`),
+falls back to the interpreter, and now prints
+`young_size=4096 old_size=16384` — the second static method resolves
+correctly. The originally failing spec
+`test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
+passes 2/2. (Both runs used a temporary working-tree strip of
+`@representation_boundary` lines to work around the separate pinned-binary
+decorator inconsistency at this HEAD; sources restored afterwards, no
+assertions touched.) The source invariant remains pinned by
+`interpreter_constructor_test.rs::impl_registers_every_static_method`.
 
 **Date:** 2026-07-20
 **Scope:** `bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary) JIT-to-interpreter fallback path (compiler internals — needs a rebuild to verify current source, not a `.spl` source edit)
@@ -111,7 +122,7 @@ source already contains the required all-method registration behavior.
 
 ## Status
 
-Source invariant pinned; deployed-binary verification pending. The exact
-`test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
-assertion remains unchanged and red on the stale deployed binary.
+Resolved 2026-11-25: deployed-binary verification completed (see header) —
+the pinned seed binary resolves `GcConfig.with_heap_size` after the JIT
+fallback and the contract spec passes 2/2.
 
