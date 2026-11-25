@@ -21,6 +21,16 @@ observable behaviour: each adapter reaches ITS store's impl, never a sibling
 # @tag:traits
 
 use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
 
 trait FieldStore:
     fn read(key: i64) -> i64
@@ -56,3 +66,23 @@ describe "trait-typed field receiver":
         expect(disk.get(5)).to_equal(105)
         expect(net.get(5)).to_equal(15)
         expect(UnrelatedReader(n: 0).read(5)).to_equal(-1)
+
+    it "lowers self.store.read(key) cleanly through pure-Simple HIR+MIR with competing read methods":
+        val src = "trait FieldStore:\n    fn read(key: i64) -> i64\n\nclass DiskStore:\n    var base: i64\n\nimpl FieldStore for DiskStore:\n    fn read(key: i64) -> i64:\n        self.base + key\n\nclass UnrelatedReader:\n    var n: i64\n    fn read(key: i64) -> i64:\n        -1\n\nclass StoreAdapter:\n    store: FieldStore\n    fn get(key: i64) -> i64:\n        self.store.read(key)\n"
+        val log = Logger(level: 0)
+        val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+        var modules: Dict<text, Module> = {}
+        modules["app.main"] = ast
+        val surfaces = module_surfaces_from_modules(modules, [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]).unwrap()
+        var hl = hirlowering_for_module("app.main", surfaces)
+        val hir = hl.lower_module(ast)
+        expect(hl.errors.len()).to_equal(0)
+        var ml = MirLowering.new(hir.symbols)
+        var pre: Dict<text, HirModule> = {}
+        pre["m0"] = hir
+        ml.prescan_module_struct_names(pre, "m0")
+        val _mir = ml.lower_module(hir, [hir])
+        var errs = ""
+        for e in ml.errors:
+            errs = errs + e.message + "\n"
+        expect(errs).to_equal("")

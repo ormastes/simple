@@ -105,3 +105,7 @@ Release package note: original workaround commit540674d6d935027f0195f5a137da5038
 fix-implemented-verification-pending. Native repro (stage3 built after 3aa79ca1610): compile the
 unannotated `phase2_module_roles_select_v1(...)?` + `for p in sel.included_paths` fixture; expect no
 for-in collection `I64` MIR error. Retire the typed-local workarounds after it passes.
+
+## Status 2026-11-25 — all 5 workarounds removed from `src/`
+- Removed explicit Ok-record annotations (and unused imports) across `grouped_native_run.spl`, `native_group_phase2_scv.spl`, and `native_group_provisional_runtime.spl`.
+- Extended `test/01_unit/compiler/mir/result_try_record_array_workaround_spec.spl` (5/5 PASS) with unannotated imported-call and local-call cases proving `lower_try_expr` (`3aa79ca1610`) preserves array field iteration with zero MIR errors.

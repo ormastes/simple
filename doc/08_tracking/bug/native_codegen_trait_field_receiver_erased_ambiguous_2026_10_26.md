@@ -65,3 +65,7 @@ Guards: `hir/lower/tests/trait_field_receiver_tests.rs` (MIR has a vtable call, 
 Verify: rebuild seed; `cargo test -p simple-compiler --lib trait_field_receiver`; then remove the
 typed-local workaround in `virtual_source_consumer_v1.spl` and run the full-CLI native-build with
 `SIMPLE_NATIVE_BUILD_RUST=1` -> expect no AMBIGUOUS-METHOD/STUB-FALLBACK for `read`.
+
+## Status 2026-11-25 — all 4 workarounds removed from `src/`
+- Reverted all 4 `val store: VirtualSourceStoreV1 = self.store` bindings in `src/compiler/00.common/cache_contract/virtual_source_consumer_v1.spl` to direct `self.store.<method>(...)`.
+- Extended `test/01_unit/compiler/50.mir/trait_field_receiver_dispatch_spec.spl` (2/2 PASS) to verify `self.store.read(key)` lowers with zero errors through pure-Simple HIR+MIR alongside competing `read` methods.

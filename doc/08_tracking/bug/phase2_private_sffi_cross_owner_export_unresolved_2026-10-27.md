@@ -58,3 +58,6 @@ Retire only the linked workaround after that root fix and compatible producer
 evidence; a successful public-facade build does not prove the language bug fixed.
 
 Evidence (2026-11-09): test/01_unit/compiler/driver/source_parse_public_boundary_spec.spl pins the decision (public driver_parse_*_v1 facades exist; selected/streaming/retained consumers use explicit imports, no wildcard import, no consumer SFFI aliases). Run from a worktree of this head (CWD=worktree): GREEN outcome=OK executed=1 passed=1; RED with `pub` removed from driver_parse_exit_v1: outcome=ERROR failed=1. Compile retry of the Phase 2 command still pending (hence verification-pending).
+
+## Status 2026-11-25 — stale `@workaround` tags removed (permanent public facade retained)
+- Per owner decision 7, the public `driver_parse_*_v1` facades and explicit imports in `driver_source_parse_{support,retained,selected,streaming}.spl` are permanent architecture (pinned by `source_parse_public_boundary_spec.spl`, 1/1 PASS). Replaced the 4 stale `@workaround` comments with normal design comments.
