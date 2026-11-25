@@ -1,5 +1,22 @@
 # `self.error(...)` used where `self.error_fatal(...)` was intended — family sweep
 
+## Triage 2026-11-25 (P2 sweep lane) — still OPEN; not a bounded single-bug fix
+
+Reviewed for the release/1.0.0 P2 sweep. This is a multi-site diagnostic-severity
+family, not one bug: three 2026-08-08 lanes already converted the
+highest-confidence sites, and the 2026-11-06/07/10 follow-ups each landed a
+source repair whose **executable verification is explicitly pending** an
+admitted self-hosted runtime (statement-binding invariant sites, unknown
+statement fallback, GPU dispatch-scope repair, function-value refusal). No
+qualified self-hosted runtime exists in this lane either — the pinned
+`bin/simple.exe` at release/1.0.0 HEAD cannot even run `test` (rejects
+`@representation_boundary` in its own runner closure) — so none of the pending
+verifications can be advanced here, and picking off additional HIGH sites
+without runtime evidence would repeat the evidence-based-not-repro-proven
+pattern the doc itself flags. Left **OPEN**; the per-section status headers
+below are current and accurate. No code or doc-status change made beyond this
+note.
+
 ## Statement-binding invariant follow-up, 2026-11-10
 
 The release/1.0.0 source at `6d496f82c5a` still records eight statement
