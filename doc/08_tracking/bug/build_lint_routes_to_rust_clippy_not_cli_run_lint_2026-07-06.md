@@ -41,3 +41,24 @@ task #21) — the same delegation lane is involved.
 ## Workaround (current)
 Pre-commit hook enforcement + `sh scripts/check/check-ui-backend-isolation.shs` directly.
 
+
+## Closed 2026-11-25 (p2w1-ah lane) — stale; duplicate of the PR #11522 resolution
+
+Same root cause and same resolution as
+`build_lint_subcommand_triggers_full_driver_rebuild_2026-06-15.md`, resolved
+2026-11-25 by PR #11522 (merge eec4a8db17f): the `build lint` -> cargo
+clippy hijack lives only in the Rust seed (`handle_build` /
+`handle_build_lint_with_args` in
+`src/compiler_rust/driver/src/cli/commands/misc_commands.rs`, reached because
+the seed's Simple-first `build` dispatch is dead), while the pure-Simple
+self-hosted CLI already routes correctly — `src/app/build/cli_entry.spl:179-180`
+dispatches `lint` to `cli_run_lint(args[1:])` (confirmed by source inspection
+on release/1.0.0 @ 602063b765f). Per repo policy the seed is bootstrap-only,
+so the residual seed-side interception is out of scope for a pure-Simple fix;
+the concrete seed fix is recorded in the sibling doc. The inert-gate
+consequence noted here (the ui-backend-isolation gate wired into
+`cli_run_lint`) does not apply on the self-hosted lane, which does execute
+`cli_run_lint`. Execution re-verification on this host is environment-blocked
+(the pinned seed rejects the `@representation_boundary` annotations at HEAD
+repo-wide); closure rests on the PR #11522 evidence plus current source
+inspection. Status: CLOSED (stale / duplicate of PR #11522).

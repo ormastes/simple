@@ -94,3 +94,19 @@ not stale test syntax.
 ## Resolution 2026-11-06
 
 Fixed together with simple_check_diagnostics_contract_raw_parser_error_not_stable_format_2026-07-20 (see its Resolution): check_diagnostics_contract_spec 10/10.
+
+## Closed 2026-11-25 (p2w1-ah lane) — stale header; fix landed 2026-11-06
+
+The "Open 2026-09-16" banner above is a normalization-pass artifact,
+superseded by the Resolution 2026-11-06 section below. The sibling record
+`simple_check_diagnostics_contract_raw_parser_error_not_stable_format_2026-07-20.md`
+documents the root causes and fix (work/fx-check-diag-20261106) with
+`check_diagnostics_contract_spec` at 10/10 under the seed. Source inspection
+on release/1.0.0 @ 602063b765f confirms the fix is present in
+`src/app/check/main.spl`: the W0410 unresolved-import probe (:167, :192),
+`severity` on `CheckDiagnostic`, and the "N warning(s) found" summary (:456).
+Execution re-verification on this host is environment-blocked (the pinned
+`bin/simple.exe` seed rejects the `@representation_boundary` annotations at
+HEAD repo-wide, failing every spec run at the test-runner harness), so
+closure rests on the recorded 2026-11-06 seed-run evidence plus current
+source inspection. Status: CLOSED.

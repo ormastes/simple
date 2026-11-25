@@ -1,6 +1,6 @@
 # cranelift `__simple_ssa_phi` N-ary-join guard now fires in a real spec
 
-**Status:** OPEN
+**Status:** CLOSED 2026-11-25 — fixed 2026-11-10 via PR #8143; see "Status 2026-11-10 — FIXED" below
 **Reconciled:** 2026-11-09
 
 ## Corrective review of PR #8095
@@ -304,3 +304,24 @@ worked around: rt_cranelift_call_function_ptr accepts NO arguments
 predecessor instead of a selector arg. Remaining: llvm-lib twin
 (llvm_lib_translate_expr.spl:714) keeps its own N-ary restriction —
 separate lane. Native/self-hosted qualification not claimed.
+
+## Closed 2026-11-25 (p2w1-ah lane) — stale header; fix merged via PR #8143
+
+The "Status: OPEN / Reconciled 2026-11-09" header above was superseded by the
+"Status 2026-11-10 — FIXED" section; the fix branch
+work/p2fix-compiler-batch-20261110 merged as PR #8143 (e4018dd6699) and is on
+release/1.0.0. Source inspection @ 602063b765f confirms the route-(1) fix is
+present: `cranelift_ssa_phi_dest_ids` is defined at
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:557` and wired
+into `compile_function` at :597, guaranteeing every `__simple_ssa_phi`
+destination a stack slot so the arity-agnostic
+`store_phi_incomings_for_edge` (:1156) is unconditionally reachable; the
+regression spec
+`test/01_unit/compiler/backend/cranelift_ssa_phi_nary_join_spec.spl` exists
+in the tree. Execution re-verification on this host is environment-blocked
+(the pinned `bin/simple.exe` seed rejects the `@representation_boundary`
+annotations at HEAD repo-wide); closure rests on the recorded 2026-11-10
+seed-smoke evidence (2/2 green post-fix, 0/2 pre-fix) plus current source
+inspection. The llvm-lib twin restriction
+(`llvm_lib_translate_expr.spl:714`) remains a separately-scoped lane, as
+recorded above. Status: CLOSED.

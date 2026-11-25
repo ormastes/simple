@@ -161,3 +161,22 @@ OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contribute
 release seed default (measured 2026-11-04) and stays 46/0 — the "19 failures"
 in the record head predate that seed.
 Coordinator owns the bug_db status change.
+
+## Closed 2026-11-25 (p2w1-ah lane) — stale; interpreter root fixed 2026-11-04
+
+The "remains OPEN" header above is superseded by the 2026-11-04 notes: the
+root cause was the seed tree-walk interpreter value-copying class instances
+stored in fields outside `main`, and the fix (`SIMPLE_INTERP_CLASS_REF`
+default ON) landed with execution evidence (`async_promise_pair_spec` 4/4,
+`async_promise_pair_persistence_spec` 3/3,
+`test/01_unit/lib/std/async_spec.spl` 46/0). Source inspection on
+release/1.0.0 @ 602063b765f confirms the switch is present and default-ON:
+`src/compiler_rust/compiler/src/value.rs:3504-3507`
+(`class_instance_storage_enabled()` -> `unwrap_or(true)`). Execution
+re-verification on this Windows host is environment-blocked: release/1.0.0
+HEAD carries 940 `@representation_boundary` annotations (cfd89933699) that
+the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects, so every
+`bin/simple.exe test ... --mode=interpreter` run fails at
+`src/app/test_runner_new/test_runner_client.spl:9` before reaching any spec.
+Closure rests on the recorded 2026-11-04 execution evidence plus current
+source inspection. Status: CLOSED.
