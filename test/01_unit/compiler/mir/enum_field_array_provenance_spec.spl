@@ -1,0 +1,54 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "qualified enum field-array provenance (mir_enum_field_array_record_provenance_2026_11_23)":
+    it "lowers enum_field_array_original.spl under a qualified module id without false record-layout fatal":
+        val src = file_read("test/fixtures/compiler/bug_token_receipt/enum_field_array_original.spl")
+        val ast = parse_full_frontend(src, "lib.nogc_sync_mut.database.bug", "lib.nogc_sync_mut.database.bug", Logger(level: 0))
+        var hl = HirLowering.with_filename("lib.nogc_sync_mut.database.bug")
+        val hir = hl.lower_module(ast)
+        expect(hl.errors.len()).to_equal(0)
+        var ml = MirLowering.new(hir.symbols)
+        ml.current_module_id = "lib.nogc_sync_mut.database.bug"
+        val mir = ml.lower_module(hir)
+        expect(ml.errors.len()).to_equal(0)
+        expect(mir.functions.len()).to_be_greater_than(0)
+        expect(ml.mir_layout_or_runtime_key_is_enum("lib.nogc_sync_mut.database.bug.Reading")).to_equal(true)
+        # Same-basename negative control: a different module's qualified key
+        # with the same bare name (`Reading`) must NEVER be classified as an
+        # enum by stripping qualification.
+        expect(ml.mir_layout_or_runtime_key_is_enum("other.record.mod.Reading")).to_equal(false)
+
+    it "lowers enum field-array index reads without false record-layout fatal and distinguishes same-basename record in another module":
+        val index_src = "struct TokenCount:\n    value: i64\n\nenum Reading:\n    Unavailable\n    Count(TokenCount)\n\nstruct Usage:\n    input: Reading\n    output: Reading\n\nfn first_known(usage: Usage) -> i64:\n    val readings = [usage.input, usage.output]\n    val first = readings[0]\n    match first:\n        case Reading.Unavailable: 0\n        case Reading.Count(c): c.value\n"
+        val ast1 = parse_full_frontend(index_src, "lib.nogc_sync_mut.database.bug", "lib.nogc_sync_mut.database.bug", Logger(level: 0))
+        var hl1 = HirLowering.with_filename("lib.nogc_sync_mut.database.bug")
+        val hir1 = hl1.lower_module(ast1)
+        expect(hl1.errors.len()).to_equal(0)
+        var ml = MirLowering.new(hir1.symbols)
+        ml.current_module_id = "lib.nogc_sync_mut.database.bug"
+        val mir1 = ml.lower_module(hir1)
+        expect(ml.errors.len()).to_equal(0)
+        expect(mir1.functions.len()).to_be_greater_than(0)
+
+        # Negative same-basename record in a separate module: must remain a
+        # record (not misclassified as enum via bare-name stripping).
+        val rec_src = "struct Reading:\n    value: i64\n\nfn read_first(items: [Reading]) -> i64:\n    items[0].value\n"
+        val ast2 = parse_full_frontend(rec_src, "other.record.mod", "other.record.mod", Logger(level: 0))
+        var hl2 = HirLowering.with_filename("other.record.mod")
+        val hir2 = hl2.lower_module(ast2)
+        expect(hl2.errors.len()).to_equal(0)
+        ml.current_module_id = "other.record.mod"
+        val mir2 = ml.lower_module(hir2)
+        expect(ml.errors.len()).to_equal(0)
+        expect(mir2.functions.len()).to_be_greater_than(0)
+        expect(ml.mir_layout_or_runtime_key_is_enum("lib.nogc_sync_mut.database.bug.Reading")).to_equal(true)
+        expect(ml.mir_layout_or_runtime_key_is_enum("other.record.mod.Reading")).to_equal(false)
+        expect(ml.mir_layout_or_runtime_key_is_enum("other.record.mod::Reading")).to_equal(false)
