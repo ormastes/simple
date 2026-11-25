@@ -1,21 +1,15 @@
-# Purpose and audience: compiler engineers owning the native stage3 bootstrap
-# (HIR identifier / call lowering and MIR NamedVar / let / static-method lowering).
+# Purpose and audience: compiler engineers owning HIR/MIR Option transport.
 # @req REQ-SSPEC-COMPILER
 """
-# Frozen-stage2 Option-transport hot sites carry raw ids / unwrapped text
+# HIR/MIR Option transport uses idiomatic Option/`if val` bindings
 
-Source-shape guard for stage2_symbol_display_name_option_transport_2026-11-03
-(family: stage2_if_val_struct_option_binding_as_int_wide_2026-11-03).
-
-The frozen stage2 (ef0681fc0e1) mis-tests `SymbolId? != nil` / `.?`, mis-binds
-`if val x = <struct Option>`, drops a `SymbolId?` built from a valid raw id and
-mis-tests `text? != nil` (native evidence: vb_mm1 in method_calls_literals.spl).
-Every site below sits on a path the stage3 compiler needs for the variable /
-call / static-method smokes, so each one carries a raw `i64` (-1 = absent) or
-an unwrapped `text` ("" = absent) instead, tagged `@workaround`.
-
-Only the seed interpreter can run this spec; the miscompile itself shows only
-in a stage2-built object, so the guard pins the SHAPE, not the behaviour.
+Verifies that the stale frozen-stage2 workarounds
+(`stage2_symbol_display_name_option_transport_2026-11-03` and
+`stage2_if_val_struct_option_binding_as_int_wide_2026-11-03`) are removed from
+the compiler source and that HIR + MIR lower every restored Option-transport
+shape (struct Option `if val`, generic turbofish `if val` with field access,
+nested `text?` `if val`, `Dict.get` `if val`, `SymbolId?` `.is_none()`, and
+direct `Option<Struct>` return `.unwrap()`) without errors or `rt_value_as_int_wide`.
 """
 
 # @tag:unit
@@ -23,94 +17,128 @@ in a stage2-built object, so the guard pins the SHAPE, not the behaviour.
 # @tag:mir
 
 use std.spec
+use std.io_runtime.{env_set}
 use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
 
-val bug_tag = "@workaround bug=stage2_symbol_display_name_option_transport_2026-11-03"
-val expression_core = "src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl"
-val call_arity = "src/compiler/20.hir/hir_lowering/_Expressions/call_arity.spl"
-val symbol_table = "src/compiler/20.hir/hir_symbol_table_methods.spl"
-val expr_dispatch = "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
-val lowering_stmts = "src/compiler/50.mir/mir_lowering_stmts.spl"
-val method_calls = "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl"
+val bug_tag_1 = "stage2_symbol_display_name_option_transport_2026-11-03"
+val bug_tag_2 = "stage2_if_val_struct_option_binding_as_int_wide_2026-11-03"
 
-describe "HIR identifier and call-arity resolution carry a raw symbol id":
-    it "resolves an identifier through lookup_or_invalid, not SymbolId? == nil / .?":
-        val src = file_read(expression_core)
-        expect(src).to_contain("val symbol_raw: i64 = self.symbols.lookup_or_invalid(ident_name_t).id")
-        expect(src).not_to_contain("if symbol == nil or symbol.? == nil:")
-        expect(src).not_to_contain("val symbol = self.symbols.lookup(ident_name_t)")
-        expect(src).to_contain(bug_tag)
+val COMPILER_FILES: [text] = [
+    "src/compiler/10.frontend/parser_types_expr.spl",
+    "src/compiler/20.hir/hir_lowering/_Expressions/call_arity.spl",
+    "src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl",
+    "src/compiler/20.hir/hir_symbol_table_methods.spl",
+    "src/compiler/35.semantics/any_escape/checker.spl",
+    "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl",
+    "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl",
+    "src/compiler/50.mir/mir_lowering_stmts.spl",
+    "src/compiler/80.driver/driver_pipeline_lowering.spl"
+]
 
-    it "proves a static-method owner through a scalar kind accessor and carries the method id raw":
-        val src = file_read(expression_core)
-        expect(src).to_contain("if not self.symbols.symbol_is_type_declaration_scalar_raw(owner.id):")
-        expect(src).to_contain("return MethodResolution.StaticMethod(owner, SymbolId(id: declared_method_raw))")
-        expect(src).not_to_contain("if val declared_method = method_symbol:")
-        expect(src).not_to_contain("if owner_symbol == nil:")
+val OPTION_TRANSPORT_SRC: text = "struct SymId:\n    id: i64\n\nstruct SymInfo:\n    id: SymId\n    owner: text?\n\nstruct TypeWrap:\n    tag: i64\n\n@unsafe(reason: \"fixture\", capabilities: [ffi])\nextern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?\n\nfn find_sym(flag: bool) -> SymId?:\n    if flag: return Some(SymId(id: 5))\n    None\n\nfn get_info(flag: bool) -> SymInfo?:\n    if flag: return Some(SymInfo(id: SymId(id: 5), owner: Some(\"mod\")))\n    None\n\nfn via_struct_if_val(flag: bool) -> i64:\n    if val s = find_sym(flag):\n        return s.id\n    -1\n\nfn via_nested_text_if_val(flag: bool) -> text:\n    if val info = get_info(flag):\n        if val owner = info.owner:\n            return owner\n    \"\"\n\nfn via_turbofish_if_val(payload: i64) -> i64:\n    unsafe(capabilities: [ffi]):\n        if val element = rt_tuple_get<TypeWrap>(payload, 0):\n            return element.tag\n    -1\n\nfn via_dict_get_if_val(k: text) -> text:\n    val d: {{text: text}} = {{\"k\": \"v\"}}\n    if val hit = d.get(k):\n        if hit != \"\":\n            return hit\n    \"\"\n\nfn via_option_var_is_none(flag: bool) -> i64:\n    var m: SymId? = None\n    if flag:\n        m = find_sym(true)\n    if m.is_none():\n        return -1\n    if val resolved = m:\n        return resolved.id\n    -1\n\nfn via_direct_unwrap(flag: bool) -> i64:\n    val s: SymId = find_sym(flag).unwrap()\n    s.id\n"
 
-    it "declares the scalar kind accessor in the symbol table":
-        val src = file_read(symbol_table)
-        expect(src).to_contain("fn symbol_is_type_declaration_scalar_raw(raw: i64) -> bool:")
+fn lower_option_probe(bootstrap: bool) -> Dict<text, text>:
+    val module = parse_full_frontend(OPTION_TRANSPORT_SRC, "option_transport_probe.spl", "option_transport_probe", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("option_transport_probe.spl")
+    if bootstrap:
+        env_set("SIMPLE_BOOTSTRAP", "1")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    else:
+        env_set("SIMPLE_BOOTSTRAP", "")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errs = ""
+    for e in hir_lowering.errors:
+        errs = errs + "hir:" + e.message + ";"
+    for e in mir_lowering.errors:
+        errs = errs + "mir:" + e.message + ";"
+    var out: Dict<text, text> = {}
+    out["__errors__"] = errs
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
 
-    it "builds call-arity rows from lookup_or_invalid, not SymbolId? != nil":
-        val src = file_read(call_arity)
-        expect(src).to_contain("val symbol_raw: i64 = self.symbols.lookup_or_invalid(fn_.name).id")
-        expect(src).not_to_contain("if symbol != nil and symbol.? != nil:")
-        expect(src).to_contain(bug_tag)
+describe "stale frozen-stage2 Option-transport workarounds are removed":
+    it "leaves none of the target workaround tags in the 9 compiler files":
+        for path in COMPILER_FILES:
+            val src = file_read(path)
+            expect(src.contains(bug_tag_1)).to_equal(false)
+            expect(src.contains(bug_tag_2)).to_equal(false)
 
-describe "MIR NamedVar fallback carries a raw symbol id and a scalar owner module":
-    it "re-resolves a NamedVar by name through lookup_or_invalid":
-        val src = file_read(expr_dispatch)
-        expect(src).to_contain("val pre_nv_id: i64 = self.symbols.lookup_or_invalid(named_var_name).id")
-        expect(src).not_to_contain("val pre_resolved = self.symbols.lookup(named_var_name)")
-        expect(src).not_to_contain("if pre_resolved != nil:")
-        expect(src).to_contain(bug_tag)
+    it "restores idiomatic Option/`if val` forms in HIR and MIR hot sites":
+        val ec = file_read("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl")
+        expect(ec).to_contain("if val owner_symbol = self.symbols.get_symbol_raw(owner.id):")
+        expect(ec).to_contain("if val declared_method = self.symbols.lookup_static_method_raw(owner.id, method):")
+        expect(ec).to_contain("if val candidate_symbol = self.symbols.lookup(ident_name_t):")
+        val ca = file_read("src/compiler/20.hir/hir_lowering/_Expressions/call_arity.spl")
+        expect(ca).to_contain("if val found_symbol = self.symbols.lookup(fn_.name):")
+        val ed = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        expect(ed).to_contain("if val pre_resolved = self.symbols.lookup(named_var_name):")
+        expect(ed).to_contain("if val foreign_symbol = self.symbols.get_symbol_raw(pre_sym_id):")
+        expect(ed).to_contain("if val foreign_owner = foreign_symbol.defining_module:")
+        val st = file_read("src/compiler/50.mir/mir_lowering_stmts.spl")
+        expect(st).to_contain("if val symbol_value = let_symbol:")
+        val mc = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        expect(mc).to_contain("if val static_owner = self.symbols.get_symbol_raw(resolved_static_receiver_symbol):")
+        expect(mc).to_contain("var static_method_id: SymbolId? = None")
+        expect(mc).to_contain("if val static_result_name = self.struct_method_return_names.get(")
+        val pt = file_read("src/compiler/10.frontend/parser_types_expr.spl")
+        expect(pt).not_to_contain("val element_type: Type = element")
 
-    it "reads the foreign owner module through the scalar accessor, not if-val on HirSymbol?":
-        val src = file_read(expr_dispatch)
-        expect(src).to_contain("val foreign_owner: text = self.symbols.symbol_defining_module_scalar_raw(pre_sym_id)")
-        expect(src).not_to_contain("if val foreign_symbol = self.symbols.get_symbol_raw(pre_sym_id):")
-        expect(src).not_to_contain("if val foreign_owner = foreign_symbol.defining_module:")
+describe "HIR and MIR lower all restored Option-transport shapes cleanly":
+    it "lowers every restored shape without errors or rt_value_as_int_wide (normal mode)":
+        val fns = lower_option_probe(false)
+        expect(fns["__errors__"] ?? "missing").to_equal("")
+        for name in [
+            "via_struct_if_val",
+            "via_nested_text_if_val",
+            "via_turbofish_if_val",
+            "via_dict_get_if_val",
+            "via_option_var_is_none",
+            "via_direct_unwrap"
+        ]:
+            val mir = fns[name] ?? ""
+            expect(mir != "").to_equal(true)
+            val wide_at = mir.index_of("rt_value_as_int_wide")
+            val wide_ctx = if wide_at >= 0:
+                val ws = if wide_at > 400: wide_at - 400 else: 0
+                val we = if wide_at + 400 < mir.len(): wide_at + 400 else: mir.len()
+                "{name}:has_wide:" + mir.substring(ws, we)
+            else:
+                "{name}:clean"
+            expect(wide_ctx).to_equal("{name}:clean")
 
-describe "MIR let lowering carries the binding symbol as a raw id":
-    it "never rebuilds a SymbolId? from the let symbol":
-        val src = file_read(lowering_stmts)
-        expect(src).to_contain("val let_symbol_raw: i64 = let_symbol_value.id")
-        expect(src).to_contain("if let_symbol_raw >= 0:")
-        expect(src).not_to_contain("val let_symbol: SymbolId? = if let_symbol_value.id >= 0:")
-        expect(src).not_to_contain("if let_symbol.?:")
-        expect(src).not_to_contain("val symbol_value = let_symbol ?? SymbolId(id: -1)")
-        expect(src).to_contain(bug_tag)
-
-describe "MIR static-method dispatch carries a raw method id and unwrapped result name":
-    it "tracks the resolved static method as i64, not a SymbolId? var":
-        val src = file_read(method_calls)
-        expect(src).to_contain("var static_method_raw: i64 = -1")
-        expect(src).to_contain("if static_method_raw >= 0:")
-        expect(src).to_contain("val resolved_static_method_id = SymbolId(id: static_method_raw)")
-        expect(src).not_to_contain("var static_method_id: SymbolId? = nil")
-        expect(src).not_to_contain("if static_method_id != nil:")
-        expect(src).not_to_contain("if static_method_id == nil")
-        expect(src).not_to_contain("static_method_id ?? SymbolId(id: -1)")
-        expect(src).to_contain(bug_tag)
-
-    it "never wraps a valid static receiver id into a SymbolId?":
-        val src = file_read(method_calls)
-        expect(src).to_contain("elif static_receiver_name != \"\" and resolved_static_receiver_symbol >= 0:")
-        expect(src).not_to_contain("val static_receiver_symbol: SymbolId? = if resolved_static_receiver_symbol >= 0:")
-
-    it "takes the unique static method id out of a match arm, not != nil":
-        val src = file_read(method_calls)
-        expect(src).to_contain("var unique_static_method_raw: i64 = -1")
-        expect(src).not_to_contain("if unique_static_method != nil:")
-
-    it "tests the unwrapped static result name, not text? != nil":
-        val src = file_read(method_calls)
-        expect(src).to_contain("val static_result_name: text = self.struct_method_return_names.get(")
-        expect(src).to_contain("if static_result_name != \"\":")
-        expect(src).not_to_contain("if static_result_name != nil and static_result_name != \"\":")
-
-    it "recovers the static owner name through the scalar identity, not if-val on HirSymbol?":
-        val src = file_read(method_calls)
-        expect(src).to_contain("val static_owner_identity: text = mir_class_identity_raw(self.symbols, resolved_static_receiver_symbol)")
-        expect(src).not_to_contain("if val static_owner = self.symbols.get_symbol_raw(resolved_static_receiver_symbol):")
+    it "lowers every restored shape without errors or rt_value_as_int_wide (entry-closure bootstrap)":
+        val fns = lower_option_probe(true)
+        expect(fns["__errors__"] ?? "missing").to_equal("")
+        for name in [
+            "via_struct_if_val",
+            "via_nested_text_if_val",
+            "via_turbofish_if_val",
+            "via_dict_get_if_val",
+            "via_option_var_is_none",
+            "via_direct_unwrap"
+        ]:
+            val mir = fns[name] ?? ""
+            expect(mir != "").to_equal(true)
+            val wide_at = mir.index_of("rt_value_as_int_wide")
+            val wide_ctx = if wide_at >= 0:
+                val ws = if wide_at > 400: wide_at - 400 else: 0
+                val we = if wide_at + 400 < mir.len(): wide_at + 400 else: mir.len()
+                "{name}:has_wide:" + mir.substring(ws, we)
+            else:
+                "{name}:clean"
+            expect(wide_ctx).to_equal("{name}:clean")

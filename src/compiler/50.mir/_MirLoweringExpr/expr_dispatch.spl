@@ -3453,18 +3453,11 @@ impl MirLowering:
             self.mark_runtime_value_local(typed.id)
             self.builder = b
             return typed
-        if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Tuple([])):
-            # A tuple literal is a native record (rt_alloc + fields) and a
-            # container stores its raw pointer. Hand back a Tuple-typed
-            # local so the next `pair[i]` takes the native get_field path;
-            # the untyped i64 word used to send it through rt_array_get,
-            # which rejected the pointer as an invalid array handle
-            # (contextual_callback_native `retained[0]`).
-            val typed = b.new_temp(result_type)
-            b.emit_copy(typed, raw)
-            self.builder = b
-            return typed
         if self.mir_type_is_str(result_type):
+            # Check string types before Tuple([]): Str lowers to
+            # Tuple([Ptr(U8), U64]) in MIR, which would otherwise fall into the
+            # generic tuple passthrough below and skip rt_interp_cstr.
+            #
             # A string element/value read back off an array or dict is a
             # TAGGED heap-string handle (box_runtime_value tags raw string
             # literals via rt_strlen + rt_string_new before storing them),
@@ -3485,6 +3478,17 @@ impl MirLowering:
             if val cstr_local = cstr_res:
                 return cstr_local
             return raw
+        if disc == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Tuple([])):
+            # A tuple literal is a native record (rt_alloc + fields) and a
+            # container stores its raw pointer. Hand back a Tuple-typed
+            # local so the next `pair[i]` takes the native get_field path;
+            # the untyped i64 word used to send it through rt_array_get,
+            # which rejected the pointer as an invalid array handle
+            # (contextual_callback_native `retained[0]`).
+            val typed = b.new_temp(result_type)
+            b.emit_copy(typed, raw)
+            self.builder = b
+            return typed
         self.mark_runtime_value_local(raw.id)
         self.builder = b
         raw
@@ -7208,7 +7212,6 @@ impl MirLowering:
         # semantics remain single-sourced.
         val binary_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
         if expr_disc == binary_disc:
-            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=stage3 reads HirExprKind payloads through _sffi_enum_payload/_sffi_tuple_get as garbage (c01: garbage child expression handle, disc=-1); bind by pattern after the discriminant check (same fix as the NamedVar pre-dispatch)
             var binary_op: HirBinOp = HirBinOp.Add
             var binary_left: HirExpr = nil_expr
             var binary_right: HirExpr = nil_expr
@@ -7233,7 +7236,6 @@ impl MirLowering:
         # and reject malformed mandatory fields before any aggregate deref.
         val if_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: None, span: nil_span), None))
         if expr_disc == if_disc:
-            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=stage3 reads HirExprKind payloads through _sffi_enum_payload/_sffi_tuple_get as garbage (c01: garbage child expression handle, disc=-1); bind by pattern after the discriminant check (same fix as the NamedVar pre-dispatch)
             var if_cond: HirExpr = nil_expr
             var if_then: HirBlock = HirBlock(stmts: [], has: false, value: None, span: nil_span)
             var if_else: HirBlock? = None
@@ -7632,7 +7634,6 @@ impl MirLowering:
                     self.payload_decode_failed("HirExprKind.Var", expr_value.span)
         val namedvar_pre_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
-            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=stage3 reads the NamedVar payload through _sffi_enum_payload/_sffi_tuple_get as garbage (name "(false, )", unknown id); bind it by pattern after the discriminant check, as the Call arm's NamedVar callee path does
             var named_var_symbol: SymbolId = SymbolId(id: -1)
             var named_var_name: text = ""
             val named_var_kind: HirExprKind = expr_value.kind
@@ -7680,14 +7681,14 @@ impl MirLowering:
             if pre_sym_id >= 0:
                 if val pre_nv_glob = self.try_lower_global_read(pre_sym_id):
                     return pre_nv_glob
-            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests SymbolId? != nil; resolve through lookup_or_invalid and test the raw id
-            val pre_nv_id: i64 = self.symbols.lookup_or_invalid(named_var_name).id
-            if pre_nv_id >= 0:
+            if val pre_resolved = self.symbols.lookup(named_var_name):
+                val pre_nv_id = pre_resolved.id
                 val resolved_named_local = self.find_local(pre_nv_id)
-                if resolved_named_local.id >= 0:
+                if pre_nv_id >= 0 and resolved_named_local.id >= 0:
                     return resolved_named_local
-                if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
-                    return pre_nv_glob2
+                if pre_nv_id >= 0:
+                    if val pre_nv_glob2 = self.try_lower_global_read(pre_nv_id):
+                        return pre_nv_glob2
             # B5b shard-registry family (bug-doc phase2_matrix addendum 7): the
             # flat short-name entry can name a symbol owned by ANOTHER module
             # that lowered earlier in this batch (importer pre-registration),
@@ -7698,17 +7699,17 @@ impl MirLowering:
             # enum's own static degraded to "undefined variable SdnValue" and
             # every enum pattern over the type collapsed to wildcards.
             if pre_sym_id >= 0 and pre_named_local.id < 0:
-                # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-binds if-val on HirSymbol? and text?; read the owner module through the scalar accessor (missing symbol -> "")
-                val foreign_owner: text = self.symbols.symbol_defining_module_scalar_raw(pre_sym_id)
-                if foreign_owner != "" and foreign_owner != self.current_module_id:
-                    val qualified_retry_id = self.symbols.lookup_qualified_type_raw(
-                        foreign_owner, named_var_name)
-                    if qualified_retry_id >= 0 and qualified_retry_id != pre_sym_id:
-                        if val retry_glob = self.try_lower_global_read(qualified_retry_id):
-                            return retry_glob
-                        val retry_local = self.find_local(qualified_retry_id)
-                        if retry_local.id >= 0:
-                            return retry_local
+                if val foreign_symbol = self.symbols.get_symbol_raw(pre_sym_id):
+                    if val foreign_owner = foreign_symbol.defining_module:
+                        if foreign_owner != "" and foreign_owner != self.current_module_id:
+                            val qualified_retry_id = self.symbols.lookup_qualified_type_raw(
+                                foreign_owner, named_var_name)
+                            if qualified_retry_id >= 0 and qualified_retry_id != pre_sym_id:
+                                if val retry_glob = self.try_lower_global_read(qualified_retry_id):
+                                    return retry_glob
+                                val retry_local = self.find_local(qualified_retry_id)
+                                if retry_local.id >= 0:
+                                    return retry_local
             # Built-in nullary Option `None` used as a value (not a
             # call): construct Option.None (disc 1) via rt_enum_new.
             # A local of the same name shadows it (handled above).
@@ -8505,16 +8506,20 @@ impl MirLowering:
                 var b_then = self.builder
                 b_then.switch_to_block(then_block)
                 self.builder = b_then
+                val decoded_text_base = self.is_decoded_text_option_local(base_local.id)
                 var some_value = base_local
-                if base_presence_bit < 0:
+                if base_presence_bit < 0 and not decoded_text_base:
                     some_value = self.option_payload_or_self(base_local)
-                if base_presence_bit >= 0:
+                if base_presence_bit >= 0 or decoded_text_base:
                     # Already the decoded payload on the present edge.
                     ()
                 elif exists_nominal_payload:
                     # Native records/classes/enums stored in runtime containers
                     # retain their handle bits. The i64 merge carrier is not a
                     # scalar payload: integer unboxing would destroy that handle.
+                    ()
+                elif self.runtime_array_locals.contains(base_local.id) or self.runtime_dict_locals.contains(base_local.id):
+                    # Already a decoded container handle from a runtime container read.
                     ()
                 elif self.is_runtime_value_local(base_local.id) and not self.option_value_locals.contains(base_local.id):
                     some_value = self.runtime_option_scalar_payload(base, base_local, result_type)
@@ -8561,11 +8566,14 @@ impl MirLowering:
 
                 # The presence bit of THIS word: the binder's `!= nil` reads it.
                 self.presence_word_locals[result_local.id] = is_some_local.id
-                if base_presence_bit >= 0:
+                if decoded_text_base:
+                    # Already decoded on the Dict.get lane: never mark it as
+                    # a tagged RuntimeValue or for a second rt_interp_cstr decode.
+                    self.mark_decoded_text_option_local(result_local.id)
+                elif base_presence_bit >= 0:
                     # A presence-carrying base is already decoded (see above):
                     # never mark it for another runtime decode.
-                    if self.is_decoded_text_option_local(base_local.id):
-                        self.mark_decoded_text_option_local(result_local.id)
+                    ()
                 elif self.is_runtime_value_local(some_value.id):
                     self.mark_runtime_value_local(result_local.id)
                 if self.runtime_array_locals.contains(some_value.id):

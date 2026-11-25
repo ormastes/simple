@@ -3350,10 +3350,8 @@ impl MirLowering:
         if static_receiver_name == "" and resolved_static_receiver_symbol < 0:
             resolved_static_receiver_symbol = self.declared_static_method_receiver_symbol_v1(receiver)
         if static_receiver_name == "" and resolved_static_receiver_symbol >= 0:
-            # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-binds if-val on HirSymbol?; mir_class_identity_raw already yields "" for a missing symbol, so test the scalar identity
-            val static_owner_identity: text = mir_class_identity_raw(self.symbols, resolved_static_receiver_symbol)
-            if static_owner_identity != "":
-                static_receiver_name = static_owner_identity
+            if val static_owner = self.symbols.get_symbol_raw(resolved_static_receiver_symbol):
+                static_receiver_name = mir_class_identity_raw(self.symbols, resolved_static_receiver_symbol)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] static-owner method={method}\n")
 
@@ -5583,24 +5581,21 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests a SymbolId? var (== nil / != nil / ?? default) and a SymbolId? built from a valid id; carry the raw i64 (-1 = unresolved) end to end
-                var static_method_raw: i64 = -1
+                val static_receiver_symbol: SymbolId? = if resolved_static_receiver_symbol >= 0:
+                    Some(SymbolId(id: resolved_static_receiver_symbol))
+                else:
+                    None
+                var static_method_id: SymbolId? = None
                 if static_receiver_name != "" and self.struct_method_key_present_v1(static_method_key):
                     val static_key_symbol: SymbolId = self.struct_method_syms[static_method_key]
-                    static_method_raw = static_key_symbol.id
-                elif static_receiver_name != "" and resolved_static_receiver_symbol >= 0:
-                    val static_symbol = SymbolId(id: resolved_static_receiver_symbol)
-                    val static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(static_symbol, method)
-                    match static_candidate_result:
-                        case Option.Some(static_candidate_id):
-                            val static_candidate_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(static_candidate_id.id)
-                            match static_candidate_symbol_result:
-                                case Option.Some(static_candidate_symbol):
-                                    match static_candidate_symbol.kind:
-                                        case SymbolKind.Function: static_method_raw = static_candidate_id.id
-                                        case _: ()
-                                case _: ()
-                        case _: ()
+                    static_method_id = Some(static_key_symbol)
+                elif static_receiver_name != "":
+                    if val static_symbol = static_receiver_symbol:
+                        if val static_candidate_id = self.symbols.lookup_method_in_type(static_symbol, method):
+                            if val static_candidate_symbol = self.symbols.get_symbol_raw(static_candidate_id.id):
+                                match static_candidate_symbol.kind:
+                                    case SymbolKind.Function: static_method_id = Some(static_candidate_id)
+                                    case _: ()
                 # The receiver aggregate is already corrupt on the failing
                 # self-host lane, so a second match cannot recover its owner.
                 # Use the symbol table's exact owner-qualified index only when
@@ -5637,20 +5632,14 @@ impl MirLowering:
                 # `lookup_or_invalid` + `lookup_method_in_type`. Accept only a
                 # Function symbol, so an instance method can never be dispatched
                 # here as a static one.
-                if static_method_raw < 0 and static_receiver_name != "":
+                if static_method_id.is_none() and static_receiver_name != "":
                     val nd_static_owner = self.symbols.lookup_or_invalid(static_receiver_name)
                     if nd_static_owner.is_valid():
-                        val nd_static_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(nd_static_owner, method)
-                        match nd_static_candidate_result:
-                            case Option.Some(nd_static_candidate):
-                                val nd_static_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(nd_static_candidate.id)
-                                match nd_static_symbol_result:
-                                    case Option.Some(nd_static_symbol):
-                                        match nd_static_symbol.kind:
-                                            case SymbolKind.Function: static_method_raw = nd_static_candidate.id
-                                            case _: ()
+                        if val nd_static_candidate = self.symbols.lookup_method_in_type(nd_static_owner, method):
+                            if val nd_static_symbol = self.symbols.get_symbol_raw(nd_static_candidate.id):
+                                match nd_static_symbol.kind:
+                                    case SymbolKind.Function: static_method_id = Some(nd_static_candidate)
                                     case _: ()
-                            case _: ()
                 # A proven scalar is a runtime value, never a lost class
                 # name. A globally unique static leaf cannot own this call.
                 # stage3_array_copy_unique_static_leaf_2026-11-19: neither is a
@@ -5660,13 +5649,8 @@ impl MirLowering:
                 # zero-argument call of that static and stored its record where
                 # an array handle was expected. Checked before the leaf scan,
                 # so value receivers also skip the whole-table walk.
-                if static_method_raw < 0 and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver and not self.method_receiver_roots_at_bound_local_v1(receiver):
-                    var unique_static_method_raw: i64 = -1
-                    match self.symbols.lookup_unique_static_method(method):
-                        case Some(unique_static_method):
-                            unique_static_method_raw = unique_static_method.id
-                        case _: ()
-                    if unique_static_method_raw >= 0:
+                if static_method_id.is_none() and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver and not self.method_receiver_roots_at_bound_local_v1(receiver):
+                    if val unique_static_method = self.symbols.lookup_unique_static_method(method):
                         # A call result is a runtime receiver, not a lost type
                         # name. Its declared return owner becomes available
                         # when lowered; retain it before accepting a foreign
@@ -5686,11 +5670,10 @@ impl MirLowering:
                                             known_record_owner = nested_owner.id
                                     case _: ()
                         if known_record_owner < 0:
-                            static_method_raw = unique_static_method_raw
+                            static_method_id = Some(unique_static_method)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-static method={method}\n")
-                if static_method_raw >= 0:
-                    val resolved_static_method_id = SymbolId(id: static_method_raw)
+                if val resolved_static_method_id = static_method_id:
                     var static_args: [MirOperand] = []
                     val name_static_param_types = self.resolved_call_hir_param_types(resolved_static_method_id)
                     var name_static_arg_index = 0
@@ -5700,18 +5683,17 @@ impl MirLowering:
                         name_static_arg_index = name_static_arg_index + 1
                     var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     self.provider_method_materialize_v1("{static_receiver_name}::{method}")
-                    # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests text? != nil from a class-field Dict.get (vb_mm1 shape); test the unwrapped text
-                    val static_result_name: text = self.struct_method_return_names.get("{static_receiver_name}::{method}") ?? ""
-                    if static_result_name != "":
-                        for static_result_symbol in self.symbols.symbols.values():
-                            if static_result_symbol.name == static_result_name:
-                                match static_result_symbol.kind:
-                                    case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
-                                        static_return_type = MirType(kind:
-                                            MirTypeKind.Struct(
-                                                self.canonical_mir_type_symbol(
-                                                    static_result_symbol.id)))
-                                    case _: ()
+                    if val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}"):
+                        if static_result_name != "":
+                            for static_result_symbol in self.symbols.symbols.values():
+                                if static_result_symbol.name == static_result_name:
+                                    match static_result_symbol.kind:
+                                        case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum:
+                                            static_return_type = MirType(kind:
+                                                MirTypeKind.Struct(
+                                                    self.canonical_mir_type_symbol(
+                                                        static_result_symbol.id)))
+                                        case _: ()
                     val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(resolved_static_method_id), static_args, static_return_type, None, None)
                     self.remember_call_hir_return(static_result, resolved_static_method_id)
                     self.remember_method_return_provenance(static_result, "{static_receiver_name}::{method}")
@@ -5789,110 +5771,99 @@ impl MirLowering:
                         unresolved_struct_name = self.struct_value_syms.get(optional_payload.id)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-owner-get method={method}\n")
-                # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests text? != nil (vb_mm1: owner text present yet branch skipped); test the unwrapped text
-                val unresolved_owner_text: text = unresolved_struct_name ?? ""
-                if unresolved_owner_text != "":
-                    val unresolved_method_key = self.struct_owner_method_key(unresolved_owner_text, method)
-                    # register_owner_method recorded two declaring modules for
-                    # this owner/method row; dispatching to either would be a
-                    # silent guess. Same fatal prefix as the miss below.
-                    self.provider_method_materialize_v1(unresolved_method_key)
-                    if self.struct_method_ambiguous.has(unresolved_method_key):
-                        val ambiguous_owner = unresolved_struct_name ?? ""
-                        self.error("unresolved method call: {method} is ambiguous on {ambiguous_owner}: impl blocks in more than one module declare it", Some(receiver.span))
-                    # Method symbols are owner-qualified during HIR lowering,
-                    # so unrelated types may safely expose the same method name.
-                    # Statement-shaped (Stage 2 miscompiles an Option-valued
-                    # if/elif/else expression whose last arm is a nested match).
-                    # Resolution order: record owner scalar, struct_method_syms,
-                    # then the declared receiver type's own method.
-                    var resolved_instance_method_raw: i64 = -1
-                    if declared_record_owner >= 0:
-                        resolved_instance_method_raw = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)
-                    elif self.struct_method_key_present_v1(unresolved_method_key):
-                        # mir_native_struct_method_syms_index_field_read_2026-11-05:
-                        # `self.struct_method_syms[k].id` (struct-valued dict
-                        # bracket-read + field read in ONE expression) miscompiles
-                        # in the native stage-3 compiler -> every same-module
-                        # instance call failed "unresolved method call ...
-                        # struct_method_syms=yes". Bind the SymbolId to a typed
-                        # local first (the shape line ~4497 uses and that works).
-                        val unresolved_method_sym: SymbolId = self.struct_method_syms[unresolved_method_key]
-                        resolved_instance_method_raw = unresolved_method_sym.id
-                    else:
-                        val found_receiver_type_result: HirType? = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local)
-                        match found_receiver_type_result:
-                            case Option.Some(found_receiver_type):
+                if val unresolved_owner = unresolved_struct_name:
+                    if unresolved_owner != "":
+                        val unresolved_method_key = self.struct_owner_method_key(unresolved_owner, method)
+                        # register_owner_method recorded two declaring modules for
+                        # this owner/method row; dispatching to either would be a
+                        # silent guess. Same fatal prefix as the miss below.
+                        self.provider_method_materialize_v1(unresolved_method_key)
+                        if self.struct_method_ambiguous.has(unresolved_method_key):
+                            self.error("unresolved method call: {method} is ambiguous on {unresolved_owner}: impl blocks in more than one module declare it", Some(receiver.span))
+                        # Method symbols are owner-qualified during HIR lowering,
+                        # so unrelated types may safely expose the same method name.
+                        # Statement-shaped (Stage 2 miscompiles an Option-valued
+                        # if/elif/else expression whose last arm is a nested match).
+                        # Resolution order: record owner scalar, struct_method_syms,
+                        # then the declared receiver type's own method.
+                        var resolved_instance_method_raw: i64 = -1
+                        if declared_record_owner >= 0:
+                            resolved_instance_method_raw = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)
+                        elif self.struct_method_key_present_v1(unresolved_method_key):
+                            # mir_native_struct_method_syms_index_field_read_2026-11-05:
+                            # `self.struct_method_syms[k].id` (struct-valued dict
+                            # bracket-read + field read in ONE expression) miscompiles
+                            # in the native stage-3 compiler -> every same-module
+                            # instance call failed "unresolved method call ...
+                            # struct_method_syms=yes". Bind the SymbolId to a typed
+                            # local first (the shape line ~4497 uses and that works).
+                            val unresolved_method_sym: SymbolId = self.struct_method_syms[unresolved_method_key]
+                            resolved_instance_method_raw = unresolved_method_sym.id
+                        else:
+                            if val found_receiver_type = self.receiver_declared_or_result_type(receiver, unresolved_receiver_local):
                                 match found_receiver_type.kind:
                                     case HirTypeKind.Named(receiver_type_symbol, _):
-                                        val instance_candidate_result: SymbolId? = self.symbols.lookup_method_in_type(receiver_type_symbol, method)
-                                        match instance_candidate_result:
-                                            case Option.Some(instance_candidate_id):
-                                                val instance_candidate_symbol_result: HirSymbol? = self.symbols.get_symbol_raw(instance_candidate_id.id)
-                                                match instance_candidate_symbol_result:
-                                                    case Option.Some(instance_candidate_symbol):
-                                                        match instance_candidate_symbol.kind:
-                                                            case SymbolKind.Method: resolved_instance_method_raw = instance_candidate_id.id
-                                                            case _: ()
+                                        if val instance_candidate_id = self.symbols.lookup_method_in_type(receiver_type_symbol, method):
+                                            if val instance_candidate_symbol = self.symbols.get_symbol_raw(instance_candidate_id.id):
+                                                match instance_candidate_symbol.kind:
+                                                    case SymbolKind.Method: resolved_instance_method_raw = instance_candidate_id.id
                                                     case _: ()
-                                            case _: ()
                                     case _: ()
-                            case _: ()
-                    # Inline-class-method fallback (native_build_cross_module_
-                    # result_payload_struct_name_collision_2026-08-09
-                    # mechanism #2): struct_method_syms is module.impls-derived
-                    # and NEVER carries a class's own inline methods, and the
-                    # receiver_declared_type fallback above needs a declared/
-                    # local HIR type that a match-bound payload local doesn't
-                    # have. We DO know the receiver's struct NAME
-                    # (struct_value_syms) -- resolve the type symbol by name in
-                    # the active scope (imports included) and look the method
-                    # up through the symbol table's owner-qualified registry,
-                    # which covers inline class methods cross-module.
-                    # @workaround bug=stage2_if_val_struct_option_binding_as_int_wide_2026-11-03 reason=frozen stage2 drops a SymbolId? built from a valid raw id (vb_mm1: struct_method_sym_id=7 yet runtime-fallback); carry the raw i64
-                    var final_method_raw: i64 = resolved_instance_method_raw
-                    if final_method_raw < 0 and declared_record_owner < 0:
-                        val unresolved_owner_type_id = self.symbols.lookup_or_invalid(unresolved_struct_name ?? "")
-                        if unresolved_owner_type_id.is_valid():
-                            if val name_derived_method_id = self.symbols.lookup_method_in_type(unresolved_owner_type_id, method):
-                                final_method_raw = name_derived_method_id.id
-                    if final_method_raw >= 0:
-                        val resolved_method_id = SymbolId(id: final_method_raw)
-                        # Cross-module flat HIR reaches this unresolved-owner
-                        # recovery path. Preserve the sole implicit receiver
-                        # with the same explicit-push construction used by the
-                        # resolved helpers; the one-element generic literal is
-                        # the exact Stage 3 receiver-loss trigger.
-                        var im_arg_operands: [MirOperand] = []
-                        im_arg_operands = im_arg_operands.push(mir_operand_copy(unresolved_receiver_local))
-                        val im_param_types = self.resolved_call_hir_param_types(resolved_method_id)
-                        var im_arg_index = 0
-                        for arg in args:
-                            val im_arg_local = self.lower_method_call_arg(arg, im_param_types, im_arg_index + 1)
-                            im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
-                            im_arg_index = im_arg_index + 1
-                        val im_method_operand = self.symbol_to_operand(resolved_method_id)
-                        val im_return_type = self.resolved_call_return_type(resolved_method_id)
-                        # Full-array pad, receiver included -- same alignment
-                        # rationale as the InstanceMethod arm above:
-                        # `im_arg_operands[0]` is the receiver and registered
-                        # `params[0]` is the synthetic `self`, 1:1.
-                        val im_final_args = self.pad_trailing_default_args(im_method_operand, im_arg_operands)
-                        var im_b = self.builder
-                        val im_result = im_b.emit_call(im_method_operand, im_final_args, im_return_type)
-                        self.builder = im_b
-                        # Keep the mutated receiver, independently of the
-                        # method's declared return type and returned value.
-                        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
-                        if val im_result_local = im_result:
-                            self.remember_call_hir_return(im_result_local, resolved_method_id)
-                            self.remember_method_return_provenance(im_result_local, unresolved_method_key)
-                            return im_result_local
-                        var im_b2 = self.builder
-                        val im_temp = im_b2.new_temp(MirType.i64())
-                        im_b2.emit_const(im_temp, MirConstValue.Int(0), MirType.i64())
-                        self.builder = im_b2
-                        return im_temp
+                        # Inline-class-method fallback (native_build_cross_module_
+                        # result_payload_struct_name_collision_2026-08-09
+                        # mechanism #2): struct_method_syms is module.impls-derived
+                        # and NEVER carries a class's own inline methods, and the
+                        # receiver_declared_type fallback above needs a declared/
+                        # local HIR type that a match-bound payload local doesn't
+                        # have. We DO know the receiver's struct NAME
+                        # (struct_value_syms) -- resolve the type symbol by name in
+                        # the active scope (imports included) and look the method
+                        # up through the symbol table's owner-qualified registry,
+                        # which covers inline class methods cross-module.
+                        var final_unresolved_method_id: SymbolId? = if resolved_instance_method_raw >= 0:
+                            Some(SymbolId(id: resolved_instance_method_raw))
+                        else:
+                            None
+                        if final_unresolved_method_id.is_none() and declared_record_owner < 0:
+                            val unresolved_owner_type_id = self.symbols.lookup_or_invalid(unresolved_owner)
+                            if unresolved_owner_type_id.is_valid():
+                                final_unresolved_method_id = self.symbols.lookup_method_in_type(unresolved_owner_type_id, method)
+                        if val resolved_method_id = final_unresolved_method_id:
+                            # Cross-module flat HIR reaches this unresolved-owner
+                            # recovery path. Preserve the sole implicit receiver
+                            # with the same explicit-push construction used by the
+                            # resolved helpers; the one-element generic literal is
+                            # the exact Stage 3 receiver-loss trigger.
+                            var im_arg_operands: [MirOperand] = []
+                            im_arg_operands = im_arg_operands.push(mir_operand_copy(unresolved_receiver_local))
+                            val im_param_types = self.resolved_call_hir_param_types(resolved_method_id)
+                            var im_arg_index = 0
+                            for arg in args:
+                                val im_arg_local = self.lower_method_call_arg(arg, im_param_types, im_arg_index + 1)
+                                im_arg_operands = im_arg_operands.push(mir_operand_copy(im_arg_local))
+                                im_arg_index = im_arg_index + 1
+                            val im_method_operand = self.symbol_to_operand(resolved_method_id)
+                            val im_return_type = self.resolved_call_return_type(resolved_method_id)
+                            # Full-array pad, receiver included -- same alignment
+                            # rationale as the InstanceMethod arm above:
+                            # `im_arg_operands[0]` is the receiver and registered
+                            # `params[0]` is the synthetic `self`, 1:1.
+                            val im_final_args = self.pad_trailing_default_args(im_method_operand, im_arg_operands)
+                            var im_b = self.builder
+                            val im_result = im_b.emit_call(im_method_operand, im_final_args, im_return_type)
+                            self.builder = im_b
+                            # Keep the mutated receiver, independently of the
+                            # method's declared return type and returned value.
+                            self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                            if val im_result_local = im_result:
+                                self.remember_call_hir_return(im_result_local, resolved_method_id)
+                                self.remember_method_return_provenance(im_result_local, unresolved_method_key)
+                                return im_result_local
+                            var im_b2 = self.builder
+                            val im_temp = im_b2.new_temp(MirType.i64())
+                            im_b2.emit_const(im_temp, MirConstValue.Int(0), MirType.i64())
+                            self.builder = im_b2
+                            return im_temp
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-owner-done method={method}\n")
 
