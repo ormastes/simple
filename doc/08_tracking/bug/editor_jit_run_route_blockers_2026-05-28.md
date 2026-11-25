@@ -99,3 +99,29 @@ native-build route. Items 1 and 3 are tractable; item 2 needs design.
 - `doc/08_tracking/feature/editor_markdown_editing_subsystem_2026-05-28.md`
   (editor render path — separate, native-route concern).
 - `doc/08_tracking/bug/seed_octal_string_escape_misdecode_2026-05-28.md`.
+
+---
+
+## Triage 2026-11-25 (p2w2-ab lane, Windows x86_64, pinned seed `bin/simple.exe` v1.0.0-rc.1, release/1.0.0 @ eb3c9c25f74)
+
+Re-ran the repro `SIMPLE_LIB=src bin/simple.exe run src/app/editor/main.spl -- --tui`:
+
+- The 2026-09-13 masking blocker (`ANY`-typed `window_title` field inference
+  in `gui_shell_run_sdl`) is **gone** — that HIR-lowering error no longer
+  appears.
+- A **new** earlier blocker now masks items 1 and 2: `[jit-fallback] HIR
+  lowering error: ambiguous call to 'md_dispatch_motion': 2 co-compiled
+  definitions (src/app/editor/md_dispatch.spl, src/lib/editor/view/md_editing.spl)
+  ... [compiler_cross_module_private_symbol_collision]` — the whole module is
+  dropped to the interpreter before codegen runs, so `Copy: source vreg
+  VReg(5) not found` (item 1) and `rt_compile_to_native_with_opt` (item 2)
+  still cannot be confirmed fixed or broken from this repro.
+- Item 3 remains fixed (2026-05-29 note above); items 1 and 2 live in the
+  Rust seed's Cranelift JIT (`codegen/instr/calls.rs`, vreg value-map) and an
+  interpreter-extern bridge design respectively — both are Rust-seed-only /
+  architectural and out of scope for a pure-Simple bounded fix.
+
+**Classification: SKIP (still OPEN).** Actionable next step is now: resolve
+the `md_dispatch_motion` duplicate-definition collision between
+`src/app/editor/md_dispatch.spl` and `src/lib/editor/view/md_editing.spl`
+(selective import or rename), then re-measure items 1 and 2.
