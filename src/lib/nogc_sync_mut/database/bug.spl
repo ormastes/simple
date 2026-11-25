@@ -24,10 +24,30 @@ use std.io_runtime.{read_file_text_result}
 use std.nogc_sync_mut.database.csm_seal.{csm_verify, csm_strip_legacy_header, csm_seal_add, csm_seal_prune, csm_writer_algo, CSM_MISSING, CSM_CORRUPT}
 use nogc_sync_mut.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
     check_empty_required, check_file_refs, check_enum_values, check_orphan_refs}
+use std.common.database.bug_tokens.{
+    BugTokenCategory, BugTokenCount, BugTokenReading,
+    BugTokenProvider, BugTokenSource, BugKnowledgeLink, BugTokenUsage,
+    bug_token_usage_columns, bug_token_category_to_string,
+    bug_token_category_for_path, bug_token_reading_text,
+    bug_token_total, bug_token_reading_known
+}
 # Removed 'use app.io' - it shadows core.spl's local function declarations
 # and causes scope resolution failures in bootstrap runtime
 
 # Exports
+export use std.common.database.bug_tokens.{
+    BugTokenCategory, BugTokenCount, BugTokenReading,
+    BugTokenProvider, BugTokenSource, BugKnowledgeLink, BugTokenUsage,
+    bug_token_usage_columns, bug_token_category_to_string,
+    bug_token_category_for_path, bug_token_reading_text,
+    bug_token_total, bug_token_reading_known
+}
+export BugSeverity, BugStatus, Bug, BugStats, BugDatabase
+export load_bug_database, load_bug_database_checked
+export merge_bug_database_shards_checked, bug_database_from_sdn
+export bug_shard_dir, create_bug_database
+export severity_to_string, parse_severity
+export status_to_string, parse_status, bug_to_row
 
 # ============================================================================
 # Enums
@@ -80,104 +100,7 @@ struct BugStats:
     important: i64
     health: text  # "good" | "attention" | "critical"
 
-# ============================================================================
-# Completion token receipts (bug_token_usage table)
-# ============================================================================
-# One row per resolve receipt. The comparable average of a category is the
-# mean total over rows of OTHER, Closed bugs in the same category; bug-resolve
-# demands a knowledge link when a new total exceeds twice that average.
-
-# Cohort a bug's tokens are compared within; derived from the bug's file path.
-enum BugTokenCategory:
-    Compiler
-    Runtime
-    Library
-    Application
-    Os
-    Test
-    Other
-
-struct BugTokenCount:
-    value: i64
-
-# A provider-reported token count, or an explicit "unavailable".
-enum BugTokenReading:
-    Unavailable
-    Count(BugTokenCount)
-
-struct BugTokenProvider:
-    value: text
-
-struct BugTokenSource:
-    value: text
-
-# Repository knowledge artifact linked to a receipt (relative .md path).
-struct BugKnowledgeLink:
-    path: text
-
-struct BugTokenUsage:
-    category: BugTokenCategory
-    provider: BugTokenProvider
-    input: BugTokenReading
-    output: BugTokenReading
-    cache_read: BugTokenReading
-    cache_create: BugTokenReading
-    source: BugTokenSource
-    knowledge: BugKnowledgeLink?
-    recorded_at: text
-
-pub fn bug_token_usage_columns() -> [text]:
-    ["bug_id", "category", "provider", "input_tokens", "output_tokens",
-     "cache_read_tokens", "cache_create_tokens", "total_tokens",
-     "source", "knowledge", "recorded_at"]
-
-pub fn bug_token_category_to_string(category: BugTokenCategory) -> text:
-    match category:
-        BugTokenCategory.Compiler: "compiler"
-        BugTokenCategory.Runtime: "runtime"
-        BugTokenCategory.Library: "library"
-        BugTokenCategory.Application: "application"
-        BugTokenCategory.Os: "os"
-        BugTokenCategory.Test: "test"
-        BugTokenCategory.Other: "other"
-
-pub fn bug_token_category_for_path(path: text) -> BugTokenCategory:
-    if path.starts_with("src/compiler"):
-        return BugTokenCategory.Compiler
-    if path.starts_with("src/runtime"):
-        return BugTokenCategory.Runtime
-    if path.starts_with("src/lib"):
-        return BugTokenCategory.Library
-    if path.starts_with("src/app"):
-        return BugTokenCategory.Application
-    if path.starts_with("src/os"):
-        return BugTokenCategory.Os
-    if path.starts_with("test/"):
-        return BugTokenCategory.Test
-    BugTokenCategory.Other
-
-pub fn bug_token_reading_text(reading: BugTokenReading) -> text:
-    match reading:
-        case BugTokenReading.Unavailable: "unavailable"
-        case BugTokenReading.Count(count): "{count.value}"
-
-# Sum of the readings; Unavailable if any reading is, Err on i64 overflow.
-pub fn bug_token_total(readings: [BugTokenReading]) -> Result<BugTokenReading, text>:
-    var total: i64 = 0
-    for reading in readings:
-        match reading:
-            case BugTokenReading.Unavailable:
-                return Ok(BugTokenReading.Unavailable)
-            case BugTokenReading.Count(count):
-                if total > 9223372036854775807 - count.value:
-                    return Err("token total overflow")
-                total = total + count.value
-    Ok(BugTokenReading.Count(BugTokenCount(value: total)))
-
-fn _bug_token_reading_known(reading: BugTokenReading) -> bool:
-    match reading:
-        case BugTokenReading.Unavailable: false
-        case BugTokenReading.Count(_): true
+# Completion token receipts live in std.common.database.bug_tokens (re-exported above).
 
 # ============================================================================
 # BugDatabase
@@ -630,10 +553,10 @@ class BugDatabase:
         val readings = [usage.input, usage.output, usage.cache_read, usage.cache_create]
         var known = 0
         # @workaround bug=mir_enum_field_array_record_provenance_2026_11_23 reason=frozen P2 mistakes qualified enum field-array loop binders for records; preserve the four scalar readings until the enum provenance owner is repaired and natively verified.
-        if _bug_token_reading_known(usage.input): known = known + 1
-        if _bug_token_reading_known(usage.output): known = known + 1
-        if _bug_token_reading_known(usage.cache_read): known = known + 1
-        if _bug_token_reading_known(usage.cache_create): known = known + 1
+        if bug_token_reading_known(usage.input): known = known + 1
+        if bug_token_reading_known(usage.output): known = known + 1
+        if bug_token_reading_known(usage.cache_read): known = known + 1
+        if bug_token_reading_known(usage.cache_create): known = known + 1
         if known != 0 and known != readings.len() and not usage.knowledge.?:
             return false
         val total = match bug_token_total(readings):
