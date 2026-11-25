@@ -133,3 +133,16 @@ Ran `bin/simple test test/01_unit/lib/terminal/credential_key_file_format_spec.s
 
 - Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)
 
+
+## Verification 2026-11-25 (work/p2w1-ak-20261125)
+
+Re-verified on release/1.0.0 @ 1ef7c198073 by source inspection: the load-
+bearing nil guard is present in `credential_kdf_cost()`
+(`src/lib/nogc_sync_mut/terminal/credential/store.spl:177` ff., "THE NIL GUARD
+IS LOAD-BEARING" docstring intact), and the spec case "resolves the production
+cost of 10 by default" exists at
+`test/01_unit/lib/terminal/credential_key_file_format_spec.spl:117` with no
+"KNOWN RED" marker remaining. Spec execution not re-run: `bin/simple.exe test`
+is repo-wide blocked at this HEAD by the known `unknown decorator
+'@representation_boundary'` seed/source inconsistency (pinned seed
+v1.0.0-rc.1). The 2026-09-13 RESOLVED status stands.

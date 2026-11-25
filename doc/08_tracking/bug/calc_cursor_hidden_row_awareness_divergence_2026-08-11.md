@@ -191,3 +191,17 @@ src/app/office/gui.spl:32
 sheet.is_row_hidden(r.to_i64()):`, plus the visible-row window contract at
 `gui.spl:1268-1282`). The asymmetry the record describes is intact. No fix
 applied by this worker; no spec written (would need a TUI-session harness).
+
+## Verification 2026-11-25 (work/p2w1-ak-20261125)
+
+Re-verified on release/1.0.0 @ 1ef7c198073 by source inspection: all three
+cursor paths are hidden-row aware — `SheetsApp.navigate_to` skips via
+`sheet.is_row_hidden((scan + 1).to_i64())` at
+`src/app/office/sheets/sheets_app.spl:195`, `_tui_move` at
+`src/app/office/interactive.spl:239`, and the GUI session path in
+`src/app/office/gui.spl`. Both evidence specs
+(`sheets_app_hidden_row_nav_spec.spl`, `cursor_hidden_row_invariant_spec.spl`)
+exist in tree. Spec execution not re-run: `bin/simple.exe test` is repo-wide
+blocked at this HEAD by the known `unknown decorator
+'@representation_boundary'` seed/source inconsistency (pinned seed
+v1.0.0-rc.1). The 2026-08-17 RESOLVED status stands.
