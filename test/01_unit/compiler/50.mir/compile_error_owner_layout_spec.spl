@@ -108,3 +108,17 @@ describe "ownerlayout-mir-20261031 CompileError owner":
     it "workaround form (typed parameter) lowers clean":
         val d = lower_consumer(["fn msg_of(e: CompileError) -> text:", "    e.message", "", "fn m(d: Driver) -> text:", "    msg_of(d.last_error())"])
         expect(d).to_equal("")
+
+    it "vhdl_validation shape: var err = self.backend_error(); field writes on err lower clean":
+        val d = lower_consumer(["class VhdlSub:", "    n: i64", "    fn backend_error(msg: text) -> CompileError:", "        CompileError(message: msg, phase: \"vhdl\", has_location: false, location: 0)", "    fn backend_error_at(msg: text, loc: i64?) -> CompileError:", "        var err = self.backend_error(msg)", "        match loc:", "            case Some(v):", "                err.has_location = true", "                err.location = v", "            case None:", "                ()", "        err"])
+        expect(d).to_equal("")
+
+    it "driver_bootstrap shape: unwrap_err().message without direct CompileError import lowers clean":
+        val body = lines(["use lib.be.\{compile\}", "", "fn m() -> text:", "    val compiled = compile(0)", "    if compiled.is_err():", "        val err = compiled.unwrap_err()", "        return err.message", "    \"\""])
+        val d = lower_closure(["lib.fe", "lib.be", "app.main"], [FE, BE, body])
+        expect(d).to_equal("")
+
+    it "lean_enum_body shape: match emitter.method() Err(error) field read lowers clean":
+        val body = lines(["use lib.be.\{CompileError, compile\}", "", "class Emitter:", "    n: i64", "    fn emit() -> Result<text, CompileError>:", "        match compile(self.n):", "            case Ok(_): Ok(\"ok\")", "            case Err(e): Err(e)", "", "fn m(emitter: Emitter) -> text:", "    match emitter.emit():", "        case Ok(v): v", "        case Err(error): error.message"])
+        val d = lower_closure(["lib.fe", "lib.be", "app.main"], [FE, BE, body])
+        expect(d).to_equal("")

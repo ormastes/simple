@@ -58,3 +58,7 @@ Revert-ready: no (driver_bootstrap / lean / vhdl helpers must stay).
 
 ## 2026-11-03 status: fix-implemented-verification-pending
 Root fix present: `struct_value_provenance_key` prefers the module-qualified layout (`src/compiler/50.mir/_MirLowering/module_lowering.spl:757-772`, tag ownerlayout-mir-20261031). Verify on a rebuilt stage2: entry-closure build with two `CompileError` structs must not fall back to the bare name; then remove the `bug=ownerlayout-mir-20261031` workarounds in `src/compiler/70.backend/bitfield.spl` and `src/compiler/50.mir/mir_bitfield.spl`.
+
+## Status 2026-11-25 — all 12 markers removed from `src/`
+- Root bug 1 (`CompileError` owner provenance): reverted the 3 typed-param wrapper helpers and all 6 call sites in `src/compiler/80.driver/driver_bootstrap.spl`, `src/plugins/backend_lean/lean_enum_body_v1.spl`, and `src/plugins/backend_vhdl/vhdl_validation.spl` (`struct_value_provenance_key` covers all `unwrap_err()`, `Err(error)` binder, and `self.backend_error()` field-write shapes; `test/01_unit/compiler/50.mir/compile_error_owner_layout_spec.spl` extended to 8/8 PASS).
+- Root bug 2 (`SymbolId.name`): kept `bitfield_symbol_key(symbol)` as a permanent fix in `src/compiler/50.mir/mir_bitfield.spl` and `src/compiler/70.backend/bitfield.spl` (`SymbolId` carries only `id: i64`), removing the 3 stale `@workaround bug=ownerlayout_mir_2026-10-31` tags.
