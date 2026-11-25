@@ -64,3 +64,23 @@ expectations. Left the spec file unmodified per the "never rewrite an
 assertion to force green" rule — deciding which of these two paths is
 correct requires product/ownership context beyond this triage pass.
 
+
+## Verification 2026-11-25 (lane p3-bac) — STALE, CLI restored and spec green
+
+Path (a) of the "Recommended direction" already landed: commit `3e932aabea0`
+("fix(wave-h1-c): credential v1 upgrade-on-write, dashboard CLI, bootstrap
+run, MCP lazy startup"). `src/app/dashboard/main.spl` is no longer a 14-line
+stub — it is now 469 lines and imports `parse_log_options`,
+`log_options_help`, and `render_progress` from `std.cli.log_modes`, with real
+argument handling in `main()`.
+
+Executed evidence (this host, `SIMPLE_LIB=src bin/simple.exe test
+test/02_integration/app/dashboard_log_modes_spec.spl --mode=interpreter`,
+self-hosted binary, Windows):
+
+    SPEC FILE VERDICT: test/02_integration/app/dashboard_log_modes_spec.spl outcome=OK declared>=5 executed=5 passed=5 failed=0 skipped=0 blocked=0 dropped=0
+    Results: 5 total, 5 passed, 0 failed
+
+All 5 previously-failing examples (`--help` text, `--log-mode=json`,
+`--progress=dot`, invalid-mode exit code 1, JSON error envelope) now pass.
+Status: resolved; no further product decision needed.
