@@ -4,8 +4,7 @@
 # Maps UI events back to widget events and syncs state changes to the DOM.
 
 use std.common.web.node_types.{DomNode, NodeKind, Element, TextNode}
-use std.common.web.attribute_types.{Attr}
-use std.common.render_scene.css_types.{CSSRule, CSSDeclaration, CSSValue, Selector, SelectorPart}
+use std.common.render_scene.css_types.{CSSRule, RsCssDeclaration, RsCssValue, Selector, SelectorPart}
 use std.common.web.event_types.{DomEvent, EventPhase}
 use common.ui.widget.{UIEvent, WidgetNode, WidgetKind}
 
@@ -135,27 +134,28 @@ class DomBridge:
         style resolver to compute styles.
         """
         var rules: [CSSRule] = []
-        var remaining = css_text
+        var pos = 0
+        val css_len = css_text.len()
 
-        while remaining.len() > 0:
-            val brace_open = remaining.index_of("{", 0)
+        while pos < css_len:
+            val brace_open = css_text.index_of("{", pos)
             if brace_open < 0:
                 break
 
-            val brace_close = remaining.index_of("}", brace_open)
+            val brace_close = css_text.index_of("}", brace_open)
             if brace_close < 0:
                 break
 
-            val selector_text = remaining[0:brace_open].trim()
-            val decls_text = remaining[brace_open + 1:brace_close].trim()
-            remaining = remaining[brace_close + 1:]
+            val selector_text = css_text[pos:brace_open].trim()
+            val decls_text = css_text[brace_open + 1:brace_close].trim()
+            pos = brace_close + 1
 
             if selector_text.len() == 0:
                 continue
 
             val selector = parse_selector(selector_text)
             val declarations = parse_declarations(decls_text)
-            val rule = CSSRule.create(selector, declarations)
+            val rule = CSSRule(selectors: [selector], declarations: declarations)
             rules = rules.push(rule)
 
         return rules
@@ -166,11 +166,11 @@ class DomBridge:
         """Convert a browser DOM event to a UI widget event."""
         match event.event_type:
             "click":
-                return UIEvent.Click(id: event.target_id)
+                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "down")
             "keydown":
                 return UIEvent.KeyPress(key: event.event_type)
             "mousedown":
-                return UIEvent.Click(id: event.target_id)
+                return UIEvent.MouseEvent(x: 0.0, y: 0.0, button: "left", kind: "down")
             _:
                 return nil
 
@@ -185,9 +185,9 @@ fn extract_tag_name(tag_content: text) -> text:
         return tag_content.lower()
     return tag_content[0:space_idx].lower()
 
-fn extract_attributes(tag_content: text) -> List<Attr>:
+fn extract_attributes(tag_content: text) -> Dict<text, text>:
     """Extract attributes from tag content."""
-    var attrs = List<Attr>.new()
+    var attrs: Dict<text, text> = {}
     val space_idx = tag_content.index_of(" ", 0)
     if space_idx < 0:
         return attrs
@@ -203,7 +203,7 @@ fn extract_attributes(tag_content: text) -> List<Attr>:
             # Strip quotes
             if value.starts_with("\"") and value.ends_with("\""):
                 value = value[1:value.len() - 1]
-            attrs = attrs.push(Attr.create(name, value))
+            attrs[name] = value
     return attrs
 
 fn is_void_element(tag_name: text) -> bool:
@@ -216,7 +216,7 @@ fn is_void_element(tag_name: text) -> bool:
 
 fn parse_selector(selector_text: text) -> Selector:
     """Parse a simple CSS selector string into a Selector."""
-    var parts = List<SelectorPart>.new()
+    var parts: [SelectorPart] = []
     val trimmed = selector_text.trim()
 
     if trimmed.starts_with("#"):
@@ -228,11 +228,11 @@ fn parse_selector(selector_text: text) -> Selector:
     else:
         parts = parts.push(SelectorPart.Type(name: trimmed))
 
-    return Selector.create(parts)
+    return Selector(parts: parts)
 
-fn parse_declarations(decls_text: text) -> List<CSSDeclaration>:
+fn parse_declarations(decls_text: text) -> [RsCssDeclaration]:
     """Parse CSS declarations like 'color: red; font-size: 14px'."""
-    var decls = List<CSSDeclaration>.new()
+    var decls: [RsCssDeclaration] = []
     val parts = decls_text.split(";")
     for part in parts:
         val trimmed = part.trim()
@@ -245,36 +245,36 @@ fn parse_declarations(decls_text: text) -> List<CSSDeclaration>:
         val val_text = trimmed[colon_idx + 1:].trim()
 
         val css_val = parse_css_value(val_text)
-        decls = decls.push(CSSDeclaration.create(prop, css_val))
+        decls = decls.push(RsCssDeclaration(property: prop, value: css_val))
     return decls
 
-fn parse_css_value(val_text: text) -> CSSValue:
-    """Parse a CSS value string into a CSSValue."""
+fn parse_css_value(val_text: text) -> RsCssValue:
+    """Parse a CSS value string into a RsCssValue."""
     # Check for length units
     if val_text.ends_with("px"):
         val num_str = val_text[0:val_text.len() - 2]
-        return CSSValue.Length(v: num_str.to_f64(), unit: "px")
+        return RsCssValue.Length(v: num_str.to_f64(), unit: "px")
     if val_text.ends_with("em"):
         val num_str = val_text[0:val_text.len() - 2]
-        return CSSValue.Length(v: num_str.to_f64(), unit: "em")
+        return RsCssValue.Length(v: num_str.to_f64(), unit: "em")
     if val_text.ends_with("rem"):
         val num_str = val_text[0:val_text.len() - 3]
-        return CSSValue.Length(v: num_str.to_f64(), unit: "rem")
+        return RsCssValue.Length(v: num_str.to_f64(), unit: "rem")
     if val_text.ends_with("%"):
         val num_str = val_text[0:val_text.len() - 1]
-        return CSSValue.Percentage(v: num_str.to_f64())
+        return RsCssValue.Percent(v: num_str.to_f64())
 
     # Check for inherit/initial/unset
     if val_text == "inherit":
-        return CSSValue.Inherit
+        return RsCssValue.Keyword(v: val_text)
     if val_text == "initial":
-        return CSSValue.Initial
+        return RsCssValue.Keyword(v: val_text)
     if val_text == "unset":
-        return CSSValue.Unset
+        return RsCssValue.Keyword(v: val_text)
 
     # Check for hex color
     if val_text.starts_with("#"):
-        return CSSValue.Keyword(v: val_text)
+        return RsCssValue.Keyword(v: val_text)
 
     # Default: treat as keyword
-    return CSSValue.Keyword(v: val_text)
+    return RsCssValue.Keyword(v: val_text)
