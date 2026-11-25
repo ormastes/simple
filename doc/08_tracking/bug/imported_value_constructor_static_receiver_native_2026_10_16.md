@@ -59,3 +59,9 @@ No native verification yet: needs a rebuilt stage3 compiling interpreter,
 binop, calls and expr in canonical context. Do not redeploy seed/stage2 for it.
 
 Repro/prevention (added 2026-11-05): native fixture test/fixtures/compiler/imported_value_constructor_static_receiver/main.spl (stage3 repro in its header; UNRUN natively), interpreter spec test/01_unit/compiler/bootstrap_regressions/imported_value_constructor_static_receiver_spec.spl (passes on bin/simple.exe).
+
+## 2026-11-25 status: callers retired after PR #11459 root fix
+
+- Root fix landed in PR #11459 (`06350eaa7dd` / merge `72f3b496942`): static enum receiver owner resolution (`static_enum_receiver_owner.spl`, `expr_dispatch.spl`, `switch_operators_calls.spl`, `method_calls_literals.spl`, `mir_lowering_stmts.spl`).
+- All 95 `@workaround bug=imported_value_constructor_static_receiver_native_2026_10_16` annotations retired across `src/compiler/00.common/runtime_value_v1.spl` (12), `src/compiler/70.backend/backend/interpreter.spl` (16 + 4 untagged calls), `src/compiler/70.backend/backend/interpreter_binop.spl` (39 + 5 untagged calls), `src/compiler/70.backend/backend/interpreter_calls.spl` (16 + 2 untagged calls), and `src/compiler/70.backend/backend/interpreter_expr.spl` (12 + 1 untagged call).
+- The `backend_value_*_v1` definitions and exports in `src/compiler/00.common/runtime_value_v1.spl` remain as compatibility helpers for external callers outside these 5 files (`backend_types.spl`, `jit_sffi.spl`, `interpreter_control.spl`, `interpreter_optional.spl`, and tests); `backend_value_option_v1` in `interpreter_expr.spl` remains scoped to `value_optional_payload_type_context_native_2026_10_16`.
