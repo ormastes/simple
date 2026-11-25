@@ -3,7 +3,20 @@
 - **Filed-on:** 2026-09-05
 - **Area:** compiler / parser + HIR lowering (Rust seed)
 - **Priority:** P2
-- **Status:** open
+- **Status:** fix-implemented-verification-pending (2026-11-25). HIR lowering
+  now rewrites a single-element `VecLiteral` assignment target to an ordinary
+  `Index` on the local/global `vec` when that name is bound
+  (`hir/lower/stmt_lowering.rs`, `Node::Assignment` arm), which is the doc's
+  preferred resolution (bound variable wins over the literal form). Unbound
+  `vec[...]` targets keep the literal shape and its existing MIR rejection.
+  Regression tests:
+  `hir::lower::tests::seed_regression_tests::local_named_vec_index_assignment_lowers_to_index_not_vec_literal`
+  (bound local -> Index assignment, no VecLiteral lvalue survives) and
+  `vec_literal_assignment_target_without_local_stays_rejected`
+  (unbound `vec[...] = x` stays a compile error, never an Index). Native/JIT re-verification with a rebuilt seed
+  is pending; the rvalue question (whether `x = vec[0]` silently yields a
+  1-lane SIMD value instead of an element read) is deliberately out of scope
+  here and needs its own owner decision.
 
 ## Symptom
 
