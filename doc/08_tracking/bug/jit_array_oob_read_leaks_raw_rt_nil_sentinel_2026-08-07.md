@@ -389,6 +389,32 @@ existing `!= nil` check and the boxed formatter then become correct without
 either of them changing. `ANY` is used rather than `Pointer`/`T?` (the lane
 `at` uses) because `at` is still broken in value position on the JIT.
 
+## Triage 2026-11-25 (release/1.0.0 pinned seed) — still OPEN, symptom shifted again, Rust-seed-only
+
+Measured on `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1,
+Windows) at release/1.0.0 HEAD, JIT lane vs `SIMPLE_EXECUTION_MODE=interpreter`:
+
+| expr | JIT (default) | interpreter |
+|---|---|---|
+| `xs.get(9)` (miss, OOB) | `Option::Some(<enum@0x...>)` — still WRONG (a miss is not `Some`, and not `nil`) | `nil` — correct |
+| bare `xs[9]` (OOB) | `val=0`, rc=0, no panic — still WRONG (no bounds check; the leaked word changed from `3` to `0`) | panics `array index out of bounds: index is 9 but length is 3` — correct |
+
+The original headline symptom (raw `RT_NIL` word `3` leaking into formatted
+output) no longer reproduces — the 2026-08-17 `TypeId::ANY` re-typing appears
+to have landed in this seed — but the underlying defect class is NOT fixed:
+the JIT still (a) formats an OOB `.get()` miss as a bogus `Some(...)` instead
+of `nil`, and (b) emits no bounds check for bare array indexing, returning `0`
+silently where the interpreter panics. Both remaining sites are in the Rust
+seed (`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs`
+array-index arm and the interpreter-independent formatter path), which this
+lane may not edit (no cargo builds, seed is bootstrap-only, fix needs a seed
+rebuild + redeploy). No pure-Simple fix is possible; the `.spl` self-hosted
+lane was already shown (2026-08-08) not to have this defect.
+
+**Disposition: SKIP (Rust-seed-only), stays OPEN.** Status header "OPEN (P1)"
+remains accurate; the measurements above supersede the 2026-08-17 table for
+anyone picking this up.
+
 Still NOT fixed by this change, and explicitly not claimed:
 - bare `xs[9]` OOB emits no bounds check and does not panic under the JIT. The
   seed's array-index MIR arm and `.get()` share one code path, so a bounds

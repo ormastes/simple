@@ -1,6 +1,6 @@
 # Bug: JIT wraps large i64 boundary constants (p60/p62/i64::MAX) to negative/zero
 
-Status: OPEN (P1)
+Status: RESOLVED 2026-11-25 (verified on the release/1.0.0 pinned seed, see bottom section)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 **Found**: 2026-08-09, via `scripts/check/check-engine-differential.shs`
@@ -97,3 +97,20 @@ Skipped from this row-order pass: primary file/fix surface is the Rust seed
 (`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
 pure-Simple, non-Codex lane within the triage budget. Not reproduced or
 re-diagnosed this pass; left OPEN as-is.
+
+## Verified RESOLVED 2026-11-25 (release/1.0.0 pinned seed, Windows)
+
+The 2026-08-17 "fix present in current source" verdict and the 2026-09-06
+aarch64 re-probe are confirmed on the binary release/1.0.0 actually ships for
+Windows (`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1). Probe
+materializing `p60`, `p62` and `i64::MAX` as `i64` locals prints the exact
+values on BOTH engines:
+
+```
+P60=1152921504606846976 P62=4611686018427387904 MAX=9223372036854775807
+```
+
+identical under default `run` (JIT) and `SIMPLE_EXECUTION_MODE=interpreter`;
+no wrap to negative or zero. The guarded `rt_value_int` heap-spill box
+(`src/compiler_rust/runtime/src/value/core.rs`) described in the 2026-08-17
+entry is doing its job in this binary. **Status: RESOLVED (2026-11-25).**
