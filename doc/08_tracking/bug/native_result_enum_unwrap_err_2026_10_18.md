@@ -1,8 +1,6 @@
 # Native Result unwrap_err rejects named enum payloads
 
-Status: OPEN. Native workaround mechanism PASS; production-owner probes UNRUN.
-Authoritative bug DB reconciliation is pending because no qualified full CLI
-or test runner is available. Canonical ID:
+Status: RESOLVED (2026-11-25). Root fix in `method_calls_literals.spl` (`lower_result_unwrap_core`, natively verified on `s3_fable43` `b2r_errunwrap.spl`); all 5 workarounds in `src/compiler/20.hir/archive/interface_action_archive.spl` reverted back to `unwrap_err()`. Canonical ID:
 `native_result_enum_unwrap_err_2026_10_18`.
 
 ## Evidence

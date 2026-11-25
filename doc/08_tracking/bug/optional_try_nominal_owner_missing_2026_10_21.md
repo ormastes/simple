@@ -2,10 +2,7 @@
 
 ## 2026-11-03 permanent owner-propagation source candidate
 
-Status: **fix implemented, verification pending**. No admitted self-hosted
-runtime is available in this recovery session; authored regressions are
-**TEST_BLOCKED**, not PASS. The library annotation and its workaround tag remain
-until the original unannotated native case passes.
+Status: **RESOLVED (2026-11-25)**. Root MIR fix landed in PR #6304 (`efbd310e067`, `optional_try_nominal_owner_spec.spl`) and `array.take` landed in PR #5106 (`6f22badafed`); reverted the `: SdnTable` workaround annotation and tag in `src/lib/nogc_async_mut/database/bug.spl`.
 
 Current source still had the actual root gap: `lower_try_expr` decoded Optional
 payload bits but returned a nominal payload without its HIR declaration or

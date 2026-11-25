@@ -1,6 +1,6 @@
 # Native array take method missing in database query
 
-Status: source workaround candidate; runtime UNRUN.
+Status: RESOLVED (2026-11-25). Native `array.take` lowering landed in PR #5106 (`6f22badafed`, `lower_runtime_array_take`, `array_take_native_lowering_spec.spl`); both `nogc_async_mut` and `nogc_sync_mut` `database/query.spl` workarounds reverted to `row_ids.take(self.limit_count)`.
 
 Checkpoint74 actual failure: `canonical-batch69/unit-6`, source commit
 `8973828b8187c7692f6e8e76489d924cc10c9c26`, producer SHA256

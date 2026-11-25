@@ -1,6 +1,6 @@
 # Seed: untyped `val n = s.byte_len()` holds a raw i64 misdecoded as a tagged value
 
-Severity: P1 (silent wrong values; non-terminating loops). Status: fix-implemented-verification-pending.
+Severity: P1 (silent wrong values; non-terminating loops). Status: resolved & workarounds retired (2026-11-25; seed fix `9a80b3cb557` + PR `#11458` MIR numeric proof). Reverted `val line: text = row` in `inventory_events.spl` and retired the `@workaround` tag in `module_path_naming.spl`.
 
 Found via PR #7883, which papered over it in `src/compiler/00.common/module_path_naming.spl`
 (`# @workaround bug=hir_unit_specs_hang_over_300s_2026-11-06`): an untyped
