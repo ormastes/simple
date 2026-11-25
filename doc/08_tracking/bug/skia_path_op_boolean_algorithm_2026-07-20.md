@@ -1,5 +1,31 @@
 # Skia path_op boolean polygon ops: 2 of 6 examples fail
-## Open 2026-09-16 — needs owner triage
+
+## Closed 2026-11-25 — all 6 spec oracles pass with the current algorithm
+
+- **measured** Worktree `wt-p2w5-al` at release/1.0.0 HEAD (`ae1572aeb67`),
+  pinned tracked `bin/simple.exe` (Rust seed v1.0.0-rc.1, 38,403,072 bytes),
+  Windows host. Because the full spec runner is blocked at this HEAD (see
+  limits below), the current `src/lib/skia/feature/path_op/boolean.spl`
+  (512 lines) was copied byte-identically into an isolated probe module and
+  driven through all 6 `it`-block oracles of
+  `test/01_unit/lib/skia/path_op_spec.spl` via `bin/simple.exe run`:
+  union-overlap bbox + 4 containment points, union-disjoint 3 points,
+  intersect-overlap 3 points + bbox, intersect-disjoint 2 points + 0 verbs,
+  difference-ring 2 points + bbox, xor-overlap 4 points.
+- **measured** Every printed value matched the spec's pinned expectation
+  (e.g. `case1 bbox: 0.0 0.0 15.0 15.0`, `case4 verbs: 0`,
+  `case6 contains: false true true false`). The "2 of 6 fail" state from
+  2026-07-20 no longer exists in the algorithm.
+- **limits** (stated, not worked around): `bin/simple.exe test` cannot run
+  at this HEAD repo-wide — the pinned seed rejects the
+  `@representation_boundary` decorator added by cfd89933699 (known
+  source/binary inconsistency), and the seed additionally rejects the
+  spec's `use std.skia.feature.path_op.{...}` import because `path_op` is a
+  private fn (module-level privacy). Both are environment/binary limits,
+  not algorithm failures; the byte-identical-copy probe above is the
+  strongest verification available on this host.
+
+## Open 2026-09-16 — needs owner triage (superseded by 2026-11-25 closure above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
