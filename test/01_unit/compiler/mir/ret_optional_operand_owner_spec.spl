@@ -3,9 +3,52 @@
 use std.spec
 use std.spec.step
 use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
 use compiler.mir.mir_types.{MirType, LocalId}
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator, BlockId}
 use compiler.mir.mir_instruction_graph.{MirBlock, MirInst}
+
+fn _ret_owner_mir_errors(src: text) -> i64:
+    val file = "testdata/ret_optional_owner_probe.spl"
+    val parsed = parse_full_frontend(src, file, "ret_optional_owner_probe", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val _mir = lowering.lower_module(hir)
+    lowering.errors.len()
+
+val UNANNOTATED_COALESCE_SRC = """
+enum OpKind:
+    Copy(id: i64)
+    Const(v: i64)
+
+struct Operand:
+    kind: OpKind
+
+enum Term:
+    Ret(value: Operand?)
+    Other
+
+fn default_op() -> Operand:
+    Operand(kind: OpKind.Const(v: 0))
+
+fn probe(t: Term) -> i64:
+    match t:
+        case Term.Ret(value):
+            if value == None:
+                return 0
+            val payload = value ?? default_op()
+            match payload.kind:
+                case OpKind.Copy(id): id
+                case OpKind.Const(v): v
+        case _: -1
+"""
 
 describe "Optional return operand keeps its MIR owner":
     it "return operand projection through MirBlock has an owner":
@@ -22,3 +65,7 @@ describe "Optional return operand keeps its MIR owner":
         expect(source).to_contain("me null_coalesce_default_owner_type(right: HirExpr) -> HirType?:")
         expect(source).to_contain("elif val default_owner = self.null_coalesce_default_owner_type(right):")
         expect(source).to_contain("self.remember_local_hir_type(result_local.id, default_owner, 0, 0)")
+
+    it "lowers unannotated null-coalesce operand field match with zero MIR errors":
+        step("unannotated value ?? default_op() keeps nominal owner through MIR lowering")
+        expect(_ret_owner_mir_errors(UNANNOTATED_COALESCE_SRC)).to_equal(0)
