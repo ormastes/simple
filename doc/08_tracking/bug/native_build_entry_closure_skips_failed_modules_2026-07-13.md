@@ -67,3 +67,22 @@ The next source fix must distinguish valid single-segment module imports from
 scanner false positives and fail unresolved required modules closed. Do not
 remove the skip while another agent owns the active driver/bootstrap rebuild.
 
+
+## Triage 2026-11-25 (lane p2w3-ak) — source fix present; executable verification still environment-blocked
+
+- Code inspection at release/1.0.0 tip 728ac68effd confirms the claimed
+  fail-fast shape in the pure-Simple driver: phase gates return
+  `CompileResult.TypeError(ctx.errors)` before link
+  (`src/compiler/80.driver/driver.spl:107`), and the old
+  `non-critical file(s) failed to compile (skipped)` warning string no longer
+  exists anywhere in `src/compiler/80.driver/`. The regression spec named by
+  the record, `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`,
+  exists and is referenced from `driver_entry_closure_core.spl`.
+- Fresh executable evidence remains blocked on this host: there is no
+  qualified self-hosted runtime (the record itself forbids substituting a
+  Rust-seed result), and the pinned seed cannot run the spec suite at this
+  HEAD (`@representation_boundary` rejection, known source/binary
+  inconsistency).
+- The remaining unresolved single-segment-import gap is explicitly
+  owner-reserved ("do not remove the skip while another agent owns the active
+  driver/bootstrap rebuild"). Left OPEN; no code change attempted.
