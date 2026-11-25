@@ -563,3 +563,13 @@ Vulkan/input/audio admission, or current-source kernel qualification occurred in
 this repair. Resume with the canonical unified live gate after the admitted
 self-hosted compiler can build the kernel. Do not infer native admission from
 these shell regressions or the historical marker-kernel firmware proof.
+
+## Triage 2026-11-25 (p2w1-ab lane) — still blocked, unchanged
+
+Re-checked at release/1.0.0 tip (38265c7f249) on a Windows host: the lane
+migration remains gated on a deployed pure-Simple self-hosted compiler able
+to build the unified arm64 kernel (item 2 of the remaining work above),
+which this host cannot provide — only the pinned Rust seed is present, and
+it rejects the `@representation_boundary` decorator tree-wide
+(cfd89933699). No code change; status correctly remains open /
+verification-pending.
