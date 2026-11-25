@@ -6,9 +6,10 @@
 - **Area:** `src/lib/common/js/engine/runtime.spl` (`JsRuntime` + `NATIVE_*` id constants +
   `dispatch_native`), the `interpreter*` clusters across tiers, the module-system's cross-module
   `val` resolution.
-- **Status:** OPEN — found 2026-07-08 attempting #35 Step 4 (move `JsRuntime` out of the pure CORE
+- **Status:** RESOLVED 2026-11-10 (Step 4 completed; header corrected 2026-11-25) — found 2026-07-08 attempting #35 Step 4 (move `JsRuntime` out of the pure CORE
   tier). Steps 1-3 (lzma2 + js/mod + js/module_loader) landed cleanly (`952208f1`, gate
-  `core_purity_new` 4→1). Step 4 reverted after the regression below.
+  `core_purity_new` 4→1). Step 4 reverted after the regression below, then
+  completed 2026-11-10 — see the final two sections.
 
 ## What was attempted (and why it failed)
 
@@ -108,3 +109,28 @@ the relocation:
   without changing live dispatch values.
 
 Seed-smoke only (Rust seed interpreter); no self-hosted/native claim.
+
+## Header correction 2026-11-25 (work/p2w1-aj-20261125)
+
+The body records the 2026-11-05 constant-resolution fix and the 2026-11-10
+Step-4 completion, but the status header still read OPEN; header now matches
+the body. Resolution evidence re-verified by source inspection on
+`origin/release/1.0.0` (f3bb6b4549b):
+
+- `src/lib/common/js/engine/runtime.spl` is pure: 389 lines, no `JsRuntime`
+  class or `PrototypeChain` (header comment at lines 7-24 documents the move
+  to `src/lib/nogc_sync_mut/js/engine/runtime.spl` and warns against
+  re-adding them); the `NATIVE_*` constants + `dispatch_native` remain as the
+  single source of truth.
+- The regression spec
+  `test/01_unit/lib/common/js_runtime_native_const_cross_module_spec.spl`
+  exists in-tree.
+- Spec execution not possible on this host: the pinned seed at HEAD rejects
+  `@representation_boundary` repo-wide (known source/binary inconsistency),
+  so this is inspection-only verification.
+
+Still-open remainder (not this bug): the option-3 ID renumbering — 11
+duplicate-name divergent IDs and the in-table numeric collisions
+(`NATIVE_ARRAY_PUSH=-50` vs `NATIVE_FETCH=-50`, etc.) — remains separate
+tracked work needing a renumbering design, as recorded in the 2026-11-10
+section.

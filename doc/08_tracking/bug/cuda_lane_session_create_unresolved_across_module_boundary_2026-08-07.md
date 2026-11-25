@@ -95,3 +95,16 @@ bin/simple test test/03_system/gpu_lane/cuda_jit_hello_spec.spl
 If `CudaLaneSession.create()` still fails to resolve on a genuinely
 self-hosted deployed binary, this becomes a real B1/B2 code defect and should
 be re-triaged as such (not an environment issue).
+
+## Triage 2026-11-25 (work/p2w1-aj-20261125) — SKIP (needs self-hosted rebuild on the CUDA host)
+
+No code change this pass. The doc's own evidence classifies this as a
+deployed-binary/environment issue on the original Linux host, with an explicit
+unblock condition: redeploy the production self-hosted
+`bin/release/<triple>/simple` and re-run the three named commands. That
+rebuild cannot happen on this Windows fleet host (pinned Rust seed rejects
+`@representation_boundary` repo-wide at HEAD; no cargo builds permitted; no
+CUDA device), and the failure mode is not reproducible here. Whether
+`CudaLaneSession.create()` resolves on a genuinely self-hosted binary — the
+question that decides code-defect vs environment — remains open pending that
+redeploy. Status header (OPEN, P2) stays accurate.

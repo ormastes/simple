@@ -233,3 +233,17 @@ Spec results (seed hosted, worktree cwd):
 - Native/JIT behavioral admission still pending a self-hosted rebuild (as
   before for this row); interpreter + MIR/LLVM-text pins are the hosted
   evidence.
+
+## Triage 2026-11-25 (work/p2w1-aj-20261125) — SKIP, status OPEN remains accurate
+
+No code change this pass. The 2026-11-12 fix-verification section above is the
+current state: storage-side (Let/call-arg/re-assignment) boxing is fixed in
+pure-Simple, but (a) the consumer-side gaps (type-directed comparison boxing in
+`expr_dispatch.spl`'s Binary case; `is_text_conversion` render routing in
+`method_calls_literals.spl`) are still open and are a design task, not a
+surgical port — the 2026-09-13 triage's assessment stands; and (b) native/JIT
+behavioral admission requires a self-hosted Stage 2+ rebuild, which this
+Windows host cannot produce (pinned Rust seed rejects
+`@representation_boundary` repo-wide at HEAD, so even interpreter specs cannot
+run). Closing or fixing here would be claiming evidence nobody has; leaving
+OPEN with the header as-is.

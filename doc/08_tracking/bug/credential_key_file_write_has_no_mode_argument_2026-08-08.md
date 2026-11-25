@@ -132,3 +132,22 @@ callers, which live in `src/lib/**` — outside this worker's file slice, where 
 edit would be a cross-worker clobber. Adding an uncalled runtime primitive alone
 would also violate the "never add unused code" rule. Handing off with the exact
 sites above.
+
+## Triage 2026-11-25 (work/p2w1-aj-20261125) — SKIP (multi-lane + bootstrap rebuild)
+
+No code change this pass. Re-verified live at `origin/release/1.0.0`
+(f3bb6b4549b): the two hard-coded-0644 creation sites still exist, now at
+`src/runtime/runtime_native.c:17976` and `:18725`
+(`rt_crt_open(path, O_WRONLY | O_CREAT, 0644)` — line numbers drifted again
+from the 2026-08-17 citations, and the call now routes through `rt_crt_open`).
+No write path accepts a caller-supplied mode; the 0600 counter-example
+(`O_WRONLY|O_CREAT|O_EXCL, 0600`) remains the only restrictive creation.
+
+Still scope-blocked exactly as the 2026-08-17 verifications concluded: the fix
+is one coherent change across (1) a runtime C primitive
+(`rt_file_write_text_mode`), (2) the Rust seed's `file_io.rs`
+(`OpenOptionsExt`), and (3) routing `credential_key_generate` in
+`src/lib/nogc_sync_mut/terminal/credential/store.spl` — plus a bootstrap
+rebuild to admit the new extern. Landing any single slice here would add
+unreachable code or cross another lane's files, and this host cannot rebuild
+or admit a seed/runtime change. Wants a single owner across all three paths.
