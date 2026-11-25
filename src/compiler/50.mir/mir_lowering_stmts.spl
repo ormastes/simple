@@ -25,6 +25,7 @@ use compiler.hir.hir_kind_carrier.{hir_type_kind_discriminant}
 use compiler.hir.hir_definitions.*
 use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_is_short_candidate, hir_type_ownership_is_known}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.mir._MirLoweringExpr.enum_payload_type_identity.{enum_payload_nominal_kind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.value_access.{compiler_value_discriminant}
@@ -259,6 +260,104 @@ fn mir_merged_struct_name_pair(first: text, second: text) -> text:
 fn mir_struct_name_bare(name: text) -> text:
     val parts = name.split("::")
     parts[parts.len() - 1]
+
+fn mir_stmts_named_alias_equal(a: SymbolId, b: SymbolId, symbols: SymbolTable) -> bool:
+    """Compare two nominal SymbolIds across declaration/import namespaces without collapsing distinct types."""
+    val kind_a = enum_payload_nominal_kind(a, symbols)
+    if kind_a == 0 or kind_a != enum_payload_nominal_kind(b, symbols):
+        return false
+    val name_a = symbols.symbol_name_scalar_raw(a.id)
+    if name_a == "" or name_a != symbols.symbol_name_scalar_raw(b.id):
+        return false
+    if a.id == b.id:
+        return true
+    val owner_a = hir_symbol_owner_module(symbols.symbol_defining_module_scalar_raw(a.id))
+    owner_a != "" and owner_a == hir_symbol_owner_module(symbols.symbol_defining_module_scalar_raw(b.id))
+
+fn mir_stmts_hir_type_lists_agree(a: [HirType], b: [HirType], symbols: SymbolTable) -> bool:
+    if a.len() != b.len():
+        return false
+    for idx in 0..a.len():
+        if not mir_stmts_hir_types_agree(a[idx], b[idx], symbols):
+            return false
+    true
+
+fn mir_stmts_hir_types_agree(a: HirType, b: HirType, symbols: SymbolTable) -> bool:
+    """Return true when two HIR types represent the same type, folding cross-module nominal aliases."""
+    if hir_types_equal(a, b):
+        return true
+    match (a.kind, b.kind):
+        case (HirTypeKind.Named(sa, aa), HirTypeKind.Named(sb, ab)):
+            mir_stmts_named_alias_equal(sa, sb, symbols) and mir_stmts_hir_type_lists_agree(aa, ab, symbols)
+        case (HirTypeKind.Array(ea, size_a), HirTypeKind.Array(eb, size_b)):
+            size_a == size_b and mir_stmts_hir_types_agree(ea, eb, symbols)
+        case (HirTypeKind.Slice(ea), HirTypeKind.Slice(eb)):
+            mir_stmts_hir_types_agree(ea, eb, symbols)
+        case (HirTypeKind.Dict(ka, va), HirTypeKind.Dict(kb, vb)):
+            mir_stmts_hir_types_agree(ka, kb, symbols) and mir_stmts_hir_types_agree(va, vb, symbols)
+        case (HirTypeKind.Optional(ia), HirTypeKind.Optional(ib)):
+            mir_stmts_hir_types_agree(ia, ib, symbols)
+        case (HirTypeKind.Result(oa, ea), HirTypeKind.Result(ob, eb)):
+            mir_stmts_hir_types_agree(oa, ob, symbols) and mir_stmts_hir_types_agree(ea, eb, symbols)
+        case (HirTypeKind.Tuple(aa), HirTypeKind.Tuple(ab)):
+            mir_stmts_hir_type_lists_agree(aa, ab, symbols)
+        case _:
+            false
+
+fn mir_stmts_unambiguous_array_elem_hir(elem: MirType, symbols: SymbolTable, span: Span) -> HirType?:
+    match elem.kind:
+        case MirTypeKind.Struct(sym):
+            if enum_payload_nominal_kind(sym, symbols) != 0:
+                return Some(HirType(kind: HirTypeKind.Named(sym, []), span: span))
+            None
+        case MirTypeKind.Opaque(opaque_name):
+            if opaque_name == "str":
+                return Some(HirType(kind: HirTypeKind.Str, span: span))
+            None
+        case MirTypeKind.Bool:
+            Some(HirType(kind: HirTypeKind.Bool, span: span))
+        case MirTypeKind.F64:
+            Some(HirType(kind: HirTypeKind.Float(64), span: span))
+        case MirTypeKind.F32:
+            Some(HirType(kind: HirTypeKind.Float(32), span: span))
+        case _:
+            None
+
+fn mir_stmts_unambiguous_array_hir_type(mir_ty: MirType, symbols: SymbolTable) -> HirType?:
+    """Recover an HIR array/slice type from an unambiguous MIR array/slice without guessing from I64 or Any."""
+    if mir_ty == None:
+        return None
+    val span = Span.empty()
+    match mir_ty.kind:
+        case MirTypeKind.Array(elem, _):
+            if val elem_hir = mir_stmts_unambiguous_array_elem_hir(elem, symbols, span):
+                return Some(HirType(kind: HirTypeKind.Array(elem_hir, None), span: span))
+            None
+        case MirTypeKind.Slice(elem):
+            if val elem_hir = mir_stmts_unambiguous_array_elem_hir(elem, symbols, span):
+                return Some(HirType(kind: HirTypeKind.Slice(elem_hir), span: span))
+            None
+        case _:
+            None
+
+fn mir_stmts_mir_elem_is_non_i64(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.Array(elem, _): elem.kind != MirTypeKind.I64
+        case MirTypeKind.Slice(elem): elem.kind != MirTypeKind.I64
+        case _: false
+
+fn mir_stmts_should_upgrade_array_mir_type(current_mir: MirType?, target_mir: MirType) -> bool:
+    """Only refine erased I64 / Array(I64) / Slice(I64) merge slots to a proven array/slice MIR type."""
+    if current_mir == None:
+        return true
+    val cur: MirType = current_mir.unwrap()
+    match cur.kind:
+        case MirTypeKind.I64: true
+        case MirTypeKind.Array(cur_elem, _):
+            cur_elem.kind == MirTypeKind.I64 and mir_stmts_mir_elem_is_non_i64(target_mir)
+        case MirTypeKind.Slice(cur_elem):
+            cur_elem.kind == MirTypeKind.I64 and mir_stmts_mir_elem_is_non_i64(target_mir)
+        case _: false
 
 fn mir_join_slot_is_payloadless(slot_type: MirType) -> bool:
     """True when an if/if-chain merge slot of this MIR type has no runtime
@@ -1782,7 +1881,7 @@ impl MirLowering:
                             init_mir_type_value
                         else if let_type != None and annotated_is_dict_pre and not self.local_is_runtime_dict(init_local):
                             mir_type
-                        else if let_type != None and annotated_is_array_pre and not self.local_is_runtime_array(init_local):
+                        else if let_type != None and annotated_is_array_pre and (not self.local_is_runtime_array(init_local) or mir_stmts_should_upgrade_array_mir_type(self.local_mir_type_of(init_local), mir_type)):
                             mir_type
                         else if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
@@ -4045,15 +4144,22 @@ impl MirLowering:
                 # a context-free `[]` arm has no element evidence of its own;
                 # it adopts the other arms' type, which must be an array.
                 saw_empty_array = true
-            elif val arm_type = self.find_local_hir_type(arm_local.id):
-                if typed_index < 0:
-                    typed_index = arm_i
-                elif all_typed:
-                    if val first_type = self.find_local_hir_type(arm_locals[typed_index].id):
-                        if not hir_types_equal(first_type, arm_type):
-                            all_typed = false
             else:
-                all_typed = false
+                var resolved_arm_type: HirType? = self.find_local_hir_type(arm_local.id)
+                if resolved_arm_type == None:
+                    if val recovered_mir = self.local_mir_type_of(arm_local):
+                        if val recovered_hir = mir_stmts_unambiguous_array_hir_type(recovered_mir, self.symbols):
+                            self.remember_local_hir_type(arm_local.id, recovered_hir, 0, 0)
+                            resolved_arm_type = Some(recovered_hir)
+                if val arm_type = resolved_arm_type:
+                    if typed_index < 0:
+                        typed_index = arm_i
+                    elif all_typed:
+                        if val first_type = self.find_local_hir_type(arm_locals[typed_index].id):
+                            if not mir_stmts_hir_types_agree(first_type, arm_type, self.symbols):
+                                all_typed = false
+                else:
+                    all_typed = false
             arm_i = arm_i + 1
         val shared_struct = mir_merged_arm_struct_name(arm_recorded_structs, arm_hir_structs)
         if shared_struct != "" and not self.struct_value_syms.contains(dest.id):
@@ -4067,6 +4173,27 @@ impl MirLowering:
                     case _: all_typed = false
         if all_typed and self.find_local_hir_type(dest.id) == None:
             self.copy_local_hir_type_metadata(arm_locals[typed_index].id, dest.id)
+        if all_typed and typed_index >= 0:
+            if val shared_type = self.find_local_hir_type(arm_locals[typed_index].id):
+                var shared_is_array = false
+                match shared_type.kind:
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        shared_is_array = true
+                    case _: ()
+                if shared_is_array:
+                    var has_float_arm = false
+                    for arm_local in arm_locals:
+                        if not self.empty_array_lit_locals.contains(arm_local.id):
+                            if val arm_mir = self.local_mir_type_of(arm_local):
+                                match arm_mir.kind:
+                                    case MirTypeKind.F64 | MirTypeKind.F32:
+                                        has_float_arm = true
+                                    case _: ()
+                    if not has_float_arm:
+                        self.runtime_array_locals[dest.id] = true
+                        val lowered_shared = self.lower_type(shared_type)
+                        if mir_stmts_should_upgrade_array_mir_type(self.local_mir_type_of(dest), lowered_shared):
+                            self.builder.set_local_type(dest, lowered_shared)
         elif self.find_local_hir_type(dest.id) == None:
             self.remember_merged_result_ctor_arm_type(dest, arm_locals, allow_untyped_ctor_join)
 
@@ -4336,6 +4463,8 @@ impl MirLowering:
         var payload_index = -1
         var payload_from_optional = false
         var ambiguous = ""
+        if self.find_local_hir_type(dest.id) == None:
+            self.remember_merged_arm_identity(dest, arm_locals, false)
         var arm_i = 0
         while arm_i < arm_locals.len():
             val arm_local: LocalId = arm_locals[arm_i]
@@ -5205,11 +5334,25 @@ impl MirLowering:
         # hand back a copy local, but the binding's own local keeps the
         # declared payload type (`case Tuple(elements)` -> [MirType]).
         # has_type_ is the presence bit: untyped placeholders carry a Unit HirType, not nil.
-        if not iter.has_type_:
-            match iter.kind:
-                case Var(_) | NamedVar(_, _):
-                    return self.receiver_declared_type(iter)
+        var iter_needs_declared_lookup = not iter.has_type_
+        if not iter_needs_declared_lookup and iter.type_ != None:
+            match iter.type_.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Unit:
+                    iter_needs_declared_lookup = true
                 case _: ()
+        if iter_needs_declared_lookup:
+            var iter_sym: SymbolId? = None
+            match iter.kind:
+                case HirExprKind.Var(symbol): iter_sym = Some(symbol)
+                case HirExprKind.NamedVar(symbol, _): iter_sym = Some(symbol)
+                case _: ()
+            if val present_sym = iter_sym:
+                if val declared = self.receiver_declared_type(iter):
+                    return Some(declared)
+                if self.local_map.contains(present_sym.id):
+                    val bound_local: LocalId = self.local_map[present_sym.id]
+                    if val bound_type = self.find_local_hir_type(bound_local.id):
+                        return Some(bound_type)
         # `for x in self.d.values()` / `.keys()` whose receiver method was
         # unresolved at HIR (bug for_in_dict_values_i64_2026-10-24): the call
         # carried no element type, so the collection lowered as a bare I64
