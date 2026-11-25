@@ -1,4 +1,29 @@
 # BUG: `std.parser.treesitter_node` does not exist, and its spec asserts nothing anyway
+
+## Resolved 2026-11-25 (verification note, worktree wt-p2w6-ah, release/1.0.0 HEAD f3fb8f24dc9)
+
+The owner decision this record was blocked on has since been made — option 1,
+**delete the spec**:
+
+- Commit `1869ae8fb3e` (2026-11-10, "chore(test): close treesitter_node bug
+  obsolete, delete tautological spec") deleted
+  `test/01_unit/std/parser/treesitter_node_spec.spl` (256 lines) and updated
+  this bug's ledger entry; confirmed absent from the tree at this HEAD.
+- A real TreeSitter facade now exists at
+  `src/compiler_rust/lib/std/src/parser/treesitter/__init__.spl`
+  (`std.parser.treesitter`: `Node`, `NodeArena`, `NodeId`, `Span`,
+  `TreeSitterParser`), covered by
+  `test/01_unit/std/parser/treesitter_facade_compat_spec.spl`, whose
+  assertions are behavioural, not tautological (arena generation/owner
+  staleness rejection, fail-closed malformed child edges, snapshot
+  independence).
+- **limitation** — the facade spec could not be executed here:
+  `bin/simple.exe test` is blocked repo-wide at this HEAD (seed rejects
+  `@representation_boundary`). Resolution verified by commit record and
+  source/spec inspection.
+
+The "Open / needs owner triage" header below is superseded by this note.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
