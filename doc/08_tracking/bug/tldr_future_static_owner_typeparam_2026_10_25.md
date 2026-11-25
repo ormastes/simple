@@ -30,3 +30,17 @@ visible without a native module trace. Concrete-constructor workaround kept.
 Next step: with a stage3 build, bisect the factory module with
 `SIMPLE_MIR_TRACE` per expression to find the T-typed expression, then fix
 static-method owner substitution in 50.mir. Status left open.
+
+## WA-S6 verification and retirement (2026-11-26)
+
+Root fix `d8c65fbd74c` (`fix(hir): instantiate generic composite field types from the receiver's type arguments`)
+and `static_factory_optional_payload_typeparam_spec.spl` (7/7) resolved
+generic field/static-factory typing. Verified `TldrTableV1.deref` using
+`Future.from_value(Some(self.entries[h.module_key]))` and `Future.pending()`
+via pure-Simple MIR+LLVM IR (untagged `Option<text>` handle passed into
+`Future.from_value`, decoded cleanly on `Poll<text?>` via `rt_enum_payload` ->
+`rt_is_some` -> `rt_unwrap_or_self`), `tldr_table_v1_spec.spl`,
+`tldr_table_async_v1_spec.spl`, `test/fixtures/compiler/tldr_future_binding_native.spl`
+(`SIMPLE_JIT_STRICT=1`), and regression specs. Retired
+`@workaround bug=tldr_future_static_owner_typeparam_2026_10_25` and the unused
+`Poll` import from `src/compiler/80.driver/cache/reader/tldr_table_v1.spl`.
