@@ -360,12 +360,21 @@ impl MirLowering:
         # registry membership before reading a header and returns candidate->data
         # only for a live registered RtCoreString*, so an exact pointer match
         # recovers the owning handle without copying the full string buffer.
+        # RtCoreString is 8-byte aligned and data starts at +16, so any unaligned
+        # pointer cannot be an owned s->data slice and skips the runtime call.
+        val ets_owner_align_block = b_ets_branch.new_block(Some("text_owner_align"))
         val ets_owner_probe_block = b_ets_branch.new_block(Some("text_owner_probe"))
         val ets_owner_keep_block = b_ets_branch.new_block(Some("text_owner_keep"))
         val ets_owner_copy_block = b_ets_branch.new_block(Some("text_owner_copy"))
         val ets_floor = b_ets_branch.emit_const_int(65552)
         val ets_plausible = b_ets_branch.emit_binop(MirBinOp.Gt, mir_operand_copy(ets_original_word), mir_operand_copy(ets_floor), MirType.bool())
-        b_ets_branch.terminate_if(mir_operand_copy(ets_plausible), ets_owner_probe_block, ets_owner_copy_block)
+        b_ets_branch.terminate_if(mir_operand_copy(ets_plausible), ets_owner_align_block, ets_owner_copy_block)
+        b_ets_branch.switch_to_block(ets_owner_align_block)
+        val ets_align_mask = b_ets_branch.emit_const_int(7)
+        val ets_align_bits = b_ets_branch.emit_binop(MirBinOp.BitAnd, mir_operand_copy(ets_original_word), mir_operand_copy(ets_align_mask), MirType.i64())
+        val ets_align_zero = b_ets_branch.emit_const_int(0)
+        val ets_aligned = b_ets_branch.emit_binop(MirBinOp.Eq, mir_operand_copy(ets_align_bits), mir_operand_copy(ets_align_zero), MirType.bool())
+        b_ets_branch.terminate_if(mir_operand_copy(ets_aligned), ets_owner_probe_block, ets_owner_copy_block)
         b_ets_branch.switch_to_block(ets_owner_probe_block)
         val ets_header_bytes = b_ets_branch.emit_const_int(16)
         val ets_header_word = b_ets_branch.emit_binop(MirBinOp.Sub, mir_operand_copy(ets_original_word), mir_operand_copy(ets_header_bytes), MirType.i64())
