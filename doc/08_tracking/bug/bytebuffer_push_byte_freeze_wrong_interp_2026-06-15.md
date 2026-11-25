@@ -6,6 +6,23 @@
 - **inferred**: the original driver was `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`, a Linux artifact not present here, so this is "does not reproduce on the current Windows seed" rather than a located fix.
 - Note found in the same run and filed against its own entry, not this one: `for b in span:` over the frozen `ByteSpan` still iterates zero times — see `for_in_custom_struct_no_iterator_protocol_2026-06-15.md`, which remains OPEN. The byte VALUES are correct; only iteration is missing.
 
+## Re-verified 2026-11-25 — still fixed on release/1.0.0
+
+The minimal repro above was re-run verbatim on the tracked self-hosted
+`bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1) at
+`origin/release/1.0.0` (`3e04c857a56`), `SIMPLE_LIB=src`, via
+`bin/simple.exe run`:
+
+```
+len=4
+get(0)=222
+get(1)=173
+get(2)=190
+get(3)=239
+```
+
+Exactly `0xde 0xad 0xbe 0xef`. Remains CLOSED (does not reproduce).
+
 **ID:** bytebuffer_push_byte_freeze_wrong_interp_2026-06-15
 **Filed:** 2026-06-15
 **Status:** CLOSED 2026-09-13 (does not reproduce). **Severity:** P1 — silent data corruption; produces wrong bytes with no error

@@ -1,14 +1,42 @@
 # Cross-module imported function mutation not propagating to caller's instance
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — does not reproduce on the current pinned seed
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Status: CLOSED (stale).** A minimal compiler-level repro of BOTH reported
+mechanisms was run 2026-11-25 on `origin/release/1.0.0` (`3e04c857a56`) with
+the tracked `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1),
+`SIMPLE_LIB=src`, on BOTH the default JIT lane and
+`SIMPLE_EXECUTION_MODE=interpret`:
+
+- Two sibling modules; module A defines `pub class Sink` and
+  `pub fn draw_showcase(mut s: Sink)` (pushes 111); module B imports
+  `use xmod_a.{run_showcase, Sink}` and defines a LOCAL same-named
+  `draw_showcase` (pushes 222). Calling `draw_showcase(s)` from B's `main`
+  resolves to the LOCAL definition (`pushed 222`) — the imported module's
+  same-named symbol no longer wins the name-resolution race.
+- Direct symptom check: module C imports `use xmod_a.{draw_showcase, Sink}`
+  and calls the imported mutating fn on a caller-owned instance — the
+  mutation propagates (`items.len()=1`, `value=111`) on both lanes.
+
+The compiler now also emits a loud diagnostic for the residual hazard
+(`compiler_cross_module_private_symbol_collision`: "N function name(s) have
+co-compiled definitions across modules with the SAME signature … one
+silently wins"), so the silent version of this failure mode is gone.
+
+Caveats, stated honestly: the repro is the minimal two-module shape, not the
+original Engine2D/WM-client program, and the workaround in
+`examples/06_io/ui/graphics_2d_showcase_gui.spl` (the renamed
+`wm_draw_showcase`/`wm_label` local copies) is LEFT IN PLACE — removing it
+and restoring the cross-module import (the doc's Acceptance item) requires
+re-running the WM client render path on a WM-capable host, which this
+Windows worktree cannot do. Whoever removes the workaround should re-run the
+client there per the Acceptance section below.
 
 ## Status
 
 Open. Workaround applied in `graphics_2d_showcase_gui.spl` (local, RENAMED copies of
 `draw_showcase`/`label` — `wm_draw_showcase`/`wm_label` — plus unmodified helpers/constants)
 — see comment block there for removal instructions once fixed.
+(Superseded by the 2026-11-25 closure above.)
 
 **Verified 2026-07-12:** a plain verbatim local copy (same names as the source module)
 was NOT sufficient — it still produced a blank frame (0/1,440,000 nonzero bytes). The

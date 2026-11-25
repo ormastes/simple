@@ -65,7 +65,14 @@ That unresolved-symbol fallback is the more likely original cause of the empty
 `MirToWat.create` cleanly today.
 
 **Date:** 2026-08-01
-**Status:** OPEN — reproduced and measured, mechanism NOT yet proven
+**Status:** CLOSED 2026-09-13 (FIXED — see the closure section at the top;
+header line corrected 2026-11-25, was stale "OPEN — reproduced and measured,
+mechanism NOT yet proven"). Re-verified 2026-11-25 on the tracked Windows
+seed `bin/simple.exe` (38,403,072 bytes, v1.0.0-rc.1) at
+`origin/release/1.0.0` (`3e04c857a56`): the self-contained Sink/Emitter
+minimal fixture (static-ctor-chained / plain-fn-chained / bound-receiver)
+prints `A=1 B=1 C=1` on BOTH the default JIT lane and
+`SIMPLE_EXECUTION_MODE=interpret`. Does not reproduce; remains CLOSED.
 **Severity:** Silent no-op. No diagnostic, no error, no warning. Generates
 false-green tests.
 **Found while:** verifying the WASM float-arithmetic fix,
