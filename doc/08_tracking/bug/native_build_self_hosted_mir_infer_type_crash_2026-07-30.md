@@ -1,8 +1,10 @@
 # `native-build` crashes on module-level globals with a binary-expression initializer (self-hosted compiler, not the Rust seed)
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-04 (n88_a triage) — verified in-tree 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+**Superseded:** the 2026-11-04 Resolution section at the end records the fix;
+the 2026-11-25 note confirms it is present on release/1.0.0.
 
 Filed while following up on
 `doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md`'s own
@@ -158,3 +160,21 @@ JIT-focused sweep never otherwise touched, and is left for its own pass.
 
 ## Resolution 2026-11-04 (n88_a triage)
 FIXED on release/1.0.0: `mir_folded_const_type` (src/compiler/50.mir/_MirLowering/function_lowering.spl) recovers a concrete type for folded Binary module constants instead of lower_type(Infer); commits 683e2d1009e, a95b6c8010f; spec test/01_unit/compiler/mir/folded_const_type_branch_spec.spl. Native repro for stage3: `val DERIVED = 5 + 5` + `fn main(): print("DERIVED={DERIVED}")` via `simple native-build --entry main.spl --entry-closure`.
+
+## Verification 2026-11-25 (p2w3-ah lane, release/1.0.0) — STALE: fix confirmed in-tree
+
+The 2026-11-04 Resolution section is accurate. Both fix commits
+(`683e2d1009e`, `a95b6c8010f`) are ancestors of release/1.0.0 HEAD
+(`git merge-base --is-ancestor`); `mir_folded_const_type` is present at
+`src/compiler/50.mir/_MirLowering/function_lowering.spl:154` and consumed at
+`:1520` (folded Binary module constants recover a concrete type instead of
+`lower_type(Infer)`); the regression spec
+`test/01_unit/compiler/mir/folded_const_type_branch_spec.spl` exists. Status
+header corrected from "Open" to Resolved.
+
+**Verification limit:** the spec and the native-build repro
+(`val DERIVED = 5 + 5` via `simple native-build --entry --entry-closure`) were
+not executed — both need a self-hosted binary, and `bin/simple test` is
+repo-wide blocked at this HEAD by the `@representation_boundary` seed
+rejection; seed rebuilds are out of scope for this lane. Verification is by
+code inspection plus commit ancestry only.
