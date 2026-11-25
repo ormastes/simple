@@ -21,7 +21,7 @@ use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes, estimate_runtime_overhead_bytes}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, runner_kind_text, select_runner}
-use std.gc_async_mut.slang.engine.pure_lane.{PureLane, pure_lane_load, pure_lane_generate}
+use std.gc_async_mut.slang.engine.pure_lane.{PureLane, pure_lane_load, pure_lane_unload, pure_lane_positions_evaluated, pure_lane_generate}
 use std.gc_async_mut.slang.host.slang_host.{host_os_name, ggml_lib_default, host_env, host_file_exists}
 use std.gc_async_mut.slang.model_executor.pure.stop.{stop_scan}
 
@@ -244,7 +244,11 @@ fn engine_physical_page_reason() -> text:
     physical_page_activation_text(engine_physical_page_activation())
 
 fn engine_unload() -> Result<(), text>:
-    ENGINE_PURE = None
+    if val lane = ENGINE_PURE:
+        ENGINE_PURE = None
+        match pure_lane_unload(lane):
+            Err(reason): return Err(reason)
+            Ok(_): ()
     if ENGINE_BACKEND.is_some():
         if paged_executor_active():
             match paged_executor_shutdown():
@@ -665,7 +669,7 @@ fn engine_pure_stats() -> PureRunnerStats?:
     val lane = ENGINE_PURE!
     PureRunnerStats(last_reused_positions: ENGINE_PURE_LAST_REUSED,
         last_evaluated_positions: ENGINE_PURE_LAST_EVALUATED,
-        total_evaluated_positions: lane.session.positions_evaluated,
+        total_evaluated_positions: pure_lane_positions_evaluated(lane),
         requests: lane.requests)
 
 export engine_complete_text, EngineChatResult, engine_last_runner, engine_pure_stats, PureRunnerStats

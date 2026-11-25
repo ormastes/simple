@@ -153,21 +153,27 @@ slang -> llama.cpp wrapper  model_executor/backend.spl + slang_ggml shim       (
   forces; an impossible forced choice (pure on GGUF, ggml on safetensors) or any
   other value is an explicit 503 `model_not_runnable`, never a fallback.
 - **Pure lane** (`engine/pure_lane.spl`): `llm_engine` owns one `PureLane`
-  (model + tokenizer + ONE `KvSession`) across requests, so a request sharing a
-  token prefix re-uses cached K/V rows. `engine_pure_stats()` exposes the last
-  request's reused / evaluated positions; `engine_last_runner()` says which
-  runner served the last chat. Loading either lane unloads the other.
+  (model + tokenizer + ONE resident KV session) across requests, so a request
+  sharing a token prefix re-uses cached K/V rows. `engine_pure_stats()` exposes
+  the last request's reused / evaluated positions; `engine_last_runner()` says
+  which runner served the last chat. Loading either lane unloads the other
+  (`pure_lane_unload` frees GPU weights and KV buffers).
 - **No chat template on the pure lane:** the prompt is the non-empty message
   contents joined by newlines (`chat_plain_prompt_from_body`); a single message
   is passed as-is. Greedy only; generation is bounded by the model's context.
 - **Usage counts are real** for both runners (`EngineChatResult.prompt_tokens` /
   `completion_tokens`; the ggml count comes from `BackendGeneration.prompt_tokens`).
-- **GPU seam:** a GPU variant of the pure runner plugs in at `RunnerKind.Pure`
-  / `pure_lane_load`; `pure_runner_unsupported_reason` is its load gate.
+- **GPU pure lane (2026-11-25):** `pure_lane_load` calls `compute_open("auto")`
+  (`rocm -> cuda -> vulkan -> cpu`) and uploads F32 safetensors directly via
+  `gpu_llama_load` / `gpu_generate_greedy`, falling back to CPU `llama_load` on
+  CPU-only hosts or non-F32 (BF16) checkpoints. `compute_open("auto")` treats
+  boolean `SLANG_GPU=1`/`true` as `auto` and `0`/`false` as `cpu`. CPU
+  `tensor_decode_{f32,bf16}_le` uses a 256-entry power-of-two table (2.7x faster
+  than calling `f32_from_bits` with an O(|exp|) loop per element).
 - Evidence: `test/03_system/lib/slang/feature/slang_runner_dispatch_live_spec.spl`
-  (`SLANG_LIVE=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi/slang_ggml.dll`).
-  The seed interpreter runs the pure lane at ~0.1 token/s; set
-  `SIMPLE_TIMEOUT_SECONDS=3600`.
+  (`SLANG_LIVE=1 SLANG_MODEL_ROOT=C:/dev/keep/model SLANG_GGML_LIB=<vulkan shim>`):
+  4/4 PASS in ~96s on Radeon 8065S (previously timed out at 900s decoding 15M F32
+  weights on the seed interpreter). On CPU-only hosts set `SIMPLE_TIMEOUT_SECONDS=3600`.
 
 ## Upgrade path to pure Simple
 
