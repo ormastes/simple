@@ -255,3 +255,27 @@ describe "immutable_store_v1 crash and failure safety":
         expect(gc.moved).to_equal(0)
         expect(immutable_store_v1_open(root, pinned.object_key).status).to_equal("ok")
         _store_cleanup(root)
+
+    it "keeps committed generations when a stalled writer regresses the pointer":
+        val root = _store_root("regress")
+        val a = immutable_store_v1_ingest(root, "regress a".bytes(), HASH_POLICY_V1_XXH3_128)
+        val b = immutable_store_v1_ingest(root, "regress b".bytes(), HASH_POLICY_V1_XXH3_128)
+        val c = immutable_store_v1_ingest(root, "regress c".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", 0)).to_equal("")
+        val pointer = root + "/roots/main.sdn"
+        val gen_one = match file_read_regular_no_follow_bounded(pointer, 65536):
+            case Ok(value): value
+            case Err(_): ""
+        expect(immutable_store_v1_publish_root(root, "main", b.object_key + "\n", 1)).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "main", c.object_key + "\n", 2)).to_equal("")
+        # Claims are never deleted, so a regressed pointer cannot reopen a slot.
+        expect(file_exists(root + "/roots/main.g2.claim")).to_equal(true)
+        expect(file_write_bytes(pointer, gen_one.bytes())).to_equal(true)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", 1)).to_equal("root-generation-mismatch")
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", 2)).to_equal("root-generation-mismatch")
+        # Head (generation 3, key c) stays reachable; a and b are history.
+        val gc = immutable_store_v1_collect(root, true)
+        expect(gc.unreachable.len()).to_equal(2)
+        expect(gc.unreachable.contains(c.object_key)).to_equal(false)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", 3)).to_equal("")
+        _store_cleanup(root)

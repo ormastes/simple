@@ -44,6 +44,7 @@ val _ISV1_MAX_ALIAS_BYTES: i64 = 512
 val _ISV1_MAX_ROOT_BYTES: i64 = 4194304
 val _ISV1_MAX_PIN_BYTES: i64 = 1048576
 val _ISV1_MAX_REFS: i64 = 65536
+val _ISV1_MAX_ROOT_CLAIM_WALK: i64 = 4096
 
 fn _isv1_is_digit_byte(b: i64) -> bool:
     b >= 48 and b <= 57
@@ -627,31 +628,19 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
     val current_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_ROOT_BYTES):
         case Ok(value): value
         case Err(_): return "root-unreadable"
-    val doc = match _isv1_doc_decode(current_text, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+    # Truth is the contiguous claim chain; the pointer is only a cache that
+    # may lag (a stalled writer can even move it back). Claims are never
+    # deleted, so walking forward from any cached generation finds the head.
+    val head_text = match _isv1_root_head_text(root, name, current_text):
         case Ok(value): value
-        case Err(_): return "root-corrupt"
-    if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+        case Err(reason): return reason
+    val head_generation = _isv1_root_doc_generation(head_text)
+    if head_generation < 0:
         return "root-corrupt"
-    val current_generation = _isv1_doc_generation(doc)
-    if current_generation < 0:
-        return "root-corrupt"
-    # A claim for the next generation means a writer won the CAS but its
-    # pointer write is pending or crashed: roll the pointer forward from the
-    # immutable claim (idempotent), then report the mismatch.
-    val pending_path = _isv1_root_claim_path(root, name, current_generation + 1)
-    if file_exists(pending_path):
-        val pending_text = match file_read_regular_no_follow_bounded(pending_path, _ISV1_MAX_ROOT_BYTES):
-            case Ok(value): value
-            case Err(_): return "root-claim-unreadable"
-        match _isv1_doc_decode(pending_text, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
-            case Ok(pending_doc):
-                if _isv1_doc_generation(pending_doc) != current_generation + 1:
-                    return "root-claim-corrupt"
-            case Err(_): return "root-claim-corrupt"
-        if not atomic_write_bytes(path, pending_text.bytes()):
-            return "root-write-failed"
-        return "root-generation-mismatch"
-    if current_generation != expected_generation:
+    if head_text != current_text:
+        # Refresh the cache; a lost race here is healed by the next walk.
+        atomic_write_bytes(path, head_text.bytes())
+    if head_generation != expected_generation:
         return "root-generation-mismatch"
     # CAS: only one writer can no-replace publish the claim for generation N+1.
     val replaced = _isv1_doc_encode("name", name, "", "", expected_generation + 1, keys)
@@ -661,13 +650,40 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
         return "root-generation-mismatch"
     if claimed != 1:
         return "root-claim-failed: {claimed}"
-    if not atomic_write_bytes(path, replaced.bytes()):
-        return "root-write-failed"
-    # The previous claim is history once the pointer has moved past it.
-    val old_claim = _isv1_root_claim_path(root, name, expected_generation)
-    if file_exists(old_claim):
-        file_delete(old_claim)
+    # The claim is the commit; the pointer write only refreshes the cache.
+    atomic_write_bytes(path, replaced.bytes())
     ""
+
+# Generation of a root doc, or -1 when it is not a valid v1 root doc.
+fn _isv1_root_doc_generation(source: text) -> i64:
+    val doc = match _isv1_doc_decode(source, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(_): return -1
+    if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+        return -1
+    _isv1_doc_generation(doc)
+
+# Walk roots/<name>.g<N>.claim forward from the cached pointer doc and return
+# the head doc text. Bounded so a hostile store cannot spin forever.
+fn _isv1_root_head_text(root: text, name: text, pointer_text: text) -> Result<text, text>:
+    var head_text = pointer_text
+    var generation = _isv1_root_doc_generation(pointer_text)
+    if generation < 0:
+        return Err("root-corrupt")
+    var steps: i64 = 0
+    while steps < _ISV1_MAX_ROOT_CLAIM_WALK:
+        val next_path = _isv1_root_claim_path(root, name, generation + 1)
+        if not file_exists(next_path):
+            return Ok(head_text)
+        val next_text = match file_read_regular_no_follow_bounded(next_path, _ISV1_MAX_ROOT_BYTES):
+            case Ok(value): value
+            case Err(_): return Err("root-claim-unreadable")
+        if _isv1_root_doc_generation(next_text) != generation + 1:
+            return Err("root-claim-corrupt")
+        head_text = next_text
+        generation = generation + 1
+        steps = steps + 1
+    Err("root-claim-chain-too-long")
 
 pub fn immutable_store_v1_pin(root: text, pin_id: text, owner: text, refs: [text]) -> text:
     if root == "":
@@ -716,7 +732,10 @@ pub fn immutable_store_v1_release_pin(root: text, pin_id: text) -> text:
         return "pin-remove-failed"
     ""
 
-fn _isv1_collect_doc_keys(dir: text, allowed: [text], max_bytes: i64) -> Result<[text], text>:
+# `store_root` non-empty means `dir` is roots/: each pointer is followed along
+# its claim chain and the head's keys count too (the pointer may lag the head).
+# Superseded claims are history and are not reachable.
+fn _isv1_collect_doc_keys(store_root: text, dir: text, allowed: [text], max_bytes: i64) -> Result<[text], text>:
     var out: [text] = []
     # Fail closed: init creates this dir, so a missing or unlistable one means
     # the reachable set is unknown.
@@ -727,21 +746,27 @@ fn _isv1_collect_doc_keys(dir: text, allowed: [text], max_bytes: i64) -> Result<
         case None: return Err("doc-dir-unlistable: {_isv1_bound_reason(dir)}")
     for entry in entries:
         val name = entry.trim()
-        # Root claims (".claim") are reachable too: a claim may be ahead of
-        # its pointer after a crash.
-        if name == "" or not (name.ends_with(".sdn") or name.ends_with(".claim")):
+        if name == "" or not name.ends_with(".sdn"):
             continue
         val path = dir + "/" + name
         val source = match file_read_regular_no_follow_bounded(path, max_bytes):
             case Ok(value): value
             case Err(_): return Err("doc-unreadable: {name}")
-        val doc = match _isv1_doc_decode(source, allowed, max_bytes):
-            case Ok(value): value
-            case Err(_): return Err("doc-corrupt: {name}")
-        if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
-            return Err("doc-corrupt: {name}")
-        for key in doc.keys:
-            out.push(key)
+        var sources: [text] = [source]
+        if store_root != "":
+            val head = match _isv1_root_head_text(store_root, name.substring(0, name.len() - 4), source):
+                case Ok(value): value
+                case Err(reason): return Err("{reason}: {name}")
+            if head != source:
+                sources.push(head)
+        for doc_source in sources:
+            val doc = match _isv1_doc_decode(doc_source, allowed, max_bytes):
+                case Ok(value): value
+                case Err(_): return Err("doc-corrupt: {name}")
+            if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+                return Err("doc-corrupt: {name}")
+            for key in doc.keys:
+                out.push(key)
     Ok(out)
 
 fn _isv1_quarantine_date() -> text:
@@ -762,7 +787,7 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
     var reachable: Dict<text, bool> = {}
     # Fail closed: an unreadable or corrupt root/pin means the reachable set
     # is unknown, so nothing may be collected.
-    val root_keys = match _isv1_collect_doc_keys(_isv1_join(root, "roots"),
+    val root_keys = match _isv1_collect_doc_keys(root, _isv1_join(root, "roots"),
             ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
         case Ok(value): value
         case Err(reason):
@@ -770,7 +795,7 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
                 unreachable: [], moved: 0)
     for key in root_keys:
         reachable[key] = true
-    val pin_keys = match _isv1_collect_doc_keys(_isv1_join(root, "pins"),
+    val pin_keys = match _isv1_collect_doc_keys("", _isv1_join(root, "pins"),
             ["format_version", "pin_id", "owner", "generation"], _ISV1_MAX_PIN_BYTES):
         case Ok(value): value
         case Err(reason):
