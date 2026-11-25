@@ -2,8 +2,11 @@
 
 - **Date:** 2026-07-30
 - **Lane:** VHDL1 (mission-critical hardening campaign)
-- **Status:** Root cause fixed for the cast defect. A second, separate, pre-existing bug was
-  uncovered underneath it and is left OPEN (see "Follow-on defect" below) — not fixed here.
+- **Status:** RESOLVED. Root cause fixed for the cast defect; the follow-on defect
+  ("Follow-on defect" below) was FIXED 2026-11-07 and re-verified 2026-11-07. The 4
+  remaining spec failures are separate, unrelated defects (listed in the 2026-11-07
+  sections). 2026-11-25 ledger re-check: fixes confirmed present in tree (see
+  "Ledger re-verification 2026-11-25" at the end).
 
 ## Background / attribution
 
@@ -350,3 +353,21 @@ No `cannot cast dict to i64`, no `found no @hardware entry`, no
 4 failures are exactly the 4 separate defects listed above (`MirStatic`
 `is_rt_struct_alloc_registered` x2, `_sffi_enum_payload` nil contract,
 AOT-facade source-text drift). No code change.
+
+## Ledger re-verification 2026-11-25 (release/1.0.0)
+
+Code-inspection re-check that both fixes are still present in the current tree
+(file now at `src/plugins/backend_vhdl/vhdl/vhdl_design_catalog.spl`):
+
+- No `as i64` cast and no `rt_dict_get_i64_raw`/`rt_dict_set_i64_raw` extern
+  anywhere in the file (grep: zero hits) — the cast defect stays fixed.
+- `vhdl_catalog_function` (`:296`) now preserves the input flags:
+  `has_vhdl_metadata: func.has_vhdl_metadata, vhdl_metadata: func.vhdl_metadata`.
+- Membership tests use `Dict.contains_key` throughout (`:163` `rebase`, `:344`
+  `types`, `:678` `modules`, ...); no `rt_dict_contains` shim remains.
+
+Execution remains environment-blocked on this host: the pinned
+`bin/simple.exe` seed rejects `@representation_boundary` repo-wide at this
+HEAD (fails in `src/app/test_runner_new/test_runner_client.spl:9` before any
+spec loads), so the 2026-11-07 interpreter re-run above stands as the latest
+execution evidence. No code change in this pass; ledger status only.
