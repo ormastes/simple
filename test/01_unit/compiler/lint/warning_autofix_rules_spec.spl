@@ -1,0 +1,181 @@
+# @req REQ-SSPEC-COMPILER
+"""
+Opt-in EasyFix rules for compiler warnings:
+  - W-BARE-VARIANT-001: qualify bare unit variants in `case` arms (`FixConfidence.Safe`)
+  - W-ANY-COMPILE-001: parameterize forwarding `fn name(param: Any)` -> `fn name<T>(param: T)`
+    (`FixConfidence.Likely`) or emit `FixConfidence.Uncertain` suggestion
+  - W-MIR-STRUCT-COLLISION: cross-file same-name `struct`/`class` collision with differing
+    field lists (`FixConfidence.Uncertain`, suggestion-only)
+Run: bin/simple test test/01_unit/compiler/lint/warning_autofix_rules_spec.spl
+"""
+
+# @tag: unit, compiler, lint, warning_autofixes
+
+use std.spec.*
+use std.tooling.easy_fix.types.{FixApplicator, FixConfidence, EasyFix, easyfix_code}
+use compiler.tools.fix.rules.impl_.lint_warning_autofixes.{check_bare_variant_match, check_any_param_to_generic, check_mir_struct_collision}
+use compiler.tools.fix.rules.registry.{registry_fix_producers}
+use compiler.tools.fix.main.{FixToolApplicator}
+use compiler.tools.fix.source_edits.{validated_fix_sources}
+use app.io.cli_fix_options.{fix_option_error}
+
+fn _apply_validated(fixes: [EasyFix], path: text, src: text) -> text:
+    if fixes.len() == 0:
+        return src
+    match validated_fix_sources(fixes, {path: src}):
+        case Ok(m): m[path]
+        case Err(e): "ERR " + e
+
+describe "W-BARE-VARIANT-001: positive cases":
+    it "qualifies bare variants from enclosing null-coalesce local (weaving_config pattern)":
+        val src = "fn weavingconfig_from_hir_advices(advices: [HirAopAdvice]) -> WeavingConfig:\n    for advice in advices:\n        val form = adviceform_from_str(advice.form) ?? AdviceForm.Before\n        match form:\n            case Before: before_advices.push(rule)\n            case AfterSuccess: after_success_advices.push(rule)\n            case AfterError: after_error_advices.push(rule)\n            case Around: around_advices.push(rule)\n"
+        val fixes = check_bare_variant_match(src, "weaving_config.spl")
+        expect(fixes.len()).to_equal(4)
+        expect(fixes[0].is_safe()).to_equal(true)
+        expect(easyfix_code(fixes[0])).to_equal("W-BARE-VARIANT-001")
+        val expected = "fn weavingconfig_from_hir_advices(advices: [HirAopAdvice]) -> WeavingConfig:\n    for advice in advices:\n        val form = adviceform_from_str(advice.form) ?? AdviceForm.Before\n        match form:\n            case AdviceForm.Before: before_advices.push(rule)\n            case AdviceForm.AfterSuccess: after_success_advices.push(rule)\n            case AdviceForm.AfterError: after_error_advices.push(rule)\n            case AdviceForm.Around: around_advices.push(rule)\n"
+        expect(_apply_validated(fixes, "weaving_config.spl", src)).to_equal(expected)
+
+    it "qualifies bare variants from explicit local type annotation":
+        val src = "fn handle(raw: text) -> text:\n    val kind: HirTypeKind = parse_kind(raw)\n    match kind:\n        case Str:\n            \"text\"\n        case Unit:\n            \"()\"\n"
+        val fixes = check_bare_variant_match(src, "local_ann.spl")
+        expect(fixes.len()).to_equal(2)
+        val expected = "fn handle(raw: text) -> text:\n    val kind: HirTypeKind = parse_kind(raw)\n    match kind:\n        case HirTypeKind.Str:\n            \"text\"\n        case HirTypeKind.Unit:\n            \"()\"\n"
+        expect(_apply_validated(fixes, "local_ann.spl", src)).to_equal(expected)
+
+    it "qualifies bare variants when another arm uses EnumName.Variant (inference_expr pattern)":
+        val src = "fn nil_compare_type_name(ty: HirType) -> text:\n    match ty.kind:\n        case HirTypeKind.Bool: \"bool\"\n        case HirTypeKind.Char: \"char\"\n        case Str: \"text\"\n        case Unit: \"()\"\n        case _: \"other\"\n"
+        val fixes = check_bare_variant_match(src, "inference_expr.spl")
+        expect(fixes.len()).to_equal(2)
+        val expected = "fn nil_compare_type_name(ty: HirType) -> text:\n    match ty.kind:\n        case HirTypeKind.Bool: \"bool\"\n        case HirTypeKind.Char: \"char\"\n        case HirTypeKind.Str: \"text\"\n        case HirTypeKind.Unit: \"()\"\n        case _: \"other\"\n"
+        expect(_apply_validated(fixes, "inference_expr.spl", src)).to_equal(expected)
+
+    it "qualifies multi-variant or-patterns and guarded arms":
+        val src = "fn is_scalar(ty: HirType) -> bool:\n    match ty.kind:\n        case Bool | Char: true\n        case Str if ty.is_leaf: true\n        case HirTypeKind.Unit: false\n"
+        val fixes = check_bare_variant_match(src, "multi_arm.spl")
+        expect(fixes.len()).to_equal(3)
+        val expected = "fn is_scalar(ty: HirType) -> bool:\n    match ty.kind:\n        case HirTypeKind.Bool | HirTypeKind.Char: true\n        case HirTypeKind.Str if ty.is_leaf: true\n        case HirTypeKind.Unit: false\n"
+        expect(_apply_validated(fixes, "multi_arm.spl", src)).to_equal(expected)
+
+    it "preserves exact UTF-8 byte offsets after non-ASCII lines and strings":
+        val src = "# note — dash é\nfn kind_tag(ty: HirType) -> text:\n    val s = \"héllo — world\"\n    match ty.kind:\n        case HirTypeKind.Bool: s\n        case Str: \"text — é\"\n"
+        val fixes = check_bare_variant_match(src, "utf8.spl")
+        expect(fixes.len()).to_equal(1)
+        val expected = "# note — dash é\nfn kind_tag(ty: HirType) -> text:\n    val s = \"héllo — world\"\n    match ty.kind:\n        case HirTypeKind.Bool: s\n        case HirTypeKind.Str: \"text — é\"\n"
+        expect(_apply_validated(fixes, "utf8.spl", src)).to_equal(expected)
+
+describe "W-BARE-VARIANT-001: negative cases":
+    it "skips wildcard, literals, payload bindings, lowercase bindings, prelude variants, and qualified arms":
+        val src = "fn skip_non_unit(expr: HirExpr) -> text:\n    val kind: HirTypeKind = HirTypeKind.Unit\n    match expr.kind:\n        case HirTypeKind.Bool: \"bool\"\n        case Lambda(params, body, captures): \"fn\"\n        case Infer(_, _): \"infer\"\n        case Some(x): \"some\"\n        case None: \"none\"\n        case Ok(v): \"ok\"\n        case Err(e): \"err\"\n        case 0: \"zero\"\n        case \"lit\": \"lit\"\n        case true: \"true\"\n        case nil: \"nil\"\n        case other: \"bind\"\n        case _: \"wild\"\n"
+        expect(check_bare_variant_match(src, "neg.spl").len()).to_equal(0)
+
+    it "skips match blocks with conflicting qualified arms or no enum hint":
+        val src = "fn ambiguous(x: Unknown) -> i64:\n    match x:\n        case EnumA.One: 1\n        case EnumB.Two: 2\n        case Three: 3\n\nfn untyped(x):\n    match x:\n        case Before: 1\n"
+        expect(check_bare_variant_match(src, "ambig.spl").len()).to_equal(0)
+
+    it "isolates nested match scopes and conflicting local hints":
+        val src = "fn nested(a: AdviceForm, b):\n    val form: AdviceForm = AdviceForm.Before\n    match form:\n        case Before:\n            match b:\n                case Around: 1\n        case Around: 2\n"
+        val fixes = check_bare_variant_match(src, "nested.spl")
+        expect(fixes.len()).to_equal(2)
+        val applied = _apply_validated(fixes, "nested.spl", src)
+        expect(applied).to_contain("case AdviceForm.Before:")
+        expect(applied).to_contain("case AdviceForm.Around: 2")
+        expect(applied).to_contain("                case Around: 1")
+
+    it "respects @allow(bare_variant) and file-scope allow":
+        val src1 = "@allow(bare_variant)\nfn f(ty: HirType):\n    match ty.kind:\n        case HirTypeKind.Bool: 1\n        case Str: 2\n"
+        val src2 = "#![allow(bare_variant)]\nfn f(ty: HirType):\n    match ty.kind:\n        case HirTypeKind.Bool: 1\n        case Str: 2\n"
+        expect(check_bare_variant_match(src1, "a.spl").len()).to_equal(0)
+        expect(check_bare_variant_match(src2, "b.spl").len()).to_equal(0)
+
+describe "W-ANY-COMPILE-001: positive and suggestion cases":
+    it "rewrites forwarding single-Any fn to generic <T> (join_point_attr_registry pattern)":
+        val src = "fn _join_point_attr_promote_raw(value: Any) -> bool:\n    unsafe(capabilities: [ffi]):\n        rt_transient_heap_promote(value)\n"
+        val fixes = check_any_param_to_generic(src, "join_point_attr_registry.spl")
+        expect(fixes.len()).to_equal(1)
+        expect(easyfix_code(fixes[0])).to_equal("W-ANY-COMPILE-001")
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].is_likely()).to_equal(true)
+        val expected = "fn _join_point_attr_promote_raw<T>(value: T) -> bool:\n    unsafe(capabilities: [ffi]):\n        rt_transient_heap_promote(value)\n"
+        expect(_apply_validated(fixes, "join_point_attr_registry.spl", src)).to_equal(expected)
+
+    it "rewrites pub fn with forwarding Any parameter among other typed params and after UTF-8":
+        val src = "# comment — é\npub fn emit_tagged(tag: text, payload: Any) -> bool:\n    send_packet(tag, payload)\n"
+        val fixes = check_any_param_to_generic(src, "emit.spl")
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].is_likely()).to_equal(true)
+        val expected = "# comment — é\npub fn emit_tagged<T>(tag: text, payload: T) -> bool:\n    send_packet(tag, payload)\n"
+        expect(_apply_validated(fixes, "emit.spl", src)).to_equal(expected)
+
+    it "emits Uncertain suggestion-only when body accesses fields or methods on param":
+        val src = "pub fn inspect_node(node: Any) -> text:\n    node.kind_name()\n"
+        val fixes = check_any_param_to_generic(src, "inspect.spl")
+        expect(fixes.len()).to_equal(1)
+        expect(easyfix_code(fixes[0])).to_equal("W-ANY-COMPILE-001")
+        expect(fixes[0].is_likely()).to_equal(false)
+        expect(fixes[0].replacements.len()).to_equal(0)
+        expect(fixes[0].description).to_contain("<T>")
+        expect(fixes[0].description).to_contain("concrete type")
+        expect(fixes[0].description).to_contain("unsafe(capabilities: [type_erasure])")
+        expect(FixToolApplicator.filter_by_confidence(fixes, FixConfidence.Safe).len()).to_equal(0)
+
+    it "emits Uncertain suggestion-only for already-generic, multi-Any, return-Any, and match-on-param":
+        val src = "fn already<U>(x: Any) -> U:\n    cast_it(x)\n\nfn pair(a: Any, b: Any) -> bool:\n    link(a, b)\n\nfn ret_any(x: Any) -> Any:\n    x\n\nfn match_it(x: Any) -> i64:\n    match x:\n        case _: 0\n"
+        val fixes = check_any_param_to_generic(src, "uncertain.spl")
+        expect(fixes.len()).to_equal(5)
+        for f in fixes:
+            expect(f.is_likely()).to_equal(false)
+            expect(f.replacements.len()).to_equal(0)
+
+    it "skips extern fn, unsafe blocks, @unsafe annotations, and non-Any functions":
+        val src = "extern fn rt_raw(x: Any) -> bool\npub extern fn rt_raw2(x: Any)\n\nunsafe(capabilities: [type_erasure]):\n    fn erase(x: Any) -> i64:\n        x.id\n\n@unsafe(reason: \"erased\", capabilities: [type_erasure])\nfn raw_box(x: Any) -> i64:\n    0\n\nfn clean<T>(x: T) -> T:\n    x\n"
+        expect(check_any_param_to_generic(src, "safe_skip.spl").len()).to_equal(0)
+
+describe "W-MIR-STRUCT-COLLISION: cross-file collision detector":
+    it "detects TextSpan field-list collision across block_types, attributed_text, and accel":
+        val block_types_src = "struct TextSpan:\n    \"\"\"Byte range within a payload.\"\"\"\n    start: i64\n    end: i64\n"
+        val attributed_text_src = "struct TextSpan:\n    text: text\n    style: InlineStyle\n    link_url: text\n"
+        val accel_src = "struct TextSpan:\n    value: text\n    start: i64\n    len: i64\n"
+        val others = {
+            "src/compiler/10.frontend/block_types.spl": block_types_src,
+            "src/lib/common/rich_text/attributed_text.spl": attributed_text_src,
+            "src/lib/nogc_sync_mut/db/accel.spl": accel_src
+        }
+        val fixes = check_mir_struct_collision(block_types_src, "src/compiler/10.frontend/block_types.spl", others)
+        expect(fixes.len()).to_equal(1)
+        expect(easyfix_code(fixes[0])).to_equal("W-MIR-STRUCT-COLLISION")
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].is_likely()).to_equal(false)
+        expect(fixes[0].replacements.len()).to_equal(0)
+        expect(fixes[0].description).to_contain("attributed_text.spl")
+        expect(fixes[0].description).to_contain("accel.spl")
+        expect(fixes[0].description).to_contain("start: i64, end: i64")
+        expect(fixes[0].description).to_contain("value: text, start: i64, len: i64")
+        expect(fixes[0].description).to_contain("BlockTypesTextSpan")
+        expect(FixToolApplicator.filter_by_confidence(fixes, FixConfidence.Safe).len()).to_equal(0)
+
+    it "ignores matching structs with identical field lists and self entries":
+        val src_a = "pub struct TextSpan:\n    start: i64\n    end: i64\n"
+        val src_b = "struct TextSpan:\n    start: i64\n    end: i64\n"
+        val others = {
+            "./mod_a.spl": src_a,
+            "mod_b.spl": src_b
+        }
+        expect(check_mir_struct_collision(src_a, "mod_a.spl", others).len()).to_equal(0)
+
+    it "ignores different struct names and respects allow annotations":
+        val src_a = "@allow(mir_struct_collision)\nstruct Span:\n    a: i64\n\nstruct UniqueSpan:\n    a: i64\n"
+        val src_b = "struct Span:\n    b: text\n\nstruct OtherSpan:\n    a: i64\n"
+        expect(check_mir_struct_collision(src_a, "a.spl", {"b.spl": src_b}).len()).to_equal(0)
+
+describe "Warning autofixes opt-in CLI wiring":
+    it "keeps all 3 rules opt-in and out of registry_fix_producers":
+        for p in registry_fix_producers():
+            expect(p.code != "W-BARE-VARIANT-001").to_equal(true)
+            expect(p.code != "W-ANY-COMPILE-001").to_equal(true)
+            expect(p.code != "W-MIR-STRUCT-COLLISION").to_equal(true)
+
+    it "accepts --rule codes via fix_option_error":
+        expect(fix_option_error(["fix", "--rule", "W-BARE-VARIANT-001", "--safe-only", "--dry-run", "src/compiler"])).to_equal("")
+        expect(fix_option_error(["fix", "--rule=W-ANY-COMPILE-001", "--dry-run", "a.spl"])).to_equal("")
+        expect(fix_option_error(["fix", "--rule", "W-MIR-STRUCT-COLLISION", "--dry-run", "src/lib"])).to_equal("")
