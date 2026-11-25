@@ -437,3 +437,24 @@ Explicitly NOT done (out of scope): the accepted-session hot path
 externs, `rt_net_socket_facade`'s broken `not(riscv64)` branches) remains
 baremetal-only — a hosted client that connects will still fail inside the
 session loop. Duplication findings 1-6 remain open architecture decisions.
+
+## Re-verification 2026-11-25 (release/1.0.0, Windows, pinned seed v1.0.0-rc.1)
+
+The 2026-11-05 hosted-listener fix is confirmed landed in this tree:
+`src/os/apps/sshd/sshd.spl:60-81` routes bind/accept/close through
+`@cfg(riscv64)` -> `rt_boot_tcp_*` / `@cfg(not(riscv64))` -> `rt_io_tcp_*`
+helpers, and the regression spec
+`test/01_unit/os/apps/sshd/sshd_hosted_listener_bind_spec.spl` exists. A
+standalone probe against the pinned binary confirms the hosted mechanism works
+on this host: `extern fn rt_io_tcp_bind("127.0.0.1:0")` returns a real listener
+fd (`bind_fd=1000`) and `rt_io_tcp_close` returns true, rc=0, under
+`SIMPLE_EXECUTION_MODE=interpreter`. The spec itself could not be executed via
+`bin/simple.exe test` here because release/1.0.0 HEAD is source/binary
+inconsistent (`unknown decorator '@representation_boundary'` in the
+test-runner closure — known seed skew, not this defect); verification of the
+spec body was by code inspection plus the direct-extern probe above.
+
+Status stays OPEN for the remainder exactly as scoped on 2026-11-05: the
+accepted-session hot path (`rt_boot_tcp_send_*` fixed-frame externs in
+`ssh_session.spl`/`ssh_session_kex.spl`) is still baremetal-only, and
+duplication findings 1-3 and 6 remain open architecture-ownership decisions.
