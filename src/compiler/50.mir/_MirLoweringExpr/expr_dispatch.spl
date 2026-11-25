@@ -1296,19 +1296,11 @@ impl MirLowering:
 
     fn struct_field_ownership_key_at(owner: text, field_idx: i64) -> text:
         """Provider ownership key recorded for `owner`'s field `field_idx`, or
-        "" when the prescan recorded none (absent owner, short row, bad index).
-
-        # @workaround bug=stage2_test_runner_record_collection_owner_unavailable_2026_10_12 reason=stage2_native_miscompiles_option_array_bound_via_if_val_from_class_field_dict_bracket_read
-        The three readers of `struct_field_type_ownership_key` used to bracket
-        read the class-field `Dict<text, [text]>` into a `[text]?` local, test
-        it with `!= None` and rebind it with `if val`. Both the Option transport
-        and the `if val` binding are frozen-stage2 miscompiled shapes; bind the
-        array straight to a typed local behind `contains` instead.
-        """
-        if not self.struct_field_type_ownership_key.contains(owner): return ""
-        val keys: [text] = self.struct_field_type_ownership_key.get(owner) ?? []
-        if field_idx < 0 or field_idx >= keys.len(): return ""
-        keys[field_idx]
+        "" when the prescan recorded none (absent owner, short row, bad index)."""
+        if val keys = self.struct_field_type_ownership_key.get(owner):
+            if field_idx >= 0 and field_idx < keys.len():
+                return keys[field_idx]
+        ""
 
     me declared_record_array_element(owner: text, field_idx: i64, element: HirType) -> HirType:
         val owner_key = self.struct_field_ownership_key_at(owner, field_idx)
@@ -1381,19 +1373,9 @@ impl MirLowering:
                     if qualified >= 0 and self.symbol_matches_ownership_key(qualified, owner_key):
                         val qualified_symbol: SymbolId = SymbolId(id: qualified)
                         return HirType(kind: HirTypeKind.Named(qualified_symbol, owner_arguments), span: declared.span)
-                # This is the last lookup before the strict "record collection
-                # payload owner is unavailable in the consumer" refusal. It used
-                # to bind `SymbolId?` from `lookup_exact_type` via `if val`;
-                # staged native code corrupts a value-type SymbolId inside
-                # Optional across that boundary (lookup_qualified_type_raw
-                # docstring), so a present exact owner read as a miss and the
-                # 252-module test-runner build died on a valid provider. Keep
-                # the whole chain scalar: raw id in, raw id out, -1 on miss.
-                # @workaround bug=stage2_test_runner_record_collection_owner_unavailable_2026_10_12 reason=stage2_native_corrupts_SymbolId_option_across_lookup_exact_type_boundary
-                val rebound_raw = self.symbols.lookup_exact_type_raw(owner_key.substring(bare_start))
-                if rebound_raw >= 0 and self.symbol_matches_ownership_key(rebound_raw, owner_key):
-                    val rebound: SymbolId = SymbolId(id: rebound_raw)
-                    return HirType(kind: HirTypeKind.Named(rebound, owner_arguments), span: declared.span)
+                if val rebound = self.symbols.lookup_exact_type(owner_key.substring(bare_start)):
+                    if self.symbol_matches_ownership_key(rebound.id, owner_key):
+                        return HirType(kind: HirTypeKind.Named(rebound, owner_arguments), span: declared.span)
                 HirType(kind: HirTypeKind.Error, span: declared.span)
             case _: declared
 

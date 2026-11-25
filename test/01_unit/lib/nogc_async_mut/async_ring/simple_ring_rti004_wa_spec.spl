@@ -107,23 +107,20 @@ describe "ring call results are bound to typed locals before matching":
         expect(src.contains("val commit_result: Result<RingToken, SimpleRingError> = self.ring.commit(")).to_equal(true)
         expect(src.contains("val cancel_outcome: RingCancelOutcome = self.ring.cancel(")).to_equal(true)
 
-    it "keeps both ring completion match subjects in async_ref.spl typed locals":
+    it "matches ring completions directly without rti004 workaround locals in async_ref.spl":
         # @req REQ-SSPEC-LIB
-        step("no `match ring.<call>(` subject remains in async_ref_deliver_wake_i64")
+        step("direct match on ring.complete_success/complete_failure without rti004 workarounds")
         val src = _source("src/lib/nogc_async_mut/async_ring/async_ref.spl")
-        expect(src.contains("match ring.complete_success(")).to_equal(false)
-        expect(src.contains("match ring.complete_failure(")).to_equal(false)
-        expect(_count(src, "@workaround bug=rti004_mono_specialization_match_subject_2026-11-01")).to_equal(2)
-        expect(src.contains("val completed: Result<(), SimpleRingError> = ring.complete_success(")).to_equal(true)
-        expect(src.contains("val failed: Result<(), SimpleRingError> = ring.complete_failure(")).to_equal(true)
+        expect(src.contains("match ring.complete_success(")).to_equal(true)
+        expect(src.contains("match ring.complete_failure(")).to_equal(true)
+        expect(_count(src, "@workaround bug=rti004_mono_specialization_match_subject_2026-11-01")).to_equal(0)
 
-    it "keeps the cancel release_result binder typed and its arms qualified in simple_ring.spl":
+    it "uses direct Result payload binders and _release_slot match in simple_ring.spl":
         # @req REQ-SSPEC-LIB
-        step("the Reserved arm of cancel matches a typed Result with qualified variants")
+        step("retired rti004 and simple_ring_result_payload_provenance workarounds")
         val src = _source("src/lib/nogc_async_mut/async_ring/simple_ring.spl")
-        expect(src.contains("val release_result: Result<(), SimpleRingError> = self._release_slot(slot)")).to_equal(true)
-        expect(src.contains("case Result.Err(error):\n                                # @workaround bug=simple_ring_result_payload_provenance_2026-11-06")).to_equal(true)
-        expect(src.contains("val rejected: SimpleRingError = error\n                                RingCancelOutcome.CancelRejected(rejected)")).to_equal(true)
-        expect(src.contains("val typed_completion: RingCompletion<Cpl> = completion\n                    match self.release_retained_completion(owner_id, typed_completion.token):")).to_equal(true)
-        expect(src.contains("val release_result = self._release_slot(slot)")).to_equal(false)
-        expect(_count(src, "@workaround bug=rti004_mono_specialization_match_subject_2026-11-01")).to_equal(1)
+        expect(src.contains("match _as_unit_result_v1(self._release_slot(slot)):")).to_equal(true)
+        expect(src.contains("RingCancelOutcome.CancelRejected(error)")).to_equal(true)
+        expect(src.contains("self.release_retained_completion(owner_id, completion.token)")).to_equal(true)
+        expect(_count(src, "@workaround bug=rti004_mono_specialization_match_subject_2026-11-01")).to_equal(0)
+        expect(_count(src, "@workaround bug=simple_ring_result_payload_provenance_2026-11-06")).to_equal(0)

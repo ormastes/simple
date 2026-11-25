@@ -14,11 +14,15 @@
 use std.spec.step
 
 use std.spec
-use std.fs.{read_file}
 use compiler.hir.hir_types.{SymbolTable, HirSymbol, SymbolId, ScopeId, SymbolKind}
 use compiler.hir.hir_symbol_table_methods
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_file(path: text) -> text:
+    rt_file_read_text(path) ?? ""
 
 val EXPR_DISPATCH = "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl"
 val BUILTIN_EXTRAS = "src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl"
@@ -65,34 +69,36 @@ describe "Stage 2 exact record owner scalar lookup":
         # oracle: the Option form agrees on the miss
         assert_nil(table.lookup_exact_type("collect_records"))
 
-    it "keeps the exact record owner rebind on the scalar lookup path":
+    it "uses the direct Option lookup_exact_type path in rebind_named_type_owner":
         # @req REQ-SSPEC-COMPILER
-        step("rebind_named_type_owner must not transport SymbolId? across lookup_exact_type")
+        step("rebind_named_type_owner binds SymbolId? from lookup_exact_type directly")
         val dispatch = read_file(EXPR_DISPATCH)
         val rebind_at = dispatch.index_of("me rebind_named_type_owner(")
         val rebind_end = dispatch.index_of("fn symbol_matches_ownership_key(")
         assert_true(rebind_at >= 0)
         assert_true(rebind_end > rebind_at)
         val rebind_body = dispatch.substring(rebind_at, rebind_end)
-        expect(rebind_body).to_contain("self.symbols.lookup_exact_type_raw(")
-        expect(rebind_body).to_not_contain("if val present_rebound = self.symbols.lookup_exact_type(")
-        expect(rebind_body).to_contain(BUG_TAG)
+        expect(rebind_body).to_contain("if val rebound = self.symbols.lookup_exact_type(")
+        expect(rebind_body).to_not_contain(BUG_TAG)
 
-    it "binds the provider ownership-key array to a typed local, not an Option":
+    it "reads struct_field_type_ownership_key via Option get and if val":
         # @req REQ-SSPEC-COMPILER
-        step("class-field Dict<text,[text]> bracket-reads bind straight to [text]")
+        step("struct_field_ownership_key_at uses Dict.get with if val")
         val dispatch = read_file(EXPR_DISPATCH)
-        expect(dispatch).to_not_contain("val optional_keys: [text]? = self.struct_field_type_ownership_key[owner]")
-        expect(dispatch).to_not_contain("if val present_keys = optional_keys:")
-        expect(dispatch).to_not_contain("if val present_optional_keys = optional_keys:")
-        expect(dispatch).to_contain("fn struct_field_ownership_key_at(owner: text, field_idx: i64) -> text:")
+        val key_at = dispatch.index_of("fn struct_field_ownership_key_at(")
+        val key_end = dispatch.index_of("me declared_record_array_element(")
+        assert_true(key_at >= 0)
+        assert_true(key_end > key_at)
+        val helper_body = dispatch.substring(key_at, key_end)
+        expect(helper_body).to_contain("if val keys = self.struct_field_type_ownership_key.get(owner):")
+        expect(helper_body).to_not_contain(BUG_TAG)
 
-    it "keeps the sibling Result payload rebind on the scalar lookup path":
+    it "uses the direct Option lookup_exact_type path in builtin_method_extras":
         # @req REQ-SSPEC-COMPILER
-        step("builtin_method_extras shares the rebind shape and must not regress it")
+        step("builtin_method_extras binds SymbolId? from lookup_exact_type directly")
         val extras = read_file(BUILTIN_EXTRAS)
-        expect(extras).to_not_contain("if val rebound = self.symbols.lookup_exact_type(")
-        expect(extras).to_contain("self.symbols.lookup_exact_type_raw(")
+        expect(extras).to_contain("if val rebound = self.symbols.lookup_exact_type(")
+        expect(extras).to_not_contain(BUG_TAG)
 
     it "defines the scalar lookup on the proven Dict bracket path":
         # @req REQ-SSPEC-COMPILER
