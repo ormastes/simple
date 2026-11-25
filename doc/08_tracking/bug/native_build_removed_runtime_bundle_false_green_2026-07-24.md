@@ -1,5 +1,39 @@
 # Native-build removed runtime bundle false-green
-## Open 2026-09-16 — needs owner triage
+
+## Verified closed 2026-11-25 (p2w3-af lane, release/1.0.0 @ 1457ddaa176)
+
+Header was stale ("Open 2026-09-16 — needs owner triage" claiming "no
+resolution evidence found in the body") — the body documents the fix and its
+spec evidence, and the fix is present at HEAD. Code-inspection verification:
+
+- `src/app/cli/bootstrap_main.spl:414-419` —
+  `native_build_runtime_bundle_is_removed` covers all six removed aliases
+  (`hosted`, `rust-hosted`, `rust_hosted`, `hosted-runtime`, `rust-runtime`,
+  `all`).
+- `run_native_build_bootstrap` checks the parsed args pre-FFI and fails
+  closed: `bootstrap_main.spl:580` (`removed_bundle = ...`) → `:614-617`
+  prints `Error: runtime bundle '<name>' was removed; use simple-core or
+  core-c-bootstrap` and returns 1, before any `rt_native_build` delegation;
+  `--help`/`-h`/`--list-optimizations` still short-circuit to exit 0 first,
+  matching the documented help behavior.
+- The full CLI predicate uses the same alias set
+  (`src/app/io/_CliCompile/compile_targets.spl:2082`).
+- All three named specs exist in-tree:
+  `test/01_unit/app/cli/bootstrap_main_source_spec.spl`,
+  `test/01_unit/app/compile/cli_compile_surface_spec.spl`,
+  `test/02_integration/os/port/runtime_bundle_policy_spec.spl`.
+
+Behavioral re-run is environment-blocked on this host: invoking the path via
+`bin/simple.exe run src/app/cli/bootstrap_main.spl native-build
+--runtime-bundle rust-hosted ...` fails during source load with
+`unknown decorator '@representation_boundary'` (the known repo-wide
+seed/source inconsistency at this HEAD), and the pinned binary is the Rust
+seed, not the pure-Simple Stage-2 compiler this bug concerned. Verification
+is therefore by code inspection only; the Stage-2/Stage-4 qualification
+caveat in the body stands as written. Status: **closed** (fix landed and
+present; header corrected).
+
+## Open 2026-09-16 — needs owner triage (superseded; kept for history)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
