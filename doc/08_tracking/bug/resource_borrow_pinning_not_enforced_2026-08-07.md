@@ -233,3 +233,27 @@ and `resource_pinning_lifetime` on a source-compatible self-hosted runner, then
 the required compiler/core/MCP checks and MCP stdio integration smoke. No test
 execution, runtime pinning, trusted foreign non-retention contract, platform
 qualification, or bug closure is inferred from these source changes.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+The 2026-11-10 foreign-call-origin repair is present at HEAD:
+`MirCallOrigin` is threaded through MIR
+(`src/compiler/50.mir/mir_data.spl`, `mir_instructions.spl`, lowering), and
+the borrow checker consults it —
+`src/compiler/55.borrow/borrow_check/mod.spl:696` (Foreign/Unknown calls
+checked even in legacy bodies) and `:723` (only `MirCallOrigin.Source`
+callees may inherit a published short summary). The executable regressions
+(`foreign_call_borrow_origin_spec.spl`, `resource_move_while_borrowed_spec.spl`)
+and the still-RED-by-design `resource_borrow_pinning_spec.spl` are in the
+tree.
+
+Not executed: the pinned seed cannot load the test runner at this HEAD
+(`unknown decorator '@representation_boundary'`, cfd89933699), and the
+pure-Simple borrow checker cannot be exercised through the Rust seed's
+`run` path, so the 2026-11-10 section's "execution pending" stands.
+Verification here is by code inspection only.
+
+**Status unchanged: OPEN (architectural).** The call-scoped region +
+runtime pinning scope described in "What real enforcement would need"
+remains the open remainder; the landed repair narrows the concrete
+extern-boundary hole but, per its own note, infers no closure.
