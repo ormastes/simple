@@ -8,6 +8,18 @@ BugDB ID: `text-split-limit-ignored`
 Priority: P2
 Claimed: 2026-08-17, Codex `p2_text_split` lane
 
+## 2026-11-25 re-verification (interpreter mode, attr-capable seed)
+
+`test/01_unit/compiler/interpreter/text_split_limit_matrix_spec.spl` (new,
+14/14) and `nested_string_split_spec.spl` (5/5) pass with
+`SIMPLE_LIB=src` on the release/1.0.0 tip: literal and variable limits,
+limit 1, zero/negative as unlimited, missing separator, multibyte
+content+separator. The MIR boundary fix (`method_calls_literals.spl`
+keeps split argument 1 as a raw i64 for `rt_string_split_limit`) is
+present in the source. The BugDB row stays OPEN per the gate below:
+`--mode=native` on a receipt-admitted pure-Simple CLI is still pending
+(next stage-2 binary; tracked with the build-gated verifications).
+
 ## Reproducer
 
 `"a:b:c".split(":", 2)` must produce `["a", "b:c"]`. The same call with
