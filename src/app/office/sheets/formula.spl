@@ -473,14 +473,14 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
             if pos + 2 < tokens.len():
                 # This is a range reference like A1:B3 — return the first cell value
                 val ref_val = parse_cell_ref(upper_token)
-                if ref_val != nil:
+                if ref_val.is_some():
                     val v = _resolve_cell_value(upper_token, sheet, depth + 1)
                     return EvalResult(
                         value: CellValue.NumberVal(value: v),
                         next_pos: pos + 3  # skip ref, colon, ref
                     )
         val ref_val = parse_cell_ref(upper_token)
-        if ref_val != nil:
+        if ref_val.is_some():
             val v = _resolve_cell_value(upper_token, sheet, depth + 1)
             return EvalResult(
                 value: CellValue.NumberVal(value: v),
@@ -617,7 +617,7 @@ fn _eval_text_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             # Range reference: expand to one display-string arg per cell
             # (TEXTJOIN/CONCAT accept ranges).
             val range_val = parse_range("{tok}:{tokens[cur_pos + 2]}")
-            if range_val != nil:
+            if range_val.is_some():
                 for ref_str in expand_range_refs(range_val):
                     args.push(cell_display_text(sheet.get_cell(ref_str)))
             cur_pos = cur_pos + 3
@@ -1633,7 +1633,7 @@ fn _eval_criteria_function(name: text, tokens: [text], pos: i32, sheet: Sheet, d
         cur_pos = cur_pos + 1
     val range_val = parse_range(range_str)
     val sum_val = parse_range(sum_range)
-    if range_val == nil or sum_val == nil:
+    if range_val.is_none() or sum_val.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     val refs = expand_range_refs(range_val)
     val sum_refs = expand_range_refs(sum_val)
@@ -1681,7 +1681,7 @@ fn _eval_ifs_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
             return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a value range"), next_pos: cur_pos)
         val vr = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
         val vrange = parse_range(vr)
-        if vrange == nil:
+        if vrange.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
         value_refs = expand_range_refs(vrange)
         cur_pos = cur_pos + 3
@@ -1694,7 +1694,7 @@ fn _eval_ifs_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
             return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a criteria range"), next_pos: cur_pos)
         val cr = "{tokens[cur_pos]}:{tokens[cur_pos + 2]}"
         val crange = parse_range(cr)
-        if crange == nil:
+        if crange.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
         crit_ranges.push(expand_range_refs(crange))
         cur_pos = cur_pos + 3
@@ -1775,7 +1775,7 @@ fn _eval_count_range_function(name: text, tokens: [text], pos: i32, sheet: Sheet
     val rs = "{tokens[pos]}:{tokens[pos + 2]}"
     var cur_pos = pos + 3
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     val refs = expand_range_refs(rng)
     if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
@@ -1971,7 +1971,7 @@ fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
         cur_pos = cur_pos + 1
     if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
-    if rng == nil:
+    if rng.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE invalid range"), next_pos: cur_pos)
     if fnum < 1 or fnum > 19:
         return EvalResult(value: CellValue.ErrorVal(message: "AGGREGATE function_num must be 1-19"), next_pos: cur_pos)
@@ -1984,7 +1984,7 @@ fn _eval_aggregate(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
         var hidden = false
         if skip_hidden:
             val ref_val = parse_cell_ref(ref_str)
-            if ref_val != nil:
+            if ref_val.is_some():
                 hidden = sheet.is_row_hidden((ref_val.row + 1).to_i64())
         if not hidden:
             val cell = sheet.get_cell(ref_str)
@@ -2012,14 +2012,14 @@ fn _resolve_cell_range_subtotal(range_str: text, sheet: Sheet, depth: i32, skip_
     resolved to 0) so AutoFilter + SUBTOTAL(109,...) composes correctly."""
     var values: [f64] = []
     val range = parse_range(range_str)
-    if range == nil:
+    if range.is_none():
         return values
     val refs = expand_range_refs(range)
     for ref_str in refs:
         var include = true
         if skip_hidden:
             val ref_val = parse_cell_ref(ref_str)
-            if ref_val != nil:
+            if ref_val.is_some():
                 if sheet.is_row_hidden((ref_val.row + 1).to_i64()):
                     include = false
         if include:
@@ -2099,7 +2099,7 @@ fn _eval_a_variant_function(name: text, tokens: [text], pos: i32, sheet: Sheet, 
         if (cur_pos + 2 < tokens.len() and (tokens.get(cur_pos + 1) ?? "") == ":" and
             _is_cell_ref_token((tokens.get(cur_pos) ?? "")) and _is_cell_ref_token((tokens.get(cur_pos + 2) ?? ""))):
             val rng = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
-            if rng != nil:
+            if rng.is_some():
                 for ref_str in expand_range_refs(rng):
                     val cell = sheet.get_cell(ref_str)
                     if cell_display_text(cell) != "":
@@ -2215,7 +2215,7 @@ fn _eval_lookup_function(name: text, tokens: [text], pos: i32, sheet: Sheet, dep
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: cur_pos)
     val range_val = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = _skip_comma(tokens, cur_pos + 3)
-    if range_val == nil:
+    if range_val.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     # trailing numeric args (col/row indexes); ignore an optional FALSE/0 flag
     var idx1 = 1
@@ -2290,7 +2290,7 @@ fn _eval_x_lookup(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a range"), next_pos: cur_pos)
     val range1 = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = _skip_comma(tokens, cur_pos + 3)
-    if range1 == nil:
+    if range1.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid range"), next_pos: cur_pos)
     val refs1 = expand_range_refs(range1)
     # XMATCH ends after the single lookup range.
@@ -2308,7 +2308,7 @@ fn _eval_x_lookup(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a return range"), next_pos: cur_pos)
     val range2 = parse_range("{tokens[cur_pos]}:{tokens[cur_pos + 2]}")
     cur_pos = _skip_comma(tokens, cur_pos + 3)
-    if range2 == nil:
+    if range2.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid return range"), next_pos: cur_pos)
     val refs2 = expand_range_refs(range2)
     # optional if_not_found (XLOOKUP only)
@@ -2371,7 +2371,7 @@ fn _eval_db_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: 
         return EvalResult(value: CellValue.ErrorVal(message: "{name} requires a database range"), next_pos: pos)
     val db = parse_range("{tokens[pos]}:{tokens[pos + 2]}")
     var cur_pos = _skip_comma(tokens, pos + 3)
-    if db == nil:
+    if db.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid database"), next_pos: cur_pos)
     # field: quoted header name or numeric 1-based index
     var field_col = -1
@@ -2391,7 +2391,7 @@ fn _eval_db_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: 
     cur_pos = cur_pos + 3
     if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ")":
         cur_pos = cur_pos + 1
-    if crit == nil:
+    if crit.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "{name} invalid criteria"), next_pos: cur_pos)
     var count = 0
     var total = 0.0
@@ -2820,13 +2820,13 @@ fn _eval_cell_info(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRe
         # Range argument: act on its top-left cell (Excel behavior).
         val a = parse_cell_ref(ref_tok)
         val b = parse_cell_ref((tokens.get(pos + 4) ?? ""))
-        if a == nil or b == nil:
+        if a.is_none() or b.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "CELL bad reference"), next_pos: end)
         val minr = if a.row < b.row: a.row else: b.row
         val minc = if a.col < b.col: a.col else: b.col
         ref_tok = cell_ref_to_string(CellRef(col: minc, row: minr))
     val ref = parse_cell_ref(ref_tok)
-    if ref == nil:
+    if ref.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "CELL bad reference"), next_pos: end)
     if info == "row":
         return EvalResult(value: CellValue.NumberVal(value: (ref.row + 1).to_f64()), next_pos: end)
@@ -2879,7 +2879,7 @@ fn _eval_offset(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
     if (cur + 1 < tokens.len() and (tokens.get(cur) ?? "") == ":" and
         _is_cell_ref_token((tokens.get(cur + 1) ?? ""))):
         cur = cur + 2
-    if ref == nil:
+    if ref.is_none():
         val e1 = _consume_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "OFFSET bad reference"), next_pos: e1)
     if cur >= tokens.len() or (tokens.get(cur) ?? "") != ",":
@@ -2948,11 +2948,11 @@ fn _eval_indirect(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalRes
     val ref_up = ref_text.trim()
     if ref_up.contains(":"):
         val rng = parse_range(ref_up)
-        if rng == nil:
+        if rng.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT cannot parse reference '{ref_text}'"), next_pos: cur)
         return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT range form needs array context"), next_pos: cur)
     val ref = parse_cell_ref(ref_up.upper())
-    if ref == nil:
+    if ref.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "INDIRECT cannot parse reference '{ref_text}'"), next_pos: cur)
     val target = cell_ref_to_string(ref)
     EvalResult(value: _ref_target_value(target, sheet, depth), next_pos: cur)
@@ -2984,7 +2984,7 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
         if _formula_origin_key.len() == 0:
             return EvalResult(value: CellValue.ErrorVal(message: "{name}() needs a cell context"), next_pos: end)
         val origin = parse_cell_ref(_formula_origin_key)
-        if origin == nil:
+        if origin.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name}() bad origin"), next_pos: end)
         if name == "ROW":
             return EvalResult(value: CellValue.NumberVal(value: (origin.row + 1).to_f64()), next_pos: end)
@@ -2993,7 +2993,7 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
         _is_cell_ref_token((tokens.get(pos) ?? "")) and _is_cell_ref_token((tokens.get(pos + 2) ?? ""))):
         val a = parse_cell_ref((tokens.get(pos) ?? ""))
         val b = parse_cell_ref((tokens.get(pos + 2) ?? ""))
-        if a == nil or b == nil:
+        if a.is_none() or b.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} bad reference"), next_pos: end)
         val minr = if a.row < b.row: a.row else: b.row
         val maxr = if a.row > b.row: a.row else: b.row
@@ -3011,7 +3011,7 @@ fn _eval_ref_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth:
         return _ref_cell_info(name, tl, sheet, end)
     if _is_cell_ref_token((tokens.get(pos) ?? "")):
         val ref = parse_cell_ref((tokens.get(pos) ?? ""))
-        if ref == nil:
+        if ref.is_none():
             return EvalResult(value: CellValue.ErrorVal(message: "{name} bad reference"), next_pos: end)
         if name == "ROWS" or name == "COLUMNS":
             return EvalResult(value: CellValue.NumberVal(value: 1.0), next_pos: end)
@@ -3042,7 +3042,7 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
             val a = parse_cell_ref((tokens.get(cur_pos) ?? ""))
             val b = parse_cell_ref((tokens.get(cur_pos + 2) ?? ""))
             vals.push(v)
-            if a == nil or b == nil:
+            if a.is_none() or b.is_none():
                 rows.push(1)
                 cols.push(1)
             else:
@@ -3730,7 +3730,7 @@ fn _eval_reduce(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResul
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE's LAMBDA needs exactly 2 parameters"), next_pos: bad_end)
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         val bad_end = _skip_balanced_to_paren(tokens, pos)
         return EvalResult(value: CellValue.ErrorVal(message: "REDUCE requires a valid range"), next_pos: bad_end)
     val rgrid = _array_range_grid(rng, sheet)
@@ -7034,7 +7034,7 @@ fn _array_offset(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if pos >= tokens.len() or not _is_cell_ref_token((tokens.get(pos) ?? "")):
         return []
     val ref = parse_cell_ref((tokens.get(pos) ?? ""))
-    if ref == nil:
+    if ref.is_none():
         return []
     var cur = pos + 1
     # Range reference: use its top-left corner (Excel behavior).
@@ -7082,7 +7082,7 @@ fn _array_indirect(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not trimmed.contains(":"):
         return []
     val rng = parse_range(trimmed)
-    if rng == nil:
+    if rng.is_none():
         return []
     _array_range_grid(rng, sheet)
 
@@ -7162,7 +7162,7 @@ fn _array_map(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 1:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val rgrid = _array_range_grid(rng, sheet)
     val pname = lam_params[0]
@@ -7205,7 +7205,7 @@ fn _array_scan(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 2:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val rgrid = _array_range_grid(rng, sheet)
     val acc_name = lam_params[0]
@@ -7260,7 +7260,7 @@ fn _array_byrow(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 1:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val min_col = if rng.start.col < rng.end_ref.col: rng.start.col else: rng.end_ref.col
     val max_col = if rng.start.col > rng.end_ref.col: rng.start.col else: rng.end_ref.col
@@ -7317,7 +7317,7 @@ fn _array_bycol(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if not lam.ok or lam_params.len() != 1:
         return []
     val rng = parse_range(a_rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val min_col = if rng.start.col < rng.end_ref.col: rng.start.col else: rng.end_ref.col
     val min_row = if rng.start.row < rng.end_ref.row: rng.start.row else: rng.end_ref.row
@@ -7452,7 +7452,7 @@ fn _array_transpose(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     if src.len() == 0:
@@ -7488,7 +7488,7 @@ fn _array_unique(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     var out: [[text]] = []
@@ -7558,7 +7558,7 @@ fn _array_sort(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     var cur = _skip_comma(tokens, pos + 3)
@@ -7595,7 +7595,7 @@ fn _array_filter(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     var cur = _skip_comma(tokens, pos + 3)
     val col_a = _read_array_num_arg(tokens, cur, sheet)
@@ -7656,7 +7656,7 @@ fn _array_read_grid(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     _array_range_grid(rng, sheet)
 
@@ -7730,7 +7730,7 @@ fn _array_sortby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if rs == "":
         return []
     val rng = parse_range(rs)
-    if rng == nil:
+    if rng.is_none():
         return []
     val src = _array_range_grid(rng, sheet)
     var cur = _skip_comma(tokens, pos + 3)
@@ -7738,7 +7738,7 @@ fn _array_sortby(tokens: [text], pos: i32, sheet: Sheet) -> [[text]]:
     if brs == "":
         return []
     val brng = parse_range(brs)
-    if brng == nil:
+    if brng.is_none():
         return []
     val bgrid = _array_range_grid(brng, sheet)
     var keys: [text] = []
@@ -8025,7 +8025,7 @@ fn _array_stack_grids(tokens: [text], pos: i32, sheet: Sheet) -> [[[text]]]:
         val rs = _read_array_range_str(tokens, cur)
         if rs != "":
             val rng = parse_range(rs)
-            if rng != nil:
+            if rng.is_some():
                 grids.push(_array_range_grid(rng, sheet))
             cur = _skip_comma(tokens, cur + 3)
         else:
@@ -8610,7 +8610,7 @@ fn resolve_cell_range(range_str: text, sheet: Sheet) -> [f64]:
 fn _resolve_cell_range(range_str: text, sheet: Sheet, depth: i32) -> [f64]:
     var values: [f64] = []
     val range = parse_range(range_str)
-    if range == nil:
+    if range.is_none():
         return values
     val refs = expand_range_refs(range)
     for ref_str in refs:
@@ -9489,7 +9489,7 @@ fn _eval_getpivotdata(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> Eva
         return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA requires pivot_anchor_ref"), next_pos: cur_pos)
     val pivot_ref_str = (tokens.get(cur_pos) ?? "")
     val pivot_anchor = parse_cell_ref(pivot_ref_str)
-    if pivot_anchor == nil:
+    if pivot_anchor.is_none():
         return EvalResult(value: CellValue.ErrorVal(message: "GETPIVOTDATA bad pivot_anchor_ref"), next_pos: cur_pos)
     cur_pos = cur_pos + 1
     if cur_pos < tokens.len() and (tokens.get(cur_pos) ?? "") == ",":
