@@ -1,4 +1,9 @@
-use app.build.sources_cli.{build_sources_output, build_sources_output_for_manifest, run_build_sources}
+use app.build.sources_cli.{build_sources_output, build_sources_output_for_manifest, run_build_sources, build_sources_lock_text, build_sources_wants_write_lock}
+use app.io.dir_ops.{dir_create_all}
+use app.io.file_ops.{file_atomic_write}
+use app.io.mod.{file_read}
+use app.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 describe "build sources CLI":
     it "defaults the library dir to current directory":
@@ -48,3 +53,32 @@ describe "build sources CLI":
 
     it "exits 2 on an invalid manifest":
         expect(run_build_sources(["test/01_unit/app/build/fixtures/bad_manifest_unit"])).to_equal(2)
+
+describe "build sources --write-lock":
+    it "renders the drift-gate lock header then one path per line":
+        val hdr = "# source_inventory.lock: every .spl under this unit (source_inventory_scan_v1), one path per line.\n"
+        expect(build_sources_lock_text(["a.spl", "b/c.spl"])).to_equal(hdr + "a.spl\nb/c.spl\n")
+
+    it "renders an empty unit as the header only":
+        val hdr = "# source_inventory.lock: every .spl under this unit (source_inventory_scan_v1), one path per line.\n"
+        expect(build_sources_lock_text([])).to_equal(hdr)
+
+    it "detects the --write-lock flag":
+        expect(build_sources_wants_write_lock(["--write-lock", "lib"])).to_equal(true)
+        expect(build_sources_wants_write_lock(["lib"])).to_equal(false)
+
+    it "accepts --write-lock alongside the dir":
+        expect(build_sources_output(["--write-lock", "lib"], ["lib/a.spl"])).to_equal("a.spl\n")
+
+    it "still rejects a missing directory with --write-lock":
+        expect(run_build_sources(["--write-lock", "no/such/dir_rb4_lucli"])).to_equal(2)
+
+    it "writes a lock that lists every .spl, ignoring manifest globs":
+        val d = cwd() + "/build/test_tmp/wlock_{getpid()}"
+        dir_create_all(d + "/keep")
+        dir_create_all(d + "/skip")
+        file_atomic_write(d + "/keep/a.spl", "fn a() -> i64: 0\n")
+        file_atomic_write(d + "/skip/b.spl", "fn b() -> i64: 0\n")
+        file_atomic_write(d + "/simple.sdn", "project:\n  name: u\n  version: 1.0.0\n  type: library\n  sources:\n    include: [\"keep/**/*.spl\"]\n")
+        expect(run_build_sources(["--write-lock", d])).to_equal(0)
+        expect(file_read(d + "/source_inventory.lock") ?? "").to_equal(build_sources_lock_text(["keep/a.spl", "skip/b.spl"]))

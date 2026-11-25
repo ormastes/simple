@@ -1,14 +1,16 @@
-# `simple build sources [--digest] [<lib dir>]` — print a library unit's source
+# `simple build sources [--digest] [--write-lock] [<lib dir>]` — print a library unit's source
 # inventory: one path per line, relative to <lib dir>, sorted, deduplicated.
 # Include/exclude globs come from `<lib dir>/simple.sdn` (project.sources) via
 # library_unit_manifest_parse_v1; an absent manifest means every `.spl`. An
 # invalid manifest exits 2. Listing goes through source_inventory_scan_resolve_v1
 # so this command and the library-unit build agree on membership. `--digest`
-# prints the library unit source digest after the listing.
+# prints the library unit source digest after the listing. `--write-lock` writes
+# <lib dir>/source_inventory.lock from source_inventory_scan_v1 (every .spl,
+# globs NOT applied) -- the exact list check-library-unit-drift.shs compares.
 
-use app.io.mod.{is_dir, file_exists, file_read, file_hash_sha256}
+use app.io.mod.{is_dir, file_exists, file_read, file_hash_sha256, file_atomic_write}
 use compiler.driver.driver_build.source_inventory_glob_v1.{source_inventory_resolve_unit_v1}
-use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_resolve_v1}
+use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_v1, source_inventory_scan_resolve_v1}
 use compiler.driver.driver_build.library_unit_manifest_v1.{library_unit_manifest_parse_v1}
 use compiler.driver.driver_build.library_unit_digest_v1.{library_unit_source_digest_v1}
 use compiler.driver.driver_build.source_inventory_v1.{SourceInventoryFileV1}
@@ -17,7 +19,7 @@ use compiler.driver.driver_build.source_inventory_v1.{SourceInventoryFileV1}
 fn _sources_parse_dir(args: [text]) -> text:
     var dir = ""
     for a in args:
-        if a == "--digest":
+        if a == "--digest" or a == "--write-lock":
             continue
         if a.starts_with("-"):
             return ""
@@ -35,6 +37,19 @@ fn _sources_wants_digest(args: [text]) -> bool:
         if a == "--digest":
             return true
     false
+
+val LOCK_HEADER = "# source_inventory.lock: every .spl under this unit (source_inventory_scan_v1), one path per line."
+
+pub fn build_sources_wants_write_lock(args: [text]) -> bool:
+    for a in args:
+        if a == "--write-lock":
+            return true
+    false
+
+# Lock file text for check-library-unit-drift.shs: header, then one path per line.
+@allow(primitive_api)  # lock file text boundary
+pub fn build_sources_lock_text(paths: [text]) -> text:
+    LOCK_HEADER + "\n" + _sources_join(paths)
 
 fn _sources_relative_paths(dir: text, walked: [text], includes: [text], excludes: [text]) -> [text]:
     val prefix = if dir == ".": "" else: dir + "/"
@@ -76,7 +91,7 @@ pub fn build_sources_output_for_manifest(dir: text, manifest: text, walked: [tex
 pub fn run_build_sources(args: [text]) -> i64:
     val dir = _sources_parse_dir(args)
     if dir == "":
-        print("usage: simple build sources [--digest] [<lib dir>]")
+        print("usage: simple build sources [--digest] [--write-lock] [<lib dir>]")
         return 2
     if not is_dir(dir):
         print("build-sources-error: not a directory: {dir}")
@@ -93,6 +108,14 @@ pub fn run_build_sources(args: [text]) -> i64:
             case Err(e):
                 print("build-sources-error: {e}")
                 return 2
+    if build_sources_wants_write_lock(args):
+        val lock_path = dir + "/source_inventory.lock"
+        val lock_paths = source_inventory_scan_v1(dir)
+        if not file_atomic_write(lock_path, build_sources_lock_text(lock_paths)):
+            print("build-sources-error: cannot write {lock_path}")
+            return 2
+        print("wrote {lock_path} ({lock_paths.len()} paths)")
+        return 0
     val paths = source_inventory_scan_resolve_v1(dir, includes, excludes)
     val text_out = _sources_join(paths)
     if text_out.len() > 0:
