@@ -119,9 +119,9 @@ impl MirInterpreter:
             locals: {},
             globals: {},
             blocks: {},
-            current_block: nil,
-            previous_block: nil,
-            return_value: nil,
+            current_block: None,
+            previous_block: None,
+            return_value: None,
             has_returned: false,
             function_table: {},
             call_stack: [],
@@ -131,7 +131,7 @@ impl MirInterpreter:
             runtime_arrays: {},
             array_slots: {},
             string_table: {},
-            last_error: nil,
+            last_error: None,
             next_string_id: -1,
             # Read once at startup so default (unset) perf/behavior is untouched;
             # never re-read per instruction.
@@ -140,7 +140,7 @@ impl MirInterpreter:
             error_frames: [],
             debug_enabled: dbg,
             cached_call_name: "",
-            cached_call_fn: nil,
+            cached_call_fn: None,
             frame_locals_pool: [],
             frame_blocks_pool: [],
             # Read once at startup (default ON); never re-read per call.
@@ -269,7 +269,7 @@ impl MirInterpreter:
         if error.?:
             return Some(InterpError.UnsupportedOperation(op: "SIMD interpreter: {error.unwrap()}"))
         self.set_local(dest, handle)
-        nil
+        None
 
     me _execute_simd_load(dest: LocalId, ptr: MirOperand, type_: MirType) -> InterpError?:
         val shape = self.simd_state.shape_for_type(type_)
@@ -297,7 +297,7 @@ impl MirInterpreter:
         while i < lanes.len():
             self.set_local(LocalId(id: base + (i * 8)), lanes[i])
             i = i + 1
-        nil
+        None
 
     me _execute_simd_gather(dest: LocalId, base: MirOperand, indices: MirOperand, type_: MirType) -> InterpError?:
         val index_handle = self.get_operand(indices)
@@ -324,7 +324,7 @@ impl MirInterpreter:
         while i < lanes.len():
             self.set_local(LocalId(id: base_addr + (index_lanes[i] * 8)), lanes[i])
             i = i + 1
-        nil
+        None
 
     fn _format_span(span: Span?) -> text:
         """Miri-mode helper: render a source span for a loud diagnostic, or
@@ -354,7 +354,7 @@ impl MirInterpreter:
         self.function_table = table
         # Invalidate the direct-call cache: entries may have changed.
         self.cached_call_name = ""
-        self.cached_call_fn = nil
+        self.cached_call_fn = None
         # Invalidate the ExecIR memo: encoded CALL targets bind to a table
         # snapshot, so a new table must force re-probe.
         self.execir_modules = {}
@@ -373,7 +373,7 @@ impl MirInterpreter:
             self.cached_call_name = name
             self.cached_call_fn = Some(f)
             return Some(f)
-        nil
+        None
 
     # ========================================================================
     # Instruction Execution
@@ -385,7 +385,7 @@ impl MirInterpreter:
             case Const(dest, value, type_):
                 self.execute_const(dest, value)
                 val const_err = self.last_error
-                self.last_error = nil
+                self.last_error = None
                 const_err
 
             case Copy(dest, src):
@@ -394,7 +394,7 @@ impl MirInterpreter:
                     return Some(InterpError.RuntimeError(message: "strict-interp:uninitialized-local-read Copy v{src.id} at {self._format_span(inst.span)}"))
                 val value = self.get_local(src)
                 self.set_local(dest, value)
-                nil
+                None
 
             case Move(dest, src):
                 if self.strict_mode and not self.is_local_set(src):
@@ -403,7 +403,7 @@ impl MirInterpreter:
                 val value = self.get_local(src)
                 self.set_local(dest, value)
                 # Note: Move semantics not enforced in interpreter
-                nil
+                None
 
             case BinOp(dest, op, left, right):
                 self.execute_binop(dest, op, left, right)
@@ -415,12 +415,12 @@ impl MirInterpreter:
                 val value = self.get_operand(operand)
                 # Simple cast - just copy value for now
                 self.set_local(dest, value)
-                nil
+                None
 
             case Bitcast(dest, operand, target):
                 val value = self.get_operand(operand)
                 self.set_local(dest, value)
-                nil
+                None
 
             case Load(dest, ptr):
                 val addr = self.get_operand(ptr)
@@ -430,7 +430,7 @@ impl MirInterpreter:
                 val local_id = LocalId(id: addr)
                 val value = self.get_local(local_id)
                 self.set_local(dest, value)
-                nil
+                None
 
             case Store(ptr, value):
                 val addr = self.get_operand(ptr)
@@ -439,12 +439,12 @@ impl MirInterpreter:
                 val val_to_store = self.get_operand(value)
                 val local_id = LocalId(id: addr)
                 self.set_local(local_id, val_to_store)
-                nil
+                None
 
             case Alloc(dest, type_):
                 # Allocate local storage - return local ID
                 self.set_local(dest, dest.id)
-                nil
+                None
 
             case GetElementPtr(dest, base, indices):
                 val base_val = self.get_operand(base)
@@ -466,13 +466,13 @@ impl MirInterpreter:
                     self.next_aggregate_id = address + 8
                     self.array_slots[address] = (handle, array_index)
                     self.set_local(dest, address)
-                    return nil
+                    return None
                 var offset = base_val
                 for idx in indices:
                     val idx_val = self.get_operand(idx)
                     offset = offset + (idx_val * 8)
                 self.set_local(dest, offset)
-                nil
+                None
 
             case Aggregate(dest, kind, operands):
                 # Allocate a base address for the aggregate
@@ -496,7 +496,7 @@ impl MirInterpreter:
                         self.array_slots[base_addr + (index * 8)] = (base_addr, index)
                 # dest holds the base address
                 self.set_local(dest, base_addr)
-                nil
+                None
 
             case GetField(dest, base, field):
                 val base_val = self.get_operand(base)
@@ -505,13 +505,13 @@ impl MirInterpreter:
                     if field < 0 or field >= elements.len():
                         return Some(InterpError.RuntimeError(message: "E-INTERP-ARRAY-Bounds: field {field}"))
                     self.set_local(dest, elements[field])
-                    return nil
+                    return None
                 # Read value from base_address + field_offset
                 val field_addr = base_val + (field * 8)
                 val slot = LocalId(id: field_addr)
                 val field_val = self.get_local(slot)
                 self.set_local(dest, field_val)
-                nil
+                None
 
             case SetField(base, field, value):
                 val base_val = self.get_operand(base)
@@ -525,19 +525,19 @@ impl MirInterpreter:
                 val field_addr = base_val + (field * 8)
                 val slot = LocalId(id: field_addr)
                 self.set_local(slot, val_to_set)
-                nil
+                None
 
             case Call(dest, call_target, args):
                 val call_result = self._dispatch_call_operand(call_target, args)
                 if call_result[1].?: return call_result[1]
                 if dest.?: self.set_local(dest.unwrap(), call_result[0] ?? 0)
-                nil
+                None
 
             case CallIndirect(dest, ptr, args, sig):
                 val call_result = self._dispatch_call_operand(ptr, args)
                 if call_result[1].?: return call_result[1]
                 if dest.?: self.set_local(dest.unwrap(), call_result[0] ?? 0)
-                nil
+                None
 
             case Intrinsic(dest, name, args):
                 # bounds_check must trap loudly, mirroring the native path
@@ -564,12 +564,12 @@ impl MirInterpreter:
                         return Some(InterpError.RuntimeError(message: "assertion failed"))
                     if dest.?:
                         self.set_local(dest.unwrap(), 0)
-                    return nil
+                    return None
                 val result = self._execute_intrinsic(name, args)
                 if dest.?:
                     self.set_local(dest.unwrap(), result)
                 val intrinsic_err = self.last_error
-                self.last_error = nil
+                self.last_error = None
                 intrinsic_err
 
             case DecisionProbe(_, semantic_id, _, _, _, _):
@@ -586,35 +586,35 @@ impl MirInterpreter:
                 # Stub: Pipeline operators need runtime support
                 val val_res = self.get_operand(value)
                 self.set_local(dest, val_res)
-                nil
+                None
 
             case Compose(dest, f, g, forward):
                 # Stub: Function composition
                 self.set_local(dest, 0)
-                nil
+                None
 
             case Parallel(dest, funcs):
                 # Stub: Parallel execution
                 self.set_local(dest, 0)
-                nil
+                None
 
             case LayerConnect(dest, layer1, layer2):
                 # Stub: Neural network layers
                 self.set_local(dest, 0)
-                nil
+                None
 
             case CreatePromise(dest, body, result_type):
                 # Mirrors LLVM: call ptr @__simple_runtime_create_promise(ptr null)
                 val result = mir_interp_call_runtime_fn("__simple_runtime_create_promise", [0])
                 self.set_local(dest, result)
-                nil
+                None
 
             case Await(dest, promise):
                 # Mirrors LLVM: call i64 @__simple_runtime_await(ptr promise)
                 val prom_val = self.get_operand(promise)
                 val result = mir_interp_call_runtime_fn("__simple_runtime_await", [prom_val])
                 self.set_local(dest, result)
-                nil
+                None
 
             case Yield(value):
                 # Mirrors LLVM: call void @__simple_runtime_yield(i64 value)
@@ -623,21 +623,21 @@ impl MirInterpreter:
                     mir_interp_call_runtime_fn("__simple_runtime_yield", [val_int])
                 else:
                     mir_interp_call_runtime_fn("__simple_runtime_yield", [0])
-                nil
+                None
 
             case Spawn(dest, handler, args):
                 # Mirrors LLVM: call ptr @__simple_runtime_spawn(ptr handler)
                 val handler_val = self.get_operand(handler)
                 val result = mir_interp_call_runtime_fn("__simple_runtime_spawn", [handler_val])
                 self.set_local(dest, result)
-                nil
+                None
 
             case Send(target, message):
                 # Mirrors LLVM: call void @__simple_runtime_send(ptr target, i64 message)
                 val target_val = self.get_operand(target)
                 val msg_val = self.get_operand(message)
                 mir_interp_call_runtime_fn("__simple_runtime_send", [target_val, msg_val])
-                nil
+                None
 
             case Receive(dest, timeout):
                 # Mirrors LLVM: call i64 @__simple_runtime_receive(i64 timeout)
@@ -646,20 +646,20 @@ impl MirInterpreter:
                     timeout_val = self.get_operand(timeout.unwrap())
                 val result = mir_interp_call_runtime_fn("__simple_runtime_receive", [timeout_val])
                 self.set_local(dest, result)
-                nil
+                None
 
             case Ref(dest, borrow_kind, place):
                 # Borrow checking - return place address
                 self.set_local(dest, place.local.id)
-                nil
+                None
 
             case DebugValue(local, name):
                 # Debug - no-op
-                nil
+                None
 
             case Nop:
                 # No-op
-                nil
+                None
 
             case Drop(local):
                 # WP-I interpreter parity (resource ownership): MirLowering
@@ -673,7 +673,7 @@ impl MirInterpreter:
                 # interpreter able to execute any function WP-E's lowering
                 # now emits Drop into, instead of erroring on the
                 # `case _:` "unknown instruction" fallthrough below.
-                nil
+                None
 
             case TransferOut(_, _, _, _, _, _):
                 self._unsupported_inst("TransferOut", inst.span)
@@ -964,7 +964,7 @@ impl MirInterpreter:
         if self.string_table.contains(id):
             Some(self.string_table[id])
         else:
-            nil
+            None
 
     me execute_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> InterpError?:
         """Evaluate binary operation."""
@@ -1012,7 +1012,7 @@ impl MirInterpreter:
                 return Some(InterpError.UnsupportedOperation(op: "E-INTERP-BINOP-Unknown: no interpreter arm for MIR binop (discriminant {unknown_binop_disc})"))
 
         self.set_local(dest, result)
-        nil
+        None
 
     me _execute_checked_binop(span: Span?, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> InterpError?:
         """Miri-mode: real i64 overflow detection for Add/Sub/Mul under
@@ -1030,7 +1030,7 @@ impl MirInterpreter:
                     print "PANIC: strict-interp integer-overflow: {l} + {r} overflows i64, at {self._format_span(span)}"
                     return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Add {l} + {r} at {self._format_span(span)}"))
                 self.set_local(dest, result)
-                nil
+                None
             case Sub:
                 val l = self.get_operand(left)
                 val r = self.get_operand(right)
@@ -1040,7 +1040,7 @@ impl MirInterpreter:
                     print "PANIC: strict-interp integer-overflow: {l} - {r} overflows i64, at {self._format_span(span)}"
                     return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Sub {l} - {r} at {self._format_span(span)}"))
                 self.set_local(dest, result)
-                nil
+                None
             case Mul:
                 val l = self.get_operand(left)
                 val r = self.get_operand(right)
@@ -1054,7 +1054,7 @@ impl MirInterpreter:
                     print "PANIC: strict-interp integer-overflow: {l} * {r} overflows i64, at {self._format_span(span)}"
                     return Some(InterpError.RuntimeError(message: "strict-interp:integer-overflow Mul {l} * {r} at {self._format_span(span)}"))
                 self.set_local(dest, result)
-                nil
+                None
             case _:
                 self.execute_binop(dest, op, left, right)
 
@@ -1072,7 +1072,7 @@ impl MirInterpreter:
                 return Some(InterpError.UnsupportedOperation(op: "E-INTERP-UNOP-Transpose: MIR interpreter does not execute matrix transpose"))
 
         self.set_local(dest, result)
-        nil
+        None
 
     # ========================================================================
     # Call Support
@@ -1081,31 +1081,31 @@ impl MirInterpreter:
     me _dispatch_call_operand(target: MirOperand, args: [MirOperand]) -> (i64?, InterpError?):
         val name_opt = _extract_func_name(target)
         if not name_opt.?:
-            return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Target: callable has no supported direct target")))
+            return (None, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Target: callable has no supported direct target")))
         val name = name_opt.unwrap()
         match target.call_origin:
             case MirCallOrigin.Source:
                 val callee = self._resolve_function(name)
                 if not callee.?:
-                    return (nil, Some(InterpError.RuntimeError(message: "E-INTERP-CALL-Source: unresolved function '{name}'")))
+                    return (None, Some(InterpError.RuntimeError(message: "E-INTERP-CALL-Source: unresolved function '{name}'")))
                 return self._call_function(callee.unwrap(), args)
             case MirCallOrigin.Foreign:
-                return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Foreign: no foreign owner for '{name}'")))
+                return (None, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Foreign: no foreign owner for '{name}'")))
             case MirCallOrigin.Unknown:
-                return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Origin: unproved callable authority for '{name}'")))
+                return (None, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Origin: unproved callable authority for '{name}'")))
             case MirCallOrigin.Runtime:
                 val arity = mir_interp_runtime_arity_v1(name)
                 if arity < 0:
-                    return (nil, Some(InterpError.UnsupportedOperation(op: "E-INTERP-RUNTIME-Unknown: no runtime owner for '{name}'")))
+                    return (None, Some(InterpError.UnsupportedOperation(op: "E-INTERP-RUNTIME-Unknown: no runtime owner for '{name}'")))
                 if args.len() != arity:
-                    return (nil, Some(InterpError.RuntimeError(message: "E-INTERP-RUNTIME-Arity: '{name}' expects {arity}, got {args.len()}")))
+                    return (None, Some(InterpError.RuntimeError(message: "E-INTERP-RUNTIME-Arity: '{name}' expects {arity}, got {args.len()}")))
                 var values: [i64] = []
                 for arg in args:
                     values.push(self.get_operand(arg))
                     if self.last_error.?:
                         val error = self.last_error
-                        self.last_error = nil
-                        return (nil, error)
+                        self.last_error = None
+                        return (None, error)
                 return self._dispatch_runtime_call(name, values)
 
     me _dispatch_runtime_call(name: text, args: [i64]) -> (i64?, InterpError?):
@@ -1114,33 +1114,33 @@ impl MirInterpreter:
         if name == "rt_array_new":
             # Match core_array.array_new_with_flags: small/negative capacity
             # still creates an empty array; excessive capacity is refused.
-            if args[0] > 100000000: return (Some(0), nil)
+            if args[0] > 100000000: return (Some(0), None)
             val handle = self.next_aggregate_id
             self.next_aggregate_id = handle + 8
             self.runtime_arrays[handle] = []
-            return (Some(handle), nil)
+            return (Some(handle), None)
         if name == "rt_array_push" or name == "rt_array_len" or name == "rt_array_get" or name == "rt_array_set":
             val handle = args[0]
             if not self.runtime_arrays.contains(handle):
                 # These are the known ABI's failure values, not an unresolved
                 # call fallback: get returns tagged nil, length/status return 0.
-                return (Some(if name == "rt_array_get": 3 else: 0), nil)
+                return (Some(if name == "rt_array_get": 3 else: 0), None)
             var elements = self.runtime_arrays[handle]
-            if name == "rt_array_len": return (Some(elements.len()), nil)
+            if name == "rt_array_len": return (Some(elements.len()), None)
             if name == "rt_array_push":
                 elements.push(args[1])
                 self.runtime_arrays[handle] = elements
-                return (Some(1), nil)
+                return (Some(1), None)
             val index = if args[1] < 0: elements.len() + args[1] else: args[1]
             if index < 0 or index >= elements.len():
-                return (Some(if name == "rt_array_get": 3 else: 0), nil)
-            if name == "rt_array_get": return (Some(elements[index]), nil)
+                return (Some(if name == "rt_array_get": 3 else: 0), None)
+            if name == "rt_array_get": return (Some(elements[index]), None)
             elements[index] = args[2]
             self.runtime_arrays[handle] = elements
-            return (Some(1), nil)
+            return (Some(1), None)
         # Only the exact supported async names reach this helper: dispatch
         # validates authority and arity before invoking the runtime bridge.
-        (Some(mir_interp_call_runtime_fn(name, args)), nil)
+        (Some(mir_interp_call_runtime_fn(name, args)), None)
 
     me _take_frame_locals() -> {i64: i64}:
         """Take a locals dict for an inner call frame: pooled (cleared) or fresh."""
@@ -1197,8 +1197,8 @@ impl MirInterpreter:
         self.locals = self._take_frame_locals()
         self.blocks = self._take_frame_blocks()
         self.has_returned = false
-        self.return_value = nil
-        self.previous_block = nil
+        self.return_value = None
+        self.previous_block = None
 
         # Initialize callee blocks
         for block in callee.blocks:
@@ -1241,7 +1241,7 @@ impl MirInterpreter:
                             # name FIRST; the pop destroys it.
                             self._record_error_frame()
                             self._pop_call_stack()
-                            return (nil, error)
+                            return (None, error)
                         if self.has_returned:
                             break
 
@@ -1250,7 +1250,7 @@ impl MirInterpreter:
                         if error.?:
                             self._record_error_frame()
                             self._pop_call_stack()
-                            return (nil, error)
+                            return (None, error)
 
                     max_iter = max_iter - 1
                 case None:
@@ -1259,7 +1259,7 @@ impl MirInterpreter:
         if max_iter == 0:
             self._record_error_frame()
             self._pop_call_stack()
-            return (nil, Some(InterpError.RuntimeError(message: "Infinite loop in called function")))
+            return (None, Some(InterpError.RuntimeError(message: "Infinite loop in called function")))
 
         # Capture return value
         val ret_val = self.return_value
@@ -1267,7 +1267,7 @@ impl MirInterpreter:
         # Restore caller state from call stack
         self._pop_call_stack()
 
-        (ret_val, nil)
+        (ret_val, None)
 
     me _pop_call_stack():
         """Pop the top frame from call stack and restore state."""
@@ -1399,7 +1399,7 @@ impl MirInterpreter:
             return Some(InterpError.OutOfBounds(index: index, size: len))
         if dest.?:
             self.set_local(dest.unwrap(), 0)
-        nil
+        None
 
     # ========================================================================
     # Function Execution
@@ -1482,11 +1482,11 @@ impl MirInterpreter:
                 val r = ctx.run(m)
                 if (r[1]).?:
                     self._record_error_frame()
-                    return (nil, r[1])
+                    return (None, r[1])
                 self.return_value = r[0]
                 self.has_returned = true
-                self.current_block = nil
-                return (r[0], nil)
+                self.current_block = None
+                return (r[0], None)
         if self.debug_enabled:
             debug("interp", "Executing function: {func.name} ({func.blocks.len()} blocks, {func.locals.len()} locals)")
         self.current_function = func.name
@@ -1501,9 +1501,9 @@ impl MirInterpreter:
 
         # Start at entry block
         self.current_block = Some(func.entry_block.id)
-        self.previous_block = nil
+        self.previous_block = None
         self.has_returned = false
-        self.return_value = nil
+        self.return_value = None
 
         # Execute blocks until return
         var max_iterations = 10000  # Prevent infinite loops
@@ -1516,7 +1516,7 @@ impl MirInterpreter:
                 val error = self.execute_instruction(inst)
                 if error.?:
                     self._record_error_frame()
-                    return (nil, error)
+                    return (None, error)
                 if self.has_returned:
                     break
 
@@ -1525,7 +1525,7 @@ impl MirInterpreter:
                 val error = self.execute_terminator(block.terminator)
                 if error.?:
                     self._record_error_frame()
-                    return (nil, error)
+                    return (None, error)
 
             max_iterations = max_iterations - 1
 
@@ -1533,10 +1533,10 @@ impl MirInterpreter:
             if self.debug_enabled:
                 debug("interp", "Infinite loop detected in function: {func.name}")
             self._record_error_frame()
-            return (nil, Some(InterpError.RuntimeError(message: "Infinite loop detected")))
+            return (None, Some(InterpError.RuntimeError(message: "Infinite loop detected")))
 
         # Return value from return instruction
-        (self.return_value, nil)
+        (self.return_value, None)
 
     me execute_terminator(term: MirTerminator) -> InterpError?:
         """Execute a block terminator."""
@@ -1544,7 +1544,7 @@ impl MirInterpreter:
             case Goto(target):
                 self.previous_block = self.current_block
                 self.current_block = Some(target.id)
-                nil
+                None
 
             case Ret(value):
                 if value.?:
@@ -1552,14 +1552,14 @@ impl MirInterpreter:
                 else:
                     self.return_value = Some(0)
                 self.has_returned = true
-                self.current_block = nil
-                nil
+                self.current_block = None
+                None
 
             case If(cond, then_, else_):
                 val cond_val = self.get_operand(cond)
                 self.previous_block = self.current_block
                 self.current_block = Some(if cond_val != 0: then_.id else: else_.id)
-                nil
+                None
 
             case Switch(value, targets, default):
                 val v = self.get_operand(value)
@@ -1570,7 +1570,7 @@ impl MirInterpreter:
                         break
                 self.previous_block = self.current_block
                 self.current_block = Some(target)
-                nil
+                None
 
             case Unreachable:
                 self.has_returned = true
@@ -1603,13 +1603,13 @@ impl MirInterpreter:
                                     self.set_local(unwind_type_tag_dest.unwrap(), type_tag)
                                 self.previous_block = self.current_block
                                 self.current_block = Some(unwind.unwrap().id)
-                                return nil
+                                return None
                             return Some(call_error)
                         case _: return Some(call_error)
                 if dest.?: self.set_local(dest.unwrap(), call_result[0] ?? 0)
                 self.previous_block = self.current_block
                 self.current_block = Some(normal.id)
-                nil
+                None
 
 # Helper functions (f64_to_bits, f64_from_bits, _extract_func_name) moved to
 # mir_interp_runtime.spl and re-exported at the top of this file.
