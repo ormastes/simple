@@ -5,37 +5,226 @@
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
 # See doc/07_guide/tooling/bootstrap_options.md "Default build mode".
 # Publish a locally built Windows bootstrap-stage compiler (stage2/stage3) as a
-# numbered rc prerelease, after a fail-closed hello-world object gate.
+# numbered rc prerelease, after a fail-closed hello-world object + link + run gate.
 #
-# Usage: sh scripts/release/publish-win-stage-rc.shs <stage-exe> <stage2|stage3> <commit> [--dry-run]
+# Usage:
+#   sh scripts/release/publish-win-stage-rc.shs [--abi gnu|msvc] \
+#     [--provenance <PROVENANCE.sdn>] [--payload-dir <dir> | --payload-tar <tar>] \
+#     [--out-dir <dir>] [--dry-run] <stage-exe> <stage2|stage3> <commit>
+#   sh scripts/release/publish-win-stage-rc.shs <stage-exe> <stage2|stage3> <commit> [--dry-run]
 #
-# The asset is the stage compiler itself (bootstrap CLI: compile/native-build
-# only), never the Rust seed. SIMPLE_RC_EXTRA_ASSETS (space-separated paths)
-# attaches extra files, e.g. the runtime DLL bundle + its .sha256. Tag = rc-1.0.0-rc.<highest existing + 1>.
+# The asset is the stage compiler itself (cli_role: bootstrap_only — compile/
+# native-build only, NEVER aliased as phase4_cli_sha256), never the Rust seed.
+# SIMPLE_RC_EXTRA_ASSETS (space-separated paths) attaches extra files, e.g. the
+# runtime DLL bundle + its .sha256 or a pre-built PROVENANCE.sdn / SPK.
+# Tag = SIMPLE_RC_TAG if set, else rc-1.0.0-rc.<highest existing + 1>.
 set -u
-# windows-gnu + llvm-mingw only; never MSVC. These make the link pick the gnu flavor.
-export SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=gnu SIMPLE_WINDOWS_ABI=gnu
-unset LIB INCLUDE LIBPATH
-exe=${1:?stage exe path}; stage=${2:?stage2|stage3}; commit=${3:?source commit}; mode=${4:-}
-case "$stage" in stage2|stage3) ;; *) echo "FAIL — stage must be stage2 or stage3"; exit 2 ;; esac
+
+usage() {
+  cat <<'EOF'
+Usage:
+  sh scripts/release/publish-win-stage-rc.shs [--abi gnu|msvc] \
+    [--provenance <PROVENANCE.sdn>] [--payload-dir <dir> | --payload-tar <tar>] \
+    [--out-dir <dir>] [--dry-run] <stage-exe> <stage2|stage3> <commit>
+
+Options:
+  --abi <gnu|msvc>          Windows target ABI (default: gnu)
+                            gnu  -> x86_64-pc-windows-gnu (llvm-mingw UCRT)
+                            msvc -> x86_64-pc-windows-msvc (LLVM clang/lld-link + core-c-bootstrap)
+  --provenance <path>       Preserve an existing PROVENANCE.sdn (validated against RC63 rules)
+  --payload-dir <dir>       Validate a release payload directory via scripts/check_release_payload.shs
+  --payload-tar <tar>       Validate a release payload archive via scripts/check_release_payload.shs
+  --out-dir <dir>           Copy staged artifacts (exe, sha256, PROVENANCE.sdn, notes.md) to <dir>
+  --dry-run                 Run all gates and stage artifacts without calling gh release create
+  -h, --help                Show this help and exit 0
+EOF
+}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || script_dir="."
+repo_root=$(CDPATH= cd -- "$script_dir/../.." 2>/dev/null && pwd -P) || repo_root="."
+payload_checker="$repo_root/scripts/check_release_payload.shs"
+
+abi=gnu
+mode=
+provenance_in=
+payload_dir=
+payload_tar=
+out_dir=
+exe=
+stage=
+commit=
+pos_count=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --abi)
+      [ $# -ge 2 ] || { echo "FAIL — --abi requires a value (gnu or msvc)" >&2; exit 2; }
+      abi=$2
+      shift 2
+      ;;
+    --abi=*)
+      abi=${1#--abi=}
+      shift
+      ;;
+    --provenance)
+      [ $# -ge 2 ] || { echo "FAIL — --provenance requires a path" >&2; exit 2; }
+      provenance_in=$2
+      shift 2
+      ;;
+    --provenance=*)
+      provenance_in=${1#--provenance=}
+      shift
+      ;;
+    --payload-dir)
+      [ $# -ge 2 ] || { echo "FAIL — --payload-dir requires a directory" >&2; exit 2; }
+      payload_dir=$2
+      shift 2
+      ;;
+    --payload-dir=*)
+      payload_dir=${1#--payload-dir=}
+      shift
+      ;;
+    --payload-tar)
+      [ $# -ge 2 ] || { echo "FAIL — --payload-tar requires an archive" >&2; exit 2; }
+      payload_tar=$2
+      shift 2
+      ;;
+    --payload-tar=*)
+      payload_tar=${1#--payload-tar=}
+      shift
+      ;;
+    --out-dir)
+      [ $# -ge 2 ] || { echo "FAIL — --out-dir requires a directory" >&2; exit 2; }
+      out_dir=$2
+      shift 2
+      ;;
+    --out-dir=*)
+      out_dir=${1#--out-dir=}
+      shift
+      ;;
+    --dry-run)
+      mode=--dry-run
+      shift
+      ;;
+    --*)
+      echo "FAIL — unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      pos_count=$(( pos_count + 1 ))
+      case "$pos_count" in
+        1) exe=$1 ;;
+        2) stage=$1 ;;
+        3) commit=$1 ;;
+        *) echo "FAIL — unexpected positional argument: $1" >&2; exit 2 ;;
+      esac
+      shift
+      ;;
+  esac
+done
+
+case "$abi" in
+  gnu)
+    target_triple=x86_64-pc-windows-gnu
+    obj_name=hello.o
+    runtime_bundle_label=${SIMPLE_NATIVE_RUNTIME_BUNDLE:-llvm-mingw-ucrt}
+    # windows-gnu + llvm-mingw only; never MSVC. These make the link pick the gnu flavor.
+    export SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=gnu SIMPLE_WINDOWS_ABI=gnu
+    unset LIB INCLUDE LIBPATH
+    ;;
+  msvc)
+    target_triple=x86_64-pc-windows-msvc
+    obj_name=hello.obj
+    runtime_bundle_label=${SIMPLE_NATIVE_RUNTIME_BUNDLE:-core-c-bootstrap}
+    # windows-msvc: preserve LIB/INCLUDE/LIBPATH for MSVC CRT + Windows SDK,
+    # and preserve CL=/TC across MSYS2/Git Bash env conversion.
+    export SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-msvc SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc
+    export SIMPLE_NATIVE_RUNTIME_BUNDLE="$runtime_bundle_label"
+    case "$(uname -s 2>/dev/null || true)" in
+      MINGW*|MSYS*|CYGWIN*)
+        case ";${MSYS2_ENV_CONV_EXCL:-};" in
+          *';CL=;'*) : ;;
+          *) MSYS2_ENV_CONV_EXCL="${MSYS2_ENV_CONV_EXCL:+${MSYS2_ENV_CONV_EXCL};}CL="
+             export MSYS2_ENV_CONV_EXCL ;;
+        esac
+        ;;
+    esac
+    ;;
+  *)
+    echo "FAIL — unsupported --abi '$abi' (expected gnu or msvc)" >&2
+    exit 2
+    ;;
+esac
+
+[ -n "$exe" ] || { echo "FAIL — stage exe path is required" >&2; exit 2; }
+[ -n "$stage" ] || { echo "FAIL — stage (stage2|stage3) is required" >&2; exit 2; }
+[ -n "$commit" ] || { echo "FAIL — source commit is required" >&2; exit 2; }
+case "$stage" in
+  stage2) phase_num=2 ;;
+  stage3) phase_num=3 ;;
+  *) echo "FAIL — stage must be stage2 or stage3" >&2; exit 2 ;;
+esac
 [ -f "$exe" ] || { echo "ERROR — nothing was checked: $exe missing"; exit 2; }
 case "$(basename "$exe")" in *seed*) echo "FAIL — refusing seed binary"; exit 1 ;; esac
+if [ -n "$provenance_in" ] && [ ! -f "$provenance_in" ]; then
+  echo "ERROR — nothing was checked: provenance file $provenance_in missing" >&2
+  exit 2
+fi
+
+sdn_field() {
+  awk -v key="$2" '
+    /^[[:space:]]*#/ { next }
+    { line=$0; sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" key "[[:space:]]*:") {
+        sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line); sub(/[[:space:]]*$/, "", line)
+        print line; exit } }' "$1"
+}
+
+validate_provenance_rc63() {
+  prov_path=$1
+  stage_hash=$2
+  prov_role=$(sdn_field "$prov_path" cli_role)
+  if [ "$prov_role" != "bootstrap_only" ]; then
+    echo "FAIL — RC63 provenance violation in $prov_path: cli_role must be 'bootstrap_only' for $stage (got '${prov_role:-missing}')" >&2
+    return 1
+  fi
+  prov_p4=$(sdn_field "$prov_path" phase4_cli_sha256)
+  if [ -n "$prov_p4" ]; then
+    if [ "$prov_p4" = "$stage_hash" ]; then
+      echo "FAIL — RC63 provenance violation in $prov_path: $stage digest must never be aliased as phase4_cli_sha256" >&2
+      return 1
+    fi
+    case "$prov_p4" in
+      none|absent|null) ;;
+      *)
+        echo "FAIL — RC63 provenance violation in $prov_path: bootstrap_only $stage must not declare phase4_cli_sha256='$prov_p4'" >&2
+        return 1
+        ;;
+    esac
+  fi
+  return 0
+}
 
 work=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
 # Per-run work dir, removed on every exit path (leaked ~62 MB per run).
 trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
 printf 'fn main():\n    print "hello world"\n' > "$work/hello.spl"
-"$exe" native-build "$work/hello.spl" --target x86_64-pc-windows-gnu --emit-object -o "$work/hello.o" > "$work/gate.log" 2>&1
+"$exe" native-build "$work/hello.spl" --target "$target_triple" --emit-object -o "$work/$obj_name" > "$work/gate.log" 2>&1
 rc=$?
-size=0; [ -f "$work/hello.o" ] && size=$(wc -c < "$work/hello.o" | tr -d ' ')
+size=0; [ -f "$work/$obj_name" ] && size=$(wc -c < "$work/$obj_name" | tr -d ' ')
 cat "$work/gate.log"
 if [ "$rc" -ne 0 ] || [ "$size" -le 0 ]; then
   echo "FAIL — hello-world object gate: rc=$rc obj_bytes=$size"; exit 1
 fi
-gate="native-build --emit-object hello.spl: rc=0, hello.o $size bytes"
-"$exe" native-build "$work/hello.spl" --target x86_64-pc-windows-gnu -o "$work/hello.exe" > "$work/link.log" 2>&1
+gate="native-build --target $target_triple --emit-object hello.spl: rc=0, $obj_name $size bytes"
+"$exe" native-build "$work/hello.spl" --target "$target_triple" -o "$work/hello.exe" > "$work/link.log" 2>&1
 lrc=$?
 if [ "$lrc" -eq 0 ] && [ -f "$work/hello.exe" ]; then
   out=$("$work/hello.exe" 2>&1); orc=$?
@@ -47,29 +236,163 @@ else
 fi
 echo "gate: $gate"
 
-last=$(gh release list -L 200 --json tagName -q '.[].tagName' | sed -n 's/^rc-1\.0\.0-rc\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)
-tag="rc-1.0.0-rc.$(( ${last:-0} + 1 ))"
-asset="$work/simple-$stage-${tag#rc-}-windows-x86_64.exe"
+# Validate explicit or extra release payload archives/dirs fail-closed.
+if [ -n "$payload_dir" ]; then
+  sh "$payload_checker" --dir "$payload_dir" || { echo "FAIL — release payload dir check failed: $payload_dir" >&2; exit 1; }
+fi
+if [ -n "$payload_tar" ]; then
+  sh "$payload_checker" --tar "$payload_tar" || { echo "FAIL — release payload tar check failed: $payload_tar" >&2; exit 1; }
+fi
+
+extra_has_provenance=0
+extra_has_provenance_sha=0
+extra_provenance_path=
+if [ -n "${SIMPLE_RC_EXTRA_ASSETS:-}" ]; then
+  for extra in $SIMPLE_RC_EXTRA_ASSETS; do
+    [ -f "$extra" ] || { echo "FAIL — extra asset missing: $extra" >&2; exit 1; }
+    extra_base=$(basename "$extra")
+    case "$extra_base" in
+      simple-bootstrap-*.spk|simple-bootstrap-*.tar.gz|simple-full-*.tar.gz)
+        sh "$payload_checker" --tar "$extra" || { echo "FAIL — release payload check failed for extra asset: $extra" >&2; exit 1; }
+        ;;
+      PROVENANCE.sdn)
+        extra_has_provenance=1
+        extra_provenance_path=$extra
+        ;;
+      PROVENANCE.sdn.sha256)
+        extra_has_provenance_sha=1
+        ;;
+    esac
+  done
+fi
+
+if [ -n "${SIMPLE_RC_TAG:-}" ]; then
+  tag=$SIMPLE_RC_TAG
+else
+  last=$(gh release list -L 200 --json tagName -q '.[].tagName' 2>/dev/null | sed -n 's/^rc-1\.0\.0-rc\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)
+  tag="rc-1.0.0-rc.$(( ${last:-0} + 1 ))"
+fi
+
+case "$abi" in
+  msvc) asset="$work/simple-$stage-${tag#rc-}-windows-x86_64-msvc.exe" ;;
+  *) asset="$work/simple-$stage-${tag#rc-}-windows-x86_64.exe" ;;
+esac
 cp "$exe" "$asset"
+asset_bytes=$(wc -c < "$asset" | tr -d ' ')
 hash=$(sha256sum "$asset" | cut -d' ' -f1)
 ( cd "$work" && sha256sum "$(basename "$asset")" > "$(basename "$asset").sha256" )
-cat > "$work/notes.md" <<EOF
-Windows x86_64 $stage bootstrap compiler (bootstrap CLI: compile/native-build only; NOT the full CLI).
+
+full=$(git rev-parse "$commit" 2>/dev/null || echo "$commit")  # API rejects abbreviated shas
+cli_role=bootstrap_only
+p2_sha=none
+p3_sha=none
+if [ "$stage" = stage2 ]; then
+  p2_sha=$hash
+else
+  p3_sha=$hash
+fi
+
+publish_prov=
+publish_prov_sha=
+if [ -n "$provenance_in" ]; then
+  validate_provenance_rc63 "$provenance_in" "$hash" || exit 1
+  cp "$provenance_in" "$work/PROVENANCE.sdn"
+  ( cd "$work" && sha256sum PROVENANCE.sdn > PROVENANCE.sdn.sha256 )
+  publish_prov="$work/PROVENANCE.sdn"
+  publish_prov_sha="$work/PROVENANCE.sdn.sha256"
+elif [ "$extra_has_provenance" -eq 1 ]; then
+  validate_provenance_rc63 "$extra_provenance_path" "$hash" || exit 1
+  cp "$extra_provenance_path" "$work/PROVENANCE.sdn"
+  if [ "$extra_has_provenance_sha" -eq 0 ]; then
+    ( cd "$work" && sha256sum PROVENANCE.sdn > PROVENANCE.sdn.sha256 )
+    publish_prov_sha="$work/PROVENANCE.sdn.sha256"
+  fi
+else
+  cat > "$work/PROVENANCE.sdn" <<EOF
+# Windows $stage RC Provenance (RC63 cli_role & physical digest contract)
+provenance:
+  schema: simple-win-stage-provenance/1
+  tag: $tag
+  stage: $stage
+  phase: $phase_num
+  cli_role: $cli_role
+  target: $target_triple
+  abi: $abi
+  runtime_bundle: $runtime_bundle_label
+  stack_reserve: 67108864
+  source_commit: $full
+  built_path: $exe
+  asset_name: $(basename "$asset")
+  asset_bytes: $asset_bytes
+  asset_sha256: $hash
+  phase2_bootstrap_sha256: $p2_sha
+  phase3_bootstrap_sha256: $p3_sha
+  phase4_cli_sha256: none
+  phase4_cli_present: false
+  gate: $gate
+EOF
+  validate_provenance_rc63 "$work/PROVENANCE.sdn" "$hash" || exit 1
+  ( cd "$work" && sha256sum PROVENANCE.sdn > PROVENANCE.sdn.sha256 )
+  publish_prov="$work/PROVENANCE.sdn"
+  publish_prov_sha="$work/PROVENANCE.sdn.sha256"
+fi
+prov_hash=$(sha256sum "$work/PROVENANCE.sdn" | cut -d' ' -f1)
+
+if [ "$abi" = msvc ]; then
+  cat > "$work/notes.md" <<EOF
+Windows x86_64 MSVC $stage bootstrap compiler (cli_role: bootstrap_only; compile/native-build only; NOT the full Phase 4 CLI).
+
+Target: x86_64-pc-windows-msvc. ABI: msvc. Runtime bundle: $runtime_bundle_label. Stack reserve: 67108864 (64 MiB). Toolchain: admitted LLVM clang/clang-cl + lld-link with MSVC CRT and Windows SDK (LIB/INCLUDE preserved; never MinGW/GCC). Policy: config/bootstrap/windows-msvc.sdn (min_phase: 3 for new compiler builds; never alias P3 as phase4_cli_sha256).
+
+- source commit: $full
+- built path: $exe
+- cli_role: $cli_role
+- sha256: $hash
+- provenance_sha256: $prov_hash
+- phase4_cli_sha256: none
+- gate: $gate
+- link env: SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-msvc SIMPLE_LINKER_FLAVOR=msvc SIMPLE_WINDOWS_ABI=msvc SIMPLE_NATIVE_RUNTIME_BUNDLE=$runtime_bundle_label (preserve LIB, INCLUDE, LIBPATH and MSYS2_ENV_CONV_EXCL=CL=).
+EOF
+  release_title="$tag (win-msvc $stage)"
+else
+  cat > "$work/notes.md" <<EOF
+Windows x86_64 $stage bootstrap compiler (cli_role: bootstrap_only; compile/native-build only; NOT the full Phase 4 CLI).
 
 Target: x86_64-pc-windows-gnu. Toolchain: llvm-mingw UCRT only (mingw clang, lld, compiler-rt, libunwind, libc++). No MSVC, no MSVC LIB, no Windows SDK, no GCC. The binary imports only KERNEL32 and UCRT.
 
-- source commit: $commit
+- source commit: $full
 - built path: $exe
+- cli_role: $cli_role
 - sha256: $hash
+- provenance_sha256: $prov_hash
+- phase4_cli_sha256: none
 - gate: $gate
 - runtime dependency: libLLVM-23.dll (MSYS2 clang64 build, e.g. C:/msys64/clang64/bin) must be first on PATH; the llvm-mingw libLLVM-23.dll fails with 0xC0000139. The bundled llvm-runtime-dlls archive carries the clang64 DLLs. Linking an exe uses target x86_64-pc-windows-gnu with llvm-mingw (CC and SIMPLE_LLVM_MINGW_ROOT=~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64); do NOT set LIB/INCLUDE. Also set SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_SCV_FREEZE_FALLBACK=1, and run from a checkout of the source commit (runtime C is compiled from the checkout at link time). The link env is SIMPLE_NATIVE_BUILD_TARGET=x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=gnu SIMPLE_WINDOWS_ABI=gnu.
 EOF
-echo "tag=$tag asset=$(basename "$asset") sha256=$hash"
+  release_title="$tag (win $stage)"
+fi
+
+if [ -n "$out_dir" ]; then
+  mkdir -p "$out_dir" || { echo "FAIL — cannot create --out-dir $out_dir" >&2; exit 1; }
+  cp "$asset" "$asset.sha256" "$work/PROVENANCE.sdn" "$work/notes.md" "$out_dir/"
+  [ -f "$work/PROVENANCE.sdn.sha256" ] && cp "$work/PROVENANCE.sdn.sha256" "$out_dir/"
+fi
+
+echo "tag=$tag abi=$abi target=$target_triple asset=$(basename "$asset") sha256=$hash provenance_sha256=$prov_hash cli_role=$cli_role"
 [ "$mode" = "--dry-run" ] && { echo "PASS — dry run, not published"; exit 0; }
-full=$(git rev-parse "$commit" 2>/dev/null || echo "$commit")  # API rejects abbreviated shas
+
+set -- "$asset" "$asset.sha256"
+[ -n "$publish_prov" ] && set -- "$@" "$publish_prov"
+[ -n "$publish_prov_sha" ] && set -- "$@" "$publish_prov_sha"
+if [ -n "${SIMPLE_RC_EXTRA_ASSETS:-}" ]; then
+  for extra in $SIMPLE_RC_EXTRA_ASSETS; do
+    set -- "$@" "$extra"
+  done
+fi
+
 gh release create "$tag" --prerelease --target "$full" \
-  --title "$tag (win $stage)" --notes-file "$work/notes.md" \
-  "$asset" "$asset.sha256" ${SIMPLE_RC_EXTRA_ASSETS:-}
+  --title "$release_title" --notes-file "$work/notes.md" \
+  "$@"
 crc=$?
 [ "$crc" -eq 0 ] || { echo "FAIL — gh release create rc=$crc"; exit 1; }
 echo "PASS — published $tag"
