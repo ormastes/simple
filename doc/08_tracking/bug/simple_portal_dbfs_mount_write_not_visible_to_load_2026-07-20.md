@@ -1,6 +1,36 @@
 # `simple_portal` DBFS mount: file written via `_write_mount_file` not visible to `portal_content_db_load_from_mount`
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25 (work/p2w5-ac-20261125) — still open, verification environment-blocked
+
+The code has moved on since this record: `MountTable` now lives at
+`src/lib/nogc_async_mut/fs_driver/mount_table.spl` (not `nogc_sync_mut`) and
+has been heavily rewritten (generational mount slots, `MountId` identity,
+backend seals; `mount` is still `me fn` mutating in place, and
+`_driver_mount` explicitly returns the mutated instance because struct
+parameters are value types — see the comment at `mount_table.spl:829-833`).
+`portal_content_db_load_from_mount`
+(`src/app/simple_portal/content_db.spl:91`) still reads the four
+`{root}/content/*.db` files through the passed `MountTable`. Neither of the
+two candidate mechanisms in this record can be confirmed or excluded from
+source alone.
+
+Attempts to reproduce on this host (Windows, pinned Rust seed v1.0.0-rc.1):
+
+1. `SIMPLE_LIB=src bin/simple.exe test
+   test/02_integration/app/simple_portal/simple_portal_content_db_spec.spl
+   --mode=interpreter` — blocked before any spec code runs: the test-runner
+   closure fails at HEAD with `unknown decorator '@representation_boundary'`
+   (seed/HEAD source-binary inconsistency).
+2. A standalone driver replicating `_make_portal_dbfs_mount` — the seed
+   stack-overflows (`thread 'simple-main' has overflowed its stack`) while
+   loading the `MountTable`/`DbFsDriver` import closure, before `main` prints;
+   even `MountTable.new()` alone after the imports never runs.
+
+Status unchanged: OPEN, needs an owner with a working self-hosted runtime to
+re-run the spec. The record's component path should read
+`src/lib/nogc_async_mut/fs_driver/mount_table.spl`.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

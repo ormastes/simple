@@ -1,0 +1,301 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @cover src/compiler/50.mir/_MirLowering/declaration_enum_metadata_v1.spl
+"""
+Cranelift ABI symmetry for non-generic and generic enum payloads carrying f64/f32/u64.
+
+Regression guard for E-BACKEND-CRANELIFT-CALL-ABI on multi-field, generic,
+mixed-concrete, and nested enum variants:
+- Construction (`rt_tuple_set`, `rt_enum_new`) always receives `MirTypeKind.I64`
+  words even when `typed_slots` is false, and concrete `u64`/`f32` slots inside
+  generic enums (such as `Mix<T>.M(a: T, f: f64, u: u64)` or `SingleU<T>.U(u: u64)`)
+  adapt unsuffixed literals so `rt_value_u64` / `Cast` run before boxing.
+- Top-level and nested pattern binds (`Some(Mix.M(...))`, `Some(Box.Full(...))`,
+  `Some(Two.Both(...))`, `Outer.Wrap(Box.Full(...))`, `Two.Both(Some(v), _)`)
+  decode back to `F64` / `F32` / `U64` / `Bool` / `Char` / `Str` with zero
+  `cl_call_abi_mismatch`.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.cranelift_codegen_adapter.{cl_call_abi_mismatch, cl_fallback_abi_type, CL_TYPE_I64}
+
+val SOURCE: text =
+    "extern fn put_f64(x: f64)\n" +
+    "extern fn put_f32(x: f32)\n" +
+    "extern fn put_u64(x: u64)\n" +
+    "extern fn put_text(x: text)\n" +
+    "extern fn put_bool(x: bool)\n" +
+    "extern fn put_char(x: char)\n\n" +
+    "enum ProbeExprKind:\n" +
+    "    FloatLit(value: f64, suffix: text?)\n" +
+    "    Mixed(f32_val: f32, u64_val: u64)\n" +
+    "    UnitVal\n\n" +
+    "enum Box<T>:\n" +
+    "    Full(item: T)\n" +
+    "    Empty\n\n" +
+    "enum Two<A, B>:\n" +
+    "    Both(a: A, b: B)\n" +
+    "    Neither\n\n" +
+    "enum Mix<T>:\n" +
+    "    M(a: T, f: f64, u: u64)\n" +
+    "    MNone\n\n" +
+    "enum SingleU<T>:\n" +
+    "    U(u: u64)\n" +
+    "    UNone\n\n" +
+    "enum MixF32<T>:\n" +
+    "    MF(a: T, f: f32)\n" +
+    "    MFNone\n\n" +
+    "enum Outer:\n" +
+    "    Wrap(inner: Box<f64>)\n" +
+    "    OEmpty\n\n" +
+    "fn mk_probe_float() -> ProbeExprKind:\n" +
+    "    ProbeExprKind.FloatLit(1.5, None)\n\n" +
+    "fn use_probe_float(k: ProbeExprKind):\n" +
+    "    match k:\n" +
+    "        case ProbeExprKind.FloatLit(v, _): put_f64(v)\n" +
+    "        case ProbeExprKind.Mixed(f, u):\n" +
+    "            put_f32(f)\n" +
+    "            put_u64(u)\n" +
+    "        case ProbeExprKind.UnitVal: ()\n\n" +
+    "fn mk_probe_mixed(f: f32, u: u64) -> ProbeExprKind:\n" +
+    "    ProbeExprKind.Mixed(f, u)\n\n" +
+    "fn use_nested_probe(opt: ProbeExprKind?):\n" +
+    "    match opt:\n" +
+    "        case Some(ProbeExprKind.FloatLit(v, _)): put_f64(v)\n" +
+    "        case _: ()\n\n" +
+    "fn touch_two_text() -> Two<text, i64>:\n" +
+    "    Two.Both(\"hi\", 1)\n\n" +
+    "fn mk_two_f64() -> Two<f64, text>:\n" +
+    "    Two.Both(2.5, \"ok\")\n\n" +
+    "fn use_two_f64(t: Two<f64, text>):\n" +
+    "    match t:\n" +
+    "        case Two.Both(v, _): put_f64(v)\n" +
+    "        case Two.Neither: ()\n\n" +
+    "fn mk_two_f32_u64(f: f32, u: u64) -> Two<f32, u64>:\n" +
+    "    Two.Both(f, u)\n\n" +
+    "fn use_two_f32_u64(t: Two<f32, u64>):\n" +
+    "    match t:\n" +
+    "        case Two.Both(f, u):\n" +
+    "            put_f32(f)\n" +
+    "            put_u64(u)\n" +
+    "        case Two.Neither: ()\n\n" +
+    "fn touch_box_text() -> Box<text>:\n" +
+    "    Box.Full(\"abc\")\n\n" +
+    "fn mk_box_f64() -> Box<f64>:\n" +
+    "    Box.Full(3.5)\n\n" +
+    "fn use_box_f64(b: Box<f64>):\n" +
+    "    match b:\n" +
+    "        case Box.Full(v): put_f64(v)\n" +
+    "        case Box.Empty: ()\n\n" +
+    "fn use_box_text_after_f64(b: Box<text>):\n" +
+    "    match b:\n" +
+    "        case Box.Full(s): put_text(s)\n" +
+    "        case Box.Empty: ()\n\n" +
+    "fn mk_box_u64(u: u64) -> Box<u64>:\n" +
+    "    Box.Full(u)\n\n" +
+    "fn use_box_u64(b: Box<u64>):\n" +
+    "    match b:\n" +
+    "        case Box.Full(u): put_u64(u)\n" +
+    "        case Box.Empty: ()\n\n" +
+    "fn mk_box_bool_char(flag: bool, ch: char):\n" +
+    "    val bb: Box<bool> = Box.Full(flag)\n" +
+    "    val bc: Box<char> = Box.Full(ch)\n" +
+    "    match bb:\n" +
+    "        case Box.Full(v): put_bool(v)\n" +
+    "        case Box.Empty: ()\n" +
+    "    match bc:\n" +
+    "        case Box.Full(c): put_char(c)\n" +
+    "        case Box.Empty: ()\n\n" +
+    "fn mk_mix_unsuffixed(a: i64) -> Mix<i64>:\n" +
+    "    Mix.M(a, 2.5, 42)\n\n" +
+    "fn use_mix(m: Mix<i64>):\n" +
+    "    match m:\n" +
+    "        case Mix.M(a, f, u):\n" +
+    "            put_f64(f)\n" +
+    "            put_u64(u)\n" +
+    "        case Mix.MNone: ()\n\n" +
+    "fn mk_single_u_unsuffixed() -> SingleU<i64>:\n" +
+    "    SingleU.U(42)\n\n" +
+    "fn use_single_u(s: SingleU<i64>):\n" +
+    "    match s:\n" +
+    "        case SingleU.U(u): put_u64(u)\n" +
+    "        case SingleU.UNone: ()\n\n" +
+    "fn mk_mix_f32_unsuffixed(a: i64) -> MixF32<i64>:\n" +
+    "    MixF32.MF(a, 2.5)\n\n" +
+    "fn use_mix_f32(m: MixF32<i64>):\n" +
+    "    match m:\n" +
+    "        case MixF32.MF(a, f): put_f32(f)\n" +
+    "        case MixF32.MFNone: ()\n\n" +
+    "fn use_nested_generic_mix(opt: Mix<i64>?):\n" +
+    "    match opt:\n" +
+    "        case Some(Mix.M(a, f, u)):\n" +
+    "            put_f64(f)\n" +
+    "            put_u64(u)\n" +
+    "        case _: ()\n\n" +
+    "fn use_nested_generic_box(opt: Box<f64>?):\n" +
+    "    match opt:\n" +
+    "        case Some(Box.Full(v)): put_f64(v)\n" +
+    "        case _: ()\n\n" +
+    "fn use_nested_generic_two(opt: Two<f32, u64>?):\n" +
+    "    match opt:\n" +
+    "        case Some(Two.Both(f, u)):\n" +
+    "            put_f32(f)\n" +
+    "            put_u64(u)\n" +
+    "        case _: ()\n\n" +
+    "fn use_outer_box(o: Outer):\n" +
+    "    match o:\n" +
+    "        case Outer.Wrap(Box.Full(v)): put_f64(v)\n" +
+    "        case Outer.OEmpty: ()\n\n" +
+    "fn mk_two_opt_f64() -> Two<f64?, text>:\n" +
+    "    Two.Both(Some(2.5), \"opt\")\n\n" +
+    "fn use_two_opt_f64(t: Two<f64?, text>):\n" +
+    "    match t:\n" +
+    "        case Two.Both(Some(v), _): put_f64(v)\n" +
+    "        case _: ()\n\n" +
+    "fn use_two_some_box(t: Two<Box<f64>?, text>):\n" +
+    "    match t:\n" +
+    "        case Two.Both(Some(Box.Full(v)), _): put_f64(v)\n" +
+    "        case _: ()\n\n" +
+    "fn use_two_ok_box(t: Two<Result<Box<f64>, text>, text>):\n" +
+    "    match t:\n" +
+    "        case Two.Both(Ok(Box.Full(v)), _): put_f64(v)\n" +
+    "        case _: ()\n\n" +
+    "fn use_mix_opt_two(m: Mix<Two<f32, u64>?>):\n" +
+    "    match m:\n" +
+    "        case Mix.M(Some(Two.Both(f, u)), _, _):\n" +
+    "            put_f32(f)\n" +
+    "            put_u64(u)\n" +
+    "        case _: ()\n\n" +
+    "fn use_box_f64_in_lambda(b: Box<f64>):\n" +
+    "    val run_fn = \\unused:\n" +
+    "        match b:\n" +
+    "            case Box.Full(v): put_f64(v)\n" +
+    "            case Box.Empty: ()\n" +
+    "    run_fn(0)\n"
+
+fn mir_local_type_of(func: MirFunction, id: i64) -> MirType:
+    for local in func.locals:
+        if local.id.id == id:
+            return local.type_
+    MirType.i64()
+
+fn mir_operand_type(op: MirOperand, func: MirFunction) -> MirType:
+    match op.kind:
+        case Copy(local) | Move(local):
+            val lid = (local ?? LocalId(id: -1)).id
+            mir_local_type_of(func, lid)
+        case Const(_, ty):
+            ty
+
+fn lower_test_module() -> (MirModule, [MirError]):
+    val parsed = parse_full_frontend(SOURCE, "floatlit_enum_abi.spl", "floatlit_enum_abi", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("floatlit_enum_abi.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    (mir, mir_lowering.errors)
+
+fn func_has_call(func: MirFunction, target: text) -> bool:
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == target: return true
+                        case _: ()
+                case _: ()
+    false
+
+fn check_call_abi_in_module(mir: MirModule) -> [i64]:
+    var tuple_set_calls = 0
+    var put_f64_calls = 0
+    var put_f32_calls = 0
+    var put_u64_calls = 0
+    var put_text_calls = 0
+    var put_bool_calls = 0
+    var put_char_calls = 0
+    for func in mir.functions.values():
+        if func.name == "mk_mix_unsuffixed" or func.name.ends_with(".mk_mix_unsuffixed"):
+            expect(func_has_call(func, "rt_value_u64")).to_equal(true)
+        if func.name == "mk_single_u_unsuffixed" or func.name.ends_with(".mk_single_u_unsuffixed"):
+            expect(func_has_call(func, "rt_value_u64")).to_equal(true)
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(dest, callee, args):
+                        val callee_name = match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _): name
+                            case _: ""
+                        val callee_ty = mir_operand_type(callee, func)
+                        var arg_types: [MirType] = []
+                        for arg in args:
+                            arg_types.push(mir_operand_type(arg, func))
+                        val ret_ty = if val d = dest: mir_local_type_of(func, d.id) else: MirType.unit()
+                        val has_ret = dest != None
+                        if callee_name == "rt_tuple_set" or callee_name == "rt_enum_new":
+                            expect(args.len()).to_equal(3)
+                            expect(arg_types[2].kind != MirTypeKind.F64).to_equal(true)
+                            expect(arg_types[2].kind != MirTypeKind.F32).to_equal(true)
+                            expect(arg_types[2].kind != MirTypeKind.U64).to_equal(true)
+                            expect(cl_fallback_abi_type(arg_types[2])).to_equal(CL_TYPE_I64)
+                            if callee_name == "rt_tuple_set":
+                                tuple_set_calls = tuple_set_calls + 1
+                        if callee_name == "put_f64" or callee_name.ends_with(".put_f64"):
+                            put_f64_calls = put_f64_calls + 1
+                            expect(arg_types.len()).to_equal(1)
+                            expect(arg_types[0].kind == MirTypeKind.F64).to_equal(true)
+                            expect(cl_call_abi_mismatch(callee_ty, arg_types, ret_ty, has_ret)).to_equal("")
+                        elif callee_name == "put_f32" or callee_name.ends_with(".put_f32"):
+                            put_f32_calls = put_f32_calls + 1
+                            expect(arg_types.len()).to_equal(1)
+                            expect(arg_types[0].kind == MirTypeKind.F32).to_equal(true)
+                            expect(cl_call_abi_mismatch(callee_ty, arg_types, ret_ty, has_ret)).to_equal("")
+                        elif callee_name == "put_u64" or callee_name.ends_with(".put_u64"):
+                            put_u64_calls = put_u64_calls + 1
+                            expect(arg_types.len()).to_equal(1)
+                            expect(arg_types[0].kind == MirTypeKind.U64).to_equal(true)
+                            expect(cl_call_abi_mismatch(callee_ty, arg_types, ret_ty, has_ret)).to_equal("")
+                        elif callee_name == "put_text" or callee_name.ends_with(".put_text"):
+                            put_text_calls = put_text_calls + 1
+                            val is_str = match arg_types[0].kind:
+                                case MirTypeKind.Opaque("str"): true
+                                case _: false
+                            expect(is_str).to_equal(true)
+                            expect(cl_call_abi_mismatch(callee_ty, arg_types, ret_ty, has_ret)).to_equal("")
+                        elif callee_name == "put_bool" or callee_name.ends_with(".put_bool"):
+                            put_bool_calls = put_bool_calls + 1
+                            expect(arg_types[0].kind == MirTypeKind.Bool).to_equal(true)
+                            expect(cl_call_abi_mismatch(callee_ty, arg_types, ret_ty, has_ret)).to_equal("")
+                        elif callee_name == "put_char" or callee_name.ends_with(".put_char"):
+                            put_char_calls = put_char_calls + 1
+                            expect(arg_types[0].kind == MirTypeKind.Char).to_equal(true)
+                            expect(cl_call_abi_mismatch(callee_ty, arg_types, ret_ty, has_ret)).to_equal("")
+                    case _: ()
+    [tuple_set_calls, put_f64_calls, put_f32_calls, put_u64_calls, put_text_calls, put_bool_calls, put_char_calls]
+
+describe "Cranelift ABI symmetry for float and u64 enum payloads":
+    it "lowers non-generic, generic, mixed-concrete, and nested float/u64 enum construction and matching with zero ABI mismatches":
+        val (mir, errors) = lower_test_module()
+        var fatal_count = 0
+        for err in errors:
+            if err.fatal:
+                fatal_count = fatal_count + 1
+        expect(fatal_count).to_equal(0)
+        val counts = check_call_abi_in_module(mir)
+        expect(counts[0]).to_be_greater_than(0)
+        expect(counts[1]).to_equal(13)
+        expect(counts[2]).to_equal(5)
+        expect(counts[3]).to_equal(8)
+        expect(counts[4]).to_equal(1)
+        expect(counts[5]).to_equal(1)
+        expect(counts[6]).to_equal(1)

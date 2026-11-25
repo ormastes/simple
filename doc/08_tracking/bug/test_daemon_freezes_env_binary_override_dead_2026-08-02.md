@@ -1,7 +1,8 @@
 # The test daemon freezes the environment, so a binary override is silently dead
 
 - **Date:** 2026-08-02
-- **Status:** fixed (client-side lane bypass); protocol-level fix still open
+- **Status:** fixed (client-side lane bypass); protocol-level fix landed
+  2026-11-03 (67ee03994a5), live-daemon verification still pending (linux-only)
 - **Severity:** measurement integrity — affected specs fail silently *green*
 - **Evidence tier:** Rust seed (`bin/simple`; bootstrap-identity probe
   `strings bin/simple | grep -c "enum construction: unregistered enum"` = 0)
@@ -282,3 +283,19 @@ OPEN as documented.
 daemon path is linux-only. Verify on linux: start the daemon, change
 SIMPLE_TEST_BINARY, run `bin/simple test <spec>`, expect "environment-identity:
 caller environment differs ... running directly".
+
+## Triage 2026-11-25 (release/1.0.0 @ 64dfa6d980f, Windows host)
+
+The 2026-11-03 protocol-level fix is present in the tree by code inspection:
+`src/app/test_daemon/environment_identity.spl` (v1 environment identity,
+exported at line 63), consumed by `src/app/test_daemon/light_daemon.spl:8,267`
+and by the client `src/app/test_runner_new/test_runner_client.spl:19`
+(`test_daemon_environment_identity_v1` + `test_daemon_environment_can_reuse_v1`).
+
+The remaining live-daemon verification step ("start the daemon, change
+SIMPLE_TEST_BINARY, expect the environment-identity reroute line") is
+linux-only per the 2026-11-03 update and cannot run on this Windows host;
+additionally `bin/simple.exe test` is blocked repo-wide at HEAD by the
+unrelated `@representation_boundary` decorator gap. No code change; the
+status header is updated to reflect that the protocol fix has landed and
+only the linux live verification remains.

@@ -2,7 +2,7 @@
 
 - **ID:** seed_jit_lsu64_load_lowering_forces_interpreter
 - **Date:** 2026-07-22
-- **Status:** STALE for the lsu64_load symptom (2026-11-06); JIT still falls back for a different reason (see Re-verification)
+- **Status:** STALE for the lsu64_load symptom (2026-11-06); JIT still falls back for a different reason (see Re-verification). CLOSED 2026-11-25 — named symptom confirmed gone; residual tracked separately (see below)
 - **Severity:** high — it is the throughput blocker to the OpenSBI banner / Linux-on-SoC bring-up
 - **Component:** seed JIT HIR lowering (`src/compiler_rust`), not the .spl compiler
 
@@ -66,3 +66,14 @@ anywhere. The interpreter fallback still occurs but with a different error:
 (declared fields: reg_0, reg_1, ...)`. The lsu64_load symptom is stale; the
 throughput blocker should be re-filed against the RegFile64 `regs` field
 lowering error.
+
+## Verification 2026-11-25 (work/p2w5-ac-20261125) — CLOSED
+
+Re-ran the repro on the pinned worktree seed (Rust seed v1.0.0-rc.1, Windows
+host, `SIMPLE_LIB=src bin/simple.exe run
+test/01_unit/lib/hardware/rv64gc_rtl/core64_probe.spl`): zero occurrences of
+`lsu64_load`, no `HIR lowering error` at all, and the probe ran to completion
+with `CORE64 PROBE: ALL PASS`. The named symptom (and the RegFile64 residual
+seen on 2026-11-06) no longer reproduces with this binary. Closing as STALE;
+any future JIT-lowering throughput gap on the RV64 SoC model should be filed
+fresh against the error observed at that time.

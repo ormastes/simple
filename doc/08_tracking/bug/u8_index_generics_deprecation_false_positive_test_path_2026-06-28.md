@@ -54,3 +54,23 @@ flagged for `--fix-generics`.
 - Indexing an array-typed variable (`[u8]`, `[i64]`, …) never emits the
   "Use angle brackets" deprecation, and `simple migrate --fix-generics` never
   rewrites such indexing.
+
+## 2026-11-25 re-verification (release/1.0.0, worktree p2w6-al) — closure confirmed
+
+Re-ran the 2026-09-13 closure probe on this host with the tracked pinned seed
+(`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1, Windows):
+
+- Scratch script taking `s: [u8]` and indexing `s[i]` in a `while` loop
+  compiles and runs under `SIMPLE_EXECUTION_MODE=interpret`:
+  output `sum=6`, exit 0.
+- `grep -icE 'deprecat|fix-generics'` over the full combined output: **0**
+  hits — no "Use angle brackets" deprecation, no `--fix-generics` suggestion.
+- Probe artifacts (not committed): `build/p2w6-al-probes/u8_index_probe.spl`,
+  `build/p2w6-al-probes/u8_run_out.txt`.
+
+Limit (unchanged from the original closure): the exact `bin/simple test`
+path is unusable at this HEAD for an unrelated reason — the pinned seed
+rejects `@representation_boundary` inside the test runner itself
+(`src/app/test_runner_new/test_runner_client.spl:9:1`), so interpret-mode
+`run` was again used as the proxy. The closure's acceptance criteria stand;
+remains RESOLVED.

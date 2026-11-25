@@ -1,14 +1,18 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
-## Open 2026-09-16 — needs owner triage
+## CLOSED 2026-11-25 — all silent-wrong lanes fixed and re-verified (see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 "needs owner triage" banner was stale bookkeeping: every lane
+that silently returned `nil` (interpreter, JIT, native LLVM) was already
+recorded FIXED below, and the 2026-11-06 note verified native. Re-verified on
+release/1.0.0 @ 0819b116ecb on 2026-11-25 — see the final section.
 
 **Date:** 2026-08-01
-**Status:** interpreter lane FIXED; **JIT lane FIXED**; **native LLVM (Rust seed
+**Status:** CLOSED 2026-11-25. interpreter lane FIXED; **JIT lane FIXED**; **native LLVM (Rust seed
 `compile --native`) FIXED to JIT parity** — see
 `array_at_native_llvm_lane_2026-08-01.md`. The pure-Simple `native-build` lane
-is still OPEN (no `at` arm in its MIR lowering; fails loudly).
+remains without an `at` arm in its MIR lowering, but it **fails loudly**
+(compile-time error), not silently — a missing-feature gap, not this bug's
+silent-wrong-answer defect.
 **Severity:** CRITICAL on native — silent wrong answer, no error, no crash
 
 ### Lane table (all rows PROVED by transcript)
@@ -428,3 +432,24 @@ in the transcripts above.
 
 ## 2026-11-06 native verified (p1w5)
 `test/fixtures/compiler/array_at_native_regression/main.spl` was built natively with s3_fable46_w5. It exits rc=0 and prints `array_at: PASS`, covering indexes 0, 2, 3 and -1 plus a `[text]` array. Status: fixed.
+
+## Re-verification 2026-11-25 (release/1.0.0 @ 0819b116ecb, worktree wt-p1w1-aa) — CLOSED
+
+The named spec `test/01_unit/lib/common/array_at_option_spec.spl` could not be
+executed at HEAD: `bin/simple.exe test` fails repo-wide on the known
+`unknown decorator '@representation_boundary'` source/binary inconsistency of
+the pinned seed (it dies in `src/app/test_runner_new/test_runner_client.spl`
+before reaching the spec). Verified instead with a self-contained probe
+covering the same assertion set (in-range hits 0..4, out-of-range 5/6,
+negative, empty, the index-3/value-3 sentinel case, and `if val Some(v) =`
+binding) run from `build/` on the pinned `bin/simple.exe` (Rust seed
+v1.0.0-rc.1):
+
+- default (JIT) lane — the lane that silently returned `nil` for every index
+  when filed: `Some(10)..Some(50)`, `None` for OOB/negative/empty,
+  `ys at(3) = Some(3)`, if-let binds `Some 20` / `None ok`. All correct.
+- `SIMPLE_EXECUTION_MODE=interpret`: identical results via `??` fallbacks.
+
+The filed symptom (nil for every index, every call site taking the None
+branch) does not reproduce on either engine. Native LLVM was verified
+2026-11-06 (see above). No code change in this pass; ledger hygiene only.

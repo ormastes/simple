@@ -184,3 +184,17 @@ The live instances at
 `src/compiler/00.common/assurance/formal_delivery_gates.spl:147-149,205-207` are
 no longer a parse failure for the seed.
 
+## 2026-11-25 verification (work/p2w4-ae-20261125, origin/release/1.0.0 HEAD ef6a94f8a03)
+
+The 2026-08-21 fix is present in the tree at release/1.0.0 HEAD, verified by
+code inspection: `Parser::reconcile_inline_body_deferred_dedents` is defined
+at `src/compiler_rust/parser/src/parser_helpers.rs:218`, called from
+`parse_inline_or_block` (`parser_helpers.rs:200`) and from both inline-body
+paths of `parse_if` (`stmt_parsing/control_flow.rs:184` and `:278`), and the
+11-variant regression matrix is registered as
+`mod trailing_operator_single_line_body_test;` in
+`src/compiler_rust/parser/src/lib.rs:63`. The cargo test run was not
+re-executed (no cargo/rust builds in this lane per worktree rules); the
+recorded 11/11 matrix + 299-test crate-green evidence stands. Closure
+unchanged.
+

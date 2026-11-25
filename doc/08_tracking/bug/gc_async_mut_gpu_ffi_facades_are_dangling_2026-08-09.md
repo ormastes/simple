@@ -10,7 +10,10 @@ ffi_*-under-nogc_async_mut path this doc originally found. Re-ran the doc's own 
 not found"). Verified all four (cuda/vulkan/intel/rocm) resolve and load
 cleanly. No further action.
 
-Status: OPEN (P2)
+Status: CLOSED 2026-09-13 (already fixed) — confirmed again 2026-11-25: all
+four facades now `export use std.nogc_async_mut.gpu.engine2d.sffi_*`, and all
+five `sffi_*.spl` targets exist on disk.
+~~Status: OPEN (P2)~~
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 **Filed:** 2026-08-09 (stream F4)

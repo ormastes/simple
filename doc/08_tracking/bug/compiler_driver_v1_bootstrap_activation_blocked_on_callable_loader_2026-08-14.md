@@ -85,3 +85,14 @@ Fresh spec evidence (tracked seed binary, interpreter, --no-cache):
 Status stays open (LIVE): gated on the provider-loader/bootstrap-core lane's
 native activation evidence, not on further code from this lane.
 
+## Triage 2026-11-25 (p2w1-ab lane) — still blocked, unchanged
+
+Confirmed at release/1.0.0 tip (38265c7f249): the concrete driver import is
+still present in `src/app/cli/bootstrap_main.spl` (its header comment still
+records the undefined-`compiler_driver_create`/`run_compile` dynload dead
+end), so the 2026-11-11 triage verdict stands — activation is gated on the
+provider-loader / bootstrap-core lane's native build+link evidence, which
+this Windows lane cannot produce (pinned Rust seed only, and it rejects the
+`@representation_boundary` decorator tree-wide). No code change; status
+remains open.
+

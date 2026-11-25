@@ -87,3 +87,30 @@ file content is wrong, so no test-only edit can fix it.
   triage pass, flagging for whoever picks this up to check the wider
   `.spipe_wrapped_entry_*` family).
 
+
+## Verification 2026-11-25 (p2w5-ae lane)
+
+Closure re-verified by source inspection at release/1.0.0 tip (4bc2c986375):
+
+- The affected file
+  `test/01_unit/lib/editor/.spipe_wrapped_entry_split_pane_spec.spl` no longer
+  exists in the tree. None of the 7 surviving `.spipe_wrapped_entry_*`
+  dotfiles uses the bare `expect X matcher(Y)` form, and dotfile specs are
+  excluded from discovery (31a5bf2fec8, "dotfile exclusion").
+- The wrapped-entry preprocessor rewrites bare infix `expect X matcher Y` to
+  `expect(X).matcher(Y)` before the `fn main():` wrap:
+  `src/app/test_runner_new/test_runner_execute.spl:233`
+  (`spipe_rewrite_infix_expect_line`, applied at line 407), with pure-Simple
+  mirrors in `src/lib/common/test_runner/native_framework_wrapper.spl:11` and
+  `src/lib/nogc_sync_mut/test_runner/test_result_wrapper.spl:120`.
+- The seed parser folds a matcher word after a parenthesized subject
+  (5a3a5ce413f, `no_paren.rs`), pinned by
+  `test/01_unit/app/test_runner_new/single_lane_paren_subject_matcher_word_spec.spl`;
+  the bare paren-adjacent form (`expect count to_equal(1)`) remains common at
+  module top level across the suite (e.g.
+  `test/01_unit/lib/editor/multi_buffer_spec.spl`).
+
+Verification limit: no live repro was possible on this host — the pinned Rust
+seed rejects `@representation_boundary` at HEAD, so `bin/simple.exe test` is
+non-functional repo-wide. Verification is by code inspection only.
+Status remains Closed.

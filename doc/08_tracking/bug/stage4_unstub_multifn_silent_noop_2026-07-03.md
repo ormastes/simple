@@ -55,3 +55,30 @@ lower_parser_module_unstub dropping non-main functions. Then extend the smoke
 matrix (multi-fn, @cfg, struct/class, imports) BEFORE any re-deploy, and flip
 the default again only after the matrix passes.
 
+
+---
+
+## Verification 2026-11-25 (P2 sweep lane) — STALE / RESOLVED
+
+The "OPEN — blocks re-deploy" status header is stale. This exact defect was
+root-caused and fixed as **iteration 19 (#85)** of
+`stage4_codegen_compact_form_hazards_2026-07-02.md` (2026-07-03, same day):
+`HirModule.functions` dict keys collapsed because `SymbolTable.lookup()`
+returned a shared/corrupt `SymbolId` struct handle on stage4; the second
+function overwrote `main`, so the module silently no-opped. Fixed by keying
+`functions` with a distinct synthetic `SymbolId(id: lower_idx)`
+(commits 95f504162fc / 370e379b6a0) plus a by-name user-fn call fast-path in
+the interpreter `Call` arm; verified on a fresh probe-free build with the
+exact repro shape from this doc (`fn helper()` + `fn main()` → `m1` /
+`plain-helper`, rc=0) and a 3-function file.
+
+Code-inspection check at release/1.0.0 HEAD (`64dfa6d980f`): the synthetic-key
+lowering is present in its evolved form in
+`src/compiler/20.hir/hir_lowering/_Items/module_build.spl:616-740`
+(`lower_idx` loop; the comment at :730 still cites the stage4 seed
+struct-value collision rationale).
+
+Behavioral re-verification is environment-blocked here: the original smoke
+required a self-hosted Linux stage4 binary (full bootstrap), and the pinned
+`bin/simple.exe` cannot run `test` at this HEAD
+(`@representation_boundary` seed/binary inconsistency). Status: **RESOLVED**.

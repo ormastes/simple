@@ -1,7 +1,22 @@
 <!-- codex-design -->
 
 # SimpleOS QEMU VirtIO-serial host-GPU transport gap
-## Open 2026-09-16 — needs owner triage
+
+## Triage 2026-11-25 — deferred: multi-component transport program, QEMU-only evidence (status unchanged: BLOCKED/OPEN)
+
+Triaged in the P2 ledger pass on worktree `wt-p2w5-al` (release/1.0.0 HEAD
+`ae1572aeb67`). This is a large, explicitly decomposed program (stream codec,
+socket endpoint, guest VirtIO console multi-queue owner for x86 PCI and
+RISC-V MMIO, WM session composition, live QEMU rows) whose acceptance gates
+require QEMU launches and an admitted pure-Simple phase runtime — neither is
+available to this Windows host lane (pinned seed binary only, no bootstrap,
+no QEMU evidence permitted). The source-only increments recorded below
+(stream-header codec, session state machine, queue owner) are real but the
+doc itself forbids closing on codec-only evidence. Not closable here; the
+"needs owner triage" header is superseded by this note. Owner lane:
+Q-LIVE / SimpleOS QEMU host-GPU transport per the decomposition above.
+
+## Open 2026-09-16 — needs owner triage (superseded by 2026-11-25 triage above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

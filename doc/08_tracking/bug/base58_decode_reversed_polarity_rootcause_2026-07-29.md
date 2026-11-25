@@ -201,3 +201,21 @@ an open item at the end of the bracket-slice byte/char index campaign
 `sha256_bytes`/base58check-encode engine divergence noted above (new,
 unowned).
 
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64)
+
+Closed status re-verified by code inspection on `origin/release/1.0.0`
+(`0819b116ecb`). The documented fix is present in
+`src/lib/common/encoding/base58.spl:base58_decode`: `work` is accumulated
+LSB-first, pre-sized to `indices.len() + 1` via a separate pure-push pre-loop,
+never rebound to a different list object, never `.push()`ed inside the
+per-digit loop, and trailing high-order zero slots are trimmed before emit —
+exactly the shape this record prescribes, with an in-source comment citing
+this document. Runtime re-verification was attempted
+(`SIMPLE_LIB=src bin/simple.exe test test/01_unit/lib/common/encoding/base58_spec.spl
+--mode=interpreter` with the pinned Rust seed v1.0.0-rc.1) but is blocked
+repo-wide at this HEAD: the seed rejects the `@representation_boundary`
+decorator introduced by cfd89933699 (`unknown decorator
+'@representation_boundary'` in `src/app/test_runner_new/test_runner_client.spl`).
+Closure rests on source inspection plus the 2026-09-16 normalization pass;
+no new runtime evidence is claimed.

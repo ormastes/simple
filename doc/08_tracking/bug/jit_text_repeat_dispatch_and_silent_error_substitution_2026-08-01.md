@@ -718,3 +718,34 @@ the Option-preserving shape 0641097d685 copied for parse_int. Remaining open
 item is only the ptr-lifetime owner decision. Note for a follow-up: `to_float`
 /`to_f64` share the same NIL-on-failure symbol, unlike total `to_int` (0) —
 check whether `to_float` is specified total before changing it.
+
+# Verification 2026-11-25 (p2w3-ah lane, release/1.0.0) — RESOLVED: both remaining items closed on origin
+
+Re-verified by source inspection on release/1.0.0 HEAD. The status line
+("partially fixed — 2 remain: `parse_i64`, `ptr`") is stale; both are now
+closed:
+
+- **`parse_i64` — FIXED** by `0641097d685` (in-tree, confirmed via
+  `git merge-base --is-ancestor`). `parse_int | parse_i32 | parse_i64` all
+  route to the Option-preserving `rt_string_parse_int`
+  (`codegen/instr/calls.rs:3890` and `:4623`; unit-pinned at `calls.rs:495-496`).
+  The 2026-11-05 "Residual A" (parse_float family) was itself re-classified as
+  a false premise in the E2 note above: `rt_string_to_float` already returns a
+  tagged `RuntimeValue` (NIL on failure) typed `TypeId::ANY`, i.e. the
+  Option-preserving shape.
+- **`ptr` — FIXED** by `74454b58b2f`. The string-receiver case is now wired to
+  the pre-existing `rt_string_data` with an explicit receiver-type guard
+  (`calls.rs:4694-4700`: `args.len() == 1 && vreg_types == STRING`; mirrored in
+  `closures_structs.rs:2645-2652` with the `text`/`String`/`str`/`string`
+  qualifier set), and array receivers route to `rt_array_data_ptr`
+  (`closures_structs.rs:2653-2658`). This is the `rt_string_data` outcome the
+  batch-5 note anticipated as the honest compiled equivalent; the guard means
+  non-string receivers no longer silently take a text answer. `rt_string_data`
+  is present in both runtimes and in `RUNTIME_SYMBOL_NAMES`.
+
+With batches 1-5 (49 of 51) plus these two, the tracked 51-method family is
+fully wired. Verification limit: code inspection only — the 102-probe sweep
+and JIT value comparisons were not re-run (seed rebuilds are out of scope for
+this lane, and `bin/simple test` is repo-wide blocked at this HEAD by the
+`@representation_boundary` seed rejection). The interpreter-side negative-count
+and loud-`not found` behaviors verified in earlier batches were not re-probed.

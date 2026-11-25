@@ -238,3 +238,20 @@ Not performed in this lane (per instructions): no struct/class renames, no
 `git`/`jj` operations, no `src/` edits. Only the throwaway
 `/tmp/claude-1000/enum1_probe.spl` was written.
 
+
+## Triage note 2026-11-25 (p2w2-aj)
+
+**Disposition: SKIP — large multi-rename program, owner-decision reserved.**
+This doc is a census, not a single defect: remediation is the prioritized
+5-item rename list in §5 (QuerySymbolKind, the Checkpoint cluster, Driver
+subsystem, CpuException.Breakpoint, HeuristicOutlineKind), each a cross-file
+rename in `src/compiler/**` / `src/lib/**` whose correctness can only be
+verified by a full bootstrap — the pure-Simple compiler sources cannot be
+executed by the pinned Rust seed, and `bin/simple.exe test` currently fails
+repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+(seed/source inconsistency from cfd89933699). Renames landed unverified would
+violate the verify-before-land rule for compiler-surface changes. The census
+numbers themselves are unchanged by this lane (no src/ edits); the §4
+negative-probe finding (minimal repro insufficient, real-build context
+required) stands and is exactly why this is not a bounded fix. Remains OPEN
+for an owner lane with bootstrap capability; the status header is accurate.

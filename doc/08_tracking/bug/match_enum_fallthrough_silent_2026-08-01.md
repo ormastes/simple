@@ -454,3 +454,24 @@ than once, and that has not changed.
 enum_match_fallthrough_trap_spec.spl: 6/6 PASS under the seed interpreter on
 an aarch64 Linux host — partial enum matches with no default arm fail closed
 (rt_panic + Abort) as recorded by the 2026-09-19 fix.
+
+## Re-verification 2026-11-25 (release/1.0.0, work/p2w3-ac-20261125) — code inspection; execution environment-blocked
+
+Confirmed by source inspection at release/1.0.0 that the landed diagnostic is
+intact: `match_fallthrough_set_abort` / `match_fallthrough_message` /
+`report_match_fallthrough` in
+`src/compiler/10.frontend/core/interpreter/eval_tables.spl:1367-1444`, the
+expression-lane call in `eval.spl:1123`, and the statement-lane call in
+`eval_stmts.spl:759`. The trap spec
+`test/01_unit/compiler/mir/enum_match_fallthrough_trap_spec.spl` and the
+diagnostic spec
+`test/01_unit/compiler_core/interpreter/match_fallthrough_diagnostic_spec.spl`
+both still exist.
+
+Execution on this host (Windows 11, release/1.0.0 pinned seed v1.0.0-rc.1) is
+blocked repo-wide: every `bin/simple.exe test` invocation fails at HEAD with
+`unknown decorator '@representation_boundary'` (commit cfd89933699 added the
+annotations; the pinned binary predates them), so no new execution evidence
+was collected here. The most recent execution evidence remains the 2026-11-05
+note above (6/6 PASS on an aarch64 Linux seed). The deferred items are
+unchanged: JIT-lane engine parity and the costed full-enforcement sequence.

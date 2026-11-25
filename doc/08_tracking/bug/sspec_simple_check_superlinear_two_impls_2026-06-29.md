@@ -1,6 +1,27 @@
 # Bug: `bin/simple check` superlinear blowup with multiple `me` methods on array-field structs
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25 (work/p2w5-ac-20261125) — still open, not verifiable on this host
+
+Re-probed with the pinned worktree seed (Rust seed v1.0.0-rc.1, Windows) using
+the minimal repro from this record (3 array fields, 2 `me` methods):
+
+`SIMPLE_LIB=src bin/simple.exe check build/.../check_repro.spl` did not check
+the target file at all. With this seed, `check` delegates to the self-hosted
+check app (`src/app/check/main.spl`), which loads its own `src/compiler`
+closure, emits lint warnings for those files, and exits rc=1 after ~25 s
+without ever reporting on the repro (0 mentions of the repro path in 294
+output lines). The repo-wide `@representation_boundary` seed/HEAD
+inconsistency and the seed's delegation behavior together mean the
+check-only constraint blowup described here can be neither reproduced nor
+verified as fixed from this environment. `bin/simple.exe run` of equivalent
+code remains unaffected, consistent with the original report.
+
+Status unchanged: OPEN. Needs an owner with a working self-hosted
+`bin/simple check` to re-run the bisection table above; if the blowup still
+reproduces, the constraint-enumeration pass in the self-hosted type checker
+is the place to look.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

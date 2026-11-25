@@ -1,9 +1,31 @@
 # Bug: cross-module `Result.Ok(...)`/`Result.Err(...)` unresolvable in an imported method body
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** RESOLVED (verified stale 2026-11-25, see below)
 - **Severity:** high (blocks qualified enum-variant construction across module boundaries)
 - **Found by:** SimpleOS harden lane INT-2 (VFS wiring)
+
+## Verification 2026-11-25 — no longer reproduces
+
+Re-probed on worktree `wt-p2w5-al` at release/1.0.0 HEAD (`ae1572aeb67`)
+with the pinned tracked binary `bin/simple.exe` (Rust seed v1.0.0-rc.1,
+38,403,072 bytes), Windows host. Minimal two-module repro: `helper.spl`
+declares `class Maker` with methods returning `Result.Ok(42)` /
+`Result.Err("boom")` (the exact qualified-construction-in-imported-method
+shape from this entry); `main.spl` imports it and matches on both results.
+
+Measured output:
+
+```text
+ok=42
+err=boom
+```
+
+The qualified `Result.Ok(x)` / `Result.Err(e)` forms inside a method body
+reached through an import now compile and run correctly; the
+`variable \`Result\` not found` error is gone. The workaround in
+`src/os/services/vfs/vfs.spl` (bare `Ok(`/`Err(`) remains in place and is
+unaffected. Closing as fixed upstream of this ledger entry.
 
 ## Symptom
 Inside a method body that is reached through an import, writing the qualified

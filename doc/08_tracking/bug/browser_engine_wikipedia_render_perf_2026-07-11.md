@@ -1,10 +1,11 @@
 # browser_engine: real-page software render is ~176s interpreted (248KB page); default 10s budget always degrades
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-09 (lane-p2-3); re-verified 2026-11-25 — see bottom note
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: open (degraded-output honesty fixed; perf itself remains)
+- Status: closed 2026-11-09 (perf gap tracked as a source TODO per owner rule
+  2026-11-02; degraded-output honesty fix landed)
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (Wikipedia Main_Page render comparison vs Chrome headless)
 
@@ -73,3 +74,14 @@ not block phase 3 become a TODO, with no implementation now. The perf gap
 `TODO(browser_engine_wikipedia_render_perf_2026-07-11)` at `compute_styles` in
 `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`.
 The degraded-output honesty fix stays landed.
+
+## Verification 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+The 2026-11-09 closure is confirmed and the misleading "Open 2026-09-16 —
+needs owner triage" header is corrected. The tracking TODO exists at HEAD:
+`TODO(browser_engine_wikipedia_render_perf_2026-07-11)` at
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl:624`.
+Per the owner rule of 2026-11-02 (non-blocking perf gaps become TODOs, no
+implementation now), this record stays closed; the perf gap itself is
+unchanged and intentionally not re-measured here (a 176s interpreted render
+is out of budget for a verification pass, and no code changed).

@@ -1,6 +1,7 @@
 # The `# @cover` gate marks 227 system tests FAILED without running a single one
 
-Status: OPEN (P2)
+Status: RESOLVED 2026-11-25 — exemption-list rollout landed 2026-11-04 and is
+verified (see bottom sections); unlisted specs still fail admission by design.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 decision needed, not a code bug
 **Found:** 2026-08-04
@@ -143,3 +144,28 @@ their real verdict; any other system spec without `# @cover` still fails the
 gate. Verified on `test/03_system/tools/llm/claude_full/ink/events`: before,
 2 specs ADMISSION FAILED unexecuted; after, 9/9 files run, 35/35 pass. A new
 unlisted spec still fails admission; `cover_admission_spec` 10/10.
+
+## Verification 2026-11-25 — CLOSED (rollout decision landed and green)
+
+The 2026-11-04 owner decision (legacy exemption list) is present and wired on
+release/1.0.0 HEAD `38265c7f249`:
+
+- `config/test/cover_exemptions.txt` exists (661 legacy specs, shrink-only).
+- `src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:334` defines
+  `COVER_EXEMPTIONS_PATH` and `load_cover_exemptions()`; `validate_system_test_covers`
+  excludes listed specs while still failing unlisted unannotated system specs.
+
+Regression spec executed in a pre-autofix scratch tree at `7c64fa458e4`
+(release HEAD itself is source/binary inconsistent for the pinned seed — the
+`@representation_boundary` autofix `cfd89933699` postdates the binary; the
+runner sources and spec are identical between `7c64fa458e4` and HEAD):
+
+```
+SPEC FILE VERDICT: test/01_unit/app/test_runner_new/cover_admission_spec.spl
+outcome=OK declared>=10 executed=10 passed=10 failed=0
+```
+
+10/10 pass with the pinned tracked seed `bin/simple.exe` (38,403,072 bytes,
+v1.0.0-rc.1). The earlier "OPEN / TEST_BLOCKED: no qualified self-hosted CLI"
+note is superseded: the admission regressions now execute green on the pinned
+seed.

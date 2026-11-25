@@ -1,8 +1,19 @@
 # JS VM DOM bridge retention is frame-linear and property-scan quadratic
-## Open 2026-09-16 — needs owner triage
+## Partially resolved — quadratic half merged and verified 2026-11-25; retention half open (owner-reserved, large program)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Triage 2026-11-25 (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`):** the
+2026-11-05 quadratic property-scan fix IS merged on release/1.0.0
+(`obj_slot_index`/`scan_ops` present in
+`src/lib/nogc_sync_mut/js/engine/vm_object_store.spl`) and its spec
+`test/01_unit/lib/nogc_sync_mut/js/engine/object_store_scan_bounds_spec.spl`
+passes 4/4 (`--no-cache --no-cover-check`; run with a temporary
+`@representation_boundary` strip to work around the separate pinned-binary
+decorator inconsistency, sources restored). The frame-linear retention half
+remains OPEN: it requires the scoped VM tracing reclamation prerequisite
+below, whose JsHeapHandle/JsExternalRootKey/JsTypedEdge ABI is frozen and
+owner-reserved ("Root Codex owns any future implementation merge") — not a
+bounded fix; skipped by the P2 fleet pass for that reason.
 
 ## Status
 

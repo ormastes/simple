@@ -2,7 +2,8 @@
 
 - **Date documented:** 2026-07-17 (cert stress-suite salvage)
 - **Date re-verified:** 2026-07-17 (STRESS lane)
-- **Status:** PARTIALLY RESOLVED.
+- **Status:** RESOLVED (2026-11-25 — residual interpreter finding fixed and
+  verified on the pinned seed; see final section). Previously:
   - Default execution path (`simple run`, resolves to Cranelift JIT) — the
     path the stress-suite's own `_run` helper actually exercises — NO LONGER
     REPRODUCES. Fixed by some earlier, unrelated commit already on `main`
@@ -139,3 +140,23 @@ zero-arg `f64()` losing to the cast builtin). Isolated repro
 Retained unit `interpreter_call::precedence_tests::user_defined_function_wins_over_builtin`
 passes in a fresh cargo build (46/46 interpreter_call tests). Seed-smoke
 evidence only; compiled-contract confirmation per stress-suite gate.
+
+## 2026-11-25 p2w6-ak lane (work/p2w6-ak-20261125, release/1.0.0 tip f3fb8f24dc9) — RESOLVED
+
+The residual interpreter-only finding (zero-arg `f64()` losing to the cast
+builtin) is fixed in the pinned seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1). The exact isolated repro from this doc:
+
+```
+fn f64() -> int:
+    return 64
+fn main():
+    print(f64())
+```
+
+prints `64` on BOTH `SIMPLE_EXECUTION_MODE=interpret` and the default lane
+(run from the worktree root with `SIMPLE_LIB=src`). This matches the
+2026-11-10 p2fix-interp note above (`builtin_wins_over_user_fn` gate at
+Priority 2) and extends it to the release/1.0.0 pinned binary. The 300-call
+chain case was already verified green on both lanes by that lane; not re-run
+here. Both halves of this bug are now closed; marking RESOLVED.

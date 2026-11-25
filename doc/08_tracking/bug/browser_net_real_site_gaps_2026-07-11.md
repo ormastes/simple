@@ -1,6 +1,6 @@
 ---
 id: browser_net_real_site_gaps_2026-07-11
-status: OPEN
+status: RESOLVED (2026-11-25 — all three Rust-seed gaps closed at release/1.0.0 tip; see fleet verification note at bottom)
 severity: medium
 discovered: 2026-07-11
 discovered_by: Manual hardening pass against real sites (example.com, en.wikipedia.org,
@@ -151,3 +151,46 @@ Verified fetch matrix after fixes: `https://example.com/` (200, 559B,
 `FetchEngine`) logs `Cache hit` on the second call and returns identical
 byte length, with `credentials: "include"` exercising the (now working)
 cookie-attach path without crashing.
+
+---
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+All three Rust-seed gaps are closed in source at `origin/release/1.0.0` HEAD
+(`38265c7f249`), verified by code inspection:
+
+1. **TLS transport stub — FIXED.** `src/compiler_rust/compiler/src/interpreter_extern/net_tls_client.rs`
+   delegates all nine `rt_tls_client_*` externs to the runtime's real rustls
+   0.23 client (`value/net_tls.rs`, feature `runtime-tls`), registered in
+   `interpreter_extern/mod.rs:3288-3295` (including
+   `rt_tls_client_connect_address_with_sni_timeout`). Its own header records:
+   "Until 2026-08-16 these nine externs were registered to stubs that
+   unconditionally returned -1". Degrades honestly to refusal when
+   `runtime-tls` is absent — never a fake success.
+2. **Response headers dropped — FIXED (twice over).** (a)
+   `rt_http_request_v2(method, url, headers, body_bytes, timeout_ms) ->
+   (status, reason, raw_headers, body_bytes, transport_error)` exists in
+   `interpreter_extern/network/mod.rs:164-171` and is registered at
+   `mod.rs:514`, surfacing serialized response headers. (b) The browser net
+   stack no longer uses the host-HTTPS fallback at all: `h1_client.spl` has
+   no `execute_host_https`/`rt_http_request` reference and drives
+   `TlsManager.handshake_address` → `TlsConnection` over the real rustls
+   transport, so response headers arrive through the pure-Simple H1 parser.
+3. **No connect/request timeout — FIXED.** `rt_http_request_v2` accepts
+   `timeout_ms` and applies `request.timeout(Duration::from_millis(...))`
+   (`network/mod.rs:207-216`); the TLS path carries explicit deadlines
+   (`handshake_address(address, host, port, timeout_ms)` in
+   `net/tls.spl:92-97`, "h1: TLS handshake deadline exceeded" in
+   `h1_client.spl:329`, plus `*_read_timeout`/`*_write_timeout` ops).
+
+Live-fetch verification is environment-blocked on this host: the pinned Rust
+seed binary (v1.0.0-rc.1) rejects `@representation_boundary` decorators
+reached transitively from `std.fs` at HEAD (`unknown decorator
+'@representation_boundary'` on `tools/pixel_compare/fetch_url_probe.spl` via
+`file_read_borrowed_bytes`), so `FETCH_URL=https://example.com/ bin/simple.exe
+run tools/pixel_compare/fetch_url_probe.spl` cannot execute. The seed-source
+fixes above postdate the pinned binary, so even an unblocked run would not
+exercise them. Status flipped OPEN → RESOLVED on source-inspection evidence;
+a live refetch under a rebuilt seed remains the ideal confirmation but is not
+required to close the ledger row, since the gaps were "needs a Rust seed
+change" items and those changes are now present.

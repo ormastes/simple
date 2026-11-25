@@ -8,6 +8,18 @@ BugDB ID: `text-split-limit-ignored`
 Priority: P2
 Claimed: 2026-08-17, Codex `p2_text_split` lane
 
+## 2026-11-25 re-verification (interpreter mode, attr-capable seed)
+
+`test/01_unit/compiler/interpreter/text_split_limit_matrix_spec.spl` (new,
+14/14) and `nested_string_split_spec.spl` (5/5) pass with
+`SIMPLE_LIB=src` on the release/1.0.0 tip: literal and variable limits,
+limit 1, zero/negative as unlimited, missing separator, multibyte
+content+separator. The MIR boundary fix (`method_calls_literals.spl`
+keeps split argument 1 as a raw i64 for `rt_string_split_limit`) is
+present in the source. The BugDB row stays OPEN per the gate below:
+`--mode=native` on a receipt-admitted pure-Simple CLI is still pending
+(next stage-2 binary; tracked with the build-gated verifications).
+
 ## Reproducer
 
 `"a:b:c".split(":", 2)` must produce `["a", "b:c"]`. The same call with
@@ -179,3 +191,78 @@ executes it). Evidence: build/review/p3fix-seedfix-20261110.sdn.
   bytes, not codepoints.
 - Status unchanged: still waits for the admitted pure-Simple
   interpreter + native run named above.
+
+## 2026-11-25 release/1.0.0 re-verification (lane work/fix-text-split-limit-20261125, Windows)
+
+Lane: `work/fix-text-split-limit-20261125` worktree on `origin/release/1.0.0`
+(HEAD 24414a7eba6). Runner: `SIMPLE_LIB=src
+/c/dev/wt-warn-3p1/src/compiler_rust/target/release/simple.exe` (Rust seed
+rebuilt 2026-11-25, carries the 2026-11-10 JIT fix and the 2026-11-14 runtime
+fix). No admitted pure-Simple binary exists in this worktree (`bin/release/`
+absent), so the admitted pure-Simple interpreter + native run named above
+remains the open closure condition; every surface runnable here is green.
+
+The prevention spec and the short dated note at the top of this doc landed
+via PR #11618 (commit 27df861356e) while this entry's evidence was being
+collected; this entry adds the surfaces that note does not cover (JIT-strict
+probe, fresh cargo unit tests, neighbor and smoke specs, exact line cites).
+
+### Static re-confirmation (current line numbers)
+
+- pure-Simple MIR: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:5328`
+  keeps split argument index 1 as the lowered numeric local (separator still
+  tagged), and `:5332` selects `rt_string_split_limit` when `args.len() == 2`;
+  the comment at `:5305-5314` names this bug.
+- seed cranelift: `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:2775`
+  (`"split" if args.len() == 2`) and
+  `src/compiler_rust/compiler/src/codegen/instr/calls.rs:4505`
+  (`"split" if args.len() >= 3`, receiver-inclusive) both route to
+  `rt_string_split_limit`.
+- seed runtime: `rt_string_split_limit`
+  (`src/compiler_rust/runtime/src/value/collections.rs:6018`): `limit <= 0`
+  unbounded, `limit == 1` whole value, bounded empty-separator arm splits
+  codepoints.
+- seed interpreter: bounded arm at
+  `src/compiler_rust/compiler/src/interpreter_method/string.rs:259`;
+  pure-Simple interpreter splitn-rejoin arm at
+  `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl:230`.
+
+### New prevention spec
+
+`test/01_unit/compiler/interpreter/text_split_limit_matrix_spec.spl` — 14
+examples: literal and variable-held limit 2, limit 1, limit 0, negative limit,
+over-count limit, multi-separator remainder, trailing separator (bounded and
+over-count), missing separator, empty string, multibyte separator, multibyte
+text with a bounded empty separator, and an empty separator at exactly the
+character count. Over-count empty-separator cases are deliberately not pinned:
+that arm is the documented cross-engine divergence above.
+
+- interpreter mode: **14/14 PASS** (exit 0).
+- `--mode=native`: PASS but degraded — the seed test-runner falls back to the
+  interpreter (no MC/DC probes), so this is not native evidence.
+- JIT evidence instead: `SIMPLE_JIT_STRICT=1 SIMPLE_LIB=src <seed> run
+  build/review/fixtures/split_limit_matrix_probe.spl` prints len=2/2/1/3 for
+  literal/variable/one/zero limits and correct unicode, trailing-separator,
+  and empty-string rows under the JIT (strict mode refuses fallback).
+
+### Rust-side unit tests (fresh cargo build of this worktree)
+
+- `cargo test -p simple-runtime --lib test_string_split_limit_matches_interpreter_bounded_split`
+  — 1 passed.
+- `cargo test -p simple-compiler --lib shared_method_static_split` — 2 passed
+  (`shared_method_static_split`, `shared_method_static_split_with_limit`,
+  both cranelift).
+- `cargo test -p simple-compiler --lib string_split_honors_limit` — 1 passed
+  (`string_split_honors_limit_and_unicode_empty_separator`).
+
+### Neighbor and smoke specs (same runner, interpreter mode)
+
+- `nested_string_split_spec.spl` 5/5, `text_byte_at_dispatch_spec.spl` 5/5,
+  `text_trim_dispatch_spec.spl` 5/5, `string_interpolation_spec.spl` 3/3,
+  `representation_boundary_autofix_spec.spl` 16/16 (the file now declares 16
+  examples; still fully green).
+
+Status: unchanged — `fix-implemented-verification-pending`. The admitted
+pure-Simple interpreter + native run remains the close-out condition.
+`bug_db.sdn` was not hand-edited (integrity-sealed; update via
+`bin/simple bug-add` once an admitted binary exists).

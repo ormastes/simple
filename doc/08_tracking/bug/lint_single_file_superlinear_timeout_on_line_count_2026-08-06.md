@@ -3,7 +3,7 @@
 **ID:** lint_single_file_superlinear_timeout_on_line_count_2026-08-06
 **Severity:** P1 — makes `bin/simple lint` unusable on any file over a few hundred
 lines
-Status: OPEN (P2)
+Status: CLOSED-STALE (2026-11-04, see bottom triage; header updated 2026-11-25 — previously still read "OPEN (P2)", which was stale)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 (third lane, same day). NOT superlinear — **linear at ~0.19-0.20 s/line**,
 replicated by two lanes on two independent synthetic families. **99.0% of the
@@ -632,3 +632,15 @@ located). Not a bounded fix for this lane. Leaving OPEN.
 ## Triage 2026-11-04 (c28-w4)
 
 CLOSED-STALE 2026-11-04. Measured once on seed 0b2c3d015b7 (bin/simple.exe lint): generated file of 120 simple fns / 480 lines lints clean in 32.5s wall (premise was ~119s for 120 lines, ~3.3-4s per decl; 2026-08-18 redeploy fixed the cause). Content-heavy declarations remain costly: tracked separately in lint_timeout_hwir_zca_rows_2026-08-17 and gated by scripts/check/check-lint-cost-budget.shs.
+
+## Note 2026-11-25 (p2w3-af lane)
+
+Header updated to match the 2026-11-04 CLOSED-STALE verdict (it still read
+"OPEN (P2)"). Re-measurement at current release/1.0.0 HEAD is
+environment-blocked: `bin/simple.exe lint <file>` now fails before linting
+with `unknown decorator '@representation_boundary'` on
+`src/app/cli/lint_entry.spl:25` (the known repo-wide seed/source
+inconsistency introduced by cfd89933699), so the pinned binary cannot load
+the lint tool from source at this HEAD. The closure therefore rests on the
+2026-11-04 measurement above; no contrary evidence at HEAD. Status remains
+**CLOSED-STALE**.

@@ -76,3 +76,16 @@ copied-DSO admission gap, but a trusted production provider build manifest
 (e.g. the pure-Simple runtime build recording its provenance into the
 registry) is still future work; the receipt remains blocked evidence for
 REQ-WEB-BROWSER-011/014 and NFR-WEB-BROWSER-011/015 until that exists.
+
+## Verification note (2026-11-25, work/p2w2-aa-20261125)
+
+Confirmed the 2026-11-05 fix artifacts are present at release/1.0.0 HEAD
+(`8aa26f51e72`) by source inspection: the forbidden-identity registry
+`config/check/hosted_wm_forbidden_runtime_identities.sdn` exists, and
+`scripts/check/check-linux-hosted-wm-live-window-evidence.shs` contains the
+`admit_runtime_provider` / `runtime-provider-forbidden-registry-missing`
+fail-closed logic. The wrapper `--self-test` was NOT re-run: it is a
+Linux-hosted live-window evidence harness and this host is Windows without
+the admitted runtime DSO. Status stays **open** for the remaining production
+build-manifest work only; the copied-bootstrap-DSO admission gap closure is
+verified present.

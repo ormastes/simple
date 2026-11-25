@@ -75,3 +75,19 @@ $SEED run src/compiler/80.driver/main.spl -c /tmp/hello.spl --target wasm32 -o /
 # after parse fix:  reaches HIR/MIR stub -> empty module
 ```
 
+
+## Triage note 2026-11-25 — left OPEN (fleet P2 pass, release/1.0.0)
+
+- The 2026-09-13 triage's blocker ("a bootstrap is running concurrently in
+  this workspace") no longer applies; that window has long closed. The bug is
+  nonetheless still not a bounded fix: un-stubbing HIR/MIR lowering (defects
+  #2/#3 in `src/compiler/80.driver/`) immediately exposes the documented
+  interpreter defect chain (4a Option.map on present values, 4b
+  resolve.spl method orphaning, typed-optional nil field-access SIGSEGV), so
+  the entry remains a multi-defect program, not a single repair. The
+  2026-06-25 cautious-consolidation decision (keep only the parse fix #1)
+  stands. Status stays OPEN; no code change made.
+- Verification limit on this host: the pinned `bin/simple.exe` (Rust seed
+  v1.0.0-rc.1) cannot run repo specs at release/1.0.0 HEAD (repo-wide
+  `unknown decorator '@representation_boundary'` from commit `cfd89933699`),
+  so no live repro was attempted; classification is by code/doc inspection.

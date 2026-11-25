@@ -1,6 +1,7 @@
 # browser_engine: CSS `contain: size` parses but is never consulted by the sizing pass
 
-Status: OPEN (P2)
+Status: CLOSED — FIXED 2026-11-05, verified 2026-11-06 (see bottom sections);
+header corrected 2026-11-25 (was stale "OPEN (P2)").
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-08 (U3.6 `web_css_visibility_containment_spec.spl`,
 `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
@@ -120,3 +121,29 @@ TDD evidence (seed binary
 `contain: size` / `contain-intrinsic-size` were implemented in `8e82eb3ee52`
 ("honor CSS contain:size in sizing"); `web_css_visibility_containment_spec.spl`
 is 7/7 on the Rust seed on release/1.0.0. Status: FIXED.
+
+## Re-verification 2026-11-25 (release/1.0.0, worktree on Windows)
+
+Fix confirmed present by source inspection at `origin/release/1.0.0`
+(`3e04c857a56`):
+
+- `simple_web_html_layout_renderer_decl_apply.spl:193-195,1112-1129` parses
+  `contain: size`/`strict` and `contain-intrinsic-size` into the
+  `contain_size` / `contain_intrinsic_{w,h}_px` Style fields.
+- `simple_web_html_layout_renderer_layout_engine.spl:4956-4985` sizes a
+  `contain: size` auto-height block from `contain_intrinsic_h_px`
+  (padding+border collapse when no intrinsic size), independent of content.
+- The system spec asserts the real value
+  (`expect(s.height).to_equal(5)`, `web_css_visibility_containment_spec.spl:291`)
+  and the unit spec `containment_size_contain_wired_spec.spl` exists.
+
+Execution limit: spec/probe execution is blocked repo-wide at this HEAD —
+the pinned seed (`bin/simple.exe`, Rust v1.0.0-rc.1) rejects the
+`@representation_boundary` decorator added tree-wide by `cfd89933699`, and
+the render path transitively imports annotated modules
+(`src/lib/nogc_async_mut/env/paths.spl`), so neither `bin/simple.exe test`
+(default runner fails in `test_runner_client.spl`; the
+`SIMPLE_TEST_RUNNER_RUST=1` runner also fails even on specs verified green
+earlier today) nor a direct `run` probe can execute here. Verification is by
+code inspection plus the 2026-11-06 execution evidence above. Header status
+corrected from the stale "OPEN (P2)".

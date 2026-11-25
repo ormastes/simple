@@ -1,5 +1,24 @@
 # Interpreter-mode watchdog timeout on heavy crypto/PQC KAT specs (7 specs)
 
+## Triage note 2026-11-25 — still open; affected-spec paths moved; re-measurement environment-blocked
+
+- **paths**: all seven specs moved from `test/unit/lib/crypto/` to
+  `test/01_unit/lib/crypto/` (same basenames); the "Affected specs" list
+  below is stale as written.
+- **attempted** (Windows host, release/1.0.0, Rust seed v1.0.0-rc.1):
+  `bin/simple.exe run test/01_unit/lib/crypto/bcrypt_kat_spec.spl` fails at
+  load with `unknown decorator '@representation_boundary'` (imported via
+  `os.crypto.bcrypt` → stdlib) — a known module-specific seed limitation, so
+  the watchdog-timeout claim could not be re-measured on this host.
+- **inspected**: the specs still exercise the same CPU-heavy pure-Simple
+  primitives (e.g. bcrypt cost=4 jBCrypt KATs in
+  `src/os/crypto/bcrypt.spl`); the sspec-modernization waves rewrote the
+  headers, so the old self-documenting "pending native fast-path" comments
+  are gone, but no native fast-path routing was found in the specs. The
+  perf-ceiling classification below stands; the suggested follow-up (route
+  through compiled/native mode) remains the fix vector and is out of scope
+  for a triage pass on a host without a working native toolchain.
+
 - **Date:** 2026-07-20
 - **Area:** SSpec test-runner / interpreter performance, exercised via 7
   crypto specs whose primitives are CPU-heavy (bcrypt Blowfish key

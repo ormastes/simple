@@ -1,9 +1,14 @@
 # ECDSA P-256 Signing, Verification, and SSH mpint Conversion
 #
-# Thin wrappers over the rt_ecdsa_p256_* SFFI externs declared in
+# Thin wrappers over the checked SFFI wrappers in
 # src/lib/nogc_sync_mut/io/signature_sffi.spl, plus pure-Simple helpers
 # for converting between the 64-byte fixed r||s form and the SSH wire
 # format (mpint r + mpint s per RFC 4251 §5).
+#
+# The runtime provider (ring) verifies against the RAW 65-byte EC point
+# (04 || Qx || Qy), not the SPKI DER wrapper, so verify converts SPKI to
+# the point before the foreign call. Passing SPKI DER straight through is
+# what made every verify — including NIST CAVP vectors — return false.
 #
 # Key format:
 #   - Signing:      PKCS#8 v1 DER-encoded ECDSA P-256 private key
@@ -20,11 +25,35 @@
 # Reference: RFC 4251 §5 (SSH mpint encoding)
 # Reference: RFC 6979 (NOT used — standard random nonce)
 
-use std.nogc_sync_mut.io.signature_sffi.{rt_ecdsa_p256_sign, rt_ecdsa_p256_verify}
+use std.nogc_sync_mut.io.signature_sffi.{ecdsa_p256_sign_checked, ecdsa_p256_verify_checked}
 
 # ============================================================================
 # Sign / Verify (fixed-width 64-byte r||s)
 # ============================================================================
+
+# Extract the raw EC point (04 || Qx || Qy, 65 bytes) from a P-256 SPKI
+# (91 bytes). Returns [] for any non-conforming input. The unique helper
+# name avoids the bare-name co-compilation collision class documented in
+# doc/08_tracking/bug/duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md.
+fn _p256_fixed_spki_to_point(spki: [u8]) -> [u8]:
+    if spki.len() != 91:
+        return []
+    # DER id-ecPublicKey + namedCurve secp256r1, BIT STRING with zero unused
+    # bits (RFC 5480); bind the raw point to that header before discarding it.
+    val prefix: [u8] = [
+        0x30u8, 0x59u8, 0x30u8, 0x13u8, 0x06u8, 0x07u8, 0x2au8,
+        0x86u8, 0x48u8, 0xceu8, 0x3du8, 0x02u8, 0x01u8, 0x06u8,
+        0x08u8, 0x2au8, 0x86u8, 0x48u8, 0xceu8, 0x3du8, 0x03u8,
+        0x01u8, 0x07u8, 0x03u8, 0x42u8, 0x00u8
+    ]
+    var i: i64 = 0
+    while i < 26:
+        if (spki[i.to_u64()] as i64) != (prefix[i.to_u64()] as i64):
+            return []
+        i = i + 1
+    if (spki[26u64] as i64) != 4:
+        return []
+    spki.slice(26, 91)
 
 fn ecdsa_p256_sign_fixed(pkcs8: [u8], message: [u8]) -> [u8]:
     """Sign `message` with ECDSA P-256 SHA-256; returns 64-byte r||s.
@@ -41,7 +70,13 @@ fn ecdsa_p256_sign_fixed(pkcs8: [u8], message: [u8]) -> [u8]:
     For SSH wire format convert the result with fixed64_to_ssh_mpint_pair().
     Hosted-only.
     """
-    rt_ecdsa_p256_sign(pkcs8, message)
+    match ecdsa_p256_sign_checked(pkcs8, message):
+        case Ok(signature):
+            if signature.len() != 64:
+                return []
+            signature
+        case Err(_):
+            []
 
 fn ecdsa_p256_verify_fixed(spki_der: [u8], message: [u8], signature_fixed64: [u8]) -> bool:
     """Verify a 64-byte r||s ECDSA P-256 SHA-256 signature.
@@ -54,8 +89,12 @@ fn ecdsa_p256_verify_fixed(spki_der: [u8], message: [u8], signature_fixed64: [u8
 
     Returns: true if the signature is valid, false otherwise.
     """
-    val result = rt_ecdsa_p256_verify(spki_der, message, signature_fixed64)
-    result == 1
+    val point = _p256_fixed_spki_to_point(spki_der)
+    if point.len() != 65:
+        return false
+    match ecdsa_p256_verify_checked(point, message, signature_fixed64):
+        case Ok(valid): valid
+        case Err(_): false
 
 # ============================================================================
 # SSH mpint helpers (pure Simple, no SFFI)

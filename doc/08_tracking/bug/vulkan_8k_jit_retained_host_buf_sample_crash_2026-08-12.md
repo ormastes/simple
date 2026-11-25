@@ -159,3 +159,25 @@ This Darwin ARM host enumerates Apple M4 through MoltenVK, not lavapipe. The
 focused owner and strict-JIT evidence can run here, but no 8K lavapipe or NVIDIA
 receipt is claimed; the full 7680x4320 capacity rerun remains pending.
 
+
+## Triage 2026-11-25 — fix components all present; 8K rerun still capacity/platform-gated
+
+Verified on `release/1.0.0` (7998d6ba40d), Windows host, by code inspection:
+
+- Backend identity collision fix present: `class SkiaVulkanBackend` at
+  `src/lib/skia/backend/vulkan/backend.spl:600` with
+  `type VulkanBackend = SkiaVulkanBackend` alias at line 606.
+- Generic-reduction fixture `test/fixtures/jit_class_u32_array_retained_read/main.spl`
+  exists.
+- Owner-local sampler `fn sample_host_mirror(indices: [i64]) -> [u32]` present
+  on the concrete Engine2D `VulkanBackend` at
+  `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl:2708`.
+- Strict-JIT mirror fixture `test/fixtures/jit_vulkan_host_mirror_64_row_sample/`
+  exists.
+
+Not verified here: the strict-JIT fixtures and the full 7680x4320 lavapipe
+benchmark re-run. Both need a Linux host (lavapipe ICD) and, for the 8K run,
+an uncontended build window — neither available on this Windows worktree.
+The prior classification stands: capacity-gated re-verification of an
+already-landed fix, NOT hardware-gated. Status remains OPEN only for the
+missing 8K timing/parity receipt.

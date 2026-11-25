@@ -1,10 +1,9 @@
 # Bug: CancellationToken depth-2 cancel propagation reads stale registry after a 3rd allocation
 
 - **Date:** 2026-07-29 (root-caused further, same date, lane G9b)
-- **Status:** open — root cause identified (receiver-less function calls not
-  observing intervening instance-method mutations; worse across `it`/closure
-  boundaries), workaround attempted and rejected (traded wrong-answer for a
-  hang), see the 2026-07-29 update section below
+- **Status:** RESOLVED 2026-11-25 — the interpreter defect no longer
+  reproduces on the pinned v1.0.0-rc.1 seed, and depth-2 propagation is now
+  asserted in `cancellation_spec.spl` (see the 2026-11-25 section below)
 - **Severity:** HIGH — cooperative cancellation across more than one level of
   `child()` nesting cannot be relied on yet
 - **Found by:** lane G9 (mission-critical robustness campaign — cancellation semantics)
@@ -182,3 +181,48 @@ resolution of a module-level `var` differs from an instance method's, and
 why crossing a `describe`/`it` closure boundary makes it worse (partial, not
 full, state reset) rather than the same as crossing a plain function-call
 boundary within one script.
+
+## Verification 2026-11-25 — CLOSED (defect no longer reproduces; depth-2 now asserted)
+
+Environment: release/1.0.0 (post-#11613), pinned tracked seed
+`bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1). Execution done in
+a pre-autofix scratch tree at `7c64fa458e4` because release HEAD is
+source/binary inconsistent for the pinned seed (`cfd89933699`'s 940
+`@representation_boundary` annotations postdate the binary);
+`src/lib/nogc_async_mut/async/cancellation.spl` and the spec are
+byte-identical between `7c64fa458e4` and release HEAD.
+
+The doc's exact failing scenarios, re-run with the current API
+(`token_new` was renamed to `cancellation_token_new`):
+
+```
+var root = cancellation_token_new()
+var mid = root.child()
+var leaf = mid.child()
+root.cancel()
+# → mid=true leaf=true        (depth-2 propagation: CORRECT)
+
+var root2 = cancellation_token_new()
+var mid2 = root2.child()
+val unrelated = cancellation_token_new()   # intervening 3rd allocation
+root2.cancel()
+# → mid2=true                 (stale-read case: CORRECT)
+```
+
+Both previously-failing cases now return the correct answer, so the
+underlying interpreter defect (receiver-less calls not observing intervening
+instance-method mutations) no longer reproduces on the current seed.
+
+The gap this doc called out — "Depth-2+ propagation across more than one
+`token_new()`/`.new()` call remains open and unasserted in the spec" — is
+closed in the same change: `test/01_unit/lib/nogc_async_mut/cancellation_spec.spl`
+gains two examples, "cancelling a grandparent propagates through two levels
+of child()" and "an unrelated allocation between child() and cancel() does
+not stale the read". They run as separate `it` blocks, i.e. across the
+`describe`/`it` closure boundary where the 2026-07-29 workaround attempt
+corrupted state. Full spec result with the additions:
+
+```
+SPEC FILE VERDICT: test/01_unit/lib/nogc_async_mut/cancellation_spec.spl
+outcome=OK declared>=10 executed=10 passed=10 failed=0
+```

@@ -1,10 +1,11 @@
 # SVM-G device single-buffer code/data co-residency diverges from ref_vm's separate code array
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — owner-chosen option 2 fully landed (see addendum below)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: open (documented divergence, not blocking)
+- Status: resolved 2026-11-25 (owner chose option 2 on 2026-11-04; the vector
+  retarget half of that resolution only landed 2026-11-25 — see addendum)
 - Found: 2026-08-07, Task C3 (vulkan_vm executor), while running the D3
   conformance vectors against the real `svmg_vulkan_kernel.spv` shader on a
   live Vulkan device.
@@ -120,3 +121,34 @@ byte, load it back). Removed the per-vector exclusion and the "device-correct
 self-modified result" check (`13107201`) from the Vulkan, CUDA and Metal
 conformance specs. `ref_vm.spl` is unchanged. Device lanes were host-skipped
 here, so device agreement is by construction, not observed.
+
+## Addendum 2026-11-25 — retarget had not actually landed; landed now
+
+Audit on `release/1.0.0` found the 2026-11-04 resolution only half-applied:
+commit `c2c6c0c45a0` removed the per-vector exclusion and the `13107201`
+device-correct check from the Vulkan/CUDA/Metal conformance specs, but
+`test/fixtures/svmg/conformance_vectors.spl` still carried the original
+`PUSHI 50 ... STORE8 ... PUSHI 50 LOAD8` program (`git log --all -S "PUSHI 128"`
+on that file: no hits). With the exclusion gone and the vector unretargeted,
+a live single-buffer device would still produce `13107201` and now FAIL the
+conformance specs instead of being excluded.
+
+This change applies the retarget the resolution describes:
+`mem_store_load_byte` now stores/loads at absolute arena offset 128.
+
+Verification (code inspection; execution environment-blocked):
+- `build_arena` (`src/lib/common/svmg/ref_vm.spl:141`) sets
+  `code_off = SGP_HEADER_SIZE = 36` (`src/lib/common/svmg/sgp.spl:44`);
+  this program's `code_len` is 25, so its code footprint is arena bytes
+  `[36,61)`. Offset 128 is past the 61-byte SGP blob (header + code, no
+  `data_init`), in the zeroed DATA region — outside the code footprint.
+- `ref_vm.spl` keeps `code`/`arena` as separate arrays, so the host-side
+  expectation `(passed: 1, value: 200)` is unchanged by the new address;
+  the host gate `test/02_integration/svmg/conformance/conformance_suite_spec.spl:214`
+  checks the vector by name with unchanged expectations.
+- `bin/simple.exe test` cannot run at this HEAD: the pinned seed rejects
+  `@representation_boundary` (repo-wide source/binary inconsistency from
+  `cfd89933699`), failing in the test runner's own
+  `src/app/test_runner_new/test_runner_client.spl:9` before any spec loads.
+  Device lanes additionally require live Vulkan/CUDA/Metal hardware. Both
+  limits stated; no execution evidence claimed.

@@ -4,7 +4,10 @@
 - **Area:** module loader / import closure resolution
 - **Severity:** medium — 8x startup penalty on every interpreted run that touches
   Engine2D without also importing winit.
-- **Status:** OPEN. Reproducible, stable across repeats, not a cache effect.
+- **Status:** RESOLVED for the std-lib amplifier (2026-11-05 root-cause section
+  below; verified in-tree 2026-11-25 — see the dated verification note at the
+  end). The residual ~12 s is legitimate Cranelift JIT-lane compilation work,
+  and the fragile substring lane gate is a separate Rust-seed follow-up.
 
 ## Repro
 
@@ -103,3 +106,28 @@ Follow-up not done here: the substring lane gate in the Rust seed is a
 fragile heuristic (any comment mentioning window_winit diverts the whole
 program to the interpreter); it deserves its own bug record against
 `src/compiler_rust/driver/src/exec_core.rs`.
+
+## Verification 2026-11-25 (p2w3-ah lane, release/1.0.0)
+
+The 2026-11-05 root-cause fix is confirmed in-tree on release/1.0.0 HEAD:
+`scripts/tool/spirv-to-spl-words.shs` documents and emits bare `0xNN` words
+(the ~25x-slower `0xNNu8` suffix path is gone), and the generated
+`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_*_spirv*.spl` modules
+contain zero `0xNNu8`-suffixed literals (grepped; bare `0xNN` words present).
+Status header corrected from OPEN to RESOLVED accordingly.
+
+**Verification limit:** the 35 s -> 12 s timing was not re-measured — the
+probe requires the JIT lane on a full engine2d import closure, which is not
+runnable within this lane's budget on this host, and `bin/simple test` is
+repo-wide blocked at this HEAD by the `@representation_boundary` seed
+rejection. The fix's presence and the byte-format conversion are verified by
+code/content inspection only; the 2026-11-05 measurements stand as the
+recorded evidence.
+
+Still open (by design, not this bug): the substring lane gate in
+`src/compiler_rust/driver/src/exec_core.rs`
+(`source_uses_jit_unsafe_graphics_runtime`) — a comment mentioning
+`window_winit` still diverts a whole program to the interpreter. That is a
+Rust-seed heuristic deserving its own bug record, as the 2026-11-05 section
+already notes; no such record existed as of this check, so it is flagged here
+for the next triage pass rather than silently dropped.

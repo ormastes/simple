@@ -1,4 +1,18 @@
 # Bug: Rust seed mangler emits bare extern for free function shared across sibling split-part modules re-exported through a facade
+
+## Triage 2026-11-25 (lane p2w3-aa)
+
+The "Open 2026-09-16 — needs owner triage" header above is stale bookkeeping;
+the operative status is the 2026-11-05 section at the bottom:
+fix-implemented-verification-pending in the Rust seed
+(`native_project/mangle.rs`, underscore gate removed, 12/12
+`mangle_symbol_tests` pass on a test-only seed build). The applied
+source-level workarounds (direct imports incl. the `{_find_substr}` import in
+`arithmetic_checks.spl`) are present in the tree. Remaining step — end-to-end
+stage4 native link after a seed redeploy — is Rust-seed/bootstrap-only and
+out of scope for a pure-Simple bug lane. Left OPEN as re-scoped; no change
+made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

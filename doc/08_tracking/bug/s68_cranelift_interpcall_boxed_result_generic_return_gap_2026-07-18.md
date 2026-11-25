@@ -1,5 +1,16 @@
 # Follow-up: seed cranelift InterpCall boxed-result gap for generic/composite return types
-## Open 2026-09-16 — needs owner triage
+## Re-scoped P3 non-bootstrap 2026-11-05 — see mirp2-E3 note at bottom; no release/1.0.0 action
+
+## 2026-11-25 triage note
+
+The "Open 2026-09-16 — needs owner triage" header predates the 2026-11-05
+mirp2-E3 re-scope recorded at the bottom of this doc, which is the current
+disposition: JIT probes (Dict/struct/Option-returning fns with `match` bodies)
+print results identical to the interpreter, and the remaining gap is confined
+to the seed `--native --backend=cranelift` hybrid AOT lane, which is not a
+bootstrap lane. No pure-Simple release/1.0.0 change is actionable here; close
+when that seed lane is retired. Runtime re-probe was not possible during this
+triage (pinned seed rejects `@representation_boundary` repo-wide at HEAD).
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

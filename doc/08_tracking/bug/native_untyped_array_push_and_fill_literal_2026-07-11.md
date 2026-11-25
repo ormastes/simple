@@ -22,6 +22,30 @@ the untyped-receiver runtime fallbacks cover string methods
 mis-typed `ptr` by `translate_copy_move`
 (`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:619`).
 
+## Verification note 2026-11-25 (release/1.0.0 tip, worktree wt-p2w4-aj)
+
+STALE-CLOSED confirmed. All three source facets verified present by code
+inspection at the release/1.0.0 tip:
+
+- Array-push lowering for untyped receivers exists in the MIR layer
+  (`src/compiler/50.mir/mir_lowering_stmts.spl:1117-1249`,
+  `src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl:313,1909`
+  emit `rt_array_push` calls).
+- The fill-literal IR typing fix is in place: `rt_array_repeat` is declared
+  `ptr @rt_array_repeat(i64, i64)` at
+  `src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl:219`
+  with the Bug #149 comment explaining the pointer typing.
+- The concat-forwarding gate script
+  `scripts/check/check-native-concat-string-array-forward.shs` exists; its
+  execution still requires the bootstrap `libsimple_native_all.a` provider
+  and remains pending, as the header states.
+
+Spec/gate execution on this Windows host is environment-blocked: the pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects the
+`@representation_boundary` decorator added tree-wide by cfd89933699, so
+`bin/simple.exe test` fails at HEAD independent of this bug. Verified by
+inspection; limit stated.
+
 ## Symptom 3: string-concat result dropped crossing rt_native_build
 
 A string-concat result passed through `extract_rt_string_array` into

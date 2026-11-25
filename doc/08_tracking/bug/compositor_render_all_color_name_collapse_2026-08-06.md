@@ -1,9 +1,9 @@
 # BUG — `Compositor.render_all()` is unrunnable from most import sets: `Color` name collapse
 
-Status: OPEN (P2)
+Status: RESOLVED 2026-11-25 (fb_driver `Color` renamed to `FbColor`; collision eliminated — see bottom note; execution verification env-blocked, inspection-verified)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
-**Filed:** 2026-08-06 (WS-D6) · **Status:** OPEN · **Pre-existing:** yes, reproduced at HEAD
+**Filed:** 2026-08-06 (WS-D6) · **Status:** RESOLVED 2026-11-25 (rename landed) · **Pre-existing:** yes, reproduced at HEAD
 **Binary:** `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`,
 md5 `ed53cc5f255e269ca27c4cd83b17aef9` (Rust seed build).
 
@@ -134,3 +134,35 @@ production compositor decorations live together, compiled 21 modules with zero
 failures, and returned the exact framebuffer channel values.  The remaining
 closure condition for this row is a focused compiler diagnostic that rejects
 or fully qualifies genuinely ambiguous unaliased duplicate declarations.
+
+## Verification 2026-11-25 (fleet lane p2w1-ad, Windows host)
+
+STALE-CLOSED for the reported defect, with an explicit execution limit.
+
+The colliding declaration is gone: `src/os/drivers/framebuffer/fb_driver.spl`
+now declares `struct FbColor` (:50) with `rgb/black/white/red/green/blue`
+constructors, and every former consumer uses it —
+`src/os/compositor/decorations.spl:1` imports
+`os.drivers.framebuffer.fb_driver.{FbColor}` and calls `FbColor.rgb(...)`;
+grep finds zero remaining `fb_driver.{Color}` imports and zero bare
+`Color.rgb/black/white` calls under `src/os/`. The only `Color` declaration
+left in the compositor's compile closure is
+`src/lib/common/color/types.spl:3`, so the first-registration-wins collapse
+that produced `unknown static method rgb on class Color` has no second
+candidate to collide with. This is the rename fix this doc's "Fix direction"
+section recommended, applied to the fb_driver side.
+
+EXECUTION LIMIT: an end-to-end `Compositor.render_all()` probe (compositor +
+display_backend + headless backend import set, per this doc's reproducer)
+could not be executed on this host — the render closure now includes a module
+carrying `@representation_boundary`, which the pinned Rust seed
+(v1.0.0-rc.1) rejects at semantic analysis (`unknown decorator`), the known
+repo-wide source/binary inconsistency at this HEAD. Verified by code
+inspection instead; the collision pair the bug names no longer exists.
+
+Still open as a SEPARATE compiler enhancement (not this bug): a focused
+diagnostic rejecting/qualifying genuinely ambiguous unaliased duplicate type
+registrations (per the 2026-08-21 section's closure condition). That is
+`src/compiler/10.frontend` feature work; the user-visible defect this row
+tracks — `render_all()` unrunnable because two `Color` types collapse — is
+eliminated by the rename.

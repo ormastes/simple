@@ -1,5 +1,5 @@
 # `native-build` invoked directly against the seed hangs under JIT; `SIMPLE_EXECUTION_MODE=interpret` terminates. Mechanism UNKNOWN — an earlier version of this doc asserted a wrong explanation; see the correction below.
-## Open 2026-09-16 — needs owner triage
+## Re-scoped 2026-07-31 — measured: not a hang; residual perf + semantic defects (see final section)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -520,3 +520,17 @@ terminating condition.
 - `_native_build_entry_closure` at ~2.2 s/file for a syntactic scan.
 - The `method 'len' not found on type 'str'` semantic error at ~5 modules in.
 
+
+## Triage 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The "Open 2026-09-16 — needs owner triage" banner was stale relative to this
+doc's own final section: the 2026-07-31 MEASURED run resolved the "hang"
+question (the worker terminates in ~22 min; the apparent hang was
+`process_run_timeout` buffering the worker's stdout until exit). Header
+updated to point at that re-scope. What remains open per the doc itself is
+(a) `_native_build_entry_closure` at ~2.2 s/file for a syntactic scan and
+(b) the `method 'len' not found on type 'str'` semantic error — both are
+Linux-seed native-build investigations not reproducible within this lane's
+budget on a Windows host (no cargo/rust builds, multi-minute native-build
+runs out of scope). Classification: SKIP (large perf/seed program); no code
+change made.

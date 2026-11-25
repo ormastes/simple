@@ -1,6 +1,8 @@
 # Cross-engine value-semantics differential harness — landed KNOWN-RED (2026-08-10)
 
-Status: OPEN (P2)
+Status: CLOSED 2026-11-05 — premise outdated; all 13 probes agree on the
+current binary (see "Re-verification 2026-11-05" at the bottom). The spec
+remains in the tree as a regression guard.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Spec:** `test/03_system/language/value_semantics/cross_engine_value_semantics_spec.spl`
@@ -94,3 +96,21 @@ All probes p1..p11 agree between interpreter and JIT lanes (p2 deep copy and
 p8 nested index assignment included); the AOT lane reaches native-build or
 reports the known llc-20 blocker. The 2026-08-10 KNOWN-RED table (7 failing
 probes) no longer reproduces. The spec stays as a regression guard.
+
+## Confirmation 2026-11-25 (p2w1-aa)
+
+Independently re-ran the harness in a pre-autofix scratch tree at `7c64fa458e4`
+(release/1.0.0 HEAD `38265c7f249` is source/binary inconsistent for the pinned
+seed — `cfd89933699`'s `@representation_boundary` annotations postdate the
+binary; spec, probes, and value-semantics sources are identical between
+`7c64fa458e4` and HEAD) with the pinned tracked seed `bin/simple.exe`
+(38,403,072 bytes, v1.0.0-rc.1):
+
+```
+SPEC FILE VERDICT: test/03_system/language/value_semantics/cross_engine_value_semantics_spec.spl
+outcome=OK declared>=13 executed=13 passed=13 failed=0
+```
+
+13/13 pass — confirms the 2026-11-05 CLOSED re-verification on a second,
+older binary. Status header updated from OPEN to CLOSED to match the body's
+own 2026-11-05 verdict; the spec stays as a regression guard.

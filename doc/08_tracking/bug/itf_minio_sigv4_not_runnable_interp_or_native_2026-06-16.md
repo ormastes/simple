@@ -107,3 +107,15 @@ binary path failed. (Container + creds + mc alias were torn down after the run.)
 3. Resolve the `nogc_sync_mut.http_client.types` module chain in all import forms.
 4. Provide an `itf` native build target that resolves `platform`, enabling an
    AOT binary that links the runtime HTTP extern.
+
+## Triage 2026-11-25 (lane p2w3-ak) — still blocked on this host
+
+- The remaining blockers are unchanged in kind: the JIT tuple-return bridge
+  (`interpreter_sffi.rs` / `runtime_bridge.rs`) is Rust-seed runtime internals
+  (no cargo builds permitted on this lane, and the seed is pinned), and the
+  SigV4 round-trip acceptance needs a reachable MinIO/S3 endpoint, which this
+  Windows host does not have.
+- The interpret-mode `rt_http_request` resolution recorded above remains the
+  landed half of the fix. No new evidence either way on the JIT tuple bridge;
+  left OPEN/partially-resolved as filed. Not a candidate for a pure-Simple
+  bounded fix.

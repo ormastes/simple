@@ -84,3 +84,18 @@ lands.
 Not proven: no `Results:` line —
 `test/02_integration/app/tools/notebook/remote_exec_qemu_rv32_spec.spl` needs a
 QEMU lane and was not run while the bootstrap holds the host.
+
+## Triage 2026-11-25 (P2 ledger sweep) — silent-`Ok` half fixed; remainder is a feature gap
+
+Code inspection of current `release/1.0.0` source confirms the 2026-09-27
+mitigation is in the tree:
+`src/lib/nogc_sync_mut/debug/remote/exec/compiler_bridge.spl:22-26` now returns
+`Err("remote compiler unavailable for arm32/riscv32: source-derived target
+bytes are required")` for both architectures — no caller can receive a
+successful-looking fixed return-zero payload anymore, so the
+silent-wrong-result / false-remote-PASS class this entry was filed for is
+closed. What remains is the unblock condition itself: a source-derived target
+compiler behind this bridge. That is a feature program requiring the compiler
+pipeline targeting Arm32/RiscV32 plus QEMU/embedded verification lanes, not a
+bounded bug fix, and it is not verifiable on this Windows host. Kept open for
+that feature work only; severity of the original P2 filing no longer applies.

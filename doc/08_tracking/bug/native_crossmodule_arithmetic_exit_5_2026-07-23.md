@@ -77,3 +77,17 @@ If it still fails, disassemble the keys before considering the separate
 `translate_load` provenance audit. Do not weaken or delete the fixture, and do
 not advance to Stage4/QEMU until it passes.
 
+
+## Verification note (2026-11-25, P2 ledger sweep)
+
+STALE-CLOSED confirmed. Current `release/1.0.0` source retains the direct
+operand-to-ID form (`src_id`/`dest_id` locals, no nested dictionary-key
+lookups) at
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl:2828-2829`;
+the signedness rule has since evolved to a later reviewed form (source-value
+propagation with conversions owned by `Cast`, per the in-code comment). The
+remaining acceptance step named in this entry — Stage2/3 rebuild plus the
+dual-backend gate — requires a full bootstrap and cannot run on this Windows
+host with the pinned seed (which rejects `@representation_boundary` at HEAD),
+so this closure rests on code inspection, not a re-run. Ledger already marked
+Closed 2026-09-16; kept closed.

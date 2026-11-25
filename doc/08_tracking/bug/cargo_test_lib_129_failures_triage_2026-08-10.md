@@ -419,3 +419,18 @@ fix and characterized the two remaining genuine failures (both owner-gated, not
 safe quick fixes). No assertion was weakened.
 
 Disposition: STALE (premise dead) with one embedded FIX. Header flipped OPEN → STALE 2026-11-11 (lane p3-seedA).
+
+## Confirmation 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+STALE disposition re-confirmed by source inspection. The embedded fix from
+the 2026-11-11 addendum is present at HEAD:
+`src/compiler_rust/compiler/src/module_resolver/mod.rs:122`
+`test_single_file_mode` uses a real `tempfile::tempdir()` and asserts the
+file's parent (the non-portable `/tmp/test.spl` fixture is gone).
+
+The suite itself was NOT re-run: this lane prohibits cargo/rust builds, so
+the "overwhelmingly green in a full checkout" measurement from 2026-11-05 /
+2026-11-11 is trusted as the latest evidence. The two remaining genuine
+failures named in the addendum (`cache_host` Windows runtime-extern behavior,
+`mir::...::primitive_field_method_call_is_builtin_qualified`) remain with
+their owners. No assertion was touched.

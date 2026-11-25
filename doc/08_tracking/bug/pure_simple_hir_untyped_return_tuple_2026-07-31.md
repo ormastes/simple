@@ -1,8 +1,19 @@
 # Pure-Simple dynamic frontend-to-HIR Tuple crash
-## Open 2026-09-16 — needs owner triage
+## Closed — fixed (re-verified 2026-11-06); header corrected 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**Correction 2026-11-25 (p2w4-ag lane):** the 2026-09-16 banner above was
+misleading — the body's Status line already records "fixed (re-verified
+2026-11-06 on release/1.0.0 `a28bdd38966`)". A re-run of the reproduction
+spec was attempted on release/1.0.0 @ 63e791180d3 (Windows, pinned Rust seed
+v1.0.0-rc.1) and is env-blocked: the test runner itself fails repo-wide with
+`unknown decorator '@representation_boundary'`
+(`src/app/test_runner_new/test_runner_single.spl:9:1`), the known
+source/binary inconsistency from cfd89933699 — unrelated to this bug. Status
+remains fixed per the 2026-11-06 re-verification; the residual Vulkan SPIR-V
+backend limitation named below is a separate record.
 
 **Status:** fixed (re-verified 2026-11-06 on release/1.0.0 `a28bdd38966`)
 

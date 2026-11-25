@@ -157,3 +157,25 @@ Repro `test/fixtures/seed_interp/simd_f32x4_float32_repro.spl` (interpreter):
 before (seed `bin/simple.exe`, 2026-10-05): `error: runtime:
 rt_simd_mul_f32x4: field x must be a float, got Float32(1.0)`; after (seed
 built from `work/seed-interp-correctness-20261106`): `simd_mul_f32x4 2.0 4.0`.
+
+## Verification 2026-11-25 (work/p2w5-ac-20261125)
+
+The source fix is confirmed present at release/1.0.0 HEAD by inspection:
+`require_f64_field` in `src/compiler_rust/compiler/src/interpreter_extern/simd.rs:527`
+matches `Value::Float32(n) => Ok(*n as f64)`, and the Rust regression tests
+`f32x4_lane_ops_accept_float32_fields` / `f32x8_lane_ops_accept_float32_fields`
+(`simd.rs:3471`, `:3480`) pin it. The FIXED status stands.
+
+Runtime re-verification on this host is blocked, with a limit worth recording:
+the pinned worktree seed (v1.0.0-rc.1) no longer produces the documented
+`field x must be a float, got Float32(1.0)` error on the repro fixture, but
+the fixture still does not go green here — pure-interpreter mode fails at load
+with the repo-wide `unknown decorator '@representation_boundary'`
+seed/HEAD inconsistency, and default hybrid mode demotes at the extern
+(`[engine-demotion] reason=hybrid-interp-splice detail=rt_simd_mul_f32x4`) and
+then fails with `rt_simd_mul_f32x4: expected Vec4f Object, got Nil` — a
+distinct JIT→interp splice marshalling gap in the seed, not the lane-typing
+bug this record covers. A minimal `Vec4f` construction probe without the
+extern call passes (`constructed: 1.0`). The splice-marshalling gap is
+Rust-seed-only and out of scope for this lane (no Rust rebuilds); file it
+fresh if it still reproduces on a current seed.

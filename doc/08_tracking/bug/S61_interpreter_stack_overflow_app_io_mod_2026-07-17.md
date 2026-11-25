@@ -1,5 +1,5 @@
 # S61: Interpreter Stack Overflow on app.io.mod Imports
-## Open 2026-09-16 — needs owner triage
+## CLOSED 2026-11-25 — filed theory refuted in-doc (2026-07-17 S65 re-verification); defect does not reproduce on the pinned v1.0.0-rc.1 binary (see 2026-11-25 note)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -164,3 +164,30 @@ doc's theory (in-flight cycle tracking, lane S64) is held un-landed: plausible
 defense-in-depth, but its motivating bug is unconfirmed and it is unverifiable
 until redeploy.
 
+
+## Verification 2026-11-25 (release/1.0.0, Windows host, work/p2w5-aa lane)
+
+The filed defect does not reproduce. Live probe on release/1.0.0 HEAD
+(4bc2c986375) with the pinned tracked binary `bin/simple.exe`
+(Simple v1.0.0-rc.1 Rust seed):
+
+```bash
+cat > probe_io_direct.spl <<'EOF2'
+use app.io.mod
+fn main() -> i64:
+    print("IO_MOD_LOADED")
+    return 0
+EOF2
+SIMPLE_LIB=src bin/simple.exe run probe_io_direct.spl
+# -> IO_MOD_LOADED, rc=0, ~3s wall. No hang, no stack overflow.
+```
+
+This matches the in-doc 2026-07-17 S65 re-verification, which refuted the
+module-import-cycle theory: `use app.io.mod` loads clean, and the historical
+`bin/simple test` hang was test-runner-init-wide on a stale seed binary, not
+an app.io-specific cycle. The pinned rc.1 binary postdates that stale binary
+by months. Closing as STALE — the motivating bug is refuted twice over. The
+loader-hardening idea (in-flight "currently_loading" tracking in
+`module_loader_core.spl`, lane S64) remains what the S65 note called it:
+optional defense-in-depth, not a fix for any confirmed defect, and is not
+tracked by this bug.

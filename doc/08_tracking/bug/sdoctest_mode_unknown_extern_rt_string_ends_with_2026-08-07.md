@@ -3,6 +3,20 @@
 **Status:** Fixed (2026-08-17) — root cause confirmed and closed; the originally
 reported SURFACE had already stopped reproducing for an unrelated reason, see
 "Re-verification 2026-08-17" below before reading the rest of this doc.
+**Re-verified 2026-11-25 on release/1.0.0 (Windows, pinned seed binary
+v1.0.0-rc.1):** the `EXTERN_DISPATCH` entries for `rt_string_ends_with` /
+`rt_string_rfind` are present in
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2495-2498`, and a
+standalone probe calling both externs directly prints the correct values on
+BOTH engines (`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`, rc=0):
+`ends_md=true ends_miss=false ends_empty=true rfind_slash=3 rfind_miss=-1
+rfind_empty=3` (empty needle -> subject length, matching the C runtime). The
+regression spec `test/01_unit/lib/text/rt_string_ends_with_extern_dispatch_spec.spl`
+could not be executed via `bin/simple.exe test` on this host because release/1.0.0
+HEAD is source/binary inconsistent (`unknown decorator '@representation_boundary'`
+in the test-runner closure — a known, separately tracked seed skew, not this
+defect); the direct-extern probe above covers the exact defect surface. Fix
+remains landed; stays Fixed.
 **Found while:** implementing L1 (notebook document model + SDoctest exporter,
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md` Stream L)
 **Date:** 2026-08-07

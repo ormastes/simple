@@ -1,4 +1,25 @@
 # Stage4 (seed-compiled self-host) codegen hazards — `-c "print(1+1)"` crash chain
+
+## Triage 2026-11-25 (P2 sweep lane) — mixed state; remainder needs seed codegen work / fresh self-hosted rebuild
+
+This is a 20-iteration investigation log, not a single bounded bug. Current
+state per the latest sections: the original `-c "print(1+1)"` → `2` goal was
+reached (iteration 18), multi-function run files fixed (iteration 19), and
+struct/class declaration lowering fixed (iteration 20); Task #99 (2026-07-17)
+verified 3 of 4 remaining interpreter-completeness gaps FIXED. What remains
+open is explicitly non-bounded: the `@cfg` same-name variant dispatch gap (#4,
+undecidable without a fresh self-hosted rebuild), the seed-level
+enum/`Value` payload-convention family (task #121 proved point-fixes regress
+self-host; needs one coordinated seed codegen change), and the
+struct-construction/field-access interpreter-runtime cascade. Every remaining
+item requires either Rust-seed codegen work (out of scope for this sweep —
+"fix .spl not Rust", no cargo builds) or a full self-hosted bootstrap
+(forbidden here). The pinned `bin/simple.exe` at release/1.0.0 HEAD also
+cannot run `test` (`@representation_boundary` inconsistency), so no
+behavioral re-verification is possible in this lane. Left **OPEN**; the
+"needs owner triage" banner is bookkeeping — the iteration sections are the
+live state. No code or status change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

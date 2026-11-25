@@ -35,3 +35,18 @@ boundary with pure-Simple config-port enumeration. QEMU audio remains a failed
 runtime gate for the separate controller/stream/IRQ wiring and live-evidence
 work, not for missing PCI providers.
 
+
+## Triage 2026-11-25 (worktree work/p2w2-ah-20261125, Windows host) — STILL OPEN
+
+- Not reproducible or verifiable from this host: the failure is a Phase-3
+  native-build SIGSEGV (Cranelift, stage3 binary, core-C runtime bundle,
+  `SIMPLE_LINK_OBJECTS` PCI port stub) on a Linux baremetal/OS lane, and the
+  required resolution is a compiler/runtime investigation of that native
+  pipeline — no bounded pure-Simple fix, and no bootstrap/native-build is
+  permitted from this lane.
+- The doc's own framing stands: this is an open compiler/runtime optimization
+  issue, not an HDA production blocker — the authoritative x86 SimpleOS
+  bundle keeps PCI enumeration in `baremetal_stubs.c`, and the memory/
+  bus-master enable provider added by that work remains the production path.
+- Status header ("Open compiler/runtime optimization issue") is accurate;
+  left OPEN with no code change.

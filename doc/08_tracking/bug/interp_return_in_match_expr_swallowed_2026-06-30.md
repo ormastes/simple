@@ -92,3 +92,16 @@ now does `Control::Return(v) => return Err(CompileError::TryError(Box::new(v)))`
 at five sites (`:167`, `:280`, `:304`, `:320`, `:362`). Grepping for
 `EarlyReturn` finds nothing, which is why this can look unfixed. Not fixed by
 this session.
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — CLOSED stands
+
+Re-ran the entry's exact minimal reproducer on the pinned tracked binary
+(`bin/simple.exe`, 38,403,072 B, Rust seed v1.0.0-rc.1), default `run` lane:
+
+```
+f(Err("bad"))  -> ERR_OK=false bad    (Err propagated out of f; no enum-to-int crash)
+f(Ok(41))      -> OK_OK=true 42       (non-return arm still works)
+```
+
+A `return` in a match-expression arm returns from the function. The
+2026-09-13 closure stands.

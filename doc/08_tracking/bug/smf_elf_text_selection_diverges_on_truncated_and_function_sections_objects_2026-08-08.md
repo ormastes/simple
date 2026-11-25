@@ -1,9 +1,10 @@
 # SMF ELF: code/reloc section selection still diverges on truncated objects, and `-ffunction-sections` is made consistent rather than correct
 
 - **Status:** CLOSED (2026-09-13) -- not reproducible on f26970e9d93; all three items already fixed, see Re-check below
-- **Status:** RESOLVED (2026-09-13) for items 1-2 — see "Re-check / RESOLVED 1-2" near
-  the bottom; item 3 (linker's own `elf_parser.spl`) remains OPEN, latent, no
-  production consumer.
+- **Status:** CLOSED (2026-11-25) — all three items verified fixed in tree on
+  release/1.0.0 HEAD (4bc2c986375); item 3 (`elf_parser.spl`) IS fixed — see
+  "Verification 2026-11-25" at the bottom. The older "item 3 remains OPEN"
+  line below is superseded.
 - **Found:** 2026-08-08, adversarial review of `f13a082b3823` + `381cd611097f`
 - **File:** `src/compiler/80.driver/smf_elf_parser.spl`
 
@@ -196,3 +197,33 @@ Results: 7 total, 7 passed, 0 failed
 No code change was needed — the fix and its test were already landed by a
 prior lane without this doc's status line being updated. Status corrected to
 RESOLVED for items 1-2.
+
+## Verification 2026-11-25 (release/1.0.0 HEAD 4bc2c986375, work/p2w5-aa lane)
+
+Code inspection on the current tree confirms all three items fixed,
+superseding the "item 3 remains OPEN" note in the BUGFIX-6 re-check above
+(that note predates or missed the BUGFIX-10 fanout fix):
+
+1. **Truncated-object divergence:** `smf_elf_parser.spl` derives both call
+   sites from the shared `_find_text_section_indices()` (line 35), which
+   carries the bounds check inline; `_find_text_section_index` (line 67) is a
+   thin wrapper over it. Divergence is impossible by construction.
+2. **`-ffunction-sections`:** `extract_code_from_object` (line 86)
+   concatenates ALL `.text*` PROGBITS sections via `text_indices`, and
+   `extract_elf_relocations` rebases each RELA section by `base_offsets`
+   (line 196) computed in the same running-sum order.
+3. **Linker `elf_parser.spl`:** `ElfRelocation` now carries `section_idx` and
+   `target_section_idx` (lines 72-73), populated from the RELA section's
+   `sh_info` at parse time (line 404) — exactly the suggested minimum fix.
+   ARM/i386 REL handling also validates `target_section_idx` bounds
+   (lines 618-630), addressing the "SHT_REL not handled" note for those
+   targets.
+
+Spec execution (`smf_elf_rela_text_section_spec.spl`,
+`elf_parser_spec.spl`) is environment-blocked on this host: the pinned
+v1.0.0-rc.1 seed rejects the `@representation_boundary` decorator present at
+release/1.0.0 HEAD, so `bin/simple.exe test` fails repo-wide before any spec
+runs (known source/binary inconsistency, not caused by this change).
+Verification here is by code inspection against the two prior green spec runs
+recorded above (7/7 and 16/16 on 2026-09-13). Status consolidated to CLOSED
+for all three items.

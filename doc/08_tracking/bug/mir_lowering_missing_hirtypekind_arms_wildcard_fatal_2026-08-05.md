@@ -2,6 +2,7 @@
 
 Status: CLOSED (2026-11-06) — all 9 missing arms (Slice, TypeParam, DynTrait, Function, Projection, Isolated, Any, Tensor, Layer) now present in `lower_type` (`src/compiler/50.mir/_MirLowering/function_lowering.spl` ~1581-1650 on origin/release/1.0.0); Projection arm via 4b88aebf00b. Wildcard remains only for genuinely unknown discriminants.
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status re-verified 2026-11-25 by source inspection on release/1.0.0 @ a19165ae174: all 9 arms present in `lower_type` (now at `function_lowering.spl:1885-1957`); wildcard arm remains only as the final catch-all.
 
 Found while verifying the `me`-receiver fix (`ea198ba3e60`,
 `MirToLlvm.llvm_type_text`/`llvm_function_symbol_name`/`native_int`) with a

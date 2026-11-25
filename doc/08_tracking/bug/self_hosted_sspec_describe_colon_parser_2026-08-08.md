@@ -1,7 +1,7 @@
 # Self-hosted parser rejects standard SSpec suite syntax
 
 Date: 2026-08-08
-Status: open / release-blocking for LLM Caret executable SSpec evidence
+Status: fixed in self-hosted parser source (see Verification 2026-11-25); deployed-binary regeneration pending bootstrap lane
 
 ## Reproducer
 
@@ -73,3 +73,24 @@ loop this shard cannot run. Leaving OPEN with this direction recorded.
 The current Windows seed `bin/simple.exe test` parses and runs `describe "x":` / `it "a":` fine.
 The reported failure is specific to the macOS arm64 self-hosted binary of 2026-08-08; cannot be
 re-verified here (no self-hosted binary on this host). Left OPEN pending a self-hosted run.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+The parser gap this record describes is closed in current self-hosted parser
+source. `src/compiler/10.frontend/core/parser_stmts.spl` now implements the
+generic trailing colon-block rule the 2026-09-13 triage asked for:
+`parse_trailing_colon_block_arg` (line 319) desugars `callee(args): <block>`
+into a call with an implicit lambda argument, and the adjacent bare-identifier
+path (comment at line 274, "`describe \"name\":` / `it \"name\":`") covers the
+exact SSpec header shape that used to raise `unexpected token in expression:
+':'`. The change is pinned by `test/01_unit/compiler/lint/parse001_spec_files_spec.spl`
+which references `parse_trailing_colon_block_arg` directly.
+
+Verification limit: no self-hosted binary can be built or run in this lane
+(bootstrap is out of scope; the pinned seed `bin/simple.exe` cannot run any
+spec at HEAD because it rejects the `@representation_boundary` decorator added
+by cfd89933699). Verified by code inspection; the 2026-11-03 re-probe already
+confirmed the seed accepts `describe "x":` / `it "a":`.
+
+Status: FIXED in parser source; deployed-binary regeneration remains with the
+bootstrap lane.

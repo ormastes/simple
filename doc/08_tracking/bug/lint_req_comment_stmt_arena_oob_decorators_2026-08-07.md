@@ -146,3 +146,22 @@ Not proven by this lane: that the five accessors above are reachable with a
 stale index today — only that the guard which makes `stmt_get_tag` safe has no
 counterpart in them.
 
+
+## Re-verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree)
+
+The fix this record closed on is present in current source:
+`src/compiler/10.frontend/core/ast_stmt.spl:592-598` — `stmt_get_tag` keeps its
+explicit bounds guard (`if idx < 0 or idx >= stmt_tag.len(): ... return -1`),
+including the arena-generation diagnostic. The executed 2026-08-17 repro
+(lint reaches its `Found N error(s)` summary, no OOB line) stands as the
+runtime evidence.
+
+A fresh runtime re-run in this lane was not possible: the pinned seed binary
+at `bin/simple.exe` rejects the `@representation_boundary` decorator added
+tree-wide by cfd89933699, so every `bin/simple.exe lint`/`test`/`compile` at
+release/1.0.0 HEAD fails before reaching subject code. The residual risk this
+record filed (five sibling accessors — `stmt_get_span`, `stmt_get_expr`,
+`stmt_get_name`, `stmt_get_type`, `stmt_get_body` — still unguarded) remains a
+separate row against `10.frontend`, unchanged by this verification.
+
+**Verdict: STALE-CLOSED, confirmed by code inspection. No patch applied.**

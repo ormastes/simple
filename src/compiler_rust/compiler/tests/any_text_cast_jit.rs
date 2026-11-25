@@ -114,3 +114,53 @@ fn main() -> i64:
 "#;
     assert_eq!(run(src), 4143);
 }
+
+#[test]
+fn erased_any_numeric_float_conversions_dispatch_by_tag() {
+    let src = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val xs: [any] = [box_any(1.5), box_any(7), box_any(true), box_any("2.25"), box_any("bad")]
+    val a = (xs[0].to_f64() * 100.0).to_i64()
+    val b = (xs[1].to_float() * 10.0).to_i64()
+    val c = (xs[2].to_f32() * 10.0).to_i64()
+    val d = (xs[3].to_f64() * 100.0).to_i64()
+    val e = (xs[4].to_f64() * 100.0).to_i64()
+    val f = box_any(65).to_u8().to_i64()
+    a + b + c + d + e + f
+"#;
+    // 150 + 70 + 10 + 225 + 0 + 65 = 520
+    assert_eq!(run(src), 520);
+}
+
+#[test]
+fn erased_any_edge_cases_wide_signed_unsigned_nil_nan_saturation_and_str_f32() {
+    let wide_neg_and_pos = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val big_pos = 1 << 60
+    val big_neg = -(1 << 60) - 1
+    val small_neg = -7
+    val max_u = (-1).to_u64()
+    val a = if box_any(big_pos).to_f64() > 1e18: 1 else: 0
+    val b = if box_any(big_neg).to_f64() < -1e18: 2 else: 0
+    val c = if box_any(small_neg).to_f64() == -7.0: 4 else: 0
+    val d = if box_any(max_u).to_f64() > 1e19: 8 else: 0
+    val nil_xs: [any] = [box_any(nil)]
+    val e = if nil_xs[0].to_i64() == 0 and nil_xs[0].to_f64() == 0.0: 16 else: 0
+    val s1 = box_any(-5.5).to_u8().to_i64()
+    val s2 = box_any(300.0).to_u8().to_i64()
+    val s3 = box_any(-200.0).to_i8().to_i64()
+    val f_sat = if s1 == 0 and s2 == 255 and s3 == -128: 32 else: 0
+    val nan_any = box_any(0.0 / 0.0)
+    val n_i = if nan_any.to_i64() == 0: 64 else: 0
+    val str_f32 = box_any("2.25".to_f32()).to_f64()
+    val g = if (str_f32 * 100.0).to_i64() == 225: 128 else: 0
+    a + b + c + d + e + f_sat + n_i + g
+"#;
+    assert_eq!(run(wide_neg_and_pos), 255);
+}

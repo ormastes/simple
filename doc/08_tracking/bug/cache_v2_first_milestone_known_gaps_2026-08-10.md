@@ -1,7 +1,7 @@
 # Cache v2 / interface-compat first milestone — known gaps NOT fixed
 
 **Date:** 2026-08-10
-Status: OPEN (P2)
+Status: CLOSED 2026-11-09 (milestone ledger moved to greppable source TODOs — see final section; header corrected 2026-11-25)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Landed work:** commits for C1 (tier router), C3 (GC/leases), A3 (CompileInterfaceDigest), C7 (fixtures).
 **Plans:** `doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md`,
@@ -184,3 +184,20 @@ gap 1 in `src/compiler/35.semantics/interface/module_identity.spl`, gap 2 in
 `src/compiler/35.semantics/interface/compile_interface.spl`, and gap 4 in
 `src/compiler/80.driver/cache/gc/admission.spl`. Gap 5 was closed 2026-11-05.
 Gaps 6 and 7 are plan and verification items (plan §2b, and a bootstrap re-run).
+
+## Header correction 2026-11-25 (work/p2w1-aj-20261125)
+
+The body was closed 2026-11-09 but the status header still read `OPEN (P2)`;
+header now matches the body. Closure evidence re-verified by source inspection
+on `origin/release/1.0.0` (21e831c0a9b):
+
+- `TODO(cache_v2_first_milestone_known_gaps_2026-08-10 gap 1)` present at
+  `src/compiler/35.semantics/interface/module_identity.spl:12`.
+- `... gap 2)` present at `src/compiler/35.semantics/interface/compile_interface.spl:15`.
+- `... gap 4)` present at `src/compiler/80.driver/cache/gc/admission.spl:101`.
+- `module_identity.spl` header confirms `abi_interface_digest` is now a real
+  typed public ABI digest (gap 1 partially landed; semantic/link digests stay
+  placeholder-v0 under the TODO).
+- Gap 5 closure (2026-11-05, lease liveness) and gaps 6/7 as plan/bootstrap
+  items stand as recorded; no spec re-run — the pinned seed at HEAD rejects
+  `@representation_boundary` repo-wide, so verification is inspection-only.

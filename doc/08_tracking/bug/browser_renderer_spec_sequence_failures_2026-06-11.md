@@ -1,5 +1,22 @@
 # browser_renderer_spec — 22 residual failures (sequence-dependent + :has(> ) direct-child)
 
+## Triage 2026-11-25 — source-level fixes confirmed present; full-spec re-run environment-blocked on this host
+
+(work/p2w1-af-20261125, release/1.0.0, Windows.) Code inspection confirms the
+two fixed clusters from the 2026-11-05 lane are in this tree:
+`normalize_child_combinators`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl:2150`)
+is paren-depth/quote-aware (combinators only split at depth 0), and
+`parse_color`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:1698`)
+decodes `#RGBA`/`#RRGGBBAA` with a real alpha byte. The remaining failures per
+the 2026-11-05 bisect are Rust-seed JIT miscompilations in the large
+compilation unit, not renderer state. A full-spec re-run is not possible on
+this host: the 2026-09-13 measurement on Windows already hit
+`reason=outer-bound-timeout budget_ms=930000` for this 98+-test spec, and the
+release/1.0.0 pinned seed additionally rejects `@representation_boundary` at
+HEAD. Left OPEN; remedy unchanged (self-hosted binary or seed JIT fix).
+
 ## Not closed 2026-09-13 — still open; re-verification blocked on this host
 
 - **measured** `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`

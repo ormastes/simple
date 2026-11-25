@@ -444,6 +444,34 @@ pub(crate) fn array_push_value(arr: &[Value], item: Value) -> Value {
     Value::array(result)
 }
 
+/// Shared array sum semantics for direct (`interpreter_method`) and chained
+/// (`interpreter_helpers::method_dispatch`) receivers.
+pub(crate) fn sum_array_values(arr: &[Value]) -> Value {
+    let mut total: i64 = 0;
+    let mut ftotal = 0.0f64;
+    let mut has_float = false;
+    for item in arr {
+        match item {
+            Value::Int(n) => total = total.wrapping_add(*n),
+            Value::UInt { value, .. } => total = total.wrapping_add(*value as i64),
+            Value::Float(f) => {
+                has_float = true;
+                ftotal += *f;
+            }
+            Value::Float32(f) => {
+                has_float = true;
+                ftotal += *f as f64;
+            }
+            _ => {}
+        }
+    }
+    if has_float {
+        Value::Float(total as f64 + ftotal)
+    } else {
+        Value::Int(total)
+    }
+}
+
 /// Handle Array methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_array_methods(
@@ -748,29 +776,7 @@ pub fn handle_array_methods(
             // result to float(int_sum) + float_sum, as `rt_array_sum` does
             // (floats were skipped too, so `[1.5, 2.25].sum()` was 0).
             // doc/08_tracking/bug/interp_unsigned_array_sum_returns_zero_2026-11-23.md
-            let mut total: i64 = 0;
-            let mut ftotal = 0.0f64;
-            let mut has_float = false;
-            for item in arr {
-                match item {
-                    Value::Int(n) => total = total.wrapping_add(*n),
-                    Value::UInt { value, .. } => total = total.wrapping_add(*value as i64),
-                    Value::Float(f) => {
-                        has_float = true;
-                        ftotal += *f;
-                    }
-                    Value::Float32(f) => {
-                        has_float = true;
-                        ftotal += *f as f64;
-                    }
-                    _ => {}
-                }
-            }
-            if has_float {
-                Value::Float(total as f64 + ftotal)
-            } else {
-                Value::Int(total)
-            }
+            sum_array_values(arr)
         }
         "index_of" => {
             let needle = args

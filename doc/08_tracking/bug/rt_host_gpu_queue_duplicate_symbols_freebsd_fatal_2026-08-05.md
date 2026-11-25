@@ -115,6 +115,19 @@ already superseded by the time this doc's fix landed.
   present. Sabotage/revert re-verified green (2 examples, 0 failures) and red
   (1 of 2 failed) against this spec directly.
 
+## Verification note 2026-11-25 (release/1.0.0 tip, worktree wt-p2w4-aj)
+
+STALE-CLOSED confirmed by code inspection: `src/compiler_rust/runtime/build.rs`
+contains no literal `"runtime_native.c"` C-source entry (grep for the quoted
+name returns zero hits), and the regression guard spec
+`test/01_unit/compiler/backend/runtime_native_gpu_stub_duplicate_symbol_guard_spec.spl`
+exists at the release/1.0.0 tip. Live re-execution of the guard spec is
+environment-blocked on this Windows host: the pinned `bin/simple.exe` (Rust
+seed v1.0.0-rc.1) rejects the `@representation_boundary` decorator added
+tree-wide by cfd89933699, so `bin/simple.exe test` fails at HEAD independent
+of this bug. The FreeBSD in-guest link verification of 2026-08-05 stands;
+verified by inspection here, limit stated.
+
 ## Verification once fixed — CONFIRMED on real FreeBSD hardware proxy
 
 Re-ran `scripts/check/check-freebsd-wm-seam-refusal.shs` inside a real

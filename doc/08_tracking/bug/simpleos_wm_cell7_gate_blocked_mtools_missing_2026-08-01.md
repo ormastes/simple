@@ -247,3 +247,16 @@ Initial value is `reason=not-run` (line 782). QEMU is launched with OVMF pflash
   `config/freestanding_fabricated_stub_baseline.sdn` ratchet, which is what
   actually refuses new nil-returning stubs.
 
+
+## Triage 2026-11-25 (P3 fleet, release/1.0.0) — SKIP, Linux-host provisioning
+
+Classification confirmed: this is a host-provisioning gap (`mtools` missing on
+the Linux gate host, `sudo` unavailable to the agent), not a product defect,
+and the gate must keep failing closed. Not actionable from this Windows fleet
+host: the gate additionally requires qemu-system-x86_64, grub-mkstandalone,
+and OVMF, none of which exist here. The 2026-09-16 normalization header above
+("no resolution evidence found in the body") misrepresents the record — the
+body already contains the proved root cause and the fix (install mtools).
+Remaining action is owner-side provisioning on the Linux gate host, then a
+re-run per "Next step" above. No code or gate change made; the "Do not"
+constraints stand.

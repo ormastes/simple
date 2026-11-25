@@ -52,3 +52,14 @@ access are still required before native ivshmem discovery can be verified.
 No hardcoded ECAM address, synthetic vendor ID, or zero-base fallback is an
 acceptable substitute. The current self-relocation direction and possible
 DTB-byte overlap are separate boot constraints; saving x0 does not fix them.
+
+## Triage 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+SKIP — environment-blocked, status OPEN is accurate. This is an ARM64 QEMU /
+PCI ECAM lane: reproduction requires a QEMU aarch64 VM booting a static
+AArch64 ELF with an ivshmem device, and the remaining work (checked boot-memory
+range owner, FDT `reg`/`bus-range`/`ranges` decoder, descriptor-backed
+ECAM/BAR access) is kernel/driver code that cannot be exercised on this
+Windows host. The 2026-11-03 source-review state stands: the x0-retention
+startup prerequisite is landed, the bug is genuinely still OPEN, and no
+hardcoded-ECAM or synthetic-vendor shortcut is acceptable. No code change made.

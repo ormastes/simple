@@ -840,12 +840,35 @@ impl Lowerer {
             }
 
             Node::Assignment(assign) => {
+                // A local named `vec` must win over the SIMD literal form:
+                // the parser reads `vec[...]` as Expr::VecLiteral without
+                // scope knowledge, so `vec[i] = x` reached MIR as a
+                // VecLiteral lvalue and failed with "complex lvalue".
+                // When a single-element literal's `vec` is bound, rewrite
+                // the target to an ordinary index assignment.
+                // Bug: local_named_vec_makes_index_assignment_a_vec_literal_lvalue_2026-09-05
+                let vec_index_target;
+                let assign_target = if let ast::ast::Expr::VecLiteral(elements) = &assign.target {
+                    if elements.len() == 1
+                        && (ctx.lookup("vec").is_some() || self.globals.contains_key("vec"))
+                    {
+                        vec_index_target = ast::ast::Expr::Index {
+                            receiver: Box::new(ast::ast::Expr::Identifier("vec".to_string())),
+                            index: Box::new(elements[0].clone()),
+                        };
+                        &vec_index_target
+                    } else {
+                        &assign.target
+                    }
+                } else {
+                    &assign.target
+                };
                 // MUST run BEFORE lowering the target: lowering a bare, unbound
                 // identifier in assignment position is exactly what mints the
                 // fresh local that shadows the receiver's field and swallows the
                 // write. Checking afterwards would inspect the already-created
                 // local and see nothing wrong.
-                if let ast::ast::Expr::Identifier(name) = &assign.target {
+                if let ast::ast::Expr::Identifier(name) = assign_target {
                     self.check_implicit_self_field_assignment(name, ctx)?;
 
                     // Implicit local declaration: a PLAIN `n = 5` whose target is a
@@ -885,7 +908,7 @@ impl Lowerer {
                     }
                 }
 
-                if let ast::ast::Expr::FieldAccess { receiver, field } = &assign.target {
+                if let ast::ast::Expr::FieldAccess { receiver, field } = assign_target {
                     if compound_assign_binop(assign.op).is_none() {
                         if let Some(setter) = self.setter_forward_name(receiver, field, ctx) {
                             let call = ast::ast::Expr::MethodCall {
@@ -914,7 +937,7 @@ impl Lowerer {
                                     vec![HirStmt::Let { local_index: rhs_local, ty: rhs_ty, value: Some(value) }];
                                 let combined = ast::ast::Expr::Binary {
                                     op,
-                                    left: Box::new(assign.target.clone()),
+                                    left: Box::new(assign_target.clone()),
                                     right: Box::new(ast::ast::Expr::Identifier(rhs_name)),
                                 };
                                 let call = ast::ast::Expr::MethodCall {
@@ -930,7 +953,7 @@ impl Lowerer {
                     }
                 }
 
-                let target = self.lower_expr(&assign.target, ctx)?;
+                let target = self.lower_expr(assign_target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
 
                 // E1052: Check for self mutation in immutable fn method

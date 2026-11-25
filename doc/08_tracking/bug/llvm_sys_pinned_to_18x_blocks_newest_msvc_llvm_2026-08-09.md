@@ -78,3 +78,26 @@ an environment/toolchain constraint rather than a silent-wrong-result defect.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: Rust seed Cargo dependency pin (Cargo.toml), needs a seed rebuild/toolchain change to verify. No change made.
+
+## Verification 2026-11-25 (P3 fleet, release/1.0.0) — STALE, pin migrated
+
+The 18.x pin described above no longer exists in the tree:
+
+- `src/compiler_rust/compiler/Cargo.toml:147,154` now reads
+  `inkwell = { path = "../vendor/inkwell", version = "0.9", optional = true,
+  features = ["llvm23-1-force-static"] }` (and `llvm23-1-force-static,
+  target-riscv` for the riscv lane) — the workspace was migrated to
+  inkwell 0.9 / LLVM 23.1, newer than the 21.1.3 this bug asked for.
+- The vendored `src/compiler_rust/vendor/llvm-sys` (180.0.0) and
+  `vendor/inkwell` crates are gone from the tree (`git ls-files
+  src/compiler_rust/vendor/ | grep -E 'llvm-sys|inkwell'` → only
+  `aya-llvm-sys`, an unrelated eBPF crate). `Cargo.lock` has no `llvm-sys`
+  entry; the `llvm = ["inkwell"]` feature (line 39) is unchanged in shape.
+
+Verification limit: per fleet rules no cargo/rust build was run; this is
+manifest/lockfile inspection only, which is sufficient to show the 18.x pin
+itself is gone. Whether the LLVM-23 seed build is green on all three host
+platforms is tracked by the bootstrap lane, not this bug.
+
+**Status:** RESOLVED (llvm-sys 18.x pin removed; workspace on inkwell 0.9 /
+LLVM 23.1).

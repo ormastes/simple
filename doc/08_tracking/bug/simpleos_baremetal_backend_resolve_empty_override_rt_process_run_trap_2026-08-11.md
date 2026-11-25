@@ -1,5 +1,20 @@
 # SimpleOS baremetal backend-resolve empty-override trap — partial fix, deeper trap remains
-## Open 2026-09-16 — needs owner triage
+
+## Triage 2026-11-25 — deferred to the SimpleOS QEMU/bootstrap lane (status unchanged: OPEN)
+
+Triaged in the P2 ledger pass on worktree `wt-p2w5-al` (release/1.0.0 HEAD
+`ae1572aeb67`). Root causes (a) and (b) are fixed and serial-verified; the
+root-cause (c) Qualcomm x86_64 source fix is in-tree and its regression spec
+`test/01_unit/lib/gpu/engine2d/backend_qualcomm_spec.spl` was verified
+20/20 on 2026-11-12 (see "Fix verification" below). What remains — the
+baremetal serial gate proving boot progress past the Qualcomm probe — is a
+QEMU/OVMF real-firmware run gated on an admitted Stage-4 bootstrap artifact,
+which this Windows host lane must not produce (no cargo/rust builds, no
+bootstrap, pinned seed binary only). Not closable here; the "needs owner
+triage" header is superseded by this note. Owner lane: SimpleOS
+visible-display evidence gate once Stage 4 lands.
+
+## Open 2026-09-16 — needs owner triage (superseded by 2026-11-25 triage above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

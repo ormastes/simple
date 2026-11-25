@@ -1,6 +1,22 @@
 # Native dynload build drops static initializers on module-level `var` globals
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Still environment-blocked, not stale-checked-closable. The defect lives on
+the SimpleOS x86-64 `--mode dynload` native-build lane (Cranelift,
+`-target x86_64-unknown-none`, QEMU evidence harness
+`scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs`). The
+2026-07-15 resolution below claims the pure-Simple Cranelift dynload adapter
+now applies scalar initializers, but the doc itself records that the strict
+initialization/mutation execution proof was never run, and running it
+requires the SimpleOS native-build + QEMU lane — unavailable on this Windows
+host (pinned Rust seed only, no bootstrap). Verification by code inspection
+cannot establish load-time initializer application on this path. Left OPEN;
+the source workaround (runtime re-seeding in `wm_entry.spl`) remains in
+force. Next step unchanged: execute the focused initialization/mutation
+regression on the SimpleOS dynload lane.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

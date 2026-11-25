@@ -1,11 +1,37 @@
 # Class reference semantics diverge: interpreter value-copies class fields; JIT crashes on optional class field
+## Closed 2026-11-25 — does not reproduce on the current pinned seed
+
+**Status: CLOSED (stale).** Re-run 2026-11-25 on `origin/release/1.0.0`
+(`3e04c857a56`) with the tracked `bin/simple.exe` (38,403,072 bytes, Rust
+seed v1.0.0-rc.1 — a NEWER seed than the md5 `ed53cc5f…` one the truth table
+below was measured on): the entry's own fixture
+`test/fixtures/repro/compiler/class_identity/class_field_reference_semantics_repro.spl`
+prints **REF for every case on BOTH engines**:
+
+```
+1 field<-original      = REF
+1b original<-field     = REF
+2 nested               = REF
+3 array elem           = REF
+4 fn param             = REF
+6 field reassign       = REF
+5 optional field       = REF
+```
+
+(identical output under the default JIT lane and
+`SIMPLE_EXECUTION_MODE=interpret`; no crash on case 5). Both defects — the
+interpreter value-copy and the JIT optional-class-field nil crash — were in
+the out-of-scope Rust seed and are fixed in the seed now pinned on
+release/1.0.0. The historical truth table below is kept as the record of the
+defect on the old seed.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P1)
+- Status: OPEN (P1) — superseded by the 2026-11-25 closure above
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to the out-of-scope Rust seed; every reachable pure-Simple candidate interpreter was
   checked and does not share this defect, but none is buildable/runnable in this tree today, so no

@@ -21,19 +21,25 @@ describe "unresolved MIR method fail-fast guard":
         # @req REQ-SSPEC-COMPILER
         step("marks unresolved method placeholders fatal before bootstrap codegen")
         val source = read_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
-        val fatal_call = "self.error_fatal(\"unresolved method call: {method}\", nil)"
+        val fatal_call = "self.error_fatal(\"unresolved method call: {method} route={route} {lookup_detail}\", Some(receiver.span))"
         val old_nonfatal_call = "self.error(\"unresolved method call: {method}\", nil)"
         val panic_call = "b.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())"
         val unreachable_const = "b.emit_const(temp, MirConstValue.Int(0), MirType.i64())"
 
         val fatal_pos = source.index_of(fatal_call)
-        val panic_pos = source.index_of(panic_call)
-        val const_pos = source.index_of(unreachable_const)
+        # An earlier fail-closed arm (erased-type-param ownership transfer,
+        # ~line 2268) emits the identical rt_panic call shape, so the
+        # panic/const ordering must be searched AFTER the fatal call rather
+        # than from the top of the file.
+        val after_fatal = source.substring(fatal_pos, source.len())
+        val panic_pos = after_fatal.index_of(panic_call)
+        val const_pos = after_fatal.index_of(unreachable_const)
 
         expect(source).to_contain(fatal_call)
         expect(source.contains(old_nonfatal_call)).to_equal(false)
         expect(fatal_pos).to_be_greater_than(-1)
-        expect(fatal_pos).to_be_less_than(panic_pos)
+        expect(panic_pos).to_be_greater_than(-1)
+        expect(const_pos).to_be_greater_than(-1)
         expect(panic_pos).to_be_less_than(const_pos)
 
     it "rejects malformed gpu atomic compare-and-swap calls without a phantom builder method":

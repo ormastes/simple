@@ -326,3 +326,31 @@ step through a ClassInstance (regressed `test/01_unit/app/tooling/test_db_compil
 build halted because C: free space fell below the 15 GB lane floor.
 Collateral so far (100 class-heavy specs, base vs new seed, interpreter): only
 that one regression; 3 specs improved.
+
+## Verified FIXED 2026-11-25 (release/1.0.0 pinned seed)
+
+The 2026-11-03 REOPENED note asked for a verdict from a fresh binary, not the
+stale hardcoded seed. Measured on the release/1.0.0 pinned binary
+(`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1, Windows), which
+contains the `Value::ClassInstance` shared-identity work: this doc's exact
+"no function-call boundary" minimal repro now prints **777 on BOTH engines**:
+
+```
+bin/simple.exe run repro.spl                              -> 777   (JIT)
+SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run ...  -> 777   (tree-walk, was 42)
+```
+
+The interpret-lane mutation drop this entry characterizes no longer
+reproduces on the current seed; the two lanes agree. Spec-route confirmation
+(`test/01_unit/compiler/interpreter/class_ref/class_element_reference_spec.spl`)
+was not possible in this lane — the pinned seed rejects the
+`@representation_boundary` decorator present at release/1.0.0 HEAD, so
+`bin/simple.exe test` fails repo-wide before reaching any spec — so this
+verdict rests on the direct both-engines probe of the doc's own repro, which
+is the defect's exact shape and lane. The self-hosted pure-Simple lane remains
+unverified on this host, as before. The 2026-11-03 open item (3-level nested
+receiver mutation, `projections_live` hunk never built) is NOT covered by this
+verdict and stays open as recorded above.
+
+**Status: RESOLVED (2026-11-25)** for the class-in-array interpret-mode
+mutation drop on the current release seed.

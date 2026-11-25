@@ -1,5 +1,19 @@
 # `crypto_sffi.random_hex` degrades to an empty string on CSPRNG failure, and `random_salt()` inherits it
 
+**Verification 2026-11-25 (work/p2w1-af-20261125, release/1.0.0, Windows,
+Rust seed v1.0.0-rc.1):** fix re-verified by source inspection and execution.
+`src/lib/nogc_sync_mut/io/crypto_sffi.spl` — `random_hex` (:78) and
+`random_salt` (:86) return `text?` and route through `checked_entropy_hex`
+(:60), which returns `None` on provider nil or on `entropy_hex_valid_for`
+failure; no `?? ""` fail-open remains (the `?? ""` at :63 only normalises an
+already-present value for validation). Ran `SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl
+--mode=interpreter` -> **10 total, 10 passed, 0 failed** (and
+`secure_entropy_hex_validator_spec.spl` -> 1/1). (Run required a local,
+reverted strip of `@representation_boundary` decorator lines — the
+release/1.0.0 source/binary inconsistency; no source was changed.) Status:
+**RESOLVED / CLOSED**, confirmed.
+
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 - **Date:** 2026-08-08
@@ -127,3 +141,26 @@ anywhere in the file. `bin/simple test
 test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl`
 -> `10 examples, 0 failures`, `PASS`. Status header updated from `OPEN (P2)`
 to `RESOLVED (2026-09-13)`; no further code change needed.
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Re-verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+the 2026-09-13 RESOLVED closure stands.
+
+- `src/lib/nogc_sync_mut/io/crypto_sffi.spl:78-87` — `random_hex` and
+  `random_salt` both return `text?` and route through
+  `checked_entropy_hex(_random_hex_raw(length), length)`.
+- `checked_entropy_hex` (`:60-66`) returns `None` when the provider yields
+  nil and when `entropy_hex_valid_for` rejects the value (wrong length,
+  non-lowercase-hex, or all zeros — validator at `:44-58`). The `?? ""` at
+  `:63` sits after the `raw.is_none()` early return, so it only unwraps a
+  known-`Some`; the fail-open path from this bug is gone.
+- Both regression specs exist at HEAD:
+  `test/01_unit/lib/nogc_sync_mut/io/secure_entropy_hex_validator_spec.spl`,
+  `test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl`.
+- Spec re-run is environment-blocked on this host: the pinned Rust seed
+  v1.0.0-rc.1 rejects `@representation_boundary` decorators at HEAD
+  (repo-wide, unrelated to this bug). The green 1/1 and 10/10 runs recorded
+  in the 2026-09-13 re-checks stand as the executed evidence.
+
+No code change needed; doc header "Status: RESOLVED (2026-09-13)" is accurate.

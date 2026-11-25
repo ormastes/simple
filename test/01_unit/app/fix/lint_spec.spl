@@ -5,11 +5,11 @@
 #   L:spipe_missing_docstrings   — Add template docstring to describe/context
 #   L:spipe_manual_assertions    — Replace manual if/fail with expect()
 #
-# These rules are implemented in std.common.tooling.easy_fix.rules
+# These rules are implemented in std.tooling.easy_fix.rules_lint
 # and comprehensively tested in test/feature/app/easy_fix_rules_spec.spl
 
-use std.common.tooling.easy_fix.types.*
-use std.common.tooling.easy_fix.rules.*
+use std.tooling.easy_fix.types.{easyfix_replacements}
+use std.tooling.easy_fix.rules_lint.{check_print_in_test_spec, check_spipe_missing_docstrings, check_spipe_manual_assertions}
 
 describe "Spec file lint rules":
     context "print_in_test_spec":
@@ -28,6 +28,27 @@ describe "Spec file lint rules":
             val source = "describe \"X\":\n    it \"y\":\n        expect true\n"
             val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
             expect(fixes.len() >= 1).to_equal(true)
+
+        it "inserts the docstring after the describe header, never inside the name string":
+            # Regression for doc/08_tracking/bug/
+            # simple_fix_spipe_missing_docstrings_corrupts_describe_string_literal_2026-08-07.md:
+            # the fixer once injected the template into the middle of the
+            # `describe "..."` string literal instead of after the header line.
+            val source = "describe \"KernelSessionManager\":\n    it \"creates a session with a default mode\":\n        expect(1).to_equal(1)\n"
+            val fixes = check_spipe_missing_docstrings(source, "kernel_session_manager_spec.spl")
+            expect(fixes.len()).to_equal(1)
+            val reps = easyfix_replacements(fixes[0])
+            expect(reps.len()).to_equal(1)
+            val rep = reps[0]
+            # Pure insertion at the byte right after the describe header's newline.
+            expect(rep.start).to_equal(33)
+            expect(rep.end).to_equal(33)
+            expect(source.slice(0, rep.start).ends_with("describe \"KernelSessionManager\":\n")).to_equal(true)
+
+        it "leaves a describe that already has a docstring untouched":
+            val source = "describe \"X\":\n    \"\"\"\n    existing\n    \"\"\"\n    it \"y\":\n        expect(1).to_equal(1)\n"
+            val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
+            expect(fixes.len()).to_equal(0)
 
     context "spipe_manual_assertions":
         it "detects manual assertions":

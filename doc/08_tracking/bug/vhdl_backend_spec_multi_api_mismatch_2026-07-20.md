@@ -1,4 +1,26 @@
 # vhdl_backend_spec: multiple genuine API mismatches after import/rename fixes (22 failures remain)
+## Triage 2026-11-25 — still OPEN; repro path updated, 24 failures at release/1.0.0 HEAD
+
+The filed repro target `.spipe_matchers_vhdl_backend_spec.spl` was a
+generated artifact, untracked in `83ae6d31588`; the live spec is
+`test/01_unit/compiler/backend/vhdl_backend_spec.spl`. Re-run at
+release/1.0.0 HEAD (Windows x86_64, pinned `bin/simple.exe` v1.0.0-rc.1,
+`--mode=interpreter`; the 152 `@representation_boundary` lines the seed
+rejects were temporarily stripped for the probe and restored after):
+**58 examples, 34 passed, 24 failed**, exit 1. Movement vs the filed 22:
+the dead-import and `lower_module`-missing causes are gone at HEAD
+(`src/hardware/fpga_linux/` now exists so bare `hardware.` resolves, and
+`HirLowering.lower_module` exists at
+`src/compiler/20.hir/hir_lowering/_Items/module_build.spl:401`), but 6
+examples still hit `class \`VhdlEntity\` has no field named \`vhdl\``
+(the struct at `src/compiler/70.backend/backend/vhdl_backend.spl:243`
+remains `{name, port_count}`), plus assertion-value mismatches and a
+`VHDL combinational local ... must be a fixed scalar or record` lowering
+rejection. Still genuine production-side VHDL-backend API mismatches, not
+test typos; left OPEN for an owner per the original assessment.
+
+### Prior header (2026-09-16)
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

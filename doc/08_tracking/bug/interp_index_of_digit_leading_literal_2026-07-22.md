@@ -283,3 +283,16 @@ other agents are concurrently editing compiler lowering files this session —
 would repeat the already-rejected approach and risks regressing `print`/`??`
 for all values, per the explicit prior-session finding. This entry is a
 status re-confirmation only, landed as a doc-only change.
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — CLOSED (obsolete) stands
+
+Re-probed on the pinned tracked binary (`bin/simple.exe`, 38,403,072 B, Rust
+seed v1.0.0-rc.1), both engines, using the entry's own decisive shape
+(`fn make_opt(v: i64) -> i64?: return v`):
+
+- JIT (default `run`): `make_opt(3) == nil` → `false`; `make_opt(3) ?? -99`
+  → `3`; `if val y = make_opt(3)` binds `3`; `"abcdef".index_of("d")` → `3`.
+- Interpreter (`SIMPLE_EXECUTION_MODE=interpret`): identical results.
+
+Payload 3 round-trips through `== nil`, `??`, and `if val` on both lanes —
+the flat sentinel-3 lane is gone, confirming the 2026-11-02 obsolete-closure.

@@ -718,6 +718,10 @@ list.last                     # same as list.last()
 text.trim.upper.split(",")    # split needs parens (has arg)
 ```
 
+`.first`/`.last` return a raw nilable `T?` (nil when the collection is
+empty), not an `Option<T>` — test presence with `.?` or `!= nil`, not
+`.is_some()`.
+
 ### Combining `.?` with No-Paren
 
 ```text
@@ -747,7 +751,7 @@ if val tags = user?.profile?.tags.?:
 | `result.is_ok()` | `result.ok.?` | `ok` returns Option |
 | `result.is_err()` | `result.err.?` | `err` returns Option |
 | `list.is_empty()` | `not list.?` | Empty = not present |
-| `list.first().is_some()` | `list.first.?` | No-paren + existence |
+| `list.first != nil` | `list.first.?` | No-paren + existence — `.first`/`.last` return a raw nilable `T?` (nil when empty), not `Option<T>`, so they have no `.is_some()` |
 
 ---
 

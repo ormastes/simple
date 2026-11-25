@@ -1,7 +1,7 @@
 # Native codegen: tuple stack-spill clobbered by intervening method call
 
 - **ID:** native_tuple_spill_clobber_across_call_2026-07-19
-- **Status:** SOURCE FIXED (staged platform execution pending; workaround remains)
+- **Status:** SOURCE FIXED (verified in tree 2026-11-25; staged platform execution pending; workaround remains)
 - **Severity:** high (silent memory corruption → wild pointer dereference)
 - **Lane:** native-build (cranelift, x86_64-unknown-none, --entry-closure --mode dynload)
 
@@ -62,3 +62,29 @@ Cranelift object successfully (`run_rc=1`, the probe's true result). A bounded
 current-source one-case rebuild with a newer pure-Simple Stage3 compiler hit
 its 180-second cap with an empty build log and no artifact, so it was not
 retried and is not counted as staged platform execution.
+
+## Verification note — 2026-11-25 (release/1.0.0)
+
+Verified by code inspection on the release/1.0.0 tree (the native lane this
+bug lives on — cranelift `--entry-closure --mode dynload` baremetal — cannot
+be exercised on this Windows host):
+
+- The Cranelift backend no longer has a stack-slot fallback aggregate branch
+  for tuple literals: `MirInst::TupleLit` lowers to `compile_tuple_lit` →
+  `compile_collection_lit(..., &TUPLE_SPEC)`
+  (`src/compiler_rust/compiler/src/codegen/instr/mod.rs:777`,
+  `instr/collections.rs:52-56,119-126`), which heap-allocates via
+  `rt_tuple_new` and fills via `rt_tuple_set` — the exact ownership the
+  "Root cause" section prescribed (mirroring LLVM).
+- The regression described under "Regression" is in the tree verbatim:
+  `cross_target_tuple_parts` returning `(17, 37, true)` and
+  `cross_target_tuple_clobber` returning `(91, 99, false)` with the
+  intervening call in `cross_target_tuple_return_survives_call`
+  (`test/fixtures/native_crossmodule_result_u8/main.spl:200-211`), plus the
+  smoke-matrix generator `write_case_tuple_return_across_call`
+  (`scripts/check/native-smoke-matrix.shs:348`).
+
+The "staged platform execution pending" caveat stands — no fresh staged
+native run was performed here — but the source fix and its regression
+coverage are confirmed present, so this entry needs no further source work;
+only the platform-execution receipt remains.

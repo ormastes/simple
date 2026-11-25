@@ -1,5 +1,21 @@
 # Web Infra Interpreter Blockers — 2026-06-04
 
+## Verification 2026-11-25 (worktree wt-p2w6-ah, release/1.0.0 HEAD f3fb8f24dc9)
+
+- **measured (live probe, Rust seed `bin/simple.exe run`,
+  `SIMPLE_EXECUTION_MODE=interpret`, Windows)** — blocker 3 (`Unknown type: T`
+  on generics) and blocker 8 (`? operator requires Result or Option type, got
+  object`) no longer reproduce: a probe declaring `class Box<T>` with a
+  `-> T` method returns the right value (`Box(value: 7).get()` → `7`), and
+  `parse_num("ok")?` on a `Result<i64, text>` unwraps to `42`.
+- **not re-exercised** — blocker 14 (Cranelift struct-field offset codegen in
+  `WebApp.start()`); verifying it needs a full native webapp build, out of
+  scope for this lane. The "Fixed This Session" items (1, 2, 9, 11, 12, 13)
+  were not re-run; closure still rests on their recorded fixes plus the probe
+  above.
+- **limitation** — `bin/simple.exe test` is blocked repo-wide at this HEAD
+  (seed rejects `@representation_boundary`), so no spec evidence.
+
 ## Closed 2026-09-13 — Recorded fixed in the entry's own "Fixed This Session" section
 
 - **inferred** The body carries a Fixed-This-Session section covering the reported interpreter blockers; the 2026-06-11 triage sweep already classified it `likely-fixed`.

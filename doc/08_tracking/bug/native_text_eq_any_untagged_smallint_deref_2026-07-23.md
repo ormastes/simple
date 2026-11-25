@@ -46,3 +46,15 @@ positive and negative boxed small integers before any C-string dereference.
 The focused native-runtime test checks the original `41 << 3` case in both
 operand orders.
 
+
+## Verification note (2026-11-25, P2 ledger sweep)
+
+STALE-CLOSED confirmed by code inspection. `rt_interp_cstr`
+(`src/runtime/runtime_native.c:4846-4850`) rejects signed candidates below
+`0x10000` (`int64_t` compare, so negative boxed ints are covered too) before
+any C-string dereference, and the focused native-runtime check
+`src/runtime/test/rt_text_eq_any_untagged_smallint_selfcheck.c` exercises the
+original `41 << 3 = 0x148` case in both operand orders (probes P2/P3) plus
+the equal-smallint case (P4). Running the selfcheck needs a hosted runtime
+build, which is not available on this Windows host; closure rests on the
+2026-09-16 classification plus this source check. Kept closed.

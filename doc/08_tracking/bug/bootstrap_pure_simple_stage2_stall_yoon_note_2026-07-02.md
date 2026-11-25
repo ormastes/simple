@@ -37,3 +37,16 @@ hir-lower rather than slowly progressing.
 
 - Try the suggested alternatives: shrink `--source`, or the in-process
   backend; or rebuild + deploy from a host with a working LLVM dev setup.
+
+## Triage 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+SKIP — needs a full `--pure-simple` bootstrap, which is out of scope and
+prohibited in this lane (no seed/bootstrap builds on this host; the tracked
+`bin/simple.exe` is used as-is). The record is also host-specific
+(yoon-note, x86_64-linux, July 2026) and predates months of bootstrap-lane
+work, so its "blocks redeploying bin/simple on this host" framing may no
+longer describe any current host — but confirming that requires running the
+very bootstrap this lane cannot run. Status left as filed; the next agent
+with a working bootstrap host should re-run
+`scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple` once and either
+close this or re-file with current timings. No code change made.

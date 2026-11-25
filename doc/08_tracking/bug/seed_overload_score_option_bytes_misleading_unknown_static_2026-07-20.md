@@ -81,3 +81,16 @@ misleading error above, which cost a WC-archaeology detour before the
 mean "argument type mismatch", and earlier greens in a shared WC may have been
 native-build **cache replays** (`[NATIVE] cache hit`) — always re-verify with
 `SIMPLE_NATIVE_BUILD_CLEAN=1`.
+
+## Verification 2026-11-25 (p2w5-ag lane) — fix confirmed present on release/1.0.0
+
+Both seed-side fixes are present at release/1.0.0 HEAD:
+`src/compiler_rust/compiler/src/interpreter_method/special/objects.rs:77-90`
+unwraps `Option::Some` in `constructor_value_matches_type` before scoring, and
+:440 emits `no overload of {class}.{method} matches argument types (...)` when
+name-matching candidates are all rejected by scoring — never "unknown static
+method". Regression tests exist in
+`src/compiler_rust/compiler/tests/interpreter_constructor_test.rs` (:178
+Option-wrapped-array scoring, :199-218 no-matching-overload diagnostic).
+`cargo test` is forbidden in this lane (no Rust builds), so this is a
+code-inspection confirmation of the 2026-11-04 fix record, not a re-run.

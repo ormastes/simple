@@ -107,3 +107,14 @@ Separate defects observed while verifying (not fixed here):
   `vulkan_runtime_init_nvidia_create_device_contention_2026-11-13.md`.
 - `backend_vulkan_rect_list_spec.spl` is red on this host
   (`rect_list_device_dispatch_count` 0, expected 1).
+
+## Verification note (2026-11-25, work/p2w2-aa-20261125)
+
+Confirmed the 2026-11-13 re-verification artifacts still stand at
+release/1.0.0 HEAD (`1861a186628`): both regression fence specs exist
+(`test/03_system/ui_showcase/showcase_vulkan_software_parity_spec.spl`,
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_showcase_frame_parity_spec.spl`).
+No re-run attempted: this Windows host has no Vulkan parity lane and the pinned
+tracked seed cannot run specs at HEAD (`@representation_boundary` rejection).
+Status header ("not reproducible; no fix in this change") remains accurate;
+record stays closed-as-not-reproducible with the fence specs in place.

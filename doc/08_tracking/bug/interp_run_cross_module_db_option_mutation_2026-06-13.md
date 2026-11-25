@@ -83,3 +83,19 @@ Regression fixture: `test/fixtures/interp_nil_option/nil_option_eq.spl`.
 ## Status
 FIXED 2026-06-14 — interpreter `==`/`!=`/`is` now bridge the `nil` literal and
 `Option::None`. db RAM-insert workload runs in interpreter/script mode.
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — FIXED stands
+
+Re-probed the confirmed root cause (interpreter `==`/`!=` bridging the `nil`
+literal and `Option::None`) on the pinned tracked binary (`bin/simple.exe`,
+38,403,072 B, Rust seed v1.0.0-rc.1) with a `fn maybe(v: i64) -> i64?` that
+returns `nil` on one path:
+
+- `maybe(-1) != nil` → `false` (returned None compares nil-like — the filed
+  defect would have printed `true` and then panicked on `.unwrap()`)
+- `maybe(5) != nil` → `true`
+
+The `db_bench_driver.spl` full re-run was not repeated (it rewrites
+`doc/09_report`/`doc/10_metrics` perf baselines as a side effect); the
+nil/None bridge it depended on is confirmed directly above. The 2026-06-14
+FIXED verdict and 2026-09-13 closure stand.

@@ -27,3 +27,22 @@ markers and exits nonzero. Exercise the no-limits tuple path and the limited
 `ProcessResult` path separately, then repair the first boundary that diverges.
 Keep the existing fail-closed summary behavior; missing evidence must never
 become a synthetic pass.
+
+## Triage 2026-11-25 (release/1.0.0 @ 64dfa6d980f, Windows host)
+
+Still OPEN; no change made. Notes for the next lane:
+
+- The required repair (a native admission probe exercising the no-limits
+  tuple path and the limited `ProcessResult` path separately, then fixing
+  the first diverging boundary) touches the Rust-seed bounded-capture
+  boundary and needs a native/bootstrap build — out of scope on this host.
+- Related work landed 2026-11-15: `da60e2106d1` ("feat(process): retain
+  bounded capture completion evidence", PR #9520) reworked the pure-Simple
+  bounded path in `src/lib/nogc_sync_mut/io/process_ops.spl` and added
+  native evidence specs (`process_capture_evidence_{linux,windows}_native_v1_spec.spl`).
+  Whether it resolves the stage4 symptom (`simple test` on
+  `stage4_smoke_gate_spec.spl` recording an empty child result) is unverified.
+- Verification on this host is blocked twice over: `bin/simple.exe test`
+  fails repo-wide at HEAD with `unknown decorator '@representation_boundary'`,
+  and `src/lib/nogc_sync_mut/io/process_ops.spl` itself carries 81 such
+  annotations, so even a `run`-lane probe of the bounded API cannot load.

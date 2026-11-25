@@ -1,8 +1,20 @@
 # Result unwrap loses receiver type during native method resolution
-## Open 2026-09-16 — needs owner triage
+## Closed — verified fixed 2026-07-16 (see Verification section); header corrected 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**Correction 2026-11-25 (p2w4-ag lane):** the 2026-09-16 banner above was
+misleading — the body's own `## Verification (2026-07-16)` section already
+records a full oracle + native verification of the fix at origin tip
+8932fcb3a148. Re-confirmed by source inspection on release/1.0.0
+(63e791180d3): MIR retains each callable's declared return type through
+erased locals via the bootstrap call-return-type registry
+(`src/compiler/50.mir/mir_data.spl:2424-2442`, consulted by
+`bootstrap_resolved_call_return_type` before the i64 fallback), which is the
+mechanism the Resolution section describes. Native re-execution is
+env-blocked on this host (pinned seed); status marked resolved on the
+existing 2026-07-16 runtime evidence plus the source confirmation.
 
 ## Symptom
 

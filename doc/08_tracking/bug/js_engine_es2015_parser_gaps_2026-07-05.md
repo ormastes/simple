@@ -1,12 +1,13 @@
 # JS engine: es2015 conformance spec was silently broken; parser gaps now exposed
-## Open 2026-09-16 — needs owner triage
+## Resolved — fix merged 2026-11-05, note 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-05
 **Spec:** `test/03_system/feature/js/es2015_conformance_spec.spl`
-**Status:** open — 13 genuine failures now visible (25 pass)
+**Status:** resolved — 38/38 (see "Resolution progress — 2026-11-05" and the
+2026-11-25 note below)
 
 ## What happened
 
@@ -93,3 +94,18 @@ unrelated to the parser; the `src/lib/common/js/engine/parser.spl` "full"
 parser and the `src/lib/nogc_sync_mut/js/engine/lexer.spl` stub were not
 touched.
 
+
+## Verification 2026-11-25 (lane p2w3-ai)
+
+The fix is in tree on release/1.0.0: commit `ac463023e92` (merged via PR
+#6789) added `let`/`const`, destructuring, template literals, spread, and
+class parsing to `src/lib/nogc_sync_mut/js/engine/parser.spl`
+(`_js_parser_var_decl_kind`, `_js_parser_object_pattern`,
+`_js_parser_template_literal_at`, `_js_parser_class_statement` all present),
+and the spec carries the restored `js_evaluates` helper and `JsLogger.new`
+construction. The 2026-11-06 ledger triage (commit `7811e6673ce`) recorded
+`es2015_conformance_spec` 38/38 on the release/1.0.0 seed. A fresh execution
+re-run in this lane is environment-blocked: the pinned `bin/simple.exe` seed
+rejects `@representation_boundary` (added tree-wide by cfd89933699), so
+`bin/simple.exe test` fails repo-wide at HEAD. Closure therefore rests on
+the recorded 2026-11-06 38/38 run plus source inspection of the fix.

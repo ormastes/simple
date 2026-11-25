@@ -1,4 +1,21 @@
 # ByteSpan.starts_with dropped from the SimpleOS kernel closure and silently replaced by a nil-returning WEAK stub
+## Triage 2026-11-25 — guards present in source; closure still gated on a seed redeploy + kernel-closure run
+
+Re-checked at `origin/release/1.0.0` HEAD `0819b116ecb`: both defences
+described below are present in the tree — the seed backstop
+(`stale_module_move_report` / `simple_module_symbol_tail` in
+`src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs`, with its
+unit tests) and the pure-Simple freestanding guard
+(`simpleos_check_no_fabricated_rt_stubs` re-exported into
+`src/compiler/70.backend/backend/llvm_native_link.spl`, including the
+`simpleos_undefined_simple_module_symbols` channel per
+`src/compiler/70.backend/verify/allocator_symbol_scan.spl:133`). What remains
+before closure is unchanged from the body's own caveat: the entry itself is
+verified only by a rebuilt seed plus a full SimpleOS WM kernel entry-closure
+run (QEMU/Linux evidence lane), neither of which is possible on this Windows
+host. Remains OPEN pending that run; not fixable further from pure-Simple
+source alone.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
+**Date:** 2026-07-28 · **Status:** RESOLVED 2026-11-25 (fixed by `6305afbbaa8`; see verification note at end) · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
 to `src/app/cli/**`.
 
@@ -90,3 +90,19 @@ Needs an owner to either implement the two functions in
 the four call sites assume), or remove the two `export` lines from
 `analysis/mod.spl` and rework the four call sites. Not guessed at here.
 
+
+## Verification 2026-11-25 (p2w5-ag lane) — RESOLVED, closing
+
+Both functions now exist with real bodies in
+`src/app/doc_coverage/analysis/sdoctest_coverage.spl`:
+`load_sdoctest_blocks` (:96) and `compute_sdoctest_coverage` (:135), landed by
+commit `6305afbbaa8` ("fix(app): implement two never-defined sdoctest
+exports"); the in-source comment at :91-93 cites this very bug doc. The
+barrel's `export` lines (`analysis/mod.spl:13,16`) now resolve. The four call
+sites in `src/app/cli/doc_coverage_command.spl` (:196,:216,:269,:455) match
+the implemented signatures. Regression spec:
+`test/01_unit/app/doc_coverage/analysis_exports_defined_spec.spl`.
+Runtime re-run of the spec is blocked on this host: release/1.0.0 HEAD is
+source/binary inconsistent (the pinned seed rejects
+`@representation_boundary` in `src/app/test_runner_new/test_runner_client.spl`,
+so no spec runs); verified by code inspection instead.

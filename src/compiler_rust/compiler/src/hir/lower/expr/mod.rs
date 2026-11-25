@@ -1837,6 +1837,9 @@ impl Lowerer {
         if matches!(method, "to_float" | "to_f64") && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY) {
             return TypeId::F64;
         }
+        if method == "to_f32" && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY) {
+            return TypeId::F32;
+        }
         // Builtin float MATH methods on a float receiver. Exactly the same
         // mechanism as the `to_float`/`to_f64` case directly above, one layer
         // over: these are compiler intrinsics lowered inline by
@@ -2528,6 +2531,8 @@ impl Lowerer {
                 "to_i8" => Some(TypeId::I8),
                 "to_i16" => Some(TypeId::I16),
                 "to_i32" => Some(TypeId::I32),
+                "to_f32" => Some(TypeId::F32),
+                "to_float" | "to_f64" => Some(TypeId::F64),
                 // `parse_*` is `i64?` (pure Simple), not ANY: the runtime
                 // already returns a tagged int or NIL, and typing it as the
                 // flat optional lets interpolation render `Option::Some(v)` /
@@ -2858,6 +2863,7 @@ impl Lowerer {
                 "to_u16" => Some(TypeId::U16),
                 "to_u32" => Some(TypeId::U32),
                 "to_u64" => Some(TypeId::U64),
+                "to_f32" => Some(TypeId::F32),
                 "to_float" | "to_f64" => Some(TypeId::F64),
                 "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),

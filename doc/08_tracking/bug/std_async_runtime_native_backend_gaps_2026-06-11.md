@@ -47,3 +47,42 @@ gaps need native runtime work or interpreter fixes and are tracked here.
 Each gap closes with a behavioral spec in `test/01_unit/lib/async/` proving
 suspension/resumption (no literal-vs-literal assertions), run in interpreter
 mode.
+
+## Triage 2026-11-25 (P2 fleet, release/1.0.0 @ d1b74b3fa1d)
+
+Per-gap state at HEAD, by code inspection (spec execution is environment-
+blocked: the tracked release/1.0.0 binary rejects the `@representation_boundary`
+decorator now present in release/1.0.0 source, so `bin/simple.exe test` aborts
+loading `src/app/test_runner_new/test_runner_client.spl:9` before any spec
+runs — no new execution evidence is claimed):
+
+1. **Gap 1 (14 async SFFI externs) — STALE, confirmed.** `sffi.spl` is gone
+   and `grep -rn future_alloc_pending src/` returns nothing; the named externs
+   are declared nowhere.
+2. **Gap 2 (no real cooperative yield/sleep) — largely superseded.**
+   `src/lib/nogc_async_mut/async/sleep.spl` now implements a Go-style
+   cooperative scheduler (`run_sleepers` drives N sleepers concurrently,
+   parking the OS thread only until the nearest deadline), and
+   `runtime.spl:113-231` has a waker-drain + timer + re-poll executor loop
+   (`_drain_wakers`, `waker_check`/`waker_clear`). Remaining integration
+   (Runtime-driven timer wakeup for `sleep`) is explicitly tracked in
+   `doc/08_tracking/todo/async_runtime_timer_wakeup_for_sleep_2026-08-17.md`.
+3. **Gap 3 (`Poll.unwrap()` → unknown `panic`) — mooted by API redesign.**
+   `Poll::unwrap` is deliberately absent; the supported extractor is the free
+   fn `poll_unwrap` (`poll.spl:19-22`), and the header note pins the remaining
+   `.unwrap()` rebinding defect to
+   `poll_unwrap_second_bind_site_lower_and_check_impl_2026-08-25`.
+4. **Gap 4 (chained `self.poll().is_ready()`) — worked around in source.**
+   `future.spl:59-65` reads the intermediate `self.poll_result`; whether the
+   interpreter nested-call defect itself is fixed is unverified (blocked as
+   above).
+5. **Gap 5 (poll-once combinators) — partially live.**
+   `combinators.spl` `join`/`select` are still single-pass (first `Pending`
+   returns `Future.pending` with no re-poll registration), but the runtime
+   executor now re-polls via wakers, and the acceptance specs this entry
+   demanded now exist under `test/01_unit/lib/async/` (async_basics,
+   async_primitives, runtime_timer_sleep, sleep_go_style).
+
+Left OPEN, re-scoped: what remains is (a) running the acceptance specs on a
+qualified self-hosted binary and (b) the tracked runtime-timer integration
+todo — not the original backend-extern gaps. Not a bounded single-lane fix.

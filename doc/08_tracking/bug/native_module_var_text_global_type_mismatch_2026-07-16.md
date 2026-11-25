@@ -1,13 +1,15 @@
 # Native: module-level `var s = ""` (text) global emits `global i64 <ptr>` → llc fails
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — fix verified on release/1.0.0 (see 2026-11-12 fix verification and 2026-11-25 note)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+(Superseded: the 2026-11-12 fix verification below is the resolution
+evidence; the header above is updated accordingly 2026-11-25.)
 
 **Severity:** P2
 **Date:** 2026-07-16
 **Area:** native codegen (module-level text/string global initialization)
-**Status:** runtime-initializer candidate under review; execution pending
+**Status:** RESOLVED (source fix + regression specs on release/1.0.0)
 **Related:** `native_module_var_bool_garbage_init_2026-06-13.md` (bool/i64 scalar
 globals — RESOLVED; this is the text sub-case that fix does not cover)
 
@@ -129,3 +131,18 @@ expectations); repaired in this change so they assert the current safe
 behavior. `llvm_module_var_text_global_type_spec.spl` 8/8 PASS,
 `llvm_mutable_global_static_spec.spl` 4/4 PASS (seed-hosted,
 `--mode=interpreter`).
+
+## Closure note 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+Fix confirmed present in the current tree by inspection: primitive-literal
+constant kinds (Int/Float/Str/Bool) in
+`src/compiler/20.hir/hir_literal_constant_v1.spl`, the `__module_init_*`
+runtime-initializer machinery in `src/compiler/50.mir/_MirLowering/module_lowering.spl`,
+and the boxed `rt_string_new_literal` store path in
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`. Both regression
+specs exist at `test/01_unit/compiler/backend/llvm_module_var_text_global_type_spec.spl`
+and `llvm_mutable_global_static_spec.spl`. Re-running them on this Windows
+host is blocked: the pinned `bin/simple.exe` seed rejects
+`@representation_boundary` (added repo-wide by cfd89933699), so no spec
+executes at HEAD. Closing on the 2026-11-12 executed PASS evidence plus
+current-tree inspection.

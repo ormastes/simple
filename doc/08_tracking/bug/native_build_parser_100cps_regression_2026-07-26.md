@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26 (run 9 trace evidence, first observable harness build)
 - **Lane:** deployed stage4 `bin/release/aarch64-apple-darwin-macho/simple` `native-build` (cranelift, `--target x86_64-unknown-none`, `--entry-closure`, harness env `SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT/src SIMPLE_ALLOW_FREESTANDING_STUBS=1`)
-- **Status:** open — measured, root cause not yet isolated
+- **Status:** fixed — enum and closure registries routed through the shared O(1) open-addressing immortal-pointer hash table in `src/runtime/runtime_native.c` (in-code PERF comments cite this record); verified 2026-11-25, see end of file
 
 ## Measured (SIMPLE_COMPILER_TRACE=1, harness run 9, 10800s wall — expired in parse)
 `[BOOTSTRAP-PHASE] phase2:parse:file` timings from `native-build.out` (19MB):
@@ -64,3 +64,34 @@ O(1) membership for enum/closure discrimination (header-tag check like the
 O(1) `rt_core_as_array` path, or a hash set), plus unregister-on-free if
 lifetime allows. Lives in the C runtime — takes effect for the compiler
 itself only after the next stage4 rebuild+redeploy.
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree)
+
+The confirmed root cause — flat arrays linearly scanned on every
+`rt_core_is_registered_enum` / `rt_core_as_closure` call, with no unregister
+path — is fixed in current `src/runtime/runtime_native.c`:
+
+- Enum registry (:1907-1934): a `PERF
+  (native_build_parser_100cps_regression_2026-07-26)` comment block describes
+  this exact defect and its fix; `rt_core_is_registered_enum` is now a single
+  `rt_core_is_registered_immortal_ptr(e)` call — the shared O(1)
+  open-addressing hash table already used by strings/dicts/floats.
+- Closure registry (:2053-2083): same treatment; `rt_core_as_closure` goes
+  through `rt_core_untag_registered_immortal` (pointer-only hash membership,
+  no dereference of untrusted values) plus a kind check. The bespoke
+  array+spinlock scan is gone.
+
+This is exactly the "O(1) membership for enum/closure discrimination" fix
+direction the record named. It takes effect for the compiler itself on the
+next stage4 rebuild+redeploy, as the record noted; the source-level defect is
+nonetheless closed.
+
+A live re-measurement (SimpleOS WM harness native-build) was not possible in
+this lane: Windows host, no aarch64-darwin stage4 deploy, and the pinned seed
+binary at `bin/simple.exe` rejects the `@representation_boundary` decorator
+added tree-wide by cfd89933699. Verification is by code inspection of the two
+registry paths cited above; the secondary contributors noted in the record
+(lexer full-text reslice, `lex_source_codes` accumulation) are tracked in
+`bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`.
+
+**Verdict: STALE-CLOSED.**

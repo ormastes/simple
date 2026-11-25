@@ -56,3 +56,15 @@ equal to whatever is there.
 
 - `interp_run_enum_single_field_payload_corrupt_2026-06-15.md` — single-field enum payload
   corruption in `bin/simple run` (separate issue; absent in seed test runner)
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — CLOSED stands
+
+Re-ran the closure scenario on the pinned tracked binary (`bin/simple.exe`,
+38,403,072 B, Rust seed v1.0.0-rc.1): a probe spec with 3 `describe` blocks
+(1 passing example, then one deliberately wrong `to_equal` in each later
+block) under `SIMPLE_TEST_RUNNER_RUST=1 bin/simple.exe test` reported
+`Passed: 1, Failed: 2` — both later-describe failures surfaced; nothing was
+swallowed. (The default pure-Simple runner path is blocked at HEAD by the
+pinned seed rejecting `@representation_boundary`; the Rust runner exercises
+the same seed spec harness this bug was filed against.) The 2026-09-13
+closure stands.

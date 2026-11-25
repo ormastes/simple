@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** stage4 native-build (cranelift), full-CLI closure
-- **Status:** open — blocks stage4 full-CLI build (last remaining compile blocker)
+- **Status:** RESOLVED for the stage4 blocker (workaround 2 landed; see 2026-11-25 note below) — the compiler-side scalability item (fix 1, large string-match lowering) remains a separate open program
 
 ## Symptom
 `native-build` of `src/app/office/sheets/formula.spl` fails:
@@ -31,3 +31,28 @@ Calc TUI UI access`.
    separate `fn` with a manageable arm count, called in sequence. Preserves exact
    behavior; gets each body under the codegen limit. Being applied to unblock the
    stage4 deploy while the compiler fix is pending.
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+
+- Workaround 2 (split into category sub-dispatchers) is LANDED:
+  `src/app/office/sheets/formula.spl:4287-4303` — `_dispatch_function` is now a
+  17-line router over six partitions `_dispatch_function_0` …
+  `_dispatch_function_5` (bodies at lines 4305, 4580, 4913, 5346, 5923, 6427;
+  largest partition ≈ 580 lines, well under the 2497-line failing body). The
+  split landed as "perf: partition formula dispatch without changing function
+  arms" (e.g. `d738b7846e6`, transplanted by `88aac2ffe28`).
+- Therefore the "blocks stage4 full-CLI build (last remaining compile
+  blocker)" claim in the header is stale: the file no longer contains the
+  236-arm single-body match that tripped the codegen limit.
+- Compilation verification is environment-blocked on this host (no admitted
+  pure-Simple binary; the pinned Rust seed rejects `@representation_boundary`
+  decorators repo-wide at HEAD, and `native-build` of the full closure needs a
+  bootstrap-scale build). Closure is on source-shape evidence: the failing
+  construct no longer exists.
+- Fix 1 (compiler-side: lower large string-match to table/hash dispatch)
+  remains an open compiler scalability program, tracked independently of this
+  ledger row; it is not a P2 bug fix for this lane.
+
+Status updated: stage4 blocker RESOLVED via the documented workaround.

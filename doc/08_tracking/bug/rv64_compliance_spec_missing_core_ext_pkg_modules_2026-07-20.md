@@ -74,3 +74,21 @@ SPEC FILE VERDICT: ... outcome=OK declared>=22 executed=22 passed=22 failed=0 sk
 
 Not verified on the pure-Simple self-hosted binary (none deployed in this
 worktree).
+
+## Re-verification (2026-11-25, work/p2w4-af-20261125)
+
+Still FIXED at `origin/release/1.0.0` tip `63e791180d3`; no code change
+needed. Confirmed `src/hardware/rv64gc/{core,ext,pkg}/` all exist with
+`rv64_execute.spl`, `rv64_muldiv.spl`, `rv64_atomics.spl`, and
+`rv64_types_pkg.spl`, and the spec's two misa-bit assertions use bitwise
+`& 1` (the 2026-11-06 fix), not logical `and`.
+
+`bin/simple.exe test` is not runnable at this tip (the pinned Rust seed
+v1.0.0-rc.1 rejects the `@representation_boundary` decorator used by
+`src/app/test_runner_new`), so execution evidence comes from a `run`-mode
+probe (`test/_probe_root_tmp/rv64_probe_p2w4af.spl`, session-local, not
+committed) importing the same four modules and exercising `alu_execute`
+64-bit ADD wrap, `alu_execute_word` ADDW sign-extension, and both misa bit
+checks with `& 1`: `RV64 PROBE OK`, exit 0, on the pinned seed. This
+complements the 22/22 full-spec PASS recorded 2026-11-07 on a privately
+built seed.

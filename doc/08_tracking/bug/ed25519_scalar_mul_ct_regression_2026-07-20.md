@@ -4,8 +4,8 @@
 - **Area:** `src/os/crypto/ed25519_ops.spl` (pure-Simple Ed25519 point arithmetic)
 - **Severity:** high (timing side-channel on the secret-scalar code path — the
   exact class of bug previously fixed and guarded against).
-- **Status:** OPEN — do NOT fix from a test-cluster triage pass; flagging with
-  full evidence for a follow-up implementation session.
+- **Status:** RESOLVED — constant-time fixed-window form restored 2026-11-15
+  (see note below); re-verified 2026-11-25.
 
 ## Symptom
 
@@ -124,3 +124,23 @@ release/1.0.0): `ed25519_secret_branch_detection_spec` 3/5 -> 5/5,
 `ed25519_ct_property_spec` 7/8 -> 8/8 (its positive check now names the real
 select helper `_ed_point_select_16`), `ed25519_rfc8032_spec` 15/15 before and
 after, wall time unchanged (15.9s -> 16.2s).
+
+## 2026-11-25 — re-verified on release/1.0.0 (0819b116ecb)
+
+Confirmed by code inspection that the restored form is intact on
+release/1.0.0 HEAD: `ed_scalar_mul` (`src/os/crypto/ed25519_ops.spl:862`) is
+the 4-bit fixed-window form with no branch on secret scalar bits — it selects
+via `_ed_point_select_16(table, ...)`, which folds every entry through
+`ed_point_cselect` (`ed25519_ops.spl:909-919`). The leaky fingerprints the
+spec checks (`if ((byte_val`, `if scalar[`, `) & 1) == 1`) are absent from
+the body, and the spec's positive check (`_ed_point_select_16(table,`)
+matches the live source. The sibling basepoint path
+(`_ed_scalar_mul_basepoint_cached`) likewise uses
+`_small_ed_point_select_16_direct` (`ed25519_ops.spl:950,958`), not a
+bit-branch.
+
+Execution limit: the pinned seed binary (`bin/simple.exe`, v1.0.0-rc.1)
+cannot run the spec at this HEAD because release/1.0.0 sources carry
+`@representation_boundary` decorators the seed rejects
+(`unknown decorator '@representation_boundary'`), so the spec was verified
+by source inspection rather than execution.

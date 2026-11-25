@@ -232,3 +232,23 @@ Re-add the `[glyphfix8-diag]` print above (temporarily) at
   `_draw_font_batch_cpu_suffix`, `_draw_font_batch_plan` — the compositing
   choke point)
 
+
+## Triage note (2026-11-25)
+
+The status header ("Root-cause LOCALIZED, not fixed") is stale with respect
+to the product-level blocker: fix direction #2 from this document WAS later
+applied tree-wide. Every `FontRenderBatch(...)` construction site in
+`src/lib/nogc_sync_mut/text_layout/font_renderer.spl` now passes
+`transform_identity: FONT_RENDER_TRANSFORM_IDENTITY` explicitly (see the
+comment at `font_renderer.spl:981-989`, which references this document), so
+`material_supported()` no longer depends on the class-field default and the
+"blocks ALL glyph compositing" gate is closed. The class default itself is
+intentionally left in place in `font_types.spl:352` for hosted builds.
+
+Still genuinely open: the underlying compiler defect — class-field default
+values (`field: T = <expr>`, at least `text`-typed) read back empty when the
+constructor omits the field on the freestanding x86_64 native-build target.
+That fix lives in construction lowering / codegen and is not verifiable on
+this Windows host (needs a SimpleOS freestanding boot under QEMU). Left
+Open for that underlying compiler bug; do not close on the strength of the
+workaround alone.

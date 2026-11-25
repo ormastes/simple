@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** OPEN — structural blockers resolved 2026-11-25 (capsule split and
+plug-in stubs landed; see the 2026-11-25 verification note at the end); full
+green run of the spec family still unmeasured
 **Found:** 2026-08-04
 **Class:** specced-but-unimplemented refactor programme. **94 failing examples**
 in `test/system/compiler/` (measured: 939 total, 803 passed, 136 failed — the
@@ -126,3 +128,26 @@ Sequenced follow-ups:
 
 Out of lane: 94 permanently-red examples across a specced-but-unimplemented refactor programme, not a bounded bug fix. No change made.
 
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host) — structural blockers resolved
+
+The specific blockers this record names are gone at release/1.0.0 HEAD:
+
+- The SA-3 capsule split LANDED: `src/lib/hardware/fpga_linux/` now contains
+  `fpga_linux_orchestrator.spl`, `fpga_linux_data.spl`, and
+  `fpga_linux_manifest.spl` alongside `riscv_fpga_linux.spl`, and
+  `test/03_system/compiler/fpga_linux_split_spec.spl` was repointed to the
+  `src/lib/hardware/fpga_linux/` root (`@cover` lines 5-8, path constants at
+  :84/:87) — the root decision ("correct whichever side is wrong") was made
+  in favor of `src/lib/hardware/`.
+- The four Phase-5 SA-4 plug-in stubs now exist:
+  `src/plugins/backend_vhdl/vhdl/vhdl_emit_{fp,simd,cache,hart}_stub.spl`,
+  matching `rtl_mdsoc_plugin_stubs_spec.spl`'s asserted paths.
+
+NOT verified: a green run of the 94-example family. `bin/simple.exe test`
+cannot load the tree on this host (`unknown decorator
+'@representation_boundary'` — known release/1.0.0 source/binary
+inconsistency), so whether every example in the programme now passes is
+unmeasured. The 2026-08-04 census above is stale as to its named missing
+files; any residual redness needs a fresh run on a working runtime before
+this record can be closed outright.

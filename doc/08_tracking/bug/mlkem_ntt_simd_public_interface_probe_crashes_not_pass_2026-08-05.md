@@ -1,6 +1,6 @@
 # AC-4 SIMD byte-identity probe crashes on reproduction — reported PASS does not hold
 
-Status: OPEN (P2)
+Status: CLOSED (2026-11-06, see bottom section; header updated 2026-11-25 — previously still read "OPEN (P2)", which was stale)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 at the `simple-runtime` source level, verified at the Rust-crate/unit level
 only — NOT yet verified end-to-end against the named `.spl` probe, which does
@@ -340,3 +340,15 @@ no crash. Combined with the 2026-08-06 `read_unaligned` fix this closes the row.
 Not run: native lane — stage3 `s3_fable46.exe` native-build fails before the
 probe, in `lib.nogc_sync_mut.simd` MIR (8x "unresolved method call: to..."),
 a separate native-stdlib defect, not this crash.
+
+## Note 2026-11-25 (p2w3-af lane, release/1.0.0)
+
+Header updated to match the 2026-11-06 closure (it still read "OPEN (P2)").
+Spot-check at current HEAD: the probe fixture exists in-tree and the
+`read_unaligned`/`write_unaligned` fix is present throughout
+`src/compiler_rust/runtime/src/value/simd_int_ops.rs` (120 `read_unaligned`
+occurrences). Re-running the probe here is environment-blocked: the probe
+source at HEAD itself uses `@representation_boundary` (line 61), which the
+pinned Windows seed rejects (`unknown decorator`), the known repo-wide
+seed/source inconsistency — so the 2026-11-06 PASS measurement on the AVX2
+host remains the authoritative run evidence. Status remains **CLOSED**.

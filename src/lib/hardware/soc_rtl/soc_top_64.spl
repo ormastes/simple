@@ -65,7 +65,7 @@ use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_tick, clint_mmio
 use std.hardware.soc_rtl.plic.{PlicState, plic_create, plic_mmio_read, plic_mmio_read_update, plic_mmio_write, plic_set_pending, plic_check_interrupt, plic_check_interrupt_s}
 use std.hardware.soc_rtl.ram64.{Ram64State, ram64_init, ram64_read, ram64_write, ram64_logical_shr, ram64_load_bytes}
 use std.hardware.soc_rtl.bootrom.{bootrom_read64, BOOTROM_BASE, BOOTROM_SIZE}
-use std.hardware.soc_rtl.dtb_asset.{SOC_DTB_RAM_SIZE, SOC_DTB_RESERVED_SIZE}
+use std.hardware.soc_rtl.dtb_asset.{SOC_DTB_RAM_SIZE, SOC_DTB_RESERVED_SIZE, soc_dtb_byte}
 use std.hardware.soc_rtl.dtb_asset.soc_rv64_linux_dtb_for_ram_initrd
 
 # -- Wishbone64 interconnect
@@ -217,12 +217,22 @@ fn soc64_in_dtb(soc: SocTop64State, addr: i64) -> bool:
     addr >= SOC64_DTB_BASE and addr < SOC64_DTB_BASE + soc.dtb_size
 
 fn soc64_dtb_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
-    """DTB load: assemble width_bytes little-endian from the shared asset
-    (the FDT header is stored big-endian byte-wise, so byte address +0 -> 0xD0,
-    +1 -> 0x0D, +2 -> 0xFE, +3 -> 0xED, i.e. the 0xD00DFEED magic). A word/
-    dword read composes those bytes in RISC-V little-endian order."""
+    """DTB load: assemble width_bytes little-endian from the shared asset,
+    materialized on demand (the FDT header is stored big-endian byte-wise, so
+    byte address +0 -> 0xD0, +1 -> 0x0D, +2 -> 0xFE, +3 -> 0xED, i.e. the
+    0xD00DFEED magic). A word/dword read composes those bytes in RISC-V
+    little-endian order. Serving from the generated asset instead of RAM keeps
+    the overlay correct for every DRAM size, including simulation configs whose
+    RAM window never reaches the DTB region and therefore cannot be preloaded."""
     val off = addr - SOC64_DTB_BASE
-    ram64_read(soc.ram, SOC64_DTB_BASE - SOC64_RAM_BASE + off, width_bytes)
+    val blob = soc_rv64_linux_dtb_for_ram_initrd(soc.dtb_ram_size as u64,
+        soc.dtb_initrd_start as u64, soc.dtb_initrd_end as u64)
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < width_bytes:
+        result = result | ((soc_dtb_byte(blob, (off + i) as u64) as i64) << (i * 8))
+        i = i + 1
+    result
 
 fn soc64_clint_read(soc: SocTop64State, addr: i64, width_bytes: i64) -> i64:
     """CLINT load: 8-byte (RV64 ld, the normal kernel access width for

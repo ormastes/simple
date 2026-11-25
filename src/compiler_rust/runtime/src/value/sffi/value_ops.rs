@@ -145,7 +145,7 @@ pub extern "C" fn rt_value_is_nil(v: RuntimeValue) -> bool {
 }
 #[no_mangle]
 pub extern "C" fn rt_value_is_int(v: RuntimeValue) -> bool {
-    v.is_int() || v.as_heap_u64().is_some()
+    v.is_int() || v.as_heap_i64().is_some() || v.as_heap_u64().is_some()
 }
 #[no_mangle]
 pub extern "C" fn rt_value_is_float(v: RuntimeValue) -> bool {
@@ -295,5 +295,19 @@ mod raw_i64_guard_tests {
             stderr.contains("refusing to truncate a non-float heap-boxed"),
             "expected the loud rt_value_raw_i64 guard message on stderr, got: {stderr}"
         );
+    }
+
+    #[test]
+    fn value_is_int_recognizes_inline_wide_signed_and_unsigned_ints() {
+        use super::rt_value_is_int;
+        assert!(rt_value_is_int(RuntimeValue::from_int(0)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(1 << 60)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(-(1 << 60) - 1)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(i64::MAX)));
+        assert!(rt_value_is_int(RuntimeValue::from_int(i64::MIN)));
+        assert!(rt_value_is_int(RuntimeValue::from_u64(u64::MAX)));
+        assert!(!rt_value_is_int(RuntimeValue::from_float(1.5)));
+        assert!(!rt_value_is_int(RuntimeValue::from_bool(true)));
+        assert!(!rt_value_is_int(RuntimeValue::NIL));
     }
 }

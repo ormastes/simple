@@ -66,3 +66,18 @@ No longer reproduces on a seed built from `origin/release/1.0.0` @ ecb705896a4 (
 `LOCAL_CAST`, `I64_TO_U32_CAST`) prints
 `268435456 268435456 268435456 268435456` under both `SIMPLE_EXECUTION_MODE=jit`
 and `interpret`. Before, the three `u32` forms were 0 under the JIT.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+Re-ran the record's exact two-module repro on this worktree's tracked seed
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1, Windows x86_64, default JIT mode):
+
+```
+FROM_U32_IMPORT / FROM_I64_IMPORT / LOCAL_CAST / I64_TO_U32_CAST
+-> 268435456 268435456 268435456 268435456
+```
+
+All four values are correct (0x10000000); the JIT zero-miscompile does not
+reproduce on the tracked binary. Confirms the 2026-11-06 re-verification.
+
+Status: RESOLVED.

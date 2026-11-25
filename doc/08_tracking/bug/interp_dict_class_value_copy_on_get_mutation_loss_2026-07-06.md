@@ -138,3 +138,30 @@ probe were retargeted from the 2026-09-27 value-type oracle to the reference
 contract (design: `class_instance_reference_storage_2026-11-03.md`) and pass
 5/5 on the rebuilt seed; the probe now also pins the `struct` copy half.
 Coordinator owns the bug_db status change.
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — RESOLVED stands
+
+Re-verified on the pinned tracked binary (`bin/simple.exe`, 38,403,072 B, Rust
+seed v1.0.0-rc.1) by running the spec's sibling oracle probe
+`test/01_unit/compiler/interpreter/probe_dict_class_value_identity.spl`
+directly:
+
+- Interpreter lane (`SIMPLE_EXECUTION_MODE=interpret`): **20/20 PASS** —
+  `DICT_CLASS_VALUE PROBE: ALL PASS`. The bug's original lane (mutation
+  through `Dict.get`, callee-field dicts, array elements, two handles,
+  `val b = a`, plus the struct copy half) is fully fixed.
+- JIT lane (default): 18/20 — two rows fail: `struct_dict_get_original_unchanged`
+  (a JIT struct copy-semantics residual, family of
+  `jit_struct_assignment_aliases_not_copies_2026-08-10.md`) and
+  `dict_write_back_idempotent` (`d.set(1, c)` write-back of a class instance
+  then `d.get(1).hits` reads a tagged artifact `103079215111` instead of 5 —
+  a JIT dict-set artifact, not the copy-on-`get` interpreter defect this
+  record gates). Every copy-on-`get` row — the defect filed here — passes on
+  BOTH lanes; the two JIT failures are adjacent JIT-lowering residuals
+  outside this record's scope and are not re-filed here.
+
+The gating spec `dict_class_value_identity_spec.spl` is not runnable end-to-end
+at HEAD: the default runner fails on `unknown decorator
+'@representation_boundary'` (pinned-seed/source drift at release/1.0.0 HEAD)
+and the Rust-runner lane cannot spawn the probe subprocess verdict cleanly on
+this host. The direct probe runs above are the same oracle the spec wraps.

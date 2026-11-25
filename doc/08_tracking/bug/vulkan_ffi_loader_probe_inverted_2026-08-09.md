@@ -1,5 +1,5 @@
 # `VulkanFfi.loader_probe()` reports false on a host with a working Vulkan loader
-## Re-verified 2026-11-05 (vulkan-fixes lane) — Status: FIXED, wait verification
+## Re-verified 2026-11-25 (p2w6-ak lane) — Status: FIXED on release/1.0.0 tip (inspection-verified; native GPU lane still pending)
 
 The fix this doc recommended (resolution check via `DynLib.sym` instead of the
 `call0(...) != 0` call-status comparison) is present on `release/1.0.0` tip at
@@ -130,3 +130,25 @@ EOF
 SIMPLE_MODULE_LIMIT=4000 bin/simple run probe.spl
 ```
 
+
+## Re-verification 2026-11-25 (p2w6-ak lane, release/1.0.0 tip ef77d4bd6ec)
+
+Confirmed by direct source inspection that the fix is present and unreverted
+on the current tip: `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl:128-155`
+resolves the symbol via `self._dyn_lib.sym("vkEnumerateInstanceVersion") != 0`
+with the inline comment documenting both original defects (inverted
+`VK_SUCCESS == 0` comparison; missing out-pointer argument to `call0`), and
+the Dynamic-mode regression test is present in
+`test/01_unit/lib/gpu/engine2d/ffi_vulkan_spec.spl:114-134` ("loader_probe
+(raw symbol-resolution signal)").
+
+Runtime verification on this host is environment-blocked, stated honestly:
+(a) this Windows host has no Vulkan loader reachable through the seed's
+dynamic loader — the doc's own probe script prints `NIL`
+(`VulkanFfi.create_dynamic()` returns nil), so `loader_probe()` cannot be
+exercised here in either direction; (b) the spec-file `test` lane is blocked
+repo-wide at HEAD by the known `unknown decorator '@representation_boundary'`
+seed/source inconsistency. The 2026-11-05 lane's red-first/green execution
+evidence (host with libvulkan.so.1) stands as the executed proof; this note
+adds tip-presence confirmation only. Native GPU lane verification remains
+pending as before.

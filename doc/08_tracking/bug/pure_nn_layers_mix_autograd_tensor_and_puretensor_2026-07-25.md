@@ -156,3 +156,28 @@ reference semantics by default", merged to release/1.0.0 2026-11-04 via
 predates it. `training_spec` 1 pass / 1 skip either way. No library change.
 Owner decision 2026-11-06: classes are reference types everywhere, structs
 are value types. Coordinator owns the bug_db status change.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+Confirms the 2026-11-06 FIXED status. The runtime shared-reference semantics
+this bug waited on (`6c7b4db3d39` "fix(interp): class reference semantics by
+default") is an ancestor of HEAD, and the currently pinned `bin/simple.exe`
+(v1.0.0-rc.1) carries it: a probe importing `std.pure.autograd` /
+`std.pure.nn` and running the spec's core scenarios —
+`Linear.create(3, 2, bias: true)`, `l.weight.shape()` → `[2, 3]`,
+`l.forward(i)` on a `[1, 3]` input → `[1, 2]`, then
+`tensor_sum(out).backward()` — printed **weight grad present** and
+**input grad present** (the exact leaf-gradient write-back the 2026-11-05/06
+notes recorded as `unwrap() on None`). Run:
+`SIMPLE_LIB=src bin/simple.exe run <probe> --mode=interpreter`.
+
+Limit: `src/lib/gc_async_mut/pure/test/nn_spec.spl` itself was not re-run —
+the pinned seed cannot load the test runner at this HEAD
+(`unknown decorator '@representation_boundary'`, cfd89933699) — so this is a
+behavioral probe of the same scenarios, not the 7/7 spec verdict. Separately
+observed (pre-existing, unrelated to this bug): the seed's cranelift JIT
+refuses `Sequential.forward` with CODEGEN-AMBIGUOUS-METHOD (20 `forward`
+candidates) and demotes to the interpreter; interpreter results are correct.
+
+**Status: RESOLVED** (bug_db status change remains with the coordinator per
+the 2026-11-06 owner note).

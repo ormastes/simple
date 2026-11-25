@@ -108,3 +108,16 @@ same expression appeared outside a string literal.
 
 FIXED (haiku fix lane F5, opus-reviewed APPROVE, static verification only): collect_free_var_syms and lambda_capture_scan_supported now recurse into string interpolations via two mirrored helpers (switch_operators_calls.spl); lambda_body_captures already handled StringLit and is untouched.
 
+
+## Verification note (2026-11-25, P2 ledger sweep)
+
+STALE-CLOSED confirmed by code inspection. The documented fix is present in
+current `release/1.0.0` source: `lambda_capture_scan_supported`'s
+`StringLit(_, interps)` case now recurses through
+`string_interps_capture_scan_supported(its)`
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:8123-8126`)
+instead of the old `not interps.?` exclusion, and free-variable collection
+walks interpolations via `string_interps_free_syms` (same file, :7619-7621).
+Runtime re-run of the repro is blocked on this host (pinned seed rejects
+`@representation_boundary` at HEAD); closure rests on the 2026-07-17
+opus-reviewed fix plus this source check. Kept closed.

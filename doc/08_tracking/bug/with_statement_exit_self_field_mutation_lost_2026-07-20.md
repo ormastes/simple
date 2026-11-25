@@ -115,3 +115,28 @@ interpreter test mode, repo `mainlane` branch `suite-2026-09-18`):
   and `src/compiler_rust/lib/std/src/core/context.spl`). After aligning names,
   its "as-clause binding" example passes and the three post-exit field-visibility
   examples fail exactly as this ledger documents.
+
+## Addendum 2026-11-25 (P2 fleet, release/1.0.0 tracked binary) — still live, seed-side
+
+Re-probed on the tracked release/1.0.0 binary (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1, `SIMPLE_EXECUTION_MODE=interpreter ... run`), module-level class:
+
+- **Implicit-self write is still silently lost.** `fn __exit__(exc): exited =
+  true` invoked via `with resource as x:` leaves `resource.exited == false`
+  (probe prints `false`). The defect this entry tracks is unchanged.
+- **Explicit `self.` works.** The identical program with
+  `self.cleanup_count = self.cleanup_count + 1` prints `1` — the `with`
+  statement's `__exit__` invocation does mutate the live object when the
+  assignment is explicit-self.
+- **Implicit-self read-modify-write no longer compiles.** `cleanup_count =
+  cleanup_count + 1` inside the method is now a compile-time
+  `variable 'cleanup_count' not found` (semantic error), so the original
+  minimal repro above fails earlier than it did in 2026-07; the silent-loss
+  case that remains is the plain implicit-self assignment (`field = value`).
+
+The fix belongs to the Rust seed interpreter's `with`-internal exit dispatch
+(`src/compiler_rust/**`), which this lane is not permitted to rebuild, and no
+pure-Simple source change can alter the pinned binary's behaviour. Left OPEN;
+`test/system/features/with_statement_basic_spec.spl` already uses the working
+`self.` form, while `test/feature/usage/context_managers_spec.spl` still
+carries implicit-self writes (its failures are this bug, not test defects).

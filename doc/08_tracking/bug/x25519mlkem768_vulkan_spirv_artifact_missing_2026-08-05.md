@@ -225,3 +225,21 @@ is the only remaining hard toolchain dependency — everything else needed
 - No changes to `src/lib/gc_async_mut/crypto_accel/*`, the CUDA/Metal
   providers, or any compiler source. `vulkan_ntt_provider.spl` was read only,
   never edited by this session (its pre-existing diff predates this task).
+
+## 2026-11-25 verification (release/1.0.0 @ f09280e5969, worktree D:\wt-p2w7-aa)
+
+Re-checked on the release branch; the closure above is real and landed:
+
+- `src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.comp` and
+  `ml_kem_ntt_inverse.comp` are present at HEAD. Their SHA-256
+  (`f29443943a381012f34e26a7ab2ac44bee51338d78662109c47e0182aa1fc668` forward,
+  `b1e5a9ed87e4331abb5ac7ab906418aa9e4c927d2e284174990110318382e09c` inverse)
+  match the source hashes recorded in this doc exactly.
+- `scripts/check/check-x25519mlkem768-vulkan-ntt.shs` and
+  `test/02_integration/os/crypto/x25519mlkem768_vulkan_candidate_spec.spl` are
+  present at HEAD.
+- Not re-executed: physical device verification needs a Linux host with two
+  NVIDIA Vulkan devices + glslangValidator; this Windows worktree has neither.
+  Verified by source/hash inspection only.
+
+Status: RESOLVED stands; no code change needed.

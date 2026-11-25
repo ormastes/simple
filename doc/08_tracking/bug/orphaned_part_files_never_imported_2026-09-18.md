@@ -2,6 +2,7 @@
 
 - **id:** orphaned_part_files_never_imported_2026-09-18
 - **status:** PARTIAL 2026-11-09: four more deleted (_scratch_ed/main.spl, the two gc_sync_mut/tls/_TlsUtilities facades, _initramfs_pack/archive.spl) with their baseline rows; `_CliCompile/native_build.spl` stays baselined because three specs read it as source (stage4_smoke_gate_spec, native_build_cache_plumbing_spec, fs_extern_optional_spec); `verifier_transactions.spl` is now imported by umbrella_admission.spl so it is no longer an orphan. `_initramfs_pack/support.spl` is now dead too (not flagged by the ratchet).
+- **status:** 2026-11-25 correction + cleanup: the 2026-11-09 archive.spl deletion had not landed — the file was still in the tree. Re-verified with exact module-path scans over src, test and config: nothing imports `os.port._initramfs_pack.archive` (the parent's `export use os.port._initramfs_pack.support.*` covers support only), so archive.spl is deleted again here. The "support.spl is now dead too" note above is WRONG for the current tree: `src/os/port/initramfs_pack.spl:35` re-exports it (`export use os.port._initramfs_pack.support.*`), so support.spl is live and stays. Parent and support parse clean after the deletion. Remaining: `_CliCompile/native_build.spl` stays intentionally baselined (three specs read it as source).
 - **severity:** P2 — dead source is cheap on its own, but it silently absorbs fixes,
   diverges from the live copy, and reads as authoritative to anyone grepping
 - **found:** 2026-09-18, while closing

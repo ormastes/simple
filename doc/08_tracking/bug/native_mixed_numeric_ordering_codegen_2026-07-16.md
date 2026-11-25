@@ -34,3 +34,15 @@ duplicate builds. First staged platform-matrix execution is pending.
 Unsigned integer/float ordering is tracked separately in
 `native_unsigned_float_ordering_codegen_2026-07-16.md`.
 
+## Verification 2026-11-25 (p2w4-ag lane, release/1.0.0 @ 63e791180d3)
+
+Re-confirmed closed by source inspection on Windows: the MIR mixed-numeric
+handling described in the Resolution section is present at
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:7218-7266` —
+`mixed_numeric_kinds` emits the type-strict constant for `Eq`/`NotEq`
+(lines 7223-7233) and widens both operands of ordered comparisons to f64,
+with unsigned int operands retyped to U64 first so the backend selects the
+unsigned int->float convert (lines 7258-7266). The strict-dual harness was
+not re-executed on this host (pinned-seed/native-build lane unavailable);
+status remains Closed.
+

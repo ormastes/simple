@@ -35,3 +35,38 @@ Users cannot cancel close/drag actions by dragging the pointer away (UX inconsis
 ## Next Step
 B1: Fire close/drag actions on release-inside; track pressed-state across down/up; cancel if pointer leaves button. B2: Add `not win.minimized` guard to `wm_lifecycle_pointer_move`. S3: Cache computed layout keyed on widget-tree revision; reuse across `set_pressed`/`dispatch_click` in the same event; skip hover hit-test if tree has not changed since the previous move event.
 
+
+## Verification 2026-11-25 — all three defects FIXED; the 2026-09-16 "Obsolete" header is wrong about the reason
+
+Verified on `release/1.0.0` (7998d6ba40d), Windows host, by code inspection.
+The normalization header claimed "referenced path(s) gone" — in fact all three
+referenced files still exist (`host_compositor_entry.spl` is now a 6-line
+facade over `host_compositor_core.spl`; the cited line numbers moved). The
+defects themselves are fixed:
+
+- **B1 (fire-on-down):** FIXED. `host_compositor_core.spl` (~3499-3520)
+  implements release-inside semantics: mouse-down only ARMS the chrome
+  target; on release the action fires only if the release hit-test resolves
+  to the same target, and moving away cancels it ("Moving away before
+  release ... cancels the action; the armed state is cleared unconditionally").
+  Regression coverage: `test/01_unit/os/compositor/host_compositor_entry_spec.spl`
+  describe block "click-on-release chrome semantics (FIX 2)".
+- **B2 (resize-hover on minimized):** FIXED. The resize-arm loop in
+  `wm_lifecycle_pointer_move` (now `wm_action_lifecycle.spl:432`) guards with
+  `if not win.minimized and wm_lifecycle_resize_grip_hit(...)`. Regression
+  coverage: `test/01_unit/os/compositor/wm_action_applier_prevention_spec.spl`
+  ("ignoring minimized windows at matching coordinates").
+- **S3 (hit-test recompute):** FIXED for the per-click multiplication.
+  `event.spl` (~291-297) computes `compute_pixel_layout` ONCE per down event
+  and passes the shared layout to both `widget_set_pressed` and
+  `widget_dispatch_click`, with a comment documenting the old double-compute;
+  `widget_hit.spl` exposes `_hit_test_rects` for exactly this sharing.
+
+Live spec execution was attempted (`SIMPLE_LIB=src bin/simple.exe run
+test/01_unit/os/compositor/wm_action_applier_prevention_spec.spl`) but is
+blocked repo-wide at this HEAD by the known `@representation_boundary`
+seed/binary inconsistency (`outcome=ERROR executed=0`), so verification is by
+inspection only.
+
+Status: RESOLVED (supersedes both the stale "Open" body status and the
+incorrect "referenced paths gone" header rationale).

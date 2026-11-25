@@ -1,4 +1,17 @@
 # ByteSpan.equals faults 93x on a boxed integer in a pointer slot (SimpleOS WM guest)
+## Triage 2026-11-25 — still OPEN; skip on this host (SimpleOS guest ELF evidence lane)
+
+Re-checked at `origin/release/1.0.0` HEAD `0819b116ecb`: the fault mechanism
+lives in the SimpleOS WM production-desktop kernel ELF and its evidence gate
+(`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`, QEMU/Linux lane),
+and the fix direction (make the MIR predicate path authoritative on the
+receiver's MIR type in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`,
+plus the `other.data` nil-check) is pure-Simple compiler work that cannot be
+executed or verified on this Windows host — no self-hosted binary is deployed
+and the pinned seed rejects `@representation_boundary` repo-wide, so neither
+`--emit-archive` byte-compare nor spec runs are available. Remains OPEN,
+owner/MIR-lane work.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

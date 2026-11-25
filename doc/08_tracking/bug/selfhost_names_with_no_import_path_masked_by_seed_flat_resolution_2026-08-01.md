@@ -369,3 +369,25 @@ Verification receipt: the full self-hosted stage3 re-census cannot run
 in-lane (bootstrap runs forbidden); it rides the next sanctioned
 stage3/4 run. The stale addendum chain (2026-11-02 close-invalid,
 2026-10-27 triage audit) is resolved by this fresh source verification.
+
+## Verification 2026-11-25 (p2w5-ae lane)
+
+Fresh source spot-check at release/1.0.0 tip (4bc2c986375), confirming the
+2026-11-11 FIXED verdict:
+
+- `src/compiler/70.backend/backend/vulkan_backend.spl:9` carries
+  `use compiler.backend.backend.backend_types.{BackendKind, compileerror_backend_error, compileoptions_default_options}`.
+- `src/compiler/10.frontend/core/_Ast/module_state.spl:26` imports
+  `make_core_decl`; `src/compiler/10.frontend/core/parser_decls_use.spl:31`
+  imports `parser_parse_type_with_union`.
+- `src/compiler/10.frontend/core/_Ast/decl_nodes.spl` uses `int_to_str` with
+  no local named import; it globs `compiler.core.ast_stmt.*`, whose line 13 is
+  `use compiler.core.types.{int_to_str}` — reachable through the class-(A)
+  named-item glob hop closed by GLB1, consistent with the earlier import
+  removal in `5021e563ca9`.
+
+Verification limit: the full self-hosted stage3 re-census still rides the next
+sanctioned stage3 run (bootstrap runs forbidden in this lane), and on this
+Windows host the pinned Rust seed rejects `@representation_boundary` at HEAD,
+so no compiler run was possible — this note is source inspection only.
+Status remains FIXED.

@@ -1,0 +1,113 @@
+use std.spec.*
+
+struct InnerRoot:
+    root: i64
+
+struct OuterResolution:
+    roots: InnerRoot
+
+struct ReceiptBox:
+    tag: text
+    count: i64
+
+fn try_bytes_head(data: [u8]?) -> i64?:
+    val input = data?
+    Some(input[0] as i64)
+
+fn format_pairs(params: [(text, text)]) -> text:
+    var out = ""
+    var i = 0
+    while i < params.len():
+        val (name, value) = params[i]
+        if i > 0:
+            out = out + "&"
+        out = out + name + "=" + value
+        i = i + 1
+    out
+
+fn resolve_outer_root(ok: bool) -> Result<InnerRoot, text>:
+    val res: Result<OuterResolution, text> = if ok:
+        Ok(OuterResolution(roots: InnerRoot(root: 77)))
+    else:
+        Err("bad")
+    match res:
+        case Ok(resolution): Ok(resolution.roots)
+        case Err(error): Err(error)
+
+fn map_vulkan_ver(vk_version: [i64]) -> [i64]:
+    match vk_version:
+        case [1, 0]: [1, 0]
+        case [1, 1]: [1, 3]
+        case [1, 2]: [1, 5]
+        case [1, 3]: [1, 6]
+        case _: [1, 6]
+
+fn wrap_one(items: [text]) -> text:
+    items[0]
+
+fn make_opt_boxes(ok: bool) -> [ReceiptBox]?:
+    if ok:
+        Some([ReceiptBox(tag: "a", count: 9), ReceiptBox(tag: "b", count: 3)])
+    else:
+        None
+
+fn make_receipt_res(ok: bool) -> Result<ReceiptBox, text>:
+    if ok:
+        Ok(ReceiptBox(tag: "ok", count: 12))
+    else:
+        Err("err")
+
+describe "wa_batch_f6 lowering regressions":
+    it "unwraps optional byte slices directly with question mark":
+        expect(try_bytes_head(Some([67])).unwrap()).to_equal(67)
+        expect(try_bytes_head(None).is_none()).to_equal(true)
+
+    it "destructures tuples directly when indexing tuple arrays":
+        expect(format_pairs([("k1", "v1"), ("k2", "v2")])).to_equal("k1=v1&k2=v2")
+
+    it "projects record fields directly inside Ok match arms":
+        val ok_res = resolve_outer_root(true)
+        val root_num = match ok_res:
+            case Ok(inner): inner.root
+            case Err(_): -1
+        expect(root_num).to_equal(77)
+
+    it "dispatches array literal match patterns without wildcard collapse":
+        expect(map_vulkan_ver([1, 1])[1]).to_equal(3)
+        expect(map_vulkan_ver([1, 2])[1]).to_equal(5)
+
+    it "unwraps popped tuple elements from stacks directly":
+        var stack: [(i64, bool)] = [(7, false), (99, true)]
+        val (node, expanded) = stack.pop().unwrap()
+        expect(node).to_equal(99)
+        expect(expanded).to_equal(true)
+
+    it "preserves element text type in single-element loop array literals":
+        val attrs: [text] = ["@pure"]
+        var out = ""
+        for a in attrs:
+            out = wrap_one([a])
+        expect(out).to_equal("@pure")
+
+    it "accumulates self-referential dict indexed entries":
+        var counts: Dict<text, i64> = {}
+        counts["unit"] = 0
+        counts["unit"] = counts["unit"] + 5
+        counts["unit"] = counts["unit"] + 3
+        expect(counts["unit"]).to_equal(8)
+
+    it "binds typed elements through if-val optional array patterns":
+        var total = 0
+        if val boxes = make_opt_boxes(true):
+            for box_item in boxes:
+                total = total + box_item.count
+        expect(total).to_equal(12)
+
+    it "pushes matched Result struct payload directly into struct array":
+        var recs: [ReceiptBox] = []
+        match make_receipt_res(true):
+            case Ok(r): recs.push(r)
+            case Err(_): ()
+        expect(recs.len()).to_equal(1)
+        expect(recs[0].tag).to_equal("ok")
+        expect(recs[0].count).to_equal(12)

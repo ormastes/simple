@@ -140,3 +140,16 @@ cache helpers from the old blob were left out. New spec
 5/5. Regression: dashboard_serve 6/6, dashboard_framework_policy 9/9 unchanged.
 `dashboard_log_modes_spec` stays 0/5 (separate bug:
 `dashboard_cli_stub_no_log_mode_support_2026-07-20`; the stub has no log-mode CLI).
+
+## Verification note (2026-11-25, work/p2w2-aa-20261125)
+
+Confirmed the 2026-11-06 resolution is real at release/1.0.0 HEAD
+(`1861a186628`) by source inspection: `src/app/dashboard/main.spl` is 16,031
+bytes and defines the restored table model
+(`grep -c 'DASHBOARD_CACHE_PATH\s*=\|TABLE_NAMES\s*=\|fn load_table\|fn ensure_dirs'`
+= 5; the original repro count was 0), and
+`test/01_unit/app/dashboard/dashboard_table_model_spec.spl` exists.
+Behavioral re-run of the spec is environment-blocked on this host: the pinned
+tracked Rust seed rejects the `@representation_boundary` decorator used by
+test-runner infrastructure at HEAD (`test_runner_client.spl:9`), failing all
+spec runs repo-wide. Fix stands as verified by inspection; bug remains closed.

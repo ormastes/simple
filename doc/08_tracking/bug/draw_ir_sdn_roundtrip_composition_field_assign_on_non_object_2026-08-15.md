@@ -1,7 +1,7 @@
 # SDN-roundtripped Draw IR composition fails render: "cannot assign field on non-object value"
 
 - **Date:** 2026-08-15
-- **Status:** OPEN (root-caused to the SDN round-trip input, exact assignment site not yet pinned)
+- **Status:** RESOLVED 2026-08-15 (see "RESOLVED" section below; header corrected 2026-11-25 — it previously still read OPEN)
 - **Component:** common.ui.draw_ir_sdn / gc_async_mut.gpu.engine2d.draw_ir_adv (interpreter path)
 
 ## Symptom
@@ -47,3 +47,23 @@ Root cause was the interpreter's missing ClassInstance arm for nested field
 assignment (see interpreter_nested_field_assignment_broke_be_dom_cascade_2026-08-15.md).
 After the node_exec.rs fix, `draw_ir_runtime_queue_spec.spl` is 4/4 and
 `draw_ir_composition_damage_spec.spl` is 7/7.
+
+## Verification 2026-11-25 (release/1.0.0, Windows lane)
+
+Confirmed the resolution is real at release/1.0.0 HEAD (`8aa26f51e72`):
+
+- The ClassInstance arms for field assignment are present in the pinned seed's
+  interpreter source: `src/compiler_rust/compiler/src/interpreter/node_exec.rs`
+  (`Value::ClassInstance(instance) => { ... instance.set_field(...) }` for both
+  the local-env and MODULE_GLOBALS paths, ~lines 1602-1608 and 1640-1649).
+- Live probe through the pinned binary (`bin/simple.exe`, v1.0.0-rc.1,
+  build-commit 1343b77bbaa): a class-with-class-field program performing
+  `o.inner.x = 42` and `o.name = "b"` prints `nested=42 name=b` — nested field
+  assignment on ClassInstance values works end-to-end.
+- Limit: `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl`
+  itself could not be re-run in this environment — release/1.0.0 HEAD carries
+  940 `@representation_boundary` annotations (commit cfd89933699) that the
+  pinned seed rejects (`unknown decorator`), so `bin/simple.exe test` fails
+  repo-wide before reaching any spec body. The 4/4 result recorded on
+  2026-08-15 plus the source and probe evidence above is the basis for this
+  closure.

@@ -5,6 +5,33 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** verification-pending — library mitigation for `sha1_bytes` only (2026-11-14, below). The compiler root cause (untyped `list` returns on compiled engines) is NOT fixed and stays open.
+
+## 2026-11-25 — titled defect re-verified FIXED on the release/1.0.0 pinned seed
+
+Measured on `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1,
+Windows) at release/1.0.0 HEAD. The doc's exact repro
+(`sha1_bytes([97, 98, 99])`) under the default JIT lane prints the correct
+RFC 3174 digest:
+
+```
+raw_sha1abc=[169, 153, 62, 54, 71, 6, 129, 106, 186, 62, 37, 113, 120, 80, 194, 108, 156, 208, 216, 157]
+```
+
+= `a9993e364706816aba3e25717850c26c9cd0d89d`. No tag corruption, no wrong
+digest. This independently confirms the "Verified FIXED 2026-11-03" entry on
+the binary release/1.0.0 actually ships. The interpreter arm of the same probe
+could not be re-run in this lane: the pinned seed rejects the
+`@representation_boundary` decorator present at release/1.0.0 HEAD when it
+loads the stdlib source tree (`bin/simple.exe test`/`run` under
+`SIMPLE_EXECUTION_MODE=interpreter` fail repo-wide on it), a known
+source/binary inconsistency, not a sha1 regression — the interpreter was
+correct in every prior measurement and the 2026-11-14 library mitigation is
+engine-independent.
+
+The deliberately-retained residual stands unchanged: the compiler root cause
+(untyped `list` returns mis-tagged on compiled engines) and the
+`sha1_tuple_*`/x4 paths remain open as recorded above. The titled defect —
+`sha1_bytes` returning a corrupted `[i64]` under the JIT — is closed.
 **Found:** 2026-08-04
 
 ## 2026-11-14 — also reproduces under `native-build` (AOT); library mitigation

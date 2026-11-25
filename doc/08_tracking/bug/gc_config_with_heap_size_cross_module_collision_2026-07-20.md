@@ -103,3 +103,26 @@ picks this up.
   (1 of 2 examples fails; the pointer-handle example in the same file
   passes cleanly).
 
+
+## Triage 2026-11-25 (p2w2-ab lane, Windows x86_64, pinned seed `bin/simple.exe` v1.0.0-rc.1, release/1.0.0 @ ead200cb544)
+
+- `static fn with_heap_size` is still textually present at line 139 of all
+  three sibling `gc.spl` copies; the affected spec
+  `test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl` still exists.
+- The minimal repro above can no longer reach the documented error at HEAD:
+  importing `std.nogc_sync_mut.gc` now pulls in `@representation_boundary`
+  annotations (cfd89933699; e.g. `src/lib/nogc_sync_mut/atomic.spl`) that the
+  pinned rc.1 seed rejects, so the run dies earlier with
+  `unknown decorator '@representation_boundary' on function 'atomic_i64_new'`.
+  The original `unknown static method with_heap_size` symptom is therefore
+  neither confirmed nor refuted on this host — it is masked.
+- **Classification: SKIP.** The suspected registry mechanism (identical
+  `struct GcConfig` in three co-compiled family modules, one static method
+  dropped) lives in the Rust seed's class/method registry — the doc itself
+  forbids a seed-source fix, and the seed is bootstrap-only. Whether the
+  pure-Simple compiler shares the defect cannot be measured without a
+  self-hosted binary (same `@representation_boundary` block applies to any
+  spec run at HEAD). Next step for a host with a qualified self-hosted CLI:
+  run the minimal repro above; if it still fails there, the fix belongs in
+  the pure-Simple semantic class registry, keyed per-module rather than per
+  `(class_name, method_name)`.

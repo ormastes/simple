@@ -1,5 +1,33 @@
 # Persistent native-build cache has no GC and a key that has rendered corrupt
-## Open 2026-09-16 — needs owner triage
+
+## Verified closed 2026-11-25 (p2w3-af lane, release/1.0.0 @ 1457ddaa176)
+
+Header was stale ("Open 2026-09-16 — needs owner triage") while the body
+already carried the 2026-11-18 Wave C5 STORAGE resolution; header corrected.
+Code-inspection spot-check at HEAD confirms the resolution's components all
+landed (in evolved form):
+
+- Scope-dir eviction: `driver_aot_native_output.spl:2633-2654` bounds scope
+  dirs via `native_cache_sweep_with_lease` with
+  `disk_bound_cap_bytes("SIMPLE_NATIVE_CACHE_SCOPES_KEEP", 6)`, gated by
+  `native_cache_scope_eviction_role_allowed_v1` so shard/worker children
+  never evict (a refinement beyond the resolution text).
+- `disk_bound_keep_newest_prefix_dirs` exists
+  (`src/lib/nogc_sync_mut/io/disk_bound.spl:210`) and is wired into
+  `native_build_parse_closure_owner.spl:145` for `closure-request-*`
+  sweeping (keep 8, min_age 3600s).
+- Stale `build_cache.sdn` row pruning is present in
+  `src/compiler/80.driver/driver_build/incremental.spl` (missing-output
+  entries dropped; `incremental_file_exists` gates at :1582 et al.).
+- Regression spec `test/01_unit/lib/nogc_sync_mut/io/disk_bound_spec.spl`
+  exists in-tree. Spec-mode execution is environment-blocked repo-wide at
+  this HEAD (`unknown decorator '@representation_boundary'` on the pinned
+  seed), so verification here is by code inspection, not a spec re-run.
+
+Status: **RESOLVED (2026-11-18 Wave C5 STORAGE)** — unchanged, now
+header-accurate.
+
+## Open 2026-09-16 — needs owner triage (superseded by the 2026-11-18 resolution below; kept for history)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
