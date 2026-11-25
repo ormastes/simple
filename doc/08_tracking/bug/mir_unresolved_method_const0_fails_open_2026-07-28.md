@@ -1,6 +1,6 @@
 # Unresolved method call fails OPEN as const-0 while its sibling sites fail CLOSED via rt_panic
 
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-11-25 (fix confirmed in source at both seams; guard specs repaired — see dated section at end)
 - **Filed:** 2026-07-28
 - **Class:** silent-null / fail-open (wrong-answer risk)
 - **Tree measured:** origin/main `bce219fbec1`
@@ -291,3 +291,62 @@ cycle. This C4 guard defect is independent of the W1.5 C3 undefined-SSA-local
 LLVM-text defect: the repair does not touch MIR-to-LLVM call destinations and
 will make C3 temporarily unobservable by rejecting invalid MIR earlier, not
 claim to fix it.
+
+## 2026-11-25: RESOLVED — fix verified in source, guard specs repaired (p1w2-ab lane)
+
+**Fix confirmed present at both owning seams (source inspection, release/1.0.0 @ 4bce05b5dce):**
+
+1. Unresolved-method arm — `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
+   `reject_unresolved_method_call_v1`: records the condition with
+   `self.error_fatal("unresolved method call: {method} route={route} {lookup_detail}", Some(receiver.span))`
+   (line ~3152; `error_fatal` sets `MirError.fatal`, see
+   `_MirLowering/asm_and_targets.spl:645`), then emits `rt_panic` (lines
+   ~3190-3195) BEFORE the `emit_const(temp, Int(0))` placeholder (~3196), so
+   the placeholder is unreachable at runtime — fail closed, matching the two
+   sibling sites. The const-0 def is retained deliberately (use-before-def
+   SIGSEGV avoidance), exactly as this doc's "Contained fix" prescribed.
+2. Flat bootstrap loop — `src/compiler/50.mir/_MirLowering/bootstrap_globals.spl`
+   rejects fatal errors after every `lower_function` / initializer lowering
+   and before the shared accumulator add (`bootstrap_reject_fatal_mir_errors`,
+   def line 39; call sites 512, 558, 570, 973-975, 1001-1006, 1119-1125,
+   1153-1156). This closes the lane this doc measured dropping the collected
+   list under `SIMPLE_BOOTSTRAP=1`.
+
+With (1) the unresolved call is a fatal compile error in every lane that runs
+`bootstrap_reject_fatal_mir_errors` or the default `_driver_collect_mir_errors`
+path, so the "exit 0 with a wrong value" end-to-end scenario this doc left
+unproven is closed by construction: the const-0 can no longer reach codegen
+without a fatal error rejecting the module first.
+
+**Guard-spec drift repaired in the same change:**
+
+- `test/01_unit/compiler/mir/unresolved_method_fatal_guard_source_spec.spl`
+  expected the original fatal literal
+  `self.error_fatal("unresolved method call: {method}", nil)`; the landed code
+  carries `route={route} {lookup_detail}` and `Some(receiver.span)`. Literal
+  updated. The panic/const ordering is now searched AFTER `fatal_pos` because
+  an earlier fail-closed arm (erased-type-param ownership transfer, ~line 2268)
+  emits the identical `b.emit_call(panic_op, ...)` shape and broke the
+  first-occurrence `index_of` comparison.
+- `test/01_unit/compiler/driver/bootstrap_flat_nonentry_globals_source_spec.spl`
+  line-77 block expected two comment lines that a later refactor dropped;
+  updated to the current source text (bootstrap_globals.spl:1153-1156).
+
+**Verification limit (stated, not guessed):** `bin/simple.exe test` is broken
+repo-wide at release/1.0.0 HEAD — the pinned Rust seed rejects the
+`@representation_boundary` decorator added tree-wide by cfd89933699
+(fails parsing `src/app/test_runner_new/test_runner_client.spl`). No spec
+could be executed. Instead every assertion of the unresolved-method spec (7/7)
+and the three fatal-rejection assertions of the bootstrap spec were verified
+by exact-text simulation against current source (all pass). The 2026-08-16
+entry's "execution verification pending" is settled by inspection + simulation,
+not by a native run.
+
+**Pre-existing, NOT repaired here (out of scope):** the bootstrap spec has 16
+other drifted assertions from the unrelated bootstrap-driver refactor
+(`updated_hir_boot`, `lower_and_check_routed_impl`,
+`_bootstrap_hir_module_functions`, the two-arg
+`lower_runtime_module_initializers(hir_module, const_vals)` form, moved
+`parser_constants`/`rt_string_builder_push` sites, etc.). That spec stays red
+until the bootstrap-driver owner re-derives those assertions; the drift
+predates this change and is not caused by it.
