@@ -1,6 +1,37 @@
 # `entry_closure_physical_source_dedup_spec.spl` is red on origin — diagnosis
 
-- **Status:** diagnosed only, nothing fixed (per task scope)
+- **Status:** RESOLVED 2026-11-25 — spec repaired and green; see resolution note below.
+
+## Resolution note (2026-11-25)
+
+All three failure classes diagnosed below have since been repaired on
+release/1.0.0:
+
+- **(C) interpolation bugs:** the four non-raw literal-brace strings now use
+  `r"..."` (e.g. spec line 130 uses
+  `r"phase2:parse:closure:sources collected={entry_sources.len()} ..."`).
+- **(B) stale greps:** the spec was retargeted to the split driver files —
+  `driver_entry_closure_core.spl`, `driver_source_pipeline_loading.spl`,
+  `driver_source_pipeline_parsing.spl`, `driver_orchestration.spl` — by
+  commit `38390812360` ("test(compiler): retarget entry-closure dedup spec to
+  current source layout", 2026-11-04, ancestor of HEAD), which reports the
+  spec 14/14 green and updated `bug_db.sdn` accordingly.
+- **(A) `.find` drift:** the three drifted copies no longer call
+  `mod_path.find(...)`; each layer now has its own text-index helper
+  (`_mir_text_index_of` in `bootstrap_globals.spl`, `_hir_text_index_of` in
+  `module_lowering.spl`), converging the normalizer bodies.
+
+Verification on this host (Windows, 2026-11-25) is by code inspection of the
+spec and the named sources: `bin/simple.exe test` cannot run any spec at
+release/1.0.0 HEAD because the pinned Rust seed rejects the
+`@representation_boundary` decorator (added by cfd89933699) that appears in
+the test runner's own sources. The 14/14-green claim is taken from commit
+`38390812360`'s message plus inspection confirming every retarget it
+describes is present at HEAD.
+
+## Original diagnosis (2026-07-30)
+
+- **Status (superseded):** diagnosed only, nothing fixed (per task scope)
 - **Spec:** `test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`
 - **Repro:** `timeout 900 bin/simple test test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl`
   (plain invocation, no `SIMPLE_TEST_RUNNER_RUST=1`) → `Results: 15 total, 7 passed, 8 failed`.
