@@ -33,3 +33,14 @@ Both take the slot protocol from `simple_runtime::vulkan_async_protocol`.
 Differences, traps (JIT `main` bypasses the bridge; exported `RUSTFLAGS` drops
 `--export-dynamic`) and evidence boundaries:
 `doc/07_guide/platform/ffi/vulkan_async_session.md` § "Two ring owners".
+
+## Shared admission receipt (2026-11-26, verification-pending)
+`SIMPLE_<CUDA|VULKAN|METAL>_PROVIDER_RECEIPT` names the
+`provider_admission_receipt_v1` SDN written by `admit_provider_with_identity`
+(`src/app/build/targets/provider_receipt.spl`). When set, `runtime_dynload.c`
+takes the expected artifact digest from the receipt's `artifact_sha256`
+(`src/runtime/simple_gpu_provider_receipt_v1.h`) and authenticates the provider
+bytes against it. A digest env that disagrees, or an unreadable/invalid receipt,
+refuses the load. Test: `test/02_integration/runtime/gpu_provider_receipt_identity_v1.c`
+(native, any host). The Linux sealed-memfd load path with a receipt has not been
+run end to end (no Linux host for this change).

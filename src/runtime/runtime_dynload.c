@@ -24,6 +24,7 @@
 #include "runtime.h"
 #include "simple_gpu_provider_abi_v1.h"
 #include "simple_gpu_provider_identity_v1.h"
+#include "simple_gpu_provider_receipt_v1.h"
 #include "runtime_dynload_snapshot_private.h"
 
 #include <stdatomic.h>
@@ -59,6 +60,7 @@ typedef struct SimpleGpuProviderState {
     int64_t backend_bit;
     const char *path_env;
     const char *digest_env;
+    const char *receipt_env;
     void *handle;
     int64_t abi_version;
     int64_t backend_bits;
@@ -86,13 +88,16 @@ typedef struct SimpleGpuCallPinV1 {
 static SimpleGpuProviderState simple_gpu_providers[] = {
     {.backend_bit = SIMPLE_GPU_BACKEND_CUDA,
         .path_env = "SIMPLE_CUDA_PROVIDER_PATH",
-        .digest_env = "SIMPLE_CUDA_PROVIDER_SHA256", .snapshot_fd = -1},
+        .digest_env = "SIMPLE_CUDA_PROVIDER_SHA256",
+        .receipt_env = "SIMPLE_CUDA_PROVIDER_RECEIPT", .snapshot_fd = -1},
     {.backend_bit = SIMPLE_GPU_BACKEND_VULKAN,
         .path_env = "SIMPLE_VULKAN_PROVIDER_PATH",
-        .digest_env = "SIMPLE_VULKAN_PROVIDER_SHA256", .snapshot_fd = -1},
+        .digest_env = "SIMPLE_VULKAN_PROVIDER_SHA256",
+        .receipt_env = "SIMPLE_VULKAN_PROVIDER_RECEIPT", .snapshot_fd = -1},
     {.backend_bit = SIMPLE_GPU_BACKEND_METAL,
         .path_env = "SIMPLE_METAL_PROVIDER_PATH",
-        .digest_env = "SIMPLE_METAL_PROVIDER_SHA256", .snapshot_fd = -1}
+        .digest_env = "SIMPLE_METAL_PROVIDER_SHA256",
+        .receipt_env = "SIMPLE_METAL_PROVIDER_RECEIPT", .snapshot_fd = -1}
 };
 static atomic_flag simple_gpu_provider_lock = ATOMIC_FLAG_INIT;
 #if defined(__linux__)
@@ -280,13 +285,39 @@ static int simple_gpu_snapshot_linux_v1(const char *path) {
 }
 #endif
 
+/* Reads the admission receipt named by SIMPLE_<BACKEND>_PROVIDER_RECEIPT and
+ * takes the expected artifact digest from it (simple_gpu_provider_receipt_v1.h).
+ * Returns 0 when the receipt is unreadable, oversized, carries no valid digest,
+ * or disagrees with the digest env: the caller must then refuse the load. */
+static int simple_gpu_receipt_digest_v1(const char *receipt_path,
+        const char *digest_env_value, char out_hex[65]) {
+    char text[16384];
+    size_t length;
+    FILE *file = fopen(receipt_path, "rb");
+    out_hex[0] = '\0';
+    if (!file) return 0;
+    length = fread(text, 1, sizeof(text) - 1, file);
+    if (length == sizeof(text) - 1 && fgetc(file) != EOF) length = 0;
+    fclose(file);
+    if (length == 0) return 0;
+    text[length] = '\0';
+    return simple_gpu_receipt_expected_digest_v1(text, digest_env_value, out_hex);
+}
+
 static void *simple_gpu_open_with_authentication_v1(
-        const char *path, const char *digest_env, uint8_t digest[32],
-        int *authenticated, int *retained_snapshot_fd) {
+        const char *path, const char *digest_env, const char *receipt_env,
+        uint8_t digest[32], int *authenticated, int *retained_snapshot_fd) {
     const char *expected = digest_env ? getenv(digest_env) : NULL;
+    const char *receipt_path = receipt_env ? getenv(receipt_env) : NULL;
+    char receipt_hex[65];
     void *handle;
     *authenticated = 0;
     *retained_snapshot_fd = -1;
+    if (receipt_path && receipt_path[0]) {
+        if (!simple_gpu_receipt_digest_v1(receipt_path, expected, receipt_hex))
+            return NULL;
+        expected = receipt_hex;
+    }
     if (!expected || !expected[0]) return simple_gpu_open(path);
 #if defined(__linux__)
     {
@@ -410,8 +441,8 @@ static int simple_gpu_load_v1(SimpleGpuProviderState *state) {
         if (path_copy) memcpy(path_copy, path, strlen(path) + 1);
     }
     handle = path_copy ? simple_gpu_open_with_authentication_v1(
-        path_copy, state->digest_env, artifact_digest, &authenticated,
-        &snapshot_fd) : NULL;
+        path_copy, state->digest_env, state->receipt_env, artifact_digest,
+        &authenticated, &snapshot_fd) : NULL;
     if (handle) valid = simple_gpu_validate_surface(
         state->backend_bit, handle, &abi_version, &backend_bits);
     if (handle && authenticated)
