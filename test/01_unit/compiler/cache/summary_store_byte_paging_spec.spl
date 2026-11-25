@@ -70,15 +70,28 @@ describe "summary projection byte paging":
                 expect(read.next_offset).to_equal(if complete: nil else: Some(end))
                 expect(read.complete).to_equal(complete)
                 expect(read.content_digest).to_equal(summary.virtual_text_digest)
+                cursor = end
+
+        step("Pages end on UTF-8 scalar boundaries and join back to the full text")
+        for limit in [1, 3, 65, 65536]:
+            var cursor: i64 = 0
+            var continuation: text? = nil
+            var joined = ""
+            var done = false
+            while not done:
                 val page = facade.page(paging_auth(), snapshot, uri, continuation, limit, 4).unwrap().value?
-                val wanted_text = bytes_to_text(wanted)
                 expect(page.page_index).to_equal(cursor)
-                expect(page.rendered_text).to_equal(wanted_text)
-                expect(page.complete).to_equal(complete)
-                expect(page.continuation).to_equal(if complete: nil else: Some(paging_token(snapshot, path, end, limit)))
-                expect(page.page_digest).to_equal(sha256_text("simple.summary.page.v1\u0000{snapshot}\u0000{path}\u0000{cursor}\u0000" + wanted_text))
+                expect(page.rendered_text.contains("�")).to_equal(false)
+                val end = cursor + text_to_bytes(page.rendered_text).len()
+                expect(end > cursor).to_equal(true)
+                expect(page.complete).to_equal(end == expected.len())
+                expect(page.continuation).to_equal(if page.complete: nil else: Some(paging_token(snapshot, path, end, limit)))
+                expect(page.page_digest).to_equal(sha256_text("simple.summary.page.v1\u0000{snapshot}\u0000{path}\u0000{cursor}\u0000" + page.rendered_text))
+                joined = joined + page.rendered_text
                 continuation = page.continuation
                 cursor = end
+                done = page.complete
+            expect(joined).to_equal(rendered)
 
     it "preserves EOF, rejects invalid byte bounds, and returns independent bytes":
         step("Read EOF and reject negative, overrun, and maximum integer bounds")
