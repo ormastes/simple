@@ -86,3 +86,11 @@ corrected to refer to the repaired `copy_mem` gap rather than conflate it with
 the later 73-hook link failure. This audit changes tracking only, so there is
 no runtime performance or memory-allocation change to assess. No new benchmark
 or current-baseline failure is claimed.
+
+## Verification 2026-11-25 (p2w3-ah lane, release/1.0.0)
+
+Status remains **closed**. The repair commit `2d5b22b2083` is an ancestor of
+release/1.0.0 HEAD (confirmed via `git merge-base --is-ancestor`), and the
+`copy_mem(dst, src, n)` owner forwarding to `rt_memcpy` is present at
+`src/runtime/runtime_memory.c:668`. Bookkeeping confirmation only — the macOS
+archive `nm` inspection was not re-run (Windows host, no macOS lane).

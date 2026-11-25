@@ -9,7 +9,11 @@ test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17 /
 prepush_hook_unpassable_native_build_oom_2026-08-17 for why). Left OPEN.
 
 
-Status: OPEN (P2)
+Status: RESOLVED for the tracked payload-struct-name collision (7th layer,
+commit `26ab53a1aa4`, confirmed in-tree on release/1.0.0 2026-11-25 — see the
+dated verification note at the end). The `rt_io_file_*` AOT stub verdict
+remains UNDETERMINED (needs the full ~18-minute closure build; blocked on this
+host — see 2026-11-25 note).
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Summary
@@ -627,3 +631,32 @@ unchanged.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — see fixwave census. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Verification 2026-11-25 (p2w3-ah lane, release/1.0.0) — collision fix confirmed in-tree; AOT stub verdict still undetermined
+
+Code inspection on release/1.0.0 HEAD:
+
+- The 7th-layer fix commit `26ab53a1aa4` is an ancestor of HEAD
+  (`git merge-base --is-ancestor`), and the name-keyed registry it added —
+  `bootstrap_fn_ret_ok_shape_register` / `_lookup` — is present at
+  `src/compiler/50.mir/mir_data.spl:2683`.
+- The 5th-layer fix (`materialize_imported_callable_type_dependencies`) and
+  the layer-4 fixes are likewise ancestors of HEAD.
+
+The tracked defect — cross-module `Result<T, E>` payload struct-name recovery
+colliding/missing — is therefore RESOLVED as of the 7th layer. Status header
+updated from OPEN accordingly.
+
+**Still open, restated (not this bug's mechanism):** the `rt_io_file_*` AOT
+stub/no-stub verdict remains UNDETERMINED — obtaining it needs the full
+~18-minute `rt_io_file_roundtrip` closure native build, which is not runnable
+within this lane's budget on this Windows host (no self-hosted binary; the
+pinned seed cannot stand up the test/native pipeline at this HEAD —
+`@representation_boundary` rejection — and seed rebuilds are out of scope).
+The fast 2-file repro was not re-executed for the same reason; the 7th-layer
+session's object-file evidence stands. Also unchanged: the fixture is
+additionally blocked under plain interpretation by the separate
+`rt_io_file_*` extern-dispatch defect
+(`rt_io_file_family_undefined_stubbed_silent_data_loss_2026-08-05.md`).
+A follow-up lane with a working self-hosted binary should run
+`scripts/check/check-rt-io-file-native-jit-stub.shs` to settle the verdict.
