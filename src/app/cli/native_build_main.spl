@@ -96,7 +96,7 @@ use std.nogc_sync_mut.io.host_capacity.{host_capacity_probe_v1, host_capacity_id
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_build_root,
     native_cache_lease_begin, native_cache_lease_end, native_cache_sweep_with_lease}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes, disk_bound_keep_newest_prefix_dirs}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use compiler.driver.driver_hir_worker_surface_v1.{parse_shard_skeleton_env_v1}
 use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
@@ -116,7 +116,7 @@ use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_outcome_v1,
     native_mir_shard_run_key_selection_v1, native_mir_shard_resume_full_pass_line_v1,
     native_cache_scope_start_retention_due_v1, native_cache_scope_start_retention_v1,
     NATIVE_CACHE_SCOPE_RETENTION_DONE_ENV_V1}
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_cap_bytes, disk_bound_keep_newest_prefix_dirs}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_cache_lane}
 use compiler.driver.cache.native_build_environment_identity.{native_build_module_environment_fingerprint_v1}
 use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
@@ -1205,6 +1205,7 @@ fn native_build_recorded_worker_peaks_v1(args: [text]) -> [i64]:
 
 fn shard_ledger_queue_dir(args: [text], prefix: text, label: text) -> text:
     val (root, cache_selection) = shard_ledger_root_v1(args)
+    val _pruned_ledgers = disk_bound_keep_newest_prefix_dirs(root, "{prefix}-", 4, 21600)
     # A prior invocation can retain its evidence even after PID reuse.
     var serial: i64 = 0
     var dir = "{root}/{prefix}-{getpid()}-{serial}"
@@ -2120,6 +2121,8 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
                 eprint "[go-to-end] HIR shard pool recorded {hir_run.failed_modules} failed module(s); the MIR stage continues over the modules whose HIR succeeded, link blocked"
             if not hir_ok:
                 eprint "[capsule-shard] HIR warm-up failed (exit={hir_run.code} failed_modules={hir_run.failed_modules} reason={hir_run.blocked_reason}); in-process build redoes HIR and reports it"
+            if hir_run.all_stopped and (env_get("SIMPLE_KEEP_SHARD_LEDGERS") ?? "") != "1":
+                val _cleaned_hir_q = dir_remove_all(hir_queue)
     var result = ""
     if allow_mir and hir_ok and mir_flag != "0":
         val admitted = native_build_mir_admitted_workers_v1(args)
@@ -2174,25 +2177,25 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     val pool_request = native_file_worker_pool_request_v1(requested, cpu_count())
     if requested <= 0 and pool_request > 1:
         admit_args = admit_args.push("--threads={pool_request}")
+    val pool_hir_kb = native_build_hir_worker_budget_kb_v1()
+    val pool_mir_kb = native_build_pool_mir_worker_budget_kb_v1()
+    val admit_avail_kb = shard_mem_available_kb()
+    val admit_requested = native_build_requested_shard_threads(admit_args)
     val hir_count = native_build_hir_shard_count(admit_args)
-    val mir_parallel = native_build_shard_threads(admit_args, native_build_pool_mir_worker_budget_kb_v1())
+    val mir_parallel = native_build_shard_threads(admit_args, pool_mir_kb)
     var parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
     val hir_disabled_by = if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0": "SIMPLE_HIR_CACHE=0"
         elif native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "", env_get("SIMPLE_HIR_SHARDING") ?? "") == 0: "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
         else: ""
     # Fail closed: a refused pool is an error, never a two-pass or in-process fallback.
-    val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, shard_mem_available_kb(),
-        native_build_hir_worker_budget_kb_v1(),
-        native_build_pool_mir_worker_budget_kb_v1(),
-        native_build_requested_shard_threads(admit_args), hir_disabled_by,
-        hir_disabled_by == "" and hir_count < 2 and shard_pool_clamp_workers(file_worker_pool_addressable_budget_kb_v1(shard_worker_estimate_kib_v1(native_build_hir_worker_budget_kb_v1(), native_build_recorded_worker_peaks_v1(args), shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "")), file_worker_pool_host_pointer_bits_v1())) in [0, 1], file_worker_pool_host_pointer_bits_v1())
+    val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, admit_avail_kb,
+        pool_hir_kb, pool_mir_kb, admit_requested, hir_disabled_by,
+        hir_disabled_by == "" and hir_count < 2 and shard_pool_clamp_workers(file_worker_pool_addressable_budget_kb_v1(shard_worker_estimate_kib_v1(pool_hir_kb, native_build_recorded_worker_peaks_v1(args), shard_mem_available_kb_from_field(env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "")), file_worker_pool_host_pointer_bits_v1())) in [0, 1], file_worker_pool_host_pointer_bits_v1())
     val serial_low_memory = native_file_worker_single_unit_low_memory_admitted_from_env_v1(
         parallel, hir_disabled_by)
-    val pool_hir_kb = native_build_hir_worker_budget_kb_v1()
-    val pool_mir_kb = native_build_pool_mir_worker_budget_kb_v1()
     val serial_memory = refusal != "" and not serial_low_memory and file_worker_pool_serial_memory_admits_v1(
-        hir_count, mir_parallel, native_build_requested_shard_threads(admit_args), hir_disabled_by,
-        shard_mem_available_kb(), if pool_hir_kb > pool_mir_kb: pool_hir_kb else: pool_mir_kb)
+        hir_count, mir_parallel, admit_requested, hir_disabled_by,
+        admit_avail_kb, if pool_hir_kb > pool_mir_kb: pool_hir_kb else: pool_mir_kb)
     if serial_memory:
         print "[file-worker] WARNING: pool admits {parallel} worker(s) under the tree headroom (hir_workers={hir_count} mir_workers={mir_parallel}); raw free memory covers one worker + coordinator, degrading to 1 serial worker (RSS guard authoritative)"
     if serial_low_memory or serial_memory:
@@ -2256,7 +2259,11 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
             env_set(FILE_WORKER_INC_PRODUCER_ENV_V1, inc_producer)
             if not fin.relink:
                 env_set(FILE_WORKER_LINK_PLACED_ENV_V1, "1")
+        if run.all_stopped and (env_get("SIMPLE_KEEP_SHARD_LEDGERS") ?? "") != "1":
+            val _cleaned_hir_q = dir_remove_all(hir_queue)
         return mir_queue
+    if run.all_stopped and (env_get("SIMPLE_KEEP_SHARD_LEDGERS") ?? "") != "1":
+        val _cleaned_hir_q = dir_remove_all(hir_queue)
     if outcome == "fail":
         eprint "[file-worker] aggregate failure exit={run.code} failed_modules={run.failed_modules} blocked={run.blocked_reason}; link blocked"
         _shard_aggregate_fail_reason_v1 = "file-worker pool exit={run.code} failed_modules={run.failed_modules} claims={run.total_claims} blocked={run.blocked_reason}; see the [file-worker] owner= lines above"

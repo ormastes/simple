@@ -1,0 +1,104 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_exists, file_write_exact, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_sweep}
+use compiler.frontend.cache_dir_evict.{CACHE_EVICT_TMP_GRACE_SECS, cache_dir_reap_stale_tmp_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_source_file.{SourceFile}
+use compiler.common.driver_compile_options.{CompileOptions, driver_core_compile_options_default}
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.driver.driver_aot_native_output.{
+    driver_native_shadow_sort,
+    driver_native_module_cache_source,
+    driver_native_module_source_identity
+}
+
+fn empty_hir(name: text) -> HirModule:
+    HirModule(name: name, path: name + ".spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [])
+
+describe "driver memory retention, O(N) lookups, and storage cleanup":
+    it "evict_hir clears mir_feed_modules and validation buffers alongside hir_modules":
+        var opts: CompileOptions = driver_core_compile_options_default()
+        var ctx = CompileContext.create(opts)
+        val m = empty_hir("m.one")
+        ctx.hir_modules["m.one"] = m
+        ctx.hir_module_count_value = 1
+        ctx.mir_feed_modules = [m]
+        ctx.validation_module_blobs = ["blob1", "blob2"]
+        ctx.evict_hir()
+        expect(ctx.hir_modules.keys().len()).to_equal(0)
+        expect(ctx.hir_module_count_value).to_equal(0)
+        expect(ctx.mir_feed_modules.len()).to_equal(0)
+        expect(ctx.validation_module_array.len()).to_equal(0)
+        expect(ctx.validation_module_blobs.len()).to_equal(0)
+
+    it "driver_native_shadow_sort sorts lines deterministically":
+        val sorted = driver_native_shadow_sort(["z.spl", "a.spl", "m.spl", "a.spl", "b.spl"])
+        expect(sorted).to_equal(["a.spl", "a.spl", "b.spl", "m.spl", "z.spl"])
+        expect(driver_native_shadow_sort([])).to_equal([])
+
+    it "handles frozen and unfrozen module cache lookups across 40 modules cleanly":
+        var opts: CompileOptions = driver_core_compile_options_default()
+        var ctx = CompileContext.create(opts)
+        var paths: [text] = []
+        var ids: [text] = []
+        var mods: [text] = []
+        var srcs: [SourceFile] = []
+        var i: i64 = 0
+        while i < 40:
+            val p = "src/mod_{i}.spl"
+            val m = "mod.n{i}"
+            val id = sha256_text("content_{i}")
+            paths.push(p)
+            ids.push(id)
+            mods.push(m)
+            srcs.push(SourceFile(path: p, authored_path: p, content: "", module_name: m))
+            i = i + 1
+        ctx.source_paths_owner = paths
+        ctx.source_identities_owner = ids
+        ctx.source_module_names_owner = mods
+        ctx.sources = srcs
+        # Unfrozen mutation sensitivity
+        expect(driver_native_module_cache_source(ctx, "mod.n15")).to_equal("src/mod_15.spl")
+        val updated_id = sha256_text("updated_15")
+        ctx.source_identities_owner[15] = updated_id
+        expect(driver_native_module_source_identity(ctx, "mod.n15")).to_equal(updated_id)
+        # Frozen lookup table fast path
+        expect(ctx.freeze_storage_registry_for_schedule(mods) == "invalid").to_equal(false)
+        var j: i64 = 0
+        while j < 40:
+            expect(driver_native_module_cache_source(ctx, "mod.n{j}")).to_equal("src/mod_{j}.spl")
+            j = j + 1
+
+    it "sweeps orphan .tmp cache files only after the grace window":
+        val dir = "/tmp/simple-perf-tmp-evict-{getpid()}"
+        val _clean0 = dir_remove_all(dir)
+        expect(dir_create_all(dir)).to_equal(true)
+        val fresh_tmp = "{dir}/in_flight.fpc.tmp"
+        val orphan_tmp = "{dir}/orphan.fpc.tmp"
+        val real_entry = "{dir}/entry.fpc"
+        expect(file_write_exact(fresh_tmp, "inflight")).to_equal(true)
+        expect(file_write_exact(orphan_tmp, "orphan")).to_equal(true)
+        expect(file_write_exact(real_entry, "realdata")).to_equal(true)
+        val mtime = file_modified_time(orphan_tmp)
+        # Within grace window: both .tmp files remain untouched
+        expect(cache_dir_reap_stale_tmp_v1(dir, mtime + 5)).to_equal(0)
+        expect(file_exists(orphan_tmp)).to_equal(true)
+        expect(file_exists(fresh_tmp)).to_equal(true)
+        # Past 1h grace window: stale orphan .tmp files are swept while .fpc remains intact
+        expect(cache_dir_reap_stale_tmp_v1(dir, mtime + CACHE_EVICT_TMP_GRACE_SECS + 10)).to_equal(2)
+        expect(file_exists(orphan_tmp)).to_equal(false)
+        expect(file_exists(fresh_tmp)).to_equal(false)
+        expect(file_exists(real_entry)).to_equal(true)
+        # disk_bound_sweep also leaves fresh .tmp files intact
+        val fresh_obj_tmp = "{dir}/fresh.o.tmp"
+        expect(file_write_exact(fresh_obj_tmp, "objtmp")).to_equal(true)
+        val _swept = disk_bound_sweep(dir, 1024)
+        expect(file_exists(fresh_obj_tmp)).to_equal(true)
+        val _clean1 = dir_remove_all(dir)

@@ -45,10 +45,6 @@ pub fn runtime_c_compile_workers_for_v1(cpus: i64, requested: i64, jobs: i64, av
         return jobs
     val safe_cpus = if cpus > 0: cpus else: 1
     var target = if requested > 0: requested else: safe_cpus
-    if requested <= 0 and target > 8:
-        target = 8
-    if target > safe_cpus:
-        target = safe_cpus
     if target > jobs:
         target = jobs
     # ~256 MiB (262144 KiB) per `clang -c` / `cc -c` translation unit above host reserve.
@@ -77,8 +73,16 @@ pub fn runtime_c_compile_workers_v1(jobs: i64) -> i64:
     val avail = host_commit_avail_kib()
     val explicit_res = host_limit_mem_reserve_free_kib(0)
     val total_kib = host_physmem_total_kib()
+    val host_pct = host_limit_i64("tree_rss_host_pct", 0)
+    val pct_reserve = if total_kib > 0 and host_pct > 0 and host_pct <= 90:
+        val r = (total_kib / 100) * (100 - host_pct) + ((total_kib % 100) * (100 - host_pct)) / 100
+        val min_ten = total_kib / 10
+        if r > min_ten: r else: min_ten
+    else:
+        0
     val quarter = if total_kib > 0: total_kib / 4 else: 5242880
-    val default_res = if quarter > 25165824: 25165824 elif quarter < 4194304: 4194304 else: quarter
+    val fallback_res = if quarter > 25165824: 25165824 elif quarter < 4194304: 4194304 else: quarter
+    val default_res = if pct_reserve > 0: pct_reserve else: fallback_res
     val reserve = if explicit_res > 0: explicit_res else: default_res
     runtime_c_compile_workers_for_v1(cpus, requested, jobs, avail, reserve)
 

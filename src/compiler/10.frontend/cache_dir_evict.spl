@@ -178,6 +178,52 @@ pub class _CacheDirEvictPlan:
         self.total = self.total - size
         self.removed = self.removed + 1
 
+# Reap stale orphan `*.tmp` files older than `CACHE_EVICT_TMP_GRACE_SECS` (1 hour)
+# without touching active in-flight writes. Kept separate from
+# `_cache_dir_evict_to_cap_at` and `cache_dir_evict_tree_to_cap_v1` so byte-cap
+# sweeps with synthetic `now_override_secs` never disturb `.tmp` files directly.
+pub const CACHE_EVICT_TMP_GRACE_SECS: i64 = 3600
+
+# reason: directory path and epoch-second timestamp scalars matching _cache_dir_evict_to_cap_at
+@allow(primitive_api)
+pub fn cache_dir_reap_stale_tmp_v1(dir: text, now_secs: i64 = 0) -> i64:
+    var dir_ok = false
+    unsafe(capabilities: [ffi]):
+        dir_ok = rt_dir_exists(dir)
+    if not dir_ok:
+        return 0
+    val now = if now_secs > 0: now_secs else: _cache_now_secs()
+    var removed: i64 = 0
+    var pending_dirs: [text] = [dir]
+    var dir_idx: i64 = 0
+    while dir_idx < pending_dirs.len():
+        val cur_dir = pending_dirs[dir_idx]
+        dir_idx = dir_idx + 1
+        var entries: [text] = []
+        unsafe(capabilities: [ffi]):
+            entries = rt_dir_list(cur_dir) ?? []
+        for name in entries:
+            if name == "" or name == "." or name == "..":
+                continue
+            val path = cur_dir + "/" + name
+            if name.ends_with(".tmp"):
+                var tmp_mtime: i64 = 0
+                unsafe(capabilities: [ffi]):
+                    tmp_mtime = rt_file_stat(path)
+                if tmp_mtime > 0 and now - tmp_mtime >= CACHE_EVICT_TMP_GRACE_SECS:
+                    var deleted = false
+                    unsafe(capabilities: [ffi]):
+                        deleted = rt_file_delete(path)
+                    if deleted:
+                        removed = removed + 1
+            else:
+                var sub_present = false
+                unsafe(capabilities: [ffi]):
+                    sub_present = rt_dir_exists(path)
+                if sub_present:
+                    pending_dirs.push(path)
+    removed
+
 # Evicts least-recently-modified entries with the given suffix until the
 # directory's total entry bytes are at or below `max_bytes`. Returns the number
 # of entries deleted. A `max_bytes` of 0 disables eviction entirely.
@@ -185,7 +231,9 @@ pub fn cache_dir_evict_to_cap(dir: text, suffix: text, max_bytes: i64) -> i64:
     var now_micros: i64 = 0
     unsafe(capabilities: [ffi]):
         now_micros = rt_time_now_unix_micros()
-    _cache_dir_evict_to_cap_at(dir, suffix, max_bytes, now_micros / 1000000)
+    val now_secs = now_micros / 1000000
+    val _reaped_tmp = cache_dir_reap_stale_tmp_v1(dir, now_secs)
+    _cache_dir_evict_to_cap_at(dir, suffix, max_bytes, now_secs)
 
 fn _cache_dir_evict_to_cap_at(dir: text, suffix: text, max_bytes: i64, now_secs: i64) -> i64:
     if max_bytes <= 0 or dir == "":
@@ -213,6 +261,8 @@ fn _cache_dir_evict_to_cap_at(dir: text, suffix: text, max_bytes: i64, now_secs:
                 if primary_size <= 0 and seal_mtime > 0 and now_secs - seal_mtime >= CACHE_EVICT_GRACE_SECS:
                     unsafe(capabilities: [ffi]):
                         val _orphan_seal = rt_file_delete(seal_path)
+            continue
+        if name.ends_with(".tmp"):
             continue
         if not name.ends_with(suffix):
             continue
@@ -283,7 +333,9 @@ pub fn cache_dir_evict_tree_to_cap_v1(req: CacheTreeEvictRequestV1) -> CacheTree
         unsafe(capabilities: [ffi]):
             entries = rt_dir_list(cur_dir) ?? []
         for name in entries:
-            if name == "" or name == "." or name == ".." or name.ends_with(".tmp"):
+            if name == "" or name == "." or name == "..":
+                continue
+            if name.ends_with(".tmp"):
                 continue
             if name.ends_with(".seal"):
                 if name.byte_len() > 5:
