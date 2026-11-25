@@ -28,3 +28,15 @@ Strict daemon linking then exposed that the Vulkan runtime archive declared no
 primitive volatile operations directly; application code continues through the
 existing `app.io.volatile_ops` facade.
 
+
+## Triage 2026-11-25 (work/p2w4-af-20261125)
+
+The "Open 2026-09-16 — needs owner triage" header is stale bookkeeping; the
+2026-07-15 status records the selector fix as source-implemented with a
+fresh native-all bootstrap deployment still required before the pure-Simple
+Stage2 compiler can consume it. That deployment/verification step needs a
+full native-all bootstrap, which this session cannot perform (Windows host,
+pinned Rust seed v1.0.0-rc.1 as the only binary, no cargo or bootstrap
+builds permitted in this lane). Status unchanged: source implemented,
+bootstrap execution verification pending. Not independently re-verified
+here.
