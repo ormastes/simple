@@ -110,23 +110,35 @@ impl MirLowering:
         placeholder
 
     me builtin_array_elem_hir_type(receiver: HirExpr, arr: LocalId) -> HirType?:
-        """Declared element type of an array receiver, or nil when unknown.
+        """Declared element type of an array receiver, or None when unknown.
         `[Error]` / `[Infer]` name no element type and are never returned."""
         var found: HirType? = None
         if val local_type = self.find_local_hir_type(arr.id):
-            match local_type.kind:
+            var unwrapped_local = local_type
+            match unwrapped_local.kind:
+                case HirTypeKind.Ref(inner_local, _): unwrapped_local = inner_local
+                case _: ()
+            match unwrapped_local.kind:
                 case HirTypeKind.Array(local_elem, _): found = Some(local_elem)
                 case HirTypeKind.Slice(local_elem): found = Some(local_elem)
                 case _: ()
         if found == None:
             if val declared_type = self.receiver_declared_type(receiver):
-                match declared_type.kind:
+                var unwrapped_declared = declared_type
+                match unwrapped_declared.kind:
+                    case HirTypeKind.Ref(inner_declared, _): unwrapped_declared = inner_declared
+                    case _: ()
+                match unwrapped_declared.kind:
                     case HirTypeKind.Array(declared_elem, _): found = Some(declared_elem)
                     case HirTypeKind.Slice(declared_elem): found = Some(declared_elem)
                     case _: ()
         if found == None:
             if val expr_type = self.enum_match_expr_type(receiver):
-                match expr_type.kind:
+                var unwrapped_expr = expr_type
+                match unwrapped_expr.kind:
+                    case HirTypeKind.Ref(inner_expr, _): unwrapped_expr = inner_expr
+                    case _: ()
+                match unwrapped_expr.kind:
                     case HirTypeKind.Array(expr_elem, _): found = Some(expr_elem)
                     case HirTypeKind.Slice(expr_elem): found = Some(expr_elem)
                     case _: ()
@@ -143,17 +155,20 @@ impl MirLowering:
         None
 
     me builtin_array_receiver_proven(receiver: HirExpr, arr: LocalId) -> bool:
-        """A runtime array local, or an erased i64 word whose DECLARED type is
-        an array (a call/field/Result projection) -- the same two populations
-        lower_for_iterator admits. Never an untyped integer, and never a
-        local known to hold a user struct/class value (its own `find` /
-        `sorted` / ... wins)."""
+        """A runtime array local, a borrowed `&[T]` array parameter, or an
+        erased i64 word whose DECLARED type is an array (a call/field/Result
+        projection) -- the same populations lower_for_iterator admits. Never
+        an untyped integer, and never a local known to hold a user
+        struct/class value (its own `find` / `sorted` / `append` / `concat`
+        wins)."""
         if self.builtin_local_has_custom_owner(arr):
             return false
         if self.local_is_runtime_array(arr):
             return true
         var erased_word = false
         if val arr_mir = self.local_mir_type_of(arr):
+            if self.borrowed_runtime_array_inner_mir_type(arr_mir).?:
+                return true
             match arr_mir.kind:
                 case MirTypeKind.I64: erased_word = true
                 case _: ()

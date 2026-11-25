@@ -2019,6 +2019,10 @@ impl MirLowering:
         false
 
     me lower_unresolved_array_push(push_recv: LocalId, push_value: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        if not self.local_is_runtime_array(push_recv):
+            if val push_recv_ty = self.local_mir_type_of(push_recv):
+                if self.borrowed_runtime_array_inner_mir_type(push_recv_ty).?:
+                    self.runtime_array_locals[push_recv.id] = true
         val push_u64_receiver = self.array_push_receiver_is_u64_v1(push_recv)
         val push_val_raw = self.option_record_element_payload_v1(push_recv, push_value, self.lower_expr(push_value))
         self.note_container_elem_type(push_recv, push_val_raw)
@@ -2360,15 +2364,20 @@ impl MirLowering:
         None
 
     me array_concat_element_authority_v1(expression: HirExpr, local: LocalId) -> HirType?:
-        # A direct empty literal has no element authority. A typed variable
-        # or cast keeps its declared element type even when its value is empty.
+        # A direct empty literal has no element authority. A typed variable,
+        # borrowed `&[T]` parameter, or cast keeps its declared element type
+        # even when its value is empty.
         match expression.kind:
             case HirExprKind.ArrayLit(elements, _):
                 if elements.len() == 0: return None
             case _: ()
         val declared = self.receiver_declared_or_result_type(expression, local)
         val source = if declared.?: declared else: self.enum_match_expr_type(expression)
-        if val container = source:
+        if val raw_container = source:
+            var container = raw_container
+            match container.kind:
+                case HirTypeKind.Ref(inner_container, _): container = inner_container
+                case _: ()
             match container.kind:
                 case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
                     match element.kind:
@@ -2382,33 +2391,40 @@ impl MirLowering:
             case HirExprKind.ArrayLit(elements, _): elements.len() == 0
             case _: false
 
-    me lower_unresolved_array_concat_v1(concat_left: LocalId, concat_right: LocalId, authority: LocalId? = None) -> LocalId:
+    me lower_unresolved_array_concat_v1(concat_left: LocalId, concat_right: LocalId, authority: LocalId? = None, resolved_element: HirType? = None) -> LocalId:
         """Allocate a fresh concatenation; never write back either input handle."""
         # Result element/array MIR type: prefer whichever
         # operand carries a concrete Array/Slice MIR type
-        # (both operands are expected to share one element
-        # type for a well-typed `arr1 + arr2`); fall back
-        # to a generic i64-element Array type (matches
-        # decode_runtime_value's own Array/Slice fallback
-        # convention) when neither operand's MIR type is
-        # known -- e.g. `[] + [1]` where the empty-literal
-        # operand's element type defaults to i64 anyway
-        # (lower_array_lit's own default).
+        # (including borrowed Ref(Array/Slice) parameters); fall back to
+        # resolved_element (for erased-i64 cross-module field/call projections)
+        # and finally generic i64-element Array type (matches
+        # decode_runtime_value's own Array/Slice fallback convention) when
+        # neither operand's MIR type is known -- e.g. `[] + [1]`.
         val metadata_source = authority ?? concat_left
         var array_result_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
         var array_result_type_known = false
         if val left_arr_ty = self.local_mir_type_of(metadata_source):
-            match left_arr_ty.kind:
+            val left_effective = self.borrowed_runtime_array_inner_mir_type(left_arr_ty) ?? left_arr_ty
+            match left_effective.kind:
                 case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
                     array_result_type = MirType(kind: MirTypeKind.Array(element, 0))
                     array_result_type_known = true
                 case _: ()
         if not array_result_type_known:
             if val right_arr_ty = self.local_mir_type_of(concat_right):
-                match right_arr_ty.kind:
+                val right_effective = self.borrowed_runtime_array_inner_mir_type(right_arr_ty) ?? right_arr_ty
+                match right_effective.kind:
                     case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
                         array_result_type = MirType(kind: MirTypeKind.Array(element, 0))
+                        array_result_type_known = true
                     case _: ()
+        if not array_result_type_known:
+            if val elem_hir = resolved_element:
+                val elem_mir = match elem_hir.kind:
+                    case HirTypeKind.Str: self.bootstrap_text_type()
+                    case _: self.lower_type(elem_hir)
+                array_result_type = MirType(kind: MirTypeKind.Array(elem_mir, 0))
+                array_result_type_known = true
         # Bug #149 (same class): the FuncPtr's declared
         # `return_type` is what registers rt_array_concat's
         # KNOWN return type at codegen time -- it MUST
@@ -2442,18 +2458,30 @@ impl MirLowering:
             self.runtime_array_locals[array_cat_local.id] = true
             self.mark_runtime_value_local(array_cat_local.id)
             self.copy_local_hir_type_metadata(metadata_source.id, array_cat_local.id)
-            # Concatenation has a new extent; retain element authority only.
+            # Concatenation returns a fresh owned array with a new extent;
+            # strip any outer Ref and fixed extent while retaining element authority.
+            var metadata_updated = false
             var metadata_index = 0
             while metadata_index < self.local_hir_type_ids.len():
                 if self.local_hir_type_ids[metadata_index] == array_cat_local.id:
-                    val source_type = self.local_hir_type_values[metadata_index]
+                    var source_type = self.local_hir_type_values[metadata_index]
+                    match source_type.kind:
+                        case HirTypeKind.Ref(inner_src, _): source_type = inner_src
+                        case _: ()
                     match source_type.kind:
                         case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
                             self.local_hir_type_values[metadata_index] = HirType(
                                 kind: HirTypeKind.Array(element, None), span: source_type.span)
+                            metadata_updated = true
                         case _: ()
                     break
                 metadata_index = metadata_index + 1
+            if not metadata_updated:
+                if val elem_hir = resolved_element:
+                    self.remember_local_hir_type(
+                        array_cat_local.id,
+                        HirType(kind: HirTypeKind.Array(elem_hir, None), span: elem_hir.span),
+                        0, 0)
             if val concat_element = self.noted_runtime_elem_type(metadata_source):
                 self.runtime_elem_value_type[array_cat_local.id] = concat_element
             elif val concat_element = self.noted_runtime_elem_type(concat_right):
@@ -2463,11 +2491,26 @@ impl MirLowering:
                     case MirTypeKind.Array(element, _):
                         self.runtime_elem_value_type[array_cat_local.id] = element
                     case _: ()
+            var elem_struct_recorded = false
             val left_elem_syms = self.array_element_struct_syms.get(metadata_source.id)
             if left_elem_syms != None:
                 val les = left_elem_syms ?? ""
                 if les != "":
                     self.array_element_struct_syms[array_cat_local.id] = les
+                    elem_struct_recorded = true
+            if not elem_struct_recorded:
+                if val elem_hir = resolved_element:
+                    match elem_hir.kind:
+                        case HirTypeKind.Named(element_symbol, _):
+                            val optional_element: HirSymbol? = self.symbols.get_symbol_raw(element_symbol.id)
+                            if val present_element = optional_element:
+                                val element: HirSymbol = present_element
+                                if element.kind == SymbolKind.Struct:
+                                    self.array_element_struct_syms[array_cat_local.id] = self.struct_value_provenance_key(element)
+                                elif element.kind == SymbolKind.Class:
+                                    val elem_cls_key = mir_class_identity_raw(self.symbols, element_symbol.id)
+                                    self.array_element_struct_syms[array_cat_local.id] = if elem_cls_key != "": elem_cls_key else: self.struct_value_provenance_key(element)
+                        case _: ()
             return array_cat_local
         self.error_fatal("unable to emit array concat", None)
         concat_left
@@ -5864,8 +5907,9 @@ impl MirLowering:
                 # recovery above has had first chance, lower it immediately;
                 # unrelated text/conversion probes below can consult stale
                 # optional local-type metadata on the staged path.
-                # `append` is the same builtin on a proven runtime array.
-                val array_append_alias = method == "append" and args.len() == 1 and self.local_is_runtime_array(unresolved_receiver_local)
+                # `append` is the same builtin on a proven array receiver
+                # (runtime array, borrowed `&[T]`, or declared-array projection).
+                val array_append_alias = method == "append" and args.len() == 1 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local)
                 if (method == "push" and args.len() == 1) or array_append_alias:
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
@@ -6485,7 +6529,7 @@ impl MirLowering:
                         wb_kind, wb_base, wb_index, wb_field_idx)
                 if method == "insert" and args.len() == 2 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local):
                     return self.lower_unresolved_array_insert_v1(unresolved_receiver_local, args, wb_kind, wb_base, wb_index, wb_field_idx)
-                if method == "concat" and args.len() == 1 and self.local_is_runtime_array(unresolved_receiver_local):
+                if method == "concat" and args.len() == 1 and self.builtin_array_receiver_proven(receiver, unresolved_receiver_local):
                     val left_element = self.array_concat_element_authority_v1(receiver, unresolved_receiver_local)
                     # Contextual literals use the existing element adaptation
                     # boundary; already typed arrays must agree without casts.
@@ -6495,7 +6539,7 @@ impl MirLowering:
                             case _: self.lower_expr(args[0].value)
                     else:
                         self.lower_expr(args[0].value)
-                    if not self.local_is_runtime_array(concat_other):
+                    if not self.builtin_array_receiver_proven(args[0].value, concat_other):
                         self.error_fatal("array concat requires an array argument", Some(args[0].value.span))
                         return unresolved_receiver_local
                     val right_element = match args[0].value.kind:
@@ -6503,7 +6547,9 @@ impl MirLowering:
                             if left_element.?: left_element else: self.array_concat_element_authority_v1(args[0].value, concat_other)
                         case _: self.array_concat_element_authority_v1(args[0].value, concat_other)
                     var metadata_source = unresolved_receiver_local
+                    var resolved_element: HirType? = None
                     if val expected = left_element:
+                        resolved_element = Some(expected)
                         if val actual = right_element:
                             if not enum_payload_types_alias_equal(expected, actual, self.symbols):
                                 self.error_fatal("array concat element type mismatch", Some(args[0].value.span))
@@ -6516,10 +6562,11 @@ impl MirLowering:
                             self.error_fatal("array concat receiver element authority missing", Some(receiver.span))
                             return unresolved_receiver_local
                         metadata_source = concat_other
+                        resolved_element = Some(expected)
                     elif not self.array_concat_is_empty_literal_v1(receiver) or not self.array_concat_is_empty_literal_v1(args[0].value):
                         self.error_fatal("array concat element authority missing", Some(receiver.span))
                         return unresolved_receiver_local
-                    return self.lower_unresolved_array_concat_v1(unresolved_receiver_local, concat_other, Some(metadata_source))
+                    return self.lower_unresolved_array_concat_v1(unresolved_receiver_local, concat_other, Some(metadata_source), resolved_element)
                 if (method == "merge" or method == "extend") and args.len() == 1:
                     return self.lower_unresolved_array_merge(
                         unresolved_receiver_local, args[0].value,
