@@ -165,3 +165,19 @@ OPEN original name-collision hypothesis; PR #6300 MERGED at a1b0b7bb79421b7d8350
 
 ## 2026-11-09 — closed (owner decision 2026-11-09 item 15: close after fresh-seed run)
 Seed `bin/simple.exe test` on origin/release/1.0.0 @1cc167e37fd: `claude_json_index_contract_spec` 5/5, `app/llm_caret/claude_cli_spec` 85/85, `claude_cli_cross_module_owner_spec` 4/4, all PASS. Collision not reproducible.
+
+## Verification note (2026-11-25, P2 ledger sweep)
+
+STALE-CLOSED confirmed by code inspection. The collision-removing rename is
+in current `release/1.0.0` source: the library owner is
+`lib_parse_claude_json_response`
+(`src/lib/nogc_async_mut/llm/claude_cli.spl:103`) while the app owner keeps
+`parse_claude_json_response` (`src/app/llm_caret/claude_cli.spl:247`), and the
+JSON search consumers now use the byte-offset `index_of` contract
+(`src/lib/nogc_async_mut/llm/json_helpers.spl:106-170`). The named specs
+(`claude_cli_cross_module_owner_spec.spl`, `claude_cli_spec.spl`,
+`claude_json_index_contract_spec.spl`) exist. A fresh seed re-run at HEAD is
+blocked: the pinned binary aborts with `unknown decorator
+'@representation_boundary'` (commit cfd89933699) before any spec runs, so this
+note rests on the 2026-11-09 seed-run closure evidence (5/5, 85/85, 4/4 PASS
+at @1cc167e37fd) plus the source check above. Kept closed.
