@@ -1,5 +1,17 @@
 # Bug: asym_typed_keypair — tuple-element corruption risk on cross-module return
 
+## Verified still-closed 2026-11-25 (release/1.0.0, worktree wt-p3-baf)
+
+- Re-ran the cross-module tuple positional-read spec on the tracked
+  `bin/simple.exe` (38,403,072 bytes) in interpreter mode:
+  `SIMPLE_LIB=src bin/simple.exe test test/01_unit/bugs/jit_cross_module_tuple_field_read_spec.spl --mode=interpreter`
+  → **8/8 passed** (`outcome=OK ... failed=0`). Positions `.0`/`.1` of tuples
+  built in another module read back correctly; the same-module predicate
+  controls agree.
+- The `Ed25519KeyPair` wrapper in `src/lib/common/crypto/typed/asym.spl` is
+  still present, as the 2026-09-13 closure deliberately left it (public
+  signature change out of triage scope). No action needed.
+
 ## Closed 2026-09-13 — Does not reproduce: cross-module tuple elements survive intact
 
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): module A returns `([u8], [u8])` as `([1u8, 2u8], [3u8, 4u8])`; module B accesses `k.0[0] k.0[1] k.1[0] k.1[1]` and prints `1 2 3 4`. No corruption at the cross-module tuple-element accessor.
