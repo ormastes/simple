@@ -128,3 +128,106 @@ since the collision is resolved by the compilers name table, not by visibility.
 Not fixed in this pass: the disambiguating rename would have to touch
 `src/lib/gc_async_mut/gpu/browser_engine/**`, which is owned by another lane in
 this fleet run.
+
+## Resolution 2026-11-25 (rename the blink/shared side; collision closed)
+
+**Status: FIXED (collision + warning); the live `browser_engine` pub API is
+untouched.**
+
+### Rename chosen
+
+The unprefixed blink-side names are gone from the co-compiled name table:
+
+- `src/lib/blink/css_parser/parser.spl` — the legacy unprefixed alias
+  `fn parse_declarations(source: String) -> [CssDeclaration]` is DELETED. The
+  canonical `blink_parse_declarations` (added in an earlier partial pass) is
+  now the only blink-side definition, so the interpreter's by-name resolution
+  can no longer bind blink call sites to the browser_engine lane's
+  `parse_declarations(text) -> [CssDecl]`.
+- `src/lib/common/css/shorthand.spl:754` — `expand_shorthand` renamed to
+  `expand_shorthand_longhands` (`(text,text)->[CssLonghand]?`) and marked
+  `pub`: with a unique name the interpreter's visibility check became a hard
+  error for the cross-module import from `blink.style.shorthand` ("private fn
+  ... is not visible ...; mark it `pub` or `export` it"), where the ambiguous
+  old name had only drawn a visibility warning. This is the blink-side
+  consumer's definition (shared module `std.common.css.shorthand`, used by
+  `blink.style.shorthand`); the name was chosen over the suggested
+  `blink_expand_shorthand` because the module is lane-neutral common CSS, not
+  blink-owned. The browser_engine lane's private `fn expand_shorthand`
+  (`style_block_parse.spl:587`) is untouched, as is its `pub
+  parse_declarations`.
+
+### Callers migrated
+
+- `src/lib/blink/css_parser/__init__.spl` — dropped `parse_declarations` from
+  the export list; comment updated.
+- `src/lib/blink/style/shorthand.spl` — import + call site now use
+  `expand_shorthand_longhands`.
+- `test/01_unit/lib/blink/css_inline_style_spec.spl` — import + call +
+  comment now use `blink_parse_declarations`.
+- `test/01_unit/lib/blink/style_shorthand_spec.spl` — import + 5 call sites
+  now use `blink_parse_declarations`.
+- `test/01_unit/lib/common/css/shorthand_spec.spl` — import + 2 call sites
+  now use `expand_shorthand_longhands`.
+- `test/01_unit/lib/blink/blink_parse_declarations_symbol_spec.spl` — import
+  updated; the "agrees with the legacy unprefixed alias" example now compares
+  against `parse_inline_style(...).declarations`; a new regression-guard
+  example asserts `src/lib/blink/css_parser/parser.spl` never re-defines
+  `fn parse_declarations(`.
+- `src/lib/blink/style/cascade.spl` needed no change — it already imported
+  and called `blink_parse_declarations`.
+- Outside blink, nothing imports these names from the blink/common modules:
+  `src/app/ui.browser/dom_bridge.spl` defines its OWN local
+  `parse_declarations` (does not import blink's) and
+  `src/lib/gc_async_mut/web/browser_session.spl` imports the browser_engine
+  lane's `parse_declarations` — both are separate lanes and were left alone.
+
+### Before/after evidence
+
+Command (both runs, worktree root, tracked self-hosted binary):
+
+```
+SIMPLE_LIB=src timeout 900 bin/simple.exe test \
+  test/01_unit/app/browser/browser_render_lane_spec.spl --mode=interpreter
+```
+
+BEFORE (this branch, base origin/release/1.0.0):
+
+```
+warning: public function `expand_shorthand` has 2 co-compiled definitions
+with 2 differing signatures ((text,text)->Optional([CssLonghand]) vs
+(text,text)->[CssDecl]); ... [compiler_cross_module_private_symbol_collision]
+warning: public function `parse_declarations` has 2 co-compiled definitions
+with 2 differing signatures ((String)->[CssDeclaration] vs (text)->[CssDecl]);
+... [compiler_cross_module_private_symbol_collision]
+Results: 12 total, 12 passed, 0 failed
+```
+
+AFTER (this change): both collision warnings are GONE (no
+`parse_declarations`/`expand_shorthand` line in the
+`compiler_cross_module_private_symbol_collision` warnings), and the spec is
+unchanged: `Results: 12 total, 12 passed, 0 failed` — no new failures.
+
+### Pre-existing failures noted by the 2026-09-13 triage
+
+The triage's two remaining RED examples ("expected 150 to equal 200" numeric
+mismatch and `semantic: variable color not found`) no longer reproduce on
+this base at all — the spec is 12/12 green both before and after this change.
+The `CssDecl has no field named important` semantic error was already gone
+before this change (fixed by the earlier `blink_parse_declarations`
+migration in cascade.spl); what this change removes is the residual collision
+itself — the unprefixed alias in the name table and the compiler's
+collision warning — so the wrong-dispatch window is closed structurally, not
+just avoided by the one migrated caller.
+
+### Migrated-spec verification (2026-11-25)
+
+- `css_inline_style_spec.spl` 16/16 PASS, `style_shorthand_spec.spl` 15/15
+  PASS, `shorthand_spec.spl` (common/css) 30/30 PASS after the migration.
+- `blink_parse_declarations_symbol_spec.spl` does not execute on this base:
+  the runner aborts at load with `error[E1002]: function `friend` not found`
+  (0 examples executed). Confirmed PRE-EXISTING by stashing this change and
+  re-running the untouched spec on the clean tree — identical failure. It is
+  a by-name resolution artifact elsewhere in the spec's co-compiled closure
+  (`fn friend` lives in `src/app/cli/_QueryVisibility/query_commands.spl`),
+  unrelated to this collision; filed here as observed-only.
