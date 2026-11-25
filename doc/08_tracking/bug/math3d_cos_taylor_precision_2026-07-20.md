@@ -1,5 +1,5 @@
 # math3d.spl `_cos`/`_sin` Taylor series loses precision away from zero
-## Open 2026-09-16 — needs owner triage
+## Fixed 2026-11-25 — see Resolution section below
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -91,3 +91,68 @@ of reusing the extern-backed helper, seemingly to avoid a second extern
 declaration; consolidating on the extern-backed version would fix this for
 free.
 
+
+## Resolution — 2026-11-25 (fixed, work/p3-math3d-20261125)
+
+**Status:** Fixed. Spec 25/25 green; `_cos(pi/4)` error 0.0.
+
+### Root cause
+
+As diagnosed above: math3d's hand-rolled Taylor `_sin`/`_cos` could not hold
+precision once the evaluated argument left the well-converged region, and
+`_cos(x) = _sin(x + pi/2)` pushed every small argument straight into the
+inaccurate zone. `Quaternion.from_axis_angle` consumes `_cos(half)` as the
+quaternion `w` directly, so the series error propagated into `rotate_vector`.
+
+### Interim state found on release/1.0.0
+
+Commits `b70f6a4df22` and `921c9f2bd41` had already replaced the original
+4-term/[-pi,pi]-only series with a two-stage range reduction
+(`[-pi, pi]`, then quadrant-fold into `[-pi/2, pi/2]` via `sin(a) = sin(pi - a)`)
+plus an 8-term series. With that interim fix the spec was already 25/25 and
+the probe error was already 0.0 — the interim fix was numerically adequate
+for the failing example, but math3d still carried a duplicate hand-rolled
+trig implementation with all the latent risk described above.
+
+### Fix applied
+
+Routed math3d's `_sin`/`_cos` through the existing `rt_math_sin` /
+`rt_math_cos` runtime externs, mirroring `src/lib/common/engine/math2d.spl`'s
+top-level wrapper pattern exactly (same `@unsafe(reason: "raw scalar math
+ABI", capabilities: [ffi])` extern declarations, same
+`unsafe(capabilities: [ffi]): rt_math_*` wrapper bodies). math2d declares and
+uses these externs unconditionally and math3d already did the same for
+`rt_math_sqrt`, so no lane-availability fallback (quadrant folding) was
+needed. The hand-rolled Taylor series and its range-reduction loops are
+deleted; `_tan` and all callers (`Mat4.perspective`,
+`Quaternion.from_axis_angle`) are unchanged and now sit on extern-backed
+trig.
+
+### Evidence (Windows worktree, `SIMPLE_LIB=src ./bin/simple ... --mode=interpreter`)
+
+Probe (`Quaternion.from_axis_angle` Y-axis 90°, public-API path to
+`_cos(pi/4)`):
+
+```
+before (4-term series, per hand computation above): 0.70127  (err ~5.8e-3)
+before (interim 8-term two-stage fix on this branch): 0.7071067811865476  (err 0.0)
+after  (extern-backed):                              0.7071067811865476  (err 0.0 < 1e-12)
+```
+
+Spec `test/01_unit/lib/engine/math3d_spec.spl` (the doc's original
+`test/unit/lib/engine/math3d_spec.spl` path had drifted):
+
+```
+before this PR (interim fix present): 25 passed, 0 failed
+after  this PR (extern-backed):       25 passed, 0 failed
+```
+
+### Note on `src/lib/skia/entity/matrix.spl` (out of scope, not fixed)
+
+`matrix.spl` no longer contains a Taylor implementation — `Matrix3x3` moved
+to `src/lib/common/drawing/vector.spl` on 2026-08-09 and `matrix.spl` is now
+a re-export shim. The latent pattern survives at the new location:
+`vector.spl:138` `_matrix3x3_sin_taylor` still reduces to `[-PI, PI]` only
+before its series, so it retains the same risk for arguments near +/-pi.
+Left untouched per scope; recommend a follow-up to route it through
+`rt_math_sin`/`rt_math_cos` as well.
