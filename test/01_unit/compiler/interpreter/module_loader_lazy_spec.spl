@@ -51,7 +51,9 @@ use std.spec.step
 
 use std.spec.step
 
+use compiler.core.interpreter.eval_tables.{func_table_reset, func_table_register}
 use compiler.core.interpreter.module_loader_core.{
+    force_deferred_module,
     interp_unload_module,
     is_deferred_module,
     module_is_loaded,
@@ -62,6 +64,7 @@ use compiler.core.interpreter.module_loader_lazy.{
     lazy_fn_slice,
     lazy_fn_span_end,
     lazy_fn_span_start,
+    lazy_force_function,
     lazy_in_fallback,
     lazy_loader_reset,
     lazy_module_count,
@@ -214,6 +217,22 @@ fn check_release_and_unload() -> text:
         return "mod_b slice still retained after interp_unload_module"
     if lazy_module_count() != 0:
         return "lazy_module_count non-zero after unloading remaining module"
+
+    # force_deferred_module releases lazy metadata, yet lazy_force_function must
+    # still return 1 for functions already registered in func_table.
+    func_table_reset()
+    module_loader_init()
+    lazy_loader_reset()
+    if load_module_lazy(mod_a, spec_current_file()) != 1:
+        return "load_module_lazy(mod_a) failed on force_deferred_module check"
+    func_table_register("to_upper", 42)
+    module_mark_loaded(mod_a, "src/lib/common/ctype.spl", ["to_upper"])
+    if force_deferred_module(mod_a, spec_current_file()) != 1:
+        return "force_deferred_module(mod_a) failed"
+    if lazy_module_known(mod_a) != 0:
+        return "force_deferred_module did not release lazy metadata for mod_a"
+    if lazy_force_function(mod_a, "to_upper") != 1:
+        return "lazy_force_function returned 0 after force_deferred_module released mod_a"
     ""
 
 describe "lazy module loader bridge":

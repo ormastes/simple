@@ -75,13 +75,45 @@ describe "JitInterpreterBackend":
             backend.record_call("second_fn")
             backend.record_call("third_fn")
 
-            val _r1 = backend.try_jit_compile(_jit_spec_find_fn(mod_a, "first_fn"), mod_a)
+            val r1 = backend.try_jit_compile(_jit_spec_find_fn(mod_a, "first_fn"), mod_a)
+            expect(r1.is_ok()).to_equal(true)
+            val err1 = backend.jit_failed["first_fn"] ?? ""
+            expect(err1.contains("MIR lowering failed")).to_equal(false)
+            expect(err1.contains("unknown variant")).to_equal(false)
             expect(backend.module_prescans).to_equal(1)
 
-            val _r2 = backend.try_jit_compile(_jit_spec_find_fn(mod_a, "second_fn"), mod_a)
+            val r2 = backend.try_jit_compile(_jit_spec_find_fn(mod_a, "second_fn"), mod_a)
+            expect(r2.is_ok()).to_equal(true)
+            val err2 = backend.jit_failed["second_fn"] ?? ""
+            expect(err2.contains("MIR lowering failed")).to_equal(false)
             expect(backend.module_prescans).to_equal(1)
             expect(backend.compile_attempts).to_equal(2)
 
-            val _r3 = backend.try_jit_compile(_jit_spec_find_fn(mod_b, "third_fn"), mod_b)
+            val r3 = backend.try_jit_compile(_jit_spec_find_fn(mod_b, "third_fn"), mod_b)
+            expect(r3.is_ok()).to_equal(true)
+            val err3 = backend.jit_failed["third_fn"] ?? ""
+            expect(err3.contains("MIR lowering failed")).to_equal(false)
             expect(backend.module_prescans).to_equal(2)
             expect(backend.compile_attempts).to_equal(3)
+
+        it "does not collide same-named modules with equal declaration counts and distinct signatures or impls":
+            val v1_src = "struct BoxVal:\n    x: i64\n\nimpl BoxVal:\n    fn get(self) -> i64:\n        self.x\n\nfn compute(a: i64) -> i64:\n    a + 1\n"
+            val v2_src = "struct BoxVal:\n    x: f64\n\nimpl BoxVal:\n    fn value(self) -> f64:\n        self.x\n\nfn compute_v2(a: f64) -> f64:\n    a + 1.0\n"
+            val mod_v1 = _jit_spec_lower(v1_src, "jit_reload_same_name")
+            val mod_v2 = _jit_spec_lower(v2_src, "jit_reload_same_name")
+
+            var backend = JitInterpreterBackend.new(JitInterpreterConfig.auto_jit())
+            backend.record_call("compute")
+            backend.record_call("compute_v2")
+
+            val r1 = backend.try_jit_compile(_jit_spec_find_fn(mod_v1, "compute"), mod_v1)
+            expect(r1.is_ok()).to_equal(true)
+            val err1 = backend.jit_failed["compute"] ?? ""
+            expect(err1.contains("MIR lowering failed")).to_equal(false)
+            expect(backend.module_prescans).to_equal(1)
+
+            val r2 = backend.try_jit_compile(_jit_spec_find_fn(mod_v2, "compute_v2"), mod_v2)
+            expect(r2.is_ok()).to_equal(true)
+            val err2 = backend.jit_failed["compute_v2"] ?? ""
+            expect(err2.contains("MIR lowering failed")).to_equal(false)
+            expect(backend.module_prescans).to_equal(2)

@@ -22,7 +22,8 @@ use compiler.mir.mir_lowering.MirLowering
 use compiler.mir.mir_serialization.serialize_mir_function
 use compiler.backend.backend_helpers.{get_effective_backend_name}
 use compiler.backend.mir_target_context_provider.{backend_mir_target_context}
-use compiler.hir.hir_types.{HirModule, HirSymbol}  # explicit: a glob is not an import-origin for surface projection
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.hir.hir_types.{HirModule, HirSymbol, HirType, HirTypeKind}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # JIT Interpreter Configuration
@@ -122,11 +123,157 @@ pub struct JitInterpreterBackend:
     interp: InterpreterBackendImpl    # Reusable tree-walking fallback backend
     jit_cfg_winners_cache: Dict<text, Dict<i64, i64>>
     jit_cfg_error_cache: Dict<text, text>
-    jit_lowering_cache: Dict<text, MirLowering>
+    jit_prescan_cache: Dict<text, MirLowering>
     module_prescans: i64
 
+fn _jit_hir_type_sig(ty: HirType) -> text:
+    match ty.kind:
+        case HirTypeKind.Int(bits, signed): "i{bits}_{signed}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Named(sym, args): "named:{sym.id}:{args.len()}"
+        case HirTypeKind.Optional(inner): "opt({_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Result(ok_t, err_t): "res({_jit_hir_type_sig(ok_t)},{_jit_hir_type_sig(err_t)})"
+        case HirTypeKind.Array(elem, _): "arr({_jit_hir_type_sig(elem)})"
+        case HirTypeKind.Slice(elem): "slice({_jit_hir_type_sig(elem)})"
+        case HirTypeKind.Tuple(elems): "tup({elems.len()})"
+        case HirTypeKind.Dict(k, v): "dict({_jit_hir_type_sig(k)},{_jit_hir_type_sig(v)})"
+        case HirTypeKind.Ref(inner, mut_): "ref({mut_},{_jit_hir_type_sig(inner)})"
+        case HirTypeKind.Ptr(inner, mut_): "ptr({mut_},{_jit_hir_type_sig(inner)})"
+        case HirTypeKind.TypeParam(name, _): "tp:{name}"
+        case HirTypeKind.Union(members): "union({members.len()})"
+        case HirTypeKind.DynTrait(tr): "dyn:{tr.id}"
+        case HirTypeKind.Function(ps, ret, _): "fn({ps.len()}->{_jit_hir_type_sig(ret)})"
+        case HirTypeKind.Projection(base, assoc): "proj({_jit_hir_type_sig(base)},{assoc})"
+
+fn _jit_fn_sig_part(f: HirFunction) -> text:
+    var p_sigs: [text] = []
+    for p in f.params:
+        p_sigs.push(p.name + ":" + _jit_hir_type_sig(p.type_))
+    "fn:{f.symbol.id}:{f.name}:({p_sigs.join(\",\")})->{_jit_hir_type_sig(f.return_type)}:{f.cfg_group}:{f.cfg_arm}:{f.cfg.join(\",\")}"
+
+fn _jit_fields_sig(fields: [HirField]) -> text:
+    var f_sigs: [text] = []
+    for fld in fields:
+        f_sigs.push(fld.name + ":" + _jit_hir_type_sig(fld.type_) + ":" + fld.has_default.to_string())
+    f_sigs.join(",")
+
 fn _jit_module_cache_key(module: HirModule, backend: text) -> text:
-    "{backend}|{module.name}|{module.path}|{module.functions.len()}|{module.structs.len()}|{module.classes.len()}|{module.enums.len()}|{module.symbols.symbols.len()}"
+    var sym_parts: [text] = []
+    for raw_sym in module.symbols.symbols.values():
+        val sym: HirSymbol = raw_sym
+        sym_parts.push("{sym.id.id}:{sym.name}:{sym.defining_module ?? \"\"}")
+    var fn_parts: [text] = []
+    for raw_fn in module.functions.values():
+        val f: HirFunction = raw_fn
+        fn_parts.push(_jit_fn_sig_part(f))
+    var st_parts: [text] = []
+    for raw_st in module.structs.values():
+        val s: HirStruct = raw_st
+        st_parts.push("st:{s.symbol.id}:{s.name}:({_jit_fields_sig(s.fields)}):{s.cfg_group}:{s.cfg_arm}:{s.cfg.join(\",\")}")
+    var cl_parts: [text] = []
+    for raw_cl in module.classes.values():
+        val c: HirClass = raw_cl
+        cl_parts.push("cl:{c.symbol.id}:{c.name}:({_jit_fields_sig(c.fields)}):({c.methods.keys().sorted().join(\",\") }):{c.cfg_group}:{c.cfg_arm}:{c.cfg.join(\",\")}")
+    var en_parts: [text] = []
+    for raw_en in module.enums.values():
+        val e: HirEnum = raw_en
+        var v_names: [text] = []
+        for v in e.variants:
+            v_names.push(v.name)
+        en_parts.push("en:{e.symbol.id}:{e.name}:{e.runtime_name}:({v_names.join(\",\") }):{e.cfg_group}:{e.cfg_arm}:{e.cfg.join(\",\")}")
+    var tr_parts: [text] = []
+    for raw_tr in module.traits.values():
+        val t: HirTrait = raw_tr
+        var tm_parts: [text] = []
+        for tm in t.methods:
+            tm_parts.push(_jit_fn_sig_part(tm))
+        tr_parts.push("tr:{t.symbol.id}:{t.name}:({tm_parts.join(\";\") }):{t.cfg_group}:{t.cfg_arm}:{t.cfg.join(\",\")}")
+    var co_parts: [text] = []
+    for raw_co in module.constants.values():
+        val k: HirConst = raw_co
+        co_parts.push("co:{k.symbol.id}:{k.name}:{_jit_hir_type_sig(k.type_)}:{k.cfg_group}:{k.cfg_arm}:{k.cfg.join(\",\")}")
+    var im_parts: [text] = []
+    for raw_im in module.impls:
+        val im: HirImpl = raw_im
+        val tr_sig = if im.has_trait_: _jit_hir_type_sig(im.trait_) else: ""
+        im_parts.push("im:{_jit_hir_type_sig(im.type_)}:{tr_sig}:({im.methods.keys().sorted().join(\",\") }):{im.cfg_group}:{im.cfg_arm}:{im.cfg.join(\",\")}")
+    [
+        backend,
+        module.name,
+        module.path,
+        sym_parts.sorted().join(";"),
+        fn_parts.sorted().join(";"),
+        st_parts.sorted().join(";"),
+        cl_parts.sorted().join(";"),
+        en_parts.sorted().join(";"),
+        tr_parts.sorted().join(";"),
+        co_parts.sorted().join(";"),
+        im_parts.sorted().join(";")
+    ].join("|")
+
+fn _jit_clone_dict<K, V>(src: Dict<K, V>) -> Dict<K, V>:
+    if src.len() == 0:
+        return {}
+    var copy: Dict<K, V> = {}
+    for k in src.keys():
+        copy[k] = src[k]
+    copy
+
+fn _seed_lowering_prescan_v1(dst: MirLowering, src: MirLowering) -> MirLowering:
+    var out = dst
+    out.composite_layout_digests = _jit_clone_dict(src.composite_layout_digests)
+    out.composite_layout_owner_counts = _jit_clone_dict(src.composite_layout_owner_counts)
+    out.struct_field_order = _jit_clone_dict(src.struct_field_order)
+    out.struct_field_order_conflict_warned = _jit_clone_dict(src.struct_field_order_conflict_warned)
+    out.struct_field_has_default = _jit_clone_dict(src.struct_field_has_default)
+    out.struct_field_default_expr = _jit_clone_dict(src.struct_field_default_expr)
+    out.class_type_names = _jit_clone_dict(src.class_type_names)
+    out.struct_field_type_ownership_key = _jit_clone_dict(src.struct_field_type_ownership_key)
+    out.struct_field_type_name = _jit_clone_dict(src.struct_field_type_name)
+    out.struct_field_type_param = _jit_clone_dict(src.struct_field_type_param)
+    out.struct_field_over_type_param = _jit_clone_dict(src.struct_field_over_type_param)
+    out.struct_type_param_names = _jit_clone_dict(src.struct_type_param_names)
+    out.struct_field_repr_name = _jit_clone_dict(src.struct_field_repr_name)
+    out.struct_field_hir_type = _jit_clone_dict(src.struct_field_hir_type)
+    out.struct_bare_layout_owner = _jit_clone_dict(src.struct_bare_layout_owner)
+    out.struct_identity_layout_key = _jit_clone_dict(src.struct_identity_layout_key)
+    out.struct_field_array_element_type_name = _jit_clone_dict(src.struct_field_array_element_type_name)
+    out.struct_field_array_elem_type = _jit_clone_dict(src.struct_field_array_elem_type)
+    out.result_err_layout_types = _jit_clone_dict(src.result_err_layout_types)
+    out.fn_return_types = _jit_clone_dict(src.fn_return_types)
+    out.extern_fn_symbols = _jit_clone_dict(src.extern_fn_symbols)
+    out.struct_method_syms = _jit_clone_dict(src.struct_method_syms)
+    out.struct_method_ambiguous = _jit_clone_dict(src.struct_method_ambiguous)
+    out.struct_method_return_names = _jit_clone_dict(src.struct_method_return_names)
+    out.struct_method_return_is_array = _jit_clone_dict(src.struct_method_return_is_array)
+    out.struct_method_return_is_optional = _jit_clone_dict(src.struct_method_return_is_optional)
+    out.enum_payload_struct_names = _jit_clone_dict(src.enum_payload_struct_names)
+    out.enum_single_payload_types = _jit_clone_dict(src.enum_single_payload_types)
+    out.enum_variant_payload_types = _jit_clone_dict(src.enum_variant_payload_types)
+    out.enum_variant_payload_names = _jit_clone_dict(src.enum_variant_payload_names)
+    out.enum_variant_payload_kind = _jit_clone_dict(src.enum_variant_payload_kind)
+    out.generic_enum_constructor_owners = _jit_clone_dict(src.generic_enum_constructor_owners)
+    out.enum_type_param_names = _jit_clone_dict(src.enum_type_param_names)
+    out.enum_variant_index = _jit_clone_dict(src.enum_variant_index)
+    out.enum_variant_discriminants = _jit_clone_dict(src.enum_variant_discriminants)
+    out.enum_variant_owners = _jit_clone_dict(src.enum_variant_owners)
+    out.enum_bare_name_collisions = _jit_clone_dict(src.enum_bare_name_collisions)
+    out.enum_variant_index_q = _jit_clone_dict(src.enum_variant_index_q)
+    out.enum_variant_discriminants_q = _jit_clone_dict(src.enum_variant_discriminants_q)
+    out.enum_runtime_id_index_q = _jit_clone_dict(src.enum_runtime_id_index_q)
+    out.enum_runtime_to_bare = _jit_clone_dict(src.enum_runtime_to_bare)
+    out.enum_bare_ambiguous = _jit_clone_dict(src.enum_bare_ambiguous)
+    out.enum_runtime_id_index = _jit_clone_dict(src.enum_runtime_id_index)
+    out.enum_runtime_id_names = _jit_clone_dict(src.enum_runtime_id_names)
+    out.callable_link_names = _jit_clone_dict(src.callable_link_names)
+    out.callable_text_value_abi = _jit_clone_dict(src.callable_text_value_abi)
+    out.declaration_enum_payload_owner = _jit_clone_dict(src.declaration_enum_payload_owner)
+    out.rti = src.rti
+    out
 
 impl JitInterpreterBackend:
     pub static fn new(config: JitInterpreterConfig) -> JitInterpreterBackend:
@@ -142,7 +289,7 @@ impl JitInterpreterBackend:
             interp: InterpreterBackendImpl.new(),
             jit_cfg_winners_cache: {},
             jit_cfg_error_cache: {},
-            jit_lowering_cache: {},
+            jit_prescan_cache: {},
             module_prescans: 0
         )
 
@@ -204,38 +351,43 @@ impl JitInterpreterBackend:
             if self.config.verbose:
                 print "[jit] Function {fn_name} reached threshold, will JIT compile"
 
-    me _get_or_init_module_lowering(module: HirModule, backend: text) -> (MirLowering, Dict<i64, i64>, text):
+    me _new_seeded_module_lowering(module: HirModule, backend: text) -> (MirLowering, Dict<i64, i64>, text):
         val cache_key = _jit_module_cache_key(module, backend)
-        if self.jit_lowering_cache.has(cache_key) and self.jit_cfg_winners_cache.has(cache_key):
-            var cached_lowering = self.jit_lowering_cache[cache_key]
-            cached_lowering.errors = []
+        val target_context = backend_mir_target_context(backend)
+        if self.jit_prescan_cache.has(cache_key) and self.jit_cfg_winners_cache.has(cache_key):
+            val cached_prescan = self.jit_prescan_cache[cache_key]
             val cached_winners = self.jit_cfg_winners_cache[cache_key]
             val cached_cfg_err = self.jit_cfg_error_cache[cache_key] ?? ""
-            return (cached_lowering, cached_winners, cached_cfg_err)
+            val fresh_lowering = _seed_lowering_prescan_v1(
+                MirLowering.new_for_target(module.symbols, target_context),
+                cached_prescan)
+            return (fresh_lowering, cached_winners, cached_cfg_err)
 
-        val target_context = backend_mir_target_context(backend)
-        var lowering = MirLowering.new_for_target(module.symbols, target_context)
+        var prescan_lowering = MirLowering.new_for_target(module.symbols, target_context)
         # Decl-level @cfg: a guard that is off for this target is not compiled (the interpreter owns it).
         # Cross-kind winners, same as lower_module (a group may mix types and functions).
-        val jit_cfg_winners = lowering.cfg_group_winners(
+        val jit_cfg_winners = prescan_lowering.cfg_group_winners(
             module.functions.values(), module.classes.values(),
             module.structs.values(), module.enums.values(),
             module.traits.values(), module.constants.values(), module.impls)
         var cfg_err = ""
-        if lowering.errors.len() > 0:
-            cfg_err = lowering.errors[0].message
+        if prescan_lowering.errors.len() > 0:
+            cfg_err = prescan_lowering.errors[0].message
             self.jit_cfg_error_cache[cache_key] = cfg_err
-            lowering.errors = []
+            prescan_lowering.errors = []
         # Registry parity with the AOT lane (driver mir_setup)
         var jit_registry_modules: Dict<text, HirModule> = {}
         jit_registry_modules["jit"] = module
-        lowering.prescan_module_struct_names(jit_registry_modules, "jit")
-        lowering.register_module_enum_bootstrap_inventory_v1([module])
-        lowering.register_module_composite_inventory_v1([module])
+        prescan_lowering.prescan_module_struct_names(jit_registry_modules, "jit")
+        prescan_lowering.register_module_enum_bootstrap_inventory_v1([module])
+        prescan_lowering.register_module_composite_inventory_v1([module])
         self.jit_cfg_winners_cache[cache_key] = jit_cfg_winners
-        self.jit_lowering_cache[cache_key] = lowering
+        self.jit_prescan_cache[cache_key] = prescan_lowering
         self.module_prescans = self.module_prescans + 1
-        (lowering, jit_cfg_winners, cfg_err)
+        val fresh_lowering = _seed_lowering_prescan_v1(
+            MirLowering.new_for_target(module.symbols, target_context),
+            prescan_lowering)
+        (fresh_lowering, jit_cfg_winners, cfg_err)
 
     pub me try_jit_compile(fn_: HirFunction, module: HirModule) -> Result<(), BackendError>:
         """Try to JIT compile a function.
@@ -259,21 +411,17 @@ impl JitInterpreterBackend:
         if self.config.verbose:
             print "[jit] Compiling function: {fn_.name}"
 
-        # Step 1: Lower HIR to MIR (reusing cached per-module/target cfg_winners and inventories)
+        # Step 1: Lower HIR to MIR (fresh MirLowering seeded from cached module prescan + cfg_winners)
         val backend = get_effective_backend_name(self.config.backend, false)
-        val cache_key = _jit_module_cache_key(module, backend)
-        val (cached_lowering, jit_cfg_winners, cfg_err) = self._get_or_init_module_lowering(module, backend)
-        var lowering = cached_lowering
+        val (seeded_lowering, jit_cfg_winners, cfg_err) = self._new_seeded_module_lowering(module, backend)
+        var lowering = seeded_lowering
         if not lowering.decl_cfg_keep(fn_.name, fn_.cfg, fn_.cfg_group, fn_.cfg_arm, jit_cfg_winners):
             # A malformed guard is an error in every mode, never a silent interpreter fallback.
             if lowering.errors.len() > 0 or cfg_err != "":
                 val raw_err = if lowering.errors.len() > 0: lowering.errors[0].message else: cfg_err
                 val malformed_msg = "malformed @cfg guard: {raw_err}"
-                lowering.errors = []
-                self.jit_lowering_cache[cache_key] = lowering
                 self.jit_failed[fn_.name] = malformed_msg
                 return Err(BackendError.compile_error(malformed_msg, Some(fn_.span)))
-            self.jit_lowering_cache[cache_key] = lowering
             val cfg_msg = "@cfg-disabled function {fn_.name} for this target"
             if self.config.mode == JitMode.AlwaysJit:
                 return Err(BackendError.compile_error(cfg_msg, Some(fn_.span)))
@@ -286,8 +434,6 @@ impl JitInterpreterBackend:
             cfg_err
         else:
             ""
-        lowering.errors = []
-        self.jit_lowering_cache[cache_key] = lowering
 
         if lower_err_msg != "":
             val full_mir_err = "MIR lowering failed: {lower_err_msg}"
