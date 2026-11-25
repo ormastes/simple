@@ -99,3 +99,49 @@ describe "to_int / to_i64 near erased receivers":
         val callees = callees_of("fn f(xs: [text], i: i64) -> i64:\n    xs[i].to_int()\n")
         expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(true)
         expect(has_callee(callees, "rt_any_to_int")).to_equal(false)
+
+describe "to_float / to_f64 / to_f32 / to_u8 on erased element reads":
+    it "erased index read xs[i].to_float() decodes tagged runtime values without ensure_tagged_str":
+        step("lower `xs[i].to_float()` where `xs` is an untyped parameter")
+        val callees = callees_of("fn f(xs, i: i64) -> f64:\n    xs[i].to_float()\n")
+        expect(has_callee(callees, "rt_value_is_float")).to_equal(true)
+        expect(has_callee(callees, "rt_value_as_float")).to_equal(true)
+        expect(has_callee(callees, "rt_string_to_float")).to_equal(true)
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(callees, "rt_interp_cstr")).to_equal(false)
+
+    it "erased index reads xs[i].to_f64() and xs[i].to_f32() decode tagged runtime values":
+        step("lower `xs[i].to_f64()` and `xs[i].to_f32()` on untyped `xs`")
+        val f64_callees = callees_of("fn f(xs, i: i64) -> f64:\n    xs[i].to_f64()\n")
+        expect(has_callee(f64_callees, "rt_value_is_float")).to_equal(true)
+        expect(has_callee(f64_callees, "rt_value_as_float")).to_equal(true)
+        expect(has_callee(f64_callees, "rt_string_to_float")).to_equal(true)
+        expect(has_callee(f64_callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(f64_callees, "rt_interp_cstr")).to_equal(false)
+        val f32_callees = callees_of("fn f(xs, i: i64) -> f32:\n    xs[i].to_f32()\n")
+        expect(has_callee(f32_callees, "rt_value_is_float")).to_equal(true)
+        expect(has_callee(f32_callees, "rt_value_as_float")).to_equal(true)
+        expect(has_callee(f32_callees, "rt_string_to_float")).to_equal(true)
+        expect(has_callee(f32_callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(f32_callees, "rt_interp_cstr")).to_equal(false)
+
+    it "erased index read xs[i].to_u8() decodes via rt_any_to_int before narrowing":
+        step("lower `xs[i].to_u8()` on untyped `xs`")
+        val callees = callees_of("fn f(xs, i: i64) -> u8:\n    xs[i].to_u8()\n")
+        expect(has_callee(callees, "rt_any_to_int")).to_equal(true)
+        expect(has_callee(callees, "__simple_rt_string_byte_at")).to_equal(false)
+        expect(has_callee(callees, "rt_string_to_int_lenient")).to_equal(false)
+
+    it "typed [i64] and declared text controls preserve direct numeric and text paths":
+        step("controls: [i64] stays numeric; text keeps text parsing / byte_at")
+        val int_float_callees = callees_of("fn f(xs: [i64], i: i64) -> f64:\n    xs[i].to_float()\n")
+        expect(has_callee(int_float_callees, "rt_value_is_float")).to_equal(false)
+        expect(has_callee(int_float_callees, "rt_string_to_float")).to_equal(false)
+        val int_u8_callees = callees_of("fn f(xs: [i64], i: i64) -> u8:\n    xs[i].to_u8()\n")
+        expect(has_callee(int_u8_callees, "rt_any_to_int")).to_equal(false)
+        val text_float_callees = callees_of("fn f(s: text) -> f64:\n    s.to_float()\n")
+        expect(has_callee(text_float_callees, "rt_string_to_float")).to_equal(true)
+        expect(has_callee(text_float_callees, "rt_value_is_float")).to_equal(false)
+        val text_u8_callees = callees_of("fn f(s: text) -> u8:\n    s.to_u8()\n")
+        expect(has_callee(text_u8_callees, "__simple_rt_string_byte_at")).to_equal(true)
+        expect(has_callee(text_u8_callees, "rt_any_to_int")).to_equal(false)
