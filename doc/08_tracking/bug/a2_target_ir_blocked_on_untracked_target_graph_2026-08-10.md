@@ -7,7 +7,7 @@ Confirmed CLOSED: re-ran test/01_unit/compiler/build_graph/target_graph_spec.spl
 No further action.
 
 **Date:** 2026-08-10
-Status: OPEN (P2)
+Status: CLOSED (recovered in `df2e577a89`; re-verified 2026-11-25 — see bottom note)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Work location:** worktree `.claude/worktrees/agent-a5cdacdf7286b11a3`, branch
 `worktree-agent-a5cdacdf7286b11a3` (do not delete this worktree).
@@ -206,3 +206,33 @@ work is genuinely not in the tree; there is nothing to reproduce and nothing to 
 `src/compiler/80.driver/driver_build/incremental.spl` (789 lines) does exist but
 contains no target-graph traversal. Row stands OPEN as "work never landed", not as a
 behavioural defect.
+
+## Verification 2026-11-25 (fleet lane p2w1-ac, Windows worktree @ origin/release/1.0.0)
+
+STALE-CLOSED confirmed. Both landed artifacts are present at HEAD:
+`src/compiler/80.driver/cache/target_ir.spl` (added in `df2e577a89a`, still
+tracked through later refactors) and
+`test/01_unit/compiler/build_graph/target_graph_spec.spl`.
+
+The spec itself cannot execute on this host: `bin/simple.exe test` aborts at
+load with `unknown decorator '@representation_boundary'` (the known
+source/binary inconsistency at release/1.0.0 HEAD — the pinned Rust seed
+predates the 940-annotation decorator migration). Instead, every one of the
+spec's 9 examples was replayed 1:1 through a standalone `run` probe
+(`SIMPLE_LIB=src bin/simple.exe run`, which does not hit the decorator path)
+against the real module `compiler.driver.cache.target_ir`:
+
+- 9 `TargetKind` members and 9 `DependencyEdgeKind` members — OK
+- canonical label round trip `//src/compiler:compiler` — OK
+- bare alias `compiler` — OK
+- malformed labels `//src/compiler`, `//src/compiler:`, `src/compiler:compiler`,
+  `//src:compiler:extra` all rejected — OK
+- `synthesize_legacy_target` output artifact `bin/app` — OK
+- `parse_build_sdn_targets` two-target fixture parses to len 2 — OK
+- forward deps closure len 2, reverse rdeps closure len 2 with `//b:b` first —
+  OK (the two sabotage properties: malformed `//path` rejected, rdeps is not
+  the forward closure)
+
+All values matched the spec's expectations exactly. The contradictory
+"Status: OPEN (P2)" header line above the 2026-08-17 CLOSED line is corrected
+to CLOSED. No code change was needed.
