@@ -1,11 +1,35 @@
 # Bug: `bin/simple run` infinite delegation loop — blocks ALL execution
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — FIXED: the unguarded `repo_seed` branch no longer exists
+
+**Status: CLOSED (fixed by removal; verified 2026-11-25).** The code this
+entry's root-cause hypothesis names is gone from the tree:
+
+- `src/app/io/cli_ops.spl` `_cli_driver_binary()` (:376-397) no longer has a
+  seed-sibling branch or a `_cli_repo_seed_path()` fallback at all. The only
+  delegation left is the explicit `SIMPLE_BOOTSTRAP_DRIVER` env override, and
+  that branch IS wrapped in the `_cli_is_current_exe(...)` self-exec guard
+  (plus `SIMPLE_NO_BOOTSTRAP_DELEGATE` and the release-wrapper refusal). The
+  `simple: seed sibling not found, skipping delegation` eprint appears nowhere
+  under `src/`. `git show 88aac2ffe28^:src/app/io/cli_ops.spl` still had 5
+  `repo_seed` occurrences; `git show 88aac2ffe28:...` has 0 — the 2026-09-29
+  transplant onto release/1.0 removed the branch. The suggested next step
+  ("add the same `_cli_is_current_exe(repo_seed)` guard") is moot: there is no
+  `repo_seed` return path to guard.
+- **Execution evidence** (tracked `bin/simple.exe`, 38,403,072 bytes, Rust
+  seed v1.0.0-rc.1, `origin/release/1.0.0` HEAD `0819b116ecb`, Windows 11 Git
+  Bash): `SIMPLE_LIB=src bin/simple.exe run build/.../hello.spl` prints
+  `hello-p1w1ad` and exits `rc=0` in well under a second — no delegation spam,
+  no hang. (The loop was Linux-only in manifestation — the whole branch sits
+  under `if not _cli_is_windows_platform():` — so the Windows run alone would
+  not discharge it; the source inspection above is the primary evidence.)
+
+## Open 2026-09-16 — needs owner triage (superseded by the 2026-11-25 closure above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25
-**Status:** BLOCKER — discovered while verifying the host-WM headless capture
+**Status:** CLOSED 2026-11-25 (see top section; was: BLOCKER — discovered while verifying the host-WM headless capture
 lane (`doc/08_tracking/bug/wm_showcase_no_headless_lane_2026-07-25.md`); files
 as its own defect because it blocks every `bin/simple run`/`bin/simple lint`
 invocation on this host, not just the headless-lane work.

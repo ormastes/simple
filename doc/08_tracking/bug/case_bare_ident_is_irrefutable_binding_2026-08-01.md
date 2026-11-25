@@ -1,5 +1,22 @@
 # Bare identifier in `case` position is an irrefutable binding, silently
 
+## Triage 2026-11-25 — status header accurate; remaining seams skipped on this host
+
+The header's split remains correct at `origin/release/1.0.0` HEAD
+`0819b116ecb`: FIXED on both Rust-seed engines (2026-08-02) and on the
+pure-Simple tree-walk evaluator (2026-09-07, `eval.spl`); the three ws_parser
+victim copies confirmed repaired (2026-11-25 section below). Still OPEN by
+design: the pure-Simple MIR / FlatAstBridge seams
+(`50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case`,
+`10.frontend/_FlatAstBridge/convert_nodes.spl` `convert_flat_pattern`) and the
+const-pattern language question (tracked in
+`match_bare_ident_const_irrefutable_2026-07-20.md`). Those seams cannot be
+executed or verified on this Windows host — no self-hosted binary is deployed
+and the pinned seed rejects `@representation_boundary` repo-wide, so a MIR
+change here would be unverifiable wrong-code surgery on the compiler that
+builds everything else. Left for the MIR lane with a runnable self-hosted
+toolchain.
+
 - **Status:** FIXED on the Rust seed's two engines 2026-08-02 (see
   "Rust-seed fix" below). Still OPEN for the pure-Simple compiler seams
   (`50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case`,
