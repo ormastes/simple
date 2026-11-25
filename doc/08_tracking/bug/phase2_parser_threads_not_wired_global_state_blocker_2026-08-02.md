@@ -66,6 +66,19 @@ It is unrelated to this parser wiring and is not treated as a passing runtime
 result. The integration shard scenario remains the required fresh admission
 run before this row can be marked verified.
 
+## Triage 2026-11-25 (p2w4-ag lane)
+
+Admission re-run attempted on Windows (`release/1.0.0` @ 63e791180d3, pinned
+Rust seed v1.0.0-rc.1): `bin/simple.exe test
+test/02_integration/compiler/driver/native_build_parse_sharding_spec.spl`
+cannot execute at HEAD — the test runner itself fails repo-wide with
+`unknown decorator '@representation_boundary'` (seed predates cfd89933699's
+repo-wide annotations; observed on a sibling spec at
+`src/app/test_runner_new/test_runner_single.spl:9:1`). This is the known
+source/binary inconsistency, not a defect in the sharding implementation.
+Status unchanged: FIX IMPLEMENTED, runtime verification still pending a
+self-hosted binary or a seed refresh.
+
 ## Superseded enabling work
 
 1. Introduce a per-worker `FrontendParseContext` owning lexer, parser, token,
