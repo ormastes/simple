@@ -1,0 +1,250 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: native array `.concat(...)` and `.append(...)` dispatch
+
+Covers typed array `.concat(...)` and `.append(...)` across local variables,
+borrowed `&[T]` parameters, untyped empty arrays, struct/class field receivers
+and arguments, indexed array receivers, Option/Result/Dict/Tuple projections,
+and function-call array returns — matching the real-world compiler patterns
+from `async.spl`, `statements.spl`, and `cmake_gen.spl`.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct LowerProbe:
+    messages: [text]
+    concat_calls: i64
+    push_calls: i64
+    extend_calls: i64
+    concat_elem_kinds: [text]
+    concat_dest_is_owned_array: bool
+
+fn probe_mir_lowering(src: text) -> LowerProbe:
+    val file = "testdata/array_concat_append_probe.spl"
+    val parsed = parse_full_frontend(src, file, "array_concat_append_probe", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(
+        hir.symbols,
+        driver_mir_target_context(driver_core_compile_options_default())
+    )
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        messages = messages.push("mir: " + e.message)
+    var concat_calls = 0
+    var push_calls = 0
+    var extend_calls = 0
+    var concat_elem_kinds: [text] = []
+    var concat_dest_is_owned_array = true
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(dest, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str("rt_array_concat"), _):
+                                concat_calls = concat_calls + 1
+                                if val d = dest:
+                                    if val et = lowering.noted_runtime_elem_type(d):
+                                        if lowering.mir_type_is_str(et):
+                                            concat_elem_kinds = concat_elem_kinds.push("str")
+                                        else:
+                                            match et.kind:
+                                                case MirTypeKind.U8: concat_elem_kinds = concat_elem_kinds.push("u8")
+                                                case MirTypeKind.Struct(_): concat_elem_kinds = concat_elem_kinds.push("struct")
+                                                case MirTypeKind.I64: concat_elem_kinds = concat_elem_kinds.push("i64")
+                                                case _: concat_elem_kinds = concat_elem_kinds.push("other")
+                                    else:
+                                        concat_elem_kinds = concat_elem_kinds.push("none")
+                                    var found_owned = false
+                                    for loc in function.locals:
+                                        if loc.id.id == d.id:
+                                            match loc.type_.kind:
+                                                case MirTypeKind.Array(_, extent):
+                                                    if extent == 0:
+                                                        found_owned = true
+                                                case _: ()
+                                    if not found_owned:
+                                        concat_dest_is_owned_array = false
+                                else:
+                                    concat_dest_is_owned_array = false
+                            case MirOperandKind.Const(MirConstValue.Str("rt_array_push"), _):
+                                push_calls = push_calls + 1
+                            case MirOperandKind.Const(MirConstValue.Str("rt_array_extend_i64"), _):
+                                extend_calls = extend_calls + 1
+                            case _: ()
+                    case _: ()
+    LowerProbe(
+        messages: messages,
+        concat_calls: concat_calls,
+        push_calls: push_calls,
+        extend_calls: extend_calls,
+        concat_elem_kinds: concat_elem_kinds,
+        concat_dest_is_owned_array: concat_dest_is_owned_array
+    )
+
+fn has_message(messages: [text], needle: text) -> bool:
+    for m in messages:
+        if m.contains(needle):
+            return true
+    false
+
+describe "MIR array .concat(...) lowering across receiver and argument shapes":
+    it "lowers struct-field .concat(struct-field) for [text] and [Struct] (async.spl pattern)":
+        val src =
+            "struct AsyncErr:\n" +
+            "    code: i64\n" +
+            "struct CheckRes:\n" +
+            "    errors: [text]\n" +
+            "    detailed: [AsyncErr]\n" +
+            "fn merge_checks(a: CheckRes, b: CheckRes) -> i64:\n" +
+            "    val errs = a.errors.concat(b.errors)\n" +
+            "    val det = a.detailed.concat(b.detailed)\n" +
+            "    errs.len() + det[0].code\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.concat_calls).to_equal(2)
+        expect(p.extend_calls).to_equal(0)
+        expect(p.concat_dest_is_owned_array).to_equal(true)
+        expect(p.concat_elem_kinds).to_equal(["str", "struct"])
+
+    it "lowers local .concat(struct-field) for [Struct] and preserves element field access (statements.spl pattern)":
+        val src =
+            "struct StmtNode:\n" +
+            "    tag: i64\n" +
+            "struct BlockNode:\n" +
+            "    stmts: [StmtNode]\n" +
+            "fn prepend_stmts(prefix: [StmtNode], body: BlockNode) -> i64:\n" +
+            "    val combined = prefix.concat(body.stmts)\n" +
+            "    combined[0].tag\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.concat_calls).to_equal(1)
+        expect(p.extend_calls).to_equal(0)
+        expect(p.concat_elem_kinds).to_equal(["struct"])
+
+    it "lowers borrowed &[u8], &[text], and &[Struct] .concat(...) to owned arrays with element metadata":
+        val src =
+            "struct Item:\n" +
+            "    id: i64\n" +
+            "fn join_bytes(a: &[u8], b: &[u8]) -> [u8]:\n" +
+            "    a.concat(b).concat([9])\n" +
+            "fn join_items(a: &[Item], b: &[Item]) -> i64:\n" +
+            "    val all = a.concat(b)\n" +
+            "    all[0].id\n" +
+            "fn join_texts(a: &[text], b: [text]) -> [text]:\n" +
+            "    a.concat(b)\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.concat_calls).to_equal(4)
+        expect(p.extend_calls).to_equal(0)
+        expect(p.concat_dest_is_owned_array).to_equal(true)
+
+    it "lowers function-call return .concat(...) for [u8] including contextual array literals":
+        val src =
+            "fn make_hdr() -> [u8]:\n" +
+            "    [1u8, 2u8]\n" +
+            "fn build_frame() -> [u8]:\n" +
+            "    val a = make_hdr().concat(make_hdr())\n" +
+            "    a.concat([3, 4])\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.concat_calls).to_equal(2)
+        expect(p.extend_calls).to_equal(0)
+        expect(p.concat_elem_kinds).to_equal(["u8", "u8"])
+
+    it "lowers indexed array slot, Option/Result unwrap, Dict lookup, and tuple destructuring .concat(...)":
+        val src =
+            "fn pair() -> ([u8], [u8]):\n" +
+            "    ([1u8], [2u8])\n" +
+            "fn join_all(rows: [[u8]], opt: [u8]?, res: Result<[u8], text>, m: Dict<text, [text]>, k: text) -> i64:\n" +
+            "    val r0 = rows[0].concat(opt.unwrap())\n" +
+            "    val r1 = res.unwrap().concat(r0)\n" +
+            "    val (pa, pb) = pair()\n" +
+            "    val r2 = pa.concat(pb)\n" +
+            "    val r3 = m[k].concat([\"tail\"])\n" +
+            "    r1.len() + r2.len() + r3.len()\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.concat_calls).to_equal(4)
+        expect(p.extend_calls).to_equal(0)
+
+    it "fails closed on scalar receiver, non-array argument, and mismatched element types":
+        val p_scalar = probe_mir_lowering("fn bad(a: i64, b: i64) -> i64:\n    a.concat(b)\n")
+        expect(has_message(p_scalar.messages, "unresolved method call: concat")).to_equal(true)
+        expect(p_scalar.concat_calls).to_equal(0)
+
+        val p_arg = probe_mir_lowering("fn bad(a: [u8]) -> [u8]:\n    a.concat(7)\n")
+        expect(has_message(p_arg.messages, "array concat requires an array argument")).to_equal(true)
+        expect(p_arg.concat_calls).to_equal(0)
+
+        val p_mix = probe_mir_lowering("fn bad(a: [u8], b: [text]) -> [u8]:\n    a.concat(b)\n")
+        expect(has_message(p_mix.messages, "array concat element type mismatch")).to_equal(true)
+        expect(p_mix.concat_calls).to_equal(0)
+
+        val p_ref_mix = probe_mir_lowering("fn bad(a: &[u8], b: &[text]) -> [u8]:\n    a.concat(b)\n")
+        expect(has_message(p_ref_mix.messages, "array concat element type mismatch")).to_equal(true)
+        expect(p_ref_mix.concat_calls).to_equal(0)
+
+describe "MIR array .append(...) lowering across receiver shapes":
+    it "lowers untyped empty array var parts = [] with .append(...) and .join(...) (cmake_gen.spl pattern)":
+        val src =
+            "fn render(items: [text]) -> text:\n" +
+            "    var parts = []\n" +
+            "    parts.append(\"header\")\n" +
+            "    for item in items:\n" +
+            "        parts.append(item)\n" +
+            "    parts.join(\"\\n\")\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.push_calls).to_equal(2)
+
+    it "lowers struct-field, indexed-slot, and borrowed &[text] .append(...)":
+        val src =
+            "struct Builder:\n" +
+            "    parts: [text]\n" +
+            "fn add_lines(b: Builder, buckets: [[text]], borrowed: &[text]) -> i64:\n" +
+            "    b.parts.append(\"one\")\n" +
+            "    buckets[0].append(\"two\")\n" +
+            "    borrowed.append(\"three\")\n" +
+            "    b.parts.len() + buckets[0].len()\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.push_calls).to_equal(3)
+
+    it "keeps custom struct .append(...) and .concat(...) methods taking priority over array builtins":
+        val src =
+            "struct Bag:\n" +
+            "    count: i64\n" +
+            "    me append(v: i64) -> i64:\n" +
+            "        self.count = self.count + v\n" +
+            "        self.count\n" +
+            "    fn concat(other: Bag) -> i64:\n" +
+            "        self.count + other.count\n" +
+            "fn use_bag(a: Bag, b: Bag) -> i64:\n" +
+            "    a.append(3)\n" +
+            "    a.concat(b)\n"
+        val p = probe_mir_lowering(src)
+        expect(p.messages.len()).to_equal(0)
+        expect(p.push_calls).to_equal(0)
+        expect(p.concat_calls).to_equal(0)
+
+    it "still rejects .append(...) on a scalar receiver":
+        val p = probe_mir_lowering("fn bad(x: i64) -> i64:\n    x.append(1)\n")
+        expect(has_message(p.messages, "unresolved method call: append")).to_equal(true)
+        expect(p.push_calls).to_equal(0)
