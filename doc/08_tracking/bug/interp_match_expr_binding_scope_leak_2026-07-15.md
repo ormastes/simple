@@ -63,3 +63,21 @@ being satisfied by the binding simply never happening.
 **Runner trap:** `bin/simple test` caches per spec file by mtime and not by the
 source under test — `touch` the spec before every A/B measurement.
 
+
+## Verification 2026-11-25 (release/1.0.0, Windows lane)
+
+Re-confirmed the fix is present at release/1.0.0 HEAD (`8aa26f51e72`) by
+source inspection: `eval_match_expr` in
+`src/compiler/10.frontend/core/interpreter/eval.spl:1053` calls
+`env_push_scope()` BEFORE `match_pattern(scrutinee, pattern_eid)` and pops the
+scope on every exit path (pattern error, guard error, guard-not-taken
+`continue`, and arm-body success). This matches the Resolution section above.
+
+Limit: `test/01_unit/compiler_core/interpreter/match_expr_binding_scope_spec.spl`
+could not be re-run in this environment — release/1.0.0 HEAD carries 940
+`@representation_boundary` annotations (commit cfd89933699) that the pinned
+Rust seed (`bin/simple.exe` v1.0.0-rc.1) rejects, so `bin/simple.exe test`
+fails repo-wide at the test-runner load step before reaching any spec body.
+The 2026-09-06 executable proof above (6/6 green, defect re-injection
+discriminates 3/3) remains the executable evidence; this note adds a
+source-level re-confirmation on the release branch. Status stays RESOLVED.
