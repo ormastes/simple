@@ -62,32 +62,21 @@ describe "E-MC-REP-001 representation boundary autofix: positive cases":
         val expected = "@representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in encode_word\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [])\n" + source
         expect(fixed).to_equal(expected)
 
-    it "emits Safe edits for class/struct/trait methods and Uncertain suggestions for impl-only methods":
-        step("Class/struct/trait emit Safe edits while impl-only methods fail closed to Uncertain")
+    it "emits Safe edits for class/struct/trait methods and impl-block methods":
+        step("All method forms emit Safe edits now that impl frames own their methods")
         val path = "src/compiler/demo.spl"
         val source = "class Holder:\n    pub fn fetch():\n        unsafe(capabilities: [raw_ptr]):\n            val p = 1\n            p\n\n    pub me mutate():\n        unsafe:\n            val m = 2\n            m\n\nstruct Buf:\n    static fn alloc():\n        unsafe(capabilities: [ffi]):\n            val b = 3\n            b\n\nimpl Buf:\n    pub static fn reset():\n        unsafe:\n            val r = 4\n            r\n\ntrait LowLevel:\n    me poke():\n        unsafe(capabilities: [mmio]):\n            val d = 5\n            d\n"
         val fixes = check_representation_boundary(source, path)
         expect(fixes.len()).to_equal(5)
-        var safe_fixes: [EasyFix] = []
-        var impl_suggestions: [EasyFix] = []
         for f in fixes:
-            if f.is_safe():
-                safe_fixes.push(f)
-            else:
-                impl_suggestions.push(f)
-        expect(safe_fixes.len()).to_equal(4)
-        expect(impl_suggestions.len()).to_equal(1)
-        expect(impl_suggestions[0].confidence == FixConfidence.Uncertain).to_equal(true)
-        expect(impl_suggestions[0].replacements.len()).to_equal(0)
-        expect(impl_suggestions[0].description).to_contain("reset")
-        expect(impl_suggestions[0].description).to_contain("nested_callable")
+            expect(f.is_safe()).to_equal(true)
 
         val fixed = _rep_apply_checked(source, path)
         expect(fixed).to_contain("    @representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in fetch\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [\"raw_ptr\"])\n    pub fn fetch():")
         expect(fixed).to_contain("    @representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in mutate\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [])\n    pub me mutate():")
         expect(fixed).to_contain("    @representation_boundary(kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in alloc\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [\"ffi\"])\n    static fn alloc():")
         expect(fixed).to_contain("    @representation_boundary(kind: \"hardware\", reason: \"Explicit unsafe hardware boundary in poke\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [\"mmio\"])\n    me poke():")
-        expect(fixed).to_contain("impl Buf:\n    pub static fn reset():")
+        expect(fixed).to_contain("impl Buf:\n    @representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in reset\", reviewers: [\"ormastes\", \"opus-review\"], capabilities: [])\n    pub static fn reset():")
 
     it "merges and deduplicates capabilities across multiple unsafe blocks in canonical order":
         step("Canonical order is raw_ptr, ffi, mmio, inline_asm, type_erasure")
@@ -170,17 +159,38 @@ describe "E-MC-REP-001 representation boundary autofix: negative cases":
         val source = "extern fn rt_unsafe_probe(x: i64) -> i64\npub extern fn rt_unsafe_read(x: i64) -> i64\n"
         expect(check_representation_boundary(source, "src/app/externs.spl").len()).to_equal(0)
 
+    it "never emits an edit for a fn nested inside a function body":
+        step("Nested callables stay compiler-rejected; the rule must not annotate them")
+        val path = "src/compiler/nested_fn.spl"
+        val source = "fn outer_word():\n    fn nested_word():\n        unsafe(capabilities: [ffi]):\n            val raw = 1\n            raw\n    nested_word()\n"
+        val fixes = check_representation_boundary(source, path)
+        for f in fixes:
+            expect(f.id == "E-MC-REP-001:2").to_equal(false)
+        val fixed = _rep_apply_checked(source, path)
+        expect(fixed).to_contain("    fn nested_word():")
+
+    it "never emits an edit for a fn nested inside an impl method":
+        step("Impl owner binding must not leak onto doubly nested callables")
+        val path = "src/compiler/nested_impl_fn.spl"
+        val source = "struct Box:\n    v: i64\n\nimpl Box:\n    fn outer(self):\n        fn nested():\n            unsafe:\n                val raw = 1\n                raw\n        nested()\n"
+        val fixes = check_representation_boundary(source, path)
+        for f in fixes:
+            expect(f.id == "E-MC-REP-001:6").to_equal(false)
+        val fixed = _rep_apply_checked(source, path)
+        expect(fixed).to_contain("        fn nested():")
+
 describe "E-MC-REP-001 real compiler validation":
     it "produces zero parser/validation errors and valid normalized RepresentationManifestV1":
         step("Apply E-MC-REP-001 fix and validate through parse_representation_source_v1 + representation_manifest_validate_v1")
         val path = "src/compiler/validated_boundary.spl"
-        val source = "# 한🙂 — UTF-8 header\n@allow(primitive_api)\n@unsafe(reason: \"raw ffi pointer\", capabilities: [ffi, raw_ptr])\npub fn read_raw(ptr: i64) -> i64:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        ptr\n\nclass DeviceBox:\n    pub fn reset_mmio():\n        unsafe(capabilities: [mmio]):\n            val r = 1\n            r\n"
+        val source = "# 한🙂 — UTF-8 header\n@allow(primitive_api)\n@unsafe(reason: \"raw ffi pointer\", capabilities: [ffi, raw_ptr])\npub fn read_raw(ptr: i64) -> i64:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        ptr\n\nclass DeviceBox:\n    pub fn reset_mmio():\n        unsafe(capabilities: [mmio]):\n            val r = 1\n            r\n\nimpl DeviceBox:\n    pub fn flush(self):\n        unsafe(capabilities: [ffi]):\n            val f = 2\n            f\n"
         val fixed = _rep_apply_checked(source, path)
         val declarations = _rep_validate_fixed_source(fixed, path)
         expect(declarations.len()).to_be_greater_than(1)
 
         var validated_fn = false
         var validated_method = false
+        var validated_impl_method = false
         for decl in declarations:
             if decl.components.name == "read_raw":
                 expect(decl.metadata_errors.len()).to_equal(0)
@@ -213,8 +223,26 @@ describe "E-MC-REP-001 real compiler validation":
                     nil:
                         assert(false)
 
+            elif decl.components.name == "flush":
+                expect(decl.components.item_kind).to_equal("method")
+                expect(decl.metadata_errors.len()).to_equal(0)
+                val admitted = representation_manifest_validate_v1(decl, AssuranceStrictness.Critical)
+                expect(admitted.diagnostics.len()).to_equal(0)
+                expect(admitted.primitive_internal_exempt).to_equal(true)
+                match admitted.manifest:
+                    Some(m):
+                        expect(m.schema_version).to_equal(1)
+                        expect(m.kind).to_equal("ffi")
+                        expect(m.reason).to_equal("Explicit unsafe ffi boundary in flush")
+                        expect(m.reviewers).to_equal(["ormastes", "opus-review"])
+                        expect(m.capabilities).to_equal(["ffi"])
+                        validated_impl_method = true
+                    nil:
+                        assert(false)
+
         expect(validated_fn).to_equal(true)
         expect(validated_method).to_equal(true)
+        expect(validated_impl_method).to_equal(true)
 
 describe "E-MC-REP-001 opt-in CLI wiring":
     it "is opt-in, not in the default registry fix producers":

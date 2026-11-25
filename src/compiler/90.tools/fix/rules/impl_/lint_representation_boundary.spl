@@ -47,7 +47,6 @@ struct RepActiveFn:
     fn_name: text
     insert_line: i64
     has_rep_boundary: bool
-    in_impl_block: bool
     header_done: bool
     header_paren_depth: i64
     header_bracket_depth: i64
@@ -628,13 +627,9 @@ fn _rep_finalize_fn(active: RepActiveFn, raw_lines: [text], offsets: [i64], file
         return []
 
     val decl_line_num = active.decl_line + 1
-    if active.in_impl_block:
-        val suggestion = EasyFix.create(
-            id: "E-MC-REP-001:{decl_line_num}",
-            description: "suggestion: `{active.fn_name}` in an `impl`/`extend` block contains an unsafe block, but `representation_declarations_v1` rejects impl-only methods as `nested_callable`; move into a `class`/`struct` method or top-level `fn` before annotating",
-            confidence: FixConfidence.Uncertain
-        )
-        return [suggestion]
+    # impl/extend methods bind as methods owned by the impl frame
+    # (representation_method_begin_v1), so they take Safe edits like any
+    # class/struct method; only unmatched policy paths fail closed below.
 
     val reviewers = _rep_infer_reviewers(norm_path, owner_rules)
     if reviewers.len() == 0:
@@ -700,7 +695,6 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
 
     var fixes: [EasyFix] = []
     var in_container = false
-    var container_kind = ""
     var container_indent = -1
     var member_indent = -1
 
@@ -715,7 +709,6 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
         fn_name: "",
         insert_line: 0,
         has_rep_boundary: false,
-        in_impl_block: false,
         header_done: false,
         header_paren_depth: 0,
         header_bracket_depth: 0,
@@ -777,7 +770,6 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
 
         if in_container and indent <= container_indent:
             in_container = false
-            container_kind = ""
             container_indent = -1
             member_indent = -1
 
@@ -803,7 +795,6 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
         val detected_container = if not in_container and indent == 0: _rep_container_kind(t) else: ""
         if detected_container != "":
             in_container = true
-            container_kind = detected_container
             container_indent = indent
             member_indent = -1
             pending_attr_start = -1
@@ -825,7 +816,6 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
                     fn_name: fn_hdr.name,
                     insert_line: insert_line,
                     has_rep_boundary: pending_has_rep_boundary,
-                    in_impl_block: in_container and container_kind == "impl",
                     header_done: hdr.0,
                     header_paren_depth: hdr.1,
                     header_bracket_depth: hdr.2,
