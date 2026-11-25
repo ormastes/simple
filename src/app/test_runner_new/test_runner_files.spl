@@ -12,7 +12,7 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk}
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry,
-    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh
+    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh, manifest_covers
 }
 use std.test_runner.test_manifest_scanner.{manifest_full_scan, manifest_incremental_update}
 
@@ -260,11 +260,21 @@ pub fn discover_test_files_fast_with_manifest_path(
 
     # Try loading manifest
     val manifest = manifest_load(manifest_path)
-    if not manifest_is_fresh(manifest):
-        # Manifest missing or stale — fall back to full scan, then save
+    if not manifest_is_fresh(manifest) or not manifest_covers(manifest, base_path):
+        # Manifest missing, stale, or built from a walk that never visited
+        # `base_path` (e.g. a relative-root index asked for an absolute
+        # spelling of the same tree) — fall back to a full scan, then save.
+        # Filtering an index that never indexed this subtree yields zero files
+        # and reads as "No test files found" even when the directory is full
+        # of specs. Mirrors the std twin in
+        # src/lib/nogc_sync_mut/test_runner/test_runner_files.spl.
         val result = discover_test_files_slow(base_path, options)
-        # Build manifest in background for next run
-        save_manifest_to_path(base_path, manifest_path)
+        # Never cache a scan that found nothing: a manifest built from a
+        # degraded or mismatched walk would make the NEXT run take the fast
+        # branch below and silently return the under-collected set.
+        if result.len() > 0:
+            # Build manifest in background for next run
+            save_manifest_to_path(base_path, manifest_path)
         return result
 
     # Fast path: filter manifest entries in-memory
