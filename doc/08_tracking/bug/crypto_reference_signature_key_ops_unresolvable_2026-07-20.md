@@ -3,7 +3,7 @@
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/signature/key_ops.smf` (and siblings)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).
-- **Status:** OPEN.
+- **Status:** RESOLVED (verified 2026-11-25, see bottom note).
 
 ## Symptom
 
@@ -50,3 +50,22 @@ gap, not a spec authoring issue.
 
 - `test/unit/lib/crypto/crypto_reference_spec.spl` (0 examples executed —
   load failure)
+
+## Verification 2026-11-25 (fleet lane p2w1-ad, Windows host)
+
+STALE-CLOSED. The premise no longer exists in the tree:
+
+- `src/lib/common/signature/` is gone entirely (the `.smf`-only directory was
+  removed; no `key_ops` artifact remains anywhere under `src/`).
+- The affected spec no longer imports `std.signature.key_ops`.
+  `test/01_unit/lib/crypto/crypto_reference_spec.spl` (the `test/unit/...`
+  mirror no longer exists) imports only `std.crypto.constant_time`,
+  `std.crypto.legacy_hash`, `std.crypto.sha1`, `std.crypto.pbkdf2`, and
+  `std.crypto.types`, and its 7 examples cover constant-time compare, SHA-1,
+  MD5, and PBKDF2 vectors. The whole-file load failure is therefore gone.
+
+Executed evidence (`bin/simple.exe run` probe importing the same five modules;
+`bin/simple.exe test` blocked repo-wide at this HEAD by the seed's
+`@representation_boundary` rejection): SHA-1("")/SHA-1("abc") known-answer
+true, MD5("abc") true, PBKDF2-HMAC-SHA256 RFC-style vector true,
+constant_time_compare equal-true. All imports resolve; all checks pass.
