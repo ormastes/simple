@@ -65,3 +65,52 @@ Add a lint/pre-push check that resolves every workflow `paths:` glob against
 `git ls-files` and fails on a zero-match entry, so this cannot regress. Note
 `bin/simple lint` cannot serve here (fail-open on syntax errors per
 `lint_does_not_detect_syntax_errors_2026-07-28.md`, and does not read YAML).
+
+## Re-verification and re-fix 2026-11-25 (P3 fleet, release/1.0.0)
+
+The 2026-09 tree transplant (88aac2ffe28) resurrected pre-fix revisions of the
+workflow files, so most "Fixed" rows above were live again on release/1.0.0.
+Re-verified every `paths:` entry against `git ls-files` (GitHub glob semantics)
+and re-applied the documented fixes:
+
+- `electron-tests.yml`: `scripts/check-electron-live-smoke.shs` (DEAD) →
+  `scripts/check/check-electron-live-smoke.shs` (ALIVE), push + PR lanes.
+- `core-mcp-dev-pipeline.yml`: removed `scripts/deploy-marketplaces.shs`
+  (DEAD, no successor), push + PR lanes.
+- `dashboard-ci.yml`: `src/lib/std/src/tooling/dashboard/**` (DEAD) →
+  `src/compiler_rust/lib/std/src/tooling/dashboard/**` (ALIVE), both lanes.
+- `gui-hardening-evidence.yml`: removed `test/baselines/html_compat/**` and
+  `test/baselines/famous_site_corpus/**` (both DEAD; `test/baselines/` does
+  not exist). Additionally found and fixed a same-class dead entry not in the
+  original table: `scripts/check-gui-hardening-open-gates.shs` (DEAD) →
+  `scripts/check/check-gui-hardening-open-gates.shs` (ALIVE), including the
+  run step that invoked the old path.
+- `vscode-tests.yml`: `test/unit/app/vscode_extension/**` (DEAD, 0 tracked
+  files) → `test/03_system/app/vscode_extension/**` (ALIVE), both lanes; the
+  guarded "Simple-side unit tests" step now points at the same live dir.
+  (`test/system/app/vscode_extension/**` from the original fix is itself dead
+  in the current tree, so it was not re-added.)
+- `vhdl-tests.yml`: all PR-lane entries were dead again. Repointed to
+  `src/compiler/70.backend/backend/vhdl/**`,
+  `src/compiler/70.backend/backend/vhdl_*.spl`,
+  `src/compiler/70.backend/vhdl_constraints.spl`,
+  `examples/09_embedded/vhdl/**`. Run steps now `cd examples/09_embedded/vhdl`
+  and analyze all `*.vhd` recursively (golden files live under
+  `builder/golden/` and `backend/golden/`); elaboration targets verified
+  against the actual `entity` declarations: `counter`, `alu`, `traffic_light`
+  (declared in `fsm.vhd`), `adder`.
+- `simpleos-build.yml` and `simple-strict-lints.yml`: the 2026-07-28 fixes
+  survived the transplant (verified ALIVE); no change needed.
+- `rust-bootstrap-multiplatform.yml`: the four absent-workflow entries are now
+  an intentional tripwire with an in-file comment ("These workflows must
+  remain absent; trigger this guard if someone restores one"); left as-is.
+- Residual `index-validate.yml`: the file no longer exists in the tree, so the
+  OPEN residual is moot.
+
+After-evidence: every `paths:` entry in the six touched workflows resolves to
+≥1 tracked file via `git ls-files` (checked 2026-11-25); YAML structure
+validated line-wise (no tabs, balanced edits). The follow-up zero-match lint
+from the original report remains a good idea and is still not implemented.
+
+**Status:** RESOLVED 2026-11-25 (re-fixed after tree transplant; residual
+index-validate.yml gone).
