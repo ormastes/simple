@@ -1,0 +1,169 @@
+# @tag: unit, compiler, frontend
+# Bug: named_type_lookup_first_registration_after_frontend_cache_hit_2026-11-23
+#
+# Verifies that `flat_type_pools_restore` rebuilds `named_type_modules` to
+# exact length `named_type_names.len()` after layout-owner validation:
+# owner rows (`named_type_layout_owners[i] == i`) receive `named_type_current_module`,
+# `named_type_apply` instance rows receive `""`, failed restores leave it empty,
+# and post-restore `named_type_register` / `named_type_find` match a fresh parse.
+
+use std.spec.{describe, it, expect}
+use compiler.core.types.{
+    reset_all_pools, named_type_register, named_type_apply, named_type_find,
+    named_type_fields, named_type_set_current_module, named_generic_instance_register,
+    option_generic_type_register, flat_type_pools_dump, flat_type_pools_restore,
+    flat_pool_state_take, flat_pool_state_install,
+    TYPE_I64, TYPE_TEXT, TYPE_NAMED_BASE
+}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.frontend.flat_ast_bridge.{
+    parse_and_build_module, flat_pools_dump_all, flat_pools_restore_all,
+    build_module_from_flat_pool_blob
+}
+
+describe "flat_type_pools_restore named_type_modules rebuild":
+    it "rebuilds named_type_modules to named_type_names.len() for owner and apply rows":
+        reset_all_pools()
+        named_type_set_current_module("pkg/source.spl")
+        val foo_id = named_type_register("Foo", ["x"], [TYPE_I64])
+        val applied_tag = named_type_apply("Foo", [TYPE_I64])
+        val applied_id = applied_tag - TYPE_NAMED_BASE
+        val generic_tag = named_generic_instance_register("ImportedBox", [TYPE_TEXT])
+        val generic_id = generic_tag - TYPE_NAMED_BASE
+        val bar_id = named_type_register("Bar", ["y"], [TYPE_TEXT])
+
+        val blob = flat_type_pools_dump()
+        reset_all_pools()
+        named_type_set_current_module("pkg/restored.spl")
+        expect(flat_type_pools_restore(FlatPoolReader.new(blob))).to_equal(true)
+
+        val state = flat_pool_state_take()
+        flat_pool_state_install(state)
+        expect(state.named_type_names.len()).to_equal(4)
+        expect(state.named_type_modules.len()).to_equal(state.named_type_names.len())
+        expect(state.named_type_layout_owners[foo_id]).to_equal(foo_id)
+        expect(state.named_type_modules[foo_id]).to_equal("pkg/restored.spl")
+        expect(state.named_type_layout_owners[applied_id]).to_equal(foo_id)
+        expect(state.named_type_modules[applied_id]).to_equal("")
+        expect(state.named_type_layout_owners[generic_id]).to_equal(generic_id)
+        expect(state.named_type_modules[generic_id]).to_equal("pkg/restored.spl")
+        expect(state.named_type_layout_owners[bar_id]).to_equal(bar_id)
+        expect(state.named_type_modules[bar_id]).to_equal("pkg/restored.spl")
+        named_type_set_current_module("")
+        reset_all_pools()
+
+    it "rebuilds named_type_modules to exact length even when trailing row is named_type_apply":
+        reset_all_pools()
+        named_type_set_current_module("pkg/trailing_apply.spl")
+        val owner_id = named_type_register("Holder", ["v"], [TYPE_I64])
+        val app_tag = named_type_apply("Holder", [TYPE_TEXT])
+        val app_id = app_tag - TYPE_NAMED_BASE
+
+        val blob = flat_type_pools_dump()
+        reset_all_pools()
+        named_type_set_current_module("pkg/trailing_restored.spl")
+        expect(flat_type_pools_restore(FlatPoolReader.new(blob))).to_equal(true)
+
+        val state = flat_pool_state_take()
+        flat_pool_state_install(state)
+        expect(state.named_type_names.len()).to_equal(2)
+        expect(state.named_type_modules.len()).to_equal(2)
+        expect(state.named_type_modules[owner_id]).to_equal("pkg/trailing_restored.spl")
+        expect(state.named_type_modules[app_id]).to_equal("")
+        named_type_set_current_module("")
+        reset_all_pools()
+
+    it "rebuilds named_type_modules to exact length when named_type_current_module is empty":
+        reset_all_pools()
+        named_type_set_current_module("pkg/source.spl")
+        val owner_id = named_type_register("EmptyModType", ["k"], [TYPE_I64])
+        val blob = flat_type_pools_dump()
+
+        reset_all_pools()
+        named_type_set_current_module("")
+        expect(flat_type_pools_restore(FlatPoolReader.new(blob))).to_equal(true)
+
+        val state = flat_pool_state_take()
+        flat_pool_state_install(state)
+        expect(state.named_type_names.len()).to_equal(1)
+        expect(state.named_type_modules.len()).to_equal(1)
+        expect(state.named_type_modules[owner_id]).to_equal("")
+        reset_all_pools()
+
+    it "keeps named_type_register idempotent and cross-module collisions isolated after full restore":
+        reset_all_pools()
+        named_type_set_current_module("pkg/mod.spl")
+        val foo_id = named_type_register("Foo", ["x"], [TYPE_I64])
+        val blob = flat_pools_dump_all()
+
+        reset_all_pools()
+        named_type_set_current_module("pkg/mod.spl")
+        expect(flat_pools_restore_all(blob)).to_equal(true)
+
+        # Re-registering the same type in the restored module reuses foo_id instead of appending a duplicate.
+        expect(named_type_register("Foo", ["x"], [TYPE_I64])).to_equal(foo_id)
+        val after_same = flat_pool_state_take()
+        flat_pool_state_install(after_same)
+        expect(after_same.named_type_names.len()).to_equal(1)
+        expect(after_same.named_type_modules.len()).to_equal(1)
+
+        # Appending a different module's Foo allocates a distinct row without clobbering foo_id.
+        named_type_set_current_module("pkg/other.spl")
+        val other_id = named_type_register("Foo", ["y"], [TYPE_TEXT])
+        expect(other_id).to_not_equal(foo_id)
+        expect(named_type_fields(foo_id)).to_equal(["x"])
+        expect(named_type_fields(other_id)).to_equal(["y"])
+        expect(named_type_find("Foo")).to_equal(other_id)
+        named_type_set_current_module("pkg/mod.spl")
+        expect(named_type_find("Foo")).to_equal(foo_id)
+        named_type_set_current_module("")
+        reset_all_pools()
+
+    it "rebuilds named_type_modules across build_module_from_flat_pool_blob cache hits":
+        val source = "struct Widget:\n    count: i64\n"
+        val path = "pkg/widget.spl"
+        val _parsed = parse_and_build_module(source, path)
+        val blob = flat_pools_dump_all()
+
+        val restored = build_module_from_flat_pool_blob(blob, source, path)
+        expect(restored.is_some()).to_equal(true)
+        val state = flat_pool_state_take()
+        flat_pool_state_install(state)
+        expect(state.named_type_names.len() > 0).to_equal(true)
+        expect(state.named_type_modules.len()).to_equal(state.named_type_names.len())
+        val widget_id = named_type_find("Widget")
+        expect(widget_id >= 0).to_equal(true)
+        if widget_id >= 0 and widget_id < state.named_type_modules.len():
+            expect(state.named_type_modules[widget_id]).to_equal(path)
+        named_type_set_current_module("")
+        reset_all_pools()
+
+    it "leaves named_type_modules empty when flat_type_pools_restore rejects a truncated or invalid blob":
+        reset_all_pools()
+        named_type_set_current_module("pkg/valid.spl")
+        named_type_register("ValidType", ["a"], [TYPE_I64])
+        val blob = flat_type_pools_dump()
+
+        # Truncate the blob mid-stream so flat_type_pools_restore returns false.
+        val half = blob.substring(0, blob.len() / 2)
+        expect(flat_type_pools_restore(FlatPoolReader.new(half))).to_equal(false)
+        val truncated_state = flat_pool_state_take()
+        flat_pool_state_install(truncated_state)
+        expect(truncated_state.named_type_modules.len()).to_equal(0)
+
+        # Forged argument graph cycle fails validation before named_type_modules rebuild.
+        reset_all_pools()
+        named_type_set_current_module("pkg/cycle.spl")
+        val owner = named_type_register("CycleType", [], [])
+        val future_tag = TYPE_NAMED_BASE + owner + 1
+        val cyclic_opt = option_generic_type_register(future_tag)
+        val _applied = named_type_apply("CycleType", [cyclic_opt])
+        val cycle_blob = flat_type_pools_dump()
+        reset_all_pools()
+        named_type_set_current_module("pkg/cycle.spl")
+        expect(flat_type_pools_restore(FlatPoolReader.new(cycle_blob))).to_equal(false)
+        val cycle_state = flat_pool_state_take()
+        flat_pool_state_install(cycle_state)
+        expect(cycle_state.named_type_modules.len()).to_equal(0)
+        named_type_set_current_module("")
+        reset_all_pools()

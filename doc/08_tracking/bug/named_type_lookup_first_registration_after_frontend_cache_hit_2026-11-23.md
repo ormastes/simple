@@ -2,7 +2,9 @@
 
 - **ID:** named_type_lookup_first_registration_after_frontend_cache_hit_2026-11-23
 - **Priority:** P4 (latent; no observable miscompile found on the current pipeline)
-- **Status:** open, record only. No source change ships with this record (see "Decision").
+- **Status:** fixed (2026-11-25) — `flat_type_pools_restore` now rebuilds `named_type_modules` to
+  `named_type_names.len()` after layout-owner validation, and `scripts/check/check-flat-ast-codec-complete.shs`
+  explicitly documents the exclusion.
 - **Found by:** review of PR #10933 while ruling out the `named_type_modules` lead for
   `stage3_surface_build_av_items_spl_warm_frontend_cache_2026-11-22.md` (section
   "`named_type_modules` not encoded").
@@ -84,6 +86,16 @@ plus a `FLAT_POOL_CODEC_VERSION` bump (`core/flat_pool_codec.spl:77`), invalidat
 still leaves 4 other offenders in the guard.
 
 ## Decision
-Record only: the reviewer's cross-module miscompile is unreachable through the cache, and the reachable
-divergence (a duplicate owner row from the bridge's bound re-parse) yields an identical AST. Fix with the
-repro above as a round-trip spec when a by-id consumer of the restored registry appears.
+Implemented the "rebuilding on restore" fix (2026-11-25):
+
+1. `src/compiler/10.frontend/core/types.spl` (`flat_type_pools_restore`): after all length,
+   `named_generic_instance_*`, `named_type_layout_owners`, and `named_type_argument_graph_valid`
+   validation checks pass, `named_type_modules` is rebuilt to `named_type_names.len()` with
+   `named_type_current_module` for owner rows (`named_type_layout_owners[i] == i`) and `""` for
+   `named_type_apply` instance rows. Rejected restores leave `named_type_modules` empty (`[]`).
+2. `scripts/check/check-flat-ast-codec-complete.shs`: added `named_type_modules` to `EXCLUDE_RE`
+   with inline rationale explaining the transient rebuild instead of serializing paths.
+3. `test/01_unit/compiler/frontend/flat_type_pools_named_type_modules_restore_spec.spl`: targeted
+   unit spec covering owner vs `named_type_apply` rows, trailing `named_type_apply`, empty
+   `named_type_current_module`, idempotent `named_type_register` + cross-module isolation after
+   restore, `build_module_from_flat_pool_blob` cache hits, and failed restores.
