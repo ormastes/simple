@@ -1,11 +1,11 @@
 # Bug: `iso` use-after-move is invisible to the borrow checker when the second use is a call argument
-## Open 2026-09-16 — needs owner triage
+## Resolved — verified 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-07
-- Status: OPEN (P2)
+- Status: FIXED (verified 2026-11-25, see note at end)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Severity:** medium (the headline "use-after-move of an `iso` value is
   caught" guarantee does NOT hold for the single most natural way a
@@ -116,3 +116,24 @@ bug's directly-measured scope.
 repo with 3/4 cases green and the `print x` case genuinely red, per repo
 policy (never weaken a failing test to make it pass).
 
+
+## Verification 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The suggested fix is already landed in current source.
+`BorrowChecker.analyze_instruction` now has a `case Call(dest, func, args)`
+arm (`src/compiler/55.borrow/borrow_check/mod.spl:430-451`) that calls
+`record_operand_use` on the callee and every argument operand — and
+`record_operand_use` (`mod.spl:815`) records `nll.record_use` /
+`nll.record_move` per operand kind, exactly the fix this doc proposed. The
+arm's own comment cites this bug doc. `MirTerminator` handling also gained
+`analyze_terminator` (`mod.spl:309-321`), covering the `Ret` audit the doc
+flagged as out of scope.
+
+Spec-run verification is environment-blocked on this Windows host:
+`SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl
+--mode=interpreter` aborts before any scenario with
+`unknown decorator '@representation_boundary'` (known release/1.0.0
+source/binary inconsistency: the pinned Rust seed predates the decorator
+added tree-wide by cfd89933699). Verified by code inspection instead; the
+fix matches the doc's "Suggested fix" exactly. Marking resolved.
