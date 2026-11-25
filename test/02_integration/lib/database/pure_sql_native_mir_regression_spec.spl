@@ -9,7 +9,47 @@ cases pin the observable SQL behaviour of those exact paths.
 
 use std.spec.*
 use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.pure_sql._PureDatabase.pure_database.{
+    PureDatabaseBitmapReducerV1, PureDatabaseBitmapReduceOwnedV1,
+    PureDatabaseBitmapReducerCloseOwnedV1
+}
+use std.database.postgres_mimic.{PostgresMimicServer, PgResponseKind}
 use nogc_sync_mut.database.sql.types.{DbValue}
+
+class _MockBitmapReducerV1 with PureDatabaseBitmapReducerV1:
+    calls: i64
+
+    fn provider_identity() -> text:
+        "mock-provider"
+
+    fn implementation_identity() -> text:
+        "mock-impl"
+
+    fn interface_identity() -> text:
+        "mock-iface"
+
+    fn abi_digest() -> text:
+        "mock-digest"
+
+    fn capability_bits() -> u64:
+        1u64
+
+    fn and_call_count() -> i64:
+        self.calls
+
+    fn reduce_and_owned_v1(lhs: [u32], rhs: [u32], row_count: i64) -> PureDatabaseBitmapReduceOwnedV1:
+        var out: [u32] = []
+        var i = 0
+        while i < lhs.len() and i < rhs.len():
+            out.push(lhs[i] & rhs[i])
+            i = i + 1
+        val next = _MockBitmapReducerV1(calls: self.calls + 1)
+        PureDatabaseBitmapReduceOwnedV1(
+            reducer: next, words: out, status: 0i32,
+            attempted: true, provider_used: true, reason: "mock-ok")
+
+    fn close_owned_v1() -> PureDatabaseBitmapReducerCloseOwnedV1:
+        PureDatabaseBitmapReducerCloseOwnedV1(reducer: self, status: 0i32, reason: "closed")
 
 fn text_of(value: DbValue) -> text:
     match value:
@@ -53,5 +93,35 @@ fn main() -> ():
             expect(db.query("SELECT v FROM w WHERE v LIKE 'al%'", []).unwrap().len()).to_equal(1)
             expect(db.query("SELECT v FROM w WHERE v LIKE '%a'", []).unwrap().len()).to_equal(2)
             expect(db.query("SELECT v FROM w WHERE v LIKE 'zz%'", []).unwrap().len()).to_equal(0)
+        )
+        it("runs unboxed PureDatabaseBitmapReducerV1? through PureDatabase and PostgresMimicServer", fn() -> ():
+            val db = PureDatabase.memory().unwrap()
+            expect(db.exec_sql("CREATE TABLE items (id INTEGER PRIMARY KEY, a INTEGER, b TEXT)").is_ok()).to_equal(true)
+            expect(db.exec_sql("INSERT INTO items (id, a, b) VALUES (1, 10, 'x')").is_ok()).to_equal(true)
+            expect(db.exec_sql("INSERT INTO items (id, a, b) VALUES (2, 20, 'x')").is_ok()).to_equal(true)
+            expect(db.exec_sql("INSERT INTO items (id, a, b) VALUES (3, 10, 'y')").is_ok()).to_equal(true)
+
+            val reducer = _MockBitmapReducerV1(calls: 0)
+            val owned = db.query_with_bitmap_reducer_owned_v1(
+                "SELECT id FROM items WHERE a = 10 AND b = 'x'", [], reducer)
+            expect(owned.provider_used).to_equal(true)
+            expect(owned.provider_and_calls).to_equal(1)
+            expect(owned.reducer.and_call_count()).to_equal(1)
+            val rows = owned.query.unwrap()
+            expect(rows.len()).to_equal(1)
+            expect(int_of(rows[0].values[0])).to_equal(1)
+
+            var server = PostgresMimicServer.memory().unwrap()
+            val sid = server.startup("simple", "app", "spec").unwrap()
+            expect(server.simple_query(sid, "CREATE TABLE items (id INTEGER PRIMARY KEY, a INTEGER, b TEXT)").kind == PgResponseKind.CommandComplete).to_equal(true)
+            expect(server.simple_query(sid, "INSERT INTO items (id, a, b) VALUES (1, 10, 'x')").kind == PgResponseKind.CommandComplete).to_equal(true)
+            expect(server.simple_query(sid, "INSERT INTO items (id, a, b) VALUES (2, 20, 'x')").kind == PgResponseKind.CommandComplete).to_equal(true)
+            server.install_bitmap_reducer_v1(_MockBitmapReducerV1(calls: 0))
+            val resp = server.simple_query(sid, "SELECT id FROM items WHERE a = 10 AND b = 'x'")
+            expect(resp.kind == PgResponseKind.RowSet).to_equal(true)
+            expect(resp.rows.len()).to_equal(1)
+            expect(server.bitmap_stats_v1()).to_contain("provider_queries=1")
+            expect(server.bitmap_stats_v1()).to_contain("provider_and_calls=1")
+            expect(server.close_bitmap_reducer_v1()).to_equal(0)
         )
     )

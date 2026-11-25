@@ -63,19 +63,13 @@ fn command_tag(sql: text, changes: i64) -> text:
         "ROLLBACK": "ROLLBACK"
         keyword: keyword
 
-# Boxed so the optional slot holds a record, not a bare trait object (native MIR
-# cannot lower Some(<trait value>) into Option<trait>; see pure_database.spl).
-# @workaround bug=puresql_native_mir_failures_2026_10_25 reason=see doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md
-class PgBitmapReducerSlotV1:
-    reducer: PureDatabaseBitmapReducerV1
-
 class PostgresMimicServer:
     db: PureDatabase
     sessions: Dict<i64, PgSession>
     next_session_id: i64
-    # Opt-in RowBitmap AND reducer (an admitted vector provider). nil = the
+    # Opt-in RowBitmap AND reducer (an admitted vector provider). None = the
     # ordinary PureDatabase query path, which stays the default.
-    bitmap: PgBitmapReducerSlotV1?
+    bitmap: PureDatabaseBitmapReducerV1?
     bitmap_provider_queries: i64
     bitmap_provider_and_calls: i64
     bitmap_ordinary_queries: i64
@@ -146,15 +140,9 @@ class PostgresMimicServer:
     # reducer; PureDatabase falls back to its ordinary path for everything else
     # and returns the reducer unchanged.
     me _bitmap_query_v1(sql: text) -> Result<[DbRow], DbError>:
-        val slot = self.bitmap!
-        val owned = self.db.query_with_bitmap_reducer_owned_v1(sql, [], slot.reducer)
-        # A trait-typed field read passed to a constructor has no concrete
-        # owner; a match result carries one (same pattern as pure_database.spl).
-        # @workaround bug=puresql_native_mir_failures_2026_10_25 reason=see doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md
-        val next_reducer = match Some(owned):
-            Some(value): value.reducer
-            nil: slot.reducer
-        self.bitmap = Some(PgBitmapReducerSlotV1(reducer: next_reducer))
+        val strategy = self.bitmap!
+        val owned = self.db.query_with_bitmap_reducer_owned_v1(sql, [], strategy)
+        self.bitmap = Some(owned.reducer)
         if owned.provider_used:
             self.bitmap_provider_queries = self.bitmap_provider_queries + 1
         else:
@@ -164,13 +152,13 @@ class PostgresMimicServer:
         owned.query
 
     me install_bitmap_reducer_v1(reducer: PureDatabaseBitmapReducerV1):
-        self.bitmap = Some(PgBitmapReducerSlotV1(reducer: reducer))
+        self.bitmap = Some(reducer)
 
     # Closes and removes the reducer. Returns the close status (0 = ok or none).
     me close_bitmap_reducer_v1() -> i32:
         if self.bitmap.is_none(): return 0
-        val closed = self.bitmap!.reducer.close_owned_v1()
-        self.bitmap = nil
+        val closed = self.bitmap!.close_owned_v1()
+        self.bitmap = None
         closed.status
 
     fn bitmap_stats_v1() -> text:
@@ -247,6 +235,6 @@ fn postgres_mimic_row_tsv(row: DbRow) -> text:
 export PgSessionState, PgResponseKind, PgResponse, PgSession, PostgresMimicServer
 export postgres_mimic_open, postgres_mimic_startup, postgres_mimic_simple_query
 export postgres_mimic_close, postgres_mimic_join_text, postgres_mimic_row_tsv
-export PgBitmapReducerSlotV1, postgres_mimic_open_memory, postgres_mimic_put_row_v1
+export postgres_mimic_open_memory, postgres_mimic_put_row_v1
 export postgres_mimic_install_bitmap_reducer_v1, postgres_mimic_close_bitmap_reducer_v1
 export postgres_mimic_bitmap_stats_v1

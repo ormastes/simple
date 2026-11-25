@@ -2,9 +2,11 @@
 """
 # MIR lowering: the three pure_sql native-MIR failure shapes lower without errors
 
-Bug puresql_native_mir_failures_2026_10_25. The source workarounds in
-pure_database.spl stay in place; these specs pin the intended-syntax shapes so
-the compiler is the thing that is held accountable.
+Bug puresql_native_mir_failures_2026_10_25. The 11 source workarounds in
+pure_database.spl, row_value_helpers.spl, and postgres_mimic/server.spl are
+retired; these specs pin the intended-syntax shapes (including the exact
+unboxed `Reducer?` and recursive `SqlExpr` patterns) so the compiler stays
+accountable.
 
 1. an enum-returning call pushed into `[Enum]`, then indexed (`arr[k].is_null()`)
 2. `Some(<trait value>)` re-wrapped from an `if val` binding of a trait object
@@ -37,6 +39,139 @@ val CAUSE2 = "trait Reducer:\n    fn name() -> text\n\nclass Concrete:\n    n: i
 
 val CAUSE3 = "class Leaf:\n    value: text\n\nclass Node:\n    right: Leaf?\n\nfn first(where_expr: Node?) -> text:\n    if not where_expr.?:\n        return \"\"\n    val expr = where_expr\n    if not expr.right.?:\n        return \"\"\n    val pattern = expr.right.value\n    pattern.slice(0, 1)\n"
 
+val CAUSE2_PURE_DB = """
+trait Reducer:
+    fn id() -> text
+    fn step() -> ReduceOut
+
+class ReduceOut:
+    reducer: Reducer
+    status: i32
+
+class Concrete with Reducer:
+    n: i64
+    fn id() -> text:
+        "c"
+    fn step() -> ReduceOut:
+        ReduceOut(reducer: self, status: 0)
+
+class SelectOwned:
+    reducer: Reducer?
+    id: text
+
+class QueryOwned:
+    reducer: Reducer
+
+fn make_select_owned(reducer: Reducer?) -> SelectOwned:
+    if val Some(strategy) = reducer:
+        return SelectOwned(reducer: Some(strategy), id: strategy.id())
+    SelectOwned(reducer: None, id: "")
+
+class Db:
+    n: i64
+
+    me do_select(reducer: Reducer?) -> SelectOwned:
+        var active_reducer = reducer
+        if val Some(strategy) = active_reducer:
+            val reduced = strategy.step()
+            active_reducer = Some(reduced.reducer)
+        make_select_owned(active_reducer)
+
+    me query_with(reducer: Reducer) -> QueryOwned:
+        val selected = self.do_select(Some(reducer))
+        val next_reducer = match selected.reducer:
+            Some(value): value
+            None: reducer
+        QueryOwned(reducer: next_reducer)
+"""
+
+val CAUSE2_SERVER = """
+trait Reducer:
+    fn id() -> text
+    fn close_owned() -> CloseOut
+
+class CloseOut:
+    reducer: Reducer
+    status: i32
+
+class Concrete with Reducer:
+    n: i64
+    fn id() -> text:
+        "c"
+    fn close_owned() -> CloseOut:
+        CloseOut(reducer: self, status: 0)
+
+class QueryOwned:
+    reducer: Reducer
+    ok: bool
+
+class Db:
+    n: i64
+    me query_with(reducer: Reducer) -> QueryOwned:
+        QueryOwned(reducer: reducer, ok: true)
+
+class Server:
+    db: Db
+    bitmap: Reducer?
+
+    static fn make(db: Db) -> Server:
+        Server(db: db, bitmap: None)
+
+    me install(reducer: Reducer):
+        self.bitmap = Some(reducer)
+
+    me bitmap_query() -> bool:
+        val strategy = self.bitmap!
+        val owned = self.db.query_with(strategy)
+        self.bitmap = Some(owned.reducer)
+        owned.ok
+
+    me close_bitmap() -> i32:
+        if self.bitmap.is_none(): return 0
+        val closed = self.bitmap!.close_owned()
+        self.bitmap = None
+        closed.status
+"""
+
+val CAUSE2_NEGATIVE = """
+trait Reducer:
+    fn id() -> text
+
+class NotAReducer:
+    n: i64
+
+class SelectOwned:
+    reducer: Reducer?
+
+fn bad(x: NotAReducer) -> SelectOwned:
+    SelectOwned(reducer: Some(x))
+"""
+
+val CAUSE3_RECURSIVE = """
+struct SqlExpr:
+    value: text
+    left: SqlExpr?
+    right: SqlExpr?
+
+fn like_prefix(where_expr: SqlExpr?) -> text:
+    if not where_expr.?:
+        return ""
+    val expr = where_expr
+    if not expr.right.?:
+        return ""
+    val pattern = expr.right.value
+    var pat = pattern
+    if pat.starts_with("'") and pat.ends_with("'"):
+        pat = pat.slice(1, pat.byte_len() - 1)
+    var i: i64 = 0
+    while i < pat.len():
+        val ch = pat.slice(i, i + 1)
+        if ch == "%":
+            return pat.slice(0, i)
+        i = i + 1
+    ""
+"""
+
 describe "pure_sql native MIR failure shapes":
     it "cause 1: enum call result pushed into [Enum] then indexed lowers cleanly":
         expect(mir_error_count(CAUSE1)).to_equal(0)
@@ -44,8 +179,20 @@ describe "pure_sql native MIR failure shapes":
     it "cause 2: trait-typed field of an Option payload re-wrapped lowers cleanly":
         expect(mir_error_count(CAUSE2)).to_equal(0)
 
+    it "cause 2 (pure_database): unboxed Reducer? slot + Some(strategy) + Some(reduced.reducer) lowers cleanly":
+        expect(mir_error_count(CAUSE2_PURE_DB)).to_equal(0)
+
+    it "cause 2 (postgres_mimic): unboxed bitmap: Reducer? + self.bitmap! + Some(owned.reducer) lowers cleanly":
+        expect(mir_error_count(CAUSE2_SERVER)).to_equal(0)
+
+    it "cause 2 negative control: non-impl class in Some(x) for Reducer? fails MIR lowering":
+        expect(mir_error_count(CAUSE2_NEGATIVE) > 0).to_equal(true)
+
     it "cause 3: flow-narrowed two-hop optional read keeps text so slice resolves":
         expect(mir_error_count(CAUSE3)).to_equal(0)
+
+    it "cause 3 (row_value_helpers): recursive SqlExpr two-hop read into unannotated var pat resolves slice":
+        expect(mir_error_count(CAUSE3_RECURSIVE)).to_equal(0)
 
     it "harness is non-vacuous: a MIR-fatal source reports errors":
         # An unresolved method call is MIR-fatal ("unresolved method call").
