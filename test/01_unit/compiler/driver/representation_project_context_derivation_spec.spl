@@ -1,0 +1,163 @@
+# Representation project-context derivation spec.
+#
+# Covers the native-build representation wiring: the entry owner selects a
+# project root (representation_project_root_from_inputs_v1) and the driver
+# derives per-source contexts from the nearest simple.sdn manifest at or
+# below that root (representation_derive_project_contexts_v1), failing
+# closed for sources outside the root, unmanifested sources, conflicts,
+# and malformed manifests.
+
+use compiler.common.driver_core_types.{driver_core_compile_options_default,
+    representation_project_root_from_inputs_v1}
+use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{representation_derive_project_contexts_v1,
+    representation_invocation_context_index_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+val FIXTURE_ROOT = "build/rep_derive_spec_fixture"
+val FIXTURE_MANIFEST = FIXTURE_ROOT + "/src/pkg/simple.sdn"
+val FIXTURE_SOURCE = FIXTURE_ROOT + "/src/pkg/mod/a.spl"
+
+fn fixture_cleanup():
+    rt_dir_remove_all(FIXTURE_ROOT)
+
+fn fixture_write_manifest(content: text):
+    fixture_cleanup()
+    expect(rt_dir_create_all(FIXTURE_ROOT + "/src/pkg/mod")).to_equal(true)
+    expect(rt_file_write_text(FIXTURE_MANIFEST, content)).to_equal(true)
+    expect(rt_file_write_text(FIXTURE_SOURCE, "pub fn f() -> i64:\n    0\n")).to_equal(true)
+
+fn single_identity() -> Dict<text, text>:
+    var identities: Dict<text, text> = {}
+    identities["pkg.mod.a"] = sha256_text("fixture-source")
+    identities
+
+fn single_path(path: text) -> Dict<text, text>:
+    var paths: Dict<text, text> = {}
+    paths["pkg.mod.a"] = path
+    paths
+
+fn no_conflicts() -> Dict<text, bool>:
+    var conflicts: Dict<text, bool> = {}
+    conflicts
+
+describe "representation_project_root_from_inputs_v1: entry-owner root selection":
+    it "selects the segment-wise common prefix of source dirs and the entry parent":
+        step("Mixed dirs and entry collapse to their shared ancestor")
+        val root = representation_project_root_from_inputs_v1(
+            ["src/compiler", "src/lib"], "src/app/cli/main.spl")
+        expect(root).to_equal("src")
+
+    it "keeps a single shared dir when the entry lives inside it":
+        step("Entry parent equal to the only source dir wins")
+        val root = representation_project_root_from_inputs_v1(
+            ["src/compiler"], "src/compiler/main.spl")
+        expect(root).to_equal("src/compiler")
+
+    it "normalizes backslash inputs before comparing":
+        step("Windows separators must not defeat the prefix walk")
+        val root = representation_project_root_from_inputs_v1(
+            ["src\\compiler"], "src\\app\\main.spl")
+        expect(root).to_equal("src")
+
+    it "uses the entry parent when no source dirs are given":
+        step("Fixed-arity bootstrap with source_count=0 still bounds the walk")
+        val root = representation_project_root_from_inputs_v1([], "tools/gen.spl")
+        expect(root).to_equal("tools")
+
+    it "fails closed to empty when inputs share no prefix":
+        step("Unrelated roots disable derivation instead of guessing")
+        val root = representation_project_root_from_inputs_v1(["alpha"], "beta/main.spl")
+        expect(root).to_equal("")
+
+describe "representation_derive_project_contexts_v1: nearest-manifest derivation":
+    it "binds a source to the nearest simple.sdn at or below the root":
+        step("Package identity, owner manifest and digests come from the manifest")
+        fixture_write_manifest("project:\n  name: fixture_pkg\n")
+        val out = representation_derive_project_contexts_v1(FIXTURE_ROOT,
+            single_identity(), single_path(FIXTURE_SOURCE), no_conflicts())
+        expect(out.len()).to_equal(1)
+        val context = out["pkg.mod.a"]
+        expect(context.package_identity).to_equal("fixture_pkg")
+        expect(context.module_identity).to_equal("pkg.mod.a")
+        expect(context.owner_kind).to_equal("project-config")
+        expect(context.owner_manifest_path).to_equal(FIXTURE_MANIFEST)
+        expect(context.owner_manifest_digest.len()).to_equal(64)
+        expect(context.source_identity).to_equal(sha256_text("fixture-source"))
+        fixture_cleanup()
+
+    it "skips sources outside the selected root":
+        step("Fail closed: a foreign path gets no context")
+        fixture_write_manifest("project:\n  name: fixture_pkg\n")
+        val out = representation_derive_project_contexts_v1(FIXTURE_ROOT,
+            single_identity(), single_path("elsewhere/src/pkg/mod/a.spl"), no_conflicts())
+        expect(out.len()).to_equal(0)
+        fixture_cleanup()
+
+    it "skips sources with no manifest on their ancestor chain":
+        step("Fail closed: no manifest means no context, never an invented one")
+        fixture_write_manifest("project:\n  name: fixture_pkg\n")
+        expect(rt_dir_create_all(FIXTURE_ROOT + "/bare/mod")).to_equal(true)
+        expect(rt_file_write_text(FIXTURE_ROOT + "/bare/mod/b.spl", "pub fn g():\n    0\n")).to_equal(true)
+        var paths = single_path(FIXTURE_ROOT + "/bare/mod/b.spl")
+        val out = representation_derive_project_contexts_v1(FIXTURE_ROOT,
+            single_identity(), paths, no_conflicts())
+        expect(out.len()).to_equal(0)
+        fixture_cleanup()
+
+    it "skips conflicting module names":
+        step("Fail closed: duplicated identities never bind")
+        fixture_write_manifest("project:\n  name: fixture_pkg\n")
+        var conflicts = no_conflicts()
+        conflicts["pkg.mod.a"] = true
+        val out = representation_derive_project_contexts_v1(FIXTURE_ROOT,
+            single_identity(), single_path(FIXTURE_SOURCE), conflicts)
+        expect(out.len()).to_equal(0)
+        fixture_cleanup()
+
+    it "skips malformed manifests instead of binding a partial context":
+        step("Fail closed: manifest without project.name yields no context")
+        fixture_write_manifest("features: [a, b]\n")
+        val out = representation_derive_project_contexts_v1(FIXTURE_ROOT,
+            single_identity(), single_path(FIXTURE_SOURCE), no_conflicts())
+        expect(out.len()).to_equal(0)
+        fixture_cleanup()
+
+    it "returns no contexts for an empty root":
+        step("Empty root disables derivation entirely")
+        val out = representation_derive_project_contexts_v1("",
+            single_identity(), single_path(FIXTURE_SOURCE), no_conflicts())
+        expect(out.len()).to_equal(0)
+
+describe "representation_invocation_context_index_v1: driver wiring":
+    it "derives admitted contexts from the selected project root when explicit sources are empty":
+        step("Native-build options admit nearest-manifest contexts for owned sources")
+        fixture_write_manifest("project:\n  name: fixture_pkg\n")
+        var options = driver_core_compile_options_default()
+        options.representation_project_root = FIXTURE_ROOT
+        val ctx = CompileContext.create(options)
+        ctx.source_module_names_owner = ["pkg.mod.a"]
+        ctx.source_identities_owner = [sha256_text("fixture-source")]
+        ctx.source_paths_owner = [FIXTURE_SOURCE]
+        val admitted = representation_invocation_context_index_v1(ctx)
+        expect(admitted.len()).to_equal(1)
+        expect(admitted["pkg.mod.a"].package_identity).to_equal("fixture_pkg")
+        expect(admitted["pkg.mod.a"].source_identity).to_equal(sha256_text("fixture-source"))
+        fixture_cleanup()
+
+    it "keeps the pre-existing empty index when no project root is selected":
+        step("Single-file and check flows are unchanged")
+        fixture_write_manifest("project:\n  name: fixture_pkg\n")
+        var options = driver_core_compile_options_default()
+        val ctx = CompileContext.create(options)
+        ctx.source_module_names_owner = ["pkg.mod.a"]
+        ctx.source_identities_owner = [sha256_text("fixture-source")]
+        ctx.source_paths_owner = [FIXTURE_SOURCE]
+        val admitted = representation_invocation_context_index_v1(ctx)
+        expect(admitted.len()).to_equal(0)
+        fixture_cleanup()

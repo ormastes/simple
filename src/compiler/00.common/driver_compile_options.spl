@@ -73,6 +73,13 @@ struct CompileOptions:
     native_source_snapshot_root: text = ""
     # Resolved by the entry/project owner for exact admitted sources only.
     representation_sources: [RepresentationSourceContextV1] = []
+    # Explicit project root selected by the entry/project owner (native-build
+    # project entries). When non-empty and representation_sources is empty,
+    # the driver derives a per-source representation context from the nearest
+    # simple.sdn manifest at or below this root for each admitted source.
+    # Empty keeps explicit-only contexts; single-file and check flows are
+    # unchanged.
+    representation_project_root: text = ""
     output_file: text?
     output_format: OutputFormat
     optimize: bool
@@ -296,3 +303,45 @@ pub fn target_profile_identity_text_v1(profile: NormalizedTargetProfileV1) -> te
     for field in target_profile_identity_fields_v1(profile):
         identity = identity + field.len().to_text() + ":" + field
     identity
+
+# Segment-wise longest common directory prefix of the admitted project inputs,
+# normalized to forward slashes. Source dirs contribute themselves; the entry
+# contributes its parent directory. "" when the inputs share no prefix, which
+# keeps representation project derivation disabled (fail closed).
+pub fn representation_project_root_from_inputs_v1(source_dirs: [text], entry: text) -> text:
+    var candidates: [text] = []
+    for raw in source_dirs:
+        val dir = _representation_root_normalize_v1(raw)
+        if dir != "":
+            candidates.push(dir)
+    val entry_dir = _representation_root_dirname_v1(_representation_root_normalize_v1(entry))
+    if entry_dir != "":
+        candidates.push(entry_dir)
+    if candidates.len() == 0:
+        return ""
+    var prefix = candidates[0].split("/")
+    for i in 1..candidates.len():
+        val parts = candidates[i].split("/")
+        var keep = 0
+        val bound = if prefix.len() < parts.len(): prefix.len() else: parts.len()
+        while keep < bound and prefix[keep] == parts[keep]:
+            keep = keep + 1
+        prefix = prefix.slice(0, keep)
+        if prefix.len() == 0:
+            return ""
+    prefix.join("/")
+
+fn _representation_root_normalize_v1(path: text) -> text:
+    var out = ""
+    for i in 0..path.byte_len():
+        val ch = path.substring(i, i + 1)
+        out = out + if ch == "\\": "/" else: ch
+    while out.ends_with("/"):
+        out = out.substring(0, out.byte_len() - 1)
+    out
+
+fn _representation_root_dirname_v1(path: text) -> text:
+    val idx = path.last_index_of("/")
+    if idx < 0:
+        return ""
+    path.substring(0, idx)
