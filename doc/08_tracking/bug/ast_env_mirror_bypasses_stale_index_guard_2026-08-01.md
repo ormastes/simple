@@ -1,8 +1,9 @@
 # Bug: bootstrap AST env mirror serves stale nodes and bypasses the stale-index guard
-## Open 2026-09-16 — needs owner triage
+## CLOSED 2026-11-25 — defects verified fixed in current source (see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 "needs owner triage" banner was stale bookkeeping: the fix
+recorded below (2026-08-01) is present in current source and was re-verified
+by code inspection on 2026-11-25 — see the final section.
 
 **ID:** ast_env_mirror_bypasses_stale_index_guard_2026-08-01
 **Severity:** P1 — latent correctness (silent wrong AST tag) + proven O(N^2) + **exec ceiling already exceeded by current source files** (measured 2026-08-01)
@@ -251,3 +252,37 @@ Under `SIMPLE_BOOTSTRAP=1` without `SIMPLE_NATIVE_ARENA_DECLS=1`, parse a large 
 then parse a small one, then read a node index between the two counts: `expr_get_tag` returns the
 first file's tag instead of -1. Expected after fix: -1 plus the OOB diagnostic.
 
+
+## Re-verification 2026-11-25 (release/1.0.0 @ 76fa786a2b3, worktree wt-p1w1-aa) — CLOSED
+
+Verified by code inspection of current source (dynamic bootstrap-lane
+verification is not possible on this host — no admitted self-hosted binary;
+stated as the limit):
+
+1. **"Reset clears the arrays but never unsets the env" — FIXED.**
+   `expr_reset()` (`src/compiler/10.frontend/core/_AstExpr/nodes.spl:992`)
+   calls `expr_env_mirror_clear()` (nodes.spl:267) BEFORE clearing the arrays;
+   `stmt_reset()` (`core/ast_stmt.spl:245`) calls `stmt_env_mirror_clear()`
+   (ast_stmt.spl:181) likewise. The clear walks every minted index x field and
+   `env_remove_process`s the entry, so no stale per-index value can be served
+   to the next compilation unit, and environ stays bounded by one file.
+2. **"Env-first read bypasses the stale-index guard" — FIXED.**
+   `expr_get_tag` (`_AstExpr/accessors.spl:126`) no longer performs an
+   env-first read at all: the bounds guard (`idx < 0 or idx >= arena_len`)
+   runs FIRST and returns the -1 sentinel with the L6 generation diagnostic;
+   the tag then comes from the arena (`expr_owner_tag`). The sibling accessor
+   family (`expr_get_span/int/float/str/...`) carries the same guard via
+   `expr_idx_is_live` + `expr_oob_trace`.
+3. **Mirror scope.** The per-index env mirror still exists but only as the
+   gated bootstrap-interpreter compatibility shim
+   (`expr_env_mirror_enabled()`: `SIMPLE_BOOTSTRAP=1` and
+   `SIMPLE_NATIVE_ARENA_DECLS!=1`); compiled Stage4 uses the array-backed fast
+   path. One imprecision in the 2026-08-01 status line above: the mirror was
+   neutralized and reset-cleared, not literally "RETIRED (deleted)" — the
+   gated code remains, deliberately, as the interpreter-persistence shim (same
+   residual the sibling bug `ast_env_var_quadratic_parse_2026-06-13.md`
+   records).
+
+All three filed defects (stale cross-unit reads, guard bypass, unbounded
+environ growth) are addressed in current source. Status: CLOSED. No code
+change in this pass.

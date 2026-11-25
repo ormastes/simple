@@ -1,8 +1,11 @@
 # `asm """..."""` template placeholders never bind — and `@cfg("target_arch", ...)` is inert
-## Open 2026-09-16 — needs owner triage
+## OPEN (P2) — triage confirmed current 2026-11-25 (see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 "needs owner triage" banner is superseded: triage was done
+2026-08-17 (below) and re-confirmed 2026-11-25 — root causes C and B are fixed
+in current source; what remains is deliberately-not-rewritten kernel asm
+(`timer.spl`/`topology.spl`) plus the diagnostic gap, both blocked on a
+freestanding verification path that does not exist on a Windows host.
 
 - **Date:** 2026-08-07
 - Status: OPEN (P2 — downgraded from P1) — **root cause C and the arch-gating gap
@@ -470,3 +473,28 @@ for the pure-Simple compiler** and **re-scoped to a seed MIR gap** (cross-owner)
 The `timer.spl` / `topology.spl` conversion is still correctly blocked: it is the
 seed that builds the SimpleOS lanes, and the seed still cannot bind operands.
 
+
+## Triage note 2026-11-25 (release/1.0.0 @ 76fa786a2b3, worktree wt-p1w1-aa) — remains OPEN (P2), accurately scoped
+
+Re-confirmed the 2026-08-17 re-triage against current source:
+
+- The two known offenders still carry bare-template placeholders, as the
+  shrink-only allowlist in
+  `test/01_unit/compiler/mir/inline_asm_bare_template_placeholder_spec.spl`
+  expects: `src/os/kernel/arch/x86_64/timer.spl:204-205` (`mov {lo}, rax` /
+  `mov {hi}, rdx`) and `src/os/kernel/arch/x86_64/topology.spl:35-38`
+  (`{leaf}`/`{subleaf}`/`{eax}`). Both guard specs still exist.
+- Root cause C fix (fresh output temps + explicit `Copy` write-back) is still
+  present in `src/compiler/50.mir/_MirLowering/function_lowering.spl`.
+- The remaining work is unchanged and correctly NOT attempted from this lane:
+  rewriting `timer.spl`/`topology.spl` to the bound form needs explicit
+  register constraints (`rdtsc` EDX:EAX, `cpuid` RBX clobber) that do not
+  parse today, and there is no executable freestanding `src/os` verification
+  path on a Windows host — landing an unverified rewrite is exactly the
+  loud-error-to-silent-zero trade this record warns against. The diagnostic
+  gap (error at the asm site for `{ident}` with empty constraints) stays
+  blocked behind those two files by its own stated precondition.
+
+Skip classification: needs a bootstrap/freestanding verification path and an
+explicit-register-constraint feature; owner-decision territory. No code
+change.
