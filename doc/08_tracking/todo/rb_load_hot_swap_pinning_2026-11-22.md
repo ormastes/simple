@@ -21,15 +21,29 @@ Remaining:
 - DONE 2026-11-23 hs4: compat `ModuleLoader.reload_with_intent` admits pinned paths through the slot before unload
   (`moduleloader_pin_hot_swap`, `moduleloader_hot_swap_read_begin`; spec `hot_swap_loader_wiring_spec` 3/3).
 - DONE 2026-11-23 hs5: `LazyModuleLoader.moduleloader_replace_live` swaps through the slot at its commit point
-  (after candidate map + relocation; refusal unmaps the candidate). OPEN: it is unreachable for any
-  identity-carrying image today: ordinary lazy load refuses SMF v1.2 and `moduleloader_load_native_batch_v1`
-  refuses the `.simple_meta` section ("unmarked symbol sections"); `hot_swap_lazy_wiring_spec` is
-  `@tag:in-development` until one of them accepts it.
+  (after candidate map + relocation; refusal unmaps the candidate).
+- FIXED-VERIFICATION-PENDING 2026-11-26 (work/rb-load02-hotswap-20261126): the lazy path accepts an
+  identity-carrying SMF. The driver writer marks its Code symbol with the explicit section index
+  (byte 43 = 0x53), the batch preflight tolerates a read-only Note section (`.simple_meta`; a symbol or
+  relocation naming it is still refused), and `moduleloader_apply_relocations` refuses v1.2+ only when a
+  Data/RoData/Bss section is present, so `replace_live` can patch a Code + Note image. Spec:
+  `hot_swap_identity_accept_spec` 4/4 (mapping-free). End to end (`hot_swap_lazy_wiring_spec`,
+  `hot_swap_autopin_spec`) stays `@tag:in-development`: on the Windows seed the exec-mapping twin
+  `loader/smf_mmap_native.spl` cannot bind its aliased imports (`owner_alloc_exec_memory` not found,
+  `smf_group_batch_load_spec` 6/7 RED on the base too; bug family
+  `aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03`).
 - DONE 2026-11-23 hs5: a failed load after an admitted swap rolls the slot back (`hot_swap_rollback`, one CAS);
   reclaim runs only after a successful load, and before each swap so a rolled-back entry cannot wedge the slot.
-- OPEN (no site): no production hot-reload entry point exists, so nothing calls `moduleloader_pin_hot_swap`.
-  `simple tooling watch --hot-reload` only prints, `run` uses one-shot `moduleloader_execute_smf`, and
-  grouped_native_worker is a one-shot native batch load. Add the pin when a real reload entry point lands.
+- FIXED-VERIFICATION-PENDING 2026-11-26 (work/rb-load02-hotswap-20261126): the pin is now at the loader
+  load API, so no caller cooperation is needed. `moduleloader_load_native_batch_v1` decodes the unit
+  identity each image carries and pins it at generation 0 from the mapped bytes (no re-read); every
+  later `moduleloader_reload` is admission-checked. Slots are built for the whole batch before any is
+  published. A live slot is never replaced: re-pin with the same identity is a no-op, a different one is
+  `SMF-E-HOTSWAP-ALREADY-PINNED`, and a batch load of a pinned path is refused. There is still no CLI
+  reload command (`simple tooling watch --hot-reload` only prints); the covered caller is
+  `grouped_native_worker` (batch load).
+- OPEN: `moduleloader_unload` does not retire a path's slot, so a pinned path cannot be batch-loaded again
+  after unload (fails closed).
 - State migration across an ABI change (currently refused).
 - Land the OS-thread pin/reclaim stress spec once the seed shared-object crash is fixed (or on a native binary).
 - Bug (FIXED-VERIFICATION-PENDING 2026-11-23, work/at1-20261123): `atomic_i64_new` resolved to an

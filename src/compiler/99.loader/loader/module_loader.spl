@@ -403,7 +403,13 @@ fn moduleloader_apply_relocations(self: LazyModuleLoader, path: text, smf_data: 
         val mem_reader = mem_reader_result.unwrap()
         val (_, minor) = mem_reader.header.version
         if minor >= 2:
-            return Err("SMF v1.2 requires native batch section loading")
+            # Only Data/RoData/Bss need the batch section mapper; a Code +
+            # Note (.simple_meta identity) image is patched here as before.
+            val data_index = mem_reader.find_section_by_type(2)?
+            val rodata_index = mem_reader.find_section_by_type(3)?
+            val bss_index = mem_reader.find_section_by_type(4)?
+            if data_index >= 0 or rodata_index >= 0 or bss_index >= 0:
+                return Err("SMF v1.2 requires native batch section loading")
         val relocs_result = mem_reader.read_relocations()
         if relocs_result.is_err():
             return Err(relocs_result.unwrap_err())
@@ -669,9 +675,34 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
 fn moduleloader_pin_hot_swap(self: LazyModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
     if not self.modules.has(path):
         return Err("SMF-E-HOTSWAP-NOT-LOADED: {path}")
+    if self.hot_swap_slots.has(path):
+        return moduleloader_hot_swap_repin(self, path, row)
     val bytes = moduleloader_ensure_provider(self).get_module_bytes(path)?
+    moduleloader_pin_hot_swap_image(self, path, row, bytes)
+
+# Pin `path` to `row` with the exact bytes that were mapped (no re-read, so
+# generation 0 is the image the code came from). A live slot is never
+# replaced: readers may hold it.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn moduleloader_pin_hot_swap_image(self: LazyModuleLoader, path: text, row: SmfManifestEntry, bytes: [u8]) -> Result<i64, text>:
+    if self.hot_swap_slots.has(path):
+        return moduleloader_hot_swap_repin(self, path, row)
     val slot = hot_swap_slot_load(row, bytes)?
     self.hot_swap_slots[path] = slot
+    Ok(slot.current_generation())
+
+# Re-pin of an already pinned module: the same identity is a no-op (Ok =
+# current generation); a different identity is refused and the slot kept.
+# reason: Result carries the loader diagnostic text
+@allow(primitive_api)
+fn moduleloader_hot_swap_repin(self: LazyModuleLoader, path: text, row: SmfManifestEntry) -> Result<i64, text>:
+    val slot = self.hot_swap_slots[path]
+    val p = slot.pinned
+    if p.iface_digest != row.iface_digest or p.abi_digest != row.abi_digest or
+            p.native_target != row.native_target or p.profile != row.profile or
+            p.allowed_families != row.allowed_families:
+        return Err("SMF-E-HOTSWAP-ALREADY-PINNED: {path} is pinned to a different unit identity")
     Ok(slot.current_generation())
 
 # Per-call reader pin on a pinned module's current image.

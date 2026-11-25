@@ -1,0 +1,104 @@
+# @tag:in-development
+# Expected RED on hosts where the loader exec-mapping twin cannot bind its
+# aliased imports (`owner_alloc_exec_memory` not found, see
+# doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md;
+# smf_group_batch_load_spec is 6/7 RED for the same reason). The identity
+# image is now accepted by the batch preflight and auto-pinned; mapping-free
+# coverage: hot_swap_identity_accept_spec.
+# @req: REQ-BUILD-SRC-001
+# RB-LOAD-02: the production lazy load path pins an identity-carrying SMF with
+# no caller cooperation. `moduleloader_load_native_batch_v1` decodes the unit
+# identity the image carries and pins that row at generation 0, so every later
+# `moduleloader_reload` of the module is identity-checked. A re-pin never
+# replaces a live slot: same identity is a no-op, a different identity is
+# refused. A legacy image with no identity record loads unpinned.
+# todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_delete}
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.module_loader.{LoadResult, lazymoduleloader_with_defaults, moduleloader_reload, moduleloader_pin_hot_swap, moduleloader_hot_swap_read_begin}
+use compiler.loader.hot_swap_pin.{hot_swap_read_end}
+use compiler.loader.smf_group_batch_load.{moduleloader_load_native_batch_v1}
+
+fn ap_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: "iface-v1-2222",
+        abi_digest: "abi-v1-cccc",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn ap_image(id: UnitIdentity, code: u8) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.host())
+    opts.unit_identity_bytes = unit_identity_encode(id).bytes()
+    generate_smf_with_options([code, 0xC3], opts)
+
+fn ap_legacy_image(code: u8) -> [u8]:
+    generate_smf_with_options([code, 0xC3], SmfBuildOptions.create(Target.host()))
+
+fn ap_row(path: text, id: UnitIdentity) -> SmfManifestEntry:
+    smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", path, 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+
+fn ap_error_text(r: LoadResult) -> text:
+    match r:
+        case LoadResult.Error(message): message
+        case _: ""
+
+
+describe "RB-LOAD-02: batch load auto-pins identity-carrying SMF":
+    it "pins generation 0 on load and refuses an ABI-changed reload":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_autopin_refuse.smf"
+        val v0 = ap_image(ap_identity(), 0x90)
+        expect(file_write_bytes(path, v0)).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        step("load without an explicit pin")
+        expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
+        val read0 = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(read0.generation()).to_equal(0)
+        expect(read0.image() == v0).to_equal(true)
+        hot_swap_read_end(read0)
+        step("reload an ABI-changed artifact")
+        var bad = ap_identity()
+        bad.abi_digest = "abi-v1-dddd"
+        expect(file_write_bytes(path, ap_image(bad, 0x91))).to_equal(true)
+        val r = moduleloader_reload(loader, path)
+        expect(ap_error_text(r).contains("SMF-E-UNIT-ABI-MISMATCH")).to_equal(true)
+        val read1 = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(read1.generation()).to_equal(0)
+        hot_swap_read_end(read1)
+        file_delete(path)
+
+    it "re-pin with the same identity is a no-op and a different identity is refused":
+        val path = "build/test_tmp/hs_autopin_repin.smf"
+        val v0 = ap_image(ap_identity(), 0x90)
+        expect(file_write_bytes(path, v0)).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
+        val held = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(moduleloader_pin_hot_swap(loader, path, ap_row(path, ap_identity())).unwrap()).to_equal(0)
+        var other = ap_identity()
+        other.iface_digest = "iface-v1-9999"
+        val refused = moduleloader_pin_hot_swap(loader, path, ap_row(path, other))
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err().contains("SMF-E-HOTSWAP-ALREADY-PINNED")).to_equal(true)
+        step("the reader pinned before the re-pin still sees the live image")
+        expect(held.image() == v0).to_equal(true)
+        hot_swap_read_end(held)
+        file_delete(path)
+
+    it "loads a legacy image with no identity record unpinned":
+        val path = "build/test_tmp/hs_autopin_legacy.smf"
+        expect(file_write_bytes(path, ap_legacy_image(0x90))).to_equal(true)
+        var loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_load_native_batch_v1(loader, [path], 4096).is_ok()).to_equal(true)
+        val read = moduleloader_hot_swap_read_begin(loader, path)
+        expect(read.is_err()).to_equal(true)
+        expect(read.unwrap_err().contains("SMF-E-HOTSWAP-NOT-PINNED")).to_equal(true)
+        file_delete(path)
