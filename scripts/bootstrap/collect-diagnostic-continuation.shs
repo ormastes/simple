@@ -1,0 +1,112 @@
+#!/bin/sh
+# Preserve bounded, explicitly unadmitted bootstrap continuation inputs.
+# Port of the former collect-diagnostic-continuation.py (repo rule: .spl/.shs only).
+#
+# usage: collect-diagnostic-continuation.shs ROOT OUT BUDGET_BYTES
+# Kept: candidate selection, priority order, byte budget, sha256 rows, receipt
+# schema. The Python per-copy inode/mtime identity re-check is reduced to a
+# size re-check before and after the copy.
+set -eu
+LC_ALL=C; export LC_ALL
+
+[ $# -eq 3 ] || { echo "usage: $0 ROOT OUT BUDGET" >&2; exit 2; }
+root=$(CDPATH= cd -- "$1" && pwd -P)
+out_arg=$2; budget=$3
+case "$budget" in ''|*[!0-9]*) budget=0 ;; esac
+if [ "$budget" -le 0 ] || [ -e "$out_arg" ]; then
+    echo "refuse invalid budget or existing output" >&2; exit 1
+fi
+mkdir -p "$out_arg"
+out=$(CDPATH= cd -- "$out_arg" && pwd -P)
+work="$out/.work"; mkdir "$work"
+: > "$work/cand"; : > "$work/rows"; : > "$work/excluded"; : > "$work/rejected"; : > "$work/roots"
+
+jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+reject() { printf '{"path": %s, "reason": %s}\n' "$(jstr "$1")" "$(jstr "$2")" >> "$work/rejected"; }
+
+for rel in build/bootstrap .simple/storage/build/bootstrap src/compiler_rust/target/bootstrap; do
+    base="$root/$rel"
+    if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+        printf '{"path": %s, "present": false}\n' "$(jstr "$rel")" >> "$work/roots"; continue
+    fi
+    bad=0; p="$root"
+    for part in $(printf '%s' "$rel" | tr / ' '); do
+        p="$p/$part"; [ -L "$p" ] && bad=1
+    done
+    if [ "$bad" = 1 ]; then
+        printf '{"path": %s, "present": true, "rejected": "symlink_or_escape"}\n' "$(jstr "$rel")" >> "$work/roots"
+        reject "$rel" symlink_or_escape; continue
+    fi
+    printf '{"path": %s, "present": true}\n' "$(jstr "$rel")" >> "$work/roots"
+    find "$base" -mindepth 1 \( -type d \( -name incremental -o -name .fingerprint -o -name build \) -prune \) \
+        -o \( -type l -print \) -o \( -type f -print \) | sort > "$work/walk"
+    while IFS= read -r p; do
+        relative=${p#"$root"/}
+        name=${p##*/}
+        if [ -L "$p" ]; then
+            [ -d "$p" ] || reject "$relative" source_symlink
+            continue
+        fi
+        ext=""; case "$name" in *.*) ext=".${name##*.}" ;; esac
+        case "$name" in .*) case "${name#.}" in *.*) ;; *) ext="" ;; esac ;; esac
+        prio=""
+        case "$name" in simple|simple.exe|simple.rejected|simple.exe.rejected) prio=0 ;; esac
+        if [ -z "$prio" ]; then case "$name" in libsimple_native_all.a|libsimple_compiler_backfill.a|simple_native_all.lib|simple_compiler_backfill.lib) prio=1 ;; esac; fi
+        if [ -z "$prio" ]; then
+            case "$relative" in src/compiler_rust/target/*) ;; *)
+                case "$ext" in .env|.json|.manifest|.sdn) prio=2 ;; esac ;; esac
+        fi
+        if [ -z "$prio" ]; then
+            case "/$relative/" in */native_cache/*|*/stage2-native-cache/*|*/stage3-native-cache/*)
+                case "$ext" in .o|.obj|.env|.json|.sdn|.manifest) prio=3 ;; esac
+                case "$name" in .cache_scope|incremental_manifest.txt) prio=3 ;; esac ;;
+            esac
+        fi
+        [ -n "$prio" ] && printf '%s\t%s\n' "$prio" "$relative" >> "$work/cand"
+    done < "$work/walk"
+done
+
+used=0
+sort -t "$(printf '\t')" -k1,1 -k2 "$work/cand" > "$work/cand.sorted"
+while IFS="$(printf '\t')" read -r _prio relative; do
+    p="$root/$relative"
+    size=$(wc -c < "$p" 2>/dev/null | tr -d ' ') || { reject "$relative" "stat failed"; continue; }
+    if [ "$size" -gt $((budget - used)) ]; then
+        printf '{"path": %s, "size": %s, "reason": "budget"}\n' "$(jstr "$relative")" "$size" >> "$work/excluded"; continue
+    fi
+    target="$out/files/$relative"
+    mkdir -p "${target%/*}"
+    if [ -L "$p" ] || [ -e "$target" ] || ! cp -p "$p" "$target"; then
+        rm -f "$target"; reject "$relative" source_symlink_or_copy_failed; continue
+    fi
+    copied=$(wc -c < "$target" | tr -d ' ')
+    if [ "$copied" != "$size" ] || [ "$(wc -c < "$p" | tr -d ' ')" != "$size" ]; then
+        rm -f "$target"
+        printf '{"path": %s, "reason": "source_changed_during_copy", "copied_bytes_discarded": %s}\n' "$(jstr "$relative")" "$copied" >> "$work/rejected"
+        continue
+    fi
+    used=$((used + copied))
+    printf '{"path": %s, "size": %s, "sha256": "%s"}\n' "$(jstr "$relative")" "$copied" "$(sha256sum "$target" | cut -d' ' -f1)" >> "$work/rows"
+done < "$work/cand.sorted"
+
+arr() { if [ -s "$1" ]; then printf '[\n    '; sed '$!s/$/,/' "$1" | sed '2,$s/^/    /'; printf '  ]'; else printf '[]'; fi; }
+complete=false; [ -s "$work/excluded" ] || [ -s "$work/rejected" ] || complete=true
+names=$(sed 's/^{"path": "\([^"]*\)".*/\1/' "$work/rows" | sed 's#.*/##')
+has() { printf '%s\n' "$names" | grep -qxE "$1"; }
+compiler=false; has 'simple|simple\.exe|simple\.rejected|simple\.exe\.rejected' && compiler=true
+archives=false
+has 'libsimple_native_all\.a|simple_native_all\.lib' && has 'libsimple_compiler_backfill\.a|simple_compiler_backfill\.lib' && archives=true
+{
+    printf '{\n  "schema": "bootstrap-diagnostic-continuation-v1",\n  "admission": "UNADMITTED",\n'
+    printf '  "source_sha": %s,\n  "run_id": %s,\n' "$(jstr "${GITHUB_SHA:-unknown}")" "$(jstr "${GITHUB_RUN_ID:-local}")"
+    printf '  "budget_bytes": %s,\n  "preserved_bytes": %s,\n  "selection_complete": %s,\n' "$budget" "$used" "$complete"
+    printf '  "coverage": "selected continuation inputs only; not full build/cache completeness",\n'
+    printf '  "canonical_roots": %s,\n' "$(arr "$work/roots")"
+    printf '  "rejected": %s,\n' "$(arr "$work/rejected")"
+    printf '  "compiler_present": %s,\n  "runtime_archives_present": %s,\n' "$compiler" "$archives"
+    printf '  "files": %s,\n' "$(arr "$work/rows")"
+    printf '  "excluded": %s\n}\n' "$(arr "$work/excluded")"
+} > "$out/receipt.json"
+nf=$(wc -l < "$work/rows" | tr -d ' '); ne=$(wc -l < "$work/excluded" | tr -d ' ')
+rm -rf "$work"
+echo "diagnostic_artifacts files=$nf bytes=$used excluded=$ne admission=UNADMITTED"
