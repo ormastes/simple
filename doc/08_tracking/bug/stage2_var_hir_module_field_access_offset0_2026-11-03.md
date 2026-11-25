@@ -57,3 +57,13 @@ reads `symbols.symbols` from its parameter). Spec:
 ## Removal condition
 A stage2 that types reassigned annotated vars (any seed-built stage2 from release/1.0.0 at or after this
 change) compiles the loops with real offsets; then the accessors can be inlined again.
+
+## Workaround retirement (2026-11-25)
+All 5 `@workaround bug=stage2_var_hir_module_field_access_offset0_2026-11-03` sites and the
+`driver_hir_module_{typed,path,structs,symbols,functions}_v1` helpers in
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl` have been removed on `release/1.0.0`.
+Current `src/compiler/50.mir/mir_lowering_stmts.spl` stamps `struct_value_syms` from explicit
+`HirTypeKind.Named` annotations on both `var m: T = nil` and `var m: T = if/elif/else` bindings
+(lines 1658-1666, 4843-4846, 5041-5046) and clears `nil_locals` on reassignment (lines 2723-2726),
+emitting real non-zero `GetField`/`SetField` field indices (verified in
+`test/01_unit/compiler/50.mir/reassigned_annotated_var_field_offset_mir_spec.spl`).

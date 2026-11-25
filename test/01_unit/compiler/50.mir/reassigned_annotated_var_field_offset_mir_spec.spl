@@ -1,0 +1,58 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, regression
+"""
+MIR regression for `stage2_var_hir_module_field_access_offset0_2026-11-03`:
+Verifies that current `MirLowering` emits the real non-zero field indices
+(`GetField` / `SetField`) — not offset 0 — for both streaming (`var m: Mod = nil`)
+and retained (`var m: Mod = if ... elif ... else ...`) reassigned annotated
+struct vars matching `driver_hir_pipeline_lowering.spl`.
+"""
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn _collect_field_indices(source: text, target_fn: text) -> ([i64], [i64], i64):
+    val ast = parse_full_frontend(source, "var_field_offset.spl", "var_field_offset", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("var_field_offset.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var get_indices: [i64] = []
+    var set_indices: [i64] = []
+    for func in mir.functions.values():
+        if func.name == target_fn or func.name.ends_with("::" + target_fn) or func.name.ends_with("." + target_fn):
+            for blk in func.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.GetField(_, _, idx):
+                            get_indices.push(idx)
+                        case MirInstKind.SetField(_, idx, _):
+                            set_indices.push(idx)
+                        case _: ()
+    (get_indices, set_indices, hir_lowering.errors.len() + mir_lowering.errors.len())
+
+val STREAMING_SHAPE = "struct Mod:\n    name: text\n    path: text\n    structs: i64\n    symbols: i64\n    functions: i64\n    rep: i64\n\nfn make_mod(n: text, p: text, f: i64) -> Mod:\n    Mod(name: n, path: p, structs: 10, symbols: 20, functions: f, rep: 0)\n\nfn streaming_loop(hit: bool) -> i64:\n    var m: Mod = nil\n    if hit:\n        m = make_mod(\"a\", \"p1\", 3)\n    else:\n        m = make_mod(\"b\", \"p2\", 4)\n    m.rep = 99\n    val s = m.structs\n    val y = m.symbols\n    val f = m.functions\n    s + y + f\n"
+
+val RETAINED_SHAPE = "struct Mod:\n    name: text\n    path: text\n    structs: i64\n    symbols: i64\n    functions: i64\n    rep: i64\n\nfn make_mod(n: text, p: text, f: i64) -> Mod:\n    Mod(name: n, path: p, structs: 10, symbols: 20, functions: f, rep: 0)\n\nfn retained_loop(a: bool, b: bool) -> i64:\n    var m: Mod = if a:\n        make_mod(\"a\", \"p1\", 1)\n    elif b:\n        make_mod(\"b\", \"p2\", 2)\n    else:\n        make_mod(\"c\", \"p3\", 3)\n    m = make_mod(\"d\", \"p4\", 4)\n    val p = m.path\n    val s = m.structs\n    val y = m.symbols\n    val f = m.functions\n    p.len() + s + y + f\n"
+
+describe "MIR field indices on reassigned annotated struct var (stage2_var_hir_module_field_access_offset0_2026-11-03)":
+    it "emits non-zero SetField and GetField indices for nil-initialized streaming var":
+        val (gets, sets, errs) = _collect_field_indices(STREAMING_SHAPE, "streaming_loop")
+        expect(errs).to_equal(0)
+        expect(sets.contains(5)).to_equal(true)
+        expect(gets.contains(2)).to_equal(true)
+        expect(gets.contains(3)).to_equal(true)
+        expect(gets.contains(4)).to_equal(true)
+
+    it "emits non-zero GetField indices for if/elif/else-initialized retained var":
+        val (gets, _sets, errs) = _collect_field_indices(RETAINED_SHAPE, "retained_loop")
+        expect(errs).to_equal(0)
+        expect(gets.contains(1)).to_equal(true)
+        expect(gets.contains(2)).to_equal(true)
+        expect(gets.contains(3)).to_equal(true)
+        expect(gets.contains(4)).to_equal(true)
