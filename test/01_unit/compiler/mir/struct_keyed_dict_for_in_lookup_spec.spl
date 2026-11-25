@@ -1,0 +1,180 @@
+# @req REQ-SSPEC-COMPILER
+"""
+Purpose: Pin direct `for k in d.keys(): ... d[k]` struct-keyed dict lookup
+after removing the temporary `keys()[i]` bridge (`phase2_struct_dict_key_copy_identity_hash_2026-11-18`).
+
+Audience: compiler engineers maintaining 20.hir, 35.semantics, and 50.mir.
+
+Contract verified here:
+1. Interpreter: direct `for k in d.keys():` and `for k in ordered_keys:` indexing
+   into `Dict<SymbolId, _>` resolves every entry cleanly without misses, across
+   both synthetic dicts and lowered `HirModule` declarations (`hir_abi_interface_parts_v1`,
+   `hir_module_encode`/`hir_module_decode_stable`, `forward_join_points_for_module_v1`).
+2. MIR lowering: `for k in d.keys(): ... d[k]` and `for k in ordered(d.keys()): ... d[k]`
+   rebuild `Sid` structs on key-out (`rt_value_as_int_wide`) and canonicalize
+   every `rt_dict_get` key-in argument via `rt_value_int_wide(getfield)`.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.abi_interface.{hir_abi_interface_parts_v1}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode_stable}
+use compiler.hir.hir_codec_key_order.{hc_order_symbol_id_keys_v1}
+use compiler.semantics.join_point_model.{forward_join_points_for_module_v1}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val SAMPLE_MODULE_SRC: text = "pub struct Point:\n    x: i64\n\npub fn helper(n: i64) -> i64:\n    n + 1\n\npub fn forward_a(n: i64) -> i64:\n    helper(n)\n\npub fn forward_b(n: i64) -> i64:\n    helper(n)\n"
+
+val MIR_FOR_IN_LOOKUP_SRC: text = "struct Sid:\n    id: i64\n\n" +
+    "fn order_sids(ks: [Sid]) -> [Sid]:\n    ks\n\n" +
+    "fn sum_direct_keys(d: Dict<Sid, i64>) -> i64:\n" +
+    "    var total = 0\n" +
+    "    for dk in d.keys():\n" +
+    "        total = total + (d[dk] ?? 0)\n" +
+    "    total\n\n" +
+    "fn sum_ordered_keys(d: Dict<Sid, i64>) -> i64:\n" +
+    "    var total = 0\n" +
+    "    val ks = order_sids(d.keys())\n" +
+    "    for dk in ks:\n" +
+    "        total = total + (d[dk] ?? 0)\n" +
+    "    total\n"
+
+fn lower_sample_hir(src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, "dict_for_in.spl", "dict_for_in", Logger(level: 0))
+    var hl = HirLowering.with_filename("dict_for_in.spl")
+    hl.lower_module(parsed)
+
+fn lower_mir_functions(src: text) -> Dict<text, MirFunction>:
+    val parsed = parse_full_frontend(src, "mir_for_in.spl", "mir_for_in", Logger(level: 0))
+    var hl = HirLowering.with_filename("mir_for_in.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    expect(ml.errors.len()).to_equal(0)
+    var out: Dict<text, MirFunction> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = function
+    out
+
+fn operand_local_id_for_in(operand: MirOperand) -> i64:
+    match operand.kind:
+        case MirOperandKind.Copy(local): return local.id
+        case MirOperandKind.Move(local): return local.id
+        case _: return -1
+
+fn callee_name_for_in(func: MirOperand) -> text:
+    match func.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): return name
+        case _: return ""
+
+fn definer_of_for_in(function: MirFunction, local_id: i64) -> text:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, func, args):
+                    if val d = dest:
+                        if d.id == local_id:
+                            val name = callee_name_for_in(func)
+                            if name == "rt_value_int_wide" and args.len() == 1:
+                                return "call:rt_value_int_wide(" + definer_of_for_in(function, operand_local_id_for_in(args[0])) + ")"
+                            return "call:" + name
+                case MirInstKind.GetField(dest, _, _):
+                    if dest.id == local_id: return "getfield"
+                case MirInstKind.Cast(dest, operand, _):
+                    if dest.id == local_id: return definer_of_for_in(function, operand_local_id_for_in(operand))
+                case MirInstKind.Copy(dest, src):
+                    if dest.id == local_id: return definer_of_for_in(function, src.id)
+                case MirInstKind.Move(dest, src):
+                    if dest.id == local_id: return definer_of_for_in(function, src.id)
+                case _: ()
+    "other"
+
+fn dict_get_key_definers(function: MirFunction) -> [text]:
+    var out: [text] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, func, args):
+                    val name = callee_name_for_in(func)
+                    if name == "rt_dict_get" and args.len() >= 2:
+                        out.push(definer_of_for_in(function, operand_local_id_for_in(args[1])))
+                case _: ()
+    out
+
+fn rebuilt_struct_key_count(function: MirFunction) -> i64:
+    var n = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Aggregate(_, kind, operands):
+                    match kind:
+                        case AggregateKind.Struct(_):
+                            if operands.len() == 1 and definer_of_for_in(function, operand_local_id_for_in(operands[0])) == "call:rt_value_as_int_wide":
+                                n = n + 1
+                        case _: ()
+                case _: ()
+    n
+
+describe "direct for-in struct-keyed dict lookup":
+    it "indexes Dict<SymbolId, _> directly in interpreter across keys() and ordered keys":
+        var d: Dict<SymbolId, i64> = {}
+        d[SymbolId(id: 12)] = 120
+        d[SymbolId(id: 3)] = 30
+        d[SymbolId(id: 7)] = 70
+
+        var direct_sum = 0
+        for dk in d.keys():
+            direct_sum = direct_sum + d[dk]
+        expect(direct_sum).to_equal(220)
+
+        var ordered_sum = 0
+        val ordered = hc_order_symbol_id_keys_v1(d.keys())
+        for dk in ordered:
+            ordered_sum = ordered_sum + d[dk]
+        expect(ordered_sum).to_equal(220)
+
+    it "walks HirModule SymbolId dicts cleanly through ABI, codec, and join-point passes":
+        val hm = lower_sample_hir(SAMPLE_MODULE_SRC)
+        var fn_count = 0
+        for dk in hm.functions.keys():
+            val f: HirFunction = hm.functions[dk]
+            expect(f.name.len()).to_be_greater_than(0)
+            fn_count = fn_count + 1
+        expect(fn_count).to_equal(3)
+
+        val abi_parts = hir_abi_interface_parts_v1(hm)
+        expect(abi_parts.is_ok()).to_equal(true)
+
+        val blob = hir_module_encode(hm)
+        expect(blob.len()).to_be_greater_than(0)
+        val decoded = hir_module_decode_stable(blob)
+        expect(decoded.is_some()).to_equal(true)
+        expect(decoded.unwrap().functions.len()).to_equal(3)
+        expect(decoded.unwrap().structs.len()).to_equal(1)
+
+        val points = forward_join_points_for_module_v1(hm, 1)
+        expect(points.len()).to_equal(2)
+
+    it "lowers direct for-in struct key lookups to canonical boxed field words in MIR":
+        val fns = lower_mir_functions(MIR_FOR_IN_LOOKUP_SRC)
+        for name in ["sum_direct_keys", "sum_ordered_keys"]:
+            val fn_opt = fns.get(name)
+            expect(fn_opt.is_some()).to_equal(true)
+            if val f = fn_opt:
+                val definers = dict_get_key_definers(f)
+                expect(definers.len()).to_be_greater_than(0)
+                for definer in definers:
+                    expect(definer).to_equal("call:rt_value_int_wide(getfield)")
+        val direct_fn = fns.get("sum_direct_keys")
+        expect(direct_fn.is_some()).to_equal(true)
+        if val df = direct_fn:
+            expect(rebuilt_struct_key_count(df)).to_be_greater_than(0)
