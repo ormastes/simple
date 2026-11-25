@@ -1,0 +1,145 @@
+#!/bin/sh
+# Real GNU COFF provider links; requires a production Simple time-utils object.
+# Port of the former check-windows-timestamp-providers.py (repo rule: .spl/.shs only).
+#
+# The supplied object must come from compiling src/lib/common/time_utils.spl with
+# the selected producer. This test retains input hashes and link maps; it does not
+# claim whole-compiler qualification or manufacture a replacement Simple owner.
+#
+# usage: check-windows-timestamp-providers.shs --toolchain DIR --runtime-archive A
+#            --simple-object O --producer P --output DIR
+#        check-windows-timestamp-providers.shs --selftest
+set -eu
+
+SYMBOLS="rt_timestamp_get_year rt_timestamp_get_month rt_timestamp_get_day
+rt_timestamp_get_hour rt_timestamp_get_minute rt_timestamp_get_second
+rt_timestamp_get_microsecond rt_timestamp_from_components
+rt_timestamp_add_days rt_timestamp_diff_days rt_progress_init
+rt_progress_reset rt_progress_get_elapsed_seconds"
+LIBS="kernel32 ntdll userenv ws2_32 winhttp mswsock dbghelp advapi32 bcrypt ole32
+oleaut32 shell32 propsys runtimeobject synchronization crypt32 secur32 ncrypt
+iphlpapi pdh netapi32 psapi powrprof d3d11 dxgi user32 gdi32 dwmapi imm32 uxtheme
+winmm shlwapi msvcrt mingwex mingw32"
+
+die() { echo "RuntimeError: $*" >&2; exit 1; }
+
+# missing_strong_exports NM_OUTPUT_FILE -> prints first symbol lacking a "T <sym>" row
+missing_strong_exports() {
+    for symbol in $SYMBOLS; do
+        awk -v s="$symbol" 'NF>=2 && $(NF-1)=="T" && $NF==s {f=1} END {exit !f}' "$1" \
+            || { echo "$symbol"; return 0; }
+    done
+}
+
+# map_unowned MAP_FILE -> prints symbols whose last defining object is not real-time-utils.o
+map_unowned() {
+    awk -v syms="$SYMBOLS" '
+        BEGIN { n = split(syms, list, /[ \n]+/); for (i = 1; i <= n; i++) if (list[i] != "") want[list[i]] = 1 }
+        index($0, ":(") { cur = $0 }
+        NF && ($NF in want) { owner[$NF] = cur }
+        END { for (s in want) if (index(owner[s], "real-time-utils.o:(") == 0) print s }
+    ' "$1"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    st=$(mktemp -d "${TMPDIR:-/tmp}/ts-providers-selftest-XXXXXX")
+    rc=0
+    : > "$st/nm"
+    for s in $SYMBOLS; do echo "0000000000000000 T $s" >> "$st/nm"; done
+    [ -z "$(missing_strong_exports "$st/nm")" ] || { echo "selftest FAIL: complete nm rejected"; rc=1; }
+    grep -v rt_progress_reset "$st/nm" > "$st/nm2"; echo "0 W rt_progress_reset" >> "$st/nm2"
+    [ "$(missing_strong_exports "$st/nm2")" = rt_progress_reset ] || { echo "selftest FAIL: weak export accepted"; rc=1; }
+    { echo " .text 0x1 0x2 C:/out/real-time-utils.o:(.text)"
+      for s in $SYMBOLS; do echo "  0x140001000  $s"; done; } > "$st/map"
+    [ -z "$(map_unowned "$st/map")" ] || { echo "selftest FAIL: owned map rejected"; rc=1; }
+    { cat "$st/map"; echo " .text 0x3 0x4 libsimple_native_all.a(x-runtime_timestamp.o):(.text)"
+      echo "  0x140002000  rt_timestamp_get_day"; } > "$st/map2"
+    [ "$(map_unowned "$st/map2")" = rt_timestamp_get_day ] || { echo "selftest FAIL: fallback owner accepted"; rc=1; }
+    rm -rf "$st"
+    [ "$rc" = 0 ] && echo "SELFTEST PASS: 4 fixtures"
+    exit "$rc"
+fi
+
+toolchain=""; runtime_archive=""; simple_object=""; producer=""; output=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --toolchain) toolchain="$2"; shift 2 ;;
+        --runtime-archive) runtime_archive="$2"; shift 2 ;;
+        --simple-object) simple_object="$2"; shift 2 ;;
+        --producer) producer="$2"; shift 2 ;;
+        --output) output="$2"; shift 2 ;;
+        *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+for v in toolchain runtime_archive simple_object producer output; do
+    eval "[ -n \"\$$v\" ]" || { echo "error: --$(echo $v | tr _ -) is required" >&2; exit 2; }
+done
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+[ ! -e "$output" ] || die "output exists: $output"
+mkdir -p "$output"
+out=$(CDPATH= cd -- "$output" && pwd -P)
+tool="$(CDPATH= cd -- "$toolchain" && pwd -P)/bin"
+PATH="$tool:$PATH"; export PATH
+
+# run NAME EXPECTED ARGV... ; log in $out/NAME.log, exit in NAME.exit, argv in NAME.argv
+run() {
+    name="$1"; expected="$2"; shift 2
+    printf '%s\n' "$@" > "$out/$name.argv"
+    set +e
+    "$@" > "$out/$name.log" 2>&1
+    status=$?
+    set -e
+    echo "$status" > "$out/$name.exit"
+    if [ "$expected" = 0 ] && [ "$status" != 0 ]; then die "$name failed: $status; see retained log"; fi
+    if [ "$expected" != 0 ] && [ "$status" = 0 ]; then die "$name unexpectedly accepted a strong duplicate"; fi
+}
+
+run members 0 "$tool/llvm-ar.exe" t "$runtime_archive"
+matches=$(grep -e '-runtime_timestamp\.o$' "$out/members.log" | tr -d '\r' || true)
+[ "$(printf '%s' "$matches" | grep -c .)" = 1 ] && [ "${matches##*/}" = "$matches" ] \
+    || die "expected exactly one flat runtime_timestamp archive member"
+member="$out/$matches"
+source="$root/src/runtime/runtime_timestamp.c"
+run compile-provider 0 "$tool/clang.exe" --target=x86_64-w64-windows-gnu -O2 \
+    -DSIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT -c "$source" -o "$member"
+runtime="$out/libsimple_native_all.a"
+cp "$runtime_archive" "$runtime"
+run replace-provider 0 "$tool/llvm-ar.exe" r "$runtime" "$member"
+simple="$out/real-time-utils.o"
+cp "$simple_object" "$simple"
+run simple-symbols 0 "$tool/llvm-nm.exe" --defined-only --extern-only "$simple"
+missing=$(missing_strong_exports "$out/simple-symbols.log")
+[ -z "$missing" ] || die "real Simple object missing strong export $missing"
+
+libflags=""
+for lib in $LIBS; do libflags="$libflags -l$lib"; done
+selfcheck="$root/src/runtime/test/windows_timestamp_provider_selfcheck.c"
+for name in compat-only simple-owner; do
+    objects=""
+    [ "$name" = simple-owner ] && objects="$simple"
+    # shellcheck disable=SC2086
+    run "$name-link" 0 "$tool/clang.exe" --target=x86_64-w64-windows-gnu -fuse-ld=lld \
+        --rtlib=compiler-rt --unwindlib=libunwind "$selfcheck" $objects "$runtime" $libflags \
+        "-Wl,-Map,$out/$name.map" -o "$out/$name.exe"
+    run "$name-run" 0 "$out/$name.exe"
+    [ "$(tr -d '\r' < "$out/$name-run.log" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed '/^$/d')" = "PASS: calendar/progress C ABI" ] \
+        || die "unexpected ABI selfcheck output"
+done
+# Map provenance distinguishes the real Simple owner from the fallback,
+# even though both intentionally return the same calendar/progress values.
+[ -z "$(map_unowned "$out/simple-owner.map")" ] \
+    || die "link map does not bind every export to the real Simple owner"
+negative="$out/strong-conflict.c"
+printf '#include <stdint.h>\nint32_t rt_timestamp_get_year(int64_t x) { return 2001; }\n' > "$negative"
+# shellcheck disable=SC2086
+run strong-conflict 1 "$tool/clang.exe" --target=x86_64-w64-windows-gnu -fuse-ld=lld \
+    --rtlib=compiler-rt --unwindlib=libunwind "$selfcheck" "$simple" "$negative" "$runtime" $libflags \
+    -o "$out/must-not-link.exe"
+grep -q 'duplicate symbol: rt_timestamp_get_year' "$out/strong-conflict.log" \
+    || die "negative control failed for an unrelated reason"
+: > "$out/inputs.sha256"
+for path in "$source" "$runtime_archive" "$simple_object" "$producer" "$runtime"; do
+    printf '%s  %s\n' "$(sha256sum "$path" | cut -d' ' -f1)" "$path" >> "$out/inputs.sha256"
+done
+echo "PASS: compatibility-only execution, real Simple owner execution/map, strong duplicate rejected"

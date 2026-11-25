@@ -95,7 +95,7 @@ def main():
     if len(objects) != 1 or not (objects[0]/'mod_0.o').is_file():
         raise RuntimeError('expected exactly one retained real Simple owner object')
     regression = out/'provider-regression'
-    command([sys.executable, root/'scripts/check/check-windows-timestamp-providers.py',
+    command(['sh', root/'scripts/check/check-windows-timestamp-providers.shs',
              '--toolchain', toolchain, '--runtime-archive', runtime,
              '--simple-object', objects[0]/'mod_0.o', '--producer', seed,
              '--output', regression], 'provider-controls')
