@@ -154,10 +154,37 @@ pub fn tldr_closure_walk_check_v1(flag_on: bool, site: text) -> Result<i64, text
 pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = false) -> [(text, [text])]:
     var out: [(text, [text])] = []
     val lines = source.replace("\r\n", "\n").split("\n")
+    var in_doc = false
+    var generated_owner = ""
     var i = 0
     while i < lines.len():
         val line = lines[i]
-        val t = line.trim()
+        val raw_trimmed = line.trim()
+        if include_export_from:
+            if line.contains("\"\"\""):
+                val quote_count = line.split("\"\"\"").len() - 1
+                val was_in_doc = in_doc
+                if quote_count % 2 == 1:
+                    in_doc = not in_doc
+                if was_in_doc or quote_count > 0:
+                    generated_owner = ""
+                    i = i + 1
+                    continue
+            if in_doc:
+                generated_owner = ""
+                i = i + 1
+                continue
+            if raw_trimmed.starts_with("# Re-exported from ") and raw_trimmed.contains(".spl"):
+                generated_owner = _tr_generated_reexport_owner_v1(raw_trimmed)
+                i = i + 1
+                continue
+        val t = if include_export_from: _tr_strip_comment_v1(line) else: raw_trimmed
+        if include_export_from and generated_owner != "":
+            if t.starts_with("export "):
+                _tr_push_spec_edge_v1(out, "." + generated_owner.replace("/", "."), "")
+                generated_owner = ""
+            elif t != "":
+                generated_owner = ""
         var rest = ""
         if t.starts_with("use "): rest = t.substring(4)
         elif t.starts_with("export use "): rest = t.substring(11)
@@ -165,34 +192,49 @@ pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = fals
         # `import mod.path` is a `use` spelling (env/mod.spl); dropping it left
         # the providers unplanned -> CLOSURE-INCOMPLETE (bug ..._2026-11-19 update h).
         elif t.starts_with("import "): rest = t.substring(7)
+        elif include_export_from and (t.starts_with("mod ") or t.starts_with("pub mod ")):
+            val mod_tail = (if t.starts_with("pub mod "): t.substring(8) else: t.substring(4)).trim()
+            if mod_tail != "" and not mod_tail.contains(" ") and not mod_tail.contains(","):
+                val mod_parts = mod_tail.split(".")
+                val mod_last = mod_parts[mod_parts.len() - 1]
+                if mod_last != "":
+                    out.push(("." + mod_last, []))
+                if mod_parts.len() > 1 and _tr_is_dotted_path_v1(mod_tail):
+                    out.push((mod_tail, []))
+            i = i + 1
+            continue
+        elif include_export_from and t.starts_with("from ") and t.contains(" import "):
+            val import_at = t.index_of(" import ")
+            if import_at > 5:
+                val from_mod = t.substring(5, import_at).trim()
+                if from_mod != "":
+                    val edge_mod = if from_mod.contains("."): from_mod else: "." + from_mod
+                    out.push((edge_mod, []))
+            i = i + 1
+            continue
         elif include_export_from and t.starts_with("export ") and not t.contains(" from ") and
                 not t.starts_with("export use "):
-            # `export variables.env_get, paths.split_path` (env/__init__.spl):
-            # a qualified sibling re-export is an import edge of the facade's
-            # package. Emitted as ".qualifier"; unit_tldr_plan_v1 resolves it
-            # against the owner's directory (bug ..._2026-11-19 update h).
-            var body = t.substring(7)
-            val qhash = body.index_of("#")
-            if qhash >= 0: body = body.substring(0, qhash)
-            for item in body.split(","):
+            # `export variables.env_get, paths.split_path`, `export mod.*`, and
+            # `export pkg.sub.*`: qualified or glob re-exports are import edges of
+            # the facade's package or absolute module (bug ..._2026-11-19 update h).
+            for item in t.substring(7).split(","):
                 var qualified = item.trim()
                 val q_as = qualified.index_of(" as ")
                 if q_as > 0: qualified = qualified.substring(0, q_as).trim()
+                if qualified.ends_with(".*"):
+                    val base_q = qualified.substring(0, qualified.byte_len() - 2).trim()
+                    if _tr_is_ident_or_dotted_v1(base_q):
+                        out.push(("." + base_q, []))
+                        if base_q.contains("."):
+                            out.push((base_q, []))
+                    continue
                 val dot = qualified.last_index_of(".")
                 if dot > 0 and _tr_is_dotted_path_v1(qualified):
-                    val qualifier = "." + qualified.substring(0, dot)
+                    val prefix = qualified.substring(0, dot)
                     val member = qualified.substring(dot + 1)
-                    var found = -1
-                    var oi = 0
-                    while oi < out.len():
-                        if out[oi].0 == qualifier: found = oi
-                        oi = oi + 1
-                    if found < 0:
-                        out.push((qualifier, [member]))
-                    else:
-                        var members = out[found].1
-                        if not members.contains(member): members.push(member)
-                        out[found] = (qualifier, members)
+                    _tr_push_spec_edge_v1(out, "." + prefix, member)
+                    if prefix.contains("."):
+                        _tr_push_spec_edge_v1(out, prefix, member)
             i = i + 1
             continue
         elif include_export_from and t.starts_with("export ") and t.contains(" from "):
@@ -207,11 +249,10 @@ pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = fals
                 val item_as = name.index_of(" as ")
                 if item_as > 0: name = name.substring(0, item_as).trim()
                 if name != "" and name != "*": exported.push(name)
-            var origin = t.substring(from_at + 6)
-            val hash_at = origin.index_of("#")
-            if hash_at >= 0: origin = origin.substring(0, hash_at)
-            origin = origin.trim()
-            if origin != "": out.push((origin, exported))
+            var origin = t.substring(from_at + 6).trim()
+            if origin != "":
+                val edge_origin = if origin.contains("."): origin else: "." + origin
+                out.push((edge_origin, exported))
             i = i + 1
             continue
         if rest == "":
@@ -391,13 +432,42 @@ export tldr_import_handle_fill_v1, tldr_import_generic_body_v1
 
 # True when `s` is a bare dotted module path (letters, digits, `_`, `.`).
 fn _tr_is_dotted_path_v1(s: text) -> bool:
-    if s == "" or not s.contains("."):
+    s.contains(".") and _tr_is_ident_or_dotted_v1(s)
+
+fn _tr_is_ident_or_dotted_v1(s: text) -> bool:
+    if s == "":
         return false
     for ch in s.chars():
         val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "."
         if not ok:
             return false
     true
+
+fn _tr_push_spec_edge_v1(out: [(text, [text])], module_id: text, member: text):
+    var found = -1
+    var oi = 0
+    while oi < out.len():
+        if out[oi].0 == module_id:
+            found = oi
+        oi = oi + 1
+    if found < 0:
+        out.push((module_id, if member != "": [member] else: []))
+    elif member != "":
+        var members = out[found].1
+        if not members.contains(member):
+            members.push(member)
+        out[found] = (module_id, members)
+
+fn _tr_generated_reexport_owner_v1(raw_trimmed: text) -> text:
+    val owner_parts = raw_trimmed.substring(19).split(".spl")
+    val candidate = owner_parts[0]
+    if candidate == "" or candidate.starts_with("/") or candidate.starts_with(".") or
+            candidate.ends_with("/") or candidate.contains(".") or
+            candidate.contains("//") or candidate.contains("\\"):
+        return ""
+    if not _tr_is_ident_or_dotted_v1(candidate.replace("/", ".")):
+        return ""
+    candidate
 
 fn _tr_strip_comment_v1(line: text) -> text:
     val at = line.index_of("#")

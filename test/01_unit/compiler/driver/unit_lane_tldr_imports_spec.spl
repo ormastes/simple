@@ -9,7 +9,7 @@ use std.spec
 use std.io_runtime.{file_read, file_write, getpid, rt_env_get, rt_env_set}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use compiler.driver.driver_tldr_import_route_v1.{unit_tldr_imports_flag_v1, unit_tldr_imports_enabled_v1,
-    unit_tldr_imports_memo_reset_v1, tldr_imports_memo_reset_v1}
+    unit_tldr_imports_memo_reset_v1, tldr_imports_memo_reset_v1, tldr_route_import_specs_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1, unit_lower_v1}
 use compiler.driver.driver_hir_cache.{hir_shard_key_sidecar_path_v1, hir_shard_key_sidecar_write_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_hirkey_publish_v1}
@@ -204,4 +204,44 @@ describe "unit-lane TLDR imports (PM3)":
         expect(plan.surfaces.len()).to_equal(2)
         for s in plan.surfaces:
             expect(s.canonical_path).to_equal(module_surface_canonical_path(mods[s.module_name]))
+        restore_switch(saved)
+
+    it "extracts mod, pub mod, reexport comment, from-import, bare export-from, and export-glob edges when enabled":
+        val src = "# Re-exported from helper.spl\nexport helper_fn\nmod child # inline comment\npub mod subpkg\nfrom pkg.dep import {x, y}\nexport a from sibling\nexport sib.*\n"
+        val specs = tldr_route_import_specs_v1(src, true)
+        var edges: [text] = []
+        for s in specs:
+            edges.push(s.0)
+        expect(edges.contains(".helper")).to_equal(true)
+        expect(edges.contains(".child")).to_equal(true)
+        expect(edges.contains(".subpkg")).to_equal(true)
+        expect(edges.contains("pkg.dep")).to_equal(true)
+        expect(edges.contains(".sibling")).to_equal(true)
+        expect(edges.contains(".sib")).to_equal(true)
+
+    it "plans mod child, directory mod subpkg/__init__.spl, and re-exported sibling edges for a package __init__":
+        val saved = with_switch("")
+        val root = fixture_root("pkg_mod_edges")
+        var mods: Dict<text, text> = {}
+        mods["pkg.core.child"] = put(root, "pkg.core.child", "pub fn child_val() -> i64:\n    10\n")
+        mods["pkg.core.subpkg.__init__"] = put(root, "pkg.core.subpkg.__init__", "pub fn sub_val() -> i64:\n    20\n")
+        mods["pkg.core.extra"] = put(root, "pkg.core.extra", "pub fn extra_val() -> i64:\n    30\n")
+        mods["pkg.core.__init__"] = put(root, "pkg.core.__init__",
+            "mod child\nmod subpkg # package subdir\n# Re-exported from extra.spl\nexport extra_val\n")
+        val leaf = put(root, "main", "use pkg.core.*\n\nfn main() -> i64:\n    1\n")
+        val plan = unit_tldr_plan_v1("u5", root + "/tldr", [leaf], mods)
+        expect(plan.parse_paths.contains(mods["pkg.core.__init__"])).to_equal(true)
+        expect(plan.parse_paths.contains(mods["pkg.core.subpkg.__init__"])).to_equal(true)
+        var has_child = false
+        for p in plan.parse_paths:
+            if p == mods["pkg.core.child"]: has_child = true
+        for s in plan.surfaces:
+            if s.canonical_path == module_surface_canonical_path(mods["pkg.core.child"]): has_child = true
+        expect(has_child).to_equal(true)
+        var has_extra = false
+        for p in plan.parse_paths:
+            if p == mods["pkg.core.extra"]: has_extra = true
+        for s in plan.surfaces:
+            if s.canonical_path == module_surface_canonical_path(mods["pkg.core.extra"]): has_extra = true
+        expect(has_extra).to_equal(true)
         restore_switch(saved)
