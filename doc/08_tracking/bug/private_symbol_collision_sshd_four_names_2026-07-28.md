@@ -57,9 +57,11 @@ self-hosted CLI admission, MCP smoke, full-suite or complete C1 qualification.
 
 - **ID:** private_symbol_collision_sshd_four_names_2026-07-28
 - **Date:** 2026-07-28
-- **Status:** PARTIALLY FIXED 2026-08-09 (source-side renames landed; compiler-side
-  C1/C2 still OPEN — compiler trees have live lanes). Re-verified: `_u8_at`,
-  `_cswap_pair`, and `_ladder_step` are **no longer present** in
+- **Status:** C1 and C2 LANDED in the Rust seed source (verified by inspection
+  2026-11-25 — see note at end); the "C1/C2 still OPEN" wording in the
+  2026-08-09 entry below is stale. Behavioral re-verification is blocked on
+  this host (no cargo/Rust build in this lane). Source-side renames landed
+  2026-08-09; `_u8_at`, `_cswap_pair`, and `_ladder_step` are **no longer present** in
   `curve25519_smalllimb.spl` at all (superseded by unrelated refactoring —
   `_u8_at_i`, `fe_cswap`; no separate `_ladder_step` helper remains), so those
   3 of 4 collision groups are already gone. The 4th (`_hex_digit`, 11
@@ -247,3 +249,30 @@ equivalent) triggers the flattening that exposes the bug.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host) — C1/C2 landed in source
+
+Code inspection at release/1.0.0 HEAD shows both compiler-side remedies are
+present in the Rust seed source, superseding the "C1/C2 still OPEN" wording
+in the 2026-08-09 status entry:
+
+- **C1 (return type in the dedup key):** `lowering_core.rs:2098-2164` builds
+  `returns_by_signature` keyed on `(name, param TypeIds)` and computes a
+  `canonical_return_type_key` (structural key covering primitives, text,
+  char, int widths, arrays, tuples, pointers, and nominal struct/enum names;
+  dynamic/unknown types stay exempt), so return-type-only collisions no
+  longer fall through as "observably equivalent". The 2026-11-10 section
+  above documents the executed 5-test owner-integration evidence for the
+  primitive subset.
+- **C2 (silent `candidates.last()` fallback removed):**
+  `lowering_expr_call.rs:1016-1054` resolves a colliding call by exact
+  param-type match, then unique-arity match, then an extern decl of the same
+  name — and otherwise returns a hard `MirLowerError::Unsupported`
+  "ambiguous call to `<name>`" compile error (citing owner decision
+  2026-11-09), instead of the deliberate last-write-wins guess this record
+  documents.
+
+Behavioral verification is NOT claimed: this lane forbids cargo/Rust builds,
+so the seed could not be rebuilt or its test suite run here. The residual
+language-level items (general private-symbol isolation, structural-return
+coverage limits noted in the 2026-11-10 section) remain as recorded there.
