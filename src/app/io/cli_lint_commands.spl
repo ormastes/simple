@@ -24,8 +24,10 @@ use lazy compiler.tools.fix.engine.{fix_filter_by_code, fix_validate, fix_outcom
 use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
 use lazy compiler.tools.fix.rules.{check_short_grammar_refactor}
 use lazy compiler.tools.fix.rules.impl_.lint_nil_unsafe.{check_nil_unsafe}
+use lazy compiler.tools.fix.rules.impl_.lint_unexported_primitive_pub.{check_unexported_primitive_pub, PrivPubScope}
+use lazy compiler.tools.fix.rules.impl_.lint_single_prim_unit.{check_single_prim_unit}
 use std.tooling.easy_fix.{FixConfidence}
-use std.tooling.easy_fix.types.{fixreport_applied, fixreport_details}
+use std.tooling.easy_fix.types.{EasyFix, easyfix_id, easyfix_description, easyfix_replacements, fixreport_applied, fixreport_details}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use std.nogc_sync_mut.io.mod_stub.{is_dir}
 use app.io.source_discovery.{discover_spl_files, source_path_identity}
@@ -903,6 +905,15 @@ pub fn run_fmt_command(all_args: [text]) -> i64:
     exit_code
 
 val NIL_UNSAFE_FIX_CODE = "NIL-UNSAFE-001"
+val PRIV_PUB_FIX_CODE = "PRIV-PUB-001"
+val UNIT_WRAP_FIX_CODE = "UNIT-WRAP-001"
+
+fn _fix_is_repo_root(dir_path: text) -> bool:
+    var root = dir_path.replace("\\", "/")
+    while root.byte_len() > 1 and root.ends_with("/"):
+        root = root.substring(0, root.byte_len() - 1)
+    val git_path = if root == "/": "/.git" else: root + "/.git"
+    file_exists(git_path) or is_dir(git_path)
 
 pub fn run_fix_command(args: [text]) -> i64:
     val option_error = fix_option_error(args)
@@ -921,7 +932,7 @@ pub fn run_fix_command(args: [text]) -> i64:
     var diagnostic: text = ""
     var safe_only = false
     var rule_value_next = false
-    var files: [text] = []
+    var raw_paths: [text] = []
     for arg in args:
         if rule_value_next:
             rule_value_next = false
@@ -946,12 +957,21 @@ pub fn run_fix_command(args: [text]) -> i64:
         elif arg == "fix":
             val _ = 0
         elif not arg.starts_with("-"):
-            # A directory is expanded only for the opt-in nil rule (`--rule` precedes the paths).
-            if diagnostic == NIL_UNSAFE_FIX_CODE and is_dir(arg):
-                for found in discover_spl_files(arg):
-                    files.push(found)
-            else:
-                files.push(arg)
+            raw_paths.push(arg)
+
+    val nil_rule = diagnostic == NIL_UNSAFE_FIX_CODE
+    val priv_pub_rule = diagnostic == PRIV_PUB_FIX_CODE
+    val unit_wrap_rule = diagnostic == UNIT_WRAP_FIX_CODE
+    val opt_in_rule = nil_rule or priv_pub_rule or unit_wrap_rule
+
+    # Directory expansion is enabled only for the opt-in refactor/nil rules.
+    var files: [text] = []
+    for raw_path in raw_paths:
+        if opt_in_rule and is_dir(raw_path):
+            for found in discover_spl_files(raw_path):
+                files.push(found)
+        else:
+            files.push(raw_path)
 
     if files.len() == 0:
         print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
@@ -962,34 +982,60 @@ pub fn run_fix_command(args: [text]) -> i64:
         print "  --fix-all   Apply all fixes regardless of confidence"
         print "  --fix-id=ID Apply only fixes matching ID prefix"
         print "  --diagnostic=CODE Only proposals with this diagnostic code (e.g. PANIC-W-INDEX)"
-        print "  --rule CODE Same as --diagnostic=CODE; NIL-UNSAFE-001 runs the opt-in nil -> None rule (paths may be directories)"
+        print "  --rule CODE Same as --diagnostic=CODE; opt-in rules: NIL-UNSAFE-001, PRIV-PUB-001, UNIT-WRAP-001 (paths may be directories)"
         print "  --safe-only Keep only Safe-confidence proposals (with --rule / --diagnostic)"
         return 1
 
-    val nil_rule = diagnostic == NIL_UNSAFE_FIX_CODE
-    var nil_fix_total = 0
-    var nil_file_total = 0
+    # PRIV-PUB-001 needs cross-file usage scanning. Safe fixes are emitted only
+    # when the scanned directory provably covers the whole repo (git root).
+    var priv_pub_sources: Dict<text, text> = {}
+    var priv_pub_whole_repo = false
+    if priv_pub_rule:
+        if raw_paths.len() == 1 and is_dir(raw_paths[0]) and _fix_is_repo_root(raw_paths[0]):
+            priv_pub_whole_repo = true
+        for p in files:
+            match fix_read_source(p):
+                case Ok(content):
+                    priv_pub_sources[p] = content
+                case Err(_):
+                    val _ = 0
+    val priv_pub_scope = PrivPubScope(
+        whole_repo: priv_pub_whole_repo,
+        repo_files_scanned: priv_pub_sources.len(),
+        other_sources: priv_pub_sources
+    )
+
+    var opt_fix_total = 0
+    var opt_suggestion_total = 0
+    var opt_file_total = 0
     var exit_code = 0
     for file_path in files:
         var source = ""
-        match fix_read_source(file_path):
-            case Err(e):
-                _cli_eprint("Error: {e}")
-                exit_code = 1
-                continue
-            case Ok(content):
-                source = content
+        if priv_pub_rule and priv_pub_sources.has(file_path):
+            source = priv_pub_sources[file_path]
+        else:
+            match fix_read_source(file_path):
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+                    continue
+                case Ok(content):
+                    source = content
 
-        # The NIL-UNSAFE-001 fix is opt-in (the lint itself warns by default): it
-        # is not in the built-in producer set, only `--rule NIL-UNSAFE-001` runs it.
+        # Opt-in rules (NIL-UNSAFE-001, PRIV-PUB-001, UNIT-WRAP-001) are NOT in
+        # the built-in producer registry; only `--rule <CODE>` runs them.
         val fixes = if nil_rule:
             check_nil_unsafe(source, file_path)
+        elif priv_pub_rule:
+            check_unexported_primitive_pub(source, file_path, priv_pub_scope)
+        elif unit_wrap_rule:
+            check_single_prim_unit(source, file_path)
         elif fix_id.starts_with("L:short_grammar_"):
             check_short_grammar_refactor(source, file_path)
         else:
             collect_fixes_from_source(file_path, source)
         if fixes.len() == 0:
-            if not nil_rule:
+            if not opt_in_rule:
                 print "No fixes available for {file_path}"
             continue
 
@@ -1004,30 +1050,56 @@ pub fn run_fix_command(args: [text]) -> i64:
             filtered = FixToolApplicator.filter_by_id(filtered, fix_id)
 
         if filtered.len() == 0:
-            print "No applicable fixes found for {file_path}"
+            if not opt_in_rule:
+                print "No applicable fixes found for {file_path}"
             continue
 
-        var sources: Dict<text, text> = {}
-        sources[file_path] = source
+        var editable: [EasyFix] = []
+        var suggestions: [EasyFix] = []
+        for f in filtered:
+            if easyfix_replacements(f).len() > 0:
+                editable.push(f)
+            else:
+                suggestions.push(f)
 
-        val result = apply_fixes_to_disk(filtered, sources, dry_run)
-        match result:
-            case Ok(report):
-                if dry_run:
-                    print "Dry run for {file_path}:"
-                else:
-                    print "Applied fixes to {file_path}:"
-                print "  {fixreport_applied(report)} fix(es) applied"
-                if nil_rule:
-                    nil_fix_total = nil_fix_total + fixreport_applied(report)
-                    nil_file_total = nil_file_total + 1
-                for detail in fixreport_details(report):
-                    print "  {detail}"
-                if preview:
-                    print fix_outcome_diff(fix_validate(filtered, snapshots_from_sources(sources)))
-            case Err(e):
-                _cli_eprint("Error applying fixes to {file_path}: {e}")
-                exit_code = 1
+        var file_counted = false
+        if suggestions.len() > 0:
+            print "Suggestions for {file_path}:"
+            for s in suggestions:
+                print "  [{easyfix_id(s)}] {easyfix_description(s)}"
+            if opt_in_rule:
+                opt_suggestion_total = opt_suggestion_total + suggestions.len()
+                file_counted = true
+
+        if editable.len() > 0:
+            var sources: Dict<text, text> = {}
+            sources[file_path] = source
+
+            val result = apply_fixes_to_disk(editable, sources, dry_run)
+            match result:
+                case Ok(report):
+                    if dry_run:
+                        print "Dry run for {file_path}:"
+                    else:
+                        print "Applied fixes to {file_path}:"
+                    print "  {fixreport_applied(report)} fix(es) applied"
+                    if opt_in_rule:
+                        opt_fix_total = opt_fix_total + fixreport_applied(report)
+                        file_counted = true
+                    for detail in fixreport_details(report):
+                        print "  {detail}"
+                    if preview:
+                        print fix_outcome_diff(fix_validate(editable, snapshots_from_sources(sources)))
+                case Err(e):
+                    _cli_eprint("Error applying fixes to {file_path}: {e}")
+                    exit_code = 1
+        if file_counted:
+            opt_file_total = opt_file_total + 1
     if nil_rule:
-        print "NIL-UNSAFE-001: {nil_fix_total} safe fix(es) in {nil_file_total} file(s), {files.len()} file(s) scanned"
+        print "NIL-UNSAFE-001: {opt_fix_total} safe fix(es) in {opt_file_total} file(s), {files.len()} file(s) scanned"
+    elif priv_pub_rule:
+        val scope_label = if priv_pub_whole_repo: "whole-repo" else: "partial-scan"
+        print "PRIV-PUB-001 ({scope_label}): {opt_fix_total} safe fix(es), {opt_suggestion_total} suggestion(s) in {opt_file_total} file(s), {files.len()} file(s) scanned"
+    elif unit_wrap_rule:
+        print "UNIT-WRAP-001: {opt_suggestion_total} suggestion(s) in {opt_file_total} file(s), {files.len()} file(s) scanned"
     exit_code
