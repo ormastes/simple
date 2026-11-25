@@ -746,7 +746,7 @@ pub fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool 
     # concrete constant comparison stays as the fast local-carrier path, and
     # AVX-512-width kinds keep their explicit owners so 512-bit functions are
     # never claimed by the YMM plan.
-    var simd_vec_kind: MirTypeKind? = nil
+    var simd_vec_kind: MirTypeKind? = None
     for block in func.blocks:
         for inst in block.instructions:
             match inst.kind:
@@ -754,14 +754,14 @@ pub fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool 
                     # i32x8 index vectors of f64x8 permute/gather/scatter belong to
                     # the AVX-512 frame plan, not to the YMM register plan.
                     val avx512_index = shares_function_with_avx512 and vec_type.kind == MirTypeKind.Vec8i
-                    if simd_vec_kind == nil and not avx512_index and vec_type.kind != MirTypeKind.Vec16f and vec_type.kind != MirTypeKind.Vec8d and vec_type.kind != MirTypeKind.Vec16i:
+                    if simd_vec_kind.is_none() and not avx512_index and vec_type.kind != MirTypeKind.Vec16f and vec_type.kind != MirTypeKind.Vec8d and vec_type.kind != MirTypeKind.Vec16i:
                         simd_vec_kind = Some(vec_type.kind)
                 case _: ()
     var avx2_locals: Dict<i64, bool> = {}
     for local in func.locals:
         if local.type_.kind == MirTypeKind.Vec8f:
             avx2_locals[local.id.id] = true
-        elif simd_vec_kind != nil and local.type_.kind == simd_vec_kind.unwrap():
+        elif simd_vec_kind.is_some() and local.type_.kind == simd_vec_kind.unwrap():
             avx2_locals[local.id.id] = true
     # Scalar and AVX-512-only functions do not need AVX2 CFG or call-liveness
     # restrictions. Preserve their existing selector paths with an empty plan.
@@ -848,7 +848,7 @@ pub fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool 
         match inst.kind:
             case MirSimdLoad(dest, _, aligned, vec_type):
                 if not avx2_locals.contains_key(dest.id): ()
-                elif not aligned or (simd_vec_kind != nil and vec_type.kind != simd_vec_kind.unwrap()):
+                elif not aligned or (simd_vec_kind.is_some() and vec_type.kind != simd_vec_kind.unwrap()):
                     return X86Avx2FunctionPlanV1(ok: false, registers: {}, reason: "requires-aligned-f32x8-load")
                 else:
                     dest_id = dest.id
