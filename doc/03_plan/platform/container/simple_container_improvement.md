@@ -57,4 +57,8 @@ Open (P2, next increment):
 - Pin overwrite ignores owner and is read-then-write; ingest takes no pin, so a `reused: true` key can be collected before it is rooted.
 - Non-canonical integers (`_c01`, `generation: 007`) are accepted.
 - Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
+- `substring(..., byte_len())` on non-ASCII hostile lines in doc/record decode: confirm `substring` clamps (fail-closed) or reject non-ASCII first.
+- Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).
+- GC derives the root name from the filename without `_isv1_name_valid`.
+- Replace `@allow(primitive_api)` in `object_record_v1`/`hash_policy_v1` with domain units; drop `.value` condition reads once the seed bool-unit bug is fixed.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.
