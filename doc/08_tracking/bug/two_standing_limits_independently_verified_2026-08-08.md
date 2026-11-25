@@ -1,8 +1,13 @@
 # Two "standing limits" independently re-verified: shape-(d) 42/29 is stale; lexer harness DOES emit a verdict
-## Open 2026-09-16 — needs owner triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+- **Status:** CLOSED 2026-11-25 — this record is a completed independent
+  verification report, not an open defect. Both verdicts were delivered with
+  injection-tested evidence in the body below; the reusable fence it produced
+  (`scripts/check/check-lexer-radix-literal-suffix.shs`) and the lexer spec it
+  verified (`test/01_unit/compiler/lexer/lexer_radix_literal_suffix_spec.spl`)
+  are both present at `origin/release/1.0.0` (confirmed 2026-11-25). The
+  "Open 2026-09-16 — needs owner triage" banner below was bookkeeping added by
+  the ledger normalization pass, not evidence of outstanding work.
 
 - **Filed:** 2026-08-08
 - **Context:** both numbers had been repeated in summaries without independent
