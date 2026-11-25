@@ -1,0 +1,721 @@
+#!/bin/sh
+# run-whole-test-lanes.shs — whole-repository test lane runner (md, comment, unit, sspec).
+#
+# Runs one or all four whole-test lanes through a qualified Phase 4+ full Simple
+# CLI, writes per-lane SDN receipts and a summary SDN receipt, and fails closed
+# on any Rust seed, pre-Phase-3 compiler (P1/P2), or Phase 3 bootstrap-only
+# compiler that lacks the full `test` CLI.
+#
+# Usage:
+#   sh scripts/check/run-whole-test-lanes.shs --lane <all|md|comment|unit|sspec>
+#       [--compiler <path>] [--mode interpreter|native] [--results-dir <dir>]
+#       [--root <dir>] [--dry-run] [--selftest] [-h|--help]
+#
+# Exit codes:
+#   0  all requested lanes passed (or dry-run / selftest passed)
+#   1  one or more requested lanes failed (or selftest failed)
+#   2  usage error, missing/invalid compiler, or P3-or-later / P4-CLI refusal
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve script directory)"
+    exit 2
+}
+DEFAULT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." 2>/dev/null && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+}
+
+LANE=""
+COMPILER_ARG=""
+MODE="interpreter"
+RESULTS_DIR=""
+ROOT="$DEFAULT_ROOT"
+DRY_RUN=0
+SELFTEST=0
+
+usage() {
+    cat <<'USAGE'
+usage: sh scripts/check/run-whole-test-lanes.shs --lane <all|md|comment|unit|sspec> [OPTIONS]
+
+Options:
+  --lane <name>            Lane to run: all, md, comment, unit, sspec (required unless --selftest)
+  --compiler <path>        Path to a Phase 4+ full Simple CLI binary
+  --mode <mode>            Execution mode: interpreter (default) or native
+  --results-dir <dir>      Directory for per-lane logs and SDN receipts
+                           (default: <root>/build/whole-test-lanes)
+  --root <dir>             Repository root (default: inferred from script location)
+  --dry-run                Validate compiler, print resolved commands, and write SDN receipts
+  --selftest               Run isolated fixture self-tests and exit
+  -h, --help               Show this help text
+
+Compiler policy (fail-closed):
+  - NEVER falls back to Rust seed, Phase 1, or Phase 2 compilers.
+  - Any new compiler build MUST start from Phase 3 or later (phase >= 3).
+  - Running whole-test lanes requires a Phase 4+ full CLI supporting `test --help`.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --lane)
+            [ $# -ge 2 ] || { echo "run-whole-test-lanes: --lane requires a value" >&2; exit 2; }
+            LANE=$2; shift 2 ;;
+        --lane=*)
+            LANE=${1#*=}; shift ;;
+        --compiler)
+            [ $# -ge 2 ] || { echo "run-whole-test-lanes: --compiler requires a value" >&2; exit 2; }
+            COMPILER_ARG=$2; shift 2 ;;
+        --compiler=*)
+            COMPILER_ARG=${1#*=}; shift ;;
+        --mode)
+            [ $# -ge 2 ] || { echo "run-whole-test-lanes: --mode requires a value" >&2; exit 2; }
+            MODE=$2; shift 2 ;;
+        --mode=*)
+            MODE=${1#*=}; shift ;;
+        --results-dir)
+            [ $# -ge 2 ] || { echo "run-whole-test-lanes: --results-dir requires a value" >&2; exit 2; }
+            RESULTS_DIR=$2; shift 2 ;;
+        --results-dir=*)
+            RESULTS_DIR=${1#*=}; shift ;;
+        --root)
+            [ $# -ge 2 ] || { echo "run-whole-test-lanes: --root requires a value" >&2; exit 2; }
+            ROOT=$2; shift 2 ;;
+        --root=*)
+            ROOT=${1#*=}; shift ;;
+        --dry-run)
+            DRY_RUN=1; shift ;;
+        --selftest)
+            SELFTEST=1; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        *)
+            echo "run-whole-test-lanes: unknown argument '$1'" >&2
+            usage >&2
+            exit 2 ;;
+    esac
+done
+
+# Escape a string for double-quoted SDN scalar output.
+sdn_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n' '  '
+}
+
+to_lower() {
+    printf '%s' "$1" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'
+}
+
+canonical_file_path() {
+    _cf_in=$1
+    [ -e "$_cf_in" ] || return 1
+    _cf_dir=$(CDPATH= cd -- "$(dirname -- "$_cf_in")" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s' "$_cf_dir" "$(basename -- "$_cf_in")"
+}
+
+# Print preferred host release triples (space-separated) for deterministic discovery.
+host_release_triples() {
+    _os=$(uname -s 2>/dev/null || echo unknown)
+    _arch=$(uname -m 2>/dev/null || echo unknown)
+    case "$_arch" in
+        amd64|x86_64) _arch=x86_64 ;;
+        arm64|aarch64) _arch=aarch64 ;;
+    esac
+    case "$_os" in
+        Linux)
+            printf '%s\n' "${_arch}-unknown-linux-gnu" "${_arch}-unknown-linux-musl" ;;
+        Darwin)
+            printf '%s\n' "${_arch}-apple-darwin" ;;
+        FreeBSD)
+            printf '%s\n' "${_arch}-unknown-freebsd" ;;
+        MINGW*|MSYS*|CYGWIN*)
+            printf '%s\n' "${_arch}-pc-windows-msvc" "${_arch}-pc-windows-gnu" "${_arch}-pc-windows-gnullvm" ;;
+        *)
+            printf '%s\n' "" ;;
+    esac
+}
+
+# Check whether a path looks like a forbidden Rust seed or pre-Phase-3 artifact.
+is_forbidden_compiler_path() {
+    _fp_lc=$(to_lower "$1")
+    case "$_fp_lc" in
+        *seed*|*/compiler_rust/target/*|*\\compiler_rust\\target\\*)
+            return 0 ;;
+        */stage1/*|*/stage2/*|*/phase1/*|*/phase2/*|*/p1/*|*/p2/*)
+            return 0 ;;
+        *\\stage1\\*|*\\stage2\\*|*\\phase1\\*|*\\phase2\\*|*\\p1\\*|*\\p2\\*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+read_phase_stamp() {
+    _rps_bin=$1
+    _rps_dir=$(dirname -- "$_rps_bin")
+    _rps_parent=$(dirname -- "$_rps_dir")
+    _rps_val=""
+    if [ -r "$_rps_dir/PHASE" ]; then
+        IFS= read -r _rps_val < "$_rps_dir/PHASE" || _rps_val=""
+    elif [ -r "$_rps_parent/PHASE" ]; then
+        IFS= read -r _rps_val < "$_rps_parent/PHASE" || _rps_val=""
+    fi
+    _rps_val=$(printf '%s' "$_rps_val" | tr -cd '0-9')
+    printf '%s' "$_rps_val"
+}
+
+p3_to_p4_hint() {
+    printf 'Build Phase 4 full CLI from Phase 3 (phase >= 3, NEVER from Rust seed/P1/P2):\n' >&2
+    printf '  bash scripts/bootstrap/build-phase3-phase4.sh --phase=p4 --p3b-bin=%s --non-interactive\n' "$1" >&2
+}
+
+# Validate a candidate compiler. Sets RESOLVED_COMPILER and RESOLVED_VERSION on success.
+validate_compiler() {
+    _vc_raw=$1
+    RESOLVED_COMPILER=""
+    RESOLVED_VERSION=""
+
+    if [ -z "$_vc_raw" ]; then
+        echo "ERROR — no compiler candidate provided" >&2
+        return 2
+    fi
+    if is_forbidden_compiler_path "$_vc_raw"; then
+        echo "ERROR — refusing Rust seed or pre-Phase-3 compiler path: $_vc_raw (phase >= 3 required; never auto-fallback to Rust seed/P1/P2)" >&2
+        return 2
+    fi
+    if [ ! -f "$_vc_raw" ]; then
+        echo "ERROR — compiler not found: $_vc_raw" >&2
+        return 2
+    fi
+    if [ ! -x "$_vc_raw" ]; then
+        echo "ERROR — compiler is not executable: $_vc_raw" >&2
+        return 2
+    fi
+
+    _vc_abs=$(canonical_file_path "$_vc_raw") || {
+        echo "ERROR — cannot canonicalize compiler path: $_vc_raw" >&2
+        return 2
+    }
+    if is_forbidden_compiler_path "$_vc_abs"; then
+        echo "ERROR — refusing Rust seed or pre-Phase-3 compiler target: $_vc_abs (phase >= 3 required)" >&2
+        return 2
+    fi
+
+    _vc_phase=$(read_phase_stamp "$_vc_abs")
+    if [ -n "$_vc_phase" ]; then
+        if [ "$_vc_phase" -lt 3 ]; then
+            echo "ERROR — refusing Phase $_vc_phase compiler ($_vc_abs); only Phase 3 or later (phase >= 3) is allowed" >&2
+            return 2
+        fi
+        if [ "$_vc_phase" -eq 3 ]; then
+            echo "ERROR — $_vc_abs is a Phase 3 bootstrap-only compiler (PHASE=3); whole-test lanes require a Phase 4+ full CLI" >&2
+            p3_to_p4_hint "$_vc_abs"
+            return 2
+        fi
+    fi
+
+    _vc_ver_out=$("$_vc_abs" --version 2>&1)
+    _vc_ver_rc=$?
+    if [ "$_vc_ver_rc" -ne 0 ]; then
+        echo "ERROR — compiler --version failed (rc=$_vc_ver_rc): $_vc_abs" >&2
+        return 2
+    fi
+    _vc_ver_line=$(printf '%s\n' "$_vc_ver_out" | sed -n '1p' | tr -d '\r')
+    _vc_ver_lc=$(to_lower "$_vc_ver_line")
+
+    case "$_vc_ver_lc" in
+        *seed*)
+            echo "ERROR — refusing Rust seed compiler ($_vc_abs: $_vc_ver_line); only Phase 3 or later (phase >= 3) is allowed" >&2
+            return 2 ;;
+        *simple-bootstrap*)
+            echo "ERROR — $_vc_abs reports bootstrap-only CLI ('$_vc_ver_line'); whole-test lanes require a Phase 4+ full CLI" >&2
+            p3_to_p4_hint "$_vc_abs"
+            return 2 ;;
+    esac
+
+    if ! "$_vc_abs" test --help >/dev/null 2>&1; then
+        echo "ERROR — $_vc_abs does not support 'test --help' (likely a Phase 3 bootstrap-only compiler); whole-test lanes require a Phase 4+ full CLI" >&2
+        p3_to_p4_hint "$_vc_abs"
+        return 2
+    fi
+
+    RESOLVED_COMPILER=$_vc_abs
+    RESOLVED_VERSION=$_vc_ver_line
+    return 0
+}
+
+# Discover a compiler following explicit precedence. Never falls back to Rust seed.
+resolve_compiler() {
+    _rc_root=$1
+    if [ -n "$COMPILER_ARG" ]; then
+        validate_compiler "$COMPILER_ARG"
+        return $?
+    fi
+    if [ -n "${SIMPLE_COMPILER:-}" ]; then
+        validate_compiler "$SIMPLE_COMPILER"
+        return $?
+    fi
+
+    # Try host-matching bin/release/<triple>/simple[.exe] first.
+    _rc_triples=$(host_release_triples)
+    for _rc_t in $_rc_triples; do
+        [ -n "$_rc_t" ] || continue
+        for _rc_ext in "" ".exe"; do
+            _rc_cand="$_rc_root/bin/release/$_rc_t/simple$_rc_ext"
+            if [ -f "$_rc_cand" ] && [ -x "$_rc_cand" ]; then
+                validate_compiler "$_rc_cand"
+                return $?
+            fi
+        done
+    done
+
+    # Fall back to any bin/release/*/simple[.exe] sorted deterministically.
+    for _rc_cand in "$_rc_root"/bin/release/*/simple "$_rc_root"/bin/release/*/simple.exe; do
+        if [ -f "$_rc_cand" ] && [ -x "$_rc_cand" ]; then
+            validate_compiler "$_rc_cand"
+            return $?
+        fi
+    done
+
+    # Check local Phase 4 build outputs (never stage1/stage2/seed).
+    for _rc_cand in \
+        "$_rc_root/build/phased-selfhost/phase4/simple" \
+        "$_rc_root/build/phased-selfhost/phase4/simple.exe" \
+        "$_rc_root/build/bootstrap/stage4/simple" \
+        "$_rc_root/build/bootstrap/stage4/simple.exe"; do
+        if [ -f "$_rc_cand" ] && [ -x "$_rc_cand" ]; then
+            validate_compiler "$_rc_cand"
+            return $?
+        fi
+    done
+
+    # Last check SIMPLE_BOOTSTRAP_COMPILER: if it points to P4+, accept; if P3, fail closed with P3->P4 instructions.
+    if [ -n "${SIMPLE_BOOTSTRAP_COMPILER:-}" ]; then
+        validate_compiler "$SIMPLE_BOOTSTRAP_COMPILER"
+        return $?
+    fi
+
+    echo "ERROR — no Phase 4+ full Simple CLI found (checked --compiler, SIMPLE_COMPILER, bin/release/*/simple[.exe], local phase4/stage4 outputs, SIMPLE_BOOTSTRAP_COMPILER)." >&2
+    echo "Build Phase 4 from a Phase 3 (or later) compiler — NEVER from Rust seed, P1, or P2:" >&2
+    echo "  bash scripts/bootstrap/build-phase3-phase4.sh --phase=p4 --p3b-bin=<phase3-compiler> --non-interactive" >&2
+    return 2
+}
+
+# Build display command string for a lane (sets LANE_CMD_DISPLAY).
+lane_command_display() {
+    _lcd_lane=$1
+    _lcd_compiler=$2
+    _lcd_mode=$3
+    _lcd_root=$4
+    case "$_lcd_lane" in
+        md)
+            LANE_CMD_DISPLAY="\"$_lcd_compiler\" test --sdoctest --no-db --mode=$_lcd_mode" ;;
+        comment)
+            LANE_CMD_DISPLAY="\"$_lcd_compiler\" test src --spl-doctest --no-db --mode=$_lcd_mode" ;;
+        unit)
+            if [ -d "$_lcd_root/test/00_unit" ]; then
+                LANE_CMD_DISPLAY="\"$_lcd_compiler\" test test/00_unit test/01_unit --no-db --mode=$_lcd_mode"
+            else
+                LANE_CMD_DISPLAY="\"$_lcd_compiler\" test test/01_unit --no-db --mode=$_lcd_mode"
+            fi ;;
+        sspec)
+            LANE_CMD_DISPLAY="\"$_lcd_compiler\" test test/02_integration test/03_system test/04_smoke --no-db --mode=$_lcd_mode" ;;
+        *)
+            LANE_CMD_DISPLAY=""
+            return 2 ;;
+    esac
+    return 0
+}
+
+# Execute one lane command inside $root with exact argv (no eval).
+exec_lane_command() {
+    _elc_lane=$1
+    _elc_compiler=$2
+    _elc_mode=$3
+    _elc_root=$4
+    _elc_log=$5
+    case "$_elc_lane" in
+        md)
+            (CDPATH= cd -- "$_elc_root" && "$_elc_compiler" test --sdoctest --no-db "--mode=$_elc_mode") >"$_elc_log" 2>&1
+            return $? ;;
+        comment)
+            (CDPATH= cd -- "$_elc_root" && "$_elc_compiler" test src --spl-doctest --no-db "--mode=$_elc_mode") >"$_elc_log" 2>&1
+            return $? ;;
+        unit)
+            if [ -d "$_elc_root/test/00_unit" ]; then
+                (CDPATH= cd -- "$_elc_root" && "$_elc_compiler" test test/00_unit test/01_unit --no-db "--mode=$_elc_mode") >"$_elc_log" 2>&1
+                return $?
+            else
+                (CDPATH= cd -- "$_elc_root" && "$_elc_compiler" test test/01_unit --no-db "--mode=$_elc_mode") >"$_elc_log" 2>&1
+                return $?
+            fi ;;
+        sspec)
+            (CDPATH= cd -- "$_elc_root" && "$_elc_compiler" test test/02_integration test/03_system test/04_smoke --no-db "--mode=$_elc_mode") >"$_elc_log" 2>&1
+            return $? ;;
+        *)
+            return 2 ;;
+    esac
+}
+
+write_lane_sdn() {
+    _wls_file=$1
+    _wls_lane=$2
+    _wls_mode=$3
+    _wls_status=$4
+    _wls_rc=$5
+    _wls_dur=$6
+    _wls_dry=$7
+    _wls_comp=$8
+    _wls_ver=$9
+    shift 9
+    _wls_log=$1
+    _wls_cmd=$2
+
+    _wls_comp_e=$(sdn_escape "$_wls_comp")
+    _wls_ver_e=$(sdn_escape "$_wls_ver")
+    _wls_log_e=$(sdn_escape "$_wls_log")
+    _wls_cmd_e=$(sdn_escape "$_wls_cmd")
+
+    cat > "$_wls_file" <<EOF
+# Whole-test lane receipt (SDN)
+whole_test_lane:
+  schema: simple-whole-test-lane-v1
+  lane: $_wls_lane
+  mode: $_wls_mode
+  status: $_wls_status
+  exit_code: $_wls_rc
+  duration_s: $_wls_dur
+  dry_run: $_wls_dry
+  compiler: "$_wls_comp_e"
+  compiler_version: "$_wls_ver_e"
+  log_file: "$_wls_log_e"
+  command: "$_wls_cmd_e"
+EOF
+}
+
+run_lanes() {
+    _rl_lane=$1
+    _rl_mode=$2
+    _rl_root=$3
+    _rl_out=$4
+    _rl_dry=$5
+
+    case "$_rl_lane" in
+        all) _rl_list="md comment unit sspec" ;;
+        md|comment|unit|sspec) _rl_list="$_rl_lane" ;;
+        *)
+            echo "ERROR — invalid --lane '$_rl_lane' (expected all|md|comment|unit|sspec)" >&2
+            return 2 ;;
+    esac
+
+    case "$_rl_mode" in
+        interpreter|native) ;;
+        *)
+            echo "ERROR — invalid --mode '$_rl_mode' (expected interpreter|native)" >&2
+            return 2 ;;
+    esac
+
+    if [ ! -d "$_rl_root" ]; then
+        echo "ERROR — root directory does not exist: $_rl_root" >&2
+        return 2
+    fi
+    _rl_root=$(CDPATH= cd -- "$_rl_root" && pwd -P) || {
+        echo "ERROR — cannot resolve root directory: $_rl_root" >&2
+        return 2
+    }
+
+    resolve_compiler "$_rl_root" || return 2
+
+    mkdir -p "$_rl_out" || {
+        echo "ERROR — cannot create results directory: $_rl_out" >&2
+        return 2
+    }
+    _rl_out=$(CDPATH= cd -- "$_rl_out" && pwd -P) || {
+        echo "ERROR — cannot resolve results directory: $_rl_out" >&2
+        return 2
+    }
+
+    _rl_dry_bool=false
+    [ "$_rl_dry" -eq 1 ] && _rl_dry_bool=true
+
+    _rl_rows_file="$_rl_out/.whole_test_rows.tmp"
+    : > "$_rl_rows_file" || return 2
+
+    _rl_total=0
+    _rl_passed=0
+    _rl_failed=0
+    _rl_failed_names=""
+
+    for _rl_cur in $_rl_list; do
+        _rl_total=$((_rl_total + 1))
+        lane_command_display "$_rl_cur" "$RESOLVED_COMPILER" "$_rl_mode" "$_rl_root" || return 2
+        _rl_log="$_rl_out/$_rl_cur.log"
+        _rl_sdn="$_rl_out/$_rl_cur.sdn"
+
+        if [ "$_rl_dry" -eq 1 ]; then
+            printf '[dry-run] lane=%s cmd=%s\n' "$_rl_cur" "$LANE_CMD_DISPLAY"
+            : > "$_rl_log"
+            _rl_rc=0
+            _rl_dur=0
+            _rl_st="dry-run"
+            _rl_passed=$((_rl_passed + 1))
+        else
+            printf '=== whole-test lane: %s (mode=%s) ===\n' "$_rl_cur" "$_rl_mode"
+            printf 'cmd: %s\n' "$LANE_CMD_DISPLAY"
+            _rl_t0=$(date +%s 2>/dev/null || echo 0)
+            exec_lane_command "$_rl_cur" "$RESOLVED_COMPILER" "$_rl_mode" "$_rl_root" "$_rl_log"
+            _rl_rc=$?
+            _rl_t1=$(date +%s 2>/dev/null || echo 0)
+            _rl_dur=$((_rl_t1 - _rl_t0))
+            [ "$_rl_dur" -ge 0 ] || _rl_dur=0
+            cat "$_rl_log"
+            if [ "$_rl_rc" -eq 0 ]; then
+                _rl_st="pass"
+                _rl_passed=$((_rl_passed + 1))
+            else
+                _rl_st="fail"
+                _rl_failed=$((_rl_failed + 1))
+                _rl_failed_names="$_rl_failed_names $_rl_cur(rc=$_rl_rc)"
+            fi
+        fi
+
+        write_lane_sdn "$_rl_sdn" "$_rl_cur" "$_rl_mode" "$_rl_st" "$_rl_rc" "$_rl_dur" "$_rl_dry_bool" \
+            "$RESOLVED_COMPILER" "$RESOLVED_VERSION" "$_rl_log" "$LANE_CMD_DISPLAY"
+        _rl_sdn_e=$(sdn_escape "$_rl_sdn")
+        printf '    %s, %s, %s, %s, %s, "%s"\n' \
+            "$_rl_cur" "$_rl_mode" "$_rl_st" "$_rl_rc" "$_rl_dur" "$_rl_sdn_e" >> "$_rl_rows_file"
+    done
+
+    _rl_summary_status="pass"
+    if [ "$_rl_failed" -gt 0 ]; then
+        _rl_summary_status="fail"
+    elif [ "$_rl_dry" -eq 1 ]; then
+        _rl_summary_status="dry-run"
+    fi
+
+    _rl_comp_e=$(sdn_escape "$RESOLVED_COMPILER")
+    _rl_ver_e=$(sdn_escape "$RESOLVED_VERSION")
+    _rl_summary="$_rl_out/whole-test-lanes.sdn"
+    {
+        cat <<EOF
+# Whole-test lanes summary receipt (SDN)
+whole_test_lanes_summary:
+  schema: simple-whole-test-lanes-summary-v1
+  requested_lane: $_rl_lane
+  mode: $_rl_mode
+  dry_run: $_rl_dry_bool
+  compiler: "$_rl_comp_e"
+  compiler_version: "$_rl_ver_e"
+  total_lanes: $_rl_total
+  passed_lanes: $_rl_passed
+  failed_lanes: $_rl_failed
+  status: $_rl_summary_status
+
+whole_test_lane_results |lane, mode, status, exit_code, duration_s, receipt|
+EOF
+        cat "$_rl_rows_file"
+    } > "$_rl_summary"
+    rm -f "$_rl_rows_file"
+
+    if [ "$_rl_failed" -gt 0 ]; then
+        echo "FAIL — $_rl_total lane(s) ran, $_rl_failed failed:$_rl_failed_names (receipt: $_rl_summary)"
+        return 1
+    fi
+    if [ "$_rl_dry" -eq 1 ]; then
+        echo "PASS — $_rl_total lane(s) dry-run verified (receipt: $_rl_summary)"
+        return 0
+    fi
+    echo "PASS — $_rl_total lane(s) passed (mode=$_rl_mode, receipt: $_rl_summary)"
+    return 0
+}
+
+run_selftest() {
+    _st_dir=$(mktemp -d "${TMPDIR:-/tmp}/whole-test-lanes-st.XXXXXX") || {
+        echo "ERROR — nothing was checked (cannot create selftest scratch dir)"
+        exit 2
+    }
+    trap 'rm -rf "$_st_dir"' EXIT INT TERM
+
+    _st_self="$SCRIPT_DIR/$(basename -- "$0")"
+    _st_checks=0
+    _st_fails=0
+
+    st_expect_rc() {
+        _se_label=$1
+        _se_want=$2
+        shift 2
+        _st_checks=$((_st_checks + 1))
+        "$@" >"$_st_dir/last.out" 2>"$_st_dir/last.err"
+        _se_got=$?
+        if [ "$_se_got" -ne "$_se_want" ]; then
+            echo "selftest FAIL [$_se_label]: expected rc=$_se_want, got rc=$_se_got" >&2
+            sed -n '1,10p' "$_st_dir/last.out" "$_st_dir/last.err" >&2
+            _st_fails=$((_st_fails + 1))
+        fi
+    }
+
+    st_expect_grep() {
+        _sg_label=$1
+        _sg_file=$2
+        _sg_pat=$3
+        _st_checks=$((_st_checks + 1))
+        if ! grep -Fq "$_sg_pat" "$_sg_file"; then
+            echo "selftest FAIL [$_sg_label]: missing '$_sg_pat' in $_sg_file" >&2
+            sed -n '1,20p' "$_sg_file" >&2
+            _st_fails=$((_st_fails + 1))
+        fi
+    }
+
+    # Prepare mock repository roots (with and without test/00_unit).
+    mkdir -p "$_st_dir/repo_with_00/test/00_unit" \
+             "$_st_dir/repo_with_00/test/01_unit" \
+             "$_st_dir/repo_with_00/test/02_integration" \
+             "$_st_dir/repo_with_00/test/03_system" \
+             "$_st_dir/repo_with_00/test/04_smoke" \
+             "$_st_dir/repo_with_00/src"
+    mkdir -p "$_st_dir/repo_no_00/test/01_unit" \
+             "$_st_dir/repo_no_00/test/02_integration" \
+             "$_st_dir/repo_no_00/test/03_system" \
+             "$_st_dir/repo_no_00/test/04_smoke" \
+             "$_st_dir/repo_no_00/src"
+
+    # Mock 1: forbidden seed binary
+    mkdir -p "$_st_dir/seed_dir"
+    cat > "$_st_dir/seed_dir/simple-seed" <<'EOF'
+#!/bin/sh
+echo "simple-seed 1.0.0"
+EOF
+    chmod +x "$_st_dir/seed_dir/simple-seed"
+
+    # Mock 2: Phase 3 bootstrap-only compiler (reports simple-bootstrap, fails test --help)
+    mkdir -p "$_st_dir/p3_pkg/bin"
+    printf '3\n' > "$_st_dir/p3_pkg/PHASE"
+    cat > "$_st_dir/p3_pkg/bin/simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "simple-bootstrap 1.0.0-rc.1"
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$_st_dir/p3_pkg/bin/simple"
+
+    # Mock 3: Phase 3 bootstrap-only compiler without PHASE stamp (caught via --version / test --help)
+    mkdir -p "$_st_dir/p3_nostamp"
+    cat > "$_st_dir/p3_nostamp/simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "simple 1.0.0-p3"
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$_st_dir/p3_nostamp/simple"
+
+    # Mock 4: Phase 2 compiler (must be refused by phase floor >= 3)
+    mkdir -p "$_st_dir/p2_pkg/bin"
+    printf '2\n' > "$_st_dir/p2_pkg/PHASE"
+    cat > "$_st_dir/p2_pkg/bin/simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "simple 1.0.0"
+    exit 0
+fi
+if [ "${1:-}" = "test" ] && [ "${2:-}" = "--help" ]; then
+    echo "usage: simple test"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$_st_dir/p2_pkg/bin/simple"
+
+    # Mock 5: Valid Phase 4 full CLI (supports --version, test --help, logs argv, optional fail trigger)
+    mkdir -p "$_st_dir/p4_pkg/bin"
+    printf '4\n' > "$_st_dir/p4_pkg/PHASE"
+    cat > "$_st_dir/p4_pkg/bin/simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "simple 1.0.0"
+    exit 0
+fi
+if [ "${1:-}" = "test" ] && [ "${2:-}" = "--help" ]; then
+    echo "usage: simple test [options]"
+    exit 0
+fi
+printf 'MOCK_ARGV:%s\n' "$*"
+if [ -n "${MOCK_FAIL_PATTERN:-}" ]; then
+    case "$*" in
+        *"$MOCK_FAIL_PATTERN"*) echo "MOCK_FAIL:$*"; exit 1 ;;
+    esac
+fi
+echo "MOCK_OK:$*"
+exit 0
+EOF
+    chmod +x "$_st_dir/p4_pkg/bin/simple"
+
+    # 1. CLI validation
+    st_expect_rc "missing-lane" 2 sh "$_st_self" --dry-run
+    st_expect_rc "invalid-lane" 2 sh "$_st_self" --lane bogus --compiler "$_st_dir/p4_pkg/bin/simple" --dry-run
+    st_expect_rc "invalid-mode" 2 sh "$_st_self" --lane md --mode jit --compiler "$_st_dir/p4_pkg/bin/simple" --dry-run
+    st_expect_rc "unknown-flag" 2 sh "$_st_self" --lane md --bogus-flag
+
+    # 2. Seed / P2 / P3-bootstrap-only rejection
+    st_expect_rc "reject-seed-path" 2 sh "$_st_self" --lane md --compiler "$_st_dir/seed_dir/simple-seed" --root "$_st_dir/repo_no_00" --dry-run
+    st_expect_grep "reject-seed-msg" "$_st_dir/last.err" "refusing Rust seed"
+
+    st_expect_rc "reject-phase2-stamp" 2 sh "$_st_self" --lane md --compiler "$_st_dir/p2_pkg/bin/simple" --root "$_st_dir/repo_no_00" --dry-run
+    st_expect_grep "reject-phase2-msg" "$_st_dir/last.err" "phase >= 3"
+
+    st_expect_rc "reject-phase3-stamp" 2 sh "$_st_self" --lane md --compiler "$_st_dir/p3_pkg/bin/simple" --root "$_st_dir/repo_no_00" --dry-run
+    st_expect_grep "reject-phase3-hint" "$_st_dir/last.err" "build-phase3-phase4.sh --phase=p4"
+
+    st_expect_rc "reject-no-test-help" 2 sh "$_st_self" --lane md --compiler "$_st_dir/p3_nostamp/simple" --root "$_st_dir/repo_no_00" --dry-run
+    st_expect_grep "reject-no-test-help-hint" "$_st_dir/last.err" "test --help"
+
+    # 3. Dry-run across all 4 lanes (with test/00_unit)
+    st_expect_rc "dry-run-all-with-00" 0 sh "$_st_self" --lane all --compiler "$_st_dir/p4_pkg/bin/simple" --mode interpreter --root "$_st_dir/repo_with_00" --results-dir "$_st_dir/out_with_00" --dry-run
+    st_expect_grep "dry-cmd-md" "$_st_dir/last.out" "test --sdoctest --no-db --mode=interpreter"
+    st_expect_grep "dry-cmd-comment" "$_st_dir/last.out" "test src --spl-doctest --no-db --mode=interpreter"
+    st_expect_grep "dry-cmd-unit-00" "$_st_dir/last.out" "test test/00_unit test/01_unit --no-db --mode=interpreter"
+    st_expect_grep "dry-cmd-sspec" "$_st_dir/last.out" "test test/02_integration test/03_system test/04_smoke --no-db --mode=interpreter"
+    st_expect_grep "sdn-summary-header" "$_st_dir/out_with_00/whole-test-lanes.sdn" "whole_test_lane_results |lane, mode, status, exit_code, duration_s, receipt|"
+    st_expect_grep "sdn-summary-total" "$_st_dir/out_with_00/whole-test-lanes.sdn" "total_lanes: 4"
+    st_expect_grep "sdn-md-receipt" "$_st_dir/out_with_00/md.sdn" "status: dry-run"
+
+    # 4. Dry-run unit lane without test/00_unit (native mode)
+    st_expect_rc "dry-run-unit-no-00" 0 sh "$_st_self" --lane unit --compiler "$_st_dir/p4_pkg/bin/simple" --mode native --root "$_st_dir/repo_no_00" --results-dir "$_st_dir/out_no_00" --dry-run
+    st_expect_grep "dry-cmd-unit-only-01" "$_st_dir/last.out" "test test/01_unit --no-db --mode=native"
+
+    # 5. Live mock execution: pass and fail-closed propagation
+    st_expect_rc "live-pass-all" 0 sh "$_st_self" --lane all --compiler "$_st_dir/p4_pkg/bin/simple" --mode interpreter --root "$_st_dir/repo_no_00" --results-dir "$_st_dir/out_live_pass"
+    st_expect_grep "live-pass-summary" "$_st_dir/out_live_pass/whole-test-lanes.sdn" "status: pass"
+    st_expect_grep "live-pass-sspec" "$_st_dir/out_live_pass/sspec.sdn" "exit_code: 0"
+
+    st_expect_rc "live-fail-comment" 1 env MOCK_FAIL_PATTERN="--spl-doctest" sh "$_st_self" --lane all --compiler "$_st_dir/p4_pkg/bin/simple" --mode interpreter --root "$_st_dir/repo_no_00" --results-dir "$_st_dir/out_live_fail"
+    st_expect_grep "live-fail-summary-status" "$_st_dir/out_live_fail/whole-test-lanes.sdn" "status: fail"
+    st_expect_grep "live-fail-summary-count" "$_st_dir/out_live_fail/whole-test-lanes.sdn" "failed_lanes: 1"
+    st_expect_grep "live-fail-comment-rc" "$_st_dir/out_live_fail/comment.sdn" "exit_code: 1"
+    st_expect_grep "live-fail-ran-remaining" "$_st_dir/out_live_fail/sspec.sdn" "status: pass"
+
+    if [ "$_st_fails" -gt 0 ]; then
+        echo "FAIL — run-whole-test-lanes selftest failed ($_st_fails/$_st_checks checks failed)"
+        exit 1
+    fi
+    echo "PASS — run-whole-test-lanes selftest verified ($_st_checks checks)"
+    exit 0
+}
+
+if [ "$SELFTEST" -eq 1 ]; then
+    run_selftest
+fi
+
+if [ -z "$LANE" ]; then
+    echo "run-whole-test-lanes: --lane is required (all|md|comment|unit|sspec)" >&2
+    usage >&2
+    exit 2
+fi
+
+if [ -z "$RESULTS_DIR" ]; then
+    RESULTS_DIR="$ROOT/build/whole-test-lanes"
+fi
+
+run_lanes "$LANE" "$MODE" "$ROOT" "$RESULTS_DIR" "$DRY_RUN"
+exit $?

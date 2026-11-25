@@ -1,0 +1,197 @@
+name: Whole Test Lanes
+
+# Runs the four whole-repository test lanes (md, comment, unit, sspec) in a
+# 4-way matrix via scripts/check/run-whole-test-lanes.shs.
+#
+# Compiler authority policy:
+#   - NEVER builds from Rust seed, Phase 1, or Phase 2.
+#   - Only Phase 3 or later (compiler_phase_floor >= 3) may produce Phase 4.
+#   - Whole-test lanes execute on a Phase 4+ full CLI supporting `test --help`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: 'Lane selection (all, md, comment, unit, sspec)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'md'
+          - 'comment'
+          - 'unit'
+          - 'sspec'
+      mode:
+        description: 'Test execution mode'
+        required: false
+        default: 'interpreter'
+        type: choice
+        options:
+          - 'interpreter'
+          - 'native'
+      compiler_phase_floor:
+        description: 'Minimum compiler phase allowed for P4 resolution/build (must be >= 3)'
+        required: false
+        default: '3'
+        type: string
+  push:
+    branches: ['release/**']
+    paths:
+      - 'test/**'
+      - 'src/**'
+      - 'doc/**'
+      - 'config/simple.test.sdn'
+      - 'config/sdoctest.sdn'
+      - 'scripts/check/run-whole-test-lanes.shs'
+      - '.github/workflows/whole-test-lanes.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  whole-test-lanes:
+    name: Whole Test Lane (${{ matrix.lane }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [md, comment, unit, sspec]
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.lanes == 'all' ||
+      inputs.lanes == matrix.lane
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve Phase 4 full CLI (from Phase >= 3 only)
+        shell: sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPILER_PHASE_FLOOR: ${{ inputs.compiler_phase_floor || '3' }}
+        run: |
+          set -eu
+          floor=$COMPILER_PHASE_FLOOR
+          case "$floor" in
+            ''|*[!0-9]*)
+              echo "ERROR: compiler_phase_floor must be an integer >= 3 (got '$floor')" >&2
+              exit 2 ;;
+          esac
+          if [ "$floor" -lt 3 ]; then
+            echo "ERROR: refusing compiler_phase_floor=$floor (< 3); Rust seed / Phase 1 / Phase 2 are forbidden" >&2
+            exit 2
+          fi
+
+          is_p4_cli() {
+            _bin=$1
+            [ -f "$_bin" ] && [ -x "$_bin" ] || return 1
+            _ver=$("$_bin" --version 2>/dev/null | sed -n '1p' | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz') || return 1
+            case "$_ver" in
+              ''|*seed*|*simple-bootstrap*) return 1 ;;
+            esac
+            "$_bin" test --help >/dev/null 2>&1 || return 1
+            return 0
+          }
+
+          resolved=""
+          # 1. Local Phase 4 full CLI if already materialized on runner.
+          for cand in \
+            "$PWD/bin/release/x86_64-unknown-linux-gnu/simple" \
+            "$PWD/build/phased-selfhost/phase4/simple" \
+            "$PWD/build/bootstrap/stage4/simple"; do
+            if is_p4_cli "$cand"; then
+              resolved=$cand
+              echo "Using local Phase 4 CLI: $resolved"
+              break
+            fi
+          done
+
+          # 2. Download a Phase >= floor package (simple-bootstrap-*-linux-x86_64.spk).
+          #    If Phase >= 4 full CLI, use directly; if Phase 3, build Phase 4 from it.
+          if [ -z "$resolved" ]; then
+            dl_root="$RUNNER_TEMP/whole-test-compiler"
+            mkdir -p "$dl_root"
+            tags=$(gh release list -R "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq '.[].tagName' 2>/dev/null | grep -E '^(rc-|v)' || true)
+            p3_bin=""
+            for tag in $tags; do
+              dl="$dl_root/$tag"
+              rm -rf "$dl" && mkdir -p "$dl"
+              gh release download "$tag" -R "$GITHUB_REPOSITORY" --pattern 'simple-bootstrap-*-linux-x86_64.spk' -D "$dl" >/dev/null 2>&1 || continue
+              spk=$(ls "$dl"/*.spk 2>/dev/null | sed -n '1p')
+              [ -n "$spk" ] || continue
+              tar -xzf "$spk" -C "$dl" || continue
+              cand=$(find "$dl" \( -path '*/bin/simple-runtime' -o -path '*/bin/simple' \) -type f | sed -n '1p')
+              [ -n "$cand" ] || continue
+              chmod +x "$cand"
+              pkg_root=$(CDPATH= cd -- "$(dirname -- "$cand")/.." && pwd -P)
+              phase=0
+              if [ -r "$pkg_root/PHASE" ]; then
+                phase=$(tr -cd '0-9' < "$pkg_root/PHASE")
+                [ -n "$phase" ] || phase=0
+              fi
+              if [ "$phase" -lt "$floor" ]; then
+                echo "Skipping $tag ($cand): PHASE=$phase < floor $floor"
+                continue
+              fi
+              if [ "$phase" -ge 4 ] && is_p4_cli "$cand"; then
+                resolved=$cand
+                echo "SIMPLE_ASSET_ROOT=$pkg_root" >> "$GITHUB_ENV"
+                echo "Using downloaded Phase $phase full CLI from $tag: $resolved"
+                break
+              fi
+              if [ "$phase" -ge 3 ] && [ -z "$p3_bin" ]; then
+                p3_bin=$cand
+                p3_tag=$tag
+                p3_root=$pkg_root
+              fi
+            done
+
+            if [ -z "$resolved" ] && [ -n "$p3_bin" ]; then
+              echo "Building Phase 4 full CLI from Phase 3 release $p3_tag ($p3_bin) — never from Rust seed/P1/P2"
+              SIMPLE_ASSET_ROOT="$p3_root" bash scripts/bootstrap/build-phase3-phase4.sh \
+                --phase=p4 \
+                --p3b-bin="$p3_bin" \
+                --build-root="$RUNNER_TEMP/whole-test-p4" \
+                --non-interactive
+              p4_cand=$(find "$RUNNER_TEMP/whole-test-p4" -type f -name simple | sed -n '1p')
+              if [ -n "$p4_cand" ] && is_p4_cli "$p4_cand"; then
+                resolved=$p4_cand
+              fi
+            fi
+          fi
+
+          if [ -z "$resolved" ]; then
+            echo "ERROR: no Phase >= $floor compiler available to provide a Phase 4+ full CLI (Rust seed/P1/P2 fallback is forbidden)" >&2
+            exit 2
+          fi
+
+          echo "SIMPLE_WHOLE_TEST_COMPILER=$resolved" >> "$GITHUB_ENV"
+
+      - name: Run whole-test lane (${{ matrix.lane }})
+        shell: sh
+        env:
+          LANE: ${{ matrix.lane }}
+          TEST_MODE: ${{ inputs.mode || 'interpreter' }}
+        run: |
+          sh scripts/check/run-whole-test-lanes.shs \
+            --lane "$LANE" \
+            --compiler "$SIMPLE_WHOLE_TEST_COMPILER" \
+            --mode "$TEST_MODE" \
+            --results-dir "build/whole-test-lanes/$LANE"
+
+      - name: Upload lane SDN receipt and log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: whole-test-lane-${{ matrix.lane }}-${{ github.run_id }}
+          path: build/whole-test-lanes/${{ matrix.lane }}
+          if-no-files-found: warn
+          retention-days: 7
