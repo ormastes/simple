@@ -1,10 +1,12 @@
 # Native Entry-Closure Common Import Type Loss
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — bare-tier fix verified in source; stage3 native confirmation pending admitted compiler
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+(Superseded by the 2026-11-04 fix and the 2026-11-25 verification at the
+end of this file.)
 
-**Status:** OPEN
+**Status:** RESOLVED in source (2026-11-25; native entry-closure run pending admitted compiler)
 
 ## Symptom
 
@@ -95,3 +97,26 @@ now resolves against `source_root/lib/<tier>`.
 Ordering follow-up: the bare-tier strategy is the LAST resort (after std/lib, source_root/<seg0>
 and project_root/<seg0>), so a project-local `common/` wins. Test strength: the unit spec is
 source-text only; the native fixture `test/fixtures/entry_closure_bare_common_import/` is the real proof.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+The 2026-11-04 bare-tier fix is present at HEAD:
+`src/compiler/99.loader/module_resolver/resolution.spl:181-193` (Strategy
+bare-tier, LAST RESORT after the source_root and project_root top-level
+strategies at :156 and :169), exactly as the unit spec
+`test/01_unit/compiler/module_resolver/bare_tier_import_spec.spl` asserts
+(all three source markers and the ordering check confirmed by direct read of
+the file). Native repro fixture
+`test/fixtures/entry_closure_bare_common_import/` is in the tree.
+
+Execution limit: the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1) cannot
+run the spec harness at this HEAD — the test runner itself fails to load with
+`unknown decorator '@representation_boundary'` (source/binary inconsistency
+introduced by cfd89933699) — and no stage3/admitted compiler exists on this
+Windows host, so the native entry-closure confirmation
+(`device-warm-production`) was not run. Verification is therefore by code
+inspection against the spec's assertions, not a spec run.
+
+**Status: RESOLVED in source.** The unit spec's assertions hold at HEAD;
+remaining confirmation is the stage3 native-build fixture run, blocked on an
+admitted compiler, not on any known source defect.
