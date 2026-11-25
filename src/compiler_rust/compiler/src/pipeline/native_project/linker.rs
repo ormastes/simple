@@ -1349,15 +1349,8 @@ impl NativeProjectBuilder {
         Ok(qualified_candidate)
     }
 
-    /// Compile the C main stub to an object file.
-    pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
-        let main_c = temp_dir.join("_main_stub.c");
-        let target = effective_target();
-        let cc = generated_c_source_compiler(target);
-        let is_msvc = uses_msvc_flags(target.linker_flavor());
-
-        // @workaround bug=BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027 reason=gnu-coff-entry-and-init-must-not-resolve-to-zero-weak-fallbacks
-        let stub_code = if is_msvc {
+    pub(super) fn main_stub_c_source(target: Target) -> &'static str {
+        if uses_msvc_flags(target.linker_flavor()) {
             r#"
 #include <wchar.h>
 
@@ -1398,6 +1391,32 @@ int wmain(int argc, wchar_t** argv) {
     return r;
 }
 "#
+        } else if target.os == TargetOS::Windows {
+            // PE/COFF weak externals bind `.weak.<sym>.default.<caller>` to
+            // absolute zero instead of extracting archive members. Keep the
+            // entry point, init caller, and argv setter strong so lazy COFF
+            // archive links pull them without forcing unused host modules.
+            r#"
+#ifdef __cplusplus
+extern "C" {
+#endif
+    int spl_main(void);
+    void __simple_call_module_inits(void);
+    void rt_set_args(int argc, char** argv);
+    void __attribute__((weak)) __simple_runtime_init(void);
+    void __attribute__((weak)) __simple_runtime_shutdown(void);
+#ifdef __cplusplus
+}
+#endif
+int main(int argc, char** argv) {
+    if (__simple_runtime_init) __simple_runtime_init();
+    __simple_call_module_inits();
+    rt_set_args(argc, argv);
+    int r = spl_main();
+    if (__simple_runtime_shutdown) __simple_runtime_shutdown();
+    return r;
+}
+"#
         } else {
             r#"
 #if defined(__APPLE__)
@@ -1416,15 +1435,8 @@ extern "C" {
 #ifdef __cplusplus
 extern "C" {
 #endif
-    // COFF weak fallbacks can satisfy archive roots with an absolute zero.
-    // These two definitions are guaranteed by the entry and generated caller.
-#if defined(_WIN32)
-    int spl_main(void);
-    void __simple_call_module_inits(void);
-#else
     int __attribute__((weak)) spl_main(void);
     void __attribute__((weak)) __simple_call_module_inits(void);
-#endif
     void rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
@@ -1441,7 +1453,16 @@ int main(int argc, char** argv) {
     return r;
 }
 "#
-        };
+        }
+    }
+
+    /// Compile the C main stub to an object file.
+    pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
+        let main_c = temp_dir.join("_main_stub.c");
+        let target = effective_target();
+        let cc = generated_c_source_compiler(target);
+        let is_msvc = uses_msvc_flags(target.linker_flavor());
+        let stub_code = Self::main_stub_c_source(target);
 
         std::fs::write(&main_c, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
@@ -4715,5 +4736,144 @@ mod linker_tests {
 
         assert!(!NativeProjectBuilder::entry_objects_require_sqlite(&[plain_o]).unwrap());
         assert!(NativeProjectBuilder::entry_objects_require_sqlite(&[sqlite_o]).unwrap());
+    }
+
+    #[test]
+    fn main_stub_c_source_selects_strong_coff_entry_and_init_for_windows_gnu() {
+        for triple in ["x86_64-pc-windows-gnu", "aarch64-pc-windows-gnullvm"] {
+            let target = Target::parse(triple).unwrap();
+            let code = NativeProjectBuilder::main_stub_c_source(target);
+            assert!(code.contains("int spl_main(void);"), "{triple}: {code}");
+            assert!(code.contains("void __simple_call_module_inits(void);"), "{triple}: {code}");
+            assert!(code.contains("int r = spl_main();"), "{triple}: {code}");
+            assert!(code.contains("__simple_call_module_inits();"), "{triple}: {code}");
+            assert!(!code.contains("__attribute__((weak)) spl_main"), "{triple}: {code}");
+            assert!(
+                !code.contains("__attribute__((weak)) __simple_call_module_inits"),
+                "{triple}: {code}"
+            );
+            assert!(!code.contains("/ALTERNATENAME:"), "{triple}: {code}");
+        }
+
+        let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
+        let msvc_code = NativeProjectBuilder::main_stub_c_source(msvc);
+        assert!(msvc_code.contains("int wmain("));
+        assert!(msvc_code.contains("/ALTERNATENAME:spl_main="));
+
+        let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
+        let linux_code = NativeProjectBuilder::main_stub_c_source(linux);
+        assert!(linux_code.contains("__attribute__((weak)) spl_main"));
+        assert!(linux_code.contains("__attribute__((weak)) __simple_call_module_inits"));
+        assert!(!linux_code.contains("_WIN32"));
+    }
+
+    #[test]
+    fn windows_gnu_main_stub_extracts_entry_and_init_without_pulling_unused_host_members() {
+        let clang_ok = std::process::Command::new("clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success());
+        let lld_ok = std::process::Command::new("lld")
+            .args(["-flavor", "gnu", "--version"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        let Ok(ar_tool) = find_archive_tool() else {
+            return;
+        };
+        if !clang_ok || !lld_ok || nm_command().is_err() {
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        let target_flag = windows_gnu_target_flag(target, "clang").unwrap();
+
+        let main_c = temp.path().join("_main_stub.c");
+        let main_o = temp.path().join("_main_stub.o");
+        let init_c = temp.path().join("_init_all.c");
+        let init_o = temp.path().join("_init_all.o");
+        let entry_c = temp.path().join("entry.c");
+        let entry_o = temp.path().join("entry.o");
+        let host_c = temp.path().join("unused_host.c");
+        let host_o = temp.path().join("unused_host.o");
+        let rt_c = temp.path().join("rt.c");
+        let rt_o = temp.path().join("rt.o");
+        let objects_a = temp.path().join("libspl_objects.a");
+        let exe = temp.path().join("probe.exe");
+
+        std::fs::write(&main_c, NativeProjectBuilder::main_stub_c_source(target)).unwrap();
+        std::fs::write(
+            &init_c,
+            "extern void __module_init_entry(void);\nvoid __simple_call_module_inits(void) { __module_init_entry(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &entry_c,
+            "static int initialized = 0;\nvoid __module_init_entry(void) { initialized = 7; }\nint spl_main(void) { return initialized; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &host_c,
+            "extern int rt_host_only_missing(void);\nint unused_host_wrapper(void) { return rt_host_only_missing(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &rt_c,
+            "void __main(void) {}\nvoid rt_set_args(int argc, char** argv) { (void)argc; (void)argv; }\nvoid __simple_runtime_init(void) {}\nvoid __simple_runtime_shutdown(void) {}\n",
+        )
+        .unwrap();
+
+        for (src, obj) in [
+            (&main_c, &main_o),
+            (&init_c, &init_o),
+            (&entry_c, &entry_o),
+            (&host_c, &host_o),
+            (&rt_c, &rt_o),
+        ] {
+            let status = std::process::Command::new("clang")
+                .args([target_flag, "-c", "-Os", "-ffunction-sections", "-fdata-sections"])
+                .arg(src)
+                .arg("-o")
+                .arg(obj)
+                .status()
+                .unwrap();
+            assert!(status.success(), "clang failed for {}", src.display());
+        }
+
+        let ar_status = archive_create_command(&ar_tool, &objects_a, &[entry_o, host_o], false, false)
+            .status()
+            .unwrap();
+        assert!(ar_status.success(), "archive creation failed");
+
+        let link_status = std::process::Command::new("lld")
+            .args(["-flavor", "gnu", "-m", "i386pep", "-e", "main"])
+            .arg(&main_o)
+            .arg(&init_o)
+            .arg(&objects_a)
+            .arg(&rt_o)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap();
+        assert!(
+            link_status.success(),
+            "lazy COFF link must extract spl_main and __module_init_entry without pulling unused_host"
+        );
+
+        let nm_out = nm_command().unwrap().arg("-g").arg(&exe).output().unwrap();
+        assert!(nm_out.status.success());
+        let symbols = String::from_utf8_lossy(&nm_out.stdout);
+        assert!(
+            symbols.lines().any(|line| line.contains(" T spl_main")),
+            "spl_main must be linked as code, not zero weak fallback:\n{symbols}"
+        );
+        assert!(
+            symbols.lines().any(|line| line.contains(" T __module_init_entry")),
+            "__module_init_entry must be linked as code:\n{symbols}"
+        );
+        assert!(
+            !symbols.contains("unused_host_wrapper"),
+            "unused host archive member must not be extracted:\n{symbols}"
+        );
     }
 }
