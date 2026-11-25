@@ -1,0 +1,89 @@
+#!/bin/sh
+# Contract test for scripts/release/package-phase1-spk.shs on Windows:
+# Ensures windows-* packages ship bin/simple.exe byte-identical to the input
+# binary (> 121 bytes, exact SHA-256) and NEVER emit a POSIX bin/simple wrapper
+# (which clobbers bin/simple.exe on Windows MSYS2), while non-Windows platforms
+# retain bin/simple-runtime + bin/simple launcher wrapper.
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fx=$(mktemp -d) || { echo "ERROR — mktemp failed" >&2; exit 2; }
+trap 'rm -rf "$fx"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+fail() {
+  echo "FAIL — $*" >&2
+  exit 1
+}
+
+# Build a lightweight self-contained repo fixture exercising the real packager
+# and real check_release_payload.shs.
+mkdir -p "$fx/repo/scripts/release" "$fx/repo/assets/fonts" "$fx/extract-win" "$fx/extract-linux"
+cp "$repo/scripts/release/package-phase1-spk.shs" "$fx/repo/scripts/release/package-phase1-spk.shs"
+cp "$repo/scripts/check_release_payload.shs" "$fx/repo/scripts/check_release_payload.shs"
+cp "$repo/LICENSE" "$fx/repo/LICENSE"
+cp "$repo/THIRD_PARTY_NOTICES.md" "$fx/repo/THIRD_PARTY_NOTICES.md"
+printf 'synthetic-font-fixture\n' > "$fx/repo/assets/fonts/test.ttf"
+
+# Create a deterministic >121-byte fake PE binary (2048 bytes).
+awk 'BEGIN { printf "MZ"; for (i = 0; i < 2046; i++) printf "%c", 65 + (i % 26) }' > "$fx/fake-simple.exe"
+expected_bytes=$(wc -c < "$fx/fake-simple.exe" | tr -d ' ')
+expected_sha=$(sha256sum "$fx/fake-simple.exe" | cut -d' ' -f1)
+[ "$expected_bytes" -gt 121 ] || fail "fixture binary too small: $expected_bytes"
+
+# 1. Windows MSVC platform: must ship bin/simple.exe byte-identical and NO bin/simple wrapper.
+(
+  cd "$fx/repo"
+  RELEASE_PAYLOAD_FONT_SOURCE_DIR="$fx/repo/assets/fonts" \
+    sh scripts/release/package-phase1-spk.shs 1.0.0-rc.68 windows-x86_64-msvc "$fx/fake-simple.exe" 3 >/dev/null
+)
+
+win_pkg="simple-bootstrap-1.0.0-rc.68-windows-x86_64-msvc"
+win_spk="$fx/repo/$win_pkg.spk"
+[ -f "$win_spk" ] || fail "missing $win_spk"
+[ -f "$win_spk.sha256" ] || fail "missing $win_spk.sha256"
+(cd "$fx/repo" && sha256sum -c "$win_pkg.spk.sha256" >/dev/null) || fail "Windows spk sha256 verification failed"
+
+tar -tzf "$win_spk" > "$fx/win.entries"
+grep -Fx "$win_pkg/bin/simple.exe" "$fx/win.entries" >/dev/null || fail "Windows spk missing bin/simple.exe"
+if grep -Fx "$win_pkg/bin/simple" "$fx/win.entries" >/dev/null; then
+  fail "Windows spk must NOT contain POSIX bin/simple wrapper"
+fi
+if grep -Fx "$win_pkg/bin/simple-runtime" "$fx/win.entries" >/dev/null; then
+  fail "Windows spk must NOT contain bin/simple-runtime"
+fi
+
+tar -xzf "$win_spk" -C "$fx/extract-win"
+extracted_exe="$fx/extract-win/$win_pkg/bin/simple.exe"
+[ -f "$extracted_exe" ] || fail "extracted bin/simple.exe missing"
+actual_bytes=$(wc -c < "$extracted_exe" | tr -d ' ')
+actual_sha=$(sha256sum "$extracted_exe" | cut -d' ' -f1)
+[ "$actual_bytes" -gt 121 ] || fail "extracted bin/simple.exe clobbered to $actual_bytes bytes"
+[ "$actual_sha" = "$expected_sha" ] || fail "extracted bin/simple.exe sha256 mismatch: got $actual_sha expected $expected_sha"
+[ "$(tr -d '[:space:]' < "$fx/extract-win/$win_pkg/PHASE")" = "3" ] || fail "Windows spk PHASE mismatch"
+
+# 2. Non-Windows platform: must still ship bin/simple-runtime + POSIX bin/simple wrapper.
+(
+  cd "$fx/repo"
+  RELEASE_PAYLOAD_FONT_SOURCE_DIR="$fx/repo/assets/fonts" \
+    sh scripts/release/package-phase1-spk.shs 1.0.0-rc.68 linux-x86_64 "$fx/fake-simple.exe" 3 >/dev/null
+)
+
+lin_pkg="simple-bootstrap-1.0.0-rc.68-linux-x86_64"
+lin_spk="$fx/repo/$lin_pkg.spk"
+[ -f "$lin_spk" ] || fail "missing $lin_spk"
+tar -tzf "$lin_spk" > "$fx/lin.entries"
+grep -Fx "$lin_pkg/bin/simple-runtime" "$fx/lin.entries" >/dev/null || fail "Linux spk missing bin/simple-runtime"
+grep -Fx "$lin_pkg/bin/simple" "$fx/lin.entries" >/dev/null || fail "Linux spk missing bin/simple wrapper"
+if grep -Fx "$lin_pkg/bin/simple.exe" "$fx/lin.entries" >/dev/null; then
+  fail "Linux spk must NOT contain bin/simple.exe"
+fi
+
+tar -xzf "$lin_spk" -C "$fx/extract-linux"
+lin_sha=$(sha256sum "$fx/extract-linux/$lin_pkg/bin/simple-runtime" | cut -d' ' -f1)
+[ "$lin_sha" = "$expected_sha" ] || fail "Linux bin/simple-runtime sha256 mismatch"
+grep -Fq 'exec "$SCRIPT_DIR/simple-runtime" "$@"' "$fx/extract-linux/$lin_pkg/bin/simple" \
+  || fail "Linux bin/simple wrapper missing simple-runtime exec"
+
+echo "PASS — package-phase1-spk Windows bin/simple.exe byte-identity (${actual_bytes} bytes, sha256=${actual_sha}) and Linux wrapper parity verified"
