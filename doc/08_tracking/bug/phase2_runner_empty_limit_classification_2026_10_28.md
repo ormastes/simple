@@ -118,3 +118,8 @@ Interpreter regression spec (original, typed, Err branch, and the similar
 
 ## Opus rerun 2026-11-09
 Root cause in source: wrapper match `case Ok((run, path))` on a tuple with a text slot was rejected by the narrow wrapper classifier and bound no field (garbage words). Fixed by 11192da46b4 (match Result/Option tuple binders use unwrap/? slot admission). New pin `test/01_unit/compiler/mir/result_tuple_record_text_spec.spl` lowers the exact `Result<(Record, text), text>` producer+consumer and asserts both use the same `(Struct, Opaque(str))` tuple: RED with switch_operators_calls.spl at 11192da46b4~1, GREEN at HEAD. The `lower_type` Str->Tuple(Ptr,U64) lead does not reach this path (both sides lower to Opaque(str)). Status fix-implemented-verification-pending; native retirement of the workaround still requires a producer rebuild.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+RETIRED` for `test/fixtures/test_runner_scoped_result/main.spl:19`.
+- Batch E9 (`a2312dfc0fb`) already retired both `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl` sites to `val (scoped_child, evidence_path) = match invocation:`.
+- Updated `test/fixtures/test_runner_scoped_result/main.spl` to use the matching `val (scoped_child, evidence_path) = match invocation:` destructuring (removing `invocation_pair` and `# @workaround`) so the manual `scripts/check/check-native-scoped-result.shs` fixture matches production `test_runner_execute.spl`. Verified clean HIR/MIR/LLVM lowering (`hir=0 mir=0 llvm=0 void=0`) of the destructured `Result<(Run, text), text>` pattern in `test/01_unit/compiler/wa_w2_lane3_fixtures_audit_spec.spl`.

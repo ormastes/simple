@@ -64,3 +64,8 @@ Traceability annotation base: `64b8854eaa6eee9470470ddbcef5fa2165902d13`. No ear
 Additional consumer workaround: Additional source workaround 64b8854eaa6eee9470470ddbcef5fa2165902d13 (recovery parent f7fdafdea3b251b4fa6f84b7203bd319cce8bc6c) replaces 11 remaining actual process_task_arena callback calls and retains 7 typed host locals. Source reviewed; changed-consumer native qualification PENDING. This is UNLANDED as of release 95c12f073ffefa99ac774264beeedd68a47e7676 and does not extend prior narrow fixture PASS. Source link https://github.com/ormastes/simple/commit/64b8854eaa6eee9470470ddbcef5fa2165902d13.
 
 **2026-11-03 (sonB): deferred.** Needs the permanent method-field layout/indirect-call return provenance owner in MIR; requires C36 consumer MIR repro on stage3; workaround kept.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+RETIRED` for `test/fixtures/compiler/callback_field_explicit_call/main.spl:42,50`.
+- Consistent with `1f349974fff` (which retired the `src/` wrapper shims), removed `callback_result_owner`, `callback_arena_join_owner`, and both `# @workaround` tags from `test/fixtures/compiler/callback_field_explicit_call/main.spl` so it calls `(port.execute_fn)(expected_owner)`, `(port.join_fn)(expected_owner)`, and `(port.effect_fn)(expected_owner + 50)` directly while preserving `original_form.spl` and `callback_field_declared_owner/main.spl`.
+- Verified `main.spl`, `original_form.spl`, and `callback_field_declared_owner/main.spl` lower cleanly (`hir=0 mir=0 llvm=0 void=0`) in `test/01_unit/compiler/wa_w2_lane3_fixtures_audit_spec.spl` and pass in `--mode=interpreter`.

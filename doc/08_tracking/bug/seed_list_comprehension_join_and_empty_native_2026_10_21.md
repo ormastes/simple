@@ -70,3 +70,8 @@ that diagnostic, versus explicit `v1` in the canonical campaign transcript;
 Windows ABI, linker flavor and no-stub policy match. No compatibility archive
 was recorded in either context. Therefore the canonical retry remains the
 authority for the later link failure and phase qualification.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+STAGE2-GATED` for `test/fixtures/native/json_comprehension_join/explicit/main.spl:10`.
+- Current `src/compiler` lowers both `original/main.spl` and `typed/main.spl` with `worker.spl` (`Thread.join() -> i64?`) with zero errors (`hir=0 mir=0 llvm=0 void=0`), and Batch E2 (`8b637333082`) retired the `src/` workarounds.
+- Kept `test/fixtures/native/json_comprehension_join/explicit/main.spl` and its `# @workaround` marker untouched because `original/` + `typed/` + `explicit/` form a paired 3-way frozen-seed diagnostic pinned by `test/01_unit/scripts/seed_list_comprehension_join_native_test.shs`.
