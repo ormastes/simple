@@ -23,6 +23,7 @@
 
 use std.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
 use std.tooling.easy_fix.rules_helpers.{EasyFixSourceView, LineContext, easy_fix_source_view, line_contexts}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 
 val REP_CANONICAL_CAPS: [text] = [
     "raw_ptr",
@@ -46,11 +47,16 @@ struct RepActiveFn:
     fn_name: text
     insert_line: i64
     has_rep_boundary: bool
+    in_impl_block: bool
     header_done: bool
     header_paren_depth: i64
     header_bracket_depth: i64
     header_saw_where: bool
     body_lines: [text]
+
+struct RepOwnerRule:
+    prefix: text
+    reviewers: [text]
 
 struct RepFnHeaderMatch:
     name: text
@@ -279,14 +285,17 @@ fn _rep_parse_fn_header(code_line: text, indent: i64) -> RepFnHeaderMatch:
             return RepFnHeaderMatch(name: "", scan_start: 0)
     RepFnHeaderMatch(name: name, scan_start: after_name_pos)
 
-fn _rep_is_container_header(trimmed_code: text) -> bool:
+fn _rep_container_kind(trimmed_code: text) -> text:
     val s = _rep_strip_words(trimmed_code, ["pub", "export"])
     if not s.ends_with(":"):
-        return false
-    for prefix in ["class ", "class\t", "class<", "struct ", "struct\t", "struct<", "trait ", "trait\t", "trait<", "impl ", "impl\t", "impl<", "extend ", "extend\t", "extend<"]:
+        return ""
+    for prefix in ["class ", "class\t", "class<", "struct ", "struct\t", "struct<", "trait ", "trait\t", "trait<"]:
         if s.starts_with(prefix):
-            return true
-    false
+            return "type"
+    for prefix in ["impl ", "impl\t", "impl<", "extend ", "extend\t", "extend<"]:
+        if s.starts_with(prefix):
+            return "impl"
+    ""
 
 fn _rep_decorator_name(trimmed_code: text) -> text:
     if not trimmed_code.starts_with("@"):
@@ -508,16 +517,99 @@ fn _rep_infer_kind(norm_path: text, caps: [text], body_text: text) -> text:
         return "intrinsics"
     "layout"
 
-fn _rep_infer_reviewer(norm_path: text) -> text:
-    if _rep_path_matches_prefix(norm_path, "src/compiler/"):
-        return "compiler-owner"
-    if _rep_path_matches_prefix(norm_path, "src/lib/nogc_sync_mut/sffi/") or _rep_path_matches_prefix(norm_path, "src/lib/nogc_sync_mut/io") or _rep_path_matches_prefix(norm_path, "src/lib/nogc_async_mut/"):
-        return "runtime-ffi-owner"
-    if _rep_path_matches_prefix(norm_path, "src/lib/"):
-        return "stdlib-owner"
-    if _rep_path_matches_prefix(norm_path, "src/app/"):
-        return "app-owner"
-    "platform-owner"
+fn _rep_unquote(raw: text) -> text:
+    val t = raw.trim()
+    if t.byte_len() >= 2 and t.starts_with("\"") and t.ends_with("\""):
+        return t.substring(1, t.byte_len() - 1)
+    t
+
+fn _rep_split_sdn_fields(line: text) -> [text]:
+    var fields: [text] = []
+    var in_quotes = false
+    var escaped = false
+    var start = 0
+    var i = 0
+    val n = line.byte_len()
+    while i < n:
+        val ch = line.substring(i, i + 1)
+        if in_quotes:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_quotes = false
+        else:
+            if ch == "\"":
+                in_quotes = true
+            elif ch == ",":
+                fields.push(_rep_unquote(line.substring(start, i)))
+                start = i + 1
+        i = i + 1
+    fields.push(_rep_unquote(line.substring(start, n)))
+    fields
+
+fn _rep_parse_reviewer_list(raw: text) -> [text]:
+    var out: [text] = []
+    for item in raw.split(";"):
+        val r = item.trim()
+        if r != "" and not out.contains(r):
+            out.push(r)
+    out
+
+fn _rep_default_owner_rules() -> [RepOwnerRule]:
+    val default_reviewers = ["ormastes", "opus-review"]
+    [
+        RepOwnerRule(prefix: "src/compiler/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/runtime/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/compiler_rust/runtime/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/lib/nogc_sync_mut/io/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/lib/nogc_sync_mut/sffi/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/lib/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/os/", reviewers: default_reviewers),
+        RepOwnerRule(prefix: "src/app/", reviewers: default_reviewers)
+    ]
+
+fn _rep_load_owner_rules() -> [RepOwnerRule]:
+    val policy_path = "config/policy/unsafe_region_owners.sdn"
+    if not file_exists(policy_path):
+        return _rep_default_owner_rules()
+    val content = file_read(policy_path)
+    var rules: [RepOwnerRule] = []
+    var in_table = false
+    for raw_line in content.split("\n"):
+        val t = raw_line.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        if t.starts_with("unsafe_region_owners ") or t.starts_with("unsafe_region_owners|"):
+            in_table = true
+            continue
+        if in_table:
+            if not raw_line.starts_with(" ") and not raw_line.starts_with("\t"):
+                break
+            val cols = _rep_split_sdn_fields(t)
+            if cols.len() >= 4:
+                val prefixes_raw = cols[1]
+                val reviewers = _rep_parse_reviewer_list(cols[3])
+                if reviewers.len() > 0:
+                    for raw_pref in prefixes_raw.split(";"):
+                        val pref = _rep_normalize_path(raw_pref.trim())
+                        if pref != "":
+                            rules.push(RepOwnerRule(prefix: pref, reviewers: reviewers))
+    if rules.len() == 0:
+        return _rep_default_owner_rules()
+    rules
+
+fn _rep_infer_reviewers(norm_path: text, rules: [RepOwnerRule]) -> [text]:
+    var best_len = -1
+    var best_reviewers: [text] = []
+    for rule in rules:
+        if _rep_path_matches_prefix(norm_path, rule.prefix):
+            val plen = rule.prefix.byte_len()
+            if plen > best_len:
+                best_len = plen
+                best_reviewers = rule.reviewers
+    best_reviewers
 
 fn _rep_format_caps_quoted(caps: [text]) -> text:
     if caps.len() == 0:
@@ -527,7 +619,7 @@ fn _rep_format_caps_quoted(caps: [text]) -> text:
         quoted.push("\"" + cap + "\"")
     quoted.join(", ")
 
-fn _rep_finalize_fn(active: RepActiveFn, raw_lines: [text], offsets: [i64], file: text, norm_path: text) -> [EasyFix]:
+fn _rep_finalize_fn(active: RepActiveFn, raw_lines: [text], offsets: [i64], file: text, norm_path: text, owner_rules: [RepOwnerRule]) -> [EasyFix]:
     if not active.header_done or active.has_rep_boundary:
         return []
     val body_text = active.body_lines.join("\n")
@@ -535,15 +627,32 @@ fn _rep_finalize_fn(active: RepActiveFn, raw_lines: [text], offsets: [i64], file
     if not unsafe_scan.has_unsafe:
         return []
 
+    val decl_line_num = active.decl_line + 1
+    if active.in_impl_block:
+        val suggestion = EasyFix.create(
+            id: "E-MC-REP-001:{decl_line_num}",
+            description: "suggestion: `{active.fn_name}` in an `impl`/`extend` block contains an unsafe block, but `representation_declarations_v1` rejects impl-only methods as `nested_callable`; move into a `class`/`struct` method or top-level `fn` before annotating",
+            confidence: FixConfidence.Uncertain
+        )
+        return [suggestion]
+
+    val reviewers = _rep_infer_reviewers(norm_path, owner_rules)
+    if reviewers.len() == 0:
+        val suggestion = EasyFix.create(
+            id: "E-MC-REP-001:{decl_line_num}",
+            description: "suggestion: no matching area in `config/policy/unsafe_region_owners.sdn` for `{file}`; register the path prefix in the owner table instead of inventing reviewers",
+            confidence: FixConfidence.Uncertain
+        )
+        return [suggestion]
+
     val kind = _rep_infer_kind(norm_path, unsafe_scan.capabilities, body_text)
-    val reviewer = _rep_infer_reviewer(norm_path)
     val reason = "Explicit unsafe {kind} boundary in {active.fn_name}"
+    val reviewers_quoted = _rep_format_caps_quoted(reviewers)
     val caps_quoted = _rep_format_caps_quoted(unsafe_scan.capabilities)
     val insert_idx = active.insert_line
     val indent = _rep_indent_text(raw_lines[insert_idx])
-    val new_text = "{indent}@representation_boundary(kind: \"{kind}\", reason: \"{reason}\", reviewers: [\"{reviewer}\"], capabilities: [{caps_quoted}])\n"
+    val new_text = "{indent}@representation_boundary(kind: \"{kind}\", reason: \"{reason}\", reviewers: [{reviewers_quoted}], capabilities: [{caps_quoted}])\n"
 
-    val decl_line_num = active.decl_line + 1
     val insert_line_num = insert_idx + 1
     val start_off = offsets[insert_idx]
 
@@ -587,9 +696,11 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
     val code = stripped.code
     val in_triple = stripped.in_triple
     val norm_path = _rep_normalize_path(file)
+    val owner_rules = _rep_load_owner_rules()
 
     var fixes: [EasyFix] = []
     var in_container = false
+    var container_kind = ""
     var container_indent = -1
     var member_indent = -1
 
@@ -604,6 +715,7 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
         fn_name: "",
         insert_line: 0,
         has_rep_boundary: false,
+        in_impl_block: false,
         header_done: false,
         header_paren_depth: 0,
         header_bracket_depth: 0,
@@ -638,7 +750,7 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
             else:
                 val is_comment_or_blank = in_triple[li] or raw_t == "" or raw_t.starts_with("#")
                 if not is_comment_or_blank and indent <= active.fn_indent:
-                    for f in _rep_finalize_fn(active, lines, offsets, file, norm_path):
+                    for f in _rep_finalize_fn(active, lines, offsets, file, norm_path, owner_rules):
                         fixes.push(f)
                     has_active = false
                 else:
@@ -665,6 +777,7 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
 
         if in_container and indent <= container_indent:
             in_container = false
+            container_kind = ""
             container_indent = -1
             member_indent = -1
 
@@ -687,8 +800,10 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
             li = li + 1
             continue
 
-        if not in_container and indent == 0 and _rep_is_container_header(t):
+        val detected_container = if not in_container and indent == 0: _rep_container_kind(t) else: ""
+        if detected_container != "":
             in_container = true
+            container_kind = detected_container
             container_indent = indent
             member_indent = -1
             pending_attr_start = -1
@@ -710,6 +825,7 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
                     fn_name: fn_hdr.name,
                     insert_line: insert_line,
                     has_rep_boundary: pending_has_rep_boundary,
+                    in_impl_block: in_container and container_kind == "impl",
                     header_done: hdr.0,
                     header_paren_depth: hdr.1,
                     header_bracket_depth: hdr.2,
@@ -729,7 +845,7 @@ pub fn check_representation_boundary_with_view(file: text, view: EasyFixSourceVi
         li = li + 1
 
     if has_active:
-        for f in _rep_finalize_fn(active, lines, offsets, file, norm_path):
+        for f in _rep_finalize_fn(active, lines, offsets, file, norm_path, owner_rules):
             fixes.push(f)
 
     fixes
