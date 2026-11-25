@@ -1,0 +1,159 @@
+#![allow(primitive_api)] # Build-time ANTLR4 G4 importer uses protocol schema versions and line indices
+# A2UI Express Grammar G4 Importer (Express.g4 -> Normalized Model -> Strict SDN)
+#
+# Narrow build-time importer for pinned Express.g4 (`1dbe86a9...`), emitting
+# strict-SDN grammar representations with unique rule keys and rejecting
+# unsupported ANTLR4 directives with source line numbers.
+
+use std.common.ui.a2ui.types.{A2UI_EXPRESS_GRAMMAR_REV}
+
+pub struct A2uiGrammarRule:
+    name: text
+    is_lexer: bool
+    alternatives: [text]
+    line: i64
+
+pub struct A2uiGrammarModel:
+    name: text
+    schema_version: i64
+    entry: text
+    source_repo: text
+    source_revision: text
+    source_path: text
+    rules: [A2uiGrammarRule]
+
+fn _is_upper_ascii(b: i64) -> bool:
+    b >= 65 and b <= 90
+
+fn _make_grammar_rule(name: text, body: text, line: i64) -> A2uiGrammarRule:
+    val first_byte = if name.byte_len() > 0: name.byte_at(0) else: 97
+    val is_lex = _is_upper_ascii(first_byte)
+    val raw_alts = body.split("|")
+    var alts: [text] = []
+    var i = 0
+    while i < raw_alts.len():
+        val a = raw_alts[i].trim()
+        if a != "":
+            alts.push(a)
+        i = i + 1
+    A2uiGrammarRule(name: name, is_lexer: is_lex, alternatives: alts, line: line)
+
+fn _sdn_quote(s: text) -> text:
+    var out = "\""
+    var i = 0
+    val n = s.byte_len()
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 92:
+            out = out + "\\\\"
+        elif b == 34:
+            out = out + "\\\""
+        elif b == 10:
+            out = out + "\\n"
+        else:
+            out = out + s.substring(i, i + 1)
+        i = i + 1
+    out + "\""
+
+# Reject unsupported ANTLR4 directives (embedded host-language actions,
+# semantic predicates, lexer commands beyond skip) with line numbers.
+pub fn a2ui_import_express_g4(g4_source: text, source_revision: text, source_path: text) -> Result<A2uiGrammarModel, text>:
+    val lines = g4_source.split("\n")
+    var grammar_name = ""
+    var rules: [A2uiGrammarRule] = []
+    var seen_names: Dict<text, bool> = {}
+    var in_rule = false
+    var cur_name = ""
+    var cur_body = ""
+    var cur_line = 0
+    var line_no = 0
+    while line_no < lines.len():
+        val raw_line = lines[line_no]
+        val trimmed = raw_line.trim()
+        line_no = line_no + 1
+        if trimmed == "" or trimmed.starts_with("//") or trimmed.starts_with("/*") or trimmed.starts_with("*"):
+            continue
+        if (trimmed.contains("{") and trimmed.contains("}?")) or trimmed.contains("@header") or trimmed.contains("@members"):
+            return Err("unsupported_g4_construct:line_" + line_no.to_string())
+        if not in_rule and trimmed.starts_with("grammar "):
+            var gname = trimmed.substring(8, trimmed.byte_len()).trim()
+            if gname.ends_with(";"):
+                gname = gname.substring(0, gname.byte_len() - 1).trim()
+            grammar_name = gname
+            continue
+        if not in_rule:
+            val colon_pos = trimmed.index_of(":")
+            if colon_pos > 0:
+                val rname = trimmed.substring(0, colon_pos).trim()
+                if seen_names.contains_key(rname):
+                    return Err("duplicate_g4_rule:" + rname + ":line_" + line_no.to_string())
+                seen_names[rname] = true
+                cur_name = rname
+                cur_line = line_no
+                cur_body = trimmed.substring(colon_pos + 1, trimmed.byte_len()).trim()
+                if cur_body.ends_with(";"):
+                    val clean = cur_body.substring(0, cur_body.byte_len() - 1).trim()
+                    rules.push(_make_grammar_rule(cur_name, clean, cur_line))
+                else:
+                    in_rule = true
+            else:
+                return Err("unexpected_g4_line:line_" + line_no.to_string())
+        else:
+            cur_body = cur_body + " " + trimmed
+            if trimmed.ends_with(";"):
+                val clean = cur_body.substring(0, cur_body.byte_len() - 1).trim()
+                rules.push(_make_grammar_rule(cur_name, clean, cur_line))
+                in_rule = false
+                cur_name = ""
+                cur_body = ""
+    if in_rule:
+        return Err("unterminated_g4_rule:" + cur_name)
+    if grammar_name == "":
+        return Err("missing_g4_grammar_header")
+    if rules.len() == 0:
+        return Err("empty_g4_grammar")
+    var entry = rules[0].name
+    var i = 0
+    while i < rules.len():
+        if rules[i].name == "program":
+            entry = "program"
+        i = i + 1
+    Ok(A2uiGrammarModel(
+        name: grammar_name,
+        schema_version: 1,
+        entry: entry,
+        source_repo: "https://github.com/a2ui-project/a2ui",
+        source_revision: source_revision,
+        source_path: source_path,
+        rules: rules
+    ))
+
+# Emit strict-SDN grammar representation with unique rule keys (no duplicate keys).
+pub fn a2ui_grammar_to_sdn(model: A2uiGrammarModel) -> text:
+    var lines: [text] = [
+        "grammar:",
+        "    name: " + _sdn_quote(model.name),
+        "    schema_version: " + model.schema_version.to_string(),
+        "    entry: " + _sdn_quote(model.entry),
+        "    source:",
+        "        repository: " + _sdn_quote(model.source_repo),
+        "        revision: " + _sdn_quote(model.source_revision),
+        "        path: " + _sdn_quote(model.source_path),
+        "rules:"
+    ]
+    var i = 0
+    while i < model.rules.len():
+        val r = model.rules[i]
+        val kind_label = if r.is_lexer: "lexer" else: "parser"
+        lines.push("    " + r.name + ":")
+        lines.push("        kind: " + kind_label)
+        lines.push("        line: " + r.line.to_string())
+        lines.push("        alternatives:")
+        var ai = 0
+        while ai < r.alternatives.len():
+            lines.push("            - " + _sdn_quote(r.alternatives[ai]))
+            ai = ai + 1
+        i = i + 1
+    lines.join("\n")
+
+export A2uiGrammarRule, A2uiGrammarModel, a2ui_import_express_g4, a2ui_grammar_to_sdn

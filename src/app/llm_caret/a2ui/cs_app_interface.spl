@@ -1,0 +1,306 @@
+#![allow(primitive_api)] # Caret app interface binds row limit and timestamp scalars to QueryIR
+# Caret Suite A2UI App Interface Registration, Declarative Assets, and Host Adapter
+#
+# Implements Section 13.2–13.6 & 13.8 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Exact flat SDN screen tables (complete interactive + Phase 3 read-only variant).
+#   - Trusted Caret authority policy (`caret.authority.sdn`) with default-deny and
+#     strict region ceilings (workspace -> roster, detail, composer).
+#   - `sendDataModel: false` on Caret surfaces to prevent whole-model leakage.
+#   - Stable host integration requiring zero changes to `cs_main.spl` on UI updates.
+
+use std.common.ui.a2ui.types.{A2UI_BASIC_CATALOG_ID, A2uiValue, A2uiSurfaceOp, A2uiArgPresence}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.screen_table.{KeyedCollectionView}
+use std.common.ui.a2ui.surface_state.{A2uiSurfaceRegistry, a2ui_surface_to_ui_tree}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    ReleaseAudience,
+    AppFieldSchema,
+    ResourceDescriptor,
+    QueryDescriptor,
+    CommandDescriptor,
+    DraftContract,
+    AppInterfaceRegistry
+}
+use std.common.app_interface.authority.{
+    RegionPolicy,
+    ResourcePolicyRule,
+    OperationPolicyRule,
+    AuthorityPolicy,
+    AuthorityGate,
+    AuthenticatedGrant,
+    authority_parse_regions_sdn
+}
+use std.common.app_interface.query_ir.{
+    QueryPredicate,
+    QueryPredicateOp,
+    QueryPlan,
+    QueryExecResult,
+    AuthorizedTableSnapshot,
+    query_execute_authorized
+}
+use std.common.app_interface.runtime.{AppInterfaceRuntime}
+use app.llm_caret.a2ui.cs_commands.{
+    caret_schema_select_args,
+    caret_schema_refresh_args,
+    caret_schema_send_args
+}
+
+# Exact 18-row flat SDN screen table from Section 13.5.
+pub fn caret_screen_sdn_v1() -> text:
+    var lines: [text] = [
+        "|id, parent, slot, order, region, repeat, key, expression|",
+        "root, null, null, 0, workspace, null, null, \"Column()\"",
+        "title, root, children, 0, workspace, null, null, \"Text(text=\\\"Caret Suite\\\")\"",
+        "status, root, children, 1, workspace, null, null, \"Text(text=$/view/status/summary)\"",
+        "toolbar, root, children, 2, roster, null, null, \"Row()\"",
+        "search, toolbar, children, 0, roster, null, null, \"TextField(label=\\\"Find agent\\\", value=$/draft/search)\"",
+        "refresh, toolbar, children, 1, roster, null, null, \"Button(action=Event(\\\"caret.refresh\\\", context={search: $/draft/search}))\"",
+        "refresh_label, refresh, child, 0, roster, null, null, \"Text(text=\\\"Refresh\\\")\"",
+        "agents, root, children, 3, roster, null, null, \"List()\"",
+        "agent, agents, children, 0, roster, \"/view/roster\", key, \"Column()\"",
+        "agent_select, agent, children, 0, roster, null, null, \"Button(action=Event(\\\"caret.select\\\", context={key: $key}))\"",
+        "agent_label, agent_select, child, 0, roster, null, null, \"Text(text=$label)\"",
+        "agent_summary, agent, children, 1, roster, null, null, \"Text(text=$summary, variant=\\\"caption\\\")\"",
+        "selected, root, children, 4, detail, null, null, \"Text(text=$/view/selected/summary)\"",
+        "preview, root, children, 5, detail, null, null, \"Text(text=$/view/selected/output)\"",
+        "composer, root, children, 6, composer, null, null, \"TextField(label=$/draft/target_label, value=$/draft/body, variant=\\\"longText\\\")\"",
+        "send, root, children, 7, composer, null, null, \"Button(action=Event(\\\"caret.send\\\", context={draftId: $/draft/id, draftRevision: $/draft/revision, body: $/draft/body}))\"",
+        "send_label, send, child, 0, composer, null, null, \"Text(text=\\\"Send\\\")\"",
+        "outcome, root, children, 8, composer, null, null, \"Text(text=$/view/outcome/summary)\""
+    ]
+    lines.join("\n")
+
+# Phase 3 read-only variant: omits action/input/composer rows, attaches labels directly.
+pub fn caret_readonly_screen_sdn_v1() -> text:
+    var lines: [text] = [
+        "|id, parent, slot, order, region, repeat, key, expression|",
+        "root, null, null, 0, workspace, null, null, \"Column()\"",
+        "title, root, children, 0, workspace, null, null, \"Text(text=\\\"Caret Suite\\\")\"",
+        "status, root, children, 1, workspace, null, null, \"Text(text=$/view/status/summary)\"",
+        "agents, root, children, 2, roster, null, null, \"List()\"",
+        "agent, agents, children, 0, roster, \"/view/roster\", key, \"Column()\"",
+        "agent_label, agent, children, 0, roster, null, null, \"Text(text=$label)\"",
+        "agent_summary, agent, children, 1, roster, null, null, \"Text(text=$summary, variant=\\\"caption\\\")\"",
+        "selected, root, children, 3, detail, null, null, \"Text(text=$/view/selected/summary)\"",
+        "preview, root, children, 4, detail, null, null, \"Text(text=$/view/selected/output)\""
+    ]
+    lines.join("\n")
+
+# Trusted `caret.authority.sdn` region policy excerpt (§13.6).
+pub fn caret_authority_regions_sdn_v1() -> text:
+    var lines: [text] = [
+        "policy:",
+        "    id: caret_ui_policy",
+        "    schema_version: 1",
+        "    revision: 1",
+        "    default: deny",
+        "    publisher: installed_app_owner",
+        "regions:",
+        "    workspace:",
+        "        parent: null",
+        "        ceiling: [discover, read, subscribe, invoke, compose]",
+        "    roster:",
+        "        parent: workspace",
+        "        ceiling: [read, subscribe, invoke]",
+        "    detail:",
+        "        parent: workspace",
+        "        ceiling: [read, subscribe]",
+        "    composer:",
+        "        parent: workspace",
+        "        ceiling: [read, subscribe, invoke]"
+    ]
+    lines.join("\n")
+
+pub fn caret_default_authority_policy() -> Result<AuthorityPolicy, text>:
+    val regions = authority_parse_regions_sdn(caret_authority_regions_sdn_v1())?
+    val roster_named = ["key", "label", "lifecycle", "turn", "transport", "evidence", "cpu_pct", "rss_mb", "cpu_label", "memory_label", "summary", "pinned", "order"]
+    val roster_dyn = ["key", "label", "summary", "lifecycle", "turn", "transport", "evidence", "cpu_label", "memory_label", "pinned"]
+    Ok(AuthorityPolicy(
+        id: "caret_ui_policy",
+        schema_version: 1,
+        revision: 1,
+        default_deny: true,
+        publisher: "installed_app_owner",
+        regions: regions,
+        resource_rules: [
+            ResourcePolicyRule(
+                resource_id: "caret.roster",
+                operations: [AppOpKind.Read, AppOpKind.Subscribe],
+                regions: ["roster", "detail"],
+                named_query_use_fields: roster_named,
+                dynamic_query_fields: roster_dyn,
+                release_fields: roster_dyn,
+                release_audiences: [ReleaseAudience.HumanSurface]
+            ),
+            ResourcePolicyRule(
+                resource_id: "caret.status",
+                operations: [AppOpKind.Read, AppOpKind.Subscribe],
+                regions: ["workspace"],
+                named_query_use_fields: ["summary"],
+                dynamic_query_fields: ["summary"],
+                release_fields: ["summary"],
+                release_audiences: [ReleaseAudience.HumanSurface]
+            ),
+            ResourcePolicyRule(
+                resource_id: "caret.pane_output",
+                operations: [AppOpKind.Read, AppOpKind.Subscribe],
+                regions: ["detail"],
+                named_query_use_fields: ["summary", "output"],
+                dynamic_query_fields: ["summary", "output"],
+                release_fields: ["summary", "output"],
+                release_audiences: [ReleaseAudience.HumanSurface]
+            ),
+            ResourcePolicyRule(
+                resource_id: "caret.outcome",
+                operations: [AppOpKind.Read, AppOpKind.Subscribe],
+                regions: ["composer"],
+                named_query_use_fields: ["summary", "request_id", "delivery"],
+                dynamic_query_fields: ["summary", "request_id", "delivery"],
+                release_fields: ["summary", "request_id", "delivery"],
+                release_audiences: [ReleaseAudience.HumanSurface]
+            )
+        ],
+        operation_rules: [
+            OperationPolicyRule(
+                operation_id: "caret.select",
+                operations: [AppOpKind.Invoke],
+                regions: ["roster"],
+                requires_activation: false,
+                input_mode: "",
+                payload_release: ReleaseAudience.HumanSurface
+            ),
+            OperationPolicyRule(
+                operation_id: "caret.refresh",
+                operations: [AppOpKind.Invoke],
+                regions: ["roster"],
+                requires_activation: false,
+                input_mode: "",
+                payload_release: ReleaseAudience.HumanSurface
+            ),
+            OperationPolicyRule(
+                operation_id: "caret.send",
+                operations: [AppOpKind.Invoke],
+                regions: ["composer"],
+                requires_activation: true,
+                input_mode: "Message",
+                payload_release: ReleaseAudience.SelectedProviderOnly
+            )
+        ],
+        model_snapshot_release_allowed: false,
+        new_executable_code_allowed: false,
+        policy_changes_allowed: false
+    ))
+
+pub fn caret_register_app_interface() -> Result<AppInterfaceRegistry, text>:
+    val draft = DraftContract(
+        owner: "authenticated_surface",
+        writable_paths: ["/draft/search", "/draft/body"],
+        protected_paths: ["/draft/id", "/draft/revision", "/draft/target_label"],
+        max_bytes_per_field: 32768
+    )
+    var reg = AppInterfaceRegistry.new("caret.ui", "caret_owner", draft)
+    reg.register_resource(ResourceDescriptor(
+        id: "caret.roster",
+        schema_version: 1,
+        owner_provider: "caret_owner",
+        key_field: "key",
+        fields: [
+            AppFieldSchema(name: "key", type_name: "text", required: true, max_bytes: 128),
+            AppFieldSchema(name: "label", type_name: "text", required: true, max_bytes: 256),
+            AppFieldSchema(name: "summary", type_name: "text", required: true, max_bytes: 512)
+        ],
+        permitted_ops: [AppOpKind.Read, AppOpKind.Subscribe]
+    ))?
+    reg.register_resource(ResourceDescriptor(
+        id: "caret.status",
+        schema_version: 1,
+        owner_provider: "caret_owner",
+        key_field: "key",
+        fields: [AppFieldSchema(name: "summary", type_name: "text", required: true, max_bytes: 512)],
+        permitted_ops: [AppOpKind.Read, AppOpKind.Subscribe]
+    ))?
+    reg.register_resource(ResourceDescriptor(
+        id: "caret.pane_output",
+        schema_version: 1,
+        owner_provider: "caret_owner",
+        key_field: "key",
+        fields: [
+            AppFieldSchema(name: "summary", type_name: "text", required: true, max_bytes: 512),
+            AppFieldSchema(name: "output", type_name: "text", required: true, max_bytes: 16384)
+        ],
+        permitted_ops: [AppOpKind.Read, AppOpKind.Subscribe]
+    ))?
+    reg.register_query(QueryDescriptor(
+        id: "caret.roster_view",
+        sources: ["caret.roster"],
+        optional_sources: [],
+        region: "roster",
+        release_audience: ReleaseAudience.HumanSurface,
+        destination_path: "/view/roster",
+        max_rows: 64,
+        max_work_steps: 4096
+    ))?
+    reg.register_command(CommandDescriptor(
+        id: "caret.select",
+        op_kind: AppOpKind.Invoke,
+        region: "roster",
+        arg_fields: caret_schema_select_args(),
+        requires_user_activation: false,
+        payload_release: ReleaseAudience.HumanSurface
+    ))?
+    reg.register_command(CommandDescriptor(
+        id: "caret.refresh",
+        op_kind: AppOpKind.Invoke,
+        region: "roster",
+        arg_fields: caret_schema_refresh_args(),
+        requires_user_activation: false,
+        payload_release: ReleaseAudience.HumanSurface
+    ))?
+    reg.register_command(CommandDescriptor(
+        id: "caret.send",
+        op_kind: AppOpKind.Invoke,
+        region: "composer",
+        arg_fields: caret_schema_send_args(),
+        requires_user_activation: true,
+        payload_release: ReleaseAudience.SelectedProviderOnly
+    ))?
+    Ok(reg)
+
+# Execute Caret's named roster query through the shared authorized QueryIR path.
+pub fn caret_run_roster_query(
+    gate: AuthorityGate,
+    grant: AuthenticatedGrant,
+    principal_id: text,
+    surface_id: text,
+    snapshot: AuthorizedTableSnapshot,
+    search_filter: text,
+    limit: i64,
+    now_ms: i64
+) -> QueryExecResult:
+    var preds: [QueryPredicate] = []
+    if search_filter != "":
+        preds.push(QueryPredicate(
+            field: "label",
+            op: QueryPredicateOp.LabelMatches,
+            param_value: search_filter
+        ))
+    val plan = QueryPlan(
+        query_id: "caret.roster_view",
+        resource_id: "caret.roster",
+        region_id: "roster",
+        is_dynamic: false,
+        predicates: preds,
+        project_fields: ["key", "label", "summary", "lifecycle", "turn", "cpu_label", "memory_label", "pinned"],
+        order_field: "",
+        order_desc: false,
+        cursor_key: "",
+        cursor_policy_revision: gate.policy.revision,
+        limit: limit,
+        max_work_steps: 4096,
+        audience: ReleaseAudience.HumanSurface
+    )
+    query_execute_authorized(gate, grant, principal_id, surface_id, snapshot, plan, "/view/roster", now_ms)
+
+export caret_screen_sdn_v1, caret_readonly_screen_sdn_v1, caret_authority_regions_sdn_v1
+export caret_default_authority_policy, caret_register_app_interface, caret_run_roster_query

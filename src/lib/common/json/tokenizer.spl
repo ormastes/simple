@@ -275,6 +275,103 @@ fn json_tokenize(text: text) -> [(text, text)]:
                                                     pos = pos + 1
     tokens
 
+fn json_tokenize_bounded(text: text, max_source_bytes: i64, max_tokens: i64) -> (bool, [(text, text)], text):
+    """Bounded JSON tokenization enforcing byte and token budgets before full allocation."""
+    if max_source_bytes <= 0 or max_tokens <= 0:
+        return (false, [], "Invalid JSON tokenization limits")
+    if text.byte_len() > max_source_bytes:
+        return (false, [], "JSON source exceeds max_source_bytes budget")
+    var tokens: [(text, text)] = []
+    var pos = 0
+    while pos < text.byte_len():
+        pos = json_skip_whitespace(text, pos)
+        if pos >= text.byte_len():
+            break
+        val c = text.substring(pos, pos + 1)
+        if c == "":
+            break
+        if tokens.len() >= max_tokens:
+            return (false, [], "JSON token count exceeds max_tokens budget")
+        if c == "{{":
+            tokens.push(("LBRACE", "{{"))
+            pos = pos + 1
+        elif c == "}":
+            tokens.push(("RBRACE", "}"))
+            pos = pos + 1
+        elif c == "[":
+            tokens.push(("LBRACKET", "["))
+            pos = pos + 1
+        elif c == "]":
+            tokens.push(("RBRACKET", "]"))
+            pos = pos + 1
+        elif c == ":":
+            tokens.push(("COLON", ":"))
+            pos = pos + 1
+        elif c == ",":
+            tokens.push(("COMMA", ","))
+            pos = pos + 1
+        elif c == "\"":
+            var str_parts: [text] = []
+            pos = pos + 1
+            var escaped = false
+            var closed = false
+            while pos < text.byte_len():
+                val sc = text.substring(pos, pos + 1)
+                if escaped:
+                    str_parts.push("\\" + sc)
+                    escaped = false
+                    pos = pos + 1
+                elif sc == "\\":
+                    escaped = true
+                    pos = pos + 1
+                elif sc == "\"":
+                    closed = true
+                    pos = pos + 1
+                    break
+                else:
+                    str_parts.push(sc)
+                    pos = pos + 1
+            if not closed:
+                return (false, [], "Unterminated string")
+            val joined = str_parts.join("")
+            if not json_string_escapes_are_valid(joined):
+                return (false, [], "Invalid string escape")
+            tokens.push(("STRING", joined))
+        elif c == "t":
+            if text.substring(pos, pos + 4) == "true":
+                tokens.push(("TRUE", "true"))
+                pos = pos + 4
+            else:
+                return (false, [], "Unexpected token: " + c)
+        elif c == "f":
+            if text.substring(pos, pos + 5) == "false":
+                tokens.push(("FALSE", "false"))
+                pos = pos + 5
+            else:
+                return (false, [], "Unexpected token: " + c)
+        elif c == "n":
+            if text.substring(pos, pos + 4) == "null":
+                tokens.push(("NULL", "null"))
+                pos = pos + 4
+            else:
+                return (false, [], "Unexpected token: " + c)
+        elif c == "-" or (c >= "0" and c <= "9"):
+            var num_parts: [text] = []
+            while pos < text.byte_len():
+                val nc = text.substring(pos, pos + 1)
+                if nc == "-" or nc == "." or nc == "e" or nc == "E" or nc == "+" or (nc >= "0" and nc <= "9"):
+                    num_parts.push(nc)
+                    pos = pos + 1
+                else:
+                    break
+            val number = num_parts.join("")
+            if not json_number_is_valid(number):
+                return (false, [], "Invalid number")
+            tokens.push(("NUMBER", number))
+        else:
+            return (false, [], "Unexpected token: " + c)
+    (true, tokens, "")
+
 fn _json_hex_digit_value(c: text) -> i64:
     """Value of one hex digit character, or -1 if not a hex digit."""
     if c >= "0" and c <= "9":

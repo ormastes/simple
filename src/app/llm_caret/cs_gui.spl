@@ -10,8 +10,12 @@ use app.llm_caret.workbench.session_contract.{
 use app.llm_caret.workbench.gui_layout.{
     WorkbenchMode, SessionUiState, workbench_mode_for_width}
 use app.llm_caret.workbench.gui_page.{render_workbench_page_with_output}
-use app.llm_caret.workbench.roster_order.{roster_order}
-use std.io_runtime.{env_get}
+use app.llm_caret.a2ui.cs_live_host.{
+    cs_gui_roster_indices,
+    cs_agent_to_session_view,
+    cs_dashboard_session_views,
+    cs_resolve_ui_mode
+}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_sfnt_resolve_path}
 use std.gc_async_mut.gpu.engine2d.color.{rgb, rgba}
 
@@ -53,85 +57,6 @@ fn _cs_gui_is_pinned(pins: [text], id: text) -> bool:
             return true
     false
 
-fn _cs_gui_roster_indices(d: CsDashboard) -> [i64]:
-    var ids: [SessionId] = []
-    for a in d.agents:
-        ids = ids + [new_session_id(a.agent_id)]
-    var pin_ids: [SessionId] = []
-    for p in d.pins:
-        pin_ids = pin_ids + [new_session_id(p)]
-    var mru_ids: [SessionId] = []
-    for m in d.mru:
-        mru_ids = mru_ids + [new_session_id(m)]
-    val ordered = roster_order(ids, pin_ids, mru_ids)
-    var out: [i64] = []
-    for oid in ordered:
-        var i: i64 = 0
-        while i < d.agents.len():
-            if d.agents[i].agent_id == oid.value:
-                out = out + [i]
-                break
-            i = i + 1
-    out
-
-fn _cs_agent_to_session_view(a: CsAgent, mgr_status: text) -> SessionView:
-    val st = a.status.to_lower()
-    var lifecycle = ProcessLifecycle.NotStarted
-    var turn = AgentTurn.Unknown
-    var transport = Transport.Connecting
-    var needs_attention = false
-    if st == "running" or st == "active" or st == "ready":
-        lifecycle = ProcessLifecycle.Running
-        turn = AgentTurn.Idle
-        transport = Transport.Ready
-    elif st == "working" or st == "busy":
-        lifecycle = ProcessLifecycle.Running
-        turn = AgentTurn.Working
-        transport = Transport.Ready
-    elif st == "idle":
-        lifecycle = ProcessLifecycle.Running
-        turn = AgentTurn.Idle
-        transport = Transport.Ready
-    elif st == "waiting_approval":
-        lifecycle = ProcessLifecycle.Running
-        turn = AgentTurn.WaitingApproval
-        transport = Transport.Ready
-        needs_attention = true
-    elif st == "waiting_answer":
-        lifecycle = ProcessLifecycle.Running
-        turn = AgentTurn.WaitingAnswer
-        transport = Transport.Ready
-        needs_attention = true
-    elif st == "starting":
-        lifecycle = ProcessLifecycle.Starting
-        turn = AgentTurn.Queued
-        transport = Transport.Connecting
-    elif st == "exited" or st == "stopped" or st == "completed":
-        lifecycle = ProcessLifecycle.Exited
-        turn = AgentTurn.Completed
-        transport = Transport.Disconnected
-    elif st == "failed" or st == "error":
-        lifecycle = ProcessLifecycle.Failed
-        turn = AgentTurn.Failed
-        transport = Transport.Closed
-    elif st == "lost":
-        lifecycle = ProcessLifecycle.Lost
-        turn = AgentTurn.Unknown
-        transport = Transport.Stale
-    if mgr_status.to_lower().contains("disconnected") or mgr_status.to_lower().contains("error"):
-        if transport == Transport.Ready:
-            transport = Transport.Stale
-    SessionView(
-        id: new_session_id(a.agent_id),
-        label: a.agent_id + " (" + a.spec + ")",
-        provider: a.spec,
-        lifecycle: lifecycle,
-        turn: turn,
-        transport: transport,
-        evidence: CapabilityEvidence.Probed,
-        needs_attention: needs_attention
-    )
-
 fn cs_render_gui_html(d: CsDashboard, width: i64, height: i64) -> text:
     var w = if width <= 0: 960 else: width
     var h = if height <= 0: 600 else: height
@@ -139,11 +64,11 @@ fn cs_render_gui_html(d: CsDashboard, width: i64, height: i64) -> text:
     var states: [SessionUiState] = []
     var selected_id = new_session_id(d.session)
     var pane_id = d.session
-    val ordered = _cs_gui_roster_indices(d)
+    val ordered = cs_gui_roster_indices(d)
     var i: i64 = 0
     for idx in ordered:
         val a = d.agents[idx]
-        val view = _cs_agent_to_session_view(a, d.manager_status)
+        val view = cs_agent_to_session_view(a, d.manager_status)
         views = views + [view]
         val is_sel = idx == d.selected or (d.selected < 0 and i == 0)
         if is_sel:
@@ -239,7 +164,7 @@ fn cs_render_gui_frame(d: CsDashboard, width: i32, height: i32, backend: text) -
     eng.draw_rect_filled(sidebar_w - 1, body_y, 1, body_h, border_col)
     _cs_gui_draw_text(eng, sfnt_path, 14, body_y + 12, "AGENTS ROSTER (" + d.agents.len().to_text() + ")", txt_muted, 11)
 
-    val ordered = _cs_gui_roster_indices(d)
+    val ordered = cs_gui_roster_indices(d)
     var sel_idx: i64 = d.selected
     if (sel_idx < 0 or sel_idx >= d.agents.len()) and ordered.len() > 0:
         sel_idx = ordered[0]
@@ -410,30 +335,4 @@ fn cs_render_gui_frame(d: CsDashboard, width: i32, height: i32, backend: text) -
         selected_agent: sel_agent_name
     )
 
-fn cs_resolve_ui_mode(args: [text]) -> text:
-    var i: i64 = 0
-    var has_gui = false
-    var has_frame_once = false
-    while i < args.len():
-        val a = args[i]
-        if a == "--tui":
-            return "tui"
-        if a == "--gui-frame-once":
-            return "gui_frame_once"
-        if a == "--gui":
-            has_gui = true
-        if a == "--frame-once":
-            has_frame_once = true
-        i = i + 1
-    if has_gui and has_frame_once:
-        return "gui_frame_once"
-    if has_gui:
-        return "gui"
-    val env_mode = (env_get("CARET_SUITE_MODE") ?? "").to_lower()
-    if env_mode == "gui":
-        if has_frame_once:
-            return "gui_frame_once"
-        return "gui"
-    "tui"
-
-export CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode
+export CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode, cs_dashboard_session_views

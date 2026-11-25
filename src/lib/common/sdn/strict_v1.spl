@@ -14,7 +14,7 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.strict_types_v1.*
 use std.common.sdn.structural_scalar_value_v1.{
     sdn_integer_from_span_v1, sdn_decode_quoted_scalar_v1, sdn_float_spelling_v1}
-use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_located_v1}
+use std.common.base_encoding.utilities.{validate_utf8_bytes_located_v1, validated_utf8_bytes_to_text_located_v1}
 
 pub fn sdn_strict_limits_valid_v1(limits: SdnStrictLimitsV1) -> bool:
     (limits.max_source_bytes >= 0 and limits.max_source_bytes <= 16777216 and
@@ -40,6 +40,10 @@ fn strict_byte_issue_v1(bytes: [u8], offset: i64, message: text) -> SdnStrictIss
         index = index + 1
     SdnStrictIssueV1(code: "invalid_utf8", message: message, offset: offset,
         line: line, column: column)
+
+fn _is_char_indexed_engine() -> bool:
+    val sample = "é"
+    sample.len() != sample.byte_len()
 
 fn strict_integer_spelling_v1(spelling: text) -> bool:
     var index = 0
@@ -72,12 +76,26 @@ class StrictSdnReaderV1:
     # issue offsets) while substring is char-indexed under the interpreter;
     # any multi-byte content before the span shifts a char-based slice (see
     # quoted()). All span extractions go through here.
+    fn char_offset_for_byte(byte_pos: i64) -> i64:
+        var chars = 0
+        var idx = 0
+        val limit = if byte_pos < self.bytes.len(): byte_pos else: self.bytes.len()
+        while idx < limit:
+            val b = self.bytes[idx].to_i64()
+            if b < 128 or b >= 192:
+                chars = chars + 1
+            idx = idx + 1
+        chars
+
     fn text_span(start: i64, end_byte: i64) -> text:
         if end_byte <= start:
             return ""
-        match validated_utf8_bytes_to_text_located_v1(self.source.bytes()[start:end_byte]):
-            case Ok(value): value
-            case Err(_issue): ""
+        val clamped_end = if end_byte <= self.bytes.len(): end_byte else: self.bytes.len()
+        if not _is_char_indexed_engine() and clamped_end <= self.source.byte_len():
+            return self.source.substring(start, clamped_end)
+        val c_start = self.char_offset_for_byte(start)
+        val c_end = self.char_offset_for_byte(clamped_end)
+        self.source.substring(c_start, c_end)
 
     fn issue(code: text, message: text) -> SdnStrictIssueV1:
         var line = 1
@@ -191,9 +209,7 @@ class StrictSdnReaderV1:
                 # interpreter; with multi-byte content the slice overshoots
                 # and the decoder reads phantom trailing content. Bridge via
                 # the byte span.
-                val raw = match validated_utf8_bytes_to_text_located_v1(self.source.bytes()[start:self.cursor]):
-                    case Ok(value): value
-                    case Err(_issue): return Err(self.issue("quoted_scalar", "quoted scalar is not valid UTF-8"))
+                val raw = self.text_span(start, self.cursor)
                 match sdn_decode_quoted_scalar_v1(raw):
                     case Ok(value): return Ok(value)
                     case Err(reason): return Err(self.issue("quoted_scalar", reason))
@@ -464,11 +480,7 @@ class StrictSdnReaderV1:
         self.next_line()?
         Ok(item)
 
-fn strict_decode_bytes_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<SdnStrictDocumentV1, SdnStrictIssueV1>:
-    var source = ""
-    match validated_utf8_bytes_to_text_located_v1(bytes):
-        case Ok(value): source = value
-        case Err(issue): return Err(strict_byte_issue_v1(bytes, issue.offset, issue.message))
+fn strict_decode_source_and_bytes_v1(source: text, bytes: [u8], limits: SdnStrictLimitsV1) -> Result<SdnStrictDocumentV1, SdnStrictIssueV1>:
     var reader = StrictSdnReaderV1(source: source, bytes: bytes, limits: limits)
     reader.next_line()?
     if reader.peek() < 0:
@@ -481,6 +493,13 @@ fn strict_decode_bytes_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<SdnS
     Ok(SdnStrictDocumentV1(value: value, consumed_bytes: reader.cursor,
         nodes: reader.nodes, rows: reader.rows, cells: reader.cells))
 
+fn strict_decode_bytes_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<SdnStrictDocumentV1, SdnStrictIssueV1>:
+    var source = ""
+    match validated_utf8_bytes_to_text_located_v1(bytes):
+        case Ok(value): source = value
+        case Err(issue): return Err(strict_byte_issue_v1(bytes, issue.offset, issue.message))
+    strict_decode_source_and_bytes_v1(source, bytes, limits)
+
 pub fn sdn_parse_strict_bytes_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<SdnStrictDocumentV1, SdnStrictIssueV1>:
     if not sdn_strict_limits_valid_v1(limits):
         return Err(strict_input_issue_v1("invalid_limits", "Strict SDN limits are outside hard bounds"))
@@ -491,8 +510,12 @@ pub fn sdn_parse_strict_bytes_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Resu
 pub fn sdn_parse_strict_v1(source: text, limits: SdnStrictLimitsV1) -> Result<SdnStrictDocumentV1, SdnStrictIssueV1>:
     if not sdn_strict_limits_valid_v1(limits):
         return Err(strict_input_issue_v1("invalid_limits", "Strict SDN limits are outside hard bounds"))
-    if source.len() > limits.max_source_bytes:
+    val bytes = source.bytes()
+    if bytes.len() > limits.max_source_bytes:
         return Err(strict_input_issue_v1("source_limit", "SDN source exceeds configured byte budget"))
-    strict_decode_bytes_v1(source.bytes(), limits)
+    match validate_utf8_bytes_located_v1(bytes):
+        case Ok(_): ()
+        case Err(issue): return Err(strict_byte_issue_v1(bytes, issue.offset, issue.message))
+    strict_decode_source_and_bytes_v1(source, bytes, limits)
 
 export sdn_parse_strict_v1, sdn_parse_strict_bytes_v1, sdn_strict_limits_valid_v1

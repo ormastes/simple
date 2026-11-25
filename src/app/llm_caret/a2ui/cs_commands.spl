@@ -1,0 +1,279 @@
+#![allow(primitive_api)] # Caret command adapter receives boolean activation and timestamp parameters
+# Caret Suite Typed Command Adapters (Select, Refresh, Message-Only Send)
+#
+# Implements Section 13.7 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Strict argument schemas rejecting unknown / mass-assignment fields.
+#   - Reuses ComposerDraft, send_draft_guarded, PaneBindingResult, and
+#     session_control_lease_check_v2.
+#   - Message-only Send: rejects non-Message modes; slash-prefixed text such as
+#     `/launch` or `/kill` stays inert Message data and NEVER invokes cs_handle_command.
+#   - Honest completion outcomes (Queued, Sent, Acknowledged, Rejected, Unknown);
+#     never auto-resends on Unknown.
+
+use app.llm_caret.workbench.session_contract.{
+    SessionId,
+    InputMode,
+    Delivery,
+    ComposerDraft,
+    SessionExecutionBindingV2,
+    SessionControlLeaseKindV2,
+    SessionControlLeaseV2,
+    new_draft,
+    same_session,
+    session_control_lease_check_v2
+}
+use app.llm_caret.workbench.pane_binding.{PaneBindingResult}
+use app.llm_caret.workbench.session_source.{send_draft_guarded}
+use std.common.ui.a2ui.types.{A2uiValue, A2uiObjectEntry, A2uiArgPresence, a2ui_obj_get}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    ReleaseAudience,
+    CommandDeliveryState,
+    AppFieldSchema,
+    CommandOutcome,
+    app_schema_validate_args
+}
+use std.common.app_interface.authority.{AuthorityGate, AuthenticatedGrant}
+use std.common.app_interface.runtime.{AppInterfaceRuntime}
+
+pub fn caret_schema_select_args() -> [AppFieldSchema]:
+    [AppFieldSchema(name: "key", type_name: "text", required: true, max_bytes: 128)]
+
+pub fn caret_schema_refresh_args() -> [AppFieldSchema]:
+    [AppFieldSchema(name: "search", type_name: "text", required: false, max_bytes: 256)]
+
+pub fn caret_schema_send_args() -> [AppFieldSchema]:
+    [
+        AppFieldSchema(name: "draftId", type_name: "text", required: true, max_bytes: 128),
+        AppFieldSchema(name: "draftRevision", type_name: "int", required: true, max_bytes: 0),
+        AppFieldSchema(name: "body", type_name: "text", required: true, max_bytes: 32768)
+    ]
+
+# Result reported by the injected target delivery port (honest outcomes only).
+pub enum CaretTransportDelivery:
+    Sent
+    Acknowledged
+    Failed(reason: text)
+    Uncertain(reason: text)
+
+pub struct CaretSendContext:
+    captured_draft: ComposerDraft
+    live_session: SessionId
+    pane_binding: PaneBindingResult
+    lease: SessionControlLeaseV2
+    observed_binding: SessionExecutionBindingV2
+    holder_id: text
+    client_id: text
+    current_nonce: text
+    current_lease_revision: i64
+    now_monotonic_ns: i64
+    native_conditional_clear: bool
+    submitted_edit_seq: i64
+
+fn _arg_text(args: [A2uiObjectEntry], key: text) -> text:
+    match a2ui_obj_get(args, key):
+        case A2uiArgPresence.Present(A2uiValue.Text(s)): s
+        case _: ""
+
+fn _arg_int(args: [A2uiObjectEntry], key: text) -> i64:
+    match a2ui_obj_get(args, key):
+        case A2uiArgPresence.Present(A2uiValue.Int(n)): n
+        case _: -1
+
+# Execute Caret's Message-only `caret.send` command with full admission,
+# authority consumption, exact deduplication, guarded draft + lease checks,
+# and honest delivery outcome reporting.
+pub fn caret_execute_send(
+    runtime: AppInterfaceRuntime,
+    gate: AuthorityGate,
+    grant: AuthenticatedGrant,
+    authenticated_principal: text,
+    user_activated: bool,
+    args: [A2uiObjectEntry],
+    ctx: CaretSendContext,
+    transport_result: CaretTransportDelivery,
+    request_id: text,
+    now_ms: i64
+) -> CommandOutcome:
+    # 1. Validate strict argument schema (rejects smuggled `input_mode`, `principal`, etc.).
+    match app_schema_validate_args(caret_schema_send_args(), args):
+        case Err(e):
+            return CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Rejected,
+                summary: "Rejected: " + e,
+                error_code: e,
+                domain_revision: runtime.revisions.data_revision
+            )
+        case Ok(_): ()
+
+    val draft_id = _arg_text(args, "draftId")
+    val base_rev = _arg_int(args, "draftRevision")
+    val body = _arg_text(args, "body")
+
+    if draft_id != runtime.draft.draft_id:
+        return CommandOutcome(
+            request_id: request_id,
+            command_id: "caret.send",
+            delivery: CommandDeliveryState.Rejected,
+            summary: "Rejected: draft_id_mismatch",
+            error_code: "draft_id_mismatch",
+            domain_revision: runtime.revisions.data_revision
+        )
+
+    # 2. Check exact-payload deduplication vs conflict on reused base revision.
+    val fingerprint = draft_id + "|" + ctx.captured_draft.target.value + ":" +
+        ctx.captured_draft.target.generation.to_string() + "|" + body
+    match runtime.check_command_dedupe("caret.send", base_rev, fingerprint):
+        case Err(conflict):
+            return CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Rejected,
+                summary: "Rejected: " + conflict,
+                error_code: conflict,
+                domain_revision: runtime.revisions.data_revision
+            )
+        case Ok(Some(prev)):
+            # Returning recorded outcome still requires valid current authority!
+            match gate.verify_grant_authentic(grant, authenticated_principal, now_ms):
+                case Err(auth_err):
+                    return CommandOutcome(
+                        request_id: request_id,
+                        command_id: "caret.send",
+                        delivery: CommandDeliveryState.Rejected,
+                        summary: "Rejected: " + auth_err,
+                        error_code: auth_err,
+                        domain_revision: runtime.revisions.data_revision
+                    )
+                case Ok(_):
+                    return prev
+        case Ok(None):
+            ()
+
+    # 3. Enforce Message-only mode on the captured draft (reject ProviderCommand/WorkbenchCommand/TerminalPaste).
+    val is_message = match ctx.captured_draft.mode:
+        case InputMode.Message: true
+        case _: false
+    if not is_message:
+        return CommandOutcome(
+            request_id: request_id,
+            command_id: "caret.send",
+            delivery: CommandDeliveryState.Rejected,
+            summary: "Rejected: non_message_input_mode",
+            error_code: "non_message_input_mode",
+            domain_revision: runtime.revisions.data_revision
+        )
+
+    # 4. Precondition check via existing send_draft_guarded (target generation + pane binding).
+    val snapshot_draft = ComposerDraft(
+        target: ctx.captured_draft.target,
+        mode: InputMode.Message,
+        body: body,
+        delivery: Delivery.Draft
+    )
+    val guarded = send_draft_guarded(snapshot_draft, ctx.live_session, ctx.pane_binding)
+    val guard_ok = match guarded.delivery:
+        case Delivery.Queued: true
+        case _: false
+    if not guard_ok:
+        return CommandOutcome(
+            request_id: request_id,
+            command_id: "caret.send",
+            delivery: CommandDeliveryState.Rejected,
+            summary: "Rejected: stale_target_or_unbound_pane",
+            error_code: "stale_target_or_unbound_pane",
+            domain_revision: runtime.revisions.data_revision
+        )
+
+    # 5. Verify current execution binding & input control lease.
+    val lease_err = session_control_lease_check_v2(
+        ctx.lease, ctx.observed_binding, SessionControlLeaseKindV2.Input,
+        ctx.holder_id, ctx.client_id, ctx.current_nonce,
+        ctx.current_lease_revision, ctx.now_monotonic_ns
+    )
+    if lease_err != "":
+        return CommandOutcome(
+            request_id: request_id,
+            command_id: "caret.send",
+            delivery: CommandDeliveryState.Rejected,
+            summary: "Rejected: " + lease_err,
+            error_code: lease_err,
+            domain_revision: runtime.revisions.data_revision
+        )
+
+    # 6. Authorize and consume command grant at the effect boundary.
+    match gate.check_and_consume_operation(
+        grant, authenticated_principal, runtime.surface_id,
+        "caret.send", AppOpKind.Invoke, "composer",
+        user_activated, "Message", ReleaseAudience.SelectedProviderOnly, now_ms
+    ):
+        case Err(auth_err):
+            return CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Rejected,
+                summary: "Rejected: " + auth_err,
+                error_code: auth_err,
+                domain_revision: runtime.revisions.data_revision
+            )
+        case Ok(_):
+            ()
+
+    # 7. Record honest delivery outcome. Slash-prefixed text (e.g. `/kill`) is
+    #    pure Message data delivered to the provider, never routed to cs_handle_command.
+    var outcome = CommandOutcome(
+        request_id: request_id,
+        command_id: "caret.send",
+        delivery: CommandDeliveryState.Queued,
+        summary: "Queued",
+        error_code: "",
+        domain_revision: runtime.revisions.data_revision
+    )
+    match transport_result:
+        case CaretTransportDelivery.Sent:
+            outcome = CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Sent,
+                summary: "Sent to " + ctx.captured_draft.target.value,
+                error_code: "",
+                domain_revision: runtime.revisions.data_revision + 1
+            )
+            runtime.reconcile_draft_after_send("/draft/body", ctx.submitted_edit_seq, ctx.native_conditional_clear)
+        case CaretTransportDelivery.Acknowledged:
+            outcome = CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Acknowledged,
+                summary: "Acknowledged by " + ctx.captured_draft.target.value,
+                error_code: "",
+                domain_revision: runtime.revisions.data_revision + 1
+            )
+            runtime.reconcile_draft_after_send("/draft/body", ctx.submitted_edit_seq, ctx.native_conditional_clear)
+        case CaretTransportDelivery.Failed(reason):
+            outcome = CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Rejected,
+                summary: "Rejected: " + reason,
+                error_code: reason,
+                domain_revision: runtime.revisions.data_revision
+            )
+        case CaretTransportDelivery.Uncertain(reason):
+            # Never auto-resend and never silently clear draft on Unknown.
+            outcome = CommandOutcome(
+                request_id: request_id,
+                command_id: "caret.send",
+                delivery: CommandDeliveryState.Unknown,
+                summary: "Unknown delivery state: " + reason,
+                error_code: "delivery_unknown",
+                domain_revision: runtime.revisions.data_revision
+            )
+
+    runtime.record_command_outcome("caret.send", base_rev, fingerprint, outcome)
+    outcome
+
+export caret_schema_select_args, caret_schema_refresh_args, caret_schema_send_args
+export CaretTransportDelivery, CaretSendContext, caret_execute_send

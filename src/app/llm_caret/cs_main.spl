@@ -28,7 +28,8 @@ use app.llm_caret.workbench.leader_keys.{new_leader_state, LeaderState, LeaderAc
 use app.llm_caret.workbench.key_chunker.{split_complete_keys, flush_carry, terminal_key_step,
     toggle_focus, focus_label}
 use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult, resolve_pane_binding}
-use app.llm_caret.cs_gui.{CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode}
+use app.llm_caret.cs_gui.{CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode, cs_dashboard_session_views}
+use app.llm_caret.a2ui.cs_live_host.{CaretA2uiHost}
 use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
 use app.llm_caret.workbench.session_source.{select_live_session, live_selected,
     publish_pane_binding, live_pane_bindings, live_pane_generation, observe_agent_generation,
@@ -88,6 +89,19 @@ fn cs_session_from_args(args: [text]) -> text:
 fn _cs_step(d: CsDashboard, line: text) -> (CsDashboard, text, bool):
     if line.trim() == "/capabilities":
         return (d, capability_lines(capability_rows(capability_probes_live())).join("\n"), false)
+    if line.trim() == "/a2ui":
+        val views = cs_dashboard_session_views(d)
+        val now_ms = time_now_monotonic_ms()
+        match CaretA2uiHost.create(d.session, "local_operator", "caret_session_local_secret_2026", false, now_ms):
+            case Err(err):
+                return (d, "cs-a2ui error: " + err, false)
+            case Ok(host_init):
+                var host = host_init
+                match host.sync_dashboard(d, views, d.selected >= 0, now_ms):
+                    case Err(sync_err):
+                        return (d, "cs-a2ui sync error: " + sync_err, false)
+                    case Ok(tree):
+                        return (d, host.render_summary_line(tree), false)
     val (after_cmd, action) = cs_handle_command(d, line)
     if action == "quit":
         return (after_cmd, "", true)
@@ -568,6 +582,32 @@ fn main() -> i64:
         if frame.pixels.len() == 0:
             return 1
         return 0
+    if ui_mode == "a2ui" or ui_mode == "a2ui_json":
+        val dash = cs_refresh(cs_dashboard_new(session))
+        val views = cs_dashboard_session_views(dash)
+        val now_ms = time_now_monotonic_ms()
+        match CaretA2uiHost.create(session, "local_operator", "caret_session_local_secret_2026", false, now_ms):
+            case Err(err):
+                print "cs-a2ui-error: " + err
+                return 1
+            case Ok(host_init):
+                var host = host_init
+                match host.sync_dashboard(dash, views, dash.selected >= 0, now_ms):
+                    case Err(sync_err):
+                        print "cs-a2ui-error: " + sync_err
+                        return 1
+                    case Ok(tree):
+                        if ui_mode == "a2ui_json":
+                            match host.export_wire_messages([]):
+                                case Ok(msgs):
+                                    for m in msgs:
+                                        print m
+                                case Err(jerr):
+                                    print "cs-a2ui-error: " + jerr
+                                    return 1
+                        else:
+                            print host.render_summary_line(tree)
+                        return 0
     if cs_live_input_supported(sosix_platform(), terminal_stdin_is_tty(), terminal_stdout_is_tty()) and terminal_enter_raw_mode():
         if cs_run_live(session).ok:
             return 0

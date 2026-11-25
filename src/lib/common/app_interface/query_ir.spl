@@ -1,0 +1,450 @@
+#![allow(primitive_api)] # Restricted SPL QueryIR planner and bounded executor use scalar budgets/flags
+# Restricted SPL QueryIR Planner, Bounded Executor, and Change Journal
+#
+# Implements Section 10 & 17.8 of doc/05_design/a2ui_dynamic_app_interfaces.md:
+#   - Closed, typed QueryIR (`ReadAuthorized -> Filter -> Project -> OrderBy -> Page -> Release`).
+#   - Restricted SPL query text admission rejecting imports, FFI, raw SQL, loops,
+#     reflection, and unauthorized fields in predicates, ordering, or projection.
+#   - Deterministic bounded execution over an owner-supplied AuthorizedTableSnapshot.
+#   - Typed error outcomes (InvalidParams, Denied, BudgetExceeded, StaleCursor, ProviderUnavailable).
+#   - Independent cursor-based BoundedChangeJournal so multiple subscribers receive
+#     insertions/updates/removals without stealing each other's events.
+
+use std.common.ui.a2ui.types.{A2uiValue, A2uiObjectEntry, A2uiArgPresence, a2ui_obj_get, a2ui_value_as_text}
+use std.common.ui.a2ui.screen_table.{KeyedRowRecord, KeyedCollectionView}
+use std.common.app_interface.contracts.{AppOpKind, ReleaseAudience}
+use std.common.app_interface.authority.{AuthorityGate, AuthenticatedGrant}
+
+# ============================================================================
+# Authorized Snapshot (Owner-Issued Handle)
+# ============================================================================
+
+pub struct AuthorizedTableSnapshot:
+    resource_id: text
+    data_revision: i64
+    rows: [KeyedRowRecord]
+    order: [text]
+
+# ============================================================================
+# Closed QueryIR (§10.2–10.4)
+# ============================================================================
+
+pub enum QueryPredicateOp:
+    LabelMatches
+    Equals
+    NotEquals
+    Contains
+
+pub struct QueryPredicate:
+    field: text
+    op: QueryPredicateOp
+    param_value: text
+
+pub struct QueryPlan:
+    query_id: text
+    resource_id: text
+    region_id: text
+    is_dynamic: bool
+    predicates: [QueryPredicate]
+    project_fields: [text]
+    order_field: text
+    order_desc: bool
+    cursor_key: text
+    cursor_policy_revision: i64
+    limit: i64
+    max_work_steps: i64
+    audience: ReleaseAudience
+
+pub enum QueryErrorKind:
+    None
+    InvalidParams
+    Denied
+    BudgetExceeded
+    StaleCursor
+    ProviderUnavailable
+    UnsupportedSyntax
+
+pub struct QueryExecResult:
+    ok: bool
+    error_kind: QueryErrorKind
+    error_message: text
+    collection: KeyedCollectionView
+    next_cursor: text
+    total_matched: i64
+    work_steps: i64
+
+fn _query_err(kind: QueryErrorKind, msg: text, steps: i64) -> QueryExecResult:
+    QueryExecResult(
+        ok: false,
+        error_kind: kind,
+        error_message: msg,
+        collection: KeyedCollectionView(path: "", order: [], rows: []),
+        next_cursor: "",
+        total_matched: 0,
+        work_steps: steps
+    )
+
+# Parse a restricted dynamic SPL query expression of the form:
+#   `from <resource> [where <field> <op> "<val>" [and ...]] [select <f1>,<f2>] [order <field> [asc|desc]] [limit <n>]`
+# Strictly rejects raw SQL, imports, FFI, loops, functions, and unknown syntax.
+pub fn query_parse_restricted_spl(
+    query_id: text,
+    region_id: text,
+    source: text,
+    audience: ReleaseAudience,
+    max_limit: i64
+) -> Result<QueryPlan, text>:
+    val lower = source.lower()
+    if lower.contains("import ") or lower.contains("extern ") or lower.contains("raw_sql") or
+        lower.contains("while ") or lower.contains("fn ") or lower.contains(";") or
+        lower.contains("--") or lower.contains("/*"):
+        return Err("forbidden_spl_query_construct")
+    val trimmed = source.trim()
+    if not trimmed.starts_with("from "):
+        return Err("query_must_start_with_from")
+    val tokens = trimmed.split(" ")
+    var clean: [text] = []
+    var i = 0
+    while i < tokens.len():
+        if tokens[i] != "":
+            clean.push(tokens[i])
+        i = i + 1
+    if clean.len() < 2:
+        return Err("missing_resource_name")
+    val resource_id = clean[1]
+    var predicates: [QueryPredicate] = []
+    var project_fields: [text] = []
+    var order_field = ""
+    var order_desc = false
+    var limit = max_limit
+    var idx = 2
+    while idx < clean.len():
+        val kw = clean[idx]
+        if kw == "where":
+            idx = idx + 1
+            while idx + 2 < clean.len():
+                val field = clean[idx]
+                val op_tok = clean[idx + 1]
+                var val_tok = clean[idx + 2]
+                if val_tok.starts_with("\"") and val_tok.ends_with("\"") and val_tok.byte_len() >= 2:
+                    val_tok = val_tok.substring(1, val_tok.byte_len() - 1)
+                var op = QueryPredicateOp.Equals
+                if op_tok == "==":
+                    op = QueryPredicateOp.Equals
+                elif op_tok == "!=":
+                    op = QueryPredicateOp.NotEquals
+                elif op_tok == "matches":
+                    op = QueryPredicateOp.LabelMatches
+                elif op_tok == "contains":
+                    op = QueryPredicateOp.Contains
+                else:
+                    return Err("unsupported_predicate_op:" + op_tok)
+                predicates.push(QueryPredicate(field: field, op: op, param_value: val_tok))
+                idx = idx + 3
+                if idx < clean.len() and clean[idx] == "and":
+                    idx = idx + 1
+                else:
+                    break
+        elif kw == "select":
+            if idx + 1 >= clean.len():
+                return Err("missing_select_fields")
+            val fparts = clean[idx + 1].split(",")
+            var fi = 0
+            while fi < fparts.len():
+                val fnm = fparts[fi].trim()
+                if fnm != "":
+                    project_fields.push(fnm)
+                fi = fi + 1
+            idx = idx + 2
+        elif kw == "order":
+            if idx + 1 >= clean.len():
+                return Err("missing_order_field")
+            order_field = clean[idx + 1]
+            idx = idx + 2
+            if idx < clean.len() and (clean[idx] == "asc" or clean[idx] == "desc"):
+                order_desc = clean[idx] == "desc"
+                idx = idx + 1
+        elif kw == "limit":
+            if idx + 1 >= clean.len():
+                return Err("missing_limit_value")
+            val parsed_lim = clean[idx + 1].to_int()
+            if parsed_lim <= 0 or parsed_lim > max_limit:
+                return Err("limit_out_of_bounds")
+            limit = parsed_lim
+            idx = idx + 2
+        else:
+            return Err("unexpected_query_clause:" + kw)
+    if project_fields.len() == 0:
+        return Err("query_requires_explicit_select_fields")
+    Ok(QueryPlan(
+        query_id: query_id,
+        resource_id: resource_id,
+        region_id: region_id,
+        is_dynamic: true,
+        predicates: predicates,
+        project_fields: project_fields,
+        order_field: order_field,
+        order_desc: order_desc,
+        cursor_key: "",
+        cursor_policy_revision: 0,
+        limit: limit,
+        max_work_steps: 4096,
+        audience: audience
+    ))
+
+fn _field_text(row: KeyedRowRecord, field: text) -> text:
+    if field == "key":
+        return row.key
+    match a2ui_obj_get(row.fields, field):
+        case A2uiArgPresence.Present(v): a2ui_value_as_text(v)
+        case A2uiArgPresence.Omitted: ""
+
+fn _eval_pred(row: KeyedRowRecord, pred: QueryPredicate) -> bool:
+    val actual = _field_text(row, pred.field)
+    match pred.op:
+        case QueryPredicateOp.Equals:
+            actual == pred.param_value
+        case QueryPredicateOp.NotEquals:
+            actual != pred.param_value
+        case QueryPredicateOp.Contains:
+            pred.param_value == "" or actual.contains(pred.param_value)
+        case QueryPredicateOp.LabelMatches:
+            pred.param_value == "" or actual.lower().contains(pred.param_value.lower())
+
+fn _collect_used_fields(plan: QueryPlan) -> [text]:
+    var used: [text] = []
+    var seen: Dict<text, bool> = {}
+    var i = 0
+    while i < plan.predicates.len():
+        val f = plan.predicates[i].field
+        if not seen.contains_key(f):
+            seen[f] = true
+            used.push(f)
+        i = i + 1
+    if plan.order_field != "" and not seen.contains_key(plan.order_field):
+        seen[plan.order_field] = true
+        used.push(plan.order_field)
+    var pi = 0
+    while pi < plan.project_fields.len():
+        val f = plan.project_fields[pi]
+        if not seen.contains_key(f):
+            seen[f] = true
+            used.push(f)
+        pi = pi + 1
+    used
+
+# Authorize every used (predicate/order/project) and released field, then run bounded QueryIR.
+pub fn query_execute_authorized(
+    gate: AuthorityGate,
+    grant: AuthenticatedGrant,
+    authenticated_principal: text,
+    surface_id: text,
+    snapshot: AuthorizedTableSnapshot,
+    plan: QueryPlan,
+    destination_path: text,
+    now_ms: i64
+) -> QueryExecResult:
+    if plan.limit <= 0 or plan.max_work_steps <= 0:
+        return _query_err(QueryErrorKind.InvalidParams, "invalid_query_bounds", 0)
+    if snapshot.resource_id != plan.resource_id:
+        return _query_err(QueryErrorKind.ProviderUnavailable, "snapshot_resource_mismatch", 0)
+    if plan.cursor_key != "" and plan.cursor_policy_revision != gate.policy.revision:
+        return _query_err(QueryErrorKind.StaleCursor, "cursor_policy_revision_mismatch", 0)
+
+    val used_fields = _collect_used_fields(plan)
+    val auth_res = gate.check_resource_access(
+        grant, authenticated_principal, surface_id, plan.resource_id,
+        AppOpKind.Read, plan.region_id, used_fields, plan.project_fields,
+        plan.is_dynamic, plan.audience, now_ms
+    )
+    match auth_res:
+        case Err(reason):
+            return _query_err(QueryErrorKind.Denied, reason, 0)
+        case Ok(_):
+            ()
+
+    # Build key -> row index in O(N) instead of nested scans (§17.8).
+    var row_by_key: Dict<text, i64> = {}
+    var i = 0
+    while i < snapshot.rows.len():
+        row_by_key[snapshot.rows[i].key] = i
+        i = i + 1
+
+    # Filter along snapshot's stable key order.
+    var matched: [KeyedRowRecord] = []
+    var steps = 0
+    var oi = 0
+    while oi < snapshot.order.len():
+        steps = steps + 1
+        if steps > plan.max_work_steps:
+            return _query_err(QueryErrorKind.BudgetExceeded, "query_step_budget_exceeded", steps)
+        val k = snapshot.order[oi]
+        if row_by_key.contains_key(k):
+            val row = snapshot.rows[row_by_key[k]]
+            var keep = true
+            var pi = 0
+            while pi < plan.predicates.len():
+                steps = steps + 1
+                if steps > plan.max_work_steps:
+                    return _query_err(QueryErrorKind.BudgetExceeded, "query_step_budget_exceeded", steps)
+                if not _eval_pred(row, plan.predicates[pi]):
+                    keep = false
+                    break
+                pi = pi + 1
+            if keep:
+                matched.push(row)
+        oi = oi + 1
+
+    # Optional deterministic ordering with stable key tie-breaker.
+    if plan.order_field != "":
+        var a = 1
+        while a < matched.len():
+            var b = a
+            while b > 0:
+                steps = steps + 1
+                if steps > plan.max_work_steps:
+                    return _query_err(QueryErrorKind.BudgetExceeded, "query_sort_budget_exceeded", steps)
+                val va = _field_text(matched[b - 1], plan.order_field)
+                val vb = _field_text(matched[b], plan.order_field)
+                val swap = if va != vb:
+                    if plan.order_desc: va < vb else: va > vb
+                else:
+                    matched[b - 1].key > matched[b].key
+                if not swap:
+                    break
+                val tmp = matched[b - 1]
+                matched[b - 1] = matched[b]
+                matched[b] = tmp
+                b = b - 1
+            a = a + 1
+
+    # Apply stable key cursor.
+    var start_idx = 0
+    if plan.cursor_key != "":
+        var found_cursor = false
+        var ci = 0
+        while ci < matched.len():
+            if matched[ci].key == plan.cursor_key:
+                start_idx = ci + 1
+                found_cursor = true
+                break
+            ci = ci + 1
+        if not found_cursor:
+            return _query_err(QueryErrorKind.StaleCursor, "cursor_key_not_found", steps)
+
+    # Project ONLY permitted fields and bound page size.
+    var out_order: [text] = []
+    var out_rows: [KeyedRowRecord] = []
+    var idx = start_idx
+    while idx < matched.len() and out_rows.len() < plan.limit:
+        val src = matched[idx]
+        var proj: [A2uiObjectEntry] = []
+        var fi = 0
+        while fi < plan.project_fields.len():
+            val fname = plan.project_fields[fi]
+            if fname == "key":
+                proj.push(A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: src.key)))
+            else:
+                match a2ui_obj_get(src.fields, fname):
+                    case A2uiArgPresence.Present(v):
+                        proj.push(A2uiObjectEntry(key: fname, value: v))
+                    case A2uiArgPresence.Omitted:
+                        ()
+            fi = fi + 1
+        out_order.push(src.key)
+        out_rows.push(KeyedRowRecord(key: src.key, fields: proj))
+        idx = idx + 1
+
+    val next_cursor = if idx < matched.len() and out_order.len() > 0:
+        out_order[out_order.len() - 1]
+    else:
+        ""
+
+    QueryExecResult(
+        ok: true,
+        error_kind: QueryErrorKind.None,
+        error_message: "",
+        collection: KeyedCollectionView(path: destination_path, order: out_order, rows: out_rows),
+        next_cursor: next_cursor,
+        total_matched: matched.len(),
+        work_steps: steps
+    )
+
+# ============================================================================
+# Independent Cursor-Based Bounded Change Journal (§17.8)
+# ============================================================================
+
+pub enum ChangeEventKind:
+    Upsert
+    Remove
+
+pub struct ChangeJournalEntry:
+    seq: i64
+    kind: ChangeEventKind
+    row_key: text
+    policy_revision: i64
+
+pub struct ChangePollResult:
+    needs_resnapshot: bool
+    events: [ChangeJournalEntry]
+    next_cursor: i64
+
+# Bounded change journal where multiple subscribers read removals independently
+# via their own sequence cursor (solving the destructive-drain gap in ECS).
+pub class BoundedChangeJournal:
+    max_entries: i64
+    next_seq: i64
+    earliest_seq: i64
+    entries: [ChangeJournalEntry]
+
+    static fn new(max_entries: i64) -> BoundedChangeJournal:
+        BoundedChangeJournal(
+            max_entries: max_entries,
+            next_seq: 1,
+            earliest_seq: 1,
+            entries: []
+        )
+
+    me append(kind: ChangeEventKind, row_key: text, policy_revision: i64) -> i64:
+        val seq = self.next_seq
+        self.next_seq = self.next_seq + 1
+        self.entries.push(ChangeJournalEntry(
+            seq: seq,
+            kind: kind,
+            row_key: row_key,
+            policy_revision: policy_revision
+        ))
+        while self.entries.len() > self.max_entries:
+            var shifted: [ChangeJournalEntry] = []
+            var i = 1
+            while i < self.entries.len():
+                shifted.push(self.entries[i])
+                i = i + 1
+            self.entries = shifted
+            if self.entries.len() > 0:
+                self.earliest_seq = self.entries[0].seq
+        seq
+
+    fn poll(since_seq: i64) -> ChangePollResult:
+        if since_seq < self.earliest_seq - 1:
+            return ChangePollResult(
+                needs_resnapshot: true,
+                events: [],
+                next_cursor: self.next_seq - 1
+            )
+        var out: [ChangeJournalEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].seq > since_seq:
+                out.push(self.entries[i])
+            i = i + 1
+        ChangePollResult(
+            needs_resnapshot: false,
+            events: out,
+            next_cursor: self.next_seq - 1
+        )
+
+export AuthorizedTableSnapshot, QueryPredicateOp, QueryPredicate, QueryPlan
+export QueryErrorKind, QueryExecResult
+export query_parse_restricted_spl, query_execute_authorized
+export ChangeEventKind, ChangeJournalEntry, ChangePollResult, BoundedChangeJournal

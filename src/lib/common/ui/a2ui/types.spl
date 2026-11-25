@@ -1,0 +1,356 @@
+#![allow(primitive_api)] # Protocol envelopes and byte spans use wire scalars (i64/f64/bool)
+# A2UI Core Types, Protocol Envelopes, and Qualified Identity
+#
+# Shared backend-independent protocol records for A2UI v1.0 above SimpleUI.
+# Distinguishes omitted arguments from explicit null values, preserves exact
+# wire IDs while qualifying native SimpleUI handles by (owner, surface, gen, id).
+
+pub val A2UI_WIRE_VERSION: text = "1.0"
+pub val A2UI_BASIC_CATALOG_ID: text = "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"
+pub val A2UI_EXPRESS_GRAMMAR_REV: text = "1dbe86a942579cc83a1d657213f0db3b881632ae"
+pub val A2UI_SDN_TABLE_PROFILE: text = "express_sdn_table_v1"
+
+# ============================================================================
+# Source Spans and Diagnostics
+# ============================================================================
+
+pub struct A2uiSourceSpan:
+    source_id: text
+    start_byte: i64
+    end_byte: i64
+    line: i64
+    column: i64
+
+pub fn a2ui_span(source_id: text, start_byte: i64, end_byte: i64, line: i64, column: i64) -> A2uiSourceSpan:
+    A2uiSourceSpan(
+        source_id: source_id,
+        start_byte: start_byte,
+        end_byte: end_byte,
+        line: line,
+        column: column
+    )
+
+pub struct A2uiDiagnostic:
+    code: text
+    message: text
+    profile: text
+    catalog_id: text
+    span: A2uiSourceSpan
+
+pub fn a2ui_wire_version() -> text: "1.0"
+pub fn a2ui_basic_catalog_id() -> text: "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"
+pub fn a2ui_sdn_table_profile() -> text: "express_sdn_table_v1"
+
+pub fn a2ui_diag(code: text, message: text, span: A2uiSourceSpan) -> A2uiDiagnostic:
+    A2uiDiagnostic(
+        code: code,
+        message: message,
+        profile: a2ui_sdn_table_profile(),
+        catalog_id: a2ui_basic_catalog_id(),
+        span: span
+    )
+
+# ============================================================================
+# Typed A2UI Values (distinct from Omission)
+# ============================================================================
+
+pub enum A2uiValue:
+    Null
+    Bool(value: bool)
+    Number(value: f64)
+    Int(value: i64)
+    Text(value: text)
+    Path(path: text)
+    Ref(component_id: text)
+    Array(items: [A2uiValue])
+    Object(entries: [A2uiObjectEntry])
+
+pub struct A2uiObjectEntry:
+    key: text
+    value: A2uiValue
+
+# Explicit distinction between omitted argument (`_`) and explicit `null`.
+pub enum A2uiArgPresence:
+    Omitted
+    Present(value: A2uiValue)
+
+pub fn a2ui_obj_get(entries: [A2uiObjectEntry], key: text) -> A2uiArgPresence:
+    var i = 0
+    while i < entries.len():
+        if entries[i].key == key:
+            return A2uiArgPresence.Present(value: entries[i].value)
+        i = i + 1
+    A2uiArgPresence.Omitted
+
+pub fn a2ui_obj_set(entries: [A2uiObjectEntry], key: text, value: A2uiValue) -> [A2uiObjectEntry]:
+    var out: [A2uiObjectEntry] = []
+    var replaced = false
+    var i = 0
+    while i < entries.len():
+        if entries[i].key == key:
+            out.push(A2uiObjectEntry(key: key, value: value))
+            replaced = true
+        else:
+            out.push(entries[i])
+        i = i + 1
+    if not replaced:
+        out.push(A2uiObjectEntry(key: key, value: value))
+    out
+
+pub fn a2ui_obj_remove(entries: [A2uiObjectEntry], key: text) -> [A2uiObjectEntry]:
+    var out: [A2uiObjectEntry] = []
+    var i = 0
+    while i < entries.len():
+        if entries[i].key != key:
+            out.push(entries[i])
+        i = i + 1
+    out
+
+pub fn a2ui_value_as_text(v: A2uiValue) -> text:
+    match v:
+        case A2uiValue.Text(s): s
+        case A2uiValue.Int(n): n.to_string()
+        case A2uiValue.Number(n): n.to_string()
+        case A2uiValue.Bool(b):
+            if b: "true" else: "false"
+        case A2uiValue.Path(p): p
+        case A2uiValue.Ref(r): r
+        case _: ""
+
+pub fn a2ui_value_is_null(v: A2uiValue) -> bool:
+    match v:
+        case A2uiValue.Null: true
+        case _: false
+
+# ============================================================================
+# Action, Component, and Protocol Operations (A2UI v1.0)
+# ============================================================================
+
+pub struct A2uiActionEvent:
+    name: text
+    context: [A2uiObjectEntry]
+    has_action: bool
+
+pub fn a2ui_no_action() -> A2uiActionEvent:
+    A2uiActionEvent(name: "", context: [], has_action: false)
+
+pub fn a2ui_event_action(name: text, context: [A2uiObjectEntry]) -> A2uiActionEvent:
+    A2uiActionEvent(name: name, context: context, has_action: true)
+
+pub struct A2uiComponentDef:
+    id: text
+    component: text
+    catalog_override: text
+    props: [A2uiObjectEntry]
+    child: text
+    children: [text]
+    action: A2uiActionEvent
+    region_request: text
+
+pub fn a2ui_component_def(id: text, component: text) -> A2uiComponentDef:
+    A2uiComponentDef(
+        id: id,
+        component: component,
+        catalog_override: "",
+        props: [],
+        child: "",
+        children: [],
+        action: a2ui_no_action(),
+        region_request: ""
+    )
+
+# Agent-to-renderer v1.0 wire operations (all 6 alternatives).
+pub enum A2uiSurfaceOp:
+    CreateSurface(
+        surface_id: text,
+        catalog_id: text,
+        send_data_model: bool,
+        root_id: text
+    )
+    UpdateComponents(
+        surface_id: text,
+        components: [A2uiComponentDef]
+    )
+    UpdateDataModel(
+        surface_id: text,
+        path: text,
+        value: A2uiArgPresence
+    )
+    DeleteSurface(
+        surface_id: text
+    )
+    CallRendererFunction(
+        function_call_id: text,
+        surface_id: text,
+        catalog_id: text,
+        function_name: text,
+        args: [A2uiObjectEntry],
+        caller_id: text,
+        user_activated: bool
+    )
+    AgentFunctionResponse(
+        function_call_id: text,
+        ok: bool,
+        result: A2uiValue,
+        error: text
+    )
+
+# Renderer-to-agent action envelope.
+pub struct A2uiRendererAction:
+    name: text
+    surface_id: text
+    source_component_id: text
+    timestamp: text
+    context: [A2uiObjectEntry]
+    owner_id: text
+    surface_generation: i64
+    composition_revision: i64
+    correlation_id: text
+
+# ============================================================================
+# Qualified Native Identity and Opaque Wire Component IDs
+# ============================================================================
+
+pub struct A2uiQualifiedHandle:
+    owner_id: text
+    wire_surface_id: text
+    surface_generation: i64
+    component_id: text
+
+pub fn a2ui_qualified_handle(
+    owner_id: text,
+    wire_surface_id: text,
+    surface_generation: i64,
+    component_id: text
+) -> A2uiQualifiedHandle:
+    A2uiQualifiedHandle(
+        owner_id: owner_id,
+        wire_surface_id: wire_surface_id,
+        surface_generation: surface_generation,
+        component_id: component_id
+    )
+
+fn _escape_handle_part(s: text) -> text:
+    var out = ""
+    var i = 0
+    val n = s.byte_len()
+    while i < n:
+        val b = s.byte_at(i)
+        if b == 37: # '%'
+            out = out + "%25"
+        elif b == 58: # ':'
+            out = out + "%3A"
+        elif b == 35: # '#'
+            out = out + "%23"
+        else:
+            out = out + s.substring(i, i + 1)
+        i = i + 1
+    out
+
+fn _unescape_handle_part(s: text) -> text:
+    var out = ""
+    var i = 0
+    val n = s.byte_len()
+    while i < n:
+        if s.byte_at(i) == 37 and i + 2 < n:
+            val code = s.substring(i + 1, i + 3)
+            if code == "25":
+                out = out + "%"
+                i = i + 3
+            elif code == "3A":
+                out = out + ":"
+                i = i + 3
+            elif code == "23":
+                out = out + "#"
+                i = i + 3
+            else:
+                out = out + s.substring(i, i + 1)
+                i = i + 1
+        else:
+            out = out + s.substring(i, i + 1)
+            i = i + 1
+    out
+
+# Unambiguous reversible encoding for native SimpleUI widget IDs.
+pub fn a2ui_qualified_encode(h: A2uiQualifiedHandle) -> text:
+    "a2ui:" + _escape_handle_part(h.owner_id) + ":" + _escape_handle_part(h.wire_surface_id) + ":" + h.surface_generation.to_string() + ":" + _escape_handle_part(h.component_id)
+
+pub fn a2ui_qualified_decode(encoded: text) -> Result<A2uiQualifiedHandle, text>:
+    val parts = encoded.split(":")
+    if parts.len() != 5 or parts[0] != "a2ui":
+        return Err("invalid_qualified_handle")
+    val gen = parts[3].to_int()
+    if gen <= 0:
+        return Err("invalid_surface_generation")
+    Ok(A2uiQualifiedHandle(
+        owner_id: _unescape_handle_part(parts[1]),
+        wire_surface_id: _unescape_handle_part(parts[2]),
+        surface_generation: gen,
+        component_id: _unescape_handle_part(parts[4])
+    ))
+
+fn _hex_nibble(n: i64) -> text:
+    val v = n % 16
+    if v == 0: return "0"
+    if v == 1: return "1"
+    if v == 2: return "2"
+    if v == 3: return "3"
+    if v == 4: return "4"
+    if v == 5: return "5"
+    if v == 6: return "6"
+    if v == 7: return "7"
+    if v == 8: return "8"
+    if v == 9: return "9"
+    if v == 10: return "a"
+    if v == 11: return "b"
+    if v == 12: return "c"
+    if v == 13: return "d"
+    if v == 14: return "e"
+    "f"
+
+# Deterministic opaque wire component ID (`c_` + 16 hex chars) from ownership,
+# surface generation, template row ID, and row key. Never concatenates raw names.
+pub fn a2ui_encode_opaque_component_id(
+    owner_id: text,
+    surface_id: text,
+    surface_generation: i64,
+    template_id: text,
+    row_key: text
+) -> text:
+    val payload = owner_id.byte_len().to_string() + ":" + owner_id + "|" +
+        surface_id.byte_len().to_string() + ":" + surface_id + "|" +
+        surface_generation.to_string() + "|" +
+        template_id.byte_len().to_string() + ":" + template_id + "|" +
+        row_key.byte_len().to_string() + ":" + row_key
+    val bs = payload.bytes()
+    var h1: i64 = 5381
+    var h2: i64 = 2166136261
+    var i = 0
+    while i < bs.len():
+        val b = bs[i] as i64
+        h1 = ((h1 * 33) + b) % 4294967296
+        h2 = ((h2 ^ b) * 16777619) % 4294967296
+        if h1 < 0: h1 = -h1
+        if h2 < 0: h2 = -h2
+        i = i + 1
+    var hex = ""
+    var shift = 28
+    while shift >= 0:
+        hex = hex + _hex_nibble((h1 >> shift) & 15)
+        shift = shift - 4
+    shift = 28
+    while shift >= 0:
+        hex = hex + _hex_nibble((h2 >> shift) & 15)
+        shift = shift - 4
+    "c_" + hex
+
+export A2UI_WIRE_VERSION, A2UI_BASIC_CATALOG_ID, A2UI_EXPRESS_GRAMMAR_REV, A2UI_SDN_TABLE_PROFILE
+export a2ui_wire_version, a2ui_basic_catalog_id, a2ui_sdn_table_profile
+export A2uiSourceSpan, A2uiDiagnostic, a2ui_span, a2ui_diag
+export A2uiValue, A2uiObjectEntry, A2uiArgPresence
+export a2ui_obj_get, a2ui_obj_set, a2ui_obj_remove, a2ui_value_as_text, a2ui_value_is_null
+export A2uiActionEvent, a2ui_no_action, a2ui_event_action
+export A2uiComponentDef, a2ui_component_def
+export A2uiSurfaceOp, A2uiRendererAction
+export A2uiQualifiedHandle, a2ui_qualified_handle, a2ui_qualified_encode, a2ui_qualified_decode
+export a2ui_encode_opaque_component_id

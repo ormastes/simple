@@ -1,0 +1,488 @@
+#![allow(primitive_api)] # CaretA2uiHost exposes scalar generations, activation flags, and timestamps
+# Caret Suite Live A2UI Host with Hot-Swap Handler Generations
+#
+# Wires the shared A2UI surface registry, Caret authorized queries,
+# Caret Message-only Send commands, dynamic screen composition, and
+# request-boundary `aspect_dynload_lifecycle_v1` hot-swap leases together
+# under a single stable Caret host owner (`cs_main.spl` loop stays unchanged).
+
+use app.llm_caret.cs_dashboard_model.{CsAgent, CsDashboard}
+use app.llm_caret.workbench.session_contract.{
+    SessionId,
+    SessionView,
+    ProcessLifecycle,
+    AgentTurn,
+    Transport,
+    CapabilityEvidence,
+    new_session_id
+}
+use app.llm_caret.workbench.roster_order.{roster_order}
+use app.io.env_ops.{env_get}
+use common.ui.widget.{UITree}
+use std.common.ui.a2ui.types.{
+    a2ui_basic_catalog_id,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiSurfaceOp,
+    a2ui_obj_get,
+    a2ui_value_as_text
+}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.screen_table.{KeyedCollectionView}
+use std.common.ui.a2ui.surface_state.{
+    A2uiSurfaceRegistry,
+    a2ui_surface_to_ui_tree,
+    a2ui_op_to_json,
+    a2ui_admit_wire_json
+}
+use std.common.json.parser.{json_parse_limits_default}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    CommandDeliveryState,
+    CommandOutcome,
+    app_schema_validate_args
+}
+use std.common.app_interface.authority.{AuthorityGate, AuthenticatedGrant}
+use std.common.app_interface.runtime.{
+    AppInterfaceRuntime,
+    HandlerGenerationLease,
+    HandlerGenerationOwner
+}
+use app.llm_caret.a2ui.cs_queries.{
+    CaretKeyBinding,
+    caret_build_roster_snapshot,
+    caret_status_summary,
+    caret_selected_preview
+}
+use app.llm_caret.a2ui.cs_commands.{
+    CaretTransportDelivery,
+    CaretSendContext,
+    caret_schema_select_args,
+    caret_schema_refresh_args,
+    caret_execute_send
+}
+use app.llm_caret.a2ui.cs_app_interface.{
+    caret_screen_sdn_v1,
+    caret_readonly_screen_sdn_v1,
+    caret_default_authority_policy,
+    caret_register_app_interface,
+    caret_run_roster_query
+}
+
+pub class CaretA2uiHost:
+    session_name: text
+    principal_id: text
+    surface_id: text
+    gate: AuthorityGate
+    surface_registry: A2uiSurfaceRegistry
+    runtime: AppInterfaceRuntime
+    roster_grant: AuthenticatedGrant
+    compose_grant: AuthenticatedGrant
+    key_bindings: [CaretKeyBinding]
+    selected_key: text
+    last_outcome_summary: text
+    handler_variant_label: text
+    next_grant_seq: i64
+
+    static fn create(
+        session_name: text,
+        principal_id: text,
+        issuer_secret: text,
+        read_only: bool,
+        now_ms: i64
+    ) -> Result<CaretA2uiHost, text>:
+        val policy = caret_default_authority_policy()?
+        var gate = AuthorityGate.new(policy, issuer_secret)?
+        val iface = caret_register_app_interface()?
+        val catalog = a2ui_basic_catalog()
+        var rt = AppInterfaceRuntime.new(
+            "caret_app:" + session_name,
+            "main",
+            principal_id,
+            "d_" + session_name,
+            iface,
+            catalog
+        )
+        rt.handler_owner = HandlerGenerationOwner.new_with_facet("caret.ui.handler", "caret_handler_abi_v1")?
+
+        val roster_grant = gate.mint_grant(
+            principal_id, "main", "caret.roster",
+            [AppOpKind.Read, AppOpKind.Subscribe], ["roster", "detail"],
+            false, "n_caret_roster_init", now_ms + 3600000
+        )?
+        val compose_grant = gate.mint_grant(
+            principal_id, "main", "caret.ui",
+            [AppOpKind.Compose], ["workspace"],
+            false, "n_caret_compose_init", now_ms + 3600000
+        )?
+        val initial_sdn = if read_only: caret_readonly_screen_sdn_v1() else: caret_screen_sdn_v1()
+        rt.admit_screen_composition(gate, compose_grant, principal_id, initial_sdn, 64, now_ms)?
+
+        var surf_reg = A2uiSurfaceRegistry.new(catalog)
+        val sgen = surf_reg.apply_op("caret_app:" + session_name, A2uiSurfaceOp.CreateSurface(
+            surface_id: "main",
+            catalog_id: a2ui_basic_catalog_id(),
+            send_data_model: false,
+            root_id: "root"
+        ))?
+        rt.revisions.surface_generation = sgen
+
+        Ok(CaretA2uiHost(
+            session_name: session_name,
+            principal_id: principal_id,
+            surface_id: "main",
+            gate: gate,
+            surface_registry: surf_reg,
+            runtime: rt,
+            roster_grant: roster_grant,
+            compose_grant: compose_grant,
+            key_bindings: [],
+            selected_key: "",
+            last_outcome_summary: "Draft",
+            handler_variant_label: "v1_standard",
+            next_grant_seq: 1
+        ))
+
+    # Project Caret dashboard + SessionViews through authorized QueryIR into a UITree.
+    me sync_dashboard(
+        d: CsDashboard,
+        sessions: [SessionView],
+        pane_authorized: bool,
+        now_ms: i64
+    ) -> Result<UITree, text>:
+        val snap_pair = caret_build_roster_snapshot(d, sessions, self.runtime.revisions.data_revision)
+        val snap = snap_pair.0
+        self.key_bindings = snap_pair.1
+
+        val search_filter = match a2ui_obj_get(self.runtime.draft.fields, "/draft/search"):
+            case A2uiArgPresence.Present(v): a2ui_value_as_text(v)
+            case A2uiArgPresence.Omitted: ""
+
+        val owner = "caret_app:" + self.session_name
+        val qgen = self.runtime.begin_query_generation()
+        val qres = caret_run_roster_query(
+            self.gate, self.roster_grant, self.principal_id,
+            self.surface_id, snap, search_filter, 64, now_ms
+        )
+        if not qres.ok:
+            return Err("caret_roster_query_failed:" + qres.error_message)
+
+        val comps = self.runtime.expand_active_screen([qres.collection], 64)?
+        self.surface_registry.apply_op(owner, A2uiSurfaceOp.UpdateComponents(
+            surface_id: self.surface_id,
+            components: comps
+        ))?
+
+        val status_txt = caret_status_summary(qres.collection.order.len(), d.manager_status)
+        var sel_summary = "No agent selected"
+        if d.selected >= 0 and d.selected < sessions.len():
+            sel_summary = sessions[d.selected].label
+        val preview_txt = caret_selected_preview(d.screen, pane_authorized, 16384)
+
+        val comp_rev = self.runtime.revisions.composition_revision
+        val pol_rev = self.runtime.revisions.policy_revision
+        self.runtime.publish_view_result(qgen, comp_rev, pol_rev, "/view/status/summary", A2uiValue.Text(value: status_txt))?
+        self.runtime.publish_view_result(qgen, comp_rev, pol_rev, "/view/selected/summary", A2uiValue.Text(value: sel_summary))?
+        self.runtime.publish_view_result(qgen, comp_rev, pol_rev, "/view/selected/output", A2uiValue.Text(value: preview_txt))?
+        self.runtime.publish_view_result(qgen, comp_rev, pol_rev, "/view/outcome/summary", A2uiValue.Text(value: self.last_outcome_summary))?
+
+        self.surface_registry.apply_op(owner, A2uiSurfaceOp.UpdateDataModel(
+            surface_id: self.surface_id, path: "/view/status/summary",
+            value: A2uiArgPresence.Present(value: A2uiValue.Text(value: status_txt))
+        ))?
+        self.surface_registry.apply_op(owner, A2uiSurfaceOp.UpdateDataModel(
+            surface_id: self.surface_id, path: "/view/selected/summary",
+            value: A2uiArgPresence.Present(value: A2uiValue.Text(value: sel_summary))
+        ))?
+        self.surface_registry.apply_op(owner, A2uiSurfaceOp.UpdateDataModel(
+            surface_id: self.surface_id, path: "/view/selected/output",
+            value: A2uiArgPresence.Present(value: A2uiValue.Text(value: preview_txt))
+        ))?
+        self.surface_registry.apply_op(owner, A2uiSurfaceOp.UpdateDataModel(
+            surface_id: self.surface_id, path: "/view/outcome/summary",
+            value: A2uiArgPresence.Present(value: A2uiValue.Text(value: self.last_outcome_summary))
+        ))?
+
+        val surf = match self.surface_registry.get_surface(owner, self.surface_id):
+            case Some(s): s
+            case None: return Err("caret_surface_missing")
+        a2ui_surface_to_ui_tree(surf)
+
+    # Dispatch an action under a request-boundary `aspect_dynload_lifecycle_v1` lease.
+    me dispatch_action(
+        action_name: text,
+        args: [A2uiObjectEntry],
+        user_activated: bool,
+        send_ctx_opt: CaretSendContext?,
+        transport_res: CaretTransportDelivery,
+        request_id: text,
+        now_ms: i64
+    ) -> Result<CommandOutcome, text>:
+        val lease = self.runtime.handler_owner.begin_request(self.runtime.revisions.surface_generation)?
+        val gen_tag = "[gen=" + lease.aspect_lease.generation.to_string() + ":" + self.handler_variant_label + "]"
+
+        var result: Result<CommandOutcome, text> = Err("unknown_caret_action:" + action_name)
+        if action_name == "caret.select":
+            match app_schema_validate_args(caret_schema_select_args(), args):
+                case Err(e):
+                    result = Ok(CommandOutcome(
+                        request_id: request_id, command_id: "caret.select",
+                        delivery: CommandDeliveryState.Rejected,
+                        summary: "Rejected: " + e, error_code: e,
+                        domain_revision: self.runtime.revisions.data_revision
+                    ))
+                case Ok(_):
+                    val key = match a2ui_obj_get(args, "key"):
+                        case A2uiArgPresence.Present(v): a2ui_value_as_text(v)
+                        case A2uiArgPresence.Omitted: ""
+                    var found_label = ""
+                    var bi = 0
+                    while bi < self.key_bindings.len():
+                        if self.key_bindings[bi].opaque_key == key:
+                            found_label = self.key_bindings[bi].label
+                            break
+                        bi = bi + 1
+                    if found_label == "":
+                        result = Ok(CommandOutcome(
+                            request_id: request_id, command_id: "caret.select",
+                            delivery: CommandDeliveryState.Rejected,
+                            summary: "Rejected: unknown_roster_key",
+                            error_code: "unknown_roster_key",
+                            domain_revision: self.runtime.revisions.data_revision
+                        ))
+                    else:
+                        self.selected_key = key
+                        self.last_outcome_summary = "Selected " + found_label + " " + gen_tag
+                        result = Ok(CommandOutcome(
+                            request_id: request_id, command_id: "caret.select",
+                            delivery: CommandDeliveryState.Acknowledged,
+                            summary: self.last_outcome_summary, error_code: "",
+                            domain_revision: self.runtime.revisions.data_revision + 1
+                        ))
+        elif action_name == "caret.refresh":
+            match app_schema_validate_args(caret_schema_refresh_args(), args):
+                case Err(e):
+                    result = Ok(CommandOutcome(
+                        request_id: request_id, command_id: "caret.refresh",
+                        delivery: CommandDeliveryState.Rejected,
+                        summary: "Rejected: " + e, error_code: e,
+                        domain_revision: self.runtime.revisions.data_revision
+                    ))
+                case Ok(_):
+                    match a2ui_obj_get(args, "search"):
+                        case A2uiArgPresence.Present(v):
+                            val _seq = self.runtime.apply_draft_edit(self.principal_id, self.surface_id, "/draft/search", a2ui_value_as_text(v))
+                        case A2uiArgPresence.Omitted: ()
+                    self.last_outcome_summary = "Refreshed " + gen_tag
+                    result = Ok(CommandOutcome(
+                        request_id: request_id, command_id: "caret.refresh",
+                        delivery: CommandDeliveryState.Acknowledged,
+                        summary: self.last_outcome_summary, error_code: "",
+                        domain_revision: self.runtime.revisions.data_revision + 1
+                    ))
+        elif action_name == "caret.send":
+            match send_ctx_opt:
+                case None:
+                    result = Err("missing_send_context")
+                case Some(send_ctx):
+                    val nonce = "n_host_send_" + self.next_grant_seq.to_string()
+                    self.next_grant_seq = self.next_grant_seq + 1
+                    match self.gate.mint_grant(
+                        self.principal_id, self.surface_id, "caret.send",
+                        [AppOpKind.Invoke], ["composer"], true, nonce, now_ms + 60000
+                    ):
+                        case Err(ge):
+                            result = Err(ge)
+                        case Ok(send_grant):
+                            val out = caret_execute_send(
+                                self.runtime, self.gate, send_grant, self.principal_id,
+                                user_activated, args, send_ctx, transport_res, request_id, now_ms
+                            )
+                            self.last_outcome_summary = out.summary + " " + gen_tag
+                            result = Ok(out)
+
+        match self.runtime.handler_owner.check_commit_fresh(lease, self.runtime.current_surface_generation()):
+            case Err(stale_err):
+                val _rel = self.runtime.handler_owner.complete_request_lease(lease)
+                return Err(stale_err)
+            case Ok(_):
+                self.runtime.handler_owner.complete_request_lease(lease)?
+        result
+
+    # Hot-swap handler generation while preserving active surface, drafts, and session state.
+    me hot_swap_handler(new_variant_label: text, candidate_abi_tag: text) -> Result<i64, text>:
+        val new_gen = self.runtime.handler_owner.hot_swap_generation(candidate_abi_tag)?
+        self.handler_variant_label = new_variant_label
+        self.runtime.revisions.code_generation = new_gen
+        Ok(new_gen)
+
+    # Dynamically compose UI table without changing handler code generation.
+    me update_screen_dynamically(sdn_table_source: text, now_ms: i64) -> Result<i64, text>:
+        self.runtime.admit_screen_composition(
+            self.gate, self.compose_grant, self.principal_id, sdn_table_source, 64, now_ms
+        )
+
+    # Export bounded standard A2UI v1.0 wire JSON messages (`sendDataModel: false`).
+    fn export_wire_messages(collections: [KeyedCollectionView]) -> Result<[text], text>:
+        val owner = "caret_app:" + self.session_name
+        val comps = self.runtime.expand_active_screen(collections, 64)?
+        val create_op = A2uiSurfaceOp.CreateSurface(
+            surface_id: self.surface_id,
+            catalog_id: a2ui_basic_catalog_id(),
+            send_data_model: false,
+            root_id: "root"
+        )
+        val update_op = A2uiSurfaceOp.UpdateComponents(
+            surface_id: self.surface_id,
+            components: comps
+        )
+        val create_json = a2ui_op_to_json(create_op)
+        val update_json = a2ui_op_to_json(update_op)
+        val limits = json_parse_limits_default()
+        a2ui_admit_wire_json(create_json, limits)?
+        a2ui_admit_wire_json(update_json, limits)?
+        Ok([create_json, update_json])
+
+    fn first_opaque_key(self) -> text:
+        if self.key_bindings.len() == 0:
+            return ""
+        self.key_bindings[0].opaque_key
+
+    fn code_generation(self) -> i64:
+        self.runtime.current_code_generation()
+
+    fn draft_text(self, path: text) -> text:
+        self.runtime.draft_text(path)
+
+    me edit_draft_text(caller_principal: text, caller_surface: text, path: text, new_value: text) -> Result<i64, text>:
+        self.runtime.apply_draft_edit(caller_principal, caller_surface, path, new_value)
+
+    fn render_summary_line(tree: UITree) -> text:
+        "cs-a2ui: session=" + self.session_name +
+            " root_id=" + tree.root_id +
+            " code_gen=" + self.runtime.revisions.code_generation.to_string() +
+            " comp_rev=" + self.runtime.revisions.composition_revision.to_string() +
+            " variant=" + self.handler_variant_label
+
+pub fn cs_gui_roster_indices(d: CsDashboard) -> [i64]:
+    var ids: [SessionId] = []
+    for a in d.agents:
+        ids = ids + [new_session_id(a.agent_id)]
+    var pin_ids: [SessionId] = []
+    for p in d.pins:
+        pin_ids = pin_ids + [new_session_id(p)]
+    var mru_ids: [SessionId] = []
+    for m in d.mru:
+        mru_ids = mru_ids + [new_session_id(m)]
+    val ordered = roster_order(ids, pin_ids, mru_ids)
+    var out: [i64] = []
+    for oid in ordered:
+        var i: i64 = 0
+        while i < d.agents.len():
+            if d.agents[i].agent_id == oid.value:
+                out = out + [i]
+                break
+            i = i + 1
+    out
+
+pub fn cs_agent_to_session_view(a: CsAgent, mgr_status: text) -> SessionView:
+    val st = a.status.to_lower()
+    var lifecycle = ProcessLifecycle.NotStarted
+    var turn = AgentTurn.Unknown
+    var transport = Transport.Connecting
+    var needs_attention = false
+    if st == "running" or st == "active" or st == "ready":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.Idle
+        transport = Transport.Ready
+    elif st == "working" or st == "busy":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.Working
+        transport = Transport.Ready
+    elif st == "idle":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.Idle
+        transport = Transport.Ready
+    elif st == "waiting_approval":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.WaitingApproval
+        transport = Transport.Ready
+        needs_attention = true
+    elif st == "waiting_answer":
+        lifecycle = ProcessLifecycle.Running
+        turn = AgentTurn.WaitingAnswer
+        transport = Transport.Ready
+        needs_attention = true
+    elif st == "starting":
+        lifecycle = ProcessLifecycle.Starting
+        turn = AgentTurn.Queued
+        transport = Transport.Connecting
+    elif st == "exited" or st == "stopped" or st == "completed":
+        lifecycle = ProcessLifecycle.Exited
+        turn = AgentTurn.Completed
+        transport = Transport.Disconnected
+    elif st == "failed" or st == "error":
+        lifecycle = ProcessLifecycle.Failed
+        turn = AgentTurn.Failed
+        transport = Transport.Closed
+    elif st == "lost":
+        lifecycle = ProcessLifecycle.Lost
+        turn = AgentTurn.Unknown
+        transport = Transport.Stale
+    if mgr_status.to_lower().contains("disconnected") or mgr_status.to_lower().contains("error"):
+        if transport == Transport.Ready:
+            transport = Transport.Stale
+    SessionView(
+        id: new_session_id(a.agent_id),
+        label: a.agent_id + " (" + a.spec + ")",
+        provider: a.spec,
+        lifecycle: lifecycle,
+        turn: turn,
+        transport: transport,
+        evidence: CapabilityEvidence.Probed,
+        needs_attention: needs_attention
+    )
+
+pub fn cs_dashboard_session_views(d: CsDashboard) -> [SessionView]:
+    var views: [SessionView] = []
+    val ordered = cs_gui_roster_indices(d)
+    for idx in ordered:
+        views.push(cs_agent_to_session_view(d.agents[idx], d.manager_status))
+    views
+
+pub fn cs_resolve_ui_mode(args: [text]) -> text:
+    var i: i64 = 0
+    var has_gui = false
+    var has_frame_once = false
+    while i < args.len():
+        val a = args[i]
+        if a == "--tui":
+            return "tui"
+        if a == "--a2ui":
+            return "a2ui"
+        if a == "--a2ui-json":
+            return "a2ui_json"
+        if a == "--gui-frame-once":
+            return "gui_frame_once"
+        if a == "--gui":
+            has_gui = true
+        if a == "--frame-once":
+            has_frame_once = true
+        i = i + 1
+    if has_gui and has_frame_once:
+        return "gui_frame_once"
+    if has_gui:
+        return "gui"
+    val env_mode = env_get("CARET_SUITE_MODE").to_lower()
+    if env_mode == "a2ui":
+        return "a2ui"
+    if env_mode == "a2ui_json":
+        return "a2ui_json"
+    if env_mode == "gui":
+        if has_frame_once:
+            return "gui_frame_once"
+        return "gui"
+    "tui"
+
+export CaretA2uiHost, cs_gui_roster_indices, cs_agent_to_session_view, cs_dashboard_session_views, cs_resolve_ui_mode

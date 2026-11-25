@@ -1,0 +1,628 @@
+# Comprehensive Native Executable Verification Harness for A2UI & Dynamic App Interfaces
+#
+# Compiled and executed natively via pure-Simple `simple native-build --backend=cranelift`
+# to verify all Section 22 correctness and security acceptance criteria end-to-end.
+
+use std.common.json.parser.{JsonParseLimits, json_parse_limits_default, json_parse_strict_bounded_with_error}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.ui.a2ui.types.{
+    a2ui_basic_catalog_id,
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiArgPresence,
+    A2uiComponentDef,
+    A2uiSurfaceOp,
+    a2ui_no_action,
+    a2ui_component_def,
+    a2ui_obj_get,
+    a2ui_obj_set,
+    a2ui_qualified_handle,
+    a2ui_qualified_encode,
+    a2ui_qualified_decode
+}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.express_grammar.{
+    a2ui_import_express_g4,
+    a2ui_grammar_to_sdn,
+    a2ui_parse_express_constructor
+}
+use std.common.ui.a2ui.screen_table.{
+    KeyedRowRecord,
+    KeyedCollectionView,
+    a2ui_compile_screen_table,
+    a2ui_expand_screen_table,
+    a2ui_lower_screen_to_ops
+}
+use std.common.ui.a2ui.surface_state.{
+    A2uiSurfaceRegistry,
+    a2ui_surface_find_component,
+    a2ui_surface_affected_components,
+    a2ui_surface_to_ui_tree,
+    a2ui_op_to_json,
+    a2ui_admit_wire_json
+}
+use std.common.app_interface.contracts.{
+    AppOpKind,
+    ReleaseAudience,
+    CommandDeliveryState
+}
+use std.common.app_interface.authority.{
+    AuthorityGate,
+    AuthenticatedGrant,
+    authority_result_cache_key
+}
+use std.common.app_interface.query_ir.{
+    QueryErrorKind,
+    ChangeEventKind,
+    BoundedChangeJournal,
+    query_parse_restricted_spl,
+    query_execute_authorized
+}
+use std.common.app_interface.runtime.{AppInterfaceRuntime}
+use std.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource}
+use std.common.privilege.id_path.{id_path_intern}
+use std.common.privilege.principal.{Principal, PrincipalKind}
+use std.common.privilege.store.{PrivilegeStore, privilege_store_encode, privilege_store_decode_untrusted}
+use app.simple_process_manager.approval_broker.{ApprovalBroker, ApprovalIntent}
+use app.llm_caret.cs_dashboard_model.{CsAgent, CsDashboard, cs_dashboard_new}
+use app.llm_caret.workbench.session_contract.{
+    SessionId,
+    SessionView,
+    ProcessLifecycle,
+    AgentTurn,
+    Transport,
+    CapabilityEvidence,
+    InputMode,
+    new_session_id,
+    next_generation,
+    new_draft,
+    SessionExecutionBindingV2,
+    SessionControlLeaseKindV2,
+    SessionControlLeaseV2
+}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult}
+use app.llm_caret.a2ui.cs_queries.{
+    caret_metric_label,
+    caret_memory_label,
+    caret_build_roster_snapshot,
+    caret_selected_preview
+}
+use app.llm_caret.a2ui.cs_commands.{
+    CaretTransportDelivery,
+    CaretSendContext,
+    caret_execute_send
+}
+use app.llm_caret.a2ui.cs_app_interface.{
+    caret_screen_sdn_v1,
+    caret_readonly_screen_sdn_v1,
+    caret_default_authority_policy,
+    caret_register_app_interface,
+    caret_run_roster_query
+}
+use app.llm_caret.a2ui.cs_live_host.{CaretA2uiHost, cs_resolve_ui_mode, cs_dashboard_session_views}
+use os.apps.clock.ecs.world.{ClockAppWorld}
+use os.apps.clock.ecs.systems.{sys_tick_stopwatch, sys_tick_timer}
+use os.apps.clock.clock_a2ui.{clock_mount_world_a2ui_surface}
+
+var _pass_count: i64 = 0
+var _fail_count: i64 = 0
+
+fn check(cond: bool, name: text):
+    if cond:
+        _pass_count = _pass_count + 1
+    else:
+        _fail_count = _fail_count + 1
+        print "FAIL: " + name
+
+fn is_ok_i64(r: Result<i64, text>) -> bool:
+    match r:
+        case Ok(_): true
+        case Err(_): false
+
+fn is_ok_bool(r: Result<bool, text>) -> bool:
+    match r:
+        case Ok(_): true
+        case Err(_): false
+
+fn _valid_digest(ch: text) -> text:
+    var out = ""
+    var i = 0
+    while i < 64:
+        out = out + ch
+        i = i + 1
+    out
+
+fn verify_grammar_and_express():
+    val g4 = "grammar Express;\nprogram : statement* EOF ;\nstatement : IDENT '=' expression ;\nIDENT : [a-zA-Z_] [a-zA-Z0-9_]* ;\n"
+    match a2ui_import_express_g4(g4, "1dbe86a942579cc83a1d657213f0db3b881632ae", "specification/inference_formats/express/Express.g4"):
+        case Ok(model):
+            check(model.name == "Express", "g4_import_name")
+            check(model.entry == "program", "g4_import_entry")
+            check(model.rules.len() == 3, "g4_import_rule_count")
+            val sdn_out = a2ui_grammar_to_sdn(model)
+            match sdn_parse_strict_v1(sdn_out, sdn_strict_limits_v1()):
+                case Ok(_): check(true, "g4_sdn_strict_valid")
+                case Err(e): check(false, "g4_sdn_strict_valid:" + e.code)
+        case Err(e):
+            check(false, "g4_import:" + e)
+
+    match a2ui_import_express_g4("grammar Bad;\n@members { int x; }\nprogram : EOF ;\n", "1dbe86a942579cc83a1d657213f0db3b881632ae", "Bad.g4"):
+        case Err(_): check(true, "g4_rejects_unsupported_members")
+        case Ok(_): check(false, "g4_rejects_unsupported_members")
+
+    match a2ui_parse_express_constructor("Text(text=$/status, variant=_)"):
+        case Ok(ast):
+            check(ast.component == "Text", "express_text_comp")
+            check(ast.args.len() == 2, "express_two_args")
+            check(ast.vm_steps > 0, "express_ran_shared_vm")
+            val omit_ok = match ast.args[1].presence:
+                case A2uiArgPresence.Omitted: true
+                case _: false
+            check(omit_ok, "express_underscore_is_omission")
+        case Err(e):
+            check(false, "express_parse_valid:" + e)
+
+    match a2ui_parse_express_constructor("Text(text=null)"):
+        case Ok(ast):
+            val null_ok = match ast.args[0].presence:
+                case A2uiArgPresence.Present(A2uiValue.Null): true
+                case _: false
+            check(null_ok, "express_null_distinct_from_omission")
+        case Err(e):
+            check(false, "express_parse_null:" + e)
+
+    match a2ui_parse_express_constructor("Column() extra"):
+        case Err(_): check(true, "express_rejects_trailing")
+        case Ok(_): check(false, "express_rejects_trailing")
+    match a2ui_parse_express_constructor("surface(\"x\")"):
+        case Err(_): check(true, "express_rejects_lifecycle_in_cell")
+        case Ok(_): check(false, "express_rejects_lifecycle_in_cell")
+    match a2ui_parse_express_constructor("Text(text=@index())"):
+        case Err(_): check(true, "express_rejects_at_index")
+        case Ok(_): check(false, "express_rejects_at_index")
+
+fn verify_bounded_json():
+    val ok_limits = json_parse_limits_default()
+    val r_ok = json_parse_strict_bounded_with_error("{\"version\":\"1.0\",\"a\":1}", ok_limits)
+    check(r_ok.1 == "", "bounded_json_accepts_valid")
+
+    val r_dup = json_parse_strict_bounded_with_error("{\"a\":1,\"a\":2}", ok_limits)
+    check(r_dup.1 != "", "bounded_json_rejects_duplicate_key")
+
+    val tiny_bytes = JsonParseLimits(max_source_bytes: 8, max_tokens: 100, max_depth: 16)
+    check(json_parse_strict_bounded_with_error("{\"long_key\":12345}", tiny_bytes).1 != "", "bounded_json_rejects_byte_budget")
+
+    val tiny_tokens = JsonParseLimits(max_source_bytes: 1024, max_tokens: 4, max_depth: 16)
+    check(json_parse_strict_bounded_with_error("[1,2,3,4,5]", tiny_tokens).1 != "", "bounded_json_rejects_token_budget")
+
+    val tiny_depth = JsonParseLimits(max_source_bytes: 1024, max_tokens: 100, max_depth: 2)
+    check(json_parse_strict_bounded_with_error("[[[1]]]", tiny_depth).1 != "", "bounded_json_rejects_depth_budget")
+
+fn verify_screen_table_and_multi_app_isolation():
+    val catalog = a2ui_basic_catalog()
+    val compiled = match a2ui_compile_screen_table(caret_screen_sdn_v1(), catalog, 64):
+        case Ok(t): t
+        case Err(e):
+            check(false, "caret_table_compile:" + e)
+            return
+
+    val col1 = KeyedCollectionView(
+        path: "/view/roster",
+        order: ["k001", "k002"],
+        rows: [
+            KeyedRowRecord(key: "k001", fields: [
+                A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: "k001")),
+                A2uiObjectEntry(key: "label", value: A2uiValue.Text(value: "Agent A")),
+                A2uiObjectEntry(key: "summary", value: A2uiValue.Text(value: "Running"))
+            ]),
+            KeyedRowRecord(key: "k002", fields: [
+                A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: "k002")),
+                A2uiObjectEntry(key: "label", value: A2uiValue.Text(value: "Agent B")),
+                A2uiObjectEntry(key: "summary", value: A2uiValue.Text(value: "Idle"))
+            ])
+        ]
+    )
+    val comps1 = match a2ui_expand_screen_table(compiled, "caret_app", "main", 1, catalog, [col1], 64):
+        case Ok(cs): cs
+        case Err(e):
+            check(false, "caret_expand_1:" + e)
+            return
+
+    val col2 = KeyedCollectionView(path: "/view/roster", order: ["k002", "k001"], rows: col1.rows)
+    val comps2 = match a2ui_expand_screen_table(compiled, "caret_app", "main", 1, catalog, [col2], 64):
+        case Ok(cs): cs
+        case Err(e):
+            check(false, "caret_expand_2:" + e)
+            return
+
+    var agents1_children: [text] = []
+    var agents2_children: [text] = []
+    var i = 0
+    while i < comps1.len():
+        if comps1[i].id == "agents": agents1_children = comps1[i].children
+        i = i + 1
+    i = 0
+    while i < comps2.len():
+        if comps2[i].id == "agents": agents2_children = comps2[i].children
+        i = i + 1
+    check(agents1_children.len() == 2 and agents2_children.len() == 2, "keyed_expand_two_rows")
+    check(agents1_children[0] == agents2_children[1] and agents1_children[1] == agents2_children[0], "keyed_reorder_preserves_opaque_ids")
+    check(agents1_children[0].starts_with("c_"), "opaque_id_prefix_c_")
+
+    val bad_btn = "|id, parent, slot, order, region, repeat, key, expression|\nroot, null, null, 0, main, null, null, \"Column()\"\nb, root, children, 0, main, null, null, \"Button(text=\\\"Bad\\\")\"\nl, b, child, 0, main, null, null, \"Text(text=\\\"L\\\")\""
+    match a2ui_compile_screen_table(bad_btn, catalog, 32):
+        case Ok(bt):
+            match a2ui_expand_screen_table(bt, "o", "s", 1, catalog, [], 32):
+                case Err(_): check(true, "rejects_button_text_prop")
+                case Ok(_): check(false, "rejects_button_text_prop")
+        case Err(_):
+            check(true, "rejects_button_text_prop")
+
+    val bad_conflict = "|id, parent, slot, order, region, repeat, key, expression|\nroot, null, null, 0, main, null, null, \"Column(children=[a])\"\na, root, children, 0, main, null, null, \"Text(text=\\\"hi\\\")\""
+    match a2ui_compile_screen_table(bad_conflict, catalog, 32):
+        case Err(_): check(true, "rejects_conflicting_children_arg")
+        case Ok(_): check(false, "rejects_conflicting_children_arg")
+
+    var reg = A2uiSurfaceRegistry.new(catalog)
+    val caret_ops = match a2ui_lower_screen_to_ops(compiled, "caret_app", "main", 1, false, catalog, [col1], 64):
+        case Ok(os): os
+        case Err(e):
+            check(false, "caret_lower_ops:" + e)
+            return
+    check(is_ok_i64(reg.apply_op("caret_app", caret_ops[0])), "caret_create_surface")
+    check(not is_ok_i64(reg.apply_op("caret_app", caret_ops[0])), "duplicate_create_surface_rejected")
+    check(is_ok_i64(reg.apply_op("caret_app", caret_ops[1])), "caret_update_components")
+
+    val wire_create = a2ui_op_to_json(caret_ops[0])
+    val wire_update = a2ui_op_to_json(caret_ops[1])
+    check(wire_create.contains("\"version\":\"1.0\""), "wire_version_1_0")
+    check(wire_create.contains("\"sendDataModel\":false"), "caret_send_data_model_false")
+    check(not wire_update.contains("\"region\""), "no_region_on_wire")
+    check(not wire_update.contains("\"repeat\""), "no_repeat_on_wire")
+    check(is_ok_bool(a2ui_admit_wire_json(wire_create, json_parse_limits_default())), "wire_create_json_valid")
+    check(is_ok_bool(a2ui_admit_wire_json(wire_update, json_parse_limits_default())), "wire_update_json_valid")
+
+    var clock_w = ClockAppWorld.new()
+    val sw_ent = clock_w.spawn_stopwatch()
+    val tm_ent = clock_w.spawn_timer()
+    sys_tick_stopwatch(clock_w, 1500u64)
+    sys_tick_timer(clock_w, 1500u64)
+    match clock_mount_world_a2ui_surface(clock_w, sw_ent, tm_ent, reg, "clock_app", "main"):
+        case Ok(pair):
+            val clock_tree = pair.1
+            match reg.get_surface("caret_app", "main"):
+                case Some(s):
+                    match a2ui_surface_to_ui_tree(s):
+                        case Ok(caret_tree):
+                            check(clock_tree.root_id != caret_tree.root_id, "multi_app_root_ids_isolated")
+                            check(clock_tree.root_id.contains("clock_app") and caret_tree.root_id.contains("caret_app"), "qualified_owner_encoded")
+                        case Err(e): check(false, "caret_to_ui_tree:" + e)
+                case None: check(false, "caret_surface_still_isolated")
+        case Err(e):
+            check(false, "clock_mount_a2ui:" + e)
+
+    var text_with_var = a2ui_component_def("title", "Text")
+    text_with_var.props = [
+        A2uiObjectEntry(key: "text", value: A2uiValue.Text(value: "Caret")),
+        A2uiObjectEntry(key: "variant", value: A2uiValue.Text(value: "caption"))
+    ]
+    check(is_ok_i64(reg.apply_op("caret_app", A2uiSurfaceOp.UpdateComponents(surface_id: "main", components: [text_with_var]))), "set_variant")
+    var text_without_var = a2ui_component_def("title", "Text")
+    text_without_var.props = [A2uiObjectEntry(key: "text", value: A2uiValue.Text(value: "Caret Updated"))]
+    check(is_ok_i64(reg.apply_op("caret_app", A2uiSurfaceOp.UpdateComponents(surface_id: "main", components: [text_without_var]))), "replace_without_variant")
+    match reg.get_surface("caret_app", "main"):
+        case Some(s):
+            match a2ui_surface_find_component(s, "title"):
+                case Some(c):
+                    val cleared = match a2ui_obj_get(c.props, "variant"):
+                        case A2uiArgPresence.Omitted: true
+                        case _: false
+                    check(cleared, "update_components_clears_omitted_props")
+                case None: check(false, "title_component_exists")
+            val affected = a2ui_surface_affected_components(s, "/view/status/summary")
+            check(affected.len() >= 1, "dependency_index_finds_status")
+        case None: check(false, "caret_surface_present")
+
+    val fn_denied = reg.apply_op("caret_app", A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "fc1", surface_id: "main", catalog_id: a2ui_basic_catalog_id(),
+        function_name: "openUrl", args: [], caller_id: "user_action", user_activated: false
+    ))
+    check(not is_ok_i64(fn_denied), "open_url_requires_user_activation")
+    val fn_ok = reg.apply_op("caret_app", A2uiSurfaceOp.CallRendererFunction(
+        function_call_id: "fc2", surface_id: "", catalog_id: a2ui_basic_catalog_id(),
+        function_name: "openUrl", args: [], caller_id: "user_action", user_activated: true
+    ))
+    check(is_ok_i64(fn_ok), "open_url_allowed_with_activation")
+
+    val qh = a2ui_qualified_handle("owner:1", "surf#a", 3, "root")
+    match a2ui_qualified_decode(a2ui_qualified_encode(qh)):
+        case Ok(dec):
+            check(dec.owner_id == "owner:1" and dec.wire_surface_id == "surf#a" and dec.surface_generation == 3 and dec.component_id == "root", "qualified_handle_roundtrip")
+        case Err(_):
+            check(false, "qualified_handle_roundtrip")
+
+fn verify_authority_queries_and_caret_send():
+    val policy = match caret_default_authority_policy():
+        case Ok(p): p
+        case Err(e):
+            check(false, "caret_policy_load:" + e)
+            return
+    var gate = match AuthorityGate.new(policy, "caret_trusted_hmac_secret_2026_v1"):
+        case Ok(g): g
+        case Err(e):
+            check(false, "authority_gate_new:" + e)
+            return
+
+    var dash = cs_dashboard_new("ws1")
+    dash.manager_status = "ready"
+    dash.agents = [
+        CsAgent(agent_id: "a1", spec: "SECRET_TOKEN=xyz claude", status: "running", pid: 100, pane_id: "p1", cpu_pct: -1.0, rss_mb: -1, detail: "private_detail"),
+        CsAgent(agent_id: "a2", spec: "codex", status: "running", pid: 101, pane_id: "p2", cpu_pct: 0.0, rss_mb: 0, detail: "d2")
+    ]
+    dash.pins = ["a2"]
+    val s1 = SessionView(
+        id: new_session_id("a1"), label: "Agent A", provider: "claude",
+        lifecycle: ProcessLifecycle.Running, turn: AgentTurn.Unknown,
+        transport: Transport.Ready, evidence: CapabilityEvidence.Verified, needs_attention: false
+    )
+    val s2 = SessionView(
+        id: new_session_id("a2"), label: "Agent B", provider: "codex",
+        lifecycle: ProcessLifecycle.Running, turn: AgentTurn.WaitingApproval,
+        transport: Transport.Ready, evidence: CapabilityEvidence.Verified, needs_attention: true
+    )
+    val snap_pair = caret_build_roster_snapshot(dash, [s1, s2], 1)
+    val snap = snap_pair.0
+    check(snap.order.len() == 2, "caret_snapshot_two_rows")
+    check(caret_metric_label(-1.0) == "CPU unavailable", "minus1_cpu_unavailable")
+    check(caret_metric_label(0.0) == "CPU 0%", "zero_cpu_stays_zero")
+    check(caret_memory_label(-1) == "memory unavailable", "minus1_mem_unavailable")
+    check(caret_memory_label(0) == "0 MB", "zero_mem_stays_zero")
+    val clean_preview = caret_selected_preview(["hello \u{001b}[31mred\u{001b}[0m world"], true, 1024)
+    check(clean_preview == "hello red world", "ansi_escape_sanitized")
+    check(caret_selected_preview(["secret"], false, 1024) == "No preview available", "denied_pane_hides_output")
+
+    val roster_grant = match gate.mint_grant("alice", "main", "caret.roster", [AppOpKind.Read], ["roster"], false, "n_roster_1", 10000):
+        case Ok(g): g
+        case Err(e):
+            check(false, "mint_roster_grant:" + e)
+            return
+    val qres = caret_run_roster_query(gate, roster_grant, "alice", "main", snap, "Agent B", 64, 1000)
+    check(qres.ok and qres.collection.order.len() == 1, "caret_named_query_filtered")
+
+    val q_wrong_user = caret_run_roster_query(gate, roster_grant, "mallory", "main", snap, "", 64, 1000)
+    check(not q_wrong_user.ok and q_wrong_user.error_kind == QueryErrorKind.Denied, "wrong_principal_denied")
+    val forged = AuthenticatedGrant(
+        grant_id: roster_grant.grant_id,
+        principal_id: roster_grant.principal_id,
+        surface_id: roster_grant.surface_id,
+        resource_or_op: roster_grant.resource_or_op,
+        operations: roster_grant.operations,
+        allowed_regions: roster_grant.allowed_regions,
+        policy_revision: roster_grant.policy_revision,
+        one_shot: roster_grant.one_shot,
+        nonce: roster_grant.nonce,
+        expires_at_ms: roster_grant.expires_at_ms,
+        mac_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    val q_forged = caret_run_roster_query(gate, forged, "alice", "main", snap, "", 64, 1000)
+    check(not q_forged.ok and q_forged.error_kind == QueryErrorKind.Denied, "forged_mac_denied")
+
+    match query_parse_restricted_spl("dyn1", "roster", "from caret.roster where label matches \"Agent\" select key,label order label asc limit 10", ReleaseAudience.HumanSurface, 64):
+        case Ok(plan):
+            val dres = query_execute_authorized(gate, roster_grant, "alice", "main", snap, plan, "/view/roster", 1000)
+            check(dres.ok and dres.collection.order.len() == 2, "dynamic_spl_query_ok")
+        case Err(e):
+            check(false, "dynamic_spl_parse:" + e)
+
+    match query_parse_restricted_spl("dyn_bad_field", "roster", "from caret.roster where spec contains \"SECRET\" select key,label", ReleaseAudience.HumanSurface, 64):
+        case Ok(bad_plan):
+            val dres_bad = query_execute_authorized(gate, roster_grant, "alice", "main", snap, bad_plan, "/view/roster", 1000)
+            check(not dres_bad.ok and dres_bad.error_kind == QueryErrorKind.Denied, "hidden_predicate_field_denied")
+        case Err(_):
+            check(true, "hidden_predicate_field_denied")
+
+    match query_parse_restricted_spl("dyn_sql", "roster", "from caret.roster; raw_sql drop table", ReleaseAudience.HumanSurface, 64):
+        case Err(_): check(true, "forbidden_sql_rejected")
+        case Ok(_): check(false, "forbidden_sql_rejected")
+
+    match query_parse_restricted_spl("dyn_llm", "roster", "from caret.roster select key,label", ReleaseAudience.ModelInput, 64):
+        case Ok(llm_plan):
+            val dres_llm = query_execute_authorized(gate, roster_grant, "alice", "main", snap, llm_plan, "/view/roster", 1000)
+            check(not dres_llm.ok and dres_llm.error_kind == QueryErrorKind.Denied, "model_input_audience_denied")
+        case Err(_):
+            check(false, "dyn_llm_parse")
+
+    check(authority_result_cache_key("q1", "s=a", "alice", "roster", 1, 1, ReleaseAudience.HumanSurface) !=
+        authority_result_cache_key("q1", "s=a", "bob", "roster", 1, 1, ReleaseAudience.HumanSurface), "cache_key_separates_principals")
+
+    var journal = BoundedChangeJournal.new(2)
+    journal.append(ChangeEventKind.Upsert, "k1", 1)
+    journal.append(ChangeEventKind.Remove, "k1", 1)
+    check(not journal.poll(0).needs_resnapshot and journal.poll(0).events.len() == 2, "journal_sub_a_receives_removal")
+    check(not journal.poll(0).needs_resnapshot and journal.poll(0).events.len() == 2, "journal_sub_b_receives_removal")
+    journal.append(ChangeEventKind.Upsert, "k2", 1)
+    journal.append(ChangeEventKind.Upsert, "k3", 1)
+    check(journal.poll(0).needs_resnapshot, "journal_slow_subscriber_resnapshots")
+
+    val iface = match caret_register_app_interface():
+        case Ok(r): r
+        case Err(e):
+            check(false, "caret_register_iface:" + e)
+            return
+    var rt = AppInterfaceRuntime.new("caret_app", "main", "alice", "d001", iface, a2ui_basic_catalog())
+
+    check(is_ok_i64(rt.apply_draft_edit("alice", "main", "/draft/body", "/kill a1")), "draft_writable_body_ok")
+    check(not is_ok_i64(rt.apply_draft_edit("alice", "main", "/view/status", "hacked")), "draft_blocks_view_write")
+    check(not is_ok_i64(rt.apply_draft_edit("alice", "main", "/draft/revision", "999")), "draft_blocks_protected_path")
+    check(not is_ok_i64(rt.apply_draft_edit("mallory", "main", "/draft/body", "x")), "draft_blocks_foreign_principal")
+
+    val compose_grant = match gate.mint_grant("alice", "main", "caret.ui", [AppOpKind.Compose], ["workspace"], false, "n_comp_1", 10000):
+        case Ok(g): g
+        case Err(e):
+            check(false, "mint_compose:" + e)
+            return
+    check(is_ok_i64(rt.admit_screen_composition(gate, compose_grant, "alice", caret_readonly_screen_sdn_v1(), 64, 1000)), "admit_readonly_composition")
+    check(is_ok_i64(rt.admit_screen_composition(gate, compose_grant, "alice", caret_screen_sdn_v1(), 64, 1000)), "admit_full_composition")
+    val bad_escalate = "|id, parent, slot, order, region, repeat, key, expression|\nroot, null, null, 0, workspace, null, null, \"Column()\"\nd, root, children, 0, detail, null, null, \"Column()\"\ns, d, children, 0, composer, null, null, \"Button(action=Event(\\\"caret.send\\\"))\"\nsl, s, child, 0, composer, null, null, \"Text(text=\\\"Send\\\")\""
+    check(not is_ok_i64(rt.admit_screen_composition(gate, compose_grant, "alice", bad_escalate, 64, 1000)), "reject_composer_under_detail")
+
+    val send_grant = match gate.mint_grant("alice", "main", "caret.send", [AppOpKind.Invoke], ["composer"], true, "n_send_1", 10000):
+        case Ok(g): g
+        case Err(e):
+            check(false, "mint_send:" + e)
+            return
+    val live_sid = new_session_id("a1")
+    val binding = SessionExecutionBindingV2(
+        session: live_sid, host_id: "host_local",
+        host_boot_digest: _valid_digest("a"), service_instance_digest: _valid_digest("b"),
+        request_id_high: 1, request_id_low: 1, ticket_high: 2, ticket_low: 2,
+        pid: 100, process_started_ns: 1000
+    )
+    val lease = SessionControlLeaseV2(
+        binding: binding, kind: SessionControlLeaseKindV2.Input,
+        holder_id: "caret_owner", client_id: "alice",
+        nonce_digest: _valid_digest("c"), revision: 1, expires_monotonic_ns: 999999
+    )
+    val pane_ok = PaneBindingResult.Bound(binding: PaneBinding(session: live_sid, pane_id: "p1", pane_generation: 1))
+    val send_ctx = CaretSendContext(
+        captured_draft: new_draft(live_sid, InputMode.Message),
+        live_session: live_sid, pane_binding: pane_ok, lease: lease, observed_binding: binding,
+        holder_id: "caret_owner", client_id: "alice", current_nonce: _valid_digest("c"),
+        current_lease_revision: 1, now_monotonic_ns: 5000,
+        native_conditional_clear: true, submitted_edit_seq: 1
+    )
+
+    val smuggled_args: [A2uiObjectEntry] = [
+        A2uiObjectEntry(key: "draftId", value: A2uiValue.Text(value: "d001")),
+        A2uiObjectEntry(key: "draftRevision", value: A2uiValue.Int(value: 2)),
+        A2uiObjectEntry(key: "body", value: A2uiValue.Text(value: "hi")),
+        A2uiObjectEntry(key: "input_mode", value: A2uiValue.Text(value: "WorkbenchCommand"))
+    ]
+    check(caret_execute_send(rt, gate, send_grant, "alice", true, smuggled_args, send_ctx, CaretTransportDelivery.Sent, "req0", 1000).delivery == CommandDeliveryState.Rejected, "send_rejects_smuggled_field")
+
+    var stale_ctx = send_ctx
+    stale_ctx.live_session = next_generation(live_sid)
+    val valid_args: [A2uiObjectEntry] = [
+        A2uiObjectEntry(key: "draftId", value: A2uiValue.Text(value: "d001")),
+        A2uiObjectEntry(key: "draftRevision", value: A2uiValue.Int(value: 2)),
+        A2uiObjectEntry(key: "body", value: A2uiValue.Text(value: "/kill a1"))
+    ]
+    check(caret_execute_send(rt, gate, send_grant, "alice", true, valid_args, stale_ctx, CaretTransportDelivery.Sent, "req1", 1000).delivery == CommandDeliveryState.Rejected, "send_rejects_stale_session_gen")
+
+    check(caret_execute_send(rt, gate, send_grant, "alice", true, valid_args, send_ctx, CaretTransportDelivery.Sent, "req2", 1000).delivery == CommandDeliveryState.Sent, "send_delivers_slash_message")
+    val conflict_args: [A2uiObjectEntry] = [
+        A2uiObjectEntry(key: "draftId", value: A2uiValue.Text(value: "d001")),
+        A2uiObjectEntry(key: "draftRevision", value: A2uiValue.Int(value: 2)),
+        A2uiObjectEntry(key: "body", value: A2uiValue.Text(value: "different text"))
+    ]
+    val r_conflict = caret_execute_send(rt, gate, send_grant, "alice", true, conflict_args, send_ctx, CaretTransportDelivery.Sent, "req3", 1000)
+    check(r_conflict.delivery == CommandDeliveryState.Rejected and r_conflict.error_code == "draft_revision_conflict_different_payload", "send_detects_revision_conflict")
+
+    val send_grant2 = match gate.mint_grant("alice", "main", "caret.send", [AppOpKind.Invoke], ["composer"], true, "n_send_2", 10000):
+        case Ok(g): g
+        case Err(_): return
+    val unknown_args: [A2uiObjectEntry] = [
+        A2uiObjectEntry(key: "draftId", value: A2uiValue.Text(value: "d001")),
+        A2uiObjectEntry(key: "draftRevision", value: A2uiValue.Int(value: 3)),
+        A2uiObjectEntry(key: "body", value: A2uiValue.Text(value: "maybe lost"))
+    ]
+    check(caret_execute_send(rt, gate, send_grant2, "alice", true, unknown_args, send_ctx, CaretTransportDelivery.Uncertain(reason: "ack timeout"), "req4", 1000).delivery == CommandDeliveryState.Unknown, "send_reports_honest_unknown")
+
+    # Hot-swap request-boundary handler generation leases using `aspect_dynload_lifecycle_v1` (§14.2-14.4).
+    val l1 = match rt.handler_owner.begin_request(1):
+        case Ok(l): l
+        case Err(_):
+            check(false, "begin_request_lease_1")
+            return
+    val l1_susp = match rt.handler_owner.suspend_async(l1):
+        case Ok(sl): sl
+        case Err(_):
+            check(false, "suspend_async_lease_1")
+            return
+    check(not is_ok_i64(rt.handler_owner.hot_swap_generation("wrong_abi")), "hot_swap_rejects_abi_mismatch")
+    val new_gen = rt.handler_owner.publish_generation()
+    check(new_gen == 2, "handler_published_gen_2")
+    val st_mid = rt.handler_owner.stats()
+    check(st_mid.in_flight_on_retired == 1 and st_mid.reclaimed_generations.len() == 0, "old_gen_retained_while_suspended")
+    val l1_resumed = match rt.handler_owner.resume_async(l1_susp):
+        case Ok(rl): rl
+        case Err(_):
+            check(false, "resume_async_lease_1")
+            return
+    check(not is_ok_bool(rt.handler_owner.check_commit_fresh(l1_resumed, 2)), "stale_async_surface_commit_rejected")
+    check(is_ok_bool(rt.handler_owner.complete_request_lease(l1_resumed)), "lease_completed")
+    val st_after = rt.handler_owner.stats()
+    check(st_after.reclaimed_generations.len() == 1 and st_after.reclaimed_generations[0] == 1, "old_gen_reclaimed_after_drain")
+
+    # CaretA2uiHost end-to-end live integration & CLI mode checks.
+    check(cs_resolve_ui_mode(["--a2ui"]) == "a2ui", "cs_resolve_a2ui_mode")
+    check(cs_resolve_ui_mode(["--a2ui-json"]) == "a2ui_json", "cs_resolve_a2ui_json_mode")
+    val views = cs_dashboard_session_views(dash)
+    check(views.len() == 2, "cs_dashboard_session_views_count")
+    match CaretA2uiHost.create("ws1", "alice", "caret_live_host_secret_2026_v1", false, 1000):
+        case Err(e):
+            check(false, "caret_live_host_create:" + e)
+        case Ok(host_init):
+            var host = host_init
+            check(is_ok_i64(host.edit_draft_text("alice", "main", "/draft/body", "keep draft across swap")), "host_draft_edit")
+            match host.sync_dashboard(dash, views, true, 1005):
+                case Err(se): check(false, "host_sync:" + se)
+                case Ok(tree):
+                    check(host.render_summary_line(tree).contains("code_gen=1"), "host_summary_gen1")
+            # Dynamic composition keeps code_gen == 1 while bumping comp_rev.
+            check(is_ok_i64(host.update_screen_dynamically(caret_readonly_screen_sdn_v1(), 1010)), "host_dynamic_screen_update")
+            check(host.code_generation() == 1, "dynamic_ui_no_code_swap")
+            check(is_ok_i64(host.update_screen_dynamically(caret_screen_sdn_v1(), 1011)), "host_restore_full_screen")
+            # Hot-swap handler generation keeps draft body intact and bumps code_gen to 2.
+            check(not is_ok_i64(host.hot_swap_handler("bad", "incompatible_abi")), "host_hot_swap_rejects_bad_abi")
+            check(is_ok_i64(host.hot_swap_handler("v2_detailed", "caret_handler_abi_v1")), "host_hot_swap_ok")
+            check(host.code_generation() == 2, "host_code_gen_2")
+            val kept_body = host.draft_text("/draft/body")
+            check(kept_body == "keep draft across swap", "host_hot_swap_preserves_draft")
+            # Dispatch select, refresh, and send on hot-swapped generation 2.
+            val first_key: text = host.first_opaque_key()
+            val sel_args = [A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: first_key))]
+            match host.dispatch_action("caret.select", sel_args, true, None, CaretTransportDelivery.Sent, "hreq1", 1015):
+                case Ok(out): check(out.delivery == CommandDeliveryState.Acknowledged and out.summary.contains("[gen=2:v2_detailed]"), "host_select_uses_gen2")
+                case Err(e): check(false, "host_select:" + e)
+            match host.export_wire_messages([]):
+                case Ok(msgs): check(msgs.len() == 2 and msgs[0].contains("\"sendDataModel\":false"), "host_export_wire_json")
+                case Err(e): check(false, "host_export_wire:" + e)
+
+    # Privilege hardening checks (§11.1).
+    var broker = ApprovalBroker.new_for_test("/tmp", "broker_secret_key_2026".bytes())
+    val alice = Principal(kind: PrincipalKind.Local, id: "alice")
+    val intent_read = ApprovalIntent(app: "caret", action: "read", required: id_path_intern("id.caret"), level: AuthorityLevel.Read)
+    val intent_admin = ApprovalIntent(app: "caret", action: "read", required: id_path_intern("id.caret"), level: AuthorityLevel.Admin)
+    broker.test_simulate_user_accept(intent_read)
+    val signed_read = broker.test_sign(intent_read, alice)
+    check(signed_read.hmac.len() == 32, "approval_broker_uses_real_hmac_sha256")
+    check(broker.verify_response(signed_read), "approval_broker_verifies_hmac")
+    check(not broker.request_approval(intent_admin, alice).ok, "approval_broker_rejects_level_escalation")
+
+    var pstore = PrivilegeStore.new()
+    val parent_tok = AuthorityToken.mock(id_path_intern("id.caret"), AuthorityLevel.Write, alice)
+    val att_ok = pstore.mint_attenuated(parent_tok, id_path_intern("id.caret.roster"), AuthorityLevel.Read)
+    check(att_ok.ok, "store_mint_attenuated_narrow_ok")
+    check(not pstore.mint_attenuated(parent_tok, id_path_intern("id.caret.roster"), AuthorityLevel.Admin).ok, "store_mint_attenuated_rejects_level_widening")
+    check(not pstore.mint_attenuated(parent_tok, id_path_intern("id.other"), AuthorityLevel.Read).ok, "store_mint_attenuated_rejects_scope_widening")
+    val decoded_untrusted = privilege_store_decode_untrusted(privilege_store_encode(pstore))
+    check(decoded_untrusted.ok and decoded_untrusted.value.tokens.len() == 1 and decoded_untrusted.value.tokens[0].trust_source == TrustSource.Untrusted, "decode_untrusted_never_promotes_trust")
+
+    val ok_id = id_path_intern("id.caret.roster")
+    check(pstore.check_verified(alice, att_ok.value, ok_id, AuthorityLevel.Read), "priv_store_verified_accepts_valid")
+    val bob = Principal(kind: PrincipalKind.Local, id: "bob")
+    check(not pstore.check_verified(bob, att_ok.value, ok_id, AuthorityLevel.Read), "priv_store_verified_rejects_wrong_principal")
+    val forged_tok = AuthorityToken.mock(id_path_intern("id.caret.roster"), AuthorityLevel.Admin, alice)
+    check(not pstore.check_verified(alice, forged_tok, ok_id, AuthorityLevel.Read), "priv_store_verified_rejects_unregistered_token")
+
+fn main() -> i64:
+    verify_grammar_and_express()
+    verify_bounded_json()
+    verify_screen_table_and_multi_app_isolation()
+    verify_authority_queries_and_caret_send()
+    print "A2UI_VERIFY_PASS=" + _pass_count.to_string() + " FAIL=" + _fail_count.to_string()
+    if _fail_count > 0:
+        return 1
+    0
