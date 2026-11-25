@@ -6,41 +6,82 @@
 # NOTE: This is a minimal smoke test since the full implementation
 # requires MIR lowering which is not yet complete in Simple.
 
+use std.spec.{describe, it, expect}
+use compiler.backend.jit_interpreter.{
+    JitMode,
+    JitInterpreterConfig,
+    JitInterpreterBackend
+}
+use compiler.backend.backend_types.{BackendKind}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+
+fn _jit_spec_lower(src: text, mod_name: text) -> HirModule:
+    val vpath = "test/{mod_name}.spl"
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, vpath, mod_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[mod_name] = ast
+    val sources = [SourceFile(path: vpath, content: src, module_name: mod_name)]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module(vpath, surfaces)
+    hl.lower_module(ast)
+
+fn _jit_spec_find_fn(hir: HirModule, name: text) -> HirFunction:
+    var found: HirFunction? = None
+    for fn_item in hir.functions.values():
+        val f: HirFunction = fn_item
+        if f.name == name:
+            found = Some(f)
+    found.unwrap()
+
 describe "JitInterpreterBackend":
     describe "Configuration":
-        it "creates with default mode":
-            # Test that Auto mode is the default
-            expect true  # Placeholder
+        it "creates with default mode and threshold":
+            val cfg = JitInterpreterConfig.default()
+            expect(cfg.mode).to_equal(JitMode.Auto)
+            expect(cfg.backend).to_equal("auto")
+            expect(cfg.jit_threshold).to_equal(10)
+            val backend = JitInterpreterBackend.default()
+            expect(backend.name()).to_equal("jit-interpreter")
+            expect(backend.kind()).to_equal(BackendKind.Interpreter)
+            expect(backend.module_prescans).to_equal(0)
 
-        it "has JIT threshold configured":
-            # Test threshold configuration
-            expect true  # Placeholder
+        it "supports hybrid, always_jit, and interpret_only modes":
+            val hybrid = JitInterpreterBackend.new(JitInterpreterConfig.hybrid(4))
+            expect(hybrid.config.mode).to_equal(JitMode.Hybrid)
+            expect(hybrid.config.jit_threshold).to_equal(4)
+            val always_jit = JitInterpreterBackend.new(JitInterpreterConfig.always_jit())
+            expect(always_jit.kind()).to_equal(BackendKind.CraneliftJit)
+            val interp_only = JitInterpreterBackend.new(JitInterpreterConfig.interpret_only())
+            expect(interp_only.should_jit_compile("anything")).to_equal(false)
 
-    describe "Backend Integration":
-        it "shares infrastructure with compiler":
-            # Test that backend uses LocalExecutionManager
-            expect true  # Placeholder
+    describe "Per-Module Lowering and CFG Cache":
+        it "caches cfg_winners and module inventory prescan across functions in the same module":
+            val src_a = "enum Color:\n    Red\n    Blue\n\nfn first_fn(c: Color) -> i64:\n    match c:\n        Color.Red: 1\n        Color.Blue: 2\n\nfn second_fn(x: i64) -> i64:\n    x + 1\n"
+            val src_b = "fn third_fn(x: i64) -> i64:\n    x * 2\n"
+            val mod_a = _jit_spec_lower(src_a, "jit_cache_mod_a")
+            val mod_b = _jit_spec_lower(src_b, "jit_cache_mod_b")
 
-        it "supports backend switching":
-            # Test LLVM vs Cranelift selection
-            expect true  # Placeholder
+            var backend = JitInterpreterBackend.new(JitInterpreterConfig.auto_jit())
+            backend.record_call("first_fn")
+            backend.record_call("second_fn")
+            backend.record_call("third_fn")
 
-    describe "Execution Strategy":
-        it "interprets by default for cold code":
-            # Test tree-walking for low call count
-            expect true  # Placeholder
+            val _r1 = backend.try_jit_compile(_jit_spec_find_fn(mod_a, "first_fn"), mod_a)
+            expect(backend.module_prescans).to_equal(1)
 
-        it "JIT compiles hot code":
-            # Test JIT compilation after threshold
-            expect true  # Placeholder
+            val _r2 = backend.try_jit_compile(_jit_spec_find_fn(mod_a, "second_fn"), mod_a)
+            expect(backend.module_prescans).to_equal(1)
+            expect(backend.compile_attempts).to_equal(2)
 
-    describe "Value Semantics":
-        it "provides reference semantics in JIT mode":
-            # Test that JIT uses pointers not copies
-            expect true  # Placeholder
-
-        it "maintains reference semantics for arrays":
-            # Test array mutation works correctly
-            expect true  # Placeholder
-
-# Full tests will be added once MIR serialization is implemented
+            val _r3 = backend.try_jit_compile(_jit_spec_find_fn(mod_b, "third_fn"), mod_b)
+            expect(backend.module_prescans).to_equal(2)
+            expect(backend.compile_attempts).to_equal(3)
