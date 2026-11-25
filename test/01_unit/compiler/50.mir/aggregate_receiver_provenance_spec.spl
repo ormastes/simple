@@ -35,9 +35,14 @@ val DICT_THEN_ROWS = PRELUDE + "impl Db:\n    fn validate() -> [text]:\n        
 
 val OPTION_DB_THEN_TABLE = PRELUDE + "fn load() -> Db?:\n    nil\n\nfn rows_of(path: text) -> i64:\n    val db_opt = load()\n    val Some(db) = db_opt else:\n        return -1\n    val table_opt = db.tables.get(path)\n    val Some(table) = table_opt else:\n        return -2\n    var n = 0\n    for row in table.rows:\n        n = n + row.cells.len()\n    n\n"
 
+val BATCH_E1_MIR_SHAPES = "struct SymItem:\n    name: text\nstruct SemCtx:\n    keys: [text]\n    syms: [SymItem]\nstruct ErrBox:\n    message: text\nenum FSRes<T>:\n    Ok(T)\n    Err(ErrBox)\n    fn is_ok() -> bool:\n        match self:\n            case Ok(_): true\n            case Err(_): false\n    fn unwrap_or(d: T) -> T:\n        match self:\n            case Ok(v): v\n            case Err(_): d\nfn split_rows(inventory: text) -> i64:\n    val rows = if inventory == \"\": [] else: inventory.split(\"\\n\")\n    var total = rows.len()\n    for row in rows:\n        val fields = row.split(\"|\")\n        total = total + fields.len()\n    total\nfn mut_field_iter(ctx: &mut SemCtx, k: text) -> i64:\n    if ctx.keys.contains(k): return 0\n    var n = 0\n    for sym in ctx.syms:\n        if sym.name == k: n = n + 1\n    n\nfn decode_tuple_res(ok: bool) -> text:\n    val payloads: Result<(text, text, text, text), text> = if ok: Ok((\"a\", \"b\", \"c\", \"d\")) else: Err(\"bad\")\n    val decoded = match payloads:\n        case Ok(v): v\n        case Err(e): return e\n    decoded.2\nfn decode_u64_pair(x: i64) -> Result<(u64, i64), ErrBox>:\n    if x < 0: Err(ErrBox(message: \"neg\")) else: Ok((x as u64, 1))\nfn decode_bytes_pair(x: i64) -> Result<(i64, [u8]), ErrBox>:\n    if x < 0: Err(ErrBox(message: \"neg\")) else: Ok((x, [1u8, 2u8]))\nfn try_tuple_u64_bytes(x: i64) -> Result<i64, ErrBox>:\n    val hdr = decode_u64_pair(x)?\n    val leaf = decode_bytes_pair(hdr.0 as i64)?\n    Ok(leaf.0 + leaf.1.len() + hdr.1)\nfn case_nil_opt_text(b: text?) -> text:\n    match b:\n        case Some(name): name\n        case nil: \"smf\"\n"
+
 describe "aggregate receiver provenance":
     it "keeps Table/Row types through for (k, v) in dict then v.rows":
         expect(mir_error_count(DICT_THEN_ROWS)).to_equal(0)
 
     it "keeps Db/Table types through Option binding then field and get":
         expect(mir_error_count(OPTION_DB_THEN_TABLE)).to_equal(0)
+
+    it "keeps provenance for if-empty-array, &mut array fields, Result tuple match/?, generic self match, and case nil":
+        expect(mir_error_count(BATCH_E1_MIR_SHAPES)).to_equal(0)
