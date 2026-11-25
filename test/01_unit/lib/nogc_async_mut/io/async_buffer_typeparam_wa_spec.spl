@@ -1,16 +1,16 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-SSPEC-UNIT
 
-# Regression: src/lib/nogc_async_mut/io/buffer.spl used the static generic
-# factories `Future.from_value(..)` / `Future.pending<R>()` at 26 sites. In the
-# frozen stage2 bootstrap compiler a static method of a generic class reaches
+# Regression: src/lib/nogc_async_mut/io/buffer.spl uses the static generic
+# factories `Future.from_value(..)` / `Future.pending()` at 26 sites. In the
+# frozen stage2 bootstrap compiler a static method of a generic class reached
 # MIR lowering with the owner's `T` unsubstituted
 # (E-MIR-TYPE-TypeParam, bug doc/08_tracking/bug/typeparam_mir_2026-10-31.md),
-# so the std.io closure could not be built natively. Every site now goes
-# through a file-private helper that constructs the Future directly under a
-# concrete declared return type (tag `@workaround bug=typeparam_mir_2026-10-31`).
-# This spec pins the behaviour of every rewritten site: Ready/Ok, Ready/Err and
-# Pending for each of the four result element types ([u8], text, (), i64).
+# so those sites temporarily went through concrete file-private helpers.
+# With generic erasure in place, buffer.spl calls `Future.from_value(..)` and
+# `Future.pending()` directly. This spec pins the behaviour of every site:
+# Ready/Ok, Ready/Err and Pending for each of the four result element types
+# ([u8], text, (), i64), plus a guard that the workaround helpers stay removed.
 
 use std.spec.step
 use std.io.types.{IoError, IoErrorKind}
@@ -345,19 +345,19 @@ describe "AsyncBufferedWriter typeparam workaround sites":
         expect(_show_unit(pending.close())).to_equal("pending")
 
 # ============================================================================
-# Source guard: the workaround must stay in place until the root fix lands
+# Source guard: workaround removed; Future static factories are used directly
 # ============================================================================
 
-describe "buffer.spl avoids Future static generic factories":
+describe "buffer.spl uses Future static generic factories directly":
     # @manual scenario evidence
 
-    it "contains no Future.from_value or Future.pending call":
+    it "uses Future.from_value and Future.pending with no typeparam workaround helpers":
         # @req REQ-SSPEC-UNIT
-        step("no static generic Future factory call remains in buffer.spl")
+        step("static generic Future factories restored and typeparam workaround removed in buffer.spl")
         val src = rt_file_read_text("src/lib/nogc_async_mut/io/buffer.spl") ?? ""
         expect(src.len() > 0).to_equal(true)
-        expect(src.contains("Future.from_value(")).to_equal(false)
-        expect(src.contains("Future.pending<")).to_equal(false)
-        expect(src.contains("@workaround bug=typeparam_mir_2026-10-31")).to_equal(true)
-        expect(src.contains("fn _ready_bytes_result_future(")).to_equal(true)
-        expect(src.contains("fn _pending_unit_result_future(")).to_equal(true)
+        expect(src.contains("Future.from_value(")).to_equal(true)
+        expect(src.contains("Future.pending(")).to_equal(true)
+        expect(src.contains("@workaround bug=typeparam_mir_2026-10-31")).to_equal(false)
+        expect(src.contains("fn _ready_bytes_result_future(")).to_equal(false)
+        expect(src.contains("fn _pending_unit_result_future(")).to_equal(false)
