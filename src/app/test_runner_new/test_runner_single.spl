@@ -550,7 +550,7 @@ fn spec_timeout_secs_directive(file_path: text) -> i64:
     val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
     spec_timeout_secs_from_source(content)
 
-fn print_test_file_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text, process_error: bool = false, blocked: i64 = 0, blocked_reason: text = ""):
+fn print_test_file_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text, process_error: bool = false, blocked: i64 = 0, blocked_reason: text = "", all_skipped: bool = false):
     print ""
     print "========================================="
     print "Test Summary"
@@ -595,6 +595,11 @@ fn print_test_file_summary(path: text, passed: i64, failed: i64, skipped: i64, p
         # Environment missing: never a pass. Exit code 6 (BlockedScenario).
         print ""
         print "BLOCKED {path}: {blocked_reason}"
+    elif all_skipped:
+        # Every declared example deliberately skipped (skip_if/skip): not a
+        # pass (nothing executed) and not a failure (deferral by design).
+        print ""
+        print "SKIPPED {path} (all examples skipped)"
     else:
         print ""
         print "PASS {path}"
@@ -1890,6 +1895,12 @@ fn run_single_target(args: [text]) -> i64:
     val (real_passed, real_failed) = single_example_counts(combined,
         evidence_passed, evidence_failed, has_evidence)
     val real_executed = real_passed + real_failed
+    # Real skip channel, counted up front so the all-skipped verdict branch
+    # below can distinguish deliberate deferral from a zero-example defect.
+    # These were hardcoded `0, 0` until 2026-08-20, which is why every spec on
+    # this path reported `skipped=0` even when it had plainly printed a skip
+    # marker -- see count_real_skips()'s docstring.
+    val (real_skipped, real_pending) = count_real_skips(combined)
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
     val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
@@ -1903,6 +1914,9 @@ fn run_single_target(args: [text]) -> i64:
     # `failed == 0` -> exit 0, i.e. a silent green for a run that produced no
     # verified result at all.
     var unverified_error = ""
+    # True only for the all-examples-skipped verdict branch below; flips the
+    # human-facing tail from PASS to SKIPPED and nothing else.
+    var all_skipped = false
     val (blocked_pending, blocked_failed, blocked_reason) = parse_blocked_examples(combined)
     val blocked_total = blocked_pending + blocked_failed
     val raw_failed = if has_verdict == 1 and verdict_failed > real_failed: verdict_failed else: real_failed
@@ -1946,6 +1960,35 @@ fn run_single_target(args: [text]) -> i64:
         passed = blocked_passed
         failed = 0
         blocked_count = blocked_total
+    elif real_executed == 0 and real_failed == 0 and real_skipped > 0 and code == 0 and not was_truncated and (has_summary == 0 or summary_failed == 0) and (has_verdict == 0 or (verdict_executed == 0 and verdict_failed == 0 and verdict_dropped == 0)):
+        # ALL-SKIPPED: every declared example was deliberately deferred
+        # (skip_if / skip / `return "skip: ..."` -- the `... skipped (reason)`
+        # and `○ ... (skipped)` markers count_real_skips() recognises) and
+        # nothing ran, failed, or was dropped. This is the opposite of the
+        # zero-examples defect the fail-closed guards below exist for:
+        # intentional deferral -- the file flips to a real PASS with zero
+        # edits the day its hardware/build precondition lands -- versus an
+        # accidental no-op. Folding both into `reason=zero-examples` made a
+        # correctly-gated hardware spec read as broken
+        # (bug: single_example_hardware_gated_spec_reports_zero_examples_fail_2026-08-11).
+        # Deliberately NOT covered here: a pending()-only file. pending
+        # markers (`... pending`) stay in the fail-closed branch, because an
+        # unimplemented example is an authoring gap, not a deferral with a
+        # reason. The `code == 0`, no-truncation, clean-summary, and
+        # clean-or-absent-verdict conjuncts keep this from softening any run
+        # that carries real failure evidence. Placed ahead of the
+        # structured-evidence and --assert-ran branches so a deliberately
+        # all-skipped file reports the same SKIP verdict on every lane;
+        # --assert-ran still fails a file that ran nothing WITHOUT skip
+        # markers, which is the case that flag exists to catch.
+        passed = 0
+        failed = 0
+        all_skipped = true
+        if not has_verdict_line(combined):
+            # outcome=NOT_RUN matches the platform-os-mismatch skip precedent
+            # above; `reason=all-examples-skipped` plus `skipped=` carry the
+            # distinction sweeps need.
+            print "SPEC FILE VERDICT: {run.path} outcome=NOT_RUN declared>={real_skipped} executed=0 passed=0 failed=0 in_development=0 blocked=0 dropped=0 skipped={real_skipped} reason=all-examples-skipped"
     elif has_evidence == 1 and evidence_passed + evidence_failed == 0:
         failed = 1
         passed = 0
@@ -1995,7 +2038,10 @@ fn run_single_target(args: [text]) -> i64:
         # read as PASS just because the child process happened to exit 0 and
         # its aggregate "N examples, M failures" summary line looked clean
         # (that line counts pending() as an executed example — bug:
-        # zero-executed single-file greenwash). Skipped when the summary
+        # zero-executed single-file greenwash). A spec whose examples were
+        # ALL deliberately skipped never reaches this branch — the
+        # all-examples-skipped SKIP verdict above claims it first. Skipped
+        # when the summary
         # line ALREADY reports real failures (has_summary==1 and
         # summary_failed>0): that signal is trustworthy on its own even
         # without a corroborating ✓/✗ glyph (e.g. a non-interpreter child
@@ -2081,10 +2127,8 @@ fn run_single_target(args: [text]) -> i64:
             failed = 1
         if failed > 0:
             print "error: test-runner: spec failed"
-    # Real skip channel. These were hardcoded `0, 0` until 2026-08-20, which is
-    # why every spec on this path reported `skipped=0` even when it had plainly
-    # printed a skip marker -- see count_real_skips()'s docstring.
-    val (real_skipped, real_pending) = count_real_skips(combined)
+    # (real_skipped / real_pending are counted up front, next to
+    # real_executed, so the all-skipped verdict branch can see them.)
     # In-development advisory. This runner IS the explicit-path surface --
     # it is handed one named file -- so the verdict below stays HONEST: a
     # `# @tag:in-development` spec run this way fails red and exits nonzero,
@@ -2131,7 +2175,7 @@ fn run_single_target(args: [text]) -> i64:
     val shown_pending = if is_blocked and real_pending >= blocked_pending: real_pending - blocked_pending else: real_pending
     print_test_file_summary(run.path, passed, failed, real_skipped, shown_pending, duration_ms,
         if failed == 0: unverified_error else: "", process_error,
-        if is_blocked: blocked_count else: 0, blocked_reason)
+        if is_blocked: blocked_count else: 0, blocked_reason, all_skipped)
     if cov_on and cov_sdn != "":
         _cov_print_report_from_source(spec_source, cov_sdn)
     if failed == 0 and unverified_error != "":
