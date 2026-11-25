@@ -138,3 +138,24 @@ covers the wired gate.
 
 Status flipped open → superseded. No code change in this lane.
 
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Re-verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+the SUPERSEDED closure stands.
+
+- `src/os/kernel/loader/executable_manifest_signature_verifier.spl` and
+  `src/lib/common/structural/execution/simple_artifact_manifest_v1_codec.spl`
+  both exist at HEAD.
+- The admission pipeline wires the gate:
+  `src/os/kernel/loader/executable_admission_pipeline.spl:242` calls
+  `executable_manifest_signature_verify` (imported at line 26).
+- Regression spec exists at
+  `test/01_unit/os/kernel/loader/executable_manifest_signature_verifier_spec.spl`.
+- Spec re-run is environment-blocked: the pinned Rust seed v1.0.0-rc.1 rejects
+  `@representation_boundary` decorators present at HEAD
+  (`unknown decorator '@representation_boundary'`), a known repo-wide
+  source/binary inconsistency unrelated to this bug. The runnable PASS
+  recorded in the 2026-11-11 triage section above stands as the evidence.
+
+No code change needed; doc header "Closed 2026-11-11 — SUPERSEDED" is accurate.

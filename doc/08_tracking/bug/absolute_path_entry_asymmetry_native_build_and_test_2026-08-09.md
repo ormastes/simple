@@ -200,3 +200,29 @@ Covering specs run once each, all green:
 `test/01_unit/app/tooling/test_runner_outcome_classification_spec.spl` (3/3),
 `test/01_unit/app/test_runner_new/runner_files_filters_spec.spl` (65/65),
 `test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl` (3/3).
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Verified on `origin/release/1.0.0` HEAD (`38265c7f249`):
+
+- PR #11547 ("fix(test-runner): gate app-twin cached discovery on manifest
+  coverage (absolute-path Half 2)") is MERGED into `release/1.0.0`
+  (mergedAt 2026-11-25T09:32:52Z, merge commit `866d31f9458`).
+- Code inspection confirms the fix is present at HEAD:
+  `src/app/test_runner_new/test_runner_files.spl:263` gates the app-twin
+  cached-manifest fast path with `not manifest_is_fresh(manifest) or not
+  manifest_covers(manifest, base_path)`, and the regression scenario
+  "walks instead of trusting a fresh manifest that never indexed the absolute
+  spelling of the root" is present in
+  `test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl:60`.
+- Spec re-run is environment-blocked on this host: `SIMPLE_LIB=src
+  bin/simple.exe test test/02_integration/app/test_runner_cached_discovery_prefix_spec.spl
+  --mode=interpreter` fails repo-wide at HEAD with
+  `unknown decorator '@representation_boundary'` (pinned Rust seed v1.0.0-rc.1
+  predates commit `cfd89933699`'s decorator annotations). This is the known
+  source/binary inconsistency, not a regression from this fix. The pre/post
+  evidence recorded in the "Half 2 resolution (2026-11-25)" section above
+  stands as the runnable verification.
+
+Both halves RESOLVED: Half 1 by the 2026-08-16 containment (stands as-is),
+Half 2 by PR #11547.

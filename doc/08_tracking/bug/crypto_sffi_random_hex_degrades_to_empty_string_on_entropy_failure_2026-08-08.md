@@ -127,3 +127,26 @@ anywhere in the file. `bin/simple test
 test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl`
 -> `10 examples, 0 failures`, `PASS`. Status header updated from `OPEN (P2)`
 to `RESOLVED (2026-09-13)`; no further code change needed.
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Re-verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+the 2026-09-13 RESOLVED closure stands.
+
+- `src/lib/nogc_sync_mut/io/crypto_sffi.spl:78-87` — `random_hex` and
+  `random_salt` both return `text?` and route through
+  `checked_entropy_hex(_random_hex_raw(length), length)`.
+- `checked_entropy_hex` (`:60-66`) returns `None` when the provider yields
+  nil and when `entropy_hex_valid_for` rejects the value (wrong length,
+  non-lowercase-hex, or all zeros — validator at `:44-58`). The `?? ""` at
+  `:63` sits after the `raw.is_none()` early return, so it only unwraps a
+  known-`Some`; the fail-open path from this bug is gone.
+- Both regression specs exist at HEAD:
+  `test/01_unit/lib/nogc_sync_mut/io/secure_entropy_hex_validator_spec.spl`,
+  `test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl`.
+- Spec re-run is environment-blocked on this host: the pinned Rust seed
+  v1.0.0-rc.1 rejects `@representation_boundary` decorators at HEAD
+  (repo-wide, unrelated to this bug). The green 1/1 and 10/10 runs recorded
+  in the 2026-09-13 re-checks stand as the executed evidence.
+
+No code change needed; doc header "Status: RESOLVED (2026-09-13)" is accurate.

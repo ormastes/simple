@@ -313,3 +313,25 @@ Spec evidence (all PASS, this pass):
 
 Status flipped open → fixed. No code change in this lane.
 
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+Re-verified at `origin/release/1.0.0` HEAD (`38265c7f249`) by code inspection:
+the 2026-11-11 FIXED closure stands.
+
+- Independence gate keys on `independence_group`, never `provider_id`:
+  `src/os/drivers/gpu/board_vulkan/provider_nvidia.spl:206-221` (with the
+  empty-group skip at line 215).
+- Enumeration provider runs the real tool:
+  `src/os/drivers/gpu/board_vulkan/boundary_enumeration_provider.spl:218,293`
+  (`parse_vulkaninfo_lavapipe` over captured `vulkaninfo` stdout).
+- All three quoted regression specs exist at HEAD:
+  `test/01_unit/os/vulkan/independence_group_key_regression_spec.spl`,
+  `independence_gate_key_confusion_detection_spec.spl`,
+  `nvidia_independent_reference_gate_spec.spl`.
+- Spec re-run is environment-blocked on this host: the pinned Rust seed
+  v1.0.0-rc.1 rejects `@representation_boundary` decorators present at HEAD
+  (repo-wide source/binary inconsistency, unrelated to this bug). The runnable
+  3/3, 3/3, 5/5 PASS evidence in the 2026-11-11 triage section stands.
+
+No code change needed; doc header "Closed 2026-11-11 — FIXED" is accurate.
