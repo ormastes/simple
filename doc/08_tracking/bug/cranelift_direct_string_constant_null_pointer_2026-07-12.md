@@ -12,6 +12,38 @@ related: src/lib/nogc_sync_mut/ffi/codegen.spl
 
 # `native-build --backend cranelift`: string constants always compile to a null pointer (SIGSEGV / silent no-op)
 
+## 2026-11-25 object-level re-verification (mechanism fix confirmed in emitted code; hosted e2e still blocked)
+
+Re-ran the cranelift-direct archive oracle on `release/1.0.0` HEAD
+`0819b116ecb` (worktree `/d/wt-p1w1-ae`, tracked `bin/simple.exe` Rust seed
+v1.0.0-rc.1): entry `fn main(): print("hello")`, `--backend cranelift
+--entry-closure --target x86_64-unknown-none --emit-archive --opt-level=none`,
+fresh cache (the seed notes `E-SEED-NATIVE-BUILD-MODE-DYNLOAD-UNSUPPORTED`
+and emits the archive via the one-binary path; compile itself is the same
+cranelift-direct codegen). The original failure mode — `Str(v)` lowering to a
+null constant — is **disproven in the emitted object**:
+
+- `.rodata.subsection` of `mod_0.o` contains the real bytes `68 65 6c 6c 6f`
+  (`hello`).
+- `spl_main` disassembly materializes the string as `lea 0x0(%rip),%rdi`
+  (RIP-relative address of the rodata bytes) + `mov $0x5,%esi` (length), then
+  calls through two relocated imports: `R_X86_64_64 rt_string_new_literal`
+  then `R_X86_64_64 rt_println_value`. No null iconst anywhere on the path.
+
+This upgrades the 2026-08-17 "fix implemented, e2e unverified" status to
+"mechanism verified in emitted cranelift-direct code": the adapter's `Str`
+arm now emits rodata + `rt_string_new_literal` exactly as designed.
+
+**Still NOT verified, so this stays OPEN:** actually *executing* a
+cranelift-built hosted binary. The hosted `native-build --mode one-binary`
+path on this HEAD is blocked before codegen by the known source/binary
+inconsistency — the pinned seed rejects the `@representation_boundary`
+decorators (commit `cfd89933699`) in `src/app/cli/native_build_main.spl`
+(`error: semantic: ... unknown decorator '@representation_boundary'`), and
+the freestanding archive produced here cannot be executed on a Windows host.
+Whoever next has a self-hosted or decorator-tolerant seed should run the
+`print("hello")` binary end-to-end and then close this entry.
+
 ## 2026-08-10 re-verification (ARCHITECTURAL-OPEN confirmed, no regression, no new e2e proof)
 
 Re-read `cl_translate_const_value`'s `Str(v)` arm in

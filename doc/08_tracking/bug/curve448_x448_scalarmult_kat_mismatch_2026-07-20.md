@@ -103,3 +103,26 @@ untouched by this fix and exceeds practical interpreter runtimes
 No code change was required on 2026-11-25; this section records the
 independent re-verification and closes the loop on the stale "OPEN"
 revalidation note above.
+
+### Independent confirmation — 2026-11-25 (second pass, HEAD `0819b116ecb`)
+
+Re-verified on a fresh `release/1.0.0` worktree (HEAD `0819b116ecb`, tracked
+`bin/simple.exe` Rust seed v1.0.0-rc.1). The fix commits `e079bb68500` and
+`79a47bf02cb` are ancestors of HEAD (`git merge-base --is-ancestor`).
+
+The standard spec invocation
+(`bin/simple.exe test test/01_unit/lib/crypto/curve448_rfc7748_kat_spec.spl
+--mode=interpreter`) is **currently blocked repo-wide** by the known
+source/binary inconsistency at this HEAD: the test runner closure
+(`src/app/test_runner_new/test_runner_client.spl`) carries
+`@representation_boundary` decorators (commit `cfd89933699`) that the pinned
+seed rejects (`unknown decorator '@representation_boundary'`). This is a
+seed/toolchain limit, not a curve448 regression.
+
+Verified instead with a direct probe: `x448_scalar_mult(SCALAR_TV1, U_TV1)`
+(TV1 bytes copied verbatim from the spec) via `bin/simple.exe run` against the
+unmodified `src/os/crypto/curve448.spl` (imported sibling-relative from a
+scratch dir because the fns are module-private) printed `X448_TV1_MATCH` —
+the RFC 7748 §5.2 TV1 output `ce3e4ff9...` matches. The earlier same-day
+7/7 spec verdict above stands; this pass confirms the fix is still live at
+the newer HEAD.

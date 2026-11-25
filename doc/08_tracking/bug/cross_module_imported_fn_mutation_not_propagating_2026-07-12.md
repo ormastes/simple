@@ -1,6 +1,15 @@
 # Cross-module imported function mutation not propagating to caller's instance
 ## Closed 2026-11-25 — does not reproduce on the current pinned seed
 
+**Independent confirmation — 2026-11-25 (second pass, HEAD `0819b116ecb`):**
+the direct-symptom half of the closure repro was re-run on a fresh
+`release/1.0.0` worktree with the tracked `bin/simple.exe` (Rust seed
+v1.0.0-rc.1): module A defines `pub class Sink` + `pub fn draw_showcase(mut s:
+Sink)` (pushes 111); module C imports `use xmod_a.{draw_showcase, Sink}` and
+calls it on a caller-owned instance. Result `len=1`, `value=111` on BOTH the
+default JIT lane and `SIMPLE_EXECUTION_MODE=interpret` — the imported mutating
+fn's mutation propagates. Closure stands at the newer HEAD.
+
 **Status: CLOSED (stale).** A minimal compiler-level repro of BOTH reported
 mechanisms was run 2026-11-25 on `origin/release/1.0.0` (`3e04c857a56`) with
 the tracked `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1),
