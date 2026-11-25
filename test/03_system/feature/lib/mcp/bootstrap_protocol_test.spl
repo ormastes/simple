@@ -1,11 +1,20 @@
 # @cover src/app/mcp/main.spl 20%
-# Real JSON-RPC protocol round-trip against the MCP bootstrap server
+# Real JSON-RPC protocol round-trip against the MCP stdio server
+# (src/app/mcp/main.spl, the live entry point; the original
+# src/app/mcp/bootstrap/main_optimized.spl subject was consolidated away).
 #
 # Converted 2026-08-17 from a print-only script whose "✗" branches printed and
 # then exited 0, so every check was vacuous and the file could never go RED.
 # Same checks, now asserted.
+# Fixed 2026-11-25: feed the requests through a stdin heredoc in a single
+# shell invocation (the old file_write("/tmp/...") + `< /tmp/...` pair split
+# across two different /tmp views on Windows, where file_write is a native
+# call writing C:\tmp but shell() resolves to MSYS sh reading its own /tmp),
+# launch the tracked per-OS binary, and assert on stdout/stderr separately
+# instead of merging compiler-runner diagnostics into the protocol stream
+# with 2>&1.
 
-use app.io.mod (file_write, shell)
+use app.io.mod (shell, env_get)
 
 describe "MCP bootstrap JSON-RPC protocol":
     it "answers initialize, tools/list and tools/call over stdio":
@@ -19,9 +28,18 @@ Content-Length: 115
 
 {"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"simple_status","arguments":{"directory":"src/"}}}
 """
-        file_write("/tmp/mcp_test_input.txt", test_input)
-        val result = shell("bin/simple run src/app/mcp/main.spl < /tmp/mcp_test_input.txt 2>&1")
+        # bin/simple.exe is the tracked self-hosted Windows binary; bin/simple
+        # is the POSIX entry point. Forward slashes are correct for both
+        # because shell() resolves to a POSIX sh on Windows whenever one is
+        # installed (cmd.exe is only the no-sh fallback).
+        val os_name = env_get("OS") ?? ""
+        val launcher = if os_name.lower().contains("windows"):
+            "bin/simple.exe"
+        else:
+            "bin/simple"
+        val result = shell("{launcher} run src/app/mcp/main.spl << 'SIMPLE_MCP_EOF'\n{test_input}SIMPLE_MCP_EOF")
         val output = result.stdout ?? ""
+        val errors = result.stderr ?? ""
         val exit_code = result.exit_code ?? 1
 
         expect(exit_code).to_equal(0)
@@ -36,5 +54,9 @@ Content-Length: 115
         expect(output.contains("[")).to_equal(true)
         # tools/call response
         expect(output.contains("\"id\":\"3\",\"result\"")).to_equal(true)
-        # no error lines
+        # no error lines on the protocol stream
         expect(output.contains("error: ")).to_equal(false)
+        # no server-side [error] diagnostics on stderr (the server's own
+        # error marker from _mcp_error; compiler-runner warnings are not
+        # protocol output and are no longer merged into stdout)
+        expect(errors.contains("[error]")).to_equal(false)
