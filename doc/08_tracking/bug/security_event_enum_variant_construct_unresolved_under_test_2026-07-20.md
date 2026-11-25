@@ -70,3 +70,29 @@ A `bin/simple run`-based repro was attempted but hit an unrelated error
 reaching the `SecurityEvent.CapabilityDenied` construction line, so a clean
 run-vs-test A/B on this exact construction was not completed. The `test`-path
 failure itself is directly reproduced and unambiguous.
+
+## Triage 2026-11-25 (work/p2w5-ai-20261125)
+
+**Classification: SKIP (Rust-seed-only, verification environment-blocked).**
+
+- The failing path is the Rust-seed SSpec `test` evaluator's cross-module
+  enum-variant-constructor resolution. The bug doc itself records "No Rust
+  seed fix attempted here (out of scope; needs a rebuild)"; the pinned seed
+  binary (`bin/simple.exe`, v1.0.0-rc.1) cannot be rebuilt in this lane
+  (no cargo/rust builds permitted).
+- Re-running the named spec on 2026-11-25 is blocked repo-wide at
+  release/1.0.0 HEAD: `bin/simple.exe test
+  test/02_integration/app/ui.web/capability_gating_spec.spl --mode=interpreter`
+  fails before collecting any example with
+  `error: semantic: src/app/test_runner_new/test_runner_client.spl:9:1:
+  unknown decorator '@representation_boundary'` — the source/binary
+  inconsistency introduced by cfd89933699 (940 `@representation_boundary`
+  annotations the pinned seed rejects).
+- Code inspection confirms the bug's factual basis is unchanged: the
+  `CapabilityDenied(capability: text, window_id: text)` variant still exists
+  (`src/lib/nogc_sync_mut/security/types.spl:19`) and
+  `src/lib/common/ui/capability_policy.spl:253` still constructs
+  `SecurityEvent.CapabilityDenied(...)` inside the transitively-called free
+  function, so the doc is not stale.
+- Status remains `open`; re-verify once a self-hosted binary can run the
+  spec (or the seed is rebuilt past the decorator support).
