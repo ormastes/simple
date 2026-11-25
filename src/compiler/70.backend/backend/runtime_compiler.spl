@@ -127,6 +127,23 @@ pub fn windows_link_flavor_for_target(target: text, linker_abi: text) -> text:
 pub fn _is_mingw() -> bool:
     windows_link_flavor_for_target("", "") == "gnu"
 
+# reason: Windows MSYS path normalization helper exported for unit specs
+@allow(primitive_api)
+pub fn windows_msys_drive_path_v1(p: text, is_windows: bool) -> text:
+    """On Windows, rewrite an MSYS/Cygwin '/d/foo' path to native 'd:/foo'."""
+    if not is_windows:
+        return p
+    if p.len() < 3:
+        return p
+    if not p.starts_with("/"):
+        return p
+    if p.substring(2, 3) != "/":
+        return p
+    val drive = p.substring(1, 2)
+    if not "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(drive):
+        return p
+    "{drive}:{p.substring(2)}"
+
 fn _msys_drive_path(p: text) -> text:
     """On Windows, rewrite an MSYS/Cygwin '/d/foo' path to native 'd:/foo'.
 
@@ -151,18 +168,7 @@ fn _msys_drive_path(p: text) -> text:
     platform this returns its argument unchanged, and '/d/foo' is a perfectly
     ordinary POSIX path that must NOT be rewritten.
     """
-    if not _is_windows():
-        return p
-    if p.len() < 3:
-        return p
-    if not p.starts_with("/"):
-        return p
-    if p.substring(2, 3) != "/":
-        return p
-    val drive = p.substring(1, 2)
-    if drive == "/" or drive == "":
-        return p
-    "{drive}:{p.substring(2)}"
+    windows_msys_drive_path_v1(p, _is_windows())
 
 pub fn _get_temp_dir() -> text:
     val tmpdir = env_get_nullable("TMPDIR")
@@ -482,7 +488,9 @@ pub fn find_c_compiler() -> text:
     if simple_cc == "":
         return ""
     if simple_cc.is_some():
-        if _is_windows() or plan.requires_cross:
+        if _is_windows():
+            return _msys_drive_path(simple_cc)
+        if plan.requires_cross:
             return simple_cc
         match c_driver_admit_v1(simple_cc):
             case Ok(cc): return cc
@@ -585,6 +593,12 @@ pub fn windows_c_compiler_candidates_v1(flavor: text) -> [text]:
         return ["clang-cl", "cl.exe", "clang"]
     ["clang"]
 
+fn _windows_strip_trailing_slashes_v1(path: text) -> text:
+    var out = path
+    while out.byte_len() > 1 and (out.ends_with("/") or out.ends_with("\\")):
+        out = out.substring(0, out.byte_len() - 1)
+    out
+
 # reason: Windows C-driver probe helper exported for unit specs
 @allow(primitive_api)
 pub fn windows_clang_env_dirs_v1(llvm_bin: text, llvm_mingw_root: text) -> [text]:
@@ -597,6 +611,28 @@ pub fn windows_clang_env_dirs_v1(llvm_bin: text, llvm_mingw_root: text) -> [text
         dirs.push(llvm_bin)
     if llvm_mingw_root != "":
         dirs.push(llvm_mingw_root + "/bin")
+    dirs
+
+# reason: Windows C-driver probe helper exported for unit specs
+@allow(primitive_api)
+pub fn windows_mingw_clang_env_dirs_v1(llvm_bin: text, llvm_mingw_root: text, mingw_root: text) -> [text]:
+    """Explicit clang bin dirs probed BEFORE PATH on the GNU lane:
+    SIMPLE_LLVM_BIN, then SIMPLE_LLVM_MINGW_ROOT/bin, then SIMPLE_MINGW_ROOT/bin.
+    Bootstrap and Git Bash env scripts (platform-detect.shs,
+    windows-gitbash-bootstrap-env.shs, retain-ladder-seed-runtime.shs) export
+    SIMPLE_MINGW_ROOT while p3 scripts export SIMPLE_LLVM_MINGW_ROOT; probing
+    both (deduplicated) keeps GNU C-driver discovery consistent across lanes."""
+    var dirs: [text] = []
+    if llvm_bin != "":
+        dirs.push(_windows_strip_trailing_slashes_v1(llvm_bin))
+    if llvm_mingw_root != "":
+        val lm_bin = _windows_strip_trailing_slashes_v1(llvm_mingw_root) + "/bin"
+        if not dirs.contains(lm_bin):
+            dirs.push(lm_bin)
+    if mingw_root != "":
+        val mg_bin = _windows_strip_trailing_slashes_v1(mingw_root) + "/bin"
+        if not dirs.contains(mg_bin):
+            dirs.push(mg_bin)
     dirs
 
 # reason: Windows C-driver probe helper exported for unit specs
@@ -631,7 +667,7 @@ pub fn windows_clang_triple_is_msvc_v1(triple: text) -> bool:
 # reason: Windows C-driver probe helper exported for unit specs
 @allow(primitive_api)
 pub fn windows_only_msvc_llvm_diagnostic_v1(paths: [text]) -> text:
-    "[cc-detect] error: only MSVC-flavoured LLVM found ({paths.join(', ')}); the default GNU lane needs llvm-mingw UCRT under ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 (scripts/setup/bootstrap-prereqs.shs install), SIMPLE_LLVM_MINGW_ROOT or SIMPLE_LLVM_BIN. MSVC LLVM is never used on this lane (--msvc selects the MSVC lane)."
+    "[cc-detect] error: only MSVC-flavoured LLVM found ({paths.join(', ')}); the default GNU lane needs llvm-mingw UCRT under ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64 (scripts/setup/bootstrap-prereqs.shs install), SIMPLE_MINGW_ROOT, SIMPLE_LLVM_MINGW_ROOT or SIMPLE_LLVM_BIN. MSVC LLVM is never used on this lane (--msvc selects the MSVC lane)."
 
 fn _windows_home_llvm_mingw_dirs() -> [text]:
     var home = _env_text("USERPROFILE")
@@ -684,18 +720,25 @@ fn _find_c_compiler_windows() -> text:
     (_cc_verify_compiles) — a `where` hit alone selects nothing."""
     val mingw = _is_mingw()
     var tried: [text] = []
+    var msvc_only: [text] = []
     if mingw:
-        for dir in windows_clang_env_dirs_v1(_env_text("SIMPLE_LLVM_BIN"), _env_text("SIMPLE_LLVM_MINGW_ROOT")):
+        for dir in windows_mingw_clang_env_dirs_v1(_env_text("SIMPLE_LLVM_BIN"), _env_text("SIMPLE_LLVM_MINGW_ROOT"), _env_text("SIMPLE_MINGW_ROOT")):
             val direct = "{_msys_drive_path(dir)}/clang.exe"
             tried.push(direct)
-            if file_exists(direct) and _cc_verify_compiles(direct):
-                return direct
+            if file_exists(direct):
+                if _windows_clang_is_msvc(direct):
+                    msvc_only.push(direct)
+                elif _cc_verify_compiles(direct):
+                    return direct
         # Default: ~/.simple/toolchains llvm-mingw UCRT, newest first, before PATH.
         for dir in _windows_home_llvm_mingw_dirs():
             val direct = "{dir}/clang.exe"
             tried.push(direct)
-            if file_exists(direct) and _cc_verify_compiles(direct):
-                return direct
+            if file_exists(direct):
+                if _windows_clang_is_msvc(direct):
+                    msvc_only.push(direct)
+                elif _cc_verify_compiles(direct):
+                    return direct
 
     # MSVC lane: clang-cl BEFORE cl.exe. cl.exe passes the trivial
     # _cc_verify_compiles probe and then cannot compile the C runtime at all:
@@ -707,7 +750,6 @@ fn _find_c_compiler_windows() -> text:
     # also the compiler the stage-2 candidate itself was built with, so probing
     # the candidate with a DIFFERENT compiler than built it is its own defect.
     # These are reached ONLY on the MSVC lane; the default lane is clang-only.
-    var msvc_only: [text] = []
     for candidate in windows_c_compiler_candidates_v1(if mingw: "gnu" else: "msvc"):
         tried.push(candidate)
         val resolved = _first_verified_windows_compiler(candidate, mingw)
@@ -727,7 +769,7 @@ fn _find_c_compiler_windows() -> text:
     print "[cc-detect] temp dir: {_get_temp_dir()}"
     print "[cc-detect] tried: {tried.join(', ')} (each `where` + a real compile; gcc is never used)"
     if mingw:
-        print "[cc-detect] default lane is llvm-mingw clang: set SIMPLE_LLVM_MINGW_ROOT (or SIMPLE_LLVM_BIN) or put its bin on PATH; clang-cl/cl.exe need the MSVC lane (--msvc / SIMPLE_WINDOWS_ABI=msvc)"
+        print "[cc-detect] default lane is llvm-mingw clang: set SIMPLE_MINGW_ROOT or SIMPLE_LLVM_MINGW_ROOT (or SIMPLE_LLVM_BIN) or put its bin on PATH; clang-cl/cl.exe need the MSVC lane (--msvc / SIMPLE_WINDOWS_ABI=msvc)"
     print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
     ""
 
@@ -817,7 +859,7 @@ pub fn find_runtime_source_dir() -> text:
         # above, so a phase4 lane that lost its env still fails loud.
     # Try SIMPLE_PROJECT_ROOT env var first so tests and callers can force
     # deterministic resolution even when cwd also contains src/runtime.
-    val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT") ?? ""
+    val project_root = _msys_drive_path(env_get_nullable("SIMPLE_PROJECT_ROOT") ?? "")
     if project_root != "":
         val rt_path = "{project_root}/src/runtime/runtime.c"
         if file_exists(rt_path):
@@ -1186,6 +1228,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         rt_dir = trytext_54
     else:
         rt_dir = find_runtime_source_dir()
+    rt_dir = _msys_drive_path(rt_dir)
     if trace:
         print "[RT-COMPILE] rt_dir={rt_dir}"
     if rt_dir == "":
@@ -1277,6 +1320,7 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             val local_data = env_get_nullable("LOCALAPPDATA") ?? ""
             if local_data != "": windows_cache_root = local_data + "/Simple/cache/runtime-objects-v1"
         if windows_cache_root != "":
+            windows_cache_root = _msys_drive_path(windows_cache_root)
             windows_compiler_digest = file_hash_sha256_or_empty(cc)
             windows_toolchain = runtime_windows_cache_toolchain_v1(windows_cache_root, cc)
     if trace:
@@ -1354,8 +1398,9 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
             comp_args = ["-c"]
             if hosted_c_target_is_mingw(target):
                 comp_args.push("--target=" + hosted_mingw_clang_target(target))
-            for target_arg in hosted_cross_c_target_args(target, host_os(), host_arch()):
-                comp_args.push(target_arg)
+            else:
+                for target_arg in hosted_cross_c_target_args(target, host_os(), host_arch()):
+                    comp_args.push(target_arg)
             for abi_define in abi_defines:
                 comp_args.push(abi_define)
             if not _is_windows():
