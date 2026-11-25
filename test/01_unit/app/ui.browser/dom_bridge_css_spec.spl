@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+
+Purpose: focused executable gate for `app.ui.browser.dom_bridge` — the CSS
+rule parser and the HTML→DOM bridge — so the parser can be optimized and
+regression-checked without the full browser/renderer stack. Audience:
+engineers working on the browser DOM bridge or CSS startup performance.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/app/ui.browser/dom_bridge_css_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the lightweight tag-walk / CSS-subset fidelity the bridge documents;
+full HTML/CSS parsing lives in the browser engine and is out of scope here.
+"""
+
+# Feature: Browser DOM Bridge — CSS rule parsing and HTML→DOM conversion
+# Category: UI Components
+# Status: Implemented
+"""
+# DOM Bridge — CSS parser + HTML→DOM gate
+
+## Overview
+
+`app.ui.browser.dom_bridge.DomBridge` turns the UI widget tree's HTML/CSS
+output into browser-engine DOM nodes. This spec is the focused gate called
+for by `doc/08_tracking/bug/browser_dom_bridge_css_runtime_blocker_2026-06-14.md`:
+it exercises `parse_css_rules` without the `html_to_dom` attribute path,
+pins rule/declaration counts and content, and proves a multi-hundred-rule
+stylesheet parses without the repeated tail-slice blowup that previously
+hung even a five-rule probe.
+
+## Examples
+
+A two-rule stylesheet yields two `CSSRule`s with the expected selector
+parts and declarations. `html_to_dom` on a tagged fragment produces the
+element, its attribute dict, and the text node. A 200-rule stylesheet
+parses to exactly 200 rules.
+"""
+
+use app.ui.browser.dom_bridge.{DomBridge}
+use std.common.render_scene.css_types.{RsCssValue, SelectorPart}
+use std.spec.{step, fail_test}
+
+
+describe "DOM Bridge — CSS rule parsing":
+
+    it "parses a two-rule stylesheet into two rules with declarations":
+        step("Parse '.item_0 { color: red; } .item_1 { margin: 4px; }'")
+        val rules = DomBridge.parse_css_rules(".item_0 { color: red; } .item_1 { margin: 4px; }")
+        expect(rules.len()).to_equal(2)
+
+        step("First rule selects .item_0 and declares color: red")
+        val sel0 = rules[0].selectors[0]
+        match sel0.parts[0]:
+            SelectorPart.Class(name) =>
+                expect(name).to_equal("item_0")
+            _ =>
+                fail_test("expected a class selector part for rule 0")
+        expect(rules[0].declarations.len()).to_equal(1)
+        expect(rules[0].declarations[0].property).to_equal("color")
+        match rules[0].declarations[0].value:
+            RsCssValue.Keyword(v) =>
+                expect(v).to_equal("red")
+            _ =>
+                fail_test("expected color: red to parse as a keyword value")
+
+        step("Second rule declares margin: 4px as a length")
+        expect(rules[1].declarations[0].property).to_equal("margin")
+        match rules[1].declarations[0].value:
+            RsCssValue.Length(v, unit) =>
+                expect(v).to_equal(4.0)
+                expect(unit).to_equal("px")
+            _ =>
+                fail_test("expected margin: 4px to parse as a px length")
+
+    it "parses id, type, and universal selectors":
+        step("Parse '#main { }', 'div { }', '* { }'")
+        val rules = DomBridge.parse_css_rules("#main { color: red; } div { color: red; } * { color: red; }")
+        expect(rules.len()).to_equal(3)
+        match rules[0].selectors[0].parts[0]:
+            SelectorPart.Id(name) =>
+                expect(name).to_equal("main")
+            _ =>
+                fail_test("expected an id selector part for '#main'")
+        match rules[1].selectors[0].parts[0]:
+            SelectorPart.Type(name) =>
+                expect(name).to_equal("div")
+            _ =>
+                fail_test("expected a type selector part for 'div'")
+        match rules[2].selectors[0].parts[0]:
+            SelectorPart.Universal =>
+                pass_dn
+            _ =>
+                fail_test("expected a universal selector part for '*'")
+
+    it "returns no rules for empty or declaration-less input":
+        step("Parse empty and brace-less CSS")
+        expect(DomBridge.parse_css_rules("").len()).to_equal(0)
+        expect(DomBridge.parse_css_rules("/* no rules here */").len()).to_equal(0)
+
+    it "parses a 200-rule stylesheet without quadratic tail-slice blowup":
+        # @req: regression guard for the repeated tail-slice hang in
+        # browser_dom_bridge_css_runtime_blocker_2026-06-14
+        step("Build and parse a 200-rule stylesheet")
+        var css = ""
+        for i in 0..200:
+            css = css + ".item_{i} {{ color: red; margin: {i}px; }}"
+        val rules = DomBridge.parse_css_rules(css)
+        expect(rules.len()).to_equal(200)
+        expect(rules[199].declarations.len()).to_equal(2)
+
+describe "DOM Bridge — HTML to DOM":
+
+    it "builds elements, attributes, and text nodes from a tagged fragment":
+        step("Convert '<div class=\"item_0\">Hello</div>' with matching CSS")
+        val css = ".item_0 { color: red; }"
+        var bridge = DomBridge.new()
+        val dom = bridge.html_to_dom("<div class=\"item_0\">Hello</div>", css)
+        expect(dom.elements.len()).to_equal(1)
+        expect(dom.elements[0].tag_name).to_equal("div")
+        expect(dom.elements[0].get_attr("class")).to_equal("item_0")
+        expect(dom.text_nodes.len()).to_equal(1)
+        expect(dom.text_nodes[0].data).to_equal("Hello")
+        expect(dom.css_rules.len()).to_equal(1)
+
+    it "handles nested and void elements without corrupting the stack":
+        step("Convert '<div><br><span>Hi</span></div>'")
+        var bridge = DomBridge.new()
+        val dom = bridge.html_to_dom("<div><br><span>Hi</span></div>", "")
+        expect(dom.elements.len()).to_equal(3)
+        expect(dom.elements[0].tag_name).to_equal("div")
+        expect(dom.elements[1].tag_name).to_equal("br")
+        expect(dom.elements[2].tag_name).to_equal("span")
+        expect(dom.text_nodes.len()).to_equal(1)

@@ -1,4 +1,45 @@
 # Browser DOM Bridge CSS Runtime Blocker - 2026-06-14
+## Resolved 2026-11-25 — parser false positive fixed earlier; remaining API drift fixed and gated
+
+- **measured** (2026-11-25, Windows x86_64, tracked `bin/simple.exe`, `SIMPLE_LIB=src ... run --mode=interpreter`):
+  the 2026-09-13 load blocker is gone — the `namespace:` named-argument false
+  positive no longer fires. Both parsers now guard it: pure-Simple
+  `src/compiler/10.frontend/parser/recovery.spl:205` only flags
+  `namespace <Identifier>`, and the seed
+  `src/compiler_rust/parser/src/error_recovery.rs:508` has the same
+  name-follows guard. `use app.ui.browser.dom_bridge.{DomBridge}` loads.
+- **measured**: with the module loading, the real residual blocker surfaced —
+  `dom_bridge.spl` was written against a removed API: `List<T>.new()`
+  (`error: semantic: ... unknown class List`), `CSSValue`/`CSSDeclaration`
+  (renamed to `RsCssValue`/`RsCssDeclaration` on 2026-08-19),
+  `CSSRule.create`/`Selector.create` (gone), `Element.attributes` as
+  `List<Attr>` (now `Dict<text, text>`), and `UIEvent.Click` (variant
+  removed; its reference also forced a whole-module JIT demotion).
+- **fixed 2026-11-25**: `src/app/ui.browser/dom_bridge.spl` ported to the
+  current APIs — `Dict<text, text>` attributes, `RsCss*` types,
+  struct-literal `CSSRule(selectors: [...], declarations: ...)`,
+  `UIEvent.MouseEvent` for click/mousedown — and the `parse_css_rules`
+  repeated tail-slice loop replaced with the position-index scan this doc's
+  Next Step called for.
+- **measured** (after): probe run prints `rules: 2 / elements: 1 / texts: 1 /
+  rules-in-tree: 2`; a 400-rule stylesheet parses in **2106 µs** and a
+  200-rule sheet in **682 µs** (previously a five-rule probe hung > 90 s);
+  no JIT demotion remains. A 26-assertion mirror of the new spec passes
+  `ALL CHECKS PASSED`.
+- **gate added**: `test/01_unit/app/ui.browser/dom_bridge_css_spec.spl` — the
+  CSS-parser-only focused executable test this doc asked for (rule counts,
+  selector/declaration content, empty input, 200-rule regression guard,
+  html_to_dom attributes/nesting).
+- **host limit stated**: the spec harness (`bin/simple test`, `run <spec>`,
+  `lint`) cannot execute on this host today — the tracked seed binary
+  (2026-11-17) predates today's seed fix `14a34acbe1e` ("accept
+  @representation_boundary as directive attribute"), so every closure that
+  touches a decorated `nogc_sync_mut` module dies with
+  `unknown decorator @representation_boundary` before any assertion runs.
+  The spec's assertions were therefore executed via an equivalent
+  `run`-mode probe (output above); the spec itself needs one CI run on a
+  current binary.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
