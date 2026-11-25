@@ -106,3 +106,14 @@ Before claiming support for `text-decoration-thickness` or
 Do not add the properties to `CSS_SUPPORTED` as no-ops. That would make
 traceability report support that the renderer cannot prove.
 
+
+## Verification 2026-11-25 (p2w5-ag lane) — fix confirmed present on release/1.0.0
+
+The 2026-11-05 repair is present at release/1.0.0 HEAD:
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl:1744-1754`
+resolves `text-underline-offset` with `parse_signed_nth_int(...)` (with the
+-1000000 sentinel falling back to 0), so negative offsets keep their sign.
+Behavioral evidence (5/5 on `text_decoration_geometry_clip_spec.spl`) was
+recorded on the Linux/aarch64 lane on 2026-11-05; a re-run on this Windows
+host is blocked because the pinned seed rejects `@representation_boundary`
+in the test runner, so this confirmation is code-inspection only. Closing.

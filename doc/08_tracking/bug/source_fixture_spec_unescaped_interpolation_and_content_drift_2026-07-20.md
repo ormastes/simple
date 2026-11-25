@@ -6,7 +6,9 @@ evidence found in the body. This is bookkeeping, not verification.
 substring checks, AND (where verified) the guarded content itself no longer
 matches current product source
 
-**Status:** OPEN — filed, not fixed (fix requires either a product source
+**Status:** RESOLVED 2026-11-25 — layer 1 fixed in all named/candidate specs;
+layer 2 product migration landed (see verification note at end). Prior
+status: OPEN — filed, not fixed (fix requires either a product source
 migration or an explicit decision to relax the guard, both out of scope for
 this triage pass; the HARD RULE against weakening assertions blocks a
 mechanical spec-only fix)
@@ -197,3 +199,32 @@ The rt_dict_keys migration was never applied to the product source. The spec is
 left RED on purpose — it documents a real, open src/ defect and must not be
 weakened. Owner: HIR lane (src/ scope).
 
+
+## Verification 2026-11-25 (p2w5-ag lane) — RESOLVED (both layers), closing
+
+Layer 1: none of the named or grep-detected candidate specs still contains an
+unescaped `{ident}` inside an interpolating literal (checked
+`hir_bootstrap_source_regression_spec.spl`, `resolve_import_symbols_spec.spl`,
+`stage4_runtime_legacy_compat_provider_spec.spl`,
+`stage4_selected_archive_projection_spec.spl`,
+`module_lowering_dict_keys_source_spec.spl`,
+`stage4_final_symbol_closure_spec.spl`,
+`native_build_cache_plumbing_spec.spl`).
+
+Layer 2 (product drift): the migration decision was made and landed.
+- `src/compiler/20.hir/hir_symbol_table_methods.spl` now owns the guarded
+  lookup: `rt_dict_contains(scope.symbols, name)` at :312 and :354, and the
+  retargeted `symbol_table_dict_get_source_spec.spl` asserts exactly that
+  owner file (no `scope.symbols.get(name)` in the guarded body).
+- `src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl` uses
+  `lookup_or_invalid` (6 sites) and contains no
+  `if val found_symbol = symbol:`.
+- `module_lowering_dict_keys_source_spec.spl` was deliberately re-pinned to
+  the opposite, owner-sanctioned invariant: deterministic sorted `.keys()`
+  traversal (`.keys()` + `.sort()`), asserting `rt_dict_keys(` is absent —
+  the current `module_lowering.spl` matches (0 `rt_dict_keys`, split across
+  the `_Items/` files the spec now reads).
+
+Runtime spec re-run is blocked on this host (pinned seed rejects
+`@representation_boundary` in the test runner); verified by code inspection
+against the current source, which matches every assertion string cited above.
