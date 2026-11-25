@@ -47,26 +47,79 @@ pub fn tensor_shape(t: PureTensor) -> [i64]:
 pub fn tensor_value_at(t: PureTensor, i: i64) -> f64:
     t.data[i]
 
+# Precompute 2^(e - 150) for IEEE-754 F32 exponent e in 1..254, plus 2^-149 at index 0
+# for subnormals. Multiplying an exact 24-bit mantissa integer by an exact power of two
+# in f64 is bit-exact and avoids an O(|exp|) loop per element in the interpreter.
+fn _f32_pow2_table() -> [f64]:
+    var p = 1.0
+    var k: i64 = 0
+    while k < 149:
+        p = p * 0.5
+        k = k + 1
+    var table: [f64] = [p]
+    var e: i64 = 1
+    while e < 255:
+        table.push(p)
+        p = p * 2.0
+        e = e + 1
+    table
+
 # Decode `count` little-endian F32 values starting at byte `offset`.
 pub fn tensor_decode_f32_le(bytes: [u8], offset: i64, count: i64, shape: [i64]) -> PureTensor:
+    val pow2 = _f32_pow2_table()
     var out: [f64] = []
     var i: i64 = 0
     var o = offset
     while i < count:
-        val bits = (bytes[o] as u32) | ((bytes[o + 1] as u32) << 8) | ((bytes[o + 2] as u32) << 16) | ((bytes[o + 3] as u32) << 24)
-        out.push(f32_from_bits(bits) as f64)
+        val b0 = bytes[o] as i64
+        val b1 = bytes[o + 1] as i64
+        val b2 = bytes[o + 2] as i64
+        val b3 = bytes[o + 3] as i64
+        val exp = ((b3 & 127) << 1) | (b2 >> 7)
+        val frac = ((b2 & 127) << 16) | (b1 << 8) | b0
+        var v = 0.0
+        if exp == 0:
+            if frac != 0:
+                v = (frac as f64) * pow2[0]
+            if (b3 & 128) != 0:
+                v = -v
+        elif exp == 255:
+            val bits = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)
+            v = f32_from_bits(bits) as f64
+        else:
+            v = ((8388608 + frac) as f64) * pow2[exp]
+            if (b3 & 128) != 0:
+                v = -v
+        out.push(v)
         o = o + 4
         i = i + 1
     PureTensor(data: out, shape: shape)
 
 # Decode `count` little-endian BF16 values: a BF16 is the high half of an F32.
 pub fn tensor_decode_bf16_le(bytes: [u8], offset: i64, count: i64, shape: [i64]) -> PureTensor:
+    val pow2 = _f32_pow2_table()
     var out: [f64] = []
     var i: i64 = 0
     var o = offset
     while i < count:
-        val bits = ((bytes[o] as u32) << 16) | ((bytes[o + 1] as u32) << 24)
-        out.push(f32_from_bits(bits) as f64)
+        val b2 = bytes[o] as i64
+        val b3 = bytes[o + 1] as i64
+        val exp = ((b3 & 127) << 1) | (b2 >> 7)
+        val frac = (b2 & 127) << 16
+        var v = 0.0
+        if exp == 0:
+            if frac != 0:
+                v = (frac as f64) * pow2[0]
+            if (b3 & 128) != 0:
+                v = -v
+        elif exp == 255:
+            val bits = ((b2 as u32) << 16) | ((b3 as u32) << 24)
+            v = f32_from_bits(bits) as f64
+        else:
+            v = ((8388608 + frac) as f64) * pow2[exp]
+            if (b3 & 128) != 0:
+                v = -v
+        out.push(v)
         o = o + 2
         i = i + 1
     PureTensor(data: out, shape: shape)

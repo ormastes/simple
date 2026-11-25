@@ -13,13 +13,18 @@
 
 use std.gc_async_mut.slang.model_executor.pure.llama_forward.{LlamaModel, llama_load}
 use std.gc_async_mut.slang.model_executor.pure.kv_cache.{KvSession, kv_session_new, kv_generate_greedy}
+use std.gc_async_mut.slang.model_executor.pure.compute_backend.{ComputeKind, ComputeOps, compute_open}
+use std.gc_async_mut.slang.model_executor.pure.llama_forward_gpu.{GpuLlama, GpuKvSession, gpu_llama_load, gpu_llama_free, gpu_kv_session_new, gpu_kv_session_free, gpu_generate_greedy}
 use std.gc_async_mut.slang.model_executor.pure.tokenizer.{PureTokenizer, pure_tokenizer_load, pure_tokenizer_encode, pure_tokenizer_decode}
 
 struct PureLane:
-    model: LlamaModel
     tokenizer: PureTokenizer
-    session: KvSession
     requests: i64
+    cpu_model: Option<LlamaModel>
+    cpu_session: Option<KvSession>
+    gpu_ops: Option<ComputeOps>
+    gpu_model: Option<GpuLlama>
+    gpu_session: Option<GpuKvSession>
 
 # What one request did, in the units the ggml lane's prefix-cache stats use.
 struct PureGeneration:
@@ -30,36 +35,128 @@ struct PureGeneration:
     reused_positions: i64
     evaluated_positions: i64
 
-fn pure_lane_load(model_dir: text) -> Result<PureLane, text>:
+fn _gpu_cap(max_pos: i64) -> i64:
+    if max_pos < 1024:
+        return max_pos
+    1024
+
+fn _pure_lane_load_cpu(model_dir: text, tokenizer: PureTokenizer) -> Result<PureLane, text>:
     val model = llama_load(model_dir)?
+    Ok(PureLane(
+        tokenizer: tokenizer,
+        requests: 0,
+        cpu_model: Some(model),
+        cpu_session: Some(kv_session_new(model)),
+        gpu_ops: None,
+        gpu_model: None,
+        gpu_session: None))
+
+fn pure_lane_load(model_dir: text) -> Result<PureLane, text>:
     val tokenizer = pure_tokenizer_load(model_dir)?
-    Ok(PureLane(model: model, tokenizer: tokenizer, session: kv_session_new(model), requests: 0))
+    val ops = compute_open("auto")?
+    if ops.kind != ComputeKind.Cpu:
+        match gpu_llama_load(ops, model_dir):
+            Ok(gm):
+                match gpu_kv_session_new(ops, gm):
+                    Ok(gs):
+                        return Ok(PureLane(
+                            tokenizer: tokenizer,
+                            requests: 0,
+                            cpu_model: None,
+                            cpu_session: None,
+                            gpu_ops: Some(ops),
+                            gpu_model: Some(gm),
+                            gpu_session: Some(gs)))
+                    Err(e):
+                        val _freed = gpu_llama_free(ops, gm)
+                        return Err(e)
+            Err(gpu_err):
+                # Non-F32 checkpoints (e.g. BF16) are not yet uploaded directly to GPU;
+                # fall back to the CPU safetensors path only for that dtype gap.
+                if not gpu_err.contains("missing F32 tensor"):
+                    return Err(gpu_err)
+    _pure_lane_load_cpu(model_dir, tokenizer)
+
+fn pure_lane_unload(lane: PureLane) -> Result<(), text>:
+    if val ops = lane.gpu_ops:
+        if val gs = lane.gpu_session:
+            gpu_kv_session_free(ops, gs)?
+        if val gm = lane.gpu_model:
+            gpu_llama_free(ops, gm)?
+    Ok(())
+
+fn pure_lane_positions_evaluated(lane: PureLane) -> i64:
+    if val gs = lane.gpu_session:
+        return gs.positions_evaluated
+    if val cs = lane.cpu_session:
+        return cs.positions_evaluated
+    0
 
 # Greedy generation of at most `max_tokens` (<= 0 means "as many as fit"),
 # bounded by the model's context. A prompt that already fills the context is an
 # Err, as the ggml lane's CapacityExceeded is.
 fn pure_lane_generate(lane: PureLane, prompt: text, max_tokens: i64) -> Result<PureGeneration, text>:
     val ids = pure_tokenizer_encode(lane.tokenizer, prompt, true)
-    val room = lane.model.config.max_pos - ids.len()
-    if room <= 0:
-        return Err("prompt is " + ids.len().to_text() + " tokens, which fills the model's " + lane.model.config.max_pos.to_text() + "-token context")
-    var budget = max_tokens
-    if budget <= 0 or budget > room:
-        budget = room
-    val before = lane.session.positions_evaluated
-    val res = kv_generate_greedy(lane.model, lane.session, ids, budget)
-    # An end-of-sequence id ends generation but is not completion text, and the
-    # ggml lane does not count its end-of-generation token either.
-    var generated = res.generated
-    if generated.len() > 0 and generated[generated.len() - 1] == lane.model.config.eos_id:
-        generated = generated.slice(0, generated.len() - 1)
-    val next = PureLane(model: lane.model, tokenizer: lane.tokenizer, session: res.session, requests: lane.requests + 1)
-    Ok(PureGeneration(
-        lane: next,
-        output: pure_tokenizer_decode(lane.tokenizer, generated),
-        prompt_tokens: ids.len(),
-        completion_tokens: generated.len(),
-        reused_positions: res.reused_positions,
-        evaluated_positions: res.session.positions_evaluated - before))
+    if val ops = lane.gpu_ops:
+        if val gm = lane.gpu_model:
+            if val gs = lane.gpu_session:
+                val cap = _gpu_cap(gm.config.max_pos)
+                val room = cap - ids.len()
+                if room <= 0:
+                    return Err("prompt is " + ids.len().to_text() + " tokens, which fills the model's " + cap.to_text() + "-token context")
+                var budget = max_tokens
+                if budget <= 0 or budget > room:
+                    budget = room
+                val before = gs.positions_evaluated
+                val res = gpu_generate_greedy(ops, gm, gs, ids, budget)?
+                var generated = res.generated
+                if generated.len() > 0 and generated[generated.len() - 1] == gm.config.eos_id:
+                    generated = generated.slice(0, generated.len() - 1)
+                val next = PureLane(
+                    tokenizer: lane.tokenizer,
+                    requests: lane.requests + 1,
+                    cpu_model: None,
+                    cpu_session: None,
+                    gpu_ops: Some(ops),
+                    gpu_model: Some(gm),
+                    gpu_session: Some(res.session))
+                return Ok(PureGeneration(
+                    lane: next,
+                    output: pure_tokenizer_decode(lane.tokenizer, generated),
+                    prompt_tokens: ids.len(),
+                    completion_tokens: generated.len(),
+                    reused_positions: res.reused_positions,
+                    evaluated_positions: res.session.positions_evaluated - before))
+    if val model = lane.cpu_model:
+        if val sess = lane.cpu_session:
+            val room = model.config.max_pos - ids.len()
+            if room <= 0:
+                return Err("prompt is " + ids.len().to_text() + " tokens, which fills the model's " + model.config.max_pos.to_text() + "-token context")
+            var budget = max_tokens
+            if budget <= 0 or budget > room:
+                budget = room
+            val before = sess.positions_evaluated
+            val res = kv_generate_greedy(model, sess, ids, budget)
+            # An end-of-sequence id ends generation but is not completion text, and the
+            # ggml lane does not count its end-of-generation token either.
+            var generated = res.generated
+            if generated.len() > 0 and generated[generated.len() - 1] == model.config.eos_id:
+                generated = generated.slice(0, generated.len() - 1)
+            val next = PureLane(
+                tokenizer: lane.tokenizer,
+                requests: lane.requests + 1,
+                cpu_model: Some(model),
+                cpu_session: Some(res.session),
+                gpu_ops: None,
+                gpu_model: None,
+                gpu_session: None)
+            return Ok(PureGeneration(
+                lane: next,
+                output: pure_tokenizer_decode(lane.tokenizer, generated),
+                prompt_tokens: ids.len(),
+                completion_tokens: generated.len(),
+                reused_positions: res.reused_positions,
+                evaluated_positions: res.session.positions_evaluated - before))
+    Err("pure lane has no resident model")
 
-export PureLane, PureGeneration, pure_lane_load, pure_lane_generate
+export PureLane, PureGeneration, pure_lane_load, pure_lane_unload, pure_lane_positions_evaluated, pure_lane_generate

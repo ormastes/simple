@@ -4,7 +4,7 @@
 # tensor_ops (the CPU reference). Needs no GPU.
 
 use std.spec.{describe, it, expect}
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, env_set}
 use std.gc_async_mut.gpu.rocm.hip_compute.{rocm_available_at, rocm_bin_default}
 use std.gc_async_mut.gpu.cuda.cuda_compute.{cuda_driver_available}
 use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values}
@@ -69,11 +69,13 @@ describe "compute_open selection and errors":
         val ops = compute_open("auto").unwrap()
         val name = compute_kind_name(ops.kind)
         # SLANG_GPU overrides the auto order (no fallback, no diag): then auto
-        # must have opened exactly the overridden kind.
+        # must have opened exactly the overridden kind. Boolean "1"/"true" mean auto;
+        # "0"/"false" mean cpu.
         val env = env_get("SLANG_GPU").lower()
-        val overridden = env != "" and env != "auto"
+        val overridden = env != "" and env != "auto" and env != "1" and env != "true"
         if overridden:
-            expect(name).to_equal(env)
+            val want_name = if env == "0" or env == "false": "cpu" else: env
+            expect(name).to_equal(want_name)
             expect(ops.diag).to_equal("")
         if not overridden and rocm_available_at(rocm_bin_default()):
             expect(name).to_equal("rocm")
@@ -81,6 +83,16 @@ describe "compute_open selection and errors":
             expect(ops.diag).to_contain("rocm:")
             expect(ops.diag).to_contain("cuda:")
             expect(ops.diag).to_contain("vulkan:")
+
+    it "treats SLANG_GPU=0 as cpu and SLANG_GPU=1 as auto":
+        val prev = env_get("SLANG_GPU")
+        val _a = env_set("SLANG_GPU", "0")
+        val cpu_ops = compute_open("auto").unwrap()
+        expect(compute_kind_name(cpu_ops.kind)).to_equal("cpu")
+        val _b = env_set("SLANG_GPU", "1")
+        val auto_ops = compute_open("auto")
+        expect(auto_ops.is_ok()).to_equal(true)
+        val _c = env_set("SLANG_GPU", prev)
 
 
 describe "compute_* vulkan kind":
