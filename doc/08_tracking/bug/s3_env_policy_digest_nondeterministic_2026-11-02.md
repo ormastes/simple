@@ -2,7 +2,7 @@
 
 - **ID:** s3_env_policy_digest_nondeterministic_2026-11-02
 - **Priority:** P1 (blocked every stage3 native-build)
-- **Status:** open (workaround). The root cause is the same as `stage2_try_unwrap_text_typed_as_i64_2026-11-02`, which is fixed in source by 0528a9ed3ac. This id tracks the tagged source workaround in `environment_variant_policy_handoff_v1.spl` that the frozen stage2 still needs.
+- **Status:** resolved & workarounds reverted (2026-11-25). Root cause (`stage2_try_unwrap_text_typed_as_i64_2026-11-02`) is fixed in source by `0528a9ed3ac` + `b6c85e5e8f3` (verified natively via `b05_c2`); all 5 typed-match workarounds in `environment_variant_policy_handoff_v1.spl` have been reverted to direct `?`.
 - **Found by:** phase-3 stage3 hello smoke (`C:/dev/p3new/linkdry/s3.exe`, objects from frozen stage2 ef0681fc0e1)
 
 ## Symptom
