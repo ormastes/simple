@@ -1,0 +1,84 @@
+# @req: REQ-BUILD-SRC-001
+# RB-LOAD-02: mapping-free coverage of the lazy identity path. The native
+# batch preflight accepts a driver-written SMF that carries a unit identity
+# (.simple_meta Note section, explicitly marked Code symbol); the batch
+# auto-pin decodes that identity from the image bytes; a re-pin never
+# replaces a live slot; the ordinary relocation pass accepts a Code + Note
+# v1.3 image. End to end: hot_swap_autopin_spec, hot_swap_lazy_wiring_spec.
+# todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_delete}
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.module_loader.{lazymoduleloader_with_defaults, moduleloader_apply_relocations, moduleloader_pin_hot_swap_image, moduleloader_hot_swap_read_begin}
+use compiler.loader.hot_swap_pin.{hot_swap_read_end}
+use compiler.loader.smf_group_batch_load.{native_group_batch_host, native_group_batch_preflight, native_group_batch_identity_slot}
+
+fn ia_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: "iface-v1-3333",
+        abi_digest: "abi-v1-eeee",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn ia_image(id: UnitIdentity, code: u8) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.host())
+    opts.unit_identity_bytes = unit_identity_encode(id).bytes()
+    generate_smf_with_options([code, 0xC3], opts)
+
+fn ia_row(path: text, id: UnitIdentity) -> SmfManifestEntry:
+    smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", path, 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+
+
+describe "RB-LOAD-02: lazy path accepts identity-carrying SMF":
+    it "batch preflight accepts the image and the auto-pin decodes its identity":
+        # @req: REQ-BUILD-SRC-001
+        val path = "build/test_tmp/hs_accept_id.smf"
+        val v0 = ia_image(ia_identity(), 0x90)
+        expect(file_write_bytes(path, v0)).to_equal(true)
+        val host = native_group_batch_host().unwrap()
+        val image = native_group_batch_preflight(path, host)
+        if image.is_err():
+            expect(image.unwrap_err()).to_equal("")
+        step("the slot is built from the mapped bytes at generation 0")
+        val slot = native_group_batch_identity_slot(image.unwrap()).unwrap().unwrap()
+        expect(slot.current_generation()).to_equal(0)
+        expect(slot.pinned.abi_digest).to_equal("abi-v1-eeee")
+        expect(slot.pinned.iface_digest).to_equal("iface-v1-3333")
+        file_delete(path)
+
+    it "a legacy image without an identity record is accepted and not pinned":
+        val path = "build/test_tmp/hs_accept_legacy.smf"
+        expect(file_write_bytes(path, generate_smf_with_options([0x90, 0xC3], SmfBuildOptions.create(Target.host())))).to_equal(true)
+        val image = native_group_batch_preflight(path, native_group_batch_host().unwrap())
+        expect(image.is_ok()).to_equal(true)
+        expect(native_group_batch_identity_slot(image.unwrap()).unwrap().?).to_equal(false)
+        file_delete(path)
+
+    it "a re-pin keeps the live slot: same identity no-op, different refused":
+        val path = "build/test_tmp/hs_accept_repin.smf"
+        val v0 = ia_image(ia_identity(), 0x90)
+        var loader = lazymoduleloader_with_defaults()
+        expect(moduleloader_pin_hot_swap_image(loader, path, ia_row(path, ia_identity()), v0).unwrap()).to_equal(0)
+        val held = moduleloader_hot_swap_read_begin(loader, path).unwrap()
+        expect(moduleloader_pin_hot_swap_image(loader, path, ia_row(path, ia_identity()), ia_image(ia_identity(), 0x92)).unwrap()).to_equal(0)
+        var other = ia_identity()
+        other.abi_digest = "abi-v1-ffff"
+        val refused = moduleloader_pin_hot_swap_image(loader, path, ia_row(path, other), ia_image(other, 0x93))
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err().contains("SMF-E-HOTSWAP-ALREADY-PINNED")).to_equal(true)
+        expect(held.image() == v0).to_equal(true)
+        hot_swap_read_end(held)
+
+    it "the ordinary relocation pass accepts a Code + Note v1.3 image":
+        var loader = lazymoduleloader_with_defaults()
+        val r = moduleloader_apply_relocations(loader, "hs_accept_reloc.smf", ia_image(ia_identity(), 0x90))
+        if r.is_err():
+            expect(r.unwrap_err()).to_equal("")
+        expect(r.is_ok()).to_equal(true)
