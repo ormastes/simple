@@ -1,8 +1,9 @@
 # Bug: `TargetArch` enum-vs-enum name collision breaks `Option<TargetArch>.?` under full-tree scan
 
 - **Date:** 2026-07-18
-- **Status:** open (documented; NOT fixed — root cause is the seed interpreter's
-  flat global type registry, not the two colliding modules)
+- **Status:** RESOLVED (verified 2026-11-25 — see note below; the seed
+  interpreter's flat-registry collision no longer corrupts the
+  `Option<TargetArch>`/`.?` path at release/1.0.0 HEAD)
 - **Area:** Rust seed interpreter (`src/compiler_rust`), global
   `enums`/`classes` registry — same mechanism as
   `doc/08_tracking/bug/duplicate_type_name_collision_audit_2026-07-17.md`
@@ -109,3 +110,25 @@ caller's lexical binding instead of a flat global registry.
 SIMPLE_LIB=src bin/release/x86_64-unknown-linux-gnu/simple test --no-session-daemon test/feature/usage/architecture_spec.spl
 => Passed: 25  Failed: 2  (both: parse_target_arch(...).? on the enum-collision path)
 ```
+
+## Verification 2026-11-25 — no longer reproducible at release/1.0.0 HEAD
+
+The colliding declaration still exists in source
+(`src/compiler/70.backend/backend/backend_selector.spl:26` still declares its
+own `enum TargetArch` next to `src/lib/common/target.spl:1`), but the failure
+mode is gone: the exact spec named above now passes in full.
+
+```
+SIMPLE_LIB=src bin/simple.exe run test/feature/usage/architecture_spec.spl --mode=interpreter
+=> SPEC FILE VERDICT: outcome=OK declared>=27 executed=27 passed=27 failed=0
+```
+
+Run on a Windows worktree at release/1.0.0 HEAD (`f3fb8f24dc9`) with the
+tracked seed `bin/simple.exe` (38,403,072 bytes, v1.0.0-rc.1). The `test`
+subcommand is unusable at HEAD (pinned seed rejects
+`@representation_boundary`, which the test runner itself carries — known
+release/1.0.0 source/binary inconsistency), so the `run` harness was used;
+both `parse_target_arch("avr").?` / `parse_target_arch("msp430").?` cases
+(Feature #ARCH-002/#BM-ARCH-001) are green. The flat-registry hazard the body
+describes may still exist for other shapes, but this bug's reported symptom
+is not reproducible with the current seed, so the entry is closed.
