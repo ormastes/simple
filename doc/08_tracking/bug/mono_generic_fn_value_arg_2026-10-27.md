@@ -23,3 +23,16 @@ the enclosing substitution). Remove the workaround after.
 A bounded static admission inventory for the current-release generic hardening lane found the existing build_session.spl marker carried a trailing colon in its bug ID and unkeyed explanatory prose. The canonical marker parser rejects that identifier. Keep the already registered ID unchanged, remove the colon, and label the same explanation with reason=. The marker still immediately precedes the same if block; executable behavior is unchanged. This repair is source-admission evidence, not a new generic-inference runtime PASS.
 
 **Status:** FIXED (row closed 2026-11-02: E-MONO-032/033 were emitted only by src/compiler/40.mono, deleted by 200a05f5bc8 (refactor(compiler)!: delete monomorphization, merged on release/1.0.0); git grep E-MONO-032 over src/compiler finds nothing and src/compiler/40.mono is absent)
+
+## WA-S6 verification and retirement (2026-11-26)
+
+Retired `@workaround bug=mono_generic_fn_value_arg_2026-10-27` in
+`src/compiler/80.driver/session/build_session.spl`: `keep<T>` now delegates
+directly to `keep_with(k, value, _sffi_session_rc_share)`. Verified via
+pure-Simple HIR/MIR lowering of both the defining `keep<T>` ->
+`keep_with(k, value, share_val)` module (`target_idx = 0`, matching `k.all_ok =
+k.all_ok and ok`) and caller module (`target_idx = 1`) in
+`test/01_unit/compiler/mir/wa_src_lane6_reexport_and_route_lowering_spec.spl`,
+`build_session_end_spec.spl` (`8/8` `--mode=interpreter`), and direct
+`build_session.keep` regression coverage against a live `RuntimeValue` handle in
+`test/01_unit/compiler/driver/wa_src_lane6_driver_workarounds_spec.spl` (`3/3`).

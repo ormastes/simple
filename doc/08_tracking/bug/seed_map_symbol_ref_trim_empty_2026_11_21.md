@@ -40,3 +40,14 @@ tool result instead of SIGSEGV.
 
 53 other `.map/filter/and_then/map_err(_.…)` sites in `src/lib` and `src/app`
 are unchanged; any of them may be affected when built by the seed.
+
+## 2026-11-26 — WA-S7 Disposition (`KEPT-WITH-REASON`)
+
+- Inspected `src/lib/nogc_sync_mut/database/core.spl` (`:271`) and
+  `src/lib/nogc_sync_mut/storage_roots/environment_owner.spl` (`:62`,
+  `resolve_ambient_storage_roots`).
+- The Rust seed (`src/compiler_rust`) still exhibits the `.map(&:trim)` /
+  `Result.map(_.roots)` closure-dispatch issue when building Phase 1 / seed
+  artifacts, so removing the explicit guards would regress seed-built binaries.
+- Guard regression spec added at
+  `test/01_unit/lib/database/wa_src_lane7_seed_map_guard_spec.spl`.

@@ -25,3 +25,8 @@ So the nil arm never matches, the match falls through and yields nil, and
 
 ## Removal
 Remove the tags after stage2 is rebuilt with a seed that contains #5882.
+
+## WA-S1 partial retirement 2026-11-26
+- Retired stale `# @workaround bug=seed_case_nil_pattern_eq_2026-11-02` marker in `src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl` while keeping `case None:` intact (safe across frozen seeds and Stage 3).
+- Kept `src/compiler/80.driver/driver_build/incremental.spl` (`incremental_digest_tag_v1` and `incremental_digest_untag_v1`) unchanged (`DEFERRED-CROSS-LANE`) because both function bodies are SHA-256 pinned in `src/verification/cache_protocol/source_bindings.txt` and enforced by `scripts/check/check-cache-formal-source-binding.shs`.
+- Regression spec: `test/01_unit/compiler/80.driver/wa_src_lane1_workarounds_spec.spl`

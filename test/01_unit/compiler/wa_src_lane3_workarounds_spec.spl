@@ -1,0 +1,262 @@
+# WA Src Lane 3 (WA-S3) Regression & Retirement Spec
+#
+# Verifies all 7 assigned @workaround entries in src/:
+# 1. RETIRED: native_comprehension_packed_u8_array_mir_2026_10_20 (frontend_advisory_preprocess_port_v1.spl)
+# 2. ROOT-FIXED+STAGE2-GATED: native_const_type_void_unit_tail_if_join_2026-11-13 (lint_entry.spl, enum_module_body.spl)
+# 3. RETIRED: parser_unsafe_call_argument_context_2026-10-30 (lockless_map_i64.spl)
+# 4. KEPT-WITH-REASON: phase3_global_pool_generic_inference_workaround_2026_10_10 (types.spl)
+# 5. KEPT-WITH-REASON: seed_nested_call_rfind_missing_2026-11-15 (lint_star_import.spl)
+# 6. KEPT-WITH-REASON: strict-field-forwarding-opt-in-20261027 (accessor_forwarding.spl)
+# 7. RETIRED: pure_simple_nested_extern_registration_2026_10_12 (parallel.spl)
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.string_core.{text_to_bytes}
+use std.io_runtime.{env_get, env_set_process, file_read}
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64}
+use std.nogc_sync_mut.sffi.transient.{
+    transient_scope_begin, transient_scope_pause, transient_scope_end}
+use compiler.common.config.{Logger}
+use compiler.common.parallel.{ParallelConfig}
+use compiler.core.parser.{parser_error_count}
+use compiler.core.types.{
+    custom_primitive_find, custom_primitive_register,
+    reset_all_pools, type_pools_promote_hir_owners}
+use compiler.driver.cache.module_surface_skeleton_v1.{module_surface_skeleton_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{
+    frontend_transformed_source_identity_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Expressions.accessor_forwarding.{
+    strict_field_forwarding_reset}
+use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{
+    module_surface_canonical_digest_v1}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.tools.fix.rules.impl_.lint_star_import.{
+    check_star_import_text_with_lines}
+
+struct _WaLane3CompileResult:
+    parse_errors: i64
+    hir_errors: i64
+    mir_errors: i64
+    hir_error_messages: [text]
+    mir_error_messages: [text]
+    mir: MirModule
+
+fn _wa_lane3_compile_to_mir(source: text, path: text) -> _WaLane3CompileResult:
+    """Parse, HIR-lower, and MIR-lower a standalone module snippet cleanly."""
+    reset_all_pools()
+    val parsed = parse_full_frontend(source, path, "wa_lane3_spec", Logger.from_env())
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir_mod = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir_mod.symbols)
+    val mir_mod = mir_lowering.lower_module(hir_mod)
+    var err_msgs: [text] = []
+    for err in hir_lowering.errors:
+        err_msgs.push(err.message)
+    var mir_msgs: [text] = []
+    for merr in mir_lowering.errors:
+        mir_msgs.push(merr.message)
+    _WaLane3CompileResult(
+        parse_errors: parser_error_count(),
+        hir_errors: hir_lowering.errors.len(),
+        mir_errors: mir_lowering.errors.len(),
+        hir_error_messages: err_msgs,
+        mir_error_messages: mir_msgs,
+        mir: mir_mod
+    )
+
+fn _wa_lane3_mir_call_targets(mir: MirModule) -> [text]:
+    """Collect called function names across all MIR blocks in a module."""
+    var targets: [text] = []
+    for fn_entry in mir.functions:
+        val mir_fn: MirFunction = fn_entry[1]
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Call(_, func, _):
+                        match func.kind:
+                            case MirOperandKind.Const(cv, _):
+                                match cv:
+                                    case MirConstValue.Str(name): targets.push(name)
+                                    case _: () # non-string constant target
+                            case _: () # non-constant call operand
+                    case _: () # non-Call instruction
+    targets
+
+fn _wa_lane3_unit_slot_defs(mir: MirModule) -> i64:
+    """Count MIR Copy or non-Unit Const instructions defining a Unit-typed local."""
+    var count = 0
+    for fn_entry in mir.functions:
+        val mir_fn: MirFunction = fn_entry[1]
+        var unit_locals: [i64] = []
+        for local in mir_fn.locals:
+            match local.type_.kind:
+                case MirTypeKind.Unit: unit_locals.push(local.id.id)
+                case _: () # non-Unit local
+        for block in mir_fn.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Const(dest, _, ty):
+                        if unit_locals.contains(dest.id):
+                            match ty.kind:
+                                case MirTypeKind.Unit: () # Unit-typed unit value const
+                                case _: count = count + 1
+                    case Copy(dest, _):
+                        if unit_locals.contains(dest.id):
+                            count = count + 1
+                    case _: () # non-Const/Copy instruction
+    count
+
+fn _wa_lane3_read_u64_le(raw: [i64], at: i64) -> u64:
+    var out = 0u64
+    for i in 0..8:
+        out = out | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    out
+
+struct _WaLane3NestedExternProbe:
+    stamp: i64
+
+impl _WaLane3NestedExternProbe:
+    static fn measure() -> i64:
+        extern fn rt_time_now_unix_micros() -> i64
+        rt_time_now_unix_micros()
+
+describe "WA-S3 workaround retirements and gated guards":
+    """Regression verification for all 7 WA-S3 src/ @workaround entries."""
+
+    it "1. retires packed [u8] comprehension loop in frontend_transformed_source_identity_v1":
+        val sample = "fn alpha() -> i64:\n    42\n"
+        val actual = frontend_transformed_source_identity_v1(sample)
+        val raw_bytes = text_to_bytes(sample)
+        var manual: [i64] = []
+        for b in raw_bytes:
+            manual.push(b as i64)
+        val expected_raw = sha256_bytes(manual)
+        expect(actual.w0).to_equal(_wa_lane3_read_u64_le(expected_raw, 0))
+        expect(actual.w1).to_equal(_wa_lane3_read_u64_le(expected_raw, 8))
+        expect(actual.w2).to_equal(_wa_lane3_read_u64_le(expected_raw, 16))
+        expect(actual.w3).to_equal(_wa_lane3_read_u64_le(expected_raw, 24))
+
+        val snippet = "extern fn text_to_bytes(s: text) -> [u8]\nfn widen(s: text) -> [i64]:\n    [value as i64 for value in text_to_bytes(s)]\n"
+        val compiled = _wa_lane3_compile_to_mir(snippet, "wa_lane3_bug1.spl")
+        expect(compiled.parse_errors).to_equal(0)
+        expect(compiled.hir_errors).to_equal(0)
+        expect(compiled.mir_errors).to_equal(0)
+        val calls = _wa_lane3_mir_call_targets(compiled.mir)
+        expect(calls.contains("rt_bytes_u8_at")).to_equal(true)
+        expect(calls.contains("rt_array_get")).to_equal(false)
+
+    it "2. keeps Stage-2-gated unit tails in lint_entry.spl and enum_module_body.spl clean in MIR":
+        val lint_src = file_read("src/app/cli/lint_entry.spl")
+        val enum_src = file_read("src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl")
+        expect(lint_src).to_contain("bug=native_const_type_void_unit_tail_if_join_2026-11-13")
+        expect(lint_src).to_contain("rc-1.0.0-rc.63")
+        expect(enum_src).to_contain("bug=native_const_type_void_unit_tail_if_join_2026-11-13")
+        expect(enum_src).to_contain("val registered_unit: i64 = if legacy_origin == \"newunit\":")
+
+        reset_all_pools()
+        val lint_parsed = parse_full_frontend(lint_src, "src/app/cli/lint_entry.spl", "lint_entry", Logger.from_env())
+        expect(lint_parsed.name).to_equal("src/app/cli/lint_entry.spl")
+        expect("lint_parse=" + parser_error_count().to_text()).to_equal("lint_parse=0")
+
+        val unit_shape = "fn help_tail(flag: i64):\n    var out = 0\n    if flag == 1:\n        out = 1\n    else:\n        out = 2\n    ()\n\nfn reg_tail(origin: text, a: i64, b: i64) -> i64:\n    val registered_unit: i64 = if origin == \"newunit\":\n        a\n    else:\n        b\n    registered_unit\n\nfn reg_unit_tail(origin: text, a: i64, b: i64):\n    val registered_unit: i64 = if origin == \"newunit\":\n        a\n    else:\n        b\n    val _kept = registered_unit\n    ()\n"
+        val compiled = _wa_lane3_compile_to_mir(unit_shape, "wa_lane3_bug2.spl")
+        expect("shape_parse=" + compiled.parse_errors.to_text()).to_equal("shape_parse=0")
+        expect(compiled.hir_error_messages).to_equal([])
+        expect(compiled.mir_error_messages).to_equal([])
+        expect(_wa_lane3_unit_slot_defs(compiled.mir)).to_equal(0)
+
+    it "3. retires temporary in LocklessMapI64.request via inline Ok(unsafe(...))":
+        var passed_roundtrip = false
+        unsafe(capabilities: [ffi]):
+            match LocklessMapI64.create(4, 4, 4, 2):
+                case Ok(map):
+                    val req = map.request(11, 22)
+                    val found = map.find(11)
+                    val contains = map.contains_key(11)
+                    passed_roundtrip = req.is_ok() and (found != nil) and contains
+                    map.close_quiescent()
+                case Err(_):
+                    passed_roundtrip = false
+        expect(passed_roundtrip).to_equal(true)
+
+        val snippet = "fn make_entry(a: i64, b: i64) -> Result<i64, text>:\n    Ok(unsafe(capabilities: [ffi]): a + b)\n"
+        val compiled = _wa_lane3_compile_to_mir(snippet, "wa_lane3_bug3.spl")
+        expect(compiled.parse_errors).to_equal(0)
+        expect(compiled.hir_errors).to_equal(0)
+        expect(compiled.mir_errors).to_equal(0)
+
+    it "4. keeps concrete pool promotion helpers and preserves custom primitive entries":
+        expect(transient_scope_begin()).to_equal(true)
+        reset_all_pools()
+        val sym_id = custom_primitive_register("WaLane3Unit", 1)
+        expect(transient_scope_pause()).to_equal(true)
+        val promoted = type_pools_promote_hir_owners()
+        expect(promoted).to_equal(true)
+        expect(custom_primitive_find("WaLane3Unit")).to_equal(sym_id)
+        expect(transient_scope_end()).to_equal(true)
+        reset_all_pools()
+
+        val types_src = file_read("src/compiler/10.frontend/core/types.spl")
+        expect(types_src).to_contain("bug=phase3_global_pool_generic_inference_workaround_2026_10_10")
+        expect(types_src).to_contain("53afb8c62cb")
+
+    it "5. keeps seed-safe norm binding in check_star_import_text_with_lines":
+        val lines = [
+            "use compiler.frontend.frontend_advisory_preprocess_port_v1.*",
+            "fn run():",
+            "    val d = frontend_transformed_source_identity_v1(\"probe\")"
+        ]
+        val fixes = check_star_import_text_with_lines("src/app/cli/wa_lane3_probe.spl", lines)
+        expect(fixes.len()).to_be_greater_than(0)
+        expect(fixes[0].replacements.len()).to_be_greater_than(0)
+        val expected_fix = "use compiler.frontend.frontend_advisory_preprocess_port_v1.{" + "frontend_transformed_source_identity_v1}"
+        expect(fixes[0].replacements[0].new_text).to_equal(expected_fix)
+
+    it "6. keeps SIMPLE_STRICT_FIELD_FORWARDING opt-in default-warn and strict-error behavior":
+        val prev_strict = env_get("SIMPLE_STRICT_FIELD_FORWARDING") ?? ""
+        val snippet = "class Inner:\n    x: i64\n\nclass Outer:\n    inner: Inner\n    me get_val() -> i64:\n        self.inner.x\n\nfn probe(o: Outer) -> i64:\n    o.missing_field\n"
+
+        env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", "")
+        strict_field_forwarding_reset()
+        val default_res = _wa_lane3_compile_to_mir(snippet, "wa_lane3_bug6_default.spl")
+
+        env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", "1")
+        strict_field_forwarding_reset()
+        val strict_res = _wa_lane3_compile_to_mir(snippet, "wa_lane3_bug6_strict.spl")
+
+        env_set_process("SIMPLE_STRICT_FIELD_FORWARDING", prev_strict)
+        strict_field_forwarding_reset()
+
+        expect(default_res.parse_errors).to_equal(0)
+        expect(default_res.hir_error_messages.len()).to_equal(1)
+        expect(default_res.hir_error_messages[0]).to_start_with("[W-HIR-FIELD-001]")
+        expect(strict_res.parse_errors).to_equal(0)
+        expect(strict_res.hir_error_messages.len()).to_equal(1)
+        expect(strict_res.hir_error_messages[0]).to_contain("no field `missing_field` on type and no get_/is_ accessor")
+
+    it "7. retires top-level rt_cpu_count hoist in parallel.spl cleanly across frontend, skeleton, HIR, and MIR":
+        val single = ParallelConfig.single_threaded()
+        expect(single.max_threads).to_equal(1)
+        expect(single.batch_size).to_equal(1)
+        expect(_WaLane3NestedExternProbe.measure()).to_be_greater_than(0)
+
+        val parallel_src = file_read("src/compiler/00.common/parallel.spl")
+        expect(parallel_src.contains("@workaround bug=pure_simple_nested_extern_registration_2026_10_12")).to_equal(false)
+
+        val compiled = _wa_lane3_compile_to_mir(parallel_src, "src/compiler/00.common/parallel.spl")
+        expect(compiled.parse_errors).to_equal(0)
+        expect(compiled.hir_errors).to_equal(0)
+        expect(compiled.mir_errors).to_equal(0)
+        val calls = _wa_lane3_mir_call_targets(compiled.mir)
+        expect(calls.contains("rt_cpu_count")).to_equal(true)
+
+        reset_all_pools()
+        val full_parsed = parse_full_frontend(parallel_src, "src/compiler/00.common/parallel.spl", "parallel", Logger.from_env())
+        val skel_src = module_surface_skeleton_v1(parallel_src)
+        reset_all_pools()
+        val skel_parsed = parse_full_frontend(skel_src, "src/compiler/00.common/parallel.spl", "parallel", Logger.from_env())
+        expect(module_surface_canonical_digest_v1(skel_parsed)).to_equal(module_surface_canonical_digest_v1(full_parsed))

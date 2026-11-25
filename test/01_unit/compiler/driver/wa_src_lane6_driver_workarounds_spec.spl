@@ -1,0 +1,101 @@
+use std.spec
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use std.nogc_sync_mut.sffi.rc_graph.{rt_rc_count, rt_rc_release}
+use std.async.poll.{Poll}
+use compiler.driver.session.build_session.{SessionKept, build_session_inactive, session_kept_begin, keep, keep_with}
+use compiler.driver.cache.reader.tldr_table_v1.{TldrTableV1, TldrHandleV1}
+
+@unsafe(reason: "allocate a RuntimeValue dict handle so interpreter tests exercise real rt_rc_share via keep", capabilities: [ffi])
+extern fn rt_dict_new() -> i64
+
+struct _Lane6KeptBox:
+    label: text
+
+struct _Lane6Dirty:
+    module_id: text
+
+struct _Lane6Route:
+    dirty_modules: [_Lane6Dirty]
+
+fn _lane6_share_true(value: text) -> bool:
+    value != ""
+
+fn _lane6_warm_route(ok: bool) -> Result<_Lane6Route, text>:
+    if not ok:
+        return Err("miss")
+    Ok(_Lane6Route(dirty_modules: [_Lane6Dirty(module_id: "a"), _Lane6Dirty(module_id: "bc")]))
+
+fn _lane6_current_route() -> _Lane6Route:
+    _Lane6Route(dirty_modules: [_Lane6Dirty(module_id: "fallback")])
+
+fn _lane6_count_route(use_warm: bool, warm_ok: bool) -> i64:
+    val route = if use_warm:
+        match _lane6_warm_route(warm_ok):
+            case Ok(v): v
+            case Err(_): return -1
+    else:
+        _lane6_current_route()
+    var total = 0
+    for item in route.dirty_modules:
+        total = total + item.module_id.len()
+    total
+
+fn _lane6_poll_tldr(table: TldrTableV1, handle: TldrHandleV1) -> text:
+    val state: Poll<text?> = table.deref(handle).poll()
+    match state:
+        case Poll.Ready(payload):
+            match payload:
+                case Some(summary): summary
+                case None: "<none>"
+        case Poll.Pending: "<pending>"
+
+describe "WA-S6 driver workaround retirements":
+    it "Bug 1: infers if/match/else route for-in iteration without explicit annotation":
+        expect(_lane6_count_route(true, true)).to_equal(3)
+        expect(_lane6_count_route(true, false)).to_equal(-1)
+        expect(_lane6_count_route(false, false)).to_equal(8)
+        val loading_src = read_file_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+        expect(loading_src.contains("for_in_unresolved_if_match_route_type_2026-10-24")).to_equal(false)
+        expect(loading_src.contains("val route = if native_group_inputs.len() > 0:")).to_equal(true)
+
+    it "Bug 2: delegates build_session.keep directly to keep_with with _sffi_session_rc_share":
+        val inactive = build_session_inactive()
+        var k_inactive = session_kept_begin(inactive)
+        k_inactive = keep(k_inactive, "ignored")
+        expect(k_inactive.session_active).to_equal(false)
+        expect(k_inactive.all_ok).to_equal(true)
+
+        var k_active = SessionKept(all_ok: true, session_active: true)
+        val live_handle = unsafe(capabilities: [ffi]): rt_dict_new()
+        k_active = keep(k_active, live_handle)
+        expect(k_active.all_ok).to_equal(true)
+        val count_after = unsafe(capabilities: [ffi]): rt_rc_count(live_handle)
+        expect(count_after).to_equal(1)
+        val released_ok = unsafe(capabilities: [ffi]): rt_rc_release(live_handle)
+        expect(released_ok).to_equal(true)
+        k_active = keep(k_active, _Lane6KeptBox(label: "box"))
+        expect(k_active.all_ok).to_equal(false)
+        val live_handle2 = unsafe(capabilities: [ffi]): rt_dict_new()
+        k_active = keep(k_active, live_handle2)
+        expect(k_active.all_ok).to_equal(false)
+
+        var k_with = SessionKept(all_ok: true, session_active: true)
+        k_with = keep_with(k_with, "kept-ok", _lane6_share_true)
+        expect(k_with.all_ok).to_equal(true)
+
+        val sess_src = read_file_text("src/compiler/80.driver/session/build_session.spl") ?? ""
+        expect(sess_src.contains("mono_generic_fn_value_arg_2026-10-27")).to_equal(false)
+        expect(sess_src.contains("keep_with(k, value, _sffi_session_rc_share)")).to_equal(true)
+
+    it "Bug 3: TldrTableV1.deref uses Future.from_value and Future.pending directly":
+        val table = TldrTableV1.create()
+        val handle = table.handle("wa-s6-mod", "RouteV1")
+        expect(_lane6_poll_tldr(table, handle)).to_equal("<pending>")
+        expect(table.take_fill_requests()).to_equal(["wa-s6-mod"])
+        expect(table.publish("wa-s6-mod", "summary S6")).to_equal(true)
+        expect(_lane6_poll_tldr(table, handle)).to_equal("summary S6")
+
+        val tldr_src = read_file_text("src/compiler/80.driver/cache/reader/tldr_table_v1.spl") ?? ""
+        expect(tldr_src.contains("tldr_future_static_owner_typeparam_2026_10_25")).to_equal(false)
+        expect(tldr_src.contains("Future.from_value(Some(self.entries[h.module_key]))")).to_equal(true)
+        expect(tldr_src.contains("Future.pending()")).to_equal(true)

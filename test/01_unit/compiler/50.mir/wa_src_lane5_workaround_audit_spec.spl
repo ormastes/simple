@@ -1,0 +1,348 @@
+# Purpose and audience: executable regression and audit specification for WA Src Lane 5 (WA-S5).
+# @req REQ-SSPEC-COMPILER
+"""
+# WA-S5 Compiler & SCV `@workaround` Disposition Verification
+
+Verifies all 8 WA-S5 assigned `@workaround` bugs across `50.mir`, `55.borrow`,
+`70.backend`, and `lib/scv`:
+1. `BUG-NATIVE-NESTED-STRUCT-NIL-COPY-20261016` (`ROOT-FIXED+STAGE2-GATED`)
+2. `stage2_local_symbol_index_bucket_tagged_id_2026-11-03` (`ROOT-FIXED+STAGE2-GATED`)
+3. `stage2_generic_tail_unwrap_reboxes_record_2026-11-19` (`KEPT-WITH-REASON`)
+4. `stage2_if_val_text_option_transport_tls_end_2026-11-04` (`ROOT-FIXED+STAGE2-GATED`)
+5. `mir_aggregate_trace_array_receiver_2026_10_25` (`ROOT-FIXED+STAGE2-GATED`)
+6. `nll_live_aliases_method_arg_corruption_2026_10_22` (`ROOT-FIXED+STAGE2-GATED`)
+7. `mir_optional_record_nil_join_2026_10_18` (`ROOT-FIXED+STAGE2-GATED`)
+8. `native_raw_integer_optional_presence_2026_10_26` (`KEPT-WITH-REASON`)
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect, assert_true, expect_not}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_data.{MirBuilder, MirSignature}
+use compiler.mir.mir_instructions.{MirOperand, mir_operand_const_int}
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend._MirToLlvm.core_codegen.{llvm_aggregate_trace_operand_count_v1}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_decode_v1,
+    compile_source_inventory_encode_v1,
+    CompileSourceInventoryEntryV1,
+    CompileSourceInventoryV1
+}
+
+struct Lane5MirFn:
+    name: text
+    body: text
+
+struct Lane5Lowered:
+    ir: text
+    mir_fns: [Lane5MirFn]
+    errors: [text]
+
+fn lower_lane5_src(src: text) -> Lane5Lowered:
+    """Lower a standalone Simple source snippet through HIR, MIR, and LLVM IR."""
+    val file = "testdata/wa_src_lane5_probe.spl"
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parse_full_frontend(src, file, "wa_src_lane5_probe", Logger(level: 0)))
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(m)
+    for e in lowering.errors:
+        errors.push("mir: " + e.message)
+    var mir_fns: [Lane5MirFn] = []
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        mir_fns.push(Lane5MirFn(name: short, body: serialize_mir_function(function)))
+    val ir = MirToLlvm.create("wa_src_lane5_probe", CodegenTarget.X86_64, None).translate_module(mir)
+    Lane5Lowered(ir: ir, mir_fns: mir_fns, errors: errors)
+
+fn find_lane5_mir_fn(fns: [Lane5MirFn], target_name: text) -> text:
+    """Return serialized MIR text for `target_name`, or empty text if absent."""
+    for entry in fns:
+        if entry.name == target_name:
+            return entry.body
+    ""
+
+fn assert_interpolated_text_fn(lowered: Lane5Lowered, fn_name: text):
+    """Assert `fn_name` lowered text `if val` interpolation via `rt_strcat_tagged` without raw int conversion."""
+    val mir = find_lane5_mir_fn(lowered.mir_fns, fn_name)
+    assert_true(mir != "")
+    expect_not(mir.contains("rt_value_as_int_wide"))
+    val ir_body = fn_slice(SliceQuery(src: lowered.ir, header: "{fn_name}(", stop: "\n}"))
+    assert_true(ir_body != "")
+    expect(ir_body).to_contain("@rt_strcat_tagged(")
+    expect_not(ir_body.contains("@rt_raw_i64_to_string("))
+
+struct SliceQuery:
+    src: text
+    header: text
+    stop: text
+
+fn fn_slice(query: SliceQuery) -> text:
+    """Extract the slice of `query.src` starting at `query.header` and stopping before `query.stop`."""
+    val start = query.src.index_of(query.header)
+    if start < 0:
+        return ""
+    val rest = query.src.substring(start, query.src.len())
+    val end = rest.index_of(query.stop)
+    if end < 0:
+        return rest
+    rest.substring(0, end)
+
+struct OccurQuery:
+    haystack: text
+    needle: text
+
+fn count_occurrences(query: OccurQuery) -> i64:
+    """Count non-overlapping occurrences of `query.needle` in `query.haystack`."""
+    if query.needle == "":
+        return 0
+    query.haystack.split(query.needle).len() - 1
+
+struct DecimalWireFields:
+    gen_field: text
+    cnt_field: text
+    size_field: text
+
+fn decimal_wire(fields: DecimalWireFields) -> text:
+    """Build a canonical v1 compile-source-inventory payload for boundary tests."""
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "simple-compile-source-inventory-v1\ngeneration=" + fields.gen_field + "\ncount=" + fields.cnt_field +
+        "\nsrc/probe.spl|" + digest + "|" + digest + "|" + digest + "|" + digest + "|" + digest + "|" + fields.size_field
+
+describe "WA-S5 compiler & SCV workaround audit":
+    """Verify current-source lowering, live helper contracts, and Stage-2 guard retention."""
+
+    it "BUG-NATIVE-NESTED-STRUCT-NIL-COPY-20261016: MirBuilder initializes non-optional absent driver manifest and lowers nested nil copies":
+        var builder = MirBuilder.new()
+        builder.begin_function(
+            SymbolId(id: 901),
+            "wa_lane5_builder_probe",
+            MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+            Span.empty()
+        )
+        builder.terminate_return(None)
+        val built = builder.end_function()
+        expect_not(built.has_driver_manifest_attr)
+        expect(built.driver_manifest_attr.version).to_equal("")
+
+        val src =
+            "struct Inner:\n" +
+            "    v: i64\n" +
+            "struct Outer:\n" +
+            "    inner: Inner?\n" +
+            "fn copy_outer(o: Outer) -> i64:\n" +
+            "    val dup = o\n" +
+            "    if val x = dup.inner:\n" +
+            "        return x.v\n" +
+            "    -1\n" +
+            "fn run_copy(flag: bool) -> i64:\n" +
+            "    val o = if flag: Outer(inner: Some(Inner(v: 9))) else: Outer(inner: nil)\n" +
+            "    copy_outer(o)\n"
+        val r = lower_lane5_src(src)
+        expect(r.errors).to_equal([])
+        expect(r.ir).to_contain("run_copy(")
+        val mir_data_src = file_read("src/compiler/50.mir/mir_data.spl")
+        val begin_slice = fn_slice(SliceQuery(src: mir_data_src, header: "me begin_function(", stop: "me end_function("))
+        val end_slice = fn_slice(SliceQuery(src: mir_data_src, header: "me end_function(", stop: "me add_function("))
+        val bug1_tag = "@workaround bug=BUG-NATIVE-NESTED-STRUCT-NIL-COPY-20261016"
+        expect(count_occurrences(OccurQuery(haystack: begin_slice, needle: bug1_tag))).to_equal(1)
+        expect(count_occurrences(OccurQuery(haystack: end_slice, needle: bug1_tag))).to_equal(2)
+        expect(count_occurrences(OccurQuery(haystack: begin_slice, needle: "driver_manifest_attr_absent_shared_v1()"))).to_equal(1)
+        expect(count_occurrences(OccurQuery(haystack: end_slice, needle: "driver_manifest_attr_absent_shared_v1()"))).to_equal(2)
+
+    it "stage2_local_symbol_index_bucket_tagged_id_2026-11-03: lowers shadowed inline lambda + capture bindings and comprehension locals cleanly and keeps all 3 rollback guards":
+        val r_lam = lower_lane5_src(
+            "fn go_lam() -> i64:\n" +
+            "    val i = 100\n" +
+            "    val k = 7\n" +
+            "    val f = \\i: i + k\n" +
+            "    val a = f(5)\n" +
+            "    i + a + k\n"
+        )
+        val r_comp = lower_lane5_src(
+            "fn go_comp(xs: [i64]) -> i64:\n" +
+            "    val i = 100\n" +
+            "    val ys = [for j in xs: j * 2]\n" +
+            "    i + ys.len()\n"
+        )
+        expect(r_lam.errors).to_equal([])
+        expect(r_comp.errors).to_equal([])
+        expect(r_lam.ir).to_contain("go_lam(")
+        expect(r_comp.ir).to_contain("go_comp(")
+        val extras_src = file_read("src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl")
+        val calls_src = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+        val named_lambda_slice = fn_slice(SliceQuery(src: calls_src, header: "me try_inline_lambda_call(", stop: "me lower_inline_lambda_with_locals("))
+        val inline_lambda_slice = fn_slice(SliceQuery(src: calls_src, header: "me lower_inline_lambda_with_locals(", stop: "me lower_iife_call("))
+        val comprehension_slice = fn_slice(SliceQuery(src: extras_src, header: "# The comprehension variable is scoped to the comprehension.", stop: "var value_array_hir: HirType? = nil"))
+        for site_body in [named_lambda_slice, inline_lambda_slice, comprehension_slice]:
+            assert_true(site_body != "")
+            expect(site_body).to_contain("@workaround bug=stage2_local_symbol_index_bucket_tagged_id_2026-11-03")
+            expect(site_body).to_contain("self.restore_mirror_bindings(rollback_syms, rollback_prev)")
+
+    it "stage2_generic_tail_unwrap_reboxes_record_2026-11-19: keeps concrete required tuple payload getters and avoids generic .unwrap() tail":
+        val ed = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        val cg = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        expect(ed).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19")
+        expect(ed).to_contain("fn _sffi_hir_expr_payload_req(tuple: i64, index: i64) -> HirExpr:")
+        expect(cg).to_contain("@workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19")
+        expect(cg).to_contain("fn _sffi_local_id_payload_req(tuple: i64, index: i64) -> LocalId:")
+        expect(cg).to_contain("fn _sffi_mir_const_value_payload_req(tuple: i64, index: i64) -> MirConstValue:")
+        expect(cg).to_contain("fn _sffi_mir_type_payload_req(tuple: i64, index: i64) -> MirType:")
+        expect(cg).to_contain("fn _sffi_aggregate_kind_payload_req(tuple: i64, index: i64) -> AggregateKind:")
+        expect(cg).to_contain("fn _sffi_mir_operand_list_payload_req(tuple: i64, index: i64) -> [MirOperand]:")
+        expect_not(ed.contains("fn _sffi_tuple_get_req<T>"))
+        expect_not(cg.contains("fn _sffi_tuple_get_req<T>"))
+
+    it "stage2_if_val_text_option_transport_tls_end_2026-11-04: lowers Dict<i64, text>.get(k) and text? if-val interpolation without rt_raw_i64_to_string and keeps frozen Stage-2 guard":
+        val src =
+            "struct Info:\n" +
+            "    owner: text?\n" +
+            "fn find_name(flag: bool) -> text?:\n" +
+            "    if flag: return Some(\"mod\")\n" +
+            "    None\n" +
+            "fn lookup_sym(table: Dict<i64, text>, k: i64) -> text:\n" +
+            "    if val sym = table.get(k):\n" +
+            "        return \"hit={{sym}}\"\n" +
+            "    \"\"\n" +
+            "fn lookup_bound(table: Dict<i64, text>, k: i64) -> text:\n" +
+            "    val found = table.get(k)\n" +
+            "    if val sym = found:\n" +
+            "        return \"bound={{sym}}\"\n" +
+            "    \"\"\n" +
+            "fn lookup_field(info: Info) -> text:\n" +
+            "    if val owner = info.owner:\n" +
+            "        return \"owner={{owner}}\"\n" +
+            "    \"\"\n" +
+            "fn lookup_fn(flag: bool) -> text:\n" +
+            "    if val name = find_name(flag):\n" +
+            "        return \"fn={{name}}\"\n" +
+            "    \"\"\n"
+        assert_true(src.contains("hit={{sym}}"))
+        val r = lower_lane5_src(src)
+        expect(r.errors).to_equal([])
+        assert_interpolated_text_fn(r, "lookup_sym")
+        assert_interpolated_text_fn(r, "lookup_bound")
+        assert_interpolated_text_fn(r, "lookup_field")
+        assert_interpolated_text_fn(r, "lookup_fn")
+        val ed = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        expect(ed).to_contain("@workaround bug=stage2_if_val_text_option_transport_tls_end_2026-11-04")
+        expect(ed).to_contain("self.array_element_struct_syms.get(base_local.id) ?? \"\"")
+
+    it "mir_aggregate_trace_array_receiver_2026_10_25: preserves concrete [MirOperand] count helper and lowers coalesced array receiver .len()":
+        val empty: [MirOperand] = []
+        val single: [MirOperand] = [mir_operand_const_int(17)]
+        val pair: [MirOperand] = [mir_operand_const_int(17), mir_operand_const_int(29)]
+        expect(llvm_aggregate_trace_operand_count_v1(empty)).to_equal(0)
+        expect(llvm_aggregate_trace_operand_count_v1(single)).to_equal(1)
+        expect(llvm_aggregate_trace_operand_count_v1(pair)).to_equal(2)
+
+        val src =
+            "fn maybe_list(flag: bool) -> [i64]?:\n" +
+            "    if flag: Some([10, 20, 30]) else: None\n" +
+            "fn count_items(flag: bool) -> i64:\n" +
+            "    val xs: [i64] = maybe_list(flag) ?? []\n" +
+            "    xs.len()\n"
+        val r = lower_lane5_src(src)
+        expect(r.errors).to_equal([])
+        expect(r.ir).to_contain("@rt_array_len")
+        val cg = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        expect(cg).to_contain("@workaround bug=mir_aggregate_trace_array_receiver_2026_10_25")
+
+    it "nll_live_aliases_method_arg_corruption_2026_10_22: lowers self method call with array and dict-indexed args and keeps free nll_live_aliases_at":
+        val src =
+            "struct Alias:\n" +
+            "    v: i64\n" +
+            "class Checker:\n" +
+            "    marker: i64\n" +
+            "    fn live_step(aliases: [Alias], live: [i64]) -> [Alias]:\n" +
+            "        var out: [Alias] = []\n" +
+            "        for a in aliases:\n" +
+            "            if live.contains(a.v): out.push(a)\n" +
+            "        out\n" +
+            "    me walk(ev: Dict<i64, [i64]>, pt: i64) -> i64:\n" +
+            "        var st: [Alias] = [Alias(v: 1), Alias(v: 2)]\n" +
+            "        st = self.live_step(st, ev[pt])\n" +
+            "        st.len()\n"
+        val r = lower_lane5_src(src)
+        expect(r.errors).to_equal([])
+        expect(r.ir).to_contain("Checker.live_step(")
+        val nll_src = file_read("src/compiler/55.borrow/borrow_check/nll.spl")
+        expect(nll_src).to_contain("@workaround bug=nll_live_aliases_method_arg_corruption_2026_10_22")
+        expect(nll_src).to_contain("fn nll_live_aliases_at(")
+
+    it "mir_optional_record_nil_join_2026_10_18: lowers full if-call-else-nil optional record branch join and retains scv guard":
+        val src =
+            "struct Seed:\n" +
+            "    value: i64\n" +
+            "fn optional_seed(present: bool) -> Seed?:\n" +
+            "    if not present: return nil\n" +
+            "    Some(Seed(value: 17))\n" +
+            "fn read_joined(enabled: bool, present: bool) -> i64:\n" +
+            "    val initial = if enabled:\n" +
+            "        optional_seed(present)\n" +
+            "    else:\n" +
+            "        nil\n" +
+            "    match initial:\n" +
+            "        case Some(seed): seed.value\n" +
+            "        case _: -1\n"
+        val r = lower_lane5_src(src)
+        expect(r.errors).to_equal([])
+        expect(r.ir).to_contain("read_joined(")
+        val scv_src = file_read("src/lib/scv/compile_source_inventory.spl")
+        expect(scv_src).to_contain("@workaround bug=mir_optional_record_nil_join_2026_10_18")
+
+    it "native_raw_integer_optional_presence_2026_10_26: preserves canonical unsigned decimal parser across sentinel 3 and boundary inputs":
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val entry3 = CompileSourceInventoryEntryV1(
+            source_identity: "src/probe.spl",
+            content_digest: digest,
+            semantic_digest: digest,
+            export_digest: digest,
+            initializer_digest: digest,
+            provider_digest: digest,
+            byte_count: 3
+        )
+        val wire3 = compile_source_inventory_encode_v1(
+            CompileSourceInventoryV1(schema_version: 1, generation: 3, entries: [entry3])
+        )
+        val decoded3 = compile_source_inventory_decode_v1(wire3)
+        assert_true(decoded3.valid)
+        expect(decoded3.inventory!.generation).to_equal(3)
+        val entry0 = decoded3.inventory!.entries.get(0)
+        assert_true(entry0 != None)
+        if val present_entry0 = entry0:
+            expect(present_entry0.byte_count).to_equal(3)
+
+        val zero = compile_source_inventory_decode_v1(
+            decimal_wire(DecimalWireFields(gen_field: "0", cnt_field: "1", size_field: "0"))
+        )
+        assert_true(zero.valid)
+        expect(zero.inventory!.generation).to_equal(0)
+
+        for bad in ["", "-1", "+3", "03", "3x", "9223372036854775808"]:
+            expect_not(compile_source_inventory_decode_v1(
+                decimal_wire(DecimalWireFields(gen_field: bad, cnt_field: "1", size_field: "24"))
+            ).valid)
+
+        val scv_src = file_read("src/lib/scv/compile_source_inventory.spl")
+        expect(scv_src).to_contain("@workaround bug=native_raw_integer_optional_presence_2026_10_26")
+        expect(scv_src).to_contain("fn compile_source_inventory_decimal_v1(")

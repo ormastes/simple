@@ -23,7 +23,7 @@
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-baseline="$here/primitive_api_semantic_baseline.txt"
+baseline=${PRIMITIVE_API_BASELINE:-"$here/primitive_api_semantic_baseline.txt"}
 SIMPLE_BIN=${SIMPLE_BIN:-"$root/bin/simple"}
 [ -x "$SIMPLE_BIN" ] || { [ -x "$SIMPLE_BIN.exe" ] && SIMPLE_BIN="$SIMPLE_BIN.exe"; }
 gen=0
@@ -36,13 +36,17 @@ count_file() {
     out=$(cd "$root" && "$SIMPLE_BIN" lint "$1" 2>&1)
     rc=$?
     if [ $rc -ge 124 ]; then echo "CRASH"; return; fi
+    # A driver-level `error: ...` (not a `error[rule]` finding) with a non-zero
+    # exit means the binary could not lint at all; counting 0 there would read
+    # as a stale baseline. Fail closed.
+    if [ $rc -ne 0 ] && printf '%s\n' "$out" | grep -q '^error: '; then echo "CRASH"; return; fi
     printf '%s\n' "$out" | grep -c '\(warning\|error\)\[primitive_api\]'
 }
 
 n=0; total=0; base_total=0; fail=0; tmp=$(mktemp)
 grep -v '^#' "$baseline" | grep -v '^[[:space:]]*$' | while read -r path expected; do
     got=$(count_file "$path")
-    if [ "$got" = "CRASH" ]; then echo "ERROR $path lint crashed/timed out"; echo "crash" >> "$tmp"; continue; fi
+    if [ "$got" = "CRASH" ]; then echo "ERROR $path lint crashed, timed out, or could not lint"; echo "crash" >> "$tmp"; continue; fi
     echo "$path $got" >> "$tmp.new"
     if [ "$gen" = 1 ]; then echo "$path $got"; continue; fi
     if [ "$got" -gt "$expected" ]; then echo "FAIL $path: $got > baseline $expected (new public primitive leak)"; echo "fail" >> "$tmp"
@@ -53,10 +57,10 @@ if [ "$gen" = 1 ]; then
     { echo "# path count — frozen primitive_api (semantic graph) findings per file."; echo "# Regenerate: sh scripts/check/check-primitive-api-semantic-ratchet.shs --generate-baseline"; cat "$tmp.new"; } > "$baseline"
     echo "PASS — baseline regenerated: $(grep -vc '^#' "$baseline") file(s)"; rm -f "$tmp" "$tmp.new"; exit 0
 fi
+if grep -q crash "$tmp" 2>/dev/null; then echo "ERROR — nothing was checked (lint crashed or could not lint)"; rm -f "$tmp" "$tmp.new"; exit 2; fi
 [ -f "$tmp.new" ] || { echo "ERROR — nothing was checked (empty baseline)"; rm -f "$tmp"; exit 2; }
 n=$(wc -l < "$tmp.new" | tr -d ' ')
 total=$(awk '{s+=$2} END {print s+0}' "$tmp.new")
 base_total=$(grep -v '^#' "$baseline" | awk 'NF==2 {s+=$2} END {print s+0}')
-if grep -q crash "$tmp" 2>/dev/null; then echo "ERROR — nothing was checked (lint crashed)"; rm -f "$tmp" "$tmp.new"; exit 2; fi
 if grep -q fail "$tmp" 2>/dev/null; then echo "FAIL — $n file(s) checked, $total finding(s) (baseline $base_total)"; rm -f "$tmp" "$tmp.new"; exit 1; fi
 echo "PASS — $n file(s) checked, $total finding(s) (baseline $base_total)"; rm -f "$tmp" "$tmp.new"; exit 0

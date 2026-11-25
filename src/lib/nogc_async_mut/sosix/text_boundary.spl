@@ -6,7 +6,9 @@ length metadata; it does not decode or scan malformed text.
 """
 use std.common.string_core.{str_len}
 use std.nogc_async_mut.io_runtime.{platform_name, host_os}
-use std.common.encoding.external_text.{ExternalText, ExternalChar, utf8_format, bytes_to_text_checked}
+use std.common.encoding.external_text.{ExternalText, ExternalChar, utf8_format, bytes_to_text_checked, external_codec_error}
+use std.common.encoding.host_text_boundary_v1.{host_text_bytes_to_utf8_v1}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_external_from_internal, io_internal_text}
 
 pub val SOSIX_TEXT_BYTE_LIMIT: i64 = 16777216
@@ -27,10 +29,19 @@ fn sosix_decode_text(value: ExternalText) -> Result<text, TextIoError>:
         return Err(TextIoError.Io("SOSIX encoded text exceeds the 16 MiB boundary limit"))
     io_internal_text(value)
 
+fn sosix_validate_utf8_scalar(bytes: [u8]) -> Result<(), TextIoError>:
+    # Pure-Simple scalar validation: never trusts the runtime bulk validator,
+    # so an undeployed seed that accepts malformed UTF-8 cannot admit it here.
+    match host_text_bytes_to_utf8_v1(bytes, "utf-8"):
+        case Ok(_): Ok(())
+        case Err(error): Err(TextIoError.Codec(external_codec_error(error, 0)))
+
 fn sosix_admit_utf8(value: text) -> Result<text, TextIoError>:
     # This shared encoder first extracts raw bytes, then validates UTF-8.
     # For UTF-8 Preserve it performs no conversion or text materialization.
     # Return the original immutable carrier only after successful admission.
+    sosix_text_check_size(value)?
+    sosix_validate_utf8_scalar(text_to_utf8_bytes(value))?
     val admitted = sosix_encode_utf8(value)?
     Ok(value)
 
@@ -40,6 +51,7 @@ fn sosix_admit_utf8_bytes(bytes: [u8]) -> Result<text, TextIoError>:
     # rejected here with its precise codec error, before any text exists.
     if bytes.len() > SOSIX_TEXT_BYTE_LIMIT:
         return Err(TextIoError.Io("SOSIX text exceeds the 16 MiB boundary limit"))
+    sosix_validate_utf8_scalar(bytes)?
     match bytes_to_text_checked(bytes):
         case Ok(value): Ok(value)
         case Err(error): Err(TextIoError.Codec(error))

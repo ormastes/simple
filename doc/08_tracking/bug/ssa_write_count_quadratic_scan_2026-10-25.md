@@ -45,3 +45,13 @@ A separately reviewed source-function split may reduce its workload temporarily.
 That workaround must retain this OPEN reference until a producer containing
 the counting fix emits the original unsplit CLI source's native object under
 the same guarded source/runtime/provenance contract and its behavior qualifies.
+
+## WA-S8 Verification (2026-11-26)
+
+- **Classification:** `ROOT-FIXED+STAGE2-GATED`
+- **Disposition:** Kept `src/app/io/_CliCompile/compile_targets.spl` phase-split helpers and `@workaround bug=ssa_write_count_quadratic_scan_2026_10_25` intact. The compiler root cause (`ssa_reassigned_locals_for_blocks` indexed local counting in `src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl`) is already fixed, but the parsed-options struct/helper (`CliNativeBuildParsedOptionsV1` / `cli_native_build_parse_options_v1`) are part of the exported surface used by `src/app/io/cli_compile.spl`, `src/app/cli/bootstrap_surface_inspection_v1.spl`, and multiple unit specs, and removing the tag requires a rebuilt native producer qualifying the unsplit CLI.
+- **Verification (`SIMPLE_BINARY=wa_shared_bin/simple.exe`, build-commit `03a407dabae`, `--mode=interpreter`):**
+  - `test/01_unit/compiler/mir_opt/ssa_write_count_index_spec.spl` (7/7 passed)
+  - `test/01_unit/compiler/mir/wa_src_lane8_lowering_spec.spl` (4/4 passed — checks `ssa_reassigned_locals_for_blocks` on sparse/cross-block MIR locals)
+  - `test/01_unit/app/devhub/wa_src_lane8_retirement_spec.spl` (5/5 passed — exercises `cli_native_build_parse_options_v1`)
+  - `test/01_unit/app/native_build_xray_options_spec.spl` (6/6 passed), `test/01_unit/app/native_build_no_borrow_check_option_spec.spl` (2/2 passed)

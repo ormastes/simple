@@ -1,0 +1,304 @@
+# Regression and audit coverage for WA Src Lane 2 (8 src/ @workaround sites)
+#
+# 1. indcall_try_then_member_2026_10_25 -> archive_file.spl (RETIRED tag; ?. is safe-nav by design)
+# 2. mir_provider_optional_type_wrapper_segv_2026-10-14 -> cranelift_codegen_adapter.spl (ROOT-FIXED+RETIRED)
+# 3. module_static_unresolved_initializer_2026-10-24 -> parser.spl (ROOT-FIXED+RETIRED tag; contract type preserved)
+# 4. native_deferred_range_index_2026_10_11 -> physical_tld_v1.spl (ROOT-FIXED+RETIRED)
+# 5. enum_payload_type_mismatch_untyped_map_2026-10-24 -> traits.spl (ROOT-FIXED+RETIRED)
+# 6. mir_cross_module_struct_field_default_error_2026-11-19 -> host_linux_service_agent_v4.spl (ROOT-FIXED+STAGE2-GATED)
+# 7. seed_coalesce_stateful_operand_twice_2026_10_12 -> fold_gen.spl & ast_semantic_value.spl (ROOT-FIXED+RETIRED)
+# 8. cranelift_bare_return_in_valued_fn_verifier_2026-11-18 -> module_import_registration.spl (RETIRED tag; E-SFFI-016 fixed)
+
+use std.spec.{describe, it, expect, assert_true, expect_not}
+use std.io.{file_read}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.frontend.generated.ast_semantic_value.{ast_semantic_hash_seed, ast_semantic_hash_finish}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer.traits.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.backend.backend_types.{compileoptions_default_options, CodegenTarget}
+use compiler.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, TldSectionRefV1, PhysicalTldHeaderV1, PhysicalTldObjectV1,
+    PhysicalTldExtensionV2, PhysicalTldObjectV2,
+    ThreePayloadContractReaderV1,
+    three_payload_contract_put_blob_v1,
+    physical_tld_section_table_digest_v1,
+    physical_tld_object_encode_v1, physical_tld_object_decode_v1,
+    physical_tld_object_encode_v2, physical_tld_object_decode_v2}
+
+struct LowerProbeResult:
+    errors: text
+    ir: text
+
+fn lower_single_module(src: text, file: text, mod_name: text) -> LowerProbeResult:
+    var hl = HirLowering.with_filename(file)
+    val ast = parse_full_frontend(src, file, mod_name, Logger(level: 0))
+    val hir = hl.lower_module(ast)
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push("hir: " + e.message)
+    val m: HirModule = hir
+    var ml = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = ml.lower_module(m)
+    for e in ml.errors:
+        errors.push("mir: " + e.message)
+    val ir = if errors.len() == 0:
+        MirToLlvm.create(mod_name, CodegenTarget.X86_64, None).translate_module(mir)
+    else:
+        ""
+    LowerProbeResult(errors: errors.join("\n"), ir: ir)
+
+fn lower_two_modules(lib_src: text, main_src: text) -> text:
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(lib_src, "lib/provider.spl", "lib.provider", log)
+    val main_ast = parse_full_frontend(main_src, "app/consumer.spl", "app.consumer", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.provider"] = lib_ast
+    modules["app.consumer"] = main_ast
+    val sources = [
+        SourceFile(path: "lib/provider.spl", content: lib_src, module_name: "lib.provider"),
+        SourceFile(path: "app/consumer.spl", content: main_src, module_name: "app.consumer")
+    ]
+    val surfaces = match module_surfaces_from_modules(modules, sources):
+        case Ok(s): s
+        case Err(err): return "surfaces: " + err
+    var lib_hl = hirlowering_for_module("lib.provider", surfaces)
+    var main_hl = hirlowering_for_module("app.consumer", surfaces)
+    val lib_hir = lib_hl.lower_module(lib_ast)
+    val main_hir = main_hl.lower_module(main_ast)
+    var errors: [text] = []
+    for e in lib_hl.errors:
+        errors.push("lib-hir: " + e.message)
+    for e in main_hl.errors:
+        errors.push("main-hir: " + e.message)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib.provider"] = lib_hir
+    prescan_mods["app.consumer"] = main_hir
+    var ml = MirLowering.new(main_hir.symbols)
+    ml.trait_impl_closure_complete = true
+    ml.prescan_module_struct_names(prescan_mods, "lib.provider")
+    ml.prescan_module_struct_names(prescan_mods, "app.consumer")
+    val _mir = ml.lower_module(main_hir, [lib_hir, main_hir])
+    for e in ml.errors:
+        errors.push("mir: " + e.message)
+    errors.join("\n")
+
+fn try_trim_token(ok: bool) -> Result<text, text>:
+    if not ok:
+        return Err("missing")
+    Ok("  foo.o  ")
+
+fn parse_try_then_member(ok: bool) -> Result<text, text>:
+    val trimmed = (try_trim_token(ok)?).trim()
+    Ok(trimmed)
+
+struct SampleModuleCfg:
+    tag: text
+    count: i64
+
+fn make_sample_cfg() -> SampleModuleCfg:
+    SampleModuleCfg(tag: "fresh", count: 9)
+
+var g_sample_cfg_inferred = make_sample_cfg()
+
+class StatefulStreamProbe:
+    var calls: i64
+
+    me fn next_hex_opt() -> text?:
+        self.calls = self.calls + 1
+        if self.calls == 1:
+            return Some("deadbeef")
+        Some("called-twice")
+
+class StatefulOuterProbe:
+    var stream: StatefulStreamProbe
+    cacheable: bool
+
+fn finish_outer_once(input: StatefulOuterProbe) -> text:
+    var state = input
+    if not state.cacheable: return ""
+    state.stream.next_hex_opt() ?? ""
+
+fn expect_bytes_equal(actual: [u8], expected: [u8]):
+    """Compares two byte arrays element-wise without relying on Value.Array equality."""
+    expect(actual.len()).to_equal(expected.len())
+    if actual.len() != expected.len():
+        return
+    var idx = 0
+    while idx < expected.len():
+        val a_b = actual.get(idx) ?? 0u8
+        val e_b = expected.get(idx) ?? 0u8
+        expect(a_b as i64).to_equal(e_b as i64)
+        idx = idx + 1
+
+describe "WA Src Lane 2 workaround audit":
+    """Verifies each of the 8 WA Src Lane 2 workaround dispositions and underlying compiler/runtime behaviors."""
+
+    it "retains parenthesized try-then-member while retiring Bug 1 tag in archive_file.spl":
+        """Checks Bug 1 tag removal while preserving parenthesized try-then-member evaluation."""
+        val src = file_read("src/compiler/70.backend/linker/elf/archive_file.spl")
+        expect_not(src.contains("indcall_try_then_member_2026_10_25"))
+        expect(src).to_contain("(archive_file_ascii(header, 0, 16)?).trim()")
+        expect(parse_try_then_member(true)).to_equal(Ok("foo.o"))
+        expect(parse_try_then_member(false)).to_equal(Err("missing"))
+
+    it "uses inline ArrayLit [] default for CraneliftCodegenAdapter.retained_features_v2 (Bug 2)":
+        """Checks Bug 2 helper removal and cross-module optional/list field default MIR lowering."""
+        val src = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        expect_not(src.contains("mir_provider_optional_type_wrapper_segv_2026-10-14"))
+        expect_not(src.contains("cranelift_default_retained_features_v2"))
+        expect(src).to_contain("retained_features_v2: [text] = []")
+        val adapter = CraneliftCodegenAdapter(options: compileoptions_default_options())
+        assert_true(adapter.retained_target_triple.is_none())
+        assert_true(adapter.retained_cpu_v2.is_none())
+        expect(adapter.retained_features_v2.len()).to_equal(0)
+        val lib_src = "pub class AdapterDef:\n    name: text\n    opt_a: text? = None\n    features: [text] = []\n"
+        val main_src = "use lib.provider.{{AdapterDef}}\nfn build_default() -> i64:\n    val d = AdapterDef(name: \"cl\")\n    d.features.len()\n"
+        expect(lower_two_modules(lib_src: lib_src, main_src: main_src)).to_equal("")
+
+    it "resolves unannotated module static initializers while keeping ParserState contract in parser.spl (Bug 3)":
+        val src = file_read("src/compiler/10.frontend/core/parser.spl")
+        expect_not(src.contains("module_static_unresolved_initializer_2026-10-24"))
+        expect(src).to_contain("var par_state: ParserState = parser_state_fresh()")
+        expect(g_sample_cfg_inferred.count).to_equal(9)
+        val lowered = lower_single_module(
+            "struct Cfg:\n    v: i64\nfn fresh_cfg() -> Cfg:\n    Cfg(v: 42)\nvar g_cfg = fresh_cfg()\nfn read_cfg() -> i64:\n    g_cfg.v\n",
+            "probe/mod_static.spl", "probe.mod_static")
+        expect(lowered.errors).to_equal("")
+
+    it "uses native byte-slice indexing in physical_tld_v1 and roundtrips TLD1/TLD2 payloads (Bug 4)":
+        val src = file_read("src/compiler/00.common/cache_contract/physical_tld_v1.spl")
+        expect_not(src.contains("native_deferred_range_index_2026_10_11"))
+        expect_not(src.contains("_copy_u8_range_tld_v1"))
+        expect(src).to_contain("self.data[self.offset..self.offset + count]")
+        expect(src).to_contain("bytes[core_start..extension_payload_start]")
+        val payload: [u8] = [10u8, 20u8, 30u8, 40u8, 50u8, 60u8, 70u8, 80u8]
+        val d_hex = "a".repeat(64)
+        val sec = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld, section_index: 0,
+            kind: "semantic-body", semantic_object_digest: sha256_u8_hex(payload),
+            offset: 0, stored_bytes: payload.len(), decoded_bytes: payload.len(),
+            encoding_profile: "raw-v1")
+        val hdr = PhysicalTldHeaderV1(schema: 1, role: TldPayloadRoleV1.PackageInitTld,
+            semantic_record_digest: d_hex, section_table_digest: physical_tld_section_table_digest_v1([sec]),
+            payload_bytes: payload.len(), sections: [sec])
+        val core = PhysicalTldObjectV1(header: hdr, canonical_sections: [payload])
+        val enc1 = physical_tld_object_encode_v1(core)
+        val dec1 = physical_tld_object_decode_v1(enc1)
+        assert_true(dec1.ok)
+        if val Some(v1) = dec1.value:
+            expect(v1.canonical_sections.len()).to_equal(1)
+            if val Some(sec0) = v1.canonical_sections.get(0):
+                expect_bytes_equal(actual: sec0, expected: payload)
+            else:
+                expect("decode_v1 missing section 0").to_equal("")
+        else:
+            expect("decode_v1 missing value").to_equal("")
+        val ext = PhysicalTldExtensionV2(field_id: 91, mandatory: false, offset: 0,
+            stored_bytes: 3, opaque_bytes: [1u8, 2u8, 3u8])
+        val enc2 = physical_tld_object_encode_v2(PhysicalTldObjectV2(core: core, extensions: [ext]))
+        val dec2 = physical_tld_object_decode_v2(enc2)
+        assert_true(dec2.ok)
+        if val Some(v2) = dec2.value:
+            expect(v2.extensions.len()).to_equal(1)
+            if val Some(ext0) = v2.extensions.get(0):
+                expect_bytes_equal(actual: ext0.opaque_bytes, expected: [1u8, 2u8, 3u8])
+            else:
+                expect("decode_v2 missing extension").to_equal("")
+        else:
+            expect("decode_v2 missing value").to_equal("")
+        var blob_wire: [u8] = []
+        blob_wire = three_payload_contract_put_blob_v1(blob_wire, [9u8, 8u8, 7u8])
+        var reader = ThreePayloadContractReaderV1(data: blob_wire, offset: 0, ok: true,
+            error: "", retained_text_bytes: 0, retained_items: 0)
+        expect_bytes_equal(actual: reader.read_blob(), expected: [9u8, 8u8, 7u8])
+        assert_true(reader.ok)
+        val lowered = lower_single_module(
+            "fn sub_bytes(bytes: [u8], start: i64, end: i64) -> [u8]:\n    bytes[start..end]\n",
+            "probe/slice.spl", "probe.slice")
+        expect(lowered.errors).to_equal("")
+        expect(lowered.ir).to_contain("@rt_slice(")
+
+    it "collects HirTypeKind.Function parameter types via .map(_.type_) in traits.spl (Bug 5)":
+        val src = file_read("src/compiler/30.types/type_infer/traits.spl")
+        expect_not(src.contains("enum_payload_type_mismatch_untyped_map_2026-10-24"))
+        expect(src).to_contain("HirTypeKind.Function(hir_fn.params.map(_.type_)")
+        val fn_src = "fn add_pair(a: i64, b: bool) -> i64:\n    a\n"
+        val ast = parse_full_frontend(fn_src, "probe/traits_fn.spl", "probe.traits_fn", Logger(level: 0))
+        var modules: Dict<text, Module> = {}
+        modules["probe.traits_fn"] = ast
+        val surfaces_res = module_surfaces_from_modules(
+            modules, [SourceFile(path: "probe/traits_fn.spl", content: fn_src, module_name: "probe.traits_fn")])
+        assert_true(surfaces_res.is_ok())
+        if val Ok(surfaces) = surfaces_res:
+            var hl = hirlowering_for_module("probe.traits_fn", surfaces)
+            val hir_mod = hl.lower_module(ast)
+            expect(hl.errors.len()).to_equal(0)
+            var infer = HmInferContext.new()
+            infer.collect_function_bounds_from_module(hir_mod)
+            expect(infer.errors.len()).to_equal(0)
+            if val Some(ctx) = infer.function_bound_context:
+                var found_fn = false
+                for sig in ctx.signatures.values():
+                    match sig.type_.kind:
+                        case HirTypeKind.Function(params, _, _):
+                            if params.len() == 2:
+                                var p0_ok = false
+                                var p1_ok = false
+                                if val Some(p0) = params.get(0):
+                                    match p0.kind:
+                                        case HirTypeKind.Int(64, true): p0_ok = true
+                                        case _: ()
+                                if val Some(p1) = params.get(1):
+                                    match p1.kind:
+                                        case HirTypeKind.Bool: p1_ok = true
+                                        case _: ()
+                                found_fn = p0_ok and p1_ok
+                        case _: ()
+                assert_true(found_fn)
+            else:
+                expect("missing function_bound_context").to_equal("")
+
+    it "gates explicit HostAgentAttachmentV4 defaults on pre-0393bef2378 Phase 2 while current MIR handles omitted None defaults (Bug 6)":
+        val src = file_read("src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl")
+        expect(src).to_contain("bug=mir_cross_module_struct_field_default_error_2026-11-19")
+        expect(src).to_contain("reason=phase2_producer_predates_mir_default_fix")
+        val lib_src = "pub enum ShadowOutput:\n    Ok\n    None\npub struct Lease:\n    id: i64\npub struct CrossDefaults:\n    helper: Option<Lease> = None\n    session: Option<Lease> = None\n    label: text = \"\"\n    tag: i64\n"
+        val main_src = "use lib.provider.{{ShadowOutput, Lease, CrossDefaults}}\nfn make_min() -> CrossDefaults:\n    CrossDefaults(tag: 17)\n"
+        expect(lower_two_modules(lib_src: lib_src, main_src: main_src)).to_equal("")
+
+    it "coalesces state.stream.finish_hex() ?? \"\" directly in fold_gen.spl and ast_semantic_value.spl (Bug 7)":
+        val gen_src = file_read("src/app/compiler_schema/fold_gen.spl")
+        val ast_src = file_read("src/compiler/10.frontend/generated/ast_semantic_value.spl")
+        expect_not(gen_src.contains("seed_coalesce_stateful_operand_twice_2026_10_12"))
+        expect_not(ast_src.contains("seed_coalesce_stateful_operand_twice_2026_10_12"))
+        expect(ast_src).to_contain("state.stream.finish_hex() ?? \"\"")
+        expect(finish_outer_once(StatefulOuterProbe(stream: StatefulStreamProbe(calls: 0), cacheable: true))).to_equal("deadbeef")
+        expect(ast_semantic_hash_finish(ast_semantic_hash_seed()).len()).to_equal(64)
+        var uncacheable = ast_semantic_hash_seed()
+        uncacheable.cacheable = false
+        expect(ast_semantic_hash_finish(uncacheable)).to_equal("")
+
+    it "retires Bug 8 tag while preserving valued return and E-SFFI-016 guard (Bug 8)":
+        val src = file_read("src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl")
+        expect_not(src.contains("cranelift_bare_return_in_valued_fn_verifier_2026-11-18"))
+        expect(src).to_contain("if local_name == qualified_local: return selected_category")
+        val valid = lower_single_module(
+            "fn pick(flag: bool, selected_category: text) -> text:\n    if flag: return selected_category\n    \"default\"\n",
+            "probe/ret_val.spl", "probe.ret_val")
+        expect(valid.errors).to_equal("")
+        val bare = lower_single_module(
+            "fn pick_bad(flag: bool) -> text:\n    if flag: return\n    \"default\"\n",
+            "probe/ret_bare.spl", "probe.ret_bare")
+        expect(bare.errors).to_contain("E-SFFI-016")

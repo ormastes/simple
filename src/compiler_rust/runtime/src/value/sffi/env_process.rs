@@ -2186,6 +2186,34 @@ pub extern "C" fn rt_riscv_read_vlenb() -> i32 {
     }
 }
 
+/// Measure the running thread's SVE vector length in bytes with `rdvl`.
+/// Fail-closed: `rdvl` runs only after AT_HWCAP reports SVE; 0 otherwise.
+/// Twin of `rt_sve_vl_bytes_measured` in `src/runtime/rt_sve_vl.h`.
+#[no_mangle]
+pub extern "C" fn rt_sve_read_vl_bytes() -> i32 {
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        const AT_HWCAP: libc::c_ulong = 16;
+        const HWCAP_SVE: libc::c_ulong = 1 << 22;
+        // SAFETY: getauxval accepts AT_HWCAP and returns zero when unavailable.
+        if unsafe { libc::getauxval(AT_HWCAP) } & HWCAP_SVE == 0 {
+            return 0;
+        }
+        let bytes: u64;
+        // SAFETY: executed only when the kernel reports SVE for this process.
+        unsafe { core::arch::asm!(".arch_extension sve", "rdvl {bytes}, #1", bytes = out(reg) bytes) };
+        if (16..=256).contains(&bytes) && bytes % 16 == 0 {
+            bytes as i32
+        } else {
+            0
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+    {
+        0
+    }
+}
+
 /// Report the Linux RISC-V V-extension bit from AT_HWCAP.
 #[no_mangle]
 pub extern "C" fn rt_riscv_has_v_ext() -> bool {
@@ -3152,6 +3180,8 @@ mod tests {
         assert_eq!(rt_sysctlbyname_i32(RuntimeValue::NIL), 0);
         #[cfg(not(all(target_arch = "riscv64", target_feature = "v")))]
         assert_eq!(rt_riscv_read_vlenb(), 0);
+        #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+        assert_eq!(rt_sve_read_vl_bytes(), 0);
         #[cfg(not(all(target_os = "linux", target_arch = "riscv64")))]
         assert!(!rt_riscv_has_v_ext());
 

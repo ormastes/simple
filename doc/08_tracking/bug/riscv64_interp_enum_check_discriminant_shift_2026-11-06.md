@@ -292,3 +292,23 @@ in-guest interpreter AND in-guest MIR-lower-and-run rows both satisfy the
 nonce anchor. This closes the gate's remaining row; the residual
 seed-codegen family (guest Result/field corruption, exec-loop
 re-dispatch) remains recorded for future lanes.
+
+
+---
+
+## 2026-11-25 Disposition (WA-S9 / `work/wa-src-9-20261125`)
+
+Audited the three related `@workaround` guards across `src/compiler/` and verified the underlying Rust seed + runtime + baremetal OpenSBI kernel paths:
+
+1. **`riscv64_interp_enum_check_discriminant_shift_2026_11_06` (`ROOT-FIXED+RETIRED`)**:
+   - The `slli 4` shift hypothesis had already been withdrawn in commit `4b0f301b369` (PR #7054, documented above in the 2026-11-06 addendum). CLIF, machine code, and `rt_enum_check_variant` match positional/hash discriminants without shifting, and the underlying runtime `Value` constructor path was retired in PR #11459.
+   - Removed the `rt_enum_discriminant(arg) == rt_enum_discriminant(Value.String(""))` string probe fast path and the unused `extern fn rt_enum_payload(value: Value) -> i64` declaration from `src/compiler/70.backend/backend/interpreter_calls.spl`, keeping direct `match arg:` (`case Value.String(sv): print sv` in both `BuiltinTag.Print` and `BuiltinTag.Println`).
+
+2. **`riscv64_interp_ok_wrapper_leak_2026_11_06` (`KEPT-WITH-REASON`)**:
+   - In pure-Simple MIR lowering (`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) and hosted runtimes (`src/compiler_rust/runtime/src/value/objects.rs`, `src/runtime/runtime_native.c`), `Result.unwrap()` uses positional discriminants `0` (`Ok`) / `1` (`Err`).
+   - However, the OpenSBI riscv64 in-guest kernel (`scripts/os/build-simpleos-riscv64-interpreter-kernel.shs`) builds with the Rust seed (`Result.unwrap()` -> `rt_unwrap_or_trap`) and links `examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:1945-1963` (outside `WA-S9` scope), where `rt_unwrap_or_trap` still only recognizes legacy hashes `2405352012u` (`Ok`) / `4200179024u` (`Err`) and returns the whole `RuntimeEnum` wrapper on positional `discriminant == 0u`.
+   - Kept the explicit `match evaluated_arg:` unwrap guard at `src/compiler/70.backend/backend/interpreter_expr.spl:368` with `reason=KEPT-WITH-REASON: ...`.
+
+3. **`riscv64_guest_result_text_payload_empty_2026_11_06` (`KEPT-WITH-REASON`)**:
+   - Blocked on the same `baremetal_runtime_core.inc.c:1945-1963` `rt_unwrap_or_trap` gap (plus `is_err()`/`unwrap_err()` on positional `Result` in the OpenSBI guest runtime).
+   - Kept the raw-env guard at `src/compiler/50.mir/_MirLowering/module_lowering.spl:3169` and `target_hir_mode_or_legacy()` at `:3220` with `reason=KEPT-WITH-REASON: ...`, replaced the residual `unwrap_err()` at `:3172` with explicit `match mir_symbol_write_ledger_resolve(...)`, and replaced `opened.unwrap()` at `:3222` with a `"legacy"` fast-path + explicit `match mir_symbol_write_ledger_open(...)` (`Ok(ledger)` / `Err(err)`) so `self.symbol_write_ledger` never receives a leaked `RuntimeEnum` wrapper in riscv64 in-guest builds.

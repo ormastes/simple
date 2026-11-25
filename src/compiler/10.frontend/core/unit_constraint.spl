@@ -23,6 +23,9 @@ var unit_constraint_predicates: [text] = []
 var unit_constraint_ref_tags: [i64] = []
 var unit_constraint_min_texts: [text] = []
 var unit_constraint_max_texts: [text] = []
+# Declaring file of each row: unit declarations are per file, so two files may
+# each declare the same unit name with their own bounds.
+var unit_constraint_owners: [text] = []
 
 pub struct UnitConstraintPoolSnapshot:
     initialized: bool
@@ -31,6 +34,7 @@ pub struct UnitConstraintPoolSnapshot:
     ref_tags: [i64]
     min_texts: [text]
     max_texts: [text]
+    owners: [text]
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_pool_reset():
@@ -39,18 +43,20 @@ pub fn unit_constraint_pool_reset():
     unit_constraint_ref_tags = []
     unit_constraint_min_texts = []
     unit_constraint_max_texts = []
+    unit_constraint_owners = []
     unit_constraint_initialized = true
 
 pub fn unit_constraint_pool_save() -> UnitConstraintPoolSnapshot:
     if not unit_constraint_initialized:
-        return UnitConstraintPoolSnapshot(initialized: false, names: [], predicates: [], ref_tags: [], min_texts: [], max_texts: [])
+        return UnitConstraintPoolSnapshot(initialized: false, names: [], predicates: [], ref_tags: [], min_texts: [], max_texts: [], owners: [])
     UnitConstraintPoolSnapshot(
         initialized: true,
         names: unit_constraint_names,
         predicates: unit_constraint_predicates,
         ref_tags: unit_constraint_ref_tags,
         min_texts: unit_constraint_min_texts,
-        max_texts: unit_constraint_max_texts
+        max_texts: unit_constraint_max_texts,
+        owners: unit_constraint_owners
     )
 
 pub fn unit_constraint_pool_restore(snap: UnitConstraintPoolSnapshot):
@@ -62,6 +68,7 @@ pub fn unit_constraint_pool_restore(snap: UnitConstraintPoolSnapshot):
     unit_constraint_ref_tags = snap.ref_tags
     unit_constraint_min_texts = snap.min_texts
     unit_constraint_max_texts = snap.max_texts
+    unit_constraint_owners = snap.owners
     unit_constraint_initialized = true
 
 fn _unit_constraint_promote_text(root: [[text]]) -> bool:
@@ -84,15 +91,30 @@ pub fn unit_constraint_promote_transient_owner() -> bool:
     promoted = _unit_constraint_promote_i64([unit_constraint_ref_tags]) and promoted
     promoted = _unit_constraint_promote_text([unit_constraint_min_texts]) and promoted
     promoted = _unit_constraint_promote_text([unit_constraint_max_texts]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_owners]) and promoted
     promoted
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+# Lookup prefers the row of the file being processed, else the latest row.
 pub fn unit_constraint_find(name: text) -> i64:
+    val own = unit_constraint_find_owned(unit_constraint_conflict_owner, name)
+    if own >= 0:
+        return own
+    if not unit_constraint_initialized:
+        return -1
+    var i = unit_constraint_names.len() - 1
+    while i >= 0:
+        if unit_constraint_names[i] == name:
+            return i
+        i = i - 1
+    -1
+
+fn unit_constraint_find_owned(owner: text, name: text) -> i64:
     if not unit_constraint_initialized:
         return -1
     var i = 0
     while i < unit_constraint_names.len():
-        if unit_constraint_names[i] == name:
+        if unit_constraint_names[i] == name and unit_constraint_owners[i] == owner:
             return i
         i = i + 1
     -1
@@ -164,13 +186,18 @@ pub fn unit_constraint_requeue_conflicts(owner: text, messages: [text]):
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
+    unit_constraint_register_owned(unit_constraint_conflict_owner, name, predicate, ref_tag, min_text, max_text)
+
+# A re-declaration is a conflict only inside the same file; another file's
+# same-name unit gets its own row.
+fn unit_constraint_register_owned(owner: text, name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
     if not unit_constraint_initialized:
         unit_constraint_pool_reset()
-    val existing = unit_constraint_find(name)
+    val existing = unit_constraint_find_owned(owner, name)
     if existing >= 0:
         if unit_constraint_bounds_differ(existing, predicate, min_text, max_text):
             unit_constraint_conflicts.push("SPL-UNIT-006: unit `" + name + "` is declared again with different bounds (" + unit_constraint_bounds_text(unit_constraint_min_texts[existing], unit_constraint_max_texts[existing], unit_constraint_predicates[existing]) + " vs " + unit_constraint_bounds_text(min_text, max_text, predicate) + "); the later declaration wins")
-            unit_constraint_conflict_owners.push(unit_constraint_conflict_owner)
+            unit_constraint_conflict_owners.push(owner)
         unit_constraint_predicates[existing] = predicate
         unit_constraint_ref_tags[existing] = ref_tag
         unit_constraint_min_texts[existing] = min_text
@@ -182,6 +209,7 @@ pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_t
     unit_constraint_ref_tags.push(ref_tag)
     unit_constraint_min_texts.push(min_text)
     unit_constraint_max_texts.push(max_text)
+    unit_constraint_owners.push(owner)
     idx
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
@@ -686,7 +714,7 @@ pub fn unit_constraint_pool_merge(parsed: UnitConstraintPoolSnapshot):
         return
     var i = 0
     while i < parsed.names.len():
-        unit_constraint_register(parsed.names[i], parsed.predicates[i], parsed.ref_tags[i], parsed.min_texts[i], parsed.max_texts[i])
+        unit_constraint_register_owned(parsed.owners[i], parsed.names[i], parsed.predicates[i], parsed.ref_tags[i], parsed.min_texts[i], parsed.max_texts[i])
         i = i + 1
 
 export unit_constraint_pool_merge

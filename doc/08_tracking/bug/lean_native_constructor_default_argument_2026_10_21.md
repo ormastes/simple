@@ -120,3 +120,20 @@ expression via `lower_expr`. Its cross-module behaviour needs a native run
 (`native-build` of the fixture on a rebuilt producer). The `lean_backend.spl:804`
 workaround must stay. Separately, the committed `omitted.spl`/`policy.spl` fixture needs
 `pub` on `Limits` and `policy_signature` to pass current visibility rules.
+
+## WA-S6 re-verification (2026-11-26): still OPEN in both Rust seed and pure-Simple `50.mir`
+
+1. On the shared post-`@representation_boundary` Rust seed (`03a407dabae`),
+   `SIMPLE_JIT_STRICT=1 run test/fixtures/compiler/lean_constructor_default_native/omitted.spl`
+   still exits `1` with `call to policy_signature omits argument 1 whose default is not a call-site constant; a cross-module/native call cannot evaluate it`.
+2. On pure-Simple `50.mir` (`switch_operators_calls.spl` `pad_trailing_default_args` ->
+   `resident_default_global_owner.spl:14-21`), `bind_resident_default_global_v1`
+   explicitly skips `HirExprKind.Call`, so omitted cross-module constructor
+   defaults (`Limits()`) fall back to consumer-local `SymbolTable` lookup of
+   the provider's `Limits` `SymbolId`, colliding and emitting broken LLVM IR
+   (`%l2 = call i64 @lean.decls.plan_decls()`, `%l3 = call i64 @lean.decls.plan_decls(ptr %l1, i64 %l2)`).
+
+Workaround `@workaround bug=lean_native_constructor_default_argument_2026_10_21`
+in `src/plugins/backend_lean/lean_backend.spl:770` MUST STAY (`50.mir` fix
+tracked separately). Pinned by
+`test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl`.

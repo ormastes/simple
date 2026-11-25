@@ -1,0 +1,40 @@
+"""
+## Purpose and audience
+Executable spec of the primitive_api semantic ratchet gate
+(`scripts/check/check-primitive-api-semantic-ratchet.shs`, item RB-PRIM-02)
+for lint and gate maintainers. It drives the gate with a fake lint binary so
+the verdict contract is pinned without a slow real lint run.
+## Operator workflow
+Run: bin/simple test test/01_unit/compiler/lint/primitive_api_semantic_ratchet_gate_spec.spl
+## Compatibility and limitations
+Uses `sh` and the gate's `SIMPLE_BIN` / `PRIMITIVE_API_BASELINE` overrides.
+## Verification guidance and troubleshooting
+The regression case: a lint binary that cannot lint (prints `error:` and
+exits non-zero) must be ERROR (exit 2), never a 0-finding count that reads as
+a stale baseline.
+"""
+# @feature: primitive-api-lint
+# @manual_section: primitive-api-semantic-ratchet
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn gate_with(lint_body: text, baseline_count: text) -> i64:
+    val script = "d=$(mktemp -d) && printf '#!/bin/sh\\n" + lint_body + "\\n' > \"$d/lint\" && chmod +x \"$d/lint\" && printf 'src/lib/common/net/byte_cursor.spl " + baseline_count + "\\n' > \"$d/base.txt\" && SIMPLE_BIN=\"$d/lint\" PRIMITIVE_API_BASELINE=\"$d/base.txt\" sh scripts/check/check-primitive-api-semantic-ratchet.shs; rc=$?; rm -rf \"$d\"; exit $rc"
+    val (_out, _err, code) = rt_process_run("sh", ["-c", script])
+    code
+
+describe "primitive_api semantic ratchet gate":
+    it "is ERROR when the lint binary cannot lint":
+        step("Fake lint prints a semantic error and exits 1")
+        expect(gate_with("echo \"error: semantic: unknown decorator\"; exit 1", "3")).to_equal(2)
+
+    it "passes when findings equal the baseline":
+        step("Fake lint reports two primitive_api findings")
+        expect(gate_with("echo \"warning[primitive_api] a\"; echo \"warning[primitive_api] b\"; exit 0", "2")).to_equal(0)
+
+    it "fails on a new public primitive leak":
+        step("Fake lint reports more findings than the baseline")
+        expect(gate_with("echo \"warning[primitive_api] a\"; echo \"warning[primitive_api] b\"; exit 0", "1")).to_equal(1)

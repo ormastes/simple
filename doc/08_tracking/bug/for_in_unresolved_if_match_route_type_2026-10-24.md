@@ -31,3 +31,15 @@ disagree). Specs: `test/01_unit/compiler/50.mir/for_in_if_match_cross_module_rou
 (4/8 red -> 8/8 green) and `test/01_unit/compiler/50.mir/if_merge_arm_struct_name_spec.spl`
 (8/8). The `val route: PackageIndexRouteV1` workaround annotation stays until
 a stage-3 native build verifies; remove it then.
+
+## WA-S6 verification and retirement (2026-11-26)
+
+Verified fixed across pure-Simple HIR/MIR/LLVM lowering and unit specs:
+`for_in_if_match_cross_module_route_spec.spl` (8/8) and
+`if_merge_arm_struct_name_spec.spl` (8/8), plus cross-module `if ... match ... Ok(v): v / Err: return else: make()`
+probe lowering to `PackageIndexRouteV1` cleanly with 0 errors and valid `for`
+iteration over `route.dirty_modules` and `route.archive_admissions`.
+Retired `@workaround bug=for_in_unresolved_if_match_route_type_2026-10-24`,
+removed the `: PackageIndexRouteV1` annotation and its now-unused import in
+`src/compiler/80.driver/driver_source_pipeline_loading.spl`, and added a
+regression pin in `test/01_unit/compiler/driver/wa_src_lane6_driver_workarounds_spec.spl`.

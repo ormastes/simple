@@ -13,7 +13,7 @@ Text-level facts (same slice as SPL-BOUND-001..003); typed HIR facts remain open
 
 use std.spec.*
 use std.spec.step
-use compiler.semantics.lint.bound_origin_facts.{bound_origin_facts, bound_origin_inventory_text, BoundOriginFact}
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_facts, bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text, BoundOriginFact}
 use app.cli.robust_command.{run_robust}
 
 val SRC = "extern fn c_read() -> i32\n@unsafe(reason: \"adapter\", capabilities: [ffi])\nfn adapter(n: i64) -> i32:\n    val raw = c_read()\n    val k = 5\n    val c = raw as i64\n    val d = raw\n    val e = helper(k)\n    raw\n"
@@ -123,3 +123,32 @@ describe "boundary origin facts: splitter edge cases":
         expect(origin_of(fs, "a")).to_equal("call")
         expect(origin_of(fs, "b")).to_equal("call")
         expect(origin_of(fs, "c")).to_equal("call")
+
+# @manual_section: bound_origin_inventory_multi
+describe "robust inventory across files":
+    """Directory walk, cross-file totals, SDN output and boundary site listing."""
+
+    it "aggregates facts across files into one SDN document":
+        # @req: REQ-DIAG-POLICY-001
+        step("Render SDN for two sources")
+        val sdn = bound_origin_inventory_sdn(["a.spl", "b.spl"], [SRC, "fn f(x: i64):\n    x\n"])
+        expect(sdn).to_contain("files: 2")
+        expect(sdn).to_contain("facts: 8")
+        expect(sdn).to_contain("boundary: 6")
+        expect(sdn).to_contain("{file: \"a.spl\", line: 4, function: \"adapter\", subject: \"raw\", origin: \"extern_return\", boundary: true}")
+        expect(sdn).to_contain("{file: \"b.spl\", line: 1, function: \"f\", subject: \"x\", origin: \"param\", boundary: false}")
+
+    it "lists only boundary sites":
+        # @req: REQ-DIAG-POLICY-001
+        step("List boundary sites for two sources")
+        val out = bound_origin_boundaries_text(["a.spl", "b.spl"], [SRC, "fn f(x: i64):\n    x\n"])
+        expect(out).to_contain("a.spl:4 adapter raw extern_return")
+        expect(out).to_contain("boundaries: files=2 sites=6")
+        expect(out.contains("b.spl")).to_equal(false)
+
+    it "walks a directory for the inventory subcommand":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run inventory and boundaries on a directory")
+        expect(run_robust(["inventory", "--sdn", "test/01_unit/compiler/lint"])).to_equal(0)
+        expect(run_robust(["boundaries", "test/01_unit/compiler/lint"])).to_equal(0)
+        expect(run_robust(["boundaries", "no/such/dir"])).to_equal(2)

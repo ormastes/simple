@@ -44,3 +44,13 @@ Disassembly evidence (`build/diag-phase4/cl_lsp_mcp/lsp_mcp.exe`):
   `_io_c_bool` in `fs.spl` masks the low byte so binaries built by the frozen
   Phase 2 compiler are correct. Remove once Phase 2 is rebuilt with the backend fix.
   Stays inside the existing SOSIX fs owner; no new `rt_*` extern.
+
+## 2026-11-26 — WA-S7 Disposition (`ROOT-FIXED+STAGE2-GATED`)
+
+- Pure-Simple Cranelift backend fix (`2fd7489926a` + `b2ea6bd62ff`) is present in
+  `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` and covered by
+  `test/01_unit/compiler/backend/cranelift_import_narrow_result_spec.spl`.
+- `_io_c_bool` and its use in `io_file_write_all` inside
+  `src/lib/nogc_sync_mut/sffi/fs.spl` (`:462`) remain stage2-gated until frozen
+  Phase 2 is rebuilt past `b2ea6bd62ff`.
+- Added unit spec `test/01_unit/sffi/wa_src_lane7_fs_c_bool_spec.spl`.

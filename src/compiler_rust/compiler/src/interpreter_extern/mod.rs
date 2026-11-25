@@ -897,6 +897,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_is_darwin_arm64", simd::rt_is_darwin_arm64);
     insert_simple!("rt_sysctlbyname_i32", simd::rt_sysctlbyname_i32);
     insert_simple!("rt_riscv_read_vlenb", simd::rt_riscv_read_vlenb);
+    insert_simple!("rt_sve_read_vl_bytes", simd::rt_sve_read_vl_bytes);
     insert_simple!("rt_riscv_has_v_ext", simd::rt_riscv_has_v_ext);
     insert_simple!("rt_cuda_sm_version", simd::rt_cuda_sm_version);
     insert_simple!("rt_cargo_build", cargo::rt_cargo_build);

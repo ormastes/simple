@@ -1,0 +1,164 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# WA-S9 RISC-V64 Interpreter & MIR Lowering Guard Regressions
+
+Covers the three WA-S9 `@workaround` dispositions:
+1. `riscv64_interp_enum_check_discriminant_shift_2026_11_06` (`ROOT-FIXED+RETIRED`):
+   `interpreter_calls.spl` matches `Value.String` directly in `BuiltinTag.Print`
+   and `BuiltinTag.Println` without constructing a `Value.String("")` probe or
+   calling `rt_enum_payload`.
+2. `riscv64_interp_ok_wrapper_leak_2026_11_06` (`KEPT-WITH-REASON`):
+   `interpreter_expr.spl` extracts `Result<Value, BackendError>` call arguments
+   via explicit `match Ok(inner_v)` instead of `.unwrap()` while OpenSBI baremetal
+   `rt_unwrap_or_trap` lacks positional `Result` discriminant checks.
+3. `riscv64_guest_result_text_payload_empty_2026_11_06` (`KEPT-WITH-REASON`):
+   `module_lowering.spl` avoids `Result` allocation on `"legacy"` and uses explicit
+   `match` on `mir_symbol_write_ledger_open(...)` / `mir_symbol_write_ledger_resolve(...)`
+   instead of `.unwrap()` / `.unwrap_err()`.
+"""
+
+# @tag: unit, compiler, backend, mir, riscv64
+
+use std.spec.{describe, it, expect, assert_true, expect_not}
+use std.io_runtime.{file_read}
+use app.bug.workaround_index.{parse_workaround_source}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.target_hir.target_hir_flags.{target_hir_mode_or_legacy}
+use compiler.mir.mir.{MirModule}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_target_hir_symbol_writes.{mir_symbol_write_ledger_legacy, mir_symbol_write_ledger_open, mir_symbol_write_ledger_resolve}
+use compiler.backend.backend_types.{BackendError, BackendResult, Value}
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+
+fn lower_to_hir_for_guard_test(src: text, mod_name: text) -> HirModule:
+    val file = "testdata/" + mod_name + ".spl"
+    val parsed = parse_full_frontend(src, file, mod_name, Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    hl.lower_module(parsed)
+
+fn summarize_builtin_nil(res_opt: Result<Value, BackendError>?) -> text:
+    match res_opt:
+        case Some(inner):
+            match inner:
+                case Ok(Value.Nil): "some_ok_nil"
+                case Ok(_): "some_ok_other"
+                case Err(e): "some_err:" + e.message
+        case None: "none"
+
+fn parse_workarounds_error(path: text) -> text:
+    val src = file_read(path)
+    match parse_workaround_source(path, src):
+        case Ok(_): ""
+        case Err(msg): msg
+
+describe "WA-S9 riscv64_interp_enum_check_discriminant_shift_2026_11_06 retirement":
+    """Verifies Print/Println direct match dispatch and string conversion after probe retirement."""
+
+    it "handles print and println builtins across String, Int, Bool, Nil, and empty args":
+        val backend = InterpreterBackendImpl.new()
+        expect(summarize_builtin_nil(backend.try_call_builtin("print", [Value.String("wa_s9_print")]))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("print", [Value.Int(7)]))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("print", [Value.Bool(true)]))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("print", [Value.Nil]))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("print", []))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("println", [Value.String("wa_s9_println")]))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("println", [Value.Int(9)]))).to_equal("some_ok_nil")
+        expect(summarize_builtin_nil(backend.try_call_builtin("println", []))).to_equal("some_ok_nil")
+
+    it "formats Value variants via value_to_string without <unknown> regression":
+        val backend = InterpreterBackendImpl.new()
+        expect(backend.value_to_string(Value.String("hello_riscv64"))).to_equal("hello_riscv64")
+        expect(backend.value_to_string(Value.Int(42))).to_equal("42")
+        expect(backend.value_to_string(Value.Bool(false))).to_equal("false")
+        expect(backend.value_to_string(Value.Nil)).to_equal("nil")
+
+    it "retired the enum discriminant probe and rt_enum_payload extern from interpreter_calls.spl":
+        val path = "src/compiler/70.backend/backend/interpreter_calls.spl"
+        val src = file_read(path)
+        expect_not(src.contains("riscv64_interp_enum_check_discriminant_shift_2026_11_06"))
+        expect_not(src.contains("extern fn rt_enum_payload"))
+        expect_not(src.contains("rt_enum_discriminant(Value.String(\"\"))"))
+        expect(parse_workarounds_error(path)).to_equal("")
+
+describe "WA-S9 riscv64_interp_ok_wrapper_leak_2026_11_06 kept guard":
+    """Verifies interpreter Call arg evaluation extracts Value payloads cleanly."""
+
+    it "evaluates nested string call arguments without leaking Result.Ok wrappers":
+        val src =
+            "fn wrap_text(s: text) -> text:\n" +
+            "    s + \"_ok\"\n\n" +
+            "fn take_text(s: text, n: i64) -> text:\n" +
+            "    print(s)\n" +
+            "    println(s)\n" +
+            "    if n > 0:\n" +
+            "        return s\n" +
+            "    \"bad\"\n\n" +
+            "fn main() -> text:\n" +
+            "    take_text(wrap_text(\"wa_s9\"), 1)\n"
+        val hir = lower_to_hir_for_guard_test(src: src, mod_name: "wa_s9_interp_call_probe")
+        val backend = InterpreterBackendImpl.new()
+        val res = backend.interpret_hir_module(hir)
+        val out = match res:
+            case Ok(BackendResult.Value(Value.String(s))): "ok:" + s
+            case Ok(_): "ok_other"
+            case Err(e): "err:" + e.message
+        expect(out).to_equal("ok:wa_s9_ok")
+
+    it "documents KEPT-WITH-REASON under valid @workaround grammar in interpreter_expr.spl":
+        val path = "src/compiler/70.backend/backend/interpreter_expr.spl"
+        val src = file_read(path)
+        assert_true(src.contains("@workaround bug=riscv64_interp_ok_wrapper_leak_2026_11_06 reason=KEPT-WITH-REASON:"))
+        assert_true(src.contains("case Ok(inner_v): inner_v"))
+        expect(parse_workarounds_error(path)).to_equal("")
+
+describe "WA-S9 riscv64_guest_result_text_payload_empty_2026_11_06 kept guard":
+    """Verifies MIR module lowering avoids Result.unwrap on the symbol-write overlay."""
+
+    it "lowers a module using Result<text, text> without mir lowering or mode errors":
+        val src =
+            "fn ok_or_err(flag: bool) -> Result<text, text>:\n" +
+            "    if flag:\n" +
+            "        return Ok(\"payload\")\n" +
+            "    Err(\"bad\")\n\n" +
+            "fn probe_result(flag: bool) -> text:\n" +
+            "    val r = ok_or_err(flag)\n" +
+            "    if r.is_err():\n" +
+            "        return r.unwrap_err()\n" +
+            "    r.unwrap()\n"
+        val hir = lower_to_hir_for_guard_test(src: src, mod_name: "wa_s9_mir_result_probe")
+        var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+        val mir: MirModule = ml.lower_module(hir)
+        expect(ml.errors.len()).to_equal(0)
+        expect(mir.functions.len()).to_be_greater_than(0)
+
+    it "keeps mode resolution Result-free, handles ledger Ok/Err explicitly, and keeps valid @workaround syntax":
+        val ambient_mode = target_hir_mode_or_legacy()
+        assert_true(ambient_mode == "legacy" or ambient_mode == "shadow" or ambient_mode == "typed")
+        val legacy = mir_symbol_write_ledger_legacy()
+        expect(legacy.mode).to_equal("legacy")
+        val legacy_resolved = match mir_symbol_write_ledger_resolve(legacy):
+            case Ok(_): "ok"
+            case Err(msg): "err:" + msg
+        expect(legacy_resolved).to_equal("ok")
+        val opened_shadow = mir_symbol_write_ledger_open("shadow", "wa_s9_mod", 0, 10)
+        val shadow_mode = match opened_shadow:
+            case Ok(ledger): ledger.mode
+            case Err(_): "err"
+        expect(shadow_mode).to_equal("shadow")
+        val opened_bad = mir_symbol_write_ledger_open("invalid_mode", "wa_s9_mod", 0, 10)
+        val bad_err = match opened_bad:
+            case Ok(_): "unexpected_ok"
+            case Err(msg): msg
+        expect(bad_err).to_equal("target_hir_symbol_writes_bad_mode: invalid_mode")
+        val path = "src/compiler/50.mir/_MirLowering/module_lowering.spl"
+        val src = file_read(path)
+        assert_true(src.contains("@workaround bug=riscv64_guest_result_text_payload_empty_2026_11_06 reason=KEPT-WITH-REASON:"))
+        expect_not(src.contains("opened.unwrap()"))
+        expect_not(src.contains("symbol_writes.unwrap_err()"))
+        expect(parse_workarounds_error(path)).to_equal("")

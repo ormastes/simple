@@ -60,3 +60,8 @@ rti007 (separate bug). Status: fixed in-tree; Stage 2 redeploy still pending.
 
 ## Bootstrap repro/prevention 2026-11-05
 Bootstrap review: HIR fix on release (e7b5c93ba65), proof spec test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl (PR #6584). Lib workarounds stay until a Stage 2 producer with the fix is deployed. Verification-pending.
+
+## WA-S1 retirement 2026-11-26
+Retired the two remaining `file_fiber_tldr_bridge_v1.spl` `arm_wait` sites (`val polled: TaskPollResult<Result<i64, AsyncRefError>> = subscription.poll()` and post-commit `val repolled: TaskPollResult<Result<i64, AsyncRefError>> = subscription.poll()`) to direct `match subscription.poll():` after verifying that both frozen Stage 2 (`18a1f28937c2`) and HEAD Stage 3 compile direct `match subscription.poll():` on `AsyncSubscriptionI64` without HIR/MIR/LLVM errors.
+- Regression spec: `test/01_unit/compiler/80.driver/wa_src_lane1_workarounds_spec.spl`
+- Source: `src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl`
