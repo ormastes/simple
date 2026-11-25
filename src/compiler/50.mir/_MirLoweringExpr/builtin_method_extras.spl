@@ -867,15 +867,93 @@ impl MirLowering:
             case _: ()
         numeric_kind
 
+    me builtin_text_byte_expr_receiver_admitted(inner_receiver: HirExpr, inner_resolution: MethodResolution) -> bool:
+        """True when `byte_at`/`char_code_at`/`byte_len` on `inner_receiver`
+        belongs to the builtin text family (a declared `text` receiver, or an
+        unknown/erased receiver that is not a user-defined struct/class/enum or
+        other non-text owner)."""
+        var resolution_is_unresolved = false
+        var resolution_is_static = false
+        match inner_resolution:
+            case MethodResolution.Unresolved: resolution_is_unresolved = true
+            case MethodResolution.StaticMethod(_, _): resolution_is_static = true
+            case _: ()
+        if resolution_is_static:
+            return false
+        if self.declared_static_method_receiver_symbol_v1(inner_receiver) >= 0:
+            return false
+        match inner_receiver.kind:
+            case HirExprKind.StructLit(_, _) | HirExprKind.EnumLit(_, _, _) | HirExprKind.ArrayLit(_, _) | HirExprKind.DictLit(_, _, _) | HirExprKind.TupleLit(_) | HirExprKind.SetLit(_, _):
+                return false
+            case _: ()
+        var recv_type: HirType? = self.enum_match_expr_type(inner_receiver)
+        if recv_type == None:
+            recv_type = self.receiver_declared_type(inner_receiver)
+        if recv_type == None:
+            match inner_receiver.kind:
+                case HirExprKind.Call(recv_callee, _, _):
+                    match recv_callee.kind:
+                        case HirExprKind.Var(call_sym) | HirExprKind.NamedVar(call_sym, _):
+                            if call_sym.id >= 0:
+                                recv_type = self.resolved_call_hir_return_type(call_sym)
+                                if recv_type == None:
+                                    if val call_decl = self.symbols.get_symbol_raw(call_sym.id):
+                                        val shape = bootstrap_fn_ret_shape_lookup(call_decl.name) ?? ""
+                                        if shape == "text" or shape == "str":
+                                            return true
+                                        if shape != "":
+                                            return false
+                        case _: ()
+                case _: ()
+        var receiver_is_declared_text = false
+        var receiver_is_unknown = true
+        match recv_type:
+            case Some(found_recv_type):
+                if found_recv_type != None and found_recv_type != 0:
+                    match found_recv_type.kind:
+                        case HirTypeKind.Str:
+                            receiver_is_declared_text = true
+                            receiver_is_unknown = false
+                        case HirTypeKind.Any | HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.TypeParam(_, _):
+                            receiver_is_unknown = true
+                        case _:
+                            return false
+            case None:
+                ()
+        if receiver_is_declared_text:
+            return true
+        if not resolution_is_unresolved:
+            return false
+        if not receiver_is_unknown:
+            return false
+        match inner_receiver.kind:
+            case HirExprKind.Var(recv_sym) | HirExprKind.NamedVar(recv_sym, _):
+                val recv_local = self.find_local(recv_sym.id)
+                if recv_local.id >= 0:
+                    if self.local_is_str(recv_local) or self.local_hir_type_is_str(recv_local):
+                        return true
+                    if self.builtin_local_has_custom_owner(recv_local) or self.local_is_runtime_array(recv_local) or self.local_is_runtime_dict(recv_local) or self.option_value_locals.contains(recv_local.id):
+                        return false
+                    if val recv_mir = self.local_mir_type_of(recv_local):
+                        match recv_mir.kind:
+                            case MirTypeKind.Struct(_) | MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Dict(_, _):
+                                return false
+                            case _: ()
+            case _: ()
+        true
+
     me builtin_numeric_expr_kind(expr: HirExpr) -> i64:
         """Numeric kind PROVEN from the expression itself: a declared/inferred
         HIR type, a numeric literal, or arithmetic / a builtin numeric method
         over operands that are themselves proven. Never the MIR type: an
         untracked struct handle is an i64 word at MIR too. 0 = not proven."""
-        if val static_type = self.enum_match_expr_type(expr):
-            val static_kind = self.builtin_numeric_kind_of_hir(static_type)
-            if static_kind != 0:
-                return static_kind
+        match self.enum_match_expr_type(expr):
+            case Some(static_type):
+                if static_type != None and static_type != 0:
+                    val static_kind = self.builtin_numeric_kind_of_hir(static_type)
+                    if static_kind != 0:
+                        return static_kind
+            case None: ()
         var numeric_kind = 0
         match expr.kind:
             case IntLit(_, int_suffix):
@@ -889,7 +967,9 @@ impl MirLowering:
             case FloatLexeme(_, _): numeric_kind = 3
             case Unary(unary_op, unary_operand):
                 match unary_op:
-                    case HirUnaryOp.Neg: numeric_kind = self.builtin_numeric_expr_kind(unary_operand)
+                    case HirUnaryOp.Neg:
+                        val neg_kind = self.builtin_numeric_expr_kind(unary_operand)
+                        numeric_kind = if neg_kind == 2: 1 else: neg_kind
                     case _: ()
             case Binary(binary_op, binary_left, binary_right):
                 var arithmetic = false
@@ -914,14 +994,17 @@ impl MirLowering:
                     val bit_left_kind = self.builtin_numeric_expr_kind(binary_left)
                     val bit_right_kind = self.builtin_numeric_expr_kind(binary_right)
                     if (bit_left_kind == 1 or bit_left_kind == 2) and (bit_right_kind == 1 or bit_right_kind == 2):
-                        numeric_kind = bit_left_kind
+                        numeric_kind = if bit_left_kind == 1 or bit_right_kind == 1: 1 else: 2
                 if arithmetic:
                     val left_kind = self.builtin_numeric_expr_kind(binary_left)
                     val right_kind = self.builtin_numeric_expr_kind(binary_right)
                     if left_kind != 0 and right_kind != 0:
-                        numeric_kind = left_kind
-                        if right_kind == 3:
+                        if left_kind == 3 or right_kind == 3:
                             numeric_kind = 3
+                        elif left_kind == 1 or right_kind == 1:
+                            numeric_kind = 1
+                        else:
+                            numeric_kind = 2
             case Cast(cast_inner, cast_target):
                 # `x as u64` / the desugared suffix literal `5u64`.
                 numeric_kind = self.builtin_numeric_kind_of_hir(cast_target)
@@ -932,7 +1015,27 @@ impl MirLowering:
                         case HirTypeKind.Array(index_elem, _): numeric_kind = self.builtin_numeric_kind_of_hir(index_elem)
                         case HirTypeKind.Slice(index_slice_elem): numeric_kind = self.builtin_numeric_kind_of_hir(index_slice_elem)
                         case _: ()
-            case MethodCall(inner_receiver, inner_method, inner_args, _):
+            case Call(callee, call_args, _):
+                match self.enum_match_expr_type(callee):
+                    case Some(call_callee_type):
+                        if call_callee_type != None and call_callee_type != 0:
+                            match call_callee_type.kind:
+                                case HirTypeKind.Function(call_params, call_ret, _):
+                                    val instantiated_ret = self.generic_call_instantiated_return(call_params, call_ret, call_args)
+                                    numeric_kind = self.builtin_numeric_kind_of_hir(instantiated_ret)
+                                case _: ()
+                    case None: ()
+                if numeric_kind == 0:
+                    match callee.kind:
+                        case Var(call_sym) | NamedVar(call_sym, _):
+                            if call_sym.id >= 0:
+                                match self.resolved_call_hir_return_type(call_sym):
+                                    case Some(declared_ret):
+                                        if declared_ret != None and declared_ret != 0:
+                                            numeric_kind = self.builtin_numeric_kind_of_hir(declared_ret)
+                                    case None: ()
+                        case _: ()
+            case MethodCall(inner_receiver, inner_method, inner_args, inner_resolution):
                 # `len()` of a DECLARED text / array / dict is the builtin
                 # length: a signed integer.
                 if inner_method == "len" and inner_args.len() == 0:
@@ -943,34 +1046,35 @@ impl MirLowering:
                             case HirTypeKind.Slice(_): numeric_kind = 1
                             case HirTypeKind.Dict(_, _): numeric_kind = 1
                             case _: ()
-                # `byte_at(i)` of a DECLARED text is the byte value, carried
-                # in a raw i64 word (__simple_rt_string_byte_at). Without this
-                # proof `s.byte_at(0).to_i64()` reached the erased text arm and
-                # lowered as rt_string_to_int_lenient, turning 'C' into 0
-                # (bug phase2_byte_at_to_i64_lowered_as_text_parse_2026-11-23).
-                if inner_method == "byte_at" and inner_args.len() == 1:
-                    if val byte_at_receiver_type = self.enum_match_expr_type(inner_receiver):
-                        match byte_at_receiver_type.kind:
-                            case HirTypeKind.Str: numeric_kind = 1
-                            case _: ()
+                # `byte_at(i)`, `char_code_at(i)` and `byte_len()` on text (or
+                # on an untyped/erased expression that is not a user type with a
+                # custom method) return raw integer scalars. Without this proof
+                # `stem.byte_at(3).to_i64()` / `char_code_at(0).to_i64()` can
+                # fall through to the erased text arm and parse as 0.
+                val is_text_byte_or_len_call =
+                    ((inner_method == "byte_at" or inner_method == "char_code_at") and inner_args.len() == 1) or
+                    (inner_method == "byte_len" and inner_args.len() == 0)
+                if is_text_byte_or_len_call and self.builtin_text_byte_expr_receiver_admitted(inner_receiver, inner_resolution):
+                    numeric_kind = 1
                 # A builtin numeric method on a PROVEN numeric receiver. A
                 # user method of the same name can only be reached through a
                 # user-typed receiver, which is not proven numeric.
-                val inner_kind = self.builtin_numeric_expr_kind(inner_receiver)
-                if inner_kind != 0:
-                    if inner_args.len() == 0:
-                        if inner_method == "to_f64" or inner_method == "to_f32" or inner_method == "to_float":
-                            numeric_kind = 3
-                        if inner_method == "to_i64" or inner_method == "to_i32" or inner_method == "to_i16" or inner_method == "to_i8":
-                            numeric_kind = 1
-                        if inner_method == "to_u64" or inner_method == "to_u32" or inner_method == "to_u16" or inner_method == "to_u8":
-                            numeric_kind = 2
-                        if inner_method == "abs":
+                if numeric_kind == 0:
+                    val inner_kind = self.builtin_numeric_expr_kind(inner_receiver)
+                    if inner_kind != 0:
+                        if inner_args.len() == 0:
+                            if inner_method == "to_f64" or inner_method == "to_f32" or inner_method == "to_float":
+                                numeric_kind = 3
+                            if inner_method == "to_i64" or inner_method == "to_i32" or inner_method == "to_i16" or inner_method == "to_i8":
+                                numeric_kind = 1
+                            if inner_method == "to_u64" or inner_method == "to_u32" or inner_method == "to_u16" or inner_method == "to_u8":
+                                numeric_kind = 2
+                            if inner_method == "abs":
+                                numeric_kind = inner_kind
+                            if inner_kind == 3 and (inner_method == "floor" or inner_method == "ceil" or inner_method == "round" or inner_method == "sqrt"):
+                                numeric_kind = 3
+                        if inner_args.len() == 1 and (inner_method == "min" or inner_method == "max"):
                             numeric_kind = inner_kind
-                        if inner_kind == 3 and (inner_method == "floor" or inner_method == "ceil" or inner_method == "round" or inner_method == "sqrt"):
-                            numeric_kind = 3
-                    if inner_args.len() == 1 and (inner_method == "min" or inner_method == "max"):
-                        numeric_kind = inner_kind
             case _: ()
         numeric_kind
 
@@ -998,20 +1102,28 @@ impl MirLowering:
                                     case _: ()
                     case _: ()
             case _: ()
-        if init_kind != 1 and init_kind != 3:
+        if init_kind != 1 and init_kind != 2 and init_kind != 3:
             return
-        if self.builtin_local_has_custom_owner(local) or self.is_runtime_value_local(local.id):
+        if self.builtin_local_has_custom_owner(local) or self.is_runtime_value_local(local.id) or self.local_is_str(local):
             return
+        var is_signed_mir = false
         var agrees = false
         if val local_mir = self.local_mir_type_of(local):
             match local_mir.kind:
-                case MirTypeKind.I64: agrees = init_kind == 1
-                case MirTypeKind.F64: agrees = init_kind == 3
+                case MirTypeKind.I64:
+                    agrees = init_kind == 1 or init_kind == 2
+                    is_signed_mir = true
+                case MirTypeKind.U64:
+                    agrees = init_kind == 2
+                case MirTypeKind.F64:
+                    agrees = init_kind == 3
                 case _: ()
         if not agrees:
             return
-        if init_kind == 1:
+        if is_signed_mir:
             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Int(64, true), span: init.span), 0, 0)
+        elif init_kind == 2:
+            self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Int(64, false), span: init.span), 0, 0)
         else:
             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Float(64), span: init.span), 0, 0)
 

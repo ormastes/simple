@@ -1,0 +1,299 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: byte_at / char_code_at / byte_len / numeric Call followed by .to_i64()
+
+Regression coverage for `builtin_numeric_expr_kind` and `symbol_expr_type` /
+`builtin_text_byte_expr_receiver_admitted`:
+1. Untyped chained text bindings (`val stem = component.split(".")[0].lower();
+   stem.byte_at(3).to_i64()`), parameters (`path: text`), `for` loop vars, and
+   `text` struct fields must emit `__simple_rt_string_byte_at` (or
+   `__simple_rt_string_char_code_at` / `rt_string_len`) and MUST NOT fall
+   through to the erased-text `.to_i64()` path (`rt_string_to_int_lenient` /
+   `rt_text_to_i64`).
+2. Helper `Call(...)` returning numeric scalars (`_smf_byte_at(bytes, off).to_i64()`,
+   `(_smf_byte_at(bytes, off) & 0xFF).to_i64()`, and bound unsigned init locals)
+   must not lower `.to_i64()` as erased text parsing.
+3. Negative controls: plain `text.to_i64()`, untyped `stem.to_i64()`, and user
+   structs defining custom `byte_at` / `char_code_at` / `byte_len` methods
+   (returning either `text` or `i64`) must keep their declared semantics without
+   being hijacked into builtin text byte methods.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lower_to_mir_and_messages(src: text) -> (MirModule, [text]):
+    val file = "testdata/fixture_byte_at_untyped_call_to_i64.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_byte_at_untyped_call_to_i64", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir_mod = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        messages = messages.push("mir: " + e.message)
+    (mir_mod, messages)
+
+fn callees_in_function(mir_mod: MirModule, fn_name: text) -> [text]:
+    var callees: [text] = []
+    for f in mir_module_functions_sorted(mir_mod):
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            for blk in f.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.Call(_, func_op, _):
+                            match func_op.kind:
+                                case MirOperandKind.Const(const_val, _):
+                                    match const_val:
+                                        case MirConstValue.Str(callee_name):
+                                            callees = callees.push(callee_name)
+                                        case _: ()
+                                case _: ()
+                        case _: ()
+    callees
+
+fn has_binop_lt_in_function(mir_mod: MirModule, fn_name: text) -> bool:
+    for f in mir_module_functions_sorted(mir_mod):
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            for blk in f.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.BinOp(_, op, _, _):
+                            match op:
+                                case MirBinOp.Lt: return true
+                                case _: ()
+                        case _: ()
+    false
+
+fn list_has(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+fn list_has_substr(items: [text], sub: text) -> bool:
+    for item in items:
+        if item.contains(sub):
+            return true
+    false
+
+fn expect_no_text_parse(src: text, fn_name: text, expected_callee: text):
+    val res = lower_to_mir_and_messages(src)
+    val mir_mod = res.0
+    val messages = res.1
+    expect(messages.len()).to_equal(0)
+    val callees = callees_in_function(mir_mod, fn_name)
+    expect(list_has(callees, "rt_string_to_int_lenient")).to_equal(false)
+    expect(list_has(callees, "rt_text_to_i64")).to_equal(false)
+    expect(list_has(callees, "rt_parse_i64")).to_equal(false)
+    expect(list_has(callees, "rt_to_int_dynamic")).to_equal(false)
+    expect(list_has(callees, "rt_any_to_int")).to_equal(false)
+    if expected_callee != "":
+        expect(list_has(callees, expected_callee)).to_equal(true)
+
+val param_and_chained_stem_src = "fn param_drive(path: text) -> i64:\n" +
+    "    path.byte_at(0).to_i64()\n" +
+    "\n" +
+    "fn chained_stem(component: text) -> i64:\n" +
+    "    val stem = component.split(\".\")[0].lower()\n" +
+    "    stem.byte_at(3).to_i64()\n" +
+    "\n" +
+    "fn for_loop_stem(path: text) -> i64:\n" +
+    "    var acc = 0\n" +
+    "    for component in path.substring(3, path.byte_len()).split(\"/\"):\n" +
+    "        val stem = component.split(\".\")[0].lower()\n" +
+    "        acc = acc + stem.byte_at(3).to_i64()\n" +
+    "    acc\n" +
+    "\n" +
+    "fn bound_byte_at(component: text) -> i64:\n" +
+    "    val stem = component.split(\".\")[0].lower()\n" +
+    "    val b = stem.byte_at(3)\n" +
+    "    b.to_i64()\n" +
+    "\n" +
+    "fn binop_byte_at(component: text) -> i64:\n" +
+    "    val stem = component.split(\".\")[0].lower()\n" +
+    "    (stem.byte_at(3) - 48).to_i64()\n"
+
+val field_char_code_byte_len_src = "struct PathHolder:\n" +
+    "    name: text\n" +
+    "\n" +
+    "fn field_byte_at(p: PathHolder) -> i64:\n" +
+    "    p.name.byte_at(0).to_i64()\n" +
+    "\n" +
+    "fn stem_char_code_at(component: text) -> i64:\n" +
+    "    val stem = component.split(\".\")[0].lower()\n" +
+    "    val a = stem.char_code_at(0).to_i64()\n" +
+    "    val b = stem.char_code_at(0)\n" +
+    "    a + b.to_i64()\n" +
+    "\n" +
+    "fn stem_byte_len(component: text) -> i64:\n" +
+    "    val stem = component.split(\".\")[0].lower()\n" +
+    "    val a = stem.byte_len().to_i64()\n" +
+    "    val b = stem.byte_len()\n" +
+    "    a + b.to_i64()\n"
+
+val call_u8_to_i64_src = "fn helper_byte(bytes: [u8], off: i64) -> u8:\n" +
+    "    bytes[off]\n" +
+    "\n" +
+    "fn direct_call_to_i64(bytes: [u8], off: i64) -> i64:\n" +
+    "    helper_byte(bytes, off).to_i64()\n" +
+    "\n" +
+    "fn masked_call_to_i64(bytes: [u8], off: i64) -> i64:\n" +
+    "    (helper_byte(bytes, off) & 255).to_i64()\n" +
+    "\n" +
+    "fn bound_unsigned_call_to_i64(bytes: [u8], off: i64) -> i64:\n" +
+    "    val raw = helper_byte(bytes, off) & 255\n" +
+    "    raw.to_i64()\n" +
+    "\n" +
+    "fn diff_is_negative_after_u8_sub(bytes: [u8], off: i64) -> bool:\n" +
+    "    val diff = helper_byte(bytes, off) - 100\n" +
+    "    diff.is_negative()\n" +
+    "\n" +
+    "fn diff_abs_after_u8_sub(bytes: [u8], off: i64) -> i64:\n" +
+    "    val diff = helper_byte(bytes, off) - 100\n" +
+    "    diff.abs()\n" +
+    "\n" +
+    "fn neg_u8_is_negative(bytes: [u8], off: i64) -> bool:\n" +
+    "    val neg = -helper_byte(bytes, off)\n" +
+    "    neg.is_negative()\n" +
+    "\n" +
+    "fn diff_u8_to_i64_after_sub(bytes: [u8], off: i64) -> i64:\n" +
+    "    val diff = helper_byte(bytes, off) - 100\n" +
+    "    diff.to_i64()\n"
+
+val negative_controls_src = "struct TextBuf:\n" +
+    "    raw: text\n" +
+    "    fn byte_at(idx: i64) -> text:\n" +
+    "        self.raw\n" +
+    "    fn char_code_at(idx: i64) -> text:\n" +
+    "        self.raw\n" +
+    "    fn byte_len() -> text:\n" +
+    "        self.raw\n" +
+    "\n" +
+    "struct IntBuf:\n" +
+    "    val_byte: i64\n" +
+    "    fn byte_at(idx: i64) -> i64:\n" +
+    "        self.val_byte + idx\n" +
+    "\n" +
+    "fn make_text_buf(s: text) -> TextBuf:\n" +
+    "    TextBuf(raw: s)\n" +
+    "\n" +
+    "fn plain_text_to_i64(s: text) -> i64:\n" +
+    "    s.to_i64()\n" +
+    "\n" +
+    "fn untyped_stem_to_i64(component: text) -> i64:\n" +
+    "    val stem = component.split(\".\")[0].lower()\n" +
+    "    stem.to_i64()\n" +
+    "\n" +
+    "fn typed_text_buf_byte_len_only(b: TextBuf) -> text:\n" +
+    "    b.byte_len()\n" +
+    "\n" +
+    "fn typed_text_buf_to_i64(b: TextBuf) -> i64:\n" +
+    "    b.byte_at(0).to_i64() + b.char_code_at(0).to_i64() + b.byte_len().to_i64()\n" +
+    "\n" +
+    "fn local_text_buf_to_i64(s: text) -> i64:\n" +
+    "    val b = TextBuf(raw: s)\n" +
+    "    b.byte_at(0).to_i64()\n" +
+    "\n" +
+    "fn call_text_buf_to_i64(s: text) -> i64:\n" +
+    "    make_text_buf(s).byte_at(0).to_i64()\n" +
+    "\n" +
+    "fn struct_lit_text_buf_to_i64(s: text) -> i64:\n" +
+    "    TextBuf(raw: s).byte_at(0).to_i64()\n" +
+    "\n" +
+    "fn custom_int_buf_to_i64(b: IntBuf) -> i64:\n" +
+    "    b.byte_at(0).to_i64()\n"
+
+describe "MIR lowering: byte_at / char_code_at / byte_len / numeric Call .to_i64()":
+    it "does not lower path.byte_at(0).to_i64() on text param to lenient text parsing":
+        expect_no_text_parse(param_and_chained_stem_src, "param_drive", "__simple_rt_string_byte_at")
+
+    it "does not lower untyped chained stem.byte_at(3).to_i64() to lenient text parsing":
+        expect_no_text_parse(param_and_chained_stem_src, "chained_stem", "__simple_rt_string_byte_at")
+
+    it "does not lower for-loop untyped stem.byte_at(3).to_i64() to lenient text parsing":
+        expect_no_text_parse(param_and_chained_stem_src, "for_loop_stem", "__simple_rt_string_byte_at")
+
+    it "does not lower bound stem.byte_at(3) or binop (stem.byte_at(3) - 48) .to_i64() to lenient text parsing":
+        expect_no_text_parse(param_and_chained_stem_src, "bound_byte_at", "__simple_rt_string_byte_at")
+        expect_no_text_parse(param_and_chained_stem_src, "binop_byte_at", "__simple_rt_string_byte_at")
+
+    it "does not lower struct text field byte_at, char_code_at, or byte_len .to_i64() to lenient text parsing":
+        expect_no_text_parse(field_char_code_byte_len_src, "field_byte_at", "__simple_rt_string_byte_at")
+        expect_no_text_parse(field_char_code_byte_len_src, "stem_char_code_at", "__simple_rt_string_char_code_at")
+        expect_no_text_parse(field_char_code_byte_len_src, "stem_byte_len", "rt_string_len")
+
+    it "does not lower numeric helper Call().to_i64() or bound masked u8 .to_i64() to lenient text parsing":
+        expect_no_text_parse(call_u8_to_i64_src, "direct_call_to_i64", "")
+        expect_no_text_parse(call_u8_to_i64_src, "masked_call_to_i64", "")
+        expect_no_text_parse(call_u8_to_i64_src, "bound_unsigned_call_to_i64", "")
+        expect_no_text_parse(call_u8_to_i64_src, "diff_u8_to_i64_after_sub", "")
+
+    it "keeps signed semantics for mixed u8 - i64 and negated u8 bindings before .abs() and .is_negative()":
+        val res = lower_to_mir_and_messages(call_u8_to_i64_src)
+        val mir_mod = res.0
+        expect(res.1.len()).to_equal(0)
+        expect(has_binop_lt_in_function(mir_mod, "diff_is_negative_after_u8_sub")).to_equal(true)
+        expect(has_binop_lt_in_function(mir_mod, "diff_abs_after_u8_sub")).to_equal(true)
+        expect(has_binop_lt_in_function(mir_mod, "neg_u8_is_negative")).to_equal(true)
+
+    it "preserves rt_string_to_int_lenient for plain and untyped text.to_i64()":
+        val res = lower_to_mir_and_messages(negative_controls_src)
+        val mir_mod = res.0
+        val messages = res.1
+        expect(messages.len()).to_equal(0)
+        expect(list_has(callees_in_function(mir_mod, "plain_text_to_i64"), "rt_string_to_int_lenient")).to_equal(true)
+        expect(list_has(callees_in_function(mir_mod, "untyped_stem_to_i64"), "rt_string_to_int_lenient")).to_equal(true)
+
+    it "does not hijack typed TextBuf custom methods returning text":
+        val res = lower_to_mir_and_messages(negative_controls_src)
+        val mir_mod = res.0
+        expect(res.1.len()).to_equal(0)
+        val typed_buf = callees_in_function(mir_mod, "typed_text_buf_to_i64")
+        expect(list_has(typed_buf, "rt_string_to_int_lenient")).to_equal(true)
+        expect(list_has(typed_buf, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.byte_at")).to_equal(true)
+        expect(list_has(typed_buf, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.char_code_at")).to_equal(true)
+        expect(list_has(typed_buf, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.byte_len")).to_equal(true)
+        expect(list_has(typed_buf, "__simple_rt_string_byte_at")).to_equal(false)
+        expect(list_has(typed_buf, "__simple_rt_string_char_code_at")).to_equal(false)
+        val byte_len_only = callees_in_function(mir_mod, "typed_text_buf_byte_len_only")
+        expect(list_has(byte_len_only, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.byte_len")).to_equal(true)
+        expect(list_has(byte_len_only, "rt_string_len")).to_equal(false)
+
+    it "does not hijack local, call, or inline struct literal TextBuf custom byte_at returning text":
+        val res = lower_to_mir_and_messages(negative_controls_src)
+        val mir_mod = res.0
+        expect(res.1.len()).to_equal(0)
+        val local_buf = callees_in_function(mir_mod, "local_text_buf_to_i64")
+        expect(list_has(local_buf, "rt_string_to_int_lenient")).to_equal(true)
+        expect(list_has(local_buf, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.byte_at")).to_equal(true)
+        expect(list_has(local_buf, "__simple_rt_string_byte_at")).to_equal(false)
+        val call_buf = callees_in_function(mir_mod, "call_text_buf_to_i64")
+        expect(list_has(call_buf, "rt_string_to_int_lenient")).to_equal(true)
+        expect(list_has(call_buf, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.byte_at")).to_equal(true)
+        expect(list_has(call_buf, "__simple_rt_string_byte_at")).to_equal(false)
+        val lit_buf = callees_in_function(mir_mod, "struct_lit_text_buf_to_i64")
+        expect(list_has(lit_buf, "rt_string_to_int_lenient")).to_equal(true)
+        expect(list_has(lit_buf, "testdata.fixture_byte_at_untyped_call_to_i64.TextBuf.byte_at")).to_equal(true)
+        expect(list_has(lit_buf, "__simple_rt_string_byte_at")).to_equal(false)
+
+    it "preserves custom IntBuf.byte_at().to_i64() without text parsing or text byte_at":
+        val res = lower_to_mir_and_messages(negative_controls_src)
+        val mir_mod = res.0
+        expect(res.1.len()).to_equal(0)
+        val custom_int = callees_in_function(mir_mod, "custom_int_buf_to_i64")
+        expect(list_has(custom_int, "rt_string_to_int_lenient")).to_equal(false)
+        expect(list_has(custom_int, "__simple_rt_string_byte_at")).to_equal(false)
+        expect(list_has_substr(custom_int, "byte_at")).to_equal(true)

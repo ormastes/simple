@@ -2731,13 +2731,33 @@ impl MirLowering:
     fn symbol_bound_local(symbol_id: i64) -> LocalId:
         """The local currently bound to `symbol_id`, or LocalId(-1).
 
-        `local_map` is written only by match-arm bindings; ordinary `val` /
-        `var` bindings live in the bind_local/find_local index. Consulting
-        only `local_map` made `val r = f(); r.is_err()` lose the Result type
-        the call result carried, while `f().is_err()` lowered fine."""
-        if self.local_map.has(symbol_id):
-            return self.local_map[symbol_id]
+        Delegates to `find_local` so `local_symbol_ids`/`local_symbol_values`
+        (`linear_local_symbol_slot`) and tombstone checks (`mirrored.id >= 0`)
+        are never bypassed by raw `Dict` reads."""
         self.find_local(symbol_id)
+
+    me symbol_expr_type(symbol_id: i64, expr: HirExpr) -> HirType?:
+        """Resolve a symbol's inferred local type before falling back to raw symbol type."""
+        val bound_local = self.symbol_bound_local(symbol_id)
+        if bound_local.id >= 0:
+            match self.find_local_hir_type(bound_local.id):
+                case Some(local_type):
+                    if local_type != None and local_type != 0:
+                        match local_type.kind:
+                            case HirTypeKind.Infer(_, _): ()
+                            case HirTypeKind.Error: ()
+                            case _: return Some(local_type)
+                case _: ()
+        val sym = self.symbols.get_symbol_raw(symbol_id)
+        if val found = sym:
+            if found.type_ != None:
+                val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                if found_type != None and found_type != 0:
+                    match found_type.kind:
+                        case HirTypeKind.Infer(_, _): ()
+                        case HirTypeKind.Error: ()
+                        case _: return Some(found_type)
+        None
 
     me enum_match_expr_type(expr: HirExpr) -> HirType?:
         """Recover a match scrutinee type without depending on lowering order."""
@@ -2745,47 +2765,22 @@ impl MirLowering:
         # type was inferred. Only the presence bit admits that metadata.
         if expr.has_type_ and expr.type_ != None:
             val explicit_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
-            match explicit_type.kind:
-                case HirTypeKind.Infer(_, _): ()
-                case HirTypeKind.Error: ()
-                case _: return Some(explicit_type)
+            if explicit_type != None and explicit_type != 0:
+                match explicit_type.kind:
+                    case HirTypeKind.Infer(_, _): ()
+                    case HirTypeKind.Error: ()
+                    case _: return Some(explicit_type)
         match expr.kind:
             case Var(symbol):
                 # Function-local provenance belongs to this binding; a raw
                 # symbol entry can still carry a pre-inference owner/type.
-                val bound_local = self.symbol_bound_local(symbol.id)
-                if bound_local.id >= 0:
-                    val local = bound_local
-                    if val local_type = self.find_local_hir_type(local.id):
-                        match local_type.kind:
-                            case HirTypeKind.Infer(_, _): ()
-                            case HirTypeKind.Error: ()
-                            case _: return Some(local_type)
-                val sym = self.symbols.get_symbol_raw(symbol.id)
-                if val found = sym:
-                    if found.type_ != None:
-                        val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
-                        match found_type.kind:
-                            case HirTypeKind.Infer(_, _): ()
-                            case HirTypeKind.Error: ()
-                            case _: return Some(found_type)
+                match self.symbol_expr_type(symbol.id, expr):
+                    case Some(resolved): return Some(resolved)
+                    case _: ()
             case NamedVar(symbol, _):
-                val bound_local = self.symbol_bound_local(symbol.id)
-                if bound_local.id >= 0:
-                    val local = bound_local
-                    if val local_type = self.find_local_hir_type(local.id):
-                        match local_type.kind:
-                            case HirTypeKind.Infer(_, _): ()
-                            case HirTypeKind.Error: ()
-                            case _: return Some(local_type)
-                val sym = self.symbols.get_symbol_raw(symbol.id)
-                if val found = sym:
-                    if found.type_ != None:
-                        val found_type = found.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
-                        match found_type.kind:
-                            case HirTypeKind.Infer(_, _): ()
-                            case HirTypeKind.Error: ()
-                            case _: return Some(found_type)
+                match self.symbol_expr_type(symbol.id, expr):
+                    case Some(resolved): return Some(resolved)
+                    case _: ()
             case Call(callee, call_args, _):
                 # Try RTI first
                 val (rti_answered, rti_type) = self.rti_enum_match_subject_type(expr, None)
