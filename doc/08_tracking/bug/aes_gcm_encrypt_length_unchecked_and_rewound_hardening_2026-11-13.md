@@ -82,6 +82,15 @@ Specs:
    pins every guard at source level ahead of key expansion (the spec
    runner cannot assert a panic); valid-input behavior stays pinned by the
    existing KAT/NIST specs (16/16, 15/15, 15/15, 5/5, sshd guard 7/7).
+   Behavioral coverage:
+   `test/01_unit/lib/crypto/aes_gcm_encrypt_length_guard_behavior_spec.spl`
+   runs every externally reachable encrypt copy in child processes —
+   wrong-variant key 15/16/24/32, empty key, nonce 11 and empty nonce all
+   fail closed with the copy's decrypt-side message and produce no
+   ciphertext, and valid boundary inputs (exact key, nonce 12, empty
+   plaintext/aad) round-trip unchanged (6/6; 1/6 with the guards
+   reverted). The noalloc TLS copy's fns stay package-private, so it
+   remains source-pinned only.
    Files:
    - `src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl`
    - `src/os/crypto/aes256_gcm.spl`
