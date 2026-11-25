@@ -1,5 +1,25 @@
 # LLVM backend silently no-ops Yield (silent wrong code, not an error)
 
+## 2026-11-25 closure re-verification (release/1.0.0, worktree wt-p3-baf)
+
+The fix recorded in the 2026-11-10 section below is present at this tip,
+confirmed by source inspection:
+
+- `src/compiler_rust/compiler/src/codegen/llvm/functions.rs:1973-1977` —
+  `MirInst::Yield { .. }` returns
+  `Err(CompileError::Codegen("generators unsupported on LLVM backend: Yield requires generator lowering"))`
+  instead of lowering to an empty block. The hard-error alternative from the
+  original Expected section is what shipped.
+- Both regressions exist in the same file:
+  `llvm_yield_refusal_errors_on_x86_and_x64` (:4191) and
+  `llvm_yield_refusal_preserves_ordinary_return` (:4217).
+
+Verification limit: per this lane's environment rules no cargo/rust build was
+run, so the two tests were not re-executed here; the 2026-11-10 section's
+executed-test receipt (2 passed, 0 failed, SHA-256-pinned binary) remains the
+execution evidence. The stale `Status: open` line in the metadata block below
+is corrected to FIXED.
+
 ## 2026-11-10 scoped LLVM backend regression PASS
 
 **Status:** FIXED for Rust LLVM's silent Yield no-op; scoped backend tests PASS.
@@ -124,7 +144,8 @@ A corrected CRT-search/capture-wrapper proposal was prepared privately for
 independent review; at that point no fifth build or linker replay had launched.
 
 - **Date:** 2026-07-19
-- **Status:** open
+- **Status:** FIXED 2026-11-10 (PR #8120; re-verified by source inspection
+  2026-11-25 — see note below)
 - **Severity:** medium (no current in-tree consumer emits Yield through the
   LLVM path, but the failure mode is silent wrong code, not a diagnostic)
 - **Area:** src/compiler_rust/compiler/src/codegen/llvm

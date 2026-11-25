@@ -1,5 +1,26 @@
 # Native RenderDoc Inspector `Else` Parse Failure
-## Open 2026-09-16 — needs owner triage
+
+## Resolved 2026-11-25 (release/1.0.0, worktree wt-p3-baf) — parse failure no longer reproduces
+
+The reproduction command from this entry now passes on the tracked
+`bin/simple.exe` (38,403,072 bytes) in interpreter mode:
+
+```
+SIMPLE_LIB=src bin/simple.exe test test/01_unit/app/renderdoc_replay_inspect_spec.spl --mode=interpreter
+→ SPEC FILE VERDICT: outcome=OK declared>=8 executed=8 passed=8 failed=0
+```
+
+The `parse: ... Unexpected token: expected expression, found Else` failure
+recorded below is gone; `src/app/test/renderdoc_replay_inspect.spl` parses and
+its spec executes green. This closes the parser bug that is this entry's
+subject.
+
+Not claimed here: a live RenderDoc capture-replay run. Executing the real
+RenderDoc 1.44 CLI against a canonical `.rdc` needs a RenderDoc install and a
+GPU capture host, which this Windows worktree lane does not provide; that
+remains app-level integration verification, not a parser defect.
+
+## Open 2026-09-16 — needs owner triage (resolved; see banner above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
