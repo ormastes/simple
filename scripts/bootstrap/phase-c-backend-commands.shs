@@ -151,6 +151,7 @@ EOF
 bootstrap_phase_c_run_tool_build() {
   pcb_backend=$1 pcb_task=$2 pcb_compiler=$3 pcb_entry=$4 pcb_output=$5 pcb_cache=$6 pcb_threads=$7
   bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
+  case "$pcb_threads" in ''|*[!0-9]*) return 2 ;; esac
   bootstrap_phase_c_policy_refused=0
   # --entry is explicit: the Stage 3 dispatcher does not derive its focused
   # entry from a positional path. --mode dynload is also explicit because the
@@ -161,8 +162,9 @@ bootstrap_phase_c_run_tool_build() {
   # opt-out selects the HIR shard profile, which admits a worker only against a
   # published request (bootstrap-fable-11, 2026-11-12).
   set -- "$pcb_compiler" native-build --entry "$pcb_entry" "--backend=$pcb_backend" --low-memory --mode dynload --entry-closure
-  # Per-file worker pool default (1 when unset; explicit SIMPLE_FILE_WORKERS=0
-  # opts out per invocation to the two-pass HIR/MIR shard route).
+  # Per-file pools require at least two workers. A one-thread host fit must use
+  # the two-pass HIR/MIR shard route instead; its process-tree cap remains the
+  # memory authority for this command. Explicit caller values still win.
   # The pin travels in the ENVIRONMENT (exported around run_matrix_task and
   # restored after), never as an `env VAR=...` argv prefix: every owner keys
   # on argv[0]=compiler / argv[1]=native-build -- the verifier's Stage 2
@@ -184,7 +186,9 @@ bootstrap_phase_c_run_tool_build() {
   fi
   pcb_fw_was_set=${SIMPLE_FILE_WORKERS+x}
   pcb_fw_previous=${SIMPLE_FILE_WORKERS-}
-  SIMPLE_FILE_WORKERS=${SIMPLE_FILE_WORKERS:-1}
+  pcb_file_workers_default=1
+  [ "$pcb_threads" -ne 1 ] || pcb_file_workers_default=0
+  SIMPLE_FILE_WORKERS=${SIMPLE_FILE_WORKERS:-$pcb_file_workers_default}
   export SIMPLE_FILE_WORKERS
   # MIR shard pins, same per-invocation scoping. Enable the bounded route here,
   # in the row owner: an outer launcher's values are not guaranteed to survive
