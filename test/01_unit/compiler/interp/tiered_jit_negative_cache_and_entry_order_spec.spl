@@ -192,6 +192,29 @@ fn probe_driver_entry_module_order() -> [bool]:
 
     [three_mods, deps_first, entry_last, dedup_and_complete, extra_entry_still_last, solo_ok, empty_ok]
 
+fn probe_interp_source_release_and_cleanup() -> [bool]:
+    var m = TieredJitManager.create(quiet_tiered_config())
+    m.register_function_with_hotspot_specialization(
+        "jit_dec_one", valid_minus_one_src(), true, true, valid_minus_one_src(), true)
+    m.register_function_with_hotspot_specialization(
+        "broken_jit_target", broken_parse_src(), true, true, broken_parse_src(), true)
+    m.record_call("jit_dec_one")
+    val cold_kept = m.profiles["jit_dec_one"].source != "" and m.profiles["jit_dec_one"].hotspot_specialized_source != ""
+    var i = 1
+    while i < 4:
+        m.record_call("jit_dec_one")
+        m.record_call("broken_jit_target")
+        i = i + 1
+    val fast_released = (m.get_tier("jit_dec_one") == JitTier.Fast and
+        m.profiles["jit_dec_one"].source == "" and
+        m.profiles["jit_dec_one"].hotspot_specialized_source == "")
+    val failed_released = (m.has_compile_failed("broken_jit_target") and
+        m.profiles["broken_jit_target"].source == "" and
+        m.profiles["broken_jit_target"].hotspot_specialized_source == "")
+    m.cleanup()
+    val cleanup_cleared = m.profiles.keys().len() == 0 and m.compile_failed.keys().len() == 0
+    [cold_kept, fast_released, failed_released, cleanup_cleared]
+
 describe "Wave B5 tiered JIT negative cache, honest Tier-2, and entry order":
     it "caches interpreter TieredJitManager compile failures so _compile_function runs once across 60 calls":
         # @req: REQ-COMPILER-INTERP-001
@@ -272,3 +295,12 @@ describe "Wave B5 tiered JIT negative cache, honest Tier-2, and entry order":
         expect probe[4] == true
         expect probe[5] == true
         expect probe[6] == true
+
+    it "releases profile source strings after Fast promotion or compile_failed and clears maps on cleanup":
+        # @req: REQ-COMPILER-INTERP-001
+        step("Verify profile sources are released after terminal JIT outcome and cleared on cleanup")
+        val probe = probe_interp_source_release_and_cleanup()
+        expect(probe[0]).to_equal(true)
+        expect(probe[1]).to_equal(true)
+        expect(probe[2]).to_equal(true)
+        expect(probe[3]).to_equal(true)

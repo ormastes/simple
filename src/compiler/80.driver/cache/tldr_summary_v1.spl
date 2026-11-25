@@ -116,6 +116,55 @@ fn _tldr_reexport_names_v1(spec: text) -> [text]?:
     if names.len() == 0: return None
     Some(names)
 
+# Advance `"""` block state across one line; outside `"""` blocks, respect
+# `#` comments and single/double-quoted literals so embedded quotes do not desync.
+fn _tldr_scan_triple_state_v1(line: text, start_in_block: bool) -> bool:
+    var in_block = start_in_block
+    var in_dq = false
+    var in_sq = false
+    var escaped = false
+    var i = 0
+    val n = line.byte_len()
+    while i < n:
+        val b = line.byte_at(i)
+        if in_block:
+            if b == 34 and i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                in_block = false
+                i = i + 3
+                continue
+            i = i + 1
+            continue
+        if in_dq:
+            if escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 34:
+                in_dq = false
+            i = i + 1
+            continue
+        if in_sq:
+            if b == 39:
+                in_sq = false
+            i = i + 1
+            continue
+        if b == 35:
+            break
+        if b == 39:
+            in_sq = true
+            i = i + 1
+            continue
+        if b == 34:
+            if i + 2 < n and line.byte_at(i + 1) == 34 and line.byte_at(i + 2) == 34:
+                in_block = true
+                i = i + 3
+                continue
+            in_dq = true
+            i = i + 1
+            continue
+        i = i + 1
+    in_block
+
 # Summary entries ("<kind>|<body>") of one module's own source, sorted.
 pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
     var out = module_tldr_sections_of_source_v1(source)
@@ -124,21 +173,31 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
     var use_stmts: [text] = []
     var impl_stmts: [text] = []
     var attrs: [text] = []
+    var in_docstring = false
+    var in_triple_str = false
     var li = 0
     while li < lines.len():
         val line = lines[li]
         li = li + 1
-        if line == "" or line.starts_with(" ") or line.starts_with("\t") or line.starts_with("#"):
+        if in_docstring:
+            in_docstring = _tldr_scan_triple_state_v1(line, true)
+            continue
+        if in_triple_str:
+            in_triple_str = _tldr_scan_triple_state_v1(line, true)
+            continue
+        if line == "" or line.starts_with("#"):
             continue
         if line.starts_with("\"\"\""):
-            val rest_doc = line.substring(3)
-            if not rest_doc.contains("\"\"\""):
-                while li < lines.len():
-                    val doc_line = lines[li]
-                    li = li + 1
-                    if doc_line.contains("\"\"\""):
-                        break
+            in_docstring = _tldr_scan_triple_state_v1(line, false)
             continue
+        if line.starts_with(" ") or line.starts_with("\t"):
+            in_triple_str = _tldr_scan_triple_state_v1(line, false)
+            if in_triple_str:
+                out = _tldr_note_fallback_v1(module_id, "multiline-string", out)
+            continue
+        in_triple_str = _tldr_scan_triple_state_v1(line, false)
+        if in_triple_str:
+            out = _tldr_note_fallback_v1(module_id, "multiline-string", out)
         if line.starts_with("@"):
             val attr_trimmed = line.trim()
             if attr_trimmed == "@end" or attr_trimmed == "@else" or attr_trimmed == "@else:" or
@@ -163,7 +222,7 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
             # literals on each line BEFORE counting `{` / `}` so comment braces
             # never corrupt multiline statement accumulation.
             var stmt = _tldr_strip_line_comment_v1(line).trim()
-            while li < lines.len() and _tldr_count_v1(stmt, "{") > _tldr_count_v1(stmt, "}"):
+            while li < lines.len() and not in_triple_str and _tldr_count_v1(stmt, "{") > _tldr_count_v1(stmt, "}"):
                 val next_line = _tldr_strip_line_comment_v1(lines[li])
                 stmt = stmt + "\n" + next_line
                 li = li + 1
@@ -218,7 +277,7 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
             continue
         # A header spans continuation lines until its parentheses balance.
         var header = line.trim()
-        while li < lines.len() and _tldr_count_v1(header, "(") > _tldr_count_v1(header, ")"):
+        while li < lines.len() and not in_triple_str and _tldr_count_v1(header, "(") > _tldr_count_v1(header, ")"):
             header = header + " " + lines[li].trim()
             li = li + 1
         val name = rest.substring(0, _tldr_ident_end_v1(rest))
@@ -228,6 +287,8 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
         if is_pub and not exported.contains(name):
             exported.push(name)
         attrs = []
+    if in_docstring:
+        out = _tldr_note_fallback_v1(module_id, "unclosed-docstring", out)
     for name in exported:
         out.push("export|" + name)
     if use_stmts.len() > 0:

@@ -52,12 +52,13 @@ use std.spec.step
 use std.spec.step
 
 use compiler.core.interpreter.module_loader_core.{
+    interp_unload_module,
     is_deferred_module,
     module_is_loaded,
-    module_loader_init
+    module_loader_init,
+    module_mark_loaded
 }
 use compiler.core.interpreter.module_loader_lazy.{
-
     lazy_fn_slice,
     lazy_fn_span_end,
     lazy_fn_span_start,
@@ -68,6 +69,7 @@ use compiler.core.interpreter.module_loader_lazy.{
     lazy_module_fn_count,
     lazy_module_known,
     lazy_parse_enabled,
+    lazy_release_module,
     load_module_lazy
 }
 
@@ -171,6 +173,49 @@ fn check_mode_gates() -> text:
         return "lazy_module_count=" + mod_count.to_text() + " (want 2)"
     ""
 
+fn check_release_and_unload() -> text:
+    module_loader_init()
+    lazy_loader_reset()
+    val mod_a = "std.ctype"
+    val mod_b = "test.fixtures.module_loader_lazy.stable_surface"
+    if load_module_lazy(mod_a, spec_current_file()) != 1:
+        return "load_module_lazy(mod_a) failed"
+    if load_module_lazy(mod_b, spec_current_file()) != 1:
+        return "load_module_lazy(mod_b) failed"
+    if lazy_module_count() != 2:
+        return "expected 2 lazy modules before release"
+
+    # Safe no-op for unknown module
+    lazy_release_module("does.not.exist")
+    if lazy_module_count() != 2:
+        return "releasing unknown module changed lazy_module_count"
+
+    # Release mod_a directly and verify all retained maps/spans are cleared
+    lazy_release_module(mod_a)
+    if lazy_module_known(mod_a) != 0:
+        return "mod_a still known after lazy_release_module"
+    if lazy_fn_slice(mod_a, "to_upper") != "":
+        return "mod_a slice still retained after lazy_release_module"
+    if lazy_fn_span_start(mod_a, "to_upper") != -1 or lazy_fn_span_end(mod_a, "to_upper") != -1:
+        return "mod_a spans still retained after lazy_release_module"
+    if lazy_module_fn_count(mod_a) != 0 or lazy_module_decl_names(mod_a).len() != 0:
+        return "mod_a fn/decl lists still retained after lazy_release_module"
+    if lazy_module_count() != 1 or lazy_module_known(mod_b) != 1:
+        return "releasing mod_a affected unrelated mod_b"
+    if not lazy_fn_slice(mod_b, "stable_escape").ends_with("\n"):
+        return "mod_b slice did not preserve trailing newline"
+
+    # interp_unload_module must also release lazy state for the unloaded module
+    module_mark_loaded(mod_b, "test/fixtures/module_loader_lazy/stable_surface.spl", ["stable_escape"])
+    val _unloaded = interp_unload_module(mod_b)
+    if lazy_module_known(mod_b) != 0:
+        return "mod_b still known after interp_unload_module"
+    if lazy_fn_slice(mod_b, "stable_escape") != "":
+        return "mod_b slice still retained after interp_unload_module"
+    if lazy_module_count() != 0:
+        return "lazy_module_count non-zero after unloading remaining module"
+    ""
+
 describe "lazy module loader bridge":
     # @manual scenario evidence
     it "outline-scans a real module and defers it with its declaration surface":
@@ -195,4 +240,10 @@ describe "lazy module loader bridge":
         # @req REQ-SSPEC-UNIT
         step("keeps the default mode gates off")
         val err = check_mode_gates()
+        expect(err).to_equal("")
+
+    it "releases lazy source and span metadata on release and module unload":
+        # @req REQ-SSPEC-UNIT
+        step("releases lazy source and span metadata on release and module unload")
+        val err = check_release_and_unload()
         expect(err).to_equal("")

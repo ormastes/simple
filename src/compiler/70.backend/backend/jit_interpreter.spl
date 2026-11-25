@@ -120,6 +120,13 @@ pub struct JitInterpreterBackend:
     compile_attempts: i64             # Number of JIT compilation attempts
     fallback_calls: i64               # Number of calls routed to interpreter fallback
     interp: InterpreterBackendImpl    # Reusable tree-walking fallback backend
+    jit_cfg_winners_cache: Dict<text, Dict<i64, i64>>
+    jit_cfg_error_cache: Dict<text, text>
+    jit_lowering_cache: Dict<text, MirLowering>
+    module_prescans: i64
+
+fn _jit_module_cache_key(module: HirModule, backend: text) -> text:
+    "{backend}|{module.name}|{module.path}|{module.functions.len()}|{module.structs.len()}|{module.classes.len()}|{module.enums.len()}|{module.symbols.symbols.len()}"
 
 impl JitInterpreterBackend:
     pub static fn new(config: JitInterpreterConfig) -> JitInterpreterBackend:
@@ -132,7 +139,11 @@ impl JitInterpreterBackend:
             jit_failed: {},
             compile_attempts: 0,
             fallback_calls: 0,
-            interp: InterpreterBackendImpl.new()
+            interp: InterpreterBackendImpl.new(),
+            jit_cfg_winners_cache: {},
+            jit_cfg_error_cache: {},
+            jit_lowering_cache: {},
+            module_prescans: 0
         )
 
     pub static fn default() -> JitInterpreterBackend:
@@ -193,6 +204,39 @@ impl JitInterpreterBackend:
             if self.config.verbose:
                 print "[jit] Function {fn_name} reached threshold, will JIT compile"
 
+    me _get_or_init_module_lowering(module: HirModule, backend: text) -> (MirLowering, Dict<i64, i64>, text):
+        val cache_key = _jit_module_cache_key(module, backend)
+        if self.jit_lowering_cache.has(cache_key) and self.jit_cfg_winners_cache.has(cache_key):
+            var cached_lowering = self.jit_lowering_cache[cache_key]
+            cached_lowering.errors = []
+            val cached_winners = self.jit_cfg_winners_cache[cache_key]
+            val cached_cfg_err = self.jit_cfg_error_cache[cache_key] ?? ""
+            return (cached_lowering, cached_winners, cached_cfg_err)
+
+        val target_context = backend_mir_target_context(backend)
+        var lowering = MirLowering.new_for_target(module.symbols, target_context)
+        # Decl-level @cfg: a guard that is off for this target is not compiled (the interpreter owns it).
+        # Cross-kind winners, same as lower_module (a group may mix types and functions).
+        val jit_cfg_winners = lowering.cfg_group_winners(
+            module.functions.values(), module.classes.values(),
+            module.structs.values(), module.enums.values(),
+            module.traits.values(), module.constants.values(), module.impls)
+        var cfg_err = ""
+        if lowering.errors.len() > 0:
+            cfg_err = lowering.errors[0].message
+            self.jit_cfg_error_cache[cache_key] = cfg_err
+            lowering.errors = []
+        # Registry parity with the AOT lane (driver mir_setup)
+        var jit_registry_modules: Dict<text, HirModule> = {}
+        jit_registry_modules["jit"] = module
+        lowering.prescan_module_struct_names(jit_registry_modules, "jit")
+        lowering.register_module_enum_bootstrap_inventory_v1([module])
+        lowering.register_module_composite_inventory_v1([module])
+        self.jit_cfg_winners_cache[cache_key] = jit_cfg_winners
+        self.jit_lowering_cache[cache_key] = lowering
+        self.module_prescans = self.module_prescans + 1
+        (lowering, jit_cfg_winners, cfg_err)
+
     pub me try_jit_compile(fn_: HirFunction, module: HirModule) -> Result<(), BackendError>:
         """Try to JIT compile a function.
 
@@ -215,41 +259,44 @@ impl JitInterpreterBackend:
         if self.config.verbose:
             print "[jit] Compiling function: {fn_.name}"
 
-        # Step 1: Lower HIR to MIR
+        # Step 1: Lower HIR to MIR (reusing cached per-module/target cfg_winners and inventories)
         val backend = get_effective_backend_name(self.config.backend, false)
-        val target_context = backend_mir_target_context(backend)
-        var lowering = MirLowering.new_for_target(module.symbols, target_context)
-        # Decl-level @cfg: a guard that is off for this target is not compiled (the interpreter owns it).
-        # Cross-kind winners, same as lower_module (a group may mix types and functions).
-        val jit_cfg_winners = lowering.cfg_group_winners(module.functions.values(), module.classes.values(), module.structs.values(), module.enums.values(), module.traits.values(), module.constants.values(), module.impls)
+        val cache_key = _jit_module_cache_key(module, backend)
+        val (cached_lowering, jit_cfg_winners, cfg_err) = self._get_or_init_module_lowering(module, backend)
+        var lowering = cached_lowering
         if not lowering.decl_cfg_keep(fn_.name, fn_.cfg, fn_.cfg_group, fn_.cfg_arm, jit_cfg_winners):
             # A malformed guard is an error in every mode, never a silent interpreter fallback.
-            if lowering.errors.len() > 0:
-                val malformed_msg = "malformed @cfg guard: {lowering.errors[0].message}"
+            if lowering.errors.len() > 0 or cfg_err != "":
+                val raw_err = if lowering.errors.len() > 0: lowering.errors[0].message else: cfg_err
+                val malformed_msg = "malformed @cfg guard: {raw_err}"
+                lowering.errors = []
+                self.jit_lowering_cache[cache_key] = lowering
                 self.jit_failed[fn_.name] = malformed_msg
                 return Err(BackendError.compile_error(malformed_msg, Some(fn_.span)))
+            self.jit_lowering_cache[cache_key] = lowering
             val cfg_msg = "@cfg-disabled function {fn_.name} for this target"
             if self.config.mode == JitMode.AlwaysJit:
                 return Err(BackendError.compile_error(cfg_msg, Some(fn_.span)))
             self.jit_failed[fn_.name] = cfg_msg
             return Ok(())
-        # Registry parity with the AOT lane (driver mir_setup)
-        var jit_registry_modules: Dict<text, HirModule> = {}
-        jit_registry_modules["jit"] = module
-        lowering.prescan_module_struct_names(jit_registry_modules, "jit")
-        lowering.register_module_enum_bootstrap_inventory_v1([module])
-        lowering.register_module_composite_inventory_v1([module])
         val mir_fn = lowering.lower_function(fn_)
+        val lower_err_msg = if lowering.errors.len() > 0:
+            lowering.errors[0].message
+        elif cfg_err != "":
+            cfg_err
+        else:
+            ""
+        lowering.errors = []
+        self.jit_lowering_cache[cache_key] = lowering
 
-        if lowering.errors.len() > 0:
-            val err_msg = lowering.errors[0].message
-            val full_mir_err = "MIR lowering failed: {err_msg}"
+        if lower_err_msg != "":
+            val full_mir_err = "MIR lowering failed: {lower_err_msg}"
             if self.config.mode == JitMode.AlwaysJit:
                 return Err(BackendError.compile_error(full_mir_err, Some(fn_.span)))
             else:
                 self.jit_failed[fn_.name] = full_mir_err
                 if self.config.verbose:
-                    print "[jit] MIR lowering failed for {fn_.name}, will interpret: {err_msg}"
+                    print "[jit] MIR lowering failed for {fn_.name}, will interpret: {lower_err_msg}"
                 return Ok(())
 
         # Step 2: Serialize MIR to JSON

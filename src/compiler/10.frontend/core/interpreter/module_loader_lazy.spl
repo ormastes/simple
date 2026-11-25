@@ -106,6 +106,48 @@ fn lazy_loader_reset():
     _lazy_enabled_cache = -1
     _lazy_lib_root_cache = "@@unset@@"
 
+fn _lazy_drop_text_key(m: {text: text}, drop_key: text) -> {text: text}:
+    if not m.has(drop_key):
+        return m
+    var kept: {text: text} = {}
+    for k in m.keys():
+        if k != drop_key:
+            kept[k] = m[k]
+    kept
+
+fn _lazy_drop_span_keys(m: {text: i64}, drop_keys: {text: bool}) -> {text: i64}:
+    var kept: {text: i64} = {}
+    for k in m.keys():
+        if not drop_keys.has(k):
+            kept[k] = m[k]
+    kept
+
+fn lazy_release_module(module_name: text):
+    # Release retained source text and outline/span metadata after full load or unload.
+    if not _lazy_mod_set.has(module_name) and not _lazy_mod_source_map.has(module_name):
+        return
+    val fn_names = lazy_module_fn_names(module_name)
+    if fn_names.len() > 0:
+        var drop_spans: {text: bool} = {}
+        for fname in fn_names:
+            drop_spans[module_name + "|" + fname] = true
+        _lazy_span_start_map = _lazy_drop_span_keys(_lazy_span_start_map, drop_spans)
+        _lazy_span_end_map = _lazy_drop_span_keys(_lazy_span_end_map, drop_spans)
+    _lazy_mod_source_map = _lazy_drop_text_key(_lazy_mod_source_map, module_name)
+    _lazy_mod_fns_map = _lazy_drop_text_key(_lazy_mod_fns_map, module_name)
+    _lazy_mod_decls_map = _lazy_drop_text_key(_lazy_mod_decls_map, module_name)
+    _lazy_mod_file_map = _lazy_drop_text_key(_lazy_mod_file_map, module_name)
+    _lazy_mod_current_map = _lazy_drop_text_key(_lazy_mod_current_map, module_name)
+    if _lazy_mod_set.has(module_name):
+        var kept_set: {text: bool} = {}
+        for k in _lazy_mod_set.keys():
+            if k != module_name:
+                kept_set[k] = _lazy_mod_set[k]
+        _lazy_mod_set = kept_set
+        val prev_count = _lazy_meta["count"] ?? 0
+        if prev_count > 0:
+            _lazy_meta["count"] = prev_count - 1
+
 fn lazy_module_count() -> i64:
     val n = _lazy_meta["count"] ?? 0
     return n
@@ -548,13 +590,14 @@ fn lazy_fn_slice(module_name: text, fn_name: text) -> text:
         return ""
     val lines = source.split("\n")
     val total = lines.len()
-    var slice = ""
+    var slice_lines: [text] = []
     var li = start_line
-    while li < end_line:
-        if li < total:
-            slice = slice + lines[li] + "\n"
+    while li < end_line and li < total:
+        slice_lines.push(lines[li])
         li = li + 1
-    slice
+    if slice_lines.len() == 0:
+        return ""
+    slice_lines.join("\n") + "\n"
 
 fn lazy_force_function(module_name: text, fn_name: text) -> i64:
     # Parse and register a single function from its recorded body span.
@@ -598,7 +641,7 @@ fn lazy_force_function(module_name: text, fn_name: text) -> i64:
         return 0
     1
 
-export load_module_lazy, lazy_parse_enabled, lazy_in_fallback, lazy_loader_reset
+export load_module_lazy, lazy_parse_enabled, lazy_in_fallback, lazy_loader_reset, lazy_release_module
 export lazy_force_function, lazy_fn_slice, lazy_module_count, lazy_module_known, lazy_scan_probe
 export lazy_module_fn_count, lazy_module_fn_names, lazy_module_decl_names
 export lazy_fn_span_start, lazy_fn_span_end
