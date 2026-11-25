@@ -767,3 +767,76 @@ inside `test/01_unit/compiler_core/interpreter` is
   `50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case` and
   `10.frontend/_FlatAstBridge/convert_nodes.spl` `convert_flat_pattern` — were
   NOT touched and are NOT covered by the proof above.
+
+## 2026-11-25 — ws_parser victim repair confirmed landed; before/after re-verified
+
+**Status: the three ws_parser.spl copies are REPAIRED in the tree.** The
+call-site fix landed 2026-08-01 in `db14f0e4c4d` ("fix(ws): dispatch WebSocket
+frames by opcode instead of always TEXT") and is an ancestor of
+`origin/release/1.0.0`. All three copies —
+`src/lib/{gc_async_mut,nogc_async_mut,nogc_sync_mut}/http/ws/ws_parser.spl` —
+dispatch with an explicit `==` if/elif chain on the `WS_OPCODE_*` constants
+(`:259-291`) instead of `match header.opcode:` with bare const arms. The
+language-level const-pattern defect itself remains OPEN (see below).
+
+### Re-verification 2026-11-25 (branch `work/p1-wsparser-20261125`)
+
+Runner: tracked self-hosted `bin/simple.exe` (38,403,072 bytes, from git
+checkout), `SIMPLE_LIB=src`, `--mode=interpreter`.
+
+Probe `build/probe-wsparser-20261125/probe_ws_dispatch.spl` (uncommitted), one
+binary, one run:
+
+- **PART A — the pre-fix shape, against the REAL constants** imported from
+  `std.http.ws.ws_frame`: `match opcode:` with `case WS_OPCODE_TEXT:` … arms
+  sent opcodes 1, 2, 0, 8, 9, 10, 3 (reserved) and 99 (garbage) ALL to `TEXT`.
+  The deliberately-failing SENTINEL row printed MISMATCH, so the harness is
+  live. This is exactly what the pre-fix parser did to every frame.
+- **PART B — the live parser**: `ws_parse_frame` from
+  `std.http.ws.ws_parser` returned the correct `WsFrame` variant for Text
+  (0x81), Binary (0x82), Continuation (0x80), Close (0x88), Ping (0x89), Pong
+  (0x8a), and rejected reserved opcodes 0x83/0x8f, a fragmented Ping (FIN=0),
+  and a 1-byte Close status payload with nil — the RFC 6455 guards that were
+  dead under the bug now fire.
+
+Spec results (same runner):
+
+| Spec | Result |
+|---|---|
+| `test/01_unit/lib/http/ws/ws_opcode_dispatch_spec.spl` | 14/14 PASS |
+| `test/01_unit/lib/http/ws/ws_frame_round_trip_spec.spl` | 18/18 PASS |
+| `test/01_unit/lib/http/ws/ws_negative_offset_guard_spec.spl` | 2/2 PASS |
+| `test/02_integration/app/ui.web/ws_e2e_spec.spl` | 43/47; 4 failures PRE-EXISTING |
+
+The 4 `ws_e2e_spec` failures are stale source-text anchors, not dispatch
+regressions: e.g. "rejects unknown opcodes" expects `return nil` in
+`ws_parser.spl`, but the file has used `return None` since before this branch
+(0 occurrences of `return nil`; the anchor matches nothing). The other three
+(SHA-1 handshake owner, duplicated SHA-1 boundary, bearer-token extraction)
+anchor on handshake source text, one already recorded as pre-existing in
+`928f1737b4c`. No source line was changed in this pass, so all 4 are
+inherited from the base.
+
+### Mirror status (preserved, not edited)
+
+`gc_async_mut` and `nogc_async_mut` copies are byte-identical. The
+`nogc_sync_mut` copy differs by one pre-existing line (`:233`
+`maybe_header == nil` vs `.is_none()` in the other two) — mirror drift that
+predates this pass and was left alone.
+
+### Same-defect-class sweep of the ws modules
+
+The dispatch was the only `match` in any ws_parser.spl copy.
+`ws_writer.spl:191` `match frame:` arms are genuine `WsFrame` enum variants;
+`permessage_deflate.spl:54,89` match on `Result` (`Err`/`Ok`, real variants).
+No other const-in-`case`-position arm exists in these files.
+
+### Still open
+
+The general const-pattern language question — should `case CONST:` be a
+constant pattern or a hard error — remains OPEN, tracked in
+`match_bare_ident_const_irrefutable_2026-07-20.md`. `MEXH006` continues to
+flag the shape; the pure-Simple compiler seams
+(`50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case`,
+`10.frontend/_FlatAstBridge/convert_nodes.spl` `convert_flat_pattern`) are
+unchanged by this note.
