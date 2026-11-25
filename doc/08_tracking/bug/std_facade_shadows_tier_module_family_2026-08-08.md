@@ -167,3 +167,25 @@ src/lib/pe_coff_header.spl and src/lib/common/pe_coff_header.spl,
 affecting pe_inspect.spl/pe_parser.spl consumers. Both exceed a safe
 single-item budget. Leaving OPEN as recorded.
 
+
+## Verification 2026-11-25 (release/1.0.0 @ 7998d6ba40d)
+
+OPEN 1 fix confirmed present by code inspection: `src/lib/log.spl:1072-1075`
+carries the narrow `export use lib.nogc_sync_mut.log.{clear_scopes, get_level,
+get_log_level, log_debug, log_error, log_info, log_verbose, set_scope_level,
+trace}` re-export, and the regression spec
+`test/01_unit/lib/log_facade_scope_level_reachability_spec.spl` exists and
+calls all 9 symbols through the `std.log` facade path. Live spec execution is
+blocked repo-wide at this HEAD: the pinned `bin/simple.exe` (Rust seed
+v1.0.0-rc.1) rejects `@representation_boundary` decorators added by
+cfd89933699 (`error: semantic: ... unknown decorator
+'@representation_boundary'`), so the GREEN arm could not be re-run on this
+host; verification is by inspection only.
+
+OPEN 2 confirmed unchanged and still inert: `pe_inspect.spl:7` and
+`pe_parser.spl:7` import only the facade's own `PeHeaderSummary`,
+`parse_pe_header_summary`, `pe_rva_to_file_offset` via `std.pe_coff_header`;
+no consumer reaches the 30 `common/` `pe_*` functions through the shadowed
+path.
+
+Status unchanged: RESOLVED for OPEN 1, OPEN (inert, no live impact) for OPEN 2.
