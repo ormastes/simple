@@ -67,3 +67,16 @@ These same methods pass all 52 tests in `test/01_unit/lib/common/bytes/bits_spec
 
 Use `bin/simple test` with `SIMPLE_BOOTSTRAP_DRIVER` for all enum + me-mutation testing.
 Do NOT use `bin/simple run` to verify numeric payload values from enum cases with 1 field.
+
+## Verification 2026-11-25 (P1 ledger sweep, Windows worktree) — CLOSED stands
+
+Re-ran the entry's minimal repro verbatim on the pinned tracked binary
+(`bin/simple.exe`, 38,403,072 B, Rust seed v1.0.0-rc.1), default `run` lane:
+
+```
+Tok.Literal(b: 65)  -> single=65   (the filed defect printed 8 = 65 >> 3)
+Tok.Other(x: 3, y: 7) -> pair=3 7
+```
+
+Single-field enum payload extraction is correct. The 2026-09-13 closure
+stands.
