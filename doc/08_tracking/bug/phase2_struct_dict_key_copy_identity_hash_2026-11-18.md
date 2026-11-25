@@ -1,9 +1,11 @@
 # Frozen Phase 2 compiler: a copied `SymbolId` loop key misses its own dict, and Stage 3 faults
 
 - **Date:** 2026-11-18
-- **Status:** OPEN as a frozen-compiler bridge. Root cause is fixed in source
-  at tip (`5c28b2506cd`, 2026-11-17). The source-level workaround here stays
-  until the Phase 2 compiler is rebuilt from a tree that contains that commit.
+- **Status:** Fix-implemented, verification pending (per-file P3 relink). Root
+  cause is fixed in source (`5c28b2506cd`, 2026-11-17); the temporary
+  `keys()[i]` workarounds across 13 files (35 sites in `codec_gen.spl`,
+  `abi_interface.spl`, `hir_codec.spl`, and 10 `35.semantics/` files) were
+  removed on `release/1.0.0` (2026-11-25).
 - **Severity:** P1 (access violation in the Stage 3 compiler; blocks the lane)
 - **Lane:** Windows, Stage 3 built by the frozen Phase 2 compiler, Cranelift.
 - **Workaround tag:** `# @workaround bug=phase2_struct_dict_key_copy_identity_hash_2026-11-18`
@@ -165,4 +167,7 @@ the interpreter and cannot reproduce the native failure.
 - The rewrite has not been run through the frozen Phase 2 compiler. That the
   Stage 3 fault is gone is unconfirmed until the lane is rebuilt.
 - Removal condition: Phase 2 compiler rebuilt from a tree containing
-  `5c28b2506cd`. The 23 tagged loops can then go back to the plain for-in.
+  `5c28b2506cd`. The tagged loops can then go back to the plain for-in.
+- **2026-11-25:** Removed all 35 `# @workaround bug=phase2_struct_dict_key_copy_identity_hash_2026-11-18`
+  sites across the 13 `src/` files on `release/1.0.0`; interpreter unit specs
+  and MIR key-canonicalization checks pass, awaiting per-file P3 relink review.
