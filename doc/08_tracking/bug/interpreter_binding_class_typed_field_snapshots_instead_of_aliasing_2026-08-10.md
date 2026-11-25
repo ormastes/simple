@@ -1,8 +1,29 @@
 # Binding a class-typed FIELD to a local snapshots it — interpreter only
-## Open 2026-09-16 — needs owner triage
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Resolution 2026-11-25 — FIXED on the pinned seed; class reference identity landed
+
+- **verified fixed (STALE)**: on the pinned Rust seed (`bin/simple.exe`
+  v1.0.0-rc.1, Windows), the 2026-09-18 repro runs green under a GENUINE
+  interpreter run (`SIMPLE_EXECUTION_MODE=interpret`, zero jit/fallback
+  diagnostics): `opt_binding_caller_n=1` (was 0 — mutation no longer lost
+  through an `Option` binding) and `field_binding_owner=11` (was 10 — the
+  class-typed field bound to a local now ALIASES). The P6 shape
+  (`val mid = c3.inner; mid.inner.bump()`) reads `back_through_root=1` under
+  the interpreter — the exact reopen condition this record named now passes.
+  The JIT lane prints identical values, so the engine divergence is gone.
+- **mechanism (source)**: the declined flip was later landed in stages —
+  `026a5bd2ce1` added opt-in `Value::ClassInstance` storage for class
+  aggregates, `75d80aec96d` added ClassInstance write-through in `place.rs`,
+  and `class_instance_storage_enabled()` (`value.rs:3504`) now DEFAULTS ON
+  (`SIMPLE_INTERP_CLASS_REF` only disables on explicit "0"), so
+  `Value::aggregate` (`value.rs:3280`) produces `Value::ClassInstance` for
+  every non-value-type aggregate. `ClassInstance::new` is no longer dead code.
+- **limit**: the `Blocks:` spec `test/02_integration/app/sj_daemon_mutual_exclusion_spec.spl`
+  could not be re-run at release/1.0.0 HEAD — the pinned seed rejects
+  `@representation_boundary` repo-wide, so `bin/simple.exe test` fails before
+  any spec executes. Closure rests on the P6/Option-binding repros above,
+  which are this bug's own named reopen condition.
+- Status: OPEN -> **RESOLVED 2026-11-25** (fix verified on pinned seed).
 
 > **Root cause lives elsewhere — see
 > `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`**,
