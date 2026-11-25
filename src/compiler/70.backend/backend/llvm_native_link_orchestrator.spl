@@ -849,19 +849,24 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
     if trace:
         print "[LLVM-LINK] link_to_native returned"
 
-    # A failed ordinary link must retain the exact inputs named by its command
-    # sidecar. Preserve managed Stage4 cleanup policy separately.
-    if link_result.is_ok() or stage4_requested:
+    # A failed ordinary link or a `.go-to-end-trial` link must retain the exact
+    # inputs named by its command/response sidecar (`<output>.link.rsp`) so the
+    # link stays directly replayable. Preserve managed Stage4 cleanup policy
+    # separately.
+    val retain_link_inputs = llvm_should_retain_link_inputs_v1(output, link_result.is_ok(), stage4_requested)
+    if not retain_link_inputs:
         cleanup_runtime_objects(runtime_objects)
         if bootstrap_support_obj != "":
             file_delete(bootstrap_support_obj)
-    else:
+    elif not link_result.is_ok():
         print "[LLVM-LINK] failed link inputs retained for replay ({runtime_objects.len()} runtime objects)"
+    else:
+        print "[LLVM-LINK] trial link inputs retained for replay ({runtime_objects.len()} runtime objects)"
     var stage4_cleanup_ok = true
     if stage4_requested:
         if not remove_file_if_exists(entry_obj_path):
             stage4_cleanup_ok = false
-    elif link_result.is_ok():
+    elif not retain_link_inputs:
         file_delete(entry_obj_path)
     if stage4_projection_dir != "":
         if not dir_remove_all(stage4_projection_dir):
@@ -924,3 +929,15 @@ pub fn llvm_native_link_failure_line(detail: text) -> text:
     """The stderr line for a failed native link. Starts with a newline so it
     never fuses with a preceding un-terminated trace print. Pure."""
     "\n[LLVM-LINK] error: link_to_native failed: " + detail
+
+@allow(primitive_api) # reason: boolean link-input retention predicate over output path, link outcome, and Stage4 cleanup policy
+pub fn llvm_should_retain_link_inputs_v1(output: text, link_ok: bool, stage4_requested: bool) -> bool:
+    """Return true when runtime objects, bootstrap support object, and entry
+    object must stay on disk after linking so `<output>.link.rsp` remains
+    directly replayable. Managed Stage4 always cleans up; failed non-Stage4
+    links and `.go-to-end-trial` links retain their inputs. Pure."""
+    if stage4_requested:
+        return false
+    if not link_ok:
+        return true
+    output.ends_with(".go-to-end-trial")
