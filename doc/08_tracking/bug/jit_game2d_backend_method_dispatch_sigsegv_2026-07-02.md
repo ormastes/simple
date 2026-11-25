@@ -270,3 +270,32 @@ Interim mitigation: the 2026-08-02 determinism fix makes the winner stable;
 divergent-layout pairs above rarely co-load (different tiers/domains), and the
 browser_engine resolver spec pins the engine2d family green (6/6).
 
+## Triage 2026-11-25 (release/1.0.0 pinned seed) — SIGSEGV gone, loud dispatch refusal remains; Rust-seed-only
+
+Re-ran this doc's exact `TinyApp`/`LoopDriver.step` repro under the
+release/1.0.0 pinned binary (`bin/simple.exe`, 38,403,072 bytes, Rust seed
+v1.0.0-rc.1, Windows), default JIT lane. **The SIGSEGV does not reproduce** —
+no jump into unmapped JIT code, no rc=139. Instead the run fails LOUDLY:
+
+```
+Runtime error: Method 'vtable slot 2 in LoopDriver.step' not found on type '<receiver without a trait vtable>'
+Runtime error: unresolved symbol -- this is a code-generation dispatch gap, not a program error. Refusing to substitute a placeholder value ...
+```
+
+So the crash half of this bug is fixed in the shipped seed (consistent with
+the 2026-08-02 `lowering_core.rs` determinism/vtable work), and the
+fail-loud-instead-of-misdispatch behavior the "Suggested fix" section asked
+for is what now happens. But `driver.step` still cannot EXECUTE via
+`bin/simple run` — the residual is the trait-vtable dispatch gap for the
+`LoopDriver.step(app, backend, ...)` call shape, which lives in the Rust seed
+(`src/compiler_rust/**` codegen/HIR), is explicitly out of bounds for this
+lane (no cargo builds; seed is bootstrap-only), and needs a seed change +
+rebuild + redeploy. The interpreter arm of the probe could not be re-run here
+(the pinned seed rejects the `@representation_boundary` decorator at
+release/1.0.0 HEAD when loading the stdlib source tree — known repo-wide
+source/binary inconsistency), but the interpreter path was never the defective
+one.
+
+**Disposition: SKIP (Rust-seed-only residual), stays OPEN** for the
+"game2d app cannot run via `bin/simple run`" functional gap; the SIGSEGV
+itself is no longer reproducible on the shipped seed.

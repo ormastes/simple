@@ -1,5 +1,5 @@
 # JIT: layout_run_full_with_ports dies with nil-receiver field access (core dump)
-## Open 2026-09-16 — needs owner triage
+## FIXED 2026-11-04; re-confirmed 2026-11-25 on the release/1.0.0 pinned seed (see bottom sections)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -104,3 +104,15 @@ path (no segfault). Making call defaults fillable is the follow-up (not done her
 ## Verified fixed 2026-11-04
 
 Seed 0b2c3d015b7: the probe above prints `boxes=2 backend=serial_cpu`, rc=0 (was rc=139). Fixed by the named-argument slot binding in HIR lowering (PR #6398). Status: fixed.
+
+## Re-confirmed 2026-11-25 (release/1.0.0 pinned seed, Windows)
+
+The 2026-11-04 verdict holds on the binary release/1.0.0 ships
+(`bin/simple.exe`, 38,403,072 bytes, Rust seed v1.0.0-rc.1). The doc's exact
+probe under default `run` prints `boxes=2 backend=serial_cpu`, rc=0 — no
+segfault. The run takes exactly the path the 2026-11-03 semantics note (c)
+predicted: JIT lowering refuses the non-call-site-constant omitted default of
+`layout_input` (`[jit-fallback] ... omits argument 10 whose default is not a
+call-site constant ... whole module dropped to the interpreter`) and the
+interpreter completes the layout correctly. Loud fallback, correct result —
+the nil-receiver core dump is gone. Status stays fixed.
