@@ -1,8 +1,9 @@
 # Residual exposure of the enum-associated-function defect in NON-spec code
 
 - **Date:** 2026-07-28
-- **Status:** triage / measurement (no call sites fixed — see "Nothing needed an
-  immediate fix")
+- **Status:** CLOSED 2026-11-25 — the underlying JIT defect is fixed in the
+  pinned seed (see dated note at the end); the exposure table below is
+  historical. (Original: triage / measurement, no call sites fixed.)
 - **Parent bugs:**
   `doc/08_tracking/bug/enum_associated_fn_never_called_on_jit_2026-07-28.md`,
   `doc/08_tracking/bug/enum_associated_fn_vacuous_spec_sweep_2026-07-28.md`
@@ -283,3 +284,30 @@ All under `build/enum_exposure/` (not committed):
 `sweep2.spl`, `closure.spl`, `all_calls.tsv`, `src_files_strict.tsv`,
 `src_per_symbol.tsv`, `ambiguous_names.tsv`, `ranked_raw.tsv`, `closure.txt`,
 `probe_*.spl` with paired `.jit.txt` / `.interp.txt` outputs.
+
+## 2026-11-25 — CLOSED: the defect mechanism is fixed in the pinned seed
+
+Re-probed against the pinned seed (`bin/simple.exe`, v1.0.0-rc.1, Windows) on
+release/1.0.0:
+
+- The baseline repro (12-line enum with `static fn make() -> E1: E1.B`) now
+  returns `got B` under BOTH the default JIT and the interpreter (was
+  `got NOTHING` on the JIT).
+- The AOT row is also fixed: `compile` + run of the `.smf` prints `EQ_B_OK`
+  (was `EQ_NEITHER`), so the "production wrapper ships the wrong answer"
+  escalation no longer applies.
+- Follow-up 1 (make the JIT `func_ids` miss an error) has landed:
+  `E1.totally_undefined()` now fails JIT lowering with
+  `unknown variant or method 'totally_undefined' on enum E1 (declared
+  variants: A, B)` and demotes to the interpreter, which raises the semantic
+  error. The diagnostic exists in
+  `src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs`.
+- Follow-up 3 (`FsNodeKind.from_u8` undefined) is also addressed:
+  `src/os/userlib/fs.spl:340` now defines `_fs_node_kind_from_u8` and the
+  call sites use it.
+
+With the wrong-value mechanism gone (hard error instead of a fabricated
+value), the 146-site exposure table is historical: any residual bad call
+site now fails loudly instead of silently returning a value matching no arm.
+The measurement methodology sections (AMBIG bucket, sweep tooling bug) remain
+useful reference for any future sweep.
