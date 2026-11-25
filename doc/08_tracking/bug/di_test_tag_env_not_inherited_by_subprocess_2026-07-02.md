@@ -79,3 +79,13 @@ pass 2/2 on the Windows direct lane with caller flags set opposite to the
 expected values. The integration wrapper
 (test/02_integration/app/test_runner/di_environment_subprocess_spec.spl) needs
 POSIX /usr/bin/env and stays unrun on Windows.
+
+## Verification 2026-11-25
+Resolution stands; status remains FIXED. On release/1.0.0 (dfbd7c9d765) commit
+f6886af285f is an ancestor and both fixtures exist on disk. Re-execution of the
+fixtures is blocked at this HEAD: the pinned Rust seed rejects the
+`@representation_boundary` decorator added tree-wide by cfd89933699, so
+`bin/simple.exe test` fails loading `src/app/test_runner_new/test_runner_client.spl`
+before any spec runs (source/binary inconsistency, not this bug). Verified by
+code inspection instead: the fixture pair and the child-observes-flags
+mechanism from the 2026-11-03 resolution are present and unchanged.

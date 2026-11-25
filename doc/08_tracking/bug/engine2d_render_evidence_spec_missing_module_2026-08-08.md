@@ -1,8 +1,26 @@
 # engine2d_render_evidence_spec.spl fails to load: missing `os.kernel.arch.x86.render_capture_ack` module (2026-08-08)
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-11-25 — missing module now exists
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+## Resolution 2026-11-25
+
+The unblock condition is met on release/1.0.0 (dfbd7c9d765):
+`src/os/kernel/arch/x86/render_capture_ack.spl` exists and exports both
+`render_capture_control_wire_byte_count()` (line 13) and
+`render_capture_control_wire_byte_at(...)` (line 16) — exactly the two
+symbols the spec imports at
+`test/01_unit/os/compositor/engine2d_render_evidence_spec.spl:36-39`
+(`use os.kernel.arch.x86.render_capture_ack.{...}`), so the
+`Cannot resolve module` load failure no longer applies.
+
+Verification limit: executing the spec at this HEAD is blocked by the
+source/binary inconsistency — the pinned Rust seed rejects the
+`@representation_boundary` decorator added by cfd89933699, so
+`bin/simple.exe test` fails loading the test runner itself
+(`test_runner_client.spl:9:1`) before any spec runs. Resolution verified by
+code inspection (module present, export names match the spec's import).
 
 ## Summary
 
