@@ -229,3 +229,35 @@ will report the server as unavailable until a native t32 artifact is built
 and hash-admitted. This is the intended fail-closed contract; the Windows
 `.cmd` wrappers still default to source and were intentionally not touched
 (measurement requires a Windows host).
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64, worktree wt-p3-baj)
+
+Re-verified on branch `work/p3-baj-20261125`:
+
+- **measured** `sh scripts/check/check-mcp-wrapper-contract.shs` runs all of
+  its static source-contract clauses clean (wrapper cached-artifact greps,
+  config raw-source bans, install.shs clause) and then stops in the dynamic
+  fixture-probe section with `native simple_lsp_mcp_server not found`
+  (exit 127): the check hardcodes the fixture native under
+  `bin/release/x86_64-unknown-linux-gnu/` while the generated wrapper
+  resolves the host triple `x86_64-pc-windows-gnu`. That dynamic section is
+  Linux-host-only as written; the static contract portion — the part this
+  bug's fixes are enforced by — passes.
+- **measured** by inspection: root `.mcp.json` launches
+  `bin/simple_mcp_server` / `bin/simple_lsp_mcp_server` wrappers (no raw
+  `.spl`, no node bridge on the simple lanes);
+  `config/mcp/mcp_startup_lib.shs` is absent (deleted per the 2026-09-21
+  lane); `scripts/setup/setup.shs` t32 wrapper tails carry refuse blocks
+  (`exit 127`) after the hash-admission native path.
+- **note** Later deliberate, measured decisions have superseded two details
+  of the 2026-11-09 note, documented in `.mcp.json`'s own `_info` strings:
+  `SIMPLE_EXECUTION_MODE=interpreter` was restored for the LSP lane (env
+  inheritance into the `query_visibility` child; 4.86s vs 7.96s measured),
+  now spelled as JSON env blocks in `config/mcp/install.shs` (the check's
+  `SIMPLE_EXECUTION_MODE=interpreter` grep targets the removed `--env`
+  spelling and does not match the JSON form), and the POSIX t32 wrappers
+  were reworked again on 2026-09-24 per the `.mcp.json` t32 `_info`.
+
+The bug as filed (raw-source client configs, stale startup-lib, missing
+POSIX wrappers) stays resolved; the guard's dynamic probe section needs a
+Linux host or a triple-parameterized fixture to run end-to-end.

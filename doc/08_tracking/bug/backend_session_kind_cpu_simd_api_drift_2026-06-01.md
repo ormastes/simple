@@ -77,3 +77,19 @@ The two runtime-family representations still differ by design shape
 class constructor), so the architecture/design step should still define the
 boundary contract. Current implementation work should treat this bug as
 monitored rather than actively reproducing.
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64, worktree wt-p3-baj)
+
+Re-verified the 2026-09-13 closure on branch `work/p3-baj-20261125`:
+
+- **measured** `grep -rn 'BackendSessionKind' src/lib/nogc_sync_mut/gpu/engine2d/`
+  returns zero hits — the nogc_sync_mut class no longer uses the name.
+- **measured** `src/lib/gc_async_mut/gpu/engine2d/backend_session.spl:24` still
+  declares the single canonical `enum BackendSessionKind` with `CpuSimd`.
+- **measured** `SIMPLE_LIB=src bin/simple.exe test
+  test/01_unit/lib/gpu/engine2d/backend_session_contract_spec.spl
+  --mode=interpreter` (tracked self-hosted binary, 38,403,072 bytes):
+  `SPEC FILE VERDICT ... outcome=OK declared>=3 executed=3 passed=3 failed=0`,
+  `Results: 3 total, 3 passed, 0 failed`.
+
+Closure stands; no code change needed.
