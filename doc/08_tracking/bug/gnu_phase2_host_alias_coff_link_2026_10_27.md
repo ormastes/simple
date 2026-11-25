@@ -318,3 +318,27 @@ hash into the cache identity. Regression/prevention spec
 current source, 0/4 against the pre-fix source. Remaining verification: native
 GNU Phase2 link + Hello run with a redeployed producer. The E-MONO-032 runner
 failure described above is a separate defect, not this bug.
+
+## Follow-up 2026-11-25: source `@workaround` markers retired into permanent architecture
+
+Both source `@workaround bug=BUG-GNU-PHASE2-HOST-ALIAS-LINK-20261027` markers
+were retired into permanent architecture rather than temporary workarounds:
+
+1. `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`
+   (`main_stub_c_source` / `compile_main_stub`): refactored from an inline
+   `#if defined(_WIN32)` preprocessor splice in the ELF stub into an explicit
+   `else if target.os == TargetOS::Windows` branch (matching
+   `generate_init_caller` and lazy `libspl_objects.a` extraction) that declares
+   `spl_main`, `__simple_call_module_inits`, and `rt_set_args` strongly and
+   calls them directly so PE/COFF weak externals cannot bind `.weak.*.default`
+   to absolute zero (`0x0`). Covered by new `linker_tests` in `linker.rs`.
+2. `src/lib/nogc_sync_mut/sffi/scv_wasm_provider.spl`: dynamic resolution of
+   the optional external `scv_wasm` provider via `DynLib` and the exact-ABI
+   C bridge `spl_scv_wasm_parse_blob_copy` (`doc/04_architecture/scv_wasm_dynamic_boundary.md`)
+   is the permanent boundary (static `wasm_rt_*` externs cannot link without
+   an external `wasmtime`/`tree-sitter` provider). Hardened with O(1)
+   `byte_len()`, embedded-NUL path rejection, `owned_output != 0` ownership
+   transfer, and `test/01_unit/lib/nogc_sync_mut/sffi/scv_wasm_provider_spec.spl`.
+
+Full GNU Phase2 native link + Hello qualification on a redeployed producer
+remains pending as tracked above.

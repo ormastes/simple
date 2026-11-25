@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect, step, assert_true}
+use std.io_runtime.{env_get, env_set, env_remove_process, dir_create_all, dir_remove_all, file_write, file_delete, getpid}
+use std.nogc_sync_mut.sffi.dynamic.{sffi_lib_candidates_for_platform, platform_name}
+use std.nogc_sync_mut.sffi.scv_wasm_provider.{scv_wasm_provider_parse_blob}
+
+"""
+## Purpose and audience
+
+Verifies the typed dynamic SCV WASM provider boundary in
+`src/lib/nogc_sync_mut/sffi/scv_wasm_provider.spl`: input size bounds,
+embedded-NUL grammar rejection, and fail-closed empty returns when the optional
+`scv_wasm` dynamic provider library is absent or un-loadable.
+See `doc/04_architecture/scv_wasm_dynamic_boundary.md`.
+"""
+
+fn _call_provider(grammar_path: text, source: text, source_len: i64) -> text:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        scv_wasm_provider_parse_blob(grammar_path, source, source_len)
+
+describe "scv_wasm_provider_parse_blob":
+    """Exercises bounds guards, NUL rejection, and missing-library handling."""
+    it "rejects invalid source and grammar bounds before loading any library":
+        step("Exercise negative, mismatched, and oversized bounds")
+        expect(_call_provider("grammar.wasm", "abc", -1)).to_equal("")
+        expect(_call_provider("grammar.wasm", "abc", 16777217)).to_equal("")
+        expect(_call_provider("grammar.wasm", "abc", 2)).to_equal("")
+        expect(_call_provider("", "abc", 3)).to_equal("")
+        val long_grammar = "g".repeat(1048577)
+        expect(_call_provider(long_grammar, "abc", 3)).to_equal("")
+
+    it "rejects grammar paths containing an embedded NUL byte":
+        step("Construct a grammar path containing a NUL byte")
+        val bad_grammar = "bad" + "\0" + ".wasm"
+        expect(_call_provider(bad_grammar, "abc", 3)).to_equal("")
+
+    it "returns empty cleanly when the optional scv_wasm provider is absent or invalid":
+        step("Point SIMPLE_SFFI_PATH at an isolated temporary directory")
+        val prev = env_get("SIMPLE_SFFI_PATH") ?? ""
+        val tmp_dir = "build/test_scv_wasm_provider_tmp_{getpid()}"
+        dir_remove_all(tmp_dir)
+        assert_true(dir_create_all(tmp_dir))
+        assert_true(env_set("SIMPLE_SFFI_PATH", tmp_dir))
+
+        expect(_call_provider("grammar.wasm", "val x = 1", 9)).to_equal("")
+
+        val candidates = sffi_lib_candidates_for_platform(tmp_dir, "scv_wasm", platform_name())
+        expect(candidates.len()).to_be_greater_than(0)
+        val bogus_lib = candidates[0]
+        assert_true(file_write(bogus_lib, "not-a-shared-library"))
+        expect(_call_provider("grammar.wasm", "val x = 1", 9)).to_equal("")
+        file_delete(bogus_lib)
+
+        if prev == "":
+            env_remove_process("SIMPLE_SFFI_PATH")
+        else:
+            env_set("SIMPLE_SFFI_PATH", prev)
+        dir_remove_all(tmp_dir)
