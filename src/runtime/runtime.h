@@ -62,6 +62,7 @@ int64_t rt_getauxval(int64_t key);
 bool rt_is_darwin_arm64(void);
 int32_t rt_sysctlbyname_i32(int64_t name);
 int32_t rt_riscv_read_vlenb(void);
+int32_t rt_sve_read_vl_bytes(void);
 bool rt_riscv_has_v_ext(void);
 int32_t rt_cuda_sm_version(int32_t device);
 

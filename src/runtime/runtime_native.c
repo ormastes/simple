@@ -40,6 +40,7 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include "runtime.h"
 #include "runtime_crt_file.h"
 #include "runtime_simd_dispatch.h"
+#include "rt_sve_vl.h"
 #include "runtime_memory_guard.h"
 #include "runtime_env_owned.h"
 #include "runtime_startup_args.h"
@@ -21435,6 +21436,10 @@ int32_t rt_riscv_read_vlenb(void) {
 #else
     return 0;
 #endif
+}
+
+int32_t rt_sve_read_vl_bytes(void) {
+    return rt_sve_vl_bytes_measured();
 }
 
 bool rt_riscv_has_v_ext(void) {

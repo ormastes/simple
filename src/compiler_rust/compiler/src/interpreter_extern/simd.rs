@@ -2552,6 +2552,12 @@ pub fn rt_riscv_read_vlenb(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(host_probe::rt_riscv_read_vlenb() as i64))
 }
 
+/// `rt_sve_read_vl_bytes() -> i32` — SVE VL via `rdvl`, 0 without SVE.
+pub fn rt_sve_read_vl_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_sve_read_vl_bytes", args)?;
+    Ok(Value::Int(host_probe::rt_sve_read_vl_bytes() as i64))
+}
+
 /// `rt_riscv_has_v_ext() -> bool`.
 pub fn rt_riscv_has_v_ext(args: &[Value]) -> Result<Value, CompileError> {
     expect_no_args("rt_riscv_has_v_ext", args)?;
