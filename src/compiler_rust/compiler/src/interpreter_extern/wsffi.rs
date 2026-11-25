@@ -673,22 +673,46 @@ pub fn spl_wffi_call_i32_i64_u32_u32_f64_bits(args: &[Value]) -> Result<Value, C
     }))
 }
 
+enum BoolOutTarget<'a> {
+    Borrow(&'a crate::value::BorrowMutValue),
+    Addr(*mut u8),
+}
+
+impl<'a> BoolOutTarget<'a> {
+    fn from_value(value: &'a Value) -> Option<Self> {
+        match value {
+            Value::BorrowMut(borrow) => Some(Self::Borrow(borrow)),
+            Value::Int(addr) if *addr > 0 => Some(Self::Addr(*addr as usize as *mut u8)),
+            _ => None,
+        }
+    }
+
+    fn write(&self, value: bool) {
+        match self {
+            Self::Borrow(borrow) => *borrow.inner_mut() = Value::Bool(value),
+            Self::Addr(ptr) => {
+                let raw = *ptr;
+                unsafe { raw.write(if value { 1 } else { 0 }) };
+            }
+        }
+    }
+}
+
 /// Allocation-free typed C-boolean call with no arguments.
 pub fn spl_wffi_call_bool0_checked(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
         return Ok(Value::Int(1));
     }
+    let Some(output) = BoolOutTarget::from_value(&args[1]) else {
+        return Ok(Value::Int(1));
+    };
+    output.write(false);
     let fptr = match args[0] {
         Value::Int(value) if value != 0 => value as usize,
         _ => return Ok(Value::Int(2)),
     };
-    let output = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    *output.inner_mut() = Value::Bool(false);
     let function: extern "C" fn() -> bool = unsafe { std::mem::transmute(fptr) };
-    *output.inner_mut() = Value::Bool(function());
+    output.write(function());
     Ok(Value::Int(0))
 }
 
@@ -697,6 +721,10 @@ pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError
     if args.len() != 3 {
         return Ok(Value::Int(1));
     }
+    let Some(output) = BoolOutTarget::from_value(&args[2]) else {
+        return Ok(Value::Int(1));
+    };
+    output.write(false);
     let fptr = match args[0] {
         Value::Int(value) if value != 0 => value as usize,
         _ => return Ok(Value::Int(2)),
@@ -705,13 +733,8 @@ pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError
         Value::Int(value) => value,
         _ => return Ok(Value::Int(1)),
     };
-    let output = match &args[2] {
-        Value::BorrowMut(value) => value,
-        _ => return Ok(Value::Int(1)),
-    };
-    *output.inner_mut() = Value::Bool(false);
     let function: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fptr) };
-    *output.inner_mut() = Value::Bool(function(arg0));
+    output.write(function(arg0));
     Ok(Value::Int(0))
 }
 
@@ -1024,6 +1047,14 @@ mod tests {
         value
     }
 
+    extern "C" fn return_bool_true() -> bool {
+        true
+    }
+
+    extern "C" fn is_positive_bool(value: i64) -> bool {
+        value > 0
+    }
+
     extern "C" fn add_scaled(a: f64, b: f64, scale: f64) -> f64 {
         (a + b) * scale
     }
@@ -1149,5 +1180,54 @@ mod tests {
         };
         assert!(spl_f64_to_bits(&[wrapped]).is_err());
         assert!(spl_f64_to_bits(&[Value::Nil]).is_err());
+    }
+
+    #[test]
+    fn bool_checked_accepts_address_slot_and_borrow_mut() {
+        use crate::value::BorrowMutValue;
+
+        let mut slot: u64 = 0x0101_0101_0101_0101;
+        let slot_addr = (&mut slot as *mut u64) as usize as i64;
+        let rc0 = spl_wffi_call_bool0_checked(&[
+            Value::Int(return_bool_true as usize as i64),
+            Value::Int(slot_addr),
+        ])
+        .unwrap();
+        assert_eq!(rc0, Value::Int(0));
+        assert_eq!(slot as u8, 1);
+
+        let rc1 = spl_wffi_call_bool1_checked(&[
+            Value::Int(is_positive_bool as usize as i64),
+            Value::Int(-5),
+            Value::Int(slot_addr),
+        ])
+        .unwrap();
+        assert_eq!(rc1, Value::Int(0));
+        assert_eq!(slot as u8, 0);
+
+        slot = 0x01;
+        let rc_null = spl_wffi_call_bool0_checked(&[Value::Int(0), Value::Int(slot_addr)]).unwrap();
+        assert_eq!(rc_null, Value::Int(2));
+        assert_eq!(slot as u8, 0);
+
+        let rc_bad_addr = spl_wffi_call_bool1_checked(&[
+            Value::Int(is_positive_bool as usize as i64),
+            Value::Int(1),
+            Value::Int(0),
+        ])
+        .unwrap();
+        assert_eq!(rc_bad_addr, Value::Int(1));
+
+        let borrow = Value::BorrowMut(BorrowMutValue::new(Value::Bool(false)));
+        let rc_borrow = spl_wffi_call_bool0_checked(&[
+            Value::Int(return_bool_true as usize as i64),
+            borrow.clone(),
+        ])
+        .unwrap();
+        assert_eq!(rc_borrow, Value::Int(0));
+        match borrow {
+            Value::BorrowMut(b) => assert_eq!(*b.inner_mut(), Value::Bool(true)),
+            other => panic!("expected BorrowMut, got {other:?}"),
+        }
     }
 }

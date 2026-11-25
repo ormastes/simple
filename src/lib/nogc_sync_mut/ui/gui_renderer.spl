@@ -31,11 +31,12 @@ use std.nogc_sync_mut.gpu.native_session_owner_v1.{NativeSessionOwnerV1,
     native_session_owner_is_live_v1, native_session_owner_claim_destroy_v1,
     native_session_owner_finish_destroy_v1}
 use std.diag.{dbg_stage, dbg_event_hop, dbg_events_on}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_write_i64, raw_read_u8}
 
 @unsafe(reason: "raw function address and dynamic integer ABI remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 @unsafe(reason: "calls a resolved C boolean function with one integer argument", capabilities: [ffi, raw_ptr])
-extern fn spl_wffi_call_bool1_checked(fptr: i64, arg0: i64, out_value: *mut bool) -> i64
+extern fn spl_wffi_call_bool1_checked(fptr: i64, arg0: i64, out_value: i64) -> i64
 @unsafe(reason: "borrows an untyped foreign string pointer", capabilities: [ffi, raw_ptr])
 extern fn spl_str_ptr(s: text) -> i64
 @unsafe(reason: "nonnull raw store; staging buffer owner validates bounds", capabilities: [ffi, raw_ptr])
@@ -166,8 +167,13 @@ fn _gui_end_call(lease: _GuiCallLease):
 fn _gui_free_bool(fptr: i64, raw: i64) -> bool:
     if fptr <= 0 or raw <= 0:
         return false
-    var released = false
-    val status = spl_wffi_call_bool1_checked(fptr, raw, &mut released)
+    val out_slot = raw_alloc(8)
+    if out_slot <= 0:
+        return false
+    raw_write_i64(out_slot, 0, 0)
+    val status = spl_wffi_call_bool1_checked(fptr, raw, out_slot)
+    val released = raw_read_u8(out_slot, 0) != 0
+    raw_free(out_slot, 8)
     status == 0 and released
 
 @unsafe(reason: "releases a provider event loop only after its last window", capabilities: [ffi, raw_ptr])

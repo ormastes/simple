@@ -372,6 +372,38 @@ Closed the 8 `torch/sffi.spl` scalar reduction sites from the census list above:
 
 Remaining follow-up list above (excluding `sffi/dynamic.spl:149/176` and `torch/sffi.spl:297-353`): unchanged.
 
+### 2026-11-25 — Remaining compiler/lib `&mut local` out-slot & dlopen/dlsym callers fixed
+
+Converted the remaining compiler and stdlib `&mut local` out-slot callers listed
+above:
+- `src/compiler/15.blocks/plugin_startup.spl`: `activate_plugin`
+  switched from `spl_dlopen_checked` / `spl_dlsym_checked` with `&mut handle`
+  / `&mut kw_fptr` / `&mut parse_fptr` to direct-return `spl_dlopen` /
+  `spl_dlsym`, failing closed on `<= 0`.
+- `src/lib/nogc_sync_mut/sffi/spl_fonts.spl`: `_font_resolve_optional`
+  and `FontRasterizer.load` switched to direct-return `spl_dlopen` / `spl_dlsym`
+  (with facade re-exports in `nogc_sync_mut/ffi/spl_fonts.spl` and
+  `nogc_async_mut/sffi/spl_fonts.spl` and `scripts/audit/font-sffi-authority.shs`
+  updated together).
+- `src/compiler/10.frontend/core/wsffi/mod.spl`: `wffi_load` /
+  `wffi_get` switched to direct-return `spl_dlopen` / `spl_dlsym`;
+  `wffi_call_bool` / `wffi_call_bool_1` switched to caller-owned 8-byte
+  address slots (`raw_alloc(8)` / `raw_write_i64` / `raw_read_u8` /
+  `raw_free(slot, 8)` before panic via `std.nogc_sync_mut.ptr.raw`) with `spl_wffi_call_bool{0,1}_checked(..., out_value: i64)`.
+- `src/lib/nogc_sync_mut/ui/gui_renderer.spl`: `_gui_free_bool` switched to
+  the caller-owned 8-byte address slot (`raw_alloc(8)` / `raw_write_i64` /
+  `raw_read_u8` / `raw_free(out_slot, 8)` with `spl_wffi_call_bool1_checked(..., out_value: i64)`),
+  and `scripts/audit/gui-renderer-sffi-authority.shs` updated cleanly.
+- `src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs`:
+  `spl_wffi_call_bool0_checked` / `spl_wffi_call_bool1_checked` updated to
+  accept both `Value::BorrowMut` and `Value::Int(addr)` (zeroing `*addr` before
+  the `fptr` check and writing `1u8`/`0u8`).
+
+Remaining follow-up sites from the original 2026-11-13 list (outside this lane):
+`gpu/engine2d/backend_metal.spl:86/97`, `ffi_gen.specs/runtime_value_full.spl:606`,
+seed std `plugin/__init__.spl:89/113`, `packaging_build.spl:221`. Regression coverage:
+`test/01_unit/compiler/borrow/sffi_out_slot_callers_borrow_spec.spl`.
+
 ## Census state at hand-off
 
 MIR phase complete 1619/1619 (progress counter said `failed=1`; the

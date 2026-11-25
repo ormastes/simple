@@ -1,0 +1,266 @@
+# SFFI out-slot callers: `&mut local` escape regression vs direct-return / address-slot fixes.
+#
+# Follow-up to census 2026-11-13 (`doc/08_tracking/bug/p3_census_mir_classes_2026-11-13.md`):
+# verifies that the pre-fix `&mut local` out-slot shapes (`spl_dlopen_checked`,
+# `spl_dlsym_checked`, `spl_wffi_call_bool0_checked`, `spl_wffi_call_bool1_checked`)
+# are rejected by `check_mir_module`, and that the real fixed modules
+# (`wsffi/mod.spl`, `plugin_startup.spl`, `sffi/spl_fonts.spl`, `ui/gui_renderer.spl`)
+# lower and pass `check_mir_module` with zero borrow errors.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.borrow.borrow_check.mod.{check_mir_module}
+use std.io_runtime.{file_read}
+
+val SLOT_EXTERNS = [
+    "extern fn rt_alloc(size: i64) -> i64",
+    "extern fn rt_free(ptr: i64)",
+    "extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)",
+    "extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64"
+]
+
+fn borrow_messages(source: text) -> [text]:
+    val filename = "sffi_out_slot_callers_borrow.spl"
+    val parsed = parse_full_frontend(source + "\n", filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var messages: [text] = []
+    for error in check_mir_module(mir):
+        messages.push(error.message)
+    messages
+
+fn extract_block(lines: [text], header_prefix: text, indent_len: i64) -> [text]:
+    var out: [text] = []
+    var in_body = false
+    var index = 0
+    val child_prefix = if indent_len == 0: "    " else: "        "
+    while index < lines.len():
+        val line: text = lines[index]
+        val previous: text = if index > 0: lines[index - 1] else: ""
+        if in_body:
+            if line == "" or line.starts_with(child_prefix):
+                out.push(line)
+            else:
+                in_body = false
+        if not in_body and line.starts_with(header_prefix):
+            if previous.trim().starts_with("@unsafe"):
+                out.push(previous)
+            out.push(line)
+            in_body = true
+        index = index + 1
+    out
+
+# Pre-fix plugin_startup / spl_fonts / wsffi `&mut local` shape for dlopen_checked + dlsym_checked.
+fn dlopen_dlsym_mut_shape() -> text:
+    [
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64",
+        "@unsafe(reason: \"status/out ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn open_and_sym(path: text, name: text) -> i64:",
+        "    var handle: i64 = 0",
+        "    val load_status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_dlopen_checked(path, &mut handle)",
+        "    if load_status != 0 or handle <= 0:",
+        "        return 0",
+        "    var fptr: i64 = 0",
+        "    val sym_status = unsafe(capabilities: [ffi, raw_ptr]):",
+        "        spl_dlsym_checked(handle, name, &mut fptr)",
+        "    if sym_status != 0 or fptr <= 0:",
+        "        return 0",
+        "    fptr"
+    ].join("\n")
+
+# Pre-fix wsffi/mod.spl & gui_renderer.spl `&mut bool` shape.
+fn bool_checked_mut_shape() -> text:
+    [
+        "@unsafe(reason: \"typed C-boolean status/out call ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_wffi_call_bool0_checked(fptr: i64, out_value: *mut bool) -> i64",
+        "@unsafe(reason: \"typed C-boolean status/out call ABI\", capabilities: [ffi, raw_ptr])",
+        "extern fn spl_wffi_call_bool1_checked(fptr: i64, arg0: i64, out_value: *mut bool) -> i64",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn call0(fptr: i64) -> bool:",
+        "    var value = false",
+        "    val status = spl_wffi_call_bool0_checked(fptr, &mut value)",
+        "    status == 0 and value",
+        "@unsafe(reason: \"probe\", capabilities: [ffi, raw_ptr])",
+        "fn call1(fptr: i64, raw: i64) -> bool:",
+        "    var released = false",
+        "    val status = spl_wffi_call_bool1_checked(fptr, raw, &mut released)",
+        "    status == 0 and released"
+    ].join("\n")
+
+fn raw_slot_preamble() -> [text]:
+    val raw_lines = file_read("src/lib/nogc_sync_mut/ptr/raw.spl").split("\n")
+    var out: [text] = []
+    for line in SLOT_EXTERNS:
+        out.push(line)
+    for line in extract_block(raw_lines, "pub fn raw_alloc(", 0):
+        out.push(line)
+    for line in extract_block(raw_lines, "pub fn raw_free(", 0):
+        out.push(line)
+    for line in extract_block(raw_lines, "pub fn raw_write_i64(", 0):
+        out.push(line)
+    for line in extract_block(raw_lines, "pub fn raw_read_u8(", 0):
+        out.push(line)
+    out
+
+fn gui_renderer_free_bool_source() -> text:
+    val lines = file_read("src/lib/nogc_sync_mut/ui/gui_renderer.spl").split("\n")
+    var out = raw_slot_preamble()
+    for line in lines:
+        if line.starts_with("extern fn spl_wffi_call_bool1_checked("):
+            out.push("@unsafe(reason: \"typed C-boolean status/out call ABI\", capabilities: [ffi, raw_ptr])")
+            out.push(line)
+    for line in extract_block(lines, "fn _gui_free_bool(", 0):
+        out.push(line)
+    out.join("\n")
+
+fn wsffi_mod_source() -> text:
+    val lines = file_read("src/compiler/10.frontend/core/wsffi/mod.spl").split("\n")
+    var out = raw_slot_preamble()
+    for line in lines:
+        if not line.starts_with("use std.nogc_sync_mut.ptr.raw."):
+            out.push(line)
+    out.join("\n")
+
+fn spl_fonts_dl_source() -> text:
+    val lines = file_read("src/lib/nogc_sync_mut/sffi/spl_fonts.spl").split("\n")
+    var out: [text] = [
+        "struct FontCandidate:",
+        "    sha256: text",
+        "    default_axes: text",
+        "struct FontValidation:",
+        "    valid: bool",
+        "fn selected_font_asset_candidate_for_path(p: text) -> FontCandidate?:",
+        "    None",
+        "fn load_selected_font_file(p: text) -> ([u8], FontValidation):",
+        "    ([], FontValidation(valid: false))",
+        "fn font_face_spec_path(p: text) -> text:",
+        "    p",
+        "fn file_exists(p: text) -> bool:",
+        "    false",
+        "fn file_read_bytes(p: text) -> [u8]:",
+        "    []",
+        "fn font_runtime_ttf_default_supported(b: [u8]) -> bool:",
+        "    false",
+        "fn text_to_bytes(s: text) -> [u8]:",
+        "    []",
+        "class FontRasterizer:",
+        "    lib_handle: i64",
+        "    init_fp: i64",
+        "    raster_fp: i64",
+        "    subpixel_raster_fp: i64",
+        "    metric_fp: i64",
+        "    pixel_fp: i64",
+        "    subpixel_pixel_fp: i64",
+        "    kern_fp: i64",
+        "    line_metric_fp: i64",
+        "    layout_fp: i64",
+        "    layout_glyph_metric_fp: i64",
+        "    glyph_pixels_ptr_fp: i64",
+        "    glyph_pixels_len_fp: i64",
+        "    glyph_free_fp: i64",
+        "    has_glyph_fp: i64",
+        "    generation_fp: i64",
+        "    font_path: text",
+        "    dylib_path: text",
+        "    font_cache_identity: text",
+        "    loaded_generation: i64",
+        "    selected_blob: [u8]"
+    ]
+    for line in lines:
+        if (line.starts_with("extern fn spl_") or line.starts_with("extern fn rt_bytes_from_raw(")):
+            out.push(line)
+    for line in extract_block(lines, "fn _font_resolve_optional(", 0):
+        out.push(line)
+    out.push("impl FontRasterizer:")
+    for line in extract_block(lines, "    static fn invalid(", 4):
+        out.push(line)
+    for line in extract_block(lines, "    static fn load(", 4):
+        out.push(line)
+    out.join("\n")
+
+fn plugin_startup_activate_source() -> text:
+    val lines = file_read("src/compiler/15.blocks/plugin_startup.spl").split("\n")
+    var out: [text] = [
+        "struct StartupPluginEntry:",
+        "    name: text",
+        "    library: text",
+        "    functions: [text]",
+        "struct _SoBlockProxy:",
+        "    _keyword: text",
+        "    _parse_fptr: i64",
+        "var _simple_hooks: [text] = []",
+        "var _simple_hook_fns: [fn() -> bool] = []",
+        "var _indexed_entries: [StartupPluginEntry] = []",
+        "var _indexed: bool = false",
+        "fn file_exists(p: text) -> bool:",
+        "    false",
+        "fn index_plugin_manifests() -> [StartupPluginEntry]:",
+        "    []",
+        "fn register_block(proxy: _SoBlockProxy) -> bool:",
+        "    true",
+        "fn _stub_text_from_handle(h: i64) -> text:",
+        "    \"\""
+    ]
+    for line in lines:
+        if line.starts_with("extern fn spl_"):
+            out.push(line)
+    for line in extract_block(lines, "fn activate_plugin(", 0):
+        # `text.from_handle` has no MIR lowering definition in standalone mode;
+        # substitute a same-typed call while keeping all spl_dlopen/spl_dlsym calls verbatim.
+        out.push(line.replace("text.from_handle(kw_handle)", "_stub_text_from_handle(kw_handle)"))
+    out.join("\n")
+
+describe "SFFI out-slot callers borrow contract":
+    it "rejects the pre-fix &mut local shape for spl_dlopen_checked and spl_dlsym_checked":
+        step("Lower the pre-fix dlopen_checked/dlsym_checked &mut local shape and run check_mir_module")
+        expect(borrow_messages(dlopen_dlsym_mut_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "rejects the pre-fix &mut bool shape for spl_wffi_call_bool0_checked and spl_wffi_call_bool1_checked":
+        step("Lower the pre-fix bool0/bool1 &mut local shape and run check_mir_module")
+        expect(borrow_messages(bool_checked_mut_shape()).join("\n")).to_contain("call argument requires a checked non-retaining short contract")
+
+    it "wsffi/mod.spl lowers and passes check_mir_module with zero borrow errors":
+        step("Load src/compiler/10.frontend/core/wsffi/mod.spl and run check_mir_module")
+        val raw_source = file_read("src/compiler/10.frontend/core/wsffi/mod.spl")
+        expect(raw_source).to_contain("use std.nogc_sync_mut.ptr.raw.{{raw_alloc, raw_free, raw_write_i64, raw_read_u8}}")
+        expect(raw_source).to_contain("fn wffi_load(")
+        expect(raw_source).to_contain("fn wffi_call_bool(")
+        expect(raw_source).to_contain("fn wffi_call_bool_1(")
+        expect(borrow_messages(wsffi_mod_source()).join("\n")).to_equal("")
+
+    it "gui_renderer.spl _gui_free_bool passes check_mir_module with zero borrow errors":
+        step("Extract real _gui_free_bool from gui_renderer.spl and run check_mir_module")
+        val source = gui_renderer_free_bool_source()
+        expect(source).to_contain("fn _gui_free_bool(")
+        expect(borrow_messages(source).join("\n")).to_equal("")
+
+    it "spl_fonts.spl _font_resolve_optional and FontRasterizer.load pass check_mir_module":
+        step("Extract real _font_resolve_optional and FontRasterizer.load from spl_fonts.spl and run check_mir_module")
+        val source = spl_fonts_dl_source()
+        expect(source).to_contain("fn _font_resolve_optional(")
+        expect(source).to_contain("static fn load(")
+        expect(borrow_messages(source).join("\n")).to_equal("")
+
+    it "plugin_startup.spl activate_plugin passes check_mir_module with zero borrow errors":
+        step("Extract real activate_plugin from plugin_startup.spl and run check_mir_module")
+        val source = plugin_startup_activate_source()
+        expect(source).to_contain("fn activate_plugin(")
+        expect(source).to_contain("spl_dlopen(entry.library)")
+        expect(source).to_contain("spl_dlsym(handle, class_name + \"_keyword\")")
+        expect(source).to_contain("spl_dlsym(handle, class_name + \"_parse\")")
+        expect(borrow_messages(source).join("\n")).to_equal("")
