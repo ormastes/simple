@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-04
 **Severity:** high (blocks CARD 16 office GUI; hidden by a test-aware fast path)
-**Status:** open — diagnosis complete, measured
+**Status:** RESOLVED (2026-07-05, pure-Simple — see the "RESOLVED" section at
+the bottom of this file; header corrected 2026-11-25, was stale "open")
 
 ## Symptom
 
@@ -324,3 +325,35 @@ pure-Simple scan.
   so it pegs a core after the first paint. Caching the parsed `Rules` keyed on
   the CSS content hash (allowed: parse artifact, NOT final pixels) makes
   frames 2..N instant. High-value follow-up for live smoothness.
+
+## Verification note (2026-11-25, release/1.0.0 bug-sweep lane)
+
+Header was stale ("open") relative to this file's own 2026-07-05 RESOLVED
+section; corrected above. Fix re-confirmed present by source inspection on
+`origin/release/1.0.0` (`0819b116ecb`):
+
+- `_css_scan_rules_simple` (the pure-Simple rule-boundary scan that replaced
+  both the interpreted byte-loop and the deleted Rust extern) is present in
+  `simple_web_html_layout_renderer_core_css_rules.spl` (the layout-renderer
+  module has since been split; the function moved there from
+  `simple_web_html_layout_renderer.spl`).
+- The Rust extern `rt_css_scan_rule_bounds` remains deleted — zero references
+  anywhere under `src/` or `test/`.
+- `_css_collect_custom_props` (`core_css_rules.spl:33`) locates `:root`
+  blocks with the native `find_from` substring search, not an interpreted
+  per-byte walk, as the 2026-07-05 fix describes.
+
+Execution re-verification is environment-blocked at this HEAD: the pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects the tree-wide
+`@representation_boundary` decorator added by `cfd89933699`, and the failure
+is in the test runner itself (`src/app/test_runner_new/test_runner_client.spl:9`),
+so `bin/simple.exe test <spec> --mode=interpreter` cannot run ANY spec at
+this HEAD; a direct `run` of the routing spec fails the same way. Per the
+lane rules the seed is not to be fixed or rebuilt, so confirmation here is
+by code inspection only — stated as a limit, not as a passing run.
+
+The hard-coded widget-id fast path removal and the held office pilot spec
+(items 2-3 of the original "Next steps") were explicitly deferred by the
+2026-07-05 resolution pending the `Style`/`CellStyle` interpreter collision;
+that deferral stands and is tracked by its own ledger entries, not by this
+row.
