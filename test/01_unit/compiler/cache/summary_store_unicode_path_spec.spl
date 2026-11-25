@@ -1,0 +1,81 @@
+# Regression: virtual URIs with non-ASCII paths must resolve to the published
+# record, and rendered_size must be a UTF-8 byte count (the read/page unit).
+# Bug: doc/08_tracking/bug/summary_store_publish_read_absent_2026-11-26.md
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256 (sha256_text)
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1}
+use compiler.common.cache_contract.virtual_source_store_v1.{SummaryAuthV1, VirtualSourceStoreV1}
+use compiler.common.cache_contract.errors_v1 (SummaryErrorCodeV1)
+use compiler.frontend.cache_artifact.public_summary_projector.{FrontendPublicFactKindV1, FrozenPublicFactV1, PublicSummaryProjectionInputV1, project_public_summary_v1, render_public_summary_tldr_v1}
+use compiler.driver.cache.summary.summary_store_v1.{SummaryStoreV1, VirtualSourceStoreAdapterV1}
+
+fn paging_auth() -> SummaryAuthV1:
+    SummaryAuthV1(root_digest: sha256_text("paging-repo"), session_digest: sha256_text("paging-session"),
+        capability_digest: sha256_text("paging-capability"), capability_admission_receipt: sha256_text("paging-admission"),
+        request_epoch: 10, expires_epoch: 20)
+
+fn paging_summary(snapshot: text, path: text):
+    val signature = "pub extern fn visible() -> i64"
+    val facts = [FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.ForwardDeclaration,
+        stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+        contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: []),
+        FrozenPublicFactV1(fact_kind: FrontendPublicFactKindV1.Declaration,
+        stable_symbol_id: "sym:visible", canonical_bytes: signature, is_public: true,
+        contains_executable_body: false, contains_private_source: false, dependency_symbol_ids: [])]
+    project_public_summary_v1(PublicSummaryProjectionInputV1(snapshot_id: snapshot,
+        logical_path: LogicalSourcePathV1(repository_namespace_digest: paging_auth().root_digest,
+            module_relative_utf8: path, path_semantics: PathSemanticsV1.CaseSensitiveNfc),
+        source_blob_digest: sha256_text("paging-source"), compiler_owner_digest: sha256_text("paging-compiler"),
+        grammar_digest: sha256_text("paging-grammar"), facts: facts)).unwrap()
+
+fn published_facade(snapshot: text, path: text) -> VirtualSourceStoreAdapterV1:
+    var store = SummaryStoreV1.memory().unwrap()
+    store.publish(paging_summary(snapshot, path), sha256_text("paging-ast"), "generated/untrusted;public-only").unwrap()
+    VirtualSourceStoreAdapterV1.new(store, paging_auth().capability_admission_receipt)
+
+describe "summary store non-ASCII virtual paths":
+    it "resolves a published record whose path has 2, 3 and 4 byte scalars":
+        val snapshot = sha256_text("unicode-path")
+        val path = "pkg/é한😀.spl"
+        var facade = published_facade(snapshot, path)
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        expect(facade.stat(paging_auth(), snapshot, uri).unwrap().present).to_equal(true)
+        expect(facade.read(paging_auth(), snapshot, uri, 0, 1).unwrap().present).to_equal(true)
+        expect(facade.page(paging_auth(), snapshot, uri, nil, 1, 4).unwrap().present).to_equal(true)
+
+    it "reports rendered_size and reads in UTF-8 bytes":
+        val snapshot = sha256_text("unicode-size")
+        val path = "pkg/é한😀.spl"
+        var facade = published_facade(snapshot, path)
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        val expected = text_to_bytes(render_public_summary_tldr_v1(paging_summary(snapshot, path)))
+        val stat = facade.stat(paging_auth(), snapshot, uri).unwrap()
+        expect(stat.present).to_equal(true)
+        if val info = stat.value:
+            expect(info.rendered_size).to_equal(expected.len())
+        val read = facade.read(paging_auth(), snapshot, uri, 0, 65536).unwrap()
+        expect(read.present).to_equal(true)
+        if val r = read.value:
+            expect(r.bytes).to_equal(expected)
+            expect(r.complete).to_equal(true)
+
+    it "still resolves an ASCII path":
+        val snapshot = sha256_text("ascii-path")
+        val path = "pkg/plain.spl"
+        var facade = published_facade(snapshot, path)
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        expect(facade.read(paging_auth(), snapshot, uri, 0, 1).unwrap().present).to_equal(true)
+
+    it "reports the plain logical path, not an Option wrapper":
+        val snapshot = sha256_text("unicode-logical")
+        val path = "pkg/é한😀.spl"
+        var facade = published_facade(snapshot, path)
+        val uri = "simple-summary://{snapshot}/{path}/_tldr.spl"
+        if val info = facade.stat(paging_auth(), snapshot, uri).unwrap().value:
+            expect(info.logical_path.module_relative_utf8).to_equal(path)
+        if val page = facade.page(paging_auth(), snapshot, uri, nil, 65536, 4).unwrap().value:
+            expect(page.logical_path.module_relative_utf8).to_equal(path)
+            expect(page.page_digest).to_equal(sha256_text("simple.summary.page.v1\u0000{snapshot}\u0000{path}\u00000\u0000" + page.rendered_text))

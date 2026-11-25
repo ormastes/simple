@@ -54,7 +54,8 @@ fn _uri_path_v1(snapshot: text, repository: text, uri: text) -> text?:
     val prefix = "simple-summary://{snapshot}/"
     val suffix = "/_tldr.spl"
     if not uri.starts_with(prefix) or not uri.ends_with(suffix): return None
-    val path = uri.slice(prefix.len(), uri.len() - suffix.len())
+    # Byte offsets: slice indexes UTF-8 bytes, while len() counts scalars.
+    val path = uri.slice(prefix.byte_len(), uri.byte_len() - suffix.byte_len())
     if not _logical_path_valid_v1(repository, path): return None
     Some(path)
 
@@ -247,7 +248,7 @@ pub class SummaryStoreV1:
         if not decoded.ok: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "stored summary bytes failed verification"))
         val summary = match decoded.value:
             case None: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryCorrupt, "stored summary decode omitted value"))
-            case value: value
+            case Some(value): value
         val rendered = rows[0].get_text("rendered_bytes")?
         val ast_digest = rows[0].get_text("ast_digest")?
         val provenance = rows[0].get_text("provenance")?
@@ -344,14 +345,14 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
         if not _lower_hex_digest_v1(snapshot): return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "snapshot digest rejected"))
         val path = match _uri_path_v1(snapshot, auth.root_digest, virtual_uri):
             case None: return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "virtual summary URI rejected"))
-            case value: value
+            case Some(value): value
         val row = self.store.row(snapshot, auth.root_digest, path)?
         if row.is_none(): return Ok(SummaryLookupV1(present: false, value: None))
         val value = row?
         val logical = LogicalSourcePathV1(repository_namespace_digest: value.get_text("repository")?, module_relative_utf8: path,
             path_semantics: _path_semantics_v1(value.get_int("path_semantics")?))
         Ok(SummaryLookupV1(present: true, value: Some(VirtualSourceStatV1(uri: virtual_uri, snapshot_id: snapshot,
-            logical_path: logical, kind: VirtualSourceKindV1.PublicSummary, rendered_size: _rendered_text_v1(value).len(),
+            logical_path: logical, kind: VirtualSourceKindV1.PublicSummary, rendered_size: _rendered_text_v1(value).byte_len(),
             content_digest: value.get_text("content_digest")?, provenance: value.get_text("provenance")?, visibility: SummaryVisibilityV1.PublicOnly))))
 
     fn read(auth: SummaryAuthV1, snapshot: text, virtual_uri: text, offset: i64, max_bytes: i64) -> Result<SummaryLookupV1<VirtualSourceReadV1>, SummaryErrorV1>:
@@ -361,12 +362,12 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
         if not _lower_hex_digest_v1(snapshot): return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "snapshot digest rejected"))
         val path = match _uri_path_v1(snapshot, auth.root_digest, virtual_uri):
             case None: return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "virtual summary URI rejected"))
-            case value: value
+            case Some(value): value
         val row = self.store.row(snapshot, auth.root_digest, path)?
         if row.is_none(): return Ok(SummaryLookupV1(present: false, value: None))
         val value = row?
         val rendered = _rendered_text_v1(value)
-        val rendered_size = rendered.len()
+        val rendered_size = rendered.byte_len()
         if offset > rendered_size: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryBoundsExceeded, "summary read offset rejected"))
         val end = offset + min(rendered_size - offset, max_bytes)
         val complete = end == rendered_size
@@ -381,14 +382,14 @@ impl VirtualSourceStoreV1 for VirtualSourceStoreAdapterV1:
         if not _lower_hex_digest_v1(snapshot): return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "snapshot digest rejected"))
         val path = match _uri_path_v1(snapshot, auth.root_digest, virtual_uri):
             case None: return Err(_summary_error_v1(SummaryErrorCodeV1.VirtualSourceRequestInvalid, "virtual summary URI rejected"))
-            case value: value
+            case Some(value): value
         var cursor: i64 = 0
         if val token = continuation: cursor = _token_cursor_v1(auth, snapshot, path, token, max_bytes, max_entries)?
         val row = self.store.row(snapshot, auth.root_digest, path)?
         if row.is_none(): return Ok(SummaryLookupV1(present: false, value: None))
         val value = row?
         val full_text = _rendered_text_v1(value)
-        val rendered_size = full_text.len()
+        val rendered_size = full_text.byte_len()
         if cursor > rendered_size: return Err(_summary_error_v1(SummaryErrorCodeV1.SummaryTokenInvalid, "summary page cursor rejected"))
         val page_text = summary_page_text_v1(text_to_bytes(full_text), cursor, max_bytes)?
         val end = page_text.end
