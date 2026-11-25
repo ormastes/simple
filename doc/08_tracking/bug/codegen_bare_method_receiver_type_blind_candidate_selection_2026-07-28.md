@@ -1,4 +1,16 @@
 # Bare-method codegen binds by name-suffix with no receiver-type check
+## Triage 2026-11-25 — still OPEN; root fix is out-of-scope Rust-seed codegen
+
+Re-checked at `origin/release/1.0.0` HEAD `0819b116ecb`: the mitigation is
+still the per-name allowlist only — `is_bare_builtin_collection_method` in
+`src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:174` (with
+the `SIMPLE_DEBUG_ERASED_RECEIVER_BIND` report-only probe at :66-70). No
+TypeId-to-name receiver-type check has landed in `InstrContext`. The real fix
+(step 3 below: plumb a TypeId-to-name map into codegen and consult the
+receiver type) is a cross-layer change inside `src/compiler_rust/**`, which is
+out of scope by repo policy ("fix .spl not Rust"), and its validation needs a
+full bootstrap. Remains OPEN, seed-codegen owner lane.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

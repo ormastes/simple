@@ -12,6 +12,38 @@ related: doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_
 
 # Codegen: locally-defined function whose name coincidentally matches a runtime SFFI symbol name compiles to a SIGSEGV, not a call to the local body
 
+## Re-verified 2026-11-25 — seed lanes clean on the pinned release/1.0.0 binary (native-link still pending)
+
+Runner: tracked `bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1) at
+`origin/release/1.0.0` HEAD `0819b116ecb`, Windows 11 Git Bash,
+`SIMPLE_LIB=src`.
+
+Both repros from the Symptom section, verbatim:
+
+| probe | lane | result |
+|---|---|---|
+| generic `fn rt_array_len_safe<T>(array: [T])` | default (`run`) | prints `4`, rc=0 |
+| non-generic `fn rt_array_len_safe(a: [i64])` | default (`run`) | prints `3`, rc=0 |
+| generic | `SIMPLE_EXECUTION_MODE=interpret` | prints `4`, rc=0 |
+
+No SIGSEGV on any lane: the call reaches the local body, matching the
+ownership rule in the Resolution section.
+
+**Limits, stated plainly:**
+
+- The regression spec added 2026-11-03
+  (`test/01_unit/compiler/codegen/rt_prefix_local_function_collision_spec.spl`)
+  could NOT be run this pass: at release/1.0.0 HEAD the pinned seed rejects
+  `@representation_boundary` (repo-wide known issue — both
+  `bin/simple.exe test <spec>` and `run <spec>` fail with `unknown decorator
+  '@representation_boundary'`, the spec's own imports carry the annotation).
+  The standalone probes above are the substitute evidence.
+- The native-LINK path (`native-build` producing a standalone binary) remains
+  unverified — it needs a self-hosted producer, none is deployed on this
+  host. Status therefore stays SOURCE-FIXED-EXECUTION-PENDING for the
+  native-link lane only; the seed interpreter/JIT lanes are now doubly
+  measured clean (2026-09-13 and 2026-11-25).
+
 ## Re-verified 2026-09-13 — seed lanes clean; pure-Simple lane still pending (LEFT OPEN)
 
 **Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is
