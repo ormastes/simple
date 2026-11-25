@@ -1,4 +1,19 @@
 # SIMPLE_JIT_STRICT coverage gap (2026-07-30, part 2 of the fail-open fix)
+
+## Verified closed 2026-11-25 (release/1.0.0 @ a19165ae174, code inspection)
+
+The §2 fix is present at HEAD: both HIR and MIR lowering error paths route
+through the strict-tagged helper — `src/compiler_rust/driver/src/exec_core.rs:1346`
+(`"HIR lowering error"`) and `:1362` (`"MIR lowering error"`), via
+`jit_strict_fallback_error_for` (defined at `:1869`, an evolved superset of
+the `jit_strict_fallback_error` helper this doc introduced, adding
+source-path attribution and extra always-escalate classes for unresolved
+imports and paren-less container accessors). Behavioral re-run was not
+possible on this host (fix lives in the Rust seed; the pinned deployed
+binary predates it and seed rebuilds are out of scope for this lane), so
+verification is by code inspection of the landed fix plus the doc's own
+run-based before/after evidence in §4b. Status: remains **closed**.
+
 ## Closed 2026-09-16 — rows 2-3 strict tagging fixed with before/after evidence; remaining rows by-design or inherent, tracked elsewhere
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is

@@ -1,4 +1,28 @@
 # `mcp_bugdb_spec.spl`: aliased free-function import unresolved (`file_exists as file_exists_backend`)
+
+## Note 2026-11-25 (p2w3-af lane, release/1.0.0, pinned Windows seed)
+
+Re-probed the exact mechanism on the pinned seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1) in `run` mode — the filed symptom does **not** reproduce:
+
+- A same-file aliased import `use std.nogc_async_mut.io.file_ops.{file_exists as
+  file_exists_backend}` resolves and calls correctly (`true`/`false` for
+  existing/missing paths).
+- Calling through the real module —
+  `nogc_async_mut.mcp.bugdb_resource.{get_all_bugs, get_bug_stats}` on a
+  missing database — returns the graceful `{"error":"Database not found: ..."}`
+  JSON instead of `function 'file_exists_backend' not found`. The aliased
+  import at `src/lib/nogc_async_mut/mcp/bugdb_resource.spl:14` is unchanged in
+  shape, so the resolver defect appears fixed on the current seed.
+
+**Limit:** the original failure context was `bin/simple test` specifically,
+and spec mode is blocked repo-wide at this HEAD by the known
+`unknown decorator '@representation_boundary'` seed/source inconsistency, so
+`test/02_integration/app/mcp_bugdb_spec.spl` could not be re-run. Evidence is
+run-mode only. Recommend closing as stale once a spec-mode run of
+`mcp_bugdb_spec.spl` confirms 6/6; until then this note is the freshest
+evidence.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
