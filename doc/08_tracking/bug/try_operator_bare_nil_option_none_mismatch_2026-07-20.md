@@ -1,7 +1,7 @@
 # Bug: `?` operator rejects a bare `nil` returned from an `Option<T>`-typed function ("got nil")
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/shared/types/try_operator_spec.spl`)
+- **Status:** RESOLVED (verified 2026-11-25 — see note below)
 - **Area:** `src/compiler_rust/compiler/src/interpreter/expr.rs` (`?` / try-operator evaluation, tree-walking interpreter), deployed seed at `bin/release/x86_64-unknown-linux-gnu/simple`
 
 ## Symptom
@@ -124,3 +124,26 @@ A seed fix was attempted and revealed two things future fixers MUST know:
   make `return nil` in an `Option<T>`-typed fn *produce* a canonical `Option::None`
   value, fixing EVERY consumer (`?`, `match`, `.is_none()`) regardless of evaluator.
   Fix the return/nil-literal coercion, not the `?` operator.
+
+## Verification 2026-11-25 — fixed at release/1.0.0 HEAD
+
+The `Expr::Try` arm now treats a bare `Value::Nil` as `None` explicitly
+(`src/compiler_rust/compiler/src/interpreter/expr.rs:425-429`):
+`Value::Nil => Err(CompileError::TryError(Box::new(Value::Nil)))`, with a
+comment stating that `return nil` from an `-> Option<T>` function must
+propagate through `?` exactly like an explicit `None`. The deployed tracked
+seed carries the fix.
+
+```
+SIMPLE_LIB=src bin/simple.exe run test/shared/types/try_operator_spec.spl --mode=interpreter
+=> SPEC FILE VERDICT: outcome=OK declared>=12 executed=12 passed=12 failed=0
+```
+
+Including the originally failing example `"propagates None on not found"`
+(helper returns via bare `return nil`, consumer applies `?`). Run on a
+Windows worktree at release/1.0.0 HEAD (`f3fb8f24dc9`) with the tracked seed
+`bin/simple.exe` (38,403,072 bytes, v1.0.0-rc.1). The `test` subcommand is
+unusable at HEAD (pinned seed rejects `@representation_boundary`, carried by
+the test runner itself — known source/binary inconsistency), so the `run`
+harness was used; it exercises the same tree-walking evaluator and reproduces
+the spec's describe/it/expect flow. Entry closed.
