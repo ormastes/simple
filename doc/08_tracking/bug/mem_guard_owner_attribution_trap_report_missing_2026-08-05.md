@@ -178,3 +178,32 @@ Not done (still open, narrower): free-site capture for the UAF report; the
 Windows guard allocator remains a no-op (no VirtualAlloc port), so the POSIX
 end-to-end path was not executed on this Windows host (WSL unavailable) --
 verification pending on a Linux/macOS run of the selfcheck.
+
+## Verification 2026-11-25 (Windows host, Part 1 only)
+
+Ran the all-hosts half of the selfcheck on this Windows host
+(`release/1.0.0` tip `47d6c5eddd5`):
+
+```
+gcc -O1 -o mem_guard_selfcheck.exe src/runtime/test/rt_mem_guard_owner_report_selfcheck.c
+./mem_guard_selfcheck.exe
+  ok   slot recorded
+  ok   trailing guard page -> overflow
+  ok   report names the owner
+  ok   report names the size
+  ok   leading guard page -> underflow
+  ok   freed slot -> use-after-free
+  ok   non-guard address produces no report
+  ok   unset owner reports <none>
+SELFCHECK PASSED   (exit 0, 8/8)
+```
+
+So the native-C report logic — slot recording, overflow/underflow/UAF
+classification, owner tag, and the no-report path for non-guard addresses —
+is now verified on a real run, not just by inspection. Still pending,
+unchanged from the 2026-11-04 note: the POSIX end-to-end half (fork +
+printed-stderr assertion + SIGSEGV death) needs a Linux/macOS run, and the
+Rust-seed `report_tests` need a seed build; neither can execute on this
+Windows host. Status stays FIX-IMPLEMENTED-VERIFICATION-PENDING with the
+pending scope narrowed to those two items (plus the already-listed
+free-site-capture gap).

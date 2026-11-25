@@ -1,8 +1,26 @@
 # type_infer_correctness_spec.spl shadows HmInferContext with a 1-field stand-in
-## Open 2026-09-16 — needs owner triage
+## RESOLVED — re-verified 2026-11-25 (header corrected; was misleadingly "Open 2026-09-16")
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+The 2026-09-16 normalization pass stamped "Open — needs owner triage" above
+this doc, contradicting the body, which records the spec rewrite as RESOLVED
+2026-08-10 with the two exposed product defects deliberately left failing.
+Both of those defects are now FIXED (both closed 2026-09-16:
+`dim_solver_mismatch_path_calls_span_merge_2026-08-10.md`,
+`dim_solver_try_eval_ignores_substitution_2026-08-10.md`).
+
+Re-verified 2026-11-25 at `release/1.0.0` tip `47d6c5eddd5` by source
+inspection: the spec (`test/01_unit/compiler/type_infer/type_infer_correctness_spec.spl`)
+imports the real `compiler.types.type_infer.*` / `dim_constraints` modules
+and declares no local `HmInferContext`/`HirType` shadow;
+`dim_constraints.spl` routes mismatch spans through `span_merge` (defect 1
+fix) and `try_eval` normalises through `self.apply_substitution(expr)`
+before matching (defect 2 fix).
+
+Limit: the spec could not be re-executed on this Windows host — the tracked
+`bin/simple.exe` (seed, last refreshed 2026-11-17) cannot compile the
+current test-runner/lib source at any recent tree (details in
+`compiled_checker_multifile_rss_retention_2026-08-03.md`'s 2026-11-25
+note). Status: RESOLVED, verification by inspection.
 
 **STATUS: RESOLVED 2026-08-10 (spec) — but the rewrite is RED on two newly
 exposed product defects, deliberately left failing.**
