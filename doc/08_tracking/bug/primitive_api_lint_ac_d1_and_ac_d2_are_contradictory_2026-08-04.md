@@ -1,5 +1,5 @@
 # primitive_api lint: AC-D1 and AC-D2 assert opposite verdicts on the same signature shape
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — body-aware extern pass-through discriminator landed (see dated verification at bottom)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -143,3 +143,16 @@ identical examples): 13/13 green post-fix; pre-fix stash check: 10 passed /
 runnable under the seed: its module docstring trips a pre-existing seed lexer
 limitation at base (unrelated to this fix). Native/self-hosted qualification
 not claimed.
+
+## Verification 2026-11-25 (work/p3-bao-20261125) — CLOSED
+
+The 2026-11-10 fix is present on current release/1.0.0 source:
+`src/compiler/90.tools/fix/rules/impl_/lint_primitive_api.spl` now applies the
+body-aware discriminator `_extern_passthrough_body` (defined at line 414,
+applied at lines 61 and 187) on top of the `_all_same_primitive` exemption, in
+both `check_primitive_api_with_lines` and the audit path, exactly the split the
+2026-11-04 triage proposed. Executed the canonical spec on this host:
+`SIMPLE_LIB=src bin/simple.exe test test/system/code_quality/primitive_api_lint_spec.spl
+--mode=interpreter` => 13 examples, 0 failures (AC-D1 rows green, AC-D2
+extern-pass-through rows green). The "Open 2026-09-16" header is stale;
+closed.
