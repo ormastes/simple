@@ -598,3 +598,20 @@ first-wins bare entry (collision warning unchanged). Spec:
 `test/01_unit/compiler/interpreter/enum_bare_name_module_preference_spec.spl` (3/3 pass).
 The MIR side already had dual keys (`enum_variant_index_q`). Variant discriminant globals in the interpreter
 (`Name.Variant`) remain bare-keyed.
+
+## 2026-11-25 — triage note (remains OPEN, owner decision reserved)
+
+State on release/1.0.0 (1b671f862f3), by code inspection:
+
+- Steps (b), (c), (d) landed as recorded above: loud miss + dual qualified
+  keyspace in the pure-Simple MIR lowering, and the seed's discriminant
+  copies delegate to the single runtime ABI definition.
+- 2026-11-03 stage 1 (seed warning `enum-bare-name-ambiguous`) and the
+  module-aware pure-Simple interpreter table (`enum_table_register_in` /
+  `enum_table_lookup_in`) are present.
+- Still open by design: seed stage 2 (module-keyed lookup / hard error),
+  promotion of the match-fallthrough diagnostic to fatal, resolution of the
+  332 duplicated names, and the numeric ABI reconciliation (name-hash vs
+  declared ordinal) — all explicitly reserved for an owner decision / a
+  dedicated sequenced lane. Not actionable from a bug-fix pass; no status
+  change.

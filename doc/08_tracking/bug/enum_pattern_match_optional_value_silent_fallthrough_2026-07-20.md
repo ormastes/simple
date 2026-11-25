@@ -1,6 +1,6 @@
 ---
 id: enum_pattern_match_optional_value_silent_fallthrough_2026-07-20
-status: OPEN
+status: RESOLVED 2026-11-25 — both lanes verified fixed on pinned seed v1.0.0-rc.1 (see dated note at end)
 severity: medium
 discovered: 2026-07-20
 discovered_by: SPEC-REPAIR lane (test/01_unit/app/ui.browser/input_translation_spec.spl repair)
@@ -167,3 +167,27 @@ value binds the payload to nil. Minimal repro and both-lane pins:
 gated by `option_enum_match_variant_spec.spl`. This is the remaining live half
 of the family; it lives in the JIT match lowering (out of the
 frontend/interpreter scope of the 2026-11-05 lane).
+
+## 2026-11-25 — RESOLVED: both lanes verified fixed on pinned seed v1.0.0-rc.1
+
+Re-probed the remaining live half (the two JIT construction shapes named in
+the 2026-11-05 note) against the tracked binary `bin/simple.exe`
+(v1.0.0-rc.1) on release/1.0.0:
+
+1. Optional enum scrutinee built via explicit `Some(Evt.Click(x: 42))`,
+   matched against bare `case Evt.Click(x):` — **JIT: matched, x=42**
+   (was silent wildcard); interpreter: matched.
+2. Implicitly-wrapped `Evt.Move(x: 7)` matched against `case Evt.Move(x):` —
+   **JIT: matched, x=7**; interpreter: matched.
+3. `case Some(Evt.Click(x))` over an implicitly-wrapped value — **JIT:
+   matched, payload x=42 bound correctly** (was nil payload); interpreter:
+   matched.
+
+The pinned binary postdates the 2026-11-05 lane and contains both the
+interpreter fix and the JIT match-lowering fix; the silent-fallthrough shape
+no longer reproduces on either engine. Pin specs
+`test/01_unit/compiler/interpreter/probe_option_enum_match.spl` and
+`option_enum_match_variant_spec.spl` are present in the tree (spec execution
+under `bin/simple.exe test` is blocked repo-wide at this HEAD by the seed's
+`@representation_boundary` rejection, so closure evidence is the direct
+`run` probes above).

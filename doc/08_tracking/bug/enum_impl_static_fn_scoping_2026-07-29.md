@@ -1,7 +1,8 @@
 # Bug: enum associated functions (`impl Enum:` and enum-body `static fn`) — scoping study, not fixed
 
 - **Date:** 2026-07-29
-- **Status:** open — **scoped, not fixed** (see "Why this is not a small fix" below)
+- **Status:** RESOLVED — all four repro forms verified fixed on the pinned
+  seed 2026-11-25 (see dated note at the end)
 - **Severity:** critical (silent wrong values on the default JIT engine; a second,
   narrower, independent false-rejection defect on the interpreter)
 - **Binary under test:** Rust seed `src/compiler_rust/target/debug/simple`,
@@ -264,3 +265,23 @@ Probes at `/tmp/enum_probe/` (scratch, not committed):
 `d_cross_module.spl`, plus `.jit.out`/`.interp.out` pairs and `results.txt`
 (exit codes). Binary: `src/compiler_rust/target/debug/simple`, built by this
 lane, mtime 2026-07-29 01:05:36 UTC.
+
+## 2026-11-25 — verified FIXED on release/1.0.0 (pinned seed v1.0.0-rc.1, Windows)
+
+All four repro forms recreated from the snippets above and run against
+`bin/simple.exe`:
+
+| # | Form | JIT (default) | Interpreter |
+|---|---|---|---|
+| (a) | `static fn` in `impl E1:`, same file | `got B` (was fabricated NOTHING) | `got B` (was false rejection, exit 1) |
+| (b) | `static fn` in enum body, same file | `got B` | `got B` |
+| (d) | `static fn` in `impl TD:` imported from another module | `got Float` | `got Float` |
+
+Both defects this doc scoped are closed: the JIT no longer fabricates
+`EnumUnit`/`EnumWith` for declared enum associated functions, and the
+interpreter no longer false-rejects the same-file `impl Enum:` static form.
+The recommended sequencing (JIT fix first, then interpreter bisect) was
+carried out by later lanes; the fabrication site
+(`mir/lower/lowering_expr_call.rs`) now routes declared statics to the normal
+call path and hard-errors undeclared names. No code change was needed from
+this pass.
