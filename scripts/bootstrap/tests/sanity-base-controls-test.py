@@ -60,6 +60,7 @@ class ControlTests(unittest.TestCase):
             ('base_control_profile','unknown','fresh control provenance'),
             ('base_control_writer_sha256','changed','fresh control writer'),
             ('base_control_writer_sha256','6ef8cd107ac6cc2575778cc9ddda69de425860fb86ddba2938a8fc42071cf52a','fresh control writer'),
+            ('base_control_writer_sha256','ed4787d0704093d70947a2bbd5aded47d93e1f229d38efb9355b611617e0a74e','fresh control writer'),
             ('base_control_snapshot_sha256','changed','fresh control snapshot'),
             ('candidate_sha256_after','changed','fresh full criterion'),
             ('frontend_smoke_bootstrap0_raw_status','124','fresh full criterion'),

@@ -31,8 +31,8 @@ OWNERS = {
     'native-proof.sha256': '30bf3cce2f4b078b578c4780991a27a161e787bed56cf2e51f81ab47ce6e075b',
 }
 COMPOSED_SCHEMA = 'simple-bootstrap-sanity-control-composition-v1'
-# Reviewed 8b22c764 cache pass-through; fresh receipts must name this writer.
-FRESH_WRITER = 'ed4787d0704093d70947a2bbd5aded47d93e1f229d38efb9355b611617e0a74e'
+# Reviewed 8fe2ea40 SIMPLE_NSCOPE_HIR_TRACE diagnostic passthrough; fresh receipts must name this writer.
+FRESH_WRITER = '315ea01f8d725590b9da5ea8d35513ebab3b1852454f147819f5c599adffead8'
 
 def verify_actual_writer(path=None):
     path = path or pathlib.Path(__file__).parent / 'sanity-control-functions.shs'
