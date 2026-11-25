@@ -1,10 +1,22 @@
 # BUG: baremetal externs have no interpreter binding — `unsafe_addr_of` and `rt_x86_syscall` fail closed in hosted unit specs
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — both externs registered with hosted doubles; verified on pinned seed
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Verification 2026-11-25 (release/1.0.0 @ a19165ae174, Windows, pinned
+`bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`):** both names
+are now registered in the interpreter extern table —
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2190-2191`
+(`insert_simple!("unsafe_addr_of", ...)` / `insert_simple!("rt_x86_syscall", ...)`)
+with hosted doubles in `interpreter_extern/memory.rs:2288` (`unsafe_addr_of`)
+and `:2324` (`rt_x86_syscall`, fails closed with ENOSYS/-38 per its doc
+comment, which cites this bug doc). Runtime probes against the pinned binary:
+`unsafe_addr_of(42)` returns a value (`ok true`); `rt_x86_syscall(0,...)`
+returns `-38` instead of raising `unknown extern function`. Limit: the full
+`test/01_unit/os/posix` directory re-run is blocked repo-wide at this HEAD by
+the separate source/binary inconsistency (pinned binary rejects the
+`@representation_boundary` decorator added in cfd89933699), so per-spec
+verdicts were verified by probe + code inspection, not a directory run.
 
-**Status:** OPEN
+**Status:** RESOLVED 2026-11-25 (see header)
 **Found:** 2026-08-04
 **Severity:** medium — 3 confirmed failing examples in
 `test/01_unit/os/posix/`. The failure is a hard error, so the affected

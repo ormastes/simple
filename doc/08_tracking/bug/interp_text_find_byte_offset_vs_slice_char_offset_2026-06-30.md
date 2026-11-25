@@ -2,6 +2,15 @@
 
 ## Closed 2026-09-13 — `find` and `slice` agree on units in the reported case
 
+- **Re-verified 2026-11-25** (release/1.0.0 @ a19165ae174, Windows, pinned
+  `bin/simple.exe` Rust seed v1.0.0-rc.1): `find` and `slice` are both
+  byte-indexed and agree — `s.slice(s.find("MARKER"), s.byte_len())` on
+  `"ab—cdMARKERxyz"` prints `MARKERxyz`. `len()` is code-point based (14)
+  per the owner decision 2026-11-07 / ADR-005 "Staging"
+  (`doc/05_design/language/text/text_len_counts_characters_2026-11-07.md`),
+  so the byte idiom is `slice(i, s.byte_len())`; the original find-vs-slice
+  skew is gone.
+
 - **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
 - **measured** The entry's reproducer (`"ab—cdMARKERxyz"`, em-dash before the marker) prints `MARKERxyz` — the expected value; the reported `RKERxyz` skew does not occur.
 
