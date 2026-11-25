@@ -7,7 +7,9 @@
 use std.spec.*
 use compiler.mir.mir_types.*
 use compiler.mir.mir_data.*
-use compiler.hir.hir_types.{HirType}
+use compiler.hir.hir_definitions.{HirParam, HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
 
@@ -240,3 +242,51 @@ describe "bootstrap fn registry promotion is per-module delta":
         expect(bootstrap_fn_registries_last_promote_roots_v1()).to_equal(0)
         expect(bootstrap_fn_ret_hir_type_lookup(conflict).is_none()).to_equal(true)
         expect(bootstrap_fn_param_hir_types_lookup(conflict).is_none()).to_equal(true)
+
+    it "vetoes conflicting shape and param-default entries via *_ambig without O(N) rebuilds":
+        val sp = Span(start: 0, end: 0, line: 0, col: 1, file: "synthetic", length: 0)
+        val i64_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_ty, span: sp)
+        val p_nodef = HirParam(symbol: SymbolId(id: 1), name: "x", type_: i64_ty, has_default: false, default: nil_expr, span: sp, is_mutable: false)
+        val p_def = HirParam(symbol: SymbolId(id: 2), name: "x", type_: i64_ty, has_default: true, default: nil_expr, span: sp, is_mutable: false)
+
+        expect(transient_scope_begin()).to_equal(true)
+        bootstrap_fn_ret_shape_register("ambig.shape.kept", "ShapeA")
+        bootstrap_fn_ret_shape_register("ambig.shape.conflict", "ShapeA")
+        bootstrap_fn_ret_array_element_shape_register("ambig.arr.kept", "ElemA", "idA")
+        bootstrap_fn_ret_array_element_shape_register("ambig.arr.conflict", "ElemA", "idA")
+        bootstrap_fn_ret_ok_shape_register("ambig.ok.kept", "OkA")
+        bootstrap_fn_ret_ok_shape_register("ambig.ok.conflict", "OkA")
+        bootstrap_fn_ret_opt_shape_register("ambig.opt.kept", "OptA")
+        bootstrap_fn_ret_opt_shape_register("ambig.opt.conflict", "OptA")
+        bootstrap_fn_param_defaults_register("ambig.def.kept", [p_nodef], "mod.a")
+        bootstrap_fn_param_defaults_register("ambig.def.conflict", [p_nodef], "mod.a")
+        bootstrap_fn_param_defaults_register("ambig.def.owner_conflict", [p_nodef], "mod.a")
+        val p1 = transient_scope_pause()
+        val ok1 = if p1: bootstrap_fn_registries_promote() else: false
+        val e1 = transient_scope_end()
+        expect(p1 and ok1 and e1).to_equal(true)
+
+        expect(transient_scope_begin()).to_equal(true)
+        bootstrap_fn_ret_shape_register("ambig.shape.conflict", "ShapeB")
+        bootstrap_fn_ret_array_element_shape_register("ambig.arr.conflict", "ElemB", "idB")
+        bootstrap_fn_ret_ok_shape_register("ambig.ok.conflict", "OkB")
+        bootstrap_fn_ret_opt_shape_register("ambig.opt.conflict", "OptB")
+        bootstrap_fn_param_defaults_register("ambig.def.conflict", [p_def], "mod.a")
+        bootstrap_fn_param_defaults_register("ambig.def.owner_conflict", [p_nodef], "mod.b")
+        val p2 = transient_scope_pause()
+        val ok2 = if p2: bootstrap_fn_registries_promote() else: false
+        val e2 = transient_scope_end()
+        expect(p2 and ok2 and e2).to_equal(true)
+
+        expect(bootstrap_fn_ret_shape_lookup("ambig.shape.conflict").is_none()).to_equal(true)
+        expect(bootstrap_fn_ret_shape_lookup("ambig.shape.kept") ?? "").to_equal("ShapeA")
+        expect(bootstrap_fn_ret_array_element_shape_lookup("ambig.arr.conflict").is_none()).to_equal(true)
+        expect(bootstrap_fn_ret_array_element_shape_lookup("ambig.arr.kept") ?? "").to_equal("ElemA")
+        expect(bootstrap_fn_ret_ok_shape_lookup("ambig.ok.conflict").is_none()).to_equal(true)
+        expect(bootstrap_fn_ret_ok_shape_lookup("ambig.ok.kept") ?? "").to_equal("OkA")
+        expect(bootstrap_fn_ret_opt_shape_lookup("ambig.opt.conflict").is_none()).to_equal(true)
+        expect(bootstrap_fn_ret_opt_shape_lookup("ambig.opt.kept") ?? "").to_equal("OptA")
+        expect(bootstrap_fn_param_defaults_lookup("ambig.def.conflict").is_none()).to_equal(true)
+        expect(bootstrap_fn_param_defaults_lookup("ambig.def.owner_conflict").is_none()).to_equal(true)
+        expect(bootstrap_fn_param_defaults_lookup("ambig.def.kept").is_some()).to_equal(true)

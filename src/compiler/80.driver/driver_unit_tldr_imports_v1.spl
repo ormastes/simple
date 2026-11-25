@@ -60,9 +60,11 @@ pub fn unit_tldr_log_line_v1(unit_id: text, parsed: i64, summaries: i64, fallbac
 # `module_paths` maps module id -> source path (the frozen inventory).
 pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths: Dict<text, text>) -> UnitTldrPlanV1:
     var parse_paths: [text] = []
+    var parse_path_set: Dict<text, bool> = {}
     var root_candidates: [text] = []
     for p in picked:
         parse_paths.push(p)
+        parse_path_set[p] = true
         root_candidates.push(p)
     for mp in module_paths.values():
         root_candidates.push(mp)
@@ -78,33 +80,35 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
         root_candidates, scv_roots, module_surface_canonical_path("."))
     var surfaces: [ModuleSurface] = []
     var fallback_modules: [text] = []
-    var seen: [text] = []
-    var seen_paths: [text] = []
+    var seen: Dict<text, bool> = {}
+    var seen_paths: Dict<text, bool> = {}
     var frontier: [text] = []
+    var frontier_set: Dict<text, bool> = {}
     for p in picked:
         for spec in tldr_route_import_specs_v1(file_read(p), true):
             val module_id = unit_tldr_relative_module_id_v1(spec.0, p)
             if module_id == "": continue
-            if not frontier.contains(module_id):
+            if not frontier_set.contains_key(module_id):
+                frontier_set[module_id] = true
                 frontier.push(module_id)
     var pos = 0
     var summaries = 0
     while pos < frontier.len():
         val module_id = frontier[pos]
         pos = pos + 1
-        if seen.contains(module_id):
+        if seen.contains_key(module_id):
             continue
         val src_path = unit_tldr_module_path_for_v1(module_paths, module_id)
         if src_path == "":
             continue
         if not file_exists(src_path):
             continue
-        seen.push(module_id)
+        seen[module_id] = true
         val src_canonical = module_surface_canonical_path(src_path)
         val path_key = if src_canonical != "": src_canonical else: src_path
-        if seen_paths.contains(path_key):
+        if seen_paths.contains_key(path_key):
             continue
-        seen_paths.push(path_key)
+        seen_paths[path_key] = true
         val source = file_read(src_path)
         var built_list: [ModuleSurface] = []
         var fallback_reason = "no-summary-surface"
@@ -128,7 +132,7 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
                         val needs_class_hir = summary.composite_values.len() > 0 or summary.impls.len() > 0
                         val needs_decl_hir = summary.constant_values.len() > 0 or summary.enum_values.len() > 0 or summary.trait_values.len() > 0
                         if (needs_class_hir or needs_decl_hir) and
-                                not parse_paths.contains(src_path) and
+                                not parse_path_set.contains_key(src_path) and
                                 not hir_shard_key_sidecar_published_v1(env_get("SIMPLE_HIR_SHARD_QUEUE"), src_path):
                             fallback_reason = if needs_class_hir: "class-without-interface-hir" else: "decl-without-interface-hir"
                         else:
@@ -160,13 +164,15 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
             surfaces.push(bound)
         else:
             fallback_modules.push(module_id)
-            if not parse_paths.contains(src_path):
+            if not parse_path_set.contains_key(src_path):
+                parse_path_set[src_path] = true
                 parse_paths.push(src_path)
             print("[tldr-fallback] module={module_id} reason={fallback_reason} source-load=1")
         for spec in tldr_route_import_specs_v1(source, true):
             val next_id = unit_tldr_relative_module_id_v1(spec.0, src_path)
             if next_id == "": continue
-            if not frontier.contains(next_id):
+            if not frontier_set.contains_key(next_id):
+                frontier_set[next_id] = true
                 frontier.push(next_id)
     UnitTldrPlanV1(unit_id: unit_id, picked: picked, parse_paths: parse_paths, parsed: parse_paths.len(),
         summaries: summaries, fallbacks: fallback_modules.len(), fallback_modules: fallback_modules,
@@ -269,9 +275,14 @@ pub fn unit_tldr_module_paths_v1(module_names: [text], paths: [text]) -> Dict<te
 
 # Per-source "this process parses it": picked + fallback modules + extra (AOP advice).
 pub fn unit_tldr_needed_flags_v1(plan: UnitTldrPlanV1, source_paths: [text], extra: [text]) -> [bool]:
+    var needed_set: Dict<text, bool> = {}
+    for p in plan.parse_paths:
+        needed_set[p] = true
+    for p in extra:
+        needed_set[p] = true
     var out: [bool] = []
     for p in source_paths:
-        out.push(plan.parse_paths.contains(p) or extra.contains(p))
+        out.push(needed_set.contains_key(p))
     out
 
 pub fn unit_tldr_surface_for_v1(plan: UnitTldrPlanV1, module_name: text) -> ModuleSurface?:
@@ -350,6 +361,102 @@ pub fn unit_tldr_surface_path_ids_v1(plan: UnitTldrPlanV1) -> Dict<text, text>:
 pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, canonical_path: text) -> ModuleSurface?:
     unit_tldr_surface_for_row_with_ids_v1(plan, module_name, canonical_path, {})
 
+# Pre-indexed lookup tables for `plan.surfaces` so the streaming loop resolves
+# each inventory row in O(1) instead of running 5 sequential linear scans.
+struct UnitTldrSurfaceIndexV1:
+    by_module_name: Dict<text, i64>
+    by_canonical_path: Dict<text, i64>
+    by_admitted_id: Dict<text, i64>
+    by_any_logical_name: Dict<text, i64>
+    by_alias_name: Dict<text, i64>
+
+pub fn unit_tldr_surface_index_empty_v1() -> UnitTldrSurfaceIndexV1:
+    UnitTldrSurfaceIndexV1(
+        by_module_name: {},
+        by_canonical_path: {},
+        by_admitted_id: {},
+        by_any_logical_name: {},
+        by_alias_name: {}
+    )
+
+fn _unit_tldr_norm_admitted_id_v1(lid: text) -> text:
+    if lid.starts_with("common."):
+        return "lib." + lid
+    lid
+
+pub fn unit_tldr_surface_index_v1(plan: UnitTldrPlanV1) -> UnitTldrSurfaceIndexV1:
+    var by_module_name: Dict<text, i64> = {}
+    var by_canonical_path: Dict<text, i64> = {}
+    var by_admitted_id: Dict<text, i64> = {}
+    var by_any_logical_name: Dict<text, i64> = {}
+    var by_alias_name: Dict<text, i64> = {}
+    val has_admitted_roots = plan.admitted_roots.len() > 0
+    var i = 0
+    while i < plan.surfaces.len():
+        val s: ModuleSurface = plan.surfaces[i]
+        if not by_module_name.contains_key(s.module_name):
+            by_module_name[s.module_name] = i
+        if not by_canonical_path.contains_key(s.canonical_path):
+            by_canonical_path[s.canonical_path] = i
+        if has_admitted_roots:
+            val surface_id = module_surface_admitted_logical_id_v1(s.canonical_path, plan.admitted_roots)
+            if surface_id != "":
+                val norm_id = _unit_tldr_norm_admitted_id_v1(surface_id)
+                if not by_admitted_id.contains_key(norm_id):
+                    by_admitted_id[norm_id] = i
+        if s.canonical_name != "" and not by_any_logical_name.contains_key(s.canonical_name):
+            by_any_logical_name[s.canonical_name] = i
+        if s.logical_name != "" and not by_any_logical_name.contains_key(s.logical_name):
+            by_any_logical_name[s.logical_name] = i
+        if s.module_name != "" and not by_any_logical_name.contains_key(s.module_name):
+            by_any_logical_name[s.module_name] = i
+        if s.canonical_name != "" and not by_alias_name.contains_key(s.canonical_name):
+            by_alias_name[s.canonical_name] = i
+        if s.module_name != "" and not by_alias_name.contains_key(s.module_name):
+            by_alias_name[s.module_name] = i
+        i = i + 1
+    UnitTldrSurfaceIndexV1(
+        by_module_name: by_module_name,
+        by_canonical_path: by_canonical_path,
+        by_admitted_id: by_admitted_id,
+        by_any_logical_name: by_any_logical_name,
+        by_alias_name: by_alias_name
+    )
+
+pub fn unit_tldr_surface_for_row_indexed_v1(plan: UnitTldrPlanV1, index: UnitTldrSurfaceIndexV1,
+        module_name: text, canonical_path: text) -> ModuleSurface?:
+    if index.by_module_name.contains_key(module_name):
+        return Some(plan.surfaces[index.by_module_name[module_name]])
+    if index.by_canonical_path.contains_key(canonical_path):
+        return Some(plan.surfaces[index.by_canonical_path[canonical_path]])
+    val row_admitted_logical = if plan.admitted_roots.len() > 0:
+        module_surface_admitted_logical_id_v1(canonical_path, plan.admitted_roots)
+    else:
+        ""
+    if plan.admitted_roots.len() == 0:
+        # Without explicit roots, admission derives them from each path pair.
+        for s in plan.surfaces:
+            if module_surface_same_admitted_logical_module_v1(s.canonical_path, canonical_path, plan.admitted_roots):
+                return Some(s)
+    elif row_admitted_logical != "":
+        val norm_row_id = _unit_tldr_norm_admitted_id_v1(row_admitted_logical)
+        if index.by_admitted_id.contains_key(norm_row_id):
+            return Some(plan.surfaces[index.by_admitted_id[norm_row_id]])
+    if row_admitted_logical != "":
+        if index.by_any_logical_name.contains_key(row_admitted_logical):
+            return Some(plan.surfaces[index.by_any_logical_name[row_admitted_logical]])
+    val row_cands = module_surface_logical_alias_candidates_v1(module_name)
+    if row_cands.len() > 0:
+        var best_idx = -1
+        for cand in row_cands:
+            if index.by_alias_name.contains_key(cand):
+                val hit_idx = index.by_alias_name[cand]
+                if best_idx < 0 or hit_idx < best_idx:
+                    best_idx = hit_idx
+        if best_idx >= 0:
+            return Some(plan.surfaces[best_idx])
+    None
+
 pub fn unit_tldr_surface_for_row_with_ids_v1(plan: UnitTldrPlanV1, module_name: text, canonical_path: text, path_ids: Dict<text, text>) -> ModuleSurface?:
     for s in plan.surfaces:
         if s.module_name == module_name:
@@ -385,7 +492,8 @@ pub fn unit_tldr_surface_for_row_with_ids_v1(plan: UnitTldrPlanV1, module_name: 
                 return Some(s)
     None
 
-export UnitTldrPlanV1, UnitLowerResultV1
+export UnitTldrPlanV1, UnitLowerResultV1, UnitTldrSurfaceIndexV1
 export unit_tldr_log_line_v1, unit_tldr_plan_v1, unit_lower_v1
 export unit_tldr_empty_plan_v1, unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1
 export unit_tldr_module_path_for_v1, unit_tldr_surface_for_row_v1, unit_tldr_surface_path_ids_v1, unit_tldr_surface_for_row_with_ids_v1, unit_tldr_relative_module_id_v1
+export unit_tldr_surface_index_empty_v1, unit_tldr_surface_index_v1, unit_tldr_surface_for_row_indexed_v1

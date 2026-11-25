@@ -37,6 +37,9 @@ use compiler.driver.driver_unit_tldr_imports_v1.{
     UnitTldrPlanV1,
     unit_tldr_module_paths_v1,
     unit_tldr_module_path_for_v1,
+    unit_tldr_needed_flags_v1,
+    unit_tldr_surface_index_v1,
+    unit_tldr_surface_for_row_indexed_v1,
     unit_tldr_surface_for_row_v1, unit_tldr_surface_path_ids_v1, unit_tldr_surface_for_row_with_ids_v1}
 use compiler.driver.driver_hir_cache.{
     hir_shard_row_terminal_due_v1,
@@ -144,6 +147,54 @@ describe "SCV snapshot vs checkout canonical logical source identity":
         # is built. Its new path must be admitted independently of the old ID.
         surf.canonical_path = "/work/repo/src/lib/common/rebound.spl"
         expect(unit_tldr_surface_for_row_with_ids_v1(rooted_plan, "other", "/work/repo/src/common/rebound.spl", path_ids).is_some()).to_be(true)
+
+    it "matches pre-indexed surfaces with exact tie-breaking, alias equivalence, and needed flags":
+        var first_surf: ModuleSurface = ModuleSurface.empty("")
+        first_surf.module_name = "lib.common.pair"
+        first_surf.logical_name = "lib.common.pair"
+        first_surf.canonical_name = "lib.common.pair"
+        first_surf.canonical_path = "/work/repo/src/lib/common/pair.spl"
+
+        var second_surf: ModuleSurface = ModuleSurface.empty("")
+        second_surf.module_name = "std.common.pair"
+        second_surf.logical_name = "std.common.pair"
+        second_surf.canonical_name = "std.common.pair"
+        second_surf.canonical_path = "/work/repo/src/lib/common/pair_dup.spl"
+
+        var common_surf: ModuleSurface = ModuleSurface.empty("")
+        common_surf.module_name = "common.helper"
+        common_surf.logical_name = "common.helper"
+        common_surf.canonical_name = "common.helper"
+        common_surf.canonical_path = "/work/repo/src/lib/common/helper.spl"
+
+        val scv_pair = "/work/repo/build/scv/snapshots/scv-revision-v1-abc123/src/lib/common/pair.spl"
+        val explicit_roots = module_surface_admitted_roots_v1([scv_pair], [], "/work/repo")
+        val plan = UnitTldrPlanV1(
+            unit_id: "0/2@0",
+            picked: [],
+            parse_paths: ["/work/repo/a.spl", "/work/repo/b.spl"],
+            parsed: 2,
+            summaries: 3,
+            fallbacks: 0,
+            fallback_modules: [],
+            surfaces: [first_surf, second_surf, common_surf],
+            import_hir_lowered: 0,
+            admitted_roots: explicit_roots)
+        val idx = unit_tldr_surface_index_v1(plan)
+        val scv_hit = unit_tldr_surface_for_row_indexed_v1(plan, idx, "row.alias", scv_pair)
+        expect(scv_hit.is_some()).to_be(true)
+        expect(scv_hit.unwrap().module_name).to_equal("lib.common.pair")
+        # Alias candidate tie-breaking must pick the first matching surface in plan.surfaces.
+        val alias_hit = unit_tldr_surface_for_row_indexed_v1(plan, idx, "common.pair", "/unrelated/path.spl")
+        expect(alias_hit.is_some()).to_be(true)
+        expect(alias_hit.unwrap().module_name).to_equal("lib.common.pair")
+        # common.* <-> lib.common.* admitted ID equivalence.
+        val common_hit = unit_tldr_surface_for_row_indexed_v1(plan, idx, "other", "/work/repo/src/common/helper.spl")
+        expect(common_hit.is_some()).to_be(true)
+        expect(common_hit.unwrap().module_name).to_equal("common.helper")
+        expect(unit_tldr_surface_for_row_indexed_v1(plan, idx, "foreign", "/foreign/repo/src/common/helper.spl").is_none()).to_be(true)
+        val flags = unit_tldr_needed_flags_v1(plan, ["/work/repo/a.spl", "/work/repo/c.spl", "/work/repo/extra.spl"], ["/work/repo/extra.spl"])
+        expect(flags).to_equal([true, false, true])
 
     it "wires ready_logical and source_of_logical alongside ready_canonical in streaming parse":
         val stream = file_read("src/compiler/80.driver/driver_source_parse_streaming.spl")

@@ -101,10 +101,31 @@ describe "surface call-origin rows outlive the surface release":
             SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
         var lowering = MirLowering.new(symbols)
         lowering.current_module_id = "lib.common.build_manager.group_process_protocol"
-        var i = 0
-        while i < rows.names.len():
-            val _n = lowering.register_surface_callable_origins_v1(rows.owners[i], [rows.names[i]],
-                [rows.externs[i]], [rows.methods[i]], [rows.statics[i]])
-            i = i + 1
+        val _n = lowering.register_surface_callable_origin_rows_v1(rows.owners, rows.names,
+            rows.externs, rows.methods, rows.statics)
         expect(lowering.provider_callable_call_origin_v1(create_sym)).to_equal(MirCallOrigin.Source)
         expect(lowering.provider_callable_call_origin_v1(scalar_sym)).to_equal(MirCallOrigin.Source)
+
+    it "batched register_surface_callable_origin_rows_v1 registers multiple owners and preserves HIR rows":
+        val lowering_src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(scor_line_of(lowering_src, "register_surface_callable_origin_rows_v1(") >= 0).to_equal(true)
+        var symbols = SymbolTable.new()
+        val f1 = symbols.define("f1", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("mod.a"))
+        val f2 = symbols.define("f2", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("mod.b"))
+        val bare_m = symbols.define("len", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("mod.a"))
+        val qual_m = symbols.define("mod.a.Box::get", SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("mod.a"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "mod.user"
+        # Pre-existing HIR-derived row must not be overwritten.
+        val _pre = lowering.register_surface_callable_origins_v1("mod.a", ["f1"], [true], [false], [false])
+        val added = lowering.register_surface_callable_origin_rows_v1(
+            ["mod.a", "mod.b", "mod.a", "mod.a", ""],
+            ["f1", "f2", "len", "Box.get", "ignored"],
+            [false, true, false, false, false],
+            [false, false, true, true, false],
+            [false, false, false, false, false])
+        expect(added).to_equal(2)
+        expect(lowering.provider_callable_call_origin_v1(f1)).to_equal(MirCallOrigin.Foreign)
+        expect(lowering.provider_callable_call_origin_v1(f2)).to_equal(MirCallOrigin.Foreign)
+        expect(lowering.provider_callable_call_origin_v1(bare_m)).to_equal(MirCallOrigin.Unknown)
+        expect(lowering.provider_callable_call_origin_v1(qual_m)).to_equal(MirCallOrigin.Source)
