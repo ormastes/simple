@@ -80,6 +80,7 @@ pub class CaretA2uiHost:
     roster_grant: AuthenticatedGrant
     compose_grant: AuthenticatedGrant
     key_bindings: [CaretKeyBinding]
+    last_collections: [KeyedCollectionView]
     selected_key: text
     last_outcome_summary: text
     handler_variant_label: text
@@ -138,6 +139,7 @@ pub class CaretA2uiHost:
             roster_grant: roster_grant,
             compose_grant: compose_grant,
             key_bindings: [],
+            last_collections: [],
             selected_key: "",
             last_outcome_summary: "Draft",
             handler_variant_label: "v1_standard",
@@ -168,6 +170,7 @@ pub class CaretA2uiHost:
         if not qres.ok:
             return Err("caret_roster_query_failed:" + qres.error_message)
 
+        self.last_collections = [qres.collection]
         val comps = self.runtime.expand_active_screen([qres.collection], 64)?
         self.surface_registry.apply_op(owner, A2uiSurfaceOp.UpdateComponents(
             surface_id: self.surface_id,
@@ -344,6 +347,9 @@ pub class CaretA2uiHost:
         a2ui_admit_wire_json(update_json, limits)?
         Ok([create_json, update_json])
 
+    fn export_live_wire_messages() -> Result<[text], text>:
+        self.export_wire_messages(self.last_collections)
+
     fn first_opaque_key(self) -> text:
         if self.key_bindings.len() == 0:
             return ""
@@ -367,8 +373,14 @@ pub class CaretA2uiHost:
 
 pub fn cs_gui_roster_indices(d: CsDashboard) -> [i64]:
     var ids: [SessionId] = []
-    for a in d.agents:
-        ids = ids + [new_session_id(a.agent_id)]
+    var idx_by_id: Dict<text, i64> = {}
+    var ai: i64 = 0
+    while ai < d.agents.len():
+        val aid = d.agents[ai].agent_id
+        ids = ids + [new_session_id(aid)]
+        if not idx_by_id.contains_key(aid):
+            idx_by_id[aid] = ai
+        ai = ai + 1
     var pin_ids: [SessionId] = []
     for p in d.pins:
         pin_ids = pin_ids + [new_session_id(p)]
@@ -378,12 +390,8 @@ pub fn cs_gui_roster_indices(d: CsDashboard) -> [i64]:
     val ordered = roster_order(ids, pin_ids, mru_ids)
     var out: [i64] = []
     for oid in ordered:
-        var i: i64 = 0
-        while i < d.agents.len():
-            if d.agents[i].agent_id == oid.value:
-                out = out + [i]
-                break
-            i = i + 1
+        if idx_by_id.contains_key(oid.value):
+            out = out + [idx_by_id[oid.value]]
     out
 
 pub fn cs_agent_to_session_view(a: CsAgent, mgr_status: text) -> SessionView:

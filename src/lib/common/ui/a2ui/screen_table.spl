@@ -370,14 +370,39 @@ fn _build_component_from_row(
     a2ui_catalog_validate_component(catalog, comp)?
     Ok(comp)
 
-fn _sorted_children(rows: [ScreenTableRow], parent_id: text) -> [ScreenTableRow]:
-    var direct: [ScreenTableRow] = []
+fn _build_children_index(rows: [ScreenTableRow]) -> Dict<text, [i64]>:
+    var by_parent: Dict<text, [i64]> = {}
     var i = 0
     while i < rows.len():
-        if rows[i].has_parent and rows[i].parent == parent_id:
-            direct.push(rows[i])
+        val r = rows[i]
+        if r.has_parent:
+            var bucket: [i64] = []
+            if by_parent.contains_key(r.parent):
+                bucket = by_parent[r.parent]
+            bucket.push(i)
+            by_parent[r.parent] = bucket
         i = i + 1
-    # Insertion sort by order (small fan-out per container, deterministic).
+    by_parent
+
+fn _sorted_children(rows: [ScreenTableRow], children_index: Dict<text, [i64]>, parent_id: text) -> [ScreenTableRow]:
+    if not children_index.contains_key(parent_id):
+        return []
+    val idxs = children_index[parent_id]
+    var direct: [ScreenTableRow] = []
+    var i = 0
+    while i < idxs.len():
+        direct.push(rows[idxs[i]])
+        i = i + 1
+    # Check if already sorted (fast path in common ordered tables).
+    var already_sorted = true
+    var si = 1
+    while si < direct.len():
+        if direct[si - 1].order > direct[si].order:
+            already_sorted = false
+            break
+        si = si + 1
+    if already_sorted:
+        return direct
     var a = 1
     while a < direct.len():
         var b = a
@@ -391,6 +416,7 @@ fn _sorted_children(rows: [ScreenTableRow], parent_id: text) -> [ScreenTableRow]
 
 fn _expand_subtree(
     table: CompiledScreenTable,
+    children_index: Dict<text, [i64]>,
     row: ScreenTableRow,
     owner_id: text,
     surface_id: text,
@@ -407,7 +433,7 @@ fn _expand_subtree(
         a2ui_encode_opaque_component_id(owner_id, surface_id, surface_generation, row.id, row_key)
     else:
         row.id
-    val direct = _sorted_children(table.rows, row.id)
+    val direct = _sorted_children(table.rows, children_index, row.id)
     var child_id = ""
     var children_ids: [text] = []
     val spec = match a2ui_catalog_find_component(catalog, row.ast.component):
@@ -426,7 +452,7 @@ fn _expand_subtree(
                     while ki < col.order.len():
                         val k = col.order[ki]
                         val sub = _expand_subtree(
-                            table, c_row, owner_id, surface_id, surface_generation,
+                            table, children_index, c_row, owner_id, surface_id, surface_generation,
                             catalog, collections, c_row.repeat_path, k,
                             max_expanded_rows, acc
                         )?
@@ -440,7 +466,7 @@ fn _expand_subtree(
                     () # Empty collection before data arrives is valid for List().
         else:
             val sub = _expand_subtree(
-                table, c_row, owner_id, surface_id, surface_generation,
+                table, children_index, c_row, owner_id, surface_id, surface_generation,
                 catalog, collections, repeat_base, row_key,
                 max_expanded_rows, acc
             )?
@@ -475,9 +501,10 @@ pub fn a2ui_expand_screen_table(
         i = i + 1
     if root_row_idx < 0:
         return Err("missing_root_row")
+    val children_index = _build_children_index(table.rows)
     val empty_acc: [A2uiComponentDef] = []
     val res = _expand_subtree(
-        table, table.rows[root_row_idx], owner_id, surface_id, surface_generation,
+        table, children_index, table.rows[root_row_idx], owner_id, surface_id, surface_generation,
         catalog, collections, "", "", max_expanded_rows, empty_acc
     )?
     Ok(res.1)

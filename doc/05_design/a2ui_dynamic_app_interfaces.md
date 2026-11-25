@@ -1396,6 +1396,23 @@ Suggested admission rules:
 
 Do not start with a universal millisecond target detached from hardware and workload. Establish baselines, then set budgets for actual app requirements.
 
+### 19.1 Measured Phase 6 Native Cranelift Benchmark Baseline
+
+- **Provenance:** Commit base `5f953c654e8` (`release/1.0.0`), compiler `/home/yoon/dev/boot-fable-lane-scripts/keep-integ6-s2/simple native-build --backend=cranelift` (`SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`), Linux `x86_64` host, fixture `test/fixtures/a2ui_phase6_suite.spl` (`verify_a2ui_phase6_and_bench`).
+- **Verification Status:** `A2UI_VERIFY_PASS=137 FAIL=0` (199 modules compiled), `A2UI_LINT_GATE_CHECKED=18 FAIL=0` (`0` `OPT-CATCHALL-001` and `0` `SPL-BOUND-003` findings).
+
+| Workload (`A2UI_BENCH_SDN`) | Measured Time | Notes |
+| --- | --- | --- |
+| `screen_10_us` | `1,864 µs` (`1.86 ms`) | Cold/full SDN compile + 10-component table expand |
+| `screen_100_us` | `104,287 µs` (`104.29 ms`) | Cold/full SDN compile + 100-component table expand |
+| `screen_500_us` | `2,522,505 µs` (`2,522.51 ms`) | One-time admission compile of 500 Express VM constructors; steady-state model updates bypass reparse |
+| `leaf_invalidation_100_us` | `8 µs` (`0.008 ms`) | Single-leaf `UpdateDataModel` + reactive dependency invalidation on 100-component surface |
+| `stream_30ops_whole_us` | `3,016 µs` (`3.02 ms`) | 30 JSONL wire envelopes in 1 chunk (`A2uiJsonlStreamDecoder`) |
+| `stream_30ops_8b_chunks_us` | `3,693 µs` (`3.69 ms`) | 30 JSONL ops fed in 8-byte adversarial chunks (`1.22x` ratio; linear carry buffering) |
+| `hotswap_lease_cycle_us` | `29 µs` (`0.029 ms`) | Full `begin_request -> suspend_async -> publish_generation -> resume_async -> complete_request_lease + reclaim` cycle |
+| `query_200rows_us` | `9,689 µs` (`9.69 ms`) | 200-row authorized QueryIR filter/sort/limit snapshot |
+| `journal_delta_poll_us` | `3 µs` (`0.003 ms`) | `BoundedChangeJournal` cursor delta poll |
+
 ## 20. Proposed module organization
 
 The names below describe responsibilities and candidate locations. Reuse an existing equivalent owner discovered during implementation; do not introduce a competing registry, compositor, authority issuer, or module-lifetime system.
@@ -1502,17 +1519,15 @@ Caret provides a concrete first integration with reusable models and contracts. 
 
 The table/fixture checks are document checks, not execution of the proposed SDN/QueryIR compiler. **Not performed:** compiling or running Simple, executing the proposed policy/query/profile APIs, native renderer integration, upstream SDK compilation of the complete Caret screen, cryptographic/capability qualification, live Caret delivery, hot-reload tests, or benchmarks.
 
-### 23.2 Concrete work that remains
+### 23.2 Implementation status and remaining follow-ups
 
-1. Implement and qualify the G4 import/generated parser adapter and typed A2UI semantic compiler.
-2. Implement the raw-table profile, keyed expansion, complete component state, and native identity/patch adapter.
-3. Register the shared app-interface/query/draft/command contracts, starting with named bounded queries.
-4. Harden the real authority issuance/consumption path, including current principal/operation/target/release checks.
-5. Integrate the Caret provider with its existing owner, draft, binding, lease, and delivery seams.
-6. Qualify dynamic composition and another app/backend using the same infrastructure.
-7. Optimize measured hotspots and add advanced streaming/incremental/lens/replacement features through separate gates.
+Phases 0–6 of the core contract and Caret integration are implemented and verified natively via Cranelift (`137/137` functional, security, hot-swap, streaming JSONL, catalog RPC, and interactive `CaretA2uiSessionStore` assertions + `18/18` compiler lint gate checks, plus `ClockApp` second-app qualification):
 
-No repository implementation has been changed as part of producing this document. All new profile fields, file names, APIs, policies, and snippets are proposed contracts until implemented and tested.
+1. Completed: Pinned Express G4 importer (`express_g4_import.spl`), `grammar_cpu_v1` VM adapter (`express_grammar.spl`), strict SDN screen table compiler & O(N) child-indexed expander (`screen_table.spl`), and pure Basic catalog function evaluator (`catalog_functions.spl`).
+2. Completed: Inbound & outbound bounded v1.0 wire JSON codec, streaming JSONL chunk decoder (`wire_codec.spl`), authoritative snapshot export/replay, and SimpleUI qualified handle lowering (`surface_state.spl`).
+3. Completed: Shared `AppInterfaceRuntime`, restricted SPL `QueryIR`, cursor-isolated `BoundedChangeJournal`, HMAC-SHA256 `AuthorityGate`, and hardened `privilege/store.spl`, `approval_broker.spl`, and `privilege_service.spl`.
+4. Completed: Live Caret `CaretA2uiHost`, persistent `CaretA2uiSessionStore` (`cs_main.spl` `--a2ui`, `--a2ui-json`, `/a2ui *`), O(N) roster ordering, `aspect_dynload_lifecycle_v1` hot-swap leases, `ClockApp` mounting (`clock_a2ui.spl`), and §19 native Cranelift benchmark baselines (§19.1).
+5. Remaining future extensions (separate opt-in gates): persistent parser incremental continuation across partial Express/SDN tokens, bidirectional relational lenses with inverse update policies, and hardware-rendered GPU/SimpleOS compositor end-to-end visual benchmarks.
 
 ## 24. Sources
 

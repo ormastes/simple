@@ -17,6 +17,7 @@ use std.common.ui.a2ui.types.{
     a2ui_wire_version,
     A2uiValue,
     A2uiObjectEntry,
+    A2uiDataEntry,
     A2uiArgPresence,
     A2uiActionEvent,
     A2uiComponentDef,
@@ -28,6 +29,8 @@ use std.common.ui.a2ui.types.{
     a2ui_obj_get,
     a2ui_obj_set,
     a2ui_obj_remove,
+    a2ui_data_get,
+    a2ui_norm_data_path,
     a2ui_value_as_text,
     a2ui_qualified_handle,
     a2ui_qualified_encode
@@ -38,10 +41,10 @@ use std.common.ui.a2ui.catalog.{
     a2ui_catalog_check_function_call,
     a2ui_catalog_validate_component
 }
-
-pub struct A2uiDataEntry:
-    path: text
-    value: A2uiValue
+use std.common.ui.a2ui.catalog_functions.{
+    a2ui_function_eval_context,
+    a2ui_eval_catalog_function
+}
 
 pub struct A2uiBindingDep:
     path: text
@@ -380,8 +383,66 @@ fn _resolve_prop_text(surface: A2uiSurfaceState, props: [A2uiObjectEntry], key: 
                     match a2ui_surface_get_data(surface, p):
                         case A2uiArgPresence.Present(dv): a2ui_value_as_text(dv)
                         case A2uiArgPresence.Omitted: ""
+                case A2uiValue.Object(entries):
+                    match a2ui_obj_get(entries, "call"):
+                        case A2uiArgPresence.Present(A2uiValue.Text(fn_name)):
+                            val cat = a2ui_basic_catalog()
+                            val cat_id = match a2ui_obj_get(entries, "catalogId"):
+                                case A2uiArgPresence.Present(A2uiValue.Text(cid)): cid
+                                case _: cat.catalog_id
+                            val fn_args = match a2ui_obj_get(entries, "args"):
+                                case A2uiArgPresence.Present(A2uiValue.Object(ae)): ae
+                                case _: []
+                            val ctx = a2ui_function_eval_context(cat, "binding", false)
+                            match a2ui_eval_catalog_function(ctx, surface.data_model, cat_id, fn_name, fn_args, 0):
+                                case Ok(res_val): a2ui_value_as_text(res_val)
+                                case Err(_): ""
+                        case _:
+                            a2ui_value_as_text(v)
                 case _:
                     a2ui_value_as_text(v)
+
+# Execute `CallRendererFunction` using explicit surface scope (or isolated empty
+# model when surface_id == "") and echo `functionCallId` in AgentFunctionResponse.
+pub fn a2ui_execute_renderer_function_rpc(
+    registry: A2uiSurfaceRegistry,
+    owner_id: text,
+    op: A2uiSurfaceOp
+) -> Result<A2uiSurfaceOp, text>:
+    match op:
+        case A2uiSurfaceOp.CallRendererFunction(function_call_id, surface_id, catalog_id, function_name, args, caller_id, user_activated):
+            if function_call_id == "":
+                return Err("missing_function_call_id")
+            var data_model: [A2uiDataEntry] = []
+            if surface_id != "":
+                match registry.get_surface(owner_id, surface_id):
+                    case Some(s):
+                        data_model = s.data_model
+                    case None:
+                        return Ok(A2uiSurfaceOp.AgentFunctionResponse(
+                            function_call_id: function_call_id,
+                            ok: false,
+                            result: A2uiValue.Null,
+                            error: "unknown_surface:" + surface_id
+                        ))
+            val ctx = a2ui_function_eval_context(registry.catalog, caller_id, user_activated)
+            match a2ui_eval_catalog_function(ctx, data_model, catalog_id, function_name, args, 0):
+                case Ok(val_res):
+                    Ok(A2uiSurfaceOp.AgentFunctionResponse(
+                        function_call_id: function_call_id,
+                        ok: true,
+                        result: val_res,
+                        error: ""
+                    ))
+                case Err(err):
+                    Ok(A2uiSurfaceOp.AgentFunctionResponse(
+                        function_call_id: function_call_id,
+                        ok: false,
+                        result: A2uiValue.Null,
+                        error: err
+                    ))
+        case _:
+            Err("expected_call_renderer_function_op")
 
 fn _lower_component_to_widget(surface: A2uiSurfaceState, comp_id: text, depth: i64) -> Result<WidgetNode, text>:
     if depth > 64:
@@ -590,4 +651,4 @@ pub fn a2ui_admit_wire_json(json_text: text, limits: JsonParseLimits) -> Result<
 
 export A2uiDataEntry, A2uiBindingDep, A2uiSurfaceState, A2uiSurfaceRegistry
 export a2ui_surface_get_data, a2ui_surface_find_component, a2ui_surface_affected_components
-export a2ui_surface_to_ui_tree, a2ui_op_to_json, a2ui_action_to_json, a2ui_admit_wire_json
+export a2ui_surface_to_ui_tree, a2ui_op_to_json, a2ui_action_to_json, a2ui_admit_wire_json, a2ui_execute_renderer_function_rpc

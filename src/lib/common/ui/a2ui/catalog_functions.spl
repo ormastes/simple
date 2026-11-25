@@ -1,0 +1,188 @@
+#![allow(primitive_api)] # Catalog function evaluator enforces caller/activation booleans and recursion depth budgets
+# A2UI Basic Catalog Function Evaluator & RPC Correlation (§8.4, §11.6, §22)
+#
+# Evaluates registered Basic v1.0 catalog functions:
+#   - `formatString` (pure, caller binding/agent/renderer): resolves `${/path}`
+#     against the active surface data model (or isolated empty model when
+#     surface_id == "") and `${name}` against args.
+#   - `required` (pure, caller binding/renderer): validates bound/literal values.
+#   - `openUrl` (effectful, requiresUserActivation=true, caller=user_action):
+#     validates https/http URLs, forbids javascript:/data:/file: and control bytes.
+
+use std.common.ui.a2ui.types.{
+    A2uiValue,
+    A2uiObjectEntry,
+    A2uiDataEntry,
+    A2uiArgPresence,
+    a2ui_obj_get,
+    a2ui_data_get,
+    a2ui_value_as_text
+}
+use std.common.ui.a2ui.catalog.{
+    A2uiCatalog,
+    a2ui_catalog_check_function_call
+}
+
+pub struct A2uiFunctionEvalContext:
+    catalog: A2uiCatalog
+    caller_id: text
+    user_activated: bool
+    max_depth: i64
+
+pub fn a2ui_function_eval_context(
+    catalog: A2uiCatalog,
+    caller_id: text,
+    user_activated: bool
+) -> A2uiFunctionEvalContext:
+    A2uiFunctionEvalContext(
+        catalog: catalog,
+        caller_id: caller_id,
+        user_activated: user_activated,
+        max_depth: 16
+    )
+
+fn _resolve_binding_arg(
+    ctx: A2uiFunctionEvalContext,
+    v: A2uiValue,
+    data_model: [A2uiDataEntry],
+    depth: i64
+) -> Result<A2uiValue, text>:
+    match v:
+        case A2uiValue.Path(p):
+            match a2ui_data_get(data_model, p):
+                case A2uiArgPresence.Present(dv): Ok(dv)
+                case A2uiArgPresence.Omitted: Ok(A2uiValue.Null)
+        case A2uiValue.Object(entries):
+            match a2ui_obj_get(entries, "call"):
+                case A2uiArgPresence.Present(A2uiValue.Text(fn_name)):
+                    val cat_id = match a2ui_obj_get(entries, "catalogId"):
+                        case A2uiArgPresence.Present(A2uiValue.Text(cid)): cid
+                        case _: ctx.catalog.catalog_id
+                    val fn_args = match a2ui_obj_get(entries, "args"):
+                        case A2uiArgPresence.Present(A2uiValue.Object(ae)): ae
+                        case _: []
+                    a2ui_eval_catalog_function(ctx, data_model, cat_id, fn_name, fn_args, depth + 1)
+                case _:
+                    Ok(v)
+        case _:
+            Ok(v)
+
+fn _eval_format_string(
+    ctx: A2uiFunctionEvalContext,
+    data_model: [A2uiDataEntry],
+    args: [A2uiObjectEntry],
+    depth: i64
+) -> Result<A2uiValue, text>:
+    val raw_tmpl = match a2ui_obj_get(args, "value"):
+        case A2uiArgPresence.Present(v):
+            val rv = _resolve_binding_arg(ctx, v, data_model, depth)?
+            a2ui_value_as_text(rv)
+        case A2uiArgPresence.Omitted:
+            match a2ui_obj_get(args, "template"):
+                case A2uiArgPresence.Present(tv):
+                    val rtv = _resolve_binding_arg(ctx, tv, data_model, depth)?
+                    a2ui_value_as_text(rtv)
+                case A2uiArgPresence.Omitted:
+                    return Err("missing_format_string_value")
+
+    var out = ""
+    var i = 0
+    val n = raw_tmpl.byte_len()
+    while i < n:
+        val b = raw_tmpl.byte_at(i)
+        if b == 36 and i + 1 < n and raw_tmpl.byte_at(i + 1) == 123: # "${"
+            var j = i + 2
+            var found_close = false
+            while j < n:
+                if raw_tmpl.byte_at(j) == 125: # '}'
+                    found_close = true
+                    break
+                j = j + 1
+            if not found_close:
+                return Err("unterminated_format_interpolation")
+            val expr = raw_tmpl.substring(i + 2, j).trim()
+            if expr.starts_with("/"):
+                match a2ui_data_get(data_model, expr):
+                    case A2uiArgPresence.Present(dv): out = out + a2ui_value_as_text(dv)
+                    case A2uiArgPresence.Omitted: ()
+            elif expr != "":
+                match a2ui_obj_get(args, expr):
+                    case A2uiArgPresence.Present(av):
+                        val rav = _resolve_binding_arg(ctx, av, data_model, depth)?
+                        out = out + a2ui_value_as_text(rav)
+                    case A2uiArgPresence.Omitted:
+                        ()
+            i = j + 1
+        else:
+            out = out + raw_tmpl.substring(i, i + 1)
+            i = i + 1
+    Ok(A2uiValue.Text(value: out))
+
+fn _eval_required(
+    ctx: A2uiFunctionEvalContext,
+    data_model: [A2uiDataEntry],
+    args: [A2uiObjectEntry],
+    depth: i64
+) -> Result<A2uiValue, text>:
+    val raw = match a2ui_obj_get(args, "value"):
+        case A2uiArgPresence.Present(v): v
+        case A2uiArgPresence.Omitted: return Ok(A2uiValue.Bool(value: false))
+    val resolved = _resolve_binding_arg(ctx, raw, data_model, depth)?
+    val ok = match resolved:
+        case A2uiValue.Null: false
+        case A2uiValue.Bool(b): b
+        case A2uiValue.Text(s): s.trim() != ""
+        case A2uiValue.Array(items): items.len() > 0
+        case A2uiValue.Int(_): true
+        case A2uiValue.Number(_): true
+        case A2uiValue.Path(_): false
+        case A2uiValue.Ref(_): true
+        case A2uiValue.Object(entries): entries.len() > 0
+    Ok(A2uiValue.Bool(value: ok))
+
+fn _is_safe_http_url(url: text) -> bool:
+    if url.byte_len() == 0 or url.byte_len() > 2048:
+        return false
+    if not (url.starts_with("https://") or url.starts_with("http://")):
+        return false
+    var i = 0
+    val n = url.byte_len()
+    while i < n:
+        val b = url.byte_at(i)
+        if b < 32 or b == 127 or b == 32:
+            return false
+        i = i + 1
+    true
+
+fn _eval_open_url(args: [A2uiObjectEntry]) -> Result<A2uiValue, text>:
+    val url = match a2ui_obj_get(args, "url"):
+        case A2uiArgPresence.Present(A2uiValue.Text(u)): u
+        case _: return Err("missing_or_invalid_url_arg")
+    if not _is_safe_http_url(url):
+        return Err("unsafe_url_scheme_or_bytes")
+    Ok(A2uiValue.Object(entries: [
+        A2uiObjectEntry(key: "opened", value: A2uiValue.Bool(value: true)),
+        A2uiObjectEntry(key: "url", value: A2uiValue.Text(value: url))
+    ]))
+
+# Evaluate an A2UI catalog function against an explicit (possibly empty) surface data model.
+pub fn a2ui_eval_catalog_function(
+    ctx: A2uiFunctionEvalContext,
+    data_model: [A2uiDataEntry],
+    catalog_id: text,
+    function_name: text,
+    args: [A2uiObjectEntry],
+    depth: i64
+) -> Result<A2uiValue, text>:
+    if depth > ctx.max_depth:
+        return Err("function_eval_depth_exceeded")
+    a2ui_catalog_check_function_call(ctx.catalog, catalog_id, function_name, ctx.caller_id, ctx.user_activated)?
+    if function_name == "formatString":
+        return _eval_format_string(ctx, data_model, args, depth)
+    if function_name == "required":
+        return _eval_required(ctx, data_model, args, depth)
+    if function_name == "openUrl":
+        return _eval_open_url(args)
+    Err("unimplemented_catalog_function:" + function_name)
+
+export A2uiFunctionEvalContext, a2ui_function_eval_context, a2ui_eval_catalog_function
