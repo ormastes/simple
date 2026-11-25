@@ -1,5 +1,5 @@
 # Seed interpreter diverges from native on `if val v = x.?:` and `return`-inside-value-match-arm
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — native bugs #182/#183 verified fixed; residual is a seed-only interpreter landmine (won't fix, seed slated for retirement)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -167,3 +167,27 @@ No native-compiler code changes were made — both #182 and #183 were already
 fixed. Only `scripts/check/native-smoke-matrix.shs` was extended (cases
 16/17) to guard the #182 fix going forward, plus this doc.
 
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree)
+
+Re-checked on `release/1.0.0` tip. The two native-codegen bugs this doc was
+filed around are fixed and guarded:
+
+- `git merge-base --is-ancestor f10db44f0f477e839562654672a1531d58c881c4 HEAD` — OK (#182 fix).
+- `git merge-base --is-ancestor 5a63936b50e430c9036cbb698f410d41a91cf5bc HEAD` — OK (#183 fix).
+- Regression guards `write_case_match_value` / `write_case_match_value_return`
+  (cases 16/17) are present in `scripts/check/native-smoke-matrix.shs:281,298,516-517`.
+
+The residual finding — the **Rust bootstrap seed interpreter** mis-evaluating
+`if val v = x.?:` and `return`-inside-value-match-arm — is unchanged by design:
+the seed is bootstrap-only and slated for retirement, the divergence is already
+documented as a known seed landmine in
+`src/compiler/50.mir/mir_lowering_stmts.spl` and
+`reference_interpreter_dict_and_value_quirks.md`, and fixing the seed
+interpreter is out of scope for pure-Simple source work on this branch.
+**Verdict: native bugs STALE-CLOSED; interpreter divergence triaged as
+seed-only won't-fix.** Live re-run of `native-smoke-matrix.shs` was not
+possible in this lane: the pinned seed binary at `bin/simple.exe` rejects the
+`@representation_boundary` decorator added tree-wide by cfd89933699, so every
+`bin/simple.exe test`/compile at HEAD fails before reaching any subject code.
+Verification above is by commit ancestry and code inspection.

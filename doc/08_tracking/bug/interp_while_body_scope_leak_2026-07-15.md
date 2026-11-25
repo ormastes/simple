@@ -1,5 +1,6 @@
 # Interpreter while-body locals leak into enclosing scope
 ## Closed 2026-09-16 — Status RESOLVED 2026-09-06: executable proof spec landed and passing
+## Re-verified 2026-11-25 by code inspection (runtime re-run blocked by seed/decorator incompatibility at release/1.0.0 HEAD)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
@@ -75,3 +76,26 @@ fixed          : Files: 1   Passed: 6   Failed: 0
 That is also the discrimination evidence for this spec: it is not vacuous, and
 it detected a real regression the first time it was run.
 
+
+## Re-verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree)
+
+The resolution described above is present in current source:
+
+- `src/compiler/10.frontend/core/interpreter/eval_stmts.spl:678-685` — the
+  statement-`while` evaluator wraps each iteration's body in
+  `env_push_scope()` / `env_pop_scope()` (same pattern in the `for` loops and
+  match arms).
+- `src/compiler/10.frontend/core/interpreter/env.spl:62-66,68-74` —
+  `_reset_scope_buckets` mutates the recycled bucket row in place, the fix for
+  the second defect (`interp_scope_slot_reuse_stale_bucket_heads_2026-09-06`).
+- Proof spec `test/01_unit/compiler_core/interpreter/while_body_scope_spec.spl`
+  exists (5,320 bytes).
+
+Attempted re-run: `SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/compiler_core/interpreter/while_body_scope_spec.spl
+--mode=interpreter` fails before reaching the spec with
+`error: semantic: ... unknown decorator '@representation_boundary'` — the
+known release/1.0.0 HEAD source/binary inconsistency (pinned Rust seed
+v1.0.0-rc.1 vs tree-wide decorator commit cfd89933699), not a regression of
+this fix. **Verdict: STALE-CLOSED, confirmed by code inspection; runtime
+re-verification environment-blocked.**

@@ -278,3 +278,25 @@ JIT-module-drop guard defect requiring live re-compile verification,
 already blocked by an unrelated environment breakage per the record.
 Seed/JIT-side, out of pure-Simple fix scope. Leaving OPEN.
 
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree) — close CONFIRMED, supersedes the "Leaving OPEN" triage
+
+The trailing "Triage 2026-09-13 ... Leaving OPEN" note above is contradicted by
+the live-compile close earlier in this same file (2026-09-13, exit 0, `.smf`
+produced) and is superseded by this check.
+
+Content re-verified on `release/1.0.0` tip:
+`grep -n '\.ty\b' src/compiler/35.semantics/lint/primitive_api.spl` returns
+exactly one hit, line 28 — a comment (`# objects. This file used to
+field-access '.ty'/'.name' ...`). No `.ty` field access on a flat-text entry
+exists anywhere in the file, so the named defect ("cannot infer field type
+... struct 'String' field 'ty'") cannot occur. The in-source NOTE recording
+the `_pf_name_of`/`_pf_type_of` flat-text fix is present.
+
+Live re-compile of the file was not possible in this lane: the pinned seed
+binary at `bin/simple.exe` rejects the `@representation_boundary` decorator
+added tree-wide by cfd89933699, so every compile/test at HEAD fails before
+reaching subject code. The 2026-09-13 live compile (exit 0) plus today's
+decisive content check stand as the evidence.
+
+**Verdict: STALE-CLOSED. Status: CLOSED.** No patch applied; none needed.
