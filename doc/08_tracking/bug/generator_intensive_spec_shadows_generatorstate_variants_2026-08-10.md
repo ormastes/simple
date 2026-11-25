@@ -1,6 +1,6 @@
 # generator_intensive_spec.spl shadows GeneratorState with different variants
 
-Status: OPEN (P3)
+Status: RESOLVED 2026-11-25 — shadow replaced by documented mirror of the real 4-variant enum (see dated note at bottom)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 - **File**: `test/unit/lib/nogc_async_mut/generator_intensive_spec.spl:17` (531 lines)
@@ -89,4 +89,27 @@ byte-identical at `Results: 33 total, 33 passed, 0 failed`.
 Test-only dedup (spec shadows real GeneratorState product enum with
 different variants) -- cleanup task across a 531-line spec, not a
 functional defect. Leaving OPEN, out of this lane's per-item scope.
+
+## Verification 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ e3902cdaa78)
+
+Closed as STALE. The 2026-08-10 "FIXED (partially, via documented mirror)"
+section above is the resolution: the shadow `Yielded`/`Completed` enum was
+replaced by a documented mirror of the real 4-variant `GeneratorState`, which
+is exactly what the body's unblock condition allows short of the separate
+package-parse bug. Confirmed by inspection:
+
+- `test/01_unit/lib/nogc_async_mut/generator_intensive_spec.spl:29-33`
+  declares `enum GeneratorState { Created, Suspended(next_value: i64, env: i64),
+  Running, Completed }` with a header comment documenting the mirror and
+  pointing at `generator_async_runtime_module_fails_to_parse_2026-08-10.md`.
+- The duplicate `test/unit/lib/nogc_async_mut/generator_intensive_spec.spl`
+  twin no longer exists (legacy `test/unit/` tree removed), so the
+  two-copy dedup concern is moot.
+
+LIMIT: spec re-execution environment-blocked on this host (pinned seed
+2026-11-17 predates the 2026-11-25 `@representation_boundary` annotations,
+`cfd89933699`; every `bin/simple.exe test` run aborts in the test runner
+before loading the spec). The 2026-08-10 executed evidence (33/33 both legs)
+stands as the last run. The remaining true-import blocker is tracked by the
+separate `generator_async_runtime_module_fails_to_parse_2026-08-10.md`.
 

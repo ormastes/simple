@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** RESOLVED 2026-11-25 (fix verified in-tree; see dated note at bottom)
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/**` (contested GPU/browser-engine area)
 
@@ -116,3 +116,25 @@ src/compiler_rust and copying `libspl_fonts.so` to `build/bootstrap/lib/`
 (the SFFI examples need it; host LiberationSerif TTF present). The single
 residual is the bearing_y example above — the documented font-metric
 disagreement, not an API gap. Row closed as fixed with evidence.
+
+## Verification 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ e3902cdaa78)
+
+Closed as STALE (fix already landed and previously verified 2026-11-09).
+Re-confirmed by code inspection on this worktree:
+
+- Fix commit `d01f25ea796` is an ancestor of `origin/release/1.0.0`
+  (`git merge-base --is-ancestor` passes).
+- `BeLayoutBox.content_x` stored field present
+  (`src/lib/gc_async_mut/gpu/browser_engine/layout_box.spl:28`).
+- `BeRenderResult.warnings` present and populated
+  (`browser_renderer.spl:45,121`).
+- `browser_render_vector_font_probe_pixels` present
+  (`text_painter.spl:47`).
+
+LIMIT: spec re-execution was environment-blocked on this host — the tracked
+pinned seed `bin/simple.exe` (built 2026-11-17, commit 41dbae93225) predates
+the 2026-11-25 mass `@representation_boundary` annotation commit
+(`cfd89933699`) and aborts on `src/lib/nogc_sync_mut/sffi/cli_args.spl:9`
+before any spec loads, so no `bin/simple.exe test` run is possible against
+current source on Windows. The 2026-11-09 executed evidence (13/14, residual
+= documented bearing_y font-metric disagreement) stands as the last run.
