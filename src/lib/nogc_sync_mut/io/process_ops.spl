@@ -394,6 +394,10 @@ pub fn process_owned_start_pinned_v3(pin: OwnedExecutablePin, args: [text], inpu
         lease: OwnedProcessLease(handle: words[0], released: false, collected: false),
         version: words[1], accepted: accepted, runtime_error: words[3]))
 
+pub enum ObservationPinMode:
+    Unpinned
+    Pinned
+
 # Process-observation V1 authority boundary. This owner deliberately has no
 # public constructor and never exposes the runtime handle.
 pub class ProcessObservationOwnerV1:
@@ -402,7 +406,7 @@ pub class ProcessObservationOwnerV1:
     pid: i64
     deadline_ms: i64
     term_grace_ms: i64
-    pinned: bool
+    pin_mode: ObservationPinMode
     pin_digest: [u8]
     var stdout_bytes: [u8]
     var stderr_bytes: [u8]
@@ -446,7 +450,7 @@ fn _process_observation_empty_start_v1(
         spawned: false, pid: 0,
         lease: ProcessObservationOwnerV1(
             provider: provider, handle: 0, pid: 0, deadline_ms: 0,
-            term_grace_ms: 0, pinned: false, pin_digest: [],
+            term_grace_ms: 0, pin_mode: ObservationPinMode.Unpinned, pin_digest: [],
             stdout_bytes: [], stderr_bytes: [], stdout_seen: 0,
             stderr_seen: 0, stdout_kept: 0, stderr_kept: 0,
             stdout_truncated: false, stderr_truncated: false,
@@ -505,13 +509,13 @@ fn _process_observation_live_owner_v1(
     request: ObservedProcessRequestV1,
     handle: i64,
     pid: i64,
-    pinned: bool,
+    pin_mode: ObservationPinMode,
     digest: [u8]
 ) -> ProcessObservationOwnerV1:
     ProcessObservationOwnerV1(
         provider: provider, handle: handle, pid: pid,
         deadline_ms: request.deadline_ms, term_grace_ms: request.term_grace_ms,
-        pinned: pinned, pin_digest: digest,
+        pin_mode: pin_mode, pin_digest: digest,
         stdout_bytes: [], stderr_bytes: [], stdout_seen: 0, stderr_seen: 0,
         stdout_kept: 0, stderr_kept: 0, stdout_truncated: false,
         stderr_truncated: false, terminal: false, deadline_exceeded: false,
@@ -524,21 +528,21 @@ fn _process_observation_cleanup_pending_start_v1(
     request: ObservedProcessRequestV1,
     handle: i64,
     pid: i64,
-    pinned: bool,
+    pin_mode: ObservationPinMode,
     digest: [u8]
 ) -> ObservedProcessStartV1:
     ObservedProcessStartV1(
         status: ObservedProcessStartStatusV1.CleanupPending,
         spawned: true, pid: pid,
         lease: _process_observation_live_owner_v1(
-            provider, request, handle, pid, pinned, digest),
+            provider, request, handle, pid, pin_mode, digest),
         failure_reason: ObservedProcessFailureReasonV1.CleanupIncomplete)
 
 fn _process_observation_finish_start_v1(
     provider: ProcessObservationProviderV1,
     request: ObservedProcessRequestV1,
     words: [i64],
-    pinned: bool,
+    pin_mode: ObservationPinMode,
     digest: [u8]
 ) -> ObservedProcessStartV1:
     if words.len() != OWNED_PROCESS_V3_START_WORDS or words[1] != 1:
@@ -556,7 +560,7 @@ fn _process_observation_finish_start_v1(
         val _cancel = unsafe(capabilities: [ffi]):
             rt_process_owned_v3_cancel_value(words[0])
         return _process_observation_cleanup_pending_start_v1(
-            provider, request, words[0], 0, pinned, digest)
+            provider, request, words[0], 0, pin_mode, digest)
     val metadata: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_observation_value(words[0])
     if metadata.len() != PROCESS_OBSERVATION_METADATA_WORDS_V1 or
@@ -566,9 +570,9 @@ fn _process_observation_finish_start_v1(
         val _cancel = unsafe(capabilities: [ffi]):
             rt_process_owned_v3_cancel_value(words[0])
         return _process_observation_cleanup_pending_start_v1(
-            provider, request, words[0], 0, pinned, digest)
+            provider, request, words[0], 0, pin_mode, digest)
     val owner = _process_observation_live_owner_v1(
-        provider, request, words[0], metadata[1], pinned, digest)
+        provider, request, words[0], metadata[1], pin_mode, digest)
     ObservedProcessStartV1(
         status: ObservedProcessStartStatusV1.Started, spawned: true,
         pid: metadata[1], lease: owner,
@@ -615,13 +619,13 @@ pub(package) fn process_observation_owner_start_v1(
                 request.stdout_limit + request.stderr_limit)
         val _closed: Result<bool, text> = pin.close()
         return _process_observation_finish_start_v1(
-            provider, request, raw, true, digest_result.unwrap())
+            provider, request, raw, ObservationPinMode.Pinned, digest_result.unwrap())
     val raw = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_start_value(
             request.command, request.args, [], request.deadline_ms,
             request.term_grace_ms,
             request.stdout_limit + request.stderr_limit)
-    _process_observation_finish_start_v1(provider, request, raw, false, [])
+    _process_observation_finish_start_v1(provider, request, raw, ObservationPinMode.Unpinned, [])
 
 pub(package) fn process_observation_owner_start_pinned_v1(
     pin: OwnedExecutablePin,
@@ -647,7 +651,7 @@ pub(package) fn process_observation_owner_start_pinned_v1(
             request.term_grace_ms,
             request.stdout_limit + request.stderr_limit)
     _process_observation_finish_start_v1(
-        provider, request, raw, true, digest_result.unwrap())
+        provider, request, raw, ObservationPinMode.Pinned, digest_result.unwrap())
 
 fn _process_observation_append_v1(target: [u8], chunk: [u8]):
     var i = 0
@@ -861,7 +865,7 @@ pub(package) fn process_observation_owner_capture_collect_v1(
             user_cpu_ms: metadata[5], system_cpu_ms: metadata[6],
             max_rss_kib: metadata[7] / 1024, available: rusage_available),
         executable_pin: ObservedExecutablePinV1(
-            pinned: lease.pinned, replacement_known: false,
+            pinned: lease.pin_mode == ObservationPinMode.Pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: ObservedProcessFailureReasonV1.None,
         output_complete_observed: true, stream_counts_observed: true,
@@ -888,7 +892,7 @@ fn _process_observation_result_error_v1(
             lease.stderr_truncated),
         rusage: observed_process_empty_rusage_v1(),
         executable_pin: ObservedExecutablePinV1(
-            pinned: lease.pinned, replacement_known: false,
+            pinned: lease.pin_mode == ObservationPinMode.Pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
         failure_reason: reason, output_complete_observed: lease.output_complete_observed,
         stream_counts_observed: lease.stream_counts_observed,
@@ -1521,6 +1525,10 @@ extern fn rt_process_observation_v6_reserved_start_deferred_admitted_value(token
 @unsafe(reason: "same submitting thread; one zero-wait pending trace/error/cleanup step", capabilities: [ffi])
 extern fn rt_process_observation_v6_reserved_poll_launch_value(token: i64, retire: i64) -> i64
 
+pub enum LaunchRetirementMode:
+    KeepRunning
+    Retire
+
 pub class ProcessObservationReservationV4:
     token: i64
     executable: OwnedExecutablePin
@@ -1586,18 +1594,20 @@ pub class ProcessObservationReservationV4:
     # Pending cancellation is not terminal proof. Keep polling on the SAME
     # submitting OS thread until ObservationAvailable, then use existing observe
     # and durable-before-ack flow. retire applies only while launch is pending.
-    pub fn poll_launch_v6(self, retire: bool = false) -> Result<ProcessLaunchProgressV6, text>:
+    pub fn poll_launch_v6(self, retire: LaunchRetirementMode = LaunchRetirementMode.KeepRunning) -> Result<ProcessLaunchProgressV6, text>:
         if self.released: return Err("process reservation already released")
+        val retire_flag = if retire == LaunchRetirementMode.Retire: 1 else: 0
         val value = unsafe(capabilities: [ffi]):
-            rt_process_observation_v6_reserved_poll_launch_value(self.token, if retire: 1 else: 0)
+            rt_process_observation_v6_reserved_poll_launch_value(self.token, retire_flag)
         if value < 0: return Err("deferred process progress unavailable; reservation retained: {value}")
         process_launch_progress_decode_v6(value)
 
-    pub fn observe(self, caller_wait_ns: i64, retire: bool) -> Result<ProcessObservationReceiptV4, text>:
+    pub fn observe(self, caller_wait_ns: i64, retire: LaunchRetirementMode) -> Result<ProcessObservationReceiptV4, text>:
         if self.released: return Err("process reservation already released")
+        val retire_flag = if retire == LaunchRetirementMode.Retire: 1 else: 0
         val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_reserved_observe_value(
-                self.token, caller_wait_ns, if retire: 1 else: 0)
+                self.token, caller_wait_ns, retire_flag)
         val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; reservation retained")?
         self.validate_receipt(receipt)
 
