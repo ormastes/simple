@@ -180,3 +180,28 @@ scope; the six `rv32-*`/`rv64-*` logs preserve the observations.
 - Declared firmware operands that start with `-` fail closed instead of being
   reinterpreted as QEMU options.
 - Regression coverage: `test/01_unit/os/qemu_firmware_projection_v1_spec.spl`.
+
+## Verification 2026-11-25 (p2w4-ad lane, release/1.0.0 @ ef6a94f8a03)
+
+Confirms the 2026-11-05 FIXED status (PR #6938). At HEAD:
+
+- `src/os/_QemuRunner/scenario_exec.spl:492` — `_build_scenario_command_impl`
+  routes `scenario.qemu_bios` through `qemu_firmware_args_v1` and fails
+  closed (empty command) on `Err`, before any `-kernel` is pushed.
+- Behavioral probe of `qemu_firmware_args_v1` on the pinned seed
+  (`SIMPLE_LIB=src bin/simple.exe run <probe> --mode=interpreter`):
+  `default`/`none`/custom-path pass through as the `bios` field, `""`
+  selects no `-bios`, a declared operand starting with `-` errors
+  ("invalid operand"), a declared value conflicting with an extra `-bios`
+  errors ("conflicts with extra arguments"), and a consistent extra
+  `-bios opensbi.bin` is adopted with the remaining extras preserved —
+  every case matching the regression spec's contract.
+- `test/01_unit/os/qemu_firmware_projection_v1_spec.spl` is in the tree.
+
+Limit: the spec itself was not executed — the pinned seed cannot load the
+test runner at this HEAD (`unknown decorator '@representation_boundary'`,
+cfd89933699), and no QEMU boot was attempted from this Windows host (no
+board evidence claimed, matching the record's own scope note).
+
+**Status: RESOLVED** — source fix and projection semantics verified; board
+bring-up transcript remains a separate board-evidence item, not a code gap.
