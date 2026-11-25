@@ -166,3 +166,30 @@ Exact and adjacent regressions live in
 `scripts/check/check-test-runner-cover-admission.shs`.
 Status remains OPEN / TEST_BLOCKED pending execution with a qualified self-hosted
 CLI. No new behavioral PASS is claimed.
+
+## 2026-11-25 verification (P2 fleet, release/1.0.0 @ d1b74b3fa1d)
+
+Item 2 (gate mis-reported as test failures / whole-directory abort) — the
+2026-11-03 "source repair candidate" IS in-tree at HEAD, confirmed by
+inspection:
+
+- `src/app/test_runner_new/cover_admission.spl:21` emits the named
+  `COVER ADMISSION FAILED ... test not executed` row;
+- `src/app/test_runner_new/test_runner_main.spl:419` prints per-file admission
+  failures and `:1386` classifies results via
+  `test_file_result_outcome_class(r) == "ADMISSION"` — policy rejection is a
+  separate outcome class from executed test failures, as the 2026-11-03 note
+  describes;
+- the regression spec `test/01_unit/app/test_runner_new/cover_admission_spec.spl`
+  and checker `scripts/check/check-test-runner-cover-admission.shs` both exist.
+
+Execution of that spec remains environment-blocked on this host: the tracked
+release/1.0.0 binary rejects the `@representation_boundary` decorator carried
+by release/1.0.0 source, so `bin/simple.exe test` aborts before any spec runs
+(known seed/source inconsistency, not this bug). Status therefore stays
+OPEN / TEST_BLOCKED exactly as the 2026-11-03 note left it — no new PASS is
+claimed.
+
+Item 1 (791 missing `# @cover` annotations) remains an owner-by-owner content
+migration program, out of scope for a single lane; nothing here fabricates
+annotations.

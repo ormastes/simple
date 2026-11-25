@@ -89,3 +89,31 @@ pre-exist at base: 37 passed/3 failed of 40 before this change). Adjacent
 codegen (`src/compiler_rust/.../codegen.rs`) supports no enum types at all
 ("VHDL backend unsupported type id ... Enum") — diagnostic-only seed path,
 out of scope for this fix.
+
+## 2026-11-25 verification (P2 fleet, release/1.0.0 @ d1b74b3fa1d)
+
+The "Status: open" header above is stale — the 2026-11-05 fix section is the
+current state. Confirmed by inspection at HEAD:
+
+- Fix commit `2b7f81fbe1c` ("fix(rtl): cross-module enum resolution in VHDL
+  entry-file facade ...") is an ancestor of HEAD.
+- `_simple_vhdl_resolve_imported_type_decls` exists at
+  `src/compiler/80.driver/driver_compile_vhdl_source_map.spl:228` and is wired
+  into `_compile_simple_vhdl_subset` at line 35 (pre-pass before
+  `_simple_vhdl_source_to_text`).
+- Both regression cases exist in
+  `test/03_system/compiler/vhdl_source_facade_spec.spl` (relative cross-module
+  import at :934; std-lib `hardware.nand_emu.nand_types.NeLatchKind` import at
+  :963).
+
+Execution re-verification is environment-blocked on this host: the tracked
+release/1.0.0 binary (`bin/simple.exe`, Rust seed v1.0.0-rc.1) rejects the
+`@representation_boundary` decorator that release/1.0.0 source now carries
+(940 annotations, commit cfd89933699), so both `bin/simple.exe test` (fails
+loading `src/app/test_runner_new/test_runner_client.spl:9`) and a direct
+`run`-mode probe importing `compiler.driver.driver_api` (fails at
+`secure_set_u8_length`) abort before reaching the facade. Verified by code
+inspection only; no new execution evidence is claimed.
+
+Status: RESOLVED (fix in-tree, spec-covered; execution check blocked by the
+known seed/source decorator inconsistency, not by this bug).

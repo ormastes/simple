@@ -112,3 +112,38 @@ Fix order: blocker 2 must be closed (or `.from()` re-expressed with an
 AOT-sound Option test) before the sugar is wired, or wiring it ships a
 fail-open capability check.
 
+
+## Triage 2026-11-25 (P2 fleet, release/1.0.0 @ d1b74b3fa1d) — both named blockers resolved; a third, seed-side defect is now the blocker
+
+Measured on the tracked release/1.0.0 binary (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1) with scratch probes (not committed):
+
+1. **Blocker 1 (sugar unwired / unparseable) — RESOLVED.** `trait AB with
+   A, B:` parses and runs on the pinned binary (`fn main(): print "ok"` →
+   `ok`). Independently, `desugar_traits` now has a real caller:
+   `src/app/desugar/mod.spl:214` (`desugar_source` pipeline), reachable via
+   the `bin/simple desugar` CLI command
+   (`src/app/cli/_CliMain/main_and_help.spl:667-668`).
+2. **Blocker 2 (`if val` fail-open in generated `.from()`) — RESOLVED in
+   source.** `_gen_group_froms`
+   (`src/app/desugar/trait_desugar.spl:119-206`) no longer emits `if val`;
+   the capability check is a `match __oN: Some(_)/_` over each accessor
+   result (AOT-sound Option test), followed by single-value acquisition —
+   exactly the re-expression this entry demanded. (AOT execution could not be
+   re-run here: `native-build` on the pinned binary aborts on the known
+   `@representation_boundary` seed/source inconsistency, so this half is
+   verified by code inspection.)
+3. **New/remaining blocker — group dispatch is broken in the seed runtime.**
+   A class implementing `A` and `B`, passed as `AB`, fails at runtime:
+   `Runtime error: Function 'AB.a_id' not found` (reproduced 2026-11-25 on the
+   pinned binary; same measurement recorded in
+   `src/lib/common/debug/debug_profiler.spl` header and in
+   `trait_group_with_sugar_status_f5_2026-08-09.md`). Until the seed's
+   supertrait/group dispatch resolves member calls, `debug_profiler.spl`
+   cannot be converted to the `with` form.
+
+Classification: the remaining defect lives in the Rust seed
+(`src/compiler_rust/**`); this lane may not rebuild the seed, so no source fix
+is landed here. Left OPEN, re-scoped to the dispatch defect. Companion status
+doc `trait_group_with_sugar_status_f5_2026-08-09.md` carries the same
+2026-11-25 measurement.

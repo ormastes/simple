@@ -177,3 +177,22 @@ Slice fixed: the 3 stale baseline lines the guard named
 Remaining (kept open): 421 new diverged pairs and 61 unallowlisted mirror-only
 files. Each needs reviewed per-pair triage (canonical vs shadow); do NOT
 `--generate-baseline` over them without reading the diff.
+
+## 2026-11-25 verification (P2 fleet, release/1.0.0 @ d1b74b3fa1d) — RESOLVED
+
+The premise of this entry no longer exists: the duplicate shadow trees were
+consolidated into the canonical trees and the guard itself was retired.
+
+- `test/unit/` and `test/integration/` do not exist at HEAD (consolidated by
+  `df80cbb5939` "test: consolidate remaining test/unit -> test/01_unit
+  (squashed onto release/1.0.0)" and predecessors — both ancestors of HEAD).
+- `scripts/check/check-test-tree-divergence.shs` and
+  `scripts/check/test_tree_divergence_baseline.txt` were removed by
+  `abb2fe62cc6` "chore(check): retire test-tree divergence guard (legacy test
+  trees consolidated)" (2026-11-09, ancestor of HEAD).
+- The 2026-11-05 re-measurement above (421 new diverged / 61 mirror-only) is
+  therefore superseded: with the shadow trees gone there is nothing left to
+  diverge. Verified by inspection (`ls`, `git ls-tree`, `git merge-base`);
+  the guard script can no longer be run because it no longer exists.
+
+Status: RESOLVED (structural fix — tree consolidation), not merely diagnosed.
