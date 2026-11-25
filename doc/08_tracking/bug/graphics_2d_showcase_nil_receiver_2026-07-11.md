@@ -1,8 +1,21 @@
 # Graphics 2D showcase nil-receiver crash
-## Open 2026-09-16 — needs owner triage
+## Triage 2026-11-25 — ledger index records closed 2026-08-17; runtime confirmation environment-blocked here
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+Triage 2026-11-25 (work/p2w2-aa-20261125): the ledger index
+(`doc/08_tracking/bug/recent_bugs.md` line 1027) records this bug as
+**closed 2026-08-17**, but this doc's own body was never updated and still
+says Open. Runtime confirmation is not possible from this Windows host: the
+repro (`bin/simple run examples/06_io/ui/graphics_2d_showcase.spl`, file
+present at HEAD `8aa26f51e72`) requires the self-hosted binary (the pinned
+tracked Rust seed cannot load `src/lib` at HEAD — it rejects the
+`@representation_boundary` decorator) and a display/present path for the GUI
+acceptance legs. Left un-merged with the index: treat as closed per
+`recent_bugs.md` unless a fresh headless run on a self-hosted binary
+reproduces the `field access on nil receiver` trap; if it does, reopen with
+that evidence.
 
 ## Status
 

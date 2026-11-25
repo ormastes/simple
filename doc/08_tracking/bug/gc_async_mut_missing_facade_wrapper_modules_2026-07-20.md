@@ -1,5 +1,18 @@
 # `gc_async_mut` tier missing facade wrapper modules for several subsystems (`compression`, `database.sql`, ...)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-03 (verified fixed; behaviorally re-verified 2026-11-05) — see closing sections at end
+
+Verified 2026-11-25 (work/p2w2-aa-20261125) at release/1.0.0 HEAD
+(`8aa26f51e72`): the facade modules exist —
+`src/lib/gc_async_mut/compression/` (lz4/zlib/gzip/snappy/brotli/types/utilities)
+and `src/lib/gc_async_mut/database/sql/` (escape, codec, connection, pool,
+`__init__.spl`, ...) are both present, matching the 2026-11-03 repair
+(`e72ff56c06e`) and the 2026-11-05 behavioral re-verification recorded below.
+Behavioral re-run on this host is environment-blocked (pinned tracked Rust
+seed rejects `@representation_boundary` in test-runner infrastructure at HEAD);
+this pass confirms the facade files exist and the earlier green evidence
+stands. The "Open" header below was stale bookkeeping; the closing sections
+("Closed 2026-11-03", "Behavioral re-verification 2026-11-05") are the
+authoritative record.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
