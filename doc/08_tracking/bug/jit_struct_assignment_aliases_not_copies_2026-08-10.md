@@ -1,6 +1,7 @@
 # BUG: JIT struct assignment ALIASES instead of copying (interpreter copies)
 
-Status: OPEN (P2)
+Status: CLOSED 2026-11-05 (mirp2-E3 closure, see bottom section; header
+corrected 2026-11-25 — it previously still read OPEN after the closure).
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 > **MOSTLY RESOLVED 2026-08-10 — stale-binary measurement.** The binary
@@ -241,3 +242,20 @@ Residual 2 (`m[1][0] = 9`) now agrees: JIT and interpret both print
 Residual 3 is the seed AOT/native lane, which is not a bootstrap lane (seed is
 bootstrap-only; AOT struct semantics are owned by the pure-Simple backend).
 CLOSED.
+
+## Verification 2026-11-25 (P2 ledger sweep, Windows worktree)
+
+Re-ran the deep-copy probe on the pinned tracked binary (`bin/simple.exe`,
+38,403,072 B, refreshed 2026-11-17 by `41dbae93225`), both engines:
+
+```
+$ bin/simple.exe run test/03_system/language/value_semantics/probe/p2_nested_struct_field.spl          # JIT
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run test/03_system/language/value_semantics/probe/p2_nested_struct_field.spl
+PROBE|CONTROL=42
+PROBE|S2 o.inner.a=99.0
+PROBE|S2b o.inner.a=99.0 o2.inner.a=33.0     # identical on both engines
+```
+
+`o.inner.a` keeps its original value under the JIT — the deep-copy fix holds
+on the tracked binary. The closure above stands; this note only corrects the
+header, which still read "OPEN (P2)".

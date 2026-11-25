@@ -213,3 +213,32 @@ nested form `case Some(Evt.Click(x))` additionally binds the payload to nil.
 Pinned verbatim by the spec's third `it` so the numbers cannot move unnoticed.
 Tracked under
 enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md.
+
+## Verification 2026-11-25 (P2 ledger sweep, Windows worktree) — RESOLVED on the tracked binary
+
+The tracked pinned binary `bin/simple.exe` (38,403,072 B, Rust seed
+v1.0.0-rc.1, last refreshed by `41dbae93225` on 2026-11-17) now postdates the
+seed fix `94bb1e16459` (2026-11-03). Re-ran this record's own fixture on both
+engines:
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple.exe run test/fixtures/repro/compiler/enum/enum_match_after_option_unwrap_repro.spl
+1 direct              = A7
+2 payload after !     = A7
+3 payloadless after ! = Green
+4 match Option direct = A7    <-- was FALLTHROUGH on every pre-refresh binary
+```
+
+Default (JIT) mode prints the identical four rows, row 4 = `A7`.
+
+The interpreter defect this record tracks is RESOLVED on the binary every
+lane actually runs. Stated limit: the two regression specs
+(`test/01_unit/compiler/interpreter/option_enum_match_variant_spec.spl`,
+`test/01_unit/compiler_core/interpreter/option_wrapped_enum_match_variant_spec.spl`)
+could not be executed via `bin/simple.exe test` at this HEAD — the pinned
+seed rejects `@representation_boundary` (added repo-wide by `cfd89933699`)
+inside the test runner itself, so every `test` invocation fails before any
+example runs. The fixture run above is the direct execution evidence. The
+JIT residual for explicit `Some(...)` construction shapes remains open under
+`enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md`, exactly
+as the 2026-11-05 note records; it is out of scope for this record.
