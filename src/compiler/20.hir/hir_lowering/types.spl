@@ -1113,15 +1113,21 @@ impl HirLowering:
         # snapshot, so the HIR-root walk promotes it (and a failure there
         # already fails the HIR promotion).
         val table = self.symbols
+        # Root cause + Stage 2 gating:
+        # 1) `reset_module()` allocates `Scope(0)` BEFORE `rt_transient_array_scope_begin()`,
+        #    and backends allocate structs with `rt_alloc` (not `rt_struct_alloc`), so
+        #    `Scope(0)` is absent from `rt_transient_raw_allocs`/`rt_struct_allocs` and
+        #    `rt_transient_heap_promote(table.scopes)` stops at `Scope(0)` without
+        #    walking `Scope(0).binding_versions_v1` (unlike `table.root_scope_symbols`).
+        # 2) Scope.binding_versions_v1 also keeps the FIRST text object inserted for a
+        #    spelling across unbind/rebind tombstones. Explicit typed locals (`Scope` and
+        #    `Dict<text, i64>`) ensure frozen Stage 2 does not lose field types into
+        #    generic `rt_transient_heap_promote<T>`. Advisory: false = already persistent.
         # @workaround bug=s3_binding_versions_keys_freed_transient_scope_2026-11-19 reason=promote_unreached_first_key
-        # Scope.binding_versions_v1 keeps the FIRST text object inserted for a
-        # spelling. After unbind/rebind that object is held by no other
-        # container, and the promotions below never reach it: the HIR cache
-        # then stored freed keys ("", "1", heap-pointer bytes). Promote each
-        # scope's version dict as its own root. Advisory: a false result means
-        # the dict is already persistent, which is the pre-workaround state.
         for scope_id in table.scopes.keys():
-            val _versions_promoted = rt_transient_heap_promote(table.scopes[scope_id].binding_versions_v1)
+            val scope: Scope = table.scopes[scope_id]
+            val binding_versions: Dict<text, i64> = scope.binding_versions_v1
+            val _versions_promoted = rt_transient_heap_promote(binding_versions)
         val symbols_ok = rt_transient_heap_promote(table.symbols)
         val scopes_ok = rt_transient_heap_promote(table.scopes)
         val gpu_targets_ok = rt_transient_heap_promote(table.gpu_function_targets)
