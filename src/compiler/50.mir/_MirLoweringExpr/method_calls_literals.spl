@@ -3648,8 +3648,10 @@ impl MirLowering:
         # constructors. Preserve declared associated methods and instances.
         var enum_constructor_allowed = resolution_is_unresolved
         var recv_enum_name = static_receiver_name
+        var recv_enum_symbol_id: i64 = -1
         if resolved_static_receiver_symbol >= 0:
             recv_enum_name = self.enum_constructor_symbol_owner(SymbolId(id: resolved_static_receiver_symbol))
+            recv_enum_symbol_id = resolved_static_receiver_symbol
             if recv_enum_name == "": enum_constructor_allowed = false
         else:
             var receiver_declaration_id: i64 = -1
@@ -3667,6 +3669,7 @@ impl MirLowering:
                     match receiver_declaration.kind:
                         case SymbolKind.Enum:
                             recv_enum_name = self.enum_constructor_symbol_owner(SymbolId(id: receiver_declaration_id))
+                            recv_enum_symbol_id = receiver_declaration_id
                             if recv_enum_name == "": enum_constructor_allowed = false
                         case _: enum_constructor_allowed = false
             if not has_receiver_declaration:
@@ -3693,7 +3696,7 @@ impl MirLowering:
             for variant_name in variant_names:
                 if variant_name == method: is_variant = true
             if is_variant:
-                return self.lower_enum_construct_named(recv_enum_name, method, args)
+                return self.lower_enum_construct_named(recv_enum_name, method, args, recv_enum_symbol_id)
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] enum-owner method={method}\n")
 
@@ -3991,7 +3994,7 @@ impl MirLowering:
         # builtin set and reuse it in every non-static dispatch path.
         var dict_recv_local: LocalId = 0
         var dict_recv_lowered = false
-        val is_dict_method_name = method == "items" or method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete" or method == "set" or method == "clear"
+        val is_dict_method_name = method == "items" or method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "get_or" or method == "remove" or method == "delete" or method == "set" or method == "clear"
         # Resolved custom remove/delete may need indexed/field writeback below;
         # do not pre-evaluate those receivers. Their unresolved Dict fallback
         # keeps its existing behavior.
@@ -4634,6 +4637,74 @@ impl MirLowering:
             # residual. Call the `as_option: true` reader directly so the
             # guard is actually reachable.
             return self.lower_dict_runtime_read(receiver, receiver_local, key_local, true)
+
+        if receiver_is_dict and method == "get_or":
+            if args.len() != 2:
+                return self.builtin_extra_fail_closed("Dict.get_or expects 2 arguments (key, default)", Some(receiver.span))
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: (if has_prelowered_method_receiver: prelowered_method_receiver else: self.lower_expr(receiver))
+            val key_local = self.lower_dict_key(args[0].value, Some(receiver))
+            val default_local = self.lower_expr(args[1].value)
+            val contains_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_contains"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ), call_origin: MirCallOrigin.Runtime)
+            var b_go = self.builder
+            val has_call = b_go.emit_call(contains_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
+            val has_raw = has_call ?? b_go.new_temp(MirType.i64())
+            val zero_go = b_go.emit_const_int(0)
+            val has_bool = b_go.emit_binop(MirBinOp.Ne, mir_operand_copy(has_raw), mir_operand_copy(zero_go), MirType.bool())
+            self.builder = b_go
+
+            val dict_value_hir = self.resolve_dict_value_hir_type_v1(receiver, receiver_local)
+            var result_type = self.resolve_dict_read_mir_type_v1(receiver, receiver_local, dict_value_hir)
+            if _sffi_enum_discriminant<MirTypeKind>(result_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64):
+                if val default_mir_type = self.local_mir_type_of(default_local):
+                    if _sffi_enum_discriminant<MirTypeKind>(default_mir_type.kind) != _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.I64) and _sffi_enum_discriminant<MirTypeKind>(default_mir_type.kind) != _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Unit):
+                        result_type = default_mir_type
+            if not self.mir_type_is_str(result_type) and self.local_is_str(default_local):
+                result_type = self.bootstrap_text_type()
+
+            var b_split = self.builder
+            val then_block = b_split.new_block(Some("dict_get_or_hit"))
+            val else_block = b_split.new_block(Some("dict_get_or_miss"))
+            val merge_block = b_split.new_block(Some("dict_get_or_merge"))
+            val result_local = b_split.new_temp(result_type)
+            b_split.terminate_if(mir_operand_copy(has_bool), then_block, else_block)
+            self.builder = b_split
+
+            var b_then = self.builder
+            b_then.switch_to_block(then_block)
+            self.builder = b_then
+            val present_local = self.lower_dict_runtime_read(receiver, receiver_local, key_local, false, false, Some(result_type))
+            b_then = self.builder
+            b_then.emit_copy(result_local, present_local)
+            b_then.terminate_goto(merge_block)
+            self.builder = b_then
+
+            var b_else = self.builder
+            b_else.switch_to_block(else_block)
+            self.builder = b_else
+            b_else.emit_copy(result_local, default_local)
+            b_else.terminate_goto(merge_block)
+            self.builder = b_else
+
+            var b_merge = self.builder
+            b_merge.switch_to_block(merge_block)
+            self.builder = b_merge
+            val get_or_arms = [present_local, default_local]
+            self.remember_merged_arm_identity(result_local, get_or_arms)
+            if self.runtime_array_locals.contains(present_local.id) or self.runtime_array_locals.contains(default_local.id):
+                self.runtime_array_locals[result_local.id] = true
+            if self.runtime_dict_locals.contains(present_local.id) or self.runtime_dict_locals.contains(default_local.id):
+                self.runtime_dict_locals[result_local.id] = true
+            if self.struct_value_syms.contains(present_local.id):
+                self.struct_value_syms[result_local.id] = self.struct_value_syms[present_local.id]
+            elif self.struct_value_syms.contains(default_local.id):
+                self.struct_value_syms[result_local.id] = self.struct_value_syms[default_local.id]
+            var joined_result = self.join_untyped_optional_arms(result_local, get_or_arms)
+            if joined_result.id == result_local.id:
+                joined_result = self.join_untyped_text_arms_v1(result_local, get_or_arms)
+            return joined_result
 
         # `.remove(key)` / `.delete(key)` -> rt_dict_remove (mutates in place,
         # returns whether the key was present -- discarded here). The oracle

@@ -1,0 +1,95 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, regression
+"""
+# MIR lowering of method calls on inferred receivers and Dict/Option/Result projections
+
+Bug: doc/08_tracking/bug/mir_unresolved_method_inferred_receiver_2026-10-24.md.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+
+val PROV_SRC = "pub struct Staged:\n    result: Result<i64, text>\npub fn decode_it() -> Result<i64, text>:\n    Ok(1)\npub fn load_staged() -> Staged:\n    Staged(result: Ok(2))\n"
+
+val SINGLE_BATCH_SRC = "use lib.prov.{{Staged, decode_it, load_staged}}\n" +
+    "struct Item:\n    v: i64\n" +
+    "struct M:\n    x: i64\n" +
+    "struct Ctx:\n    m_bool: Dict<i64, bool>\n    m_text: Dict<i64, text>\n    m_opt_bool: Dict<i64, bool?>\n    m_opt_text: Dict<i64, text?>\n" +
+    "struct S:\n    id: i64\n" +
+    "struct B:\n    n: i64\n" +
+    "enum K:\n    If(c: i64, e: B?)\n" +
+    "var tbl: Dict<text, text> = {{}}\n" +
+    "fn get_item(a: bool) -> Item?:\n    if a: Some(Item(v: 1)) else: nil\n" +
+    "fn mk_m() -> Result<M, text>:\n    Ok(M(x: 1))\n" +
+    "fn mk_s(n: i64) -> S?:\n    Some(S(id: n))\n" +
+    "fn check_it(x: i64) -> Result<i64, text>:\n    if x < 0: Err(\"neg\") else: Ok(x)\n" +
+    "fn c01_inferred_opt_unwrap(a: bool) -> i64:\n    val it = get_item(a)\n    if it == nil: return 0\n    it.unwrap().v\n" +
+    "fn c02_chained_opt_unwrap() -> i64:\n    get_item(true).unwrap().v\n" +
+    "fn c03_if_nil_array_unwrap(c: bool, xs: [text]) -> i64:\n    val opt = if c: xs else: nil\n    if opt.is_none(): return 0\n    opt.unwrap().len()\n" +
+    "fn c04_if_err_result(c: bool) -> i64:\n    val r = if c: mk_m() else: Err(\"bad\")\n    if r.is_err(): return r.unwrap_err().len()\n    r.unwrap().x\n" +
+    "fn c05_dict_bool_get_and_opt_index(c: Ctx, id: i64) -> bool:\n    val b1 = c.m_bool.get(id)\n    val b2 = c.m_opt_bool[id]\n    if b1.? and b1.unwrap() and b2.?: return b2.unwrap()\n    false\n" +
+    "fn c06_dict_var_get_or(k: text) -> text:\n    tbl.get_or(k, \"\")\n" +
+    "fn c07_dict_local_get_or(k: text) -> text:\n    val local_tbl: Dict<text, text> = {{}}\n    local_tbl.get_or(k, \"\")\n" +
+    "fn c08_chained_substring_bytes_and_trim_parse(s: text) -> i64:\n    val a = s.substring(0, 2).bytes().len()\n    val b = s.trim().parse_i64() ?? 0\n    a + b\n" +
+    "fn c09_match_opt_unwrap(x: i64) -> i64:\n    val o = match x:\n        case 1: mk_s(1)\n        case _: nil\n    if o.is_none(): return 0\n    o.unwrap().id\n" +
+    "fn c10_err_opt_unwrap(x: i64) -> text:\n    val r = check_it(x)\n    if r.is_err(): return r.err().unwrap()\n    \"ok\"\n" +
+    "fn c11_paren_arith_max(a: i64, b: i64, c: i64) -> i64:\n    (a + b).max(c)\n" +
+    "fn c12_if_array_index_substring(xs: [text], i: i64, c: bool) -> text:\n    val s = if c: xs[i].substring(0, 1) else: \"\"\n    s\n" +
+    "fn c13_pattern_opt_unwrap(k: K) -> i64:\n    match k:\n        case K.If(_, e):\n            if e.?: return e.unwrap().n\n            0\n" +
+    "fn c14_cross_module_result_inferred() -> bool:\n    val decoded = decode_it()\n    if decoded.is_err(): return false\n    val staged = load_staged()\n    staged.result.is_err()\n" +
+    "fn c15_dict_text_get_and_opt_index(c: Ctx, id: i64) -> text:\n    val s1 = c.m_text.get(id).unwrap()\n    val s2 = c.m_opt_text[id].unwrap()\n    s1 + s2\n" +
+    "fn c16_if_nil_dict_and_tuple_unwrap(c: bool, d: Dict<text, i64>, t: (i64, text)) -> i64:\n    val opt_d = if c: d else: nil\n    if opt_d.is_none(): return 0\n    val d2 = opt_d.unwrap()\n    val opt_t = if c: t else: nil\n    if opt_t.is_none(): return 0\n    d2.get_or(\"k\", 0) + opt_t.unwrap().0\n" +
+    "fn c17_untyped_dict_get_or_text_len(k: text) -> i64:\n    val d = {{}}\n    val v = d.get_or(k, \"fallback\")\n    v.len()\n"
+
+fn collect_batch_errors() -> [text]:
+    val log = Logger(level: 0)
+    val prov_ast = parse_full_frontend(PROV_SRC, "lib/prov.spl", "lib.prov", log)
+    val app_ast = parse_full_frontend(SINGLE_BATCH_SRC, "app/main.spl", "app.main", log)
+    var modules: Dict<text, ParserModule> = {}
+    modules["lib.prov"] = prov_ast
+    modules["app.main"] = app_ast
+    val sources = [
+        SourceFile(path: "lib/prov.spl", content: PROV_SRC, module_name: "lib.prov"),
+        SourceFile(path: "app/main.spl", content: SINGLE_BATCH_SRC, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl_prov = hirlowering_for_module("lib.prov", surfaces)
+    val hir_prov = hl_prov.lower_module(prov_ast)
+    var hl_app = hirlowering_for_module("app.main", surfaces)
+    val hir_app = hl_app.lower_module(app_ast)
+    var hir_mods: Dict<text, HirModule> = {}
+    hir_mods["lib.prov"] = hir_prov
+    hir_mods["app.main"] = hir_app
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var ml = MirLowering.new_for_target(hir_app.symbols, target)
+    ml.prescan_module_struct_names(hir_mods, "lib.prov")
+    ml.prescan_module_struct_names(hir_mods, "app.main")
+    val _mir = ml.lower_module(hir_app, [hir_prov, hir_app], true)
+    var out: [text] = []
+    for e in hl_prov.errors:
+        out = out.push("HIR(prov): " + e.message)
+    for e in hl_app.errors:
+        out = out.push("HIR(app): " + e.message)
+    for e in ml.errors:
+        var loc = "?"
+        if val sp = e.span:
+            loc = "{sp.file}:{sp.line}"
+        out = out.push("MIR({loc}): " + e.message)
+    out
+
+describe "MIR unresolved method on inferred receiver":
+    it "lowers all inferred receiver shapes without unresolved method errors":
+        val errs = collect_batch_errors()
+        if errs.len() > 0:
+            for e in errs:
+                print "  {e}"
+        expect(errs).to_equal([])
