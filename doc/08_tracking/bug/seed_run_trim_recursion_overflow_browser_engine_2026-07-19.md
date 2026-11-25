@@ -1,7 +1,8 @@
 # Seed interpreter: stack overflow in 'trim' (recursion depth 1000) loading browser_engine module graph
 
 - **ID:** seed_run_trim_recursion_overflow_browser_engine_2026-07-19
-- **Status:** OPEN
+- **Status:** RESOLVED (verified 2026-11-25 — module graph loads cleanly on
+  the pinned seed; see verification note at end)
 - **Severity:** medium (blocks `bin/simple run` on any program importing the
   browser_engine module graph; compounds the tracked test-runner init hang)
 - **Lane:** Rust bootstrap seed, hosted Linux (`bin/simple run`)
@@ -39,3 +40,15 @@ iterative or raise/eliminate the recursion — likely a pathological input in
 one of the large browser_engine sources (e.g. multi-thousand-entry literal
 arrays around simple_web_html_layout_renderer.spl:6959-7013). Preferred per
 repo policy: land the self-hosted redeploy and retire seed-lane usage here.
+
+## Verification 2026-11-25 (release/1.0.0, Windows host, pinned seed bin/simple.exe v1.0.0-rc.1)
+
+Re-ran the repro shape against the tracked pinned seed: a minimal script
+`use gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.*` +
+`fn main(): print "loaded"`, executed via
+`SIMPLE_LIB=src bin/simple.exe run`, now loads the full browser_engine module
+graph and prints `loaded` (~150 s wall on this host) with **no**
+`stack overflow: recursion depth 1000 ... in function 'trim'` abort. The
+seed-side trim recursion no longer overflows on this module graph at
+release/1.0.0 HEAD. Marking resolved; the hosted verification-route impact
+described above no longer applies to this repro.

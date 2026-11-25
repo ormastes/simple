@@ -1,9 +1,11 @@
 # `bin/simple test` (in-process AND nested-subprocess) can silently turn `[u8]` (array) extern arguments into empty results — two distinct, same-shaped, NOT-yet-reconciled observations
 
 - **Filed:** 2026-07-20
-- **Status:** open (root cause narrowed for observation 1, not confirmed
-  for observation 2 — see "Two observations" below; not fixed; not chased
-  further, out of scope for the fix that found it)
+- **Status:** observation 1 FIXED (verified 2026-11-25 — SSpec `it`-block
+  marshaling repro now returns the real conversion; see verification note at
+  end). Observation 2 remains open and unverified — its only repro lane
+  (`bin/simple test` ancestor) is blocked by the known
+  `@representation_boundary` seed/source inconsistency.
 - **Severity:** high — affects any extern function taking an array-typed
   argument called (directly or via a spawned `bin/simple run` subprocess)
   anywhere downstream of `bin/simple test`; silent (no error, no crash), so
@@ -339,3 +341,37 @@ and the C-level behavior still differs, the divergence is happening above
 `rt_bytes_to_text` entirely and this doc's C-level framing does not apply
 to observation 2. Either result meaningfully narrows this down — right now
 neither has been checked.
+
+## Verification 2026-11-25 (release/1.0.0, Windows host, pinned seed bin/simple.exe v1.0.0-rc.1)
+
+**Observation 1 — FIXED, verified.** The doc's exact minimal repro (an
+`extern fn rt_bytes_to_text(bytes: [u8]) -> text` called with a 2-element
+`[u8]` literal inside a `describe`/`it` block, which executes via the
+tree-walking SSpec interpreter even under `run`) now returns the real
+conversion:
+
+```
+SSPEC len=2 text=[AB]
+  ✓ encodes a 2-byte array literal to text
+1 example, 0 failures
+SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0 ...
+```
+
+via `SIMPLE_LIB=src bin/simple.exe run <repro>` — no silent empty result.
+The in-process SSpec marshaling gap no longer reproduces at release/1.0.0
+HEAD.
+
+**Observation 2 — still open, verification blocked.** Its only confirmed
+repro requires a `bin/simple test` ancestor process, and `bin/simple.exe
+test` fails repo-wide at HEAD with `unknown decorator
+'@representation_boundary'` (known seed/source inconsistency). The
+subprocess-probe guard spec
+(`test/03_system/interpreter/char_from_code_non_ascii_system_spec.spl`)
+still tolerates the `gap:rt_bytes_to_text_env...` outcome, so the gap is not
+claimed fixed. Note for whoever re-verifies: running the probe standalone
+via `run` today prints `fail:U+0080 expected_len=2 actual_len=1` — that is
+NOT this bug and NOT a canary failure (the `rt_bytes_to_text` canary passes);
+it is the probe's byte-count expectations going stale after the
+`text.len()` -> character-count / `byte_len()` semantics split
+(commit 4183b795175). The probe needs `byte_len()` before it can guard
+anything again.
