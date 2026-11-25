@@ -1,13 +1,13 @@
 # @req REQ-SSPEC-COMPILER
 """
-# Static generic class factories lower with T substituted (typeparam-mir-20261031)
+# Static generic class factories lower with T erased (typeparam-mir-20261031)
 
 `Future.from_value(x)` / `Future.pending()` -- static fns of a generic class --
 reached MIR with `T` unsubstituted in the frozen stage2 (`E-MIR-TYPE-TypeParam`),
-so `src/lib/nogc_async_mut/io/buffer.spl` and three cache modules build Futures
-directly under a concrete return type (tagged `bug=typeparam-mir-20261031`).
+so `src/lib/nogc_async_mut/io/buffer.spl` and three cache modules temporarily
+built Futures directly under a concrete return type (`typeparam_mir_2026-10-31`).
 Current source (generic erasure; monomorphization deleted) lowers the original
-shape: the consumer module reports no HIR/MIR diagnostic at all.
+shapes directly: the consumer module reports no HIR/MIR diagnostic at all.
 Bug: doc/08_tracking/bug/typeparam_mir_2026-10-31.md
 """
 
@@ -75,4 +75,11 @@ describe "static generic class factory call sites (typeparam-mir-20261031)":
     it "Fut.from_value of a Result payload (io.buffer shape) lowers cleanly":
         val out = lower_consumer(IMP, "fn c(x: Result<[u8], RErr>) -> Fut<Result<[u8], RErr>>:\n    Fut.from_value(x)\n")
         expect(out.contains("TypeParam")).to_equal(false)
+        expect(out).to_equal("")
+
+    it "refill Ok(data).slice(0, take) with untyped if-expr and Fut.from_value/pending lowers cleanly":
+        val body = "fn _extract(p: Poll<Result<[u8], RErr>>) -> Result<[u8], RErr>:\n    match p:\n        case Poll.Ready(r): r\n        case Poll.Pending: Err(RErr.Busy)\n\nfn d(p: Poll<Result<[u8], RErr>>, size: i64) -> Fut<Result<[u8], RErr>>:\n    match p:\n        case Poll.Ready(_):\n            val res: Result<[u8], RErr> = _extract(p)\n            match res:\n                case Ok(data):\n                    val filled = data.len()\n                    val take = if size < filled: size else: filled\n                    val chunk = data.slice(0, take)\n                    return Fut.from_value(Ok(chunk))\n                case Err(e):\n                    return Fut.from_value(Err(e))\n        case Poll.Pending:\n            return Fut.pending()\n"
+        val out = lower_consumer(IMP, body)
+        expect(out.contains("TypeParam")).to_equal(false)
+        expect(out.contains("unresolved method call")).to_equal(false)
         expect(out).to_equal("")
