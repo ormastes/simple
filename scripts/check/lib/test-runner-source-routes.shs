@@ -1,0 +1,166 @@
+#!/bin/sh
+# Qualify actual source routes with an explicit native runner and child.
+# Port of the former test-runner-source-routes.py (repo rule: .spl/.shs only).
+#
+# usage: test-runner-source-routes.shs --runner EXE --child EXE --out DIR [--verify-existing]
+#   --verify-existing  verify pinned existing receipts; collect missing full diagnostic evidence only
+set -eu
+LC_ALL=C; export LC_ALL
+
+runner=""; child=""; out=""; verify=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --runner) runner="$2"; shift 2 ;;
+        --child) child="$2"; shift 2 ;;
+        --out) out="$2"; shift 2 ;;
+        --verify-existing) verify=1; shift ;;
+        *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+[ -n "$runner" ] && [ -n "$child" ] && [ -n "$out" ] \
+    || { echo "error: --runner, --child and --out are required" >&2; exit 2; }
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+abspath() { case "$1" in /*|[A-Za-z]:*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd -P)" "$1" ;; esac; }
+runner=$(abspath "$runner"); child=$(abspath "$child"); out=$(abspath "$out")
+for exe in "$runner" "$child"; do
+    [ -f "$exe" ] && [ -x "$exe" ] || { echo "error: not an executable: $exe" >&2; exit 2; }
+done
+if [ "$verify" = 0 ]; then
+    [ ! -e "$out" ] || { echo "error: output exists: $out" >&2; exit 2; }
+    mkdir -p "$out/tmp"
+fi
+digest() { sha256sum "$1" | cut -d' ' -f1; }
+# field FILE KEY -> value of "KEY: value" line
+field() { sed -n "s/^$2: //p" "$1" | head -n 1; }
+
+if [ "$verify" = 1 ]; then
+    if [ "$(field "$out/identity.sdn" runner_sha256)" != "$(digest "$runner")" ] \
+        || [ "$(field "$out/identity.sdn" child_sha256)" != "$(digest "$child")" ]; then
+        echo "error: existing receipt executable identities changed" >&2; exit 2
+    fi
+    rows_file="$out/rows.verified.sdn"
+else
+    { echo "runner_sha256: $(digest "$runner")"
+      echo "child_sha256: $(digest "$child")"
+      echo "source_head: $(git -C "$repo" rev-parse HEAD)"; } > "$out/identity.sdn"
+    rows_file="$out/rows.sdn"
+fi
+for key in $(env | cut -d= -f1 | grep -E '^(SIMPLE_BOOTSTRAP_SESSION|SIMPLE_NATIVE_BUILD|SIMPLE_MANAGED_)' || true); do
+    unset "$key"
+done
+SIMPLE_BINARY="$child"; SIMPLE_TEST_BINARY="$child"; SIMPLE_LIB="$repo/src"
+SIMPLE_PROJECT_ROOT="$repo"; TMPDIR="$out/tmp"; SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=4194304
+export SIMPLE_BINARY SIMPLE_TEST_BINARY SIMPLE_LIB SIMPLE_PROJECT_ROOT TMPDIR SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+timeout_sh="$repo/scripts/bootstrap/run-process-group-timeout.shs"
+cd "$repo"
+
+failures=0; index=0; count=0; rows_tmp="$out/.rows.$$"
+: > "$rows_tmp"
+for path in "$repo"/test/fixtures/test_runner_source_routes/calibration/*; do
+    [ -e "$path" ] || continue
+    count=$((count + 1))
+    name=${path##*/}
+    case "$name" in *green*) expected=0 ;; *) expected=1 ;; esac
+    doctest=""
+    case "$name" in comment_*|slashcomment_*|doublecomment_*|docstring_*|mixed_*) doctest="--spl-doctest" ;; esac
+    start=$(date +%s)
+    if [ "$verify" = 1 ]; then
+        if [ "$(field "$out/rows.sdn" "case_${index}_input")" != "$name" ] \
+            || [ "$(field "$out/rows.sdn" "case_${index}_sha256")" != "$(digest "$path")" ]; then
+            echo "error: existing fixture identity changed: $name" >&2; exit 2
+        fi
+        actual=$(field "$out/rows.sdn" "case_${index}_actual")
+    else
+        set +e
+        SIMPLE_PROCESS_TREE_RSS_RECEIPT="$out/$name.rss.env" sh "$timeout_sh" 30 2 "$runner" "$path" \
+            --mode=interpreter --no-cache --no-db --no-cover-check --no-self-protect --no-fork --timeout=12 \
+            $doctest > "$out/$name.stdout" 2> "$out/$name.stderr"
+        actual=$?
+        set -e
+    fi
+    shown="$out/.shown.$$"
+    cat "$out/$name.stdout" "$out/$name.stderr" > "$shown"
+    has() { grep -qF -- "$1" "$shown"; }
+    valid=0
+    [ "$actual" = "$expected" ] && ! has "Resource limit exceeded ()" && valid=1
+    case "$name" in
+        plain_early_exit_test.spl|plain_spoof_test.spl)
+            { has "structured BDD evidence unavailable" || has "no BDD examples executed"; } || valid=0 ;;
+        plain_green_test.spl) has "Results: 1 total, 1 passed, 0 failed" || valid=0 ;;
+        plain_bdd_prefix_names_green_test.spl)
+            { has "Results: 1 total, 1 passed, 0 failed" && ! has "CALIBRATION_EXPECTED_plain_bdd_prefix_names_test"; } || valid=0 ;;
+    esac
+    case "$name" in
+        mixed_empty_spec.spl) ;;
+        mixed_*) { has "Results:" && has "SPL Doctest:"; } || valid=0 ;;
+    esac
+    case "$name" in *red*)
+        seen=0
+        { has "CALIBRATION_EXPECTED_" || has "expected 41 to equal 42"; } && seen=1
+        if [ "$seen" = 0 ] && [ -n "$doctest" ] && [ "$actual" = 1 ]; then
+            # The console formatter may show engine-demotion before the panic.
+            # Capture the native worker's complete typed BlockResult stderr;
+            # source-code fields containing the panic string never count.
+            diagnostic="$out/$name.diagnostic.sdn"
+            dstatus=none
+            if ! { [ "$verify" = 1 ] && [ -f "$diagnostic" ]; }; then
+                set +e
+                SIMPLE_TEST_SDN_WORKER_AUTH=1 SIMPLE_PROCESS_TREE_RSS_RECEIPT="$out/$name.diagnostic.rss.env" \
+                    sh "$timeout_sh" 30 2 "$runner" --test-sdn-worker "--test-sdn-result=$diagnostic" "$path" \
+                    --mode=interpreter --no-cache --no-db --no-cover-check --no-self-protect --no-fork --timeout=12 \
+                    $doctest > "$out/$name.diagnostic.stdout" 2> "$out/$name.diagnostic.stderr"
+                dstatus=$?
+                set -e
+                echo "$dstatus" > "$out/$name.diagnostic.exit"
+            fi
+            if [ -f "$diagnostic" ] && { [ "$dstatus" = none ] || [ "$dstatus" = 1 ]; }; then
+                grep -qE '(^|[^[:alnum:]_])stderr: "([^"\\]|\\.)*error: semantic: panic: CALIBRATION_EXPECTED_' "$diagnostic" && seen=1
+            fi
+            if [ "$seen" = 0 ] && [ "$name" = mixed_doc_red_spec.spl ]; then
+                # Mixed native SDN serialization can fail independently after
+                # correct text results. Diagnose the EXACT same-file doctest
+                # composite with the pinned child; the original native runner
+                # must still report spec PASS and doctest FAIL.
+                dir=${path%/*}
+                expect="$out/.expect.$$"
+                { cat "$dir/spec_green_spec.spl"; echo; cat "$dir/comment_red.spl"; } > "$expect"
+                if cmp -s "$expect" "$path" \
+                    && [ "$(head -n 1 "$dir/comment_red.spl")" = '# ```simple' ] \
+                    && [ "$(tail -n 1 "$dir/comment_red.spl")" = '# ```' ]; then
+                    line=$(grep -nxF '# ```simple' "$path" | head -n 1 | cut -d: -f1)
+                    composite="$out/$name.composite.spl"
+                    { cat "$path"; printf '\n\n# --- doctest from line %s ---\nuse std.spec.*\n' "$line"
+                      sed '1d;$d' "$dir/comment_red.spl" | cut -c3-; } > "$composite"
+                    mkdir -p "$repo/.simple/doctest"
+                    temporary="$repo/.simple/doctest/acceptance_composite_$$.spl"
+                    [ ! -e "$temporary" ] || { echo "error: exists: $temporary" >&2; exit 2; }
+                    cp "$composite" "$temporary"
+                    set +e
+                    SIMPLE_PROCESS_TREE_RSS_RECEIPT="$out/$name.composite.rss.env" sh "$timeout_sh" 30 2 \
+                        "$child" "$temporary" > "$out/$name.composite.stdout" 2> "$out/$name.composite.stderr"
+                    cstatus=$?
+                    set -e
+                    rm -f "$temporary"
+                    echo "$cstatus" > "$out/$name.composite.exit"
+                    [ "$cstatus" = 1 ] \
+                        && grep -qF "error: semantic: panic: CALIBRATION_EXPECTED_comment_red" "$out/$name.composite.stderr" \
+                        && has "Results: 1 total, 1 passed, 0 failed" && has "SPL Doctest: 0 passed, 1 failed" && seen=1
+                fi
+                rm -f "$expect"
+            fi
+        fi
+        [ "$seen" = 1 ] || valid=0 ;;
+    esac
+    rm -f "$shown"
+    if [ "$valid" = 1 ]; then status=PASS; else status=FAIL; failures=$((failures + 1)); fi
+    seconds=$(( $(date +%s) - start ))
+    { echo "case_${index}_input: $name"; echo "case_${index}_sha256: $(digest "$path")"
+      echo "case_${index}_expected: $expected"; echo "case_${index}_actual: $actual"
+      echo "case_${index}_seconds: $seconds"; echo "case_${index}_status: $status"; } >> "$rows_tmp"
+    cp "$rows_tmp" "$rows_file"
+    echo "$status $name expected=$expected actual=$actual"
+    index=$((index + 1))
+done
+rm -f "$rows_tmp"
+echo "SOURCE_ROUTE_ACCEPTANCE cases=$count failures=$failures"
+[ "$failures" = 0 ]
