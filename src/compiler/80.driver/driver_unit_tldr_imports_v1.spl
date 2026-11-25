@@ -284,9 +284,27 @@ pub fn unit_tldr_relative_module_id_v1(spec_id: text, owner_path: text) -> text:
         return spec_id
     val resolved = resolve_module_path(spec_id, owner_path)
     # The resolver echoes an unresolvable spelling back; only a real file counts.
-    if resolved == "" or not resolved.ends_with(".spl") or not file_exists(resolved):
+    if resolved != "" and resolved.ends_with(".spl") and file_exists(resolved):
+        return module_logical_name_from_path(resolved)
+    # Relative `mod subdir` / `export subpkg.*` can name a directory package
+    # (`<owner_dir>/<rel>/__init__.spl` or `mod.spl`), which resolve_module_path's
+    # `.spl`-only relative branch misses.
+    if spec_id.starts_with(".."):
         return ""
-    module_logical_name_from_path(resolved)
+    val rel = spec_id.substring(1).replace(".", "/")
+    val owner_norm = owner_path.replace("\\", "/")
+    val slash = owner_norm.last_index_of("/")
+    if slash <= 0 or rel == "":
+        return ""
+    val owner_dir = owner_norm.substring(0, slash)
+    for cand in [
+        owner_dir + "/" + rel + ".spl",
+        owner_dir + "/" + rel + "/__init__.spl",
+        owner_dir + "/" + rel + "/mod.spl"
+    ]:
+        if file_exists(cand):
+            return module_logical_name_from_path(cand)
+    ""
 
 # Inventory path of an import spelling. The closure loader admits a src/lib
 # file under its canonical `lib.*` name and adds the `std.*` twin only on
