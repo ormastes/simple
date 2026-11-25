@@ -112,3 +112,15 @@ closure-materialization path; `.filter` with a block lambda reports
 "unresolved method call: filter") — tracked as residual gaps in the tail-value
 doc. Standalone-bound block lambdas compile and run correctly.
 
+## Verification 2026-11-25 (work/p2w5-ac-20261125)
+
+Confirmed the 2026-07-17 parser resolution is present at release/1.0.0 HEAD by
+code inspection: the forced-indentation mechanism the fix ported from the seed
+(`enable_forced_indentation` / `force_indent_bracket_depths`) is live in
+`src/compiler/10.frontend/core/lexer_struct.spl:2014-2019` with the bracket-depth
+stack initialized at `:211` and consumed in the indent/dedent paths
+(`:1575`, `:2008-2013`). Runtime re-verification of the self-hosted parser is
+not possible on this host: exercising it requires a self-hosted/native build,
+and the pinned seed cannot load repo modules at HEAD (`unknown decorator
+'@representation_boundary'`). The 2026-09-16 closure stands.
+
