@@ -3,8 +3,8 @@
 - **Date:** 2026-07-20
 - **Area:** `src/os/crypto/pem.spl` (and/or a base64 helper it calls)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).
-- **Status:** OPEN — root cause not fully localized, needs a source-owner
-  follow-up (see caveat below).
+- **Status:** RESOLVED 2026-09-21 by `034865a1491` (see Resolution below);
+  re-verified 2026-11-25.
 
 ## Symptom
 
@@ -61,3 +61,27 @@ the bug is inside the library's encode path.
 
 - `test/unit/lib/crypto/pem_rfc7468_kat_spec.spl` (0 examples executed —
   load failure)
+
+## Resolution (fixed 2026-09-21, verified 2026-11-25)
+
+The root cause this doc left unlocalized was found and fixed by commit
+`034865a1491` ("fix(pem): use real base64/bytes API instead of nonexistent
+list-based calls", 2026-09-21): `pem_encode`/`pem_decode`/`pem_decode_all`
+called `base64_encode(list)`/`base64_decode(list)` and `line_wrap`/
+`line_unwrap`, none of which exist; the "method `bytes` not found on type
+`array`" error came from that dead list-based API path. The fix added
+binary-safe `base64_encode_bytes([u8]) -> text` to
+`src/lib/common/base_encoding/base64.spl` and local `_line_wrap64`/
+`_line_unwrap` helpers in `src/os/crypto/pem.spl`. That commit records
+`pem_rfc7468_kat_spec.spl`: 13/13 examples pass.
+
+Re-verification 2026-11-25 (worktree at `origin/release/1.0.0` tip
+`63e791180d3`, Windows host): the spec file moved to
+`test/01_unit/lib/crypto/pem_rfc7468_kat_spec.spl`. `bin/simple.exe test`
+is not runnable at this tip (the pinned Rust seed v1.0.0-rc.1 rejects the
+`@representation_boundary` decorator used by `src/app/test_runner_new`), so
+the encode/decode path was exercised directly with a `run`-mode probe
+calling `pem_encode(_label_spki(), _der_32())` then `pem_decode` and
+comparing the recovered DER byte-for-byte: `PEM PROBE OK`, exit 0. Probe
+source retained at `test/_probe_root_tmp/pem_probe_p2w4af.spl` in that
+session only (not committed).

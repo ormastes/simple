@@ -1,8 +1,5 @@
 # HandleArena spec fails on anonymous-tuple `.0`/`.1` field access
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Resolved — verified 2026-11-25 (see Verification below)
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (likely interpreter/compiler tuple-return defect, not a lib API gap)
@@ -47,3 +44,23 @@ it needs interpreter/compiler-level investigation into anonymous tuple
 scope for this cluster-fix pass (guide: "Do NOT attempt a Rust seed source
 fix; out of scope").
 
+
+## Verification 2026-11-25 (work/p2w4-af-20261125)
+
+No longer reproducible; classified STALE. Worktree at `origin/release/1.0.0`
+tip `63e791180d3`, pinned binary `bin/simple.exe` (Rust seed v1.0.0-rc.1),
+Windows host.
+
+The spec moved to `test/01_unit/lib/engine/resource_handle_spec.spl`.
+`bin/simple.exe test` is not runnable at this tip (the seed rejects the
+`@representation_boundary` decorator used by `src/app/test_runner_new`), so
+the exact failing shapes were exercised with a `run`-mode probe against
+`std.nogc_sync_mut.engine.resource.handle.{HandleArena}` covering every
+behavior the 6 failing examples assert: `insert()` returning `(i64, i64)`
+with `.0`/`.1` positional access, `get` round-trip, `remove` + stale-handle
+nil, slot reuse with bumped generation, and new-handle retrieval.
+Result: `HANDLE PROBE OK`, exit 0. Anonymous-tuple `.0`/`.1` access on the
+`insert()` return value works correctly under the current seed; the defect
+recorded here (2/8 passing under the 2026-07-20 seed) is fixed in the
+current toolchain. Probe source was session-local
+(`test/_probe_root_tmp/handle_probe_p2w4af.spl`), not committed.
