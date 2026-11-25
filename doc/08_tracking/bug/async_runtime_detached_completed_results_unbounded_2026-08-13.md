@@ -1,6 +1,8 @@
 # Async runtime: detached completed results have no bounded consumption contract
 
-Status: OPEN (P2)
+Status: NARROW DEFECT RESOLVED 2026-11-25 (see dated note at bottom); the
+broader bounded result-domain contract remains a WP-14/WP-18 design program,
+not a bug-ledger fix.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 - **Date:** 2026-08-13
@@ -50,3 +52,29 @@ Reconfirmed via source inspection: bounded-memory contract for detached
 completed results is still unimplemented per this record's own description.
 Fix is a runtime design change (async task-result lifecycle), not a quick
 single-file fix. Left OPEN, no code change attempted.
+
+## Verification 2026-11-25 (p2w1-ag lane, source inspection)
+
+The narrow retention defect filed here is resolved in current source, and
+more strongly than the 2026-08-17 note describes:
+
+- `Runtime.run_once()` now drops results for unawaited tasks entirely:
+  `src/lib/nogc_async_mut/async/runtime.spl:226` gates the
+  `self.completed.insert(task_id, result)` on
+  `self.awaited.contains_key(task_id)`, so a detached `spawn()` leaves **no**
+  completed entry behind at all (the in-source comment at :222-225 cites this
+  exact bug doc).
+- `Runtime.block_on()` consumes and removes its own result:
+  `self.completed.remove(task_id)` at :260, with `self.awaited` cleaned up at
+  :261.
+
+So the unbounded-retention path ("a caller that uses detached `spawn()` can
+leave completed entries retained indefinitely") no longer exists. The broader
+"Expected" section — an owner-owned bounded result domain with admission
+reservations, typed terminal outcomes, and high-water counters — is the
+WP-14/WP-18 typed task-envelope design program named in the unblock
+condition; it is a design lane, not a bug-ledger fix, and is out of scope for
+this pass. Verified by source inspection only: spec execution at this HEAD is
+blocked repo-wide by the pinned seed rejecting `@representation_boundary`
+(see the 2026-11-25 note in
+`check_directory_target_false_green_2026-07-24.md`).

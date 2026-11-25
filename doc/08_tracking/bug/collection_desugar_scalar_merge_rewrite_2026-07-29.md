@@ -1,7 +1,8 @@
 # Bug: AST collection-desugar rewrites `x = x + n` to `x.merge(n)` on scalar (non-collection) targets
 
 - **Date:** 2026-07-29
-- **Status:** open
+- **Status:** RESOLVED 2026-11-25 — scalar-addend gate landed; see dated
+  verification note at bottom.
 - **Severity:** MEDIUM — silently changes program shape (Assign -> MethodCall) for a
   extremely common idiom (`total = total + item`, `x = x + 1`); found as a side
   discovery while implementing E1047 (param-mutability-semantic, lane G2), not yet
@@ -77,3 +78,31 @@ fn bump(x: i64) -> i64:
 Parse with `parse_full_frontend`, lower with `HirLowering`, inspect the resulting
 `HirStmtKind` for `bump`'s body: it is `Expr(MethodCall(NamedVar(x), "merge", [IntLit(1)]))`,
 not `Assign(NamedVar(x), Add, IntLit(1))`.
+
+## Verification 2026-11-25 (p2w1-ag lane, source inspection)
+
+RESOLVED in current source. `src/compiler/10.frontend/desugar/collection_desugar.spl`
+now carries exactly the gate this entry's "Suggested fix" asked for:
+
+- `is_definite_scalar_addend` (:159-179, added under an in-source comment
+  citing this bug) classifies int/float/bool/string/interpolated/suffixed
+  literals and unary/binary sub-expressions as provably non-collection
+  addends. The repro case `x = x + 1` (and the field form `c.n = c.n + 1`,
+  and the suffixed-literal form `c.n = c.n + 1i64`) all hit this gate.
+- Pattern B in `try_rewrite_assign_pair` returns without rewriting when the
+  gate matches (:243-245), so scalar `x = x + n` keeps its `Assign` shape.
+- The compound-assign sibling no longer rewrites to `.merge(...)` at all;
+  every non-`+=`-with-single-array-literal case stays a `CompoundAssign`
+  (:299-305, citing the follow-up bug
+  `compound_plus_assign_call_rhs_rewritten_to_merge_2026-11-06.md`).
+
+Regression coverage exists at
+`test/01_unit/compiler/frontend/collection_desugar_gate_spec.spl` (plus
+`test/01_unit/compiler/mir/scalar_compound_reassign_not_array_merge_spec.spl`
+for the MIR side). Verified by source inspection only: executing the spec at
+this HEAD is blocked repo-wide because the pinned seed binary rejects the
+`@representation_boundary` decorator (release/1.0.0 source/binary
+inconsistency, known issue). The identifier/field/call-result addend shapes
+the gate deliberately still rewrites are documented in the in-source comment
+as genuinely ambiguous without type info — that residual ambiguity is the
+pre-existing separate concern this entry already scoped out.
