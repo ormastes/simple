@@ -897,3 +897,53 @@ fn stage2_text_optional_unwrap_keeps_string_type_for_byte_at() {
         "unwrap on a nullable text must lower to a builtin, not a name-dispatched method: {body}"
     );
 }
+
+#[test]
+fn local_named_vec_index_assignment_lowers_to_index_not_vec_literal() {
+    // Bug: local_named_vec_makes_index_assignment_a_vec_literal_lvalue_2026-09-05
+    // The parser reads `vec[...]` as a SIMD VecLiteral without scope
+    // knowledge, so `vec[i] = x` on a local named `vec` reached MIR as a
+    // VecLiteral lvalue ("complex lvalue"). The bound local must win.
+    let source = concat!(
+        "fn probe() -> f64:\n",
+        "    var vec: [f64] = []\n",
+        "    var i = 0\n",
+        "    while i < 4:\n",
+        "        vec.push(0.0)\n",
+        "        i = i + 1\n",
+        "    vec[0] = 1.0\n",
+        "    1.0\n",
+    );
+    let module = parse_and_lower(source).expect("vec-local index assignment lowers");
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let assigns_index = function.body.iter().any(|stmt| match stmt {
+        HirStmt::Assign { target, .. } => matches!(target.kind, HirExprKind::Index { .. }),
+        _ => false,
+    });
+    assert!(
+        assigns_index,
+        "vec[0] = 1.0 on a bound local must lower to an Index assignment: {:?}",
+        function.body
+    );
+    assert!(
+        !function.body.iter().any(|stmt| match stmt {
+            HirStmt::Assign { target, .. } => matches!(target.kind, HirExprKind::VecLiteral(_)),
+            _ => false,
+        }),
+        "no VecLiteral lvalue may survive: {:?}",
+        function.body
+    );
+}
+
+#[test]
+fn vec_literal_assignment_target_without_local_stays_rejected() {
+    // Without a bound `vec` the rewrite must not mint an index: the shape
+    // stays a compile error (UnknownVariable at HIR), never an Index.
+    let source = "fn probe():\n    vec[0] = 1.0\n";
+    let result = parse_and_lower(source);
+    assert!(
+        result.is_err(),
+        "unbound vec[...] assignment must stay rejected, got {:?}",
+        result.map(|m| format!("{:?}", m.functions.iter().map(|f| &f.name).collect::<Vec<_>>()))
+    );
+}
