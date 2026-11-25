@@ -57,10 +57,10 @@ use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, v
 # Raw SFFI externs (interpreter + native both provide these)
 # ============================================================================
 
-@unsafe(reason: "status/out font provider loader ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
-@unsafe(reason: "status/out font symbol resolver ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
+@unsafe(reason: "raw dynamic library admission ABI", capabilities: [ffi])
+extern fn spl_dlopen(path: text) -> i64
+@unsafe(reason: "raw dynamic symbol resolution ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlsym(handle: i64, name: text) -> i64
 @unsafe(reason: "raw dynamic-library handle lifetime remains caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_dlclose(handle: i64) -> i64
 @unsafe(reason: "raw function address and dynamic argument ABI remain caller-owned", capabilities: [ffi, raw_ptr])
@@ -76,10 +76,11 @@ extern fn spl_fonts_call_init_path(fptr: i64, path: [u8]) -> i64
 extern fn spl_fonts_call_layout_text(fptr: i64, text_bytes: [u8], size_px: i64, max_width: i64) -> i64
 
 fn _font_resolve_optional(handle: i64, name: text) -> i64:
-    var symbol: i64 = 0
-    val status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_checked(handle, name, &mut symbol)
-    if status != 0 or symbol <= 0:
+    if handle <= 0 or name == "":
+        return 0
+    val symbol = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym(handle, name)
+    if symbol <= 0:
         return 0
     symbol
 
@@ -317,10 +318,11 @@ impl FontRasterizer:
         # Reject a missing provider before reading a potentially multi-megabyte
         # font. In the interpreter each byte is boxed; probing four absent
         # dylibs after loading the font can otherwise retain gigabytes of RSS.
-        var h: i64 = 0
-        val load_status = unsafe(capabilities: [ffi, raw_ptr]):
-            spl_dlopen_checked(dylib_path, &mut h)
-        if load_status != 0 or h <= 0:
+        if dylib_path == "":
+            return FontRasterizer.invalid()
+        val h = unsafe(capabilities: [ffi]):
+            spl_dlopen(dylib_path)
+        if h <= 0:
             return FontRasterizer.invalid()
         val selected = selected_font_asset_candidate_for_path(ttf_path)
         val blob = if selected.is_some():
