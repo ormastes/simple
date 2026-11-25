@@ -95,7 +95,23 @@ low_memory=${P3G_LOW_MEMORY:-0}
 reserve_bytes=${P3G_RESERVE_BYTES:-${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-}}
 min_commit_gb=${P3G_MIN_FREE_COMMIT_GB:-8}
 case "$min_commit_gb" in ''|*[!0-9]*) min_commit_gb=8 ;; esac
-lm=${SIMPLE_LLVM_MINGW_ROOT:-C:/Users/user/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64}
+lm=${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT:-}}
+if [ -z "$lm" ]; then
+    _lm_home=${HOME:-}
+    if [ -z "$_lm_home" ] && [ -n "${USERPROFILE:-}" ]; then
+        _lm_home=$(cygpath -u "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE" | tr '\\' '/')
+    fi
+    lm=$(
+        for _lm_base in "${_lm_home:+$_lm_home/.simple/toolchains}" "/c/dev/tool"; do
+            [ -n "$_lm_base" ] || continue
+            for _lm_cand in "$_lm_base"/llvm-mingw-*-ucrt-x86_64; do
+                [ -d "$_lm_cand/bin" ] || continue
+                printf '%s\t%s\n' "$(basename "$_lm_cand")" "$_lm_cand"
+            done
+        done | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -r | head -n 1 | cut -f2-
+    )
+fi
+[ -n "$lm" ] || { echo "error: llvm-mingw toolchain not found (set SIMPLE_LLVM_MINGW_ROOT or SIMPLE_MINGW_ROOT)" >&2; exit 1; }
 ar="$lm/bin/llvm-ar.exe"; [ -x "$ar" ] || ar="$lm/bin/llvm-ar"
 nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
 ps=$(command -v pwsh || command -v powershell || true)
@@ -203,7 +219,7 @@ Remove-Item Env:LIB -EA SilentlyContinue
 Remove-Item Env:INCLUDE -EA SilentlyContinue
 Remove-Item Env:LIBPATH -EA SilentlyContinue
 \$lm="$lm_win"
-\$env:PATH=\$env:PATH+";\$lm\\bin"; \$env:CC="\$lm\\bin\\clang.exe"; \$env:SIMPLE_LLVM_MINGW_ROOT=\$lm
+\$env:PATH=\$env:PATH+";\$lm\\bin"; \$env:CC="\$lm\\bin\\clang.exe"; \$env:SIMPLE_LLVM_MINGW_ROOT=\$lm; \$env:SIMPLE_MINGW_ROOT=\$lm
 # @workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01 reason=frozen_stage2_runtime_c_list_shadow_5760
 $ptree_env_line
 Set-Location "$checkout_win"

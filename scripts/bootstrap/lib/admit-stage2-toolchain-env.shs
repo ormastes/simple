@@ -2,8 +2,9 @@
 # (W13, doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md).
 # bootstrap-windows.sh / bootstrap-from-scratch.sh export these before running
 # this gate; admit-built-stage2-compiler-tests.shs runs it on its own and used
-# to need SIMPLE_LINKER_FLAVOR, LLVM_SYS_231_PREFIX and LLVM 23's bin ahead of
-# MSYS2 mingw64 (whose clang-cl.exe fails to load) set by hand.
+# to need SIMPLE_LINKER_FLAVOR, LLVM_SYS_231_PREFIX (MSVC) or
+# SIMPLE_LLVM_MINGW_ROOT / SIMPLE_MINGW_ROOT / CC (GNU), and the toolchain's
+# bin ahead of MSYS2 mingw64 set by hand.
 #
 # PLATFORM SOURCE_ROOT -> 0 with the env exported, 1 with a reason on stderr.
 # Non-Windows platforms are left untouched. The ABI comes from the admitted
@@ -12,6 +13,10 @@
 # check). MSVC LLVM prefix order: LLVM_SYS_231_PREFIX, SIMPLE_LLVM_WIN_ROOT_23,
 # host config llvm_root (scripts/setup/host-env.shs, as platform-detect.shs),
 # then the pinned toolchain locations windows-msvc-bootstrap-env.shs knows.
+# GNU llvm-mingw prefix order: SIMPLE_LLVM_MINGW_ROOT, SIMPLE_MINGW_ROOT,
+# host config mingw_root (scripts/setup/host-env.shs), then the newest valid
+# pinned llvm-mingw-*-ucrt-x86_64 under ${HOME}/.simple/toolchains or
+# /c/dev/tool.
 admit_stage2_toolchain_env() {
     case "$1" in
         *-windows-msvc) admit_env_abi=msvc ;;
@@ -31,7 +36,54 @@ admit_stage2_toolchain_env() {
     SIMPLE_WINDOWS_ABI=$admit_env_abi
     SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR:-$admit_env_abi}
     export SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
-    [ "$admit_env_abi" = msvc ] || return 0
+
+    if [ "$admit_env_abi" = gnu ]; then
+        admit_env_mingw=${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT:-}}
+        admit_env_mingw_source=environment
+        if [ -z "$admit_env_mingw" ] && [ -f "$2/scripts/setup/host-env.shs" ]; then
+            admit_env_mingw=$(sh "$2/scripts/setup/host-env.shs" --get mingw_root 2>/dev/null) ||
+                admit_env_mingw=
+            admit_env_mingw_source="host config mingw_root"
+        fi
+        if [ -z "$admit_env_mingw" ]; then
+            admit_env_mingw_source="pinned toolchain location"
+            admit_env_mingw_home=${HOME:-}
+            if [ -z "$admit_env_mingw_home" ] && [ -n "${USERPROFILE:-}" ]; then
+                admit_env_mingw_home=$(cygpath -u "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE" | tr '\\' '/')
+            fi
+            admit_env_mingw=$(
+                for admit_env_base in "${admit_env_mingw_home:+$admit_env_mingw_home/.simple/toolchains}" "/c/dev/tool"; do
+                    [ -n "$admit_env_base" ] || continue
+                    for admit_env_candidate in "$admit_env_base"/llvm-mingw-*-ucrt-x86_64; do
+                        [ -x "$admit_env_candidate/bin/clang.exe" ] &&
+                            [ -x "$admit_env_candidate/bin/ld.lld.exe" ] &&
+                            [ -x "$admit_env_candidate/bin/llvm-ar.exe" ] &&
+                            [ -f "$admit_env_candidate/x86_64-w64-mingw32/lib/libunwind.a" ] || continue
+                        printf '%s\t%s\n' "$(basename "$admit_env_candidate")" "$admit_env_candidate"
+                    done
+                done | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -r | head -n 1 | cut -f2-
+            )
+        fi
+        [ -n "$admit_env_mingw" ] &&
+            [ -x "$admit_env_mingw/bin/clang.exe" ] &&
+            [ -x "$admit_env_mingw/bin/ld.lld.exe" ] &&
+            [ -x "$admit_env_mingw/bin/llvm-ar.exe" ] &&
+            [ -f "$admit_env_mingw/x86_64-w64-mingw32/lib/libunwind.a" ] || {
+            echo "admit-stage2: no llvm-mingw UCRT toolchain (clang.exe + ld.lld.exe + llvm-ar.exe + libunwind.a) at '${admit_env_mingw}' (${admit_env_mingw_source}); set SIMPLE_LLVM_MINGW_ROOT or SIMPLE_MINGW_ROOT" >&2
+            return 1
+        }
+        SIMPLE_MINGW_ROOT=$admit_env_mingw
+        SIMPLE_LLVM_MINGW_ROOT=$admit_env_mingw
+        CC="$admit_env_mingw/bin/clang.exe"
+        export SIMPLE_MINGW_ROOT SIMPLE_LLVM_MINGW_ROOT CC
+        # llvm-mingw must shadow MSYS2 mingw64's clang.exe / ld.lld.exe.
+        case "$(command -v clang.exe 2>/dev/null || :)" in
+            "$admit_env_mingw/bin/clang.exe") ;;
+            *) PATH="$admit_env_mingw/bin:$PATH"; export PATH ;;
+        esac
+        echo "admit-stage2: toolchain env SIMPLE_WINDOWS_ABI=$SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR=$SIMPLE_LINKER_FLAVOR SIMPLE_MINGW_ROOT=$SIMPLE_MINGW_ROOT SIMPLE_LLVM_MINGW_ROOT=$SIMPLE_LLVM_MINGW_ROOT CC=$CC ($admit_env_mingw_source)" >&2
+        return 0
+    fi
 
     admit_env_prefix=${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_WIN_ROOT_23:-}}
     admit_env_prefix_source=environment

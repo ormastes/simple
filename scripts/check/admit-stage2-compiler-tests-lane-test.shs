@@ -92,20 +92,29 @@ checked=$((checked + 1))
 # W13 unit cases on the env helper.
 . "$repo/scripts/bootstrap/lib/admit-stage2-toolchain-env.shs"
 llvm="$scratch/llvm23"
-mkdir -p "$llvm/bin" "$scratch/nolld/bin"
+mingw="$scratch/llvm-mingw"
+mkdir -p "$llvm/bin" "$scratch/nolld/bin" \
+    "$mingw/bin" "$mingw/x86_64-w64-mingw32/lib" \
+    "$scratch/mingw-nounwind/bin"
 for t in clang-cl.exe lld-link.exe; do
     printf '#!/bin/sh\n' >"$llvm/bin/$t"; chmod +x "$llvm/bin/$t"
 done
 printf '#!/bin/sh\n' >"$scratch/nolld/bin/clang-cl.exe"; chmod +x "$scratch/nolld/bin/clang-cl.exe"
+for t in clang.exe ld.lld.exe llvm-ar.exe; do
+    printf '#!/bin/sh\n' >"$mingw/bin/$t"; chmod +x "$mingw/bin/$t"
+    printf '#!/bin/sh\n' >"$scratch/mingw-nounwind/bin/$t"; chmod +x "$scratch/mingw-nounwind/bin/$t"
+done
+: >"$mingw/x86_64-w64-mingw32/lib/libunwind.a"
 probe() {
     # prints "rc|abi|flavor|prefix|path-head" from a clean subshell
     (
-        unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR LLVM_SYS_231_PREFIX SIMPLE_LLVM_WIN_ROOT_23
+        unset SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR LLVM_SYS_231_PREFIX SIMPLE_LLVM_WIN_ROOT_23 \
+            SIMPLE_LLVM_MINGW_ROOT SIMPLE_MINGW_ROOT CC
         for kv in "$@"; do case "$kv" in *=*) export "$kv" ;; esac; done
         r=0
         admit_stage2_toolchain_env "$1" "$scratch/no-src" 2>/dev/null || r=$?
         printf '%s|%s|%s|%s|%s\n' "$r" "${SIMPLE_WINDOWS_ABI:-}" "${SIMPLE_LINKER_FLAVOR:-}" \
-            "${LLVM_SYS_231_PREFIX:-}" "${PATH%%:*}"
+            "${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_MINGW_ROOT:-}}" "${PATH%%:*}"
     )
 }
 want() { [ "$1" = "$2" ] || fail "env: got '$1' want '$2'"; checked=$((checked + 1)); }
@@ -114,8 +123,10 @@ want "$(probe x86_64-pc-windows-msvc SIMPLE_LLVM_WIN_ROOT_23="$llvm")" "0|msvc|m
 want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$llvm" SIMPLE_LINKER_FLAVOR=gnu | cut -d'|' -f1)" 1
 want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$llvm" SIMPLE_WINDOWS_ABI=gnu | cut -d'|' -f1)" 1
 want "$(probe x86_64-pc-windows-msvc LLVM_SYS_231_PREFIX="$scratch/nolld" | cut -d'|' -f1)" 1
-want "$(probe x86_64-pc-windows-gnu | cut -d'|' -f1-4)" '0|gnu|gnu|'
-want "$(probe x86_64-pc-windows-gnu SIMPLE_LINKER_FLAVOR=mingw | cut -d'|' -f1-3)" '0|gnu|mingw'
+want "$(probe x86_64-pc-windows-gnu SIMPLE_LLVM_MINGW_ROOT="$mingw")" "0|gnu|gnu|$mingw|$mingw/bin"
+want "$(probe x86_64-pc-windows-gnu SIMPLE_MINGW_ROOT="$mingw" SIMPLE_LINKER_FLAVOR=mingw)" "0|gnu|mingw|$mingw|$mingw/bin"
+want "$(probe x86_64-pc-windows-gnu SIMPLE_LLVM_MINGW_ROOT="$scratch/mingw-nounwind" | cut -d'|' -f1)" 1
+want "$(probe x86_64-pc-windows-gnu SIMPLE_LLVM_MINGW_ROOT="$mingw" SIMPLE_LINKER_FLAVOR=msvc | cut -d'|' -f1)" 1
 want "$(probe x86_64-unknown-linux-gnu SIMPLE_LINKER_FLAVOR=gnu | cut -d'|' -f1-4)" '0||gnu|'
 
 # W13 lane: a conflicting env is refused before an earlier rejection is superseded.
