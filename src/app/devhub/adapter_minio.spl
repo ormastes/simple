@@ -10,8 +10,6 @@ use std.io.file_ops.{file_exists, file_read_regular_no_follow_bounded_bytes}
 use std.io_runtime.{read_file_text_result}
 use std.io.http_client_core.{rt_http_request, rt_http_download, http_request_v2_raw}
 use std.common.crypto.sha256.{sha256_bytes}
-use std.common.http_curl.{curl_request_bytes}
-use std.io_runtime.{host_os}
 use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.aws_sigv4.{
@@ -477,9 +475,6 @@ fn _minio_get_checked(url: text, headers: [text]) -> (i64, text, text):
     # Typed: the runtime rejects an untyped empty array as "body must be bytes".
     val no_body: [u8] = []
     val response: (i64, text, text, [u8], text) = http_request_v2_raw("GET", url, headers, no_body, 30000)
-    # @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=The core Windows runtime has no native HTTP v2 provider; curl reports a short body itself
-    if response.0 == -1 and response.4.contains("native HTTP is unavailable"):
-        return curl_request_bytes("GET", url, headers, [])
     if response.0 == -1:
         return (0, "", response.4)
     val received: [u8] = response.3
@@ -890,27 +885,16 @@ fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], conten
     var body_error = ""
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
         body_error = ""
-        # @workaround bug=windows_core_http_client_unavailable_2026_10_27 reason=Use the bounded private-file curl transport while the selected Windows core HTTP provider is unavailable
-        if host_os() == "windows":
-            # The core Windows runtime explicitly has no native HTTP v2
-            # provider. The real bounded compatibility transport keeps binary
-            # octets and Authorization out of shell/argv interpolation.
-            val response: (i64, text, text) = curl_request_bytes(
-                "PUT", "{cfg.url}{canonical_uri}", headers, body)
-            status = response.0
-            response_body = response.1
-            transport_error = response.2
-        else:
-            val response: (i64, text, text, [u8], text) = http_request_v2_raw(
-                "PUT", "{cfg.url}{canonical_uri}", headers, body, 30000)
-            status = response.0
-            val response_bytes: [u8] = response.3
-            transport_error = response.4
-            match bytes_to_text_checked(response_bytes):
-                case Ok(t): response_body = t
-                case Err(_):
-                    response_body = ""
-                    body_error = "S3 response body is not valid UTF-8"
+        val response: (i64, text, text, [u8], text) = http_request_v2_raw(
+            "PUT", "{cfg.url}{canonical_uri}", headers, body, 30000)
+        status = response.0
+        val response_bytes: [u8] = response.3
+        transport_error = response.4
+        match bytes_to_text_checked(response_bytes):
+            case Ok(t): response_body = t
+            case Err(_):
+                response_body = ""
+                body_error = "S3 response body is not valid UTF-8"
         attempt = attempt + 1
         if not itf_should_retry(status, transport_error) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
             break
