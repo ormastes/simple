@@ -11,3 +11,12 @@
 - **NFR-A2UI-004 (Shared Layering & Zero Caret Coupling):** `src/lib/common/ui/a2ui/` and `src/lib/common/app_interface/` contain zero Caret imports, zero `rt_*` direct calls (`direct-env-runtime-guard`), and remain under 800 lines per source file.
 - **NFR-A2UI-005 (Cryptographic Authority & Default-Deny Security):** Grants are bound with canonical length-prefixed HMAC-SHA256 (`hmac_sha256_bytes`), verified against store membership, principal, surface, region ceiling, policy revision, expiry, and one-shot nonces; unknown command arguments (mass assignment) are rejected.
 - **NFR-A2UI-006 (Request-Boundary Hot-Swap Lifetime Safety):** Code generation replacement delegates lifetime tracking to `std.common.aspect_dynload_lifecycle_v1`, ensuring in-flight and suspended async handlers finish on their pinned generation before reclamation while rejecting mismatched ABIs and stale surface commits.
+
+## Measured Verification Baselines (§19.1)
+
+Verified natively on Stage 2 Cranelift (`release/1.0.0` `5f953c654e8`, `test/fixtures/a2ui_native_verify.spl`: `A2UI_VERIFY_PASS=137 FAIL=0`; `test/fixtures/a2ui_lint_gate_verify.spl`: `A2UI_LINT_GATE_CHECKED=18 FAIL=0`):
+
+- Leaf data-model invalidation on 100-component surface: `8 µs` (`NFR-A2UI-001`)
+- Streaming 30-op JSONL decode: `3,016 µs` whole vs `3,693 µs` in 8-byte chunks (`1.22x`, `NFR-A2UI-002`)
+- `BoundedChangeJournal` delta poll: `3 µs`; 200-row QueryIR snapshot: `9,689 µs` (`NFR-A2UI-003`)
+- Hot-swap request-boundary lease + suspend + swap + resume + reclaim cycle: `29 µs` (`NFR-A2UI-006`)

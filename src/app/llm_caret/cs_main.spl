@@ -30,6 +30,7 @@ use app.llm_caret.workbench.key_chunker.{split_complete_keys, flush_carry, termi
 use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult, resolve_pane_binding}
 use app.llm_caret.cs_gui.{CsGuiFrame, cs_render_gui_html, cs_render_gui_frame, cs_resolve_ui_mode, cs_dashboard_session_views}
 use app.llm_caret.a2ui.cs_live_host.{CaretA2uiHost}
+use app.llm_caret.a2ui.cs_session_store.{CaretA2uiSessionStore}
 use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
 use app.llm_caret.workbench.session_source.{select_live_session, live_selected,
     publish_pane_binding, live_pane_bindings, live_pane_generation, observe_agent_generation,
@@ -84,24 +85,26 @@ fn cs_session_from_args(args: [text]) -> text:
             session = arg
     session
 
+var _cs_a2ui_store_ready: bool = false
+var _cs_a2ui_store: CaretA2uiSessionStore = CaretA2uiSessionStore.new()
+
 # One submitted line: the command reducer, then its action. Returns the next
 # dashboard, the outcome to show, and whether the operator quit.
 fn _cs_step(d: CsDashboard, line: text) -> (CsDashboard, text, bool):
-    if line.trim() == "/capabilities":
+    val trimmed = line.trim()
+    if trimmed == "/capabilities":
         return (d, capability_lines(capability_rows(capability_probes_live())).join("\n"), false)
-    if line.trim() == "/a2ui":
+    if trimmed == "/a2ui" or trimmed.starts_with("/a2ui "):
+        if not _cs_a2ui_store_ready:
+            _cs_a2ui_store = CaretA2uiSessionStore.new()
+            _cs_a2ui_store_ready = true
         val views = cs_dashboard_session_views(d)
         val now_ms = time_now_monotonic_ms()
-        match CaretA2uiHost.create(d.session, "local_operator", "caret_session_local_secret_2026", false, now_ms):
+        match _cs_a2ui_store.handle_slash(d, views, trimmed, now_ms):
             case Err(err):
                 return (d, "cs-a2ui error: " + err, false)
-            case Ok(host_init):
-                var host = host_init
-                match host.sync_dashboard(d, views, d.selected >= 0, now_ms):
-                    case Err(sync_err):
-                        return (d, "cs-a2ui sync error: " + sync_err, false)
-                    case Ok(tree):
-                        return (d, host.render_summary_line(tree), false)
+            case Ok(out):
+                return (d, out, false)
     val (after_cmd, action) = cs_handle_command(d, line)
     if action == "quit":
         return (after_cmd, "", true)
@@ -598,7 +601,7 @@ fn main() -> i64:
                         return 1
                     case Ok(tree):
                         if ui_mode == "a2ui_json":
-                            match host.export_wire_messages([]):
+                            match host.export_live_wire_messages():
                                 case Ok(msgs):
                                     for m in msgs:
                                         print m

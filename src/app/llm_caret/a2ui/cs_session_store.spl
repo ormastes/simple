@@ -1,0 +1,134 @@
+#![allow(primitive_api)] # Persistent Caret A2UI session store exposes generation/revision/count scalars
+# Persistent Caret A2UI Session Store & Interactive `/a2ui` Command Handler
+#
+# Preserves active surface state, drafts, composition_revision, and
+# hot-swapped handler generations across repeated `/a2ui` turns in `cs`.
+
+use app.llm_caret.cs_dashboard_model.{CsDashboard}
+use app.llm_caret.workbench.session_contract.{SessionView}
+use app.llm_caret.a2ui.cs_live_host.{CaretA2uiHost}
+use app.llm_caret.a2ui.cs_app_interface.{caret_screen_sdn_v1, caret_readonly_screen_sdn_v1}
+use std.common.app_interface.contracts.{CommandDeliveryState, CommandOutcome}
+use app.llm_caret.a2ui.cs_commands.{CaretTransportDelivery}
+use std.common.ui.a2ui.types.{A2uiValue, A2uiObjectEntry}
+
+pub class CaretA2uiSessionStore:
+    sessions: [CaretA2uiHost]
+
+    static fn new() -> CaretA2uiSessionStore:
+        CaretA2uiSessionStore(sessions: [])
+
+    fn _find_index(session_name: text) -> i64:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].session_name == session_name:
+                return i
+            i = i + 1
+        -1
+
+    me _ensure_session_idx(session_name: text, principal_id: text, secret: text, now_ms: i64) -> Result<i64, text>:
+        val existing = self._find_index(session_name)
+        if existing >= 0:
+            return Ok(existing)
+        val host = CaretA2uiHost.create(session_name, principal_id, secret, false, now_ms)?
+        self.sessions.push(host)
+        Ok(self.sessions.len() - 1)
+
+    fn session_count(self) -> i64:
+        self.sessions.len()
+
+    fn session_code_generation(self, session_name: text) -> i64:
+        val idx = self._find_index(session_name)
+        if idx < 0:
+            return 0
+        self.sessions[idx].code_generation()
+
+    fn session_composition_revision(self, session_name: text) -> i64:
+        val idx = self._find_index(session_name)
+        if idx < 0:
+            return 0
+        self.sessions[idx].runtime.revisions.composition_revision
+
+    fn session_draft_text(self, session_name: text, path: text) -> text:
+        val idx = self._find_index(session_name)
+        if idx < 0:
+            return ""
+        self.sessions[idx].draft_text(path)
+
+    fn session_first_key(self, session_name: text) -> text:
+        val idx = self._find_index(session_name)
+        if idx < 0:
+            return ""
+        self.sessions[idx].first_opaque_key()
+
+    # Execute an interactive `/a2ui ...` command while persisting host state across turns.
+    me handle_slash(
+        d: CsDashboard,
+        views: [SessionView],
+        cmd_line: text,
+        now_ms: i64
+    ) -> Result<text, text>:
+        val trimmed = cmd_line.trim()
+        val idx = self._ensure_session_idx(d.session, "local_operator", "caret_session_local_secret_2026", now_ms)?
+        var host = self.sessions[idx]
+
+        if trimmed == "/a2ui":
+            val tree = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            self.sessions[idx] = host
+            return Ok(host.render_summary_line(tree))
+
+        if trimmed == "/a2ui json":
+            val _tree = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            val msgs = host.export_live_wire_messages()?
+            self.sessions[idx] = host
+            return Ok(msgs.join("\n"))
+
+        if trimmed.starts_with("/a2ui hotswap "):
+            val variant = trimmed.substring(14, trimmed.byte_len()).trim()
+            if variant == "":
+                return Err("missing_hotswap_variant")
+            val new_gen = host.hot_swap_handler(variant, "caret_handler_abi_v1")?
+            val tree = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            self.sessions[idx] = host
+            return Ok(host.render_summary_line(tree) + " hotswap_gen=" + new_gen.to_string())
+
+        if trimmed == "/a2ui compose readonly":
+            val _crev = host.update_screen_dynamically(caret_readonly_screen_sdn_v1(), now_ms)?
+            val tree = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            self.sessions[idx] = host
+            return Ok(host.render_summary_line(tree))
+
+        if trimmed == "/a2ui compose full":
+            val _crev = host.update_screen_dynamically(caret_screen_sdn_v1(), now_ms)?
+            val tree = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            self.sessions[idx] = host
+            return Ok(host.render_summary_line(tree))
+
+        if trimmed.starts_with("/a2ui draft "):
+            val body_text = trimmed.substring(12, trimmed.byte_len())
+            val edit_seq = host.edit_draft_text("local_operator", "main", "/draft/body", body_text)?
+            self.sessions[idx] = host
+            return Ok("cs-a2ui draft_seq=" + edit_seq.to_string() + " bytes=" + body_text.byte_len().to_string())
+
+        if trimmed == "/a2ui select":
+            val _tree = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            val first_key = host.first_opaque_key()
+            if first_key == "":
+                self.sessions[idx] = host
+                return Err("no_roster_key_to_select")
+            val out = host.dispatch_action(
+                "caret.select",
+                [A2uiObjectEntry(key: "key", value: A2uiValue.Text(value: first_key))],
+                true,
+                None,
+                CaretTransportDelivery.Sent,
+                "slash_select_" + now_ms.to_string(),
+                now_ms
+            )?
+            val tree2 = host.sync_dashboard(d, views, d.selected >= 0, now_ms)?
+            self.sessions[idx] = host
+            return Ok(out.summary + " | " + host.render_summary_line(tree2))
+
+        Err("unknown_a2ui_subcommand:" + trimmed)
+
+export CaretA2uiSessionStore

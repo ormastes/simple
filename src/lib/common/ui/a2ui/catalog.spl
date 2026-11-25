@@ -210,24 +210,38 @@ pub fn a2ui_catalog_check_function_call(
         return Err("user_activation_required:" + function_name)
     Ok(spec)
 
-fn _prop_value_matches(kind: A2uiPropKind, v: A2uiValue) -> bool:
+fn _is_pure_binding_call(catalog: A2uiCatalog, v: A2uiValue) -> bool:
+    match v:
+        case A2uiValue.Object(entries):
+            match a2ui_obj_get(entries, "call"):
+                case A2uiArgPresence.Present(A2uiValue.Text(fn_name)):
+                    val cat_id = match a2ui_obj_get(entries, "catalogId"):
+                        case A2uiArgPresence.Present(A2uiValue.Text(cid)): cid
+                        case _: catalog.catalog_id
+                    match a2ui_catalog_check_function_call(catalog, cat_id, fn_name, "binding", false):
+                        case Ok(fspec): fspec.pure
+                        case Err(_): false
+                case _: false
+        case _: false
+
+fn _prop_value_matches(catalog: A2uiCatalog, kind: A2uiPropKind, v: A2uiValue) -> bool:
     match kind:
         case A2uiPropKind.AnyTextOrPath:
             match v:
                 case A2uiValue.Text(_): true
                 case A2uiValue.Path(_): true
-                case _: false
+                case _: _is_pure_binding_call(catalog, v)
         case A2uiPropKind.AnyBoolOrPath:
             match v:
                 case A2uiValue.Bool(_): true
                 case A2uiValue.Path(_): true
-                case _: false
+                case _: _is_pure_binding_call(catalog, v)
         case A2uiPropKind.AnyNumberOrPath:
             match v:
                 case A2uiValue.Number(_): true
                 case A2uiValue.Int(_): true
                 case A2uiValue.Path(_): true
-                case _: false
+                case _: _is_pure_binding_call(catalog, v)
         case A2uiPropKind.ActionOnly:
             false
 
@@ -272,7 +286,7 @@ pub fn a2ui_catalog_validate_component(
             si = si + 1
         if not matched:
             return Err("unknown_property:" + comp.component + "." + entry.key)
-        if not _prop_value_matches(expected_kind, entry.value):
+        if not _prop_value_matches(catalog, expected_kind, entry.value):
             return Err("invalid_property_type:" + comp.component + "." + entry.key)
         pi = pi + 1
     # Verify required properties are present.

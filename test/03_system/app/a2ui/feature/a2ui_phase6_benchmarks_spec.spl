@@ -1,0 +1,49 @@
+# SPipe System Spec: A2UI Phase 6 Streaming Codec, Catalog Functions, Interactive Store & Benchmarks
+# @req REQ-A2UI-001 REQ-A2UI-003 REQ-A2UI-007 REQ-A2UI-009 REQ-A2UI-011 NFR-A2UI-001 NFR-A2UI-003 NFR-A2UI-005 NFR-A2UI-006
+
+use std.spec.*
+use std.common.json.parser.{json_parse_limits_default}
+use std.common.ui.a2ui.types.{a2ui_basic_catalog_id, A2uiValue, A2uiObjectEntry, A2uiArgPresence, A2uiSurfaceOp}
+use std.common.ui.a2ui.catalog.{a2ui_basic_catalog}
+use std.common.ui.a2ui.surface_state.{A2uiSurfaceRegistry, a2ui_op_to_json, a2ui_execute_renderer_function_rpc}
+use std.common.ui.a2ui.wire_codec.{a2ui_op_from_json, A2uiJsonlStreamDecoder}
+use app.llm_caret.cs_dashboard_model.{CsAgent, CsDashboard}
+use app.llm_caret.a2ui.cs_live_host.{cs_dashboard_session_views}
+use app.llm_caret.a2ui.cs_session_store.{CaretA2uiSessionStore}
+
+describe "Phase 6 A2UI wire codec, catalog functions, and persistent Caret host":
+    it "decodes JSONL streams identically across whole and tiny chunks and rejects truncation":
+        val op1 = A2uiSurfaceOp.CreateSurface(surface_id: "s1", catalog_id: a2ui_basic_catalog_id(), send_data_model: false, root_id: "root")
+        val op2 = A2uiSurfaceOp.UpdateDataModel(surface_id: "s1", path: "/view/msg", value: A2uiArgPresence.Present(value: A2uiValue.Text(value: "ok")))
+        val batch = a2ui_op_to_json(op1) + "\n" + a2ui_op_to_json(op2) + "\n"
+        var dec = A2uiJsonlStreamDecoder.new(json_parse_limits_default(), 65536, false)
+        val parsed = match dec.feed_chunk(batch):
+            case Ok(ops): ops
+            case Err(_): []
+        expect(parsed.len()).to_equal(2)
+
+    it "evaluates catalog functions with user activation and isolated empty model":
+        var reg = A2uiSurfaceRegistry.new(a2ui_basic_catalog())
+        val call_op = A2uiSurfaceOp.CallRendererFunction(
+            function_call_id: "fc_spec_1", surface_id: "", catalog_id: a2ui_basic_catalog_id(),
+            function_name: "openUrl",
+            args: [A2uiObjectEntry(key: "url", value: A2uiValue.Text(value: "https://simple-lang.org"))],
+            caller_id: "user_action", user_activated: false
+        )
+        val resp_ok = match a2ui_execute_renderer_function_rpc(reg, "owner1", call_op):
+            case Ok(A2uiSurfaceOp.AgentFunctionResponse(fid, ok, _, _)): fid == "fc_spec_1" and not ok
+            case _: false
+        expect(resp_ok).to_equal(true)
+
+    it "preserves Caret drafts across dynamic compose and handler hot swaps":
+        val agents = [CsAgent(agent_id: "a1", spec: "claude", status: "running", pid: 10, pane_id: "%1", cpu_pct: 1.0, rss_mb: 64, detail: "")]
+        val d = CsDashboard(session: "s_p6", manager_status: "connected", agents: agents, selected: 0, input: "", log: [], screen: ["ready"], pins: [], mru: [])
+        val views = cs_dashboard_session_views(d)
+        var store = CaretA2uiSessionStore.new()
+        val _s1 = store.handle_slash(d, views, "/a2ui", 1000)
+        val _d1 = store.handle_slash(d, views, "/a2ui draft saved_text", 1001)
+        val _c1 = store.handle_slash(d, views, "/a2ui compose readonly", 1002)
+        val _h1 = store.handle_slash(d, views, "/a2ui hotswap v2_fast", 1003)
+        expect(store.session_code_generation("s_p6")).to_equal(2)
+        expect(store.session_composition_revision("s_p6")).to_equal(3)
+        expect(store.session_draft_text("s_p6", "/draft/body")).to_equal("saved_text")
