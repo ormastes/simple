@@ -655,3 +655,53 @@ fn caller() -> i64:
         "rt_* names are runtime externs"
     );
 }
+
+#[test]
+fn test_jit_import_resolves_agrees_with_seed_symbol_table_and_registers_bounded_bytes() {
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    let table = super::seed_jit_runtime_symbol_table(provider.as_ref());
+
+    assert!(
+        table
+            .iter()
+            .any(|&(name, ptr)| name == "rt_process_run_bounded_bytes" && !ptr.is_null()),
+        "rt_process_run_bounded_bytes must be registered in seed_jit_runtime_symbol_table"
+    );
+    assert!(
+        super::jit_import_resolves(provider.as_ref(), "rt_process_run_bounded_bytes"),
+        "rt_process_run_bounded_bytes must resolve for JIT"
+    );
+    // An elf_utils symbol absent from RUNTIME_SYMBOL_NAMES (and not a compiler-owned
+    // or dlsym-exported symbol) is NOT registered in JITBuilder by with_provider, so
+    // jit_import_resolves must NOT report it as resolvable.
+    if !super::dlsym_resolves("rt_cranelift_new_module") {
+        assert!(
+            !super::jit_import_resolves(provider.as_ref(), "rt_cranelift_new_module"),
+            "symbol absent from RUNTIME_SYMBOL_NAMES must not claim JIT resolvability via elf_utils"
+        );
+    }
+}
+
+#[test]
+fn test_jit_calls_rt_process_run_bounded_bytes_without_null_jump() {
+    simple_runtime::register_static_runtime_symbols();
+    let source = r#"
+@unsafe(reason: "test rt_process_run_bounded_bytes JIT registration", capabilities: [ffi])
+extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
+
+fn caller() -> i64:
+    val res = rt_process_run_bounded_bytes("nonexistent_cmd", [], -1, 65536)
+    res.2
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse bounded_bytes fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower bounded_bytes fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower bounded_bytes fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    jit.compile_module(&mir_module)
+        .expect("compile bounded_bytes caller in JIT");
+    let status = unsafe { jit.call_i64_void("caller").expect("execute caller in JIT") };
+    assert_eq!(status, -1, "negative timeout_ms must return early with exit code -1");
+}
