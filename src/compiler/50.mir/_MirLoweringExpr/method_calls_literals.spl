@@ -3531,10 +3531,10 @@ impl MirLowering:
         # discriminator is absent: unresolved resolution, no custom owner on
         # the lowered local, and not a proven runtime array/dict/struct.
         var erased_receiver_text_builtin = false
-        # `to_f64`/`to_f32` parse text only on a PROVEN text receiver. An
-        # erased word reaching them is far more often a raw number, which the
-        # numeric conversion arm below owns.
-        val erased_text_shape = primitive_text_method_shape and method != "byte_len" and method != "to_f64" and method != "to_f32"
+        # `to_float`/`to_f64`/`to_f32` parse text only on a PROVEN text receiver.
+        # An erased word reaching them is a tagged RuntimeValue (number, float,
+        # or text), which the numeric/erased conversion arm below decodes safely.
+        val erased_text_shape = primitive_text_method_shape and method != "byte_len" and method != "to_float" and method != "to_f64" and method != "to_f32"
         if erased_text_shape and not resolution_is_static_method and not primitive_text_receiver and resolution_is_unresolved and not predicate_has_custom_owner:
             var erased_recv_ty_ok = false
             # `has_type_` is the presence bit; an untyped receiver carries a
@@ -6273,6 +6273,8 @@ impl MirLowering:
                             self.builder = b_txt_u8
                             if val txt_byte_local = txt_byte_res:
                                 conv_src_local = txt_byte_local
+                        elif not self.unresolved_receiver_is_text_v1(receiver, unresolved_receiver_local, declared_text_receiver) and self.local_is_tagged_runtime_scalar(unresolved_receiver_local):
+                            conv_src_local = self.emit_runtime_any_int_decode(unresolved_receiver_local, "rt_any_to_int")
                         var b_conv_n = self.builder
                         val conv_narrowed = b_conv_n.emit_cast(mir_operand_copy(conv_src_local), conv_narrow)
                         # U64 already fills the scalar slot. Casting it back to
@@ -6325,7 +6327,8 @@ impl MirLowering:
                             match conv_receiver_type.kind:
                                 case HirTypeKind.Int(_, _): conv_int_float_alias = true
                                 case _: ()
-                    if method == "to_f64" or method == "to_f32" or conv_int_float_alias:
+                    val conv_erased_float = (method == "to_float" or method == "to_f64" or method == "to_f32") and not predicate_has_custom_owner and self.local_is_tagged_runtime_scalar(unresolved_receiver_local)
+                    if method == "to_f64" or method == "to_f32" or conv_int_float_alias or conv_erased_float:
                         # A text receiver is parsed by the text builtin arm;
                         # casting its handle is never a conversion.
                         if self.local_is_str(unresolved_receiver_local) or self.local_hir_type_is_str(unresolved_receiver_local):
@@ -6335,6 +6338,14 @@ impl MirLowering:
                         var conv_float_ty = MirType.f64()
                         if method == "to_f32":
                             conv_float_ty = MirType(kind: MirTypeKind.F32)
+                        if conv_erased_float:
+                            val decoded_float = self.emit_runtime_any_float_decode(unresolved_receiver_local, "rt_any_to_int", true)
+                            if method == "to_f32":
+                                var b_conv_f32 = self.builder
+                                val narrowed_f32 = b_conv_f32.emit_cast(mir_operand_copy(decoded_float), conv_float_ty)
+                                self.builder = b_conv_f32
+                                return narrowed_f32
+                            return decoded_float
                         var b_conv_f = self.builder
                         val conv_floated = b_conv_f.emit_cast(mir_operand_copy(unresolved_receiver_local), conv_float_ty)
                         self.builder = b_conv_f

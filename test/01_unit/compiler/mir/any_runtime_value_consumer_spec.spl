@@ -20,13 +20,30 @@ use compiler.mir.mir.*
 use compiler.mir.mir_serialization.{serialize_mir_module}
 use compiler.mir._MirLowering.module_lowering.*
 
-fn lower_any_mir(source: text, name: text) -> text:
+fn lower_any_mir_module(source: text, name: text) -> MirModule:
     val filename = "any_runtime_value_" + name + ".spl"
     val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(filename)
     val hir = hir_lowering.lower_module(module)
     var mir_lowering = MirLowering.new(hir.symbols)
-    serialize_mir_module(mir_lowering.lower_module(hir))
+    mir_lowering.lower_module(hir)
+
+fn lower_any_mir(source: text, name: text) -> text:
+    serialize_mir_module(lower_any_mir_module(source, name))
+
+fn has_direct_cast_of_local(module: MirModule, target_local_id: i64) -> bool:
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Cast(_, operand, _):
+                        match operand.kind:
+                            case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                if local.id == target_local_id:
+                                    return true
+                            case _: ()
+                    case _: ()
+    false
 
 fn occurrences(haystack: text, needle: text) -> i64:
     haystack.split(needle).len() - 1
@@ -131,3 +148,35 @@ describe "Any RuntimeValue consumer semantics", tag: ["only-compiled"]:
         expect(occurrences(bool_mir, "\"value\":19")).to_equal(2)
         expect(occurrences(float_mir, "rt_value_float")).to_equal(2)
         expect(float_mir).to_contain("rt_value_to_string")
+
+    it "decodes Any as-casts to integers through rt_any_cast_int without raw tagged Cast":
+        val i64_mod = lower_any_mir_module("fn probe(v: Any) -> i64:\n    v as i64\n", "cast_i64")
+        val i64_mir = serialize_mir_module(i64_mod)
+        val u8_mod = lower_any_mir_module("fn probe(v: Any) -> u8:\n    v as u8\n", "cast_u8")
+        val u8_mir = serialize_mir_module(u8_mod)
+
+        expect(i64_mir).to_contain("rt_any_cast_int")
+        expect(i64_mir.contains("{\"Cast\":")).to_equal(false)
+        expect(has_direct_cast_of_local(i64_mod, 0)).to_equal(false)
+        expect(u8_mir).to_contain("rt_any_cast_int")
+        expect(u8_mir).to_contain("\"U8\"")
+        expect(has_direct_cast_of_local(u8_mod, 0)).to_equal(false)
+
+    it "decodes Any as-casts to floats through tagged float helpers without raw tagged Cast":
+        val f64_mod = lower_any_mir_module("fn probe(v: Any) -> f64:\n    v as f64\n", "cast_f64")
+        val f64_mir = serialize_mir_module(f64_mod)
+        val f32_mod = lower_any_mir_module("fn probe(v: Any) -> f32:\n    v as f32\n", "cast_f32")
+        val f32_mir = serialize_mir_module(f32_mod)
+        val raw_f64_mir = lower_any_mir("fn probe(x: i64) -> f64:\n    x as f64\n", "raw_cast_f64")
+
+        expect(f64_mir).to_contain("rt_value_is_float")
+        expect(f64_mir).to_contain("rt_value_as_float")
+        expect(f64_mir).to_contain("rt_any_cast_int")
+        expect(has_direct_cast_of_local(f64_mod, 0)).to_equal(false)
+        expect(f32_mir).to_contain("rt_value_is_float")
+        expect(f32_mir).to_contain("rt_value_as_float")
+        expect(f32_mir).to_contain("rt_any_cast_int")
+        expect(f32_mir).to_contain("\"F32\"")
+        expect(has_direct_cast_of_local(f32_mod, 0)).to_equal(false)
+        expect(raw_f64_mir.contains("rt_value_is_float")).to_equal(false)
+        expect(raw_f64_mir.contains("rt_any_cast_int")).to_equal(false)
