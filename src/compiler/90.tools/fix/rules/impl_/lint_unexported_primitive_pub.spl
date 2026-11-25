@@ -1,0 +1,493 @@
+# EasyFix Rules - Unused `pub` Exposing Primitives (PRIV-PUB-001), Opt-in Safe
+#
+# Drops `pub ` from a `pub fn` (or `pub me` / `pub static fn` / `pub async fn`)
+# or a `pub` field on a `class`/`struct` when:
+#   1. Its signature / field type exposes a bare primitive
+#      (`i8..i64`, `u8..u64`, `f32`, `f64`, `bool`; `text` is exempt), AND
+#   2. Cross-file usage scan finds ZERO users outside its own module.
+#
+# Whole-repo guard (fail closed):
+#   - Emits a `FixConfidence.Safe` edit removing `pub ` ONLY when
+#     `scope.whole_repo` is true AND `scope.repo_files_scanned` provably covers
+#     this module plus every other scanned repo file (`>= other_count + 1`).
+#   - Under a partial scan (`whole_repo == false` or insufficient count), emits
+#     a suggestion-only `FixConfidence.Uncertain` record with NO replacements so
+#     neither `--safe-only` nor `FixApplicator.apply` modifies source.
+#
+# Not in the default producer registry (`registry.spl`): opt-in only via
+# `simple fix --rule PRIV-PUB-001 [--safe-only] [--dry-run] <paths>`.
+
+use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
+
+pub struct PrivPubScope:
+    whole_repo: bool
+    repo_files_scanned: i64
+    other_sources: Dict<text, text>
+
+struct PrivPubCandidate:
+    kind: text       # "fn" or "field"
+    owner: text      # enclosing class/struct/impl name, or ""
+    name: text       # function or field identifier
+    prim: text       # first offending bare primitive type
+    line_idx: i64    # 0-based line index
+    pub_col: i64     # 0-based byte column of `pub `
+
+fn _ppub_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _ppub_is_ident(s: text) -> bool:
+    if s == "":
+        return false
+    val first = s.substring(0, 1)
+    if first >= "0" and first <= "9":
+        return false
+    var i = 0
+    while i < s.byte_len():
+        if not _ppub_is_word_char(s.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+fn _ppub_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _ppub_is_word_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _ppub_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.byte_len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t":
+            break
+        n = n + 1
+    n
+
+fn _ppub_triple_quote_count(line: text) -> i64:
+    var n = 0
+    var start = 0
+    while start < line.byte_len():
+        val at = line.index_of("\"\"\"", start)
+        if at < 0:
+            break
+        n = n + 1
+        start = at + 3
+    n
+
+fn _ppub_blank_triple_spans(line: text) -> text:
+    var out = ""
+    var inside = false
+    var i = 0
+    while i < line.byte_len():
+        if i + 3 <= line.byte_len() and line.substring(i, i + 3) == "\"\"\"":
+            inside = not inside
+            out = out + "   "
+            i = i + 3
+            continue
+        out = out + (if inside: " " else: line.substring(i, i + 1))
+        i = i + 1
+    out
+
+fn _ppub_code_of(line: text) -> text:
+    var out = ""
+    var quote = ""
+    var i = 0
+    while i < line.byte_len():
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + ch
+        elif ch == "#":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _ppub_code_lines(lines: [text]) -> [text]:
+    var out: [text] = []
+    var in_doc = false
+    for line in lines:
+        val quotes = if line.contains("\"\"\""): _ppub_triple_quote_count(line) else: 0
+        if in_doc:
+            if quotes % 2 == 1:
+                in_doc = false
+            out.push("")
+            continue
+        if quotes % 2 == 1:
+            in_doc = true
+            out.push("")
+            continue
+        val unquoted = if quotes > 0: _ppub_blank_triple_spans(line) else: line
+        if unquoted.contains("\"") or unquoted.contains("'") or unquoted.contains("#"):
+            out.push(_ppub_code_of(unquoted))
+        else:
+            out.push(unquoted)
+    out
+
+fn _ppub_strip_words(t: text, words: [text]) -> text:
+    var s = t
+    var changed = true
+    while changed:
+        changed = false
+        for w in words:
+            if s.starts_with(w):
+                s = s.substring(w.byte_len(), s.byte_len()).trim()
+                changed = true
+    s
+
+fn _ppub_params_close(t: text, open: i64) -> i64:
+    var depth = 0
+    var i = open
+    while i < t.byte_len():
+        val ch = t.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _ppub_split_params(params: text) -> [text]:
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < params.byte_len():
+        val ch = params.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{{" or ch == "<":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}}":
+            depth = depth - 1
+        elif ch == ">" and i > 0 and params.substring(i - 1, i) != "-":
+            depth = depth - 1
+        elif ch == "," and depth == 0:
+            val seg = params.substring(start, i).trim()
+            if seg != "":
+                out.push(seg)
+            start = i + 1
+        i = i + 1
+    val tail = params.substring(start, params.byte_len()).trim()
+    if tail != "":
+        out.push(tail)
+    out
+
+fn _ppub_param_type(param: text) -> text:
+    val clean = _ppub_strip_words(param.trim(), ["mut ", "val ", "var "])
+    val colon = clean.index_of(":", 0)
+    if colon <= 0:
+        return ""
+    var ty = clean.substring(colon + 1, clean.byte_len())
+    val eq = ty.index_of("=", 0)
+    if eq >= 0:
+        ty = ty.substring(0, eq)
+    ty.trim()
+
+fn _ppub_fn_exposed_primitive(trimmed: text) -> text:
+    val open = trimmed.index_of("(", 0)
+    if open < 0:
+        return ""
+    val close = _ppub_params_close(trimmed, open)
+    if close < 0:
+        return ""
+    val params_str = trimmed.substring(open + 1, close)
+    for param in _ppub_split_params(params_str):
+        val ty = _ppub_param_type(param)
+        if is_bare_primitive_name(ty):
+            return ty
+    val rest = trimmed.substring(close + 1, trimmed.byte_len()).trim()
+    if rest.starts_with("->"):
+        var ret = rest.substring(2, rest.byte_len()).trim()
+        if ret.ends_with(":"):
+            ret = ret.substring(0, ret.byte_len() - 1).trim()
+        if is_bare_primitive_name(ret):
+            return ret
+    ""
+
+fn _ppub_fn_name_if_pub_fn(trimmed: text) -> text:
+    if not trimmed.starts_with("pub ") and not trimmed.starts_with("pub\t"):
+        return ""
+    val after_pub = trimmed.substring(4, trimmed.byte_len()).trim()
+    if after_pub.starts_with("extern "):
+        return ""
+    val s = _ppub_strip_words(after_pub, ["async ", "static "])
+    var rest = ""
+    if s.starts_with("fn "):
+        rest = s.substring(3, s.byte_len()).trim()
+    elif s.starts_with("me "):
+        rest = s.substring(3, s.byte_len()).trim()
+    else:
+        return ""
+    val name = _ppub_leading_ident(rest)
+    if name == "" or name == "main":
+        return ""
+    name
+
+fn _ppub_field_if_pub_primitive(trimmed: text) -> [text]:
+    if not trimmed.starts_with("pub ") and not trimmed.starts_with("pub\t"):
+        return []
+    val after_pub = trimmed.substring(4, trimmed.byte_len()).trim()
+    for kw in ["fn ", "me ", "static ", "async ", "extern ", "struct ", "class ", "enum ", "trait ", "unit ", "type ", "alias ", "use "]:
+        if after_pub.starts_with(kw):
+            return []
+    val clean = _ppub_strip_words(after_pub, ["val ", "var ", "mut "])
+    val colon = clean.index_of(":", 0)
+    if colon <= 0:
+        return []
+    val name = clean.substring(0, colon).trim()
+    if not _ppub_is_ident(name):
+        return []
+    var ty = clean.substring(colon + 1, clean.byte_len())
+    val eq = ty.index_of("=", 0)
+    if eq >= 0:
+        ty = ty.substring(0, eq)
+    ty = ty.trim()
+    if not is_bare_primitive_name(ty):
+        return []
+    [name, ty]
+
+fn _ppub_block_header(trimmed: text) -> [text]:
+    val s = _ppub_strip_words(trimmed, ["pub ", "export "])
+    if not s.ends_with(":"):
+        return []
+    if s.starts_with("class "):
+        val n = _ppub_leading_ident(s.substring(6, s.byte_len()).trim())
+        if n != "":
+            return ["class", n]
+    elif s.starts_with("struct "):
+        val n = _ppub_leading_ident(s.substring(7, s.byte_len()).trim())
+        if n != "":
+            return ["struct", n]
+    elif s.starts_with("trait "):
+        val n = _ppub_leading_ident(s.substring(6, s.byte_len()).trim())
+        if n != "":
+            return ["trait", n]
+    elif s.starts_with("impl "):
+        val body = s.substring(5, s.byte_len() - 1)
+        if body.contains(" for "):
+            return ["trait_impl", ""]
+        val n = _ppub_leading_ident(body.trim())
+        if n != "":
+            return ["impl", n]
+    []
+
+fn _ppub_line_has_word(code: text, word: text) -> bool:
+    var start = 0
+    while start < code.byte_len():
+        val at = code.index_of(word, start)
+        if at < 0:
+            return false
+        val end = at + word.byte_len()
+        val before_ok = at == 0 or not _ppub_is_word_char(code.substring(at - 1, at))
+        val after_ok = end >= code.byte_len() or not _ppub_is_word_char(code.substring(end, end + 1))
+        if before_ok and after_ok:
+            return true
+        start = end
+    false
+
+fn _ppub_line_has_dot_field(code: text, field: text) -> bool:
+    val needle = "." + field
+    var start = 0
+    while start < code.byte_len():
+        val at = code.index_of(needle, start)
+        if at < 0:
+            return false
+        val end = at + needle.byte_len()
+        val not_range = at == 0 or code.substring(at - 1, at) != "."
+        val after_ok = end >= code.byte_len() or not _ppub_is_word_char(code.substring(end, end + 1))
+        if not_range and after_ok:
+            return true
+        start = end
+    false
+
+fn _ppub_normalize_path(path: text) -> text:
+    var p = path.replace("\\", "/")
+    while p.starts_with("./"):
+        p = p.substring(2, p.byte_len())
+    p
+
+fn _ppub_is_used_in_other_source(cand: PrivPubCandidate, other_src: text) -> bool:
+    if not other_src.contains(cand.name):
+        return false
+    val code_lines = _ppub_code_lines(other_src.split("\n"))
+    if cand.kind == "fn":
+        for c in code_lines:
+            if c.contains(cand.name) and _ppub_line_has_word(c, cand.name):
+                return true
+        return false
+    # Field: external user if another file accesses `.field` OR references both `Owner` and `field`.
+    var saw_owner = false
+    var saw_field = false
+    for c in code_lines:
+        if c.contains(cand.name):
+            if _ppub_line_has_dot_field(c, cand.name):
+                return true
+            if _ppub_line_has_word(c, cand.name):
+                saw_field = true
+        if cand.owner != "" and not saw_owner and c.contains(cand.owner) and _ppub_line_has_word(c, cand.owner):
+            saw_owner = true
+        if saw_owner and saw_field:
+            return true
+    if cand.owner == "":
+        return saw_field
+    false
+
+fn _ppub_has_external_user(cand: PrivPubCandidate, other_list: [text]) -> bool:
+    for other_src in other_list:
+        if _ppub_is_used_in_other_source(cand, other_src):
+            return true
+    false
+
+fn _ppub_collect_candidates(lines: [text], code: [text]) -> [PrivPubCandidate]:
+    var out: [PrivPubCandidate] = []
+    if lines_allow_rule(lines, "primitive_api") or lines_allow_rule(lines, "priv_pub"):
+        return out
+    var block_kind = ""
+    var block_name = ""
+    var block_indent = -1
+    var body_indent = -1
+    var block_allowed = false
+    var li = 0
+    while li < code.len():
+        val c = code[li]
+        val t = c.trim()
+        if t == "":
+            li = li + 1
+            continue
+        val indent = _ppub_indent_of(c)
+        if block_kind != "" and indent <= block_indent:
+            block_kind = ""
+            block_name = ""
+            block_indent = -1
+            body_indent = -1
+            block_allowed = false
+        val hdr = _ppub_block_header(t)
+        if hdr.len() == 2:
+            block_kind = hdr[0]
+            block_name = hdr[1]
+            block_indent = indent
+            body_indent = -1
+            block_allowed = line_is_allowed(lines, li, "primitive_api") or line_is_allowed(lines, li, "priv_pub")
+            li = li + 1
+            continue
+        if block_kind != "" and body_indent < 0 and indent > block_indent:
+            body_indent = indent
+        if block_allowed or block_kind == "trait" or block_kind == "trait_impl":
+            li = li + 1
+            continue
+        if line_is_allowed(lines, li, "primitive_api") or line_is_allowed(lines, li, "priv_pub"):
+            li = li + 1
+            continue
+        val raw_line = lines[li]
+        val pub_col = _ppub_indent_of(raw_line)
+        if pub_col + 4 > raw_line.byte_len():
+            li = li + 1
+            continue
+        val pub_tok = raw_line.substring(pub_col, pub_col + 4)
+        if pub_tok != "pub " and pub_tok != "pub\t":
+            li = li + 1
+            continue
+        val fn_name = _ppub_fn_name_if_pub_fn(t)
+        if fn_name != "":
+            val prim = _ppub_fn_exposed_primitive(t)
+            if prim != "":
+                val at_decl_level = (block_kind == "" and indent == 0) or (block_kind != "" and indent == body_indent)
+                if at_decl_level:
+                    out.push(PrivPubCandidate(
+                        kind: "fn",
+                        owner: block_name,
+                        name: fn_name,
+                        prim: prim,
+                        line_idx: li,
+                        pub_col: pub_col
+                    ))
+            li = li + 1
+            continue
+        if (block_kind == "class" or block_kind == "struct") and indent == body_indent:
+            val fld = _ppub_field_if_pub_primitive(t)
+            if fld.len() == 2:
+                out.push(PrivPubCandidate(
+                    kind: "field",
+                    owner: block_name,
+                    name: fld[0],
+                    prim: fld[1],
+                    line_idx: li,
+                    pub_col: pub_col
+                ))
+        li = li + 1
+    out
+
+# Main entry point for PRIV-PUB-001.
+# Emits Safe fixes ONLY when `scope.whole_repo` is true AND
+# `scope.repo_files_scanned` provably covers this file plus every other file
+# in `scope.other_sources`. Otherwise emits Uncertain suggestions with no edits.
+pub fn check_unexported_primitive_pub(source: text, file: text, scope: PrivPubScope) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    val code = _ppub_code_lines(lines)
+    val candidates = _ppub_collect_candidates(lines, code)
+    if candidates.len() == 0:
+        return fixes
+    val norm_file = _ppub_normalize_path(file)
+    var other_list: [text] = []
+    for path in scope.other_sources.keys():
+        if _ppub_normalize_path(path) != norm_file:
+            other_list.push(scope.other_sources[path])
+    val other_count = other_list.len()
+    val whole_repo_proven = scope.whole_repo and scope.repo_files_scanned >= other_count + 1
+    var offsets: [i64] = []
+    var off = 0
+    for line in lines:
+        offsets.push(off)
+        off = off + line.byte_len() + 1
+    for cand in candidates:
+        if _ppub_has_external_user(cand, other_list):
+            continue
+        val start = offsets[cand.line_idx] + cand.pub_col
+        val label = if cand.owner != "": "{cand.owner}.{cand.name}" else: cand.name
+        if whole_repo_proven:
+            var fix = EasyFix.create(
+                id: "PRIV-PUB-001:{start}",
+                description: "drop `pub` from {cand.kind} `{label}` (exposes primitive `{cand.prim}`; 0 external users across {scope.repo_files_scanned} scanned repo file(s))",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: start + 4,
+                line: cand.line_idx + 1,
+                column: cand.pub_col + 1,
+                new_text: ""
+            ))
+            fixes.push(fix)
+        else:
+            val fix = EasyFix.create(
+                id: "PRIV-PUB-001:{start}",
+                description: "suggestion: consider dropping `pub` from {cand.kind} `{label}` (exposes primitive `{cand.prim}`; partial scan of {scope.repo_files_scanned} file(s) — whole-repo scan required for Safe auto-fix)",
+                confidence: FixConfidence.Uncertain
+            )
+            fixes.push(fix)
+    fixes
+
+# Convenience partial-scope wrapper (always suggestion-only, never emits Safe).
+pub fn check_unexported_primitive_pub_partial(source: text, file: text, other_sources: Dict<text, text>) -> [EasyFix]:
+    val scope = PrivPubScope(
+        whole_repo: false,
+        repo_files_scanned: other_sources.len() + 1,
+        other_sources: other_sources
+    )
+    check_unexported_primitive_pub(source, file, scope)

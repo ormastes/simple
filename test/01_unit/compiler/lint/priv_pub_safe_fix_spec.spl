@@ -1,0 +1,150 @@
+# @req REQ-SSPEC-COMPILER
+"""
+PRIV-PUB-001 Opt-in Safe auto-fix: drops `pub ` from a `pub fn` or `pub` field
+whose signature exposes a bare primitive (`i8..i64`, `u8..u64`, `f32`, `f64`,
+`bool`; `text` exempt) AND that has zero users outside its own module.
+Emits a Safe fix ONLY when the cross-file usage scan provably covers the whole
+repo; under a partial scan it emits a suggestion-only Uncertain record with no
+edit.
+Run: bin/simple test test/01_unit/compiler/lint/priv_pub_safe_fix_spec.spl
+"""
+
+# @tag: unit, compiler, lint, priv_pub
+
+use std.spec.*
+use std.tooling.easy_fix.types.{FixApplicator, FixConfidence, EasyFix, easyfix_code}
+use compiler.tools.fix.rules.impl_.lint_unexported_primitive_pub.{check_unexported_primitive_pub, check_unexported_primitive_pub_partial, PrivPubScope}
+use compiler.tools.fix.rules.registry.{registry_fix_producers}
+use compiler.tools.fix.main.{FixToolApplicator}
+use compiler.tools.fix.source_edits.{validated_fix_sources}
+use app.io.cli_fix_options.{fix_option_error}
+
+fn _whole_scope(others: Dict<text, text>) -> PrivPubScope:
+    PrivPubScope(whole_repo: true, repo_files_scanned: others.len() + 1, other_sources: others)
+
+fn _partial_scope(others: Dict<text, text>) -> PrivPubScope:
+    PrivPubScope(whole_repo: false, repo_files_scanned: others.len() + 1, other_sources: others)
+
+fn _fixes_whole(src: text, others: Dict<text, text>) -> [EasyFix]:
+    check_unexported_primitive_pub(src, "mod_a.spl", _whole_scope(others))
+
+fn _applied_whole(src: text, others: Dict<text, text>) -> text:
+    val fixes = _fixes_whole(src, others)
+    if fixes.len() == 0: return src
+    match FixApplicator.apply(fixes, {"mod_a.spl": src}):
+        case Ok(m): m["mod_a.spl"]
+        case Err(e): "ERR " + e
+
+describe "PRIV-PUB-001 safe fix: positive cases":
+    it "drops pub from an unused pub fn taking a bare integer primitive":
+        val src = "pub fn helper(n: i64) -> text:\n    \"ok\"\n"
+        expect(_applied_whole(src, {"mod_b.spl": "fn other():\n    pass\n"})).to_equal("fn helper(n: i64) -> text:\n    \"ok\"\n")
+
+    it "drops pub from an unused pub fn returning bool or float":
+        val src = "pub fn is_ready(s: text) -> bool:\n    s != \"\"\n\npub fn ratio() -> f64:\n    0.5\n"
+        expect(_applied_whole(src, {})).to_equal("fn is_ready(s: text) -> bool:\n    s != \"\"\n\nfn ratio() -> f64:\n    0.5\n")
+
+    it "drops pub from an unused pub static fn and pub fn method":
+        val src = "class Calc:\n    pub static fn scale(x: u32) -> u32:\n        x\n    pub fn active() -> bool:\n        true\n"
+        expect(_applied_whole(src, {})).to_equal("class Calc:\n    static fn scale(x: u32) -> u32:\n        x\n    fn active() -> bool:\n        true\n")
+
+    it "drops pub from an unused pub primitive field on a struct or class":
+        val src = "pub struct Packet:\n    pub seq: u64\n    pub flag: bool = false\n    pub label: text\n"
+        val expected = "pub struct Packet:\n    seq: u64\n    flag: bool = false\n    pub label: text\n"
+        expect(_applied_whole(src, {"mod_b.spl": "val seq = 99\n"})).to_equal(expected)
+
+    it "still drops pub when the symbol is only used inside its own module":
+        val src = "pub fn internal_step(x: i32) -> i32:\n    x + 1\n\nfn run() -> i32:\n    internal_step(4)\n"
+        val expected = "fn internal_step(x: i32) -> i32:\n    x + 1\n\nfn run() -> i32:\n    internal_step(4)\n"
+        expect(_applied_whole(src, {"mod_a.spl": src, "mod_b.spl": "fn unrelated(): pass\n"})).to_equal(expected)
+
+    it "ignores occurrences in comments and strings of other files":
+        val src = "pub fn ghost_fn(v: i16) -> i16:\n    v\n"
+        val other = "# ghost_fn is mentioned only in a comment\nval note = \"ghost_fn\"\n"
+        expect(_applied_whole(src, {"mod_b.spl": other})).to_equal("fn ghost_fn(v: i16) -> i16:\n    v\n")
+
+    it "does not confuse a longer identifier prefix in another file as a user":
+        val src = "pub fn parse(n: i8) -> i8:\n    n\n"
+        val other = "fn caller():\n    parse_all(1)\n"
+        expect(_applied_whole(src, {"mod_b.spl": other})).to_equal("fn parse(n: i8) -> i8:\n    n\n")
+
+    it "marks whole-repo fixes Safe with PRIV-PUB-001 code and passes validated apply after non-ASCII":
+        val src = "# note — dash é\npub fn compute(x: f32) -> f32:\n    x\n"
+        val fixes = _fixes_whole(src, {})
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].is_safe()).to_equal(true)
+        expect(easyfix_code(fixes[0])).to_equal("PRIV-PUB-001")
+        match validated_fix_sources(fixes, {"mod_a.spl": src}):
+            case Ok(m): expect(m["mod_a.spl"]).to_equal("# note — dash é\nfn compute(x: f32) -> f32:\n    x\n")
+            case Err(e): expect("ERR " + e).to_equal("")
+
+describe "PRIV-PUB-001 safe fix: negative cases":
+    it "exempts text-only public functions and text fields":
+        val src = "pub fn greet(name: text) -> text:\n    name\n\npub struct Msg:\n    pub body: text\n"
+        expect(_fixes_whole(src, {}).len()).to_equal(0)
+
+    it "leaves domain-typed public functions and fields untouched":
+        val src = "pub fn connect(p: PortNumber) -> ConnHandle:\n    p\n\npub struct Config:\n    pub timeout: Millis\n"
+        expect(_fixes_whole(src, {}).len()).to_equal(0)
+
+    it "keeps pub fn when called or imported in another file":
+        val src = "pub fn shared_fn(n: i64) -> i64:\n    n\n"
+        val other = "use mod_a.{{shared_fn}}\nfn main():\n    val r = shared_fn(1)\n"
+        expect(_fixes_whole(src, {"mod_b.spl": other}).len()).to_equal(0)
+
+    it "keeps pub field when accessed via dot syntax in another file":
+        val src = "pub struct Item:\n    pub count: i64\n"
+        val other = "fn total(it: Any) -> i64:\n    it.count\n"
+        expect(_fixes_whole(src, {"mod_b.spl": other}).len()).to_equal(0)
+
+    it "keeps pub field when owner type and field name appear together in another file":
+        val src = "pub struct Item:\n    pub count: i64\n"
+        val other = "fn make() -> Item:\n    Item(count: 3)\n"
+        expect(_fixes_whole(src, {"mod_b.spl": other}).len()).to_equal(0)
+
+    it "skips trait blocks, trait impl blocks, extern fns, and allow annotations":
+        val src = "pub extern fn rt_raw(n: i64) -> i64\n\ntrait Runner:\n    pub fn step(n: i64) -> i64\n\nimpl Runner for Box:\n    pub fn step(n: i64) -> i64:\n        n\n\n@allow(primitive_api)\npub fn kept(n: i64) -> i64:\n    n\n"
+        expect(_fixes_whole(src, {}).len()).to_equal(0)
+
+    it "skips file-scope #![allow(primitive_api)]":
+        val src = "#![allow(primitive_api)]\npub fn allowed_fn(n: i64) -> i64:\n    n\n"
+        expect(_fixes_whole(src, {}).len()).to_equal(0)
+
+describe "PRIV-PUB-001 whole-repo guard":
+    it "emits only an Uncertain suggestion with no edit under a partial scan":
+        val src = "pub fn maybe_private(n: i64) -> i64:\n    n\n"
+        val fixes = check_unexported_primitive_pub(src, "mod_a.spl", _partial_scope({}))
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].replacements.len()).to_equal(0)
+        expect(easyfix_code(fixes[0])).to_equal("PRIV-PUB-001")
+        expect(FixToolApplicator.filter_by_confidence(fixes, FixConfidence.Safe).len()).to_equal(0)
+
+    it "fails closed to suggestion-only when repo_files_scanned is zero or inconsistent":
+        val src = "pub fn maybe_private(n: i64) -> i64:\n    n\n"
+        val bad_zero = PrivPubScope(whole_repo: true, repo_files_scanned: 0, other_sources: {})
+        val bad_short = PrivPubScope(whole_repo: true, repo_files_scanned: 1, other_sources: {"mod_b.spl": "", "mod_c.spl": ""})
+        val f1 = check_unexported_primitive_pub(src, "mod_a.spl", bad_zero)
+        val f2 = check_unexported_primitive_pub(src, "mod_a.spl", bad_short)
+        expect(f1.len()).to_equal(1)
+        expect(f1[0].is_safe()).to_equal(false)
+        expect(f1[0].replacements.len()).to_equal(0)
+        expect(f2.len()).to_equal(1)
+        expect(f2[0].is_safe()).to_equal(false)
+        expect(f2[0].replacements.len()).to_equal(0)
+
+    it "convenience partial wrapper never produces a Safe fix":
+        val src = "pub fn helper(b: bool) -> bool:\n    b\n"
+        val fixes = check_unexported_primitive_pub_partial(src, "mod_a.spl", {})
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].replacements.len()).to_equal(0)
+
+describe "PRIV-PUB-001 opt-in CLI wiring":
+    it "is opt-in, not in the default registry fix producers":
+        for p in registry_fix_producers():
+            expect(p.code != "PRIV-PUB-001").to_equal(true)
+
+    it "accepts --rule PRIV-PUB-001 and --safe-only via fix_option_error":
+        expect(fix_option_error(["fix", "--rule", "PRIV-PUB-001", "--safe-only", "--dry-run", "src/lib/common"])).to_equal("")
+        expect(fix_option_error(["fix", "--rule=PRIV-PUB-001", "--dry-run", "a.spl"])).to_equal("")
