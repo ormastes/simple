@@ -481,6 +481,22 @@ void rt_thread_local_free(int64_t handle) {
  * Thread Management
  * ================================================================ */
 
+#ifdef SPL_THREAD_WINDOWS
+typedef struct {
+    void* (*entry_point)(void*);
+    void* arg;
+} SplWinThreadStart;
+
+static DWORD WINAPI spl_win_thread_trampoline(LPVOID raw) {
+    SplWinThreadStart* start = (SplWinThreadStart*)raw;
+    void* (*entry_point)(void*) = start->entry_point;
+    void* arg = start->arg;
+    SPL_FREE(start);
+    (void)entry_point(arg);
+    return 0;
+}
+#endif
+
 spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
     if (!entry_point) {
         return 0;
@@ -519,16 +535,25 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
     return alloc_handle(HANDLE_THREAD, thread);
 
 #else  /* Windows */
+    SplWinThreadStart* start = (SplWinThreadStart*)SPL_MALLOC(
+        sizeof(SplWinThreadStart), "thread_start");
+    if (!start) {
+        return 0;
+    }
+    start->entry_point = entry_point;
+    start->arg = arg;
+
     HANDLE thread = CreateThread(
         NULL,           /* default security */
         0,              /* default stack size */
-        (LPTHREAD_START_ROUTINE)entry_point,
-        arg,
+        spl_win_thread_trampoline,
+        start,
         0,              /* run immediately */
         NULL            /* don't need thread ID */
     );
 
     if (thread == NULL) {
+        SPL_FREE(start);
         return 0;
     }
 
@@ -740,6 +765,7 @@ static int64_t rt_native_worker_arg(int64_t value, int raw_worker_args) {
     return value;
 }
 
+#ifdef SPL_THREAD_PTHREAD
 static void* rt_isolated_wrapper(void* raw) {
     RtThreadData* td = (RtThreadData*)raw;
 #if defined(SIMPLE_XRAY_CONTEXT_HOOKS_V1)
@@ -768,6 +794,7 @@ static void* rt_isolated_wrapper(void* raw) {
     if (rt_thread_data_release(td)) spl_thread_data_free(td);
     return NULL;
 }
+#endif
 
 #ifdef SPL_THREAD_WINDOWS
 static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {

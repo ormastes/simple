@@ -196,12 +196,14 @@ static SplArray* process_capture_result(const char* stdout_text, size_t stdout_l
     return result;
 }
 
+#if !defined(_WIN32)
 static SplArray* process_timeout_result(const char* stdout_text, const char* stderr_text,
                                        int64_t code, int timed_out, int64_t timeout_ms) {
     return process_capture_result(stdout_text, stdout_text ? strlen(stdout_text) : 0,
                                   stderr_text, stderr_text ? strlen(stderr_text) : 0,
                                   code, timed_out, timeout_ms, 0, -1);
 }
+#endif
 
 #ifdef _WIN32
 

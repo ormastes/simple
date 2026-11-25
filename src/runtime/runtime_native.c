@@ -4099,7 +4099,7 @@ static void rt_win_set_binary_stdio(void) {
      * had already broken inventory generations. Make binary the process
      * default, which is the POSIX and Rust-std contract every caller assumes;
      * an explicit "t" still opts into translation. */
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(_UCRT)
     _set_fmode(_O_BINARY);
 #else
     _fmode = _O_BINARY;
@@ -12110,7 +12110,7 @@ static int64_t enum_unit_singleton_find(RtEnumUnitSingleton* from, RtEnumUnitSin
 
 static int64_t enum_new_unit_singleton(int32_t enum_id, int32_t discriminant, int64_t payload) {
     const int is_option_none = enum_id == RT_OPTION_ENUM_ID &&
-        (discriminant == RT_DISC_NONE || discriminant == 1) && payload == rt_core_nil();
+        ((uint32_t)discriminant == RT_DISC_NONE || discriminant == 1) && payload == rt_core_nil();
     if (is_option_none) {
         int64_t cached = atomic_load_explicit(&rt_option_none_singleton, memory_order_acquire);
         if (cached) return cached;

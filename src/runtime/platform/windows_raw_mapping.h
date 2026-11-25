@@ -11,7 +11,12 @@
 #include <stdlib.h>
 #include <windows.h>
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(_UCRT)
+/* MinGW UCRT exports this thread-local handler API in libucrt.a but omits the
+ * prototype from stdlib.h; MSVC's stdlib.h declares the same signature. */
+_CRTIMP _invalid_parameter_handler __cdecl
+_set_thread_local_invalid_parameter_handler(_invalid_parameter_handler handler);
+
 static void __cdecl spl_windows_ignore_invalid_parameter(
         const wchar_t* expression, const wchar_t* function,
         const wchar_t* file, unsigned int line, uintptr_t reserved) {
@@ -24,7 +29,7 @@ static void __cdecl spl_windows_ignore_invalid_parameter(
 #endif
 
 static inline intptr_t spl_windows_os_handle(int fd) {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(_UCRT)
     _invalid_parameter_handler previous =
         _set_thread_local_invalid_parameter_handler(
             spl_windows_ignore_invalid_parameter);

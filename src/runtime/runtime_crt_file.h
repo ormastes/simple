@@ -3,14 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
 #include <stdarg.h>
 #include <fcntl.h>
 #include <io.h>
 #include <direct.h>
 #include <share.h>
 #include <sys/stat.h>
-static int rt_crt_open(const char* path, int flags, ...) {
+static inline int rt_crt_open(const char* path, int flags, ...) {
     int mode = 0;
     if (flags & _O_CREAT) {
         va_list args;
@@ -24,15 +24,15 @@ static int rt_crt_open(const char* path, int flags, ...) {
     int fd = -1;
     return _sopen_s(&fd, path, flags, _SH_DENYNO, mode) == 0 ? fd : -1;
 }
-static FILE* rt_crt_fopen(const char* path, const char* mode) {
+static inline FILE* rt_crt_fopen(const char* path, const char* mode) {
     return _fsopen(path, mode, _SH_DENYNO);
 }
-static int rt_crt_wopen(const wchar_t* path, int flags, int mode) {
+static inline int rt_crt_wopen(const wchar_t* path, int flags, int mode) {
     int fd = -1;
     mode &= _S_IREAD | _S_IWRITE;
     return _wsopen_s(&fd, path, flags, _SH_DENYNO, mode) == 0 ? fd : -1;
 }
-static FILE* rt_crt_wfopen(const wchar_t* path, const wchar_t* mode) {
+static inline FILE* rt_crt_wfopen(const wchar_t* path, const wchar_t* mode) {
     return _wfsopen(path, mode, _SH_DENYNO);
 }
 #define rt_crt_rmdir _rmdir

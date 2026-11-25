@@ -8,10 +8,10 @@
  * with NULL for absence or an allocated string for a present (possibly empty)
  * value; return -1 with NULL for lookup/allocation failure. Never retain
  * CRT environment storage across another environment lookup or mutation. */
-static int rt_env_snapshot(const char* key, char** result) {
+static inline int rt_env_snapshot(const char* key, char** result) {
     *result = NULL;
     if (!key) return -1;
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
     char* value = NULL;
     size_t length = 0;
     if (_dupenv_s(&value, &length, key) != 0) {
@@ -32,8 +32,8 @@ static int rt_env_snapshot(const char* key, char** result) {
 }
 
 /* Exact one-byte flag values need no allocation or borrowed CRT storage. */
-static char rt_env_flag_value(const char* key) {
-#if defined(_MSC_VER)
+static inline char rt_env_flag_value(const char* key) {
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
     char value[2];
     size_t length = 0;
     return getenv_s(&length, value, sizeof(value), key) == 0 &&
@@ -44,18 +44,18 @@ static char rt_env_flag_value(const char* key) {
 #endif
 }
 
-static int rt_env_flag_is(const char* key, char expected) {
+static inline int rt_env_flag_is(const char* key, char expected) {
     return rt_env_flag_value(key) == expected;
 }
 
-static char* rt_env_owned(const char* key) {
+static inline char* rt_env_owned(const char* key) {
     char* value = NULL;
     (void)rt_env_snapshot(key, &value);
     return value;
 }
 
-static int rt_env_present(const char* key) {
-#if !defined(_MSC_VER)
+static inline int rt_env_present(const char* key) {
+#if !defined(_MSC_VER) && !(defined(_WIN32) && defined(_UCRT))
     return key && getenv(key) != NULL;
 #else
     char* value = rt_env_owned(key);
