@@ -1,10 +1,9 @@
 # `type X = Y` does not resolve as a static-call receiver — `X.new()` sees nil
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — seed now binds type aliases as static-call receivers (verified, see final section)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
-
-**Status:** OPEN — architectural (needs a Rust-seed interpreter name-resolution
+**Status:** RESOLVED (2026-11-25, p2w6-ak lane — the Rust-seed interpreter
+fix this doc said was needed has landed; see final section). Previously:
+OPEN — architectural (needs a Rust-seed interpreter name-resolution
 change, out of scope per repo rules; re-confirmed 2026-08-10)
 **Found:** 2026-08-04
 
@@ -140,3 +139,36 @@ Root cause unchanged (seed interpreter has no receiver resolution for
 `type_aliases`; pure-Simple `alias_registry.spl` is a lint-only consumer, so
 editing it cannot change spec-body evaluation). Needs a seed interpreter change
 or the interp path moving off the seed; left open, no code change.
+
+## Verification 2026-11-25 (p2w6-ak lane, release/1.0.0 tip ef77d4bd6ec) — RESOLVED
+
+The seed-interpreter fix this doc said was required has landed:
+`src/compiler_rust/compiler/src/interpreter_module/module_evaluator/evaluation_helpers.rs:642-668`
+now resolves `type X = Y` aliases after imports are bound, inserting a
+`Value::Constructor` / `Value::EnumType` binding for the alias name — the
+comment there cites this exact bug
+(`bug type_alias_static_dispatch_unresolved_2026-08-04`).
+
+Executed evidence on the pinned seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1), from the worktree root with `SIMPLE_LIB=src`, using this doc's
+exact SharedWal/DbfsWal repro rewritten as a `run` script (same imports, same
+constructors, `print` instead of `expect`):
+
+```
+direct=0
+alias=0
+```
+
+i.e. `DbfsWal.new()` (the alias receiver) now constructs and reads
+`durable_lsn == 0` exactly like the direct `SharedWal.new()` — the
+`semantic: method new not found on type nil` failure is gone. This
+supersedes the 2026-11-04 note above, which reproduced the failure on an
+older seed (`0b2c3d015b7`); the pinned release/1.0.0 seed contains the fix.
+
+Limit stated honestly: the doc's original `bin/simple.exe test` spec lane
+cannot run at release/1.0.0 HEAD because of the known repo-wide
+`unknown decorator '@representation_boundary'` seed/source inconsistency
+(the test runner module fails to load before any spec body executes), so the
+alias-resolving specs named above (`dbfs_engine_intent_log_spec.spl`,
+`dbfs_engine_checkpoint_ring_spec.spl`) were not re-run; the `run`-lane
+evidence plus the in-source fix citing this bug are the basis for closure.
