@@ -117,15 +117,20 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
                 case Some(rows):
                     summaries = summaries + 1
                     # A summary surface gives MIR free-function call origins only -- no
-                    # method origins, no class/struct layout -- so a provider declaring a
-                    # class, struct or methods is usable as an import only through its
-                    # interface HIR. Until its unit publishes the .hirkey sidecar, parse
-                    # its source (bug per_file_unit_imported_class_method_origin_2026-11-22).
+                    # method origins, no class/struct layout, and no provider HIR globals,
+                    # enums, or traits (`provider.constants`, `provider.enums`,
+                    # `provider.traits` are read from provider `HirModule`s during MIR
+                    # lowering). Until its unit publishes the `.hirkey` interface-HIR
+                    # sidecar, parse its source (bugs
+                    # per_file_unit_imported_class_method_origin_2026-11-22 and
+                    # per_file_unit_imported_const_enum_trait_provider_2026-11-25).
                     if val summary = module_surface_from_tldr_v1(module_id, rows):
-                        if (summary.composite_values.len() > 0 or summary.impls.len() > 0) and
+                        val needs_class_hir = summary.composite_values.len() > 0 or summary.impls.len() > 0
+                        val needs_decl_hir = summary.constant_values.len() > 0 or summary.enum_values.len() > 0 or summary.trait_values.len() > 0
+                        if (needs_class_hir or needs_decl_hir) and
                                 not parse_paths.contains(src_path) and
                                 not hir_shard_key_sidecar_published_v1(env_get("SIMPLE_HIR_SHARD_QUEUE"), src_path):
-                            fallback_reason = "class-without-interface-hir"
+                            fallback_reason = if needs_class_hir: "class-without-interface-hir" else: "decl-without-interface-hir"
                         else:
                             built_list.push(summary)
                 case None: pass

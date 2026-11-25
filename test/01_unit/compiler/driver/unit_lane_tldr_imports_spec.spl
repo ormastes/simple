@@ -245,3 +245,49 @@ describe "unit-lane TLDR imports (PM3)":
             if s.canonical_path == module_surface_canonical_path(mods["pkg.core.extra"]): has_extra = true
         expect(has_extra).to_equal(true)
         restore_switch(saved)
+
+    it "parses a constant-only provider until its interface HIR sidecar is published":
+        assert_decl_provider_waits_for_hirkey(
+            "const_provider",
+            "pkg.hash256",
+            "val HASH256_LEN: i64 = 32\nval HASH256_HEX_LEN: i64 = 64\n",
+            'use pkg.hash256.{HASH256_LEN, HASH256_HEX_LEN}' + "\n\nfn main() -> i64:\n    HASH256_LEN + HASH256_HEX_LEN\n"
+        )
+
+    it "parses enum-only and trait-only providers until their interface HIR sidecar is published":
+        assert_decl_provider_waits_for_hirkey(
+            "enum_provider",
+            "pkg.mode",
+            "enum Mode:\n    Fast\n    Slow\n",
+            'use pkg.mode.{Mode}' + "\n\nfn main() -> i64:\n    1\n"
+        )
+        assert_decl_provider_waits_for_hirkey(
+            "trait_provider",
+            "pkg.codec",
+            "trait Codec:\n    fn size() -> i64\n",
+            'use pkg.codec.{Codec}' + "\n\nfn main() -> i64:\n    2\n"
+        )
+
+fn assert_decl_provider_waits_for_hirkey(tag: text, module_id: text, provider_src: text, leaf_src: text):
+    """Verify a provider with non-callable declarations falls back before .hirkey publication."""
+    val saved = with_switch("")
+    val saved_queue = rt_env_get("SIMPLE_HIR_SHARD_QUEUE") ?? ""
+    val root = fixture_root(tag)
+    val queue = root + "/queue"
+    val _q = dir_create_all(queue)
+    rt_env_set("SIMPLE_HIR_SHARD_QUEUE", queue)
+    var mods: Dict<text, text> = {}
+    mods[module_id] = put(root, module_id, provider_src)
+    val leaf = put(root, "leaf", leaf_src)
+    val early = unit_tldr_plan_v1("u_" + tag, root + "/tldr", [leaf], mods)
+    expect(early.fallback_modules).to_equal([module_id])
+    expect(early.parse_paths).to_equal([leaf, mods[module_id]])
+    expect(early.surfaces.len()).to_equal(0)
+    val provider = mods[module_id]
+    val binding = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    expect(hir_shard_key_sidecar_write_v1(queue, provider, "iface-key", binding)).to_equal(true)
+    val late = unit_tldr_plan_v1("u_" + tag, root + "/tldr", [leaf], mods)
+    expect(late.fallbacks).to_equal(0)
+    expect(late.surfaces.len()).to_equal(1)
+    rt_env_set("SIMPLE_HIR_SHARD_QUEUE", saved_queue)
+    restore_switch(saved)
