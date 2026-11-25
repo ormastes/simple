@@ -1,6 +1,8 @@
 # Interpreter byte allocation U64 false-green and memory blow-up
 
-Status: OPEN (P2)
+Status: FIXED 2026-11-25 (interpreter defect verified fixed in the deployed
+seed; the admitted self-hosted Stage-4 RSS proof remains open — see the
+2026-11-25 verification note at the bottom).
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 This is a condensed restoration of the tracking record originally introduced
@@ -44,3 +46,35 @@ runtime byte array (`rt_bytes_from_raw`). The bench also treated `env_get` "" as
 Test-only seed (not deployed): bench prints len=1048576/4194304/33554432, checksum=0, rc=0.
 Rust unit: `runtime_bridge::tests::test_value_to_runtime_byte_array_is_packed_bytes`.
 Spec: `test/01_unit/interpreter/bytes_alloc_zero_fill_spec.spl`. Verify on next seed deploy.
+
+## Verification note (2026-11-25, Windows host, deployed seed)
+
+The 2026-11-06 fix (`27ebe8174cc` "fix(seed-interp): packed [u8] bridge, ...")
+is present in source at
+`src/compiler_rust/compiler/src/runtime_bridge.rs:90-97` —
+`Value::ByteArray`/`FrozenByteArray` now cross the hybrid-interp-splice as one
+packed runtime byte array via `rt_bytes_from_raw`, not one heap-boxed `UInt`
+per byte. The deployed `bin/simple.exe` (committed 2026-11-17, after the fix)
+contains it. Live verification on this host with a minimal probe that avoids
+the decorator-blocked stdlib (`extern fn rt_bytes_alloc` only):
+
+```
+len=8
+checksum=0
+big_len=1048576
+big_checksum=0
+```
+
+`rt_bytes_alloc(8)` no longer reads back pointer-bit garbage (was 49,...)
+and the 1 MiB case reports correct length and zero-fill checksum (was
+len=0 / checksum=126953776). The false-green + garbage-bytes defect named by
+this bug is fixed in the deployed seed.
+
+Limit / still open: the full `test/05_perf/bytes_push_1mib.spl` oracle run is
+blocked at HEAD by the known release/1.0.0 source/binary inconsistency (the
+pinned seed rejects `@representation_boundary` from cfd89933699 while parsing
+`std.io_runtime`), and the admitted self-hosted Stage-4 RSS-bound proof (peak
+RSS <= 4x payload on an admitted self-hosted binary) still requires a
+self-hosted binary that does not exist on this host. That admission row
+remains open exactly as the "Unblock condition" section states; this note
+closes only the interpreter defect.

@@ -1,6 +1,6 @@
 # `dynsmf_session_unload_reload_spec` pins a 6-entry manifest that the product grew to 12 — red since the 2026-07-17 toolchain additions (2026-08-04)
 
-Status: OPEN (P2)
+Status: RESOLVED (2026-11-25) — see verification note at bottom.
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 `SIMPLE_TIMEOUT_SECONDS=190 bin/simple test
 test/03_system/stdlib/dynload/dynsmf_session_unload_reload_spec.spl
@@ -101,3 +101,34 @@ today would convert a real drift signal into a rubber stamp.
 Cause 2 needs `build/dynsmf/*.smf` produced (the plans are already emitted by
 `dynsmf_build_plans`, `:144`), i.e. a build step, plus a decision on whether the
 spec should hard-fail or report a missing-artifact precondition.
+
+## Verification note (2026-11-25)
+
+STALE — fixed on release/1.0.0 before this verification.
+
+- **Cause 1 (spec pinned to 6)** — fixed by spec rewrite. Commits
+  `e0057bbe194` ("derive lifecycle coverage from explicit startup
+  selections"), `245295340b6` ("exercise real admitted fixtures across
+  manifest exports"), and `51937f7cd58` replaced every hard-pinned count:
+  the spec now asserts `manifest.len()).to_be_greater_than(0)`, derives
+  loaded/evidence counts from `manifest.len()`, and uses a copied
+  `startup_manifest()` instead of absolute `evidence[N]` indices and a
+  hardcoded 6-id list. The requirements question (does `ui_html` belong in
+  startup autoload) was decided by `fef46c5dd3c`: production bundles are
+  demand-loaded — every `dynsmf_default_manifest()` entry in
+  `src/os/smf/dynsmf_session.spl:105-128` is now `default_autoload: false`,
+  and the spec's first example asserts exactly that fail-closed policy.
+- **Cause 2 (missing `build/dynsmf/*.smf`)** — fixed by the same rewrite:
+  positive lifecycle cases now build host-target fixtures through the
+  admitted-byte API (`test.helpers.dynsmf_admitted_startup_fixture`,
+  `dynsmf_session_load_admitted`), so the spec no longer depends on a
+  `build/dynsmf/*.smf` build step; compatibility autoload fails closed and
+  the spec asserts `status == "failed"`, `reason` starts with `artifact_`
+  instead of indexing an empty `loaded` array.
+
+Limit: a live spec run on this host is blocked by the known release/1.0.0
+source/binary inconsistency — the pinned Rust seed rejects
+`@representation_boundary` (added by cfd89933699) while parsing
+`src/app/test_runner_new/test_runner_client.spl`, so `bin/simple.exe test`
+errors out repo-wide at HEAD. Verified by source inspection of the current
+spec and manifest as cited above.
