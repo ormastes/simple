@@ -1,4 +1,19 @@
 # Stage4 post-HIR corrupt module runaway
+## Closed 2026-11-25 — fix verified on release/1.0.0
+
+`bin/simple.exe test test/01_unit/compiler/driver/hir_function_count_spec.spl
+--mode=interpreter` at release/1.0.0 HEAD (Windows x86_64, pinned
+v1.0.0-rc.1 seed): `Results: 4 total, 4 passed, 0 failed`, exit 0 — the
+typed-key `hir_function_count` helper (`driver_hir_pipeline_lowering.spl`,
+`driver_dict_entry_count(hir_module.functions)`) passes its empty/populated/
+replacement cases. Code inspection confirms the driver no longer calls
+`hir_module.functions.len()` directly. Method note: the 152
+`@representation_boundary` decorator lines the pinned seed rejects were
+temporarily stripped in the probe worktree for this run and restored
+afterwards (nothing committed); the decorator is metadata-only.
+
+### Prior status (superseded)
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

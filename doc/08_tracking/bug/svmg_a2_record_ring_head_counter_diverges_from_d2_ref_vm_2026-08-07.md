@@ -1,8 +1,16 @@
 # A2 record-ring layout diverges from D2/ref_vm's (no head-counter word)
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — documented-distinct-formats resolution (suggested fix option 2) verified present
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+Verified by code inspection at release/1.0.0 HEAD: both files now carry the
+loud cross-reference this entry's suggested fix option 2 asked for.
+`src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl` (the `append_record`
+doc comment, ~line 226) names this bug doc and warns that the A2 format
+(4-byte head-counter word, first record at `ring_base+8`) is NOT
+interchangeable with D2/ref_vm's no-counter format; `src/lib/common/svmg/ref_vm.spl`
+(~line 211) carries the reciprocal warning naming this bug doc and directing
+conformance decoding to ref_vm's own functions. Option 1 (unifying the
+formats) was not taken; the shipped resolution is "documented as
+intentionally distinct", with the foot-gun labelled at both ends.
 
 Date: 2026-08-07
 Found by: Task B3 (cuda_vm per-launch executor)
