@@ -317,3 +317,72 @@ Status: OPEN (P3) — unchanged. The residual differing-signature program is
 the 29 rows quoted above (`shell` still the named highest-risk of the
 original filing); the slice dispatched on 2026-11-25 required no rename
 because its rows were already resolved by earlier passes.
+
+### 2026-11-25 corroboration (lane p3-collisions, second probe) — same verdict on the TRACKED self-hosted binary; corrects the binary-identity note above
+
+The addendum above was probed with a locally rebuilt Rust seed because its
+lane believed no deployed binary could parse tip source. That belief is
+wrong for this worktree: the tracked, git-checked-in self-hosted binary
+`bin/simple.exe` (**38403072 bytes**, mtime 2026-11-25 18:11, from `git
+checkout` at branch base `271db41d1b0`) parses and runs tip source fine.
+Independent re-probe, same vehicle spec, same worktree:
+
+```
+$ SIMPLE_LIB=src timeout 1500 bin/simple.exe test \
+    test/01_unit/app/build/private_helper_name_collision_spec.spl \
+    --mode=interpreter 2>&1 | grep -E "compiler_cross_module_private_symbol_collision|Results:"
+```
+
+Result: identical verdict to the addendum above. The complete
+differing-signature `public function` row set emitted by the compiler is:
+
+```
+bytes_to_u16_le, bytes_to_u32_le, collection_plan_unproven_facts,
+crc32_finalize, crc32_update, detect_arch, elf_write_object, env_get (5 defs),
+factorial, fnv1a_hash_i64, format_binary, format_hex, gzip_decompress,
+hir_owned_artifact_load_blob_v1, hir_owned_artifact_store_blob_v1,
+read_u32_le, resolve, shell (3 defs), strtab_add, symbol_name
+```
+
+plus 10 `private helper` rows (`_fact_key_v1`, `_fail`, `_field`,
+`_field_is`, `_read_v1`, `_sffi_enum_discriminant`, `_sffi_enum_payload`,
+`_skip_ws`, `_sorted_unique_v1` — 9 distinct names, one with 7 defs) and
+three collapsed SAME-signature summary warnings (73, 367, 128 names).
+**None of `read_file`, `write_file`, `last_index_of` appears in any
+differing-signature row.** A second run with
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1` expanded the collapsed lists into
+568 per-symbol SAME-signature warnings; `grep -cE "\bread_file\b"` /
+`\bwrite_file\b` / `\blast_index_of\b` over that output is **0, 0, 0** —
+the three names collide in neither mode. `io_runtime.spl` (owner of the
+canonical `pub fn read_file`/`pub fn write_file`) IS inside this spec's
+closure — it co-compiles and warns on `cwd`, `dir_create`, `dir_create_all`,
+`dir_exists`, `dir_remove` (quoted owners:
+`src\lib\nogc_sync_mut\io_runtime.spl` + peers) — so the absence of
+`read_file`/`write_file` rows is a real absence of duplicates, not a
+missing-module artifact.
+
+Static cross-check at the same commit:
+
+```
+$ grep -rn "fn last_index_of" src --include=*.spl
+src/lib/common/text_advanced.spl:1191:fn last_index_of_func(...)   # different name
+src/lib/text.spl:74:fn last_index_of(s: text, needle: text) -> i64:  # sole definition
+$ grep -rnE "fn (read_file|write_file)\([^)]*String" src --include=*.spl
+(none)   # the (String)->Result<String,String> side of the 2026-08-17 row no longer exists
+$ grep -rnE "pub fn (read_file|write_file)\b" src/lib --include=*.spl
+src/lib/nogc_sync_mut/io_runtime.spl:231:pub fn read_file(path: text) -> text:
+src/lib/nogc_sync_mut/io_runtime.spl:281:pub fn write_file(path: text, content: text) -> bool:
+```
+
+Vehicle spec result at this probe: `Results: 3 total, 3 passed, 0 failed`
+(twice) — the separate `_has` defect
+(`private_helper_name_collision_across_modules_has_2026-08-17.md`) no longer
+reproduces here either.
+
+Verdict for this slice, on executed evidence from the deployed tracked
+binary: `read_file`, `write_file`, `last_index_of` are **already resolved**
+by earlier passes — no rename, no caller migration, no code change in this
+lane. Overall record stays **OPEN (P3)**: `shell` (3 defs,
+`(text)->ProcessResult` vs `(text)->Tuple([text, text, i64])`, quoted
+verbatim from this run) and the other 19 differing-signature public rows
+listed above remain live.
