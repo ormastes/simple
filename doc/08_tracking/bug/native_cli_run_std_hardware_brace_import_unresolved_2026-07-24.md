@@ -3,7 +3,7 @@
 - **Date:** 2026-07-24
 - **Severity:** high (breaks `bin/simple run` for hardware probes when seed
   delegation is not taken)
-- **Status:** fix-implemented-verification-pending — fixed in source by `4b88aebf00b` (2026-08-21); native CLI not re-run (re-verified 2026-11-07, see below)
+- **Status:** resolved — fixed in source by `4b88aebf00b` (2026-08-21); re-verified 2026-11-07 (seed-driven pipeline) and 2026-11-25 (source inspection, see below)
 
 ## Symptom
 
@@ -103,3 +103,25 @@ Side finding: under the seed interpreter, destructuring a 4-tuple returned
 from a fn (`val (a, b, c, d) = f()` where the tuple carries `Dict`s and a
 `ModuleSurfacesByName`) failed with `semantic: value is not callable`; the
 spec uses a struct return instead.
+
+## Verification 2026-11-25 (release/1.0.0 @ 4c6024f8271, Windows host) — still fixed
+
+The regression spec
+`test/01_unit/compiler/hir/std_hardware_brace_import_hir_spec.spl` could not be
+executed on this host: `bin/simple.exe test` (pinned Rust seed v1.0.0-rc.1)
+fails repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+(seed predates commit `cfd89933699`). Verified by source inspection instead:
+
+- The `std.X` -> `lib.X` fold lives on in `resolve_module_key`, relocated to
+  `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl:1359`
+  (the `60.hir` path cited above no longer exists). It still tries the literal
+  key, `lib.` mirror, the `std.`->`lib.` swap, and the concurrency-tier
+  fallbacks, so `std.hardware.link_mux.*` brace-imports resolve to
+  `lib.hardware.link_mux.*` surface keys.
+- `_cli_driver_binary` (`src/app/io/cli_ops.spl:376`) still delegates only on
+  an explicit `SIMPLE_BOOTSTRAP_DRIVER`; no `simple_seed`-sibling implicit
+  authority. One rule, independent of binary name/location.
+
+Both fixes from the 2026-11-07 re-verification are present at the current
+release/1.0.0 HEAD. Marking resolved; native-CLI execution remains unverified
+(no self-hosted binary on this host), same limit as the 2026-11-07 pass.
