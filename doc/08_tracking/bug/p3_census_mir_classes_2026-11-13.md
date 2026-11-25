@@ -338,6 +338,40 @@ shape must reject; real loader/resolver slice must pass). The spec runner was no
 host: the 11-05 seed cannot parse `00.common/driver_compile_options.spl:63`,
 and the 11-16 seed fails `test` on a `mcdc/dynamic_probe.spl` visibility error.
 Remaining list above: unchanged.
+
+### 2026-11-25 — `torch/sffi.spl:297-353` fixed (all 8 `rt_torch_torchtensor_*_checked` sites)
+
+Closed the 8 `torch/sffi.spl` scalar reduction sites from the census list above:
+- `src/lib/nogc_sync_mut/torch/sffi.spl`: changed all 8
+  `rt_torch_torchtensor_{norm,det,sum,mean,max,min,std,var}_checked` extern
+  declarations from `out: *mut f64` to `out: i64` (identical C ABI `double*`
+  and codegen `RuntimeFuncSpec` `[I64, I64] -> [I32]`), declared `@unsafe`
+  `rt_ptr_read_i64`, and updated all 8 `torch_torchtensor_*_result` wrappers via
+  `_torch_scalar_alloc_slot` / `_torch_scalar_finish_slot` to allocate a zeroed
+  8-byte `rt_alloc(8)` cell, pass `out_slot` inside
+  `unsafe(capabilities: [ffi, raw_ptr]):`, read `raw_bits`, call
+  `rt_free(out_slot)` before any error return, and decode via pure
+  `std.common.binary_io.f64_from_bits` (avoiding unbacked `spl_bits_to_f64`).
+- `src/compiler_rust/compiler/src/interpreter_extern/torch.rs`: updated
+  `torch_scalar_checked` (`torch_scalar_checked_with`) to accept both
+  `Value::BorrowMut` and `Value::Int(addr)` (`addr <= 0` returns `-1`;
+  `status == 0` writes `f64` via `write_unaligned`), with `#[cfg(test)]` unit
+  tests covering null/negative addresses, unaligned `Value::Int` writeback, and
+  `Value::BorrowMut`.
+- `scripts/audit/torch-scalar-status-out-contract.shs` and
+  `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl`: updated to
+  enforce the caller-owned `out_slot` (`out: i64`) contract, per-wrapper counts,
+  `rt_ptr_read_i64` -> `rt_free` -> status ordering, pure `f64_from_bits` decode,
+  and multiline `insert_simple!` matching in `interpreter_extern/mod.rs`.
+- `test/01_unit/compiler/borrow/torch_scalar_out_slot_borrow_spec.spl`: added
+  `check_mir_module` regression proving pre-fix `&mut value` (both straight-line
+  and post-guard join) fails borrow check while the caller-owned address form
+  and the real `torch/sffi.spl` scalar checked slice pass with 0 errors, plus
+  runtime tests exercising `_torch_scalar_alloc_slot` and
+  `_torch_scalar_finish_slot`.
+
+Remaining follow-up list above (excluding `sffi/dynamic.spl:149/176` and `torch/sffi.spl:297-353`): unchanged.
+
 ## Census state at hand-off
 
 MIR phase complete 1619/1619 (progress counter said `failed=1`; the

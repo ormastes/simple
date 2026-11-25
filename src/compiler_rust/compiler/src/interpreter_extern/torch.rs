@@ -639,21 +639,40 @@ pub fn rt_torch_torchtensor_sum(args: &[Value]) -> Result<Value, CompileError> {
     }))
 }
 
-fn torch_scalar_checked(args: &[Value], symbol: &str) -> Result<Value, CompileError> {
+fn torch_scalar_checked_with<F>(args: &[Value], symbol: &str, call_fn: F) -> Result<Value, CompileError>
+where
+    F: FnOnce(&str, i64, *mut f64) -> i32,
+{
     if args.len() != 2 {
         return Err(CompileError::runtime(format!("{symbol} requires 2 arguments")));
     }
     let handle = args[0].as_int()?;
-    let borrow = match &args[1] {
-        Value::BorrowMut(value) => value,
-        _ => return Err(CompileError::runtime(format!("{symbol}: output must be &mut f64"))),
-    };
+    match &args[1] {
+        Value::Int(addr) if *addr <= 0 => return Ok(Value::Int(-1)),
+        Value::Int(_) | Value::BorrowMut(_) => {}
+        _ => {
+            return Err(CompileError::runtime(format!(
+                "{symbol}: output must be &mut f64 or out address"
+            )))
+        }
+    }
     let mut output = std::mem::MaybeUninit::<f64>::uninit();
-    let status = unsafe { torch_call_i64_out_f64(symbol, handle, output.as_mut_ptr()) };
+    let status = call_fn(symbol, handle, output.as_mut_ptr());
     if status == 0 {
-        *borrow.inner_mut() = Value::Float(unsafe { output.assume_init() });
+        let value = unsafe { output.assume_init() };
+        match &args[1] {
+            Value::BorrowMut(borrow) => *borrow.inner_mut() = Value::Float(value),
+            Value::Int(addr) => unsafe { (*addr as usize as *mut f64).write_unaligned(value) },
+            _ => unreachable!(),
+        }
     }
     Ok(Value::Int(i64::from(status)))
+}
+
+fn torch_scalar_checked(args: &[Value], symbol: &str) -> Result<Value, CompileError> {
+    torch_scalar_checked_with(args, symbol, |sym, handle, out| unsafe {
+        torch_call_i64_out_f64(sym, handle, out)
+    })
 }
 
 pub fn rt_torch_torchtensor_sum_checked(args: &[Value]) -> Result<Value, CompileError> {
@@ -907,4 +926,76 @@ pub fn rt_ps_torch_tensor_zeros(args: &[Value]) -> Result<Value, CompileError> {
     let dims = extract_i64_array(&args[0], "rt_ps_torch_tensor_zeros")?;
     let zeros = vec![0.0; dims.iter().product::<i64>().max(0) as usize];
     Ok(Value::Int(torch_tensor_impl(&zeros, &dims, 1, 0) as i64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::BorrowMutValue;
+
+    #[test]
+    fn torch_scalar_checked_rejects_null_and_nonpositive_out_addresses() {
+        assert_eq!(
+            rt_torch_torchtensor_sum_checked(&[Value::Int(1), Value::Int(0)]).unwrap(),
+            Value::Int(-1)
+        );
+        assert_eq!(
+            rt_torch_torchtensor_sum_checked(&[Value::Int(1), Value::Int(-99)]).unwrap(),
+            Value::Int(-1)
+        );
+        assert!(rt_torch_torchtensor_sum_checked(&[Value::Int(1), Value::Bool(false)]).is_err());
+    }
+
+    #[test]
+    fn torch_scalar_checked_writes_unaligned_int_slot_only_on_status_zero() {
+        let mut buf = [0u8; 16];
+        let unaligned_addr = unsafe { buf.as_mut_ptr().add(1) } as usize as i64;
+        let ok_status = torch_scalar_checked_with(
+            &[Value::Int(7), Value::Int(unaligned_addr)],
+            "rt_torch_torchtensor_sum_checked",
+            |_sym, _handle, out| {
+                unsafe { *out = -3.25 };
+                0
+            },
+        )
+        .unwrap();
+        assert_eq!(ok_status, Value::Int(0));
+        assert_eq!(f64::from_ne_bytes(buf[1..9].try_into().unwrap()), -3.25);
+
+        let mut untouched = [0u8; 8];
+        let aligned_addr = untouched.as_mut_ptr() as usize as i64;
+        let err_status = torch_scalar_checked_with(
+            &[Value::Int(0), Value::Int(aligned_addr)],
+            "rt_torch_torchtensor_sum_checked",
+            |_sym, _handle, _out| -2,
+        )
+        .unwrap();
+        assert_eq!(err_status, Value::Int(-2));
+        assert_eq!(untouched, [0u8; 8]);
+    }
+
+    #[test]
+    fn torch_scalar_checked_preserves_borrow_mut_contract() {
+        let borrow = BorrowMutValue::new(Value::Float(1.5));
+        let ok_status = torch_scalar_checked_with(
+            &[Value::Int(7), Value::BorrowMut(borrow.clone())],
+            "rt_torch_torchtensor_sum_checked",
+            |_sym, _handle, out| {
+                unsafe { *out = -3.25 };
+                0
+            },
+        )
+        .unwrap();
+        assert_eq!(ok_status, Value::Int(0));
+        assert_eq!(*borrow.inner(), Value::Float(-3.25));
+
+        let err_status = torch_scalar_checked_with(
+            &[Value::Int(0), Value::BorrowMut(borrow.clone())],
+            "rt_torch_torchtensor_sum_checked",
+            |_sym, _handle, _out| -2,
+        )
+        .unwrap();
+        assert_eq!(err_status, Value::Int(-2));
+        assert_eq!(*borrow.inner(), Value::Float(-3.25));
+    }
 }

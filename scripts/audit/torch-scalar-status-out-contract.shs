@@ -13,25 +13,32 @@ registry="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
 specs="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
 symbols="$root/src/compiler_rust/common/src/runtime_symbols.rs"
 
+registry_compact=$(tr -d ' \t\r\n' < "$registry")
+
 for op in sum mean min max norm det std var; do
     symbol="rt_torch_torchtensor_${op}_checked"
 
     grep -Fq "int32_t     ${symbol}(int64_t handle, double* out)" "$header"
     grep -Fq "int32_t ${symbol}(int64_t handle, double* out) noexcept" "$runtime"
-    grep -Fq "extern fn ${symbol}(handle: i64, out: *mut f64) -> i32" "$raw"
+    grep -Fq "extern fn ${symbol}(handle: i64, out: i64) -> i32" "$raw"
     grep -Fq "fn torch_torchtensor_${op}_result(handle: i64) -> Result<f64, text>:" "$raw"
-    test "$(grep -Fc "${symbol}(handle, &mut value)" "$raw")" -eq 1
+    test "$(grep -Fc "${symbol}(handle, out_slot)" "$raw")" -eq 1
+    grep -B1 -F "${symbol}(handle, out_slot)" "$raw" |
+        grep -Fq 'unsafe(capabilities: [ffi, raw_ptr]):'
     grep -Fq "fn dyn_torch_tensor_${op}_result(handle: i64) -> Result<f64, text>:" "$wrapper"
     test "$(grep -Fc "torch_torchtensor_${op}_result(handle)" "$wrapper")" -eq 1
     grep -Fq "pub fn ${symbol}(args: &[Value])" "$interpreter"
-    grep -Fq "insert_simple!(\"${symbol}\"" "$registry"
+    printf '%s\n' "$registry_compact" | grep -Fq "insert_simple!(\"${symbol}\",torch::${symbol})"
     grep -Fq "RuntimeFuncSpec::new(\"${symbol}\", &[I64, I64], &[I32])" "$specs"
     grep -Fq "\"${symbol}\"" "$symbols"
 done
 
+grep -Fq 'use std.common.binary_io.{f64_from_bits}' "$raw"
+! grep -Fq 'spl_bits_to_f64' "$raw"
+grep -Fq 'extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64' "$raw"
 grep -Fq 'fn _torch_scalar_status(status: i32) -> text:' "$raw"
 test "$(grep -Fc 'fn _dyn_torch_scalar_status' "$wrapper")" -eq 0
-test "$(grep -Ec 'rt_torch_torchtensor_(sum|mean|min|max|norm|det|std|var)_checked\(handle, &mut value\)' "$wrapper")" -eq 0
+test "$(grep -Ec 'rt_torch_torchtensor_(sum|mean|min|max|norm|det|std|var)_checked\(' "$wrapper")" -eq 0
 
 grep -Fq 'static int32_t torch_scalar_checked' "$runtime"
 grep -Fq 'const double value = op(*tensor);' "$runtime"
@@ -39,6 +46,15 @@ grep -Fq 'catch (...)' "$runtime"
 grep -Fq '*out = value;' "$runtime"
 grep -Fq '*slot.get_or_init(|| unsafe { lookup_torch_symbol(name) })' "$interpreter"
 test "$(grep -Fc 'return torch_scalar_checked(handle, out,' "$runtime")" -eq 8
+
+interp_scalar_body=$(awk '
+    /fn torch_scalar_checked_with</ { capture=1 }
+    capture { print }
+    capture && /^}/ { exit }
+' "$interpreter")
+printf '%s\n' "$interp_scalar_body" | grep -Fq 'Value::BorrowMut('
+printf '%s\n' "$interp_scalar_body" | grep -Fq 'Value::Int('
+printf '%s\n' "$interp_scalar_body" | grep -Fq 'write_unaligned('
 
 helper_body=$(awk '
     /static int32_t torch_scalar_checked/ { capture=1 }
@@ -54,10 +70,32 @@ simple_scalar_bodies=$(awk '
     capture { print }
     /# Shape Manipulation/ { exit }
 ' "$raw")
-if printf '%s\n' "$simple_scalar_bodies" | grep -Eq 'rt_alloc|dlsym|CString'; then
-    echo 'Torch scalar checked wrappers gained explicit allocation or dynamic lookup' >&2
+if printf '%s\n' "$simple_scalar_bodies" | grep -Eq 'dlsym|CString|&mut|spl_bits_to_f64'; then
+    echo 'Torch scalar checked wrappers gained dynamic lookup, stack-borrow escape, or unbacked spl_bits_to_f64' >&2
     exit 1
 fi
+alloc_count=$(printf '%s\n' "$simple_scalar_bodies" | grep -Fc 'rt_alloc(8)')
+free_count=$(printf '%s\n' "$simple_scalar_bodies" | grep -Fc 'rt_free(out_slot)')
+test "$alloc_count" -ge 1
+test "$alloc_count" -eq "$free_count"
+test "$(printf '%s\n' "$simple_scalar_bodies" | grep -Fc 'val out_slot = _torch_scalar_alloc_slot()')" -eq 8
+test "$(printf '%s\n' "$simple_scalar_bodies" | grep -Fc 'if out_slot <= 0: return Err("out_slot_alloc_failed")')" -ge 8
+test "$(printf '%s\n' "$simple_scalar_bodies" | grep -Fc '_torch_scalar_finish_slot(out_slot, status)')" -eq 8
+printf '%s\n' "$simple_scalar_bodies" | grep -Fq 'rt_ptr_write_i64(out_slot, 0, 0)'
+printf '%s\n' "$simple_scalar_bodies" | grep -Fq 'rt_ptr_read_i64(out_slot, 0)'
+printf '%s\n' "$simple_scalar_bodies" | grep -Fq 'Ok(f64_from_bits(raw_bits as u64))'
+
+finish_body=$(awk '
+    /fn _torch_scalar_finish_slot\(/ { capture=1 }
+    capture { print }
+    capture && /^$/ { exit }
+' "$raw")
+read_line=$(printf '%s\n' "$finish_body" | grep -Fn 'rt_ptr_read_i64(out_slot, 0)' | head -n1 | cut -d: -f1)
+free_line=$(printf '%s\n' "$finish_body" | grep -Fn 'rt_free(out_slot)' | head -n1 | cut -d: -f1)
+status_line=$(printf '%s\n' "$finish_body" | grep -Fn 'if status != 0: return Err(_torch_scalar_status(status))' | head -n1 | cut -d: -f1)
+test -n "$read_line" && test -n "$free_line" && test -n "$status_line"
+test "$read_line" -lt "$free_line"
+test "$free_line" -lt "$status_line"
 if grep -Eq 'rt_alloc|dlsym|CString' "$wrapper"; then
     echo 'Torch dynamic scalar wrappers gained explicit allocation or dynamic lookup' >&2
     exit 1
@@ -68,4 +106,4 @@ if grep -Eq 'fn dyn_torch_tensor_(sum|mean|min|max|norm|det|std|var)\(' "$wrappe
     exit 1
 fi
 
-echo 'Torch scalar status/out contract: PASS operations=8 checked_abi_calls=1 cached_symbol_after_init=1 explicit_wrapper_alloc=none'
+echo 'Torch scalar status/out contract: PASS operations=8 checked_abi_calls=1 cached_symbol_after_init=1 out_slot_contract=caller_owned'
