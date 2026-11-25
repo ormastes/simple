@@ -1,8 +1,5 @@
 # native-build: struct/class with a `static fn new()` crashes (nil-symbol)
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Resolved 2026-07-15 — re-verified 2026-11-25 (see dated note at bottom)
 
 **Severity:** high (loud crash — blocks ALL stdlib collections)
 **Found:** 2026-07-14, collections lane
@@ -57,4 +54,18 @@ entry-closure lowering switches to that module's symbol table.
 The complete parity gate reports `total=38 pass=38 fail=0` and
 `native_seed_parity=true`. This resolves the local named-struct constructor
 layer; it does not claim every generic stdlib collection is now native-ready.
+
+## Verification note 2026-11-25 (release/1.0.0 tip, worktree wt-p2w4-aj)
+
+STALE-CLOSED. The 2026-09-16 "Open — needs owner triage" banner was stale
+bookkeeping that overlooked the in-body `**Resolved:** 2026-07-15` section;
+the banner is corrected above. Fix evidence confirmed present by code
+inspection at the release/1.0.0 tip: the parity gate
+`scripts/check/check-native-seed-parity.shs` still carries the
+`static_ctor_field` (`:400`, run at `:2219`) and `static_ctor_ambiguous_loud`
+(`:415`, run at `:2332`) cases cited as regression evidence. Live re-execution
+of the parity gate on this Windows host is environment-blocked: the pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1) rejects the `@representation_boundary`
+decorator added tree-wide by cfd89933699, so `bin/simple.exe test` fails at
+HEAD independent of this bug. Verified by inspection; limit stated.
 
