@@ -1,8 +1,7 @@
 # Bug: `m{}` math-DSL implicit multiplication mis-chains 3+ groups / unary-minus, and 1D-vector matmul rejected
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/implicit_mul_spec.spl`,
-  `test/feature/usage/math_render_spec.spl` — both "Status: Implemented")
+- **Status:** resolved — implicit-mul chain + 1D matmul fixed by ea30e1330fb (2026-08-31, ancestor of release/1.0.0); render unary-power defect fixed in `src/lib/common/math_repr.spl` (verified 2026-11-25, see end of file)
 - **Area:** math-block (`m{...}`) DSL implicit-multiplication parsing/lowering
   and tensor `@` matmul operator, not isolated further in this pass, deployed
   seed at `bin/release/x86_64-unknown-linux-gnu/simple`
@@ -75,3 +74,35 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/math_render_
 ```
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter was probed.
+
+## Verification 2026-11-25 (p2w3-ae lane, release/1.0.0 worktree) — both defect families fixed
+
+**1. Implicit-mul chain + 1D matmul (the 4 `implicit_mul_spec.spl` failures):**
+fixed by commit `ea30e1330fb` ("fix(math): implicit multiplication drops
+factors; matmul rejects 1D operands (#134)", 2026-08-31), confirmed an ancestor
+of the release/1.0.0 tip via `git merge-base --is-ancestor`. The commit removed
+the shape-based `is_implicit_mul` guard in `parse_multiplicative` (the exact
+"only the first two operands combine" mechanism this record suspected) and gave
+`Tensor::matmul` NumPy-`@`-style 1D promotion. It landed with its own
+regression spec, `test/01_unit/compiler/blocks/math_implicit_mul_precedence_spec.spl`.
+Per the commit message, the 2 failures remaining in `implicit_mul_spec.spl`
+after that fix are an unrelated int-vs-float design conflict between two
+protected specs — not the chaining/matmul defects filed here.
+
+**2. Render `Id(?)` for unary-minus exponent (`math_render_spec.spl` "renders
+power right-assoc with unary"):** fixed in the pure-Simple renderer this spec
+exercises (`std.math_repr` → `src/lib/common/math_repr.spl`).
+`_power_debug` (:1064-1075) now handles a leading `-` at power level
+(`Neg(...)` wrapping) and parses the exponent at power level ("right-associative
+and accepts unary minus"), so `x^-2` yields `Pow(Id(x), Neg(Num(2)))`; the
+`Id(?)` fallback in `_primary_debug` (:1062) is unreachable for a `-` token on
+this path.
+
+Runtime re-run of both specs in this lane was not possible: the pinned seed
+binary at `bin/simple.exe` rejects the `@representation_boundary` decorator
+added tree-wide by cfd89933699, so every `bin/simple.exe test` at release/1.0.0
+HEAD fails in the test runner itself before reaching any spec. Verification is
+by commit ancestry + code inspection; the mechanisms named above are decisive
+for the filed symptoms.
+
+**Verdict: STALE-CLOSED.**
