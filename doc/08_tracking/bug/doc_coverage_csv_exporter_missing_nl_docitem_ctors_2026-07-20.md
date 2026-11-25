@@ -1,5 +1,21 @@
 # doc_coverage csv_exporter: undefined `NL` import + DocItem missing create_class/create_enum
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — all three root causes verified fixed on release/1.0.0
+
+Verified fixed 2026-11-25 (work/p2w2-aa-20261125) at release/1.0.0 HEAD
+(`1861a186628`) by source inspection:
+
+- Root cause 2 (`NL`): `csv_exporter.spl:6` now imports
+  `use std.common.text.{NL}`, and `src/lib/common/text.spl:3` defines
+  `pub val NL = "\n"` (exported at line 76).
+- Root cause 3 (DocItem ctors): `src/app/doc_coverage/types/doc_item.spl:71,88`
+  now define `static fn create_class(...)` and `static fn create_enum(...)`.
+- Import paths: both `csv_export_spec.spl` and `json_export_spec.spl` use the
+  `app.`-prefixed form (`use app.doc_coverage.reporting...`).
+
+Behavioral re-run is environment-blocked on this host (pinned tracked Rust
+seed rejects `@representation_boundary` in test-runner infrastructure at HEAD,
+failing all spec runs repo-wide); closure is by code inspection of all three
+root causes.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
