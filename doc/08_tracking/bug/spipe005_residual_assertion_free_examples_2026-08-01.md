@@ -258,3 +258,17 @@ added to any spec to suppress a finding.
 ## Triage 2026-11-04 (c28-w4)
 
 Triage 2026-11-04 (no change; rule lives under lint infra owned by other lanes): residual count 1790 firings / 196 files not re-measured, a full lint sweep is unaffordable per the doc. Suggested concrete next step for owner: run the rule only over the 196 recorded files via check-lint-cost-budget style cached runs and re-baseline the number, then burn down by directory. QUESTION: is SPIPE005 intended to stay warn-level or become deny once under 100 firings?
+
+## Triage 2026-11-25 (p3-bam lane) — disposition pointer, no re-measurement
+
+The "Open 2026-09-16 — needs owner triage" header above is superseded by the
+Triage 2026-11-04 (c28-w4) section: owner triage HAS occurred and its
+disposition stands — no change in this lane. The rule implementation lives
+under lint infrastructure owned by other lanes, a full lint sweep is
+unaffordable per this doc's own measurement section, and the residual
+(1,752 firings / 188 files as last measured) is a burn-down program
+(scanner fixes (A)+(B), 22 `pass`-skeleton file decisions, 3 truncated
+`tmp_*` specs, 263 single-stmt/setup-only triage), not a bounded bugfix.
+Not re-measured here; the 2026-11-04 open question (warn-level vs deny once
+under 100 firings) remains for the lint-infra owner. Left OPEN as a tracked
+program, not an actionable single bug.
