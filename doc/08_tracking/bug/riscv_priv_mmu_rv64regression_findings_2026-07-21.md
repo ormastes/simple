@@ -1,5 +1,26 @@
 # RISC-V Priv/MMU/RV64 Regression Findings (2026-07-21)
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — RV64 protected core restored; RV32 item is a docs recommendation
+
+Re-verification 2026-11-25 (p2w4-ac lane, release/1.0.0):
+
+- **BUG-RISCV-003 (RV64 protected-core regression): RECOVERED.** Current
+  `src/lib/hardware/rv64gc_rtl/core.spl` is 806 lines (the regressed staged
+  version was 419) and contains every removed symbol named in the recovery
+  verification step below: `core64_instruction_legal`, `PmpEntries64`,
+  `memory64_cycle`, `mmu64_set_satp`, `pmp64_csr_read`, `trap64_enter` (8
+  refs), `core64_privileged_instruction_legal`. The regression described here
+  (a staged, uncommitted stale-WC artifact) is not present at release/1.0.0
+  HEAD. Verified by symbol grep per this doc's own step 3; RTL simulation was
+  not run (hardware lane, out of scope for this host).
+- **BUG-RISCV-002 (RV32 disconnected priv/MMU modules):** verdict here was
+  "no fix needed for the baremetal PL core; document it as
+  semihosting-only". That remains a documentation recommendation, not a code
+  defect; no code change is owed by this entry.
+
+Status: CLOSED for the regression; the P1/P2 follow-ups in "Next Actions"
+(docs wording, VERIFY-001 force-fail tests) are tracked as their own lanes.
+
+## Open 2026-09-16 — needs owner triage (superseded by the 2026-11-25 resolution above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
