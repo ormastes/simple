@@ -42,6 +42,10 @@ method call: append" rows, and the rendered output controls pass (3 parts,
 exit 0). unresolved_builtin_ufcs_method_spec.spl: 6/6 under the seed
 interpreter on the same host.
 
-Not claimed: the doc's literal stage3-producer repro and the retained
-[text]/push workaround removal (that stays per the doc until the stage3
-rebuilt producer runs); BDD/broad gates remain with the owner lane.
+Not claimed: the doc's literal stage3-producer repro and BDD/broad gates remain
+with the owner lane until P3 relink and native bootstrap verification run.
+
+**2026-11-25 Wave D cleanup:** Following PR #11436 (`2b6f32d7fe6`), reverted all
+25 `cmake_array_append_native_2026_10_16` `[text]` / `.push(...)` workarounds in
+`src/compiler/70.backend/backend/cmake_gen.spl` back to `var parts = []` and
+`parts.append(...)`. Pending P3 relink verification before closing.

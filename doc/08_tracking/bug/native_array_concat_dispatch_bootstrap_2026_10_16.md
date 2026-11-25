@@ -71,9 +71,18 @@ Fixture-only finalcycle3 preparation adds all ten genuine families plus two dist
 ## 2026-11-04 triage (n88b) - status fix-implemented-verification-pending
 
 Source compiler dispatches typed array `.concat(...)` (8bf5daec825:
-`method_calls_literals.spl` concat arm + element-authority checks). Spec
+`method_calls_literals.spl` concat arm + element-authority checks) and PR #11436
+(`2b6f32d7fe6`) fixed MIR lowering for `.concat(...)`/`.append(...)`. Spec
 `test/01_unit/compiler/mir/array_concat_spec.spl` passes on the current seed;
-native fixture `test/04_smoke/array_concat_runtime_native.spl`. The
-`concat_copy_v1` workarounds stay until a rebuilt stage3 producer compiles the
-original call sites. Stage3 repro:
+native fixture `test/04_smoke/array_concat_runtime_native.spl`.
+Stage3 repro:
 `bootstrap/stage3/simple native-build test/04_smoke/array_concat_runtime_native.spl -o build/concat.exe && build/concat.exe`.
+
+**2026-11-25 Wave D cleanup:** Reverted clean `native_array_concat_dispatch_bootstrap_2026_10_16`
+workarounds across `pane_backend.spl`, `launch_metadata.spl`, `async.spl`,
+`reverse_reference_receipt.spl`, `driver_aot_native_output.spl`,
+`driver_aot_smf_output.spl`, `smf_serialization.spl`, and `smf_writer.spl`.
+`src/compiler/20.hir/hir_lowering/statements.spl` (and `hir_stmt_concat_copy_v1`
+in `concat_copy_v1.spl`) remain deferred while PR #11451 is open, and helper
+modules stay exported until P3-relink/native verification completes and final
+cleanup removes them.
