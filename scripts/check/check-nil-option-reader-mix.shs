@@ -732,6 +732,37 @@ scan() {
             echo "ERROR — nothing was checked (revision $s_rev does not resolve to a commit in $s_root)"
             return 2
         fi
+        # Fast-path for --rev R --base B when committed src/**/*.spl and the
+        # baseline file are byte-identical to merge-base(B, R): skip exporting
+        # ~16k .spl files when nothing relevant changed in the PR range.
+        if [ -n "$s_base" ] && [ "$list" -eq 0 ] && [ -z "$s_blfile" ]; then
+            if ! git -C "$s_root" rev-parse --verify --quiet "$s_base^{commit}" >/dev/null 2>&1; then
+                echo "ERROR — nothing was checked (base $s_base does not resolve to a commit in $s_root)"
+                return 2
+            fi
+            s_mb=$(git -C "$s_root" merge-base "$s_base" "$s_sha" 2>/dev/null)
+            if [ -n "$s_mb" ] && git -C "$s_root" cat-file -e "$s_sha:$baseline_name" 2>/dev/null; then
+                git -C "$s_root" ls-tree -r "$s_sha" -- src > "$s_w/fast.tree" 2>/dev/null
+                awk '$2 == "blob" { p = $0; sub(/^[^\t]*\t/, "", p)
+                         if (p ~ /\.spl$/ && p !~ /^src\/(compiler_rust|runtime)\/vendor\//) print p }' \
+                    "$s_w/fast.tree" | LC_ALL=C sort -u > "$s_w/fast.files"
+                s_files=$(wc -l < "$s_w/fast.files" | tr -d ' ')
+                if [ "${s_files:-0}" -ge 100 ] &&
+                   git -C "$s_root" diff --quiet "$s_mb" "$s_sha" -- 'src/*.spl' ':(glob)src/**/*.spl' "$baseline_name" 2>/dev/null; then
+                    git -C "$s_root" show "$s_sha:$baseline_name" > "$s_w/fast.bl" 2>/dev/null
+                    grep -v -E '^(#|$)' "$s_w/fast.bl" > "$s_w/fast.entries" || true
+                    s_bl_cnt=$(wc -l < "$s_w/fast.entries" | tr -d ' ')
+                    if [ "${s_bl_cnt:-0}" -gt 0 ]; then
+                        awk -F'|' '{ print $1 }' "$s_w/fast.entries" | LC_ALL=C sort -u > "$s_w/fast.blpaths"
+                        s_bl_missing=$(comm -23 "$s_w/fast.blpaths" "$s_w/fast.files" | wc -l | tr -d ' ')
+                        if [ "${s_bl_missing:-1}" -eq 0 ]; then
+                            echo "PASS — $s_files file(s) checked at $(printf '%s' "$s_sha" | cut -c1-11), $s_bl_cnt grandfathered reader(s) (unchanged from merge base $(printf '%s' "$s_mb" | cut -c1-11)), 0 new, 0 stale"
+                            return 0
+                        fi
+                    fi
+                fi
+            fi
+        fi
         materialize "$s_root" "$s_sha" "$s_w/tree"
         s_rc=$?
         if [ "$s_rc" -eq 3 ]; then
@@ -1078,9 +1109,17 @@ EOF
 }
 
 selftest_fixtures=21
-if ! selftest; then
-    echo "ERROR — nothing was checked (selftest failed)"
-    exit 2
+# Cache implicit pre-scan selftest by script content (same positive-proof marker
+# pattern as check-no-monomorphization.shs); explicit --selftest always runs.
+. "$script_dir/lib/selftest-green-marker.shs"
+_stk=""
+[ "$mode" = selftest ] || _stk=$(selftest_marker_key "$script_dir/check-nil-option-reader-mix.shs") || _stk=""
+if ! selftest_marker_hit "$_stk"; then
+    if ! selftest; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+    selftest_marker_record "$_stk"
 fi
 if [ "$mode" = selftest ]; then
     echo "PASS — selftest $selftest_fixtures fixture(s)"

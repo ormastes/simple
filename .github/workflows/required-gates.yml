@@ -111,9 +111,10 @@ jobs:
             src/compiler_rust/compiler
             src/compiler_rust/runtime
             src/compiler_rust/native_all
+            src/compiler_rust/native_loader
             src/compositions
             src/plugins
-            src/lib/nogc_sync_mut/sffi
+            src/lib
             src/app
             src/os/libc
             src/os/port/llvm
@@ -232,18 +233,25 @@ jobs:
           _run_unified=0
           if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
             _run_unified=1
-          elif git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -Eq '^(bin|config|release|scripts|\.github|doc/04_architecture/compiler/plugin_arch|test/01_unit/scripts)/'; then
+          elif git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -Eq '^(scripts/bootstrap/|scripts/check/check-bootstrap-unified-scripts-contract\.shs$|scripts/check/fast-verify-bootstrap-scripts\.shs$)'; then
             _run_unified=1
           fi
           if [ "$_run_unified" -eq 1 ]; then
-            (
-              set -e
-              sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
-              sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
-            ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
-            _unified_pid=$!
+            if [ -n "$BASE_SHA" ] && git show "$BASE_SHA:config/check/must_check_gates.sdn" 2>/dev/null | grep -q 'local-bootstrap-unified-scripts-contract'; then
+              (
+                sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+              ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
+              _unified_pid=$!
+            else
+              (
+                set -e
+                sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+                sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites
+              ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
+              _unified_pid=$!
+            fi
           else
-            echo "fast-gates: no bootstrap/script/config/workflow paths changed in range; skipping standalone duplicate unified-contract sweep"
+            echo "fast-gates: no bootstrap unified-contract paths changed in range; skipping standalone duplicate unified-contract sweep"
           fi
 
           # One runner, one manifest, for both local and remote (goal item 5,
@@ -299,7 +307,7 @@ jobs:
           if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
             PRIVATE_IMPORT_BASE="$BASE_SHA" sh scripts/check/run-gate-tier.shs --tier local \
                 --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
-                --manifest-rev "$BASE_SHA" --jobs 16 --budget 240
+                --manifest-rev "$BASE_SHA" --jobs 8 --budget 240
             _tier_rc=$?
           else
             echo "fast-gates: not a pull_request event, no PR range; the extended job is the lane for push/main"

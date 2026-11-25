@@ -259,7 +259,17 @@ set_now_ms() {
             [ -n "$_er_ms" ] || _er_ms=0
             _NOW_MS=$(( _er_s * 1000 + _er_ms ))
             ;;
-        *) _NOW_MS=$(now_ms) ;;
+        *)
+            if [ -r /proc/uptime ] && IFS='. ' read -r _up_s _up_cs _ < /proc/uptime 2>/dev/null; then
+                _up_cs=${_up_cs#0}
+                case "$_up_s:$_up_cs" in
+                    *[!0-9:]*|:*|*:) _NOW_MS=$(now_ms) ;;
+                    *) _NOW_MS=$(( _up_s * 1000 + _up_cs * 10 )) ;;
+                esac
+            else
+                _NOW_MS=$(now_ms)
+            fi
+            ;;
     esac
 }
 
@@ -394,7 +404,7 @@ run_tier() {
         trap '' INT TERM
         echo "run-gate-tier: interrupted -- killing active row(s)" >&2
         if [ -f "$_active" ]; then
-            while IFS=" " read -r _ip _ir; do
+            while IFS=" " read -r _ip _ir _it0; do
                 [ -n "$_ip" ] || continue
                 kill_row "$_ip" TERM
             done < "$_active"
@@ -446,10 +456,12 @@ run_tier() {
             _running=0
             _next_buf=""
             _reaped=0
-            while IFS=" " read -r _pid _rid; do
+            set_now_ms
+            _elapsed=$(( _NOW_MS - _t0 ))
+            while IFS=" " read -r _pid _rid _rt0; do
                 [ -n "$_pid" ] || continue
                 if kill -0 "$_pid" 2>/dev/null; then
-                    _next_buf="$_next_buf$_pid $_rid
+                    _next_buf="$_next_buf$_pid $_rid $_rt0
 "
                     _running=$((_running + 1))
                 else
@@ -461,13 +473,12 @@ run_tier() {
                     else
                         printf '%s fail\n' "$_rid" >> "$_work/verdicts"
                     fi
+                    printf '%s\t%d\n' "$_rid" "$(( _NOW_MS - ${_rt0:-$_NOW_MS} ))" >> "$_work/timings"
                 fi
             done < "$_active"
             if [ "$_reaped" -eq 1 ]; then
                 printf '%s' "$_next_buf" > "$_active"
             fi
-            set_now_ms
-            _elapsed=$(( _NOW_MS - _t0 ))
             if [ "$_elapsed" -ge "$_budget_ms" ]; then
                 break
             fi
@@ -479,6 +490,8 @@ run_tier() {
             _killed=1
             continue
         fi
+        set_now_ms
+        _row_t0=$_NOW_MS
         # </dev/null: a row must never block on or steal stdin from the
         # runner (or, worse, from whatever launched the runner -- a pre-push
         # hook's stdin is the pushed ref rows, and an inherited-stdin row can
@@ -497,7 +510,7 @@ run_tier() {
         else
             sh -c "$_expanded" </dev/null >"$_work/$_id.log" 2>&1 &
         fi
-        echo "$! $_id" >> "$_active"
+        echo "$! $_id $_row_t0" >> "$_active"
     done < "$_rows"
 
     # Drain remaining rows against whatever budget is left; anything still
@@ -514,12 +527,12 @@ run_tier() {
             # anything it forked (git, awk, grep, a nested sh -c) keeps
             # running and burning the host's CPU/IO for a verdict nobody
             # reads.
-            while IFS=" " read -r _pid _rid; do
+            while IFS=" " read -r _pid _rid _rt0; do
                 [ -n "$_pid" ] || continue
                 kill_row "$_pid" TERM
             done < "$_active"
             sleep 1
-            while IFS=" " read -r _pid _rid; do
+            while IFS=" " read -r _pid _rid _rt0; do
                 [ -n "$_pid" ] || continue
                 kill_row "$_pid" KILL
                 wait "$_pid" 2>/dev/null
@@ -531,10 +544,10 @@ run_tier() {
         fi
         _next_buf=""
         _reaped=0
-        while IFS=" " read -r _pid _rid; do
+        while IFS=" " read -r _pid _rid _rt0; do
             [ -n "$_pid" ] || continue
             if kill -0 "$_pid" 2>/dev/null; then
-                _next_buf="$_next_buf$_pid $_rid
+                _next_buf="$_next_buf$_pid $_rid $_rt0
 "
             else
                 wait "$_pid" 2>/dev/null
@@ -545,6 +558,7 @@ run_tier() {
                 else
                     printf '%s fail\n' "$_rid" >> "$_work/verdicts"
                 fi
+                printf '%s\t%d\n' "$_rid" "$(( _NOW_MS - ${_rt0:-$_NOW_MS} ))" >> "$_work/timings"
             fi
         done < "$_active"
         if [ "$_reaped" -eq 1 ]; then
@@ -554,6 +568,10 @@ run_tier() {
     done
 
     trap - INT TERM
+    if [ -s "$_work/timings" ]; then
+        _slow=$(sort -t "$_tab" -k2,2nr "$_work/timings" | head -n 5 | awk -F'\t' '{printf "%s%s=%sms", sep, $1, $2; sep=", "}')
+        [ -z "$_slow" ] || echo "run-gate-tier: slowest rows: $_slow" >&2
+    fi
 
     [ -f "$_work/verdicts" ] || : > "$_work/verdicts"
     if [ -n "$_results" ]; then

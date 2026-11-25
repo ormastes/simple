@@ -6,21 +6,42 @@
 # Verdict is the last stdout line: PASS exit 0 / FAIL exit 1 / ERROR exit 2.
 # Usage: sh scripts/check/check-no-unbounded-tcp-read-line.shs [--root DIR]
 root="."
-[ "$1" = "--root" ] && root="$2"
+explicit_root=0
+if [ "${1:-}" = "--root" ]; then
+    root="${2:-.}"
+    explicit_root=1
+fi
 cd "$root" || { echo "ERROR — nothing was checked (bad root)"; exit 2; }
 allow="scripts/check/no_unbounded_tcp_read_line_allowlist.txt"
-[ -d src/app ] || { echo "ERROR — nothing was checked (no src/app)"; exit 2; }
-files=$(grep -rl "TcpStream" src/app --include=*.spl 2>/dev/null)
-grc=$?
-# grep rc 2 = hard failure (unreadable tree); only rc 0/1 are trustworthy scans.
-[ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$grc scanning src/app)"; exit 2; }
+use_git_head=0
+if [ "$explicit_root" -eq 0 ] && [ "$(git config --bool core.sparseCheckout 2>/dev/null || true)" = "true" ] &&
+   git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+    use_git_head=1
+fi
 n=0; bad=""
-for f in $files; do
-    n=$((n+1))
-    if grep -q "\.read_line()\|\.read_line_nullable()\|\.read_line_or_empty()" "$f"; then
-        if ! grep -qxF "$f" "$allow" 2>/dev/null; then bad="$bad $f"; fi
-    fi
-done
+if [ "$use_git_head" -eq 1 ]; then
+    files=$(git grep -l "TcpStream" HEAD -- 'src/app/*.spl' 'src/app/**/*.spl' 2>/dev/null | sed 's/^HEAD://')
+    grc=$?
+    [ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (git grep rc=$grc scanning HEAD src/app)"; exit 2; }
+    for f in $files; do
+        n=$((n+1))
+        if git cat-file -p "HEAD:$f" 2>/dev/null | grep -q "\.read_line()\|\.read_line_nullable()\|\.read_line_or_empty()"; then
+            if ! grep -qxF "$f" "$allow" 2>/dev/null; then bad="$bad $f"; fi
+        fi
+    done
+else
+    [ -d src/app ] || { echo "ERROR — nothing was checked (no src/app)"; exit 2; }
+    files=$(grep -rl "TcpStream" src/app --include=*.spl 2>/dev/null)
+    grc=$?
+    # grep rc 2 = hard failure (unreadable tree); only rc 0/1 are trustworthy scans.
+    [ "$grc" -le 1 ] || { echo "ERROR — nothing was checked (grep rc=$grc scanning src/app)"; exit 2; }
+    for f in $files; do
+        n=$((n+1))
+        if grep -q "\.read_line()\|\.read_line_nullable()\|\.read_line_or_empty()" "$f"; then
+            if ! grep -qxF "$f" "$allow" 2>/dev/null; then bad="$bad $f"; fi
+        fi
+    done
+fi
 [ "$n" -gt 0 ] || { echo "ERROR — nothing was checked (0 files)"; exit 2; }
 if [ -n "$bad" ]; then echo "FAIL — $n file(s) checked, unbounded read_line in:$bad"; exit 1; fi
 echo "PASS — $n file(s) checked, 0 unallowlisted unbounded read_line"
