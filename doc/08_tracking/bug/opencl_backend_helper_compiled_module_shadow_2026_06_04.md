@@ -41,3 +41,28 @@ Make backend artifact output use a uniquely named type or a runtime-stable quali
 - `compile_module_with_backend("opencl", ...)` returns OpenCL C text in `assembly`.
 - `compile_module_with_backend("cl", ...)` follows the same path.
 - The spec subprocess exits cleanly without `code -1`.
+
+## Triage 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+- **measured**: the suspected root cause no longer matches the tree. There is
+  now exactly ONE `struct CompiledModule`
+  (`src/compiler/70.backend/backend/backend_types.spl:399`, with the
+  `object_code: [u8]?` field at :402); the former duplicate definitions are
+  uniquely named (`CoreCompiledModule`, `CudaCompiledModule`,
+  `VhdlCompiledModule`, `VulkanCompiledModule`, `CraneliftCompiledModule`),
+  which is the "uniquely named type" fix this entry required. The
+  `compile_module_with_backend` helper path is exercised by multiple landed
+  specs (`test/02_integration/compiler/llvm_compiled_proof_spec.spl`,
+  `llvm_parity_spec.spl`, others).
+- **gap**: the specific requested regression — an assertion calling
+  `compile_module_with_backend("opencl", ...)` / `("cl", ...)` from
+  `backend_gpu_target_contract_spec.spl` proving OpenCL C text in `assembly`
+  and a clean subprocess exit — was never added; no spec in the tree calls the
+  helper with `"opencl"`/`"cl"`.
+- **blocked**: adding and running that test here is not possible: the pinned
+  `bin/simple.exe` seed rejects `@representation_boundary` (cfd89933699), so
+  no spec executes at HEAD on this host, and the original symptom was exactly
+  an interpreter-driven instability that must be executed to confirm gone.
+- Verdict: leave OPEN, narrowed — shadowing hazard structurally removed;
+  remaining work is the opencl/cl helper regression spec, executed on a host
+  with a runnable toolchain.

@@ -1,8 +1,10 @@
 # `rt_file_read_bytes` extern declared with SIX incompatible return types
 
 - **Filed:** 2026-08-09 (stream I3)
-- **Status:** PARTIALLY CONVERGED — six return types reduced to four. Guard spec
-  landed intentionally RED on the remainder.
+- **Status:** RESOLVED 2026-11-25 — declarations converged to the single
+  canonical return type `[u8]?` on release/1.0.0; the 2026-11-03 candidate
+  repair landed. Static census re-verified 2026-11-25 (see closure note at
+  end); guard-spec execution pending a runnable toolchain.
 - **Guard:** `test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl`
 - **Layer above (already done, do not redo):** stream G2, commit `47adbf730ca`,
   `doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md`
@@ -288,3 +290,29 @@ and empty-success versus missing-error facade results with unchanged SFM error
 text. Required before admission: execute that spec, the signature guard and
 persistent-cache invalidation spec, plus core/lib/MCP runtime checks. This is
 an unverified candidate, not a closed bug or verification PASS.
+
+## Closure note 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+The 2026-11-03 candidate repair is landed and its static oracle property is
+now verified against the current tree. Repo-wide anchored census
+(`git grep -E "extern fn rt_file_read_bytes" -- '*.spl'`, the same
+declaration anchor the guard spec uses) finds **79 declaration sites and
+exactly one return type: `(path: text) -> [u8]?`**. The only other grep hits
+are string-literal fixtures inside the guard spec itself and the distinct
+`rt_file_read_bytes_range` symbol. The three formerly divergent sites are
+converged: `src/lib/nogc_sync_mut/io/file_ops.spl` and
+`src/lib/nogc_sync_mut/sfm/container.spl` no longer declare the extern (they
+use the io_runtime facade), and
+`src/lib/nogc_sync_mut/io/telnet_serial_bridge.spl:31` declares `-> [u8]?`.
+The guard spec's oracle was updated with the repair and now asserts exactly
+this contract (`decl_return_types() == "[u8]?"`, `decl_type_count() == 1`,
+`test/01_unit/compiler/extern/rt_file_read_bytes_single_extern_signature_spec.spl:123-124`),
+so the census above is the guard's own static check executed by hand.
+
+Execution limit: running the guard spec itself (and the SFM/cache behavioral
+specs) is blocked on this host — the pinned `bin/simple.exe` seed rejects
+`@representation_boundary` (cfd89933699), so no spec executes at HEAD. The
+defect this bug tracks — closure-dependent resolution across mutually
+incompatible extern declarations — is eliminated by the single-signature
+census; closing on that static verification with the execution caveat
+recorded.

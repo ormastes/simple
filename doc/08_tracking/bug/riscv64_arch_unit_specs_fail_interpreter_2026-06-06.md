@@ -1,6 +1,6 @@
 # RISC-V64 arch unit specs fail in interpreter mode
 
-Status: open (triaged 2026-06-11)
+Status: RESOLVED 2026-11-25 — both root causes fixed on release/1.0.0; verified 2026-11-05 (25/25 across the four specs) and re-confirmed by tree inspection 2026-11-25 (see closure note at end)
 
 Date: 2026-06-06
 
@@ -116,3 +116,15 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 120 \
 All four report `outcome=OK`. Matches the "After" column of the 2026-11-05
 evidence table above; the fix from work/libbug-linux-rv64specs-20261105 has
 landed. No code change needed in this lane.
+
+## Closure note 2026-11-25 (p2w4-ai lane, release/1.0.0 @ b1a2b76fb64)
+
+Both fixes re-confirmed present in the current tree by inspection:
+`RV64_SSTATUS_FS_MASK` / `RV64_SSTATUS_FS_INITIAL` / `RV64_CONTEXT_BYTES` are
+defined at `src/os/kernel/arch/riscv64/trap_model.spl:22-26` and used in the
+initial kernel/user sstatus values (:42, :46), and
+`test/01_unit/os/kernel/arch/riscv64_interrupt_spec.spl:17` publishes the boot
+hart identity fixture (`riscv_publish_boot_hart_identity_v1(read_tp())`).
+Spec re-run on this Windows host is blocked (pinned seed rejects
+`@representation_boundary` at HEAD). Closing on the executed 2026-11-05
+evidence (all four specs green) plus current-tree inspection.
