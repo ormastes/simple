@@ -164,7 +164,7 @@ fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
     # Only a path (one containing a separator) names a filesystem artifact. A
     # bare soname such as `libsimple_audio_cuda.so` is resolved by the dynamic
     # loader's own search path and must still be handed to it.
-    if path.contains("/") and not file_exists(path):
+    if (path.contains("/") or path.contains("\\")) and not file_exists(path):
         return Err("E-SFFI-001: failed to load provider: {path} (artifact not present)")
     # Direct-return ABI only. `spl_dlopen_checked(path, &mut handle)` hands a
     # live short borrow to a foreign callee, which the borrow stage rejects
@@ -622,10 +622,12 @@ pub fn platform_name() -> text:
         return "macos"
     if ostype.starts_with("freebsd"):
         return "freebsd"
+    if ostype.starts_with("msys") or ostype.starts_with("cygwin") or ostype.starts_with("mingw") or ostype == "win32":
+        return "windows"
     "linux"
 
 # Return the shared library extension for the current platform: ".so", ".dylib", or ".dll".
-fn platform_lib_extension() -> text:
+pub fn platform_lib_extension() -> text:
     val plat = platform_name()
     if plat == "windows":
         return ".dll"
@@ -637,15 +639,56 @@ fn platform_lib_extension() -> text:
 # Convention helpers
 # ============================================================================
 
-# Build the library path for a given SFFI prefix.
-# Reads SIMPLE_SFFI_PATH env var; defaults to "build" if empty.
-# Uses platform_lib_extension() (.dll on Windows, .dylib on macOS, .so elsewhere).
-fn sffi_lib_path(prefix: text) -> text:
+fn _sffi_join_lib_path(base: text, filename: text) -> text:
+    if base == "":
+        return filename
+    if base.ends_with("/") or base.ends_with("\\"):
+        return "{base}{filename}"
+    if base.contains("\\") and not base.contains("/"):
+        return "{base}\\{filename}"
+    "{base}/{filename}"
+
+# Build ordered shared-library path candidates for a platform and SFFI prefix.
+# On Windows, MinGW (`libspl_{prefix}.dll`) is checked before MSVC cdylib (`spl_{prefix}.dll`).
+# On macOS, `.dylib` (`libspl_{prefix}.dylib`); on Linux/FreeBSD ELF, `.so` (`libspl_{prefix}.so`).
+pub fn sffi_lib_candidates_for_platform(base: text, prefix: text, plat: text) -> [text]:
+    if plat == "windows":
+        return [
+            _sffi_join_lib_path(base, "libspl_{prefix}.dll"),
+            _sffi_join_lib_path(base, "spl_{prefix}.dll")
+        ]
+    if plat == "macos":
+        return [_sffi_join_lib_path(base, "libspl_{prefix}.dylib")]
+    [_sffi_join_lib_path(base, "libspl_{prefix}.so")]
+
+# Select the preferred shared-library path for an explicit base dir and platform.
+# Prefers existing MinGW (`libspl_{prefix}.dll`) or MSVC (`spl_{prefix}.dll`) artifact on Windows,
+# and defaults to the primary candidate if none exists on disk yet.
+pub fn sffi_select_lib_path_for_platform(base: text, prefix: text, plat: text) -> text:
+    val candidates = sffi_lib_candidates_for_platform(base, prefix, plat)
+    var i = 0
+    while i < candidates.len():
+        if file_exists(candidates[i]):
+            return candidates[i]
+        i = i + 1
+    candidates[0]
+
+fn _sffi_base_dir() -> text:
     var base = env_get("SIMPLE_SFFI_PATH") ?? ""
     if base == "":
         base = "build"
-    val ext = platform_lib_extension()
-    "{base}/libspl_{prefix}{ext}"
+    base
+
+# Return ordered shared-library path candidates for a given SFFI prefix on the current platform.
+pub fn sffi_lib_candidates(prefix: text) -> [text]:
+    sffi_lib_candidates_for_platform(_sffi_base_dir(), prefix, platform_name())
+
+# Build the library path for a given SFFI prefix.
+# Reads SIMPLE_SFFI_PATH env var; defaults to "build" if empty.
+# Prefers existing MinGW (`libspl_{prefix}.dll`) or MSVC (`spl_{prefix}.dll`) artifact on Windows,
+# and defaults to the primary candidate if none exists on disk yet.
+pub fn sffi_lib_path(prefix: text) -> text:
+    sffi_select_lib_path_for_platform(_sffi_base_dir(), prefix, platform_name())
 
 # Call an SFFI function by its full rt_{prefix}_{rest} name.
 # Parses the prefix from the function name, resolves the library path
@@ -687,3 +730,4 @@ export spl_wffi_call_i64, spl_wffi_call_i64_checked, spl_wffi_try_call_i64_out
 export spl_wffi_call_i64_with_bytes, spl_wffi_call_i64_into_bytes
 export bytes_zeroed, BYTES_ZEROED_MAX
 export DynI64FnSlot, DynLib, DynLoader
+export platform_name, platform_lib_extension, sffi_lib_candidates_for_platform, sffi_lib_candidates, sffi_select_lib_path_for_platform, sffi_lib_path
