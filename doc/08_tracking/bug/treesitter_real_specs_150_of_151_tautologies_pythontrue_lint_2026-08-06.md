@@ -227,3 +227,33 @@ module -- a multi-hour project, not a single bounded fix, and the
 doc's own "Disposition proposed" section explicitly says this "needs
 approval" before proceeding. Leaving OPEN, no attempt.
 
+
+## Triage 2026-11-25 — 3 of 4 specs de-vacuumed; parser spec + lint remain
+
+Verified on `release/1.0.0` (7998d6ba40d) by code inspection (live spec runs
+are blocked repo-wide at this HEAD: the pinned Rust seed rejects the
+`@representation_boundary` decorators added by cfd89933699, and all four specs
+transitively import annotated modules — `SPEC FILE VERDICT ... outcome=ERROR
+executed=0` on both the `test` and `run` paths):
+
+- `treesitter_lexer_real_spec.spl` — REWRITTEN. Zero `expect true`; 65 real
+  assertions against the live `compiler.core.lexer` /
+  `compiler.core.lexer_types` API (`lex_all_records` helper, TokenKind
+  oracles, error-reporting checks).
+- `treesitter_tokenkind_real_spec.spl` — REWRITTEN. Zero `expect true`; 16
+  real assertions.
+- `treesitter_tree_real_spec.spl` — REWRITTEN. Zero `expect true`; 29 real
+  assertions.
+- `treesitter_parser_real_spec.spl` — PARTIAL. The first examples now assert
+  real oracles against `compiler.semantics.lint.semantic_api.alias_registry`,
+  but the file still contains **41 `expect true` tautologies** with the
+  original commented-out `TreeSitterParser` bodies (lines ~57+).
+
+So 109 of the original 150 tautologies are gone; 41 remain in one file. The
+two blockers recorded in the 2026-09-13 triage are unchanged: (1) the
+`PythonTrue` recovery-lint false positive lives in the Rust seed parser hot
+path (`src/compiler_rust/parser/src/error_recovery.rs:249` et al.) — out of
+scope for a pure-Simple bugfix lane and unverifiable without a seed rebuild;
+(2) restoring the 41 `TreeSitterParser` bodies still requires the owner
+approval the doc's "Disposition proposed" section demands. Left OPEN for the
+remainder; no skip-tags added, no assertions touched.

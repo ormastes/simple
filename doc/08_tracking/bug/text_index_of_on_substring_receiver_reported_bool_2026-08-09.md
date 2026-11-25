@@ -154,3 +154,33 @@ Re-run the reproducer on a self-hosted pure-Simple binary produced by
 `bin/simple build bootstrap`, and either promote this to Open with that
 transcript or retract it.
 
+
+## Triage 2026-11-25 — negative re-confirmed on pinned seed; still needs self-hosted sweep
+
+Re-ran the 9-shape reproducer verbatim on `release/1.0.0` (7998d6ba40d),
+Windows host, pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1, prints the
+bootstrap-seed WARNING), `SIMPLE_EXECUTION_MODE=interpreter`:
+
+```
+1 named            = 14
+2 sub-temp         = 11
+3 trim-temp        = 11
+4 sub-trim-temp    = 11
+5 named-line       = 11
+6 guard            = taken
+7 typed i64        = 11
+8 other named      = 7
+9 other sub-temp   = 5
+```
+
+Identical to the 2026-08-09 negative sweep — no bool, no coercion. Also
+checked whether the discriminating WM probe (`raw_len`/`line_len`/
+`colon_index_of`/`colon_find_from` on the first `CssVarResolutionState`
+iteration) ever landed in
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`:
+it did not (grep finds none of those identifiers; `line.index_of(":")` is
+still the live statement at ~line 477 region).
+
+Classification: SKIP. Promotion or retraction still requires a genuine
+self-hosted pure-Simple binary, which requires a full bootstrap — not
+available on this host. Status ("Reported, NOT REPRODUCED") remains accurate.
