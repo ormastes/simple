@@ -1,6 +1,14 @@
 # Browser renders boxes pixel-exact, but any text node blanks the whole frame
 
-Status: OPEN (P1)
+Status: CLOSED (2026-09-13) — both defects fixed and verified 2026-08-06 (see
+"Resolution" below); header corrected 2026-11-25 (was stale "OPEN (P1)").
+Fix re-confirmed present 2026-11-25 by source inspection on
+`origin/release/1.0.0` (`3e04c857a56`): `_web_budget_expired_at` at
+`simple_web_html_layout_renderer_foundation.spl:703` and
+`simple_web_layout_last_render_degrade_reason` at `:600`. Execution
+re-verification is blocked at this HEAD by the seed's
+`unknown decorator '@representation_boundary'` rejection (tree-wide since
+`cfd89933699`), so confirmation is by code inspection.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-05
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/`
