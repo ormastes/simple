@@ -170,3 +170,27 @@ sets `gpu_backend_used=true`. The focused browser/Metal fixture now retains
 the original surfaced batch and requires all four commands to render, so the
 short-circuit regression cannot be hidden by forcing an empty surface ID.
 
+
+## Verification 2026-11-25 — RESOLVED (fix present; Metal evidence not repeatable on this host)
+
+Verified on `release/1.0.0` (7998d6ba40d), Windows host, by code inspection:
+
+- The Resolution's executor fix is present verbatim in
+  `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:3642-3656`: typed scalar
+  locals (`target_width/target_height/embedding_x/.../embedding_opacity`) and
+  three intermediate booleans (`origin_matches`, `size_matches`,
+  `fully_opaque`) replace the compact mixed field/method predicate, with the
+  comment documenting the original native Metal mis-evaluation.
+- The two-module regression fixture
+  `test/fixtures/native_nested_struct_array_text_projection/` (`main.spl`,
+  `model.spl`) exists.
+- The canonical native evidence in the Resolution section (Metal device
+  readback, `rendered=4 skipped=0`) was gathered on macOS and cannot be
+  re-run on this Windows host; no Vulkan/D3D rerun was attempted.
+
+The broader "Required compiler fix" ask (diagnose unresolved names in grouped
+imports/annotations instead of silently defaulting field index zero) is a
+general compiler-diagnostic improvement not claimed by this bug's Resolution
+and is not assessed here.
+
+Status: RESOLVED for the reported Engine2D/browser-Metal corruption.
