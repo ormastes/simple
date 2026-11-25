@@ -1,0 +1,67 @@
+"""Regression spec for retiring ctor_mir_2026-10-31 workarounds in 80.driver.
+
+Verifies:
+1. Unboxed `[Future<text>]` parking and polling in `FileFiberRunV1` works
+   directly without `FileFiberFutureBoxV1`.
+2. All 15 `@workaround bug=ctor_mir_2026-10-31` tags, the `FileFiberFutureBoxV1`
+   boxing shim, redundant generic Result binder annotations, and the explicit
+   `<i64>` type argument on `async_ref_deliver_wake_i64` stay retired across
+   the 3 driver modules while keeping `simple_ring_rti004_wa_spec` invariants.
+"""
+
+use std.spec.{describe, it, expect}
+use std.async.future.{Future}
+use compiler.driver.driver_build.file_fiber_v1.{
+    FileFiberEntryV1,
+    file_fiber_begin_v1,
+    file_fiber_end_v1
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "ctor_mir_2026-10-31 workaround removal":
+    it "parks and polls unboxed [Future<text>] directly in FileFiberRunV1":
+        val entries = [
+            FileFiberEntryV1(module_key: "a", path: "a.spl", est_bytes: 16, content: "fn a(): ()"),
+            FileFiberEntryV1(module_key: "b", path: "b.spl", est_bytes: 16, content: "fn b(): ()")
+        ]
+        var run = file_fiber_begin_v1(entries, [0], 1024)
+        run.park_async(0, Future<text>.from_value("ok-0"))
+        run.park_async(1, Future<text>.pending())
+        expect(run.async_parks).to_equal(1)
+        expect(run.async_idx).to_equal([1])
+        expect(run.async_fut.len()).to_equal(1)
+
+        val done1 = run.poll_async()
+        expect(done1.len()).to_equal(1)
+        expect(done1[0].index).to_equal(0)
+        expect(done1[0].err).to_equal("ok-0")
+        expect(run.async_idx).to_equal([1])
+        expect(run.async_fut.len()).to_equal(1)
+
+        # Replace pending future with ready one and confirm poll_async drains it.
+        run.async_fut[0] = Future<text>.from_value("ok-1")
+        val done2 = run.poll_async()
+        expect(done2.len()).to_equal(1)
+        expect(done2[0].index).to_equal(1)
+        expect(done2[0].err).to_equal("ok-1")
+        expect(run.async_idx.len()).to_equal(0)
+        expect(run.async_fut.len()).to_equal(0)
+        file_fiber_end_v1(run)
+
+    it "keeps all ctor_mir_2026-10-31 workaround tags and boxing shims retired":
+        val bridge = rt_file_read_text("src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl") ?? ""
+        val fiber = rt_file_read_text("src/compiler/80.driver/driver_build/file_fiber_v1.spl") ?? ""
+        val imports = rt_file_read_text("src/compiler/80.driver/driver_unit_tldr_imports_v1.spl") ?? ""
+
+        for body in [bridge, fiber, imports]:
+            expect(body.len()).to_be_greater_than(0)
+            expect(body.contains("ctor_mir_2026-10-31")).to_equal(false)
+
+        expect(fiber.contains("FileFiberFutureBoxV1")).to_equal(false)
+        expect(fiber.contains("async_fut: [Future<text>]")).to_equal(true)
+        expect(bridge.contains("val created = SimpleRing<i64, i64>.create(")).to_equal(true)
+        expect(bridge.contains("val taken = self.ring.provider_take(1)")).to_equal(true)
+        expect(bridge.contains("val taken_completion = self.ring.take_completion_retained(self.owner_id)")).to_equal(true)
+        expect(bridge.contains("val delivered = async_ref_deliver_wake_i64(self.ring, wake)")).to_equal(true)
+        expect(bridge.contains("async_ref_deliver_wake_i64<i64>")).to_equal(false)
