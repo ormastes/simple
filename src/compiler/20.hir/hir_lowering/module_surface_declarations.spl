@@ -199,16 +199,8 @@ fn module_surface_export_origin_hints(
             owner_file = ""
     Ok(true)
 
-# The self-hosted candidate corrupts class fields whose type is a large
-# inline struct: `value: ParserModule` (30 limbs) read back garbage
-# (name.len() == -1) no matter how many typed local binds wrapped the
-# store. Same family as the NLL live_aliases array-argument corruption.
-# The wrapper therefore stores ONE HANDLE-SIZED SLOT PER ParserModule LIMB
-# (texts/Dicts/arrays are all single handles; bools/i64s are scalars) and
-# `module_surface_owner_value` reconstructs the ParserModule at the use
-# site. The proper repair is the compiler's class-field layout/copy for
-# large inline structs.
-# @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=class_inline_struct_field_corrupts
+# By-reference owner storing one handle-sized slot per ParserModule limb;
+# `module_surface_owner_value` reconstructs the ParserModule value when needed.
 pub class ModuleSurfaceParserOwner:
     name: text
     imports: [ParserImport]
@@ -252,9 +244,6 @@ pub class ModuleSurfaceParserOwner:
     manifest_valid_v1: bool = true
 
     static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
-        # Annotated rebind per limb: ANY-transport hazard sweep pattern used
-        # throughout this file for parser aggregates crossing call boundaries.
-        # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=by_value_sweep
         val v_name: text = value.name
         val v_imports: [ParserImport] = value.imports
         val v_exports: [Export] = value.exports
@@ -393,10 +382,6 @@ pub fn module_surface_from_owner(
 ) -> Result<ModuleSurface, text>:
     # Compute while the complete ParserModule owner is alive; only four flat
     # limbs cross into persistent surface storage.
-    # owner.value no longer exists: the class stores one handle-sized slot per
-    # ParserModule limb (see ModuleSurfaceParserOwner) and this reconstruction
-    # is the single sanctioned read path.
-    # @workaround bug=stage2_sanity_module_path_naming_probe_segv_2026_10_22 reason=class_inline_struct_field_corrupts
     val module_local: ParserModule = module_surface_owner_value(owner)
     val semantic_hex = module_surface_semantic_projection(module_local)
     val semantic_cacheable = semantic_hex.len() == 64
