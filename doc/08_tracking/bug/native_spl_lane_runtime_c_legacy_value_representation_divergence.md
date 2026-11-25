@@ -241,3 +241,39 @@ invocation forms (doc form, with/without --seed-ok, absolute path,
 resolution limitation; the doc's repro prescribes a stage3 self-hosted
 binary. Native-lane behavioural re-run remains open for a stage3-capable
 environment.
+
+## Verification 2026-11-25 (P3 fleet, release/1.0.0) — fix in tree; behavioural native run environment-blocked
+
+The 2026-11-12 Lane C source-set swap is present on release/1.0.0:
+`src/app/compile/native.spl:474` compiles the modern core-C set
+(`runtime_native.c`, `runtime_legacy_core.c`, + Lane B unconditional inputs,
++ `runtime_socket_nonblock.c`) with
+`-DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1`
+(native.spl:484), and legacy `runtime.c` appears nowhere in `rt_sources`.
+The divergent-representation pairing this bug describes (Lane C on legacy
+untagged `runtime.c`) therefore no longer exists in the tree.
+
+Attempted the stage3 behavioural re-run this doc left open, using the tracked
+self-hosted bin/simple.exe at tree fcd95d41d60:
+
+```
+env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple.exe native-build \
+  --entry test/03_system/native/native_lane_modern_runtime_representation.spl -o /tmp/p3bag_native_b
+```
+
+Two attempts, both blocked before codegen by host/toolchain conditions
+unrelated to the lane swap: (1) at current release/1.0.0 HEAD the pinned
+binary rejects the `@representation_boundary` autofix annotations
+(cfd89933699) that moved src/ ahead of the binary — a repo-wide
+source/binary skew, not this bug; (2) at the consistent pre-autofix tree the
+build ran 540 s and was killed by the wall timeout after reporting
+`workarounds: refresh failed: src/compiler/20.hir/hir_lowering/types.spl:1114`
+(a source-structure gate in the compiler lane, again unrelated to the runtime
+source set). No native binary was produced, so behavioural confirmation of
+rc=42 through Lane C remains OPEN for an environment where native-build
+completes; the interpreter-lane fixture evidence (rc=42) and the 2026-11-12
+nm-verified mechanical checks stand as the current proof.
+
+**Status:** fix LANDED and verified in-tree by inspection + prior mechanical
+evidence; behavioural native-lane re-run still outstanding (environment-
+blocked on this host, two documented attempts).
