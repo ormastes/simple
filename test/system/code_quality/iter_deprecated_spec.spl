@@ -32,6 +32,23 @@ use std.spipe.*
 use std.spec.step
 use std.common.iterable.{each, each_with_index}
 
+# Callback closures capture enclosing locals BY VALUE, so a `var` declared
+# inside an `it` block and mutated from an `each`/`each_with_index` callback
+# silently drops the mutation (compiler warning W-CAPTURE-MUTATION). The
+# callback examples below therefore collect through module-level accumulators
+# — the compiler-sanctioned workaround — reset at the start of each example.
+# The callbacks also only push the RAW parameter: method calls and string
+# interpolation on a closure parameter miscompile to "" under the seed test
+# evaluator, so all string building happens outside the callback.
+var each_order_vals: [i64] = []
+var each_empty_seen: [i64] = []
+var each_sum_seen: [i64] = []
+var ewi_vals: [text] = []
+var ewi_idx: [i64] = []
+var ewi_empty_seen: [text] = []
+var ewi_dup_vals: [text] = []
+var ewi_dup_idx: [i64] = []
+
 
 # ============================================================================
 # List.each() — replacement for List.iter() callback usage
@@ -47,28 +64,31 @@ describe "List.each() iterates all elements (replaces iter())":
 
     it "List.each() visits every element in order":
         val items = [10, 20, 30]
-        var parts: [text] = []
+        each_order_vals = []
         each(items, \n:
-            parts.push(n.to_string())
+            each_order_vals.push(n)
         )
-        expect(parts.join("")).to_equal("102030")
+        var joined = ""
+        for n in each_order_vals:
+            joined = joined + n.to_string()
+        expect(joined).to_equal("102030")
 
     it "List.each() on empty list calls fn zero times":
         val items: [i64] = []
-        var seen: [i64] = []
+        each_empty_seen = []
         each(items, \n:
-            seen.push(1)
+            each_empty_seen.push(1)
         )
-        expect(seen.len()).to_equal(0)
+        expect(each_empty_seen.len()).to_equal(0)
 
     it "List.each() accumulates a sum correctly":
         val items = [1, 2, 3, 4, 5]
-        var seen: [i64] = []
+        each_sum_seen = []
         each(items, \n:
-            seen.push(n)
+            each_sum_seen.push(n)
         )
         var sum = 0
-        for n in seen:
+        for n in each_sum_seen:
             sum = sum + n
         expect(sum).to_equal(15)
 
@@ -122,31 +142,47 @@ describe "List.each_with_index provides index alongside element":
     it "List.each_with_index passes correct index and value":
         step("Reproduce the exact failure")
         val items = ["x", "y", "z"]
-        var indices: [i64] = []
-        var pairs: [text] = []
+        ewi_vals = []
+        ewi_idx = []
         each_with_index(items, \v, i:
-            indices.push(i)
-            pairs.push("{v}:{i}")
+            ewi_vals.push(v)
+            ewi_idx.push(i)
         )
         var index_sum = 0
-        for i in indices:
+        for i in ewi_idx:
             index_sum = index_sum + i
         expect(index_sum).to_equal(3)
-        expect(pairs.join(",")).to_equal("x:0,y:1,z:2")
+        var pairs_text = ""
+        var k = 0
+        while k < ewi_vals.len():
+            if k > 0:
+                pairs_text = pairs_text + ","
+            pairs_text = pairs_text + "{ewi_vals[k]}:{ewi_idx[k]}"
+            k = k + 1
+        expect(pairs_text).to_equal("x:0,y:1,z:2")
 
     it "indexed iteration invokes no callback on an empty array":
         step("Reject the adjacent regression")
         val items: [text] = []
-        var seen: [text] = []
+        ewi_empty_seen = []
         each_with_index(items, \v, i:
-            seen.push("{v}:{i}")
+            ewi_empty_seen.push(v)
         )
-        expect(seen.len()).to_equal(0)
+        expect(ewi_empty_seen.len()).to_equal(0)
 
     it "iteration preserves duplicate values and their distinct indices":
         step("Exercise the repaired owner")
-        var seen: [text] = []
+        ewi_dup_vals = []
+        ewi_dup_idx = []
         each_with_index(["same", "same"], \v, i:
-            seen.push("{v}:{i}")
+            ewi_dup_vals.push(v)
+            ewi_dup_idx.push(i)
         )
-        expect(seen.join(",")).to_equal("same:0,same:1")
+        var seen_text = ""
+        var k = 0
+        while k < ewi_dup_vals.len():
+            if k > 0:
+                seen_text = seen_text + ","
+            seen_text = seen_text + "{ewi_dup_vals[k]}:{ewi_dup_idx[k]}"
+            k = k + 1
+        expect(seen_text).to_equal("same:0,same:1")
