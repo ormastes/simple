@@ -1,13 +1,24 @@
 # seed driver: `RunningType::Interpreter` SIGSEGVs on `match` over a
-## Open 2026-09-16 — needs owner triage
+## Resolved — verified 2026-11-06, note 2026-11-25
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**2026-11-25 verification (lane p2w3-ai):** RESOLVED. The 2026-11-06 ledger
+triage (commit `7811e6673ce`, "close four rows verified passing on the
+release/1.0.0 seed") ran the minimal `Result`+`match`+`return`-in-each-arm
+repro on the release/1.0.0 seed — it runs, no crash — and set the bug_db row
+to `fixed`. The named files (`interpreter_call/block_execution.rs`,
+`interpreter_patterns.rs`) have been heavily reworked since 2026-07-17, so
+the original crash shape no longer reproduces. This lane could not re-run
+the cargo-test repro itself (Rust-seed-only test; cargo builds are out of
+scope for the pure-Simple lane), so closure rests on the recorded 2026-11-06
+execution evidence plus source-drift inspection.
 # `Result`-returning call with `return` in each arm
 
 **Severity:** medium (crash, not silent-wrong -- found while regression-testing task #170)
 **Found:** 2026-07-17, task #170 (BoxInt<<3 tag-shift verification) lane
-**Status:** filed, not yet root-caused or fixed -- out of scope for #170
+**Status:** resolved (verified passing 2026-11-06; see header note)
 
 ## Symptom
 

@@ -1,7 +1,7 @@
 # Bug: `regenerate_memory_capabilities()` never emits a `conversion_is_safe`-named theorem — generated Lean output only proves narrow special cases (reflexivity, two hand-picked pairs), not general conversion safety
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** resolved (verified in tree 2026-11-25; see note at bottom)
 - **Area:** `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl` (`regenerate_memory_capabilities`), exercised via `test/00_formal_verification/compiler/regeneration_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple` (prints the Rust-seed bootstrap warning); this is a content-generation gap in pure-`.spl` code, not an interpreter defect, so it is expected to reproduce identically on a self-hosted binary.
 
@@ -36,3 +36,25 @@ Either (a) add a genuinely general theorem to `regenerate_memory_capabilities()`
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/regeneration_spec.spl --no-session-daemon
 ```
 Failing example: "Lean Regeneration > module generators > regenerates memory capability output".
+
+## Verification 2026-11-25 (lane p2w3-ai)
+
+RESOLVED — option (a) from "Suggested fix direction" was implemented.
+`regenerate_memory_capabilities()` in
+`src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`
+now emits a general `conversion_is_safe` theorem (line ~105):
+
+    theorem conversion_is_safe (srcCap : RefCapability) (dstCap : RefCapability) :
+      canConvert srcCap dstCap = true ↔ isMoreRestrictive srcCap dstCap
+      -- proof: cases srcCap <;> cases dstCap <;> simp [canConvert, isMoreRestrictive]
+
+`build_theorem` renders it as `theorem {name}` (`lean/_Codegen/lean_codegen.spl:107`),
+so the spec's `expect(lean_code).to_contain("theorem conversion_is_safe")`
+(`test/00_formal_verification/compiler/regeneration_spec.spl:26`) is satisfied
+by construction. Prior lanes already re-verified the fix in tree
+(`303762cc215`, `3097c6e8c47`, tracked under the sibling doc
+`regeneration_spec_asserts_nonexistent_conversion_is_safe_theorem_2026-08-17`).
+A fresh spec execution in this lane is environment-blocked: the pinned
+`bin/simple.exe` seed rejects `@representation_boundary` tree-wide at HEAD,
+so `bin/simple.exe test` cannot run any spec. Closure rests on source
+inspection of the generator, the codegen renderer, and the spec expectation.
