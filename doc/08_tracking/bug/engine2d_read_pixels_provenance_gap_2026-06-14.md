@@ -40,3 +40,25 @@ Engine2D boundary.
 - Consume the typed result in the Simple Web Engine2D presenter and WebRender
   artifact receipt before allowing
   `same_frame_gpu_backend_readback_status=pass`.
+
+## Verification note 2026-11-25 (p2w2-aj)
+
+CLOSED status re-verified on release/1.0.0 HEAD by code inspection:
+
+- `Engine2DReadback` type and `read_pixels_with_source()` are declared on the
+  backend trait (`src/lib/gc_async_mut/gpu/engine2d/backend.spl:168`) with a
+  default row-cropping wrapper at :177.
+- The typed `ReadbackSource` enum (`backend.spl:100-110`) maps to
+  `device_readback` / `cpu_mirror` / `software`, and the provenance classifier
+  at `backend.spl:118-120` additionally admits `cpu_fallback`,
+  `host_cache_after_device_present`, `host_cache_after_device_copy`, and
+  `swapchain_present` — the full source taxonomy the fix specified.
+- `backend_cpu.spl:73` returns the `cpu_mirror`-tagged readback
+  (`engine2d_readback_rows(..., "cpu_mirror", ...)`) as recorded.
+- Compatibility wrapper `read_pixels()` and consumers (viability probe,
+  Simple Web presenter) remain as described in the 2026-09-13 closure.
+
+Execution limit: GPU hardware lanes (CUDA/Vulkan/Metal) cannot be exercised on
+this Windows seed-only host, and `bin/simple.exe test` fails repo-wide at HEAD
+with `unknown decorator '@representation_boundary'`; verification is by code
+inspection against the 2026-09-13 closure's measured claims, which all hold.

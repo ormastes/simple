@@ -990,3 +990,31 @@ The cited `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
 (:2529 arity check, :3272 receiver re-lowering, :3582 literals duplication).
 Nothing implements or reports duplicate impl-method detection, consistent with
 the reported silent first-win. Owner path: src/compiler/50.mir/**.
+
+## Verification note 2026-11-25 (p2w2-aj)
+
+Resolution verified on release/1.0.0 HEAD by code inspection:
+
+- `src/compiler/50.mir/_MirLoweringExpr/literals.spl` is deleted
+  (directory listing confirms; last touched by 0861983da93
+  "fix(sffi): remove dead MIR literal authority"). `method_calls_literals.spl`
+  remains the sole copy.
+- The dependent-surface cleanup holds: zero `MirLoweringExpr/literals` rows in
+  `scripts/check/*_baseline.txt` / `*.tsv` and in
+  `test/01_unit/compiler/mir/value_access_ownership_spec.spl`.
+- Residual cosmetic item: one stale comment reference survives at
+  `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:10262`
+  (`# sites (literals.spl:79,108,163,174)...`) — a comment pointer, not a
+  load-path or baseline reference; left as-is (comment-only, editing compiler
+  sources for it would require bootstrap verification to land per this
+  lane's rules).
+- Execution verification limit unchanged from the 2026-09-18 resolution: the
+  change is compiler-source-only and `bin/simple.exe` here is the Rust seed
+  that never loads these sources; additionally `bin/simple.exe test` fails
+  repo-wide at HEAD with `unknown decorator '@representation_boundary'`
+  (seed/source inconsistency), so no spec run was possible. Verified by code
+  inspection against the recorded resolution.
+
+The broader defect class (no duplicate-impl-method diagnostic; remaining
+orphan part-files; the `ObjectProvider` co-load question) stays as filed
+separately per the resolution's "Still open, filed separately" section.
