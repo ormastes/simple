@@ -1,5 +1,38 @@
 # SMF writer/kernel trailer layout skew: toolchain cannot emit a kernel-recognized role-2 library
-## Closed 2026-09-16 — ...tible enum the kernel never reads. ## Fix Make the writer emit the kernel's trailer contra
+## Open 2026-11-25 — the 2026-09-16 "Closed" header was bookkeeping, not a fix; mechanism has since changed (see triage below)
+
+## Triage 2026-11-25 (work/p2w5-ac-20261125) — still OPEN, but the skew mechanism is gone
+
+The "Closed 2026-09-16" header above was a normalization-pass bookkeeping
+excerpt, not resolution evidence; the gate spec still pinned the broken
+behavior at that time. Re-checked at release/1.0.0 HEAD by code inspection:
+
+**What changed since this record:**
+- The toolchain writer no longer emits the skewed 128-byte v1.1 trailer.
+  `smf_writer.spl:547` builds `SmfHeader.new_v1_3(...)` and writes a 96-byte
+  v1.3 `#[repr(C)]` trailer, the same layout the Rust seed uses.
+- The kernel reader (`src/os/kernel/loader/smf.spl`) is now v1.3-aware:
+  `smf_header_offset` prefers the canonical 96-byte trailer at EOF-96, derives
+  role from flags (`_smf_v13_flags_to_role`: EXECUTABLE→1, RELOADABLE→2) and
+  ABI from platform. The byte-60/61/62 module_hash collision this record
+  describes does not exist in the v1.3 layout.
+
+**What is still missing:** no production writer path sets
+`SMF_FLAG_RELOADABLE` — `set_reloadable` is called only from
+`src/compiler/70.backend/linker/test/*` specs; `smf_writer.spl:558` sets only
+executable/aspect-pack. So toolchain output still cannot arrive as a role-2
+library; role-2 is now *expressible* (flags-based) but never *emitted*. The
+remaining work is a design decision (when does the writer emit a library
+envelope?) plus wiring `set_reloadable(true)` on that path, and updating the
+gate spec: its final skew example
+(`test/01_unit/os/kernel/loader/smf_dyload_spec.spl:336`,
+`make_writer_layout_envelope`) pins the legacy 128-byte layout failing the
+role-2 gate, which remains true for legacy bytes and is no longer a statement
+about current toolchain output.
+
+Not attempted in this lane: the emit-policy decision is owner-level, and the
+spec harness cannot run at HEAD (pinned seed rejects
+`@representation_boundary`), so any writer change would be unverifiable here.
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
