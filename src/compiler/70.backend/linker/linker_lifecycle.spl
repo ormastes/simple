@@ -24,7 +24,7 @@ pub struct LinkerProviderV1:
     composition_digest: KpfDigest256
     engine_id: text
     invoke: fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text) -> LinkReceiptV1
-    invoke_with_config: Option<fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text, NativeLinkConfig) -> LinkReceiptV1> = nil
+    invoke_with_config: Option<fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text, NativeLinkConfig) -> LinkReceiptV1> = None
 
 pub struct LinkerSessionHandleV1:
     index: u32
@@ -62,9 +62,9 @@ pub class LinkerLifecycleV1:
         var sessions: [_LinkerSessionSlotV1] = []
         var index: u32 = 0
         while index < capacity:
-            providers.push(nil)
-            packs.push(nil)
-            owned_generations.push(nil)
+            providers.push(None)
+            packs.push(None)
+            owned_generations.push(None)
             index = index + 1
         index = 0
         while index < session_capacity:
@@ -75,7 +75,7 @@ pub class LinkerLifecycleV1:
         var owner = LinkerLifecycleV1(
             generations: KpfGenerationTable.create(capacity, session_capacity),
             providers: providers, packs: packs, owned_generations: owned_generations,
-            pending_pack: nil, sessions: sessions,
+            pending_pack: None, sessions: sessions,
             requirement: requirement, recovery: recovery,
             active: KpfGenerationHandle(index: 0, epoch: 0), registry_revision: 0,
             recovery_running: false, closing: false, closed: false)
@@ -108,7 +108,7 @@ pub class LinkerLifecycleV1:
         val closed = pack.close()
         self.pending_pack = Some(pack)
         if closed.is_err(): return closed
-        self.pending_pack = nil
+        self.pending_pack = None
         Ok(true)
 
     pub me publish_pack(config: LinkerPackConfigV1) -> Result<KpfGenerationHandle, text>:
@@ -136,8 +136,8 @@ pub class LinkerLifecycleV1:
             return Err("linker generation publish rejected: code={published.status.code()}")
         self.packs[published.current.index] = Some(pack)
         self.owned_generations[published.current.index] = Some(published.current)
-        self.providers[published.current.index] = nil
-        self.pending_pack = nil
+        self.providers[published.current.index] = None
+        self.pending_pack = None
         self.active = published.current
         self.registry_revision = self.registry_revision + 1
         Ok(published.current)
@@ -165,7 +165,7 @@ pub class LinkerLifecycleV1:
 
     pub me run(session: LinkerSessionHandleV1, request: LinkRequestV1,
             policy: LinkExecutionPolicyV1, inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
-        self.run_selected(session, request, policy, inputs, output, nil)
+        self.run_selected(session, request, policy, inputs, output, None)
 
     pub me run_with_config(session: LinkerSessionHandleV1, request: LinkRequestV1,
             policy: LinkExecutionPolicyV1, inputs: [text], output: text,
@@ -181,10 +181,10 @@ pub class LinkerLifecycleV1:
         val generation = self.sessions[session.index].generation
         val view = self.generations.view(generation)
         if not view.status.accepted(): return Err("stale linker generation")
-        if self.packs[generation.index] != nil:
+        if self.packs[generation.index].is_some():
             self.sessions[session.index].running = true
             var pack = self.packs[generation.index].unwrap()
-            val result = if config == nil:
+            val result = if config.is_none():
                 pack.invoke(request, policy, inputs, output)
             else:
                 pack.invoke_with_config(request, policy, inputs, output, config.unwrap())
@@ -192,12 +192,12 @@ pub class LinkerLifecycleV1:
             self.sessions[session.index].running = false
             return result
         val selected = self.providers[generation.index]
-        if selected == nil: return Err("linker generation has no operation")
+        if selected.is_none(): return Err("linker generation has no operation")
         val provider = selected.unwrap()
-        if config != nil and provider.invoke_with_config.is_none():
+        if config.is_some() and provider.invoke_with_config.is_none():
             return Err("linker generation has no configured operation")
         self.sessions[session.index].running = true
-        val receipt = if config == nil:
+        val receipt = if config.is_none():
             provider.invoke(request, policy, inputs, output)
         else:
             val invoke = provider.invoke_with_config.unwrap()
@@ -224,7 +224,7 @@ pub class LinkerLifecycleV1:
         if view.pin_count != 0: return Err("linker generation is still pinned")
         # Close before releasing the generation slot. A failed unload retains
         # both the mapping owner and slot, so publication cannot overwrite it.
-        if self.packs[generation.index] != nil:
+        if self.packs[generation.index].is_some():
             var pack = self.packs[generation.index].unwrap()
             val closed = pack.close()
             self.packs[generation.index] = Some(pack)
@@ -234,9 +234,9 @@ pub class LinkerLifecycleV1:
             return Err("linker generation is still pinned")
         if not collected.accepted():
             return Err("linker generation collect rejected: code={collected.code()}")
-        self.providers[generation.index] = nil
-        self.packs[generation.index] = nil
-        self.owned_generations[generation.index] = nil
+        self.providers[generation.index] = None
+        self.packs[generation.index] = None
+        self.owned_generations[generation.index] = None
         Ok(true)
 
     pub me recover() -> Result<KpfGenerationHandle, text>:
@@ -246,7 +246,7 @@ pub class LinkerLifecycleV1:
     pub me run_recovery(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
             inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
         """Execute static recovery without depending on publication/session capacity."""
-        self.run_recovery_selected(request, policy, inputs, output, nil)
+        self.run_recovery_selected(request, policy, inputs, output, None)
 
     pub me run_recovery_with_config(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
             inputs: [text], output: text, config: NativeLinkConfig) -> Result<LinkReceiptV1, text>:
@@ -256,10 +256,10 @@ pub class LinkerLifecycleV1:
             inputs: [text], output: text, config: Option<NativeLinkConfig>) -> Result<LinkReceiptV1, text>:
         if self.closing: return Err("linker lifecycle is closing")
         if self.recovery_running: return Err("recursive linker recovery dispatch")
-        if config != nil and self.recovery.invoke_with_config.is_none():
+        if config.is_some() and self.recovery.invoke_with_config.is_none():
             return Err("linker recovery has no configured operation")
         self.recovery_running = true
-        val receipt = if config == nil:
+        val receipt = if config.is_none():
             self.recovery.invoke(request, policy, inputs, output)
         else:
             val invoke = self.recovery.invoke_with_config.unwrap()
@@ -293,7 +293,7 @@ pub class LinkerLifecycleV1:
                 if first_error == "": first_error = "linker retirement rejected: code={retired.code()}"
         index = 0
         while index < self.owned_generations.len():
-            if self.owned_generations[index] != nil:
+            if self.owned_generations[index].is_some():
                 val result = self.collect(self.owned_generations[index].unwrap())
                 if result.is_err() and first_error == "": first_error = result.unwrap_err()
             index = index + 1
