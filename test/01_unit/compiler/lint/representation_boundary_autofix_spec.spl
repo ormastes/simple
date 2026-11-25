@@ -1,0 +1,196 @@
+# @req REQ-SSPEC-COMPILER
+"""
+E-MC-REP-001 EasyFix auto-fix unit and compiler validation specification.
+
+Verifies `check_representation_boundary` for top-level and member callable
+declarations containing `unsafe:` or `unsafe(capabilities: [...]):` blocks,
+exact UTF-8 byte offsets via `validated_fix_sources`, decorator attachment order,
+capability canonicalization, deterministic kind/reviewer inference, negative
+exclusions, and real compiler validation (`parse_representation_source_v1` +
+`representation_manifest_validate_v1`).
+"""
+
+use std.spec.*
+use std.tooling.easy_fix.types.{EasyFix, FixApplicator, FixConfidence, easyfix_code}
+use compiler.tools.fix.rules.impl_.lint_representation_boundary.{check_representation_boundary}
+use compiler.tools.fix.source_edits.{validated_fix_sources}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.assurance.representation_manifest_v1.{
+    RepresentationDeclarationV1, RepresentationManifestV1}
+use compiler.frontend.core.representation_declarations_v1.{
+    parse_representation_source_v1}
+use compiler.semantics.representation_boundary.validation.{
+    representation_manifest_validate_v1}
+
+fn _rep_apply_checked(source: text, path: text) -> text:
+    val fixes = check_representation_boundary(source, path)
+    if fixes.len() == 0:
+        return source
+    match validated_fix_sources(fixes, {path: source}):
+        case Ok(updated):
+            updated[path]
+        case Err(e):
+            "ERR: " + e
+
+fn _rep_validate_fixed_source(fixed: text, path: text) -> [RepresentationDeclarationV1]:
+    parse_representation_source_v1(fixed, path, "fixture_pkg", "fixture_pkg.mod")
+
+describe "E-MC-REP-001 representation boundary autofix: positive cases":
+    it "inserts @representation_boundary for top-level fn with unsafe(capabilities: [ffi])":
+        step("Emit Safe E-MC-REP-001 fix and apply via validated_fix_sources")
+        val path = "src/app/demo.spl"
+        val source = "fn read_fd():\n    unsafe(capabilities: [ffi]):\n        val raw = 1\n        raw\n"
+        val fixes = check_representation_boundary(source, path)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].is_safe()).to_equal(true)
+        expect(fixes[0].confidence == FixConfidence.Safe).to_equal(true)
+        expect(fixes[0].id).to_equal("E-MC-REP-001:1")
+        expect(easyfix_code(fixes[0])).to_equal("E-MC-REP-001")
+
+        val fixed = _rep_apply_checked(source, path)
+        val expected = "@representation_boundary(kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in read_fd\", reviewers: [\"app-owner\"], capabilities: [\"ffi\"])\n" + source
+        expect(fixed).to_equal(expected)
+        expect(check_representation_boundary(fixed, path).len()).to_equal(0)
+
+    it "inserts @representation_boundary with empty capabilities for pub fn with bare unsafe:":
+        step("Bare unsafe: emits capabilities: [] and layout fallback kind")
+        val path = "src/app/representation_layout.spl"
+        val source = "pub fn encode_word():\n    unsafe:\n        val raw = 1\n        raw\n"
+        val fixed = _rep_apply_checked(source, path)
+        val expected = "@representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in encode_word\", reviewers: [\"app-owner\"], capabilities: [])\n" + source
+        expect(fixed).to_equal(expected)
+
+    it "handles methods inside class, struct, impl, and trait with preserved indentation":
+        step("Indent attribute to match member level in class, struct, impl, and trait")
+        val path = "src/compiler/demo.spl"
+        val source = "class Holder:\n    pub fn fetch():\n        unsafe(capabilities: [raw_ptr]):\n            val p = 1\n            p\n\n    pub me mutate():\n        unsafe:\n            val m = 2\n            m\n\nstruct Buf:\n    static fn alloc():\n        unsafe(capabilities: [ffi]):\n            val b = 3\n            b\n\nimpl Buf:\n    pub static fn reset():\n        unsafe:\n            val r = 4\n            r\n\ntrait LowLevel:\n    me poke():\n        unsafe(capabilities: [mmio]):\n            val d = 5\n            d\n"
+        val fixes = check_representation_boundary(source, path)
+        expect(fixes.len()).to_equal(5)
+        val fixed = _rep_apply_checked(source, path)
+        expect(fixed).to_contain("    @representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in fetch\", reviewers: [\"compiler-owner\"], capabilities: [\"raw_ptr\"])\n    pub fn fetch():")
+        expect(fixed).to_contain("    @representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in mutate\", reviewers: [\"compiler-owner\"], capabilities: [])\n    pub me mutate():")
+        expect(fixed).to_contain("    @representation_boundary(kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in alloc\", reviewers: [\"compiler-owner\"], capabilities: [\"ffi\"])\n    static fn alloc():")
+        expect(fixed).to_contain("    @representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in reset\", reviewers: [\"compiler-owner\"], capabilities: [])\n    pub static fn reset():")
+        expect(fixed).to_contain("    @representation_boundary(kind: \"hardware\", reason: \"Explicit unsafe hardware boundary in poke\", reviewers: [\"compiler-owner\"], capabilities: [\"mmio\"])\n    me poke():")
+        expect(check_representation_boundary(fixed, path).len()).to_equal(0)
+
+    it "merges and deduplicates capabilities across multiple unsafe blocks in canonical order":
+        step("Canonical order is raw_ptr, ffi, mmio, inline_asm, type_erasure")
+        val path = "other/custom.spl"
+        val source = "pub static fn multi_a():\n    unsafe(capabilities: [type_erasure, ffi]):\n        val a = 1\n    unsafe(capabilities: [ffi, raw_ptr, inline_asm]):\n        val b = 2\n    unsafe(capabilities: [mmio]):\n        val c = 3\n    unsafe:\n        val d = 4\n"
+        val fixed = _rep_apply_checked(source, path)
+        expect(fixed).to_contain("capabilities: [\"raw_ptr\", \"ffi\", \"mmio\", \"inline_asm\", \"type_erasure\"]")
+        expect(fixed).to_contain("kind: \"ffi\"")
+        expect(fixed).to_contain("reviewers: [\"platform-owner\"]")
+
+    it "infers kind and reviewers deterministically from body and file path":
+        step("Verify ffi, hardware, intrinsics, layout and reviewer path mapping")
+        val rt_src = "fn call_rt():\n    unsafe:\n        rt_sleep_ms(1)\n"
+        expect(_rep_apply_checked(rt_src, "src/lib/nogc_sync_mut/util.spl")).to_contain(
+            "kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in call_rt\", reviewers: [\"stdlib-owner\"], capabilities: []")
+
+        val sffi_src = "fn wrap():\n    unsafe:\n        val x = 1\n"
+        expect(_rep_apply_checked(sffi_src, "src/lib/nogc_sync_mut/sffi/shim.spl")).to_contain(
+            "kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in wrap\", reviewers: [\"runtime-ffi-owner\"], capabilities: []")
+        expect(_rep_apply_checked(sffi_src, "src/lib/nogc_sync_mut/io/file.spl")).to_contain(
+            "kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in wrap\", reviewers: [\"runtime-ffi-owner\"], capabilities: []")
+        expect(_rep_apply_checked(sffi_src, "src/lib/gc_async_mut/net.spl")).to_contain(
+            "kind: \"layout\", reason: \"Explicit unsafe layout boundary in wrap\", reviewers: [\"runtime-ffi-owner\"], capabilities: []")
+        expect(_rep_apply_checked(sffi_src, "src/lib/gc_async_mut/process_ops.spl")).to_contain(
+            "kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in wrap\", reviewers: [\"runtime-ffi-owner\"], capabilities: []")
+
+        val hw_src = "fn reg():\n    unsafe:\n        val v = 0\n"
+        expect(_rep_apply_checked(hw_src, "src/lib/baremetal/uart.spl")).to_contain(
+            "kind: \"hardware\", reason: \"Explicit unsafe hardware boundary in reg\", reviewers: [\"stdlib-owner\"], capabilities: []")
+
+        val simd_src = "fn vec():\n    unsafe:\n        val v = 0\n"
+        expect(_rep_apply_checked(simd_src, "src/lib/common/simd_scan.spl")).to_contain(
+            "kind: \"intrinsics\", reason: \"Explicit unsafe intrinsics boundary in vec\", reviewers: [\"stdlib-owner\"], capabilities: []")
+
+    it "places @representation_boundary above existing @allow and @unsafe decorators":
+        step("Insert at the top of the contiguous decorator stack for clean parser binding")
+        val path = "src/compiler/decorated.spl"
+        val source = "@allow(primitive_api)\n@unsafe(reason: \"raw syscall\", capabilities: [ffi])\npub fn do_call(fd: i64) -> i64:\n    unsafe(capabilities: [ffi]):\n        fd\n"
+        val fixes = check_representation_boundary(source, path)
+        expect(fixes.len()).to_equal(1)
+        expect(fixes[0].id).to_equal("E-MC-REP-001:3")
+        expect(fixes[0].replacements[0].line).to_equal(1)
+        expect(fixes[0].replacements[0].column).to_equal(1)
+        val fixed = _rep_apply_checked(source, path)
+        val expected = "@representation_boundary(kind: \"ffi\", reason: \"Explicit unsafe ffi boundary in do_call\", reviewers: [\"compiler-owner\"], capabilities: [\"ffi\"])\n" + source
+        expect(fixed).to_equal(expected)
+
+    it "keeps UTF-8 byte offsets exact after non-ASCII prefixes in validated_fix_sources":
+        step("Non-ASCII comments and strings before unsafe fn pass validated_fix_sources")
+        val path = "src/app/utf8_prefix.spl"
+        val prefix = "# 한🙂 — café résumé\nval banner = \"αβγ🙂\"\n\n"
+        val body = "pub fn a():\n    unsafe(capabilities: [raw_ptr]):\n        val x = 1\n        x\n"
+        val source = prefix + body
+        val fixes = check_representation_boundary(source, path)
+        expect(fixes.len()).to_equal(1)
+        val fixed = _rep_apply_checked(source, path)
+        val expected = prefix + "@representation_boundary(kind: \"layout\", reason: \"Explicit unsafe layout boundary in a\", reviewers: [\"app-owner\"], capabilities: [\"raw_ptr\"])\n" + body
+        expect(fixed).to_equal(expected)
+
+describe "E-MC-REP-001 representation boundary autofix: negative cases":
+    it "skips safe functions without unsafe blocks":
+        val source = "pub fn safe_add(a: i64, b: i64) -> i64:\n    a + b\n"
+        expect(check_representation_boundary(source, "src/app/safe.spl").len()).to_equal(0)
+
+    it "skips functions already annotated with @representation_boundary":
+        val source = "@representation_boundary(kind: \"ffi\", reason: \"Already declared\", reviewers: [\"app-owner\"], capabilities: [\"ffi\"])\nfn already():\n    unsafe(capabilities: [ffi]):\n        val x = 1\n        x\n\n@allow(primitive_api)\n@representation_boundary(\n    kind: \"layout\",\n    reason: \"Multi-line declared\",\n    reviewers: [\"app-owner\"],\n    capabilities: []\n)\npub fn already_stacked(x: i64) -> i64:\n    unsafe:\n        x\n"
+        expect(check_representation_boundary(source, "src/app/already.spl").len()).to_equal(0)
+
+    it "ignores unsafe words in comments, strings, docstrings, and plain calls":
+        val source = "# unsafe: in comment\nfn only_text():\n    \"\"\"\n    unsafe(capabilities: [ffi]):\n        ignored in docstring\n    \"\"\"\n    val s = \"unsafe: in string\"\n    val r = 'unsafe: in single quote'\n    val u = unsafe(42)\n    s\n"
+        expect(check_representation_boundary(source, "src/app/ignored.spl").len()).to_equal(0)
+
+    it "skips extern fn and pub extern fn declarations":
+        val source = "extern fn rt_unsafe_probe(x: i64) -> i64\npub extern fn rt_unsafe_read(x: i64) -> i64\n"
+        expect(check_representation_boundary(source, "src/app/externs.spl").len()).to_equal(0)
+
+describe "E-MC-REP-001 real compiler validation":
+    it "produces zero parser/validation errors and valid normalized RepresentationManifestV1":
+        step("Apply E-MC-REP-001 fix and validate through parse_representation_source_v1 + representation_manifest_validate_v1")
+        val path = "src/compiler/validated_boundary.spl"
+        val source = "# 한🙂 — UTF-8 header\n@allow(primitive_api)\n@unsafe(reason: \"raw ffi pointer\", capabilities: [ffi, raw_ptr])\npub fn read_raw(ptr: i64) -> i64:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        ptr\n\nclass DeviceBox:\n    pub fn reset_mmio():\n        unsafe(capabilities: [mmio]):\n            val r = 1\n            r\n"
+        val fixed = _rep_apply_checked(source, path)
+        val declarations = _rep_validate_fixed_source(fixed, path)
+        expect(declarations.len()).to_be_greater_than(1)
+
+        var validated_fn = false
+        var validated_method = false
+        for decl in declarations:
+            if decl.components.name == "read_raw":
+                expect(decl.metadata_errors.len()).to_equal(0)
+                val admitted = representation_manifest_validate_v1(decl, AssuranceStrictness.Critical)
+                expect(admitted.diagnostics.len()).to_equal(0)
+                expect(admitted.primitive_internal_exempt).to_equal(true)
+                match admitted.manifest:
+                    Some(m):
+                        expect(m.schema_version).to_equal(1)
+                        expect(m.kind).to_equal("ffi")
+                        expect(m.reason).to_equal("Explicit unsafe ffi boundary in read_raw")
+                        expect(m.reviewers).to_equal(["compiler-owner"])
+                        expect(m.capabilities).to_equal(["raw_ptr", "ffi"])
+                        validated_fn = true
+                    nil:
+                        assert(false)
+            elif decl.components.name == "reset_mmio":
+                expect(decl.metadata_errors.len()).to_equal(0)
+                val admitted = representation_manifest_validate_v1(decl, AssuranceStrictness.Critical)
+                expect(admitted.diagnostics.len()).to_equal(0)
+                expect(admitted.primitive_internal_exempt).to_equal(true)
+                match admitted.manifest:
+                    Some(m):
+                        expect(m.schema_version).to_equal(1)
+                        expect(m.kind).to_equal("hardware")
+                        expect(m.reason).to_equal("Explicit unsafe hardware boundary in reset_mmio")
+                        expect(m.reviewers).to_equal(["compiler-owner"])
+                        expect(m.capabilities).to_equal(["mmio"])
+                        validated_method = true
+                    nil:
+                        assert(false)
+
+        expect(validated_fn).to_equal(true)
+        expect(validated_method).to_equal(true)
