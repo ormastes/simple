@@ -20,3 +20,20 @@ exit code 2 before file discovery. It accepts only canonical `log-mode`
 fail-closed and accepted forms and passes through the temporary bootstrap
 interpreter. Fresh Stage 4 runtime evidence remains pending.
 
+
+## Re-verification 2026-11-25 (fleet lane p2w1-ai, worktree wt-p2w1-ai, release/1.0.0 HEAD 50adb6f42ce)
+
+Closed status confirmed with fresh runtime evidence:
+
+- Fix present in source: `check_option_error` is defined in
+  `src/app/cli/check_options.spl` and enforced by both the normal worker
+  (`src/app/cli/check.spl:22,316`) and the lightweight entry
+  (`src/app/cli/check_entry.spl:12,315`).
+- Contract check executed:
+  `SIMPLE_LIB=src bin/simple.exe run test/01_unit/app/check_cli_option_validation_contract_check.spl`
+  (Windows host, pinned seed v1.0.0-rc.1) printed
+  `PASS: check rejects invalid options before file discovery`.
+
+The closure note's "fresh Stage 4 qualification remains pending" caveat is
+unaffected by this re-verification; the source-level fix and its contract
+spec are confirmed green.

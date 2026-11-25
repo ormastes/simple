@@ -1,14 +1,11 @@
 # `src/lib/common/encoding/yaml.spl` has a broken cross-submodule import — repo-wide, reproduces under both `run` and `test`
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Resolved — verified 2026-11-25 (fleet lane p2w1-ai)
 
 **Date:** 2026-07-20
 **Severity:** medium (product source bug, not test-only — affects every real
 caller of `std.common.encoding.yaml`, not just this spec)
-**Status:** open — needs a source fix, out of test-triage scope (not a
-one-line change, not inside the assigned test-cluster dir)
+**Status:** RESOLVED — the exact fix this doc prescribes is in the tree and
+verified at runtime on 2026-11-25 (see verification section at bottom).
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/common` cluster
 
 ## Symptom
@@ -108,3 +105,35 @@ green.
   resolution (dead `std.common.yaml` path, see above); after that companion
   fix, 22 of 27 examples would still fail via this source-level blocker.
 
+
+## Verification 2026-11-25 (fleet lane p2w1-ai, worktree wt-p2w1-ai, release/1.0.0 HEAD 50adb6f42ce)
+
+RESOLVED — the fix prescribed above ("split the single broken
+`use std.common.yaml.{...}` into three correctly-scoped imports") is exactly
+what the current tree contains:
+
+- `src/lib/common/encoding/yaml.spl:34-40` now imports from
+  `std.common.yaml.parse` (`yaml_parse_flow_sequence`,
+  `yaml_parse_flow_mapping`, `yaml_parse_block`, `yaml_parse_scalar`),
+  `std.common.yaml.types` (`yaml_get_scalar_content`,
+  `yaml_get_sequence_items`, `yaml_get_mapping_pairs`, `yaml_null`,
+  `is_yaml_scalar`), and `std.common.yaml.utilities` (`yaml_needs_quotes`).
+- `std.common.yaml.parse` exports `yaml_parse_block`
+  (`src/lib/common/yaml/parse.spl:114`).
+- The companion spec-side import fix also landed: the spec now lives at
+  `test/01_unit/lib/common/encoding/yaml_spec.spl` and imports
+  `std.common.encoding.yaml` / `std.common.yaml.types` (lines 7-9).
+
+Runtime evidence (Windows host, pinned seed `bin/simple.exe` v1.0.0-rc.1,
+`SIMPLE_LIB=src`): a probe importing
+`std.common.encoding.yaml.{yaml_parse, yaml_parse_mapping, yaml_get}` and
+calling `yaml_parse("a: 1\nb: hello\n")` + `yaml_parse_mapping` ran to
+completion and printed `parsed ok` — the `function yaml_parse_block not
+found` / `yaml_null not found` failures are gone.
+
+Limit: the full 27-example spec could not be executed — both
+`bin/simple.exe test` and `bin/simple.exe run` on the spec abort at compile
+time with `unknown decorator '@representation_boundary'` (the spec's closure
+pulls in a decorated lib file; the pinned seed predates that decorator —
+known source/binary inconsistency at release/1.0.0 HEAD, not caused by this
+bug). The module under test itself compiles and runs clean, as shown above.

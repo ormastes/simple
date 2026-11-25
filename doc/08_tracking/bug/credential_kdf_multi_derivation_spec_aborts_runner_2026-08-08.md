@@ -75,3 +75,24 @@ greps identically to "not run" is the part that makes this dangerous.
 
 - `doc/09_report/lib/crypto/credential_store_aes_cbc_adversarial_review_2026-08-08.md`
 - `.claude/rules/testing.md` § "Take `$?` from the command under test"
+
+## Triage 2026-11-25 (fleet lane p2w1-ai, worktree wt-p2w1-ai, release/1.0.0 HEAD 50adb6f42ce)
+
+SKIP — left open; root cause is in the test-runner child and cannot be
+reproduced from this lane.
+
+- Spec-side mitigation described above is in place:
+  `test/01_unit/lib/terminal/credential_key_full_width_spec.spl` now contains
+  3 derivation-bearing call sites (was ~10), consistent with the
+  split-across-files workaround.
+- The runner-side defect (child dies rc=255 with no `SPEC FILE VERDICT`) is
+  not re-verifiable here: (a) the original repro was a Linux native child;
+  this host is Windows with only the pinned seed; (b) at release/1.0.0 HEAD
+  the seed cannot run any spec at all — `bin/simple.exe test`/`run` aborts
+  with `unknown decorator '@representation_boundary'` from the spec closure
+  (confirmed on this spec: ERROR verdict, executed=0), the known
+  source/binary inconsistency.
+- Related runner hardening has landed since filing (e.g. `c003f16f73f`
+  re-emit-verdict-last), but that addresses buried verdicts, not the
+  silent-rc=255 abort path; the "child must always emit a verdict" requirement
+  above remains the open ask.
