@@ -128,7 +128,7 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
   *) BOOTSTRAP_TREE_RSS_PER_JOB_MIB_DEFAULT=5120 ;;
 esac
 BOOTSTRAP_TREE_RSS_HOST_PCT_DEFAULT=50
-BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=75
+BOOTSTRAP_TREE_RSS_HOST_PCT_MAX=90
 # Host-scaled default (2026-10-25). When the job-priced budget is below the
 # need (bound floor or budget; Windows 96 MiB/job pricing: 27 workers = 5.59 GiB on a 128 GB host),
 # the cap is raised to what the workers really need, (base + jobs * worker_mem)
@@ -1384,7 +1384,7 @@ bootstrap_tree_rss__selftest() {
   export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
   printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
   printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
-  printf 'MemTotal:         5000000 kB\n' >"$btr_st_dir/tiny"
+  printf 'MemTotal:        4000000 kB\n' >"$btr_st_dir/tiny"
   : >"$btr_st_dir/none"
   # The 2026-11-05 incident host (121 GiB aarch64), idle and with another
   # lane holding most of it (MemAvailable 44 GB), and a 64 GiB host.
@@ -1410,7 +1410,7 @@ bootstrap_tree_rss__selftest() {
   export BOOTSTRAP_TREE_RSS_TEST_PLATFORM
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: 200\n' >"$btr_st_dir/good.sdn"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: many\n' >"$btr_st_dir/bad.sdn"
-  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 90\n' >"$btr_st_dir/pct.sdn"
+  printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 95\n' >"$btr_st_dir/pct.sdn"
   btr_st_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || btr_st_root=
   # expect LABEL MEMINFO JOBS EXPLICIT_CAP WANT [SETUP]
   #   WANT = cap:ceiling:bound:source, or REFUSED (a refusal WITH a reason)
@@ -1488,7 +1488,8 @@ bootstrap_tree_rss__selftest() {
   btr_st_expect knob-host-env big 80 '' 67047100:87031808:host-fraction:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
   btr_st_expect knob-host-env-base-few-jobs big 8 '' 47185920:58720256:budget:env-knobs SIMPLE_HOST_TREE_RSS_BASE_MIB=5120
   btr_st_expect knob-runaway-hits-ceiling big 80 '' 87031808:87031808:hard-ceiling:env-knobs 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75'
-  btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
+  btr_st_expect knob-pct-at-max-admitted big 80 '' 87031808:87031808:hard-ceiling:env-knobs 'SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=4096 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90'
+  btr_st_expect knob-pct-over-max-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=95
   btr_st_expect knob-garbage-refused big 80 '' REFUSED SIMPLE_BOOTSTRAP_TREE_RSS_PER_JOB_MIB=many
   btr_st_expect jobs-out-of-range-refused big 129 '' REFUSED
   # Leading zeros: 08/09 used to crash $(( )) and 040 was read as octal 32.
@@ -1704,9 +1705,9 @@ bootstrap_tree_rss__selftest() {
   # Tiny host: 16 GB x 50% = 8000000 KiB < one worker (32505856): fail closed,
   # naming the requirement.
   # Small host (16 GB): below one worker at floor x margin -> small-host
-  # single-worker mode at 75% of RAM (12000000 KiB), cap = that budget.
-  btr_st_plan small-host-one-worker small 8 1:12000000:0:small-host-one-worker
-  btr_st_plan small-host-ignores-default-pct small 1 1:12000000:0:small-host-one-worker SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=50
+  # single-worker mode at 90% of RAM (14400000 KiB), cap = that budget.
+  btr_st_plan small-host-one-worker small 8 1:14400000:0:small-host-one-worker
+  btr_st_plan small-host-ignores-default-pct small 1 1:14400000:0:small-host-one-worker SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=50
   # TEMPORARY headroom (bug stage2_compiler_tests_rss_headroom_temp_2026-11-13):
   # 31 GiB available: old 3/4 = 24379392 KiB; relaxed 32505856 - 4194304.
   btr_st_plan small-host-temp-headroom win-busy 8 1:28311552:0:small-host-one-worker-temp
@@ -1734,7 +1735,7 @@ bootstrap_tree_rss__selftest() {
   btr_st_plan unknown-host-fails-closed none 8 'REFUSED=needs host RAM evidence'
   btr_st_plan junk-workers-refused aarch64 8x 'REFUSED=worker count must be a decimal 1..128'
   btr_st_plan zero-workers-refused aarch64 0 'REFUSED=worker count must be a decimal 1..128'
-  btr_st_plan pct-over-max-refused aarch64 8 'REFUSED=exceeds 75' SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
+  btr_st_plan pct-over-max-refused aarch64 8 'REFUSED=exceeds 90' SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=95
   # compiler_cli_build row cap (run 11, 2026-11-06): a 2-worker plan prices
   # that ONE row at BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB when the host
   # budget holds it; every other row keeps the plan cap, and the plan cap
@@ -1781,7 +1782,7 @@ bootstrap_tree_rss__selftest() {
   btr_st_cli_plan one-worker-keeps-plan aarch64 1 32505856:0:worker-floor:32505856:0
   btr_st_cli_plan host64-keeps-plan host64 8 32505856:0:worker-floor:32505856:0
   btr_st_cli_plan pct75-keeps-plan big 8 89128960:89128960:worker-floor-elevated:89128960:89128960 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
-  btr_st_cli_plan small-host-keeps-plan small 8 12000000:0:small-host-one-worker:12000000:0
+  btr_st_cli_plan small-host-keeps-plan small 8 14400000:0:small-host-one-worker:14400000:0
   # Row / campaign consumers of a PUBLISHED plan (enforce-mode values, no host
   # probe): row-cap TASK SETUP -> cap:ceiling:bound inside, then restored.
   btr_st_pub='SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952
