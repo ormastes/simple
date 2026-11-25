@@ -260,3 +260,25 @@ Audited `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer
 
 **Status: fix-implemented-verification-pending** (static review + idiom
 parity only; native verification pending admitted compiler). DB row updated.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+In-tree state of the offline fixes re-confirmed on current release/1.0.0 by
+code inspection:
+
+- The degenerate-parse diagnostic branch in
+  `simple_web_html_layout_renderer.spl` probes with `byte_at` (lines
+  1162-1185, with the index-space comments), not `char_code_at`/`len()`.
+- The foundation file routes gradient-decode `starts_with` receivers through
+  `text_starts_with_portable` and scans `s.bytes()` as recorded
+  (`simple_web_html_layout_renderer_foundation.spl:16,63,133,1872,2070`).
+- `test/01_unit/runtime/baremetal_string_split_abi_spec.spl` is in tree.
+
+Execution limits on this host: the ABI spec cannot run under the pinned seed
+at HEAD (rejects `@representation_boundary`), and the canonical SimpleOS
+zero-exception three-content-frame QEMU gate requires an admitted self-hosted
+compiler plus a QEMU guest — both outside this lane. The status header
+("fix-implemented-verification-pending") remains accurate and is unchanged.
+
+Status: fix-implemented-verification-pending (native/QEMU gate still open),
+unchanged.

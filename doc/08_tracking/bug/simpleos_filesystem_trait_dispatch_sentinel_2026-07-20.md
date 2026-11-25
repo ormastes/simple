@@ -186,3 +186,23 @@ the now-executable trait-dispatch result.
   image/compiler digests plus serial evidence that `open`, `read`, and `stat`
   dispatch without `DUCK_DISPATCH_UNSUPPORTED_SLOT` or `#UD`. This commit
   claims only the focused compiler-regression coverage above.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+The 2026-09-22 resolution is intact on current release/1.0.0:
+
+- Fix commit `f7d68db89a6` ("fix(seed/mir): deterministic trait selection for
+  unknown-receiver dispatch") is an ancestor of HEAD
+  (`git merge-base --is-ancestor` confirmed).
+- Both regression tests are in tree:
+  `src/compiler_rust/compiler/src/mir/lower/tests/seed_regression_tests.rs:170`
+  (`erased_filesystem_receiver_prefers_implemented_trait_slots`) and
+  `src/compiler_rust/compiler/tests/any_receiver_vtable_dispatch_jit.rs:97`
+  (`filesystem_methods_on_erased_receiver_ignore_impl_less_name_collisions`).
+
+The cargo test runs were not repeated — Rust builds are out of scope for this
+lane. Verified by code inspection + commit ancestry. The deferred QEMU boot
+gate remains open as recorded above and is environment-blocked on this
+Windows host.
+
+Status: RESOLVED (compiler semantics), unchanged.
