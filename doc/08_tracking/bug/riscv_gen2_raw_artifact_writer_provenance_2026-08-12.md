@@ -147,3 +147,19 @@ Left as-is, no code change attempted.
   past byte-substring matching; `vhdl_write_production_artifacts` propagates
   the rejection.
 - Regression coverage: `test/01_unit/compiler/backend/vhdl_artifact_manifest_spec.spl`.
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+The 2026-11-05 resolution is confirmed present at release/1.0.0 HEAD:
+`vhdl_rendered_claims_compiler_owned_gen2`
+(`src/compiler/80.driver/driver_vhdl_artifacts.spl:856`) decodes the manifest
+with `json_parse_value_strict`, fails closed on non-object/duplicate-key
+manifests, and is consulted by `vhdl_write_production_artifacts` at `:926`
+before any write. Regression spec
+`test/01_unit/compiler/backend/vhdl_artifact_manifest_spec.spl` exists.
+Execution of the spec was environment-blocked on this host
+(`bin/simple.exe test` cannot load the tree: `unknown decorator
+'@representation_boundary'` in `src/app/test_runner_new/test_runner_client.spl`
+— known release/1.0.0 source/binary inconsistency); confirmation is by source
+inspection. The language-level authority gap (remediation item 4) remains
+open by design and is not claimed here.
