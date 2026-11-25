@@ -900,11 +900,14 @@ impl MirLowering:
         MIR locals cannot hold tagged text/runtime words and prove their owner."""
         if self.is_runtime_value_local(local.id):
             return false
-        if val known = self.find_local_hir_type(local.id):
-            match known.kind:
-                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
-                    return true
-                case _: ()
+        match self.find_local_hir_type(local.id):
+            case Some(known):
+                if known != None and known != 0:
+                    match known.kind:
+                        case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                            return true
+                        case _: ()
+            case None: ()
         if val mir_ty = self.local_mir_type_of(local):
             match mir_ty.kind:
                 case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.F32 | MirTypeKind.F64:
@@ -4047,6 +4050,7 @@ impl MirLowering:
             val byte_length = b_byte_len.emit_call(byte_len_operand, [mir_operand_copy(text_local)], MirType.i64())
             self.builder = b_byte_len
             if val length = byte_length:
+                self.remember_local_hir_type(length.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 2, 0)
                 return length
             return text_local
 
@@ -5941,9 +5945,19 @@ impl MirLowering:
                 # Text.ord() is the first Unicode scalar, or zero for empty
                 # text, exactly the existing char_code_at(0) runtime contract.
                 if (method == "char_code_at" and args.len() == 1) or (method == "ord" and args.len() == 0):
-                    var char_code_receiver_is_text = self.local_is_str(unresolved_receiver_local)
+                    var char_code_receiver_is_text = declared_text_receiver
+                    if not char_code_receiver_is_text:
+                        char_code_receiver_is_text = self.local_is_str(unresolved_receiver_local)
                     if not char_code_receiver_is_text:
                         char_code_receiver_is_text = self.local_hir_type_is_str(unresolved_receiver_local)
+                    if not char_code_receiver_is_text:
+                        match self.enum_match_expr_type(receiver):
+                            case Some(char_code_bound_type):
+                                if char_code_bound_type != None and char_code_bound_type != 0:
+                                    match char_code_bound_type.kind:
+                                        case HirTypeKind.Str: char_code_receiver_is_text = true
+                                        case _: ()
+                            case None: ()
                     if not char_code_receiver_is_text:
                         self.error_fatal("{method} receiver is not text", Some(receiver.span))
                         return unresolved_receiver_local
@@ -5970,6 +5984,7 @@ impl MirLowering:
                     )
                     self.builder = char_code_builder
                     if val char_code_local = char_code_result:
+                        self.remember_local_hir_type(char_code_local.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 2, 0)
                         return char_code_local
 
                 # `text.ptr()` (the raw byte-buffer address handed to dlsym'd
@@ -6079,6 +6094,7 @@ impl MirLowering:
                     )
                     self.builder = len_unit_builder
                     if val len_unit_local = len_unit_result:
+                        self.remember_local_hir_type(len_unit_local.id, HirType(kind: HirTypeKind.Int(64, true), span: receiver.span), 2, 0)
                         return len_unit_local
 
                 # Primitive/text `.to_text()` and `.to_string()` share the
