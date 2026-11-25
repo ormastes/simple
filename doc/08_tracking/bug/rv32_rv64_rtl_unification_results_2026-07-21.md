@@ -171,3 +171,14 @@ All checks passed (1 file(s))
 - Audit: `doc/01_research/hardware/riscv/riscv_rtl_disconnect_audited_bugs_2026-07-21.md`
 - Regression findings: `doc/08_tracking/bug/riscv_priv_mmu_rv64regression_findings_2026-07-21.md` (to be created by RISCV-002/003 agent)
 
+
+## Path correction 2026-11-25 (work/p3-bao-20261125)
+
+Per the unwired-extractions audit
+(`unwired_extractions_audit_2026-08-11.md`, instance 4): the directory this
+doc names, `src/lib/hardware/riscv_rtl/common/`, was renamed after the merge
+and no longer exists. The unification itself landed and is genuinely wired at
+`src/lib/hardware/riscv_common/` (19 `.spl` files incl. `rtl_pkg.spl`,
+`rtl_decode.spl`, `alu.spl`, `decode.spl`, with real cross-module importers
+and spec `riscv_common/test/riscv_common_xlen_mask_spec.spl`). Status
+COMPLETE stands; only the paths above are stale. Do not reopen.
