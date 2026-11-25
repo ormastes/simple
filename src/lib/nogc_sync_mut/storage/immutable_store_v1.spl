@@ -1,0 +1,875 @@
+# ImmutableStoreV1 — collision-safe immutable object store with selectable
+# hashing; SCV publication discipline (staging, verify, no-replace, winner
+# verify), quarantine-only GC. Design: doc/05_design/platform/container/simple_container_improvement.md
+
+use std.common.hash.hash_policy_v1.{hash_policy_v1_supported, hash_policy_v1_digest}
+use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1,
+    ObjectRecordV1, object_record_v1_encode}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_publish_noreplace_raw,
+    file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes,
+    file_write_bytes, secure_temp_dir_raw}
+use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use std.io_runtime.{file_delete, dir_list_optional}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure,
+    timestamp_year, timestamp_month, timestamp_day}
+
+unit StoreFlagV1: bool
+unit StoreCountV1: i64
+unit StoreGenerationV1: i64
+export StoreFlagV1, StoreCountV1, StoreGenerationV1
+
+pub struct StoreIngestV1:
+    status: text        # "ok" | "rejected"
+    reason: text
+    object_key: text
+    alias_hex: text
+    reused: StoreFlagV1        # true when an existing verified object satisfied the ingest
+
+pub struct StoreOpenV1:
+    status: text        # "ok" | "missing" | "corrupt"
+    reason: text
+    bytes: [u8]
+
+pub struct StoreGcV1:
+    status: text        # "ok" | "rejected" | "partial"
+    reason: text
+    dry_run: StoreFlagV1
+    unreachable: [text]
+    moved: StoreCountV1
+
+struct Isv1DocV1:
+    fields: Dict<text, text>
+    keys: [text]
+
+val _ISV1_MAX_OBJECT_BYTES: i64 = 268435456
+val _ISV1_MAX_COLLISION_SCAN: i64 = 64
+val _ISV1_MAX_RECORD_BYTES: i64 = 65536
+val _ISV1_MAX_ALIAS_BYTES: i64 = 512
+val _ISV1_MAX_ROOT_BYTES: i64 = 4194304
+val _ISV1_MAX_PIN_BYTES: i64 = 1048576
+val _ISV1_MAX_REFS: i64 = 65536
+val _ISV1_MAX_ROOT_CLAIM_WALK: i64 = 4096
+
+fn _isv1_is_digit_byte(b: i64) -> bool:
+    b >= 48 and b <= 57
+fn _isv1_is_hex_byte(b: i64) -> bool:
+    _isv1_is_digit_byte(b) or (b >= 97 and b <= 102)
+fn _isv1_is_algo_byte(b: i64) -> bool:
+    _isv1_is_digit_byte(b) or (b >= 97 and b <= 122) or b == 45
+fn _isv1_is_name_byte(b: i64) -> bool:
+    _isv1_is_digit_byte(b) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or
+        b == 45 or b == 95 or b == 46
+
+fn _isv1_hex_valid(value: text) -> bool:
+    val bs = value.bytes()
+    if bs.len() < 16 or bs.len() > 128 or bs.len() % 2 != 0:
+        return false
+    for b in bs:
+        if not _isv1_is_hex_byte(b):
+            return false
+    true
+fn _isv1_algo_valid(value: text) -> bool:
+    val bs = value.bytes()
+    if bs.len() < 1 or bs.len() > 64:
+        return false
+    for b in bs:
+        if not _isv1_is_algo_byte(b):
+            return false
+    true
+fn _isv1_name_valid(name: text) -> bool:
+    if name == "." or name == "..":
+        return false
+    val bs = name.bytes()
+    if bs.len() < 1 or bs.len() > 128:
+        return false
+    for b in bs:
+        if not _isv1_is_name_byte(b):
+            return false
+    true
+fn _isv1_owner_valid(owner: text) -> bool:
+    val bs = owner.bytes()
+    if bs.len() > 256:
+        return false
+    for b in bs:
+        if b < 32 or b > 126:
+            return false
+    true
+fn _isv1_parse_nonneg_int(value: text) -> i64:
+    val bs = value.bytes()
+    if bs.len() == 0 or bs.len() > 18:
+        return -1
+    for b in bs:
+        if not _isv1_is_digit_byte(b):
+            return -1
+    val parsed = value.to_i64() ?? -1
+    if parsed < 0:
+        return -1
+    parsed
+fn _isv1_bare_token_valid(value: text) -> bool:
+    val bs = value.bytes()
+    if bs.len() < 1 or bs.len() > 256:
+        return false
+    for b in bs:
+        if not _isv1_is_name_byte(b):
+            return false
+    true
+fn _isv1_field_name_valid(key: text) -> bool:
+    val bs = key.bytes()
+    if bs.len() < 1 or bs.len() > 64:
+        return false
+    for b in bs:
+        if not (_isv1_is_digit_byte(b) or (b >= 97 and b <= 122) or b == 95):
+            return false
+    true
+# Structural object key `<algorithm>_<hex>` with optional `_c<n>` suffix,
+# identical to object_record_v1's rule. Charset is validated before any
+# substring so byte/char indexing cannot diverge on hostile input.
+fn _isv1_key_valid(key: text) -> bool:
+    val bs = key.bytes()
+    if key.byte_len() < 3 or key.byte_len() > 256:
+        return false
+    for b in bs:
+        if not (_isv1_is_algo_byte(b) or b == 95 or b == 46):
+            return false
+    var sep: i64 = -1
+    var i: i64 = 0
+    while i < key.byte_len():
+        if bs[i] == 95:
+            sep = i
+            break
+        i = i + 1
+    if sep <= 0 or sep >= key.byte_len() - 1:
+        return false
+    if not _isv1_algo_valid(key.substring(0, sep)):
+        return false
+    val rest = key.substring(sep + 1, key.byte_len())
+    val rbs = rest.bytes()
+    var hex_end = rest.byte_len()
+    var k: i64 = 0
+    while k < rest.byte_len():
+        if rbs[k] == 95:
+            hex_end = k
+            break
+        k = k + 1
+    if not _isv1_hex_valid(rest.substring(0, hex_end)):
+        return false
+    if hex_end == rest.byte_len():
+        return true
+    val suffix = rest.substring(hex_end, rest.byte_len())
+    if not suffix.starts_with("_c"):
+        return false
+    val n = _isv1_parse_nonneg_int(suffix.substring(2, suffix.byte_len()))
+    n >= 1 and n <= _ISV1_MAX_COLLISION_SCAN
+
+fn _isv1_key_algorithm(key: text) -> text:
+    val bs = key.bytes()
+    var i: i64 = 0
+    while i < key.byte_len():
+        if bs[i] == 95:
+            return key.substring(0, i)
+        i = i + 1
+    key
+fn _isv1_key_hex(key: text) -> text:
+    val bs = key.bytes()
+    var sep: i64 = 0
+    var i: i64 = 0
+    while i < key.byte_len():
+        if bs[i] == 95:
+            sep = i + 1
+            break
+        i = i + 1
+    var hex_end = key.byte_len()
+    var k = sep
+    while k < key.byte_len():
+        if bs[k] == 95:
+            hex_end = k
+            break
+        k = k + 1
+    key.substring(sep, hex_end)
+fn _isv1_bound_reason(value: text) -> text:
+    if value.byte_len() > 32:
+        return value.substring(0, 32)
+    value
+fn _isv1_join(root: text, rel: text) -> text:
+    if root.ends_with("/") or root.ends_with("\\"):
+        return root + rel
+    root + "/" + rel
+
+fn _isv1_object_path(root: text, key: text) -> text:
+    _isv1_join(root, "objects/" + key.substring(0, 2) + "/" + key + ".obj")
+fn _isv1_record_path(root: text, key: text) -> text:
+    _isv1_join(root, "records/" + key + ".sdn")
+fn _isv1_alias_path(root: text, algorithm: text, digest_hex: text) -> text:
+    _isv1_join(root, "aliases/" + algorithm + "/" + digest_hex)
+fn _isv1_root_path(root: text, name: text) -> text:
+    _isv1_join(root, "roots/" + name + ".sdn")
+fn _isv1_root_claim_path(root: text, name: text, generation: i64) -> text:
+    _isv1_join(root, "roots/" + name + ".g{generation}.claim")
+fn _isv1_pin_path(root: text, pin_id: text) -> text:
+    _isv1_join(root, "pins/" + pin_id + ".sdn")
+fn _isv1_collision_path(root: text, algorithm: text, digest_hex: text, n: i64) -> text:
+    _isv1_join(root, "collisions/" + algorithm + "/" + digest_hex + "_{n}.sdn")
+
+fn _isv1_escape(value: text) -> text:
+    var out = value.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\t", "\\t")
+    out = out.replace("\r", "\\r")
+    out
+fn _isv1_unquote(value: text) -> Result<text, text>:
+    if value.byte_len() < 2:
+        return Err("unquoted-value")
+    if not value.starts_with("\"") or not value.ends_with("\""):
+        return Err("unquoted-value")
+    val inner = value.substring(1, value.byte_len() - 1)
+    var out = ""
+    var index: i64 = 0
+    while index < inner.byte_len():
+        val ch = inner.substring(index, index + 1)
+        if ch == "\\":
+            if index + 2 > inner.byte_len():
+                return Err("malformed-escape")
+            val code = inner.substring(index + 1, index + 2)
+            if code == "\"":
+                out = out + "\""
+            elif code == "\\":
+                out = out + "\\"
+            elif code == "n":
+                out = out + "\n"
+            elif code == "t":
+                out = out + "\t"
+            elif code == "r":
+                out = out + "\r"
+            else:
+                return Err("malformed-escape")
+            index = index + 2
+        else:
+            if ch == "\"":
+                return Err("unescaped-value")
+            out = out + ch
+            index = index + 1
+    Ok(out)
+fn _isv1_find_colon(line: text) -> i64:
+    var index: i64 = 0
+    while index < line.byte_len():
+        if line.substring(index, index + 1) == ":":
+            return index
+        index = index + 1
+    -1
+
+# Strict header+objects document: `key: value` header lines (quoted strings or
+# bare tokens, exact allowed set, no duplicates), then a literal `objects:`
+# line, then one validated object key per line. Any deviation is an Err.
+fn _isv1_doc_decode(source: text, allowed: [text], max_bytes: i64) -> Result<Isv1DocV1, text>:
+    if source.byte_len() > max_bytes:
+        return Err("doc-too-large")
+    val lines = source.split("\n")
+    var fields: Dict<text, text> = {}
+    var keys: [text] = []
+    var in_objects = false
+    for i in 0..lines.len():
+        val line = lines[i]
+        if line == "":
+            if i == lines.len() - 1:
+                continue
+            return Err("blank-line")
+        if not in_objects:
+            if line == "objects:":
+                in_objects = true
+                continue
+            val colon = _isv1_find_colon(line)
+            if colon <= 0:
+                return Err("malformed-line")
+            val field_name = line.substring(0, colon)
+            if not _isv1_field_name_valid(field_name):
+                return Err("malformed-field")
+            if not allowed.contains(field_name):
+                return Err("unknown-field")
+            if fields.contains_key(field_name):
+                return Err("duplicate-field")
+            val rest = line.substring(colon + 1, line.byte_len())
+            if not rest.starts_with(" "):
+                return Err("malformed-line")
+            val raw = rest.substring(1, rest.byte_len())
+            if raw.starts_with("\""):
+                val unquoted = match _isv1_unquote(raw):
+                    case Ok(value): value
+                    case Err(unquote_err): return Err(unquote_err)
+                fields[field_name] = unquoted
+            else:
+                if not _isv1_bare_token_valid(raw):
+                    return Err("malformed-value")
+                fields[field_name] = raw
+        else:
+            if not _isv1_key_valid(line):
+                return Err("object-key-invalid")
+            keys.push(line)
+    if not in_objects:
+        return Err("objects-section-missing")
+    Ok(Isv1DocV1(fields: fields, keys: keys))
+
+fn _isv1_doc_generation(doc: Isv1DocV1) -> i64:
+    if not doc.fields.contains_key("generation"):
+        return -1
+    _isv1_parse_nonneg_int(doc.fields["generation"])
+fn _isv1_doc_encode(name_field: text, name_value: text, owner_field: text, owner_value: text,
+        generation: i64, keys: [text]) -> text:
+    var out = "format_version: 1\n"
+    out = out + "{name_field}: \"{_isv1_escape(name_value)}\"\n"
+    if owner_field != "":
+        out = out + "{owner_field}: \"{_isv1_escape(owner_value)}\"\n"
+    out = out + "generation: {generation}\n"
+    out = out + "objects:\n"
+    for key in keys:
+        out = out + key + "\n"
+    out
+
+# Stage `content` in a private staging dir and no-replace publish it.
+# Returns the raw publish status: 1 published, 0 destination existed,
+# anything else (including -1 staging failure) is a failure.
+fn _isv1_publish_text_noreplace(root: text, leaf: text, content: text, destination: text) -> i64:
+    val staging_root = _isv1_join(root, "staging")
+    if not dir_create_all(staging_root) and not is_dir(staging_root):
+        return -1
+    val stage = secure_temp_dir_raw(staging_root, "publish-")
+    if stage.len() <= 0:
+        return -1
+    val staged = stage + "/" + leaf
+    if not file_write_bytes(staged, content.bytes()):
+        dir_remove_all(stage)
+        return -1
+    val published = file_publish_noreplace_raw(staged, destination)
+    # The rename may consume the staged file; remove only our private dir,
+    # never the winning destination.
+    dir_remove_all(stage)
+    published
+
+fn _isv1_read_object_bytes(root: text, key: text) -> Result<[u8], text>:
+    val path = _isv1_object_path(root, key)
+    if not file_exists(path):
+        return Err("object-missing")
+    file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES)
+fn _isv1_ingest_rejected(reason: text) -> StoreIngestV1:
+    StoreIngestV1(status: "rejected", reason: reason, object_key: "", alias_hex: "", reused: StoreFlagV1(false))
+fn _isv1_ingest_ok(key: text, alias_hex: text, reused: StoreFlagV1) -> StoreIngestV1:
+    StoreIngestV1(status: "ok", reason: "", object_key: key, alias_hex: alias_hex, reused: reused)
+
+# Record content is deterministic per object key, so a losing no-replace
+# publish with identical bytes is success; different bytes are corruption.
+fn _isv1_publish_record(root: text, key: text, logical_length: i64, algorithm: text,
+        alias_hex: text, profile: text) -> text:
+    val records_dir = _isv1_join(root, "records")
+    if not dir_create_all(records_dir) and not is_dir(records_dir):
+        return "records-dir-failed"
+    val record = ObjectRecordV1(format_version: OBJECT_RECORD_V1_VERSION,
+        object_key: key, logical_length: logical_length, generation: 0,
+        aliases: [DigestAliasV1(algorithm: algorithm, algorithm_profile: profile, digest_hex: alias_hex)])
+    val content = object_record_v1_encode(record)
+    val record_path = _isv1_record_path(root, key)
+    val published = _isv1_publish_text_noreplace(root, "record.sdn", content, record_path)
+    if published == 1:
+        return ""
+    if published == 0:
+        val existing = match file_read_regular_no_follow_bounded(record_path, _ISV1_MAX_RECORD_BYTES):
+            case Ok(value): value
+            case Err(_): return "record-conflict"
+        if existing == content:
+            return ""
+        return "record-conflict"
+    "record-publish-failed: {published}"
+fn _isv1_publish_alias(root: text, algorithm: text, alias_hex: text, key: text) -> text:
+    val alias_dir = _isv1_join(root, "aliases/" + algorithm)
+    if not dir_create_all(alias_dir) and not is_dir(alias_dir):
+        return "alias-dir-failed"
+    val alias_path = _isv1_alias_path(root, algorithm, alias_hex)
+    val published = _isv1_publish_text_noreplace(root, "alias", key, alias_path)
+    if published == 1:
+        return ""
+    if published == 0:
+        val existing = match file_read_regular_no_follow_bounded(alias_path, _ISV1_MAX_ALIAS_BYTES):
+            case Ok(value): value
+            case Err(_): return "alias-conflict"
+        if existing.trim() == key:
+            return ""
+        return "alias-conflict"
+    "alias-publish-failed: {published}"
+
+fn _isv1_finish_publish(root: text, key: text, logical_length: i64, algorithm: text,
+        alias_hex: text, profile: text, from_collision: bool) -> text:
+    val record_reason = _isv1_publish_record(root, key, logical_length, algorithm, alias_hex, profile)
+    if record_reason != "":
+        return record_reason
+    if not from_collision:
+        return _isv1_publish_alias(root, algorithm, alias_hex, key)
+    ""
+
+# Stage, read-back verify (length + recomputed digest), then no-replace
+# publish into objects/. A lost race opens and byte-verifies the winner:
+# identical bytes reuse it, different bytes take the collision path.
+fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex: text,
+        profile: text, from_collision: bool) -> StoreIngestV1:
+    val staging_root = _isv1_join(root, "staging")
+    if not dir_create_all(staging_root) and not is_dir(staging_root):
+        return _isv1_ingest_rejected("staging-dir-failed")
+    val stage = secure_temp_dir_raw(staging_root, "ingest-")
+    if stage.len() <= 0:
+        return _isv1_ingest_rejected("staging-create-failed")
+    val staged_object = stage + "/payload.obj"
+    if not file_write_bytes(staged_object, bytes):
+        dir_remove_all(stage)
+        return _isv1_ingest_rejected("staging-write-failed")
+    val staged_back = match file_read_regular_no_follow_bounded_bytes(staged_object, _ISV1_MAX_OBJECT_BYTES):
+        case Ok(value): value
+        case Err(_):
+            dir_remove_all(stage)
+            return _isv1_ingest_rejected("staging-verify-failed")
+    if staged_back.len() != bytes.len():
+        dir_remove_all(stage)
+        return _isv1_ingest_rejected("staging-verify-failed")
+    val recomputed = hash_policy_v1_digest(algorithm, staged_back)
+    if recomputed.status != "ok" or recomputed.hex != alias_hex:
+        dir_remove_all(stage)
+        return _isv1_ingest_rejected("staging-verify-failed")
+    val shard_dir = _isv1_join(root, "objects/" + key.substring(0, 2))
+    if not dir_create_all(shard_dir) and not is_dir(shard_dir):
+        dir_remove_all(stage)
+        return _isv1_ingest_rejected("objects-dir-failed")
+    val object_path = _isv1_object_path(root, key)
+    val published = file_publish_noreplace_raw(staged_object, object_path)
+    if published == 1:
+        val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
+        dir_remove_all(stage)
+        if finish_reason != "":
+            return _isv1_ingest_rejected(finish_reason)
+        return _isv1_ingest_ok(key, alias_hex, StoreFlagV1(false))
+    if published == 0:
+        val winner = match file_read_regular_no_follow_bounded_bytes(object_path, _ISV1_MAX_OBJECT_BYTES):
+            case Ok(value): value
+            case Err(_):
+                dir_remove_all(stage)
+                return _isv1_ingest_rejected("publish-winner-unreadable")
+        dir_remove_all(stage)
+        if winner == bytes:
+            val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
+            if finish_reason != "":
+                return _isv1_ingest_rejected(finish_reason)
+            return _isv1_ingest_ok(key, alias_hex, StoreFlagV1(true))
+        if from_collision:
+            return _isv1_ingest_rejected("collision-slot-race")
+        return _isv1_collision_ingest(root, algorithm, alias_hex, bytes, profile)
+    dir_remove_all(stage)
+    _isv1_ingest_rejected("publish-failed: {published}")
+
+# Collision: same digest, different bytes. Never merge: derive the next free
+# `_c<n>` key (bounded scan, then explicit rejection), reusing an existing
+# slot only on an exact byte match, and record the collision.
+fn _isv1_collision_ingest(root: text, algorithm: text, alias_hex: text, bytes: [u8],
+        profile: text) -> StoreIngestV1:
+    var n: i64 = 1
+    while n <= _ISV1_MAX_COLLISION_SCAN:
+        val candidate = "{algorithm}_{alias_hex}_c{n}"
+        if file_exists(_isv1_object_path(root, candidate)):
+            val existing = _isv1_read_object_bytes(root, candidate)
+            var matches = false
+            match existing:
+                case Ok(existing_bytes):
+                    if existing_bytes == bytes:
+                        matches = true
+                case Err(_):
+                    matches = false
+            if matches:
+                return _isv1_ingest_ok(candidate, alias_hex, StoreFlagV1(true))
+            n = n + 1
+            continue
+        val attempt = _isv1_publish(root, candidate, bytes, algorithm, alias_hex, profile, true)
+        if attempt.status == "ok":
+            val record_reason = _isv1_write_collision_record(root, algorithm, alias_hex, candidate, bytes.len())
+            if record_reason != "":
+                return _isv1_ingest_rejected(record_reason)
+            return attempt
+        if attempt.reason == "collision-slot-race":
+            n = n + 1
+            continue
+        return attempt
+    _isv1_ingest_rejected("collision-bound-exceeded")
+
+fn _isv1_write_collision_record(root: text, algorithm: text, alias_hex: text,
+        object_key: text, logical_length: i64) -> text:
+    val collision_dir = _isv1_join(root, "collisions/" + algorithm)
+    if not dir_create_all(collision_dir) and not is_dir(collision_dir):
+        return "collision-dir-failed"
+    # All interpolated fields are charset-validated (no quotes or backslashes).
+    var content = "format_version: 1\n"
+    content = content + "algorithm: \"{algorithm}\"\n"
+    content = content + "digest_hex: \"{alias_hex}\"\n"
+    content = content + "object_key: \"{object_key}\"\n"
+    content = content + "logical_length: {logical_length}\n"
+    var n: i64 = 1
+    while n <= _ISV1_MAX_COLLISION_SCAN:
+        val path = _isv1_collision_path(root, algorithm, alias_hex, n)
+        if not file_exists(path):
+            val published = _isv1_publish_text_noreplace(root, "collision.sdn", content, path)
+            if published == 1:
+                return ""
+            if published == 0:
+                n = n + 1
+                continue
+            return "collision-record-failed: {published}"
+        n = n + 1
+    "collision-record-exhausted"
+
+pub fn immutable_store_v1_init(root: text) -> text:
+    if root == "":
+        return "store-root-empty"
+    if not dir_create_all(root) and not is_dir(root):
+        return "store-init-failed: {root}"
+    val subs = ["objects", "records", "aliases", "roots", "pins", "collisions", "staging", "quarantine"]
+    for sub in subs:
+        val path = _isv1_join(root, sub)
+        if not dir_create_all(path) and not is_dir(path):
+            return "store-init-failed: {path}"
+    ""
+
+pub fn immutable_store_v1_ingest(root: text, bytes: [u8], policy: text) -> StoreIngestV1:
+    if root == "":
+        return _isv1_ingest_rejected("store-root-empty")
+    if bytes.len() > _ISV1_MAX_OBJECT_BYTES:
+        return _isv1_ingest_rejected("object-too-large")
+    val digest = hash_policy_v1_digest(policy, bytes)
+    if digest.status != "ok":
+        return _isv1_ingest_rejected("hash-policy-unsupported: {policy}: {digest.reason}")
+    val algorithm = digest.policy
+    if not _isv1_algo_valid(algorithm):
+        return _isv1_ingest_rejected("hash-policy-tag-invalid")
+    val alias_hex = digest.hex
+    if not _isv1_hex_valid(alias_hex):
+        return _isv1_ingest_rejected("hash-digest-invalid")
+    val alias_path = _isv1_alias_path(root, algorithm, alias_hex)
+    if file_exists(alias_path):
+        val alias_text = match file_read_regular_no_follow_bounded(alias_path, _ISV1_MAX_ALIAS_BYTES):
+            case Ok(value): value
+            case Err(read_err): return _isv1_ingest_rejected("alias-unreadable: {read_err}")
+        val candidate = alias_text.trim()
+        if not _isv1_key_valid(candidate):
+            return _isv1_ingest_rejected("alias-corrupt")
+        if _isv1_key_algorithm(candidate) != algorithm:
+            return _isv1_ingest_rejected("alias-corrupt")
+        # Design step 2: read the record, open the object's bytes, byte-compare.
+        val existing = _isv1_read_object_bytes(root, candidate)
+        match existing:
+            case Ok(existing_bytes):
+                if existing_bytes == bytes:
+                    val record_reason = _isv1_publish_record(root, candidate, bytes.len(),
+                        algorithm, alias_hex, digest.profile)
+                    if record_reason != "":
+                        return _isv1_ingest_rejected(record_reason)
+                    return _isv1_ingest_ok(candidate, alias_hex, StoreFlagV1(true))
+                return _isv1_collision_ingest(root, algorithm, alias_hex, bytes, digest.profile)
+            case Err(_):
+                # Alias points at a missing/unreadable object: republish under
+                # the same key; no-replace plus winner verify keeps this safe.
+                # The key's hex must be this digest, or open() could never verify it.
+                if _isv1_key_hex(candidate) != alias_hex:
+                    return _isv1_ingest_rejected("alias-corrupt")
+                return _isv1_publish(root, candidate, bytes, algorithm, alias_hex, digest.profile, false)
+    _isv1_publish(root, algorithm + "_" + alias_hex, bytes, algorithm, alias_hex, digest.profile, false)
+
+pub fn immutable_store_v1_open(root: text, object_key: text) -> StoreOpenV1:
+    if root == "":
+        return StoreOpenV1(status: "missing", reason: "store-root-empty", bytes: [])
+    if not _isv1_key_valid(object_key):
+        return StoreOpenV1(status: "missing", reason: "object-key-invalid", bytes: [])
+    val path = _isv1_object_path(root, object_key)
+    if not file_exists(path):
+        return StoreOpenV1(status: "missing", reason: "object-missing", bytes: [])
+    val bytes = match file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES):
+        case Ok(value): value
+        case Err(read_err):
+            return StoreOpenV1(status: "corrupt", reason: "object-read-failed: {read_err}", bytes: [])
+    val algorithm = _isv1_key_algorithm(object_key)
+    if not hash_policy_v1_supported(algorithm):
+        return StoreOpenV1(status: "corrupt", reason: "digest-policy-unsupported: {algorithm}", bytes: [])
+    val digest = hash_policy_v1_digest(algorithm, bytes)
+    if digest.status != "ok":
+        return StoreOpenV1(status: "corrupt", reason: "digest-recompute-failed", bytes: [])
+    if digest.hex != _isv1_key_hex(object_key):
+        return StoreOpenV1(status: "corrupt", reason: "object-digest-mismatch", bytes: [])
+    StoreOpenV1(status: "ok", reason: "", bytes: bytes)
+
+pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
+        generation: StoreGenerationV1) -> text:
+    val expected_generation: i64 = generation.value
+    if root == "":
+        return "store-root-empty"
+    if not _isv1_name_valid(name):
+        return "root-name-invalid"
+    if expected_generation < 0:
+        return "root-generation-invalid"
+    if manifest.len() > _ISV1_MAX_ROOT_BYTES:
+        return "manifest-too-large"
+    var keys: [text] = []
+    for line in manifest.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if not _isv1_key_valid(trimmed):
+            return "manifest-key-invalid: {_isv1_bound_reason(trimmed)}"
+        keys.push(trimmed)
+    val roots_dir = _isv1_join(root, "roots")
+    if not dir_create_all(roots_dir) and not is_dir(roots_dir):
+        return "roots-dir-failed"
+    val path = _isv1_root_path(root, name)
+    if expected_generation == 0:
+        val created = _isv1_doc_encode("name", name, "", "", 1, keys)
+        val published = _isv1_publish_text_noreplace(root, "root.sdn", created, path)
+        if published == 1:
+            return ""
+        if published == 0:
+            return "root-exists"
+        return "root-publish-failed: {published}"
+    if not file_exists(path):
+        return "root-missing"
+    val current_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(_): return "root-unreadable"
+    # Truth is the contiguous claim chain; the pointer is only a cache that
+    # may lag (a stalled writer can even move it back). Claims are never
+    # deleted, so walking forward from any cached generation finds the head.
+    val head_text = match _isv1_root_head_text(root, name, current_text):
+        case Ok(value): value
+        case Err(reason): return reason
+    val head_generation = _isv1_root_doc_generation(head_text)
+    if head_generation < 0:
+        return "root-corrupt"
+    if head_text != current_text:
+        # Refresh the cache; a lost race here is healed by the next walk.
+        atomic_write_bytes(path, head_text.bytes())
+    if head_generation != expected_generation:
+        return "root-generation-mismatch"
+    # CAS: only one writer can no-replace publish the claim for generation N+1.
+    val replaced = _isv1_doc_encode("name", name, "", "", expected_generation + 1, keys)
+    val claimed = _isv1_publish_text_noreplace(root, "root.claim", replaced,
+        _isv1_root_claim_path(root, name, expected_generation + 1))
+    if claimed == 0:
+        return "root-generation-mismatch"
+    if claimed != 1:
+        return "root-claim-failed: {claimed}"
+    # The claim is the commit; the pointer write only refreshes the cache.
+    atomic_write_bytes(path, replaced.bytes())
+    ""
+
+# Generation of a root doc, or -1 when it is not a valid v1 root doc.
+fn _isv1_root_doc_generation(source: text) -> i64:
+    val doc = match _isv1_doc_decode(source, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(_): return -1
+    if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+        return -1
+    _isv1_doc_generation(doc)
+
+# Walk roots/<name>.g<N>.claim forward from the cached pointer doc and return
+# the head doc text. Bounded so a hostile store cannot spin forever.
+fn _isv1_root_head_text(root: text, name: text, pointer_text: text) -> Result<text, text>:
+    var head_text = pointer_text
+    var generation = _isv1_root_doc_generation(pointer_text)
+    if generation < 0:
+        return Err("root-corrupt")
+    var steps: i64 = 0
+    while steps < _ISV1_MAX_ROOT_CLAIM_WALK:
+        val next_path = _isv1_root_claim_path(root, name, generation + 1)
+        if not file_exists(next_path):
+            return Ok(head_text)
+        val next_text = match file_read_regular_no_follow_bounded(next_path, _ISV1_MAX_ROOT_BYTES):
+            case Ok(value): value
+            case Err(_): return Err("root-claim-unreadable")
+        if _isv1_root_doc_generation(next_text) != generation + 1:
+            return Err("root-claim-corrupt")
+        head_text = next_text
+        generation = generation + 1
+        steps = steps + 1
+    Err("root-claim-chain-too-long")
+
+pub fn immutable_store_v1_pin(root: text, pin_id: text, owner: text, refs: [text]) -> text:
+    if root == "":
+        return "store-root-empty"
+    if not _isv1_name_valid(pin_id):
+        return "pin-id-invalid"
+    if not _isv1_owner_valid(owner):
+        return "pin-owner-invalid"
+    if refs.len() > _ISV1_MAX_REFS:
+        return "pin-refs-too-many"
+    for ref_key in refs:
+        if not _isv1_key_valid(ref_key):
+            return "pin-ref-invalid: {_isv1_bound_reason(ref_key)}"
+    val pins_dir = _isv1_join(root, "pins")
+    if not dir_create_all(pins_dir) and not is_dir(pins_dir):
+        return "pins-dir-failed"
+    val path = _isv1_pin_path(root, pin_id)
+    var generation: i64 = 1
+    if file_exists(path):
+        val existing_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_PIN_BYTES):
+            case Ok(value): value
+            case Err(_): return "pin-unreadable"
+        val doc = match _isv1_doc_decode(existing_text, ["format_version", "pin_id", "owner", "generation"], _ISV1_MAX_PIN_BYTES):
+            case Ok(value): value
+            case Err(_): return "pin-corrupt"
+        if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+            return "pin-corrupt"
+        val prior = _isv1_doc_generation(doc)
+        if prior < 0:
+            return "pin-corrupt"
+        generation = prior + 1
+    val content = _isv1_doc_encode("pin_id", pin_id, "owner", owner, generation, refs)
+    if not atomic_write_bytes(path, content.bytes()):
+        return "pin-write-failed"
+    ""
+
+pub fn immutable_store_v1_release_pin(root: text, pin_id: text) -> text:
+    if root == "":
+        return "store-root-empty"
+    if not _isv1_name_valid(pin_id):
+        return "pin-id-invalid"
+    val path = _isv1_pin_path(root, pin_id)
+    if not file_exists(path):
+        return "pin-missing"
+    if not file_delete(path):
+        return "pin-remove-failed"
+    ""
+
+# `store_root` non-empty means `dir` is roots/: each pointer is followed along
+# its claim chain and the head's keys count too (the pointer may lag the head).
+# Superseded claims are history and are not reachable.
+fn _isv1_collect_doc_keys(store_root: text, dir: text, allowed: [text], max_bytes: i64) -> Result<[text], text>:
+    var out: [text] = []
+    # Fail closed: init creates this dir, so a missing or unlistable one means
+    # the reachable set is unknown.
+    if not is_dir(dir):
+        return Err("doc-dir-missing: {_isv1_bound_reason(dir)}")
+    val entries = match dir_list_optional(dir):
+        case Some(value): value
+        case None: return Err("doc-dir-unlistable: {_isv1_bound_reason(dir)}")
+    for entry in entries:
+        val name = entry.trim()
+        if name == "" or not name.ends_with(".sdn"):
+            continue
+        val path = dir + "/" + name
+        val source = match file_read_regular_no_follow_bounded(path, max_bytes):
+            case Ok(value): value
+            case Err(_): return Err("doc-unreadable: {name}")
+        var sources: [text] = [source]
+        if store_root != "":
+            val head = match _isv1_root_head_text(store_root, name.substring(0, name.byte_len() - 4), source):
+                case Ok(value): value
+                case Err(reason): return Err("{reason}: {name}")
+            if head != source:
+                sources.push(head)
+        for doc_source in sources:
+            val doc = match _isv1_doc_decode(doc_source, allowed, max_bytes):
+                case Ok(value): value
+                case Err(_): return Err("doc-corrupt: {name}")
+            if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+                return Err("doc-corrupt: {name}")
+            for key in doc.keys:
+                out.push(key)
+    Ok(out)
+
+fn _isv1_quarantine_date() -> text:
+    val micros = time_sample_unix_micros_or_failure()
+    if micros < 0:
+        return "undated"
+    val year = timestamp_year(micros)
+    val month = timestamp_month(micros)
+    val day = timestamp_day(micros)
+    val month_text = if month < 10: "0{month}" else: "{month}"
+    val day_text = if day < 10: "0{day}" else: "{day}"
+    "{year}{month_text}{day_text}"
+
+pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1:
+    if root == "":
+        return StoreGcV1(status: "rejected", reason: "store-root-empty", dry_run: dry_run,
+            unreachable: [], moved: StoreCountV1(0))
+    var reachable: Dict<text, bool> = {}
+    # Fail closed: an unreadable or corrupt root/pin means the reachable set
+    # is unknown, so nothing may be collected.
+    val root_keys = match _isv1_collect_doc_keys(root, _isv1_join(root, "roots"),
+            ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(reason):
+            return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
+                unreachable: [], moved: StoreCountV1(0))
+    for key in root_keys:
+        reachable[key] = true
+    val pin_keys = match _isv1_collect_doc_keys("", _isv1_join(root, "pins"),
+            ["format_version", "pin_id", "owner", "generation"], _ISV1_MAX_PIN_BYTES):
+        case Ok(value): value
+        case Err(reason):
+            return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
+                unreachable: [], moved: StoreCountV1(0))
+    for key in pin_keys:
+        reachable[key] = true
+    var unreachable: [text] = []
+    val objects_dir = _isv1_join(root, "objects")
+    if is_dir(objects_dir):
+        for shard in dir_list(objects_dir):
+            val shard_name = shard.trim()
+            if shard_name == "" or shard_name.starts_with("."):
+                continue
+            val shard_path = objects_dir + "/" + shard_name
+            if not is_dir(shard_path):
+                continue
+            for entry in dir_list(shard_path):
+                val entry_name = entry.trim()
+                if not entry_name.ends_with(".obj"):
+                    continue
+                val key = entry_name.substring(0, entry_name.byte_len() - 4)
+                if not reachable.contains_key(key):
+                    unreachable.push(key)
+    unreachable.sort()
+    if dry_run.value:
+        return StoreGcV1(status: "ok", reason: "", dry_run: StoreFlagV1(true), unreachable: unreachable, moved: StoreCountV1(0))
+    var moved: i64 = 0
+    var first_error = ""
+    if unreachable.len() > 0:
+        val quarantine = _isv1_join(root, "quarantine/" + _isv1_quarantine_date())
+        if not dir_create_all(quarantine) and not is_dir(quarantine):
+            return StoreGcV1(status: "rejected", reason: "quarantine-dir-failed",
+                dry_run: StoreFlagV1(false), unreachable: unreachable, moved: StoreCountV1(0))
+        for key in unreachable:
+            if not _isv1_key_valid(key):
+                if first_error == "":
+                    first_error = "object-name-invalid: {_isv1_bound_reason(key)}"
+                continue
+            val source_path = _isv1_object_path(root, key)
+            var destination = quarantine + "/" + key + ".obj"
+            if file_exists(destination):
+                # Never unlink: pick a fresh quarantine name, bounded.
+                var placed = false
+                var n: i64 = 1
+                while n <= _ISV1_MAX_COLLISION_SCAN:
+                    val alternative = quarantine + "/" + key + "_{n}.obj"
+                    if not file_exists(alternative):
+                        destination = alternative
+                        placed = true
+                        break
+                    n = n + 1
+                if not placed:
+                    if first_error == "":
+                        first_error = "quarantine-name-exhausted: {_isv1_bound_reason(key)}"
+                    continue
+            # No-replace so a concurrent GC can never overwrite a quarantined
+            # object (that would be an unlink). If the host links rather than
+            # renames, drop the source name once the quarantine copy exists.
+            val placed_status = file_publish_noreplace_raw(source_path, destination)
+            if placed_status == 1:
+                if file_exists(source_path) and file_exists(destination):
+                    file_delete(source_path)
+                moved = moved + 1
+            else:
+                if first_error == "":
+                    first_error = "quarantine-move-failed: {_isv1_bound_reason(key)}"
+    var status = "ok"
+    if first_error != "":
+        status = "partial"
+    StoreGcV1(status: status, reason: first_error, dry_run: StoreFlagV1(false), unreachable: unreachable, moved: StoreCountV1(moved))

@@ -136,3 +136,11 @@ dispatch: a passing spec there is interpreter evidence, never GPU evidence.
 ROCm coverage of all 26 former extension methods:
 `test/01_unit/lib/gpu/engine3d/backend_rocm_ext_methods_spec.spl`; record:
 `doc/08_tracking/bug/engine3d_ext_impl_blocks_never_imported_2026-07-02.md`.
+
+## Container shared immutable store (2026-11-26)
+
+`std.nogc_sync_mut.storage.immutable_store_v1` (it does file I/O, so it is not
+in `common/`) over pure `std.common.hash.hash_policy_v1` and
+`std.common.storage.object_record_v1`. Root CAS truth is the never-deleted
+`roots/<name>.g<N>.claim` chain; `roots/<name>.sdn` is a cache. Details:
+`doc/00_llm_process/feature_expert/simple_container_store/skill.md`.

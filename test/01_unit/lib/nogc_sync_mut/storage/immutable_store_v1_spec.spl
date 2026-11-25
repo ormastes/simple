@@ -1,0 +1,281 @@
+# ImmutableStoreV1: collision-safe immutable object store with selectable
+# hashing. Real temp stores under build/test-artifacts (never mocks): ingest/
+# open roundtrips, digest reuse, forced-collision disambiguation, root CAS,
+# pins, and dry-run-first quarantine GC.
+# Design: doc/05_design/platform/container/simple_container_improvement.md
+use std.spec.{describe, it, expect}
+use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_128,
+    HASH_POLICY_V1_SHA256_LEGACY}
+use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
+    immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
+    immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
+    immutable_store_v1_collect, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use app.io.file_ops.{path_absolute}
+
+val HELLO_XXH3_128 = "b5e9c1ad071b3e7fc779cfaa5e523818"
+val HELLO_SHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+fn _hex(b: [u8]) -> text:
+    var s = ""
+    val digits = "0123456789abcdef"
+    for x in b:
+        val v = x.to_i64()
+        s = s + digits[v / 16] + digits[v % 16]
+    s
+
+fn _store_root(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    expect(is_dir("build/test-artifacts")).to_equal(true)
+    val owned = secure_temp_dir_raw("build/test-artifacts", "immutable-store-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    val root = path_absolute(owned).replace("\\", "/")
+    expect(immutable_store_v1_init(root)).to_equal("")
+    root
+
+fn _store_cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _count_objects(root: text) -> i64:
+    var count: i64 = 0
+    val objects_dir = root + "/objects"
+    if not is_dir(objects_dir):
+        return 0
+    for shard in dir_list(objects_dir):
+        val shard_name = shard.trim()
+        if shard_name == "" or shard_name.starts_with("."):
+            continue
+        val shard_path = objects_dir + "/" + shard_name
+        if not is_dir(shard_path):
+            continue
+        for entry in dir_list(shard_path):
+            if entry.trim().ends_with(".obj"):
+                count = count + 1
+    count
+
+describe "immutable_store_v1 init":
+    it "initializes the store layout and rejects an empty root":
+        expect(immutable_store_v1_init("")).to_equal("store-root-empty")
+        val root = _store_root("init")
+        for sub in ["objects", "records", "aliases", "roots", "pins", "collisions", "staging", "quarantine"]:
+            expect(is_dir(root + "/" + sub)).to_equal(true)
+        _store_cleanup(root)
+
+describe "immutable_store_v1 ingest and open":
+    it "roundtrips bytes through ingest and open":
+        val root = _store_root("roundtrip")
+        val ingested = immutable_store_v1_ingest(root, "hello".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(ingested.status).to_equal("ok")
+        expect(ingested.reason).to_equal("")
+        expect(ingested.reused.value).to_equal(false)
+        expect(ingested.object_key).to_equal("xxh3-128_" + HELLO_XXH3_128)
+        expect(ingested.alias_hex).to_equal(HELLO_XXH3_128)
+        val opened = immutable_store_v1_open(root, ingested.object_key)
+        expect(opened.status).to_equal("ok")
+        expect(_hex(opened.bytes)).to_equal(_hex("hello".bytes()))
+        _store_cleanup(root)
+
+    it "reuses an existing verified object on a second ingest":
+        val root = _store_root("reuse")
+        val first = immutable_store_v1_ingest(root, "shared payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(first.status).to_equal("ok")
+        expect(first.reused.value).to_equal(false)
+        expect(_count_objects(root)).to_equal(1)
+        val second = immutable_store_v1_ingest(root, "shared payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(second.status).to_equal("ok")
+        expect(second.reused.value).to_equal(true)
+        expect(second.object_key).to_equal(first.object_key)
+        expect(_count_objects(root)).to_equal(1)
+        _store_cleanup(root)
+
+    it "produces a legacy-compatible sha256 key shape":
+        val root = _store_root("sha256")
+        val ingested = immutable_store_v1_ingest(root, "hello".bytes(), HASH_POLICY_V1_SHA256_LEGACY)
+        expect(ingested.status).to_equal("ok")
+        expect(ingested.object_key).to_start_with("sha256_")
+        expect(ingested.object_key).to_equal("sha256_" + HELLO_SHA256)
+        expect(ingested.alias_hex.len()).to_equal(64)
+        val opened = immutable_store_v1_open(root, ingested.object_key)
+        expect(opened.status).to_equal("ok")
+        expect(_hex(opened.bytes)).to_equal(_hex("hello".bytes()))
+        _store_cleanup(root)
+
+    it "rejects an unsupported hash policy without publishing":
+        val root = _store_root("badpolicy")
+        val rejected = immutable_store_v1_ingest(root, "hello".bytes(), "md5")
+        expect(rejected.status).to_equal("rejected")
+        expect(rejected.reason).to_contain("hash-policy-unsupported")
+        expect(rejected.object_key).to_equal("")
+        expect(rejected.reused.value).to_equal(false)
+        expect(_count_objects(root)).to_equal(0)
+        _store_cleanup(root)
+
+    it "reports missing for absent and invalid keys":
+        val root = _store_root("missing")
+        val absent = immutable_store_v1_open(root, "xxh3-128_" + "0".repeat(32))
+        expect(absent.status).to_equal("missing")
+        expect(absent.reason).to_equal("object-missing")
+        val invalid = immutable_store_v1_open(root, "not a key")
+        expect(invalid.status).to_equal("missing")
+        expect(invalid.reason).to_equal("object-key-invalid")
+        _store_cleanup(root)
+
+describe "immutable_store_v1 forced collision":
+    it "never merges different bytes under one digest":
+        val root = _store_root("collision")
+        val bytes_a = "collision-object-A-payload".bytes()
+        val bytes_b = "collision-object-B-payload".bytes()
+        val first = immutable_store_v1_ingest(root, bytes_a, HASH_POLICY_V1_XXH3_128)
+        expect(first.status).to_equal("ok")
+        val hex_b = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, bytes_b).hex
+        # Force the collision: point B's digest alias at A's published object.
+        val alias_path = root + "/aliases/xxh3-128/" + hex_b
+        expect(file_write_bytes(alias_path, first.object_key.bytes())).to_equal(true)
+        val collided = immutable_store_v1_ingest(root, bytes_b, HASH_POLICY_V1_XXH3_128)
+        expect(collided.status).to_equal("ok")
+        expect(collided.reused.value).to_equal(false)
+        expect(collided.object_key).to_equal("xxh3-128_" + hex_b + "_c1")
+        expect(collided.object_key == first.object_key).to_equal(false)
+        expect(file_exists(root + "/collisions/xxh3-128/" + hex_b + "_1.sdn")).to_equal(true)
+        val opened_a = immutable_store_v1_open(root, first.object_key)
+        expect(opened_a.status).to_equal("ok")
+        expect(_hex(opened_a.bytes)).to_equal(_hex(bytes_a))
+        val opened_b = immutable_store_v1_open(root, collided.object_key)
+        expect(opened_b.status).to_equal("ok")
+        expect(_hex(opened_b.bytes)).to_equal(_hex(bytes_b))
+        val again = immutable_store_v1_ingest(root, bytes_b, HASH_POLICY_V1_XXH3_128)
+        expect(again.status).to_equal("ok")
+        expect(again.reused.value).to_equal(true)
+        expect(again.object_key).to_equal(collided.object_key)
+        expect(_count_objects(root)).to_equal(2)
+        _store_cleanup(root)
+
+describe "immutable_store_v1 roots and pins":
+    it "enforces create-only then compare-and-swap root generations":
+        val root = _store_root("roots")
+        val ingested = immutable_store_v1_ingest(root, "rooted payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        val key = ingested.object_key
+        expect(immutable_store_v1_publish_root(root, "main", key + "\n", StoreGenerationV1(0))).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "main", key + "\n", StoreGenerationV1(0))).to_equal("root-exists")
+        expect(immutable_store_v1_publish_root(root, "main", key + "\n", StoreGenerationV1(1))).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "main", key + "\n", StoreGenerationV1(1))).to_equal("root-generation-mismatch")
+        expect(immutable_store_v1_publish_root(root, "other", key + "\n", StoreGenerationV1(3))).to_equal("root-missing")
+        expect(immutable_store_v1_publish_root(root, "bad name", key + "\n", StoreGenerationV1(0))).to_equal("root-name-invalid")
+        expect(immutable_store_v1_publish_root(root, "main2", "not a key\n", StoreGenerationV1(0))).to_start_with("manifest-key-invalid")
+        _store_cleanup(root)
+
+    it "pins and releases retention pins":
+        val root = _store_root("pins")
+        val ingested = immutable_store_v1_ingest(root, "pinned payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        val key = ingested.object_key
+        expect(immutable_store_v1_pin(root, "p1", "owner-a", [key])).to_equal("")
+        expect(immutable_store_v1_pin(root, "p1", "owner-a", [key])).to_equal("")
+        expect(immutable_store_v1_release_pin(root, "p1")).to_equal("")
+        expect(immutable_store_v1_release_pin(root, "p1")).to_equal("pin-missing")
+        expect(immutable_store_v1_pin(root, "p2", "owner-a", ["bad key"])).to_start_with("pin-ref-invalid")
+        _store_cleanup(root)
+
+describe "immutable_store_v1 garbage collection":
+    it "dry-run lists unreachable objects without moving them":
+        val root = _store_root("gcdry")
+        val orphan = immutable_store_v1_ingest(root, "orphan payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        val rooted = immutable_store_v1_ingest(root, "rooted payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "main", rooted.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gc.status).to_equal("ok")
+        expect(gc.dry_run.value).to_equal(true)
+        expect(gc.moved.value).to_equal(0)
+        expect(gc.unreachable.len()).to_equal(1)
+        expect(gc.unreachable[0]).to_equal(orphan.object_key)
+        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("ok")
+        expect(_count_objects(root)).to_equal(2)
+        _store_cleanup(root)
+
+    it "prune quarantines orphans and preserves rooted and pinned objects":
+        val root = _store_root("gcprune")
+        val orphan = immutable_store_v1_ingest(root, "orphan payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        val rooted = immutable_store_v1_ingest(root, "rooted payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        val pinned = immutable_store_v1_ingest(root, "pinned payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "main", rooted.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        expect(immutable_store_v1_pin(root, "keep", "owner-a", [pinned.object_key])).to_equal("")
+        val dry = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(dry.unreachable.len()).to_equal(1)
+        expect(dry.unreachable[0]).to_equal(orphan.object_key)
+        val pruned = immutable_store_v1_collect(root, StoreFlagV1(false))
+        expect(pruned.status).to_equal("ok")
+        expect(pruned.dry_run.value).to_equal(false)
+        expect(pruned.moved.value).to_equal(1)
+        expect(pruned.unreachable.len()).to_equal(1)
+        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("missing")
+        expect(immutable_store_v1_open(root, rooted.object_key).status).to_equal("ok")
+        expect(immutable_store_v1_open(root, pinned.object_key).status).to_equal("ok")
+        val quarantine_root = root + "/quarantine"
+        val dates = dir_list(quarantine_root)
+        expect(dates.len()).to_equal(1)
+        val quarantine = quarantine_root + "/" + dates[0].trim()
+        expect(file_exists(quarantine + "/" + orphan.object_key + ".obj")).to_equal(true)
+        expect(_count_objects(root)).to_equal(2)
+        val after = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(after.unreachable.len()).to_equal(0)
+        _store_cleanup(root)
+
+describe "immutable_store_v1 crash and failure safety":
+    it "rolls a root forward from a claim whose pointer write was lost":
+        val root = _store_root("claim")
+        val a = immutable_store_v1_ingest(root, "gen one".bytes(), HASH_POLICY_V1_XXH3_128)
+        val b = immutable_store_v1_ingest(root, "gen two".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        val pointer = root + "/roots/main.sdn"
+        val gen_one = match file_read_regular_no_follow_bounded(pointer, 65536):
+            case Ok(value): value
+            case Err(_): ""
+        expect(gen_one == "").to_equal(false)
+        expect(immutable_store_v1_publish_root(root, "main", b.object_key + "\n", StoreGenerationV1(1))).to_equal("")
+        expect(file_exists(root + "/roots/main.g2.claim")).to_equal(true)
+        # Simulate a crash after the claim but before the pointer write.
+        expect(file_write_bytes(pointer, gen_one.bytes())).to_equal(true)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(1))).to_equal("root-generation-mismatch")
+        # The claimed generation-2 keys stay reachable and the pointer moved forward.
+        expect(immutable_store_v1_collect(root, StoreFlagV1(true)).unreachable.len()).to_equal(1)
+        expect(immutable_store_v1_publish_root(root, "main", b.object_key + "\n", StoreGenerationV1(2))).to_equal("")
+        _store_cleanup(root)
+
+    it "refuses to collect when the pins directory is missing":
+        val root = _store_root("gc-closed")
+        val pinned = immutable_store_v1_ingest(root, "pinned only".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "keep", "owner-a", [pinned.object_key])).to_equal("")
+        expect(dir_remove_all(root + "/pins")).to_equal(true)
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(false))
+        expect(gc.status).to_equal("rejected")
+        expect(gc.reason).to_start_with("doc-dir-missing")
+        expect(gc.moved.value).to_equal(0)
+        expect(immutable_store_v1_open(root, pinned.object_key).status).to_equal("ok")
+        _store_cleanup(root)
+
+    it "keeps committed generations when a stalled writer regresses the pointer":
+        val root = _store_root("regress")
+        val a = immutable_store_v1_ingest(root, "regress a".bytes(), HASH_POLICY_V1_XXH3_128)
+        val b = immutable_store_v1_ingest(root, "regress b".bytes(), HASH_POLICY_V1_XXH3_128)
+        val c = immutable_store_v1_ingest(root, "regress c".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        val pointer = root + "/roots/main.sdn"
+        val gen_one = match file_read_regular_no_follow_bounded(pointer, 65536):
+            case Ok(value): value
+            case Err(_): ""
+        expect(immutable_store_v1_publish_root(root, "main", b.object_key + "\n", StoreGenerationV1(1))).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "main", c.object_key + "\n", StoreGenerationV1(2))).to_equal("")
+        # Claims are never deleted, so a regressed pointer cannot reopen a slot.
+        expect(file_exists(root + "/roots/main.g2.claim")).to_equal(true)
+        expect(file_write_bytes(pointer, gen_one.bytes())).to_equal(true)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(1))).to_equal("root-generation-mismatch")
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(2))).to_equal("root-generation-mismatch")
+        # Head (generation 3, key c) stays reachable; a and b are history.
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(gc.unreachable.len()).to_equal(2)
+        expect(gc.unreachable.contains(c.object_key)).to_equal(false)
+        expect(immutable_store_v1_publish_root(root, "main", a.object_key + "\n", StoreGenerationV1(3))).to_equal("")
+        _store_cleanup(root)
