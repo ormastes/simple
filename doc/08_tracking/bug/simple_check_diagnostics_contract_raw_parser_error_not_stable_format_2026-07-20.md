@@ -1,7 +1,7 @@
 # `bin/simple check` emits raw legacy parser-error text instead of the stable `error[Exxxx]` diagnostic format (10/10 examples fail)
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** resolved 2026-11-06 (re-verified by code inspection 2026-11-25)
 - **Area:** CLI `check` diagnostics pipeline (compiler-facing, likely
   `src/app/*` check-command driver and/or `src/compiler/**` diagnostic
   emission)
@@ -99,3 +99,26 @@ add `severity` to `CheckDiagnostic`, add first-segment W0410 probe + summary.
 Evidence: check_diagnostics_contract_spec 0/10 -> 10/10 (seed run). The type
 mismatch half of this record was already fixed by the E1003 inference path.
 Remaining: raw `[parser_error]` lines are still printed by the parser in addition to the E0002 form.
+
+## Verification 2026-11-25 (p2w5-ad lane, release/1.0.0)
+
+The 2026-11-06 resolution is present in the current tree:
+
+- `collect_files` (`src/app/check/main.spl:104-122`) no longer re-expands
+  plain file paths (comment at :118-119 records the fix).
+- W0410 unresolved-import probe and `severity` field:
+  `src/app/check/main.spl:167,192`.
+- Warning summary line `"N warning(s) found in M file(s)"`:
+  `src/app/check/main.spl:456`.
+- Stable `E0002` formatter with `expected:` / `found:` / `= help:` rendering:
+  `src/compiler/90.tools/lint/check_diagnostic.spl:38-88`, wired into the
+  check CLI via `src/app/check/main.spl:18` and `:298`.
+
+Execution evidence could not be regenerated on this host: both the spec runner
+and `src/app/check/main.spl` itself fail under the pinned seed at HEAD with
+`unknown decorator '@representation_boundary'` (source/binary inconsistency
+from cfd89933699). Verified by code inspection.
+
+Status: RESOLVED (header updated; the raw `[parser_error]` lines noted as
+"remaining" in the 2026-11-06 resolution are additive parser output, not a
+contract violation).
