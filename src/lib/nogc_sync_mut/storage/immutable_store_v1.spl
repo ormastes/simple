@@ -14,12 +14,17 @@ use std.io_runtime.{file_delete, dir_list_optional}
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure,
     timestamp_year, timestamp_month, timestamp_day}
 
+unit StoreFlagV1: bool
+unit StoreCountV1: i64
+unit StoreGenerationV1: i64
+export StoreFlagV1, StoreCountV1, StoreGenerationV1
+
 pub struct StoreIngestV1:
     status: text        # "ok" | "rejected"
     reason: text
     object_key: text
     alias_hex: text
-    reused: bool        # true when an existing verified object satisfied the ingest
+    reused: StoreFlagV1        # true when an existing verified object satisfied the ingest
 
 pub struct StoreOpenV1:
     status: text        # "ok" | "missing" | "corrupt"
@@ -29,9 +34,9 @@ pub struct StoreOpenV1:
 pub struct StoreGcV1:
     status: text        # "ok" | "rejected" | "partial"
     reason: text
-    dry_run: bool
+    dry_run: StoreFlagV1
     unreachable: [text]
-    moved: i64
+    moved: StoreCountV1
 
 struct Isv1DocV1:
     fields: Dict<text, text>
@@ -122,45 +127,45 @@ fn _isv1_field_name_valid(key: text) -> bool:
 # substring so byte/char indexing cannot diverge on hostile input.
 fn _isv1_key_valid(key: text) -> bool:
     val bs = key.bytes()
-    if bs.len() < 3 or bs.len() > 256:
+    if key.byte_len() < 3 or key.byte_len() > 256:
         return false
     for b in bs:
         if not (_isv1_is_algo_byte(b) or b == 95 or b == 46):
             return false
     var sep: i64 = -1
     var i: i64 = 0
-    while i < bs.len():
+    while i < key.byte_len():
         if bs[i] == 95:
             sep = i
             break
         i = i + 1
-    if sep <= 0 or sep >= bs.len() - 1:
+    if sep <= 0 or sep >= key.byte_len() - 1:
         return false
     if not _isv1_algo_valid(key.substring(0, sep)):
         return false
-    val rest = key.substring(sep + 1, bs.len())
+    val rest = key.substring(sep + 1, key.byte_len())
     val rbs = rest.bytes()
-    var hex_end = rbs.len()
+    var hex_end = rest.byte_len()
     var k: i64 = 0
-    while k < rbs.len():
+    while k < rest.byte_len():
         if rbs[k] == 95:
             hex_end = k
             break
         k = k + 1
     if not _isv1_hex_valid(rest.substring(0, hex_end)):
         return false
-    if hex_end == rbs.len():
+    if hex_end == rest.byte_len():
         return true
-    val suffix = rest.substring(hex_end, rbs.len())
+    val suffix = rest.substring(hex_end, rest.byte_len())
     if not suffix.starts_with("_c"):
         return false
-    val n = _isv1_parse_nonneg_int(suffix.substring(2, suffix.len()))
+    val n = _isv1_parse_nonneg_int(suffix.substring(2, suffix.byte_len()))
     n >= 1 and n <= _ISV1_MAX_COLLISION_SCAN
 
 fn _isv1_key_algorithm(key: text) -> text:
     val bs = key.bytes()
     var i: i64 = 0
-    while i < bs.len():
+    while i < key.byte_len():
         if bs[i] == 95:
             return key.substring(0, i)
         i = i + 1
@@ -169,21 +174,21 @@ fn _isv1_key_hex(key: text) -> text:
     val bs = key.bytes()
     var sep: i64 = 0
     var i: i64 = 0
-    while i < bs.len():
+    while i < key.byte_len():
         if bs[i] == 95:
             sep = i + 1
             break
         i = i + 1
-    var hex_end = bs.len()
+    var hex_end = key.byte_len()
     var k = sep
-    while k < bs.len():
+    while k < key.byte_len():
         if bs[k] == 95:
             hex_end = k
             break
         k = k + 1
     key.substring(sep, hex_end)
 fn _isv1_bound_reason(value: text) -> text:
-    if value.len() > 32:
+    if value.byte_len() > 32:
         return value.substring(0, 32)
     value
 fn _isv1_join(root: text, rel: text) -> text:
@@ -214,17 +219,17 @@ fn _isv1_escape(value: text) -> text:
     out = out.replace("\r", "\\r")
     out
 fn _isv1_unquote(value: text) -> Result<text, text>:
-    if value.len() < 2:
+    if value.byte_len() < 2:
         return Err("unquoted-value")
     if not value.starts_with("\"") or not value.ends_with("\""):
         return Err("unquoted-value")
-    val inner = value.substring(1, value.len() - 1)
+    val inner = value.substring(1, value.byte_len() - 1)
     var out = ""
     var index: i64 = 0
-    while index < inner.len():
+    while index < inner.byte_len():
         val ch = inner.substring(index, index + 1)
         if ch == "\\":
-            if index + 2 > inner.len():
+            if index + 2 > inner.byte_len():
                 return Err("malformed-escape")
             val code = inner.substring(index + 1, index + 2)
             if code == "\"":
@@ -248,7 +253,7 @@ fn _isv1_unquote(value: text) -> Result<text, text>:
     Ok(out)
 fn _isv1_find_colon(line: text) -> i64:
     var index: i64 = 0
-    while index < line.len():
+    while index < line.byte_len():
         if line.substring(index, index + 1) == ":":
             return index
         index = index + 1
@@ -258,7 +263,7 @@ fn _isv1_find_colon(line: text) -> i64:
 # bare tokens, exact allowed set, no duplicates), then a literal `objects:`
 # line, then one validated object key per line. Any deviation is an Err.
 fn _isv1_doc_decode(source: text, allowed: [text], max_bytes: i64) -> Result<Isv1DocV1, text>:
-    if source.len() > max_bytes:
+    if source.byte_len() > max_bytes:
         return Err("doc-too-large")
     val lines = source.split("\n")
     var fields: Dict<text, text> = {}
@@ -284,10 +289,10 @@ fn _isv1_doc_decode(source: text, allowed: [text], max_bytes: i64) -> Result<Isv
                 return Err("unknown-field")
             if fields.contains_key(field_name):
                 return Err("duplicate-field")
-            val rest = line.substring(colon + 1, line.len())
+            val rest = line.substring(colon + 1, line.byte_len())
             if not rest.starts_with(" "):
                 return Err("malformed-line")
-            val raw = rest.substring(1, rest.len())
+            val raw = rest.substring(1, rest.byte_len())
             if raw.starts_with("\""):
                 val unquoted = match _isv1_unquote(raw):
                     case Ok(value): value
@@ -347,8 +352,8 @@ fn _isv1_read_object_bytes(root: text, key: text) -> Result<[u8], text>:
         return Err("object-missing")
     file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES)
 fn _isv1_ingest_rejected(reason: text) -> StoreIngestV1:
-    StoreIngestV1(status: "rejected", reason: reason, object_key: "", alias_hex: "", reused: false)
-fn _isv1_ingest_ok(key: text, alias_hex: text, reused: bool) -> StoreIngestV1:
+    StoreIngestV1(status: "rejected", reason: reason, object_key: "", alias_hex: "", reused: StoreFlagV1(false))
+fn _isv1_ingest_ok(key: text, alias_hex: text, reused: StoreFlagV1) -> StoreIngestV1:
     StoreIngestV1(status: "ok", reason: "", object_key: key, alias_hex: alias_hex, reused: reused)
 
 # Record content is deterministic per object key, so a losing no-replace
@@ -438,7 +443,7 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
         dir_remove_all(stage)
         if finish_reason != "":
             return _isv1_ingest_rejected(finish_reason)
-        return _isv1_ingest_ok(key, alias_hex, false)
+        return _isv1_ingest_ok(key, alias_hex, StoreFlagV1(false))
     if published == 0:
         val winner = match file_read_regular_no_follow_bounded_bytes(object_path, _ISV1_MAX_OBJECT_BYTES):
             case Ok(value): value
@@ -450,7 +455,7 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
             val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
             if finish_reason != "":
                 return _isv1_ingest_rejected(finish_reason)
-            return _isv1_ingest_ok(key, alias_hex, true)
+            return _isv1_ingest_ok(key, alias_hex, StoreFlagV1(true))
         if from_collision:
             return _isv1_ingest_rejected("collision-slot-race")
         return _isv1_collision_ingest(root, algorithm, alias_hex, bytes, profile)
@@ -475,7 +480,7 @@ fn _isv1_collision_ingest(root: text, algorithm: text, alias_hex: text, bytes: [
                 case Err(_):
                     matches = false
             if matches:
-                return _isv1_ingest_ok(candidate, alias_hex, true)
+                return _isv1_ingest_ok(candidate, alias_hex, StoreFlagV1(true))
             n = n + 1
             continue
         val attempt = _isv1_publish(root, candidate, bytes, algorithm, alias_hex, profile, true)
@@ -560,7 +565,7 @@ pub fn immutable_store_v1_ingest(root: text, bytes: [u8], policy: text) -> Store
                         algorithm, alias_hex, digest.profile)
                     if record_reason != "":
                         return _isv1_ingest_rejected(record_reason)
-                    return _isv1_ingest_ok(candidate, alias_hex, true)
+                    return _isv1_ingest_ok(candidate, alias_hex, StoreFlagV1(true))
                 return _isv1_collision_ingest(root, algorithm, alias_hex, bytes, digest.profile)
             case Err(_):
                 # Alias points at a missing/unreadable object: republish under
@@ -594,7 +599,8 @@ pub fn immutable_store_v1_open(root: text, object_key: text) -> StoreOpenV1:
     StoreOpenV1(status: "ok", reason: "", bytes: bytes)
 
 pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
-        expected_generation: i64) -> text:
+        generation: StoreGenerationV1) -> text:
+    val expected_generation: i64 = generation.value
     if root == "":
         return "store-root-empty"
     if not _isv1_name_valid(name):
@@ -754,7 +760,7 @@ fn _isv1_collect_doc_keys(store_root: text, dir: text, allowed: [text], max_byte
             case Err(_): return Err("doc-unreadable: {name}")
         var sources: [text] = [source]
         if store_root != "":
-            val head = match _isv1_root_head_text(store_root, name.substring(0, name.len() - 4), source):
+            val head = match _isv1_root_head_text(store_root, name.substring(0, name.byte_len() - 4), source):
                 case Ok(value): value
                 case Err(reason): return Err("{reason}: {name}")
             if head != source:
@@ -780,10 +786,10 @@ fn _isv1_quarantine_date() -> text:
     val day_text = if day < 10: "0{day}" else: "{day}"
     "{year}{month_text}{day_text}"
 
-pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
+pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1:
     if root == "":
         return StoreGcV1(status: "rejected", reason: "store-root-empty", dry_run: dry_run,
-            unreachable: [], moved: 0)
+            unreachable: [], moved: StoreCountV1(0))
     var reachable: Dict<text, bool> = {}
     # Fail closed: an unreadable or corrupt root/pin means the reachable set
     # is unknown, so nothing may be collected.
@@ -792,7 +798,7 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
         case Ok(value): value
         case Err(reason):
             return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
-                unreachable: [], moved: 0)
+                unreachable: [], moved: StoreCountV1(0))
     for key in root_keys:
         reachable[key] = true
     val pin_keys = match _isv1_collect_doc_keys("", _isv1_join(root, "pins"),
@@ -800,7 +806,7 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
         case Ok(value): value
         case Err(reason):
             return StoreGcV1(status: "rejected", reason: reason, dry_run: dry_run,
-                unreachable: [], moved: 0)
+                unreachable: [], moved: StoreCountV1(0))
     for key in pin_keys:
         reachable[key] = true
     var unreachable: [text] = []
@@ -817,19 +823,19 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
                 val entry_name = entry.trim()
                 if not entry_name.ends_with(".obj"):
                     continue
-                val key = entry_name.substring(0, entry_name.len() - 4)
+                val key = entry_name.substring(0, entry_name.byte_len() - 4)
                 if not reachable.contains_key(key):
                     unreachable.push(key)
     unreachable.sort()
-    if dry_run:
-        return StoreGcV1(status: "ok", reason: "", dry_run: true, unreachable: unreachable, moved: 0)
+    if dry_run.value:
+        return StoreGcV1(status: "ok", reason: "", dry_run: StoreFlagV1(true), unreachable: unreachable, moved: StoreCountV1(0))
     var moved: i64 = 0
     var first_error = ""
     if unreachable.len() > 0:
         val quarantine = _isv1_join(root, "quarantine/" + _isv1_quarantine_date())
         if not dir_create_all(quarantine) and not is_dir(quarantine):
             return StoreGcV1(status: "rejected", reason: "quarantine-dir-failed",
-                dry_run: false, unreachable: unreachable, moved: 0)
+                dry_run: StoreFlagV1(false), unreachable: unreachable, moved: StoreCountV1(0))
         for key in unreachable:
             if not _isv1_key_valid(key):
                 if first_error == "":
@@ -866,4 +872,4 @@ pub fn immutable_store_v1_collect(root: text, dry_run: bool) -> StoreGcV1:
     var status = "ok"
     if first_error != "":
         status = "partial"
-    StoreGcV1(status: status, reason: first_error, dry_run: false, unreachable: unreachable, moved: moved)
+    StoreGcV1(status: status, reason: first_error, dry_run: StoreFlagV1(false), unreachable: unreachable, moved: StoreCountV1(moved))

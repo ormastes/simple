@@ -4,6 +4,7 @@
 # Design: doc/05_design/platform/container/simple_container_improvement.md (architecture §11.2-11.4)
 use std.spec.{describe, it, expect}
 use std.common.contracts.container.lifecycle_journal_v1.{ContainerLifecycleJournalV1,
+    ContainerJournalVersionV1, ContainerJournalGenerationV1, ContainerNativeAliveV1,
     container_lifecycle_journal_v1_empty, lifecycle_journal_v1_encode,
     lifecycle_journal_v1_decode, lifecycle_recovery_actions_v1,
     LIFECYCLE_JOURNAL_V1_VERSION, LIFECYCLE_PHASE_V1_CREATED, LIFECYCLE_PHASE_V1_RUNNING,
@@ -17,8 +18,8 @@ val OBJ_KEY_A = "xxh3-128_b5e9c1ad071b3e7fc779cfaa5e523818"
 val OBJ_KEY_B = "sha256_2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
 fn _sample_journal() -> ContainerLifecycleJournalV1:
-    ContainerLifecycleJournalV1(format_version: LIFECYCLE_JOURNAL_V1_VERSION,
-        container_id: "container-7", generation: 3, provider_id: "linux-oci-v1",
+    ContainerLifecycleJournalV1(format_version: ContainerJournalVersionV1(LIFECYCLE_JOURNAL_V1_VERSION),
+        container_id: "container-7", generation: ContainerJournalGenerationV1(3), provider_id: "linux-oci-v1",
         phase: LIFECYCLE_PHASE_V1_RUNNING,
         owned_paths: ["/run/containers/c7", "/tmp/c7-root"],
         owned_objects: [OBJ_KEY_A, OBJ_KEY_B])
@@ -29,9 +30,9 @@ describe "lifecycle_journal_v1 encode/decode":
         val encoded = lifecycle_journal_v1_encode(journal)
         expect(encoded).to_contain("container-lifecycle-journal")
         val decoded = lifecycle_journal_v1_decode(encoded)
-        expect(decoded.format_version).to_equal(LIFECYCLE_JOURNAL_V1_VERSION)
+        expect(decoded.format_version.value).to_equal(LIFECYCLE_JOURNAL_V1_VERSION)
         expect(decoded.container_id).to_equal("container-7")
-        expect(decoded.generation).to_equal(3)
+        expect(decoded.generation.value).to_equal(3)
         expect(decoded.provider_id).to_equal("linux-oci-v1")
         expect(decoded.phase).to_equal(LIFECYCLE_PHASE_V1_RUNNING)
         expect(decoded.owned_paths.len()).to_equal(2)
@@ -47,24 +48,24 @@ describe "lifecycle_journal_v1 encode/decode":
         expect(reencoded).to_equal(encoded)
 
     it "rejects malformed input with the format_version 0 sentinel":
-        expect(lifecycle_journal_v1_decode("").format_version).to_equal(0)
-        expect(lifecycle_journal_v1_decode("kind: container-lifecycle-journal").format_version).to_equal(0)
-        expect(lifecycle_journal_v1_decode("not-a-journal").format_version).to_equal(0)
+        expect(lifecycle_journal_v1_decode("").format_version.value).to_equal(0)
+        expect(lifecycle_journal_v1_decode("kind: container-lifecycle-journal").format_version.value).to_equal(0)
+        expect(lifecycle_journal_v1_decode("not-a-journal").format_version.value).to_equal(0)
         val encoded = lifecycle_journal_v1_encode(_sample_journal())
-        expect(lifecycle_journal_v1_decode(encoded.substring(0, encoded.len() - 1)).format_version).to_equal(0)
-        expect(lifecycle_journal_v1_decode(encoded + " ").format_version).to_equal(0)
+        expect(lifecycle_journal_v1_decode(encoded.substring(0, encoded.len() - 1)).format_version.value).to_equal(0)
+        expect(lifecycle_journal_v1_decode(encoded + " ").format_version.value).to_equal(0)
 
     it "rejects an unknown phase at decode and encode time":
         val encoded = lifecycle_journal_v1_encode(_sample_journal())
         val tampered = encoded.replace("running", "exploded")
-        expect(lifecycle_journal_v1_decode(tampered).format_version).to_equal(0)
+        expect(lifecycle_journal_v1_decode(tampered).format_version.value).to_equal(0)
         var journal = _sample_journal()
         journal.phase = "exploded"
         expect(lifecycle_journal_v1_encode(journal)).to_equal("")
 
 describe "lifecycle_recovery_actions_v1":
     it "plans stop-descendants first and mark-destroyed last for a live RUNNING journal":
-        val actions = lifecycle_recovery_actions_v1(_sample_journal(), true)
+        val actions = lifecycle_recovery_actions_v1(_sample_journal(), ContainerNativeAliveV1(true))
         expect(actions.len()).to_equal(9)
         expect(actions[0]).to_equal(LIFECYCLE_ACTION_STOP_DESCENDANTS_V1)
         expect(actions[1]).to_equal(LIFECYCLE_ACTION_REVOKE_HANDLES_V1)
@@ -77,7 +78,7 @@ describe "lifecycle_recovery_actions_v1":
         expect(actions[8]).to_equal(LIFECYCLE_ACTION_MARK_DESTROYED_V1)
 
     it "omits stop-descendants when the native attempt is already dead":
-        val actions = lifecycle_recovery_actions_v1(_sample_journal(), false)
+        val actions = lifecycle_recovery_actions_v1(_sample_journal(), ContainerNativeAliveV1(false))
         expect(actions.len()).to_equal(8)
         expect(actions.contains(LIFECYCLE_ACTION_STOP_DESCENDANTS_V1)).to_equal(false)
         expect(actions[0]).to_equal(LIFECYCLE_ACTION_REVOKE_HANDLES_V1)
@@ -86,16 +87,16 @@ describe "lifecycle_recovery_actions_v1":
     it "returns no actions for a DESTROYED journal":
         var journal = _sample_journal()
         journal.phase = LIFECYCLE_PHASE_V1_DESTROYED
-        expect(lifecycle_recovery_actions_v1(journal, true).len()).to_equal(0)
-        expect(lifecycle_recovery_actions_v1(journal, false).len()).to_equal(0)
+        expect(lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(true)).len()).to_equal(0)
+        expect(lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false)).len()).to_equal(0)
 
     it "fails closed with a single error action for an unknown phase":
         var journal = _sample_journal()
         journal.phase = "exploded"
-        val actions = lifecycle_recovery_actions_v1(journal, true)
+        val actions = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(true))
         expect(actions.len()).to_equal(1)
         expect(actions[0]).to_equal(LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1)
-        val sentinel = lifecycle_recovery_actions_v1(container_lifecycle_journal_v1_empty(), false)
+        val sentinel = lifecycle_recovery_actions_v1(container_lifecycle_journal_v1_empty(), ContainerNativeAliveV1(false))
         expect(sentinel.len()).to_equal(1)
         expect(sentinel[0]).to_equal(LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1)
 
@@ -104,7 +105,7 @@ describe "lifecycle_recovery_actions_v1":
         journal.phase = LIFECYCLE_PHASE_V1_STOPPED
         journal.owned_paths = ["/a", "/b", "/c"]
         journal.owned_objects = [OBJ_KEY_A]
-        val first = lifecycle_recovery_actions_v1(journal, false)
+        val first = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false))
         expect(first.len()).to_equal(8)
         expect(first[0]).to_equal(LIFECYCLE_ACTION_REVOKE_HANDLES_V1)
         expect(first[1]).to_equal(LIFECYCLE_ACTION_DETACH_VIEW_V1)
@@ -114,7 +115,7 @@ describe "lifecycle_recovery_actions_v1":
         expect(first[5]).to_equal("remove-owned-object:" + OBJ_KEY_A)
         expect(first[6]).to_equal(LIFECYCLE_ACTION_RETAIN_SAVED_ROOT_V1)
         expect(first[7]).to_equal(LIFECYCLE_ACTION_MARK_DESTROYED_V1)
-        val replay = lifecycle_recovery_actions_v1(journal, false)
+        val replay = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false))
         expect(replay.len()).to_equal(first.len())
         for i in 0..first.len():
             expect(replay[i]).to_equal(first[i])
@@ -124,7 +125,7 @@ describe "lifecycle_recovery_actions_v1":
         journal.phase = LIFECYCLE_PHASE_V1_CREATED
         journal.owned_paths = []
         journal.owned_objects = []
-        val actions = lifecycle_recovery_actions_v1(journal, false)
+        val actions = lifecycle_recovery_actions_v1(journal, ContainerNativeAliveV1(false))
         expect(actions.len()).to_equal(4)
         expect(actions[0]).to_equal(LIFECYCLE_ACTION_REVOKE_HANDLES_V1)
         expect(actions[1]).to_equal(LIFECYCLE_ACTION_DETACH_VIEW_V1)

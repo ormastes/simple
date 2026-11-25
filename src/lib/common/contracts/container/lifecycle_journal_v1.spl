@@ -49,10 +49,14 @@ pub const LIFECYCLE_ACTION_RETAIN_SAVED_ROOT_V1 = "retain-saved-root"
 pub const LIFECYCLE_ACTION_MARK_DESTROYED_V1 = "mark-destroyed"
 pub const LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1 = "error-unknown-phase"
 
+pub unit ContainerJournalVersionV1: i64
+pub unit ContainerJournalGenerationV1: i64
+pub unit ContainerNativeAliveV1: bool
+
 pub struct ContainerLifecycleJournalV1:
-    format_version: i64
+    format_version: ContainerJournalVersionV1
     container_id: text
-    generation: i64
+    generation: ContainerJournalGenerationV1
     provider_id: text
     phase: text
     owned_paths: [text]
@@ -85,19 +89,19 @@ fn _journal_owned_safe_v1(values: [text]) -> bool:
 # The invalid sentinel: decode failure and hand-built zeros both carry
 # format_version 0, which no valid journal ever has.
 pub fn container_lifecycle_journal_v1_empty() -> ContainerLifecycleJournalV1:
-    ContainerLifecycleJournalV1(format_version: 0, container_id: "",
-        generation: 0, provider_id: "", phase: "", owned_paths: [],
+    ContainerLifecycleJournalV1(format_version: ContainerJournalVersionV1(0), container_id: "",
+        generation: ContainerJournalGenerationV1(0), provider_id: "", phase: "", owned_paths: [],
         owned_objects: [])
 
 # Canonical SDN text in canonical field order, or "" when the journal is
 # outside the bounded contract; "" never decodes back to a valid journal.
 pub fn lifecycle_journal_v1_encode(journal: ContainerLifecycleJournalV1) -> text:
-    if journal.format_version != LIFECYCLE_JOURNAL_V1_VERSION:
+    if journal.format_version != ContainerJournalVersionV1(LIFECYCLE_JOURNAL_V1_VERSION):
         return ""
     if not _journal_text_safe_v1(journal.container_id) or
             not _journal_text_safe_v1(journal.provider_id):
         return ""
-    if journal.generation < 0 or not _lifecycle_phase_known_v1(journal.phase):
+    if journal.generation < ContainerJournalGenerationV1(0) or not _lifecycle_phase_known_v1(journal.phase):
         return ""
     if not _journal_owned_safe_v1(journal.owned_paths) or
             not _journal_owned_safe_v1(journal.owned_objects):
@@ -111,7 +115,7 @@ pub fn lifecycle_journal_v1_encode(journal: ContainerLifecycleJournalV1) -> text
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(LIFECYCLE_JOURNAL_V1_KIND),
         "version": SdnValue.Int(LIFECYCLE_JOURNAL_V1_VERSION),
         "container_id": SdnValue.String(journal.container_id),
-        "generation": SdnValue.Int(journal.generation),
+        "generation": SdnValue.Int(journal.generation.value),
         "provider_id": SdnValue.String(journal.provider_id),
         "phase": SdnValue.String(journal.phase),
         "owned_paths": SdnValue.Array(path_values),
@@ -164,14 +168,14 @@ fn _lifecycle_journal_v1_decode_strict(source: text) -> Result<ContainerLifecycl
     if _journal_field_int_v1(fields, "version")? != LIFECYCLE_JOURNAL_V1_VERSION:
         return Err("journal-version")
     val journal = ContainerLifecycleJournalV1(
-        format_version: LIFECYCLE_JOURNAL_V1_VERSION,
+        format_version: ContainerJournalVersionV1(LIFECYCLE_JOURNAL_V1_VERSION),
         container_id: _journal_field_text_v1(fields, "container_id")?,
-        generation: _journal_field_int_v1(fields, "generation")?,
+        generation: ContainerJournalGenerationV1(_journal_field_int_v1(fields, "generation")?),
         provider_id: _journal_field_text_v1(fields, "provider_id")?,
         phase: _journal_field_text_v1(fields, "phase")?,
         owned_paths: _journal_field_texts_v1(fields, "owned_paths")?,
         owned_objects: _journal_field_texts_v1(fields, "owned_objects")?)
-    if journal.generation < 0:
+    if journal.generation < ContainerJournalGenerationV1(0):
         return Err("journal-generation")
     if not _lifecycle_phase_known_v1(journal.phase):
         return Err("journal-phase")
@@ -203,13 +207,13 @@ pub fn lifecycle_journal_v1_decode(source: text) -> ContainerLifecycleJournalV1:
 # action; an unknown phase fails closed with a single error-unknown-phase
 # action so callers fail explicitly instead of guessing a cleanup.
 pub fn lifecycle_recovery_actions_v1(journal: ContainerLifecycleJournalV1,
-        native_alive: bool) -> [text]:
+        native_alive: ContainerNativeAliveV1) -> [text]:
     if journal.phase == LIFECYCLE_PHASE_V1_DESTROYED:
         return []
     if not _lifecycle_phase_known_v1(journal.phase):
         return [LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1]
     var actions: [text] = []
-    if native_alive:
+    if native_alive.value:
         actions.push(LIFECYCLE_ACTION_STOP_DESCENDANTS_V1)
     actions.push(LIFECYCLE_ACTION_REVOKE_HANDLES_V1)
     actions.push(LIFECYCLE_ACTION_DETACH_VIEW_V1)
@@ -221,7 +225,8 @@ pub fn lifecycle_recovery_actions_v1(journal: ContainerLifecycleJournalV1,
     actions.push(LIFECYCLE_ACTION_MARK_DESTROYED_V1)
     actions
 
-export ContainerLifecycleJournalV1
+export ContainerLifecycleJournalV1, ContainerJournalVersionV1
+export ContainerJournalGenerationV1, ContainerNativeAliveV1
 export container_lifecycle_journal_v1_empty
 export lifecycle_journal_v1_encode, lifecycle_journal_v1_decode
 export lifecycle_recovery_actions_v1
