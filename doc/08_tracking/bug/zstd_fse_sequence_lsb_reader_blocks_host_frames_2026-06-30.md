@@ -83,3 +83,14 @@ fixture re-derivation rather than bundled with the literals fix.
   asserts).
 - Fresh-table literal decode (1- and 4-stream, FSE or direct weights) is correct
   and over-read/trailing-bit safe (matches host rejection on malformed frames).
+
+## 2026-11-25 re-verification (release/1.0.0 @ f09280e5969, worktree D:\wt-p2w7-aa)
+
+Closure still holds at HEAD: `src/lib/common/compress/zstd_seq.spl:2` imports
+`ZstdMsbBackwardBits, zstd_msb_bits_init, zstd_msb_bits_read,
+zstd_msb_bits_remaining`; all sequence-decode helpers
+(`_zstd_read_sequence_bits:272`, `_zstd_read_sequence_state:285`,
+`_zstd_advance_sequence_state:316`, `_zstd_read_extra_bits:429`) are typed on
+the MSB reader, and `zstd_bits_init` (LSB reader) appears nowhere in the file.
+Spec re-execution remains blocked by the `@representation_boundary` seed
+inconsistency; source-level verification only. Closed status stands.

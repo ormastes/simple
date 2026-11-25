@@ -221,3 +221,25 @@ Until the encoders are implemented, `supported_encodings()` legitimately lists
 zstd and br — the dispatcher will simply never select them for a body they
 cannot shrink.
 
+
+## 2026-11-25 verification (release/1.0.0 @ f09280e5969, worktree D:\wt-p2w7-aa)
+
+Both fixes are present at HEAD:
+
+- zstd: `src/lib/common/compress/zstd.spl` `zstd_compress_frame` emits real
+  Compressed_Blocks (Huffman literals + `Number_of_Sequences = 0`) with raw/RLE
+  fallback, using `zstd_huf_encode_literals_msb` in `zstd_huf.spl`.
+- brotli: `src/lib/nogc_sync_mut/compression/brotli/lz77_encoder.spl` (297
+  lines) and `prefix_code.spl` (314 lines) exist; `encoder.spl:brotli_encode`
+  picks the smallest candidate (LZ77 compressed meta-block vs stored
+  fallback). Specs `brotli_lz77_general_round_trip_spec.spl` and
+  `brotli_lz77_general_large_text_spec.spl` exist with real size-bound and
+  round-trip assertions (e.g. `expect(encoded.len() < payload.len())`).
+- Not re-executed: the pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1) cannot
+  load any spec at release/1.0.0 HEAD — commit cfd89933699 added
+  `@representation_boundary` annotations the seed rejects
+  (`unknown decorator '@representation_boundary'`), and `run` hits the same
+  wall in the import closure. Verified by code inspection only.
+
+Status: RESOLVED stands (zstd 2026-08-17, brotli 2026-11-05 Phase 1); the
+residual items listed above remain follow-ups, not regressions.
