@@ -152,3 +152,33 @@ read of the interpret path plus an exhaustive call-site census of
 `test-slot.shs` slot (host under a live stage-3 bootstrap, 164 concurrent
 `simple` processes).
 
+
+## Verification 2026-11-25 (p2w3-ah lane, release/1.0.0) — STALE: fixed by the HIR-ownership preflight (the doc's own preferred design)
+
+The structural gap this doc describes — "the interpret pipeline goes HIR ->
+interpreter directly, never calls `lower_to_mir()` and never calls any
+borrow/ownership check" — is **closed on release/1.0.0**. Commit `50d6bedaf7d`
+("fix(ownership): preflight strict HIR before interpreter execution",
+2026-11-07) landed exactly the option this doc marked *preferred* ("re-express
+the check over HIR ... avoiding `lower_to_mir()` entirely"):
+
+- New HIR-level ownership checker: `src/compiler/55.borrow/borrow_check/
+  hir_ownership.spl` (+ `_cfg`/`_expr`/`_facts` siblings).
+- `CompilerDriver.interpret_pipeline()` (`src/compiler/80.driver/driver.spl:100`)
+  now builds an ownership provider index over **all** retained HIR modules and
+  runs `check_hir_ownership_with_live_providers_v1` on each **before** any
+  module executes, returning `CompileResult.BorrowError` on findings — no MIR
+  lowering added to the interpret path, so the perf/blast-radius objections in
+  the "Why that's not a safe drive-by change" section do not apply.
+- Spec coverage landed with the same commit:
+  `test/01_unit/compiler/borrow/hir_ownership_preflight_spec.spl`.
+
+Verified by code inspection on release/1.0.0 HEAD (both the driver wiring and
+the checker modules confirmed present). **Limit:** the spec was not executed —
+`bin/simple test` is repo-wide blocked at this HEAD (the pinned Rust seed
+rejects the `@representation_boundary` decorator added by cfd89933699), and
+this lane may not rebuild the seed. Coverage caveat for a future lane: the HIR
+preflight is an ownership check, not the full MIR NLL pass; whether it flags
+every iso-transfer shape `check_mir_module` would is not re-verified here. The
+"unreachable from interpret" claim itself — the subject of this bug — no
+longer holds.
