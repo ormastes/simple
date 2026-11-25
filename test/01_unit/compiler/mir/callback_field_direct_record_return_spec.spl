@@ -1,0 +1,107 @@
+"""Regression spec for WA-2 retirement of runner_callback_field_owner_2026_10_11.
+
+Verifies that direct callback-field calls `(port.fn_field)(...)` and indirect
+function-parameter calls returning nominal Record structs preserve field access
+without identity owner-wrapper shims (`host_authorization_context_owner_v1`,
+`rt_hal_arena_join_owner`), and pins that caller `@workaround` tags and wrapper
+shims stay retired across the 7 affected modules.
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+struct DirectCallbackOutcome:
+    completed: bool
+    outcome_word: i64
+    trace_word: i64
+    error_word: i64
+    label: text
+
+struct DirectCallbackPort:
+    execute_fn: fn(i64) -> DirectCallbackOutcome
+    join_fn: fn(i64, i64) -> DirectCallbackOutcome
+
+fn _make_outcome(seed: i64) -> DirectCallbackOutcome:
+    DirectCallbackOutcome(
+        completed: true,
+        outcome_word: seed * 2,
+        trace_word: seed + 11,
+        error_word: 0,
+        label: "direct-{seed}"
+    )
+
+fn _join_outcome(handle: i64, timeout_ticks: i64) -> DirectCallbackOutcome:
+    DirectCallbackOutcome(
+        completed: timeout_ticks > 0,
+        outcome_word: handle + timeout_ticks,
+        trace_word: handle * 3,
+        error_word: if timeout_ticks > 0: 0 else: 42,
+        label: "join-{handle}"
+    )
+
+fn _invoke_refresh(refresh: fn() -> DirectCallbackOutcome) -> DirectCallbackOutcome:
+    val fresh = refresh()
+    DirectCallbackOutcome(
+        completed: fresh.completed,
+        outcome_word: fresh.outcome_word + 1,
+        trace_word: fresh.trace_word,
+        error_word: fresh.error_word,
+        label: fresh.label
+    )
+
+describe "direct callback field dispatch returning a Record without wrapper shims":
+    it "reads record fields directly from explicit callback-field calls":
+        val port = DirectCallbackPort(execute_fn: _make_outcome, join_fn: _join_outcome)
+        val observed = (port.execute_fn)(21)
+        expect(observed.completed).to_equal(true)
+        expect(observed.outcome_word).to_equal(42)
+        expect(observed.trace_word).to_equal(32)
+        expect(observed.error_word).to_equal(0)
+        expect(observed.label).to_equal("direct-21")
+
+        val joined = (port.join_fn)(7, 100)
+        expect(joined.completed).to_equal(true)
+        expect(joined.outcome_word).to_equal(107)
+        expect(joined.trace_word).to_equal(21)
+        expect(joined.error_word).to_equal(0)
+        expect(joined.label).to_equal("join-7")
+
+    it "reads record fields directly across loop-bound callback ports":
+        val ports = [
+            DirectCallbackPort(execute_fn: _make_outcome, join_fn: _join_outcome),
+            DirectCallbackPort(execute_fn: _make_outcome, join_fn: _join_outcome)
+        ]
+        var idx = 0
+        var total_words = 0
+        for port in ports:
+            val rec = (port.join_fn)(idx + 1, 10)
+            expect(rec.completed).to_equal(true)
+            expect(rec.error_word).to_equal(0)
+            total_words = total_words + rec.outcome_word
+            idx = idx + 1
+        expect(total_words).to_equal(23)
+
+    it "reads record fields directly from a fn-typed parameter return":
+        val refreshed = _invoke_refresh(\: _make_outcome(5))
+        expect(refreshed.completed).to_equal(true)
+        expect(refreshed.outcome_word).to_equal(11)
+        expect(refreshed.trace_word).to_equal(16)
+        expect(refreshed.label).to_equal("direct-5")
+
+    it "keeps retired wrapper shims and caller @workaround tags absent from caller modules":
+        val caller_files = [
+            "src/app/devhub/messenger/adapter/db_common.spl",
+            "src/lib/nogc_sync_mut/database/codec/codec_registry.spl",
+            "src/lib/nogc_sync_mut/database/server/storage_port.spl",
+            "src/lib/nogc_sync_mut/orchestration/host_authorized_reservation_v1.spl",
+            "src/lib/nogc_sync_mut/rt_hal/exact_boundary.spl",
+            "src/lib/nogc_sync_mut/rt_hal/parallel_executor.spl",
+            "src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl"
+        ]
+        for path in caller_files:
+            val body = rt_file_read_text(path) ?? ""
+            expect(body.len()).to_be_greater_than(0)
+            expect(body.contains("@workaround bug=runner_callback_field_owner_2026_10_11")).to_equal(false)
+            expect(body.contains("host_authorization_context_owner_v1")).to_equal(false)
+            expect(body.contains("rt_hal_arena_join_owner")).to_equal(false)
