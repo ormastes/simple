@@ -44,7 +44,7 @@ use compiler.backend.linker.crt_discovery.*
 
 # Import helpers (SMF linking, self-contained, binary utils)
 use compiler.backend.linker.linker_wrapper_helpers.{SelfContainedConfig}
-use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths, msvc_strip_unix_rpath_args}
+use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths, msvc_strip_unix_rpath_args, msvc_opt_noref_flags}
 use compiler.backend.linker.linker_wrapper_helpers.{SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION}
 use compiler.backend.linker.linker_wrapper_helpers.{link_to_smf, link_to_self_contained}
 use compiler.backend.linker.linker_wrapper_helpers.{detect_self_contained, find_runtime_binary, find_runtime_lib_dir}
@@ -273,33 +273,33 @@ pub fn link_to_shared(object_files: [text], output: text, config: NativeLinkConf
     # Unix-like: Linux, macOS, FreeBSD
     _link_shared_unix(object_files, output, config)
 
-fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
-    """Link a shared library on Unix-like systems using cc."""
-    val os = host_os()
-    val sb = StringBuilder(parts: [])
-    sb.push("cc")
+pub fn shared_unix_link_args(object_files: [text], output: text, config: NativeLinkConfig, os: text, brew_prefix: text) -> [text]:
+    """Assemble compiler-driver arguments for a Unix-like shared library."""
+    var args: [text] = []
 
     # Position-independent code (required for shared libs)
-    sb.push(" -fPIC")
+    args = args.push("-fPIC")
 
     # Shared library flag
     if os == "macos" or os == "darwin":
-        sb.push(" -dynamiclib")
+        args = args.push("-dynamiclib")
     else:
-        sb.push(" -shared")
+        args = args.push("-shared")
 
     # Define SPL_SHARED_LIBRARY macro
-    sb.push(" -DSPL_SHARED_LIBRARY")
+    args = args.push("-DSPL_SHARED_LIBRARY")
+
+    # Retained/exported roots from static archives or dynamic symbol table
+    for flag in native_retained_symbol_cc_args(config.retained_symbols, os):
+        args = args.push(flag)
 
     # Object files
     for obj in object_files:
-        sb.push(" ")
-        sb.push(obj)
+        args = args.push(obj)
 
     # Library paths from config
     for lp in config.library_paths:
-        sb.push(" -L")
-        sb.push(lp)
+        args = args.push("-L" + lp)
 
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
@@ -311,8 +311,7 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
             runtime_dir, config.runtime_bundle)
         for arg in native_runtime_archive_link_args(
                 runtime_dir, config.runtime_bundle, runtime_archives, true, true, true):
-            sb.push(" ")
-            sb.push(arg)
+            args = args.push(arg)
             support_inputs.push(arg)
 
     # Standard libraries
@@ -320,29 +319,40 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
     # is all three. See native_all_support.spl and
     # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md.
     for lib in native_link_shared_std_libs(os):
-        sb.push(" ")
-        sb.push(lib)
-    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+        args = args.push(lib)
     for flag in native_all_gnu_support_args(support_inputs, os, brew_prefix):
-        sb.push(" ")
-        sb.push(flag)
+        args = args.push(flag)
 
     # Libraries from config
     for lib in config.libraries:
-        sb.push(" -l")
-        sb.push(lib)
+        args = args.push("-l" + lib)
 
     # NOTE: No -dead_strip / --gc-sections for shared libraries.
     # Exported ABI symbols may not be referenced internally but must survive
     # for consumers. Dead-stripping would remove them.
+    if config.strip_output:
+        if os == "macos" or os == "darwin":
+            args = args.push("-Wl,-S,-x")
+        else:
+            args = args.push("-Wl,-s")
 
     # Extra flags
     for flag in config.extra_flags:
-        sb.push(" ")
-        sb.push(flag)
+        args = args.push(flag)
 
-    sb.push(" -o ")
-    sb.push(output)
+    args = args.push("-o")
+    args = args.push(output)
+    args
+
+fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
+    """Link a shared library on Unix-like systems using cc."""
+    val os = host_os()
+    val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    val args = shared_unix_link_args(object_files, output, config, os, brew_prefix)
+    val sb = StringBuilder(parts: ["cc"])
+    for arg in args:
+        sb.push(" ")
+        sb.push(arg)
     val cmd = sb.to_text()
 
     if config.verbose:
@@ -365,18 +375,29 @@ fn _link_shared_windows(object_files: [text], output: text, config: NativeLinkCo
         return _link_shared_mingw(object_files, output, config)
     _link_shared_msvc(object_files, output, config)
 
-fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
-    """Link a DLL using MSVC toolchain."""
+pub fn shared_msvc_link_config(object_files: [text], config: NativeLinkConfig) -> MsvcConfig:
+    """Build the MSVC/lld-link configuration for a Windows DLL."""
     var msvc_config: MsvcConfig = MsvcConfig.default()
     msvc_config.debug = config.debug
+    # DLLs do not use the EXE mainCRTStartup entry point.
+    msvc_config.entry_point = ""
 
-    # Add /DLL flag
+    val link_arch = _windows_link_arch(config)
+    if link_arch == "aarch64":
+        msvc_config.machine = "ARM64"
+        # MsvcConfig.default() pre-populates the x64 CRT/SDK directories.
+        msvc_config.lib_paths = []
+
+    # Add /DLL flag and retained/exported symbols
     msvc_config.extra_args.push("/DLL")
+    for flag in native_retained_symbol_msvc_args(config.retained_symbols):
+        msvc_config.extra_args.push(flag)
 
     # CRT library paths
-    val crt_paths = _find_msvc_lib_paths()
+    val crt_paths = _find_msvc_lib_paths_for_arch(link_arch)
     for p in crt_paths:
-        msvc_config.lib_paths.push(p)
+        if not msvc_config.lib_paths.contains(p):
+            msvc_config.lib_paths.push(p)
 
     # User library paths
     for lp in config.library_paths:
@@ -386,8 +407,13 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
     msvc_config.libs = native_msvc_configured_libraries(
         msvc_config.libs, config.libraries)
 
-    # Windows system libraries
-    val win_libs: [text] = ["kernel32.lib", "ws2_32.lib", "winhttp.lib", "mswsock.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib"]
+    # Windows system libraries (aligned with mingw_default_windows_libs_v1)
+    val win_libs: [text] = [
+        "kernel32.lib", "user32.lib", "ws2_32.lib", "winhttp.lib",
+        "mswsock.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib",
+        "ntdll.lib", "shell32.lib", "psapi.lib", "ole32.lib",
+        "synchronization.lib", "d3d11.lib", "dxgi.lib"
+    ]
     for wlib in win_libs:
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)
@@ -413,12 +439,24 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
 
     # Extra flags. Filtered at the source too, not only in build_args()
     # below -- see msvc_strip_unix_rpath_args's docstring (msvc.spl).
-    for flag in msvc_strip_unix_rpath_args(config.extra_flags):
+    val filtered_extra = msvc_strip_unix_rpath_args(config.extra_flags)
+    for flag in filtered_extra:
         msvc_config.extra_args.push(flag)
 
     # Size optimization: remove unreferenced data + fold identical COMDATs
-    if not config.debug:
+    if not config.debug and msvc_opt_noref_flags(filtered_extra).len() == 0:
         msvc_config.extra_args.push("/OPT:REF,ICF")
+    if config.strip_output:
+        msvc_config.extra_args.push("/DEBUG:NONE")
+    msvc_config
+
+fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
+    """Link a DLL using MSVC toolchain."""
+    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    if argument_error != "": return Err(argument_error)
+    var msvc_config: MsvcConfig = shared_msvc_link_config(object_files, config)
+    if native_tool_strict_requested_v1():
+        msvc_config.link_exe = native_tool_strict_resolve_v1("linker")?
 
     if config.verbose:
         print "[linker-wrapper] MSVC DLL linking: {object_files.len()} objects -> {output}"
@@ -431,21 +469,16 @@ fn _link_shared_msvc(object_files: [text], output: text, config: NativeLinkConfi
         case Err(e):
             Err("Windows MSVC DLL linking failed: {e.message}")
 
-fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
-    """Link a DLL using the bootstrap-owned Windows GNU Clang C driver."""
-    val cc = env_get("CC")
-    if cc == "" or (not cc.ends_with("/clang") and not cc.ends_with("/clang.exe") and not cc.ends_with("\\clang") and not cc.ends_with("\\clang.exe")):
-        return Err("Windows GNU shared linking requires bootstrap-owned clang through CC")
+fn _build_shared_mingw_args(object_files: [text], output: text, config: NativeLinkConfig, strict_linker: text) -> [text]:
     var args: [text] = []
-    val target_lower = config.target_triple.lower()
-    var mingw_arch = "x86_64"
-    if target_lower.starts_with("aarch64") or target_lower.starts_with("arm64"):
-        mingw_arch = "aarch64"
-    elif target_lower.starts_with("i686"):
-        mingw_arch = "i686"
-    args = args.push("--target={mingw_arch}-w64-windows-gnu")
-    args = args.push("-fuse-ld=lld")
+    args = args.push("--target=" + hosted_mingw_clang_target(config.target_triple))
+    if strict_linker != "":
+        args = args.push("-fuse-ld=" + strict_linker)
+    else:
+        args = args.push("-fuse-ld=lld")
     args = args.push("-shared")
+    for flag in native_retained_symbol_cc_args(config.retained_symbols, "windows-mingw"):
+        args = args.push(flag)
 
     for obj in object_files:
         args = args.push(mingw_driver_path(obj))
@@ -480,9 +513,13 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
         else:
             args = args.push("-l{lib}")
 
-    # Dead code elimination and strip (size reduction)
-    args = args.push("-Wl,--gc-sections")
-    args = args.push("-Wl,-s")
+    # NOTE: No --gc-sections for shared libraries (matches _link_shared_unix).
+    # Exported ABI symbols may not be referenced internally and must survive for
+    # consumers. Preserve COFF .symtab unless config.strip_output is requested.
+    if not _has_mingw_explicit_export_policy(config.extra_flags):
+        args = args.push("-Wl,--export-all-symbols")
+    if config.strip_output:
+        args = args.push("-Wl,-s")
 
     # Extra flags (drop ELF/Mach-O -rpath options before MinGW/COFF lld)
     for flag in mingw_strip_unix_rpath_args(config.extra_flags):
@@ -490,9 +527,49 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     args = args.push("-o")
     args = args.push(mingw_driver_path(output))
-    val cmd_text = record_link_command(output, cc, args, config.verbose)
+    args
 
-    val (link_out, link_err, link_code) = _mingw_run_response_v1(cc, args, output)
+fn _has_mingw_explicit_export_policy(flags: [text]) -> bool:
+    for flag in flags:
+        val lower = flag.lower()
+        if lower == "--exclude-all-symbols" or lower.ends_with(".def"):
+            return true
+        if lower.starts_with("-wl,"):
+            for part in lower.substring(4).split(","):
+                if part == "--exclude-all-symbols" or part.ends_with(".def"):
+                    return true
+    false
+
+pub fn shared_mingw_link_args(object_files: [text], output: text, config: NativeLinkConfig) -> [text]:
+    """Assemble clang/lld driver arguments for a Windows GNU (MinGW) DLL."""
+    _build_shared_mingw_args(object_files, output, config, strict_linker: "")
+
+fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
+    """Link a DLL using the bootstrap-owned Windows GNU Clang C driver."""
+    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    if argument_error != "": return Err(argument_error)
+    var link_cc: text = ""
+    if native_tool_strict_requested_v1():
+        link_cc = native_tool_strict_resolve_v1("cc")?
+        if not _mingw_driver_is_clang(link_cc):
+            return Err("Windows GNU shared linking requires bootstrap-owned clang through CC")
+    else:
+        val cc = env_get("CC")
+        val discovered_cc = if cc == "": find_c_compiler() else: ""
+        link_cc = mingw_link_driver_select(cc, discovered_cc)
+        if link_cc == "":
+            return Err(mingw_link_driver_error(cc, discovered_cc))
+    var strict_linker = ""
+    if native_tool_strict_requested_v1():
+        strict_linker = native_tool_strict_resolve_v1("linker")?
+        val strict_extra_err = managed_native_extra_args_error_v1(config.extra_flags)
+        if strict_extra_err != "": return Err(strict_extra_err)
+        val strict_path_err = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
+        if strict_path_err != "": return Err(strict_path_err)
+    val args = _build_shared_mingw_args(object_files, output, config, strict_linker)
+    val cmd_text = record_link_command(output, link_cc, args, config.verbose)
+
+    val (link_out, link_err, link_code) = _mingw_run_response_v1(link_cc, args, output)
     if link_code == 0:
         Ok(output)
     else:

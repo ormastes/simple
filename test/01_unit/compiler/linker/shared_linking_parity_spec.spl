@@ -1,0 +1,218 @@
+"""Shared-library linking parity and COFF x64 symbol preservation specs."""
+
+use std.spec.{describe, it, expect, assert_true, expect_not}
+use std.io_runtime.{file_read}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.msvc.{MsvcConfig}
+use compiler.backend.linker._LinkerWrapper.shared_linking.{
+    shared_unix_link_args,
+    shared_msvc_link_config,
+    shared_mingw_link_args
+}
+use compiler.backend.stage4_symbol_closure.{stage4_provider_symbol}
+
+fn _count_arg(args: [text], needle: text) -> i64:
+    var count: i64 = 0
+    for arg in args:
+        if arg == needle:
+            count = count + 1
+    count
+
+describe "Shared-library linker parity across ELF, Darwin, MSVC, and MinGW":
+    """Verifies /EXPORT+/INCLUDE wiring, strip_output gating, and no --gc-sections on DLL/shared links."""
+    it "wires retained_symbols to /INCLUDE and /EXPORT on MSVC /DLL and omits mainCRTStartup":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.retained_symbols = ["term_init", "term_poll", "__simple_runtime_init"]
+        cfg.extra_flags = ["-rpath", "$ORIGIN", "-Wl,-rpath,C:/provider", "/SUBSYSTEM:WINDOWS"]
+
+        val msvc_cfg: MsvcConfig = shared_msvc_link_config(["term_native.obj"], cfg)
+        expect(msvc_cfg.entry_point).to_equal("")
+        assert_true(msvc_cfg.extra_args.contains("/DLL"))
+        assert_true(msvc_cfg.extra_args.contains("/INCLUDE:term_init"))
+        assert_true(msvc_cfg.extra_args.contains("/EXPORT:term_init"))
+        assert_true(msvc_cfg.extra_args.contains("/INCLUDE:term_poll"))
+        assert_true(msvc_cfg.extra_args.contains("/EXPORT:term_poll"))
+        assert_true(msvc_cfg.extra_args.contains("/INCLUDE:__simple_runtime_init"))
+        assert_true(msvc_cfg.extra_args.contains("/EXPORT:__simple_runtime_init"))
+        expect_not(msvc_cfg.extra_args.contains("-rpath"))
+        expect_not(msvc_cfg.extra_args.contains("$ORIGIN"))
+        expect_not(msvc_cfg.extra_args.contains("-Wl,-rpath,C:/provider"))
+        assert_true(msvc_cfg.extra_args.contains("/OPT:REF,ICF"))
+
+        val args = msvc_cfg.build_args("term_native.dll", ["term_native.obj"])
+        assert_true(args.contains("/DLL"))
+        expect_not(args.contains("/ENTRY:mainCRTStartup"))
+        assert_true(args.contains("/INCLUDE:term_init"))
+        assert_true(args.contains("/EXPORT:term_init"))
+        assert_true(args.contains("/INCLUDE:__simple_runtime_init"))
+        assert_true(args.contains("/EXPORT:__simple_runtime_init"))
+        expect_not(args.contains("-rpath"))
+        expect_not(args.contains("$ORIGIN"))
+        assert_true(args.contains("/SUBSYSTEM:WINDOWS"))
+
+    it "protects retained_symbols even when extra_flags ends with a dangling -rpath":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.retained_symbols = ["exported_api"]
+        cfg.extra_flags = ["/OPT:NOREF", "-rpath"]
+
+        val msvc_cfg = shared_msvc_link_config(["mod.obj"], cfg)
+        assert_true(msvc_cfg.extra_args.contains("/INCLUDE:exported_api"))
+        assert_true(msvc_cfg.extra_args.contains("/EXPORT:exported_api"))
+        assert_true(msvc_cfg.extra_args.contains("/OPT:NOREF"))
+        expect_not(msvc_cfg.extra_args.contains("/OPT:REF,ICF"))
+        expect_not(msvc_cfg.extra_args.contains("-rpath"))
+
+        val args = msvc_cfg.build_args("mod.dll", ["mod.obj"])
+        assert_true(args.contains("/INCLUDE:exported_api"))
+        assert_true(args.contains("/EXPORT:exported_api"))
+        assert_true(args.contains("/OPT:NOREF"))
+        expect_not(args.contains("/OPT:REF,ICF"))
+        expect_not(args.contains("-rpath"))
+
+        var dash_cfg = cfg
+        dash_cfg.extra_flags = ["-opt:noref,noicf"]
+        val dash_msvc_cfg = shared_msvc_link_config(["mod.obj"], dash_cfg)
+        expect_not(dash_msvc_cfg.extra_args.contains("/OPT:REF,ICF"))
+        val dash_args = dash_msvc_cfg.build_args("mod.dll", ["mod.obj"])
+        assert_true(dash_args.contains("-opt:noref,noicf"))
+        expect_not(dash_args.contains("/OPT:REF,ICF"))
+
+    it "aligns MSVC DLL default Windows SDK libs and ARM64 machine selection with MinGW":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.target_triple = "aarch64-pc-windows-msvc"
+        cfg.strip_output = true
+        cfg.debug = true
+
+        val msvc_cfg = shared_msvc_link_config(["arm_mod.obj"], cfg)
+        expect(msvc_cfg.machine).to_equal("ARM64")
+        for lib_path in msvc_cfg.lib_paths:
+            val lower_path = lib_path.lower()
+            expect_not(lower_path.ends_with("/x64") or lower_path.ends_with("\\x64"))
+        assert_true(msvc_cfg.extra_args.contains("/DEBUG:NONE"))
+        for lib in [
+            "kernel32.lib", "user32.lib", "ws2_32.lib", "winhttp.lib",
+            "mswsock.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib",
+            "ntdll.lib", "shell32.lib", "psapi.lib", "ole32.lib",
+            "synchronization.lib", "d3d11.lib", "dxgi.lib"
+        ]:
+            expect(_count_arg(msvc_cfg.libs, lib)).to_equal(1)
+
+        val args = msvc_cfg.build_args("arm_mod.dll", ["arm_mod.obj"])
+        assert_true(args.contains("/MACHINE:ARM64"))
+        assert_true(args.contains("/DEBUG:NONE"))
+        expect_not(args.contains("/DEBUG"))
+        expect(_count_arg(args, "/DEBUG:NONE")).to_equal(1)
+
+    it "gates MinGW -Wl,-s on strip_output and avoids --gc-sections on shared DLLs":
+        var unstripped = NativeLinkConfig.default()
+        unstripped.runtime_path = "none"
+        unstripped.target_triple = "x86_64-pc-windows-gnu"
+        unstripped.strip_output = false
+        unstripped.retained_symbols = ["__simple_runtime_init", "luaopen_demo"]
+        unstripped.extra_flags = ["-rpath", "$ORIGIN", "-Wl,-rpath,/bad"]
+
+        val unstripped_args = shared_mingw_link_args(["\\\\?\\C:\\tmp\\mod.o"], "\\\\?\\C:\\tmp\\out.dll", unstripped)
+        assert_true(unstripped_args.contains("--target=x86_64-w64-windows-gnu"))
+        assert_true(unstripped_args.contains("-fuse-ld=lld"))
+        assert_true(unstripped_args.contains("-shared"))
+        expect_not(unstripped_args.contains("-Wl,-s"))
+        expect_not(unstripped_args.contains("-Wl,--gc-sections"))
+        assert_true(unstripped_args.contains("-Wl,--export-all-symbols"))
+        assert_true(unstripped_args.contains("-Wl,-u,__simple_runtime_init"))
+        assert_true(unstripped_args.contains("-Wl,-u,luaopen_demo"))
+        expect_not(unstripped_args.contains("-rpath"))
+        expect_not(unstripped_args.contains("$ORIGIN"))
+        expect_not(unstripped_args.contains("-Wl,-rpath,/bad"))
+        assert_true(unstripped_args.contains("C:/tmp/mod.o"))
+        assert_true(unstripped_args.contains("C:/tmp/out.dll"))
+
+        var stripped = unstripped
+        stripped.strip_output = true
+        val stripped_args = shared_mingw_link_args(["mod.o"], "out.dll", stripped)
+        assert_true(stripped_args.contains("-Wl,-s"))
+        expect_not(stripped_args.contains("-Wl,--gc-sections"))
+
+        var explicit_def = unstripped
+        explicit_def.extra_flags = ["exports.def"]
+        val def_args = shared_mingw_link_args(["mod.o"], "out.dll", explicit_def)
+        expect_not(def_args.contains("-Wl,--export-all-symbols"))
+        assert_true(def_args.contains("exports.def"))
+
+        var wl_exclude = unstripped
+        wl_exclude.extra_flags = ["-Wl,-O1,--exclude-all-symbols"]
+        val wl_exclude_args = shared_mingw_link_args(["mod.o"], "out.dll", wl_exclude)
+        expect_not(wl_exclude_args.contains("-Wl,--export-all-symbols"))
+
+    it "selects MinGW shared link driver via mingw_link_driver_select":
+        val src = file_read("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl")
+        val idx = src.index_of("fn _link_shared_mingw(") ?? -1
+        expect(idx).to_be_greater_than(-1)
+        val body = src.substring(idx)
+        expect(body).to_contain("val cc = env_get(\"CC\")")
+        expect(body).to_contain("mingw_link_driver_select(cc, discovered_cc)")
+
+    it "emits consistent ELF and Darwin shared-library flags without --gc-sections or -dead_strip":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.retained_symbols = ["luaopen_demo", "__simple_runtime_init"]
+
+        val linux_args = shared_unix_link_args(["mod.o"], "libdemo.so", cfg, "linux", "")
+        assert_true(linux_args.contains("-fPIC"))
+        assert_true(linux_args.contains("-shared"))
+        assert_true(linux_args.contains("-DSPL_SHARED_LIBRARY"))
+        assert_true(linux_args.contains("-Wl,--undefined=luaopen_demo"))
+        assert_true(linux_args.contains("-Wl,--export-dynamic-symbol=luaopen_demo"))
+        assert_true(linux_args.contains("-Wl,--undefined=__simple_runtime_init"))
+        assert_true(linux_args.contains("-Wl,--export-dynamic-symbol=__simple_runtime_init"))
+        expect_not(linux_args.contains("--gc-sections"))
+        expect_not(linux_args.contains("-Wl,--gc-sections"))
+        expect_not(linux_args.contains("-Wl,-s"))
+
+        var linux_stripped = cfg
+        linux_stripped.strip_output = true
+        assert_true(shared_unix_link_args(["mod.o"], "libdemo.so", linux_stripped, "linux", "").contains("-Wl,-s"))
+
+        val darwin_args = shared_unix_link_args(["mod.o"], "libdemo.dylib", cfg, "darwin", "/opt/homebrew")
+        assert_true(darwin_args.contains("-fPIC"))
+        assert_true(darwin_args.contains("-dynamiclib"))
+        assert_true(darwin_args.contains("-DSPL_SHARED_LIBRARY"))
+        assert_true(darwin_args.contains("-lSystem"))
+        expect_not(darwin_args.contains("-lc"))
+        expect_not(darwin_args.contains("-dead_strip"))
+        expect_not(darwin_args.contains("-Wl,-dead_strip"))
+        assert_true(darwin_args.contains("-Wl,-u,_luaopen_demo"))
+        assert_true(darwin_args.contains("-Wl,-export_dynamic"))
+
+        var darwin_stripped = cfg
+        darwin_stripped.strip_output = true
+        assert_true(shared_unix_link_args(["mod.o"], "libdemo.dylib", darwin_stripped, "darwin", "/opt/homebrew").contains("-Wl,-S,-x"))
+
+describe "Stage4 COFF provider symbol normalization":
+    """Verifies x64 COFF __simple_* preservation alongside 32-bit and __imp_ normalization."""
+    it "preserves x64 double-underscore __simple_* symbols on coff-msvc and coff-mingw":
+        for fmt in ["coff-msvc", "coff-mingw"]:
+            expect(stage4_provider_symbol("__simple_runtime_init", fmt)).to_equal("__simple_runtime_init")
+            expect(stage4_provider_symbol("__simple_runtime_shutdown", fmt)).to_equal("__simple_runtime_shutdown")
+            expect(stage4_provider_symbol("__simple_pow", fmt)).to_equal("__simple_pow")
+            expect(stage4_provider_symbol("__simple_main", fmt)).to_equal("__simple_main")
+            expect(stage4_provider_symbol("__chkstk", fmt)).to_equal("__chkstk")
+            expect(stage4_provider_symbol("__imp___simple_runtime_init", fmt)).to_equal("__simple_runtime_init")
+
+    it "keeps 32-bit cdecl, stdcall, triple-underscore, and __imp_ normalization working":
+        for fmt in ["coff-msvc", "coff-mingw"]:
+            expect(stage4_provider_symbol("___simple_runtime_init", fmt)).to_equal("__simple_runtime_init")
+            expect(stage4_provider_symbol("_rt_font_load", fmt)).to_equal("rt_font_load")
+            expect(stage4_provider_symbol("_spl_dlopen", fmt)).to_equal("spl_dlopen")
+            expect(stage4_provider_symbol("_g_memtrack_enabled", fmt)).to_equal("g_memtrack_enabled")
+            expect(stage4_provider_symbol("__imp__LoadLibraryA@4", fmt)).to_equal("LoadLibraryA")
+            expect(stage4_provider_symbol("__imp__GetProcAddress@8", fmt)).to_equal("GetProcAddress")
+            expect(stage4_provider_symbol("__imp__FreeLibrary@4", fmt)).to_equal("FreeLibrary")
+            expect(stage4_provider_symbol("__imp_LoadLibraryA", fmt)).to_equal("LoadLibraryA")
+            expect(stage4_provider_symbol("__imp_LoadLibraryA@8", fmt)).to_equal("LoadLibraryA@8")
+
+        expect(stage4_provider_symbol("___simple_runtime_init", "macho")).to_equal("__simple_runtime_init")
+        expect(stage4_provider_symbol("_rt_font_load", "macho")).to_equal("rt_font_load")
+        expect(stage4_provider_symbol("__simple_runtime_init", "elf")).to_equal("__simple_runtime_init")

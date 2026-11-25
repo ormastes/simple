@@ -102,6 +102,18 @@ pub fn msvc_strip_unix_rpath_args(extra_args: [text]) -> [text]:
             index = index + 1
     result
 
+pub fn msvc_opt_noref_flags(extra_args: [text]) -> [text]:
+    """Return any extra_args flags that explicitly disable /OPT:REF dead-stripping."""
+    var matched: [text] = []
+    for arg in extra_args:
+        val upper = arg.replace("\"", "").trim().to_upper()
+        if upper.starts_with("/OPT:") or upper.starts_with("-OPT:"):
+            for opt_part in upper.substring(5).split(","):
+                if opt_part == "NOREF":
+                    matched.push(arg)
+                    break
+    matched
+
 # ===========================================================================
 # MSVC Linker Configuration
 # ===========================================================================
@@ -160,11 +172,19 @@ impl MsvcConfig:
         # lib/common/process/observation_v4.spl). 64 MiB matches the internal
         # COFF linker's PeImagePolicy default; an explicit /STACK or -STACK
         # in extra_args wins (case-insensitive).
+        val filtered_extra = msvc_strip_unix_rpath_args(self.extra_args)
+        val has_opt_noref = msvc_opt_noref_flags(filtered_extra).len() > 0
         var has_stack = false
-        for arg in self.extra_args:
-            val upper = arg.to_upper()
+        var has_debug_flag = false
+        var has_opt_ref_icf = false
+        for arg in filtered_extra:
+            val upper = arg.replace("\"", "").trim().to_upper()
             if upper.starts_with("/STACK:") or upper.starts_with("-STACK:"):
                 has_stack = true
+            elif upper == "/DEBUG" or upper == "-DEBUG" or upper.starts_with("/DEBUG:") or upper.starts_with("-DEBUG:"):
+                has_debug_flag = true
+            elif upper == "/OPT:REF,ICF" or upper == "-OPT:REF,ICF":
+                has_opt_ref_icf = true
         if not has_stack:
             args.push("/STACK:{MSVC_DEFAULT_STACK_RESERVE}")
 
@@ -173,11 +193,14 @@ impl MsvcConfig:
 
         # Debug info
         if self.debug:
-            args.push("/DEBUG")
+            if not has_debug_flag:
+                args.push("/DEBUG")
         else:
-            args.push("/DEBUG:NONE")
+            if not has_debug_flag:
+                args.push("/DEBUG:NONE")
             # Remove unreferenced functions/data and fold identical COMDATs
-            args.push("/OPT:REF,ICF")
+            if not has_opt_noref and not has_opt_ref_icf:
+                args.push("/OPT:REF,ICF")
 
         # No logo
         args.push("/NOLOGO")
@@ -195,7 +218,7 @@ impl MsvcConfig:
         # native_linking.spl's `native_msvc_extra_args`, kept local here
         # (import direction: native_linking.spl imports this module, not the
         # reverse) so this boundary cannot be bypassed by a future caller.
-        for arg in msvc_strip_unix_rpath_args(self.extra_args):
+        for arg in filtered_extra:
             args.push(arg)
 
         args
