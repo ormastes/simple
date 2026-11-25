@@ -1,7 +1,6 @@
 # `use lib.gc_async_mut.gpu.browser_engine...` import alias fails to resolve `_web_budget_clock` module var — `std.` alias works fine
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: CLOSED (2026-11-25) — not reproducible on the committed Windows seed; see the dated verification note at the bottom. (Was: OPEN (P2); a 2026-09-13 re-check had already closed it as not reproducible, and a same-day later triage that could not execute left it open — the 2026-11-25 run below is the deciding execution evidence.)
 
 **Filed:** 2026-08-08
 **Severity:** medium — blocks any spec/script that reaches
@@ -117,3 +116,30 @@ itself is unfixed) without needing execution, and that source state is
 unchanged at this sha. This is a compiler/interpreter module-resolver defect
 (`std.X` vs `lib.X` treated as distinct module instances), not something
 fixable from `src/lib/**`. No change made. Leaving OPEN.
+
+## Verification 2026-11-25 (p2w3-al lane, Windows) — CLOSED, not reproducible
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), `SIMPLE_LIB=src ... run`, Windows Git Bash, worktree at
+release/1.0.0 @ 1457ddaa176.
+
+Ran this doc's exact minimal repro as a standalone program (the
+`simple_web_flex_grow_weighted_spec.spl` indicator spec itself cannot run here:
+release/1.0.0 HEAD is source/binary inconsistent — the pinned seed rejects
+`@representation_boundary`, so `bin/simple.exe test` fails repo-wide):
+
+```
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
+
+fn main():
+    print("PROBE_BEGIN")
+    val r = simple_web_layout_debug_layout_by_id("<div></div>", 100, 100, "x", "y")
+    print("PROBE_RESULT_LEN=" + r.len().to_text())
+    print("PROBE_END")
+```
+
+Result: `PROBE_BEGIN` / `PROBE_RESULT_LEN=0` / `PROBE_END`, `exit=0`, and **no**
+`error: semantic: variable `_web_budget_clock` not found` anywhere in the log —
+the `lib.` alias resolves the module and its module-level `var` correctly. The
+failure mode this record describes (a hard semantic error at load) does not
+reproduce on this binary, matching the 2026-09-13 aarch64 re-check. Closing.

@@ -2,7 +2,7 @@
 # mem_infra parity specs: the "cranelift" arm never measured cranelift
 
 - **Filed:** 2026-08-09
-- Status: OPEN (P2)
+- Status: CLOSED (2026-11-05, mirp2-E3 closure at the bottom of this file: Defect A registration fixed and both parity specs green; the interpreter `_native` residual was a stale-binary artifact; natively-linked-backend coverage explicitly scoped out). Header corrected 2026-11-25 (p2w3-al lane) — it still read OPEN after the closure was appended.
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
   are GREEN for real reasons; the natively-linked-backend coverage gap is
   SCOPED OUT and recorded below. The interpreter-mode `_native` residual

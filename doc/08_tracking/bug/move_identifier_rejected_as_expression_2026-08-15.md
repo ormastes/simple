@@ -1,7 +1,7 @@
 # `move` identifier rejected in expression position ("expected expression, found Plus")
 
 - **Date:** 2026-08-15
-- **Status:** OPEN (workaround applied)
+- **Status:** Closed (2026-11-25) — not reproducible on the committed seed; `move` parses and evaluates correctly in expression position. See the dated verification note at the bottom. (Was: OPEN, workaround applied.)
 - **Component:** parser (Rust seed lexer/parser reserved-word handling)
 
 ## Symptom
@@ -37,3 +37,31 @@ Renamed the compaction cursor `move` -> `shift` in
 Either make `move` a plain identifier, or reject its declaration with a clear
 "reserved keyword" diagnostic instead of failing at the first later use, and add
 `move` to the documented reserved-keyword list in `.claude/rules/language.md`.
+
+## Verification 2026-11-25 (p2w3-al lane, Windows) — not reproducible, closing
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), `SIMPLE_LIB=src ... run`, Windows Git Bash, worktree at
+release/1.0.0 @ 1457ddaa176.
+
+Two standalone probes using `move` as a plain local in expression position —
+including the doc's failing shape, `move` as the left operand of `+` in a
+`while` condition — both parse and evaluate correctly:
+
+```
+var move = 1
+var x = move + 1        # prints x=2, exit 0   (was: expected expression, found Plus)
+
+var move = 1
+var total = 0
+while move + 1 < 5:     # prints total=6, exit 0
+    total = total + move
+    move = move + 1
+```
+
+The current deployed seed no longer treats `move` as reserved in expression
+position, so the defect does not reproduce. The `shift` rename in
+`draw_ir_packed_generation_store_v3.spl` stays (harmless). If a future seed
+regresses this, re-open with the probe above. The residual ask — a documented
+reserved-keyword list in `.claude/rules/language.md` — is documentation
+hygiene, not this bug.
