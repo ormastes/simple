@@ -166,3 +166,16 @@ dependencies (`os_parse_log_arg`, `os_log_arg_error`, `os_parse_scenario_arg`,
 `build_os`, `_export_os_log_mode_inline`, `_restore_os_log_mode_inline`) are
 themselves absent and touch the SimpleOS/QEMU build path.
 
+
+## Triage 2026-11-25 (p2w1-aa) — unchanged, still owner-decision
+
+Re-verified by source inspection on release/1.0.0 HEAD `38265c7f249`:
+`fn handle_os_build` now lives at `src/os/cli.spl:264` and its build path
+still does `val target = get_qemu_target(arch.unwrap())` at `:353` — the
+exact pattern `test/01_unit/app/cli/os_build_dispatch_spec.spl` forbids for
+the build path. The spec still asserts on the pre-split
+`src/app/cli/_CliMain/args_and_os_commands.spl` text. Nothing has landed
+since the 2026-09-13 triage; the row stays OPEN pending the owner decision
+(`get_target` vs `get_qemu_target` in `handle_os_build`), with the same
+caveat: retargeting the spec without that decision would ratify the
+guarded-against behavior.

@@ -1,11 +1,11 @@
 # `wm_content_frame_web_provenance_valid` is unreachable for `widget-panel`-wrapped WM content
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — fixes (a)+(b) landed; guard spec green
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-05
-- Status: OPEN (P2)
+- Status: RESOLVED (verified 2026-11-25, see bottom section)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 ## Status 2026-09-13 — Left Open
@@ -115,3 +115,31 @@ touches shared theme/renderer code used well beyond this showcase and needs
 its own verification pass; each interpreted HTML render in this environment
 costs 30-50 CPU-minutes, so iterating on it is expensive.
 
+
+## Verification 2026-11-25 — CLOSED (both suggested fixes landed)
+
+Both halves of the suggested fix are in the tree on release/1.0.0 HEAD
+`38265c7f249`:
+
+- **(a) `.widget-panel` now uses a literal two-compatible declaration:**
+  `src/lib/common/ui/glass_css_components.spl:26` declares
+  `backdrop-filter: blur(20px);` (literal px, not `var(--glass-blur-surface)`),
+  with an in-source comment citing this bug doc and the guard spec.
+- **(b) `simple_web_backdrop_admission` now accepts a blur-only declaration:**
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:129`
+  admits `blur(Npx)` with no `saturate(...)` term, defaulting
+  `realized_saturation_milli` to 1000 (100%) — exactly suggested fix (b).
+
+Guard spec executed in a pre-autofix scratch tree at `7c64fa458e4` (release
+HEAD itself is source/binary inconsistent: the pinned seed rejects the 940
+`@representation_boundary` annotations from `cfd89933699`; the module and spec
+are byte-identical between `7c64fa458e4` and HEAD):
+
+```
+SPEC FILE VERDICT: test/01_unit/lib/common/ui/glass_css_backdrop_admission_spec.spl
+outcome=OK declared>=5 executed=5 passed=5 failed=0
+```
+
+5/5 pass with the pinned tracked seed `bin/simple.exe` (38,403,072 bytes,
+v1.0.0-rc.1). The gate is reachable for wrapper-produced content; the
+showcase workaround noted above is no longer load-bearing for this defect.
