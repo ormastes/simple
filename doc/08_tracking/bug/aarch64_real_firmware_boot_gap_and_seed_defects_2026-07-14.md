@@ -1246,3 +1246,27 @@ Audited by the fix-pipeline classification review: **environment-blocked: hardwa
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Triage 2026-11-25 (fleet lane p2w1-ad) — SKIP, environment-blocked
+
+The "needs owner triage" header above is stale: this row has been triaged
+repeatedly (2026-08-06/07/08 implementation passes, 2026-08-17 content
+classification, 2026-09-18 env classifications). Current disposition,
+unchanged: **SKIP — environment-blocked: hardware/QEMU-aarch64.** Every
+remaining open item requires either a real aarch64 firmware boot (AAVMF/EDK2
+pflash or physical board) or the aarch64 native-build pipeline:
+
+- item 1 (real-firmware boot): Limine BOOTAA64.EFI vendored, real-firmware
+  boot to the milestone marker proven 2026-08-07; remaining work (Layer 1
+  memory subsystem past the `memory_init` stub, `_parse_hhdm`-family codegen
+  follow-ups) is aarch64-target work not executable on this Windows x86_64
+  host, and `bin/simple.exe test`/`native-build` verification is additionally
+  blocked repo-wide at this HEAD by the pinned seed's
+  `@representation_boundary` rejection.
+- item 2 (seed cranelift `_arm_fat32_find_sys_cluster` spc=8 miscompile):
+  seed codegen defect, workaround in-tree; seed fixes are out of fleet scope.
+- item 3 (arm64 virtio-blk single-sector ring): tracked with fresh evidence in
+  `arm64_simpleos_virtio_blk_durable_write_gap_2026-08-14.md`; needs an ARM64
+  QEMU writable-disk power-cut/reboot proof.
+
+No status change; no code change attempted from this lane.

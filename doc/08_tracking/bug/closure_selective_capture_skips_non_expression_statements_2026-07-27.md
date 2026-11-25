@@ -197,3 +197,22 @@ declare a fixture at describe level. Each is affected *only* if that fixture is 
 and only when no earlier plain-expression statement in the same `it` already referenced it.
 The failure is loud (`variable X not found`) inside sspec, so it surfaces as a red example
 rather than a false green — but the same defect in non-spec code is silent.
+
+## Verification 2026-11-25 (fleet lane p2w1-ad, Windows host)
+
+STALE-CLOSED confirmed against the DEPLOYED binary (bin/simple.exe, Rust seed
+v1.0.0-rc.1), not just the source tree. A probe replicating the k2_plain.spl
+truth table (outer `val fx = 10`, lambda passed as a `fn()` parameter, reads
+from direct/`val`/`val+1`/assignment/`for`/`if` statement forms) prints the
+fixed values under BOTH engines:
+
+```
+KA_DIRECT=10 KB_LET=10 KC_LETADD=11 KD_ASSIGN=10 KE_FOR=10 KF_IF=10
+```
+
+(default JIT and SIMPLE_EXECUTION_MODE=interpreter identical; pre-fix the JIT
+printed 0/0/1/0/0/0 and the interpreter errored). The silent-zero
+value-corruption mode is gone. `bin/simple.exe test` remains blocked repo-wide
+at this HEAD (seed rejects `@representation_boundary`), so the committed
+regression spec `test/01_unit/compiler/closure_capture_statements_spec.spl`
+could not be re-run directly; the probe above exercises the same walker paths.
