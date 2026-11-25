@@ -1,9 +1,13 @@
 # Tautology-guarded skip specs: a repo-wide false-green family (2026-08-04)
-## Closed 2026-09-16 — ....{...}`, so 6/13 module lookups resolved to nothing — the same defect that once invented 1
+## Open — mass-scale spec-vacuity backlog; partial repairs landed (see body; header repaired 2026-11-25)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
-fresh dated repro if the symptom returns.
+fresh dated repro if the symptom returns. (The 2026-09-16 header line was
+auto-generated garbage — a truncated quote of a body sentence reading
+"Closed 2026-09-16 — ....`{...}`, so 6/13 module lookups resolved to
+nothing" — contradicting the doc's own `**Status:** OPEN` line. Replaced
+2026-11-25; the doc was never closed.)
 
 **Status:** OPEN — 4 specs repaired and sabotage-proven; complete inventory below.
 
@@ -1597,3 +1601,15 @@ occurrences alone); only 4 specs repaired so far by design. Repairing more is
 real, valuable, but mass-scale work far beyond a single-bug budget. No change
 made.
 
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-al) — remains OPEN, mass-scale program
+
+This is a repo-wide census/backlog (hundreds of tautology-bearing specs,
+thousands of vacuous examples), not a single bounded bug. The 2026-09-13
+BUGFIX-7 triage already ruled it out of lane for single-bug repair, and the
+four passes above landed the coupling-gated subset. No further repair was
+attempted in this lane (per-bug budget: 2 cycles); remaining inventory in
+the body stands. The only change this pass is the header repair noted above
+— the doc's status was and remains OPEN. Spec re-runs are additionally
+environment-blocked at this HEAD (`bin/simple.exe test` fails repo-wide:
+pinned seed rejects `@representation_boundary` in the test runner).
