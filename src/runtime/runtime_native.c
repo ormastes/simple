@@ -14650,7 +14650,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     int fd = rt_crt_open(path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
     if (fd < 0) return -1;
     HANDLE handle = (HANDLE)_get_osfhandle(fd);
-    if (handle == INVALID_HANDLE_VALUE) { _close(fd); return -1; }
+    if (handle == INVALID_HANDLE_VALUE) { rt_crt_close(fd); return -1; }
     OVERLAPPED overlapped;
     if (timeout_secs <= 0) {
         memset(&overlapped, 0, sizeof(overlapped));
@@ -14658,7 +14658,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
                        MAXDWORD, MAXDWORD, &overlapped)) {
             return (int64_t)fd;
         }
-        _close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_secs * 1000ULL;
@@ -14671,10 +14671,10 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
         }
         DWORD error = GetLastError();
         if (error != ERROR_LOCK_VIOLATION && error != ERROR_IO_PENDING) {
-            _close(fd);
+            rt_crt_close(fd);
             return -1;
         }
-        if (GetTickCount64() >= deadline) { _close(fd); return -1; }
+        if (GetTickCount64() >= deadline) { rt_crt_close(fd); return -1; }
         Sleep(50); /* 50ms, matching the POSIX branch's poll interval */
     }
 #else
@@ -14690,7 +14690,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     deadline.tv_sec += timeout_secs;
     for (;;) {
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
-        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) { close(fd); return -1; }
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) { rt_crt_close(fd); return -1; }
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (now.tv_sec > deadline.tv_sec ||
@@ -14714,11 +14714,11 @@ bool rt_file_unlock(int64_t handle) {
         memset(&overlapped, 0, sizeof(overlapped));
         unlocked = UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlapped) != 0;
     }
-    bool closed = _close(fd) == 0;
+    bool closed = rt_crt_close(fd) == 0;
     return unlocked && closed;
 #else
     bool unlocked = flock(fd, LOCK_UN) == 0;
-    bool closed = close(fd) == 0;
+    bool closed = rt_crt_close(fd) == 0;
     return unlocked && closed;
 #endif
 }

@@ -90,8 +90,16 @@ static int check_positive_wait(const char* path) {
 int main(void) {
     char directory[MAX_PATH];
     char path[MAX_PATH];
+    char missing[MAX_PATH];
     if (!GetTempPathA(MAX_PATH, directory) || !GetTempFileNameA(directory, "sfl", 0, path)) return 1;
     if (rt_file_unlock(-1)) return 1;
+    if (rt_file_lock(NULL, 4, 0) != -1) return 1;
+    if (rt_file_lock((const uint8_t*)"", 0, 0) != -1) return 1;
+    int missing_len = snprintf(missing, sizeof(missing), "%ssfl_missing_%lu\\lock.tmp",
+                               directory, (unsigned long)GetCurrentProcessId());
+    if (missing_len <= 0 || (size_t)missing_len >= sizeof(missing)) return 1;
+    if (rt_file_lock((const uint8_t*)missing, strlen(missing), 0) != -1) return 1;
+    if (rt_file_lock((const uint8_t*)missing, strlen(missing), 1) != -1) return 1;
     for (int timeout = -1; timeout <= 0; timeout++) {
         if (!check_nonpositive(path, timeout)) {
             fprintf(stderr, "FAIL: Windows nonpositive-timeout contention (%d)\n", timeout);
@@ -106,7 +114,10 @@ int main(void) {
         fprintf(stderr, "FAIL: Windows positive-timeout acquisition after release\n");
         return 1;
     }
-    DeleteFileA(path);
+    if (!DeleteFileA(path)) {
+        fprintf(stderr, "FAIL: DeleteFileA failed after lock release (err=%lu)\n", (unsigned long)GetLastError());
+        return 1;
+    }
     puts("PASS: Windows C file-lock contention, timeouts, descriptor release, and reacquire");
     return 0;
 }
