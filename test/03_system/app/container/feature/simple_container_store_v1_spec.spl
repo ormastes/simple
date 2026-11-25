@@ -1,0 +1,173 @@
+# @cover src/lib/nogc_sync_mut/storage/immutable_store_v1.spl 90%
+# @cover src/lib/common/storage/object_record_v1.spl 90%
+# @cover src/lib/common/hash/hash_policy_v1.spl 90%
+# @cover src/lib/common/contracts/container/capability_report_v1.spl 90%
+# codex-system-test
+# @manual: primary
+# Evidence class: contract-and-store. Two simulated container clients share one
+# immutable store root: digest-addressed reuse, CAS root generations,
+# quarantine-only GC, and fail-closed capability admission. Design:
+# doc/05_design/platform/container/simple_container_improvement.md
+use std.spec.*
+use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init,
+    immutable_store_v1_ingest, immutable_store_v1_open, immutable_store_v1_publish_root,
+    immutable_store_v1_collect}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityRequirementV1, container_capability_v1_admission_reason,
+    container_capability_requirement_v1_empty, CONTAINER_CLIENT_AUTHORITY_USER_V1,
+    CONTAINER_ISOLATION_KIND_NATIVE_V1, CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1,
+    CONTAINER_MEMORY_ACCOUNTING_CGROUP_V1}
+use std.nogc_sync_mut.io.file_ops.{file_exists, secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
+use app.io.file_ops.{path_absolute}
+
+fn _store_root(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    expect(is_dir("build/test-artifacts")).to_equal(true)
+    val owned = secure_temp_dir_raw("build/test-artifacts", "container-store-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    val root = path_absolute(owned).replace("\\", "/")
+    expect(immutable_store_v1_init(root)).to_equal("")
+    root
+
+fn _store_cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+fn _count_objects(root: text) -> i64:
+    var count: i64 = 0
+    val objects_dir = root + "/objects"
+    if not is_dir(objects_dir):
+        return 0
+    for shard in dir_list(objects_dir):
+        val shard_name = shard.trim()
+        if shard_name == "" or shard_name.starts_with("."):
+            continue
+        val shard_path = objects_dir + "/" + shard_name
+        if not is_dir(shard_path):
+            continue
+        for entry in dir_list(shard_path):
+            if entry.trim().ends_with(".obj"):
+                count = count + 1
+    count
+
+fn _linux_cgroup_report() -> ContainerCapabilityReportV1:
+    ContainerCapabilityReportV1(host_os: "linux", host_arch: "x86_64",
+        guest_abi: "linux-amd64", isolation_kind: CONTAINER_ISOLATION_KIND_NATIVE_V1,
+        client_authority: CONTAINER_CLIENT_AUTHORITY_USER_V1, launch_qualified: true,
+        filesystem_confinement: true, root_view_kind: "overlay",
+        ephemeral_cleanup: true, durable_recovery: true,
+        memory_accounting: CONTAINER_MEMORY_ACCOUNTING_CGROUP_V1,
+        memory_hard_limit: true, memory_limit_update: true, memory_reclaim: true,
+        readonly_file_backing_reuse: true, explicit_shared_memory: false,
+        filesystem_save_load: true, process_checkpoint: false,
+        provider_version: "1.0.0", evidence_revision: "ev-linux-20261125")
+
+fn _macos_sandbox_report() -> ContainerCapabilityReportV1:
+    ContainerCapabilityReportV1(host_os: "macos", host_arch: "arm64",
+        guest_abi: "macos-arm64", isolation_kind: CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1,
+        client_authority: CONTAINER_CLIENT_AUTHORITY_USER_V1, launch_qualified: true,
+        filesystem_confinement: true, root_view_kind: "sandbox-exec",
+        ephemeral_cleanup: true, durable_recovery: false,
+        memory_accounting: "", memory_hard_limit: false, memory_limit_update: false,
+        memory_reclaim: false, readonly_file_backing_reuse: false,
+        explicit_shared_memory: false, filesystem_save_load: false,
+        process_checkpoint: false, provider_version: "1.0.0",
+        evidence_revision: "ev-macos-20261125")
+
+describe "simple container shared immutable store", tag: ["system", "container"]:
+    it "shares base objects between two container clients with zero new payload bytes":
+        step("Initialize one shared store root for both container clients")
+        val root = _store_root("shared")
+        step("Client 1 ingests the base file set")
+        val base_hostname = immutable_store_v1_ingest(root, "container-a\n".bytes(), HASH_POLICY_V1_XXH3_128)
+        val base_app = immutable_store_v1_ingest(root, "elf-bytes-v1".bytes(), HASH_POLICY_V1_XXH3_128)
+        val base_config = immutable_store_v1_ingest(root, "key=value\n".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(base_hostname.status).to_equal("ok")
+        expect(base_hostname.reused).to_equal(false)
+        expect(base_app.reused).to_equal(false)
+        expect(base_config.reused).to_equal(false)
+        val base_manifest = base_hostname.object_key + "\n" + base_app.object_key + "\n" +
+            base_config.object_key + "\n"
+        step("Client 1 publishes the shared root at generation 0")
+        expect(immutable_store_v1_publish_root(root, "shared", base_manifest, 0)).to_equal("")
+        expect(_count_objects(root)).to_equal(3)
+        step("Client 2 resolves the same base objects by digest")
+        val again_hostname = immutable_store_v1_ingest(root, "container-a\n".bytes(), HASH_POLICY_V1_XXH3_128)
+        val again_app = immutable_store_v1_ingest(root, "elf-bytes-v1".bytes(), HASH_POLICY_V1_XXH3_128)
+        val again_config = immutable_store_v1_ingest(root, "key=value\n".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(again_hostname.reused).to_equal(true)
+        expect(again_hostname.object_key).to_equal(base_hostname.object_key)
+        expect(again_app.reused).to_equal(true)
+        expect(again_app.object_key).to_equal(base_app.object_key)
+        expect(again_config.reused).to_equal(true)
+        expect(again_config.object_key).to_equal(base_config.object_key)
+        step("Verify client 2 wrote zero new payload bytes")
+        expect(_count_objects(root)).to_equal(3)
+        step("Client 2 saves an edit as a new object and advances the shared root to generation 1")
+        val edited = immutable_store_v1_ingest(root, "key=value\nmotd=hello\n".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(edited.status).to_equal("ok")
+        expect(edited.reused).to_equal(false)
+        expect(edited.object_key == base_config.object_key).to_equal(false)
+        expect(_count_objects(root)).to_equal(4)
+        val work_manifest = base_hostname.object_key + "\n" + base_app.object_key + "\n" +
+            base_config.object_key + "\n" + edited.object_key + "\n"
+        expect(immutable_store_v1_publish_root(root, "shared", work_manifest, 1)).to_equal("")
+        step("Reject a stale root writer and a second create-only publish")
+        expect(immutable_store_v1_publish_root(root, "shared", base_manifest, 1)).to_equal(
+            "root-generation-mismatch")
+        expect(immutable_store_v1_publish_root(root, "shared", base_manifest, 0)).to_equal(
+            "root-exists")
+        step("Client 2 publishes its own work root at generation 0")
+        expect(immutable_store_v1_publish_root(root, "client2-work", work_manifest, 0)).to_equal("")
+        step("Ingest a deliberately orphaned object")
+        val orphan = immutable_store_v1_ingest(root, "orphan-scratch\n".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(orphan.status).to_equal("ok")
+        expect(_count_objects(root)).to_equal(5)
+        step("Dry-run GC lists the orphan without moving anything")
+        val dry = immutable_store_v1_collect(root, true)
+        expect(dry.status).to_equal("ok")
+        expect(dry.moved).to_equal(0)
+        expect(dry.unreachable.len()).to_equal(1)
+        expect(dry.unreachable[0]).to_equal(orphan.object_key)
+        expect(_count_objects(root)).to_equal(5)
+        step("Prune quarantines the orphan and keeps everything reachable from both roots")
+        val pruned = immutable_store_v1_collect(root, false)
+        expect(pruned.status).to_equal("ok")
+        expect(pruned.moved).to_equal(1)
+        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("missing")
+        expect(immutable_store_v1_open(root, base_hostname.object_key).status).to_equal("ok")
+        expect(immutable_store_v1_open(root, base_app.object_key).status).to_equal("ok")
+        expect(immutable_store_v1_open(root, base_config.object_key).status).to_equal("ok")
+        expect(immutable_store_v1_open(root, edited.object_key).status).to_equal("ok")
+        expect(_count_objects(root)).to_equal(4)
+        val quarantine_dates = dir_list(root + "/quarantine")
+        expect(quarantine_dates.len()).to_equal(1)
+        val quarantine = root + "/quarantine/" + quarantine_dates[0].trim()
+        expect(file_exists(quarantine + "/" + orphan.object_key + ".obj")).to_equal(true)
+        _store_cleanup(root)
+
+    it "admits a linux cgroup report and rejects a macOS report without memory hard limit evidence":
+        step("Admit a linux cgroup capability report against a strict requirement")
+        var requirement = container_capability_requirement_v1_empty()
+        requirement.required_host_os = "linux"
+        requirement.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+        requirement.required_launch_qualified = true
+        requirement.required_memory_accounting = CONTAINER_MEMORY_ACCOUNTING_CGROUP_V1
+        requirement.required_memory_hard_limit = true
+        expect(container_capability_v1_admission_reason(_linux_cgroup_report(),
+            requirement)).to_equal("")
+        step("Reject a macOS-like report without memory hard limit evidence")
+        var macos_requirement = container_capability_requirement_v1_empty()
+        macos_requirement.required_host_os = "macos"
+        macos_requirement.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_SANDBOX_V1
+        macos_requirement.required_memory_hard_limit = true
+        expect(container_capability_v1_admission_reason(_macos_sandbox_report(),
+            macos_requirement)).to_equal("memory-hard-limit-missing")
+        step("Reject unknown memory accounting evidence fail-closed")
+        var unknown_accounting = _macos_sandbox_report()
+        unknown_accounting.memory_accounting = "vm-pressure"
+        expect(container_capability_v1_admission_reason(unknown_accounting,
+            macos_requirement)).to_equal("capability-report-memory-accounting-unknown")

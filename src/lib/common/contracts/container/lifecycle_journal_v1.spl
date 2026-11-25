@@ -1,0 +1,237 @@
+# Durable container lifecycle journal and pure crash-recovery planner
+# (architecture simple_container_improvement §11.2-11.4). Value-only: the
+# platform leaf owns native handles, execution, and the actual cleanup; this
+# module carries the recoverable identity and decides the ordered, idempotent
+# action list. Simple has no trait syntax, so the journal value plus the pure
+# decision function is the portable contract; executors live in platform leaves.
+#
+# Action vocabulary returned by lifecycle_recovery_actions_v1 (executed in
+# order, each idempotent so a replay after partial teardown converges):
+#   stop-descendants        stop every owned descendant and confirm authoritative exit
+#   revoke-handles          revoke/close owned access handles and IPC endpoints
+#   detach-view             detach the filesystem view and release backing/mapping references
+#   remove-owned-path:<p>   remove one owned ephemeral path; one action per owned_paths entry
+#   remove-owned-object:<k> remove one owned native/IPC object; one action per owned_objects entry
+#   retain-saved-root       retain saved roots and explicit persistent volumes
+#   mark-destroyed          persist completion and report any retryable residual resources
+#   error-unknown-phase     journal phase is not a known LIFECYCLE_PHASE_V1_* value;
+#                           the caller must fail explicitly, never guess a cleanup
+#
+# Cleanup identity comes only from the journaled owned_* lists and generation,
+# never from a recycled PID, an untrusted path string, or a broad name prefix
+# (§11.2). A busy mount or lingering native process is a retry state, not
+# success (§11.3); partial create/save/teardown is a normal recovery case
+# (§11.4).
+
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub const LIFECYCLE_JOURNAL_V1_VERSION: i64 = 1
+pub const LIFECYCLE_JOURNAL_V1_KIND = "container-lifecycle-journal"
+pub const LIFECYCLE_JOURNAL_V1_MAX_OWNED: i64 = 64
+pub const LIFECYCLE_JOURNAL_V1_MAX_TEXT: i64 = 1024
+
+pub const LIFECYCLE_PHASE_V1_CREATED = "created"
+pub const LIFECYCLE_PHASE_V1_STARTING = "starting"
+pub const LIFECYCLE_PHASE_V1_RUNNING = "running"
+pub const LIFECYCLE_PHASE_V1_STOPPING = "stopping"
+pub const LIFECYCLE_PHASE_V1_STOPPED = "stopped"
+pub const LIFECYCLE_PHASE_V1_DESTROYED = "destroyed"
+
+pub const LIFECYCLE_ACTION_STOP_DESCENDANTS_V1 = "stop-descendants"
+pub const LIFECYCLE_ACTION_REVOKE_HANDLES_V1 = "revoke-handles"
+pub const LIFECYCLE_ACTION_DETACH_VIEW_V1 = "detach-view"
+pub const LIFECYCLE_ACTION_REMOVE_OWNED_PATH_PREFIX_V1 = "remove-owned-path:"
+pub const LIFECYCLE_ACTION_REMOVE_OWNED_OBJECT_PREFIX_V1 = "remove-owned-object:"
+pub const LIFECYCLE_ACTION_RETAIN_SAVED_ROOT_V1 = "retain-saved-root"
+pub const LIFECYCLE_ACTION_MARK_DESTROYED_V1 = "mark-destroyed"
+pub const LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1 = "error-unknown-phase"
+
+pub struct ContainerLifecycleJournalV1:
+    format_version: i64
+    container_id: text
+    generation: i64
+    provider_id: text
+    phase: text
+    owned_paths: [text]
+    owned_objects: [text]
+
+fn _lifecycle_phase_known_v1(phase: text) -> bool:
+    phase == LIFECYCLE_PHASE_V1_CREATED or phase == LIFECYCLE_PHASE_V1_STARTING or
+        phase == LIFECYCLE_PHASE_V1_RUNNING or phase == LIFECYCLE_PHASE_V1_STOPPING or
+        phase == LIFECYCLE_PHASE_V1_STOPPED or phase == LIFECYCLE_PHASE_V1_DESTROYED
+
+# Journal text is printable ASCII without controls: a journal is durable
+# identity, so hostile or ambiguous bytes are rejected rather than escaped
+# into a cleanup decision.
+fn _journal_text_safe_v1(value: text) -> bool:
+    if value.byte_len() < 1 or value.byte_len() > LIFECYCLE_JOURNAL_V1_MAX_TEXT:
+        return false
+    for byte in value.bytes():
+        if byte < 32 or byte > 126:
+            return false
+    true
+
+fn _journal_owned_safe_v1(values: [text]) -> bool:
+    if values.len() > LIFECYCLE_JOURNAL_V1_MAX_OWNED:
+        return false
+    for value in values:
+        if not _journal_text_safe_v1(value):
+            return false
+    true
+
+# The invalid sentinel: decode failure and hand-built zeros both carry
+# format_version 0, which no valid journal ever has.
+pub fn container_lifecycle_journal_v1_empty() -> ContainerLifecycleJournalV1:
+    ContainerLifecycleJournalV1(format_version: 0, container_id: "",
+        generation: 0, provider_id: "", phase: "", owned_paths: [],
+        owned_objects: [])
+
+# Canonical SDN text in canonical field order, or "" when the journal is
+# outside the bounded contract; "" never decodes back to a valid journal.
+pub fn lifecycle_journal_v1_encode(journal: ContainerLifecycleJournalV1) -> text:
+    if journal.format_version != LIFECYCLE_JOURNAL_V1_VERSION:
+        return ""
+    if not _journal_text_safe_v1(journal.container_id) or
+            not _journal_text_safe_v1(journal.provider_id):
+        return ""
+    if journal.generation < 0 or not _lifecycle_phase_known_v1(journal.phase):
+        return ""
+    if not _journal_owned_safe_v1(journal.owned_paths) or
+            not _journal_owned_safe_v1(journal.owned_objects):
+        return ""
+    var path_values: [SdnValue] = []
+    for path in journal.owned_paths:
+        path_values.push(SdnValue.String(path))
+    var object_values: [SdnValue] = []
+    for object_key in journal.owned_objects:
+        object_values.push(SdnValue.String(object_key))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(LIFECYCLE_JOURNAL_V1_KIND),
+        "version": SdnValue.Int(LIFECYCLE_JOURNAL_V1_VERSION),
+        "container_id": SdnValue.String(journal.container_id),
+        "generation": SdnValue.Int(journal.generation),
+        "provider_id": SdnValue.String(journal.provider_id),
+        "phase": SdnValue.String(journal.phase),
+        "owned_paths": SdnValue.Array(path_values),
+        "owned_objects": SdnValue.Array(object_values)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn _journal_field_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key):
+        return Err("journal-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("journal-field-text:" + key)
+
+fn _journal_field_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key):
+        return Err("journal-field-missing:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("journal-field-int:" + key)
+
+fn _journal_field_texts_v1(fields: Dict<text, SdnValue>, key: text) -> Result<[text], text>:
+    if not fields.contains_key(key):
+        return Err("journal-field-missing:" + key)
+    val rows = match fields[key]:
+        case SdnValue.Array(value): value
+        case _: return Err("journal-field-array:" + key)
+    var out: [text] = []
+    for row in rows:
+        val item = match row:
+            case SdnValue.String(value): value
+            case _: return Err("journal-field-texts:" + key)
+        out.push(item)
+    Ok(out)
+
+fn _lifecycle_journal_v1_decode_strict(source: text) -> Result<ContainerLifecycleJournalV1, text>:
+    if source.len() > 65536:
+        return Err("journal-source-out-of-bounds")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(
+            max_source_bytes: 65536, max_depth: 4, max_nodes: 512,
+            max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("journal-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("journal-object")
+    if fields.len() != 8:
+        return Err("journal-fields")
+    if _journal_field_text_v1(fields, "kind")? != LIFECYCLE_JOURNAL_V1_KIND:
+        return Err("journal-kind")
+    if _journal_field_int_v1(fields, "version")? != LIFECYCLE_JOURNAL_V1_VERSION:
+        return Err("journal-version")
+    val journal = ContainerLifecycleJournalV1(
+        format_version: LIFECYCLE_JOURNAL_V1_VERSION,
+        container_id: _journal_field_text_v1(fields, "container_id")?,
+        generation: _journal_field_int_v1(fields, "generation")?,
+        provider_id: _journal_field_text_v1(fields, "provider_id")?,
+        phase: _journal_field_text_v1(fields, "phase")?,
+        owned_paths: _journal_field_texts_v1(fields, "owned_paths")?,
+        owned_objects: _journal_field_texts_v1(fields, "owned_objects")?)
+    if journal.generation < 0:
+        return Err("journal-generation")
+    if not _lifecycle_phase_known_v1(journal.phase):
+        return Err("journal-phase")
+    if not _journal_text_safe_v1(journal.container_id) or
+            not _journal_text_safe_v1(journal.provider_id):
+        return Err("journal-identity")
+    if not _journal_owned_safe_v1(journal.owned_paths) or
+            not _journal_owned_safe_v1(journal.owned_objects):
+        return Err("journal-owned")
+    if lifecycle_journal_v1_encode(journal) != source:
+        return Err("journal-noncanonical")
+    Ok(journal)
+
+# Strict decode: any syntax, shape, bound, vocabulary, or canonical-form
+# failure yields the format_version 0 sentinel, never a partially trusted
+# journal. An unknown phase is a decode failure here; the recovery planner
+# still guards it for hand-built values and for the sentinel itself.
+pub fn lifecycle_journal_v1_decode(source: text) -> ContainerLifecycleJournalV1:
+    match _lifecycle_journal_v1_decode_strict(source):
+        case Ok(journal): journal
+        case Err(_): container_lifecycle_journal_v1_empty()
+
+# Pure recovery decision (§11.3-11.4): reconcile the journaled phase with the
+# observed native liveness and return the ordered idempotent action list; the
+# platform leaf executes it. Native liveness, not the journaled phase, decides
+# stop-descendants: a stale RUNNING journal whose native attempt is already
+# dead must not issue a stop, and a live native attempt must be stopped even
+# when the journal claims a terminal-ish phase. DESTROYED journals need no
+# action; an unknown phase fails closed with a single error-unknown-phase
+# action so callers fail explicitly instead of guessing a cleanup.
+pub fn lifecycle_recovery_actions_v1(journal: ContainerLifecycleJournalV1,
+        native_alive: bool) -> [text]:
+    if journal.phase == LIFECYCLE_PHASE_V1_DESTROYED:
+        return []
+    if not _lifecycle_phase_known_v1(journal.phase):
+        return [LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1]
+    var actions: [text] = []
+    if native_alive:
+        actions.push(LIFECYCLE_ACTION_STOP_DESCENDANTS_V1)
+    actions.push(LIFECYCLE_ACTION_REVOKE_HANDLES_V1)
+    actions.push(LIFECYCLE_ACTION_DETACH_VIEW_V1)
+    for path in journal.owned_paths:
+        actions.push(LIFECYCLE_ACTION_REMOVE_OWNED_PATH_PREFIX_V1 + path)
+    for object_key in journal.owned_objects:
+        actions.push(LIFECYCLE_ACTION_REMOVE_OWNED_OBJECT_PREFIX_V1 + object_key)
+    actions.push(LIFECYCLE_ACTION_RETAIN_SAVED_ROOT_V1)
+    actions.push(LIFECYCLE_ACTION_MARK_DESTROYED_V1)
+    actions
+
+export ContainerLifecycleJournalV1
+export container_lifecycle_journal_v1_empty
+export lifecycle_journal_v1_encode, lifecycle_journal_v1_decode
+export lifecycle_recovery_actions_v1
+export LIFECYCLE_JOURNAL_V1_VERSION, LIFECYCLE_JOURNAL_V1_KIND
+export LIFECYCLE_JOURNAL_V1_MAX_OWNED, LIFECYCLE_JOURNAL_V1_MAX_TEXT
+export LIFECYCLE_PHASE_V1_CREATED, LIFECYCLE_PHASE_V1_STARTING
+export LIFECYCLE_PHASE_V1_RUNNING, LIFECYCLE_PHASE_V1_STOPPING
+export LIFECYCLE_PHASE_V1_STOPPED, LIFECYCLE_PHASE_V1_DESTROYED
+export LIFECYCLE_ACTION_STOP_DESCENDANTS_V1, LIFECYCLE_ACTION_REVOKE_HANDLES_V1
+export LIFECYCLE_ACTION_DETACH_VIEW_V1, LIFECYCLE_ACTION_REMOVE_OWNED_PATH_PREFIX_V1
+export LIFECYCLE_ACTION_REMOVE_OWNED_OBJECT_PREFIX_V1
+export LIFECYCLE_ACTION_RETAIN_SAVED_ROOT_V1, LIFECYCLE_ACTION_MARK_DESTROYED_V1
+export LIFECYCLE_ACTION_ERROR_UNKNOWN_PHASE_V1

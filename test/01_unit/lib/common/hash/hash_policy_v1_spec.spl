@@ -1,0 +1,102 @@
+# Hash policy dispatch v1: known-answer vectors, fail-closed policy selection,
+# and cross-algorithm tag isolation for the container object store identity.
+# Design: doc/05_design/platform/container/simple_container_improvement.md
+use std.spec.{describe, it, expect}
+use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128, HASH_POLICY_V1_GXHASH_128,
+    HASH_POLICY_V1_BLAKE3_256, HASH_POLICY_V1_SHA256_LEGACY, HASH_POLICY_V1_GXHASH_PROFILE,
+    hash_policy_v1_default, hash_policy_v1_supported, hash_policy_v1_digest}
+
+val HELLO_XXH3_128 = "b5e9c1ad071b3e7fc779cfaa5e523818"
+val HELLO_SHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+val HELLO_BLAKE3_256 = "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
+val EMPTY_XXH3_128 = "99aa06d3014798d86001c324468d497f"
+val EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+val EMPTY_BLAKE3_256 = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+
+describe "hash_policy_v1 known-answer vectors":
+    it "hashes hello under xxh3-128 to the verified 16-byte digest":
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, "hello".bytes())
+        expect(digest.status).to_equal("ok")
+        expect(digest.reason).to_equal("")
+        expect(digest.policy).to_equal("xxh3-128")
+        expect(digest.profile).to_equal("")
+        expect(digest.hex).to_equal(HELLO_XXH3_128)
+        expect(digest.byte_len).to_equal(16)
+
+    it "hashes hello under sha256 to the verified legacy 32-byte digest":
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_SHA256_LEGACY, "hello".bytes())
+        expect(digest.status).to_equal("ok")
+        expect(digest.policy).to_equal("sha256")
+        expect(digest.profile).to_equal("")
+        expect(digest.hex).to_equal(HELLO_SHA256)
+        expect(digest.byte_len).to_equal(32)
+
+    it "hashes hello under blake3-256 to the verified 32-byte digest":
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_BLAKE3_256, "hello".bytes())
+        expect(digest.status).to_equal("ok")
+        expect(digest.policy).to_equal("blake3-256")
+        expect(digest.hex).to_equal(HELLO_BLAKE3_256)
+        expect(digest.byte_len).to_equal(32)
+
+    it "hashes empty input under xxh3-128 to the official XXH128 empty vector":
+        # oracle: xxHash sanity vectors, XXH128 of empty input
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, [])
+        expect(digest.status).to_equal("ok")
+        expect(digest.hex).to_equal(EMPTY_XXH3_128)
+        expect(digest.byte_len).to_equal(16)
+
+    it "hashes empty input under sha256 and blake3-256 to their official vectors":
+        # oracle: FIPS 180-4 SHA-256 of the empty message
+        expect(hash_policy_v1_digest(HASH_POLICY_V1_SHA256_LEGACY, []).hex).to_equal(EMPTY_SHA256)
+        # oracle: official BLAKE3 test_vectors hash of the 0-byte input
+        expect(hash_policy_v1_digest(HASH_POLICY_V1_BLAKE3_256, []).hex).to_equal(EMPTY_BLAKE3_256)
+
+    it "pins the gxhash-128 algorithm profile on every digest":
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_GXHASH_128, "hello".bytes())
+        expect(digest.status).to_equal("ok")
+        expect(digest.profile).to_equal("gxhash-4.0.0-scalar")
+        expect(digest.profile).to_equal(HASH_POLICY_V1_GXHASH_PROFILE)
+        expect(digest.byte_len).to_equal(16)
+        expect(digest.hex.len()).to_equal(32)
+        val again = hash_policy_v1_digest(HASH_POLICY_V1_GXHASH_128, "hello".bytes())
+        expect(again.hex).to_equal(digest.hex)
+
+describe "hash_policy_v1 selection":
+    it "defaults to xxh3-128":
+        expect(hash_policy_v1_default()).to_equal("xxh3-128")
+        expect(hash_policy_v1_default()).to_equal(HASH_POLICY_V1_XXH3_128)
+
+    it "supports exactly the four named policies":
+        expect(hash_policy_v1_supported(HASH_POLICY_V1_XXH3_128)).to_equal(true)
+        expect(hash_policy_v1_supported(HASH_POLICY_V1_GXHASH_128)).to_equal(true)
+        expect(hash_policy_v1_supported(HASH_POLICY_V1_BLAKE3_256)).to_equal(true)
+        expect(hash_policy_v1_supported(HASH_POLICY_V1_SHA256_LEGACY)).to_equal(true)
+        expect(hash_policy_v1_supported("xxh3-64")).to_equal(false)
+        expect(hash_policy_v1_supported("SHA256")).to_equal(false)
+        expect(hash_policy_v1_supported("md5")).to_equal(false)
+        expect(hash_policy_v1_supported("")).to_equal(false)
+
+    it "fails closed on an unknown policy with empty hex and a precise reason":
+        val digest = hash_policy_v1_digest("md5", "hello".bytes())
+        expect(digest.status).to_equal("unsupported")
+        expect(digest.policy).to_equal("md5")
+        expect(digest.hex).to_equal("")
+        expect(digest.byte_len).to_equal(0)
+        expect(digest.reason).to_contain("unknown hash policy 'md5'")
+
+describe "hash_policy_v1 cross-algorithm tag isolation":
+    it "never shares a hex value across policies for the same input":
+        val xxh = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, "hello".bytes())
+        val gx = hash_policy_v1_digest(HASH_POLICY_V1_GXHASH_128, "hello".bytes())
+        val b3 = hash_policy_v1_digest(HASH_POLICY_V1_BLAKE3_256, "hello".bytes())
+        val sha = hash_policy_v1_digest(HASH_POLICY_V1_SHA256_LEGACY, "hello".bytes())
+        expect(xxh.policy).to_equal(HASH_POLICY_V1_XXH3_128)
+        expect(gx.policy).to_equal(HASH_POLICY_V1_GXHASH_128)
+        expect(b3.policy).to_equal(HASH_POLICY_V1_BLAKE3_256)
+        expect(sha.policy).to_equal(HASH_POLICY_V1_SHA256_LEGACY)
+        expect(xxh.hex == gx.hex).to_equal(false)
+        expect(xxh.hex == b3.hex).to_equal(false)
+        expect(xxh.hex == sha.hex).to_equal(false)
+        expect(gx.hex == b3.hex).to_equal(false)
+        expect(gx.hex == sha.hex).to_equal(false)
+        expect(b3.hex == sha.hex).to_equal(false)

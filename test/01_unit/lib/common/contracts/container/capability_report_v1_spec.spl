@@ -1,0 +1,120 @@
+# ContainerCapabilityReportV1: fail-closed admission of a host capability
+# report against a requirement. Admission success, every fail-closed reason
+# class, and the empty-requirement semantics exactly as implemented.
+# Design: doc/05_design/platform/container/simple_container_improvement.md (architecture §4.2)
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1,
+    ContainerCapabilityRequirementV1, container_capability_v1_admission_reason,
+    container_capability_report_v1_empty, container_capability_requirement_v1_empty,
+    CONTAINER_CLIENT_AUTHORITY_USER_V1, CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1,
+    CONTAINER_ISOLATION_KIND_NATIVE_V1,
+    CONTAINER_ISOLATION_KIND_VM_V1, CONTAINER_MEMORY_ACCOUNTING_CGROUP_V1,
+    CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1}
+
+fn _linux_cgroup_report() -> ContainerCapabilityReportV1:
+    ContainerCapabilityReportV1(host_os: "linux", host_arch: "x86_64",
+        guest_abi: "linux-amd64", isolation_kind: CONTAINER_ISOLATION_KIND_NATIVE_V1,
+        client_authority: CONTAINER_CLIENT_AUTHORITY_USER_V1, launch_qualified: true,
+        filesystem_confinement: true, root_view_kind: "overlay",
+        ephemeral_cleanup: true, durable_recovery: true,
+        memory_accounting: CONTAINER_MEMORY_ACCOUNTING_CGROUP_V1,
+        memory_hard_limit: true, memory_limit_update: true, memory_reclaim: true,
+        readonly_file_backing_reuse: true, explicit_shared_memory: false,
+        filesystem_save_load: true, process_checkpoint: false,
+        provider_version: "1.0.0", evidence_revision: "ev-20261125-001")
+
+fn _strict_requirement() -> ContainerCapabilityRequirementV1:
+    var requirement = container_capability_requirement_v1_empty()
+    requirement.required_host_os = "linux"
+    requirement.required_isolation_kind = CONTAINER_ISOLATION_KIND_NATIVE_V1
+    requirement.required_launch_qualified = true
+    requirement.required_filesystem_confinement = true
+    requirement.required_memory_accounting = CONTAINER_MEMORY_ACCOUNTING_CGROUP_V1
+    requirement.required_memory_hard_limit = true
+    requirement
+
+describe "container_capability_v1 admission success":
+    it "admits a report that affirms every requirement":
+        expect(container_capability_v1_admission_reason(_linux_cgroup_report(),
+            _strict_requirement())).to_equal("")
+
+    it "admits a matching memory accounting kind":
+        var report = _linux_cgroup_report()
+        report.memory_accounting = CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1
+        var requirement = container_capability_requirement_v1_empty()
+        requirement.required_memory_accounting = CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1
+        requirement.required_memory_hard_limit = true
+        expect(container_capability_v1_admission_reason(report, requirement)).to_equal("")
+
+describe "container_capability_v1 fail-closed reasons":
+    it "rejects a memory hard limit requirement without memory accounting evidence":
+        var report = _linux_cgroup_report()
+        report.memory_accounting = ""
+        var requirement = container_capability_requirement_v1_empty()
+        requirement.required_memory_hard_limit = true
+        expect(container_capability_v1_admission_reason(report,
+            requirement)).to_equal("memory-accounting-missing")
+
+    it "rejects a constraining requirement when evidence_revision is empty":
+        var report = _linux_cgroup_report()
+        report.evidence_revision = ""
+        expect(container_capability_v1_admission_reason(report,
+            _strict_requirement())).to_equal("capability-evidence-missing")
+
+    it "names the missing capability in the reason":
+        var requirement = container_capability_requirement_v1_empty()
+        requirement.required_memory_reclaim = true
+        var report = _linux_cgroup_report()
+        report.memory_reclaim = false
+        expect(container_capability_v1_admission_reason(report, requirement)).to_equal(
+            "memory-reclaim-missing")
+        requirement = container_capability_requirement_v1_empty()
+        requirement.required_process_checkpoint = true
+        expect(container_capability_v1_admission_reason(_linux_cgroup_report(),
+            requirement)).to_equal("process-checkpoint-missing")
+        requirement = container_capability_requirement_v1_empty()
+        requirement.required_durable_recovery = true
+        report = _linux_cgroup_report()
+        report.durable_recovery = false
+        expect(container_capability_v1_admission_reason(report, requirement)).to_equal(
+            "durable-recovery-missing")
+
+    it "rejects an unknown memory accounting kind and never weakens it":
+        var report = _linux_cgroup_report()
+        report.memory_accounting = "cgroup-v3-experimental"
+        expect(container_capability_v1_admission_reason(report,
+            _strict_requirement())).to_equal("capability-report-memory-accounting-unknown")
+        report = _linux_cgroup_report()
+        report.memory_accounting = CONTAINER_MEMORY_ACCOUNTING_JOB_COMMIT_V1
+        expect(container_capability_v1_admission_reason(report,
+            _strict_requirement())).to_equal("memory-accounting-mismatch")
+
+    it "rejects mismatched required identity values":
+        var requirement = container_capability_requirement_v1_empty()
+        requirement.required_host_os = "freebsd"
+        expect(container_capability_v1_admission_reason(_linux_cgroup_report(),
+            requirement)).to_equal("host-os-mismatch")
+        requirement = container_capability_requirement_v1_empty()
+        requirement.required_isolation_kind = CONTAINER_ISOLATION_KIND_VM_V1
+        expect(container_capability_v1_admission_reason(_linux_cgroup_report(),
+            requirement)).to_equal("isolation-kind-mismatch")
+
+    it "rejects a report with an incomplete identity even for an empty requirement":
+        expect(container_capability_v1_admission_reason(
+            container_capability_report_v1_empty(),
+            container_capability_requirement_v1_empty())).to_equal(
+            "capability-report-identity-missing")
+
+describe "container_capability_v1 empty requirement semantics":
+    it "admits an identity-complete report without evidence when nothing is required":
+        var report = _linux_cgroup_report()
+        report.evidence_revision = ""
+        expect(container_capability_v1_admission_reason(report,
+            container_capability_requirement_v1_empty())).to_equal("")
+
+describe "container_capability_v1 client authority":
+    it "rejects launch qualification when client authority is unavailable":
+        var report = _linux_cgroup_report()
+        report.client_authority = CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1
+        expect(container_capability_v1_admission_reason(report,
+            _strict_requirement())).to_equal("client-authority-unavailable")
