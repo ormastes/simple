@@ -91,3 +91,30 @@ to a struct literal; and two genuine numeric-precision bugs in
 by the `EngineColor.rgba` compile error and are now newly visible, still
 unclassified.)
 
+## Verification 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ 33280d09762)
+
+The owner decision this doc said was needed has been made and landed; the
+"Status: open — needs an owner decision" line above is stale (the 2026-09-16
+header closure is correct). Verified by code inspection:
+
+- `src/lib/common/engine/ids.spl:95` now provides
+  `static fn new(index: i64, generation: i64) -> i64` on `RawHandle`, packing
+  index (low 32) + generation (high 32) — the same layout `NodeId.to_index()`
+  / `generation()` unpack — plus `index_of`/`generation_of` and a `Generation`
+  class. The doc comment on `new` records the design call: `NodeId.raw` /
+  `TextureId.raw` stay plain packed `i64`, not 2-field structs.
+- Both named specs now compile against that API:
+  `test/01_unit/lib/engine/sprite_spec.spl:104,115,125` use
+  `TextureId(raw: RawHandle.new(0, 1))` (type-correct: `new` returns `i64`,
+  `TextureId.raw: i64`), and
+  `test/01_unit/lib/nogc_async_mut/engine/component/engine_component_facade_spec.spl:35-36`
+  use `RawHandle.new(1, 1)` / `RawHandle.new(2, 1)` with a comment documenting
+  why the old struct-shaped `RawHandle(index:, generation:)` form was dropped.
+
+LIMIT: spec re-execution environment-blocked on this host (pinned seed
+`bin/simple.exe` 2026-11-17 predates the 2026-11-25
+`@representation_boundary` annotations, `cfd89933699`; all
+`bin/simple.exe test` runs abort in the test runner with `unknown decorator`
+before loading any spec). Closure rests on the API/signature match above; the
+two masked numeric-precision bugs noted above are outside this doc's scope.
+

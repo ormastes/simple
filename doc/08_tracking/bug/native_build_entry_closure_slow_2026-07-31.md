@@ -156,3 +156,18 @@ cost) only for callers that pass dotted `module_path`, e.g. the `phase1:load_sou
 in `driver_source_pipeline_loading.spl` — outside the profiled BFS hot path, so out of scope here.
 Left unchanged apart from a comment recording this so a future reader doesn't re-chase the same
 "~150 probes" estimate against the wrong call path. No code/behavior change.
+
+## Verification 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ 33280d09762)
+
+Bounded scope confirmed closed by code inspection: the content-keyed
+`_driver_entry_import_module_paths_cache` is gone from
+`src/compiler/80.driver/driver_source_loading.spl` (recursive grep over
+`src/compiler` returns zero matches), matching the "Removed the cache
+instead" resolution above. The remaining item — running the closure walk
+under a faster engine than the worker's forced-interpret mode — is a
+structural execution-mode change this doc already scoped out as
+architecturally nontrivial; it stays open as that larger program, not as a
+P3 defect. No re-measurement attempted: the repro is an ~18-minute
+`native-build` and spec/tool execution on this host is environment-blocked
+anyway (pinned seed `bin/simple.exe` 2026-11-17 predates the 2026-11-25
+`@representation_boundary` annotations, `cfd89933699`).

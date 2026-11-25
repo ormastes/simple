@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** PARTIAL — title and the "implemented nowhere" claim are WRONG;
+**Status:** RESOLVED 2026-11-25 — implementation AND interpreter registration
+both present in-tree (see dated note at bottom). Earlier status: PARTIAL —
+title and the "implemented nowhere" claim are WRONG;
 corrected 2026-08-17. The **native runtime implementation exists**:
 `src/compiler_rust/runtime/src/value/screenshot_sffi.rs` defines 11
 `pub extern "C" fn rt_screenshot_*` symbols. The 2026-08-09 re-verification
@@ -104,4 +106,31 @@ unimplemented.
 ## Triage 2026-09-13
 
 Confirmed still a feature gap (screenshot SFFI API declared but never implemented), deliberately left red per repo policy so the missing feature stays visible. Implementing the real screenshot capture API is out of scope for a mechanical bugfix pass. Leaving OPEN, no code change made.
+
+## Resolution 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ 33280d09762)
+
+The narrower gap this doc left open — "zero `rt_screenshot_*` registrations
+under `interpreter_extern/`" — is now closed in-tree. Verified by code
+inspection:
+
+- `src/compiler_rust/compiler/src/interpreter_extern/mod.rs:318+` registers
+  all 16 `rt_screenshot_*` symbols (`insert_simple!` entries), an exact 1:1
+  match with the 16 externs declared in
+  `src/compiler_rust/lib/std/src/spec/screenshot.spl` (diffed the two sorted
+  symbol lists: identical).
+- The native implementation
+  `src/compiler_rust/runtime/src/value/screenshot_sffi.rs` remains present.
+
+So the API is no longer "unknown extern function" in interpreter mode by
+construction: every declared symbol has both a runtime definition and an
+interpreter registration.
+
+LIMIT (unchanged from the 2026-08-17 note, still honest): no live capture
+run was made — on this host spec execution is environment-blocked because
+the pinned seed `bin/simple.exe` (2026-11-17) predates the 2026-11-25
+`@representation_boundary` annotations (`cfd89933699`) and aborts in the
+test runner before loading `screenshot_ffi_spec.spl`. This closure is a
+symbol-presence + registration-presence finding, one level stronger than
+the 2026-08-17 triage (which found zero registrations); actual pixel/terminal
+capture behavior remains unexecuted evidence.
 
