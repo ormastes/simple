@@ -1,7 +1,9 @@
 # Bug: seed's static-method/constructor dispatch requires an exact runtime type match — no numeric-literal coercion, no type-based overload resolution (breaks scilib `Series.from_values`/`Float32.new`/`Vec8f.splat`)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging the `test/feature/scilib` cluster)
+- **Status:** resolved 2026-11-04 (int literal -> float widening; see update
+  below), re-verified 2026-11-25. Repro (3) same-name static overloads by
+  type remains a separate, still-open registration issue.
 - **Area:** `src/compiler_rust/compiler/src/interpreter_method/special/objects.rs`
   (`handle_constructor_methods`, `constructor_overload_score`,
   `constructor_value_matches_type`, `constructor_value_type_matches_name`),
@@ -196,3 +198,18 @@ widens `Value::Int` to `f64`/`f32` for float-declared params, and
 args (same coercion plain calls use via `coerce_param`). Regression tests:
 `compiler/tests/interpreter_constructor_test.rs` (3 new). Not fixed here:
 repro (3) same-name static overloads by type (separate registration issue).
+
+## Verification 2026-11-25 (release/1.0.0, Windows host, pinned seed bin/simple.exe v1.0.0-rc.1)
+
+Re-ran the coercion repro against the tracked pinned seed
+(`SIMPLE_LIB=src bin/simple.exe run`): a struct with `static fn of(x: f64)`
+and `fn new(v: f64)` called with bare int literals now widens correctly —
+`Half.of(3)` prints `3.0`, `Half.new(4)` prints `4.0`, and a plain
+`fn takes_f64(x: f64)` called with `5` prints `5.0`. The 2026-11-04 fix
+(`coerce_to_declared_type` widening `Value::Int` to `f64`/`f32`) is intact at
+release/1.0.0 HEAD. Status header corrected from "open" to resolved; the
+2026-11-04 update already recorded the fix. Not re-verified here: repro (3)
+same-name static overload registration (explicitly out of scope of the
+2026-11-04 fix, still open), and the 19 scilib specs under `bin/simple test`
+(blocked repo-wide by the known `@representation_boundary` seed/source
+inconsistency at release/1.0.0 HEAD).
