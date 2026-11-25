@@ -1,4 +1,21 @@
 # `shim_init()` cannot run under the tree-walk interpreter — `_shim_keepalive()`'s function-pointer-to-u64 casts fail at runtime
+
+## Triage 2026-11-25 (P2 sweep lane) — fix implemented, closure blocked on admitted runtime / native build
+
+The 2026-11-10 section below is the current state: the pure-Simple source
+repair (typed module function slot instead of calling `_shim_keepalive()`)
+landed with executable regressions authored, and its own "Required before this
+bug can close" list needs (1) a recovered self-hosted runtime to execute the
+two specs, (2) a native-build of the production-import probe plus the
+strong-symbol gate, and (3) a retention-mechanism control. None of these can
+run in this lane: the pinned `bin/simple.exe` at release/1.0.0 HEAD rejects
+`@representation_boundary` in its own test-runner closure (so no spec
+execution), and native builds / full bootstrap are out of scope for this
+sweep. The stale "Open 2026-09-16 — needs owner triage" banner above predates
+the 2026-11-10 repair; treat the 2026-11-10 "fix implemented, verification
+pending" state as authoritative. Left **OPEN — verification pending**, no
+code change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
