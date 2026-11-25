@@ -12,6 +12,11 @@ the same pass.
 
 Status: OPEN (P3)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Triage 2026-11-25 (P3 fleet): re-reviewed; remains a multi-gate audit
+program, not a single bounded bug — per the 2026-08-11 closure summary,
+~29 Tier-3 EXIT-CODE-ONLY gates still need case-by-case full reads, and the
+census itself warns its grep buckets are not work-authorization. No single
+fix applies; left open for a dedicated gate-soundness lane.
 for every gate). See "Confidence / follow-up" section — do not treat the
 per-gate bucket assignments below as final without a full manual read.
 
