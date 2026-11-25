@@ -9,10 +9,18 @@ Audience: COMP maintainers who read this spec to confirm the behavior still hold
 use std.spec
 use std.spec.step
 use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.inference_control.*
+use compiler.frontend.core.lexer.{lex_span_empty}
 use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
 fn bind_diagnostics(source: text) -> text:
@@ -36,3 +44,62 @@ describe "enum payload typing":
         step("case (Fn(a,b,_), Fn(c,d,_)) rebuilds Kind.Fn from binders")
         val source = BIND_PRELUDE + "fn compose(f: Kind, g: Kind) -> Kind:\n    match (f, g):\n        case (Kind.Fn(a, b, _), Kind.Fn(c, d, _)):\n            Kind.Fn(a, d, 0)\n        case _:\n            Kind.Other\n"
         expect(bind_diagnostics(source)).to_equal("")
+
+fn cross_module_diagnostics(consumer_body: text) -> text:
+    val types_source = "pub enum Dev:\n    Cpu\n    Gpu(id: i64)\n\npub struct Dim:\n    n: i64\n\npub enum TK:\n    Function(params: [TT], ret: TT, effects: [i64])\n    Layer(inputs: [Dim], outputs: [Dim])\n    Tensor(elem: TT, dims: [Dim], dev: Dev?)\n    Infer(id: i64, level: i64)\n    Unit\n\npub struct TT:\n    kind: TK\n"
+    val consumer_source = "use lib.types.{{Dev, Dim, TK, TT}}\n\n" + consumer_body
+    val log = Logger(level: 0)
+    val types_ast = parse_full_frontend(types_source, "lib/types.spl", "lib.types", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.types"] = types_ast
+    val sources = [SourceFile(path: "lib/types.spl", content: types_source, module_name: "lib.types")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var types_lowering = hirlowering_for_module("lib.types", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val types_hir = types_lowering.lower_module(types_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["types_hir"] = types_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "types_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [types_hir, consumer_hir])
+    var errors: [text] = []
+    for error in consumer_lowering.errors:
+        errors = errors.push("HIR: " + error.message)
+    for error in mir_lowering.errors:
+        if error.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        errors = errors.push("MIR: " + error.message)
+    errors.join("\n")
+
+describe "cross-module tuple-pattern binders without typed rebind workarounds":
+    it "lowers Function, Layer, Infer, and Tensor tuple-pattern binders across modules":
+        val body = "fn take_tt(t: TT) -> i64:\n    0\n\nfn take_dims(ds: [Dim]) -> i64:\n    ds.len()\n\nfn check(l: TT, r: TT) -> TT:\n    match (l.kind, r.kind):\n        case (Function(params_f, ret_f, _), Function(params_g, ret_g, _)):\n            if params_g.len() == 0:\n                return TT(kind: TK.Unit)\n            val _a = take_tt(ret_f)\n            val _b = take_tt(params_g[0])\n            TT(kind: TK.Function(params_f, ret_g, []))\n        case (Layer(in_l, out_l), Layer(in_r, out_r)):\n            var combined: [Dim] = []\n            for d in in_l:\n                combined = combined.push(d)\n            val _k = take_dims(out_l) + take_dims(in_r)\n            TT(kind: TK.Layer(combined, out_r))\n        case (Layer(in_l, out_l), Infer(_, _)):\n            var ins: [Dim] = []\n            for d in out_l:\n                ins = ins.push(d)\n            TT(kind: TK.Layer(in_l, ins))\n        case (Infer(_, _), Layer(in_r, out_r)):\n            var outs: [Dim] = []\n            for d in in_r:\n                outs = outs.push(d)\n            TT(kind: TK.Layer(outs, out_r))\n        case (Tensor(elem_l, dims_l, dev_l), Tensor(elem_r, dims_r, _)):\n            val _u = take_tt(elem_l) + take_tt(elem_r)\n            var res: [Dim] = []\n            if dims_l.len() >= 2 and dims_r.len() >= 2:\n                for i in 0..(dims_l.len() - 1):\n                    res = res.push(dims_l[i])\n                res = res.push(dims_r[dims_r.len() - 1])\n            TT(kind: TK.Tensor(elem_l, res, dev_l))\n        case (Tensor(elem, dims, dev), _):\n            TT(kind: TK.Tensor(elem, dims, dev))\n        case (_, Tensor(elem, dims, dev)):\n            TT(kind: TK.Tensor(elem, dims, dev))\n        case _:\n            TT(kind: TK.Unit)\n"
+        expect(cross_module_diagnostics(body)).to_equal("")
+
+describe "HmInferContext tuple-pattern operator inference without rebind workarounds":
+    it "infers compose, parallel, layer_connect, matmul, and broadcast_op":
+        var ctx = HmInferContext.new()
+        val sp = lex_span_empty()
+        val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val fn_ty = HirType(kind: HirTypeKind.Function([i_ty], i_ty, []), span: sp)
+        expect(ctx.infer_compose(fn_ty, fn_ty, sp).is_ok()).to_equal(true)
+        expect(ctx.infer_parallel(fn_ty, fn_ty, sp).is_ok()).to_equal(true)
+        val d2 = DimExpr.literal(2, sp)
+        val d4 = DimExpr.literal(4, sp)
+        val layer_ty = HirType(kind: HirTypeKind.Layer([d2], [d4]), span: sp)
+        val layer_r = HirType(kind: HirTypeKind.Layer([d4], [d2]), span: sp)
+        expect(ctx.infer_parallel(layer_ty, layer_r, sp).is_ok()).to_equal(true)
+        expect(ctx.infer_layer_connect(layer_ty, layer_r, sp).is_ok()).to_equal(true)
+        val v_ty = ctx.fresh_var(sp)
+        expect(ctx.infer_layer_connect(layer_ty, v_ty, sp).is_ok()).to_equal(true)
+        expect(ctx.infer_layer_connect(ctx.fresh_var(sp), layer_r, sp).is_ok()).to_equal(true)
+        val mat_l = HirType(kind: HirTypeKind.Tensor(i_ty, [d2, d4], None), span: sp)
+        val mat_r = HirType(kind: HirTypeKind.Tensor(i_ty, [d4, d2], None), span: sp)
+        expect(ctx.infer_matmul(mat_l, mat_r, sp).is_ok()).to_equal(true)
+        expect(ctx.infer_broadcast_op(mat_l, mat_l, sp).is_ok()).to_equal(true)
+        expect(ctx.infer_broadcast_op(mat_l, i_ty, sp).is_ok()).to_equal(true)
+        expect(ctx.infer_broadcast_op(i_ty, mat_l, sp).is_ok()).to_equal(true)
