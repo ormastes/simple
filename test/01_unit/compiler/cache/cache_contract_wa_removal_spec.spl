@@ -1,0 +1,104 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, cache_contract, regression
+"""
+Regression pinning the retired `native_cache_contract_mir_lowering_gaps_2026_10_11`
+workarounds across `canonical_cache_codec_v1.spl` and `public_summary_v1.spl`:
+- `.copy()` on borrowed/field arrays preserves sort isolation (caller order untouched)
+- direct scalar equality on envelope kind/schema
+- direct `for value in sorted:` traversal in public summary reference encoding/decoding
+"""
+use std.spec.{describe, it, expect}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1}
+use compiler.common.cache_contract.semantic_read_set_v1.{
+    SemanticEffectKindV1, SemanticReplayPolicyV1, SemanticReadEntryV1, SemanticReadSetV1
+}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_semantic_read_set_payload_v1,
+    canonical_cache_encode_envelope_v1, canonical_cache_decode_envelope_v1
+}
+use compiler.common.cache_contract.public_summary_v1.{
+    SummaryObjectReferenceV2, SummaryObjectReferenceRoleV2,
+    public_summary_reference_payload_encode_v2,
+    public_summary_reference_payload_decode_v2
+}
+
+fn _hex64(ch: text) -> text:
+    var out = ""
+    var i = 0
+    while i < 64:
+        out = out + ch
+        i = i + 1
+    out
+
+describe "cache_contract workaround retirement (native_cache_contract_mir_lowering_gaps_2026_10_11)":
+    it "sorts SemanticReadSetV1 entries via .copy() without mutating caller array":
+        val h1 = _hex64("a")
+        val h2 = _hex64("b")
+        val e1 = SemanticReadEntryV1(
+            effect_kind: SemanticEffectKindV1.EnvironmentFacade,
+            logical_name: "Z_VAR",
+            provider_id: "env",
+            provider_manifest_digest: h1,
+            value_digest: h1,
+            replay_policy: SemanticReplayPolicyV1.DeclaredReplayable
+        )
+        val e2 = SemanticReadEntryV1(
+            effect_kind: SemanticEffectKindV1.EnvironmentFacade,
+            logical_name: "A_VAR",
+            provider_id: "env",
+            provider_manifest_digest: h2,
+            value_digest: h2,
+            replay_policy: SemanticReplayPolicyV1.DeclaredReplayable
+        )
+        val rs1 = SemanticReadSetV1(entries: [e1, e2], uncacheable_reason: "")
+        val rs2 = SemanticReadSetV1(entries: [e2, e1], uncacheable_reason: "")
+        val b1 = canonical_semantic_read_set_payload_v1(rs1)
+        val b2 = canonical_semantic_read_set_payload_v1(rs2)
+        expect(b1.len() > 0).to_equal(true)
+        expect(b1 == b2).to_equal(true)
+        # Caller array order must remain unchanged (sort isolation via .copy())
+        expect(rs1.entries[0].logical_name).to_equal("Z_VAR")
+        expect(rs1.entries[1].logical_name).to_equal("A_VAR")
+
+    it "validates canonical cache envelope kind and schema with direct i64 equality":
+        val payload: [u8] = [1u8, 2u8, 3u8]
+        val env = canonical_cache_encode_envelope_v1(7, 1, payload)
+        expect(env.len() > 0).to_equal(true)
+        val ok_dec = canonical_cache_decode_envelope_v1(env)
+        expect(ok_dec.ok).to_equal(true)
+
+    it "encodes and decodes public_summary_v1 typed references canonically via for-in":
+        val h1 = _hex64("1")
+        val h2 = _hex64("2")
+        val h3 = _hex64("3")
+        val alpha = SummaryObjectReferenceV2(
+            stable_symbol_id: "pkg.alpha",
+            role: SummaryObjectReferenceRoleV2.ExecutableBody,
+            target: CacheObjectRefV1(kind: "portable_hir_object", schema: 2, object_digest: h1),
+            access_policy_digest: h1,
+            semantic_profile_digest: h1
+        )
+        val omega = SummaryObjectReferenceV2(
+            stable_symbol_id: "pkg.omega",
+            role: SummaryObjectReferenceRoleV2.ConstBody,
+            target: CacheObjectRefV1(kind: "portable_hir_object", schema: 2, object_digest: h2),
+            access_policy_digest: h2,
+            semantic_profile_digest: h2
+        )
+        val rev = SummaryObjectReferenceV2(
+            stable_symbol_id: "pkg.zeta",
+            role: SummaryObjectReferenceRoleV2.ReverseNavigation,
+            target: CacheObjectRefV1(kind: "reverse_reference_shard", schema: 1, object_digest: h3),
+            access_policy_digest: h3,
+            semantic_profile_digest: h3
+        )
+        val p1 = public_summary_reference_payload_encode_v2([omega, rev, alpha])
+        val p2 = public_summary_reference_payload_encode_v2([alpha, omega, rev])
+        expect(p1.len() > 0).to_equal(true)
+        expect(p1 == p2).to_equal(true)
+        val dec = public_summary_reference_payload_decode_v2(p1)
+        expect(dec.ok).to_equal(true)
+        expect(dec.references.len()).to_equal(3)
+        expect(dec.references[0].stable_symbol_id).to_equal("pkg.alpha")
+        expect(dec.references[1].stable_symbol_id).to_equal("pkg.omega")
+        expect(dec.references[2].stable_symbol_id).to_equal("pkg.zeta")

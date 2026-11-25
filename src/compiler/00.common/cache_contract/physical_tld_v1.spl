@@ -26,10 +26,6 @@ fn _copy_u8_range_tld_v1(values: [u8], start: i64, end: i64) -> [u8]:
         index = index + 1
     out
 
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=retain declared scalar equality owner for TLD payload bounds
-fn _i64_equal_tld_v1(left: i64, right: i64) -> bool:
-    left == right
-
 pub fn three_payload_contract_max_items_v1() -> i64: 1048576
 pub fn three_payload_contract_max_text_bytes_v1() -> i64: 16777216
 pub fn three_payload_contract_max_payload_bytes_v1() -> i64: 268435456
@@ -572,11 +568,7 @@ pub fn physical_tld_object_decode_bounded_v1(bytes: [u8], max_sections: i64,
     # identical and the caller's decode budget applies to their aggregate.
     var expected_offset: i64 = 0
     var retained_body_bytes: i64 = 0
-    # @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=retain array element owner and ordered indexed section traversal
-    val sections: [TldSectionRefV1] = header.sections
-    var section_index = 0
-    while section_index < sections.len():
-        val section = sections[section_index]
+    for section in header.sections:
         if section.encoding_profile != "raw-v1":
             return _physical_tld_object_failure_v1("tld_unsupported_encoding")
         if section.stored_bytes != section.decoded_bytes:
@@ -591,18 +583,13 @@ pub fn physical_tld_object_decode_bounded_v1(bytes: [u8], max_sections: i64,
             return _physical_tld_object_failure_v1("tld_section_bounds")
         retained_body_bytes = retained_body_bytes + section.decoded_bytes
         expected_offset = expected_offset + section.stored_bytes
-        section_index = section_index + 1
-    val header_payload_bytes: i64 = header.payload_bytes
-    if not _i64_equal_tld_v1(expected_offset, header_payload_bytes):
+    if expected_offset != header.payload_bytes:
         return _physical_tld_object_failure_v1("tld_noncontiguous_payload")
     var bodies: [[u8]] = []
-    section_index = 0
-    while section_index < sections.len():
-        val section = sections[section_index]
+    for section in header.sections:
         val start = decoded.header_bytes + section.offset
         val end = start + section.stored_bytes
         bodies.push(_copy_u8_range_tld_v1(bytes, start, end))
-        section_index = section_index + 1
     val value = PhysicalTldObjectV1(header: header, canonical_sections: bodies)
     if not physical_tld_object_valid_v1(value): return _physical_tld_object_failure_v1("tld_body_digest_mismatch")
     PhysicalTldObjectDecodeV1(ok: true, value: Some(value), error: "")
