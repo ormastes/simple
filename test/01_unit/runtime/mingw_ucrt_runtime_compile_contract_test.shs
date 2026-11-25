@@ -1,0 +1,269 @@
+#!/bin/sh
+# Windows llvm-mingw UCRT C runtime compile, link, and behavioral parity contract.
+#
+# Verifies:
+#   1. Static UCRT/MinGW parity contracts (all hosts):
+#      - runtime_thread.c uses a DWORD WINAPI trampoline in spl_thread_create
+#        (no incompatible void*(*)(void*) -> LPTHREAD_START_ROUTINE cast).
+#      - windows_raw_mapping.h suppresses UCRT invalid-parameter handler on
+#        both _MSC_VER and _UCRT.
+#      - runtime_crt_file.h, runtime_env_owned.h, runtime_win_long_path.h,
+#        runtime_memory_guard.h, and runtime_native.c enable UCRT parity paths
+#        under _UCRT as well as _MSC_VER.
+#   2. Real llvm-mingw UCRT compile + direct/archive link + runtime probes
+#      (when an llvm-mingw clang.exe is available on Windows):
+#      - Compiles all 45 core-c-bootstrap TUs + hosted_win32 with the exact
+#        runtime_compiler.spl defines and strict -Werror=... flags.
+#      - Compiles runtime_thread.c and runtime_process.c with -Wall -Wextra -Werror
+#        (plus i686-w64-windows-gnu -fsyntax-only for runtime_thread.c).
+#      - Direct .o link and llvm-ar .a archive link + run:
+#        runtime init/shutdown, string ABI, spl_thread_create/join trampoline,
+#        weak-symbol override (rt_process_run_bounded_bytes), absent/present
+#        optional worker_loop_entry, UCRT invalid-parameter non-leak in
+#        spl_windows_os_handle, and runtime_crt_file.h / runtime_env_owned.h
+#        UCRT fixtures.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+rt="$root/src/runtime"
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+# --- 1. Static source contracts (every host) ---
+grep -Fq 'spl_win_thread_trampoline' "$rt/runtime_thread.c" ||
+    fail 'runtime_thread.c lacks spl_win_thread_trampoline'
+if grep -Fq '(LPTHREAD_START_ROUTINE)entry_point' "$rt/runtime_thread.c"; then
+    fail 'runtime_thread.c still casts entry_point directly to LPTHREAD_START_ROUTINE'
+fi
+grep -Fq '#if defined(_MSC_VER) || defined(_UCRT)' "$rt/platform/windows_raw_mapping.h" ||
+    fail 'windows_raw_mapping.h lacks _UCRT invalid-parameter handler guard'
+grep -Fq '#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))' "$rt/runtime_crt_file.h" ||
+    fail 'runtime_crt_file.h lacks _UCRT share-mode parity guard'
+grep -Fq '#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))' "$rt/runtime_env_owned.h" ||
+    fail 'runtime_env_owned.h lacks _UCRT owned-env parity guard'
+grep -Fq '#if defined(_MSC_VER) || defined(_UCRT)' "$rt/platform/runtime_win_long_path.h" ||
+    fail 'runtime_win_long_path.h lacks _UCRT _fsopen fallback guard'
+grep -Fq '#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))' "$rt/runtime_memory_guard.h" ||
+    fail 'runtime_memory_guard.h lacks _UCRT _dupenv_s guard'
+grep -Fq '#if defined(_MSC_VER) || defined(_UCRT)' "$rt/runtime_native.c" ||
+    fail 'runtime_native.c lacks _UCRT _set_fmode guard'
+
+# --- 2. Locate llvm-mingw UCRT clang (Windows) ---
+find_llvm_mingw_cc() {
+    if [ -n "${LLVM_MINGW_CC:-}" ] && [ -x "$LLVM_MINGW_CC" ]; then
+        printf '%s\n' "$LLVM_MINGW_CC"
+        return 0
+    fi
+    if [ -n "${CC:-}" ] && command -v "$CC" >/dev/null 2>&1; then
+        if "$CC" --version 2>/dev/null | grep -qi 'clang' &&
+           "$CC" -dumpmachine 2>/dev/null | grep -qi 'windows-gnu\|mingw'; then
+            command -v "$CC"
+            return 0
+        fi
+    fi
+    for cand in \
+        /c/dev/tool/llvm-mingw-*-ucrt-x86_64/bin/clang.exe \
+        "${HOME:-}/.simple/toolchains"/llvm-mingw-*-ucrt-x86_64/bin/clang.exe; do
+        [ -x "$cand" ] && { printf '%s\n' "$cand"; return 0; }
+    done
+    return 1
+}
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) is_win=1 ;;
+    *) is_win=0 ;;
+esac
+
+if [ "$is_win" -ne 1 ]; then
+    echo "PASS — MinGW/UCRT static source contracts verified (non-Windows host; llvm-mingw execution skipped)"
+    exit 0
+fi
+
+MINGW_CC=$(find_llvm_mingw_cc) || {
+    echo "PASS — MinGW/UCRT static source contracts verified (no llvm-mingw clang found on host)"
+    exit 0
+}
+case "$(basename "$MINGW_CC")" in *gcc*|*g++*) fail "gcc is forbidden: $MINGW_CC" ;; esac
+MINGW_BIN=$(dirname "$MINGW_CC")
+MINGW_AR="$MINGW_BIN/llvm-ar.exe"
+[ -x "$MINGW_AR" ] || MINGW_AR=$(command -v llvm-ar) || fail "llvm-ar not found beside $MINGW_CC"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/objs" "$tmp/crtwork"
+
+CORE_C="runtime_native runtime_alloc_observer runtime_core_intrinsics runtime_file_view runtime_disk_headroom runtime_memory_headroom runtime_cache_host_authority_v1 runtime_framebuffer runtime_directx_core runtime_legacy_core runtime_core_io_exports runtime_core_host_services runtime_fork runtime_memtrack runtime_process runtime_process_tree runtime_memory runtime_process_owned runtime_coverage_core runtime_contracts runtime_font runtime_thread runtime_simd_utf8 runtime_simd_case runtime_simd_search runtime_simd_dispatch runtime_packed_span runtime_terminal runtime_prof_sample runtime_core_exports runtime_backend_plugin runtime_rocm runtime_renderdoc runtime_timestamp runtime_glfw runtime_sdl2 runtime_sdl3 runtime_audio runtime_image runtime_socket_nonblock counterpart_abi_runtime runtime_cranelift_bridge_stub platform/async_driver platform/async_windows runtime_dynload"
+
+CORE_DEFS="-DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1 -DSIMPLE_RUNTIME_NO_RUST_ARRAY_PACKING=1 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1"
+STRICT_W="-Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Werror=implicit-function-declaration -Werror=int-conversion -Werror=incompatible-pointer-types -Werror=cast-function-type-mismatch -Werror=return-type -Werror=format -Werror=sign-compare"
+LIBS="-lkernel32 -lntdll -luserenv -lws2_32 -lwinhttp -lmswsock -ldbghelp -ladvapi32 -lbcrypt -luser32 -lole32 -loleaut32 -lshell32 -lcrypt32 -lsecur32 -lgdi32 -lcomdlg32 -lwinmm -ld3d11 -ldxgi -ld3dcompiler -lsynchronization -lpthread -lm"
+
+# 2a. Compile all 45 core-c-bootstrap TUs + hosted_win32 with strict warning-as-error gates
+compiled=0
+for name in $CORE_C; do
+    base=$(printf '%s' "$name" | tr '/' '_')
+    # shellcheck disable=SC2086
+    "$MINGW_CC" --target=x86_64-w64-windows-gnu -c -O2 -ffunction-sections -fdata-sections -std=gnu11 \
+        $CORE_DEFS $STRICT_W -I "$rt" -I "$rt/platform" \
+        -o "$tmp/objs/${base}.o" "$rt/${name}.c" || fail "compile failed: ${name}.c"
+    compiled=$((compiled + 1))
+done
+# shellcheck disable=SC2086
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -c -O2 -ffunction-sections -fdata-sections -std=gnu11 \
+    $CORE_DEFS $STRICT_W -I "$rt" -I "$rt/platform" \
+    -o "$tmp/hosted_win32.o" "$rt/hosted_win32.c" || fail "compile failed: hosted_win32.c"
+compiled=$((compiled + 1))
+
+# 2b. Full -Wall -Wextra -Werror on runtime_thread.c (x86_64 + i686) and runtime_process.c
+# shellcheck disable=SC2086
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -fsyntax-only -O2 -std=gnu11 $CORE_DEFS \
+    -Wall -Wextra -Werror -I "$rt" -I "$rt/platform" "$rt/runtime_thread.c" ||
+    fail "runtime_thread.c failed x86_64 -Wall -Wextra -Werror"
+# shellcheck disable=SC2086
+"$MINGW_CC" --target=i686-w64-windows-gnu -fsyntax-only -O2 -std=gnu11 $CORE_DEFS \
+    -Wall -Wextra -Werror -I "$rt" -I "$rt/platform" "$rt/runtime_thread.c" ||
+    fail "runtime_thread.c failed i686 -Wall -Wextra -Werror"
+# shellcheck disable=SC2086
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -fsyntax-only -O2 -std=gnu11 $CORE_DEFS \
+    -Wall -Wextra -Werror -I "$rt" -I "$rt/platform" "$rt/runtime_process.c" ||
+    fail "runtime_process.c failed x86_64 -Wall -Wextra -Werror"
+
+# 2c. Direct .o link + llvm-ar archive link + runtime behavioral probe
+cat > "$tmp/probe_main.c" <<'EOF'
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "runtime_thread.h"
+#include "runtime_env_owned.h"
+#include "platform/windows_raw_mapping.h"
+
+extern void __simple_runtime_init(void);
+extern void __simple_runtime_shutdown(void);
+extern int64_t rt_string_new(const uint8_t* data, uint64_t len);
+extern int64_t rt_string_len(int64_t str);
+extern int64_t rt_string_byte_at(int64_t str, int64_t idx);
+extern int64_t rt_string_free(int64_t str);
+extern int64_t spl_thread_cpu_count(void);
+extern int64_t rt_process_run_bounded_bytes(const char*, uint64_t, void*, int64_t, int64_t);
+
+static int g_iph_leaked = 0;
+static void __cdecl test_caller_iph(
+    const wchar_t* e, const wchar_t* f, const wchar_t* fi, unsigned int l, uintptr_t r) {
+    (void)e; (void)f; (void)fi; (void)l; (void)r;
+    g_iph_leaked++;
+}
+
+static void* trampoline_worker(void* arg) {
+    int64_t* slot = (int64_t*)arg;
+    *slot = 0x55AA1234LL;
+    return (void*)(intptr_t)1;
+}
+
+int main(void) {
+    __simple_runtime_init();
+
+    int64_t s = rt_string_new((const uint8_t*)"mingw-ucrt", 10);
+    assert(rt_string_len(s) == 10);
+    assert(rt_string_byte_at(s, 6) == 'u');
+    assert(rt_string_free(s) == 1);
+    assert(spl_thread_cpu_count() >= 1);
+
+    /* Exercise spl_win_thread_trampoline via spl_thread_create/join */
+    int64_t slot = 0;
+    spl_thread_handle th = spl_thread_create(trampoline_worker, &slot);
+    assert(th != 0);
+    assert(spl_thread_join(th));
+    assert(slot == 0x55AA1234LL);
+
+    /* Verify spl_windows_os_handle suppresses UCRT invalid-parameter leakage */
+    _invalid_parameter_handler orig =
+        _set_thread_local_invalid_parameter_handler(test_caller_iph);
+    intptr_t bad = spl_windows_os_handle(99999);
+    _set_thread_local_invalid_parameter_handler(orig);
+    assert(bad == -1);
+    assert(g_iph_leaked == 0);
+
+    /* Verify UCRT owned-env helpers */
+    assert(_putenv_s("SIMPLE_MINGW_PARITY_PROBE", "1") == 0);
+    char* snap = NULL;
+    assert(rt_env_snapshot("SIMPLE_MINGW_PARITY_PROBE", &snap) == 0);
+    assert(snap && strcmp(snap, "1") == 0);
+    free(snap);
+    assert(rt_env_flag_value("SIMPLE_MINGW_PARITY_PROBE") == '1');
+    assert(rt_env_present("SIMPLE_MINGW_PARITY_PROBE") == 1);
+    assert(_putenv_s("SIMPLE_MINGW_PARITY_PROBE", "") == 0);
+    assert(rt_env_present("SIMPLE_MINGW_PARITY_PROBE") == 0);
+
+    /* Verify weak-override symbol resolved cleanly */
+    assert(rt_process_run_bounded_bytes("x", 1, NULL, 1, 1) == 424242);
+
+    __simple_runtime_shutdown();
+    return 0;
+}
+EOF
+
+cat > "$tmp/strong_override.c" <<'EOF'
+#include <stdint.h>
+int64_t rt_process_run_bounded_bytes(const char* cmd, uint64_t cmd_len, void* args,
+                                     int64_t timeout_ms, int64_t max_bytes) {
+    (void)cmd; (void)cmd_len; (void)args; (void)timeout_ms; (void)max_bytes;
+    return 424242;
+}
+EOF
+
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -c -O2 -std=gnu11 -Wall -Wextra -Werror \
+    -I "$rt" -I "$rt/platform" -o "$tmp/probe_main.o" "$tmp/probe_main.c" ||
+    fail "probe_main.c compile failed"
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -c -O2 -std=gnu11 -Wall -Wextra -Werror \
+    -o "$tmp/strong_override.o" "$tmp/strong_override.c" ||
+    fail "strong_override.c compile failed"
+
+# shellcheck disable=SC2086
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -O2 -Wl,--gc-sections \
+    "$tmp/probe_main.o" "$tmp/strong_override.o" "$tmp"/objs/*.o \
+    -o "$tmp/probe_direct.exe" $LIBS || fail "direct core-C .o link failed"
+"$tmp/probe_direct.exe" || fail "direct core-C runtime probe failed"
+
+"$MINGW_AR" rcs "$tmp/libcorec.a" "$tmp"/objs/*.o || fail "llvm-ar failed"
+# shellcheck disable=SC2086
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -O2 -Wl,--gc-sections \
+    "$tmp/probe_main.o" "$tmp/strong_override.o" "$tmp/libcorec.a" \
+    -o "$tmp/probe_archive.exe" $LIBS || fail "archive core-C .a link failed"
+"$tmp/probe_archive.exe" || fail "archive core-C runtime probe failed"
+
+# 2d. Optional weak worker_loop_entry (absent + present + empty)
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -c -O1 -ffunction-sections -fdata-sections -std=gnu11 \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+    -I "$rt" -I "$rt/platform" "$root/scripts/check/fixtures/runtime-thread-unused-pool-abi.c" \
+    -o "$tmp/unused_pool_abi.o" || fail "unused-pool-abi compile failed"
+for mode in absent present empty; do
+    def=""
+    [ "$mode" = present ] && def="-DTEST_WORKER_PROVIDER=1"
+    [ "$mode" = empty ] && def="-DTEST_EMPTY_WORKER_PROVIDER=1"
+    # shellcheck disable=SC2086
+    "$MINGW_CC" --target=x86_64-w64-windows-gnu -c -O1 -ffunction-sections -fdata-sections -std=gnu11 \
+        $def -I "$rt" -I "$rt/platform" "$root/scripts/check/fixtures/runtime-thread-optional-worker.c" \
+        -o "$tmp/opt_${mode}.o" || fail "optional-worker $mode compile failed"
+    "$MINGW_CC" --target=x86_64-w64-windows-gnu -Wl,--gc-sections \
+        "$tmp/opt_${mode}.o" "$tmp/objs/runtime_thread.o" "$tmp/objs/runtime_memtrack.o" "$tmp/unused_pool_abi.o" \
+        -o "$tmp/opt_${mode}.exe" -lkernel32 || fail "optional-worker $mode link failed"
+    "$tmp/opt_${mode}.exe" || fail "optional-worker $mode run failed"
+done
+
+# 2e. UCRT runtime_crt_file.h fixtures
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -std=gnu11 -O1 -Wall -Wextra -Werror \
+    -I "$rt" "$root/scripts/check/fixtures/runtime-msvc-crt-file.c" \
+    -o "$tmp/crt_file.exe" || fail "runtime-msvc-crt-file.c compile failed under llvm-mingw UCRT"
+"$MINGW_CC" --target=x86_64-w64-windows-gnu -std=gnu11 -O1 -Wall -Wextra -Werror \
+    -I "$rt" "$root/scripts/check/fixtures/runtime-msvc-crt-file-modes.c" \
+    -o "$tmp/crt_file_modes.exe" || fail "runtime-msvc-crt-file-modes.c compile failed under llvm-mingw UCRT"
+(cd "$tmp/crtwork" && "$tmp/crt_file.exe" && "$tmp/crt_file_modes.exe") ||
+    fail "runtime_crt_file.h UCRT fixture run failed"
+
+echo "PASS — llvm-mingw UCRT runtime parity ($compiled TUs compiled strict; direct + archive links, trampoline, UCRT IPH/CRT/env, weak overrides all green)"
+exit 0

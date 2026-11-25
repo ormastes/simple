@@ -193,7 +193,7 @@ static long rt_mem_guard_rate_value = 0;
 /* Cached SIMPLE_MEM_GUARD_RATE, read via getenv exactly once. 0 = disabled. */
 static long rt_mem_guard_rate(void) {
     if (rt_mem_guard_rate_cached < 0) {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
         char* v = NULL;
         size_t value_size = 0;
         if (_dupenv_s(&v, &value_size, "SIMPLE_MEM_GUARD_RATE") != 0) v = NULL;
@@ -206,7 +206,7 @@ static long rt_mem_guard_rate(void) {
             long n = strtol(v, &end, 10);
             if (end != v && n > 0) parsed = n;
         }
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || (defined(_WIN32) && defined(_UCRT))
         free(v);
 #endif
         rt_mem_guard_rate_value = parsed;
