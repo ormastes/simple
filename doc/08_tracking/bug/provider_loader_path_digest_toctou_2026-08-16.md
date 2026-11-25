@@ -29,6 +29,16 @@ callability, and query stability checks remain useful fail-closed checks.
 Do not paper over this with a second path hash after `dynlib_open`; that is
 diagnostic only and cannot undo already executed load-time code.
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Reconfirmed unchanged: `grep -rn "dynlib_open_handle\|dynlib_open_fd" src/os/`
+still returns no hits — the immutable-handle open API (unblock condition 1)
+remains unbuilt. This is OS-dynlib-loader design/API work spanning the owner
+boundary, not a bounded single-file fix, and the controlled replacement-race
+fixture (condition 4) would additionally need a native run this host cannot
+produce. Left OPEN, no code change attempted; the 2026-09-13 triage below
+stands.
+
 ## Triage 2026-09-13
 
 Reconfirmed via source inspection: `src/os/smf/provider_loader.spl` still
