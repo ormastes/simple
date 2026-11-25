@@ -1,0 +1,43 @@
+# @cover src/lib/nogc_sync_mut/sffi/fs.spl
+# Regression guard for cranelift_lsp_mcp_stdout_write_failed_2026-11-13 (ROOT-FIXED+STAGE2-GATED):
+# Verifies io_file_write_all bool return contract and Cranelift backend narrow-result plan.
+use std.spec.*
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{read_file_text_result}
+use std.nogc_sync_mut.sffi.fs.{io_file_open, io_file_write_all, io_file_close}
+use compiler.mir.mir.{MirType}
+use compiler.backend.cranelift_codegen_adapter.{cl_import_result_narrow_plan}
+
+fn lane7_fs_workspace() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    secure_temp_dir(parent, "wa-lane7-fs-bool").unwrap()
+
+describe "sffi fs C bool normalization and Cranelift narrow plan":
+    it "returns false on invalid file descriptors without crashing":
+        expect(io_file_write_all(-1, [65u8, 66u8])).to_equal(false)
+
+    it "writes empty and non-empty byte spans and returns true bool":
+        val root = lane7_fs_workspace()
+        val path = root + "/write_all.txt"
+        val fd = io_file_open(path, 1)
+        expect(fd >= 0).to_equal(true)
+        val empty_ok = io_file_write_all(fd, [])
+        val body_ok = io_file_write_all(fd, [72u8, 105u8, 33u8])
+        val closed = io_file_close(fd)
+        val content = read_file_text_result(path).unwrap()
+        val cleaned = dir_remove_all(root)
+        expect(empty_ok).to_equal(true)
+        expect(body_ok).to_equal(true)
+        expect(closed).to_equal(true)
+        expect(content).to_equal("Hi!")
+        expect(cleaned).to_equal(true)
+
+    it "keeps Cranelift imported Bool normalized as unsigned 1-byte":
+        val (narrow_ty, is_signed) = cl_import_result_narrow_plan(MirType.bool())
+        expect(narrow_ty).to_equal(1)
+        expect(is_signed).to_equal(false)
