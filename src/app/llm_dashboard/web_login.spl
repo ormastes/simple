@@ -47,14 +47,14 @@ fn _auth_revoke_all():
 
 fn _auth_string(value: SdnValue, key: text) -> text:
     val item = value.get(key)
-    if item == nil: return ""
+    if item.is_none(): return ""
     match item!:
         case SdnValue.String(content): content
         case _: ""
 
 fn _auth_integer(value: SdnValue, key: text, fallback: i64) -> i64:
     val item = value.get(key)
-    if item == nil: return fallback
+    if item.is_none(): return fallback
     match item!:
         case SdnValue.Int(number): number
         case _: -1
@@ -194,34 +194,34 @@ fn _auth_form(body: text) -> [text]:
 fn auth_authenticate_form(body: text) -> (DashboardAuthSession?, text, text):
     val config = _auth_config()
     val now = _auth_now()
-    if config.is_none() or now < 0: return (nil, "Authentication unavailable", "")
+    if config.is_none() or now < 0: return (None, "Authentication unavailable", "")
     _auth_prune(now)
     if _auth_attempt_start == 0 or now - _auth_attempt_start >= 60000:
         _auth_attempt_start = now
         _auth_attempts = 0
     # Bound expensive derivations even for wrong users and local hostile callers.
-    if _auth_attempts >= 8: return (nil, "Authentication temporarily unavailable", "")
+    if _auth_attempts >= 8: return (None, "Authentication temporarily unavailable", "")
     _auth_attempts = _auth_attempts + 1
     val form = _auth_form(body)
-    if form.len() != 2: return (nil, "Invalid credentials", "")
+    if form.len() != 2: return (None, "Invalid credentials", "")
     val derived = pbkdf2_sha256_bytes(crypto_text_to_bytes(form[1]), hex_to_bytes(config!.salt), config!.iterations, 32)
-    if derived.len() != 32: return (nil, "Authentication unavailable", "")
+    if derived.len() != 32: return (None, "Authentication unavailable", "")
     val verified = constant_time_compare(bytes_to_hex(derived), config!.verifier)
-    if not verified or form[0] != config!.username: return (nil, "Invalid credentials", form[0])
+    if not verified or form[0] != config!.username: return (None, "Invalid credentials", form[0])
     # Rotation/removal during derivation must not issue an old credential lease.
     val fresh = _auth_config()
-    if fresh.is_none() or fresh!.identity != config!.identity: return (nil, "Authentication unavailable", "")
+    if fresh.is_none() or fresh!.identity != config!.identity: return (None, "Authentication unavailable", "")
     val issued = _auth_now()
-    if issued < 0: return (nil, "Authentication unavailable", "")
+    if issued < 0: return (None, "Authentication unavailable", "")
     _auth_prune(issued)
-    if _auth_leases.len() >= fresh!.capacity: return (nil, "Authentication temporarily unavailable", "")
+    if _auth_leases.len() >= fresh!.capacity: return (None, "Authentication temporarily unavailable", "")
     val token = random_hex(32)
-    if token.is_none() or not entropy_hex_valid_for(token!, 32): return (nil, "Authentication unavailable", "")
+    if token.is_none() or not entropy_hex_valid_for(token!, 32): return (None, "Authentication unavailable", "")
     val token_hash = _auth_token_hash(token!)
-    if token_hash.len() != 64: return (nil, "Authentication unavailable", "")
+    if token_hash.len() != 64: return (None, "Authentication unavailable", "")
     for lease in _auth_leases:
         if constant_time_compare(lease.token_hash, token_hash):
-            return (nil, "Authentication unavailable", "")
+            return (None, "Authentication unavailable", "")
     val session = DashboardAuthSession.new(token!, fresh!.username)
     # Only a one-way digest enters the registry. Comparison is best effort;
     # no compiler/runtime constant-time guarantee is asserted.
@@ -256,7 +256,7 @@ fn auth_session_lookup(session_id: text) -> DashboardAuthSession?:
     for lease in _auth_leases:
         if constant_time_compare(lease.token_hash, token_hash):
             return Some(DashboardAuthSession.new(session_id, lease.username))
-    nil
+    None
 
 fn auth_delete_session(session_id: text):
     if not entropy_hex_valid_for(session_id, 32): return
