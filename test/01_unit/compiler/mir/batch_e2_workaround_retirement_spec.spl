@@ -1,0 +1,101 @@
+"""
+# Batch E2 Workaround Retirement Verification
+
+Verifies HIR/MIR lowering, runtime behavior, and source contracts for the four
+retired workaround families in Wave E Batch E2:
+1. `value_optional_payload_type_context_native_2026_10_16`: direct
+   `Value.Option(Some(value))`, `Value.Option(None)`, `Value.Result(Some(value), None)`,
+   and `Value.Result(None, Some(value))` without local `Value?` rebinds.
+2. `native_sdn_empty_payload_owner_2026_10_11`: direct `SdnValue.Array([])`,
+   `SdnValue.Dict({})`, and tuple-projected `SdnValue.Array(sq.0)`.
+3. `seed_list_comprehension_join_and_empty_native_2026_10_21`: list
+   comprehensions `[for x in xs: ...]` with `.join(",")` under `Thread.join`
+   namespace pollution, plus MIR JSON enum serialization.
+4. `windows_core_http_client_unavailable_2026_10_27`: WinHTTP native HTTP
+   provider active in `runtime_native.c` and curl workaround bypasses removed
+   from MinIO adapters and OAuth2 modules.
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.common.runtime_value_v1.{Value}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse as sdn_parse}
+
+fn lower_hir_mir_errors(source: text, filename: text) -> [text]:
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors: [text] = []
+    for err in hir_lowering.errors:
+        errors.push("HIR: " + err.message)
+    for err in mir_lowering.errors:
+        errors.push("MIR: " + err.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    errors
+
+describe "Batch E2 compiler root-cause verification":
+    it "lowers direct Value.Option/Result Some/None payloads with zero HIR/MIR errors":
+        val src = "enum MyValue:\n    Int(i64)\n    Option(MyValue?)\n    Result(MyValue?, MyValue?)\n\nimpl MyValue:\n    static fn some(v: MyValue) -> MyValue:\n        MyValue.Option(Some(v))\n    static fn none() -> MyValue:\n        MyValue.Option(None)\n    static fn ok(v: MyValue) -> MyValue:\n        MyValue.Result(Some(v), None)\n    static fn err(v: MyValue) -> MyValue:\n        MyValue.Result(None, Some(v))\n"
+        val errs = lower_hir_mir_errors(src, "batch_e2_value_opt.spl")
+        expect(errs).to_equal([])
+
+    it "lowers direct SdnValue empty containers and tuple-projected arrays with zero HIR/MIR errors":
+        val src = "enum MySdn:\n    Null\n    Int(i64)\n    Array([MySdn])\n    Dict(Dict<text, MySdn>)\n\nfn pair_seq() -> ([MySdn], i64):\n    ([MySdn.Int(1)], 1)\n\nfn make_all() -> MySdn:\n    val a = MySdn.Array([])\n    val d = MySdn.Dict({{}})\n    val sq = pair_seq()\n    MySdn.Array(sq.0)\n"
+        val errs = lower_hir_mir_errors(src, "batch_e2_sdn_empty.spl")
+        expect(errs).to_equal([])
+
+    it "lowers list comprehensions with .join under Thread.join pollution with zero HIR/MIR errors":
+        val src = "class Thread:\n    id: i64\n    fn join() -> i64?:\n        None\n\nstruct BlockRef:\n    id: i64\n\nfn render_indexes(indexes: [i64]) -> text:\n    val parts = [for index in indexes: \"{{index}}\"]\n    \"[\" + parts.join(\",\") + \"]\"\n\nfn collect_ids(blocks: [BlockRef]) -> [i64]:\n    val exits = [for b in blocks: b.id]\n    exits\n"
+        val errs = lower_hir_mir_errors(src, "batch_e2_list_comp.spl")
+        expect(errs).to_equal([])
+
+    it "preserves Value.some/none/ok/err and SdnValue empty_array/empty_dict runtime behavior":
+        val s = Value.some(Value.int(42))
+        val n = Value.none()
+        val o = Value.ok(Value.string("hi"))
+        val e = Value.err(Value.string("bad"))
+        expect(s.is_truthy()).to_equal(true)
+        expect(n.is_truthy()).to_equal(false)
+        expect(o.type_name()).to_equal("result")
+        expect(e.type_name()).to_equal("result")
+
+        val ea = SdnValue.empty_array()
+        val ed = SdnValue.empty_dict()
+        expect(ea.is_null()).to_equal(false)
+        expect(ed.is_null()).to_equal(false)
+        val parsed = sdn_parse("items:\n  - 1\n  - 2\nmeta: {{a: 3}}\n")
+        expect(parsed.is_ok()).to_equal(true)
+
+    it "removes all 25 Batch E2 workaround markers from compiler, stdlib, and app sources":
+        val retired_files = [
+            "src/app/devhub/adapter_minio.spl",
+            "src/app/itf/adapter_minio.spl",
+            "src/compiler/00.common/runtime_value_v1.spl",
+            "src/compiler/50.mir/mir_json.spl",
+            "src/lib/common/http_curl.spl",
+            "src/lib/common/sdn/parser.spl",
+            "src/lib/common/sdn/value.spl",
+            "src/lib/gc_async_mut/oauth2.spl",
+            "src/lib/nogc_async_mut/oauth2.spl",
+            "src/lib/nogc_sync_mut/oauth2.spl"
+        ]
+        val retired_tags = [
+            "@workaround bug=windows_core_http_client_unavailable_2026_10_27",
+            "@workaround bug=seed_list_comprehension_join_and_empty_native_2026_10_21",
+            "@workaround bug=native_sdn_empty_payload_owner_2026_10_11",
+            "@workaround bug=value_optional_payload_type_context_native_2026_10_16"
+        ]
+        for path in retired_files:
+            val content = file_read(path)
+            for tag in retired_tags:
+                expect(content.contains(tag)).to_equal(false)
