@@ -1,6 +1,29 @@
 # Prevention-mock deferred arming is impossible under this interpreter; `std.spec.*` also can't reach it
 ## Open 2026-09-16 — needs owner triage
 
+> **Triage 2026-11-25 (release/1.0.0):** the "no resolution evidence found in
+> the body" line above is stale — the 2026-11-04 re-verify sections below ARE
+> the resolution evidence. Current state by code inspection at `47d6c5eddd5`:
+> Defects 1 and 2 are GONE (class-ref interpreter default; 2026-11-04 probe
+> table below), and the directory-wide prevention policy that this record said
+> was unreachable has LANDED — `src/lib/nogc_sync_mut/spec.spl`
+> (`_dir_prevention_before`/`_dir_prevention_after` before/after_each pair,
+> `mock_auto_registry`, `SIMPLE_SPEC_DIR_PREVENTION` / `_prevention.sdn`
+> loading; see the "Directory-wide prevention policy" section ~line 1386).
+> `prevent`/`prevent_at_most`/`prevent_file` deliberately keep immediate-check
+> semantics; converting `prevent_file` to true auto-checked file scope is an
+> API-semantics owner decision, not a bug fix. Defect 3 (wildcard
+> `use std.spec.*` not exposing every pub fn) was not re-verified here:
+> interpreter re-verification on this host is environment-blocked — the
+> tracked `bin/simple.exe` (seed refreshed 2026-11-17, `41dbae93225`) predates
+> the seed's `@representation_boundary` directive-attribute fix
+> (`14a34acbe1e`, 2026-11-25), so loading today's annotated std-lib files
+> fails with `unknown decorator '@representation_boundary'` before any probe
+> can run. Defect 3 remains an open compiler import-resolution question;
+> everything else in this record is either resolved or an owner decision.
+> Status header left as-is for the owner; treat this note as the current
+> triage verdict.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
