@@ -19,7 +19,9 @@ use std.io_runtime.{file_read}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.{SymbolTable, SymbolKind}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceCallable, ModuleSurfaceImpl}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
@@ -67,3 +69,42 @@ describe "surface call-origin rows outlive the surface release":
             i = i + 1
         expect(lowering.provider_callable_call_origin_v1(str_len)).to_equal(MirCallOrigin.Source)
         expect(lowering.provider_callable_call_origin_v1(rt_len)).to_equal(MirCallOrigin.Foreign)
+
+    it "captures owner-qualified impl methods and static constructors from provider surfaces":
+        var provider = ModuleSurface.empty("lib.common.build_manager.codec")
+        val ret_ty = Type(kind: TypeKind.Named("BuilderWireReaderV1", []), span: Span.empty())
+        val str_ty = Type(kind: TypeKind.Named("text", []), span: Span.empty())
+        val create_fn = ModuleSurfaceCallable(name: "create", type_params: [], params: [],
+            has_return_type: true, return_type: ret_ty, return_type_name: "BuilderWireReaderV1",
+            return_array_element_name: "", visibility: Visibility.Public, is_async: false,
+            is_static: true, is_public: true, is_method: false, is_mutable: false,
+            is_const: false, is_kernel: false, is_extern: false, span: Span.empty())
+        val scalar_fn = ModuleSurfaceCallable(name: "scalar", type_params: [], params: [],
+            has_return_type: true, return_type: str_ty, return_type_name: "text",
+            return_array_element_name: "", visibility: Visibility.Public, is_async: false,
+            is_static: false, is_public: true, is_method: true, is_mutable: true,
+            is_const: false, is_kernel: false, is_extern: false, span: Span.empty())
+        val reader_impl = ModuleSurfaceImpl(type_: ret_ty, has_trait_: false, trait_: ret_ty,
+            methods: {"create": create_fn, "scalar": scalar_fn})
+        provider.impls = [reader_impl]
+        val surfaces = ModuleSurfacesByName(surfaces: [provider],
+            index_by_name: {"lib.common.build_manager.codec": 0},
+            ordered_names: ["lib.common.build_manager.codec"], ordered_indices: [0],
+            generation: 1, frozen: true)
+        val rows = surface_call_origin_rows_capture_v1(surfaces)
+        expect(rows.names.contains("BuilderWireReaderV1.create")).to_equal(true)
+        expect(rows.names.contains("BuilderWireReaderV1.scalar")).to_equal(true)
+        var symbols = SymbolTable.new()
+        val create_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::create",
+            SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        val scalar_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::scalar",
+            SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "lib.common.build_manager.group_process_protocol"
+        var i = 0
+        while i < rows.names.len():
+            val _n = lowering.register_surface_callable_origins_v1(rows.owners[i], [rows.names[i]],
+                [rows.externs[i]], [rows.methods[i]], [rows.statics[i]])
+            i = i + 1
+        expect(lowering.provider_callable_call_origin_v1(create_sym)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(scalar_sym)).to_equal(MirCallOrigin.Source)

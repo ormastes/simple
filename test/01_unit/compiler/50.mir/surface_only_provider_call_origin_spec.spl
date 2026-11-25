@@ -76,6 +76,28 @@ describe "surface-only provider call origin":
         expect(lowering.callable_text_value_abi.has(mir_provider_callable_key("pubonly.core", "len"))).to_equal(false)
         expect(lowering.callable_text_value_abi.has(mir_provider_callable_key("pubonly.core", "make"))).to_equal(false)
 
+    it "resolves owner-qualified surface impl methods and static constructors":
+        step("group_process_protocol calls BuilderWireReaderV1.create/scalar/complete_error from codec's surface")
+        var symbols = SymbolTable.new()
+        val create_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::create",
+            SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        val scalar_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::scalar",
+            SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        val complete_sym = symbols.define("lib.common.build_manager.codec.BuilderWireReaderV1::complete_error",
+            SymbolKind.Method, nil, Span.empty(), Visibility.Public, false, Some("lib.common.build_manager.codec"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "lib.common.build_manager.group_process_protocol"
+        var existing = lowering.callable_text_value_abi
+        existing[mir_provider_callable_key("lib.common.build_manager.codec", "BuilderWireReaderV1.complete_error")] = false
+        lowering.callable_text_value_abi = existing
+        val added = lowering.register_surface_callable_origins_v1("lib.common.build_manager.codec",
+            ["BuilderWireReaderV1.create", "BuilderWireReaderV1.scalar", "BuilderWireReaderV1.complete_error"],
+            [false, false, false], [false, true, true], [true, false, false])
+        expect(added).to_equal(2)
+        expect(lowering.provider_callable_call_origin_v1(create_sym)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(scalar_sym)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(complete_sym)).to_equal(MirCallOrigin.Foreign)
+
     it "an empty owner registers nothing":
         var lowering = MirLowering.new(SymbolTable.new())
         expect(lowering.register_surface_callable_origins_v1("", ["f"], [false], [false], [false])).to_equal(0)
