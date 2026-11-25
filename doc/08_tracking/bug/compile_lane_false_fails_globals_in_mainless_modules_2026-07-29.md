@@ -1,10 +1,10 @@
 # `bin/simple compile` false-fails any main-less module with a module-level global
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — both truth-table repros compile clean on the pinned seed
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open. **Severity:** verification-lane defect — `run`/`native-build`
+**Status:** RESOLVED (verified 2026-11-25, see bottom section). **Severity:** verification-lane defect — `run`/`native-build`
 handle the same modules correctly, but single-file compile (the recommended
 syntax/semantic gate) false-fails a large class of library modules.
 
@@ -76,3 +76,37 @@ forcing entry-script synthesis. The written-global `Undefined` should be
 impossible once globals register; the SMF emission error should only remain
 for genuine top-level executable statements.
 
+
+## Verification 2026-11-25 — CLOSED (fix landed)
+
+Ran the doc's own truth-table repros on worktree `work/p2w1-aa-20261125`
+(release/1.0.0 HEAD `38265c7f249`) with the pinned tracked seed
+`bin/simple.exe` (38,403,072 bytes, Rust seed v1.0.0-rc.1):
+
+```
+var _n: i64 = 0
+fn get() -> i64:
+    _n
+```
+→ `Compiled ... -> g.smf` (previously: `SMF emission failed: the entry script
+could not be lowered to a real main entry point`)
+
+```
+var _n: i64 = 0
+fn add():
+    _n = _n + 1
+```
+→ `Compiled ... -> g2.smf` (previously: `Undefined("undefined identifier: _n")`)
+
+Both previously-failing shapes now compile clean, matching the fix commit
+`333db7d975f fix(seed): compile main-less library entries to real SMF; keep
+alias markers top-level`. The original defect — false-fail keyed on absence of
+`fn main()` — no longer reproduces.
+
+Residual, different defect (not this bug): compiling the real module
+`src/lib/nogc_sync_mut/io/font_sffi.spl` no longer produces the reported
+`Undefined("undefined identifier: _signal_handlers")`; it now fails later, in
+codegen, with `Failed to preserve SMF imports/relocations from object code:
+... relocation source section .rdata$subsection is not executable code`.
+That is a distinct SMF/object-relocation issue on the Windows seed, not the
+main-less-module false-fail this entry tracks.
