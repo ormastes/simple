@@ -1,0 +1,190 @@
+# @req BUG-TOKENS-LAYOUT-001
+# Verifies canonical BugTokenReading and related receipt types under
+# std.common.database.bug_tokens share a single nominal layout with
+# std.nogc_sync_mut.database.bug without duplicating enum definitions.
+
+use std.spec.*
+use std.env.{env_get}
+use std.io.file_ops.{secure_temp_dir}
+use std.io.dir_ops.{dir_remove_all}
+use std.common.database.bug_tokens.{
+    BugTokenCategory,
+    BugTokenCount,
+    BugTokenReading,
+    BugTokenProvider,
+    BugTokenSource,
+    BugKnowledgeLink,
+    BugTokenUsage,
+    bug_token_usage_columns,
+    bug_token_category_to_string,
+    bug_token_category_for_path,
+    bug_token_reading_text,
+    bug_token_total,
+    bug_token_reading_known
+}
+use std.nogc_sync_mut.database.bug.{
+    Bug,
+    BugSeverity,
+    BugStatus,
+    create_bug_database,
+    load_bug_database,
+    BugTokenCategory as SyncBugTokenCategory,
+    BugTokenCount as SyncBugTokenCount,
+    BugTokenReading as SyncBugTokenReading,
+    BugTokenProvider as SyncBugTokenProvider,
+    BugTokenSource as SyncBugTokenSource,
+    BugKnowledgeLink as SyncBugKnowledgeLink,
+    BugTokenUsage as SyncBugTokenUsage,
+    bug_token_total as sync_bug_token_total,
+    bug_token_reading_known as sync_bug_token_reading_known
+}
+
+fn make_closed_library_bug(id: text) -> Bug:
+    Bug(
+        id: id,
+        severity: BugSeverity.P2,
+        status: BugStatus.Closed,
+        title: "Token receipt regression",
+        description: ["shared token type check"],
+        file: "src/lib/common/database/bug_tokens.spl",
+        line: 1,
+        reproducible_by: "test/01_unit/lib/database/bug_tokens_shared_layout_spec.spl",
+        fix_strategy: ["canonical common module"],
+        investigation_log: ["verified shared layout"],
+        created_at: "2026-11-25",
+        updated_at: "2026-11-25",
+        valid: true
+    )
+
+fn tokens_sync_workspace() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    secure_temp_dir(parent, "bug-tokens-sync").unwrap()
+
+describe "Shared BugTokenReading layout across common and nogc_sync_mut":
+    it "maps paths, columns, reading text, and totals consistently from common.database.bug_tokens":
+        step("Inspect token usage column schema and path cohorts")
+        val cols = bug_token_usage_columns()
+        expect(cols.len()).to_equal(11)
+        expect(cols[0]).to_equal("bug_id")
+        expect(cols[7]).to_equal("total_tokens")
+        expect(cols[10]).to_equal("recorded_at")
+
+        expect(bug_token_category_to_string(bug_token_category_for_path("src/compiler/foo.spl"))).to_equal("compiler")
+        expect(bug_token_category_to_string(bug_token_category_for_path("src/runtime/bar.c"))).to_equal("runtime")
+        expect(bug_token_category_to_string(bug_token_category_for_path("src/lib/baz.spl"))).to_equal("library")
+        expect(bug_token_category_to_string(bug_token_category_for_path("src/app/cli.spl"))).to_equal("application")
+        expect(bug_token_category_to_string(bug_token_category_for_path("src/os/init.spl"))).to_equal("os")
+        expect(bug_token_category_to_string(bug_token_category_for_path("test/01_unit/a.spl"))).to_equal("test")
+        expect(bug_token_category_to_string(bug_token_category_for_path("doc/notes.md"))).to_equal("other")
+
+        expect(bug_token_reading_known(BugTokenReading.Unavailable)).to_equal(false)
+        expect(bug_token_reading_known(BugTokenReading.Count(BugTokenCount(value: 0)))).to_equal(true)
+        expect(bug_token_reading_text(BugTokenReading.Unavailable)).to_equal("unavailable")
+        expect(bug_token_reading_text(BugTokenReading.Count(BugTokenCount(value: 42)))).to_equal("42")
+
+        val sum_res = bug_token_total([
+            BugTokenReading.Count(BugTokenCount(value: 10)),
+            BugTokenReading.Count(BugTokenCount(value: 20)),
+            BugTokenReading.Count(BugTokenCount(value: 30))
+        ])
+        match sum_res:
+            case Ok(reading): expect(bug_token_reading_text(reading)).to_equal("60")
+            case Err(msg): expect(msg).to_equal("")
+
+        val mixed_res = bug_token_total([
+            BugTokenReading.Count(BugTokenCount(value: 10)),
+            BugTokenReading.Unavailable
+        ])
+        match mixed_res:
+            case Ok(reading): expect(bug_token_reading_known(reading)).to_equal(false)
+            case Err(msg): expect(msg).to_equal("")
+
+        val overflow_res = bug_token_total([
+            BugTokenReading.Count(BugTokenCount(value: 9223372036854775807)),
+            BugTokenReading.Count(BugTokenCount(value: 1))
+        ])
+        match overflow_res:
+            case Ok(_): expect("overflow should fail").to_equal("")
+            case Err(msg): expect(msg).to_equal("token total overflow")
+
+    it "passes common BugTokenReading and BugTokenUsage through sync BugDatabase without type divergence":
+        step("Create temporary sync BugDatabase and verify shared token usage behavior")
+        val root = tokens_sync_workspace()
+        val db_path = root + "/bug_db.sdn"
+        var db = create_bug_database(db_path)
+        expect(db.add_bug(make_closed_library_bug("tok_sync_1"))).to_equal(true)
+        expect(db.add_bug(make_closed_library_bug("tok_sync_2"))).to_equal(true)
+
+        val partial_no_link = SyncBugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-a"),
+            input: BugTokenReading.Count(BugTokenCount(value: 50)),
+            output: SyncBugTokenReading.Unavailable,
+            cache_read: BugTokenReading.Count(BugTokenCount(value: 10)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 5)),
+            source: BugTokenSource(value: "unit-test"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_sync_1", partial_no_link)).to_equal(false)
+
+        val overflow_usage = BugTokenUsage(
+            category: SyncBugTokenCategory.Library,
+            provider: SyncBugTokenProvider(value: "provider-a"),
+            input: BugTokenReading.Count(BugTokenCount(value: 9223372036854775807)),
+            output: BugTokenReading.Count(BugTokenCount(value: 1)),
+            cache_read: BugTokenReading.Count(BugTokenCount(value: 0)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 0)),
+            source: SyncBugTokenSource(value: "unit-test"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_sync_1", overflow_usage)).to_equal(false)
+
+        val partial_with_link = BugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-a"),
+            input: BugTokenReading.Count(BugTokenCount(value: 50)),
+            output: BugTokenReading.Unavailable,
+            cache_read: BugTokenReading.Count(BugTokenCount(value: 10)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 5)),
+            source: BugTokenSource(value: "unit-test"),
+            knowledge: Some(SyncBugKnowledgeLink(path: "doc/08_tracking/bug/partial.md")),
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_sync_2", partial_with_link)).to_equal(true)
+
+        val full_usage = BugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-a"),
+            input: BugTokenReading.Count(BugTokenCount(value: 100)),
+            output: BugTokenReading.Count(BugTokenCount(value: 20)),
+            cache_read: SyncBugTokenReading.Count(SyncBugTokenCount(value: 5)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 5)),
+            source: BugTokenSource(value: "unit-test"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(sync_bug_token_reading_known(full_usage.input)).to_equal(true)
+        match sync_bug_token_total([full_usage.input, full_usage.output, full_usage.cache_read, full_usage.cache_create]):
+            case Ok(r): expect(bug_token_reading_text(r)).to_equal("130")
+            case Err(msg): expect(msg).to_equal("")
+        expect(db.add_token_usage("tok_sync_1", full_usage)).to_equal(true)
+        expect(db.save()).to_equal(true)
+
+        val reloaded_opt = load_bug_database(db_path)
+        expect(reloaded_opt.?).to_equal(true)
+        match reloaded_opt:
+            case Some(reloaded):
+                val avg_res = reloaded.comparable_token_average(BugTokenCategory.Library, "tok_sync_other")
+                match avg_res:
+                    case Ok(avg):
+                        expect(bug_token_reading_text(avg)).to_equal("130")
+                    case Err(msg):
+                        expect(msg).to_equal("")
+            case None:
+                pass
+        dir_remove_all(root)

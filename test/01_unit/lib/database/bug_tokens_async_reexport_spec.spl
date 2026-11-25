@@ -1,0 +1,154 @@
+# @req BUG-TOKENS-LAYOUT-002
+# Verifies std.nogc_async_mut.database.bug re-exports the canonical
+# std.common.database.bug_tokens types and helpers without duplicating
+# BugTokenReading or breaking add_token_usage four-scalar evaluation.
+
+use std.spec.*
+use std.common.database.bug_tokens.{
+    BugTokenCategory as CommonBugTokenCategory,
+    BugTokenCount as CommonBugTokenCount,
+    BugTokenReading as CommonBugTokenReading,
+    BugTokenUsage as CommonBugTokenUsage
+}
+use std.nogc_async_mut.database.core.{SdnDatabase, SdnTable}
+use std.nogc_async_mut.database.bug.{
+    Bug,
+    BugSeverity,
+    BugStatus,
+    BugDatabase,
+    bug_database_from_sdn,
+    BugTokenCategory,
+    BugTokenCount,
+    BugTokenReading,
+    BugTokenProvider,
+    BugTokenSource,
+    BugKnowledgeLink,
+    BugTokenUsage,
+    bug_token_usage_columns,
+    bug_token_category_to_string,
+    bug_token_category_for_path,
+    bug_token_reading_text,
+    bug_token_total,
+    bug_token_reading_known
+}
+
+fn in_memory_async_bug_db() -> BugDatabase:
+    val raw = SdnDatabase.new("unused-in-memory-async-bugdb")
+    val bug_columns = [
+        "id", "severity", "status", "title", "file",
+        "line", "reproducible_by", "created_at", "updated_at", "valid"
+    ]
+    raw.set_table("bugs_active", SdnTable.new("bugs_active", bug_columns))
+    raw.set_table("bugs", SdnTable.new("bugs", bug_columns))
+    raw.set_table("bug_descriptions", SdnTable.new("bug_descriptions", ["bug_id", "line_num", "content"]))
+    raw.set_table("bug_investigation_logs", SdnTable.new("bug_investigation_logs", ["bug_id", "line_num", "content"]))
+    raw.set_table("bug_fix_strategies", SdnTable.new("bug_fix_strategies", ["bug_id", "line_num", "content"]))
+    bug_database_from_sdn(raw)
+
+fn make_async_closed_bug(id: text) -> Bug:
+    Bug(
+        id: id,
+        severity: BugSeverity.P2,
+        status: BugStatus.Closed,
+        title: "Async token receipt check",
+        description: ["canonical layout verification"],
+        file: "src/lib/nogc_async_mut/database/bug.spl",
+        line: 1,
+        reproducible_by: "test/01_unit/lib/database/bug_tokens_async_reexport_spec.spl",
+        fix_strategy: ["re-export common bug_tokens"],
+        investigation_log: ["single BugTokenReading definition"],
+        created_at: "2026-11-25",
+        updated_at: "2026-11-25",
+        valid: true
+    )
+
+describe "Async BugDatabase BugTokenReading re-exports and scalar receipt checks":
+    it "shares identical nominal BugTokenReading and BugTokenUsage types with common.database.bug_tokens":
+        step("Verify all re-exported helpers and pass common BugTokenUsage to async BugDatabase")
+        expect(bug_token_usage_columns().len()).to_equal(11)
+        expect(bug_token_category_to_string(bug_token_category_for_path("src/lib/a.spl"))).to_equal("library")
+        expect(bug_token_reading_known(CommonBugTokenReading.Unavailable)).to_equal(false)
+        expect(bug_token_reading_text(CommonBugTokenReading.Count(CommonBugTokenCount(value: 7)))).to_equal("7")
+
+        var db = in_memory_async_bug_db()
+        expect(db.add_bug(make_async_closed_bug("tok_async_1"))).to_equal(true)
+
+        val common_usage = CommonBugTokenUsage(
+            category: CommonBugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-async"),
+            input: CommonBugTokenReading.Count(CommonBugTokenCount(value: 40)),
+            output: BugTokenReading.Count(BugTokenCount(value: 10)),
+            cache_read: CommonBugTokenReading.Count(CommonBugTokenCount(value: 30)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 20)),
+            source: BugTokenSource(value: "async-spec"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_async_1", common_usage)).to_equal(true)
+
+        match bug_token_total([common_usage.input, common_usage.output, common_usage.cache_read, common_usage.cache_create]):
+            case Ok(total): expect(bug_token_reading_text(total)).to_equal("100")
+            case Err(msg): expect(msg).to_equal("")
+
+    it "evaluates all four scalar token readings and computes comparable_token_average on async BugDatabase":
+        step("Check all-known, all-unavailable, and partial receipts across all 4 reading positions")
+        var db = in_memory_async_bug_db()
+        expect(db.add_bug(make_async_closed_bug("tok_async_a"))).to_equal(true)
+        expect(db.add_bug(make_async_closed_bug("tok_async_b"))).to_equal(true)
+        expect(db.add_bug(make_async_closed_bug("tok_async_c"))).to_equal(true)
+
+        val missing_tail = BugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-async"),
+            input: BugTokenReading.Count(BugTokenCount(value: 10)),
+            output: BugTokenReading.Count(BugTokenCount(value: 20)),
+            cache_read: BugTokenReading.Count(BugTokenCount(value: 30)),
+            cache_create: BugTokenReading.Unavailable,
+            source: BugTokenSource(value: "async-spec"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_async_a", missing_tail)).to_equal(false)
+
+        val missing_head_with_link = BugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-async"),
+            input: BugTokenReading.Unavailable,
+            output: BugTokenReading.Count(BugTokenCount(value: 20)),
+            cache_read: BugTokenReading.Count(BugTokenCount(value: 30)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 40)),
+            source: BugTokenSource(value: "async-spec"),
+            knowledge: Some(BugKnowledgeLink(path: "doc/08_tracking/bug/async_partial.md")),
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_async_b", missing_head_with_link)).to_equal(true)
+
+        val all_unavailable = BugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-async"),
+            input: BugTokenReading.Unavailable,
+            output: BugTokenReading.Unavailable,
+            cache_read: BugTokenReading.Unavailable,
+            cache_create: BugTokenReading.Unavailable,
+            source: BugTokenSource(value: "async-spec"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_async_c", all_unavailable)).to_equal(true)
+
+        val all_known = BugTokenUsage(
+            category: BugTokenCategory.Library,
+            provider: BugTokenProvider(value: "provider-async"),
+            input: BugTokenReading.Count(BugTokenCount(value: 40)),
+            output: BugTokenReading.Count(BugTokenCount(value: 10)),
+            cache_read: BugTokenReading.Count(BugTokenCount(value: 30)),
+            cache_create: BugTokenReading.Count(BugTokenCount(value: 20)),
+            source: BugTokenSource(value: "async-spec"),
+            knowledge: None,
+            recorded_at: "2026-11-25"
+        )
+        expect(db.add_token_usage("tok_async_a", all_known)).to_equal(true)
+
+        match db.comparable_token_average(BugTokenCategory.Library, "tok_async_other"):
+            case Ok(avg): expect(bug_token_reading_text(avg)).to_equal("100")
+            case Err(msg): expect(msg).to_equal("")
