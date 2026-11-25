@@ -1,6 +1,6 @@
 # v1 credential records are never rewritten: no config writer owns the upgrade
 
-Status: OPEN (P3)
+Status: RESOLVED 2026-11-25 — upgrade-on-write owner landed (see dated note at bottom)
 Update 2026-11-06: persist spec 11/12 -> 12/12; spec declared unregistered extern rt_ensure_dir, replaced by std.io_runtime dir_create_all.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
@@ -91,3 +91,33 @@ parser has no matching writer that preserves untouched fields/formatting)
 plus the atomic-write primitive and load-time wiring described above — a real
 feature addition past a shard triage budget, not a local one-line fix. No
 change made. Leaving OPEN as filed.
+
+## Resolution 2026-11-25 (p3-bau fleet, worktree wt-p3-bau, release/1.0.0 @ e3902cdaa78)
+
+The exact fix this doc specified has since landed; the "read-only owner /
+no upgrade path" claims above are stale. Verified by code inspection:
+
+- `src/lib/nogc_sync_mut/terminal/credential/config_parser.spl` now imports
+  `credential_needs_upgrade` / `credential_upgrade_file` (lines 19-20),
+  defines `config_write_atomic` (line 52), and wires upgrade-on-load via
+  `_maybe_upgrade_v1_entries` (line 161) into both the terminals (line 197)
+  and power (line 237) parse paths, plus `config_save_atomic` /
+  `config_update_entry_field_atomic` write paths.
+- `src/lib/nogc_sync_mut/terminal/credential/store.spl:729`
+  `credential_upgrade_file` implements the prescribed atomic persist:
+  same-directory temp write, fsync, `rename(2)` over the original
+  (documented at store.spl:752-753, matching fix step 1 verbatim), and fails
+  closed when the upgrade re-decrypt check does not match (fix step 3).
+- Pinned by two dedicated specs:
+  `test/01_unit/lib/terminal/credential_config_upgrade_on_write_spec.spl`
+  (8 examples, REQ-LIB-CREDENTIAL-CONFIG-UPGRADE-001, exercises
+  `parse_terminal_config_with_key` / `config_write_atomic` /
+  `config_update_entry_field_atomic` against temp files) and
+  `test/01_unit/lib/terminal/credential_upgrade_persist_spec.spl`
+  (20 examples).
+
+LIMIT: spec re-execution environment-blocked on this host — pinned seed
+`bin/simple.exe` (2026-11-17) cannot parse the 2026-11-25
+`@representation_boundary` annotations (`cfd89933699`) and aborts before any
+spec loads. Closure rests on the inspection above plus the 2026-11-06
+12/12 pass recorded in the header.
