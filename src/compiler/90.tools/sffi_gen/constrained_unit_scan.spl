@@ -12,13 +12,19 @@
 #   extern fn rt_net_port(fd: i32) -> Port
 #   extern fn rt_version() -> CStr        borrowed `char*` return: copied to text
 #                                         at once (Option<text>, None on null)
+#   extern fn rt_flag(fd: i32) -> bool    C `_Bool` return: raw u8, values other
+#                                         than 0/1 are a ConstraintError
+#   enum Color: i32                       C enum over an explicit integer ABI;
+#       Red                               the indented variant lines give the
+#       Green                             sequential discriminants 0..=n-1
+#   extern fn rt_color() -> Color         discriminant checked against 0..=n-1
 # Each extern returning a declared unit becomes a facade (checked when the unit
 # has a range, a direct projection otherwise). Externs returning anything else
 # are ignored. The range comes from the declaration itself since 2026-11-17
 # (same `where` predicate the compiler registers); the annotation comment is
 # kept only as a deprecated alias.
 
-use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, UnitReturnFacade, BorrowedCStrReturn, generate_unit_return_facade, generate_borrowed_cstr_facade}
+use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, UnitReturnFacade, BorrowedCStrReturn, BoolReturn, EnumReturn, generate_unit_return_facade, generate_borrowed_cstr_facade, generate_bool_return_facade, generate_enum_return_facade}
 
 struct _UnitDecl:
     name: text
@@ -108,6 +114,44 @@ fn _scan_units(lines: [text]) -> [_UnitDecl]:
                     units[idx] = _UnitDecl(name: units[idx].name, abi_type: units[idx].abi_type, range_min: lo, range_max: hi)
     units
 
+# `enum Name: <abi>` followed by indented variant lines. An enum with no ABI
+# type after the colon is a plain Simple enum and is not a C boundary type.
+struct _EnumDecl:
+    name: text
+    abi_type: text
+    variant_count: i64
+
+fn _scan_enums(lines: [text]) -> [_EnumDecl]:
+    var enums: [_EnumDecl] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].split("#")[0].trim()
+        i = i + 1
+        if line.starts_with("enum ") and line.contains(":"):
+            val head = line.substring(5).split(":")
+            val abi = head[1].trim()
+            if abi == "":
+                continue
+            var count = 0
+            while i < lines.len():
+                val raw = lines[i]
+                val body = raw.split("#")[0].trim()
+                if body != "" and not (raw.starts_with(" ") or raw.starts_with("\t")):
+                    break
+                if body != "":
+                    count = count + 1
+                i = i + 1
+            enums.push(_EnumDecl(name: head[0].trim(), abi_type: abi, variant_count: count))
+    enums
+
+fn _find_enum(enums: [_EnumDecl], name: text) -> i64:
+    var i = 0
+    while i < enums.len():
+        if enums[i].name == name:
+            return i
+        i = i + 1
+    -1
+
 # Return-type classes of a parsed extern signature.
 val RET_CSTR: i64 = 1
 val RET_OTHER: i64 = 0
@@ -155,6 +199,7 @@ fn _arg_names(params: text) -> text:
 pub fn generate_constrained_unit_facades(source: text) -> UnitReturnFacade:
     val lines = source.split("\n")
     val units = _scan_units(lines)
+    val enums = _scan_enums(lines)
     var out = ""
     for raw in lines:
         val sig = _parse_extern_sig(raw)
@@ -165,6 +210,18 @@ pub fn generate_constrained_unit_facades(source: text) -> UnitReturnFacade:
             if sig.ret_kind == RET_CSTR:
                 val cspec = BorrowedCStrReturn(extern_name: name, params: params, arg_names: _arg_names(params))
                 out = out + generate_borrowed_cstr_facade(cspec).source + "\n"
+                continue
+            if ret == "bool":
+                val bspec = BoolReturn(extern_name: name, params: params, arg_names: _arg_names(params))
+                out = out + generate_bool_return_facade(bspec).source + "\n"
+                continue
+            val eidx = _find_enum(enums, ret)
+            if eidx >= 0:
+                val espec = EnumReturn(extern_name: name, params: params, arg_names: _arg_names(params), enum_name: ret, first: "0", last: "{enums[eidx].variant_count - 1}", abi_type: enums[eidx].abi_type)
+                val er = generate_enum_return_facade(espec)
+                if er.diagnostic != "":
+                    return UnitReturnFacade(source: "", diagnostic: er.diagnostic)
+                out = out + er.source + "\n"
                 continue
             val idx = _find_unit(units, ret)
             if idx >= 0:
