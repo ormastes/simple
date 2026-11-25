@@ -119,3 +119,24 @@ Rust arm once the self-hosted binary is the default tool (the intercept exists
 only because the seed cannot rely on the stdlib spec DSL loading), not to patch
 it now.
 
+
+## Triage 2026-11-25 (p2w3-ah lane, release/1.0.0) — SKIP: Rust-seed-only, semantically benign, owner decision recorded
+
+Re-verified by source inspection on release/1.0.0 HEAD. The unconditional
+Rust intercept is still present (`bdd.rs:1366`, `"pending" | "pending_it" =>`),
+and the reachable governance path (`skip_via_ref`, `spec.spl:848`) is still in
+place. Classification unchanged from the 2026-08-17 re-verification: the
+intercept produces the same observable outcome as the `.spl` body (skipped,
+counted, passed), so this is a maintainability/divergence-risk defect, not a
+correctness one.
+
+Disposition: **SKIP for this fix wave.** The only real fix is deleting or
+rerouting the Rust arm in `src/compiler_rust/**`, which (a) repo convention
+(".claude/rules/bootstrap.md") explicitly deprioritizes — default tooling is
+the pure-Simple self-hosted binary, which has no such name-based intercept —
+and (b) cannot be built or verified on this host (no cargo builds permitted
+in this lane; the pinned seed is used as-is). The doc's own recommendation
+stands: delete the arm once the self-hosted binary is the default tool.
+Not executable on this lane; resumes if/when the seed is next rebuilt for
+another reason and an owner picks option (a) or (b) from the 2026-08-07
+"Suggested owner" section.
