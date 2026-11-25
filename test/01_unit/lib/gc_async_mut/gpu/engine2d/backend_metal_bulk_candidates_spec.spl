@@ -1,0 +1,44 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use std.gc_async_mut.gpu.engine2d.backend_metal.{bulk_candidate_paths}
+use std.gc_sync_mut.gpu.engine2d.backend_metal.{bulk_candidate_paths as sync_bulk_candidate_paths}
+
+fn _index_of(paths: [text], target: text) -> i64:
+    var i = 0
+    while i < paths.len():
+        if paths[i] == target:
+            return i
+        i = i + 1
+    -1
+
+describe "Metal 2D bulk transfer library candidates":
+    it "includes macOS dylib, ELF so, MinGW dll, and MSVC dll in order":
+        step("Save any SIMPLE_SPL_GPU_TRANSFER_PATH override and clear it")
+        val prev = env_get("SIMPLE_SPL_GPU_TRANSFER_PATH") ?? ""
+        if prev != "":
+            env_remove_process("SIMPLE_SPL_GPU_TRANSFER_PATH")
+
+        val paths = bulk_candidate_paths()
+        val idx_dylib = _index_of(paths, "build/sffi/libspl_gpu_transfer.dylib")
+        val idx_so = _index_of(paths, "build/sffi/libspl_gpu_transfer.so")
+        val idx_mingw = _index_of(paths, "build/sffi/libspl_gpu_transfer.dll")
+        val idx_msvc = _index_of(paths, "build/sffi/spl_gpu_transfer.dll")
+
+        expect(idx_dylib).to_equal(0)
+        expect(idx_so).to_equal(1)
+        expect(idx_mingw).to_equal(2)
+        expect(idx_msvc).to_equal(3)
+
+        val sync_paths = sync_bulk_candidate_paths()
+        expect(sync_paths.len()).to_equal(paths.len())
+        expect(_index_of(sync_paths, "build/sffi/spl_gpu_transfer.dll")).to_equal(3)
+
+        expect(env_set("SIMPLE_SPL_GPU_TRANSFER_PATH", "custom/spl_gpu_transfer.dll")).to_equal(true)
+        val overridden = bulk_candidate_paths()
+        expect(overridden[0]).to_equal("custom/spl_gpu_transfer.dll")
+        expect(_index_of(overridden, "build/sffi/spl_gpu_transfer.dll")).to_equal(4)
+
+        if prev == "":
+            env_remove_process("SIMPLE_SPL_GPU_TRANSFER_PATH")
+        else:
+            env_set("SIMPLE_SPL_GPU_TRANSFER_PATH", prev)
