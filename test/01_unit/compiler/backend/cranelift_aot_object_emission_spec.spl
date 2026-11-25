@@ -88,3 +88,24 @@ describe "Cranelift AOT lane emits an object through the shared lowering":
             if name.starts_with(prefix) and name.ends_with(".o"):
                 leaked = leaked + 1
         expect(leaked).to_equal(0)
+
+    it "compiles rt_panic void ABI and __simple_rt_string_char_code_at alias cleanly":
+        val panic_sig = MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.unit(), is_variadic: false)
+        val panic_callee = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(panic_sig))
+        ))
+        val char_sig = MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+        val char_callee = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("__simple_rt_string_char_code_at"),
+            MirType(kind: MirTypeKind.FuncPtr(char_sig))
+        ))
+        val module = MirModule(name: "aot_panic_char_code_probe",
+            functions: {
+                SymbolId(id: 1): aot_fn(1, "main", [
+                    MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)), char_callee, [aot_int(0), aot_int(0)]), span: nil),
+                    MirInst(kind: MirInstKind.Call(None, panic_callee, [aot_int(0), aot_int(5)]), span: nil)
+                ], MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))
+            },
+            statics: {}, constants: {}, types: {})
+        expect(aot_object_size(module) > 0).to_equal(true)
