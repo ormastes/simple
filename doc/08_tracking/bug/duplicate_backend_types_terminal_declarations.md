@@ -171,3 +171,21 @@ Replay the recorded Stage 3 command against the Stage 2 self-hosted binary
     build/bootstrap/stage3/<triple>/stage2-admitted/simple native-build \
       --target <triple> --backend cranelift --runtime-bundle core-c-bootstrap \
       --mode dynload -o <out> src/app/cli/bootstrap_main.spl
+
+## Verification 2026-11-25 (worktree work/p2w2-ah-20261125, source inspection)
+
+The `BackendKind` half of this entry remains FIXED: a tree-wide grep finds
+exactly one terminal `enum BackendKind` declaration, in
+`src/compiler/70.backend/backend/backend_types.spl:24`.
+`src/compiler/70.backend/backend_types.spl` (A) imports the three names from
+B (`use compiler.backend.backend.backend_types.{BackendKind, CompiledSymbol,
+CompiledSymbolKind}`) and carries them via its wildcard re-export;
+`src/compiler/10.frontend/core/backend_types.spl` (C) declares neither
+`BackendKind` nor `CodegenTarget` and re-exports both from B. No second
+declaration exists anywhere under `src/`.
+
+The wider family (the 29 multiply-declared enums and the missing
+duplicate-terminal check in `scripts/check/` or lint) is untouched and
+remains OPEN, as the header states. No spec run attempted — `bin/simple.exe
+test` is blocked repo-wide at release/1.0.0 HEAD by
+`unknown decorator '@representation_boundary'` (pinned seed vs cfd89933699).
