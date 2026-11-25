@@ -1,7 +1,14 @@
 # NOT_RUN: actual coordinator policy function, not native retirement evidence.
 use std.spec.*
+use std.io_runtime.{file_read}
+use app.io.env_ops.{env_set, env_unset}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
+use app.cli.native_build_main.{native_build_capsule_abort_v1, native_build_hir_only_scv_error_v1,
+    native_build_shard_aggregate_fail_reason_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
-    native_build_hir_refusal_runs_serial_v1, native_build_hir_warmup_go_to_end_outcome_v1,
+    native_build_hir_refusal_runs_serial_v1, native_build_hir_refusal_blocks_v1,
+    native_build_hir_warmup_go_to_end_outcome_v1,
     native_build_hir_warmup_admits_mir_v1, native_build_stage3_capsule_shard_entry_selected_v1,
     native_build_stage3_capsule_mir_route_v1, native_build_mir_outcome_after_hir_failures_v1, native_build_capsule_mir_outcome_v1}
 
@@ -35,19 +42,75 @@ describe "Stage 3 capsule HIR worker arguments":
         expect(native_build_capsule_user_args_v1([]).len()).to_equal(0)
 
 describe "Tool-build coordinator HIR pool refusal":
-    # bootstrap-fable-17 (2026-11-12): the HIR profile refused the row's
-    # environment before any worker started, and the whole build failed
-    # although the pool only warms the HIR cache.
-    it "lowers HIR serially when the pool was refused before any spawn":
+    # bootstrap-fable-17 (2026-11-12): an auto/default HIR pool refused before
+    # any worker started falls back to serial HIR in process, whereas an explicit
+    # SIMPLE_HIR_SHARDING=1 request must fail closed with hir_run.blocked_reason.
+    it "lowers HIR serially when an auto/default pool was refused before any spawn":
         expect(native_build_hir_refusal_runs_serial_v1(1, true)).to_equal(true)
+        expect(native_build_hir_refusal_runs_serial_v1(1, true, "")).to_equal(true)
+        expect(native_build_hir_refusal_runs_serial_v1(1, true, "auto")).to_equal(true)
+        expect(native_build_hir_refusal_blocks_v1(1, true, "")).to_equal(false)
+        expect(native_build_hir_refusal_blocks_v1(1, true, "auto")).to_equal(false)
+
+    it "fails closed when SIMPLE_HIR_SHARDING=1 is refused before any spawn":
+        expect(native_build_hir_refusal_runs_serial_v1(1, true, "1")).to_equal(false)
+        expect(native_build_hir_refusal_blocks_v1(1, true, "1")).to_equal(true)
 
     it "keeps a started pool's failure fatal":
         # Owners spawned and crashed (e.g. the executable pin refusal).
         expect(native_build_hir_refusal_runs_serial_v1(1, false)).to_equal(false)
+        expect(native_build_hir_refusal_runs_serial_v1(1, false, "1")).to_equal(false)
+        expect(native_build_hir_refusal_blocks_v1(1, false, "1")).to_equal(false)
 
     it "does not degrade a successful warm-up":
         expect(native_build_hir_refusal_runs_serial_v1(0, false)).to_equal(false)
         expect(native_build_hir_refusal_runs_serial_v1(0, true)).to_equal(false)
+        expect(native_build_hir_refusal_runs_serial_v1(0, true, "1")).to_equal(false)
+        expect(native_build_hir_refusal_blocks_v1(0, true, "1")).to_equal(false)
+
+    it "wires explicit SIMPLE_HIR_SHARDING=1 fail-closed refusal into native_build_main.spl":
+        val source = file_read("src/app/cli/native_build_main.spl")
+        expect(source).to_contain("native_build_hir_refusal_runs_serial_v1(hir_result, hir_run.refused_before_spawn, hir_sharding)")
+        expect(source).to_contain("native_build_hir_refusal_blocks_v1(hir_result, hir_run.refused_before_spawn, hir_sharding)")
+        expect(source).to_contain("native_build_hir_refusal_blocks_v1(hir_run.code, hir_run.refused_before_spawn, hir_sharding)")
+        expect(source).to_contain("env_get(\"SIMPLE_HIR_SHARDING\") ?? \"\") != 0: native_build_hir_shard_count(args) else: 0")
+        expect(source).to_contain("native_build_hir_only_scv_error_v1(")
+        expect(source).to_contain("hir_run.blocked_reason")
+        expect(source).to_contain("SIMPLE_HIR_SHARDING=1 forbids serial HIR fallback")
+
+    it "restores optional saved env slots and records reason on capsule abort":
+        val orig_mem = native_build_env_saved_v1("SIMPLE_MEM_SNAPSHOT_FILE")
+        val orig_phase = native_build_env_saved_v1("SIMPLE_COMPILER_PHASE_PROFILE_FILE")
+        val orig_prog = native_build_env_saved_v1("SIMPLE_BUILD_PROGRESS_EVENTS")
+        env_set("SIMPLE_MEM_SNAPSHOT_FILE", "")
+        env_set("SIMPLE_COMPILER_PHASE_PROFILE_FILE", "")
+        env_set("SIMPLE_BUILD_PROGRESS_EVENTS", "")
+        val rc = native_build_capsule_abort_v1(
+            "error: capsule HIR aborted",
+            "capsule blocked reason",
+            None,
+            Some("/tmp/kept-phase.sdn"),
+            None)
+        val got_mem = env_get_nullable("SIMPLE_MEM_SNAPSHOT_FILE")
+        val got_phase = env_get_nullable("SIMPLE_COMPILER_PHASE_PROFILE_FILE")
+        val got_prog = env_get_nullable("SIMPLE_BUILD_PROGRESS_EVENTS")
+        native_build_env_restore_v1("SIMPLE_MEM_SNAPSHOT_FILE", orig_mem)
+        native_build_env_restore_v1("SIMPLE_COMPILER_PHASE_PROFILE_FILE", orig_phase)
+        native_build_env_restore_v1("SIMPLE_BUILD_PROGRESS_EVENTS", orig_prog)
+        expect(rc).to_equal("fail")
+        expect(native_build_shard_aggregate_fail_reason_v1()).to_equal("capsule blocked reason")
+        expect(got_mem.is_none()).to_equal(true)
+        expect(got_phase ?? "").to_equal("/tmp/kept-phase.sdn")
+        expect(got_prog.is_none()).to_equal(true)
+
+    it "enforces canonical SCV authority only on policy 2 (SIMPLE_PARSE_SHARDING=0, SIMPLE_HIR_SHARDING=1)":
+        expect(native_build_hir_only_scv_error_v1("", "1")).to_equal("")
+        expect(native_build_hir_only_scv_error_v1("0", "")).to_equal("")
+        val orig_root = native_build_env_saved_v1("SIMPLE_SCV_SNAPSHOT_ROOT")
+        env_unset("SIMPLE_SCV_SNAPSHOT_ROOT")
+        val err = native_build_hir_only_scv_error_v1("0", "1")
+        native_build_env_restore_v1("SIMPLE_SCV_SNAPSHOT_ROOT", orig_root)
+        expect(err).to_start_with("SCV-E-HIR-ADMISSION:")
 
 describe "Stage 3 go-to-end HIR warm-up with module failures":
     # Directive 2026-11-13: HIR runs to the end, then MIR lowers every module
