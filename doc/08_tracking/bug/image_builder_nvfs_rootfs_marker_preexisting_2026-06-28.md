@@ -121,3 +121,34 @@ The disk scenario similarly expects `/sbin/init` despite an explicit empty
 candidate; its toolchain executable paths can additionally depend on ambient
 native-tool discovery. Do not restore fabricated executables or flip all those
 assertions without testing the applicable payload contract.
+
+## Verification note 2026-11-25 (release/1.0.0 ledger pass, Windows seed host)
+
+The ORIGINAL marker defect is verified fixed; the header's "behavioral
+verification blocked" is now partially lifted for the marker path itself.
+
+- **measured (this host, `SIMPLE_LIB=src bin/simple.exe run`
+  `build/p2w2-af-probes/rootfs_markers_probe.spl`, PROBE PASS):**
+  1. fresh nvfs staging succeeds, readback validates, and
+     `SYS/ROOTFS.CFG` contains `rootfs_carrier=fat32` + `rootfs_backend=nvfs`;
+  2. stale dbfs metadata is rejected by validation and replaced on restage;
+  3. a missing marker is rejected;
+  4. malformed marker/config content is rejected.
+  This exercises the exact repair surface: checked writes + readback in
+  `src/os/installer/image_rootfs_markers.spl:15-23`.
+- **verified by code inspection:** `build_install_image_with_rootfs` threads
+  the per-call backend into `_image_builder_rootfs_backend` before
+  `_build_image_v1` (`src/os/installer/image_builder.spl:1491`), and the build
+  validates markers again after population (`image_builder.spl:967,1022`).
+  The "likely cause" from the original report (per-call backend not reaching
+  the marker write) is closed.
+- Consistent with the 2026-11-04 measurement (marker defect fixed, 512 MB nvfs
+  build stages correct `SYS/ROOTFS.CFG`) and 2026-11-06 (`image_rootfs_markers_spec`
+  7/7).
+
+Still open, unchanged and NOT covered by this note: full
+`image_builder_artifact_spec.spl` execution (FAT32 generation needs the Linux
+tooling lane; `bin/simple test` is additionally blocked repo-wide at HEAD by
+the pinned seed rejecting `@representation_boundary`), the remaining arm64 ISO
+output/contents-path expectation, and the controlled native-payload fixture
+contract from the 2026-11-10 update.

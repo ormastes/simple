@@ -59,3 +59,24 @@ One `it` block deliberately drives a genuine type error (`i64 - nil`) and
 asserts `ops_get_error()` contains `"type error"`, so the many
 `expect(ops_get_error()).to_equal("")` assertions elsewhere are not vacuous.
 
+
+---
+
+## Verification note 2026-11-25 (release/1.0.0 ledger pass)
+
+Closure re-confirmed by code inspection at HEAD: the `f64(...)` widening is
+present in all four operators in both operand orders —
+`src/compiler/10.frontend/core/interpreter/ops.spl:40,48` (add), `:63,68`
+(sub), `:79,84` (mul), `:99,104` (div) — and the executable-proof spec
+`test/01_unit/compiler_core/interpreter/mixed_numeric_arithmetic_spec.spl`
+exists with its 10 `it` blocks intact. The 2026-09-06 proof (10/10 green plus
+defect re-injection discriminating 6/4) stands as the executable evidence.
+
+Fresh runtime re-verification on this host is blocked twice over: `bin/simple
+test` fails repo-wide at HEAD (pinned seed rejects `@representation_boundary`),
+and a run-mode mirror probe cannot import the subject because `val_add` /
+`val_sub` / `val_mul` / `val_div` / `val_make_int` / `val_reset` are
+module-private in the current source (the spec reaches them through the
+compiler-tree test lane, not through `bin/simple run`). Stated as the limit;
+the inspection result matches the recorded proof exactly. Status: **RESOLVED**
+(unchanged).
