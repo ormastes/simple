@@ -93,3 +93,24 @@ above is unchanged.
 
 Identical to the recorded baseline (29/50 passing, 21 failing). The seed rebuild
 changed nothing here. Status unchanged: OPEN (P2).
+
+## Triage note 2026-11-25 — header clarified; residual still owned by riscv_gen2 lane
+
+The top-line "Status: RESOLVED 2026-08-19" refers to the *infra* half only
+(the missing `use std.spec.*` imports). That half is confirmed present in the
+release/1.0.0 tree: all seven specs named above (including
+`hwir_foundation_spec.spl` and `hwir_mir_function_extract_spec.spl`) carry
+`use std.spec` imports today.
+
+The residual half is NOT resolved by this record: the 21 substantive
+`hwir_foundation_spec` failures (and 14 in `hwir_mir_function_extract_spec`)
+remain owned by the `.spipe/riscv_gen2_hwir_foundation` lane per the
+"Residual" section, and nothing in this pass changes that ownership.
+
+Execution limit on this host: the residual could not be re-measured —
+`bin/simple.exe test` fails repo-wide at release/1.0.0 HEAD because the
+pinned Rust seed (v1.0.0-rc.1) rejects `@representation_boundary`, so the
+29/50 baseline could neither be confirmed nor refuted here. The 2026-08-17
+re-run on the rebuilt seed (identical 29/50) remains the latest measurement.
+Readers should treat this entry as: infra fix landed and present; residual
+OPEN under the riscv_gen2_hwir_foundation lane.
