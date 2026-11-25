@@ -9,7 +9,7 @@ use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.{HirModule}
-use compiler.core.unit_constraint.{unit_constraint_register, unit_constraint_drain_conflicts}
+use compiler.core.unit_constraint.{unit_constraint_register, unit_constraint_drain_conflicts, unit_constraint_set_conflict_owner, unit_constraint_max_text}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
 use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
 
@@ -74,3 +74,29 @@ describe "SPL-UNIT-006 attribution across modules":
         expect(ws_a.len()).to_equal(1)
         expect(ws_a[0]).to_contain("unc_mod_a")
         expect(ws_a[0]).to_contain("UncMa")
+
+describe "unit declarations are per file":
+    it "does not report SPL-UNIT-006 when two modules each declare the same unit name once":
+        val _s = unit_constraint_drain_conflicts()
+        val src_a = "unit UncPf: u16 as ucpf in 1..=100\nfn main():\n    0\n"
+        val src_b = "unit UncPf: u16 as ucpf in 1..=200\nfn main():\n    0\n"
+        val mod_a = parse_full_frontend(src_a, "unc_pf_a.spl", "unc_pf_a.spl", Logger(level: 0))
+        val mod_b = parse_full_frontend(src_b, "unc_pf_b.spl", "unc_pf_b.spl", Logger(level: 0))
+        var hl_a = HirLowering.with_filename("unc_pf_a.spl")
+        val hir_a = hl_a.lower_module(mod_a)
+        var hl_b = HirLowering.with_filename("unc_pf_b.spl")
+        val hir_b = hl_b.lower_module(mod_b)
+        expect(receipt_conflicts("unc_pf_a", hir_a).len()).to_equal(0)
+        expect(receipt_conflicts("unc_pf_b", hir_b).len()).to_equal(0)
+
+    it "keeps each module's own bounds for the shared unit name":
+        val _s = unit_constraint_drain_conflicts()
+        unit_constraint_set_conflict_owner("unc_pr_a.spl")
+        unit_constraint_register("UncPr", "1 <= self <= 100", 0, "1", "100")
+        unit_constraint_set_conflict_owner("unc_pr_b.spl")
+        unit_constraint_register("UncPr", "1 <= self <= 200", 0, "1", "200")
+        expect(unit_constraint_drain_conflicts().len()).to_equal(0)
+        unit_constraint_set_conflict_owner("unc_pr_a.spl")
+        expect(unit_constraint_max_text("UncPr")).to_equal("100")
+        unit_constraint_set_conflict_owner("unc_pr_b.spl")
+        expect(unit_constraint_max_text("UncPr")).to_equal("200")
