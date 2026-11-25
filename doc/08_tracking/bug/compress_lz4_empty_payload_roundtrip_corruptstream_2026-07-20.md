@@ -1,6 +1,6 @@
 # LZ4 auto-frame round-trip rejects its own empty-payload output as corrupt
 
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-11-25 — empty-input round-trip verified working at release/1.0.0 tip; see fleet verification note at bottom)
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/lib/common/compress/lz4.spl` — LZ4 frame encoder/decoder facade
 - **Severity:** Medium — breaks the empty-input round-trip for the public
@@ -79,3 +79,39 @@ The spec's assertion (`expect(decoded.unwrap()).to_equal(payload)` /
 weakened or dropped — round-tripping an empty payload through a compression
 codec is a legitimate requirement. This is a genuine codec defect, not a
 stale test.
+
+## Fleet verification note (2026-11-25, worktree wt-p2w1-ae, branch work/p2w1-ae-20261125)
+
+STALE — the defect no longer reproduces at `origin/release/1.0.0` HEAD
+(`38265c7f249`). Verified by executing the doc's own minimal repro under the
+tracked seed binary (`SIMPLE_LIB=src bin/simple.exe run`, Windows host):
+
+- Empty round-trip (the exact repro from this doc):
+  `compress_bytes([], lz4 options)` → `decompress_bytes(...)` prints
+  `is_err=false`, `roundtrip_len=0`. The `CorruptStream(lz4 empty data
+  block)` failure is gone.
+- Non-empty control (1000-byte payload): round-trips intact
+  (`nonempty_roundtrip_ok=true`).
+- The corruption guard is still intact: a hand-crafted frame whose data block
+  is zero-length *uncompressed* (`size_word = 0x80000000`, i.e. not the end
+  mark) is still rejected (`zero_len_block_rejected=true`) by the guard at
+  `src/lib/common/compress/lz4.spl:336-338`.
+
+Root cause of the stale row: the encoder side of the either/or fix this doc
+proposed has landed. `lz4_compress_frame`
+(`src/lib/common/compress/lz4.spl:195-228`) emits data blocks only inside
+`while pos < data.len()`, so empty input produces the canonical frame —
+descriptor + immediate end mark, no data block record (docstring: "Empty
+input uses the canonical immediate end mark"). The decoder's end-mark path
+(`lz4.spl:315-331`) accepts that shape, so encoder and decoder agree again.
+
+The named harness spec moved to
+`test/01_unit/lib/common/compress_facade_harness_spec.spl` (still asserts the
+empty-fixture round-trip, unweakened). It could not be executed on this host:
+every `bin/simple.exe test` invocation at HEAD fails in the test runner
+itself with `unknown decorator '@representation_boundary'` (pinned Rust seed
+v1.0.0-rc.1 predates commit `cfd89933699`) — the known repo-wide
+source/binary inconsistency, unrelated to this bug. The executed repro probes
+above cover the same behavior the spec's first fixture asserts.
+
+Status flipped OPEN → RESOLVED. No code change in this lane.
