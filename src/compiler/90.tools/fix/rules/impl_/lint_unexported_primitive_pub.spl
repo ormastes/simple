@@ -8,11 +8,13 @@
 #
 # Whole-repo guard (fail closed):
 #   - Emits a `FixConfidence.Safe` edit removing `pub ` ONLY when
-#     `scope.whole_repo` is true AND `scope.repo_files_scanned` provably covers
-#     this module plus every other scanned repo file (`>= other_count + 1`).
-#   - Under a partial scan (`whole_repo == false` or insufficient count), emits
-#     a suggestion-only `FixConfidence.Uncertain` record with NO replacements so
-#     neither `--safe-only` nor `FixApplicator.apply` modifies source.
+#     `scope.mode` is `PrivPubScanMode.WholeRepo` AND `scope.repo_files_scanned`
+#     provably covers this module plus every other scanned repo file
+#     (`>= other_count + 1`).
+#   - Under a partial scan (`PrivPubScanMode.Partial` or insufficient count),
+#     emits a suggestion-only `FixConfidence.Uncertain` record with NO
+#     replacements so neither `--safe-only` nor `FixApplicator.apply` modifies
+#     source.
 #
 # Not in the default producer registry (`registry.spl`): opt-in only via
 # `simple fix --rule PRIV-PUB-001 [--safe-only] [--dry-run] <paths>`.
@@ -21,9 +23,15 @@ use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
 use compiler.tools.fix.rules.impl_.lint_allow.{lines_allow_rule, line_is_allowed}
 
+pub enum PrivPubScanMode:
+    WholeRepo
+    Partial
+
+pub unit RepoFileCount: i64
+
 pub struct PrivPubScope:
-    whole_repo: bool
-    repo_files_scanned: i64
+    mode: PrivPubScanMode
+    repo_files_scanned: RepoFileCount
     other_sources: Dict<text, text>
 
 struct PrivPubCandidate:
@@ -448,7 +456,11 @@ pub fn check_unexported_primitive_pub(source: text, file: text, scope: PrivPubSc
         if _ppub_normalize_path(path) != norm_file:
             other_list.push(scope.other_sources[path])
     val other_count = other_list.len()
-    val whole_repo_proven = scope.whole_repo and scope.repo_files_scanned >= other_count + 1
+    val scanned = scope.repo_files_scanned.value
+    val is_whole_mode = match scope.mode:
+        case WholeRepo: true
+        case Partial: false
+    val whole_repo_proven = is_whole_mode and scanned >= other_count + 1
     var offsets: [i64] = []
     var off = 0
     for line in lines:
@@ -462,7 +474,7 @@ pub fn check_unexported_primitive_pub(source: text, file: text, scope: PrivPubSc
         if whole_repo_proven:
             var fix = EasyFix.create(
                 id: "PRIV-PUB-001:{start}",
-                description: "drop `pub` from {cand.kind} `{label}` (exposes primitive `{cand.prim}`; 0 external users across {scope.repo_files_scanned} scanned repo file(s))",
+                description: "drop `pub` from {cand.kind} `{label}` (exposes primitive `{cand.prim}`; 0 external users across {scanned} scanned repo file(s))",
                 confidence: FixConfidence.Safe
             )
             fix.add_replacement(Replacement.create(
@@ -477,7 +489,7 @@ pub fn check_unexported_primitive_pub(source: text, file: text, scope: PrivPubSc
         else:
             val fix = EasyFix.create(
                 id: "PRIV-PUB-001:{start}",
-                description: "suggestion: consider dropping `pub` from {cand.kind} `{label}` (exposes primitive `{cand.prim}`; partial scan of {scope.repo_files_scanned} file(s) — whole-repo scan required for Safe auto-fix)",
+                description: "suggestion: consider dropping `pub` from {cand.kind} `{label}` (exposes primitive `{cand.prim}`; partial scan of {scanned} file(s) — whole-repo scan required for Safe auto-fix)",
                 confidence: FixConfidence.Uncertain
             )
             fixes.push(fix)
@@ -486,8 +498,8 @@ pub fn check_unexported_primitive_pub(source: text, file: text, scope: PrivPubSc
 # Convenience partial-scope wrapper (always suggestion-only, never emits Safe).
 pub fn check_unexported_primitive_pub_partial(source: text, file: text, other_sources: Dict<text, text>) -> [EasyFix]:
     val scope = PrivPubScope(
-        whole_repo: false,
-        repo_files_scanned: other_sources.len() + 1,
+        mode: PrivPubScanMode.Partial,
+        repo_files_scanned: RepoFileCount(other_sources.len() + 1),
         other_sources: other_sources
     )
     check_unexported_primitive_pub(source, file, scope)
