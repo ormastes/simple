@@ -102,3 +102,15 @@ as-is, no code change attempted.
 ## HIR-P2 HC triage 2026-11-05
 
 Reconfirmed: renames + warning landed (class_name_collision_warning_spec). Keying classes by (module,name) is resolver-level work touching eval_tables.spl and the seed; with 1,917 latent duplicate names it needs a staged plan (warn -> qualify -> error). No safe small fix; remains OPEN.
+
+## Triage 2026-11-25 (worktree work/p2w2-ah-20261125) — STILL OPEN
+
+Reconfirmed the HIR-P2 HC triage above: the renames and the duplicate-symbol
+warning remain landed (`struct_table_register` warning in
+`src/compiler/10.frontend/core/interpreter/eval_tables.spl`, proven by
+`test/01_unit/compiler/interpreter/class_name_collision_warning_spec.spl`),
+and by-name class resolution across modules is unchanged — keying classes by
+(module, name) is resolver-level work in `eval_tables.spl` plus the seed,
+needing a staged warn → qualify → error plan given ~1,917 latent duplicate
+names. No safe small fix exists; remains OPEN. No code change attempted; the
+status header is accurate.

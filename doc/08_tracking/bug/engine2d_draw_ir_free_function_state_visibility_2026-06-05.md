@@ -90,3 +90,22 @@ Commands and results:
 5. Remaining failure (reported verbatim, NOT fixed): the same Vulkan test now fails one assertion later — `expected 48 to equal 4` at the pinned `engine.vulkan_present_readback_bytes() == 4` oracle. Diagnosis: the replayed display list contains a full-surface background rect, so the Vulkan frame-damage union legitimately covers the whole 4x3 surface and the honest receipt reports a full-surface download (48 bytes). A 4-byte damage-scoped receipt would require the draw funnel to intersect damage hints with the staged damage clip, which backend_vulkan.spl deliberately rejects ("An active clip can only SHRINK the painted area, so ignoring it keeps the union conservative (a superset), which is the safe direction"). On hosts without a real Vulkan device the test body is skipped (`if engine.backend_name() == "vulkan"`), so this oracle has very likely only ever been green vacuously. This is a requirement-vs-implementation receipt gap, separate from the caller-visible-mutation semantics this bug tracks; fixing it needs an owner decision on the receipt contract, not a verification-lane change.
 
 Status note: bug_db.sdn intentionally NOT modified (verification-only mandate). The bug doc's own guidance applies: keep open until the candidate is merged and behavioral gates are green; gate 1 (owner-state spec) is now green, the repro spec is 69/70 with the residual oracle gap documented above.
+
+## Triage 2026-11-25 (worktree work/p2w2-ah-20261125, Windows host) — STILL OPEN
+
+No state change; recorded so the ledger reflects a current look:
+
+- The 2026-11-05 evidence above (aarch64 Linux, lavpipe Vulkan lane) stands:
+  owner-state spec 3/3, repro spec 69/70, residual `vulkan_present_readback_bytes`
+  oracle gap documented and explicitly deferred to an owner decision on the
+  receipt contract.
+- Nothing in that residual is verifiable or fixable from this Windows host:
+  there is no qualified self-hosted full CLI here (only the pinned Rust seed,
+  which the 2026-11-03 section rules out as ordinary verification), no Vulkan
+  lane, and `bin/simple.exe test` is additionally blocked repo-wide at
+  release/1.0.0 HEAD by `unknown decorator '@representation_boundary'`
+  (pinned seed predates cfd89933699).
+- The `Engine2dDrawIrAdvOwnerResult` owner-path files and both named specs
+  (`draw_ir_owner_state_spec.spl`, `draw_ir_adv_spec.spl`) are present in this
+  tree. Status stays open per the doc's own guidance: the receipt-contract
+  oracle gap needs an owner decision, not a verification-lane change.
