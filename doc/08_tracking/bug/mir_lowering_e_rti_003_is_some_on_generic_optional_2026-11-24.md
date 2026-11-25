@@ -1,8 +1,6 @@
 # MIR lowering rejects `.is_some()` chained on a generic-optional call result (E-RTI-003)
 
-Status: open (compiler). Call sites worked around 2026-11-24; no compiler fix
-in this change. Source diagnosis is static; the failure itself was observed in
-a real pure-Simple self-build (Phase 3 `native-build` of the release head).
+Status: RTI compiler cause repaired across `845dd620d31`, `95598705f45`, and 2026-11-25 chained-nominal owner discovery fix (verified under `--mode=interpreter`); call-site workarounds left intact and native self-build verification pending. Source diagnosis below was updated on 2026-11-25.
 
 ## Observed
 
@@ -114,3 +112,18 @@ Either substitute the concrete subset of owner arguments instead of dropping
 all of them when one is a `Param`, or resolve builtin Option methods without
 requiring a concrete nominal receiver. The 2026-11-23 record lists what a
 repair must not do (treat every outer E-RTI-003 as a successful lookup).
+
+## 2026-11-25 — RTI compiler repairs and remaining binder/field notes
+
+Three RTI changes in `src/compiler/20.hir/return_type_interface_v1.spl` address this failure family:
+
+1. `845dd620d31` added `rti_term_head_may_own_methods_v1` in `receiver_owner_with_args` so builtin-headed receiver terms (`opt(p1)`, `result(..)`, etc.) return non-fatal `E-RTI-001` ("is not a struct/class") instead of fatal `E-RTI-003` (`test/01_unit/compiler/50.mir/rti_generic_optional_receiver_predicate_spec.spl`).
+2. `95598705f45` threaded `consumer_params` (`current_rti_consumer_params` populated in `src/compiler/50.mir/_MirLowering/function_lowering.spl:544-556` and passed at `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:3064`) through `method_return`, `receiver_owner_with_args`, `static_or_value_owner`, and `rti_owner_args_v1`, retaining `[Param(0), Builtin("bool")]` for `inner: Store<K, bool>` inside `Facade<K>` so `inner.remove(key)` specializes to `opt(b:bool)` when `consumer_params = ["K"]`.
+3. This change updates `receiver_owner_with_args` to return `Ok((decl, false, args))` directly for `ReturnTypeEntry.Decided(RtType.Nominal(decl, args))` instead of calling `require_concrete(resolved)`. That fixes multi-hop chained nominal receivers inside generic bodies — e.g. `inner.clone_store().remove(key)`, `inner.clone_store().remove(key).is_some()`, and `make_bool_store<K>(true).remove(key)` — which previously raised fatal `E-RTI-003` on the intermediate `Store<K, bool>` receiver (`test/01_unit/compiler/hir/rti_chained_nominal_owner_spec.spl`).
+
+Remaining caller/MIR boundary notes (unchanged by this lane):
+
+- When `consumer_params` is `[]` (e.g., direct caller omitting `consumer_params`, or a lifted lambda child `lw` at `switch_operators_calls.spl:9095` which does not inherit `current_rti_consumer_params`), `rti_owner_args_v1` falls back to `[]`; `Store::remove` stays `opt(p1)` and `.is_some()` still returns non-fatal `E-RTI-001` instead of `E-RTI-003`.
+- For field-base chained calls (`self.inner.remove(key).is_some()`), `switch_operators_calls.spl:2816` supplies `receiver_declared_type` only for the outermost `MethodCall`'s immediate receiver (`self.inner.remove(key)` -> `None`); nested `receiver_owner_with_args(self.inner, ...)` sees `HirExprKind.Field` with `receiver_type = nil` and returns non-fatal `E-RTI-001`.
+- Under `SIMPLE_RTI_STRICT=1`, `method_calls_literals.spl` calling `enum_match_expr_type(receiver)` on an intermediate generic nominal receiver (`inner.clone_store()`) still hits `require_concrete` (`E-RTI-003`); normal MIR lowering succeeds cleanly.
+- Call-site workarounds in `adaptive_set.spl`, `dict.spl`, `lazy_seq.spl`, and `lazy_seq_fixed.spl` were left untouched, and full native self-build verification remains pending a native build lane.
